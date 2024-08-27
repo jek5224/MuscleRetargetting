@@ -730,14 +730,13 @@ class GLFWApp():
                     orig_size = orig_info['size'][stretch]
                     
                     imgui.push_item_width(150)
-                    changed, info['size'][stretch] = imgui.slider_float(name_new,
+                    changed, size = imgui.slider_float(name_new,
                                                                         size,
                                                                         min_value = orig_size * 0.25,
                                                                         max_value = orig_size * 4,
                                                                         format='%.3f')
                     imgui.pop_item_width()
-                    
-                    # if self.skel_change_realtime and changed:
+
                     if changed:
                         gap = info['gaps'][i]
                         stretch_axis = info['stretch_axises'][i]
