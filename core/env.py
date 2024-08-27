@@ -229,31 +229,36 @@ class Env(gym.Env):
                     if not name in skel['muscles']:
                         skel['muscles'].append(name)
 
-                    if skel.get('stretch') != "None":
-                        body_t = skel['body_t']
+                        ratios = []
+                        gaps = []
+                        for i in range(len(skel['stretches'])):
+                            stretch = skel['stretches'][i]
+                            stretch_axis = skel['stretch_axises'][i]
+                            gap = skel['gaps'][i]
 
-                        stretch = skel['stretch']
-                        if stretch == "x":
-                            size = skel['size'][0]
-                        elif stretch == "y":
-                            size = skel['size'][1]
-                        elif stretch == "z":
-                            size = skel['size'][2]
+                            size = skel['size'][stretch]
+                            '''
+                            # body_t based retargetting
+                            body_t = skel['body_t']
+                            
+                            ratio = np.dot(p - body_t, stretch_axis) / (size * 0.5)
+                            gap = p - (body_t + stretch_axis * ratio * size * 0.5)
+                            '''
 
-                        stretch_axis = skel['stretch_axis']
-                        
-                        ratio = np.dot(p - body_t, stretch_axis) / (size * 0.5)
-                        gap = p - (body_t + stretch_axis * ratio * size * 0.5)
+                            # starting_point (joint_t + gap) based retargetting
+                            starting_point = skel['joint_t'] + gap
+
+                            ratio = np.dot(p - starting_point, stretch_axis) / size
+                            gap = p - (starting_point + stretch_axis * ratio * size)
+
+                            ratios.append(ratio)
+                            gaps.append(gap)
+                            
                         waypoints.append({
                             'body': body,
                             'p': p,
-                            'ratio': ratio,
-                            'gap': gap,
-                        })
-                    else:
-                        waypoints.append({
-                            'body': body,
-                            'p': p,
+                            'ratios': ratios,
+                            'gaps': gaps,
                         })
 
             # muscle['f0'] = float(child.attrib['f0'])

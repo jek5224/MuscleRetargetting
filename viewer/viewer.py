@@ -510,6 +510,107 @@ class GLFWApp():
             
             glPopMatrix()
 
+    def retargetting(self, name, index):
+        info = self.env.new_skel_info[name]
+
+        stretches = info['stretches']
+
+        stretch = stretches[index]
+        size = info['size'][stretch]
+        stretch_axis = info['stretch_axises'][index]
+        gap = info['gaps'][index]
+
+        '''
+        # body_t based retargetting
+        for muscle in info['muscles']:
+            new_muscle_info = self.env.new_muscle_info[muscle]
+
+            for waypoint in new_muscle_info['waypoints']:
+                waypoint_ratio = waypoint['ratios'][index]
+                waypoint_gap = waypoint['gaps'][index]
+                if waypoint['body'] == name:
+                    waypoint['p'] = info['body_t'] + stretch_axis * waypoint['ratio'] * size * 0.5 + waypoint_gap
+        '''
+        # starting point based retargetting
+        for muscle in info['muscles']:
+            new_muscle_info = self.env.new_muscle_info[muscle]
+
+            for waypoint in new_muscle_info['waypoints']:
+                waypoint_ratio = waypoint['ratios'][index]
+                waypoint_gap = waypoint['gaps'][index]
+                if waypoint['body'] == name:
+                    waypoint['p'] = info['joint_t'] + gap + stretch_axis * waypoint_ratio * size + waypoint_gap
+
+        if len(info['children']) > 0:
+            for child in info['children']:
+                parent_str = self.env.skel_info[child]['parent_str']
+                
+                new_parent_info = self.env.new_skel_info[parent_str]
+                parent_info = self.env.skel_info[parent_str]
+
+                parent_stretches = parent_info['stretches']
+                if parent_str == name:
+                    parent_stretch = parent_info['stretches'][index]
+                    parent_stretch_axis = parent_info['stretch_axises'][index]
+                    parent_size = new_parent_info['size'][parent_stretch]
+                    parent_gap = parent_info['gaps'][index]
+                else:
+                    parent_stretch = parent_stretches[0]
+                    parent_stretch_axis = parent_info['stretch_axises'][0]
+                    parent_size = new_parent_info['size'][parent_stretch]
+                    parent_gap = parent_info['gaps'][0]
+
+                new_child_info = self.env.new_skel_info[child]
+                child_info = self.env.skel_info[child]
+
+                child_stretch = child_info['stretches'][0]
+                child_stretch_axis = child_info['stretch_axises'][0]
+                child_size = new_child_info['size'][child_stretch]
+                child_gap = child_info['gaps'][0]
+                child_gap_parent = child_info['gaps_parent'][0]
+
+                new_child_info['joint_t'] = new_parent_info['joint_t'] + parent_gap + parent_stretch_axis * parent_size + child_gap_parent
+                new_child_info['body_t'] = new_child_info['joint_t'] + child_gap + child_stretch_axis * child_size * 0.5
+
+                if parent_str == name and len(parent_stretches) > 1:
+                    for i in range(len(parent_stretches)):
+                        if i != index:
+                            parent_stretch_other = parent_info['stretches'][i]
+                            parent_stretch_axis_other = parent_info['stretch_axises'][i]
+                            parent_size_other = new_parent_info['size'][parent_stretch_other]
+                            parent_gap_other = parent_info['gaps'][i]
+                            new_child_info['gaps_parent'][i] = new_child_info['joint_t'] - (new_parent_info['joint_t'] + parent_gap_other + parent_stretch_axis_other * parent_size_other)
+
+                '''
+                for muscle in child_info['muscles']:
+                    new_muscle_info = self.env.new_muscle_info[muscle]
+
+                    for waypoint in new_muscle_info['waypoints']:
+                        if waypoint['body'] == child:
+                            waypoint['p'] = new_child_info['body_t'] + child_stretch_axis * waypoint['ratio'] * new_child_info['size'][child_stretch_index] * 0.5 + waypoint['gap']
+                ''' 
+                for muscle in child_info['muscles']:
+                    new_muscle_info = self.env.new_muscle_info[muscle]
+
+                    for waypoint in new_muscle_info['waypoints']:
+                        waypoint_ratio = waypoint['ratios'][0]
+                        waypoint_gap = waypoint['gaps'][0]
+                        if waypoint['body'] == child:
+                            waypoint['p'] = new_child_info['joint_t'] + child_gap + child_stretch_axis * waypoint_ratio * child_size + waypoint_gap
+
+        foot_h = np.min([self.env.skel_info['TalusR']['body_t'][1], self.env.skel_info['TalusL']['body_t'][1]])
+        new_foot_h = np.min([self.env.new_skel_info['TalusR']['body_t'][1], self.env.new_skel_info['TalusL']['body_t'][1]])
+
+        if np.abs(new_foot_h - foot_h) > 1E-10:
+            h_diff = foot_h - new_foot_h
+            for name, info in self.env.new_skel_info.items():
+                info['body_t'][1] += h_diff
+                info['joint_t'][1] += h_diff
+
+            for muscle_name, muscle_info in self.env.new_muscle_info.items():
+                for waypoint in muscle_info['waypoints']:
+                    waypoint['p'][1] += h_diff
+
     def newSkeleton(self):
         current_pos = self.env.skel.getPositions()
         self.env.world.removeSkeleton(self.env.skel)
@@ -614,137 +715,69 @@ class GLFWApp():
             for name, info in self.env.new_skel_info.items():
                 orig_info = self.env.skel_info[name]
 
-                stretch = info['stretch']
-                slider_index = -1
-                if stretch == "x":
-                    slider_index = 0                    
-                elif stretch == "y":
-                    slider_index = 1
-                elif stretch == "z":
-                    slider_index = 2
+                stretches = info['stretches']
+                for i in range(len(stretches)):
+                    stretch = stretches[i]
 
-                if slider_index != -1:
+                    if stretch == 0:
+                        name_new = name + "_x"
+                    elif stretch == 1:
+                        name_new = name + "_y"
+                    elif stretch == 2:
+                        name_new = name + "_z"
+
+                    size = info['size'][stretch]
+                    orig_size = orig_info['size'][stretch]
+                    
                     imgui.push_item_width(150)
-                    changed, info['size'][slider_index] = imgui.slider_float(name,
-                                                                             info['size'][slider_index],
-                                                                             min_value = orig_info['size'][slider_index] * 0.25,
-                                                                             max_value = orig_info['size'][slider_index] * 4,
-                                                                             format='%.3f')
+                    changed, info['size'][stretch] = imgui.slider_float(name_new,
+                                                                        size,
+                                                                        min_value = orig_size * 0.25,
+                                                                        max_value = orig_size * 4,
+                                                                        format='%.3f')
                     imgui.pop_item_width()
                     
                     # if self.skel_change_realtime and changed:
                     if changed:
-                        info['body_t'] = info['joint_t'] + info['gap'] + info['stretch_axis'] * info['size'][slider_index] * 0.5
+                        gap = info['gaps'][i]
+                        stretch_axis = info['stretch_axises'][i]
 
-                        for muscle in info['muscles']:
-                            new_muscle_info = self.env.new_muscle_info[muscle]
-
-                            for waypoint in new_muscle_info['waypoints']:
-                                if waypoint['body'] == name:
-                                    waypoint['p'] = info['body_t'] + info['stretch_axis'] * waypoint['ratio'] * info['size'][slider_index] * 0.5 + waypoint['gap']
-
-                        if len(info['children']) > 0:
-                            for child in info['children']:
-                                parent_str = self.env.skel_info[child]['parent_str']
-                                
-                                new_parent_info = self.env.new_skel_info[parent_str]
-                                parent_info = self.env.skel_info[parent_str]
-
-                                parent_stretch = parent_info['stretch']
-                                if parent_stretch == "x":
-                                    parent_stretch_index = 0
-                                elif parent_stretch == "y":
-                                    parent_stretch_index = 1
-                                elif parent_stretch == "z":
-                                    parent_stretch_index = 2
-                                else:   # "None"
-                                    continue
-
-                                new_child_info = self.env.new_skel_info[child]
-                                child_info = self.env.skel_info[child]
-
-                                child_stretch = child_info['stretch']
-                                if child_stretch == "x":
-                                    child_stretch_index = 0
-                                elif child_stretch == "y":
-                                    child_stretch_index = 1
-                                elif child_stretch == "z":
-                                    child_stretch_index = 2
-
-                                child_stretch_axis = child_info['stretch_axis']
-
-                                new_child_info['joint_t'] = new_parent_info['joint_t'] + parent_info['gap'] + parent_info['stretch_axis'] * new_parent_info['size'][parent_stretch_index] + child_info['gap_parent']
-                                new_child_info['body_t'] = new_child_info['joint_t'] + child_info['gap'] + child_stretch_axis * new_child_info['size'][child_stretch_index] * 0.5
+                        info['body_t'] = info['joint_t'] + gap + stretch_axis * size * 0.5
                         
-                                for muscle in child_info['muscles']:
-                                    new_muscle_info = self.env.new_muscle_info[muscle]
+                        self.retargetting(name, i)
 
-                                    for waypoint in new_muscle_info['waypoints']:
-                                        if waypoint['body'] == child:
-                                            waypoint['p'] = new_child_info['body_t'] + child_stretch_axis * waypoint['ratio'] * new_child_info['size'][child_stretch_index] * 0.5 + waypoint['gap']
+                        if self.skel_change_symmetry and name[-1] in ['R', 'L']:
+                            if name[-1] == "R":
+                                name_pair = name[:-1] + "L"
+                            elif name[-1] == "L":
+                                name_pair = name[:-1] + "R"
+
+                            info_pair = self.env.new_skel_info[name_pair]
+                            info_pair['size'][stretch] = info['size'][stretch].copy()
+
+                            size_pair = info_pair['size'][stretch]
+                            gap_pair = info_pair['gaps'][i]
+                            stretch_axis_pair = info_pair['stretch_axises'][i]
+
+                            info_pair['body_t'] = info_pair['joint_t'] + gap_pair + stretch_axis_pair * size_pair * 0.5
+
+                            self.retargetting(name_pair, i)
 
                         self.newSkeleton()
 
                     imgui.same_line()
                     imgui.set_cursor_pos_x(300)
-                    if imgui.button("Reset##" + name):
-                        info['size'][slider_index] = orig_info['size'][slider_index].copy()
+                    if imgui.button("Reset##" + name_new):
+                        info['size'][stretch] = orig_info['size'][stretch].copy()
 
-                        info['body_t'] = info['joint_t'] + info['gap'] + info['stretch_axis'] * info['size'][slider_index] * 0.5
+                        gap = info['gaps'][i]
+                        stretch_axis = info['stretch_axises'][i]
 
-                        for muscle in info['muscles']:
-                            new_muscle_info = self.env.new_muscle_info[muscle]
+                        info['body_t'] = info['joint_t'] + gap + stretch_axis * size * 0.5
 
-                            for waypoint in new_muscle_info['waypoints']:
-                                if waypoint['body'] == name:
-                                    waypoint['p'] = info['body_t'] + info['stretch_axis'] * waypoint['ratio'] * info['size'][slider_index] * 0.5 + waypoint['gap']
-
-                        if len(info['children']) > 0:
-                            for child in info['children']:
-                                parent_str = self.env.skel_info[child]['parent_str']
-                                
-                                new_parent_info = self.env.new_skel_info[parent_str]
-                                parent_info = self.env.skel_info[parent_str]
-
-                                parent_stretch = parent_info['stretch']
-                                if parent_stretch == "x":
-                                    parent_stretch_index = 0
-                                elif parent_stretch == "y":
-                                    parent_stretch_index = 1
-                                elif parent_stretch == "z":
-                                    parent_stretch_index = 2
-                                else:   # "None"
-                                    continue
-
-                                new_child_info = self.env.new_skel_info[child]
-                                child_info = self.env.skel_info[child]
-
-                                child_stretch = child_info['stretch']
-                                if child_stretch == "x":
-                                    child_stretch_index = 0
-                                elif child_stretch == "y":
-                                    child_stretch_index = 1
-                                elif child_stretch == "z":
-                                    child_stretch_index = 2
-
-                                child_stretch_axis = child_info['stretch_axis']
-
-                                new_child_info['joint_t'] = new_parent_info['joint_t'] + parent_info['gap'] + parent_info['stretch_axis'] * new_parent_info['size'][parent_stretch_index] + child_info['gap_parent']
-                                new_child_info['body_t'] = new_child_info['joint_t'] + child_info['gap'] + child_stretch_axis * new_child_info['size'][child_stretch_index] * 0.5
-                        
-                                for muscle in child_info['muscles']:
-                                    new_muscle_info = self.env.new_muscle_info[muscle]
-
-                                    for waypoint in new_muscle_info['waypoints']:
-                                        if waypoint['body'] == child:
-                                            waypoint['p'] = new_child_info['body_t'] + child_stretch_axis * waypoint['ratio'] * new_child_info['size'][child_stretch_index] * 0.5  + waypoint['gap']
+                        self.retargetting(name, i)
 
                         self.newSkeleton()
-            # if not self.skel_change_realtime:
-            #     if imgui.button("New Skeleton"):
-            #         self.newSkeleton()
-
-            #     imgui.same_line()
 
             if imgui.button("Reset Skeleton"):
                 for name, new_info in self.env.new_skel_info.items():
@@ -752,8 +785,8 @@ class GLFWApp():
                     new_info['size'] = info['size'].copy()
                     new_info['body_t'] = info['body_t'].copy()
                     new_info['joint_t'] = info['joint_t'].copy()
-                    if info.get('stretch_origin') is not None:
-                        new_info['stretch_origin'] = info['stretch_origin'].copy()
+                    if new_info['parent_str'] != "None":
+                        new_info['gaps_parent'] = info['gaps_parent'].copy()
 
                 for name, new_info in self.env.new_muscle_info.items():
                     info = self.env.muscle_info[name]

@@ -157,52 +157,61 @@ def saveSkeletonInfo(path=None, defaultDamping = 0.2):
         skel['joint_t'] = np.array(trans.attrib['translation'].strip().split(' ')).astype(np.float32)
 
         if body.get('stretch') is not None:
-            stretch = body.attrib['stretch']
-            skel['stretch'] = stretch
-            if skel['parent_str'] != "None":
-                # d = skel['joint_t'] - skel['body_t']
+            stretches = np.array(body.attrib['stretch'].strip().split(' ')).astype(np.int32)
+            skel['stretches'] = stretches
 
-                if stretch == "x":
+            stretch_axises = []
+            gaps = []
+
+            for i in stretches:
+                if i == 0:
                     axis = np.array([1, 0, 0])
-                    size = skel['size'][0]
-                elif stretch == "y":
+                elif i == 1:
                     axis = np.array([0, 1, 0])
-                    size = skel['size'][1]
-                elif stretch == "z":
+                elif i == 2:
                     axis = np.array([0, 0, 1])
-                    size = skel['size'][2]
+                
+                size = skel['size'][i]
 
                 stretch_axis = skel['body_r'] @ axis
                 if np.dot(stretch_axis, skel['body_t'] - skel['joint_t'] ) < 0:
                     stretch_axis = -stretch_axis
-                skel['stretch_axis'] = stretch_axis
 
-                skel['gap'] = skel['body_t'] - (skel['joint_t'] + stretch_axis * size * 0.5)
+                stretch_axises.append(stretch_axis)
+                gap = skel['body_t'] - (skel['joint_t'] + stretch_axis * size * 0.5)
+                gaps.append(gap)
 
-                '''
-                <----- size ----->
-                ------------------                             ------------------
-                |                |                             |     parent     |
-                |      body      |<- --gap ----O<--------------|      body      |    O    
-                |                |           joint  gap_parent |                |  parent
-                ------------------                             ------------------   joint
+            skel['stretch_axises'] = stretch_axises
+            skel['gaps'] = gaps
 
-                '''
+            '''
+            <----- size ----->
+            ------------------                             ------------------
+            |                |                             |     parent     |
+            |      body      |<- --gap ----O<--------------|      body      |    O    
+            |                |           joint  gap_parent |                |  parent
+            ------------------                             ------------------   joint
+
+            '''
+
+            if skel['parent_str'] != "None":
                 parent_info = skel_info[skel['parent_str']]
-                parent_stretch = parent_info['stretch']
-                if parent_stretch != "None":
-                    if parent_stretch == "x":
-                        parent_size = parent_info['size'][0]
-                    elif parent_stretch == "y":
-                        parent_size = parent_info['size'][1]
-                    elif parent_stretch == "z":
-                        parent_size = parent_info['size'][2]
+                parent_stretches = parent_info['stretches']
+                parent_joint_t = parent_info['joint_t']
 
-                    parent_joint_t = parent_info['joint_t']
-                    parent_stretch_axis = parent_info['stretch_axis']
-                    parent_gap = parent_info['gap']
+                gaps_parent = []
 
-                    skel['gap_parent'] = skel['joint_t'] - (parent_joint_t + parent_gap + parent_stretch_axis * parent_size)
+                for i in range(len(parent_stretches)):
+                    parent_stretch = parent_stretches[i]
+                    parent_size = parent_info['size'][parent_stretch]
+
+                    parent_stretch_axis = parent_info['stretch_axises'][i]
+                    parent_gap = parent_info['gaps'][i]
+
+                    gap_parent = skel['joint_t'] - (parent_joint_t + parent_gap + parent_stretch_axis * parent_size)
+                    gaps_parent.append(gap_parent)
+
+                skel['gaps_parent'] = gaps_parent
 
         if joint_type == "Free":
             damping = defaultDamping
