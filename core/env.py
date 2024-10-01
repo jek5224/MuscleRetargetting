@@ -34,6 +34,9 @@ class Env(gym.Env):
         self.skel_info = None
         self.new_skel_info = None
         self.root_name = None
+        self.bvh_info = None
+        self.mesh_info = None
+        self.smpl_jn_idx = None
 
         # self.muscle_path = None
         self.skel = None
@@ -63,6 +66,10 @@ class Env(gym.Env):
         self.muscle_activation_levels = None
         self.muscle_nn = None
         self.muscle_buffer = [[],[],[]]
+
+        self.test_skel = None
+        self.test_muscles = None
+        self.test_muscle_pos = []
 
         self.kp = 0.0
         self.kv = 0.0
@@ -100,14 +107,15 @@ class Env(gym.Env):
         ## XML loading
         doc = ET.ElementTree(ET.fromstring(metadata))  # ET.parse(metadata)
         root = doc.getroot()
-        bvh_info = None
         for child in root:
             if child.tag == "skeleton":
-                self.skel_info, self.root_name, bvh_info = saveSkeletonInfo(child.text)
+                # self.skel_info, self.root_name, bvh_info = saveSkeletonInfo(child.text)
+                self.skel_info, self.root_name, self.bvh_info, joints_pd_gain, self.mesh_info, self.smpl_jn_idx = saveSkeletonInfo(child.text)
                 self.new_skel_info = deepcopy(self.skel_info)
                 self.skel = buildFromInfo(self.skel_info, self.root_name)
                 # self.skel, bvh_info = buildFromFile(child.text)
                 self.target_skel = self.skel.clone()
+                self.test_skel = self.skel.clone()
                 self.world.addSkeleton(self.skel)
             elif child.tag == "ground":
                 self.ground, _ = buildFromFile(child.text)
@@ -122,10 +130,10 @@ class Env(gym.Env):
                 if "firstT" in child.attrib.keys():
                     Tframe = 1 if(child.attrib["firstT"].upper() == "TRUE") else None   
                 if child.text[-3:] == "bvh":
-                    self.bvhs = [MyBVH(child.text, bvh_info, self.skel, Tframe)]
+                    self.bvhs = [MyBVH(child.text, self.bvh_info, self.skel, Tframe)]
                 else:   
                     files = os.listdir(child.text)
-                    self.bvhs = (MyBVH(f, bvh_info, self.skel) for f in files if f[-3:] == "bvh")
+                    self.bvhs = (MyBVH(f, self.bvh_info, self.skel) for f in files if f[-3:] == "bvh")
 
                 for _ in range(self.bvhs[self.bvh_idx].num_frames):
                     self.reward_bins.append(0)
@@ -139,6 +147,7 @@ class Env(gym.Env):
 
                 self.muscle_info = self.saveMuscleInfo(child.text)
                 self.loading_muscle_info(self.muscle_info)
+                self.loading_test_muscle_info(self.muscle_info)
 
                 self.new_muscle_info = deepcopy(self.muscle_info)
 
@@ -200,6 +209,20 @@ class Env(gym.Env):
 
         self.muscle_activation_levels = np.zeros(self.muscles.getNumMuscles())
 
+    def loading_test_muscle_info(self, muscle_info):
+        self.test_muscles = dart.dynamics.Muscles(self.test_skel)
+
+        for name, muscle in muscle_info.items():
+            muscle_properties = muscle['muscle_properties']
+            useVelocityForce = muscle['useVelocityForce']
+            waypoints_info = muscle['waypoints']
+
+            waypoints = []
+            for waypoint in waypoints_info:
+                waypoints.append((waypoint['body'], waypoint['p']))
+
+            self.test_muscles.addMuscle(name, muscle_properties, useVelocityForce, waypoints)
+
     def saveMuscleInfo(self, path):
         muscle_info = {}
 
@@ -219,7 +242,7 @@ class Env(gym.Env):
             name = child.attrib['name']
             
             waypoints = []
-            for waypoint in child:
+            for waypoint_i, waypoint in enumerate(child):
                 if waypoint.tag == "Waypoint":
                     body = waypoint.attrib['body']
                     p = np.array([float(p) for p in waypoint.attrib["p"].strip().split(" ")])
@@ -229,32 +252,45 @@ class Env(gym.Env):
                     if not name in skel['muscles']:
                         skel['muscles'].append(name)
 
-                    if skel.get('stretch') != "None":
+                    ratios = []
+                    gaps = []
+                    for i in range(len(skel['stretches'])):
+                        stretch = skel['stretches'][i]
+                        stretch_axis = skel['stretch_axises'][i]
+                        gap = skel['gaps'][i]
+
+                        size = skel['size'][stretch]
+                        '''
+                        # body_t based retargetting
                         body_t = skel['body_t']
-
-                        stretch = skel['stretch']
-                        if stretch == "x":
-                            size = skel['size'][0]
-                        elif stretch == "y":
-                            size = skel['size'][1]
-                        elif stretch == "z":
-                            size = skel['size'][2]
-
-                        stretch_axis = skel['stretch_axis']
                         
                         ratio = np.dot(p - body_t, stretch_axis) / (size * 0.5)
                         gap = p - (body_t + stretch_axis * ratio * size * 0.5)
-                        waypoints.append({
-                            'body': body,
-                            'p': p,
-                            'ratio': ratio,
-                            'gap': gap,
-                        })
-                    else:
-                        waypoints.append({
-                            'body': body,
-                            'p': p,
-                        })
+                        '''
+
+                        # starting_point (joint_t + gap) based retargetting
+
+                        joint_t = skel['joint_t']
+                        starting_point = joint_t + gap
+
+                        if np.linalg.norm(joint_t - p) <= 0.05:
+                            ratio = 0.0
+                        else:     
+                            ratio = np.dot(p - starting_point, stretch_axis) / size
+                            if ratio < 0:
+                                ratio = 0.0
+
+                        waypoint_gap = p - (starting_point + stretch_axis * ratio * size)
+
+                        ratios.append(ratio)
+                        gaps.append(waypoint_gap)
+                        
+                    waypoints.append({
+                        'body': body,
+                        'p': p,
+                        'ratios': ratios,
+                        'gaps': gaps,
+                    })
 
             # muscle['f0'] = float(child.attrib['f0'])
             # muscle['lm'] = float(child.attrib['lm'])
@@ -280,6 +316,22 @@ class Env(gym.Env):
         self.new_skel_info = deepcopy(self.skel_info)
 
         return muscle_info
+    
+    def exportMuscle(self, muscle_info, filename):
+        def tw(file, string, tabnum):
+            for _ in range(tabnum):
+                file.write("\t")
+            file.write(string + "\n")
+
+        with open(f"data/{filename}", "w") as file:
+            tw(file, "<Muscle>", 0)
+            
+            for name, muscle in muscle_info.items():
+                tw(file, f"<Unit name=\"{name}\" f0=\"{muscle['muscle_properties'][0]}\" lm=\"{muscle['muscle_properties'][1]}\" lt=\"{muscle['muscle_properties'][2]}\" pen_angle=\"{muscle['muscle_properties'][3]}\" lmax=\"{muscle['muscle_properties'][4]}\">", 1)
+                for waypoint in muscle['waypoints']:
+                    tw(file, f"<Waypoint body=\"{waypoint['body']}\" p=\"{' '.join([str(np.round(p, 6)) for p in waypoint['p']])}\"/>", 2)
+                tw(file, "</Unit>", 1)
+            tw(file, "</Muscle>", 0)
 
     def get_zero_action(self):
         if True:  # if using PD servo # self.actuator_type == "pd_ref_residual" or self.actuator_type == "mass":
@@ -387,6 +439,9 @@ class Env(gym.Env):
             self.muscles.update()
             self.muscle_pos = self.muscles.getMusclePositions()
 
+            self.test_muscles.update()
+            self.test_muscle_pos = self.test_muscles.getMusclePositions()
+
         self.step_counter = 0
         self.pd_target = np.zeros(self.skel.getNumDofs())
 
@@ -430,6 +485,9 @@ class Env(gym.Env):
         if self.muscles != None:
             self.muscles.update()
             self.muscle_pos = self.muscles.getMusclePositions()
+
+            self.test_muscles.update()
+            self.test_muscle_pos = self.test_muscles.getMusclePositions()
 
         self.step_counter = 0
         self.pd_target = np.zeros(self.skel.getNumDofs())
@@ -498,6 +556,7 @@ class Env(gym.Env):
 
             if self.muscles != None:
                 self.muscles.update()
+                self.test_muscles.update()
 
             if self.actuator_type.find("mass") != -1 and rand_idx == i:
                 self.muscle_buffer[0].append(mt[0]) # reduced_JtA
@@ -509,6 +568,7 @@ class Env(gym.Env):
         
         if self.muscles != None:
             self.muscle_pos = self.muscles.getMusclePositions()
+            self.test_muscle_pos = self.test_muscles.getMusclePositions()
         
         self.update_obs()
         self.get_reward()

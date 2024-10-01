@@ -2,10 +2,9 @@
     <!-- Simulation Setting  -->
     <simHz>480</simHz>
     <controlHz>30</controlHz>
-    <skeleton>data/skel_retargettable.xml</skeleton>
+    <!-- <skeleton>data/skel_retargettable.xml</skeleton> -->
     <!-- <skeleton>data/skel_base.xml</skeleton> -->
-    <!-- <skeleton>data/new_skel.xml</skeleton> -->
-    <!-- <skeleton>data/skel_lafan.xml</skeleton> -->
+    <skeleton>data/new_skel.xml</skeleton>
     <ground>data/ground.xml</ground>
 
     <!-- Actuator Type : pd_ref_residual, pd_cur_residual, mass_ref_residual -->
@@ -18,9 +17,9 @@
     <learningGain>false</learningGain>
 
     <!-- Muscle Setting -->
-    <muscle>data/muscle_gaitnet.xml</muscle>
+    <!-- <muscle>data/muscle284.xml</muscle> -->
     <!-- <muscle>data/muscle_base.xml</muscle> -->
-    <!-- <muscle>data/new_muscle.xml</muscle> -->
+    <muscle>data/new_muscle.xml</muscle>
     <!-- Motion set  -->
     <bvh>data/motion/walk.bvh</bvh>
 

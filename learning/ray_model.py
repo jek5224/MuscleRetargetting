@@ -70,7 +70,7 @@ class MuscleNN(nn.Module):
             print(reduced_JtA.shape, self.std_muscle_tau.shape)
             print("Dimension of reduced_JtA and tau doesn't match")
             return torch.zeros(self.num_muscles)
-        # reduced_JtA = reduced_JtA / self.std_muscle_tau
+        reduced_JtA = reduced_JtA / self.std_muscle_tau
         tau = tau / self.std_tau
 
         return torch.relu(torch.tanh(self.fc(torch.cat([reduced_JtA, tau], dim=-1))))
