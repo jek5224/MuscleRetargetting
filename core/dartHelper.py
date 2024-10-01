@@ -1,6 +1,7 @@
 import dartpy as dart
 import xml.etree.ElementTree as ET
 import numpy as np
+import os
 
 def MakeWeldJointProperties(name, T_ParentBodyToJoint, T_ChildBodyToJoint):
     joint_prop = dart.dynamics.getWeldJointProperties()
@@ -107,6 +108,9 @@ def saveSkeletonInfo(path=None, defaultDamping = 0.2):
     root_name = root.attrib['name']
 
     bvh_info = {}
+    smpl_info = {}
+    joints_pd_gain = []
+    mesh_info = {}
 
     for node in root:
         skel = {}
@@ -118,6 +122,15 @@ def saveSkeletonInfo(path=None, defaultDamping = 0.2):
         body = node.find('Body')
         skel['type'] = body.attrib['type']
         skel['mass'] = float(body.attrib['mass'])
+
+        obj = None
+        if "obj" in body.attrib:
+            obj = body.attrib['obj']
+        skel['obj'] = obj
+
+        if obj:
+            obj_path = os.getcwd() + "/data/OBJ/" + obj
+            mesh_info[name] = obj_path
 
         skel['size'] = np.array(body.attrib['size'].strip().split(' ')).astype(np.float32)
 
@@ -144,6 +157,11 @@ def saveSkeletonInfo(path=None, defaultDamping = 0.2):
         skel['joint_type'] = joint_type
         if 'bvh' in joint.attrib:
             bvh_info[name] = joint.attrib['bvh']
+            skel['bvh'] = joint.attrib['bvh']
+
+        if 'smpl_jidx' in joint.attrib:
+            smpl_info[name] = int(joint.attrib['smpl_jidx'])
+            skel['smpl_jidx'] = int(joint.attrib['smpl_jidx'])
 
         # T_joint = dart.math.Isometry3().Identity()
         # trans = joint.find('Transformation')
@@ -157,52 +175,71 @@ def saveSkeletonInfo(path=None, defaultDamping = 0.2):
         skel['joint_t'] = np.array(trans.attrib['translation'].strip().split(' ')).astype(np.float32)
 
         if body.get('stretch') is not None:
-            stretch = body.attrib['stretch']
-            skel['stretch'] = stretch
-            if skel['parent_str'] != "None":
-                # d = skel['joint_t'] - skel['body_t']
+            stretches = np.array(body.attrib['stretch'].strip().split(' ')).astype(np.int32)
+            skel['stretches'] = stretches
 
-                if stretch == "x":
+            stretch_axises = []
+            gaps = []
+
+            for i in stretches:
+                if i == 0:
                     axis = np.array([1, 0, 0])
-                    size = skel['size'][0]
-                elif stretch == "y":
+                elif i == 1:
                     axis = np.array([0, 1, 0])
-                    size = skel['size'][1]
-                elif stretch == "z":
+                elif i == 2:
                     axis = np.array([0, 0, 1])
-                    size = skel['size'][2]
+                
+                size = skel['size'][i]
 
                 stretch_axis = skel['body_r'] @ axis
                 if np.dot(stretch_axis, skel['body_t'] - skel['joint_t'] ) < 0:
                     stretch_axis = -stretch_axis
-                skel['stretch_axis'] = stretch_axis
 
-                skel['gap'] = skel['body_t'] - (skel['joint_t'] + stretch_axis * size * 0.5)
+                stretch_axises.append(stretch_axis)
+                gap = skel['body_t'] - (skel['joint_t'] + stretch_axis * size * 0.5)
 
-                '''
-                <----- size ----->
-                ------------------                             ------------------
-                |                |                             |     parent     |
-                |      body      |<- --gap ----O<--------------|      body      |    O    
-                |                |           joint  gap_parent |                |  parent
-                ------------------                             ------------------   joint
+                gaps.append(gap)
 
-                '''
+            skel['stretch_axises'] = stretch_axises
+            skel['gaps'] = gaps
+
+            '''
+            <----- size ----->
+            ------------------                             ------------------
+            |                |                             |     parent     |
+            |      body      |<- --gap ----O<--------------|      body      |    O    
+            |                |           joint  gap_parent |                |  parent
+            ------------------                             ------------------   joint
+
+            '''
+
+            if skel['parent_str'] != "None":
                 parent_info = skel_info[skel['parent_str']]
-                parent_stretch = parent_info['stretch']
-                if parent_stretch != "None":
-                    if parent_stretch == "x":
-                        parent_size = parent_info['size'][0]
-                    elif parent_stretch == "y":
-                        parent_size = parent_info['size'][1]
-                    elif parent_stretch == "z":
-                        parent_size = parent_info['size'][2]
+                parent_stretches = parent_info['stretches']
+                parent_joint_t = parent_info['joint_t']
 
-                    parent_joint_t = parent_info['joint_t']
-                    parent_stretch_axis = parent_info['stretch_axis']
-                    parent_gap = parent_info['gap']
+                gaps_parent = []
 
-                    skel['gap_parent'] = skel['joint_t'] - (parent_joint_t + parent_gap + parent_stretch_axis * parent_size)
+                for i in range(len(parent_stretches)):
+                    parent_stretch = parent_stretches[i]
+                    parent_size = parent_info['size'][parent_stretch]
+
+                    parent_stretch_axis = parent_info['stretch_axises'][i]
+                    parent_gap = parent_info['gaps'][i]
+
+                    gap_parent_cand1 = skel['joint_t'] - (parent_joint_t + parent_gap + parent_stretch_axis * parent_size)
+                    gap_parent_cand2 = skel['joint_t'] - (parent_joint_t + parent_gap)
+
+                    if np.linalg.norm(gap_parent_cand1) < np.linalg.norm(gap_parent_cand2):
+                        gap_parent = gap_parent_cand1
+                        same_direction_to_parent = True
+                    else:
+                        gap_parent = gap_parent_cand2
+                        same_direction_to_parent = False
+
+                    gaps_parent.append([gap_parent, same_direction_to_parent])
+
+                skel['gaps_parent'] = gaps_parent
 
         if joint_type == "Free":
             damping = defaultDamping
@@ -250,7 +287,19 @@ def saveSkeletonInfo(path=None, defaultDamping = 0.2):
             print("Not implemented")
             return None
         
+        pd_gain = None
+        if 'pd_gain' in joint.attrib:
+            pd_gain = [np.array(joint.attrib['pd_gain'].strip().split(' ')).astype(np.float32)]
+            if 'kv' in joint.attrib:
+                pd_gain.append(np.array(joint.attrib['kv'].strip().split(' ')).astype(np.float32))
+            else:
+                pd_gain.append(np.sqrt(pd_gain[0]) * 2)
+
+        joints_pd_gain.append(pd_gain)
+        
         skel_info[name] = skel
+
+
 
     children = {}
     for name in skel_info.keys():
@@ -266,11 +315,10 @@ def saveSkeletonInfo(path=None, defaultDamping = 0.2):
                         if not grandchild in children[name]:
                             children[name].append(grandchild)
 
-    # print(children)
     for name in skel_info.keys():
         skel_info[name]['children'] = children[name]
-    
-    return skel_info, root_name, bvh_info
+
+    return skel_info, root_name, bvh_info, joints_pd_gain, mesh_info, smpl_info
 
 # XML file to Skeleton
 def buildFromFile(path = None, defaultDamping = 0.2):
@@ -471,3 +519,87 @@ def buildFromInfo(skel_info, root_name):
             shape_node.createCollisionAspect()
 
     return skel
+
+def exportSkeleton(skel_info, root_name, filename):
+    def tw(file, string, tabnum):
+        for _ in range(tabnum):
+            file.write("\t")
+        file.write(string + "\n")
+
+    f = open(f"data/{filename}", 'w')
+    tw(f, "<Skeleton name=\"%s\">" % (root_name), 0)
+
+    for name, info in skel_info.items():
+        tw(f, "<Node name=\"%s\" parent=\"%s\">" % (name, info['parent_str']), 1)
+
+        tw(f, "<Body type=\"%s\" mass=\"%f\" size=\"%s\" contact=\"%s\" color=\"%s\" obj=\"%s\" stretch=\"%s\">" % 
+           (info['type'], 
+            info['mass'], 
+            " ".join(info['size'].astype(str)), 
+            "On" if info['contact'] else "Off", 
+            " ".join(info['color'].astype(str)), 
+            info['obj'],
+            " ".join([str(i) for i in info['stretches']]),
+            ), 
+            2)
+        
+        tw(f, "<Transformation linear=\"%s\" translation=\"%s\"/>" % 
+           (" ".join(info['body_r'].astype(str).flatten()), 
+            " ".join(info['body_t'].astype(str))
+            ), 
+            3)
+
+        tw(f, "</Body>", 2)
+
+        if info['joint_type'] == "Free":
+            if 'bvh' in info:
+                tw(f, "<Joint type=\"Free\" bvh=\"%s\" smpl_jidx=\"%s\">" % 
+                   (info['bvh'], info['smpl_jidx']), 2)
+            else:
+                tw(f, "<Joint type=\"Free\" smpl_jidx=\"%s\">" % 
+                   (info['smpl_jidx']), 2)
+        elif info['joint_type'] == "Ball":
+            if 'bvh' in info:
+                tw(f, "<Joint type=\"Ball\" bvh=\"%s\" lower=\"%s\" upper=\"%s\" smpl_jidx=\"%s\">" %
+                (info['bvh'],
+                    " ".join(info['lower'].astype(str)),
+                    " ".join(info['upper'].astype(str)),
+                    info['smpl_jidx']
+                    ),
+                    2)
+            else:
+                tw(f, "<Joint type=\"Ball\" lower=\"%s\" upper=\"%s\" smpl_jidx=\"%s\">" %
+                (" ".join(info['lower'].astype(str)),
+                    " ".join(info['upper'].astype(str)),
+                    info['smpl_jidx']
+                    ),
+                    2)
+        elif info['joint_type'] == "Revolute":
+            if 'bvh' in info:
+                tw(f, "<Joint type=\"Revolute\" bvh=\"%s\" axis=\"%s\" lower=\"%s\" upper=\"%s\" smpl_jidx=\"%s\">" %
+                (info['bvh'],
+                    " ".join(info['axis'].astype(str)),
+                    info['lower'],
+                    info['upper'],
+                    info['smpl_jidx']
+                    ),
+                    2)
+            else:
+                tw(f, "<Joint type=\"Revolute\" axis=\"%s\" lower=\"%s\" upper=\"%s\" smpl_jidx=\"%s\">" %
+                (" ".join(info['axis'].astype(str)),
+                    info['lower'],
+                    info['upper'],
+                    info['smpl_jidx']
+                    ),
+                    2)
+        
+        tw(f, "<Transformation linear=\"%s\" translation=\"%s\"/>" %
+                (" ".join(info['joint_r'].astype(str).flatten()),
+                " ".join(info['joint_t'].astype(str))),
+                3)
+        
+        tw(f, "</Joint>", 2)
+
+        tw(f, "</Node>", 1)
+    tw(f, "</Skeleton>", 0)
+    f.close()
