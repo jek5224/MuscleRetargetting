@@ -1,0 +1,6 @@
+Result_Images/
+studying/
+*.pyc
+**/__pycache__/
+dart/
+ray_results/

@@ -96,7 +96,6 @@ class MyBVH():
         self.frames_raw = np.array(self.frames_raw)
         self.mocap_refs = np.zeros([self.num_frames, self.skel.getNumDofs()])
         
-       
         ## Loading Finish
         self.bvh2rot()
 

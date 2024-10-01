@@ -1,0 +1,1782 @@
+<Muscle>
+	<Unit name="L_Abductor_Pollicis_Longus" f0="1000.0" lm="1.2" lt="0.2" pen_angle="0.0" lmax="-0.1">
+		<Waypoint body="ForeArmL" p="0.525949 1.427341 -0.037689"/>
+		<Waypoint body="ForeArmL" p="0.613776 1.443362 -0.008344"/>
+		<Waypoint body="ForeArmL" p="0.659995 1.446137 -0.002431"/>
+		<Waypoint body="HandL" p="0.69375 1.428316 0.032748"/>
+	</Unit>
+	<Unit name="R_Abductor_Pollicis_Longus" f0="1000.0" lm="1.2" lt="0.2" pen_angle="0.0" lmax="-0.1">
+		<Waypoint body="ForeArmR" p="-0.520853 1.426191 -0.042633"/>
+		<Waypoint body="ForeArmR" p="-0.611124 1.442339 -0.013025"/>
+		<Waypoint body="ForeArmR" p="-0.658594 1.44518 -0.006977"/>
+		<Waypoint body="HandR" p="-0.692557 1.427369 0.028224"/>
+	</Unit>
+	<Unit name="L_Adductor_Brevis" f0="151.85" lm="1.0" lt="0.2" pen_angle="0.0" lmax="-0.1">
+		<Waypoint body="Pelvis" p="0.030326 0.889252 0.039548"/>
+		<Waypoint body="FemurL" p="0.079207 0.796948 0.0048"/>
+		<Waypoint body="FemurL" p="0.105175 0.788814 -0.007829"/>
+	</Unit>
+	<Unit name="R_Adductor_Brevis" f0="151.85" lm="1.0" lt="0.2" pen_angle="0.0" lmax="-0.1">
+		<Waypoint body="Pelvis" p="-0.030326 0.889252 0.039548"/>
+		<Waypoint body="FemurR" p="-0.079185 0.795366 0.004822"/>
+		<Waypoint body="FemurR" p="-0.105156 0.7871 -0.007804"/>
+	</Unit>
+	<Unit name="L_Adductor_Brevis1" f0="151.85" lm="1.0" lt="0.2" pen_angle="0.0" lmax="-0.1">
+		<Waypoint body="Pelvis" p="0.013404 0.881647 0.040593"/>
+		<Waypoint body="FemurL" p="0.073278 0.714537 -0.00037"/>
+		<Waypoint body="FemurL" p="0.099284 0.686748 0.002725"/>
+	</Unit>
+	<Unit name="R_Adductor_Brevis1" f0="151.85" lm="1.0" lt="0.2" pen_angle="0.0" lmax="-0.1">
+		<Waypoint body="Pelvis" p="-0.013404 0.881647 0.040593"/>
+		<Waypoint body="FemurR" p="-0.073279 0.711654 -0.000325"/>
+		<Waypoint body="FemurR" p="-0.099293 0.683417 0.002778"/>
+	</Unit>
+	<Unit name="L_Adductor_Longus" f0="199.75" lm="1.0" lt="0.2" pen_angle="0.0" lmax="-0.1">
+		<Waypoint body="Pelvis" p="0.02871 0.891153 0.040593"/>
+		<Waypoint body="FemurL" p="0.095751 0.695394 0.002899"/>
+		<Waypoint body="FemurL" p="0.104668 0.65528 0.001738"/>
+	</Unit>
+	<Unit name="R_Adductor_Longus" f0="199.75" lm="1.0" lt="0.2" pen_angle="0.0" lmax="-0.1">
+		<Waypoint body="Pelvis" p="-0.02871 0.891153 0.040593"/>
+		<Waypoint body="FemurR" p="-0.095757 0.692201 0.002949"/>
+		<Waypoint body="FemurR" p="-0.104685 0.65145 0.001799"/>
+	</Unit>
+	<Unit name="L_Adductor_Longus1" f0="199.75" lm="1.0" lt="0.2" pen_angle="0.0" lmax="-0.1">
+		<Waypoint body="Pelvis" p="0.013309 0.884689 0.046487"/>
+		<Waypoint body="FemurL" p="0.048424 0.686105 0.005196"/>
+		<Waypoint body="FemurL" p="0.09482 0.584171 0.00187"/>
+	</Unit>
+	<Unit name="R_Adductor_Longus1" f0="199.75" lm="1.0" lt="0.2" pen_angle="0.0" lmax="-0.1">
+		<Waypoint body="Pelvis" p="-0.013309 0.884689 0.046487"/>
+		<Waypoint body="FemurR" p="-0.048432 0.682777 0.005248"/>
+		<Waypoint body="FemurR" p="-0.094857 0.579218 0.001951"/>
+	</Unit>
+	<Unit name="L_Adductor_Magnus" f0="259.38" lm="1.0" lt="0.2" pen_angle="0.0" lmax="-0.1">
+		<Waypoint body="Pelvis" p="0.0212 0.862348 0.012739"/>
+		<Waypoint body="FemurL" p="0.10135 0.800891 -0.016217"/>
+		<Waypoint body="FemurL" p="0.127406 0.796997 -0.01659"/>
+	</Unit>
+	<Unit name="R_Adductor_Magnus" f0="259.38" lm="1.0" lt="0.2" pen_angle="0.0" lmax="-0.1">
+		<Waypoint body="Pelvis" p="-0.0212 0.862348 0.012739"/>
+		<Waypoint body="FemurR" p="-0.101327 0.799372 -0.016195"/>
+		<Waypoint body="FemurR" p="-0.127385 0.795409 -0.016567"/>
+	</Unit>
+	<Unit name="L_Adductor_Magnus1" f0="259.38" lm="1.0" lt="0.2" pen_angle="0.0" lmax="-0.1">
+		<Waypoint body="Pelvis" p="0.022341 0.852842 0.012359"/>
+		<Waypoint body="FemurL" p="0.093153 0.761569 -0.021943"/>
+		<Waypoint body="FemurL" p="0.11862 0.71775 -0.00161"/>
+	</Unit>
+	<Unit name="R_Adductor_Magnus1" f0="259.38" lm="1.0" lt="0.2" pen_angle="0.0" lmax="-0.1">
+		<Waypoint body="Pelvis" p="-0.022341 0.852842 0.012359"/>
+		<Waypoint body="FemurR" p="-0.093141 0.759431 -0.021911"/>
+		<Waypoint body="FemurR" p="-0.11862 0.714905 -0.001566"/>
+	</Unit>
+	<Unit name="L_Adductor_Magnus2" f0="259.38" lm="1.2" lt="0.2" pen_angle="0.0" lmax="-0.1">
+		<Waypoint body="Pelvis" p="0.033844 0.842479 -0.024527"/>
+		<Waypoint body="FemurL" p="0.066706 0.770692 -0.022817"/>
+		<Waypoint body="FemurL" p="0.097923 0.702376 -0.023258"/>
+		<Waypoint body="FemurL" p="0.111285 0.675102 0.001511"/>
+	</Unit>
+	<Unit name="R_Adductor_Magnus2" f0="259.38" lm="1.2" lt="0.2" pen_angle="0.0" lmax="-0.1">
+		<Waypoint body="Pelvis" p="-0.033844 0.842479 -0.024527"/>
+		<Waypoint body="FemurR" p="-0.066691 0.768706 -0.022787"/>
+		<Waypoint body="FemurR" p="-0.097927 0.6993 -0.02321"/>
+		<Waypoint body="FemurR" p="-0.111296 0.671583 0.001567"/>
+	</Unit>
+	<Unit name="L_Adductor_Magnus3" f0="259.38" lm="1.0" lt="0.2" pen_angle="0.0" lmax="-0.1">
+		<Waypoint body="Pelvis" p="0.045157 0.841814 -0.041449"/>
+		<Waypoint body="FemurL" p="0.071039 0.741696 -0.03208"/>
+		<Waypoint body="FemurL" p="0.097816 0.658542 -0.02099"/>
+		<Waypoint body="FemurL" p="0.100794 0.592164 -0.001566"/>
+	</Unit>
+	<Unit name="R_Adductor_Magnus3" f0="259.38" lm="1.0" lt="0.2" pen_angle="0.0" lmax="-0.1">
+		<Waypoint body="Pelvis" p="-0.045157 0.841814 -0.041449"/>
+		<Waypoint body="FemurR" p="-0.071032 0.739252 -0.032042"/>
+		<Waypoint body="FemurR" p="-0.097832 0.654771 -0.02093"/>
+		<Waypoint body="FemurR" p="-0.100829 0.587337 -0.001488"/>
+	</Unit>
+	<Unit name="L_Adductor_Magnus4" f0="259.38" lm="1.0" lt="0.2" pen_angle="0.0" lmax="-0.1">
+		<Waypoint body="Pelvis" p="0.065311 0.848944 -0.053237"/>
+		<Waypoint body="Pelvis" p="0.059892 0.817667 -0.045822"/>
+		<Waypoint body="FemurL" p="0.06115 0.591666 -0.029328"/>
+		<Waypoint body="FemurL" p="0.062844 0.500265 -0.02678"/>
+	</Unit>
+	<Unit name="R_Adductor_Magnus4" f0="259.38" lm="1.0" lt="0.2" pen_angle="0.0" lmax="-0.1">
+		<Waypoint body="Pelvis" p="-0.065311 0.848944 -0.053237"/>
+		<Waypoint body="Pelvis" p="-0.059892 0.817667 -0.045822"/>
+		<Waypoint body="FemurR" p="-0.061184 0.586849 -0.02925"/>
+		<Waypoint body="FemurR" p="-0.062903 0.494 -0.026677"/>
+	</Unit>
+	<Unit name="L_Anconeous" f0="1000.0" lm="1.2" lt="0.2" pen_angle="0.0" lmax="-0.1">
+		<Waypoint body="ArmL" p="0.420093 1.43879 -0.032333"/>
+		<Waypoint body="ForeArmL" p="0.44693 1.436066 -0.048442"/>
+		<Waypoint body="ForeArmL" p="0.479348 1.425704 -0.051485"/>
+	</Unit>
+	<Unit name="R_Anconeous" f0="1000.0" lm="1.2" lt="0.2" pen_angle="0.0" lmax="-0.1">
+		<Waypoint body="ArmR" p="-0.413173 1.43755 -0.037489"/>
+		<Waypoint body="ForeArmR" p="-0.4397 1.434805 -0.053616"/>
+		<Waypoint body="ForeArmR" p="-0.472118 1.424443 -0.056659"/>
+	</Unit>
+	<Unit name="L_Bicep_Brachii_Long_Head" f0="1000.0" lm="1.2" lt="0.2" pen_angle="0.0" lmax="-0.1">
+		<Waypoint body="ShoulderL" p="0.160948 1.387495 -0.046818"/>
+		<Waypoint body="ArmL" p="0.153698 1.384168 -0.051978"/>
+		<Waypoint body="ArmL" p="0.156645 1.39396 -0.038003"/>
+		<Waypoint body="ArmL" p="0.166247 1.396146 -0.028592"/>
+		<Waypoint body="ArmL" p="0.188493 1.396621 -0.027356"/>
+		<Waypoint body="ArmL" p="0.221099 1.395299 -0.023463"/>
+		<Waypoint body="ForeArmL" p="0.43923 1.406215 0.000327"/>
+		<Waypoint body="ForeArmL" p="0.486217 1.419478 -0.022123"/>
+	</Unit>
+	<Unit name="R_Bicep_Brachii_Long_Head" f0="1000.0" lm="1.2" lt="0.2" pen_angle="0.0" lmax="-0.1">
+		<Waypoint body="ShoulderR" p="-0.160948 1.387495 -0.051344"/>
+		<Waypoint body="ArmR" p="-0.152826 1.383334 -0.056779"/>
+		<Waypoint body="ArmR" p="-0.155773 1.393126 -0.042804"/>
+		<Waypoint body="ArmR" p="-0.165375 1.395312 -0.033393"/>
+		<Waypoint body="ArmR" p="-0.187621 1.395787 -0.032157"/>
+		<Waypoint body="ArmR" p="-0.218937 1.394378 -0.02834"/>
+		<Waypoint body="ForeArmR" p="-0.432 1.404954 -0.004847"/>
+		<Waypoint body="ForeArmR" p="-0.480097 1.418275 -0.027177"/>
+	</Unit>
+	<Unit name="L_Bicep_Brachii_Short_Head" f0="1000.0" lm="1.2" lt="0.2" pen_angle="0.0" lmax="-0.1">
+		<Waypoint body="ShoulderL" p="0.160092 1.378939 -0.018773"/>
+		<Waypoint body="ArmL" p="0.21564 1.37371 -0.028426"/>
+		<Waypoint body="ArmL" p="0.406338 1.384695 -0.000892"/>
+		<Waypoint body="ForeArmL" p="0.488141 1.418424 -0.025183"/>
+	</Unit>
+	<Unit name="R_Bicep_Brachii_Short_Head" f0="1000.0" lm="1.2" lt="0.2" pen_angle="0.0" lmax="-0.1">
+		<Waypoint body="ShoulderR" p="-0.160092 1.378939 -0.023299"/>
+		<Waypoint body="ArmR" p="-0.213648 1.372801 -0.033292"/>
+		<Waypoint body="ArmR" p="-0.399784 1.383479 -0.006027"/>
+		<Waypoint body="ForeArmR" p="-0.482062 1.417222 -0.030233"/>
+	</Unit>
+	<Unit name="L_Bicep_Femoris_Longus" f0="705.2" lm="1.0" lt="0.2" pen_angle="0.0" lmax="-0.1">
+		<Waypoint body="Pelvis" p="0.067402 0.870809 -0.060462"/>
+		<Waypoint body="FemurL" p="0.091759 0.82765 -0.044059"/>
+		<Waypoint body="FemurL" p="0.133728 0.520165 -0.0271"/>
+		<Waypoint body="FemurL" p="0.137787 0.485291 -0.030458"/>
+		<Waypoint body="TibiaL" p="0.132284 0.434812 -0.035955"/>
+	</Unit>
+	<Unit name="R_Bicep_Femoris_Longus" f0="705.2" lm="1.0" lt="0.2" pen_angle="0.0" lmax="-0.1">
+		<Waypoint body="Pelvis" p="-0.067402 0.870809 -0.060462"/>
+		<Waypoint body="FemurR" p="-0.091709 0.827634 -0.044064"/>
+		<Waypoint body="FemurR" p="-0.133783 0.514195 -0.027002"/>
+		<Waypoint body="FemurR" p="-0.137851 0.478769 -0.03035"/>
+		<Waypoint body="TibiaR" p="-0.132353 0.42795 -0.035844"/>
+	</Unit>
+	<Unit name="L_Bicep_Femoris_Short" f0="157.9" lm="1.0" lt="0.2" pen_angle="0.0" lmax="-0.1">
+		<Waypoint body="FemurL" p="0.112786 0.685978 0.00054"/>
+		<Waypoint body="FemurL" p="0.137209 0.488911 -0.027517"/>
+		<Waypoint body="TibiaL" p="0.133802 0.435025 -0.031494"/>
+	</Unit>
+	<Unit name="R_Bicep_Femoris_Short" f0="157.9" lm="1.0" lt="0.2" pen_angle="0.0" lmax="-0.1">
+		<Waypoint body="FemurR" p="-0.112795 0.682632 0.000593"/>
+		<Waypoint body="FemurR" p="-0.137272 0.482447 -0.027411"/>
+		<Waypoint body="TibiaR" p="-0.133871 0.428164 -0.031382"/>
+	</Unit>
+	<Unit name="L_Bicep_Femoris_Short1" f0="157.9" lm="1.0" lt="0.2" pen_angle="0.0" lmax="-0.1">
+		<Waypoint body="FemurL" p="0.106926 0.567188 0.002378"/>
+		<Waypoint body="FemurL" p="0.13543 0.475033 -0.018174"/>
+		<Waypoint body="TibiaL" p="0.131997 0.43449 -0.028258"/>
+	</Unit>
+	<Unit name="R_Bicep_Femoris_Short1" f0="157.9" lm="1.0" lt="0.2" pen_angle="0.0" lmax="-0.1">
+		<Waypoint body="FemurR" p="-0.106967 0.561963 0.002463"/>
+		<Waypoint body="FemurR" p="-0.135497 0.468346 -0.018064"/>
+		<Waypoint body="TibiaR" p="-0.132066 0.427628 -0.028146"/>
+	</Unit>
+	<Unit name="L_Brachialis" f0="1000.0" lm="1.2" lt="0.2" pen_angle="0.0" lmax="-0.1">
+		<Waypoint body="ArmL" p="0.279847 1.419586 -0.03987"/>
+		<Waypoint body="ArmL" p="0.294077 1.430236 -0.029671"/>
+		<Waypoint body="ArmL" p="0.411932 1.418163 -0.006581"/>
+		<Waypoint body="ForeArmL" p="0.466038 1.419145 -0.033897"/>
+	</Unit>
+	<Unit name="R_Brachialis" f0="1000.0" lm="1.2" lt="0.2" pen_angle="0.0" lmax="-0.1">
+		<Waypoint body="ArmR" p="-0.27628 1.418571 -0.044829"/>
+		<Waypoint body="ArmR" p="-0.290143 1.429196 -0.034651"/>
+		<Waypoint body="ArmR" p="-0.405201 1.416936 -0.011725"/>
+		<Waypoint body="ForeArmR" p="-0.458808 1.417884 -0.039071"/>
+	</Unit>
+	<Unit name="L_Brachioradialis" f0="1000.0" lm="1.2" lt="0.2" pen_angle="0.0" lmax="-0.1">
+		<Waypoint body="ArmL" p="0.369075 1.423074 -0.042616"/>
+		<Waypoint body="ArmL" p="0.386704 1.446695 -0.030752"/>
+		<Waypoint body="ArmL" p="0.414431 1.435511 0.000601"/>
+		<Waypoint body="ForeArmL" p="0.467516 1.418043 0.012088"/>
+		<Waypoint body="ForeArmL" p="0.59334 1.430067 0.009184"/>
+		<Waypoint body="ForeArmL" p="0.660301 1.442711 0.002695"/>
+	</Unit>
+	<Unit name="R_Brachioradialis" f0="1000.0" lm="1.2" lt="0.2" pen_angle="0.0" lmax="-0.1">
+		<Waypoint body="ArmR" p="-0.363399 1.421917 -0.047699"/>
+		<Waypoint body="ArmR" p="-0.380558 1.445507 -0.035863"/>
+		<Waypoint body="ArmR" p="-0.407604 1.434277 -0.004549"/>
+		<Waypoint body="ForeArmR" p="-0.460994 1.416819 0.00699"/>
+		<Waypoint body="ForeArmR" p="-0.590176 1.429017 0.004447"/>
+		<Waypoint body="ForeArmR" p="-0.658919 1.441755 -0.001849"/>
+	</Unit>
+	<Unit name="L_Coracobrachialis" f0="1000.0" lm="1.2" lt="0.2" pen_angle="0.0" lmax="-0.1">
+		<Waypoint body="ShoulderL" p="0.159807 1.376943 -0.019629"/>
+		<Waypoint body="ArmL" p="0.202182 1.370288 -0.038859"/>
+		<Waypoint body="ArmL" p="0.264027 1.390045 -0.040063"/>
+		<Waypoint body="ArmL" p="0.285248 1.401851 -0.037729"/>
+	</Unit>
+	<Unit name="R_Coracobrachialis" f0="1000.0" lm="1.2" lt="0.2" pen_angle="0.0" lmax="-0.1">
+		<Waypoint body="ShoulderR" p="-0.159807 1.376943 -0.024155"/>
+		<Waypoint body="ArmR" p="-0.20131 1.369454 -0.04366"/>
+		<Waypoint body="ArmR" p="-0.260881 1.389058 -0.044997"/>
+		<Waypoint body="ArmR" p="-0.281579 1.400829 -0.042694"/>
+	</Unit>
+	<Unit name="L_Deltoid" f0="1000.0" lm="1.2" lt="0.2" pen_angle="0.0" lmax="-0.1">
+		<Waypoint body="ShoulderL" p="0.136135 1.408885 -0.029801"/>
+		<Waypoint body="ShoulderL" p="0.152772 1.391203 -0.010312"/>
+		<Waypoint body="ArmL" p="0.1907 1.374565 -0.007832"/>
+		<Waypoint body="ArmL" p="0.228613 1.403746 -0.007872"/>
+		<Waypoint body="ArmL" p="0.253708 1.406406 -0.0317"/>
+	</Unit>
+	<Unit name="R_Deltoid" f0="1000.0" lm="1.2" lt="0.2" pen_angle="0.0" lmax="-0.1">
+		<Waypoint body="ShoulderR" p="-0.136135 1.408885 -0.034327"/>
+		<Waypoint body="ShoulderR" p="-0.152772 1.391203 -0.014838"/>
+		<Waypoint body="ArmR" p="-0.189266 1.373694 -0.012666"/>
+		<Waypoint body="ArmR" p="-0.226238 1.402811 -0.012761"/>
+		<Waypoint body="ArmR" p="-0.250769 1.405433 -0.036622"/>
+	</Unit>
+	<Unit name="L_Deltoid1" f0="1000.0" lm="1.2" lt="0.2" pen_angle="0.0" lmax="-0.1">
+		<Waypoint body="ShoulderL" p="0.187946 1.4086 -0.03617"/>
+		<Waypoint body="ArmL" p="0.161969 1.411547 -0.028782"/>
+		<Waypoint body="ArmL" p="0.195381 1.427518 -0.014855"/>
+		<Waypoint body="ArmL" p="0.236393 1.42902 -0.014337"/>
+		<Waypoint body="ArmL" p="0.2687 1.412589 -0.029391"/>
+	</Unit>
+	<Unit name="R_Deltoid1" f0="1000.0" lm="1.2" lt="0.2" pen_angle="0.0" lmax="-0.1">
+		<Waypoint body="ShoulderR" p="-0.187946 1.4086 -0.040696"/>
+		<Waypoint body="ArmR" p="-0.161097 1.410713 -0.033583"/>
+		<Waypoint body="ArmR" p="-0.193762 1.426634 -0.019699"/>
+		<Waypoint body="ArmR" p="-0.233803 1.42807 -0.019238"/>
+		<Waypoint body="ArmR" p="-0.265393 1.411591 -0.034335"/>
+	</Unit>
+	<Unit name="L_Deltoid2" f0="1000.0" lm="1.2" lt="0.2" pen_angle="0.0" lmax="-0.1">
+		<Waypoint body="ShoulderL" p="0.19365 1.402326 -0.061173"/>
+		<Waypoint body="ShoulderL" p="0.183763 1.409551 -0.048434"/>
+		<Waypoint body="ArmL" p="0.202738 1.444645 -0.045916"/>
+		<Waypoint body="ArmL" p="0.249822 1.436283 -0.036906"/>
+		<Waypoint body="ArmL" p="0.273363 1.416334 -0.032388"/>
+	</Unit>
+	<Unit name="R_Deltoid2" f0="1000.0" lm="1.2" lt="0.2" pen_angle="0.0" lmax="-0.1">
+		<Waypoint body="ShoulderR" p="-0.19365 1.402326 -0.065699"/>
+		<Waypoint body="ShoulderR" p="-0.183763 1.409551 -0.05296"/>
+		<Waypoint body="ArmR" p="-0.200962 1.44375 -0.05077"/>
+		<Waypoint body="ArmR" p="-0.246934 1.435314 -0.041825"/>
+		<Waypoint body="ArmR" p="-0.269945 1.415328 -0.037338"/>
+	</Unit>
+	<Unit name="L_Extensor_Carpi_Radialis_Longus" f0="1000.0" lm="1.2" lt="0.2" pen_angle="0.0" lmax="-0.1">
+		<Waypoint body="ArmL" p="0.398101 1.427756 -0.039504"/>
+		<Waypoint body="ArmL" p="0.415677 1.445772 -0.024217"/>
+		<Waypoint body="ForeArmL" p="0.459479 1.445749 0.00476"/>
+		<Waypoint body="ForeArmL" p="0.603671 1.438282 0.001178"/>
+		<Waypoint body="ForeArmL" p="0.656525 1.442933 -0.013307"/>
+		<Waypoint body="HandL" p="0.700024 1.440199 0.010503"/>
+	</Unit>
+	<Unit name="R_Extensor_Carpi_Radialis_Longus" f0="1000.0" lm="1.2" lt="0.2" pen_angle="0.0" lmax="-0.1">
+		<Waypoint body="ArmR" p="-0.391727 1.426553 -0.044628"/>
+		<Waypoint body="ArmR" p="-0.408838 1.444537 -0.029368"/>
+		<Waypoint body="ForeArmR" p="-0.45276 1.444514 -0.000359"/>
+		<Waypoint body="ForeArmR" p="-0.60077 1.437246 -0.00353"/>
+		<Waypoint body="ForeArmR" p="-0.654997 1.441968 -0.017867"/>
+		<Waypoint body="HandR" p="-0.698831 1.439252 0.005979"/>
+	</Unit>
+	<Unit name="L_Extensor_Carpi_Ulnaris" f0="1000.0" lm="1.2" lt="0.2" pen_angle="0.0" lmax="-0.1">
+		<Waypoint body="ArmL" p="0.4299 1.439336 -0.029776"/>
+		<Waypoint body="ForeArmL" p="0.468035 1.446524 -0.039696"/>
+		<Waypoint body="ForeArmL" p="0.545744 1.426952 -0.052827"/>
+		<Waypoint body="ForeArmL" p="0.659753 1.406046 -0.025095"/>
+		<Waypoint body="HandL" p="0.696412 1.432879 -0.025147"/>
+	</Unit>
+	<Unit name="R_Extensor_Carpi_Ulnaris" f0="1000.0" lm="1.2" lt="0.2" pen_angle="0.0" lmax="-0.1">
+		<Waypoint body="ArmR" p="-0.422743 1.43808 -0.034946"/>
+		<Waypoint body="ForeArmR" p="-0.460805 1.445263 -0.04487"/>
+		<Waypoint body="ForeArmR" p="-0.541131 1.425828 -0.05772"/>
+		<Waypoint body="ForeArmR" p="-0.658226 1.405082 -0.029655"/>
+		<Waypoint body="HandR" p="-0.695219 1.431932 -0.029671"/>
+	</Unit>
+	<Unit name="L_Extensor_Digiti_Minimi" f0="1000.0" lm="1.2" lt="0.2" pen_angle="0.0" lmax="-0.1">
+		<Waypoint body="ArmL" p="0.431334 1.439888 -0.028558"/>
+		<Waypoint body="ForeArmL" p="0.457577 1.445858 -0.030665"/>
+		<Waypoint body="ForeArmL" p="0.657759 1.419175 -0.029352"/>
+		<Waypoint body="HandL" p="0.692704 1.437062 -0.024767"/>
+		<Waypoint body="HandL" p="0.767526 1.414623 -0.02981"/>
+		<Waypoint body="HandL" p="0.818904 1.394157 -0.026381"/>
+	</Unit>
+	<Unit name="R_Extensor_Digiti_Minimi" f0="1000.0" lm="1.2" lt="0.2" pen_angle="0.0" lmax="-0.1">
+		<Waypoint body="ArmR" p="-0.424141 1.438629 -0.033729"/>
+		<Waypoint body="ForeArmR" p="-0.450347 1.444597 -0.035839"/>
+		<Waypoint body="ForeArmR" p="-0.656184 1.418209 -0.033917"/>
+		<Waypoint body="HandR" p="-0.691511 1.436115 -0.029291"/>
+		<Waypoint body="HandR" p="-0.766083 1.413734 -0.034355"/>
+		<Waypoint body="HandR" p="-0.817286 1.393308 -0.03094"/>
+	</Unit>
+	<Unit name="L_Extensor_Digitorum_Longus" f0="172.7" lm="1.0" lt="0.2" pen_angle="0.0" lmax="-0.1">
+		<Waypoint body="TibiaL" p="0.118133 0.429505 -0.011204"/>
+		<Waypoint body="TibiaL" p="0.119773 0.399258 -0.022978"/>
+		<Waypoint body="TibiaL" p="0.091874 0.112541 -0.02023"/>
+		<Waypoint body="TalusL" p="0.089564 0.08746 -0.010365"/>
+		<Waypoint body="TalusL" p="0.087758 0.033557 0.068445"/>
+		<Waypoint body="FootThumbL" p="0.089659 0.027378 0.095539"/>
+		<Waypoint body="FootThumbL" p="0.09137 0.019583 0.110749"/>
+	</Unit>
+	<Unit name="R_Extensor_Digitorum_Longus" f0="172.7" lm="1.0" lt="0.2" pen_angle="0.0" lmax="-0.1">
+		<Waypoint body="TibiaR" p="-0.118201 0.422639 -0.011093"/>
+		<Waypoint body="TibiaR" p="-0.11984 0.392359 -0.02287"/>
+		<Waypoint body="TibiaR" p="-0.091931 0.105336 -0.020149"/>
+		<Waypoint body="TalusR" p="-0.089621 0.080236 -0.010286"/>
+		<Waypoint body="TalusR" p="-0.087815 0.026333 0.068524"/>
+		<Waypoint body="FootThumbR" p="-0.089716 0.020154 0.095618"/>
+		<Waypoint body="FootThumbR" p="-0.091427 0.012359 0.110828"/>
+	</Unit>
+	<Unit name="L_Extensor_Digitorum_Longus1" f0="172.7" lm="1.0" lt="0.2" pen_angle="0.0" lmax="-0.1">
+		<Waypoint body="TibiaL" p="0.123139 0.437265 -0.00862"/>
+		<Waypoint body="TibiaL" p="0.128173 0.364554 -0.017425"/>
+		<Waypoint body="TibiaL" p="0.094627 0.113462 -0.01872"/>
+		<Waypoint body="TalusL" p="0.095743 0.083943 -0.006753"/>
+		<Waypoint body="TalusL" p="0.101733 0.030515 0.062741"/>
+		<Waypoint body="FootPinkyL" p="0.104299 0.025762 0.079853"/>
+		<Waypoint body="FootPinkyL" p="0.108672 0.017301 0.102289"/>
+	</Unit>
+	<Unit name="R_Extensor_Digitorum_Longus1" f0="172.7" lm="1.0" lt="0.2" pen_angle="0.0" lmax="-0.1">
+		<Waypoint body="TibiaR" p="-0.123209 0.430408 -0.008508"/>
+		<Waypoint body="TibiaR" p="-0.128239 0.357619 -0.01732"/>
+		<Waypoint body="TibiaR" p="-0.094684 0.106257 -0.018639"/>
+		<Waypoint body="TalusR" p="-0.0958 0.076719 -0.006674"/>
+		<Waypoint body="TalusR" p="-0.10179 0.023291 0.06282"/>
+		<Waypoint body="FootPinkyR" p="-0.104356 0.018538 0.079932"/>
+		<Waypoint body="FootPinkyR" p="-0.108729 0.010077 0.102368"/>
+	</Unit>
+	<Unit name="L_Extensor_Digitorum_Longus2" f0="172.7" lm="1.0" lt="0.2" pen_angle="0.0" lmax="-0.1">
+		<Waypoint body="TibiaL" p="0.121725 0.434266 -0.008115"/>
+		<Waypoint body="TibiaL" p="0.135017 0.364228 -0.012105"/>
+		<Waypoint body="TibiaL" p="0.095768 0.113292 -0.019288"/>
+		<Waypoint body="TalusL" p="0.0985 0.080901 -0.005897"/>
+		<Waypoint body="FootPinkyL" p="0.114376 0.031941 0.055801"/>
+		<Waypoint body="FootPinkyL" p="0.117609 0.028519 0.069491"/>
+		<Waypoint body="FootPinkyL" p="0.121221 0.019488 0.084606"/>
+	</Unit>
+	<Unit name="R_Extensor_Digitorum_Longus2" f0="172.7" lm="1.0" lt="0.2" pen_angle="0.0" lmax="-0.1">
+		<Waypoint body="TibiaR" p="-0.121794 0.427406 -0.008003"/>
+		<Waypoint body="TibiaR" p="-0.135083 0.357293 -0.012001"/>
+		<Waypoint body="TibiaR" p="-0.095825 0.106087 -0.019207"/>
+		<Waypoint body="TalusR" p="-0.098557 0.073677 -0.005818"/>
+		<Waypoint body="FootPinkyR" p="-0.114433 0.024717 0.05588"/>
+		<Waypoint body="FootPinkyR" p="-0.117666 0.021295 0.06957"/>
+		<Waypoint body="FootPinkyR" p="-0.121278 0.012264 0.084685"/>
+	</Unit>
+	<Unit name="L_Extensor_Digitorum_Longus3" f0="172.7" lm="1.0" lt="0.2" pen_angle="0.0" lmax="-0.1">
+		<Waypoint body="TibiaL" p="0.124467 0.438303 -0.010245"/>
+		<Waypoint body="TibiaL" p="0.12618 0.364668 -0.029869"/>
+		<Waypoint body="TibiaL" p="0.100811 0.086387 -0.012385"/>
+		<Waypoint body="TalusL" p="0.110764 0.063693 0.005036"/>
+		<Waypoint body="TalusL" p="0.12645 0.034128 0.041731"/>
+		<Waypoint body="FootPinkyL" p="0.132534 0.016065 0.075005"/>
+	</Unit>
+	<Unit name="R_Extensor_Digitorum_Longus3" f0="172.7" lm="1.0" lt="0.2" pen_angle="0.0" lmax="-0.1">
+		<Waypoint body="TibiaR" p="-0.124536 0.431447 -0.010133"/>
+		<Waypoint body="TibiaR" p="-0.126246 0.357732 -0.029764"/>
+		<Waypoint body="TibiaR" p="-0.100867 0.079154 -0.012306"/>
+		<Waypoint body="TalusR" p="-0.110821 0.056469 0.005115"/>
+		<Waypoint body="TalusR" p="-0.126507 0.026904 0.04181"/>
+		<Waypoint body="FootPinkyR" p="-0.132591 0.008841 0.075084"/>
+	</Unit>
+	<Unit name="L_Extensor_Digitorum1" f0="1000.0" lm="1.2" lt="0.2" pen_angle="0.0" lmax="-0.1">
+		<Waypoint body="ArmL" p="0.430374 1.443886 -0.02494"/>
+		<Waypoint body="ForeArmL" p="0.625505 1.43779 -0.020346"/>
+		<Waypoint body="ForeArmL" p="0.656683 1.433624 -0.023747"/>
+		<Waypoint body="HandL" p="0.695651 1.446188 -0.001096"/>
+		<Waypoint body="HandL" p="0.780119 1.432477 0.007633"/>
+		<Waypoint body="HandL" p="0.858148 1.391059 0.018684"/>
+	</Unit>
+	<Unit name="R_Extensor_Digitorum1" f0="1000.0" lm="1.2" lt="0.2" pen_angle="0.0" lmax="-0.1">
+		<Waypoint body="ArmR" p="-0.423192 1.442628 -0.030111"/>
+		<Waypoint body="ForeArmR" p="-0.623124 1.436782 -0.024998"/>
+		<Waypoint body="ForeArmR" p="-0.655116 1.432657 -0.028311"/>
+		<Waypoint body="HandR" p="-0.694458 1.445241 -0.00562"/>
+		<Waypoint body="HandR" p="-0.77864 1.431596 0.003085"/>
+		<Waypoint body="HandR" p="-0.856395 1.390242 0.014114"/>
+	</Unit>
+	<Unit name="L_Extensor_Hallucis_Longus" f0="165.0" lm="1.0" lt="0.2" pen_angle="0.0" lmax="-0.1">
+		<Waypoint body="TibiaL" p="0.110676 0.342053 -0.025088"/>
+		<Waypoint body="TibiaL" p="0.094321 0.118599 -0.017914"/>
+		<Waypoint body="TalusL" p="0.081483 0.085654 -0.010175"/>
+		<Waypoint body="TalusL" p="0.071026 0.067591 0.030228"/>
+		<Waypoint body="TalusL" p="0.064562 0.037455 0.072343"/>
+		<Waypoint body="FootThumbL" p="0.059808 0.019488 0.111415"/>
+	</Unit>
+	<Unit name="R_Extensor_Hallucis_Longus" f0="165.0" lm="1.0" lt="0.2" pen_angle="0.0" lmax="-0.1">
+		<Waypoint body="TibiaR" p="-0.110741 0.335093 -0.024986"/>
+		<Waypoint body="TibiaR" p="-0.094378 0.1114 -0.017832"/>
+		<Waypoint body="TalusR" p="-0.08154 0.07843 -0.010096"/>
+		<Waypoint body="TalusR" p="-0.071083 0.060367 0.030307"/>
+		<Waypoint body="TalusR" p="-0.064619 0.030231 0.072422"/>
+		<Waypoint body="FootThumbR" p="-0.059865 0.012264 0.111494"/>
+	</Unit>
+	<Unit name="L_Extensor_Pollicis_Brevis" f0="1000.0" lm="1.2" lt="0.2" pen_angle="0.0" lmax="-0.1">
+		<Waypoint body="ForeArmL" p="0.586861 1.426508 -0.016848"/>
+		<Waypoint body="ForeArmL" p="0.664848 1.445448 -0.007139"/>
+		<Waypoint body="HandL" p="0.688046 1.436967 0.025428"/>
+		<Waypoint body="HandL" p="0.735633 1.411292 0.050431"/>
+	</Unit>
+	<Unit name="R_Extensor_Pollicis_Brevis" f0="1000.0" lm="1.2" lt="0.2" pen_angle="0.0" lmax="-0.1">
+		<Waypoint body="ForeArmR" p="-0.583445 1.425445 -0.021612"/>
+		<Waypoint body="ForeArmR" p="-0.663563 1.444496 -0.011673"/>
+		<Waypoint body="HandR" p="-0.686853 1.43602 0.020904"/>
+		<Waypoint body="HandR" p="-0.734266 1.410386 0.045893"/>
+	</Unit>
+	<Unit name="L_Extensor_Pollicis_Longus" f0="1000.0" lm="1.2" lt="0.2" pen_angle="0.0" lmax="-0.1">
+		<Waypoint body="ForeArmL" p="0.562245 1.425706 -0.031752"/>
+		<Waypoint body="ForeArmL" p="0.647041 1.434817 -0.020596"/>
+		<Waypoint body="HandL" p="0.686525 1.444857 0.011453"/>
+		<Waypoint body="HandL" p="0.725196 1.419916 0.046338"/>
+		<Waypoint body="HandL" p="0.761021 1.399129 0.058668"/>
+	</Unit>
+	<Unit name="R_Extensor_Pollicis_Longus" f0="1000.0" lm="1.2" lt="0.2" pen_angle="0.0" lmax="-0.1">
+		<Waypoint body="ForeArmR" p="-0.55813 1.424607 -0.03659"/>
+		<Waypoint body="ForeArmR" p="-0.645228 1.433838 -0.025187"/>
+		<Waypoint body="HandR" p="-0.685332 1.44391 0.006929"/>
+		<Waypoint body="HandR" p="-0.723869 1.419001 0.041803"/>
+		<Waypoint body="HandR" p="-0.759564 1.398243 0.054123"/>
+	</Unit>
+	<Unit name="L_Flexor_Carpi_Radialis" f0="1000.0" lm="1.2" lt="0.2" pen_angle="0.0" lmax="-0.1">
+		<Waypoint body="ArmL" p="0.430371 1.385288 -0.03877"/>
+		<Waypoint body="ForeArmL" p="0.621462 1.414991 0.000129"/>
+		<Waypoint body="ForeArmL" p="0.658625 1.421148 0.001304"/>
+		<Waypoint body="HandL" p="0.702971 1.429457 0.011073"/>
+	</Unit>
+	<Unit name="R_Flexor_Carpi_Radialis" f0="1000.0" lm="1.2" lt="0.2" pen_angle="0.0" lmax="-0.1">
+		<Waypoint body="ArmR" p="-0.423301 1.384037 -0.043934"/>
+		<Waypoint body="ForeArmR" p="-0.619 1.413978 -0.004532"/>
+		<Waypoint body="ForeArmR" p="-0.657164 1.420187 -0.003249"/>
+		<Waypoint body="HandR" p="-0.701778 1.42851 0.006549"/>
+	</Unit>
+	<Unit name="L_Flexor_Carpi_Ulnaris" f0="1000.0" lm="1.2" lt="0.2" pen_angle="0.0" lmax="-0.1">
+		<Waypoint body="ArmL" p="0.43615 1.384651 -0.044341"/>
+		<Waypoint body="ForeArmL" p="0.485598 1.394413 -0.05685"/>
+		<Waypoint body="ForeArmL" p="0.637311 1.406836 -0.019231"/>
+		<Waypoint body="HandL" p="0.677208 1.422802 -0.016686"/>
+	</Unit>
+	<Unit name="R_Flexor_Carpi_Ulnaris" f0="1000.0" lm="1.2" lt="0.2" pen_angle="0.0" lmax="-0.1">
+		<Waypoint body="ArmR" p="-0.428953 1.383392 -0.049513"/>
+		<Waypoint body="ForeArmR" p="-0.479327 1.393201 -0.061921"/>
+		<Waypoint body="ForeArmR" p="-0.635204 1.405841 -0.023853"/>
+		<Waypoint body="HandR" p="-0.676015 1.421855 -0.02121"/>
+	</Unit>
+	<Unit name="L_Flexor_Digiti_Minimi_Brevis_Foot" f0="50.0" lm="1.0" lt="0.2" pen_angle="0.0" lmax="-0.1">
+		<Waypoint body="FootPinkyL" p="0.131869 0.017871 0.051333"/>
+		<Waypoint body="TalusL" p="0.116373 0.02966 -0.004566"/>
+	</Unit>
+	<Unit name="R_Flexor_Digiti_Minimi_Brevis_Foot" f0="50.0" lm="1.0" lt="0.2" pen_angle="0.0" lmax="-0.1">
+		<Waypoint body="FootPinkyR" p="-0.131926 0.010647 0.051412"/>
+		<Waypoint body="TalusR" p="-0.11643 0.022436 -0.004487"/>
+	</Unit>
+	<Unit name="L_Flexor_Digitorum_Longus" f0="137.2" lm="1.0" lt="0.2" pen_angle="0.0" lmax="-0.1">
+		<Waypoint body="TibiaL" p="0.086281 0.357502 -0.017724"/>
+		<Waypoint body="TibiaL" p="0.061756 0.111519 -0.048706"/>
+		<Waypoint body="TalusL" p="0.062755 0.045631 -0.016925"/>
+		<Waypoint body="TalusL" p="0.081198 0.037835 0.002849"/>
+		<Waypoint body="TalusL" p="0.084621 0.01616 0.060364"/>
+		<Waypoint body="FootThumbL" p="0.090325 0.01559 0.107232"/>
+	</Unit>
+	<Unit name="R_Flexor_Digitorum_Longus" f0="137.2" lm="1.0" lt="0.2" pen_angle="0.0" lmax="-0.1">
+		<Waypoint body="TibiaR" p="-0.086347 0.350557 -0.01762"/>
+		<Waypoint body="TibiaR" p="-0.061813 0.104309 -0.048626"/>
+		<Waypoint body="TalusR" p="-0.062812 0.038407 -0.016846"/>
+		<Waypoint body="TalusR" p="-0.081255 0.030611 0.002928"/>
+		<Waypoint body="TalusR" p="-0.084678 0.008936 0.060443"/>
+		<Waypoint body="FootThumbR" p="-0.090382 0.008366 0.107311"/>
+	</Unit>
+	<Unit name="L_Flexor_Digitorum_Longus1" f0="137.2" lm="1.0" lt="0.2" pen_angle="0.0" lmax="-0.1">
+		<Waypoint body="TibiaL" p="0.086281 0.357502 -0.017724"/>
+		<Waypoint body="TibiaL" p="0.064608 0.111344 -0.04937"/>
+		<Waypoint body="TalusL" p="0.063896 0.045536 -0.018541"/>
+		<Waypoint body="TalusL" p="0.083004 0.03736 -0.004281"/>
+		<Waypoint body="TalusL" p="0.098786 0.013879 0.054565"/>
+		<Waypoint body="FootPinkyL" p="0.106961 0.01597 0.098961"/>
+	</Unit>
+	<Unit name="R_Flexor_Digitorum_Longus1" f0="137.2" lm="1.0" lt="0.2" pen_angle="0.0" lmax="-0.1">
+		<Waypoint body="TibiaR" p="-0.086347 0.350557 -0.01762"/>
+		<Waypoint body="TibiaR" p="-0.064665 0.104133 -0.049289"/>
+		<Waypoint body="TalusR" p="-0.063953 0.038312 -0.018462"/>
+		<Waypoint body="TalusR" p="-0.083061 0.030136 -0.004202"/>
+		<Waypoint body="TalusR" p="-0.098843 0.006655 0.054644"/>
+		<Waypoint body="FootPinkyR" p="-0.107018 0.008746 0.09904"/>
+	</Unit>
+	<Unit name="L_Flexor_Digitorum_Longus2" f0="137.2" lm="1.0" lt="0.2" pen_angle="0.0" lmax="-0.1">
+		<Waypoint body="TibiaL" p="0.086408 0.349552 -0.020212"/>
+		<Waypoint body="TibiaL" p="0.065447 0.115541 -0.049411"/>
+		<Waypoint body="TalusL" p="0.06247 0.048103 -0.020252"/>
+		<Waypoint body="TalusL" p="0.088899 0.035934 -0.001904"/>
+		<Waypoint body="TalusL" p="0.111619 0.015685 0.044203"/>
+		<Waypoint body="FootPinkyL" p="0.120175 0.016255 0.08318"/>
+	</Unit>
+	<Unit name="R_Flexor_Digitorum_Longus2" f0="137.2" lm="1.0" lt="0.2" pen_angle="0.0" lmax="-0.1">
+		<Waypoint body="TibiaR" p="-0.086474 0.342599 -0.020109"/>
+		<Waypoint body="TibiaR" p="-0.065504 0.108335 -0.049329"/>
+		<Waypoint body="TalusR" p="-0.062527 0.040879 -0.020173"/>
+		<Waypoint body="TalusR" p="-0.088956 0.02871 -0.001825"/>
+		<Waypoint body="TalusR" p="-0.111676 0.008461 0.044282"/>
+		<Waypoint body="FootPinkyR" p="-0.120232 0.009031 0.083259"/>
+	</Unit>
+	<Unit name="L_Flexor_Digitorum_Longus3" f0="137.2" lm="1.0" lt="0.2" pen_angle="0.0" lmax="-0.1">
+		<Waypoint body="TibiaL" p="0.080992 0.348506 -0.016116"/>
+		<Waypoint body="TibiaL" p="0.066952 0.119651 -0.04964"/>
+		<Waypoint body="TalusL" p="0.059048 0.055708 -0.021773"/>
+		<Waypoint body="TalusL" p="0.103729 0.031941 0.003134"/>
+		<Waypoint body="TalusL" p="0.12664 0.01559 0.041256"/>
+		<Waypoint body="FootPinkyL" p="0.131869 0.013974 0.071202"/>
+	</Unit>
+	<Unit name="R_Flexor_Digitorum_Longus3" f0="137.2" lm="1.0" lt="0.2" pen_angle="0.0" lmax="-0.1">
+		<Waypoint body="TibiaR" p="-0.081058 0.341552 -0.016012"/>
+		<Waypoint body="TibiaR" p="-0.067009 0.11245 -0.049559"/>
+		<Waypoint body="TalusR" p="-0.059105 0.048484 -0.021694"/>
+		<Waypoint body="TalusR" p="-0.103786 0.024717 0.003213"/>
+		<Waypoint body="TalusR" p="-0.126697 0.008366 0.041335"/>
+		<Waypoint body="FootPinkyR" p="-0.131926 0.00675 0.071281"/>
+	</Unit>
+	<Unit name="L_Flexor_Digitorum_Profundus2" f0="1000.0" lm="1.2" lt="0.2" pen_angle="0.0" lmax="-0.1">
+		<Waypoint body="ForeArmL" p="0.495746 1.422092 -0.03268"/>
+		<Waypoint body="ForeArmL" p="0.545082 1.413539 -0.024232"/>
+		<Waypoint body="ForeArmL" p="0.657416 1.415646 -0.003331"/>
+		<Waypoint body="HandL" p="0.699073 1.426414 0.000901"/>
+		<Waypoint body="HandL" p="0.852157 1.391608 0.017735"/>
+	</Unit>
+	<Unit name="R_Flexor_Digitorum_Profundus2" f0="1000.0" lm="1.2" lt="0.2" pen_angle="0.0" lmax="-0.1">
+		<Waypoint body="ForeArmR" p="-0.489853 1.4209 -0.03771"/>
+		<Waypoint body="ForeArmR" p="-0.540514 1.412416 -0.02912"/>
+		<Waypoint body="ForeArmR" p="-0.655902 1.414682 -0.00789"/>
+		<Waypoint body="HandR" p="-0.69788 1.425467 -0.003623"/>
+		<Waypoint body="HandR" p="-0.850422 1.390786 0.013166"/>
+	</Unit>
+	<Unit name="L_Flexor_Hallucis" f0="218.4" lm="1.0" lt="0.2" pen_angle="0.0" lmax="-0.1">
+		<Waypoint body="TibiaL" p="0.115012 0.352754 -0.035261"/>
+		<Waypoint body="TibiaL" p="0.07308 0.108415 -0.051056"/>
+		<Waypoint body="TalusL" p="0.060569 0.071014 -0.056187"/>
+		<Waypoint body="TalusL" p="0.066653 0.05162 -0.036508"/>
+		<Waypoint body="TalusL" p="0.063896 0.018062 0.059033"/>
+		<Waypoint body="FootThumbL" p="0.060854 0.014829 0.106091"/>
+	</Unit>
+	<Unit name="R_Flexor_Hallucis" f0="218.4" lm="1.0" lt="0.2" pen_angle="0.0" lmax="-0.1">
+		<Waypoint body="TibiaR" p="-0.115078 0.345804 -0.035157"/>
+		<Waypoint body="TibiaR" p="-0.073137 0.101201 -0.050975"/>
+		<Waypoint body="TalusR" p="-0.060626 0.06379 -0.056108"/>
+		<Waypoint body="TalusR" p="-0.06671 0.044396 -0.036429"/>
+		<Waypoint body="TalusR" p="-0.063953 0.010838 0.059112"/>
+		<Waypoint body="FootThumbR" p="-0.060911 0.007605 0.10617"/>
+	</Unit>
+	<Unit name="L_Flexor_Hallucis1" f0="218.4" lm="1.0" lt="0.2" pen_angle="0.0" lmax="-0.1">
+		<Waypoint body="TibiaL" p="0.115012 0.352754 -0.035261"/>
+		<Waypoint body="TibiaL" p="0.07308 0.108415 -0.051056"/>
+		<Waypoint body="TalusL" p="0.060569 0.071014 -0.056187"/>
+		<Waypoint body="TalusL" p="0.066653 0.05162 -0.036508"/>
+		<Waypoint body="TalusL" p="0.063896 0.018062 0.059033"/>
+		<Waypoint body="FootThumbL" p="0.060854 0.014829 0.106091"/>
+	</Unit>
+	<Unit name="R_Flexor_Hallucis1" f0="218.4" lm="1.0" lt="0.2" pen_angle="0.0" lmax="-0.1">
+		<Waypoint body="TibiaR" p="-0.115078 0.345804 -0.035157"/>
+		<Waypoint body="TibiaR" p="-0.073137 0.101201 -0.050975"/>
+		<Waypoint body="TalusR" p="-0.060626 0.06379 -0.056108"/>
+		<Waypoint body="TalusR" p="-0.06671 0.044396 -0.036429"/>
+		<Waypoint body="TalusR" p="-0.063953 0.010838 0.059112"/>
+		<Waypoint body="FootThumbR" p="-0.060911 0.007605 0.10617"/>
+	</Unit>
+	<Unit name="L_Flexor_Pollicis_Longus" f0="1000.0" lm="1.2" lt="0.2" pen_angle="0.0" lmax="-0.1">
+		<Waypoint body="ForeArmL" p="0.566569 1.427375 -0.003604"/>
+		<Waypoint body="ForeArmL" p="0.658628 1.421718 0.000734"/>
+		<Waypoint body="HandL" p="0.685384 1.425179 0.003182"/>
+		<Waypoint body="HandL" p="0.701165 1.422327 0.028185"/>
+		<Waypoint body="HandL" p="0.763187 1.398666 0.054801"/>
+	</Unit>
+	<Unit name="R_Flexor_Pollicis_Longus" f0="1000.0" lm="1.2" lt="0.2" pen_angle="0.0" lmax="-0.1">
+		<Waypoint body="ForeArmR" p="-0.562652 1.426287 -0.008421"/>
+		<Waypoint body="ForeArmR" p="-0.657166 1.420758 -0.003819"/>
+		<Waypoint body="HandR" p="-0.684191 1.424232 -0.001342"/>
+		<Waypoint body="HandR" p="-0.699972 1.42138 0.023661"/>
+		<Waypoint body="HandR" p="-0.761724 1.397781 0.050255"/>
+	</Unit>
+	<Unit name="L_Gastrocnemius_Lateral_Head" f0="606.4" lm="1.0" lt="0.2" pen_angle="0.0" lmax="-0.1">
+		<Waypoint body="FemurL" p="0.120919 0.507027 -0.004925"/>
+		<Waypoint body="FemurL" p="0.116655 0.499317 -0.035713"/>
+		<Waypoint body="TibiaL" p="0.120829 0.449733 -0.06212"/>
+		<Waypoint body="TibiaL" p="0.108003 0.27555 -0.084674"/>
+	</Unit>
+	<Unit name="R_Gastrocnemius_Lateral_Head" f0="606.4" lm="1.0" lt="0.2" pen_angle="0.0" lmax="-0.1">
+		<Waypoint body="FemurR" p="-0.120977 0.500848 -0.004823"/>
+		<Waypoint body="FemurR" p="-0.116715 0.493025 -0.035609"/>
+		<Waypoint body="TibiaR" p="-0.120898 0.442884 -0.062008"/>
+		<Waypoint body="TibiaR" p="-0.108066 0.268513 -0.084578"/>
+	</Unit>
+	<Unit name="L_Gastrocnemius_Medial_Head" f0="1308.0" lm="1.0" lt="0.2" pen_angle="0.0" lmax="-0.1">
+		<Waypoint body="FemurL" p="0.072043 0.5128 -0.013018"/>
+		<Waypoint body="FemurL" p="0.091279 0.495121 -0.043597"/>
+		<Waypoint body="TibiaL" p="0.088701 0.449782 -0.064865"/>
+		<Waypoint body="TibiaL" p="0.058946 0.250423 -0.053546"/>
+	</Unit>
+	<Unit name="R_Gastrocnemius_Medial_Head" f0="1308.0" lm="1.0" lt="0.2" pen_angle="0.0" lmax="-0.1">
+		<Waypoint body="FemurR" p="-0.072099 0.506728 -0.012919"/>
+		<Waypoint body="FemurR" p="-0.09134 0.488772 -0.043492"/>
+		<Waypoint body="TibiaR" p="-0.08877 0.442932 -0.064752"/>
+		<Waypoint body="TibiaR" p="-0.059008 0.24336 -0.053453"/>
+	</Unit>
+	<Unit name="L_Gluteus_Maximus" f0="370.52" lm="1.0" lt="0.2" pen_angle="0.0" lmax="-0.1">
+		<Waypoint body="Pelvis" p="0.051241 0.999719 -0.091454"/>
+		<Waypoint body="Pelvis" p="0.105999 0.978329 -0.084894"/>
+		<Waypoint body="FemurL" p="0.145567 0.908361 -0.044344"/>
+		<Waypoint body="FemurL" p="0.141018 0.838237 -0.016"/>
+	</Unit>
+	<Unit name="R_Gluteus_Maximus" f0="370.52" lm="1.0" lt="0.2" pen_angle="0.0" lmax="-0.1">
+		<Waypoint body="Pelvis" p="-0.051241 0.999719 -0.091454"/>
+		<Waypoint body="Pelvis" p="-0.105999 0.978329 -0.084894"/>
+		<Waypoint body="FemurR" p="-0.145517 0.908345 -0.044349"/>
+		<Waypoint body="FemurR" p="-0.140985 0.837298 -0.015989"/>
+	</Unit>
+	<Unit name="L_Gluteus_Maximus1" f0="370.52" lm="1.0" lt="0.2" pen_angle="0.0" lmax="-0.1">
+		<Waypoint body="Pelvis" p="0.036315 0.954848 -0.094401"/>
+		<Waypoint body="Pelvis" p="0.098679 0.936025 -0.105334"/>
+		<Waypoint body="FemurL" p="0.147712 0.867614 -0.046858"/>
+		<Waypoint body="FemurL" p="0.134798 0.809766 -0.010624"/>
+	</Unit>
+	<Unit name="R_Gluteus_Maximus1" f0="370.52" lm="1.0" lt="0.2" pen_angle="0.0" lmax="-0.1">
+		<Waypoint body="Pelvis" p="-0.036315 0.954848 -0.094401"/>
+		<Waypoint body="Pelvis" p="-0.098679 0.936025 -0.105334"/>
+		<Waypoint body="FemurR" p="-0.14767 0.867146 -0.046854"/>
+		<Waypoint body="FemurR" p="-0.134772 0.808376 -0.010605"/>
+	</Unit>
+	<Unit name="L_Gluteus_Maximus2" f0="370.52" lm="1.0" lt="0.2" pen_angle="0.0" lmax="-0.1">
+		<Waypoint body="Pelvis" p="0.028235 0.917962 -0.089648"/>
+		<Waypoint body="Pelvis" p="0.049149 0.910737 -0.114175"/>
+		<Waypoint body="Pelvis" p="0.116076 0.877179 -0.092214"/>
+		<Waypoint body="FemurL" p="0.142129 0.803614 -0.034189"/>
+		<Waypoint body="FemurL" p="0.127818 0.780236 -0.008287"/>
+	</Unit>
+	<Unit name="R_Gluteus_Maximus2" f0="370.52" lm="1.0" lt="0.2" pen_angle="0.0" lmax="-0.1">
+		<Waypoint body="Pelvis" p="-0.028235 0.917962 -0.089648"/>
+		<Waypoint body="Pelvis" p="-0.049149 0.910737 -0.114175"/>
+		<Waypoint body="Pelvis" p="-0.116076 0.877179 -0.092214"/>
+		<Waypoint body="FemurR" p="-0.142105 0.802131 -0.034168"/>
+		<Waypoint body="FemurR" p="-0.127801 0.77838 -0.00826"/>
+	</Unit>
+	<Unit name="L_Gluteus_Maximus3" f0="370.52" lm="1.0" lt="0.2" pen_angle="0.0" lmax="-0.1">
+		<Waypoint body="Pelvis" p="0.033463 0.888872 -0.076719"/>
+		<Waypoint body="Pelvis" p="0.063219 0.852366 -0.106189"/>
+		<Waypoint body="FemurL" p="0.118433 0.815582 -0.072335"/>
+		<Waypoint body="FemurL" p="0.124075 0.74941 -0.000909"/>
+	</Unit>
+	<Unit name="R_Gluteus_Maximus3" f0="370.52" lm="1.0" lt="0.2" pen_angle="0.0" lmax="-0.1">
+		<Waypoint body="Pelvis" p="-0.033463 0.888872 -0.076719"/>
+		<Waypoint body="Pelvis" p="-0.063219 0.852366 -0.106189"/>
+		<Waypoint body="FemurR" p="-0.118406 0.814306 -0.072318"/>
+		<Waypoint body="FemurR" p="-0.124066 0.747065 -0.000874"/>
+	</Unit>
+	<Unit name="L_Gluteus_Maximus4" f0="370.52" lm="1.2" lt="0.2" pen_angle="0.0" lmax="-0.1">
+		<Waypoint body="Pelvis" p="0.04278 0.866816 -0.061603"/>
+		<Waypoint body="Pelvis" p="0.061318 0.82185 -0.069399"/>
+		<Waypoint body="FemurL" p="0.110153 0.770632 -0.038027"/>
+		<Waypoint body="FemurL" p="0.123063 0.731274 0.002928"/>
+	</Unit>
+	<Unit name="R_Gluteus_Maximus4" f0="370.52" lm="1.2" lt="0.2" pen_angle="0.0" lmax="-0.1">
+		<Waypoint body="Pelvis" p="-0.04278 0.866816 -0.061603"/>
+		<Waypoint body="Pelvis" p="-0.061318 0.82185 -0.069399"/>
+		<Waypoint body="FemurR" p="-0.110138 0.768637 -0.037997"/>
+		<Waypoint body="FemurR" p="-0.123059 0.728641 0.002968"/>
+	</Unit>
+	<Unit name="L_Gluteus_Medius" f0="549.9" lm="1.0" lt="0.2" pen_angle="0.0" lmax="-0.1">
+		<Waypoint body="Pelvis" p="0.123111 0.978805 0.027284"/>
+		<Waypoint body="FemurL" p="0.149464 0.91397 -0.005082"/>
+		<Waypoint body="FemurL" p="0.149663 0.892373 -0.006404"/>
+	</Unit>
+	<Unit name="R_Gluteus_Medius" f0="549.9" lm="1.0" lt="0.2" pen_angle="0.0" lmax="-0.1">
+		<Waypoint body="Pelvis" p="-0.123111 0.978805 0.027284"/>
+		<Waypoint body="FemurR" p="-0.149414 0.913954 -0.005087"/>
+		<Waypoint body="FemurR" p="-0.149615 0.892286 -0.006407"/>
+	</Unit>
+	<Unit name="L_Gluteus_Medius1" f0="549.9" lm="1.0" lt="0.2" pen_angle="0.0" lmax="-0.1">
+		<Waypoint body="Pelvis" p="0.121875 1.029665 -0.028425"/>
+		<Waypoint body="FemurL" p="0.147848 0.919009 -0.025236"/>
+		<Waypoint body="FemurL" p="0.157523 0.858234 -0.008337"/>
+	</Unit>
+	<Unit name="R_Gluteus_Medius1" f0="549.9" lm="1.0" lt="0.2" pen_angle="0.0" lmax="-0.1">
+		<Waypoint body="Pelvis" p="-0.121875 1.029665 -0.028425"/>
+		<Waypoint body="FemurR" p="-0.147798 0.918993 -0.025241"/>
+		<Waypoint body="FemurR" p="-0.157484 0.857605 -0.008331"/>
+	</Unit>
+	<Unit name="L_Gluteus_Medius2" f0="549.9" lm="1.0" lt="0.2" pen_angle="0.0" lmax="-0.1">
+		<Waypoint body="Pelvis" p="0.075293 1.027003 -0.066166"/>
+		<Waypoint body="Pelvis" p="0.116171 0.992684 -0.069969"/>
+		<Waypoint body="FemurL" p="0.151193 0.887296 -0.028451"/>
+		<Waypoint body="FemurL" p="0.151914 0.858057 -0.019935"/>
+	</Unit>
+	<Unit name="R_Gluteus_Medius2" f0="549.9" lm="1.0" lt="0.2" pen_angle="0.0" lmax="-0.1">
+		<Waypoint body="Pelvis" p="-0.075293 1.027003 -0.066166"/>
+		<Waypoint body="Pelvis" p="-0.116171 0.992684 -0.069969"/>
+		<Waypoint body="FemurR" p="-0.151147 0.887134 -0.028453"/>
+		<Waypoint body="FemurR" p="-0.151875 0.85743 -0.019929"/>
+	</Unit>
+	<Unit name="L_Gluteus_Medius3" f0="549.9" lm="1.0" lt="0.2" pen_angle="0.0" lmax="-0.1">
+		<Waypoint body="Pelvis" p="0.058086 0.973956 -0.083183"/>
+		<Waypoint body="Pelvis" p="0.083944 0.954658 -0.07881"/>
+		<Waypoint body="FemurL" p="0.132828 0.905129 -0.045865"/>
+		<Waypoint body="FemurL" p="0.140203 0.866852 -0.031455"/>
+	</Unit>
+	<Unit name="R_Gluteus_Medius3" f0="549.9" lm="1.0" lt="0.2" pen_angle="0.0" lmax="-0.1">
+		<Waypoint body="Pelvis" p="-0.058086 0.973956 -0.083183"/>
+		<Waypoint body="Pelvis" p="-0.083944 0.954658 -0.07881"/>
+		<Waypoint body="FemurR" p="-0.132778 0.905113 -0.04587"/>
+		<Waypoint body="FemurR" p="-0.140162 0.86637 -0.031451"/>
+	</Unit>
+	<Unit name="L_Gluteus_Minimus" f0="198.333333" lm="1.0" lt="0.2" pen_angle="0.0" lmax="-0.1">
+		<Waypoint body="Pelvis" p="0.065216 0.958651 -0.063504"/>
+		<Waypoint body="Pelvis" p="0.092975 0.938592 -0.056279"/>
+		<Waypoint body="FemurL" p="0.144806 0.901136 -0.010976"/>
+		<Waypoint body="FemurL" p="0.152837 0.873167 -0.004657"/>
+	</Unit>
+	<Unit name="R_Gluteus_Minimus" f0="198.333333" lm="1.0" lt="0.2" pen_angle="0.0" lmax="-0.1">
+		<Waypoint body="Pelvis" p="-0.065216 0.958651 -0.063504"/>
+		<Waypoint body="Pelvis" p="-0.092975 0.938592 -0.056279"/>
+		<Waypoint body="FemurR" p="-0.144756 0.90112 -0.010981"/>
+		<Waypoint body="FemurR" p="-0.152794 0.872774 -0.004655"/>
+	</Unit>
+	<Unit name="L_Gluteus_Minimus1" f0="198.333333" lm="1.0" lt="0.2" pen_angle="0.0" lmax="-0.1">
+		<Waypoint body="Pelvis" p="0.093355 1.009416 -0.039643"/>
+		<Waypoint body="Pelvis" p="0.119499 0.980801 -0.038027"/>
+		<Waypoint body="FemurL" p="0.148704 0.902087 -0.001659"/>
+		<Waypoint body="FemurL" p="0.15058 0.859933 0.002117"/>
+	</Unit>
+	<Unit name="R_Gluteus_Minimus1" f0="198.333333" lm="1.0" lt="0.2" pen_angle="0.0" lmax="-0.1">
+		<Waypoint body="Pelvis" p="-0.093355 1.009416 -0.039643"/>
+		<Waypoint body="Pelvis" p="-0.119499 0.980801 -0.038027"/>
+		<Waypoint body="FemurR" p="-0.148654 0.902071 -0.001664"/>
+		<Waypoint body="FemurR" p="-0.150541 0.85933 0.002123"/>
+	</Unit>
+	<Unit name="L_Gluteus_Minimus2" f0="198.333333" lm="1.0" lt="0.2" pen_angle="0.0" lmax="-0.1">
+		<Waypoint body="Pelvis" p="0.126819 1.001145 0.008556"/>
+		<Waypoint body="FemurL" p="0.147183 0.901992 0.005566"/>
+		<Waypoint body="FemurL" p="0.144202 0.864634 0.00439"/>
+	</Unit>
+	<Unit name="R_Gluteus_Minimus2" f0="198.333333" lm="1.0" lt="0.2" pen_angle="0.0" lmax="-0.1">
+		<Waypoint body="Pelvis" p="-0.126819 1.001145 0.008556"/>
+		<Waypoint body="FemurR" p="-0.147133 0.901976 0.005561"/>
+		<Waypoint body="FemurR" p="-0.144162 0.864107 0.004395"/>
+	</Unit>
+	<Unit name="L_Gracilis" f0="137.3" lm="1.0" lt="0.2" pen_angle="0.0" lmax="-0.1">
+		<Waypoint body="Pelvis" p="0.010743 0.873566 0.029185"/>
+		<Waypoint body="FemurL" p="0.047303 0.472812 -0.039753"/>
+		<Waypoint body="TibiaL" p="0.059496 0.427207 -0.019615"/>
+		<Waypoint body="TibiaL" p="0.074746 0.414918 -0.002025"/>
+	</Unit>
+	<Unit name="R_Gracilis" f0="137.3" lm="1.0" lt="0.2" pen_angle="0.0" lmax="-0.1">
+		<Waypoint body="Pelvis" p="-0.010743 0.873566 0.029185"/>
+		<Waypoint body="FemurR" p="-0.04737 0.46612 -0.039643"/>
+		<Waypoint body="TibiaR" p="-0.059565 0.420336 -0.019504"/>
+		<Waypoint body="TibiaR" p="-0.074814 0.408036 -0.001916"/>
+	</Unit>
+	<Unit name="L_Inferior_Gemellus" f0="50.0" lm="1.0" lt="0.2" pen_angle="0.0" lmax="-0.1">
+		<Waypoint body="Pelvis" p="0.062934 0.857025 -0.059036"/>
+		<Waypoint body="FemurL" p="0.118224 0.876417 -0.044593"/>
+		<Waypoint body="FemurL" p="0.129061 0.877006 -0.031569"/>
+	</Unit>
+	<Unit name="R_Inferior_Gemellus" f0="50.0" lm="1.0" lt="0.2" pen_angle="0.0" lmax="-0.1">
+		<Waypoint body="Pelvis" p="-0.062934 0.857025 -0.059036"/>
+		<Waypoint body="FemurR" p="-0.11818 0.876096 -0.044592"/>
+		<Waypoint body="FemurR" p="-0.129017 0.876688 -0.031569"/>
+	</Unit>
+	<Unit name="L_Infraspinatus1" f0="1000.0" lm="1.2" lt="0.2" pen_angle="0.0" lmax="-0.1">
+		<Waypoint body="ShoulderL" p="0.087081 1.316291 -0.132567"/>
+		<Waypoint body="ShoulderL" p="0.177774 1.368577 -0.083703"/>
+		<Waypoint body="ShoulderL" p="0.193745 1.401185 -0.056324"/>
+		<Waypoint body="ShoulderL" p="0.188232 1.404417 -0.037406"/>
+	</Unit>
+	<Unit name="R_Infraspinatus1" f0="1000.0" lm="1.2" lt="0.2" pen_angle="0.0" lmax="-0.1">
+		<Waypoint body="ShoulderR" p="-0.087081 1.316291 -0.137093"/>
+		<Waypoint body="ShoulderR" p="-0.177774 1.368577 -0.088229"/>
+		<Waypoint body="ShoulderR" p="-0.193745 1.401185 -0.06085"/>
+		<Waypoint body="ShoulderR" p="-0.188232 1.404417 -0.041932"/>
+	</Unit>
+	<Unit name="L_Latissimus_Dorsi" f0="1000.0" lm="1.2" lt="0.2" pen_angle="0.0" lmax="-0.1">
+		<Waypoint body="Torso" p="1e-06 1.261722 -0.120354"/>
+		<Waypoint body="ShoulderL" p="0.110087 1.277313 -0.134659"/>
+		<Waypoint body="ShoulderL" p="0.144976 1.30165 -0.101671"/>
+		<Waypoint body="ArmL" p="0.217298 1.378179 -0.058442"/>
+		<Waypoint body="ArmL" p="0.197904 1.39396 -0.036577"/>
+	</Unit>
+	<Unit name="R_Latissimus_Dorsi" f0="1000.0" lm="1.2" lt="0.2" pen_angle="0.0" lmax="-0.1">
+		<Waypoint body="Torso" p="-1e-06 1.261722 -0.120354"/>
+		<Waypoint body="ShoulderR" p="-0.110087 1.277313 -0.139185"/>
+		<Waypoint body="ShoulderR" p="-0.144976 1.30165 -0.106197"/>
+		<Waypoint body="ArmR" p="-0.216426 1.377345 -0.063243"/>
+		<Waypoint body="ArmR" p="-0.197032 1.393126 -0.041378"/>
+	</Unit>
+	<Unit name="L_Latissimus_Dorsi3" f0="1000.0" lm="1.2" lt="0.2" pen_angle="0.0" lmax="-0.1">
+		<Waypoint body="Spine" p="0.00057 1.064079 -0.087461"/>
+		<Waypoint body="Torso" p="0.096207 1.187381 -0.113129"/>
+		<Waypoint body="Torso" p="0.146117 1.25155 -0.093926"/>
+		<Waypoint body="ArmL" p="0.238047 1.382395 -0.064961"/>
+		<Waypoint body="ArmL" p="0.225594 1.384336 -0.044784"/>
+		<Waypoint body="ArmL" p="0.214187 1.396816 -0.036503"/>
+	</Unit>
+	<Unit name="R_Latissimus_Dorsi3" f0="1000.0" lm="1.2" lt="0.2" pen_angle="0.0" lmax="-0.1">
+		<Waypoint body="Spine" p="-0.00057 1.064079 -0.087461"/>
+		<Waypoint body="Torso" p="-0.096207 1.187381 -0.113129"/>
+		<Waypoint body="Torso" p="-0.146117 1.25155 -0.093926"/>
+		<Waypoint body="ArmR" p="-0.235562 1.381453 -0.069856"/>
+		<Waypoint body="ArmR" p="-0.223372 1.383411 -0.049664"/>
+		<Waypoint body="ArmR" p="-0.212203 1.395907 -0.041369"/>
+	</Unit>
+	<Unit name="L_Latissimus_Dorsi5" f0="1000.0" lm="1.2" lt="0.2" pen_angle="0.0" lmax="-0.1">
+		<Waypoint body="Pelvis" p="0.073581 1.026148 -0.072251"/>
+		<Waypoint body="Torso" p="0.112083 1.135284 -0.073677"/>
+		<Waypoint body="Torso" p="0.160852 1.249554 -0.05704"/>
+		<Waypoint body="ArmL" p="0.240553 1.378652 -0.052444"/>
+		<Waypoint body="ArmL" p="0.221294 1.396636 -0.037718"/>
+	</Unit>
+	<Unit name="R_Latissimus_Dorsi5" f0="1000.0" lm="1.2" lt="0.2" pen_angle="0.0" lmax="-0.1">
+		<Waypoint body="Pelvis" p="-0.073581 1.026148 -0.072251"/>
+		<Waypoint body="Torso" p="-0.112083 1.135284 -0.073677"/>
+		<Waypoint body="Torso" p="-0.160852 1.249554 -0.05704"/>
+		<Waypoint body="ArmR" p="-0.237998 1.377705 -0.057343"/>
+		<Waypoint body="ArmR" p="-0.219144 1.395716 -0.042593"/>
+	</Unit>
+	<Unit name="L_Longissimus_Capitis3" f0="1000.0" lm="1.2" lt="0.2" pen_angle="0.0" lmax="-0.1">
+		<Waypoint body="Torso" p="0.024907 1.373235 -0.097253"/>
+		<Waypoint body="Torso" p="0.028995 1.441208 -0.07111"/>
+		<Waypoint body="Neck" p="0.029566 1.503096 -0.037076"/>
+		<Waypoint body="Head" p="0.054188 1.54445 -0.016446"/>
+	</Unit>
+	<Unit name="R_Longissimus_Capitis3" f0="1000.0" lm="1.2" lt="0.2" pen_angle="0.0" lmax="-0.1">
+		<Waypoint body="Torso" p="-0.024907 1.373235 -0.097253"/>
+		<Waypoint body="Torso" p="-0.028995 1.441208 -0.07111"/>
+		<Waypoint body="Neck" p="-0.029566 1.503096 -0.037076"/>
+		<Waypoint body="Head" p="-0.054188 1.54445 -0.016446"/>
+	</Unit>
+	<Unit name="L_Longissimus_Thoracis" f0="1000.0" lm="1.2" lt="0.2" pen_angle="0.0" lmax="-0.1">
+		<Waypoint body="Pelvis" p="0.003422 0.869478 -0.069018"/>
+		<Waypoint body="Pelvis" p="0.019108 0.969298 -0.098869"/>
+		<Waypoint body="Spine" p="0.019774 1.053432 -0.076338"/>
+		<Waypoint body="Torso" p="0.027759 1.154488 -0.090693"/>
+		<Waypoint body="Torso" p="0.032798 1.226168 -0.113699"/>
+		<Waypoint body="Torso" p="0.034604 1.339962 -0.109517"/>
+		<Waypoint body="Torso" p="0.032608 1.397287 -0.089172"/>
+		<Waypoint body="Neck" p="0.030421 1.442064 -0.038407"/>
+	</Unit>
+	<Unit name="R_Longissimus_Thoracis" f0="1000.0" lm="1.2" lt="0.2" pen_angle="0.0" lmax="-0.1">
+		<Waypoint body="Pelvis" p="-0.003422 0.869478 -0.069018"/>
+		<Waypoint body="Pelvis" p="-0.019108 0.969298 -0.098869"/>
+		<Waypoint body="Spine" p="-0.019774 1.053432 -0.076338"/>
+		<Waypoint body="Torso" p="-0.027759 1.154488 -0.090693"/>
+		<Waypoint body="Torso" p="-0.032798 1.226168 -0.113699"/>
+		<Waypoint body="Torso" p="-0.034604 1.339962 -0.109517"/>
+		<Waypoint body="Torso" p="-0.032608 1.397287 -0.089172"/>
+		<Waypoint body="Neck" p="-0.030421 1.442064 -0.038407"/>
+	</Unit>
+	<Unit name="L_Longus_Capitis2" f0="1000.0" lm="1.2" lt="0.2" pen_angle="0.0" lmax="-0.1">
+		<Waypoint body="Neck" p="0.018158 1.466591 -0.011883"/>
+		<Waypoint body="Neck" p="0.009887 1.524771 0.010743"/>
+		<Waypoint body="Head" p="0.001996 1.557664 0.009792"/>
+	</Unit>
+	<Unit name="R_Longus_Capitis2" f0="1000.0" lm="1.2" lt="0.2" pen_angle="0.0" lmax="-0.1">
+		<Waypoint body="Neck" p="-0.018158 1.466591 -0.011883"/>
+		<Waypoint body="Neck" p="-0.009887 1.524771 0.010743"/>
+		<Waypoint body="Head" p="-0.001996 1.557664 0.009792"/>
+	</Unit>
+	<Unit name="L_Multifidus" f0="1000.0" lm="1.2" lt="0.2" pen_angle="0.0" lmax="-0.1">
+		<Waypoint body="Pelvis" p="0.008651 0.893055 -0.087176"/>
+		<Waypoint body="Pelvis" p="0.010552 0.941729 -0.105143"/>
+		<Waypoint body="Pelvis" p="0.011123 0.978329 -0.095162"/>
+		<Waypoint body="Spine" p="0.008841 1.067597 -0.073867"/>
+		<Waypoint body="Torso" p="0.005324 1.13633 -0.080997"/>
+		<Waypoint body="Torso" p="0.000475 1.236245 -0.114745"/>
+	</Unit>
+	<Unit name="R_Multifidus" f0="1000.0" lm="1.2" lt="0.2" pen_angle="0.0" lmax="-0.1">
+		<Waypoint body="Pelvis" p="-0.008651 0.893055 -0.087176"/>
+		<Waypoint body="Pelvis" p="-0.010552 0.941729 -0.105143"/>
+		<Waypoint body="Pelvis" p="-0.011123 0.978329 -0.095162"/>
+		<Waypoint body="Spine" p="-0.008841 1.067597 -0.073867"/>
+		<Waypoint body="Torso" p="-0.005324 1.13633 -0.080997"/>
+		<Waypoint body="Torso" p="-0.000475 1.236245 -0.114745"/>
+	</Unit>
+	<Unit name="L_Obturator_Externus" f0="50.0" lm="1.0" lt="0.2" pen_angle="0.0" lmax="-0.1">
+		<Waypoint body="Pelvis" p="0.020154 0.881457 0.023481"/>
+		<Waypoint body="Pelvis" p="0.065025 0.86539 -0.027094"/>
+		<Waypoint body="FemurL" p="0.131246 0.877948 -0.025202"/>
+	</Unit>
+	<Unit name="R_Obturator_Externus" f0="50.0" lm="1.0" lt="0.2" pen_angle="0.0" lmax="-0.1">
+		<Waypoint body="Pelvis" p="-0.020154 0.881457 0.023481"/>
+		<Waypoint body="Pelvis" p="-0.065025 0.86539 -0.027094"/>
+		<Waypoint body="FemurR" p="-0.131202 0.877643 -0.025201"/>
+	</Unit>
+	<Unit name="L_Obturator_Internus" f0="50.0" lm="1.0" lt="0.2" pen_angle="0.0" lmax="-0.1">
+		<Waypoint body="Pelvis" p="0.017587 0.876133 0.013214"/>
+		<Waypoint body="Pelvis" p="0.049054 0.875658 -0.055899"/>
+		<Waypoint body="Pelvis" p="0.070349 0.874992 -0.067022"/>
+		<Waypoint body="FemurL" p="0.131808 0.882433 -0.029107"/>
+	</Unit>
+	<Unit name="R_Obturator_Internus" f0="50.0" lm="1.0" lt="0.2" pen_angle="0.0" lmax="-0.1">
+		<Waypoint body="Pelvis" p="-0.017587 0.876133 0.013214"/>
+		<Waypoint body="Pelvis" p="-0.049054 0.875658 -0.055899"/>
+		<Waypoint body="Pelvis" p="-0.070349 0.874992 -0.067022"/>
+		<Waypoint body="FemurR" p="-0.131762 0.8822 -0.029108"/>
+	</Unit>
+	<Unit name="L_Omohyoid" f0="1000.0" lm="1.2" lt="0.2" pen_angle="0.0" lmax="-0.1">
+		<Waypoint body="ShoulderL" p="0.119213 1.399949 -0.070679"/>
+		<Waypoint body="ShoulderL" p="0.105524 1.421529 -0.042444"/>
+		<Waypoint body="Torso" p="0.044301 1.432747 0.0"/>
+		<Waypoint body="ShoulderL" p="0.017397 1.446912 0.012219"/>
+		<Waypoint body="Head" p="0.012549 1.498153 0.040974"/>
+	</Unit>
+	<Unit name="R_Omohyoid" f0="1000.0" lm="1.2" lt="0.2" pen_angle="0.0" lmax="-0.1">
+		<Waypoint body="ShoulderR" p="-0.119213 1.399949 -0.075205"/>
+		<Waypoint body="ShoulderR" p="-0.105524 1.421529 -0.04697"/>
+		<Waypoint body="Torso" p="-0.044301 1.432747 0.0"/>
+		<Waypoint body="ShoulderR" p="-0.017397 1.446912 0.007693"/>
+		<Waypoint body="Head" p="-0.012549 1.498153 0.040974"/>
+	</Unit>
+	<Unit name="L_Palmaris_Longus" f0="1000.0" lm="1.2" lt="0.2" pen_angle="0.0" lmax="-0.1">
+		<Waypoint body="ArmL" p="0.433393 1.383543 -0.04127"/>
+		<Waypoint body="ForeArmL" p="0.538339 1.391624 -0.02452"/>
+		<Waypoint body="ForeArmL" p="0.658345 1.415259 -0.001823"/>
+		<Waypoint body="HandL" p="0.770102 1.414093 0.006592"/>
+	</Unit>
+	<Unit name="R_Palmaris_Longus" f0="1000.0" lm="1.2" lt="0.2" pen_angle="0.0" lmax="-0.1">
+		<Waypoint body="ArmR" p="-0.426259 1.382289 -0.046438"/>
+		<Waypoint body="ForeArmR" p="-0.533561 1.39049 -0.02943"/>
+		<Waypoint body="ForeArmR" p="-0.65686 1.414297 -0.006378"/>
+		<Waypoint body="HandR" p="-0.768642 1.413208 0.002046"/>
+	</Unit>
+	<Unit name="L_Pectineus" f0="177.0" lm="1.0" lt="0.2" pen_angle="0.0" lmax="-0.1">
+		<Waypoint body="Pelvis" p="0.038407 0.897048 0.031087"/>
+		<Waypoint body="Pelvis" p="0.054378 0.887636 0.044586"/>
+		<Waypoint body="FemurL" p="0.096313 0.800136 -0.007184"/>
+		<Waypoint body="FemurL" p="0.106879 0.793175 -0.003844"/>
+	</Unit>
+	<Unit name="R_Pectineus" f0="177.0" lm="1.0" lt="0.2" pen_angle="0.0" lmax="-0.1">
+		<Waypoint body="Pelvis" p="-0.038407 0.897048 0.031087"/>
+		<Waypoint body="Pelvis" p="-0.054378 0.887636 0.044586"/>
+		<Waypoint body="FemurR" p="-0.09629 0.798603 -0.007162"/>
+		<Waypoint body="FemurR" p="-0.106859 0.791528 -0.00382"/>
+	</Unit>
+	<Unit name="L_Pectoralis_Major" f0="1000.0" lm="1.2" lt="0.2" pen_angle="0.0" lmax="-0.1">
+		<Waypoint body="ShoulderL" p="0.052096 1.405653 0.007465"/>
+		<Waypoint body="Torso" p="0.097063 1.38027 0.041259"/>
+		<Waypoint body="Torso" p="0.144311 1.35137 0.026238"/>
+		<Waypoint body="ArmL" p="0.209922 1.364178 -0.018003"/>
+		<Waypoint body="ArmL" p="0.233214 1.407221 -0.03063"/>
+	</Unit>
+	<Unit name="R_Pectoralis_Major" f0="1000.0" lm="1.2" lt="0.2" pen_angle="0.0" lmax="-0.1">
+		<Waypoint body="ShoulderR" p="-0.052096 1.405653 0.002939"/>
+		<Waypoint body="Torso" p="-0.097063 1.38027 0.041259"/>
+		<Waypoint body="Torso" p="-0.144311 1.35137 0.026238"/>
+		<Waypoint body="ArmR" p="-0.208065 1.363277 -0.022862"/>
+		<Waypoint body="ArmR" p="-0.230756 1.406281 -0.035524"/>
+	</Unit>
+	<Unit name="L_Pectoralis_Major2" f0="1000.0" lm="1.2" lt="0.2" pen_angle="0.0" lmax="-0.1">
+		<Waypoint body="Torso" p="0.004088 1.315245 0.073486"/>
+		<Waypoint body="Torso" p="0.072821 1.319238 0.080141"/>
+		<Waypoint body="Torso" p="0.138797 1.321424 0.048009"/>
+		<Waypoint body="ArmL" p="0.21263 1.372128 -0.023453"/>
+		<Waypoint body="ArmL" p="0.211891 1.404725 -0.032114"/>
+	</Unit>
+	<Unit name="R_Pectoralis_Major2" f0="1000.0" lm="1.2" lt="0.2" pen_angle="0.0" lmax="-0.1">
+		<Waypoint body="Torso" p="-0.004088 1.315245 0.073486"/>
+		<Waypoint body="Torso" p="-0.072821 1.319238 0.080141"/>
+		<Waypoint body="Torso" p="-0.138797 1.321424 0.048009"/>
+		<Waypoint body="ArmR" p="-0.210704 1.371223 -0.028315"/>
+		<Waypoint body="ArmR" p="-0.209943 1.403819 -0.036978"/>
+	</Unit>
+	<Unit name="L_Pectoralis_Minor1" f0="1000.0" lm="1.2" lt="0.2" pen_angle="0.0" lmax="-0.1">
+		<Waypoint body="Torso" p="0.081282 1.295946 0.075958"/>
+		<Waypoint body="Torso" p="0.108756 1.320854 0.056755"/>
+		<Waypoint body="ShoulderL" p="0.151346 1.391678 -0.028565"/>
+	</Unit>
+	<Unit name="R_Pectoralis_Minor1" f0="1000.0" lm="1.2" lt="0.2" pen_angle="0.0" lmax="-0.1">
+		<Waypoint body="Torso" p="-0.081282 1.295946 0.075958"/>
+		<Waypoint body="Torso" p="-0.108756 1.320854 0.056755"/>
+		<Waypoint body="ShoulderR" p="-0.151346 1.391678 -0.033091"/>
+	</Unit>
+	<Unit name="L_Peroneus_Brevis" f0="305.9" lm="1.0" lt="0.2" pen_angle="0.0" lmax="-0.1">
+		<Waypoint body="TibiaL" p="0.113658 0.259289 -0.040067"/>
+		<Waypoint body="TibiaL" p="0.108817 0.110172 -0.060393"/>
+		<Waypoint body="TalusL" p="0.099071 0.071584 -0.061416"/>
+		<Waypoint body="TalusL" p="0.113331 0.030325 -0.010175"/>
+	</Unit>
+	<Unit name="R_Peroneus_Brevis" f0="305.9" lm="1.0" lt="0.2" pen_angle="0.0" lmax="-0.1">
+		<Waypoint body="TibiaR" p="-0.113721 0.252239 -0.039972"/>
+		<Waypoint body="TibiaR" p="-0.108873 0.102961 -0.060312"/>
+		<Waypoint body="TalusR" p="-0.099128 0.06436 -0.061337"/>
+		<Waypoint body="TalusR" p="-0.113388 0.023101 -0.010096"/>
+	</Unit>
+	<Unit name="L_Peroneus_Longus" f0="653.3" lm="1.0" lt="0.2" pen_angle="0.0" lmax="-0.1">
+		<Waypoint body="TibiaL" p="0.134496 0.42673 -0.024005"/>
+		<Waypoint body="TibiaL" p="0.146467 0.329493 -0.034099"/>
+		<Waypoint body="TibiaL" p="0.112067 0.104984 -0.056354"/>
+		<Waypoint body="TalusL" p="0.101923 0.063313 -0.061131"/>
+		<Waypoint body="TalusL" p="0.108482 0.045156 -0.034987"/>
+		<Waypoint body="TalusL" p="0.083004 0.043064 -0.006658"/>
+		<Waypoint body="TalusL" p="0.070741 0.042018 0.027947"/>
+	</Unit>
+	<Unit name="R_Peroneus_Longus" f0="653.3" lm="1.0" lt="0.2" pen_angle="0.0" lmax="-0.1">
+		<Waypoint body="TibiaR" p="-0.134565 0.419861 -0.023894"/>
+		<Waypoint body="TibiaR" p="-0.146532 0.32252 -0.033997"/>
+		<Waypoint body="TibiaR" p="-0.112123 0.097767 -0.056274"/>
+		<Waypoint body="TalusR" p="-0.10198 0.056089 -0.061052"/>
+		<Waypoint body="TalusR" p="-0.108539 0.037932 -0.034908"/>
+		<Waypoint body="TalusR" p="-0.083061 0.03584 -0.006579"/>
+		<Waypoint body="TalusR" p="-0.070798 0.034794 0.028026"/>
+	</Unit>
+	<Unit name="L_Peroneus_Tertius" f0="45.0" lm="1.0" lt="0.2" pen_angle="0.0" lmax="-0.1">
+		<Waypoint body="TibiaL" p="0.104267 0.130205 -0.04586"/>
+		<Waypoint body="TibiaL" p="0.108704 0.086 -0.020457"/>
+		<Waypoint body="TalusL" p="0.115232 0.040307 0.006557"/>
+	</Unit>
+	<Unit name="R_Peroneus_Tertius" f0="45.0" lm="1.0" lt="0.2" pen_angle="0.0" lmax="-0.1">
+		<Waypoint body="TibiaR" p="-0.104324 0.123016 -0.045777"/>
+		<Waypoint body="TibiaR" p="-0.10876 0.078767 -0.020378"/>
+		<Waypoint body="TalusR" p="-0.115289 0.033083 0.006636"/>
+	</Unit>
+	<Unit name="L_Peroneus_Tertius1" f0="45.0" lm="1.0" lt="0.2" pen_angle="0.0" lmax="-0.1">
+		<Waypoint body="TibiaL" p="0.104267 0.130205 -0.04586"/>
+		<Waypoint body="TibiaL" p="0.108704 0.086 -0.020457"/>
+		<Waypoint body="TalusL" p="0.115232 0.040307 0.006557"/>
+	</Unit>
+	<Unit name="R_Peroneus_Tertius1" f0="45.0" lm="1.0" lt="0.2" pen_angle="0.0" lmax="-0.1">
+		<Waypoint body="TibiaR" p="-0.104324 0.123016 -0.045777"/>
+		<Waypoint body="TibiaR" p="-0.10876 0.078767 -0.020378"/>
+		<Waypoint body="TalusR" p="-0.115289 0.033083 0.006636"/>
+	</Unit>
+	<Unit name="L_Piriformis" f0="148.0" lm="1.0" lt="0.2" pen_angle="0.0" lmax="-0.1">
+		<Waypoint body="Pelvis" p="0.030041 0.948003 -0.08537"/>
+		<Waypoint body="FemurL" p="0.130451 0.899996 -0.024475"/>
+	</Unit>
+	<Unit name="R_Piriformis" f0="148.0" lm="1.0" lt="0.2" pen_angle="0.0" lmax="-0.1">
+		<Waypoint body="Pelvis" p="-0.030041 0.948003 -0.08537"/>
+		<Waypoint body="FemurR" p="-0.130401 0.89998 -0.02448"/>
+	</Unit>
+	<Unit name="L_Piriformis1" f0="148.0" lm="1.0" lt="0.2" pen_angle="0.0" lmax="-0.1">
+		<Waypoint body="Pelvis" p="0.015211 0.905128 -0.083754"/>
+		<Waypoint body="FemurL" p="0.132841 0.889348 -0.021705"/>
+	</Unit>
+	<Unit name="R_Piriformis1" f0="148.0" lm="1.0" lt="0.2" pen_angle="0.0" lmax="-0.1">
+		<Waypoint body="Pelvis" p="-0.015211 0.905128 -0.083754"/>
+		<Waypoint body="FemurR" p="-0.132794 0.889222 -0.021708"/>
+	</Unit>
+	<Unit name="L_Plantaris" f0="50.0" lm="1.0" lt="0.2" pen_angle="0.0" lmax="-0.1">
+		<Waypoint body="FemurL" p="0.114161 0.511109 -0.011873"/>
+		<Waypoint body="FemurL" p="0.106778 0.493683 -0.034467"/>
+		<Waypoint body="TibiaL" p="0.102409 0.442887 -0.046091"/>
+		<Waypoint body="TibiaL" p="0.072246 0.10448 -0.071535"/>
+		<Waypoint body="TalusL" p="0.073593 0.042684 -0.088985"/>
+	</Unit>
+	<Unit name="R_Plantaris" f0="50.0" lm="1.0" lt="0.2" pen_angle="0.0" lmax="-0.1">
+		<Waypoint body="FemurR" p="-0.114218 0.504998 -0.011773"/>
+		<Waypoint body="FemurR" p="-0.10684 0.487304 -0.034362"/>
+		<Waypoint body="TibiaR" p="-0.102478 0.436032 -0.045979"/>
+		<Waypoint body="TibiaR" p="-0.072302 0.09726 -0.071455"/>
+		<Waypoint body="TalusR" p="-0.07365 0.03546 -0.088906"/>
+	</Unit>
+	<Unit name="L_Platysma1" f0="1000.0" lm="1.2" lt="0.2" pen_angle="0.0" lmax="-0.1">
+		<Waypoint body="ShoulderL" p="0.084894 1.394435 0.019634"/>
+		<Waypoint body="ShoulderL" p="0.045061 1.418012 0.006039"/>
+		<Waypoint body="Neck" p="0.02928 1.481421 0.02158"/>
+		<Waypoint body="Head" p="0.026999 1.493685 0.035365"/>
+		<Waypoint body="Head" p="0.031847 1.500054 0.065025"/>
+	</Unit>
+	<Unit name="R_Platysma1" f0="1000.0" lm="1.2" lt="0.2" pen_angle="0.0" lmax="-0.1">
+		<Waypoint body="ShoulderR" p="-0.084894 1.394435 0.015108"/>
+		<Waypoint body="ShoulderR" p="-0.045061 1.418012 0.001513"/>
+		<Waypoint body="Neck" p="-0.02928 1.481421 0.02158"/>
+		<Waypoint body="Head" p="-0.026999 1.493685 0.035365"/>
+		<Waypoint body="Head" p="-0.031847 1.500054 0.065025"/>
+	</Unit>
+	<Unit name="L_Popliteus" f0="50.0" lm="1.0" lt="0.2" pen_angle="0.0" lmax="-0.1">
+		<Waypoint body="FemurL" p="0.131325 0.483878 -0.011536"/>
+		<Waypoint body="FemurL" p="0.130402 0.469631 -0.030904"/>
+		<Waypoint body="TibiaL" p="0.111618 0.445288 -0.039943"/>
+		<Waypoint body="TibiaL" p="0.077541 0.405863 -0.016662"/>
+	</Unit>
+	<Unit name="R_Popliteus" f0="50.0" lm="1.0" lt="0.2" pen_angle="0.0" lmax="-0.1">
+		<Waypoint body="FemurR" p="-0.13139 0.477331 -0.011429"/>
+		<Waypoint body="FemurR" p="-0.13047 0.462864 -0.030792"/>
+		<Waypoint body="TibiaR" p="-0.111687 0.438437 -0.039831"/>
+		<Waypoint body="TibiaR" p="-0.077609 0.39897 -0.016554"/>
+	</Unit>
+	<Unit name="L_Psoas_Major" f0="239.85" lm="1.0" lt="0.2" pen_angle="0.0" lmax="-0.1">
+		<Waypoint body="Torso" p="0.01388 1.177399 -0.045727"/>
+		<Waypoint body="Pelvis" p="0.087461 1.035464 -0.029566"/>
+		<Waypoint body="Pelvis" p="0.082803 0.900185 0.042685"/>
+		<Waypoint body="FemurL" p="0.089858 0.853033 0.001193"/>
+		<Waypoint body="FemurL" p="0.104213 0.823562 -0.014873"/>
+	</Unit>
+	<Unit name="R_Psoas_Major" f0="239.85" lm="1.0" lt="0.2" pen_angle="0.0" lmax="-0.1">
+		<Waypoint body="Torso" p="-0.01388 1.177399 -0.045727"/>
+		<Waypoint body="Pelvis" p="-0.087461 1.035464 -0.029566"/>
+		<Waypoint body="Pelvis" p="-0.082803 0.900185 0.042685"/>
+		<Waypoint body="FemurR" p="-0.089808 0.853017 0.001188"/>
+		<Waypoint body="FemurR" p="-0.104163 0.823546 -0.014878"/>
+	</Unit>
+	<Unit name="L_Psoas_Major1" f0="239.85" lm="1.0" lt="0.2" pen_angle="0.0" lmax="-0.1">
+		<Waypoint body="Spine" p="0.020344 1.091554 -0.035365"/>
+		<Waypoint body="Pelvis" p="0.06493 0.997343 -0.019869"/>
+		<Waypoint body="Pelvis" p="0.070729 0.899519 0.041734"/>
+		<Waypoint body="FemurL" p="0.087861 0.849135 -0.006983"/>
+		<Waypoint body="FemurL" p="0.104403 0.829456 -0.008789"/>
+	</Unit>
+	<Unit name="R_Psoas_Major1" f0="239.85" lm="1.0" lt="0.2" pen_angle="0.0" lmax="-0.1">
+		<Waypoint body="Spine" p="-0.020344 1.091554 -0.035365"/>
+		<Waypoint body="Pelvis" p="-0.06493 0.997343 -0.019869"/>
+		<Waypoint body="Pelvis" p="-0.070729 0.899519 0.041734"/>
+		<Waypoint body="FemurR" p="-0.087811 0.849119 -0.006988"/>
+		<Waypoint body="FemurR" p="-0.104353 0.82944 -0.008794"/>
+	</Unit>
+	<Unit name="L_Psoas_Major2" f0="239.85" lm="1.0" lt="0.2" pen_angle="0.0" lmax="-0.1">
+		<Waypoint body="Spine" p="0.017492 1.011793 -0.035555"/>
+		<Waypoint body="Pelvis" p="0.050956 0.975572 -0.031277"/>
+		<Waypoint body="Pelvis" p="0.065121 0.898664 0.034794"/>
+		<Waypoint body="FemurL" p="0.087861 0.851036 0.001383"/>
+		<Waypoint body="FemurL" p="0.103167 0.829076 -0.014113"/>
+	</Unit>
+	<Unit name="R_Psoas_Major2" f0="239.85" lm="1.0" lt="0.2" pen_angle="0.0" lmax="-0.1">
+		<Waypoint body="Spine" p="-0.017492 1.011793 -0.035555"/>
+		<Waypoint body="Pelvis" p="-0.050956 0.975572 -0.031277"/>
+		<Waypoint body="Pelvis" p="-0.065121 0.898664 0.034794"/>
+		<Waypoint body="FemurR" p="-0.087811 0.85102 0.001378"/>
+		<Waypoint body="FemurR" p="-0.103117 0.82906 -0.014118"/>
+	</Unit>
+	<Unit name="L_Psoas_Minor" f0="239.85" lm="1.0" lt="0.2" pen_angle="0.0" lmax="-0.1">
+		<Waypoint body="Torso" p="0.010743 1.176163 -0.04335"/>
+		<Waypoint body="Spine" p="0.052572 1.07986 -0.011028"/>
+		<Waypoint body="Pelvis" p="0.060177 0.964925 -0.005134"/>
+		<Waypoint body="Pelvis" p="0.054948 0.90741 0.018823"/>
+	</Unit>
+	<Unit name="R_Psoas_Minor" f0="239.85" lm="1.0" lt="0.2" pen_angle="0.0" lmax="-0.1">
+		<Waypoint body="Torso" p="-0.010743 1.176163 -0.04335"/>
+		<Waypoint body="Spine" p="-0.052572 1.07986 -0.011028"/>
+		<Waypoint body="Pelvis" p="-0.060177 0.964925 -0.005134"/>
+		<Waypoint body="Pelvis" p="-0.054948 0.90741 0.018823"/>
+	</Unit>
+	<Unit name="L_Quadratus_Femoris" f0="254.0" lm="1.0" lt="0.2" pen_angle="0.0" lmax="-0.1">
+		<Waypoint body="Pelvis" p="0.081662 0.887351 -0.041164"/>
+		<Waypoint body="Pelvis" p="0.103337 0.868623 -0.046583"/>
+		<Waypoint body="FemurL" p="0.1295 0.845857 -0.027138"/>
+	</Unit>
+	<Unit name="R_Quadratus_Femoris" f0="254.0" lm="1.0" lt="0.2" pen_angle="0.0" lmax="-0.1">
+		<Waypoint body="Pelvis" p="-0.081662 0.887351 -0.041164"/>
+		<Waypoint body="Pelvis" p="-0.103337 0.868623 -0.046583"/>
+		<Waypoint body="FemurR" p="-0.129464 0.845044 -0.027129"/>
+	</Unit>
+	<Unit name="L_Quadratus_Lumborum1" f0="1000.0" lm="1.2" lt="0.2" pen_angle="0.0" lmax="-0.1">
+		<Waypoint body="Pelvis" p="0.073486 1.030901 -0.065881"/>
+		<Waypoint body="Torso" p="0.045537 1.141273 -0.079571"/>
+	</Unit>
+	<Unit name="R_Quadratus_Lumborum1" f0="1000.0" lm="1.2" lt="0.2" pen_angle="0.0" lmax="-0.1">
+		<Waypoint body="Pelvis" p="-0.073486 1.030901 -0.065881"/>
+		<Waypoint body="Torso" p="-0.045537 1.141273 -0.079571"/>
+	</Unit>
+	<Unit name="L_Rectus_Femoris" f0="424.4" lm="1.0" lt="0.2" pen_angle="0.0" lmax="-0.1">
+		<Waypoint body="Pelvis" p="0.102196 0.946957 0.01369"/>
+		<Waypoint body="FemurL" p="0.110772 0.910168 0.029428"/>
+		<Waypoint body="FemurL" p="0.100018 0.550485 0.041673"/>
+		<Waypoint body="TibiaL" p="0.106169 0.483656 0.03394"/>
+	</Unit>
+	<Unit name="R_Rectus_Femoris" f0="424.4" lm="1.0" lt="0.2" pen_angle="0.0" lmax="-0.1">
+		<Waypoint body="Pelvis" p="-0.102196 0.946957 0.01369"/>
+		<Waypoint body="FemurR" p="-0.110722 0.910152 0.029423"/>
+		<Waypoint body="FemurR" p="-0.100064 0.544986 0.041763"/>
+		<Waypoint body="TibiaR" p="-0.106238 0.476813 0.034053"/>
+	</Unit>
+	<Unit name="L_Rectus_Femoris1" f0="424.4" lm="1.0" lt="0.2" pen_angle="0.0" lmax="-0.1">
+		<Waypoint body="Pelvis" p="0.100675 0.940493 0.015686"/>
+		<Waypoint body="FemurL" p="0.101268 0.895492 0.03019"/>
+		<Waypoint body="FemurL" p="0.07824 0.554583 0.041569"/>
+		<Waypoint body="TibiaL" p="0.0728 0.48147 0.031183"/>
+	</Unit>
+	<Unit name="R_Rectus_Femoris1" f0="424.4" lm="1.0" lt="0.2" pen_angle="0.0" lmax="-0.1">
+		<Waypoint body="Pelvis" p="-0.100675 0.940493 0.015686"/>
+		<Waypoint body="FemurR" p="-0.101219 0.895457 0.030186"/>
+		<Waypoint body="FemurR" p="-0.078285 0.549155 0.041658"/>
+		<Waypoint body="TibiaR" p="-0.072869 0.474627 0.031296"/>
+	</Unit>
+	<Unit name="L_Rhomboid_Major2" f0="1000.0" lm="1.2" lt="0.2" pen_angle="0.0" lmax="-0.1">
+		<Waypoint body="Torso" p="1e-06 1.370764 -0.113509"/>
+		<Waypoint body="Torso" p="0.038407 1.354032 -0.122255"/>
+		<Waypoint body="ShoulderL" p="0.082518 1.337586 -0.12905"/>
+	</Unit>
+	<Unit name="R_Rhomboid_Major2" f0="1000.0" lm="1.2" lt="0.2" pen_angle="0.0" lmax="-0.1">
+		<Waypoint body="Torso" p="-1e-06 1.370764 -0.113509"/>
+		<Waypoint body="Torso" p="-0.038407 1.354032 -0.122255"/>
+		<Waypoint body="ShoulderR" p="-0.082518 1.337586 -0.133576"/>
+	</Unit>
+	<Unit name="L_Rhomboid_Minor" f0="1000.0" lm="1.2" lt="0.2" pen_angle="0.0" lmax="-0.1">
+		<Waypoint body="Neck" p="1e-06 1.448433 -0.083088"/>
+		<Waypoint body="Torso" p="0.02177 1.435694 -0.083754"/>
+		<Waypoint body="ShoulderL" p="0.086225 1.404037 -0.097203"/>
+	</Unit>
+	<Unit name="R_Rhomboid_Minor" f0="1000.0" lm="1.2" lt="0.2" pen_angle="0.0" lmax="-0.1">
+		<Waypoint body="Neck" p="-1e-06 1.448433 -0.083088"/>
+		<Waypoint body="Torso" p="-0.02177 1.435694 -0.083754"/>
+		<Waypoint body="ShoulderR" p="-0.086225 1.404037 -0.101729"/>
+	</Unit>
+	<Unit name="L_Sartorius" f0="113.5" lm="1.0" lt="0.2" pen_angle="0.0" lmax="-0.1">
+		<Waypoint body="Pelvis" p="0.117977 0.975002 0.029851"/>
+		<Waypoint body="FemurL" p="0.033924 0.6621 0.02511"/>
+		<Waypoint body="TibiaL" p="0.052597 0.441552 -0.020415"/>
+		<Waypoint body="TibiaL" p="0.087232 0.404658 0.009942"/>
+	</Unit>
+	<Unit name="R_Sartorius" f0="113.5" lm="1.0" lt="0.2" pen_angle="0.0" lmax="-0.1">
+		<Waypoint body="Pelvis" p="-0.117977 0.975002 0.029851"/>
+		<Waypoint body="FemurR" p="-0.033939 0.65839 0.025169"/>
+		<Waypoint body="TibiaR" p="-0.052667 0.434696 -0.020303"/>
+		<Waypoint body="TibiaR" p="-0.0873 0.397767 0.01005"/>
+	</Unit>
+	<Unit name="L_Scalene_Anterior1" f0="1000.0" lm="1.2" lt="0.2" pen_angle="0.0" lmax="-0.1">
+		<Waypoint body="Torso" p="0.055519 1.409646 -0.005514"/>
+		<Waypoint body="Neck" p="0.033273 1.44482 -0.009031"/>
+		<Waypoint body="Neck" p="0.017397 1.463454 -0.016446"/>
+	</Unit>
+	<Unit name="R_Scalene_Anterior1" f0="1000.0" lm="1.2" lt="0.2" pen_angle="0.0" lmax="-0.1">
+		<Waypoint body="Torso" p="-0.055519 1.409646 -0.005514"/>
+		<Waypoint body="Neck" p="-0.033273 1.44482 -0.009031"/>
+		<Waypoint body="Neck" p="-0.017397 1.463454 -0.016446"/>
+	</Unit>
+	<Unit name="L_Scalene_Middle4" f0="1000.0" lm="1.2" lt="0.2" pen_angle="0.0" lmax="-0.1">
+		<Waypoint body="Torso" p="0.052857 1.42305 -0.032703"/>
+		<Waypoint body="Neck" p="0.037932 1.48703 -0.010267"/>
+		<Waypoint body="Neck" p="0.025383 1.508705 -0.005704"/>
+	</Unit>
+	<Unit name="R_Scalene_Middle4" f0="1000.0" lm="1.2" lt="0.2" pen_angle="0.0" lmax="-0.1">
+		<Waypoint body="Torso" p="-0.052857 1.42305 -0.032703"/>
+		<Waypoint body="Neck" p="-0.037932 1.48703 -0.010267"/>
+		<Waypoint body="Neck" p="-0.025383 1.508705 -0.005704"/>
+	</Unit>
+	<Unit name="L_Semimembranosus" f0="581.35" lm="1.0" lt="0.2" pen_angle="0.0" lmax="-0.1">
+		<Waypoint body="Pelvis" p="0.071395 0.872235 -0.054568"/>
+		<Waypoint body="Pelvis" p="0.066642 0.819473 -0.037171"/>
+		<Waypoint body="FemurL" p="0.051552 0.488387 -0.046438"/>
+		<Waypoint body="TibiaL" p="0.054739 0.454905 -0.039161"/>
+		<Waypoint body="TibiaL" p="0.059939 0.436272 -0.027301"/>
+	</Unit>
+	<Unit name="R_Semimembranosus" f0="581.35" lm="1.0" lt="0.2" pen_angle="0.0" lmax="-0.1">
+		<Waypoint body="Pelvis" p="-0.071395 0.872235 -0.054568"/>
+		<Waypoint body="Pelvis" p="-0.066642 0.819473 -0.037171"/>
+		<Waypoint body="FemurR" p="-0.051615 0.481942 -0.046331"/>
+		<Waypoint body="TibiaR" p="-0.054809 0.448062 -0.039048"/>
+		<Waypoint body="TibiaR" p="-0.060008 0.42941 -0.02719"/>
+	</Unit>
+	<Unit name="L_Semimembranosus1" f0="581.35" lm="1.0" lt="0.2" pen_angle="0.0" lmax="-0.1">
+		<Waypoint body="Pelvis" p="0.074532 0.875658 -0.05067"/>
+		<Waypoint body="FemurL" p="0.089097 0.83478 -0.032651"/>
+		<Waypoint body="FemurL" p="0.100006 0.505236 -0.044851"/>
+		<Waypoint body="FemurL" p="0.078016 0.470107 -0.052677"/>
+		<Waypoint body="TibiaL" p="0.078843 0.440338 -0.03922"/>
+	</Unit>
+	<Unit name="R_Semimembranosus1" f0="581.35" lm="1.0" lt="0.2" pen_angle="0.0" lmax="-0.1">
+		<Waypoint body="Pelvis" p="-0.074532 0.875658 -0.05067"/>
+		<Waypoint body="FemurR" p="-0.089047 0.834764 -0.032656"/>
+		<Waypoint body="FemurR" p="-0.100064 0.499045 -0.04475"/>
+		<Waypoint body="FemurR" p="-0.078084 0.463368 -0.052566"/>
+		<Waypoint body="TibiaR" p="-0.078912 0.43348 -0.039108"/>
+	</Unit>
+	<Unit name="L_Semispinalis_Capitis1" f0="1000.0" lm="1.2" lt="0.2" pen_angle="0.0" lmax="-0.1">
+		<Waypoint body="Torso" p="0.024717 1.375517 -0.095447"/>
+		<Waypoint body="Neck" p="0.01388 1.452901 -0.063029"/>
+		<Waypoint body="Neck" p="0.010362 1.503952 -0.052001"/>
+		<Waypoint body="Head" p="0.008271 1.550059 -0.066356"/>
+	</Unit>
+	<Unit name="R_Semispinalis_Capitis1" f0="1000.0" lm="1.2" lt="0.2" pen_angle="0.0" lmax="-0.1">
+		<Waypoint body="Torso" p="-0.024717 1.375517 -0.095447"/>
+		<Waypoint body="Neck" p="-0.01388 1.452901 -0.063029"/>
+		<Waypoint body="Neck" p="-0.010362 1.503952 -0.052001"/>
+		<Waypoint body="Head" p="-0.008271 1.550059 -0.066356"/>
+	</Unit>
+	<Unit name="L_Semitendinosus" f0="301.9" lm="1.0" lt="0.2" pen_angle="0.0" lmax="-0.1">
+		<Waypoint body="Pelvis" p="0.064645 0.86501 -0.061983"/>
+		<Waypoint body="Pelvis" p="0.083754 0.826223 -0.044016"/>
+		<Waypoint body="FemurL" p="0.082122 0.51074 -0.057412"/>
+		<Waypoint body="TibiaL" p="0.06782 0.440077 -0.044248"/>
+		<Waypoint body="TibiaL" p="0.063232 0.420204 -0.024015"/>
+		<Waypoint body="TibiaL" p="0.076893 0.400085 -0.00236"/>
+	</Unit>
+	<Unit name="R_Semitendinosus" f0="301.9" lm="1.0" lt="0.2" pen_angle="0.0" lmax="-0.1">
+		<Waypoint body="Pelvis" p="-0.064645 0.86501 -0.061983"/>
+		<Waypoint body="Pelvis" p="-0.083754 0.826223 -0.044016"/>
+		<Waypoint body="FemurR" p="-0.082179 0.504644 -0.057312"/>
+		<Waypoint body="TibiaR" p="-0.067889 0.433217 -0.044137"/>
+		<Waypoint body="TibiaR" p="-0.0633 0.413325 -0.023905"/>
+		<Waypoint body="TibiaR" p="-0.076961 0.393188 -0.002252"/>
+	</Unit>
+	<Unit name="L_Serratus_Anterior2" f0="1000.0" lm="1.2" lt="0.2" pen_angle="0.0" lmax="-0.1">
+		<Waypoint body="ShoulderL" p="0.085655 1.355648 -0.123631"/>
+		<Waypoint body="ShoulderL" p="0.09944 1.355458 -0.106804"/>
+		<Waypoint body="Torso" p="0.124727 1.350324 -0.041164"/>
+		<Waypoint body="Torso" p="0.11465 1.357359 -0.022721"/>
+	</Unit>
+	<Unit name="R_Serratus_Anterior2" f0="1000.0" lm="1.2" lt="0.2" pen_angle="0.0" lmax="-0.1">
+		<Waypoint body="ShoulderR" p="-0.085655 1.355648 -0.128157"/>
+		<Waypoint body="ShoulderR" p="-0.09944 1.355458 -0.11133"/>
+		<Waypoint body="Torso" p="-0.124727 1.350324 -0.041164"/>
+		<Waypoint body="Torso" p="-0.11465 1.357359 -0.022721"/>
+	</Unit>
+	<Unit name="L_Serratus_Anterior4" f0="1000.0" lm="1.2" lt="0.2" pen_angle="0.0" lmax="-0.1">
+		<Waypoint body="ShoulderL" p="0.089267 1.296707 -0.133708"/>
+		<Waypoint body="Torso" p="0.109612 1.302886 -0.090884"/>
+		<Waypoint body="Torso" p="0.135565 1.277884 -0.011313"/>
+		<Waypoint body="Torso" p="0.120164 1.263053 0.045252"/>
+	</Unit>
+	<Unit name="R_Serratus_Anterior4" f0="1000.0" lm="1.2" lt="0.2" pen_angle="0.0" lmax="-0.1">
+		<Waypoint body="ShoulderR" p="-0.089267 1.296707 -0.138234"/>
+		<Waypoint body="Torso" p="-0.109612 1.302886 -0.090884"/>
+		<Waypoint body="Torso" p="-0.135565 1.277884 -0.011313"/>
+		<Waypoint body="Torso" p="-0.120164 1.263053 0.045252"/>
+	</Unit>
+	<Unit name="L_Soleus" f0="1792.95" lm="1.0" lt="0.2" pen_angle="0.0" lmax="-0.1">
+		<Waypoint body="TibiaL" p="0.084153 0.417453 -0.02143"/>
+		<Waypoint body="TibiaL" p="0.083849 0.375314 -0.054748"/>
+		<Waypoint body="TibiaL" p="0.069612 0.145394 -0.054066"/>
+		<Waypoint body="TibiaL" p="0.071975 0.100606 -0.069503"/>
+		<Waypoint body="TalusL" p="0.071501 0.035649 -0.086323"/>
+	</Unit>
+	<Unit name="R_Soleus" f0="1792.95" lm="1.0" lt="0.2" pen_angle="0.0" lmax="-0.1">
+		<Waypoint body="TibiaR" p="-0.084221 0.410572 -0.021321"/>
+		<Waypoint body="TibiaR" p="-0.083916 0.368385 -0.054642"/>
+		<Waypoint body="TibiaR" p="-0.06967 0.138219 -0.053983"/>
+		<Waypoint body="TibiaR" p="-0.072031 0.093382 -0.069424"/>
+		<Waypoint body="TalusR" p="-0.071558 0.028425 -0.086244"/>
+	</Unit>
+	<Unit name="L_Soleus1" f0="1792.95" lm="1.0" lt="0.2" pen_angle="0.0" lmax="-0.1">
+		<Waypoint body="TibiaL" p="0.130758 0.436672 -0.042336"/>
+		<Waypoint body="TibiaL" p="0.125573 0.353019 -0.070221"/>
+		<Waypoint body="TalusL" p="0.08329 0.089266 -0.077102"/>
+		<Waypoint body="TalusL" p="0.085476 0.035554 -0.089175"/>
+	</Unit>
+	<Unit name="R_Soleus1" f0="1792.95" lm="1.0" lt="0.2" pen_angle="0.0" lmax="-0.1">
+		<Waypoint body="TibiaR" p="-0.130827 0.429811 -0.042225"/>
+		<Waypoint body="TibiaR" p="-0.125639 0.346066 -0.070118"/>
+		<Waypoint body="TalusR" p="-0.083347 0.082042 -0.077023"/>
+		<Waypoint body="TalusR" p="-0.085533 0.02833 -0.089096"/>
+	</Unit>
+	<Unit name="L_Splenius_Capitis1" f0="1000.0" lm="1.2" lt="0.2" pen_angle="0.0" lmax="-0.1">
+		<Waypoint body="Neck" p="1e-06 1.443014 -0.081947"/>
+		<Waypoint body="Neck" p="0.021295 1.49397 -0.053903"/>
+		<Waypoint body="Head" p="0.037171 1.531806 -0.046202"/>
+		<Waypoint body="Head" p="0.05761 1.57316 -0.04335"/>
+	</Unit>
+	<Unit name="R_Splenius_Capitis1" f0="1000.0" lm="1.2" lt="0.2" pen_angle="0.0" lmax="-0.1">
+		<Waypoint body="Neck" p="-1e-06 1.443014 -0.081947"/>
+		<Waypoint body="Neck" p="-0.021295 1.49397 -0.053903"/>
+		<Waypoint body="Head" p="-0.037171 1.531806 -0.046202"/>
+		<Waypoint body="Head" p="-0.05761 1.57316 -0.04335"/>
+	</Unit>
+	<Unit name="L_Splenius_Cervicis" f0="1000.0" lm="1.2" lt="0.2" pen_angle="0.0" lmax="-0.1">
+		<Waypoint body="Torso" p="1e-06 1.352321 -0.114175"/>
+		<Waypoint body="Torso" p="0.033939 1.4375 -0.075578"/>
+		<Waypoint body="Neck" p="0.037836 1.485034 -0.037266"/>
+		<Waypoint body="Neck" p="0.03565 1.528289 -0.005324"/>
+	</Unit>
+	<Unit name="R_Splenius_Cervicis" f0="1000.0" lm="1.2" lt="0.2" pen_angle="0.0" lmax="-0.1">
+		<Waypoint body="Torso" p="-1e-06 1.352321 -0.114175"/>
+		<Waypoint body="Torso" p="-0.033939 1.4375 -0.075578"/>
+		<Waypoint body="Neck" p="-0.037836 1.485034 -0.037266"/>
+		<Waypoint body="Neck" p="-0.03565 1.528289 -0.005324"/>
+	</Unit>
+	<Unit name="L_Splenius_Cervicis1" f0="1000.0" lm="1.2" lt="0.2" pen_angle="0.0" lmax="-0.1">
+		<Waypoint body="Torso" p="1e-06 1.293285 -0.119594"/>
+		<Waypoint body="Torso" p="0.031372 1.360687 -0.10733"/>
+		<Waypoint body="Torso" p="0.046297 1.434078 -0.067117"/>
+		<Waypoint body="Neck" p="0.039928 1.479615 -0.027284"/>
+		<Waypoint body="Neck" p="0.025668 1.508515 -0.005989"/>
+	</Unit>
+	<Unit name="R_Splenius_Cervicis1" f0="1000.0" lm="1.2" lt="0.2" pen_angle="0.0" lmax="-0.1">
+		<Waypoint body="Torso" p="-1e-06 1.293285 -0.119594"/>
+		<Waypoint body="Torso" p="-0.031372 1.360687 -0.10733"/>
+		<Waypoint body="Torso" p="-0.046297 1.434078 -0.067117"/>
+		<Waypoint body="Neck" p="-0.039928 1.479615 -0.027284"/>
+		<Waypoint body="Neck" p="-0.025668 1.508515 -0.005989"/>
+	</Unit>
+	<Unit name="L_Sternocleidomastoid1" f0="1000.0" lm="1.2" lt="0.2" pen_angle="0.0" lmax="-0.1">
+		<Waypoint body="ShoulderL" p="0.053998 1.407745 0.004899"/>
+		<Waypoint body="Neck" p="0.051906 1.510226 -0.029376"/>
+		<Waypoint body="Head" p="0.046583 1.572685 -0.0578"/>
+	</Unit>
+	<Unit name="R_Sternocleidomastoid1" f0="1000.0" lm="1.2" lt="0.2" pen_angle="0.0" lmax="-0.1">
+		<Waypoint body="ShoulderR" p="-0.053998 1.407745 0.000373"/>
+		<Waypoint body="Neck" p="-0.051906 1.510226 -0.029376"/>
+		<Waypoint body="Head" p="-0.046583 1.572685 -0.0578"/>
+	</Unit>
+	<Unit name="L_Subclavian" f0="1000.0" lm="1.2" lt="0.2" pen_angle="0.0" lmax="-0.1">
+		<Waypoint body="Torso" p="0.050385 1.392439 0.02082"/>
+		<Waypoint body="ShoulderL" p="0.130051 1.403562 -0.034744"/>
+	</Unit>
+	<Unit name="R_Subclavian" f0="1000.0" lm="1.2" lt="0.2" pen_angle="0.0" lmax="-0.1">
+		<Waypoint body="Torso" p="-0.050385 1.392439 0.02082"/>
+		<Waypoint body="ShoulderR" p="-0.130051 1.403562 -0.03927"/>
+	</Unit>
+	<Unit name="L_Subscapularis1" f0="1000.0" lm="1.2" lt="0.2" pen_angle="0.0" lmax="-0.1">
+		<Waypoint body="ShoulderL" p="0.089743 1.331501 -0.125247"/>
+		<Waypoint body="ShoulderL" p="0.145737 1.364204 -0.05062"/>
+		<Waypoint body="ArmL" p="0.17775 1.369813 -0.036102"/>
+		<Waypoint body="ArmL" p="0.175944 1.376182 -0.037433"/>
+	</Unit>
+	<Unit name="R_Subscapularis1" f0="1000.0" lm="1.2" lt="0.2" pen_angle="0.0" lmax="-0.1">
+		<Waypoint body="ShoulderR" p="-0.089743 1.331501 -0.129773"/>
+		<Waypoint body="ShoulderR" p="-0.145737 1.364204 -0.055146"/>
+		<Waypoint body="ArmR" p="-0.176878 1.368979 -0.040903"/>
+		<Waypoint body="ArmR" p="-0.175072 1.375348 -0.042234"/>
+	</Unit>
+	<Unit name="L_Superior_Gemellus" f0="50.0" lm="1.0" lt="0.2" pen_angle="0.0" lmax="-0.1">
+		<Waypoint body="Pelvis" p="0.058276 0.888397 -0.056279"/>
+		<Waypoint body="Pelvis" p="0.08594 0.891914 -0.058276"/>
+		<Waypoint body="FemurL" p="0.133314 0.890204 -0.023608"/>
+	</Unit>
+	<Unit name="R_Superior_Gemellus" f0="50.0" lm="1.0" lt="0.2" pen_angle="0.0" lmax="-0.1">
+		<Waypoint body="Pelvis" p="-0.058276 0.888397 -0.056279"/>
+		<Waypoint body="Pelvis" p="-0.08594 0.891914 -0.058276"/>
+		<Waypoint body="FemurR" p="-0.133267 0.890091 -0.02361"/>
+	</Unit>
+	<Unit name="L_Supraspinatus" f0="1000.0" lm="1.2" lt="0.2" pen_angle="0.0" lmax="-0.1">
+		<Waypoint body="ShoulderL" p="0.088697 1.410216 -0.089122"/>
+		<Waypoint body="ShoulderL" p="0.160852 1.403086 -0.054233"/>
+		<Waypoint body="ArmL" p="0.153128 1.396431 -0.046939"/>
+		<Waypoint body="ArmL" p="0.158261 1.40166 -0.041616"/>
+	</Unit>
+	<Unit name="R_Supraspinatus" f0="1000.0" lm="1.2" lt="0.2" pen_angle="0.0" lmax="-0.1">
+		<Waypoint body="ShoulderR" p="-0.088697 1.410216 -0.093648"/>
+		<Waypoint body="ShoulderR" p="-0.160852 1.403086 -0.058759"/>
+		<Waypoint body="ArmR" p="-0.152256 1.395597 -0.05174"/>
+		<Waypoint body="ArmR" p="-0.157389 1.400826 -0.046417"/>
+	</Unit>
+	<Unit name="L_Tensor_Fascia_Lata" f0="77.5" lm="1.0" lt="0.2" pen_angle="0.0" lmax="-0.1">
+		<Waypoint body="Pelvis" p="0.130526 1.025387 -0.022721"/>
+		<Waypoint body="FemurL" p="0.154795 0.892718 -0.023422"/>
+		<Waypoint body="FemurL" p="0.152264 0.773458 -0.00409"/>
+		<Waypoint body="FemurL" p="0.135478 0.500362 0.006021"/>
+		<Waypoint body="TibiaL" p="0.126594 0.428749 -0.006544"/>
+	</Unit>
+	<Unit name="R_Tensor_Fascia_Lata" f0="77.5" lm="1.0" lt="0.2" pen_angle="0.0" lmax="-0.1">
+		<Waypoint body="Pelvis" p="-0.130526 1.025387 -0.022721"/>
+		<Waypoint body="FemurR" p="-0.154747 0.892639 -0.023425"/>
+		<Waypoint body="FemurR" p="-0.152249 0.771486 -0.004061"/>
+		<Waypoint body="FemurR" p="-0.135538 0.49407 0.006125"/>
+		<Waypoint body="TibiaR" p="-0.126663 0.421884 -0.006433"/>
+	</Unit>
+	<Unit name="L_Tensor_Fascia_Lata1" f0="77.5" lm="1.0" lt="0.2" pen_angle="0.0" lmax="-0.1">
+		<Waypoint body="Pelvis" p="0.12872 0.994871 0.018253"/>
+		<Waypoint body="FemurL" p="0.109741 0.889562 0.052353"/>
+		<Waypoint body="FemurL" p="0.137847 0.554919 0.024363"/>
+		<Waypoint body="TibiaL" p="0.105978 0.483751 0.033275"/>
+	</Unit>
+	<Unit name="R_Tensor_Fascia_Lata1" f0="77.5" lm="1.0" lt="0.2" pen_angle="0.0" lmax="-0.1">
+		<Waypoint body="Pelvis" p="-0.12872 0.994871 0.018253"/>
+		<Waypoint body="FemurR" p="-0.109694 0.889425 0.052351"/>
+		<Waypoint body="FemurR" p="-0.137893 0.549485 0.024452"/>
+		<Waypoint body="TibiaR" p="-0.106047 0.476908 0.033388"/>
+	</Unit>
+	<Unit name="L_Tensor_Fascia_Lata2" f0="77.5" lm="1.0" lt="0.2" pen_angle="0.0" lmax="-0.1">
+		<Waypoint body="Pelvis" p="0.13585 1.012458 0.003042"/>
+		<Waypoint body="FemurL" p="0.151197 0.886234 0.020798"/>
+		<Waypoint body="FemurL" p="0.128725 0.501743 0.015525"/>
+		<Waypoint body="TibiaL" p="0.116529 0.424736 0.005655"/>
+	</Unit>
+	<Unit name="R_Tensor_Fascia_Lata2" f0="77.5" lm="1.0" lt="0.2" pen_angle="0.0" lmax="-0.1">
+		<Waypoint body="Pelvis" p="-0.13585 1.012458 0.003042"/>
+		<Waypoint body="FemurR" p="-0.151151 0.886042 0.020796"/>
+		<Waypoint body="FemurR" p="-0.128785 0.495472 0.015628"/>
+		<Waypoint body="TibiaR" p="-0.116598 0.417867 0.005766"/>
+	</Unit>
+	<Unit name="L_Teres_Major" f0="1000.0" lm="1.2" lt="0.2" pen_angle="0.0" lmax="-0.1">
+		<Waypoint body="ShoulderL" p="0.095066 1.285964 -0.13637"/>
+		<Waypoint body="ShoulderL" p="0.151156 1.321519 -0.10804"/>
+		<Waypoint body="ArmL" p="0.214699 1.392464 -0.070708"/>
+		<Waypoint body="ArmL" p="0.216062 1.392153 -0.04076"/>
+	</Unit>
+	<Unit name="R_Teres_Major" f0="1000.0" lm="1.2" lt="0.2" pen_angle="0.0" lmax="-0.1">
+		<Waypoint body="ShoulderR" p="-0.095066 1.285964 -0.140896"/>
+		<Waypoint body="ShoulderR" p="-0.151156 1.321519 -0.112566"/>
+		<Waypoint body="ArmR" p="-0.212757 1.391558 -0.075571"/>
+		<Waypoint body="ArmR" p="-0.21519 1.391319 -0.045561"/>
+	</Unit>
+	<Unit name="L_Tibialis_Anterior" f0="673.7" lm="1.0" lt="0.2" pen_angle="0.0" lmax="-0.1">
+		<Waypoint body="TibiaL" p="0.124767 0.434346 -0.008687"/>
+		<Waypoint body="TibiaL" p="0.0708 0.104205 -0.00922"/>
+		<Waypoint body="TalusL" p="0.05534 0.0655 -0.004471"/>
+		<Waypoint body="TalusL" p="0.065037 0.042684 0.027186"/>
+	</Unit>
+	<Unit name="R_Tibialis_Anterior" f0="673.7" lm="1.0" lt="0.2" pen_angle="0.0" lmax="-0.1">
+		<Waypoint body="TibiaR" p="-0.124836 0.427486 -0.008576"/>
+		<Waypoint body="TibiaR" p="-0.070857 0.096991 -0.009139"/>
+		<Waypoint body="TalusR" p="-0.055397 0.058276 -0.004392"/>
+		<Waypoint body="TalusR" p="-0.065094 0.03546 0.027265"/>
+	</Unit>
+	<Unit name="L_Tibialis_Posterior" f0="905.6" lm="1.0" lt="0.2" pen_angle="0.0" lmax="-0.1">
+		<Waypoint body="TibiaL" p="0.100584 0.420824 -0.021373"/>
+		<Waypoint body="TibiaL" p="0.082579 0.134207 -0.044085"/>
+		<Waypoint body="TibiaL" p="0.053266 0.094206 -0.045499"/>
+		<Waypoint body="TalusL" p="0.058287 0.053616 -0.016069"/>
+		<Waypoint body="TalusL" p="0.087663 0.04449 0.013687"/>
+	</Unit>
+	<Unit name="R_Tibialis_Posterior" f0="905.6" lm="1.0" lt="0.2" pen_angle="0.0" lmax="-0.1">
+		<Waypoint body="TibiaR" p="-0.100653 0.413948 -0.021263"/>
+		<Waypoint body="TibiaR" p="-0.082637 0.127022 -0.044002"/>
+		<Waypoint body="TibiaR" p="-0.053322 0.086977 -0.04542"/>
+		<Waypoint body="TalusR" p="-0.058344 0.046392 -0.01599"/>
+		<Waypoint body="TalusR" p="-0.08772 0.037266 0.013766"/>
+	</Unit>
+	<Unit name="L_Triceps_Lateral_Head" f0="1000.0" lm="1.2" lt="0.2" pen_angle="0.0" lmax="-0.1">
+		<Waypoint body="ArmL" p="0.216442 1.413353 -0.051883"/>
+		<Waypoint body="ArmL" p="0.269439 1.442812 -0.065524"/>
+		<Waypoint body="ArmL" p="0.40599 1.434695 -0.046148"/>
+		<Waypoint body="ForeArmL" p="0.434001 1.423993 -0.049108"/>
+	</Unit>
+	<Unit name="R_Triceps_Lateral_Head" f0="1000.0" lm="1.2" lt="0.2" pen_angle="0.0" lmax="-0.1">
+		<Waypoint body="ArmR" p="-0.21557 1.412519 -0.056684"/>
+		<Waypoint body="ArmR" p="-0.266117 1.441813 -0.070469"/>
+		<Waypoint body="ArmR" p="-0.399428 1.433479 -0.051283"/>
+		<Waypoint body="ForeArmR" p="-0.426771 1.422732 -0.054282"/>
+	</Unit>
+	<Unit name="L_Triceps_Long_Head" f0="1000.0" lm="1.2" lt="0.2" pen_angle="0.0" lmax="-0.1">
+		<Waypoint body="ShoulderL" p="0.165606 1.356884 -0.071915"/>
+		<Waypoint body="ArmL" p="0.219002 1.404102 -0.078457"/>
+		<Waypoint body="ArmL" p="0.288186 1.423608 -0.093734"/>
+		<Waypoint body="ArmL" p="0.396018 1.420488 -0.068835"/>
+		<Waypoint body="ForeArmL" p="0.428012 1.419905 -0.055192"/>
+	</Unit>
+	<Unit name="R_Triceps_Long_Head" f0="1000.0" lm="1.2" lt="0.2" pen_angle="0.0" lmax="-0.1">
+		<Waypoint body="ShoulderR" p="-0.165606 1.356884 -0.076441"/>
+		<Waypoint body="ArmR" p="-0.216951 1.403188 -0.083326"/>
+		<Waypoint body="ArmR" p="-0.284491 1.422584 -0.098701"/>
+		<Waypoint body="ArmR" p="-0.389746 1.419291 -0.073953"/>
+		<Waypoint body="ForeArmR" p="-0.420782 1.418644 -0.060366"/>
+	</Unit>
+	<Unit name="L_Triceps_Medial_Head" f0="1000.0" lm="1.2" lt="0.2" pen_angle="0.0" lmax="-0.1">
+		<Waypoint body="ArmL" p="0.247892 1.403072 -0.053582"/>
+		<Waypoint body="ArmL" p="0.364002 1.387999 -0.057359"/>
+		<Waypoint body="ForeArmL" p="0.429057 1.412015 -0.050344"/>
+	</Unit>
+	<Unit name="R_Triceps_Medial_Head" f0="1000.0" lm="1.2" lt="0.2" pen_angle="0.0" lmax="-0.1">
+		<Waypoint body="ArmR" p="-0.245125 1.402111 -0.058494"/>
+		<Waypoint body="ArmR" p="-0.358522 1.386855 -0.06243"/>
+		<Waypoint body="ForeArmR" p="-0.421827 1.410754 -0.055518"/>
+	</Unit>
+	<Unit name="L_Vastus_Intermedius" f0="512.1" lm="1.0" lt="0.2" pen_angle="0.0" lmax="-0.1">
+		<Waypoint body="FemurL" p="0.108871 0.843146 0.000813"/>
+		<Waypoint body="FemurL" p="0.092372 0.773188 0.032129"/>
+		<Waypoint body="FemurL" p="0.078815 0.552143 0.035109"/>
+		<Waypoint body="TibiaL" p="0.076413 0.486318 0.02624"/>
+	</Unit>
+	<Unit name="R_Vastus_Intermedius" f0="512.1" lm="1.0" lt="0.2" pen_angle="0.0" lmax="-0.1">
+		<Waypoint body="FemurR" p="-0.108821 0.84313 0.000808"/>
+		<Waypoint body="FemurR" p="-0.092357 0.771219 0.032159"/>
+		<Waypoint body="FemurR" p="-0.078861 0.546678 0.035198"/>
+		<Waypoint body="TibiaR" p="-0.076482 0.479475 0.026353"/>
+	</Unit>
+	<Unit name="L_Vastus_Intermedius1" f0="512.1" lm="1.0" lt="0.2" pen_angle="0.0" lmax="-0.1">
+		<Waypoint body="FemurL" p="0.118014 0.836967 0.00254"/>
+		<Waypoint body="FemurL" p="0.124454 0.750193 0.031508"/>
+		<Waypoint body="FemurL" p="0.112947 0.601551 0.035398"/>
+		<Waypoint body="TibiaL" p="0.091148 0.498201 0.031468"/>
+	</Unit>
+	<Unit name="R_Vastus_Intermedius1" f0="512.1" lm="1.0" lt="0.2" pen_angle="0.0" lmax="-0.1">
+		<Waypoint body="FemurR" p="-0.117981 0.836009 0.002552"/>
+		<Waypoint body="FemurR" p="-0.124446 0.747852 0.031544"/>
+		<Waypoint body="FemurR" p="-0.112979 0.596859 0.035474"/>
+		<Waypoint body="TibiaR" p="-0.091217 0.491358 0.031581"/>
+	</Unit>
+	<Unit name="L_Vastus_Lateralis" f0="1127.7" lm="1.0" lt="0.2" pen_angle="0.0" lmax="-0.1">
+		<Waypoint body="FemurL" p="0.141599 0.883416 0.000933"/>
+		<Waypoint body="FemurL" p="0.127405 0.848863 0.016113"/>
+		<Waypoint body="FemurL" p="0.100809 0.534708 0.037994"/>
+		<Waypoint body="TibiaL" p="0.085064 0.490596 0.034035"/>
+	</Unit>
+	<Unit name="R_Vastus_Lateralis" f0="1127.7" lm="1.0" lt="0.2" pen_angle="0.0" lmax="-0.1">
+		<Waypoint body="FemurR" p="-0.141554 0.883188 0.000932"/>
+		<Waypoint body="FemurR" p="-0.127368 0.848087 0.016121"/>
+		<Waypoint body="FemurR" p="-0.100859 0.52896 0.038088"/>
+		<Waypoint body="TibiaR" p="-0.085133 0.483753 0.034148"/>
+	</Unit>
+	<Unit name="L_Vastus_Lateralis1" f0="1127.7" lm="1.0" lt="0.2" pen_angle="0.0" lmax="-0.1">
+		<Waypoint body="FemurL" p="0.151696 0.872951 -0.002089"/>
+		<Waypoint body="FemurL" p="0.1458 0.823903 9.3e-05"/>
+		<Waypoint body="FemurL" p="0.130261 0.54473 0.008791"/>
+		<Waypoint body="TibiaL" p="0.098088 0.48204 0.034891"/>
+	</Unit>
+	<Unit name="R_Vastus_Lateralis1" f0="1127.7" lm="1.0" lt="0.2" pen_angle="0.0" lmax="-0.1">
+		<Waypoint body="FemurR" p="-0.151654 0.872555 -0.002087"/>
+		<Waypoint body="FemurR" p="-0.145771 0.822732 0.000109"/>
+		<Waypoint body="FemurR" p="-0.130309 0.539141 0.008882"/>
+		<Waypoint body="TibiaR" p="-0.098157 0.475197 0.035004"/>
+	</Unit>
+	<Unit name="L_Vastus_Medialis" f0="721.85" lm="1.0" lt="0.2" pen_angle="0.0" lmax="-0.1">
+		<Waypoint body="FemurL" p="0.112769 0.843241 0.002714"/>
+		<Waypoint body="FemurL" p="0.037591 0.633217 0.012995"/>
+		<Waypoint body="FemurL" p="0.041737 0.552072 0.004496"/>
+		<Waypoint body="TibiaL" p="0.07185 0.482896 0.023673"/>
+	</Unit>
+	<Unit name="R_Vastus_Medialis" f0="721.85" lm="1.0" lt="0.2" pen_angle="0.0" lmax="-0.1">
+		<Waypoint body="FemurR" p="-0.112849 0.835804 0.002837"/>
+		<Waypoint body="FemurR" p="-0.037614 0.629053 0.013062"/>
+		<Waypoint body="FemurR" p="-0.041782 0.546624 0.004585"/>
+		<Waypoint body="TibiaR" p="-0.071919 0.476053 0.023786"/>
+	</Unit>
+	<Unit name="L_Vastus_Medialis1" f0="721.85" lm="1.0" lt="0.2" pen_angle="0.0" lmax="-0.1">
+		<Waypoint body="FemurL" p="0.113365 0.832283 0.003404"/>
+		<Waypoint body="FemurL" p="0.077258 0.621758 0.046862"/>
+		<Waypoint body="TibiaL" p="0.084113 0.492307 0.034796"/>
+	</Unit>
+	<Unit name="R_Vastus_Medialis1" f0="721.85" lm="1.0" lt="0.2" pen_angle="0.0" lmax="-0.1">
+		<Waypoint body="FemurR" p="-0.113333 0.831252 0.003417"/>
+		<Waypoint body="FemurR" p="-0.077284 0.617393 0.046933"/>
+		<Waypoint body="TibiaR" p="-0.084182 0.485464 0.034909"/>
+	</Unit>
+	<Unit name="L_Vastus_Medialis2" f0="721.85" lm="1.0" lt="0.2" pen_angle="0.0" lmax="-0.1">
+		<Waypoint body="FemurL" p="0.112769 0.843241 0.002714"/>
+		<Waypoint body="FemurL" p="0.05553 0.598153 0.035878"/>
+		<Waypoint body="TibiaL" p="0.073846 0.488124 0.030423"/>
+	</Unit>
+	<Unit name="R_Vastus_Medialis2" f0="721.85" lm="1.0" lt="0.2" pen_angle="0.0" lmax="-0.1">
+		<Waypoint body="FemurR" p="-0.112849 0.835804 0.002837"/>
+		<Waypoint body="FemurR" p="-0.055563 0.593422 0.035955"/>
+		<Waypoint body="TibiaR" p="-0.073915 0.481281 0.030536"/>
+	</Unit>
+	<Unit name="L_iliacus" f0="207.3" lm="1.0" lt="0.2" pen_angle="0.0" lmax="-0.1">
+		<Waypoint body="Pelvis" p="0.064645 1.010462 -0.058086"/>
+		<Waypoint body="Pelvis" p="0.073772 0.910642 0.017112"/>
+		<Waypoint body="FemurL" p="0.089382 0.852082 -0.014303"/>
+		<Waypoint body="FemurL" p="0.105734 0.826319 -0.019912"/>
+	</Unit>
+	<Unit name="R_iliacus" f0="207.3" lm="1.0" lt="0.2" pen_angle="0.0" lmax="-0.1">
+		<Waypoint body="Pelvis" p="-0.064645 1.010462 -0.058086"/>
+		<Waypoint body="Pelvis" p="-0.073772 0.910642 0.017112"/>
+		<Waypoint body="FemurR" p="-0.089332 0.852066 -0.014308"/>
+		<Waypoint body="FemurR" p="-0.105684 0.826303 -0.019917"/>
+	</Unit>
+	<Unit name="L_iliacus1" f0="207.3" lm="1.0" lt="0.2" pen_angle="0.0" lmax="-0.1">
+		<Waypoint body="Pelvis" p="0.111133 1.031947 -0.030802"/>
+		<Waypoint body="Pelvis" p="0.079951 0.940018 0.012359"/>
+		<Waypoint body="Pelvis" p="0.082518 0.886875 0.028235"/>
+		<Waypoint body="FemurL" p="0.094706 0.84885 -0.008789"/>
+		<Waypoint body="FemurL" p="0.112864 0.839914 -0.021718"/>
+	</Unit>
+	<Unit name="R_iliacus1" f0="207.3" lm="1.0" lt="0.2" pen_angle="0.0" lmax="-0.1">
+		<Waypoint body="Pelvis" p="-0.111133 1.031947 -0.030802"/>
+		<Waypoint body="Pelvis" p="-0.079951 0.940018 0.012359"/>
+		<Waypoint body="Pelvis" p="-0.082518 0.886875 0.028235"/>
+		<Waypoint body="FemurR" p="-0.094656 0.848834 -0.008794"/>
+		<Waypoint body="FemurR" p="-0.112814 0.839898 -0.021723"/>
+	</Unit>
+	<Unit name="L_iliacus2" f0="207.3" lm="1.0" lt="0.2" pen_angle="0.0" lmax="-0.1">
+		<Waypoint body="Pelvis" p="0.12216 0.997533 0.021295"/>
+		<Waypoint body="Pelvis" p="0.094971 0.940018 0.029756"/>
+		<Waypoint body="FemurL" p="0.096988 0.878986 0.013932"/>
+		<Waypoint body="FemurL" p="0.103833 0.836111 -0.012687"/>
+	</Unit>
+	<Unit name="R_iliacus2" f0="207.3" lm="1.0" lt="0.2" pen_angle="0.0" lmax="-0.1">
+		<Waypoint body="Pelvis" p="-0.12216 0.997533 0.021295"/>
+		<Waypoint body="Pelvis" p="-0.094971 0.940018 0.029756"/>
+		<Waypoint body="FemurR" p="-0.096938 0.87897 0.013927"/>
+		<Waypoint body="FemurR" p="-0.103783 0.836095 -0.012692"/>
+	</Unit>
+	<Unit name="L_iliocostalis" f0="1000.0" lm="1.2" lt="0.2" pen_angle="0.0" lmax="-0.1">
+		<Waypoint body="Pelvis" p="0.003422 0.869573 -0.069969"/>
+		<Waypoint body="Pelvis" p="0.023957 0.991068 -0.096017"/>
+		<Waypoint body="Spine" p="0.050195 1.071114 -0.075102"/>
+		<Waypoint body="Torso" p="0.055329 1.131481 -0.088792"/>
+		<Waypoint body="Torso" p="0.060747 1.193085 -0.119974"/>
+		<Waypoint body="Torso" p="0.047628 1.377704 -0.09963"/>
+		<Waypoint body="Torso" p="0.039072 1.433032 -0.059321"/>
+		<Waypoint body="Neck" p="0.021295 1.477143 -0.010172"/>
+	</Unit>
+	<Unit name="R_iliocostalis" f0="1000.0" lm="1.2" lt="0.2" pen_angle="0.0" lmax="-0.1">
+		<Waypoint body="Pelvis" p="-0.003422 0.869573 -0.069969"/>
+		<Waypoint body="Pelvis" p="-0.023957 0.991068 -0.096017"/>
+		<Waypoint body="Spine" p="-0.050195 1.071114 -0.075102"/>
+		<Waypoint body="Torso" p="-0.055329 1.131481 -0.088792"/>
+		<Waypoint body="Torso" p="-0.060747 1.193085 -0.119974"/>
+		<Waypoint body="Torso" p="-0.047628 1.377704 -0.09963"/>
+		<Waypoint body="Torso" p="-0.039072 1.433032 -0.059321"/>
+		<Waypoint body="Neck" p="-0.021295 1.477143 -0.010172"/>
+	</Unit>
+	<Unit name="L_Rectus_Abdominis1" f0="1000.0" lm="1.2" lt="0.2" pen_angle="0.0" lmax="-0.1">
+		<Waypoint body="Pelvis" p="0.02101 0.892104 0.048294"/>
+		<Waypoint body="Pelvis" p="0.038217 0.993445 0.081852"/>
+		<Waypoint body="Torso" p="0.057135 1.071114 0.084989"/>
+		<Waypoint body="Torso" p="0.060367 1.128059 0.087746"/>
+		<Waypoint body="Torso" p="0.072441 1.254878 0.088317"/>
+	</Unit>
+	<Unit name="R_Rectus_Abdominis1" f0="1000.0" lm="1.2" lt="0.2" pen_angle="0.0" lmax="-0.1">
+		<Waypoint body="Pelvis" p="-0.02101 0.892104 0.048294"/>
+		<Waypoint body="Pelvis" p="-0.038217 0.993445 0.081852"/>
+		<Waypoint body="Torso" p="-0.057135 1.071114 0.084989"/>
+		<Waypoint body="Torso" p="-0.060367 1.128059 0.087746"/>
+		<Waypoint body="Torso" p="-0.072441 1.254878 0.088317"/>
+	</Unit>
+	<Unit name="L_Serratus_Posterior_Inferior" f0="1000.0" lm="1.2" lt="0.2" pen_angle="0.0" lmax="-0.1">
+		<Waypoint body="Spine" p="1e-06 1.098208 -0.087461"/>
+		<Waypoint body="Torso" p="0.068733 1.11475 -0.079856"/>
+		<Waypoint body="Torso" p="0.076528 1.120454 -0.071965"/>
+	</Unit>
+	<Unit name="R_Serratus_Posterior_Inferior" f0="1000.0" lm="1.2" lt="0.2" pen_angle="0.0" lmax="-0.1">
+		<Waypoint body="Spine" p="-1e-06 1.098208 -0.087461"/>
+		<Waypoint body="Torso" p="-0.068733 1.11475 -0.079856"/>
+		<Waypoint body="Torso" p="-0.076528 1.120454 -0.071965"/>
+	</Unit>
+	<Unit name="L_Transversus_Abdominis" f0="1000.0" lm="1.2" lt="0.2" pen_angle="0.0" lmax="-0.1">
+		<Waypoint body="Pelvis" p="0.051431 1.006754 -0.088222"/>
+		<Waypoint body="Torso" p="0.060082 1.12977 -0.075388"/>
+	</Unit>
+	<Unit name="R_Transversus_Abdominis" f0="1000.0" lm="1.2" lt="0.2" pen_angle="0.0" lmax="-0.1">
+		<Waypoint body="Pelvis" p="-0.051431 1.006754 -0.088222"/>
+		<Waypoint body="Torso" p="-0.060082 1.12977 -0.075388"/>
+	</Unit>
+	<Unit name="L_Transversus_Abdominis2" f0="1000.0" lm="1.2" lt="0.2" pen_angle="0.0" lmax="-0.1">
+		<Waypoint body="Pelvis" p="0.12891 1.004378 0.016922"/>
+		<Waypoint body="Torso" p="0.105714 1.096782 -0.011218"/>
+	</Unit>
+	<Unit name="R_Transversus_Abdominis2" f0="1000.0" lm="1.2" lt="0.2" pen_angle="0.0" lmax="-0.1">
+		<Waypoint body="Pelvis" p="-0.12891 1.004378 0.016922"/>
+		<Waypoint body="Torso" p="-0.105714 1.096782 -0.011218"/>
+	</Unit>
+	<Unit name="L_Transversus_Abdominis4" f0="1000.0" lm="1.2" lt="0.2" pen_angle="0.0" lmax="-0.1">
+		<Waypoint body="Pelvis" p="0.015211 0.896953 0.050861"/>
+		<Waypoint body="Torso" p="0.036981 1.137756 0.088412"/>
+		<Waypoint body="Torso" p="0.019964 1.248793 0.088697"/>
+	</Unit>
+	<Unit name="R_Transversus_Abdominis4" f0="1000.0" lm="1.2" lt="0.2" pen_angle="0.0" lmax="-0.1">
+		<Waypoint body="Pelvis" p="-0.015211 0.896953 0.050861"/>
+		<Waypoint body="Torso" p="-0.036981 1.137756 0.088412"/>
+		<Waypoint body="Torso" p="-0.019964 1.248793 0.088697"/>
+	</Unit>
+	<Unit name="L_Trapezius" f0="1000.0" lm="1.2" lt="0.2" pen_angle="0.0" lmax="-0.1">
+		<Waypoint body="Torso" p="1e-06 1.13671 -0.092024"/>
+		<Waypoint body="Torso" p="0.033083 1.231301 -0.121685"/>
+		<Waypoint body="Torso" p="0.076528 1.293855 -0.12891"/>
+		<Waypoint body="ShoulderL" p="0.124917 1.391203 -0.109086"/>
+	</Unit>
+	<Unit name="R_Trapezius" f0="1000.0" lm="1.2" lt="0.2" pen_angle="0.0" lmax="-0.1">
+		<Waypoint body="Torso" p="-1e-06 1.13671 -0.092024"/>
+		<Waypoint body="Torso" p="-0.033083 1.231301 -0.121685"/>
+		<Waypoint body="Torso" p="-0.076528 1.293855 -0.12891"/>
+		<Waypoint body="ShoulderR" p="-0.124917 1.391203 -0.113612"/>
+	</Unit>
+	<Unit name="L_Trapezius3" f0="1000.0" lm="1.2" lt="0.2" pen_angle="0.0" lmax="-0.1">
+		<Waypoint body="Torso" p="1e-06 1.381411 -0.113414"/>
+		<Waypoint body="ShoulderL" p="0.081662 1.418297 -0.109847"/>
+		<Waypoint body="ShoulderL" p="0.116647 1.41516 -0.099674"/>
+		<Waypoint body="ShoulderL" p="0.138322 1.398808 -0.099104"/>
+	</Unit>
+	<Unit name="R_Trapezius3" f0="1000.0" lm="1.2" lt="0.2" pen_angle="0.0" lmax="-0.1">
+		<Waypoint body="Torso" p="-1e-06 1.381411 -0.113414"/>
+		<Waypoint body="ShoulderR" p="-0.081662 1.418297 -0.114373"/>
+		<Waypoint body="ShoulderR" p="-0.116647 1.41516 -0.1042"/>
+		<Waypoint body="ShoulderR" p="-0.138322 1.398808 -0.10363"/>
+	</Unit>
+	<Unit name="L_Trapezius5" f0="1000.0" lm="1.2" lt="0.2" pen_angle="0.0" lmax="-0.1">
+		<Waypoint body="Neck" p="1e-06 1.50091 -0.060462"/>
+		<Waypoint body="Neck" p="0.037361 1.488076 -0.059321"/>
+		<Waypoint body="ShoulderL" p="0.10771 1.437881 -0.073436"/>
+		<Waypoint body="ShoulderL" p="0.189087 1.403752 -0.065831"/>
+	</Unit>
+	<Unit name="R_Trapezius5" f0="1000.0" lm="1.2" lt="0.2" pen_angle="0.0" lmax="-0.1">
+		<Waypoint body="Neck" p="-1e-06 1.50091 -0.060462"/>
+		<Waypoint body="Neck" p="-0.037361 1.488076 -0.059321"/>
+		<Waypoint body="ShoulderR" p="-0.10771 1.437881 -0.077962"/>
+		<Waypoint body="ShoulderR" p="-0.189087 1.403752 -0.070357"/>
+	</Unit>
+</Muscle>

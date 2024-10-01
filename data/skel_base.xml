@@ -1,0 +1,186 @@
+<Skeleton name="Human">
+	<Node name="Pelvis" parent="None">
+		<Body type="Box" mass="7.000000" size="0.24555665 0.13822663 0.12301599" contact="Off" color="0.6 0.6 1.5 1.0" obj="Pelvis.obj" stretch="1">
+			<Transformation linear="1.0 0.0 0.0 0.0 1.0 0.0 0.0 0.0 1.0" translation="0.0 0.9325068 -0.011027709"/>
+		</Body>
+		<Joint type="Free" bvh="Character1_Hips" smpl_jidx="0">
+			<Transformation linear="1.0 0.0 0.0 0.0 1.0 0.0 0.0 0.0 1.0" translation="0.0 0.9325068 -0.011027709"/>
+		</Joint>
+	</Node>
+	<Node name="FemurR" parent="Pelvis">
+		<Body type="Box" mass="7.500000" size="0.12082946 0.38435367 0.13290289" contact="Off" color="0.3 0.3 1.5 1.0" obj="R_Femur.obj" stretch="1">
+			<Transformation linear="0.9998 -0.0174 -0.0024 -0.0175 -0.9997 -0.0172 -0.21 0.0172 -0.9998" translation="-0.091168724 0.6883762 -0.021580085"/>
+		</Body>
+		<Joint type="Ball" bvh="Character1_RightUpLeg" lower="-1.6 -1.6 -1.6" upper="1.6 1.6 1.6" smpl_jidx="2">
+			<Transformation linear="1.0 0.0 0.0 0.0 1.0 0.0 0.0 0.0 1.0" translation="-0.0677 0.8420 -0.0153"/>
+		</Joint>
+	</Node>
+	<Node name="TibiaR" parent="FemurR">
+		<Body type="Box" mass="4.000000" size="0.09487632 0.39509618 0.08945753" contact="Off" color="0.3 0.3 1.5 1.0" obj="R_Tibia.obj" stretch="1">
+			<Transformation linear="0.9994 0.0348 -0.003 0.0349 -0.9956 0.0871 0.0 -0.0872 -0.9962" translation="-0.08822167 0.28691056 -0.03241766"/>
+		</Body>
+		<Joint type="Revolute" bvh="Character1_RightLeg" axis="1.0 0.0 0.0" lower="-0.1" upper="2.3" smpl_jidx="5">
+			<Transformation linear="1.0 0.0 0.0 0.0 1.0 0.0 0.0 0.0 1.0" translation="-0.09459112 0.512123 -0.0097918445"/>
+		</Joint>
+	</Node>
+	<Node name="TalusR" parent="TibiaR">
+		<Body type="Box" mass="1.000000" size="0.07187024 0.047343094 0.14925434" contact="On" color="0.3 0.3 1.5 1.0" obj="TalusR.obj" stretch="2">
+			<Transformation linear="1.0 0.0 0.0 0.0 -1.0 0.0 0.0 0.0 -1.0" translation="-0.08803154 0.03831178 -0.023006082"/>
+		</Body>
+		<Joint type="Ball" bvh="Character1_RightFoot" lower="-0.8 -0.4 -0.4" upper="0.8 0.4 0.4" smpl_jidx="8">
+			<Transformation linear="1.0 0.0 0.0 0.0 1.0 0.0 0.0 0.0 1.0" translation="-0.07605316 0.073771566 -0.039832845"/>
+		</Joint>
+	</Node>
+	<Node name="FootPinkyR" parent="TalusR">
+		<Body type="Box" mass="0.100000" size="0.038692046 0.02490741 0.05352241" contact="On" color="0.3 0.3 1.5 1.0" obj="FootPinkyR.obj" stretch="2">
+			<Transformation linear="1.0 0.0 0.0 0.0 -1.0 0.0 0.0 0.0 -1.0" translation="-0.11826266 0.029375533 0.07700383"/>
+		</Body>
+		<Joint type="Revolute" axis="1.0 0.0 0.0" lower="-0.6" upper="0.6" smpl_jidx="11">
+			<Transformation linear="1.0 0.0 0.0 0.0 1.0 0.0 0.0 0.0 1.0" translation="-0.11550574 0.011027709 0.046962827"/>
+		</Joint>
+	</Node>
+	<Node name="FootThumbR" parent="TalusR">
+		<Body type="Box" mass="0.100000" size="0.040118042 0.022625817 0.050290156" contact="On" color="0.3 0.3 1.5 1.0" obj="FootThumbR.obj" stretch="2">
+			<Transformation linear="1.0 0.0 0.0 0.0 -1.0 0.0 0.0 0.0 -1.0" translation="-0.07272583 0.029280467 0.08917233"/>
+		</Body>
+		<Joint type="Revolute" axis="1.0 0.0 0.0" lower="-0.6" upper="0.6" smpl_jidx="11">
+			<Transformation linear="1.0 0.0 0.0 0.0 1.0 0.0 0.0 0.0 1.0" translation="-0.07187024 0.011217842 0.064264916"/>
+		</Joint>
+	</Node>
+	<Node name="FemurL" parent="Pelvis">
+		<Body type="Box" mass="7.500000" size="0.12082946 0.38435367 0.13290289" contact="Off" color="0.6 0.6 1.5 1.0" obj="L_Femur.obj" stretch="1">
+			<Transformation linear="0.9998 -0.0174 -0.0024 0.0175 0.9997 0.0172 0.21 -0.0172 0.9998" translation="0.091168724 0.6883762 -0.021580085"/>
+		</Body>
+		<Joint type="Ball" bvh="Character1_LeftUpLeg" lower="-1.6 -1.6 -1.6" upper="1.6 1.6 1.6" smpl_jidx="1">
+			<Transformation linear="1.0 0.0 0.0 0.0 1.0 0.0 0.0 0.0 1.0" translation="0.0695 0.8411 -0.0178"/>
+		</Joint>
+	</Node>
+	<Node name="TibiaL" parent="FemurL">
+		<Body type="Box" mass="4.000000" size="0.09487632 0.39509618 0.08945753" contact="Off" color="0.6 0.6 1.5 1.0" obj="L_Tibia.obj" stretch="1">
+			<Transformation linear="0.9994 0.0348 -0.003 -0.0349 0.9956 -0.0871 -0.0 0.0872 0.9962" translation="0.08822167 0.28691056 -0.03241766"/>
+		</Body>
+		<Joint type="Revolute" bvh="Character1_LeftLeg" axis="1.0 0.0 0.0" lower="-0.1" upper="2.3" smpl_jidx="4">
+			<Transformation linear="1.0 0.0 0.0 0.0 1.0 0.0 0.0 0.0 1.0" translation="0.09459112 0.512123 -0.0097918445"/>
+		</Joint>
+	</Node>
+	<Node name="TalusL" parent="TibiaL">
+		<Body type="Box" mass="1.000000" size="0.07187024 0.047343094 0.14925434" contact="On" color="0.6 0.6 1.5 1.0" obj="TalusL.obj" stretch="2">
+			<Transformation linear="1.0 0.0 0.0 0.0 1.0 0.0 0.0 0.0 1.0" translation="0.08803154 0.03831178 -0.023006082"/>
+		</Body>
+		<Joint type="Ball" bvh="Character1_LeftFoot" lower="-0.8 -0.4 -0.4" upper="0.8 0.4 0.4" smpl_jidx="7">
+			<Transformation linear="1.0 0.0 0.0 0.0 1.0 0.0 0.0 0.0 1.0" translation="0.07605316 0.073771566 -0.039832845"/>
+		</Joint>
+	</Node>
+	<Node name="FootPinkyL" parent="TalusL">
+		<Body type="Box" mass="0.100000" size="0.038692046 0.02490741 0.05352241" contact="On" color="0.6 0.6 1.5 1.0" obj="FootPinkyL.obj" stretch="2">
+			<Transformation linear="1.0 0.0 0.0 0.0 1.0 0.0 0.0 0.0 1.0" translation="0.11826266 0.029375533 0.07700383"/>
+		</Body>
+		<Joint type="Revolute" axis="1.0 0.0 0.0" lower="-0.6" upper="0.6" smpl_jidx="10">
+			<Transformation linear="1.0 0.0 0.0 0.0 1.0 0.0 0.0 0.0 1.0" translation="0.11550574 0.011027709 0.046962827"/>
+		</Joint>
+	</Node>
+	<Node name="FootThumbL" parent="TalusL">
+		<Body type="Box" mass="0.100000" size="0.040118042 0.022625817 0.050290156" contact="On" color="0.6 0.6 1.5 1.0" obj="FootThumbL.obj" stretch="2">
+			<Transformation linear="1.0 0.0 0.0 0.0 1.0 0.0 0.0 0.0 1.0" translation="0.07272583 0.029280467 0.08917233"/>
+		</Body>
+		<Joint type="Revolute" axis="1.0 0.0 0.0" lower="-0.6" upper="0.6" smpl_jidx="10">
+			<Transformation linear="1.0 0.0 0.0 0.0 1.0 0.0 0.0 0.0 1.0" translation="0.07187024 0.011217842 0.064264916"/>
+		</Joint>
+	</Node>
+	<Node name="Spine" parent="Pelvis">
+		<Body type="Box" mass="13.000000" size="0.10172111 0.09278485 0.065025456" contact="Off" color="0.6 0.6 1.5 1.0" obj="Spine.obj" stretch="1">
+			<Transformation linear="1.0 0.0 0.0 0.0 1.0 0.0 0.0 0.0 1.0" translation="0.0 1.0651245 -0.011027709"/>
+		</Body>
+		<Joint type="Ball" bvh="Character1_Spine" lower="-0.25 -0.25 -0.25" upper="0.25 0.25 0.25" smpl_jidx="3">
+			<Transformation linear="1.0 0.0 0.0 0.0 1.0 0.0 0.0 0.0 1.0" translation="0.0 1.0148344 -0.011027709"/>
+		</Joint>
+	</Node>
+	<Node name="Torso" parent="Spine">
+		<Body type="Box" mass="12.000000" size="0.2184627 0.22635323 0.14611714" contact="Off" color="0.6 0.6 1.5 1.0" obj="Torso.obj" stretch="1">
+			<Transformation linear="1.0 0.0 0.0 0.0 1.0 0.0 0.0 0.0 1.0" translation="0.0 1.2579193 -0.011027709"/>
+		</Body>
+		<Joint type="Ball" bvh="Character1_Spine1" lower="-0.6 -0.6 -0.6" upper="0.6 0.6 0.6" smpl_jidx="6">
+			<Transformation linear="1.0 0.0 0.0 0.0 1.0 0.0 0.0 0.0 1.0" translation="0.0 1.1180766 -0.011027709"/>
+		</Joint>
+	</Node>
+	<Node name="Neck" parent="Torso">
+		<Body type="Box" mass="1.000000" size="0.075387694 0.06920838 0.06198333" contact="Off" color="0.6 0.6 1.5 1.0" obj="Neck.obj" stretch="1">
+			<Transformation linear="1.0 0.0 0.0 0.0 1.0 0.0 0.0 0.0 1.0" translation="0.0 1.4542315 -0.011027709"/>
+		</Body>
+		<Joint type="Ball" bvh="Character1_Neck" lower="-0.1 -0.6 -0.05" upper="0.6 0.6 0.05" smpl_jidx="12">
+			<Transformation linear="1.0 0.0 0.0 0.0 1.0 0.0 0.0 0.0 1.0" translation="0.0 1.4111664 -0.011027709"/>
+		</Joint>
+	</Node>
+	<Node name="Head" parent="Neck">
+		<Body type="Box" mass="5.500000" size="0.107330024 0.10875602 0.11084748" contact="Off" color="0.6 0.6 1.5 1.0" obj="Skull.obj" stretch="1">
+			<Transformation linear="1.0 0.0 0.0 0.0 1.0 0.0 0.0 0.0 1.0" translation="0.0 1.5711632 -0.008175715"/>
+		</Body>
+		<Joint type="Ball" lower="-0.6 -0.6 -0.6" upper="0.6 0.6 0.6" smpl_jidx="15">
+			<Transformation linear="1.0 0.0 0.0 0.0 1.0 0.0 0.0 0.0 1.0" translation="0.0 1.4879801 -0.011027709"/>
+		</Joint>
+	</Node>
+	<Node name="ShoulderR" parent="Torso">
+		<Body type="Box" mass="1.000000" size="0.15543364 0.06027213 0.061317857" contact="Off" color="0.3 0.3 1.5 1.0" obj="R_Shoulder.obj" stretch="0">
+			<Transformation linear="0.9985 -0.0048 0.0549 -0.0047 -1.0 -0.0011 0.0549 0.0008 -0.9985" translation="-0.09326019 1.3921531 -0.033558458"/>
+		</Body>
+		<Joint type="Ball" bvh="Character1_RightShoulder" lower="-0.15 -0.05 -0.05" upper="0.15 0.05 0.05" smpl_jidx="14">
+			<Transformation linear="1.0 0.0 0.0 0.0 1.0 0.0 0.0 0.0 1.0" translation="-0.013974769 1.3817909 -0.033558458"/>
+		</Joint>
+	</Node>
+	<Node name="ArmR" parent="ShoulderR">
+		<Body type="Box" mass="1.000000" size="0.3164762 0.051526017 0.04743816" contact="Off" color="0.3 0.3 1.5 1.0" obj="R_Humerus.obj" stretch="0">
+			<Transformation linear="0.996 0.0361 -0.0812 -0.0669 -0.2971 -0.9525 -0.0585 0.9542 -0.2936" translation="-0.34014776 1.380555 -0.0128339715"/>
+		</Body>
+		<Joint type="Ball" bvh="Character1_RightArm" lower="-2.0 -2.0 -2.0" upper="2.0 2.0 2.0" smpl_jidx="17">
+			<Transformation linear="1.0 0.0 0.0 0.0 1.0 0.0 0.0 0.0 1.0" translation="-0.18965757 1.3642036 -0.033558458"/>
+		</Joint>
+	</Node>
+	<Node name="ForeArmR" parent="ArmR">
+		<Body type="Box" mass="1.500000" size="0.25002477 0.048103623 0.04876909" contact="Off" color="0.3 0.3 1.5 1.0" obj="R_Radius.obj" stretch="0">
+			<Transformation linear="0.9929 0.0823 -0.0856 -0.0517 -0.3492 -0.9356 -0.1069 0.9334 -0.3424" translation="-0.6344735 1.3973818 -0.005608921"/>
+		</Body>
+		<Joint type="Revolute" bvh="Character1_RightForeArm" axis="0.0 1.0 0.0" lower="0.0" upper="2.3" smpl_jidx="19">
+			<Transformation linear="1.0 0.0 0.0 0.0 1.0 0.0 0.0 0.0 1.0" translation="-0.49757782 1.3886358 -0.009981978"/>
+		</Joint>
+	</Node>
+	<Node name="HandR" parent="ForeArmR">
+		<Body type="Box" mass="1.000000" size="0.12415679 0.009886911 0.08042622" contact="On" color="0.3 0.3 1.5 1.0" obj="R_Hand.obj" stretch="0">
+			<Transformation linear="0.9712 0.2357 -0.0353 0.2243 -0.954 -0.199 -0.0806 0.1853 -0.9794" translation="-0.8378206 1.3917729 0.029945932"/>
+		</Body>
+		<Joint type="Ball" bvh="Character1_RightHand" lower="-0.7 -0.7 -0.7" upper="0.7 0.7 0.7" smpl_jidx="21">
+			<Transformation linear="1.0 0.0 0.0 0.0 1.0 0.0 0.0 0.0 1.0" translation="-0.7702284 1.3969065 0.018442892"/>
+		</Joint>
+	</Node>
+	<Node name="ShoulderL" parent="Torso">
+		<Body type="Box" mass="1.000000" size="0.15543364 0.06027213 0.061317857" contact="Off" color="0.6 0.6 1.5 1.0" obj="L_Shoulder.obj" stretch="0">
+			<Transformation linear="0.9985 -0.0048 0.0549 0.0047 1.0 0.0011 -0.0549 -0.0008 0.9985" translation="0.09326019 1.3921531 -0.033558458"/>
+		</Body>
+		<Joint type="Ball" bvh="Character1_LeftShoulder" lower="-0.15 -0.05 -0.05" upper="0.15 0.05 0.05" smpl_jidx="13">
+			<Transformation linear="1.0 0.0 0.0 0.0 1.0 0.0 0.0 0.0 1.0" translation="0.013974769 1.3817909 -0.033558458"/>
+		</Joint>
+	</Node>
+	<Node name="ArmL" parent="ShoulderL">
+		<Body type="Box" mass="1.000000" size="0.3164762 0.051526017 0.04743816" contact="Off" color="0.6 0.6 1.5 1.0" obj="L_Humerus.obj" stretch="0">
+			<Transformation linear="0.996 0.0361 -0.0812 0.0669 0.2971 0.9525 0.0585 -0.9542 0.2936" translation="0.34014776 1.380555 -0.0128339715"/>
+		</Body>
+		<Joint type="Ball" bvh="Character1_LeftArm" lower="-2.0 -2.0 -2.0" upper="2.0 2.0 2.0" smpl_jidx="16">
+			<Transformation linear="1.0 0.0 0.0 0.0 1.0 0.0 0.0 0.0 1.0" translation="0.18965757 1.3642036 -0.033558458"/>
+		</Joint>
+	</Node>
+	<Node name="ForeArmL" parent="ArmL">
+		<Body type="Box" mass="1.500000" size="0.25002477 0.048103623 0.04876909" contact="Off" color="0.6 0.6 1.5 1.0" obj="L_Radius.obj" stretch="0">
+			<Transformation linear="0.9929 0.0823 -0.0856 0.0517 0.3492 0.9356 0.1069 -0.9334 0.3424" translation="0.6344735 1.3973818 -0.005608921"/>
+		</Body>
+		<Joint type="Revolute" bvh="Character1_LeftForeArm" axis="0.0 -1.0 0.0" lower="0.0" upper="2.3" smpl_jidx="18">
+			<Transformation linear="1.0 0.0 0.0 0.0 1.0 0.0 0.0 0.0 1.0" translation="0.49757782 1.3886358 -0.009981978"/>
+		</Joint>
+	</Node>
+	<Node name="HandL" parent="ForeArmL">
+		<Body type="Box" mass="1.000000" size="0.12415679 0.009886911 0.08042622" contact="On" color="0.6 0.6 1.5 1.0" obj="L_Hand.obj" stretch="0">
+			<Transformation linear="0.9712 0.2357 -0.0353 -0.2243 0.954 0.199 0.0806 -0.1853 0.9794" translation="0.8378206 1.3917729 0.029945932"/>
+		</Body>
+		<Joint type="Ball" bvh="Character1_LeftHand" lower="-0.7 -0.7 -0.7" upper="0.7 0.7 0.7" smpl_jidx="20">
+			<Transformation linear="1.0 0.0 0.0 0.0 1.0 0.0 0.0 0.0 1.0" translation="0.7702284 1.3969065 0.018442892"/>
+		</Joint>
+	</Node>
+</Skeleton>
