@@ -24,6 +24,16 @@ import time
 from models.smpl import SMPL
 import torch
 
+from skel.skel_model import SKEL
+
+# from data.face_info import male_right_faces, female_right_faces
+from data.skel_info import male_skin_right_faces as male_right_faces
+from data.skel_info import male_skin_left_faces as male_left_faces
+from data.skel_info import female_skin_right_faces as female_right_faces
+from data.skel_info import female_skin_left_faces as female_left_faces
+from data.skel_info import skel_joint_edges
+from skel.kin_skel import skel_joints_name, pose_param_names, pose_limits
+
 smpl_joint_names = [
     "Pelvis", 
     "L_Hip", 
@@ -76,6 +86,35 @@ smpl_links = [
                                 (21, 23)    # Left Arm
 ]
 
+class Box:
+    def __init__(self, name, pos, rot, size, color, joint):
+        self.name = name
+        self.pos = pos
+        self.rot = rot
+        self.rot_angle = np.rad2deg(np.linalg.norm(np.array(rot)))
+        self.rot_axis = rot / self.rot_angle if self.rot_angle != 0 else np.array([0, 0, 0])
+        self.size = size
+        self.color = color
+        self.joint = joint
+
+    def updateRot(self):
+        self.rot_angle = np.rad2deg(np.linalg.norm(np.array(self.rot)))
+        self.rot_axis = self.rot / self.rot_angle if self.rot_angle != 0 else np.array([0, 0, 0])
+
+    def draw(self):
+        glPushMatrix()
+        glTranslatef(self.joint[0], self.joint[1], self.joint[2])
+        glColor3f(0, 0, 0)
+        mygl.draw_sphere(0.005, 10, 10)
+        glPopMatrix()
+
+        glPushMatrix()
+        glTranslatef(self.pos[0], self.pos[1], self.pos[2])
+        glRotatef(self.rot_angle, self.rot_axis[0], self.rot_axis[1], self.rot_axis[2])
+        glColor4d(self.color[0], self.color[1], self.color[2], self.color[3])
+        mygl.draw_cube(self.size)
+        glPopMatrix()
+
 ## Light Option 
 ambient = np.array([0.2, 0.2, 0.2, 1.0], dtype=np.float32)
 diffuse = np.array([0.6, 0.6, 0.6, 1.0], dtype=np.float32)
@@ -95,6 +134,7 @@ def initGL():
     glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT)
     glEnable(GL_BLEND)
     glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
+    glBlendEquation(GL_FUNC_ADD)
     glHint(GL_POLYGON_SMOOTH_HINT, GL_NICEST)
     glShadeModel(GL_SMOOTH)
     glPolygonMode(GL_FRONT, GL_FILL)
@@ -125,7 +165,6 @@ def initGL():
     glDepthFunc(GL_LEQUAL)
     glEnable(GL_NORMALIZE)
     glEnable(GL_MULTISAMPLE)
-    
 
 ## GLFW Initilization Function
 def impl_glfw_init(window_name="Muscle Simulation", width=1920, height=1080):
@@ -183,7 +222,7 @@ class GLFWApp():
         ## Flag         
         self.is_simulation = False
 
-        self.draw_obj = True
+        self.draw_obj = False
         self.obj_trans = 0.5
         self.obj_axis = {}
 
@@ -195,7 +234,7 @@ class GLFWApp():
 
         self.draw_body = False
         self.body_trans = 0.5
-        self.draw_muscle = True
+        self.draw_muscle = False
         self.draw_line_muscle = True
         self.line_width = 2
         self.draw_bone = False
@@ -261,11 +300,317 @@ class GLFWApp():
         self.data_path = './data'
         self.get_skeletons(self.data_path)
 
+
+        self.isDrawHalfSkin = True
+        self.skin_direction = "right"
+        self.draw_skel_skin = False
+        self.draw_skel_skel = True
+        self.draw_skel_joint = False
+        self.draw_skel_joint_rot = False
+        self.draw_skel_bone = False
+
+        self.skel_vertex3 = [None, None]
+        self.skel_color4 = [None, None]
+        self.skel_normal = [None, None]
+
+        self.skel_joints = None
+        self.skel_joints_orig = None
+        self.skel_joints_prev = None
+        self.skel_joint_index = 0
+        self.skel_oris = None
+        self.skel_oris_prev = None
+        self.skel_vertices = None
+        self.skel_colors = None
+
+        self.skel_zero_joints = None
+        self.skel_opacity = 0.1
+
+        self.skin_vertex3 = [None, None]
+        self.skin_color4 = [None, None]
+        self.skin_normal = [None, None]
+
+        self.skin_vertices = None
+        self.skin_colors = None
+
+        self.skin_zero_joints = None
+        self.skin_opacity = 1
+
+        self.device = 'cuda' if torch.cuda.is_available() else 'cpu'
+        self.skel_gender = "male"
+        self.skel = SKEL(gender=self.skel_gender).to(self.device)
+
+        # Set parameters to default values (T pose)
+        self.skel_pose = torch.zeros(1, self.skel.num_q_params).to(self.device) # (1, 46)
+        self.skel_pose_base = torch.zeros(1, self.skel.num_q_params).to(self.device) # (1, 46)
+        # self.skel_pose[0][4] = -0.5
+        # self.skel_pose[0][11] = -0.5
+        for i in range(len(pose_param_names)):
+            j = pose_param_names[i]
+            if j in pose_limits.keys():
+                if pose_limits[j][0] * pose_limits[j][1] < 0:
+                    self.skel_pose_base[0][i] = 0
+                    self.skel_pose[0][i] = 0
+                else:
+                    abs_vals = np.abs(np.array(pose_limits[j]))
+                    base = pose_limits[j][0] if abs_vals[0] < abs_vals[1] else pose_limits[j][1]
+                    self.skel_pose_base[0][i] = base
+                    self.skel_pose[0][i] = base
+            else:
+                self.skel_pose_base[0][i] = 0
+                self.skel_pose[0][i] = 0
+        self.skel_betas = torch.zeros(1, self.skel.num_betas).to(self.device) # (1, 10)
+        self.skel_trans = torch.zeros(1, 3).to(self.device)
+
+        # SKEL forward pass
+        skel_output = self.skel(self.skel_pose, self.skel_betas, self.skel_trans)
+
+        self.skel_joints = skel_output.joints[0]
+        self.skel_joints_orig = skel_output.joints_orig[0]
+        self.skel_oris = skel_output.joints_ori[0]
+
+        from skel_f_updated import skel_f_updated_male, skel_f_updated_female
+        self.skel_f_updated_male = np.array(skel_f_updated_male, dtype=int)
+        self.skel_f_updated_female = np.array(skel_f_updated_female, dtype=int)
+        if self.skel_gender == "male":
+            self.skel_faces = self.skel_f_updated_male
+        else:
+            self.skel_faces = self.skel_f_updated_female
+
+        skel_vertices = skel_output.skel_verts.detach().cpu().numpy()[0]
+
+        self.skel_face_start_index = 107781
+        self.skel_face_index = 107781
+        self.isSKELSection = False
+        self.SKEL_section_unique = False
+        
+        self.skel_vertices = skel_vertices.copy()
+
+        from skeleton_section import SKEL_face_index_male, SKEL_face_index_female
+        self.SKEL_section_names_male = list(SKEL_face_index_male.keys())
+        self.SKEL_section_names_female = list(SKEL_face_index_female.keys())
+
+        self.SKEL_section_index_male = 0
+        self.SKEL_section_toggle_male = [True] * len(self.SKEL_section_names_male)
+        self.SKEL_section_faces_male = []
+
+        # # Find index for vertebrae
+        # i = 0
+        # cervix = []
+        # thorax = []
+        # lumbar = []
+        # for name in SKEL_face_index_male.keys():
+        #     if name[1] in ["1", "2", "3", "4", "5", "6", "7", "8", "9"]:
+        #         if name[0] == "L":
+        #             lumbar.append(i)
+        #         elif name[0] == "T":
+        #             thorax.append(i)
+        #         elif name[0] == "C":
+        #             cervix.append(i)
+        #     i += 1
+        # print(f"Cervix: {cervix}")
+        # print(f"Thorax: {thorax}")
+        # print(f"Lumbar: {lumbar}")
+
+        # Cervix: [131, 132, 133, 134, 135]
+        # Thorax: [72, 73, 74, 75, 76, 77, 78, 79, 80, 81, 82, 83]
+        # Lumbar: [67, 68, 69, 70, 71]
+
+        for index in list(SKEL_face_index_male.values()):
+            if index[0] == index[1]:
+                print(index)
+            self.SKEL_section_faces_male.append(self.skel_f_updated_male[3 * index[0]: 3 * index[1]])
+
+        self.SKEL_section_index_female = 0
+        self.SKEL_section_toggle_female = [True] * len(self.SKEL_section_names_female)
+        self.SKEL_section_faces_female = []        
+        for index in list(SKEL_face_index_female.values()):
+            self.SKEL_section_faces_female.append(self.skel_f_updated_female[3 * index[0]: 3 * index[1]])
+
+        self.SKEL_section_colors = []
+        self.SKEL_section_vertex3 = []
+        self.SKEL_section_color4 = []
+        self.SKEL_section_normal = []
+        self.SKEL_section_midpoints = []
+
+        self.gui_boxes = []
+        self.cand_gui_box = None
+
+        SKEL_section_vertices = self.skel_vertices
+        SKEL_section_faces = self.SKEL_section_faces_male if self.skel_gender == "male" else self.SKEL_section_faces_female
+        min_vertex = np.min(SKEL_section_vertices, axis=0)
+        max_vertex = np.max(SKEL_section_vertices, axis=0)
+        for faces in SKEL_section_faces:
+            vertex_normals = np.zeros_like(SKEL_section_vertices)
+            vertex_counts = np.zeros((SKEL_section_vertices.shape[0], 1))
+            SKEL_section_vertex3 = SKEL_section_vertices[faces]
+
+            # SKEL_section_midpoint = np.mean(SKEL_section_vertex3, axis=0)
+            unique_vertex = SKEL_section_vertices[np.unique(faces)]
+            SKEL_section_midpoint = np.mean(unique_vertex, axis=0)
+            self.SKEL_section_midpoints.append(SKEL_section_midpoint)
+
+            SKEL_section_colors = np.ones((len(SKEL_section_vertices), 4))
+            SKEL_section_colors[:, :3] = (np.mean(SKEL_section_vertex3, axis=0) - min_vertex) / (max_vertex - min_vertex)
+            # SKEL_section_colors[:, :3] = np.random.rand(3)
+            SKEL_section_colors[:, 3] = self.skel_opacity
+            self.SKEL_section_colors.append(SKEL_section_colors)
+
+            SKEL_section_color4 = SKEL_section_colors[faces]
+            self.SKEL_section_vertex3.append(SKEL_section_vertex3)
+            self.SKEL_section_color4.append(SKEL_section_color4)
+
+            SKEL_section_normal = np.cross(SKEL_section_vertex3[1::3] - SKEL_section_vertex3[0::3], SKEL_section_vertex3[2::3] - SKEL_section_vertex3[0::3])
+            SKEL_section_normal = SKEL_section_normal / np.linalg.norm(SKEL_section_normal, axis=1)[:, np.newaxis]
+            SKEL_section_normal = np.repeat(SKEL_section_normal, 3, axis=0)
+            np.add.at(vertex_normals, faces, SKEL_section_normal)
+            np.add.at(vertex_counts, faces, 1)
+            vertex_counts[vertex_counts == 0] = 1
+            vertex_normals /= vertex_counts
+            self.SKEL_section_normal.append(vertex_normals[faces])
+
+        
+        # Thorax Realignment 
+        L1 = self.SKEL_section_midpoints[68]
+        C7 = self.SKEL_section_midpoints[133]
+        a = (C7[0] - L1[0]) / (C7[1] - L1[1])
+        b = L1[0] - a * L1[1]
+
+        for i, thor in enumerate([80, 82, 83, 81, 79, 76, 75, 72, 74, 77, 73, 78]):
+            fixed = a * self.SKEL_section_midpoints[thor][1] + b
+            offset = fixed - self.SKEL_section_midpoints[thor][0]
+            offset *= 0.5 / (5.5**2) * (i - 5.5) ** 2 + 0.5
+
+            self.SKEL_section_vertex3[thor][:, 0] += offset
+            self.SKEL_section_midpoints[thor][0] += offset
+        
+        # L2_T1 = [70, 68, 80, 82, 83, 81, 79, 76, 75, 72, 74, 77, 73, 78]
+        L2_T1 = [70, 68, 78, 73, 77, 74, 72, 75, 76, 79, 81, 83, 82, 80, 133]
+        for index, i in enumerate(range(len(L2_T1) - 3)):
+            inf = self.SKEL_section_midpoints[L2_T1[i]]
+            sup = self.SKEL_section_midpoints[L2_T1[i + 1]]
+            a = (sup[2] - inf[2]) / (sup[1] - inf[1])
+            b = inf[2] - a * inf[1]
+
+            fix_vert = L2_T1[i + 2]
+            fixed = a * self.SKEL_section_midpoints[fix_vert][1] + b
+            offset = (fixed - self.SKEL_section_midpoints[fix_vert][2]) * (12 - i) / 12
+            
+            self.SKEL_section_vertex3[fix_vert][:, 2] += offset
+            self.SKEL_section_midpoints[fix_vert][2] += offset
+
+            up_vert = L2_T1[i + 3]
+            y_offset = (sup[1] + self.SKEL_section_midpoints[up_vert][1]) / 2 - self.SKEL_section_midpoints[fix_vert][1]
+            self.SKEL_section_vertex3[fix_vert][:, 1] += y_offset
+            self.SKEL_section_midpoints[fix_vert][1] += y_offset
+
+        self.skel_colors = np.ones((2, len(self.skel_vertices), 4))
+        # self.skel_colors[:, :, :3] = (self.skel_vertices - min_vertex) / (max_vertex - min_vertex)
+        self.skel_colors[:, :, 3] = self.skel_opacity
+
+        vertex_normals = np.zeros_like(skel_vertices)
+        vertex_counts = np.zeros((skel_vertices.shape[0], 1))
+        self.skel_vertex3[0] = skel_vertices[self.skel_faces]
+        self.skel_color4[0] = self.skel_colors[0][self.skel_faces]
+
+        ## Compute normal vector according to vertex3
+        self.skel_normal[0] = np.cross(self.skel_vertex3[0][1::3] - self.skel_vertex3[0][0::3], self.skel_vertex3[0][2::3] - self.skel_vertex3[0][0::3])
+        self.skel_normal[0] = self.skel_normal[0] / np.linalg.norm(self.skel_normal[0], axis=1)[:, np.newaxis]
+        self.skel_normal[0] = np.repeat(self.skel_normal[0], 3, axis=0)
+
+        np.add.at(vertex_normals, self.skel_faces, self.skel_normal[0])
+        np.add.at(vertex_counts, self.skel_faces, 1)
+        vertex_counts[vertex_counts == 0] = 1
+        vertex_normals /= vertex_counts
+        self.skel_normal[0] = vertex_normals[self.skel_faces]
+        
+        # f = open(f'skel_f_{self.skel_gender}.py', 'w')
+        # f.write(f'skel_f = {self.skel_faces.tolist()}\n')
+        # f.close()
+
+        # duplicate_vertices = np.where(vertex_counts == 1)[0]    
+        # vertex_groups = []
+        # while len(duplicate_vertices) > 0:
+        #     group = [duplicate_vertices[0]]
+        #     for i in range(1, len(duplicate_vertices)):
+        #         if np.linalg.norm(skel_vertices[duplicate_vertices[0]] - skel_vertices[duplicate_vertices[i]]) < 0.0001:
+        #             group.append(duplicate_vertices[i])
+        #     vertex_groups.append(group)
+        #     duplicate_vertices = duplicate_vertices[~np.isin(duplicate_vertices, group)]
+        #     print(len(duplicate_vertices))
+
+        # f = open(f'duplicate_vertices_{self.skel_gender}.py', 'w')
+        # f.write('duplicate_vertices = [\n')
+        # for group in vertex_groups:
+        #     f.write(f"    {group},\n")
+        # f.write(']\n')
+        # f.close()
+
+        self.skin_faces = np.array(list(self.skel.skin_f.cpu().flatten()), dtype=int)
+        skin_vertices = skel_output.skin_verts.detach().cpu().numpy()[0]
+
+        self.skin_vertices = skin_vertices.copy()
+
+        if self.isDrawHalfSkin:
+            if self.skel_gender == 'male':
+                if self.skin_direction == "right":
+                    self.skin_half_faces = male_right_faces
+                else:
+                    self.skin_half_faces = male_left_faces
+            else:
+                if self.skin_direction == "right":
+                    self.skin_half_faces = female_right_faces
+                else:
+                    self.skin_half_faces = female_left_faces
+
+            # # Used for checking half skin faces
+            # self.skin_right_faces = []
+            # self.cand_skin_right_faces = []
+            # self.skin_left_faces = []
+            # if self.skel_gender == 'male':
+            #     threshold = 0.003
+            # else:
+            #     threshold = 0
+            # for i in range(len(self.skin_faces) // 3):
+            #     indices = self.skin_faces[i * 3: (i + 1) * 3]
+            #     vertices = self.skin_vertices[indices]
+            #     num_minus_x = np.sum(vertices[:, 0] < threshold)
+            #     if num_minus_x == 3:
+            #         self.skin_right_faces.extend(indices)
+            #     elif num_minus_x == 1 or num_minus_x == 2:
+            #         self.cand_skin_right_faces.extend(indices)
+            #     else:
+            #         self.skin_left_faces.extend(indices)
+            # print(len(self.skin_right_faces))
+            # print(len(self.skin_left_faces))
+            # self.skin_faces = np.array(self.skin_right_faces, dtype=int)
+
+            self.skin_faces = np.array(self.skin_half_faces, dtype=int)
+
+        self.add_skin_index = 0
+
+        self.skin_colors = np.ones((2, len(self.skin_vertices), 4)) * 0.8
+        self.skin_colors[:, :, 3] = self.skin_opacity
+
+        vertex_normals = np.zeros_like(skin_vertices)
+        vertex_counts = np.zeros((skin_vertices.shape[0], 1))
+        self.skin_vertex3[0] = skin_vertices[self.skin_faces]
+        self.skin_color4[0] = self.skin_colors[0][self.skin_faces]
+
+        ## Compute normal vector according to vertex3
+        self.skin_normal[0] = np.cross(self.skin_vertex3[0][1::3] - self.skin_vertex3[0][0::3], self.skin_vertex3[0][2::3] - self.skin_vertex3[0][0::3])
+        self.skin_normal[0] = self.skin_normal[0] / np.linalg.norm(self.skin_normal[0], axis=1)[:, np.newaxis]
+        self.skin_normal[0] = np.repeat(self.skin_normal[0], 3, axis=0)
+        np.add.at(vertex_normals, self.skin_faces, self.skin_normal[0])
+        np.add.at(vertex_counts, self.skin_faces, 1)
+        vertex_counts[vertex_counts == 0] = 1
+        vertex_normals /= vertex_counts
+        self.skin_normal[0] = vertex_normals[self.skin_faces]
+    
+        self.meshes = {}
+
         imgui.create_context()
         self.window = impl_glfw_init(self.name, self.width, self.height)
         self.impl = GlfwRenderer(self.window)
-
-        self.meshes = {}
 
         # Set Callback Function        
         ## Framebuffersize Callback Function
@@ -325,17 +670,207 @@ class GLFWApp():
             if item.endswith('.xml') and 'skel' in item:
                 self.skeleton_files.append(os.path.join(path, item))
 
+    def update_skel(self, gender_changed=False):
+        self.skel_joints_prev = self.skel_joints
+        self.skel_oris_prev = self.skel_oris
+
+        if gender_changed:
+            self.skel = SKEL(gender=self.skel_gender).to(self.device)
+
+            if self.skel_gender == "female":
+                self.skel_faces = np.array(self.skel_f_updated_female, dtype=int)
+            else:
+                self.skel_faces = np.array(self.skel_f_updated_male, dtype=int)
+
+        # SKEL forward pass
+        skel_output = self.skel(self.skel_pose, self.skel_betas, self.skel_trans)
+
+        self.skel_joints = skel_output.joints[0]
+        self.skel_joints_orig = skel_output.joints_orig[0]
+        self.skel_oris = skel_output.joints_ori[0]
+        pelvis = self.env.skel.getBodyNode("Pelvis").getCOM() - self.skel_joints[0].cpu().numpy()
+        # pelvis = np.array([0, 0, 0])
+        
+        skel_vertices = skel_output.skel_verts.detach().cpu().numpy()[0] + pelvis
+        self.skel_vertices = skel_vertices.copy()
+
+        # self.skel_vertices = skel_vertices.copy()
+        SKEL_section_vertices = self.skel_vertices
+        SKEL_section_faces = self.SKEL_section_faces_male if self.skel_gender == "male" else self.SKEL_section_faces_female
+        # min_vertex = np.min(SKEL_section_vertices, axis=0)
+        # max_vertex = np.max(SKEL_section_vertices, axis=0)
+
+        for i, faces in enumerate(SKEL_section_faces):
+            self.SKEL_section_colors[i][:, 3] = self.skel_opacity
+
+            vertex_normals = np.zeros_like(SKEL_section_vertices)
+            vertex_counts = np.zeros((SKEL_section_vertices.shape[0], 1))
+            SKEL_section_vertex3 = SKEL_section_vertices[faces]
+            SKEL_section_color4 = self.SKEL_section_colors[i][faces]
+            self.SKEL_section_vertex3[i] = SKEL_section_vertex3
+            self.SKEL_section_color4[i] = SKEL_section_color4
+
+            SKEL_section_midpoint = np.mean(SKEL_section_vertex3, axis=0)
+            self.SKEL_section_midpoints[i] = SKEL_section_midpoint
+
+            SKEL_section_normal = np.cross(SKEL_section_vertex3[1::3] - SKEL_section_vertex3[0::3], SKEL_section_vertex3[2::3] - SKEL_section_vertex3[0::3])
+            SKEL_section_normal = SKEL_section_normal / np.linalg.norm(SKEL_section_normal, axis=1)[:, np.newaxis]
+            SKEL_section_normal = np.repeat(SKEL_section_normal, 3, axis=0)
+            np.add.at(vertex_normals, faces, SKEL_section_normal)
+            np.add.at(vertex_counts, faces, 1)
+            vertex_counts[vertex_counts == 0] = 1
+            vertex_normals /= vertex_counts
+            self.SKEL_section_normal[i] = vertex_normals[faces]
+
+        # Thorax Realignment 
+        L1 = self.SKEL_section_midpoints[68]
+        C7 = self.SKEL_section_midpoints[133]
+        a = (C7[0] - L1[0]) / (C7[1] - L1[1])
+        b = L1[0] - a * L1[1]
+
+        for i, thor in enumerate([80, 82, 83, 81, 79, 76, 75, 72, 74, 77, 73, 78]):
+            fixed = a * self.SKEL_section_midpoints[thor][1] + b
+            offset = fixed - self.SKEL_section_midpoints[thor][0]
+            offset *= 0.5 / (5.5**2) * (i - 5.5) ** 2 + 0.5
+
+            self.SKEL_section_vertex3[thor][:, 0] += offset
+            self.SKEL_section_midpoints[thor][0] += offset
+
+        # # Linearly decrease offset from T12 to T1; doesn't apply well to thorax near cervix
+        # offset = a * self.SKEL_section_midpoints[78][1] + b - self.SKEL_section_midpoints[78][0]
+        # for i, thor in enumerate([80, 82, 83, 81, 79, 76, 75, 72, 74, 77, 73, 78]):
+        #     self.SKEL_section_vertex3[thor][:, 0] += offset * (i + 2) / 13
+        #     self.SKEL_section_midpoints[thor][0] += offset * (i + 2) / 13
+
+        ## This code makes thorax fit too much to cervix-lumbar line
+        # for i in [72, 73, 74, 75, 76, 77, 78, 79, 80, 81, 82, 83]:
+        #     fixed = a * self.SKEL_section_midpoints[i][1] + b
+        #     offset = fixed - self.SKEL_section_midpoints[i][0]
+        #     self.SKEL_section_vertex3[i][:, 0] += offset
+        #     self.SKEL_section_midpoints[i][0] += offset
+        
+        # L2_T1 = [70, 68, 80, 82, 83, 81, 79, 76, 75, 72, 74, 77, 73, 78]
+        L2_T1 = [70, 68, 78, 73, 77, 74, 72, 75, 76, 79, 81, 83, 82, 80, 133]
+        for index, i in enumerate(range(len(L2_T1) - 3)):
+            inf = self.SKEL_section_midpoints[L2_T1[i]]
+            sup = self.SKEL_section_midpoints[L2_T1[i + 1]]
+            a = (sup[2] - inf[2]) / (sup[1] - inf[1])
+            b = inf[2] - a * inf[1]
+
+            fix_vert = L2_T1[i + 2]
+            fixed = a * self.SKEL_section_midpoints[fix_vert][1] + b
+            offset = (fixed - self.SKEL_section_midpoints[fix_vert][2]) * (12 - i) / 12
+            
+            self.SKEL_section_vertex3[fix_vert][:, 2] += offset
+            self.SKEL_section_midpoints[fix_vert][2] += offset
+
+            up_vert = L2_T1[i + 3]
+            y_offset = (sup[1] + self.SKEL_section_midpoints[up_vert][1]) / 2 - self.SKEL_section_midpoints[fix_vert][1]
+            self.SKEL_section_vertex3[fix_vert][:, 1] += y_offset
+            self.SKEL_section_midpoints[fix_vert][1] += y_offset
+        
+
+        if len(self.gui_boxes) == 0:
+            for i, vertex3 in enumerate(self.SKEL_section_vertex3):
+                min_vertex = np.min(vertex3, axis=0)
+                max_vertex = np.max(vertex3, axis=0)
+                mean_vertex = (min_vertex + max_vertex) / 2
+
+                box_size = max_vertex - min_vertex
+                self.gui_boxes.append(Box(i, mean_vertex, [0, 0, 0], box_size, [0.5, 0.5, 0.5, 0.3], mean_vertex))
+
+
+        self.skel_colors = np.ones((2, len(self.skel_vertices), 4)) * 0.8
+        # self.skel_colors[:, :, :3] = (self.skel_vertices - min_vertex) / (max_vertex - min_vertex)
+        self.skel_colors[:, :, 3] = self.skel_opacity
+
+        vertex_normals = np.zeros_like(skel_vertices)
+        vertex_counts = np.zeros((skel_vertices.shape[0], 1))
+        self.skel_vertex3[0] = skel_vertices[self.skel_faces]
+        self.skel_color4[0] = self.skel_colors[0][self.skel_faces]
+        ## Compute normal vector according to vertex3
+        self.skel_normal[0] = np.cross(self.skel_vertex3[0][1::3] - self.skel_vertex3[0][0::3], self.skel_vertex3[0][2::3] - self.skel_vertex3[0][0::3])
+        self.skel_normal[0] = self.skel_normal[0] / np.linalg.norm(self.skel_normal[0], axis=1)[:, np.newaxis]
+        self.skel_normal[0] = np.repeat(self.skel_normal[0], 3, axis=0)
+        np.add.at(vertex_normals, self.skel_faces, self.skel_normal[0])
+        np.add.at(vertex_counts, self.skel_faces, 1)
+        vertex_counts[vertex_counts == 0] = 1
+        vertex_normals /= vertex_counts
+        self.skel_normal[0] = vertex_normals[self.skel_faces]
+
+        self.skin_faces = np.array(list(self.skel.skin_f.cpu().flatten()), dtype=int)
+
+        if self.isDrawHalfSkin:
+            # self.skin_faces = np.array(self.skin_right_faces, dtype=int)
+
+            if self.skel_gender == 'male':
+                if self.skin_direction == "right":
+                    self.skin_half_faces = male_right_faces
+                else:
+                    self.skin_half_faces = male_left_faces
+            else:
+                if self.skin_direction == "right":
+                    self.skin_half_faces = female_right_faces
+                else:
+                    self.skin_half_faces = female_left_faces
+            
+            self.skin_faces = np.array(self.skin_half_faces, dtype=int)
+
+        skin_vertices = skel_output.skin_verts.detach().cpu().numpy()[0] + pelvis
+
+        # self.skin_vertices = skin_vertices.copy()
+
+        self.skin_colors = np.ones((2, len(self.skin_vertices), 4)) * 0.8
+        self.skin_colors[:, :, 3] = self.skin_opacity
+
+        vertex_normals = np.zeros_like(skin_vertices)
+        vertex_counts = np.zeros((skin_vertices.shape[0], 1))
+        self.skin_vertex3[0] = skin_vertices[self.skin_faces]
+        self.skin_color4[0] = self.skin_colors[0][self.skin_faces]
+        ## Compute normal vector according to vertex3
+        self.skin_normal[0] = np.cross(self.skin_vertex3[0][1::3] - self.skin_vertex3[0][0::3], self.skin_vertex3[0][2::3] - self.skin_vertex3[0][0::3])
+        self.skin_normal[0] = self.skin_normal[0] / np.linalg.norm(self.skin_normal[0], axis=1)[:, np.newaxis]
+        self.skin_normal[0] = np.repeat(self.skin_normal[0], 3, axis=0)
+        np.add.at(vertex_normals, self.skin_faces, self.skin_normal[0])
+        np.add.at(vertex_counts, self.skin_faces, 1)
+        vertex_counts[vertex_counts == 0] = 1
+        vertex_normals /= vertex_counts
+        self.skin_normal[0] = vertex_normals[self.skin_faces]
+
+        # if self.skel_joints_prev is not None:
+        #     ori_gap = self.skel_oris - self.skel_oris_prev
+        #     ori_gap_sum = torch.sum(ori_gap, axis=(1,2))
+
+        #     non_zero_indices = torch.nonzero(ori_gap_sum, as_tuple=True)[0]
+
+        #     if len(non_zero_indices) > 0:
+        #         j = non_zero_indices[0]
+        #         self.skel_joint_index = j
+
+        #         rot = self.skel_oris_prev[j] * self.skel_oris[j].inverse()
+        #         rot = rot.cpu().numpy()
+
+        #         pos_gap = (self.skel_joints[j] - self.skel_joints_prev[j]).cpu().numpy()
+        #         if np.linalg.norm(pos_gap) == 0:
+        #             orig = self.skel_joints[j]
+        #             print('same pos')
+        #         else:
+        #             orig = np.linalg.inv(rot - np.eye(3)) @ (rot @ self.skel_joints_prev[j].cpu().numpy() - self.skel_joints[j].cpu().numpy())
+        #             print('diff pos')
+        #         print(j, orig, R.from_matrix(rot).as_rotvec())
+        #         print()
+
     def update_smpl(self):
         ## Update SMPL Vertex to character's vertex
         ## Pos 0 : Sim Character, Pos 1 : Ref Character
         pos = torch.tensor(np.tile(np.zeros(3, dtype=np.float32), (2, 24, 1)))
 
-        with torch.no_grad():
-            res = self.smpl_model(body_pose = pos[:, 1:], global_orient=pos[:, 0].unsqueeze(1), betas = torch.tensor(np.array([self.shape_parameters,self.shape_parameters], dtype=np.float32)))
-            self.smpl_zero_joints = res.smpl_joints[0] * self.smpl_scale
+        # with torch.no_grad():
+        #     res = self.smpl_model(body_pose = pos[:, 1:], global_orient=pos[:, 0].unsqueeze(1), betas = torch.tensor(np.array([self.shape_parameters,self.shape_parameters], dtype=np.float32)))
+        #     self.smpl_zero_joints = res.smpl_joints[0] * self.smpl_scale
 
-            self.smpl_colors = np.ones((2, len(self.smpl_vertices[0]), 4)) * 0.8
-            self.smpl_colors[:, :, 3] = self.smpl_trans
+        #     self.smpl_colors = np.ones((2, len(self.smpl_vertices[0]), 4)) * 0.8
+        #     self.smpl_colors[:, :, 3] = self.smpl_trans
 
         for jn_idx in range(self.env.skel.getNumJoints()):
             skel_joint = self.env.skel.getJoint(jn_idx)
@@ -1126,6 +1661,9 @@ class GLFWApp():
 
         mygl.drawGround(-1E-3)
 
+        self.drawSKELCharacter()
+        self.drawGuiBoxes()
+
         if self.mouse_down:
             glLineWidth(1.5)
             mygl.draw_axis()
@@ -1224,6 +1762,7 @@ class GLFWApp():
             
             glPopMatrix()
 
+
     def drawSmplBone(self):
         color = np.array([0, 0, 1, 0.5])
         glColor4d(color[0], color[1], color[2], color[3])
@@ -1264,6 +1803,257 @@ class GLFWApp():
             mygl.draw_sphere(0.005 * np.sqrt(2), 10, 10)
             glPopMatrix()
 
+    def drawGuiBoxes(self):
+        if self.gui_boxes is None:
+            return
+        
+        # pelvis = self.env.skel.getBodyNode("Pelvis").getCOM() - self.skel_joints[0].cpu().numpy()
+        for box in self.gui_boxes:       
+            glPushMatrix()
+            # glTranslatef(pelvis[0], pelvis[1], pelvis[2])
+            box.draw()
+            glPopMatrix()
+
+        if self.cand_gui_box is not None:
+            self.cand_gui_box.draw()
+            
+
+    def reorder_vertices_by_depth(self, vertices, colors, normals):
+        # Convert camera position to a NumPy array for easy calculations
+        camera_position = self.eye
+
+        # Calculate the centroid for each face
+        num_faces = len(vertices) // 3  # Each face consists of 3 vertices
+        centroids = np.zeros((num_faces, 3))
+
+        for i in range(num_faces):
+            # Get the vertices for the current face
+            face_vertices = vertices[i * 3:(i + 1) * 3]
+            # Calculate the centroid of the face
+            centroids[i] = np.mean(face_vertices, axis=0)
+
+        # Calculate depth for each face centroid
+        depths = np.linalg.norm(centroids - camera_position, axis=1)
+
+        # Create an index array for sorting
+        sorted_indices = np.argsort(depths)[::-1]
+
+        # Reorder vertices, colors, and normals based on sorted face indices
+        sorted_vertices = np.vstack([vertices[i * 3:(i + 1) * 3] for i in sorted_indices])
+        sorted_colors = np.vstack([colors[i * 3:(i + 1) * 3] for i in sorted_indices])
+        sorted_normals = np.vstack([normals[i * 3:(i + 1) * 3] for i in sorted_indices])
+
+        return sorted_vertices, sorted_colors, sorted_normals
+
+    def drawSKELCharacter(self, color=np.array([0.5, 0.5, 0.5, 0.5])):
+        # sorted_vertices, sorted_colors, sorted_normals = self.reorder_vertices_by_depth(self.skel_vertex3[0], self.skel_color4[0], self.skel_normal[0])
+
+        root_dif = self.env.skel.getBodyNode("Pelvis").getCOM() - self.skel_joints[0].cpu().numpy()
+
+        if self.draw_skel_joint_rot:
+            for i in range(len(self.skel_joints)):
+                j_ = self.skel_joints[i].cpu().numpy() + root_dif
+                ori = self.skel_oris[i].cpu().numpy()
+                ori = R.from_matrix(ori).as_rotvec()
+                angle = np.linalg.norm(ori)
+                axis = ori / angle if angle != 0 else np.array([0, 0, 1])
+                glPushMatrix()
+
+                glTranslatef(j_[0], j_[1], j_[2])
+                glRotatef(np.rad2deg(angle), axis[0], axis[1], axis[2])
+                glScalef(0.1, 0.1, 0.1)
+                glBegin(GL_LINES)
+                glColor3f(1, 0, 0)
+                glVertex3f(0, 0 ,0)
+                glVertex3f(1, 0, 0)
+                glColor3f(0, 1, 0)
+                glVertex3f(0, 0 ,0)
+                glVertex3f(0, 1, 0)
+                glColor3f(0, 0, 1)
+                glVertex3f(0, 0 ,0)
+                glVertex3f(0, 0, 1)
+                glEnd()
+
+                glPopMatrix()
+        
+        # Draw SKEL joint
+        if self.draw_skel_joint:
+            for i in range(len(self.skel_joints)):
+                joint_p = self.skel_joints[i].cpu() + root_dif
+                joint_orig_p = self.skel_joints_orig[i].cpu() + root_dif
+                if i == self.skel_joint_index:
+                    glColor3f(1, 0.7, 0.7)
+                else:
+                    glColor3f(0, 0, 0)
+                glPushMatrix()
+                glTranslatef(joint_p[0], joint_p[1], joint_p[2])
+                mygl.draw_sphere(0.005 * np.sqrt(2), 10, 10)
+                glPopMatrix()
+
+                glPushMatrix()
+                glColor3f(1, 0, 0)
+                glTranslatef(joint_orig_p[0], joint_orig_p[1], joint_orig_p[2])
+                mygl.draw_sphere(0.005 * np.sqrt(2), 10, 10)
+                glPopMatrix()
+
+        # Draw SKEL joint edges
+        if self.draw_skel_bone:
+            glColor4d(color[0], color[1], color[2], color[3])
+            for edge in skel_joint_edges:
+                t_parent = self.skel_joints[edge[0]].cpu().numpy() + root_dif
+                t_child = self.skel_joints[edge[1]].cpu().numpy() + root_dif
+
+                glPushMatrix()
+                m = (t_parent + t_child) / 2
+                p2c = t_child - t_parent
+                length = np.linalg.norm(p2c)
+                p2c = p2c / length
+                z = np.array([0, 0, 1])
+                axis = np.cross(z, p2c)
+                s = np.linalg.norm(axis)
+                axis /= s
+                c = np.dot(z, p2c)
+                angle = np.rad2deg(np.arctan2(s, c))
+                
+                glTranslatef(m[0], m[1], m[2])
+                glRotatef(angle, axis[0], axis[1], axis[2])
+                mygl.draw_cube([0.01, 0.01, length])
+
+                glPopMatrix()
+        
+        # glColor3f(1, 0, 0)
+        # for i in range(0, len(self.cand_skin_right_faces) // 3):
+        #     v0, v1, v2 = self.skin_vertices[self.cand_skin_right_faces[i*3:i*3+3]] + root_dif
+        #     if i == self.add_skin_index:
+        #         glColor3f(0, 0, 1)
+        #     else:
+        #         glColor3f(1, 0, 0)
+        #     glBegin(GL_TRIANGLES)
+        #     glVertex3f(v0[0], v0[1], v0[2])
+        #     glVertex3f(v1[0], v1[1], v1[2])
+        #     glVertex3f(v2[0], v2[1], v2[2])
+        #     glEnd() 
+
+        # Used for skeleton sectioning
+        glPushMatrix()
+        for i in range(self.skel_face_start_index, self.skel_face_index):
+            glColor3f(1, 1, 1)
+            v0, v1, v2 = self.skel_vertices[self.skel_faces[i*3:i*3+3]]# + root_dif
+            glBegin(GL_TRIANGLES)
+            glVertex3f(v0[0], v0[1], v0[2])
+            glVertex3f(v1[0], v1[1], v1[2])
+            glVertex3f(v2[0], v2[1], v2[2])
+            glEnd()
+
+            if i == self.skel_face_index - 1:
+                glColor3f(1, 0, 0)
+            else:
+                glColor3f(0, 0, 1)
+            glBegin(GL_LINE_LOOP)
+            glVertex3f(v0[0], v0[1], v0[2])
+            glVertex3f(v1[0], v1[1], v1[2])
+            glVertex3f(v2[0], v2[1], v2[2])
+            glEnd()
+        glPopMatrix()
+
+        for i, midpoint in enumerate(self.SKEL_section_midpoints):
+            if i in [131, 132, 133, 134, 135]: # Cervix: 
+                glColor3f(200, 0, 0)
+            elif i in [72, 73, 74, 75, 76, 77, 78, 79, 80, 81, 82, 83]: # Thorax
+                glColor3f(0, 200, 0)
+            elif i in [67, 68, 69, 70, 71]: # Lumbar
+                glColor3f(0, 0, 200)
+            else:
+                continue
+            glPushMatrix()
+            glTranslatef(midpoint[0], midpoint[1], midpoint[2])
+            mygl.draw_sphere(0.005, 10, 10)
+            glPopMatrix()
+
+        L1 = self.SKEL_section_midpoints[68]
+        C7 = self.SKEL_section_midpoints[133]
+        glBegin(GL_LINES)
+        glVertex3f(L1[0], L1[1], L1[2])
+        glVertex3f(C7[0], C7[1], C7[2])
+        glEnd()
+
+        T11 = self.SKEL_section_midpoints[73]
+        T12 = self.SKEL_section_midpoints[78]
+        L2 = self.SKEL_section_midpoints[70]
+        glColor3f(0, 0, 200)
+        glBegin(GL_LINE_STRIP)
+        glVertex3f(T11[0], T11[1], T11[2])
+        glVertex3f(T12[0], T12[1], T12[2])
+        glVertex3f(L1[0], L1[1], L1[2])
+        glVertex3f(L2[0], L2[1], L2[2])
+        glEnd()
+        
+        if self.draw_skel_skel:
+            if self.isSKELSection:
+                SKEL_section_toggle = self.SKEL_section_toggle_male if self.skel_gender == "male" else self.SKEL_section_toggle_female
+                for i, isOn in enumerate(SKEL_section_toggle):
+                    if isOn:
+                        # min = np.min(self.SKEL_section_vertex3[i], axis=0)
+                        # max = np.max(self.SKEL_section_vertex3[i], axis=0)
+                        # mean = (min + max) / 2
+                        # print(mean, self.gui_boxes[i].pos)
+                        # for pos in [min, max, mean]:
+                        #     glPushMatrix()
+                        #     glTranslatef(pos[0], pos[1], pos[2])
+                        #     glColor4d(0, 1, 1, 1)
+                        #     mygl.draw_sphere(0.005, 10, 10)
+                        #     glPopMatrix()
+
+
+                        glPushMatrix()
+                        glEnableClientState(GL_COLOR_ARRAY)
+                        glBindBuffer(GL_ARRAY_BUFFER, 0)
+                        glColorPointer(4, GL_FLOAT, 0, self.SKEL_section_color4[i])
+                        glEnableClientState(GL_VERTEX_ARRAY)
+                        glBindBuffer(GL_ARRAY_BUFFER, 0)
+                        glVertexPointer(3, GL_FLOAT, 0, self.SKEL_section_vertex3[i])
+                        glEnableClientState(GL_NORMAL_ARRAY)
+                        glNormalPointer(GL_FLOAT, 0, self.SKEL_section_normal[i])
+                        glDrawArrays(GL_TRIANGLES, 0, len(self.SKEL_section_vertex3[i]))
+                        glDisableClientState(GL_NORMAL_ARRAY)
+                        glDisableClientState(GL_VERTEX_ARRAY)
+                        glDisableClientState(GL_COLOR_ARRAY)
+                        glPopMatrix()
+  
+            else:
+                glPushMatrix()
+                glEnableClientState(GL_COLOR_ARRAY)
+                glBindBuffer(GL_ARRAY_BUFFER, 0)
+                glColorPointer(4, GL_FLOAT, 0, self.skel_color4[0])
+                glEnableClientState(GL_VERTEX_ARRAY)
+                glBindBuffer(GL_ARRAY_BUFFER, 0)
+                glVertexPointer(3, GL_FLOAT, 0, self.skel_vertex3[0])
+                glEnableClientState(GL_NORMAL_ARRAY)
+                glNormalPointer(GL_FLOAT, 0, self.skel_normal[0])
+                glDrawArrays(GL_TRIANGLES, 0, len(self.skel_vertex3[0]))
+                glDisableClientState(GL_NORMAL_ARRAY)
+                glDisableClientState(GL_VERTEX_ARRAY)
+                glDisableClientState(GL_COLOR_ARRAY)
+                glPopMatrix()
+
+        if self.draw_skel_skin:
+            glPushMatrix()
+            glEnableClientState(GL_COLOR_ARRAY)
+            glBindBuffer(GL_ARRAY_BUFFER, 0)
+            glColorPointer(4, GL_FLOAT, 0, self.skin_color4[0])
+            glEnableClientState(GL_VERTEX_ARRAY)
+            glBindBuffer(GL_ARRAY_BUFFER, 0)
+            glVertexPointer(3, GL_FLOAT, 0, self.skin_vertex3[0])
+            glEnableClientState(GL_NORMAL_ARRAY)
+            glNormalPointer(GL_FLOAT, 0, self.skin_normal[0])
+            glDrawArrays(GL_TRIANGLES, 0, len(self.skin_vertex3[0]))
+            glDisableClientState(GL_NORMAL_ARRAY)
+            glDisableClientState(GL_VERTEX_ARRAY)
+            glDisableClientState(GL_COLOR_ARRAY)
+            glPopMatrix()
+
+        
+
     def drawSmplCharacter(self, color=np.array([0.5, 0.5, 0.5, 0.5])):
         glPushMatrix()
         glEnableClientState(GL_COLOR_ARRAY)
@@ -1279,21 +2069,6 @@ class GLFWApp():
         glDisableClientState(GL_VERTEX_ARRAY)
         glDisableClientState(GL_COLOR_ARRAY)
         glPopMatrix()
-
-        # ## Draw Shawdow
-        # glPushMatrix()
-        # glScalef(1,1E-3,1)
-        # color = np.array([0.0, 0.0, 0.0, 1.0])
-        # glColor4f(color[0], color[1], color[2], color[3])
-        # glEnableClientState(GL_VERTEX_ARRAY)
-        # glBindBuffer(GL_ARRAY_BUFFER, 0)
-        # glVertexPointer(3, GL_FLOAT, 0, self.smpl_vertex3[0])
-        # glEnableClientState(GL_NORMAL_ARRAY)
-        # glNormalPointer(GL_FLOAT, 0, self.smpl_normal[0])
-        # glDrawArrays(GL_TRIANGLES, 0, len(self.smpl_vertex3[0]))
-        # glDisableClientState(GL_NORMAL_ARRAY)
-        # glDisableClientState(GL_VERTEX_ARRAY)
-        # glPopMatrix()
 
     def retargetting(self, name, index=0):
         info = self.env.new_skel_info[name]
@@ -1750,9 +2525,130 @@ class GLFWApp():
                     self.env.test_muscles.update()
                     self.env.test_muscle_pos = self.env.test_muscles.getMusclePositions()
             imgui.tree_pop()
+        
+        if imgui.tree_node("SKEL Parameters"):
+            _, self.draw_skel_skin = imgui.checkbox("Draw SKEL skin", self.draw_skel_skin)
+            imgui.same_line()
+            imgui.set_cursor_pos_x(200)
+            imgui.push_item_width(100)
+            changed, self.skin_opacity = imgui.slider_float(f"Opacity##skin", self.skin_opacity, 0, 1)
+            if changed:
+                self.update_skel()
+            imgui.pop_item_width()
+            _, self.draw_skel_skel = imgui.checkbox("Draw SKEL skel", self.draw_skel_skel)
+            imgui.same_line()
+            imgui.set_cursor_pos_x(200)
+            imgui.push_item_width(100)
+            changed, self.skel_opacity = imgui.slider_float(f"Opacity##skel", self.skel_opacity, 0, 1)
+            if changed:
+                self.update_skel()
+            imgui.pop_item_width()
+            _, self.draw_skel_joint = imgui.checkbox("Draw SKEL joint", self.draw_skel_joint)
+            _, self.draw_skel_joint_rot = imgui.checkbox("Draw SKEL joint rot", self.draw_skel_joint_rot)
+            _, self.draw_skel_bone = imgui.checkbox("Draw SKEL bone", self.draw_skel_bone)
+            if self.draw_skel_skin:
+                changed, self.isDrawHalfSkin = imgui.checkbox("Draw Half Skin", self.isDrawHalfSkin)
+                if changed:
+                    self.update_skel()
+                if self.isDrawHalfSkin:
+                    imgui.set_cursor_pos_x(200)
+                    imgui.same_line()
+                    if imgui.radio_button("Left", self.skin_direction == "left"):
+                        self.skin_direction = "left"
+                        self.update_skel()
+                    imgui.same_line()
+                    if imgui.radio_button("Right", self.skin_direction == "right"):
+                        self.skin_direction = "right"
+                        self.update_skel()
+            
+            if imgui.radio_button("Male", self.skel_gender == "male"):
+                self.skel_gender = "male"
+                self.update_skel(gender_changed=True)
+            imgui.same_line()
+            if imgui.radio_button("Female", self.skel_gender == "female"):
+                self.skel_gender = "female"
+                self.update_skel(gender_changed=True)
+
+            changed, self.isSKELSection = imgui.checkbox("Show SKEL section", self.isSKELSection)
+            if changed:
+                self.update_skel()
+
+            if self.isSKELSection:
+                # clicked, self.SKEL_section_index = imgui.listbox('', self.SKEL_section_index, self.SKEL_section_names)
+                # if clicked:
+                #     self.update_skel()
+                if imgui.tree_node("SKEL Sections"):
+                    if self.skel_gender == "male":
+                        SKEL_section_toggle = self.SKEL_section_toggle_male
+                        SKEL_section_names = self.SKEL_section_names_male
+                    else:
+                        SKEL_section_toggle = self.SKEL_section_toggle_female
+                        SKEL_section_names = self.SKEL_section_names_female
+
+                    if imgui.button("Choose All"):
+                        for i in range(len(SKEL_section_toggle)):
+                            SKEL_section_toggle[i] = True
+                    imgui.same_line()
+                    if imgui.button("Choose None"):
+                        for i in range(len(SKEL_section_toggle)):
+                            SKEL_section_toggle[i] = False
+                    imgui.same_line()
+                    changed, self.SKEL_section_unique = imgui.checkbox("Choose One Section", self.SKEL_section_unique)
+                    if changed:
+                        if self.SKEL_section_unique == True:
+                            SKEL_section_toggle[0] = True
+                            for i in range(1, len(SKEL_section_toggle)):
+                                SKEL_section_toggle[i] = False
+                        else:
+                            for i in range(len(SKEL_section_toggle)):
+                                SKEL_section_toggle[i] = True
+
+                    for i in range(len(SKEL_section_toggle)):
+                        changed, SKEL_section_toggle[i] = imgui.checkbox(SKEL_section_names[i], SKEL_section_toggle[i])
+                        if changed:
+                            if self.SKEL_section_unique and SKEL_section_toggle[i] == True:
+                                for j in range(len(SKEL_section_toggle)):
+                                    if j != i:
+                                        SKEL_section_toggle[j] = False
+                            self.update_skel()
+                    imgui.tree_pop()
+
+            imgui.text("SKEL Betas")
+            for i in range(len(self.skel_betas[0])):
+                imgui.push_item_width(150)
+                changed, self.skel_betas[0][i] = imgui.slider_float(f"Beta {i}", self.skel_betas[0][i], -5.0, 5.0)
+                if changed:
+                    self.update_skel()
+                imgui.pop_item_width()
+                imgui.same_line()
+                if imgui.button(f"Reset##skelbeta{i}"):
+                    self.skel_betas[0][i] = 0.0
+                    self.update_skel()
+            imgui.text("SKEL Pose")
+            for i in range(len(self.skel_pose[0])):
+                imgui.push_item_width(150)
+                pose_param_name = pose_param_names[i]
+                if pose_param_name in pose_limits.keys():
+                    lower = pose_limits[pose_param_name][0]
+                    upper = pose_limits[pose_param_name][1]
+                    if lower > upper:
+                        lower, upper = upper, lower
+                else:
+                    lower = -3.14
+                    upper = 3.14
+                changed, self.skel_pose[0][i] = imgui.slider_float(pose_param_name, self.skel_pose[0][i], lower, upper)
+                if changed:
+                    self.update_skel()
+                imgui.pop_item_width()
+                imgui.same_line()
+                if imgui.button(f"Reset##skelpose{i}"):
+                    self.skel_pose[0][i] = self.skel_pose_base[0][i].clone()
+                    self.update_skel()
+            
+            imgui.tree_pop()
 
         if imgui.tree_node("Smpl Shape Parameters"):
-            ## Smpl Shape Parameters 
+            ## Smpl Shape Parameters
             for i in range(len(self.shape_parameters)):
                 imgui.push_item_width(200)
                 changed, self.shape_parameters[i] = imgui.slider_float("Beta %d" % (i), self.shape_parameters[i], -5.0, 5.0)
@@ -1764,7 +2660,7 @@ class GLFWApp():
                     
                 imgui.pop_item_width()
                 imgui.same_line()
-                if imgui.button(f"Reset##beta{i}"):
+                if imgui.button(f"Reset##smplbeta{i}"):
                     self.shape_parameters[i] = 0.0
                     self.update_smpl()
                     self.fitSkel2SMPL()
@@ -1792,16 +2688,71 @@ class GLFWApp():
 
             imgui.tree_pop()
 
-        # if imgui.tree_node("Skeletons"):
-        #     if imgui.button("Update Skeletons"):
-        #         self.get_skeletons(self.data_path)
+        
+        # # Used for selecting half skin faces
+        # if imgui.button("Add this face"):
+        #     if len(self.cand_skin_right_faces) >= 3:
+        #         self.skin_right_faces.extend(self.cand_skin_right_faces[0:3])
+        #         self.cand_skin_right_faces = self.cand_skin_right_faces[3:]
+        #         self.update_skel()
+        # imgui.same_line()
+        # if imgui.button("Remove this face"):
+        #     if len(self.cand_skin_right_faces) >= 3:
+        #         self.skin_left_faces.extend(self.cand_skin_right_faces[0:3])
+        #         self.cand_skin_right_faces = self.cand_skin_right_faces[3:]
+        #         self.update_skel()
+        # imgui.same_line()
+        # if imgui.button("Print faces"):
+        #     print("Right faces")
+        #     print(self.skin_right_faces)
+        #     if len(self.cand_skin_right_faces) > 0:
+        #         print("Remaining right faces")
+        #         print(self.cand_skin_right_faces)
+        #     print("Left faces")
+        #     print(self.skin_left_faces)
 
-        #     clicked, self.skeleton_idx = imgui.listbox('', self.skeleton_idx, self.skeleton_files)
+        #     f = open(f"{self.skel_gender}_face_info.py", "w")
+        #     f.write(f"skin_right_faces = {self.skin_right_faces}\n")
+        #     f.write(f"skin_left_faces = {self.skin_left_faces}\n")
+        #     f.close()
+        
+        ## Show selected SKEL joint
+        # if imgui.button("<##skeljoint"):
+        #     self.skel_joint_index -= 1
+        #     if self.skel_joint_index < 0:
+        #         self.skel_joint_index = len(self.skel_joints) - 1
+        # imgui.same_line()
+        # if imgui.button(">##skeljoint"):
+        #     self.skel_joint_index += 1
+        #     if self.skel_joint_index >= len(self.skel_joints):
+        #         self.skel_joint_index = 0
 
-        #     if imgui.button("Load Skeleton"):
-        #         pass
+        if imgui.tree_node("GUI Boxes"):
+            if imgui.button("Add Cand Box"):
+                self.cand_gui_box = Box("box", [0, 0, 0], [0, 0, 0], [0.1, 0.1, 0.1], [0.5, 0.5, 0.5, 0.5], [0, 0, 0])
+            if self.cand_gui_box:
+                _, self.cand_gui_box.pos[:] = imgui.slider_float3("Position", *self.cand_gui_box.pos[:], -5.0, 5.0)
+                changed, self.cand_gui_box.rot[:] = imgui.slider_float3("Rotation", *self.cand_gui_box.rot[:], -5.0, 5.0)
+                if changed:
+                    self.cand_gui_box.updateRot()
+                _, self.cand_gui_box.size[:] = imgui.slider_float3("Size", *self.cand_gui_box.size[:], 0.001, 5.0)
+                _, self.cand_gui_box.joint[:] = imgui.slider_float3("Joint", *self.cand_gui_box.joint[:], -5.0, 5.0)
 
-        #     imgui.tree_pop()
+            if imgui.button("Print Cand Box"):
+                if self.cand_gui_box is not None:
+                    print(self.cand_gui_box.name)
+                    print(self.cand_gui_box.pos)
+                else:
+                    print("No Cand Box")
+            
+            if imgui.button("Delete Cand Box"):
+                self.cand_gui_box = None
+
+            if imgui.button("Add Cand to GUI Box"):
+                self.gui_boxes.append(self.cand_gui_box)
+                self.cand_gui_box = None
+
+            imgui.tree_pop()
 
         if imgui.tree_node("Activation Plot"):
             p0 = imgui.get_cursor_screen_pos()
@@ -1853,11 +2804,13 @@ class GLFWApp():
         self.env.reset(reset_time)
         self.reward_buffer = [self.env.get_reward()]
         self.update_smpl()
+        self.update_skel()
 
     def zero_reset(self):
         self.env.zero_reset()
         self.reward_buffer = [self.env.get_reward()]
         self.update_smpl()
+        self.update_skel()
 
     def keyboardPress(self, key, scancode, action, mods):
         
@@ -1872,6 +2825,30 @@ class GLFWApp():
                 self.reset(self.reset_value)
             elif key == glfw.KEY_Z:
                 self.zero_reset()
+            elif key == glfw.KEY_A:
+                self.skel_face_index -= 1
+                if self.skel_face_index < 0:
+                    self.skel_face_index = len(self.skel_faces) // 3 - 1
+                print(self.skel_face_index)
+            elif key in [glfw.KEY_D, glfw.KEY_F]:
+                self.skel_face_index += 1
+                if self.skel_face_index >= len(self.skel_faces) // 3:
+                    self.skel_face_index = 0
+                print(self.skel_face_index)
+            elif key == glfw.KEY_G:
+                self.skel_face_index += 10
+                if self.skel_face_index >= len(self.skel_faces) // 3:
+                    self.skel_face_index = 0
+                print(self.skel_face_index)
+            elif key == glfw.KEY_H:
+                self.skel_face_index += 100
+                if self.skel_face_index >= len(self.skel_faces) // 3:
+                    self.skel_face_index = 0
+                print(self.skel_face_index)
+
+            elif key == glfw.KEY_X:
+                self.skel_pose[0][37] -= 0.03
+                self.update_skel()
         pass
 
     def startLoop(self):        
