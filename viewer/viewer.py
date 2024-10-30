@@ -386,41 +386,24 @@ class GLFWApp():
         self.skel_vertices = skel_vertices.copy()
 
         from skeleton_section import SKEL_face_index_male, SKEL_face_index_female
+        self.SKEL_section_index_male = {}
+        self.SKEL_section_index_female = {}
+        self.skel_farthest_section_index = 0
+        for i, (key_male, key_female) in enumerate(zip(SKEL_face_index_male.keys(), SKEL_face_index_female.keys())):
+            self.SKEL_section_index_male[key_male] = i
+            self.SKEL_section_index_female[key_female] = i
+
         self.SKEL_section_names_male = list(SKEL_face_index_male.keys())
         self.SKEL_section_names_female = list(SKEL_face_index_female.keys())
 
-        self.SKEL_section_index_male = 0
         self.SKEL_section_toggle_male = [True] * len(self.SKEL_section_names_male)
         self.SKEL_section_faces_male = []
-
-        # # Find index for vertebrae
-        # i = 0
-        # cervix = []
-        # thorax = []
-        # lumbar = []
-        # for name in SKEL_face_index_male.keys():
-        #     if name[1] in ["1", "2", "3", "4", "5", "6", "7", "8", "9"]:
-        #         if name[0] == "L":
-        #             lumbar.append(i)
-        #         elif name[0] == "T":
-        #             thorax.append(i)
-        #         elif name[0] == "C":
-        #             cervix.append(i)
-        #     i += 1
-        # print(f"Cervix: {cervix}")
-        # print(f"Thorax: {thorax}")
-        # print(f"Lumbar: {lumbar}")
-
-        # Cervix: [131, 132, 133, 134, 135]
-        # Thorax: [72, 73, 74, 75, 76, 77, 78, 79, 80, 81, 82, 83]
-        # Lumbar: [67, 68, 69, 70, 71]
 
         for index in list(SKEL_face_index_male.values()):
             if index[0] == index[1]:
                 print(index)
             self.SKEL_section_faces_male.append(self.skel_f_updated_male[3 * index[0]: 3 * index[1]])
 
-        self.SKEL_section_index_female = 0
         self.SKEL_section_toggle_female = [True] * len(self.SKEL_section_names_female)
         self.SKEL_section_faces_female = []        
         for index in list(SKEL_face_index_female.values()):
@@ -483,22 +466,22 @@ class GLFWApp():
             self.SKEL_section_vertex3[thor][:, 0] += offset
             self.SKEL_section_midpoints[thor][0] += offset
         
-        # L2_T1 = [70, 68, 80, 82, 83, 81, 79, 76, 75, 72, 74, 77, 73, 78]
-        L2_T1 = [70, 68, 78, 73, 77, 74, 72, 75, 76, 79, 81, 83, 82, 80, 133]
-        for index, i in enumerate(range(len(L2_T1) - 3)):
-            inf = self.SKEL_section_midpoints[L2_T1[i]]
-            sup = self.SKEL_section_midpoints[L2_T1[i + 1]]
+        # L2_C7 = [70, 68, 80, 82, 83, 81, 79, 76, 75, 72, 74, 77, 73, 78]
+        L2_C7 = [70, 68, 78, 73, 77, 74, 72, 75, 76, 79, 81, 83, 82, 80, 133]
+        for index, i in enumerate(range(len(L2_C7) - 3)):
+            inf = self.SKEL_section_midpoints[L2_C7[i]]
+            sup = self.SKEL_section_midpoints[L2_C7[i + 1]]
             a = (sup[2] - inf[2]) / (sup[1] - inf[1])
             b = inf[2] - a * inf[1]
 
-            fix_vert = L2_T1[i + 2]
+            fix_vert = L2_C7[i + 2]
             fixed = a * self.SKEL_section_midpoints[fix_vert][1] + b
             offset = (fixed - self.SKEL_section_midpoints[fix_vert][2]) * (12 - i) / 12
             
             self.SKEL_section_vertex3[fix_vert][:, 2] += offset
             self.SKEL_section_midpoints[fix_vert][2] += offset
 
-            up_vert = L2_T1[i + 3]
+            up_vert = L2_C7[i + 3]
             y_offset = (sup[1] + self.SKEL_section_midpoints[up_vert][1]) / 2 - self.SKEL_section_midpoints[fix_vert][1]
             self.SKEL_section_vertex3[fix_vert][:, 1] += y_offset
             self.SKEL_section_midpoints[fix_vert][1] += y_offset
@@ -710,7 +693,8 @@ class GLFWApp():
             self.SKEL_section_vertex3[i] = SKEL_section_vertex3
             self.SKEL_section_color4[i] = SKEL_section_color4
 
-            SKEL_section_midpoint = np.mean(SKEL_section_vertex3, axis=0)
+            unique_vertex = SKEL_section_vertices[np.unique(faces)]
+            SKEL_section_midpoint = np.mean(unique_vertex, axis=0)
             self.SKEL_section_midpoints[i] = SKEL_section_midpoint
 
             SKEL_section_normal = np.cross(SKEL_section_vertex3[1::3] - SKEL_section_vertex3[0::3], SKEL_section_vertex3[2::3] - SKEL_section_vertex3[0::3])
@@ -723,18 +707,47 @@ class GLFWApp():
             self.SKEL_section_normal[i] = vertex_normals[faces]
 
         # Thorax Realignment 
-        L1 = self.SKEL_section_midpoints[68]
-        C7 = self.SKEL_section_midpoints[133]
+        SKEL_section_index = self.SKEL_section_index_male if self.skel_gender == "male" else self.SKEL_section_index_female
+        L1 = self.SKEL_section_midpoints[SKEL_section_index["L1"]]
+        C7 = self.SKEL_section_midpoints[SKEL_section_index["C7"]]
         a = (C7[0] - L1[0]) / (C7[1] - L1[1])
         b = L1[0] - a * L1[1]
 
-        for i, thor in enumerate([80, 82, 83, 81, 79, 76, 75, 72, 74, 77, 73, 78]):
+        # T1-12
+        # for i, thor in enumerate([80, 82, 83, 81, 79, 76, 75, 72, 74, 77, 73, 78]):
+        for i in range(12):
+            thor = SKEL_section_index["T" + str(i + 1)]
+            rib_l = SKEL_section_index["Left rib " + str(i + 1)]
+            rib_r = SKEL_section_index["Right rib " + str(i + 1)]
+
+            sects = [thor, rib_l, rib_r]
+            
+            if i < 7:
+                rib_l_cart = SKEL_section_index["Left rib " + str(i + 1) + " cartilage"]
+                rib_r_cart = SKEL_section_index["Right rib " + str(i + 1) + " cartilage"]
+                sects.append(rib_l_cart)
+                sects.append(rib_r_cart)
+                if i == 0:
+                    manu = SKEL_section_index["Manubrium"]
+                    xiph = SKEL_section_index["Xiphoid Process"]
+                    sects.append(manu)
+                    sects.append(xiph)
+                elif i == 1:
+                    sternum = SKEL_section_index["Sternum Body"]
+                    sects.append(sternum)
+            elif i == 7:
+                rib_l_cart = SKEL_section_index["Left 8910 costal cartilage"]
+                rib_r_cart = SKEL_section_index["Right 8910 costal cartilage"]
+                sects.append(rib_l_cart)
+                sects.append(rib_r_cart)
+            
             fixed = a * self.SKEL_section_midpoints[thor][1] + b
             offset = fixed - self.SKEL_section_midpoints[thor][0]
             offset *= 0.5 / (5.5**2) * (i - 5.5) ** 2 + 0.5
-
-            self.SKEL_section_vertex3[thor][:, 0] += offset
-            self.SKEL_section_midpoints[thor][0] += offset
+            
+            for sect in sects:
+                self.SKEL_section_vertex3[sect][:, 0] += offset
+                self.SKEL_section_midpoints[sect][0] += offset
 
         # # Linearly decrease offset from T12 to T1; doesn't apply well to thorax near cervix
         # offset = a * self.SKEL_section_midpoints[78][1] + b - self.SKEL_section_midpoints[78][0]
@@ -749,35 +762,67 @@ class GLFWApp():
         #     self.SKEL_section_vertex3[i][:, 0] += offset
         #     self.SKEL_section_midpoints[i][0] += offset
         
-        # L2_T1 = [70, 68, 80, 82, 83, 81, 79, 76, 75, 72, 74, 77, 73, 78]
-        L2_T1 = [70, 68, 78, 73, 77, 74, 72, 75, 76, 79, 81, 83, 82, 80, 133]
-        for index, i in enumerate(range(len(L2_T1) - 3)):
-            inf = self.SKEL_section_midpoints[L2_T1[i]]
-            sup = self.SKEL_section_midpoints[L2_T1[i + 1]]
+        L2_C7 = []
+        L2_C7.append(SKEL_section_index["L2"])
+        L2_C7.append(SKEL_section_index["L1"])
+        for i in range(12):
+            L2_C7.append(SKEL_section_index["T" + str(12 - i)])
+        L2_C7.append(SKEL_section_index["C7"])
+        # L2_C7.append(SKEL_section_index["C6"])
+        
+        # L2_C7 = [70, 68, 78, 73, 77, 74, 72, 75, 76, 79, 81, 83, 82, 80, 133]
+        for i in range(len(L2_C7) - 3):
+            inf = self.SKEL_section_midpoints[L2_C7[i]]
+            sup = self.SKEL_section_midpoints[L2_C7[i + 1]]
             a = (sup[2] - inf[2]) / (sup[1] - inf[1])
             b = inf[2] - a * inf[1]
 
-            fix_vert = L2_T1[i + 2]
+            fix_vert = L2_C7[i + 2]
+            rib_l = SKEL_section_index["Left rib " + str(12 - i)]
+            rib_r = SKEL_section_index["Right rib " + str(12 - i)]
+
+            sects = [fix_vert, rib_l, rib_r]
+            
+            if i > 4:
+                rib_l_cart = SKEL_section_index["Left rib " + str(12 - i) + " cartilage"]
+                rib_r_cart = SKEL_section_index["Right rib " + str(12 - i) + " cartilage"]
+                sects.append(rib_l_cart)
+                sects.append(rib_r_cart)
+                if i == 11:
+                    manu = SKEL_section_index["Manubrium"]
+                    xiph = SKEL_section_index["Xiphoid Process"]
+                    sects.append(manu)
+                    sects.append(xiph)
+                elif i == 10:
+                    sternum = SKEL_section_index["Sternum Body"]
+                    sects.append(sternum)
+            elif i == 4:
+                rib_l_cart = SKEL_section_index["Left 8910 costal cartilage"]
+                rib_r_cart = SKEL_section_index["Right 8910 costal cartilage"]
+                sects.append(rib_l_cart)
+                sects.append(rib_r_cart)
+
             fixed = a * self.SKEL_section_midpoints[fix_vert][1] + b
             offset = (fixed - self.SKEL_section_midpoints[fix_vert][2]) * (12 - i) / 12
             
-            self.SKEL_section_vertex3[fix_vert][:, 2] += offset
-            self.SKEL_section_midpoints[fix_vert][2] += offset
-
-            up_vert = L2_T1[i + 3]
+            up_vert = L2_C7[i + 3]
             y_offset = (sup[1] + self.SKEL_section_midpoints[up_vert][1]) / 2 - self.SKEL_section_midpoints[fix_vert][1]
-            self.SKEL_section_vertex3[fix_vert][:, 1] += y_offset
-            self.SKEL_section_midpoints[fix_vert][1] += y_offset
+
+            for sect in sects:
+                self.SKEL_section_vertex3[sect][:, 2] += offset
+                self.SKEL_section_midpoints[sect][2] += offset
+
+                self.SKEL_section_vertex3[sect][:, 1] += y_offset
+                self.SKEL_section_midpoints[sect][1] += y_offset
         
+        # if len(self.gui_boxes) == 0:
+        #     for i, vertex3 in enumerate(self.SKEL_section_vertex3):
+        #         min = np.min(vertex3, axis=0)
+        #         max = np.max(vertex3, axis=0)
+        #         mean = (min + max) / 2
+        #         box_size = max - min
 
-        if len(self.gui_boxes) == 0:
-            for i, vertex3 in enumerate(self.SKEL_section_vertex3):
-                min_vertex = np.min(vertex3, axis=0)
-                max_vertex = np.max(vertex3, axis=0)
-                mean_vertex = (min_vertex + max_vertex) / 2
-
-                box_size = max_vertex - min_vertex
-                self.gui_boxes.append(Box(i, mean_vertex, [0, 0, 0], box_size, [0.5, 0.5, 0.5, 0.3], mean_vertex))
+        #         self.gui_boxes.append(Box(i, mean, [0, 0, 0], box_size, [0.5, 0.5, 0.5, 0.3], mean))
 
 
         self.skel_colors = np.ones((2, len(self.skel_vertices), 4)) * 0.8
@@ -1956,39 +2001,62 @@ class GLFWApp():
             glEnd()
         glPopMatrix()
 
-        for i, midpoint in enumerate(self.SKEL_section_midpoints):
-            if i in [131, 132, 133, 134, 135]: # Cervix: 
-                glColor3f(200, 0, 0)
-            elif i in [72, 73, 74, 75, 76, 77, 78, 79, 80, 81, 82, 83]: # Thorax
-                glColor3f(0, 200, 0)
-            elif i in [67, 68, 69, 70, 71]: # Lumbar
-                glColor3f(0, 0, 200)
-            else:
-                continue
-            glPushMatrix()
-            glTranslatef(midpoint[0], midpoint[1], midpoint[2])
-            mygl.draw_sphere(0.005, 10, 10)
-            glPopMatrix()
+        # glPushMatrix()
+        # for index, farthest in enumerate([[1026, 5928], [539, 2863], [3, 660], [653, 1722], [328, 737], [321, 582], [7, 330], [658, 939], [368, 678], [169, 233], [267, 313], [377, 937], [258, 313], [237, 332], [235, 240], [322, 417], [427, 612], [440, 1540], [1480, 1663], [330, 760], [381, 826], [183, 1084], [578, 1342], [542, 1092], [580, 1138], [200, 975], [1279, 4454], [174, 317], [0, 172], [181, 2033], [9, 260], [2, 59], [6, 17], [2, 57], [21, 26], [3, 45], [13, 17], [0, 41], [3, 6], [9, 473], [14, 22], [10, 60], [9, 29], [12, 38], [29, 59], [28, 472], [12, 36], [25, 447], [3, 100], [8, 29], [7, 26], [3, 58], [7, 16], [3, 56], [20, 27], [2, 44], [12, 16], [1, 39], [2, 7], [8, 432], [15, 23], [11, 60], [8, 28], [13, 32], [28, 58], [29, 473], [13, 37], [24, 446], [2, 101], [9, 28], [6, 27], [342, 1142], [50, 119], [343, 1143], [34, 222], [7, 15], [37, 599], [4, 167], [534, 614], [81, 176], [306, 446], [307, 395], [36, 165], [36, 124], [18, 70], [131, 552], [97, 303], [107, 403], [0, 112], [67, 307], [12, 62], [4, 60], [7, 34], [8, 231], [2, 64], [1, 59], [153, 199], [30, 68], [1, 73], [6, 39], [61, 197], [171, 207], [5, 195], [35, 119], [1, 35], [34, 222], [7, 15], [37, 599], [10, 162], [534, 614], [81, 176], [306, 446], [307, 395], [36, 165], [36, 124], [18, 70], [131, 552], [97, 303], [107, 403], [0, 112], [67, 307], [12, 62], [4, 60], [7, 34], [8, 231], [2, 64], [1, 59], [153, 199], [30, 68], [1, 73], [6, 39], [61, 197], [171, 207], [5, 195], [35, 119], [1, 35], [16, 256], [374, 2130], [21, 75], [33, 466], [94, 175], [5, 157], [2, 67], [23, 206], [107, 178], [33, 87], [29, 103], [87, 190], [87, 292], [194, 374], [68, 205], [65, 267], [29, 234], [39, 204], [26, 66], [34, 271], [9, 259], [15, 38], [162, 182], [40, 183], [27, 189], [9, 29], [2, 188], [12, 153], [1, 22], [11, 157], [14, 235], [16, 256], [374, 2130], [21, 75], [33, 466], [12, 153], [27, 54], [1, 22], [9, 212], [1, 188], [94, 175], [5, 157], [2, 66], [18, 319], [107, 178], [86, 197], [104, 192], [87, 190], [87, 292], [194, 374], [68, 205], [65, 267], [29, 234], [162, 182], [40, 183], [8, 25], [3, 33], [11, 199], [26, 66], [34, 271], [9, 259], [13, 58]]):
+        #     for i in farthest:
+        #         glColor3f(1, 1, 1)
+        #         v0, v1, v2 = self.skel_vertices[self.SKEL_section_faces_male[index][3*i:3*i+3]]# + root_dif
+        #         glBegin(GL_TRIANGLES)
+        #         glVertex3f(v0[0], v0[1], v0[2])
+        #         glVertex3f(v1[0], v1[1], v1[2])
+        #         glVertex3f(v2[0], v2[1], v2[2])
+        #         glEnd()
 
-        L1 = self.SKEL_section_midpoints[68]
-        C7 = self.SKEL_section_midpoints[133]
-        glBegin(GL_LINES)
-        glVertex3f(L1[0], L1[1], L1[2])
-        glVertex3f(C7[0], C7[1], C7[2])
-        glEnd()
+        #         if i == self.skel_face_index - 1:
+        #             glColor3f(1, 0, 0)
+        #         else:
+        #             glColor3f(0, 0, 1)
+        #         glBegin(GL_LINE_LOOP)
+        #         glVertex3f(v0[0], v0[1], v0[2])
+        #         glVertex3f(v1[0], v1[1], v1[2])
+        #         glVertex3f(v2[0], v2[1], v2[2])
+        #         glEnd()
+        # glPopMatrix()
 
-        T11 = self.SKEL_section_midpoints[73]
-        T12 = self.SKEL_section_midpoints[78]
-        L2 = self.SKEL_section_midpoints[70]
-        glColor3f(0, 0, 200)
-        glBegin(GL_LINE_STRIP)
-        glVertex3f(T11[0], T11[1], T11[2])
-        glVertex3f(T12[0], T12[1], T12[2])
-        glVertex3f(L1[0], L1[1], L1[2])
-        glVertex3f(L2[0], L2[1], L2[2])
-        glEnd()
         
         if self.draw_skel_skel:
+            # for i, midpoint in enumerate(self.SKEL_section_midpoints):
+            #     if i in [131, 132, 133, 134, 135]: # Cervix: 
+            #         glColor3f(200, 0, 0)
+            #     elif i in [72, 73, 74, 75, 76, 77, 78, 79, 80, 81, 82, 83]: # Thorax
+            #         glColor3f(0, 200, 0)
+            #     elif i in [67, 68, 69, 70, 71]: # Lumbar
+            #         glColor3f(0, 0, 200)
+            #     else:
+            #         continue
+            #     glPushMatrix()
+            #     glTranslatef(midpoint[0], midpoint[1], midpoint[2])
+            #     mygl.draw_sphere(0.005, 10, 10)
+            #     glPopMatrix()
+
+            # L1 = self.SKEL_section_midpoints[68]
+            # C7 = self.SKEL_section_midpoints[133]
+            # glBegin(GL_LINES)
+            # glVertex3f(L1[0], L1[1], L1[2])
+            # glVertex3f(C7[0], C7[1], C7[2])
+            # glEnd()
+
+            # T11 = self.SKEL_section_midpoints[73]
+            # T12 = self.SKEL_section_midpoints[78]
+            # L2 = self.SKEL_section_midpoints[70]
+            # glColor3f(0, 0, 200)
+            # glBegin(GL_LINE_STRIP)
+            # glVertex3f(T11[0], T11[1], T11[2])
+            # glVertex3f(T12[0], T12[1], T12[2])
+            # glVertex3f(L1[0], L1[1], L1[2])
+            # glVertex3f(L2[0], L2[1], L2[2])
+            # glEnd()
+            
             if self.isSKELSection:
                 SKEL_section_toggle = self.SKEL_section_toggle_male if self.skel_gender == "male" else self.SKEL_section_toggle_female
                 for i, isOn in enumerate(SKEL_section_toggle):
@@ -1996,14 +2064,13 @@ class GLFWApp():
                         # min = np.min(self.SKEL_section_vertex3[i], axis=0)
                         # max = np.max(self.SKEL_section_vertex3[i], axis=0)
                         # mean = (min + max) / 2
-                        # print(mean, self.gui_boxes[i].pos)
+                        # print((mean - self.gui_boxes[i].pos)[1])
                         # for pos in [min, max, mean]:
                         #     glPushMatrix()
                         #     glTranslatef(pos[0], pos[1], pos[2])
                         #     glColor4d(0, 1, 1, 1)
                         #     mygl.draw_sphere(0.005, 10, 10)
                         #     glPopMatrix()
-
 
                         glPushMatrix()
                         glEnableClientState(GL_COLOR_ARRAY)
@@ -2618,10 +2685,12 @@ class GLFWApp():
                 imgui.push_item_width(150)
                 changed, self.skel_betas[0][i] = imgui.slider_float(f"Beta {i}", self.skel_betas[0][i], -5.0, 5.0)
                 if changed:
+                    self.gui_boxes = []
                     self.update_skel()
                 imgui.pop_item_width()
                 imgui.same_line()
                 if imgui.button(f"Reset##skelbeta{i}"):
+                    self.gui_boxes = []
                     self.skel_betas[0][i] = 0.0
                     self.update_skel()
             imgui.text("SKEL Pose")
@@ -2751,6 +2820,57 @@ class GLFWApp():
             if imgui.button("Add Cand to GUI Box"):
                 self.gui_boxes.append(self.cand_gui_box)
                 self.cand_gui_box = None
+
+            imgui.tree_pop()
+
+        if imgui.tree_node("Find Farthest faces in SKEL sections"):
+            SKEL_section_index = self.SKEL_section_index_male if self.skel_gender == "male" else self.SKEL_section_index_female
+            if imgui.button("<##face"):
+                self.skel_farthest_section_index -= 1
+                if self.skel_farthest_section_index < 0:
+                    self.skel_farthest_section_index = len(SKEL_section_index) - 1
+            imgui.same_line()
+            imgui.text(list(SKEL_section_index.keys())[self.skel_farthest_section_index])
+            imgui.same_line()
+            if imgui.button(">##face"):
+                self.skel_farthest_section_index += 1
+                if self.skel_farthest_section_index >= len(SKEL_section_index):
+                    self.skel_farthest_section_index = 0
+
+            if imgui.button("Find Farthest faces"):
+                pairs = []
+                for section_index in range(len(SKEL_section_index)):
+                    section_name = list(SKEL_section_index.keys())[section_index]
+                    if self.skel_gender == "male":
+                        SKEL_section_faces = self.SKEL_section_faces_male[section_index]
+                    else:
+                        SKEL_section_faces = self.SKEL_section_faces_female[section_index]
+                    SKEL_section_vertices = self.skel_vertices
+
+                    len_faces = SKEL_section_faces.shape[0] // 3
+
+                    max_d = 0
+                    cand_i = 0
+                    cand_j = 0
+                    for i in range(len_faces):
+                        face_i = SKEL_section_vertices[SKEL_section_faces[3*i:3*i+3]]
+                        mid_i = np.mean(face_i, axis=0)
+                        for j in range(i + 1, len_faces):
+                            face_j = SKEL_section_vertices[SKEL_section_faces[3*j:3*j+3]]
+                            mid_j = np.mean(face_j, axis=0)
+                            d = np.linalg.norm(mid_i - mid_j)
+                            if d > max_d:
+                                max_d = d
+                                cand_i = i
+                                cand_j = j
+                                print(f"Candidates {i}, {j} with distance {d}")
+                        print(f"face {i+1} / {len_faces} done")
+                    print(f"Farthest faces are {cand_i}, {cand_j} in section {section_name}")
+
+                    pairs.append([cand_i, cand_j])
+                
+                print(pairs)
+
 
             imgui.tree_pop()
 
