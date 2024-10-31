@@ -8,6 +8,7 @@ import viewer.gl_function as mygl
 import quaternion
 from PIL import Image
 from viewer.mesh_loader import MeshLoader
+from sklearn.decomposition import PCA
 
 from OpenGL.GL import *
 from OpenGL.GLU import *
@@ -87,7 +88,7 @@ smpl_links = [
 ]
 
 class Box:
-    def __init__(self, name, pos, rot, size, color, joint):
+    def __init__(self, name, pos, rot, size, color, joint, axes=None, corners=None):
         self.name = name
         self.pos = pos
         self.rot = rot
@@ -96,6 +97,8 @@ class Box:
         self.size = size
         self.color = color
         self.joint = joint
+        self.axes = axes
+        self.corners = corners
 
     def updateRot(self):
         self.rot_angle = np.rad2deg(np.linalg.norm(np.array(self.rot)))
@@ -108,8 +111,36 @@ class Box:
         mygl.draw_sphere(0.005, 10, 10)
         glPopMatrix()
 
+        # if self.corners is not None:
+        #     glColor3f(10, 0, 0)
+        #     for corner in self.corners:
+        #         glPushMatrix()
+        #         glTranslatef(corner[0], corner[1], corner[2])
+        #         mygl.draw_sphere(0.005, 10, 10)
+        #         glPopMatrix()
+
         glPushMatrix()
         glTranslatef(self.pos[0], self.pos[1], self.pos[2])
+
+        # glPushMatrix()
+        # glScalef(0.1, 0.1, 0.1)
+        # if self.axes is not None:
+        #     ax0 = self.axes[0]
+        #     ax1 = self.axes[1]
+        #     ax2 = self.axes[2]
+        #     glBegin(GL_LINES)
+        #     glColor3f(1, 0, 0)
+        #     glVertex3f(0, 0, 0)
+        #     glVertex3f(ax0[0], ax0[1], ax0[2])
+        #     glColor3f(0, 1, 0)
+        #     glVertex3f(0, 0, 0)
+        #     glVertex3f(ax1[0], ax1[1], ax1[2])
+        #     glColor3f(0, 0, 1)
+        #     glVertex3f(0, 0, 0)
+        #     glVertex3f(ax2[0], ax2[1], ax2[2])
+        #     glEnd()
+        # glPopMatrix()
+
         glRotatef(self.rot_angle, self.rot_axis[0], self.rot_axis[1], self.rot_axis[2])
         glColor4d(self.color[0], self.color[1], self.color[2], self.color[3])
         mygl.draw_cube(self.size)
@@ -378,8 +409,8 @@ class GLFWApp():
 
         skel_vertices = skel_output.skel_verts.detach().cpu().numpy()[0]
 
-        self.skel_face_start_index = 107781
-        self.skel_face_index = 107781
+        self.skel_face_start_index = 61102
+        self.skel_face_index = 61102
         self.isSKELSection = False
         self.SKEL_section_unique = False
         
@@ -398,16 +429,19 @@ class GLFWApp():
 
         self.SKEL_section_toggle_male = [True] * len(self.SKEL_section_names_male)
         self.SKEL_section_faces_male = []
+        self.SKEL_unique_vertices_male = []
 
         for index in list(SKEL_face_index_male.values()):
-            if index[0] == index[1]:
-                print(index)
             self.SKEL_section_faces_male.append(self.skel_f_updated_male[3 * index[0]: 3 * index[1]])
+            self.SKEL_unique_vertices_male.append(np.unique(self.SKEL_section_faces_male[-1]))
 
         self.SKEL_section_toggle_female = [True] * len(self.SKEL_section_names_female)
         self.SKEL_section_faces_female = []        
+        self.SKEL_unique_vertices_female = []
+    
         for index in list(SKEL_face_index_female.values()):
             self.SKEL_section_faces_female.append(self.skel_f_updated_female[3 * index[0]: 3 * index[1]])
+            self.SKEL_unique_vertices_female.append(np.unique(self.SKEL_section_faces_female[-1]))
 
         self.SKEL_section_colors = []
         self.SKEL_section_vertex3 = []
@@ -815,15 +849,341 @@ class GLFWApp():
                 self.SKEL_section_vertex3[sect][:, 1] += y_offset
                 self.SKEL_section_midpoints[sect][1] += y_offset
         
-        # if len(self.gui_boxes) == 0:
-        #     for i, vertex3 in enumerate(self.SKEL_section_vertex3):
-        #         min = np.min(vertex3, axis=0)
-        #         max = np.max(vertex3, axis=0)
-        #         mean = (min + max) / 2
-        #         box_size = max - min
+        def find_major_axes(vertices):
+            # Step 1: Center the vertices by subtracting the mean
+            centered_vertices = vertices - np.mean(vertices, axis=0)
+    
+            # Step 2: Perform PCA
+            pca = PCA(n_components=3)
+            pca.fit(centered_vertices)
+            
+            # Step 3: Get the principal components
+            major_axes = pca.components_  # Each row is a major axis (PC1, PC2, PC3)
+            explained_variance = pca.explained_variance_ratio_  # Proportion of variance along each axis
+            
+            return major_axes, explained_variance
+        
+        if len(self.gui_boxes) == 0:
+            pass
+            
+            # # First Trial
+            # # Simply find Bounding box aligned to xyz axes
+            # for i, vertex3 in enumerate(self.SKEL_section_vertex3):
+            #     min = np.min(vertex3, axis=0)
+            #     max = np.max(vertex3, axis=0)
+            #     mean = (min + max) / 2
+            #     box_size = max - min
+                
+            #     if np.max(box_size) > 4 * np.min(box_size):
+            #         print(self.SKEL_section_names_male[i], box_size, np.max(box_size) / np.min(box_size))
 
-        #         self.gui_boxes.append(Box(i, mean, [0, 0, 0], box_size, [0.5, 0.5, 0.5, 0.3], mean))
+            #     self.gui_boxes.append(Box(i, mean, [0, 0, 0], box_size, [0.5, 0.5, 0.5, 0.3], mean))
 
+            # # Second Trial
+            # # Find bounding box for each major group
+            # for group in [[0, 1],   # Skull
+            #               [2],[3],[4],[5],[6],[7],[8],  # Cervix
+            #               [9],[10],[11],[12],[13],[14],[15],[16],[17],[18],[19],[20],  # Thorax
+            #               [21],[22],[23],[24],[25],     # Lumbar
+            #               [26, 27, 71, 72, 73],     # Saccrococcygeal
+            #               [28, 29, 30],  # Sternum
+            #               range(31, 51),    # Left Ribs
+            #               range(51, 71),    # Right Ribs,
+            #               [74],[75, 76],    # Left Lower Limb
+            #               [77],             # Talus
+            #               range(78, 89),    # Calcaneus, Metacarpal
+            #               range(89, 105),   # Phalanges
+            #               [105],[106,107],  # Left Lower Limb
+            #               [108],            # Talus
+            #               range(109, 120),  # Calcaneus, Metacarpal
+            #               range(120, 136),  # Phalanges
+            #               [136],[137],[138],[139],  # Left Upper Limb
+            #               range(140, 153),   # Left Carpals
+            #               [153],[154],[155],[156],[157],[158],[159],[160],[161],[162],[163],[164],[165],[166],    # Left Fingers
+            #               [167],[168],[169],[170],  # Right Upper Limb
+            #               range(171, 184),   # Right Carpals
+            #               [184],[185],[186],[187],[188],[189],[190],[191],[192],[193],[194],[195],[196],[197],    # Right Fingers
+            #               ]:
+            #     min_all = None
+            #     max_all = None
+            #     for elem in group:
+            #         min = np.min(self.SKEL_section_vertex3[elem], axis=0)
+            #         max = np.max(self.SKEL_section_vertex3[elem], axis=0)
+            #         if min_all is None:
+            #             min_all = min
+            #             max_all = max
+            #         else:
+            #             min_all = np.minimum(min_all, min)
+            #             max_all = np.maximum(max_all, max)
+            #     mean = (min_all + max_all) / 2
+            #     box_size = max_all - min_all
+            #     self.gui_boxes.append(Box(i, mean, [0, 0, 0], box_size, [0.5, 0.5, 0.5, 0.3], mean))
+
+
+            # # Third Trial
+            # # Find bounding boxes aligned to PCA major axes of each section
+            # for i, section_vertices in enumerate(self.SKEL_unique_vertices_male):
+            #     vertices = self.skel_vertices[section_vertices]
+            #     name = self.SKEL_section_names_male[i]
+            #     major_axes, explained_variance = find_major_axes(vertices)
+
+            #     if np.dot(np.cross(major_axes[0], major_axes[1]), major_axes[2]) < 0:
+            #         major_axes = -major_axes
+
+            #     if explained_variance[0] > 0.75 and not "rib" in name.lower() and not "cartilage" in name.lower():
+            #         rot_mat = np.array(major_axes).T
+            #         transformed_vertices = vertices @ rot_mat
+
+            #         min = np.min(transformed_vertices, axis=0)
+            #         max = np.max(transformed_vertices, axis=0)
+            #         box_size = max - min
+            #         mean = (min + max) / 2
+
+            #         corners = np.array([
+            #             [min[0], min[1], min[2]],
+            #             [min[0], min[1], max[2]],
+            #             [min[0], max[1], min[2]],
+            #             [min[0], max[1], max[2]],
+            #             [max[0], min[1], min[2]],
+            #             [max[0], min[1], max[2]],
+            #             [max[0], max[1], min[2]],
+            #             [max[0], max[1], max[2]],
+            #         ])
+            #         corners = corners @ rot_mat.T
+            #         mean = mean @ rot_mat.T
+
+            #         rot_vec = R.from_matrix(rot_mat).as_rotvec()
+            #         self.gui_boxes.append(Box(i, mean, rot_vec, box_size, [1, 0.5, 0.5, 0.3], mean, major_axes, corners))
+            #     else:
+            #         min = np.min(vertices, axis=0)
+            #         max = np.max(vertices, axis=0)
+            #         box_size = max - min
+            #         mean = (min + max) / 2
+            #         self.gui_boxes.append(Box(i, mean, [0, 0, 0], box_size, [0.5, 0.5, 1, 0.3], mean, major_axes))
+
+            # Fourth Trial
+            # Find PCA aligned bounding box for each group
+            # Determine Parent, Joint, PCA align
+            '''
+            # Group First Version
+            for group in [[0, 1],   # Skull
+                          
+                          [2],[3],[4],[5],[6],[7],[8],  # Cervix
+                          [9],[10],[11],[12],[13],[14],[15],[16],[17],[18],[19],[20],  # Thorax
+                          [21],[22],[23],[24],[25],     # Lumbar
+
+                        #   range(2, 9),  # Cervix
+                        #   range(9, 21),  # Thorax
+                        #   range(21, 26),  # Lumbar
+
+                          [26, 27, 71, 72, 73],     # Sacrum, Coccyx and Hip
+
+                        #   [28, 29, 30],  # Sternum
+                        #   range(31, 51),    # Left Ribs
+                        #   range(51, 71),    # Right Ribs,
+
+                          range(28, 71),    # Thoracic Cage
+
+                          [74],[75, 76],    # Left Lower Limb
+
+                        #   [77],[78],        # Left Talus, Calcaneus
+                        #   range(79, 84),    # Left Toe Carpal
+
+                          [77],             # Left Talus
+                          range(78, 84),    # Left Calcaneus, Toe Carpal
+
+                          [84],[85],[86],[87],[88],  # Left Toe Metacarpal
+                          [89],[90],[91],[92],[93],   # Left Toe Phalanges
+                          [94],[95],[96],[97],
+                          [98],[99],[100],[101],[102],
+                          # [103],[104],    # Sesamoid
+                          [105],[106,107],  # Left Lower Limb
+
+                        #   [108],[109],      # Right Talus, Calcaneus
+                        #   range(110, 115),  # Right Toe Carpal
+
+                          [108],      # Right Talus,
+                          range(109, 115),  # Right Calcaneus, Toe Carpal
+
+                            [115],[116],[117],[118],[119],  # Right Toe Metacarpal
+                            [120],[121],[122],[123],[124],   # Right Toe Phalanges
+                            [125],[126],[127],[128],
+                            [129],[130],[131],[132],[133],
+                          # [134],[135],    # Sesamoid
+                          [136],[137],[138],[139],  # Left Upper Limb
+                          range(140, 148),   # Left Carpals
+                          [148],[149],[150],[151],[152],  # Left Metacarpals
+                          [153],[154],[155],[156],[157],[158],[159],[160],[161],[162],[163],[164],[165],[166],    # Left Fingers
+                          [167],[168],[169],[170],  # Right Upper Limb
+                          range(171, 179),   # Right Carpals
+                          [179],[180],[181],[182],[183],  # Right Metacarpals
+                          [184],[185],[186],[187],[188],[189],[190],[191],[192],[193],[194],[195],[196],[197],    # Right Fingers
+                          ]:
+                '''
+            
+            # Group Second Version
+            # ([Group elements], Name, Parent, Joint, PCA align)
+            for info in [([0, 1], "Skull", "C1", None, False),
+                          ([2], "C1", "C2", None, False),
+                          ([3], "C2", "C3", None, False),
+                          ([4], "C3", "C4", None, False),
+                          ([5], "C4", "C5", None, False),
+                          ([6], "C5", "C6", None, False),
+                          ([7], "C6", "C7", None, False),
+                          ([8], "C7", "T1", None, False),
+                          ([9], "T1", "T2", None, False),
+                          ([10], "T2", "T3", None, False),
+                          ([11], "T3", "T4", None, False),
+                          ([12], "T4", "T5", None, False),
+                          ([13], "T5", "T6", None, False),
+                          ([14], "T6", "T7", None, False),
+                          ([15], "T7", "T8", None, False),
+                          ([16], "T8", "T9", None, False),
+                          ([17], "T9", "T10", None, False),
+                          ([18], "T10", "T11", None, False),
+                          ([19], "T11", "T12", None, False),
+                          ([20], "T12", "L1", None, False),
+                          ([21], "L1", "L2", None, False),
+                          ([22], "L2", "L3", None, False),
+                          ([23], "L3", "L4", None, False),
+                          ([24], "L4", "L5", None, False),
+                          ([25], "L5", "Pelvis", None, False),
+                          ([26, 27, 71, 72, 73], "Pelvis", "None", None, False),
+                          ([28, 29, 30], "Sternum", "T1", None, True),
+                          (range(31, 51), "Left Ribs", "T1", None, False),
+                          (range(51, 71), "Right Ribs", "T1", None, False),
+                        #   (range(28, 71), "Thoracic Cage", "T1", None, True),
+                          ([74], "Femur_L", "Pelvis", None, True),
+                          ([75, 76], "Tibia_L", "Femur_L", None, True),
+                          ([77], "Talus_L", "Tibia_L", None, True),
+                          (range(78, 84), "Calcaneus_L", "Toe_Calcaneus_L", None, False),
+                          ([84], "Toe_Metacarpal_1st_L", "Toe_Calcaneus_L", None, True),
+                          ([85], "Toe_Metacarpal_2nd_L", "Toe_Calcaneus_L", None, True),
+                          ([86], "Toe_Metacarpal_3rd_L", "Toe_Calcaneus_L", None, True),
+                          ([87], "Toe_Metacarpal_4th_L", "Toe_Calcaneus_L", None, True),
+                          ([88], "Toe_Metacarpal_5th_L", "Toe_Calcaneus_L", None, True),
+                        #   ([84, 85, 86, 87, 88], "Toe_Metacarpals_L", "Toe_Calcaneus_L", None, False),
+                          ([89], "Toe_Proximal_Palanx_1st_L", "Toe_Metacarpal_1st_L", None, True),
+                          ([90], "Toe_Proximal_Palanx_2nd_L", "Toe_Metacarpal_2nd_L", None, True),
+                          ([91], "Toe_Proximal_Palanx_3rd_L", "Toe_Metacarpal_3rd_L", None, True),
+                          ([92], "Toe_Proximal_Palanx_4th_L", "Toe_Metacarpal_4th_L", None, True),
+                          ([93], "Toe_Proximal_Palanx_5th_L", "Toe_Metacarpal_5th_L", None, True),
+                          ([94], "Toe_Middle_Palanx_2nd_L", "Toe_Proximal_Palanx_2nd_L", None, True),
+                          ([95], "Toe_Middle_Palanx_3rd_L", "Toe_Proximal_Palanx_3rd_L", None, True),
+                          ([96], "Toe_Middle_Palanx_4th_L", "Toe_Proximal_Palanx_4th_L", None, True),
+                          ([97], "Toe_Middle_Palanx_5th_L", "Toe_Proximal_Palanx_5th_L", None, True),
+                          ([98], "Toe_Distal_Palanx_1st_L", "Toe_Proximal_Palanx_1st_L", None, True),
+                          ([99], "Toe_Distal_Palanx_2nd_L", "Toe_Middle_Palanx_2nd_L", None, True),
+                          ([100], "Toe_Distal_Palanx_3rd_L", "Toe_Middle_Palanx_3rd_L", None, True),
+                          ([101], "Toe_Distal_Palanx_4th_L", "Toe_Middle_Palanx_4th_L", None, True),
+                          ([102], "Toe_Distal_Palanx_5th_L", "Toe_Middle_Palanx_5th_L", None, True),
+                          ([105], "Femur_R", "Pelvis", None, True),
+                          ([106, 107], "Tibia_R", "Femur_R", None, True),
+                          ([108], "Talus_R", "Tibia_R", None, True),
+                          (range(109, 115), "Calcaneus_R", "Talus_R", None, False),
+                          ([115], "Toe_Metacarpal_1st_R", "Calcaneus_R", None, True),
+                          ([116], "Toe_Metacarpal_2nd_R", "Calcaneus_R", None, True),
+                          ([117], "Toe_Metacarpal_3rd_R", "Calcaneus_R", None, True),
+                          ([118], "Toe_Metacarpal_4th_R", "Calcaneus_R", None, True),
+                          ([119], "Toe_Metacarpal_5th_R", "Calcaneus_R", None, True),
+                        #   ([115, 116, 117, 118, 119], "Toe_Metacarpals_R", "Calcaneus_R", None, False),
+                          ([120], "Toe_Proximal_Palanx_1st_R", "Toe_Metacarpal_1st_R", None, True),
+                          ([121], "Toe_Proximal_Palanx_2nd_R", "Toe_Metacarpal_2nd_R", None, True),
+                          ([122], "Toe_Proximal_Palanx_3rd_R", "Toe_Metacarpal_3rd_R", None, True),
+                          ([123], "Toe_Proximal_Palanx_4th_R", "Toe_Metacarpal_4th_R", None, True),
+                          ([124], "Toe_Proximal_Palanx_5th_R", "Toe_Metacarpal_5th_R", None, True),
+                          ([125], "Toe_Middle_Palanx_2nd_R", "Toe_Proximal_Palanx_2nd_R", None, True),
+                          ([126], "Toe_Middle_Palanx_3rd_R", "Toe_Proximal_Palanx_3rd_R", None, True),
+                          ([127], "Toe_Middle_Palanx_4th_R", "Toe_Proximal_Palanx_4th_R", None, True),
+                          ([128], "Toe_Middle_Palanx_5th_R", "Toe_Proximal_Palanx_5th_R", None, True),
+                          ([129], "Toe_Distal_Palanx_1st_R", "Toe_Proximal_Palanx_1st_R", None, True),
+                          ([130], "Toe_Distal_Palanx_2nd_R", "Toe_Middle_Palanx_2nd_R", None, True),
+                          ([131], "Toe_Distal_Palanx_3rd_R", "Toe_Middle_Palanx_3rd_R", None, True),
+                          ([132], "Toe_Distal_Palanx_4th_R", "Toe_Middle_Palanx_4th_R", None, True),
+                          ([133], "Toe_Distal_Palanx_5th_R", "Toe_Middle_Palanx_5th_R", None, True),
+                          ([136], "Scapula_L", "Sternum", None, True),
+                          ([137], "Humerus_L", "Scapula_L", None, True),
+                          ([138], "Radius_L", "Humerus_L", None, True),
+                          ([139], "Ulna_L", "Radius_L", None, True),
+                          (range(140, 148), "Carpals_L", "Ulna_L", None, False),
+                          ([148], "Finger_Metacarpal_1st_L", "Carpals_L", None, True),
+                        #   ([149], "Finger_Metacarpal_2nd_L", "Carpals_L", None, True),
+                        #   ([150], "Finger_Metacarpal_3rd_L", "Carpals_L", None, True),
+                        #   ([151], "Finger_Metacarpal_4th_L", "Carpals_L", None, True),
+                        #   ([152], "Finger_Metacarpal_5th_L", "Carpals_L", None, True),
+                          ([149, 150, 151, 152], "Finger_Metacarapls_L", "Carpals_L", None, False),
+                          ([153], "Finger_Proximal_Phalanx_1st_L", "Finger_Metacarpal_1st_L", None, True),
+                          ([154], "Finger_Proximal_Phalanx_2nd_L", "Finger_Metacarpal_2nd_L", None, True),
+                          ([155], "Finger_Proximal_Phalanx_3rd_L", "Finger_Metacarpal_3rd_L", None, True),
+                          ([156], "Finger_Proximal_Phalanx_4th_L", "Finger_Metacarpal_4th_L", None, True),
+                          ([157], "Finger_Proximal_Phalanx_5th_L", "Finger_Metacarpal_5th_L", None, True),
+                          ([158], "Finger_Middle_Phalanx_2nd_L", "Finger_Proximal_Phalanx_2nd_L", None, True),
+                          ([159], "Finger_Middle_Phalanx_3rd_L", "Finger_Proximal_Phalanx_3rd_L", None, True),
+                          ([160], "Finger_Middle_Phalanx_4th_L", "Finger_Proximal_Phalanx_4th_L", None, True),
+                          ([161], "Finger_Middle_Phalanx_5th_L", "Finger_Proximal_Phalanx_5th_L", None, True),
+                          ([162], "Finger_Distal_Phalanx_1st_L", "Finger_Proximal_Phalanx_1st_L", None, True),
+                          ([163], "Finger_Distal_Phalanx_2nd_L", "Finger_Middle_Phalanx_2nd_L", None, True),
+                          ([164], "Finger_Distal_Phalanx_3rd_L", "Finger_Middle_Phalanx_3rd_L", None, True),
+                          ([165], "Finger_Distal_Phalanx_4th_L", "Finger_Middle_Phalanx_4th_L", None, True),
+                          ([166], "Finger_Distal_Phalanx_5th_L", "Finger_Middle_Phalanx_5th_L", None, True),
+                          ([167], "Scapula_R", "Sternum", None, True),
+                          ([168], "Humerus_R", "Scapula_R", None, True),
+                          ([169], "Radius_R", "Humerus_R", None, True),
+                          ([170], "Ulna_R", "Radius_R", None, True),
+                          (range(171, 179), "Carpals_R", "Ulna_R", None, False),
+                          ([179], "Finger_Metacarpal_1st_R", "Carpals_R", None, True),
+                        #   ([180], "Finger_Metacarpal_2nd_R", "Carpals_R", None, True),
+                        #   ([181], "Finger_Metacarpal_3rd_R", "Carpals_R", None, True),
+                        #   ([182], "Finger_Metacarpal_4th_R", "Carpals_R", None, True),
+                        #   ([183], "Finger_Metacarpal_5th_R", "Carpals_R", None, True),
+                          ([180, 181, 182, 183], "Finger_Metacarpals_R", "Carpals_R", None, False),
+                          ([184], "Finger_Proximal_Phalanx_1st_R", "Finger_Metacarpal_1st_R", None, True),
+                          ([185], "Finger_Proximal_Phalanx_2nd_R", "Finger_Metacarpal_2nd_R", None, True),
+                          ([186], "Finger_Proximal_Phalanx_3rd_R", "Finger_Metacarpal_3rd_R", None, True),
+                          ([187], "Finger_Proximal_Phalanx_4th_R", "Finger_Metacarpal_4th_R", None, True),
+                          ([188], "Finger_Proximal_Phalanx_5th_R", "Finger_Metacarpal_5th_R", None, True),
+                          ([189], "Finger_Middle_Phalanx_2nd_R", "Finger_Proximal_Phalanx_2nd_R", None, True),
+                          ([190], "Finger_Middle_Phalanx_3rd_R", "Finger_Proximal_Phalanx_3rd_R", None, True),
+                          ([191], "Finger_Middle_Phalanx_4th_R", "Finger_Proximal_Phalanx_4th_R", None, True),
+                          ([192], "Finger_Middle_Phalanx_5th_R", "Finger_Proximal_Phalanx_5th_R", None, True),
+                          ([193], "Finger_Distal_Phalanx_1st_R", "Finger_Proximal_Phalanx_1st_R", None, True),
+                          ([194], "Finger_Distal_Phalanx_2nd_R", "Finger_Middle_Phalanx_2nd_R", None, True),
+                          ([195], "Finger_Distal_Phalanx_3rd_R", "Finger_Middle_Phalanx_3rd_R", None, True),
+                          ([196], "Finger_Distal_Phalanx_4th_R", "Finger_Middle_Phalanx_4th_R", None, True),
+                          ([197], "Finger_Distal_Phalanx_5th_R", "Finger_Middle_Phalanx_5th_R", None, True),
+                        ]:
+                
+                vertices_all = []
+                group = info[0]
+                for elem in group:
+                    # vertices = self.skel_vertices[self.SKEL_unique_vertices_male[elem]]
+                    vertices = self.SKEL_section_vertex3[elem]
+                    vertices_all.extend(list(vertices))
+
+                name = info[1]
+                isPCA = info[4]
+                if isPCA:
+                    major_axes, _ = find_major_axes(vertices_all)
+                    if np.dot(np.cross(major_axes[0], major_axes[1]), major_axes[2]) < 0:
+                        major_axes = -major_axes
+                
+                    rot_mat = np.array(major_axes).T
+                    transformed_vertices = vertices_all @ rot_mat
+
+                    min = np.min(transformed_vertices, axis=0)
+                    max = np.max(transformed_vertices, axis=0)
+                    box_size = max - min
+                    mean = (min + max) / 2
+                    mean = mean @ rot_mat.T
+
+                    rot_vec = R.from_matrix(rot_mat).as_rotvec()
+                    self.gui_boxes.append(Box(name, mean, rot_vec, box_size, [1, 0.5, 0.5, 0.3], mean, major_axes))
+                else:
+                    min = np.min(vertices_all, axis=0)
+                    max = np.max(vertices_all, axis=0)
+                    box_size = max - min
+                    mean = (min + max) / 2
+                    self.gui_boxes.append(Box(name, mean, [0, 0, 0], box_size, [0.5, 0.5, 1, 0.3], mean))
 
         self.skel_colors = np.ones((2, len(self.skel_vertices), 4)) * 0.8
         # self.skel_colors[:, :, :3] = (self.skel_vertices - min_vertex) / (max_vertex - min_vertex)
