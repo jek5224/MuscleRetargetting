@@ -6,7 +6,7 @@ import sys
 import argparse
 parser = argparse.ArgumentParser(description='Muscle Simulation')
 parser.add_argument('--checkpoint', type=str, default=None, help='Checkpoint_path')
-parser.add_argument('--env_path', type=str, default='data/env.xml', help='Env_path')
+parser.add_argument('--env_path', type=str, default='data/env_skel.xml', help='Env_path')
 
 if __name__ == "__main__":
     args = parser.parse_args()

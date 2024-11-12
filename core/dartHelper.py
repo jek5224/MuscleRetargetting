@@ -299,8 +299,6 @@ def saveSkeletonInfo(path=None, defaultDamping = 0.2):
         
         skel_info[name] = skel
 
-
-
     children = {}
     for name in skel_info.keys():
         children[name] = []
