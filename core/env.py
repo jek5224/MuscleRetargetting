@@ -94,6 +94,10 @@ class Env(gym.Env):
         self.cur_root_T_inv = None
         self.pd_target = None
 
+        self.skel_skel = None
+        self.kp_skel = None
+        self.kv_skel = None
+
         self.reset()
         
         self.num_obs = len(self.get_obs())
@@ -101,7 +105,6 @@ class Env(gym.Env):
         self.observation_space = gym.spaces.Box(low=np.float32(-np.inf), high=np.float32(np.inf), shape=(self.num_obs,))
         self.action_space = gym.spaces.Box(low=np.float32(-np.inf), high=np.float32(np.inf), shape=(self.num_action,))
         self.action_scale = 0.04 # default
-        
 
     def loading_xml(self, metadata):
         ## XML loading
@@ -431,6 +434,14 @@ class Env(gym.Env):
         self.skel.clearExternalForces()
         self.skel.clearConstraintImpulses()
 
+        if self.skel_skel is not None:
+            self.skel_skel.setPositions(np.zeros(self.skel_skel.getNumDofs()))
+            self.skel_skel.setVelocities(np.zeros(self.skel_skel.getNumDofs()))
+
+            self.skel_skel.clearInternalForces()
+            self.skel_skel.clearExternalForces()
+            self.skel_skel.clearConstraintImpulses()
+
         self.world.setTime(0)
               
         self.update_obs()
@@ -478,6 +489,14 @@ class Env(gym.Env):
         self.skel.clearExternalForces()
         self.skel.clearConstraintImpulses()
 
+        if self.skel_skel is not None:
+            self.skel_skel.setPositions(np.zeros(self.skel_skel.getNumDofs()))
+            self.skel_skel.setVelocities(np.zeros(self.skel_skel.getNumDofs()))
+
+            self.skel_skel.clearInternalForces()
+            self.skel_skel.clearExternalForces()
+            self.skel_skel.clearConstraintImpulses()
+
         self.world.setTime(time)
               
         self.update_obs()
@@ -513,7 +532,6 @@ class Env(gym.Env):
         return self.cur_reward
 
     def step(self, action):
-
         self.update_target(self.world.getTime())
         pd_target = np.zeros(self.skel.getNumDofs())
         if self.actuator_type.find("ref") != -1:
@@ -535,10 +553,22 @@ class Env(gym.Env):
             kv[6:] = self.kv[6:] + 0.01 * action[2*len(action)//3:] * self.kv[6:]
         
         pd_target = self.skel.getPositionDifferences(pd_target, -displacement)
-        
+
         self.pd_target = pd_target
         
         mt = None
+
+        if self.skel_skel is not None:
+            action_skel = np.zeros(self.skel_skel.getNumDofs() - self.skel_skel.getJoint(0).getNumDofs())
+            pd_target_skel = np.zeros(self.skel_skel.getNumDofs())
+            displacement_skel = np.zeros(self.skel_skel.getNumDofs())
+            # print(displacement_skel.shape, action_skel.shape, self.action_scale)
+            displacement_skel[6:] = self.action_scale * action_skel[:len(displacement_skel) - 6]
+
+            kp_skel = self.kp_skel
+            kv_skel = self.kv_skel
+
+            pd_target_skel = self.skel_skel.getPositionDifferences(pd_target_skel, -displacement_skel)
 
         rand_idx = np.random.randint(0, int(self.simulationHz//self.controlHz))
         for i in range(int(self.simulationHz//self.controlHz)):
@@ -552,6 +582,11 @@ class Env(gym.Env):
                 self.muscle_activation_levels = self.muscle_nn.get_activation(mt[0], tau[6:])
                 self.muscles.setActivations(self.muscle_activation_levels)
                 self.muscles.applyForceToBody()
+
+            if self.skel_skel is not None:
+                tau_skel = self.skel_skel.getSPDForce(pd_target_skel, kp_skel, kv_skel)
+                self.skel_skel.setForces(np.zeros_like(tau_skel))
+
             self.world.step()
 
             if self.muscles != None:

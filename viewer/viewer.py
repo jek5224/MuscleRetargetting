@@ -19,6 +19,7 @@ from learning.ray_model import loading_network
 from numba import jit
 from core.env import Env
 from core.dartHelper import buildFromInfo, exportSkeleton
+from skeleton_section import SKEL_dart_info
 
 import time
 
@@ -88,7 +89,22 @@ smpl_links = [
 ]
 
 class Box:
-    def __init__(self, name, pos, rot, size, color, joint, axes=None, corners=None):
+    def __init__(self, 
+                 name, 
+                 pos, 
+                 rot, 
+                 size, 
+                 color, 
+                 joint, 
+                 axes=None, 
+                 corners=None, 
+                 parent=None, 
+                 isContact=None,
+                 upper=None,
+                 lower=None,
+                 ori=None,
+                 jointType=None,
+                 axis=None):
         self.name = name
         self.pos = pos
         self.rot = rot
@@ -99,6 +115,13 @@ class Box:
         self.joint = joint
         self.axes = axes
         self.corners = corners
+        self.parent = parent
+        self.isContact = isContact
+        self.upper = upper
+        self.lower = lower
+        self.ori = ori
+        self.jointType = jointType
+        self.axis = axis
 
     def updateRot(self):
         self.rot_angle = np.rad2deg(np.linalg.norm(np.array(self.rot)))
@@ -122,24 +145,24 @@ class Box:
         glPushMatrix()
         glTranslatef(self.pos[0], self.pos[1], self.pos[2])
 
-        # glPushMatrix()
-        # glScalef(0.1, 0.1, 0.1)
-        # if self.axes is not None:
-        #     ax0 = self.axes[0]
-        #     ax1 = self.axes[1]
-        #     ax2 = self.axes[2]
-        #     glBegin(GL_LINES)
-        #     glColor3f(1, 0, 0)
-        #     glVertex3f(0, 0, 0)
-        #     glVertex3f(ax0[0], ax0[1], ax0[2])
-        #     glColor3f(0, 1, 0)
-        #     glVertex3f(0, 0, 0)
-        #     glVertex3f(ax1[0], ax1[1], ax1[2])
-        #     glColor3f(0, 0, 1)
-        #     glVertex3f(0, 0, 0)
-        #     glVertex3f(ax2[0], ax2[1], ax2[2])
-        #     glEnd()
-        # glPopMatrix()
+        glPushMatrix()
+        glScalef(0.1, 0.1, 0.1)
+        if self.axes is not None:
+            ax0 = self.axes[0]
+            ax1 = self.axes[1]
+            ax2 = self.axes[2]
+            glBegin(GL_LINES)
+            glColor3f(1, 0, 0)
+            glVertex3f(0, 0, 0)
+            glVertex3f(ax0[0], ax0[1], ax0[2])
+            glColor3f(0, 1, 0)
+            glVertex3f(0, 0, 0)
+            glVertex3f(ax1[0], ax1[1], ax1[2])
+            glColor3f(0, 0, 1)
+            glVertex3f(0, 0, 0)
+            glVertex3f(ax2[0], ax2[1], ax2[2])
+            glEnd()
+        glPopMatrix()
 
         glRotatef(self.rot_angle, self.rot_axis[0], self.rot_axis[1], self.rot_axis[2])
         glColor4d(self.color[0], self.color[1], self.color[2], self.color[3])
@@ -249,6 +272,7 @@ class GLFWApp():
         self.mouse_x = 0
         self.mouse_y = 0
         self.motion_skel = None
+        
 
         ## Flag         
         self.is_simulation = False
@@ -267,6 +291,9 @@ class GLFWApp():
         self.body_trans = 0.5
         self.draw_muscle = False
         self.draw_line_muscle = True
+        self.muscle_index = 0
+        self.origin_v = None
+        self.insertion_v = None
         self.line_width = 2
         self.draw_bone = False
         self.draw_joint = False
@@ -331,6 +358,8 @@ class GLFWApp():
         self.data_path = './data'
         self.get_skeletons(self.data_path)
 
+        self.skel_skel = None
+        self.draw_dart_skel = True
 
         self.isDrawHalfSkin = True
         self.skin_direction = "right"
@@ -389,6 +418,16 @@ class GLFWApp():
             else:
                 self.skel_pose_base[0][i] = 0
                 self.skel_pose[0][i] = 0
+        # # wrist_deviation_l: 45
+        # self.skel_pose[0][29] = 1.247               # shoulder_r_x
+        # self.skel_pose[0][30] = 0.185               # shoulder_r_y
+        # self.skel_pose[0][31] = -0.416               # shoulder_r_z
+        # self.skel_pose[0][33] = -3/4 * np.pi / 2    # pro_sup_r
+
+        # self.skel_pose[0][39] = -1.385              # shoulder_l_x
+        # self.skel_pose[0][40] = -0.231              # shoulder_l_y
+        # self.skel_pose[0][41] = 0.139               # shoulder_l_z
+        # self.skel_pose[0][43] = -np.pi / 2          # pro_sup_l
         self.skel_betas = torch.zeros(1, self.skel.num_betas).to(self.device) # (1, 10)
         self.skel_trans = torch.zeros(1, 3).to(self.device)
 
@@ -409,8 +448,12 @@ class GLFWApp():
 
         skel_vertices = skel_output.skel_verts.detach().cpu().numpy()[0]
 
-        self.skel_face_start_index = 61102
-        self.skel_face_index = 61102
+        self.skel_face_start_index = 94777
+        self.skel_face_index =  94777
+
+        # range(88733, 91333), (88733, "Atlas, C1")
+        # list(range(89521, 91333)) + list(range(94777, 95763)), (89521, "Axis, C2")
+
         self.isSKELSection = False
         self.SKEL_section_unique = False
         
@@ -451,6 +494,14 @@ class GLFWApp():
 
         self.gui_boxes = []
         self.cand_gui_box = None
+        self.test_skel = None
+        self.test_skel_dofs = None
+        self.draw_skel_dofs = True
+        self.draw_gui_boxes = False
+
+        self.selected_face = None
+        self.selected_point = None
+        self.selected_mesh_index = None
 
         SKEL_section_vertices = self.skel_vertices
         SKEL_section_faces = self.SKEL_section_faces_male if self.skel_gender == "male" else self.SKEL_section_faces_female
@@ -707,7 +758,7 @@ class GLFWApp():
         self.skel_oris = skel_output.joints_ori[0]
         pelvis = self.env.skel.getBodyNode("Pelvis").getCOM() - self.skel_joints[0].cpu().numpy()
         # pelvis = np.array([0, 0, 0])
-        
+
         skel_vertices = skel_output.skel_verts.detach().cpu().numpy()[0] + pelvis
         self.skel_vertices = skel_vertices.copy()
 
@@ -862,7 +913,7 @@ class GLFWApp():
             explained_variance = pca.explained_variance_ratio_  # Proportion of variance along each axis
             
             return major_axes, explained_variance
-        
+
         if len(self.gui_boxes) == 0:
             pass
             
@@ -964,195 +1015,9 @@ class GLFWApp():
             # Fourth Trial
             # Find PCA aligned bounding box for each group
             # Determine Parent, Joint, PCA align
-            '''
-            # Group First Version
-            for group in [[0, 1],   # Skull
-                          
-                          [2],[3],[4],[5],[6],[7],[8],  # Cervix
-                          [9],[10],[11],[12],[13],[14],[15],[16],[17],[18],[19],[20],  # Thorax
-                          [21],[22],[23],[24],[25],     # Lumbar
 
-                        #   range(2, 9),  # Cervix
-                        #   range(9, 21),  # Thorax
-                        #   range(21, 26),  # Lumbar
-
-                          [26, 27, 71, 72, 73],     # Sacrum, Coccyx and Hip
-
-                        #   [28, 29, 30],  # Sternum
-                        #   range(31, 51),    # Left Ribs
-                        #   range(51, 71),    # Right Ribs,
-
-                          range(28, 71),    # Thoracic Cage
-
-                          [74],[75, 76],    # Left Lower Limb
-
-                        #   [77],[78],        # Left Talus, Calcaneus
-                        #   range(79, 84),    # Left Toe Carpal
-
-                          [77],             # Left Talus
-                          range(78, 84),    # Left Calcaneus, Toe Carpal
-
-                          [84],[85],[86],[87],[88],  # Left Toe Metacarpal
-                          [89],[90],[91],[92],[93],   # Left Toe Phalanges
-                          [94],[95],[96],[97],
-                          [98],[99],[100],[101],[102],
-                          # [103],[104],    # Sesamoid
-                          [105],[106,107],  # Left Lower Limb
-
-                        #   [108],[109],      # Right Talus, Calcaneus
-                        #   range(110, 115),  # Right Toe Carpal
-
-                          [108],      # Right Talus,
-                          range(109, 115),  # Right Calcaneus, Toe Carpal
-
-                            [115],[116],[117],[118],[119],  # Right Toe Metacarpal
-                            [120],[121],[122],[123],[124],   # Right Toe Phalanges
-                            [125],[126],[127],[128],
-                            [129],[130],[131],[132],[133],
-                          # [134],[135],    # Sesamoid
-                          [136],[137],[138],[139],  # Left Upper Limb
-                          range(140, 148),   # Left Carpals
-                          [148],[149],[150],[151],[152],  # Left Metacarpals
-                          [153],[154],[155],[156],[157],[158],[159],[160],[161],[162],[163],[164],[165],[166],    # Left Fingers
-                          [167],[168],[169],[170],  # Right Upper Limb
-                          range(171, 179),   # Right Carpals
-                          [179],[180],[181],[182],[183],  # Right Metacarpals
-                          [184],[185],[186],[187],[188],[189],[190],[191],[192],[193],[194],[195],[196],[197],    # Right Fingers
-                          ]:
-                '''
-            
-            # Group Second Version
-            # ([Group elements], Name, Parent, Joint, PCA align)
-            for info in [([0, 1], "Skull", "C1", None, False),
-                          ([2], "C1", "C2", None, False),
-                          ([3], "C2", "C3", None, False),
-                          ([4], "C3", "C4", None, False),
-                          ([5], "C4", "C5", None, False),
-                          ([6], "C5", "C6", None, False),
-                          ([7], "C6", "C7", None, False),
-                          ([8], "C7", "T1", None, False),
-                          ([9], "T1", "T2", None, False),
-                          ([10], "T2", "T3", None, False),
-                          ([11], "T3", "T4", None, False),
-                          ([12], "T4", "T5", None, False),
-                          ([13], "T5", "T6", None, False),
-                          ([14], "T6", "T7", None, False),
-                          ([15], "T7", "T8", None, False),
-                          ([16], "T8", "T9", None, False),
-                          ([17], "T9", "T10", None, False),
-                          ([18], "T10", "T11", None, False),
-                          ([19], "T11", "T12", None, False),
-                          ([20], "T12", "L1", None, False),
-                          ([21], "L1", "L2", None, False),
-                          ([22], "L2", "L3", None, False),
-                          ([23], "L3", "L4", None, False),
-                          ([24], "L4", "L5", None, False),
-                          ([25], "L5", "Pelvis", None, False),
-                          ([26, 27, 71, 72, 73], "Pelvis", "None", None, False),
-                          ([28, 29, 30], "Sternum", "T1", None, True),
-                          (range(31, 51), "Left Ribs", "T1", None, False),
-                          (range(51, 71), "Right Ribs", "T1", None, False),
-                        #   (range(28, 71), "Thoracic Cage", "T1", None, True),
-                          ([74], "Femur_L", "Pelvis", None, True),
-                          ([75, 76], "Tibia_L", "Femur_L", None, True),
-                          ([77], "Talus_L", "Tibia_L", None, True),
-                          (range(78, 84), "Calcaneus_L", "Toe_Calcaneus_L", None, False),
-                          ([84], "Toe_Metacarpal_1st_L", "Toe_Calcaneus_L", None, True),
-                          ([85], "Toe_Metacarpal_2nd_L", "Toe_Calcaneus_L", None, True),
-                          ([86], "Toe_Metacarpal_3rd_L", "Toe_Calcaneus_L", None, True),
-                          ([87], "Toe_Metacarpal_4th_L", "Toe_Calcaneus_L", None, True),
-                          ([88], "Toe_Metacarpal_5th_L", "Toe_Calcaneus_L", None, True),
-                        #   ([84, 85, 86, 87, 88], "Toe_Metacarpals_L", "Toe_Calcaneus_L", None, False),
-                          ([89], "Toe_Proximal_Palanx_1st_L", "Toe_Metacarpal_1st_L", None, True),
-                          ([90], "Toe_Proximal_Palanx_2nd_L", "Toe_Metacarpal_2nd_L", None, True),
-                          ([91], "Toe_Proximal_Palanx_3rd_L", "Toe_Metacarpal_3rd_L", None, True),
-                          ([92], "Toe_Proximal_Palanx_4th_L", "Toe_Metacarpal_4th_L", None, True),
-                          ([93], "Toe_Proximal_Palanx_5th_L", "Toe_Metacarpal_5th_L", None, True),
-                          ([94], "Toe_Middle_Palanx_2nd_L", "Toe_Proximal_Palanx_2nd_L", None, True),
-                          ([95], "Toe_Middle_Palanx_3rd_L", "Toe_Proximal_Palanx_3rd_L", None, True),
-                          ([96], "Toe_Middle_Palanx_4th_L", "Toe_Proximal_Palanx_4th_L", None, True),
-                          ([97], "Toe_Middle_Palanx_5th_L", "Toe_Proximal_Palanx_5th_L", None, True),
-                          ([98], "Toe_Distal_Palanx_1st_L", "Toe_Proximal_Palanx_1st_L", None, True),
-                          ([99], "Toe_Distal_Palanx_2nd_L", "Toe_Middle_Palanx_2nd_L", None, True),
-                          ([100], "Toe_Distal_Palanx_3rd_L", "Toe_Middle_Palanx_3rd_L", None, True),
-                          ([101], "Toe_Distal_Palanx_4th_L", "Toe_Middle_Palanx_4th_L", None, True),
-                          ([102], "Toe_Distal_Palanx_5th_L", "Toe_Middle_Palanx_5th_L", None, True),
-                          ([105], "Femur_R", "Pelvis", None, True),
-                          ([106, 107], "Tibia_R", "Femur_R", None, True),
-                          ([108], "Talus_R", "Tibia_R", None, True),
-                          (range(109, 115), "Calcaneus_R", "Talus_R", None, False),
-                          ([115], "Toe_Metacarpal_1st_R", "Calcaneus_R", None, True),
-                          ([116], "Toe_Metacarpal_2nd_R", "Calcaneus_R", None, True),
-                          ([117], "Toe_Metacarpal_3rd_R", "Calcaneus_R", None, True),
-                          ([118], "Toe_Metacarpal_4th_R", "Calcaneus_R", None, True),
-                          ([119], "Toe_Metacarpal_5th_R", "Calcaneus_R", None, True),
-                        #   ([115, 116, 117, 118, 119], "Toe_Metacarpals_R", "Calcaneus_R", None, False),
-                          ([120], "Toe_Proximal_Palanx_1st_R", "Toe_Metacarpal_1st_R", None, True),
-                          ([121], "Toe_Proximal_Palanx_2nd_R", "Toe_Metacarpal_2nd_R", None, True),
-                          ([122], "Toe_Proximal_Palanx_3rd_R", "Toe_Metacarpal_3rd_R", None, True),
-                          ([123], "Toe_Proximal_Palanx_4th_R", "Toe_Metacarpal_4th_R", None, True),
-                          ([124], "Toe_Proximal_Palanx_5th_R", "Toe_Metacarpal_5th_R", None, True),
-                          ([125], "Toe_Middle_Palanx_2nd_R", "Toe_Proximal_Palanx_2nd_R", None, True),
-                          ([126], "Toe_Middle_Palanx_3rd_R", "Toe_Proximal_Palanx_3rd_R", None, True),
-                          ([127], "Toe_Middle_Palanx_4th_R", "Toe_Proximal_Palanx_4th_R", None, True),
-                          ([128], "Toe_Middle_Palanx_5th_R", "Toe_Proximal_Palanx_5th_R", None, True),
-                          ([129], "Toe_Distal_Palanx_1st_R", "Toe_Proximal_Palanx_1st_R", None, True),
-                          ([130], "Toe_Distal_Palanx_2nd_R", "Toe_Middle_Palanx_2nd_R", None, True),
-                          ([131], "Toe_Distal_Palanx_3rd_R", "Toe_Middle_Palanx_3rd_R", None, True),
-                          ([132], "Toe_Distal_Palanx_4th_R", "Toe_Middle_Palanx_4th_R", None, True),
-                          ([133], "Toe_Distal_Palanx_5th_R", "Toe_Middle_Palanx_5th_R", None, True),
-                          ([136], "Scapula_L", "Sternum", None, True),
-                          ([137], "Humerus_L", "Scapula_L", None, True),
-                          ([138], "Radius_L", "Humerus_L", None, True),
-                          ([139], "Ulna_L", "Radius_L", None, True),
-                          (range(140, 148), "Carpals_L", "Ulna_L", None, False),
-                          ([148], "Finger_Metacarpal_1st_L", "Carpals_L", None, True),
-                        #   ([149], "Finger_Metacarpal_2nd_L", "Carpals_L", None, True),
-                        #   ([150], "Finger_Metacarpal_3rd_L", "Carpals_L", None, True),
-                        #   ([151], "Finger_Metacarpal_4th_L", "Carpals_L", None, True),
-                        #   ([152], "Finger_Metacarpal_5th_L", "Carpals_L", None, True),
-                          ([149, 150, 151, 152], "Finger_Metacarapls_L", "Carpals_L", None, False),
-                          ([153], "Finger_Proximal_Phalanx_1st_L", "Finger_Metacarpal_1st_L", None, True),
-                          ([154], "Finger_Proximal_Phalanx_2nd_L", "Finger_Metacarpal_2nd_L", None, True),
-                          ([155], "Finger_Proximal_Phalanx_3rd_L", "Finger_Metacarpal_3rd_L", None, True),
-                          ([156], "Finger_Proximal_Phalanx_4th_L", "Finger_Metacarpal_4th_L", None, True),
-                          ([157], "Finger_Proximal_Phalanx_5th_L", "Finger_Metacarpal_5th_L", None, True),
-                          ([158], "Finger_Middle_Phalanx_2nd_L", "Finger_Proximal_Phalanx_2nd_L", None, True),
-                          ([159], "Finger_Middle_Phalanx_3rd_L", "Finger_Proximal_Phalanx_3rd_L", None, True),
-                          ([160], "Finger_Middle_Phalanx_4th_L", "Finger_Proximal_Phalanx_4th_L", None, True),
-                          ([161], "Finger_Middle_Phalanx_5th_L", "Finger_Proximal_Phalanx_5th_L", None, True),
-                          ([162], "Finger_Distal_Phalanx_1st_L", "Finger_Proximal_Phalanx_1st_L", None, True),
-                          ([163], "Finger_Distal_Phalanx_2nd_L", "Finger_Middle_Phalanx_2nd_L", None, True),
-                          ([164], "Finger_Distal_Phalanx_3rd_L", "Finger_Middle_Phalanx_3rd_L", None, True),
-                          ([165], "Finger_Distal_Phalanx_4th_L", "Finger_Middle_Phalanx_4th_L", None, True),
-                          ([166], "Finger_Distal_Phalanx_5th_L", "Finger_Middle_Phalanx_5th_L", None, True),
-                          ([167], "Scapula_R", "Sternum", None, True),
-                          ([168], "Humerus_R", "Scapula_R", None, True),
-                          ([169], "Radius_R", "Humerus_R", None, True),
-                          ([170], "Ulna_R", "Radius_R", None, True),
-                          (range(171, 179), "Carpals_R", "Ulna_R", None, False),
-                          ([179], "Finger_Metacarpal_1st_R", "Carpals_R", None, True),
-                        #   ([180], "Finger_Metacarpal_2nd_R", "Carpals_R", None, True),
-                        #   ([181], "Finger_Metacarpal_3rd_R", "Carpals_R", None, True),
-                        #   ([182], "Finger_Metacarpal_4th_R", "Carpals_R", None, True),
-                        #   ([183], "Finger_Metacarpal_5th_R", "Carpals_R", None, True),
-                          ([180, 181, 182, 183], "Finger_Metacarpals_R", "Carpals_R", None, False),
-                          ([184], "Finger_Proximal_Phalanx_1st_R", "Finger_Metacarpal_1st_R", None, True),
-                          ([185], "Finger_Proximal_Phalanx_2nd_R", "Finger_Metacarpal_2nd_R", None, True),
-                          ([186], "Finger_Proximal_Phalanx_3rd_R", "Finger_Metacarpal_3rd_R", None, True),
-                          ([187], "Finger_Proximal_Phalanx_4th_R", "Finger_Metacarpal_4th_R", None, True),
-                          ([188], "Finger_Proximal_Phalanx_5th_R", "Finger_Metacarpal_5th_R", None, True),
-                          ([189], "Finger_Middle_Phalanx_2nd_R", "Finger_Proximal_Phalanx_2nd_R", None, True),
-                          ([190], "Finger_Middle_Phalanx_3rd_R", "Finger_Proximal_Phalanx_3rd_R", None, True),
-                          ([191], "Finger_Middle_Phalanx_4th_R", "Finger_Proximal_Phalanx_4th_R", None, True),
-                          ([192], "Finger_Middle_Phalanx_5th_R", "Finger_Proximal_Phalanx_5th_R", None, True),
-                          ([193], "Finger_Distal_Phalanx_1st_R", "Finger_Proximal_Phalanx_1st_R", None, True),
-                          ([194], "Finger_Distal_Phalanx_2nd_R", "Finger_Middle_Phalanx_2nd_R", None, True),
-                          ([195], "Finger_Distal_Phalanx_3rd_R", "Finger_Middle_Phalanx_3rd_R", None, True),
-                          ([196], "Finger_Distal_Phalanx_4th_R", "Finger_Middle_Phalanx_4th_R", None, True),
-                          ([197], "Finger_Distal_Phalanx_5th_R", "Finger_Middle_Phalanx_5th_R", None, True),
-                        ]:
-                
+            # ([Group elements], Name, Parent, Joint, PCA align, Contact)
+            for info in SKEL_dart_info:
                 vertices_all = []
                 group = info[0]
                 for elem in group:
@@ -1161,7 +1026,15 @@ class GLFWApp():
                     vertices_all.extend(list(vertices))
 
                 name = info[1]
-                isPCA = info[4]
+                parent = info[2]
+                joint = info[3]
+                isPCA = info[4]      
+                isContact = info[5]
+                upper = info[6]
+                lower = info[7]
+                jointType = info[8]
+                
+                # isPCA based partwise bounding box
                 if isPCA:
                     major_axes, _ = find_major_axes(vertices_all)
                     if np.dot(np.cross(major_axes[0], major_axes[1]), major_axes[2]) < 0:
@@ -1177,13 +1050,130 @@ class GLFWApp():
                     mean = mean @ rot_mat.T
 
                     rot_vec = R.from_matrix(rot_mat).as_rotvec()
-                    self.gui_boxes.append(Box(name, mean, rot_vec, box_size, [1, 0.5, 0.5, 0.3], mean, major_axes))
                 else:
-                    min = np.min(vertices_all, axis=0)
-                    max = np.max(vertices_all, axis=0)
-                    box_size = max - min
-                    mean = (min + max) / 2
-                    self.gui_boxes.append(Box(name, mean, [0, 0, 0], box_size, [0.5, 0.5, 1, 0.3], mean))
+                    if len(vertices_all) == 0:
+                        if name[-1] == "R":
+                            SC = np.mean(self.skel_vertices[[101422, 100837]], axis=0)
+                            AC = self.skel_vertices[180303]
+                        else:
+                            SC = np.mean(self.skel_vertices[[100621, 100807]], axis=0)
+                            AC = self.skel_vertices[224083]
+                        SC2AC = AC - SC
+                        length = np.linalg.norm(SC2AC)
+                        box_size = [0.02, 0.02, length]
+
+                        SC2AC = SC2AC / length
+                        z = np.array([0, 0, 1])
+
+                        axis = np.cross(z, SC2AC)
+                        s = np.linalg.norm(axis)
+                        axis /= s
+                        c = np.dot(z, SC2AC)
+                        angle = np.arctan2(s, c)
+
+                        mean = (SC + AC) / 2
+                        rot_vec = angle * axis
+                        major_axes = None
+                    else:
+                        min = np.min(vertices_all, axis=0)
+                        max = np.max(vertices_all, axis=0)
+                        box_size = max - min
+                        mean = (min + max) / 2
+
+                        rot_vec = [0, 0, 0]
+                        major_axes = None
+                color = [0.5, 0.5, 1, 0.3]
+
+                # # Always no PCA
+                # min = np.min(vertices_all, axis=0)
+                # max = np.max(vertices_all, axis=0)
+                # box_size = max - min
+                # mean = (min + max) / 2
+                # rot_vec = [0, 0, 0]
+                # color = [0.5, 0.5, 0.5, 0.3]
+                # major_axes = None
+
+                # # Always PCA
+                # major_axes, _ = find_major_axes(vertices_all)
+                # if np.dot(np.cross(major_axes[0], major_axes[1]), major_axes[2]) < 0:
+                #     major_axes = -major_axes
+            
+                # rot_mat = np.array(major_axes).T
+                # transformed_vertices = vertices_all @ rot_mat
+
+                # min = np.min(transformed_vertices, axis=0)
+                # max = np.max(transformed_vertices, axis=0)
+                # box_size = max - min
+                # mean = (min + max) / 2
+                # mean = mean @ rot_mat.T
+                # rot_vec = R.from_matrix(rot_mat).as_rotvec()
+                # color = [1, 0.5, 0.5, 0.3]
+
+                if joint is not None:
+                    if joint[0] == "Joint":
+                        pelvis = self.env.skel.getBodyNode("Pelvis").getCOM() - self.skel_joints[0].cpu().numpy()
+                        joint_index = joint[1]
+                        joint_pos = self.skel_joints[joint_index].cpu() + pelvis
+
+                        ori = self.skel_oris[joint[1]].cpu().numpy()
+                    elif joint[0] == "Mid":
+                        section_indices = joint[1]
+                        vertices_joint_all = []
+                        for elem in section_indices:
+                            # vertices = self.skel_vertices[self.SKEL_unique_vertices_male[elem]]
+                            vertices_joint = self.SKEL_section_vertex3[elem]
+                            vertices_joint_all.extend(list(vertices_joint))
+                        joint_pos = np.mean(vertices_joint_all, axis=0)
+                        ori = np.eye(3)
+                    elif joint[0] == "Face":
+                        start, section_name = joint[2]
+
+                        indices = np.array(joint[1]) -start
+                        vertices_joint_all = []
+                        for index in indices:
+                            section_i = self.SKEL_section_index_male[section_name]
+                            vertices_joint = self.SKEL_section_vertex3[section_i][index*3:index*3+3]
+                            vertices_joint_all.extend(vertices_joint)
+                        joint_pos = np.mean(vertices_joint_all, axis=0)
+                        ori = np.eye(3)
+                else:
+                    joint_pos = mean
+                    ori = None
+
+                # 30 Knee R
+                # 43 Knee L
+                # 62 Elbow R
+                # 63 Sup R
+                # 91 Elbow L
+                # 92 Sup L
+                if jointType == "Revolute":
+                    rotvec = R.from_matrix(ori).as_rotvec()
+                    angle = np.linalg.norm(rotvec)
+                    axis = ori / angle if angle != 0 else np.array([0, 0, 1])
+                    if "Tibia" in name:
+                        axis = axis[0]
+                    elif "Radius" in name:  # 91 Elbow L, 92 Sup L
+                        axis = axis[0]
+                    else:
+                        axis = axis[1]
+                else:
+                    axis = None
+
+                self.gui_boxes.append(Box(name, 
+                                          mean, 
+                                          rot_vec, 
+                                          box_size, 
+                                          color, 
+                                          joint_pos, 
+                                          axes=major_axes, 
+                                          parent=parent, 
+                                          isContact=isContact,
+                                          upper=upper,
+                                          lower=lower,
+                                          ori=ori,
+                                          jointType=jointType,
+                                          axis=axis
+                                          ))
 
         self.skel_colors = np.ones((2, len(self.skel_vertices), 4)) * 0.8
         # self.skel_colors[:, :, :3] = (self.skel_vertices - min_vertex) / (max_vertex - min_vertex)
@@ -1766,10 +1756,9 @@ class GLFWApp():
 
         # self.update_smpl()
 
-        self.fitSkel2SMPL()
+        # self.fitSkel2SMPL()
         self.setObjScale()
-        self.newSkeleton()        
-        
+        self.newSkeleton()
     
     def loadNetwork(self, path):
         self.nn, mus_nn, env_str = loading_network(path)
@@ -1786,12 +1775,110 @@ class GLFWApp():
                 self.trackball.start_ball(self.mouse_x, self.height - self.mouse_y)
             elif button == glfw.MOUSE_BUTTON_RIGHT:
                 self.translate = True
+
+            if button == glfw.MOUSE_BUTTON_MIDDLE:
+                xpos, ypos = glfw.get_cursor_pos(self.window)
+                selected_face, selected_point, selected_mesh_index = self.pick_face(xpos, ypos, self.width, self.height)
+                if selected_face is not None:
+                    self.selected_face = selected_face
+                    self.selected_point = selected_point
+                    self.selected_mesh_index = selected_mesh_index
+                print(self.selected_face, self.selected_point, self.SKEL_section_names_male[self.selected_mesh_index])
+
         elif action == glfw.RELEASE:
             self.mouse_down = False
             if button == glfw.MOUSE_BUTTON_LEFT:
                 self.rotate = False
             elif button == glfw.MOUSE_BUTTON_RIGHT:
                 self.translate = False
+
+    def get_ray_from_cursor(self, cursor_x, cursor_y, screen_width, screen_height):
+        projection_matrix = glGetDoublev(GL_PROJECTION_MATRIX)
+        modelview_matrix = glGetDoublev(GL_MODELVIEW_MATRIX)
+        viewport = glGetIntegerv(GL_VIEWPORT)
+
+        x = cursor_x
+        y = screen_height - cursor_y  # Convert GLFW coordinates to OpenGL
+        near = gluUnProject(x, y, 0.0, modelview_matrix, projection_matrix, viewport)
+        far = gluUnProject(x, y, 1.0, modelview_matrix, projection_matrix, viewport)
+
+        ray_origin = np.array(near)
+        ray_direction = np.array(far) - ray_origin
+        ray_direction /= np.linalg.norm(ray_direction)
+        return ray_origin, ray_direction
+
+    def ray_intersects_triangles(self, ray_origin, ray_direction, v0, v1, v2):
+        # Expand ray_direction to match the shape of v0, v1, and v2
+        ray_direction = np.expand_dims(ray_direction, axis=0)  # Shape (1, 3)
+        
+        # Prepare edge vectors
+        edge1 = v1 - v0
+        edge2 = v2 - v0
+        
+        # Calculate determinants
+        h = np.cross(ray_direction, edge2)  # Cross product with ray direction, shape (num_faces, 3)
+        a = np.einsum('ij,ij->i', edge1, h)  # Dot product with shape (num_faces,)
+
+        # Filter out triangles that are parallel to the ray (|a| close to zero)
+        epsilon = 1e-7
+        mask = np.abs(a) > epsilon
+        if not np.any(mask):
+            return None, None  # No intersection
+
+        # Calculate parameters u and v for triangles that are not parallel
+        f = 1.0 / a[mask]
+        s = ray_origin - v0[mask]
+        u = f * np.einsum('ij,ij->i', s, h[mask])
+        valid_u = (u >= 0) & (u <= 1)
+
+        # Continue with valid triangles only
+        q = np.cross(s[valid_u], edge1[mask][valid_u])
+        v = f[valid_u] * np.einsum('ij,ij->i', ray_direction.repeat(len(q), axis=0), q)
+        valid_v = (v >= 0) & (u[valid_u] + v <= 1)
+
+        # Calculate intersection points for the remaining triangles
+        t = f[valid_u][valid_v] * np.einsum('ij,ij->i', edge2[mask][valid_u][valid_v], q[valid_v])
+        valid_intersections = t > epsilon  # Ignore intersections behind the ray origin
+
+        if np.any(valid_intersections):
+            # Compute intersection points and return the closest one
+            intersection_points = ray_origin + np.outer(t[valid_intersections], ray_direction.squeeze())
+            distances = np.linalg.norm(intersection_points - ray_origin, axis=1)
+            closest_index = np.argmin(distances)
+            closest_point = intersection_points[closest_index]
+            closest_face_index = np.where(mask)[0][valid_u][valid_v][closest_index]
+            
+            return closest_face_index, closest_point
+
+        return None, None  # No intersection
+    
+    def pick_face(self, cursor_x, cursor_y, screen_width, screen_height):
+        ray_origin, ray_direction = self.get_ray_from_cursor(cursor_x, cursor_y, screen_width, screen_height)
+
+        closest_face = None
+        closest_point = None
+        closest_mesh_index = None
+        closest_distance = float('inf')
+        
+        SKEL_section_toggle = self.SKEL_section_toggle_male if self.skel_gender == "male" else self.SKEL_section_toggle_female
+        for i, isOn in enumerate(SKEL_section_toggle):
+            if isOn:
+                vertex3 = self.SKEL_section_vertex3[i]
+
+                v0 = vertex3[0::3]
+                v1 = vertex3[1::3]
+                v2 = vertex3[2::3]
+
+                face, point = self.ray_intersects_triangles(ray_origin, ray_direction, v0, v1, v2)
+                if point is not None:
+                    distance = np.linalg.norm(point - ray_origin)
+                    if distance < closest_distance:
+                        closest_distance = distance
+                        closest_face = face
+                        closest_point = point
+                        closest_mesh_index = i
+
+        return closest_face, closest_point, closest_mesh_index
 
     ## mouse move callback function
     def mouseMove(self, xpos, ypos):
@@ -1870,11 +1957,33 @@ class GLFWApp():
             
             glScalef(self.skel_scale, self.skel_scale, self.skel_scale)
 
-            self.meshes[bn.getName()].draw(np.array([color[0], color[1], color[2], self.obj_trans]))
+            name = list(self.env.muscle_info.keys())[self.muscle_index]
+            wps = self.env.muscle_info[name]['waypoints']
+            origin_body = wps[0]['body']
+            insertion_body = wps[-1]['body']
+
+            if bn.getName() in [origin_body, insertion_body]:
+                self.meshes[bn.getName()].draw(np.array([1, 1, 0, self.obj_trans]))
+
+                glColor4d(1,0,0,1)
+                for i in range(len(self.meshes[bn.getName()].new_vertices_4) // 4):
+                    v0, v1, v2, v3 = self.meshes[bn.getName()].new_vertices_4[i * 4 : (i + 1) * 4]
+                    glBegin(GL_LINE_LOOP)
+                    glVertex3f(v0[0], v0[1], v0[2])
+                    glVertex3f(v1[0], v1[1], v1[2])
+                    glVertex3f(v2[0], v2[1], v2[2])
+                    glVertex3f(v3[0], v3[1], v3[2])
+                    glEnd()
+
+            else:
+                self.meshes[bn.getName()].draw(np.array([color[0], color[1], color[2], self.obj_trans]))
+
+            # self.meshes[bn.getName()].draw(np.array([color[0], color[1], color[2], self.obj_trans]))
 
             glPopMatrix()
 
         glPopMatrix()
+
 
     def drawSkeleton(self, pos, color = np.array([0.5, 0.5, 0.5, 0.5])):
         self.motion_skel.setPositions(pos)
@@ -1899,7 +2008,73 @@ class GLFWApp():
                 glPopMatrix()
             glPopMatrix()
         pass
-    
+
+    def drawSKELskel(self, pos, color = np.array([0.5, 0.5, 1, 0.5])):
+        self.skel_skel.setPositions(pos)
+
+        for bn in self.skel_skel.getBodyNodes():
+            glPushMatrix()
+            bnWorldTransform = bn.getWorldTransform().matrix().transpose()
+            glMultMatrixd(bnWorldTransform)
+            j = bn.getParentJoint()
+            jTransform = j.getTransformFromChildBodyNode().matrix().transpose()
+            glMultMatrixd(jTransform)
+
+            glColor4d(0, 0, 0, 1)
+            mygl.draw_sphere(0.005 * np.sqrt(2), 10, 10)
+            glPopMatrix()
+
+        # for bn in self.skel_skel.getBodyNodes():
+        #     transform = bn.getWorldTransform().matrix() @ bn.getParentJoint().getTransformFromChildBodyNode().matrix()
+        #     t_parent = transform[:3, 3]
+
+        #     glPushMatrix()
+        #     numChild = bn.getNumChildBodyNodes()
+        #     for i in range(numChild):
+        #         bn_child = bn.getChildBodyNode(i)
+        #         transform_child = bn_child.getWorldTransform().matrix() @ bn_child.getParentJoint().getTransformFromChildBodyNode().matrix()
+        #         t_child = transform_child[:3, 3]
+
+        #         glPushMatrix()
+        #         m = (t_parent + t_child) / 2
+        #         p2c = t_child - t_parent
+        #         length = np.linalg.norm(p2c)
+        #         p2c = p2c / length if length != 0 else np.array([0, 0, 1])
+        #         z = np.array([0, 0, 1])
+
+        #         axis = np.cross(z, p2c)
+        #         s = np.linalg.norm(axis)
+        #         axis = axis / s if s != 0 else np.array([0, 0, 1])
+        #         c = np.dot(z, p2c)
+        #         angle = np.rad2deg(np.arctan2(s, c))
+                
+        #         glTranslatef(m[0], m[1], m[2])
+        #         glRotatef(angle, axis[0], axis[1], axis[2])
+        #         mygl.draw_cube([0.01, 0.01, length])
+        #         glPopMatrix()
+        #     glPopMatrix()
+
+        for bn in self.skel_skel.getBodyNodes():
+            glPushMatrix()
+            glMultMatrixd(bn.getWorldTransform().matrix().transpose())
+            
+            for sn in bn.getShapeNodes():
+                if not sn:
+                    return
+                va = sn.getVisualAspect()
+
+                if not va or va.isHidden():
+                    return
+                
+                glPushMatrix()
+                
+                glMultMatrixd(sn.getRelativeTransform().matrix().transpose())
+                self.drawShape(sn.getShape(), color)  
+                glPopMatrix()
+            glPopMatrix()
+
+        pass
+
     def drawJoint(self, pos, color = np.array([0.0, 0.0, 0.0, 0.5])):
         self.motion_skel.setPositions(pos)
 
@@ -1998,26 +2173,28 @@ class GLFWApp():
             glColor4d(color[0], color[1], color[2], color[3])
         if self.draw_line_muscle:
             glLineWidth(self.line_width)
-            idx = 0
-            for m_wps in self.env.muscle_pos:
+            for idx, m_wps in enumerate(self.env.muscle_pos):
                 a = self.env.muscle_activation_levels[idx]
                 if color is None:
-                    glColor4d(1.0 * a,  0.2 * a, 0.2 * a, 0.2 + 0.6 * a)
+                    if idx == self.muscle_index:
+                        glColor4d(10, 0, 0, 1)
+                    else:
+                        glColor4d(1.0 * a,  0.2 * a, 0.2 * a, 0.2 + 0.6 * a)
+                    # glColor4d(1.0 * a,  0.2 * a, 0.2 * a, 0.2 + 0.6 * a)
                 glBegin(GL_LINE_STRIP)
                 for wp in m_wps:
                     glVertex3f(wp[0], wp[1], wp[2])
                 glEnd() 
 
+                # # Draw Origin an dInsertion Points
                 # glColor4d(1, 0, 0, 1)
                 # for i in [0, -1]:
                 #     glPushMatrix()
                 #     glTranslatef(m_wps[i][0], m_wps[i][1], m_wps[i][2])
                 #     mygl.draw_sphere(0.003, 10, 10)
                 #     glPopMatrix()
-                idx += 1
         else:
-            idx = 0
-            for m_wps in self.env.muscle_pos:
+            for idx, m_wps in enumerate(self.env.muscle_pos):
                 a = self.env.muscle_activation_levels[idx]
                 if color is None:
                     glColor4d(1.0 * a,  0.2 * a, 0.2 * a, 0.2 + 0.6 * a)
@@ -2042,8 +2219,15 @@ class GLFWApp():
                     glRotatef(angle, axis[0], axis[1], axis[2])
                     mygl.draw_cube([0.01, 0.01, length])
                     glPopMatrix()
-                idx += 1
-            
+                    
+        if self.origin_v is not None:
+            glColor4d(10, 0, 0, 1)
+            for v in [self.origin_v, self.insertion_v]:
+                glPushMatrix()
+                glTranslatef(v[0], v[1], v[2])
+                mygl.draw_sphere(0.002, 5, 5)
+                glPopMatrix()    
+
     def drawSimFrame(self):
         initGL()
         
@@ -2067,7 +2251,8 @@ class GLFWApp():
         mygl.drawGround(-1E-3)
 
         self.drawSKELCharacter()
-        self.drawGuiBoxes()
+        if self.draw_gui_boxes:
+            self.drawGuiBoxes()
 
         if self.mouse_down:
             glLineWidth(1.5)
@@ -2089,10 +2274,10 @@ class GLFWApp():
             self.drawBone(self.env.skel.getPositions())
         if self.draw_joint:
             self.drawJoint(self.env.skel.getPositions())
-        if self.draw_muscle:
-            self.drawMuscles()
         if self.draw_obj:
             self.drawObj(self.env.skel.getPositions())
+        if self.draw_muscle:
+            self.drawMuscles()
         if self.draw_body:
             self.drawSkeleton(self.env.skel.getPositions(), np.array([0.5, 0.5, 0.5, self.body_trans]))
 
@@ -2142,6 +2327,11 @@ class GLFWApp():
             if self.draw_muscle:
                 self.drawTestMuscles(np.array([0.1, 0.1, 0.1, 0.1]))
             self.drawSkeleton(self.test_dofs, np.array([0.3, 1.0, 1.0, 0.5]))
+
+        if self.draw_dart_skel and self.env.skel_skel is not None:
+                self.drawSKELskel(self.env.skel_skel.getPositions())
+        if self.test_skel is not None and self.draw_skel_dofs:
+                self.drawSKELskel(self.test_skel_dofs)
 
         if self.draw_shadow:
             shadow_color = np.array([0.3, 0.3, 0.3, 1.0])
@@ -2295,11 +2485,11 @@ class GLFWApp():
                 mygl.draw_sphere(0.005 * np.sqrt(2), 10, 10)
                 glPopMatrix()
 
-                glPushMatrix()
-                glColor3f(1, 0, 0)
-                glTranslatef(joint_orig_p[0], joint_orig_p[1], joint_orig_p[2])
-                mygl.draw_sphere(0.005 * np.sqrt(2), 10, 10)
-                glPopMatrix()
+                # glPushMatrix()
+                # glColor3f(1, 0, 0)
+                # glTranslatef(joint_orig_p[0], joint_orig_p[1], joint_orig_p[2])
+                # mygl.draw_sphere(0.005 * np.sqrt(2), 10, 10)
+                # glPopMatrix()
 
         # Draw SKEL joint edges
         if self.draw_skel_bone:
@@ -2362,25 +2552,36 @@ class GLFWApp():
         glPopMatrix()
 
         # glPushMatrix()
-        # for index, farthest in enumerate([[1026, 5928], [539, 2863], [3, 660], [653, 1722], [328, 737], [321, 582], [7, 330], [658, 939], [368, 678], [169, 233], [267, 313], [377, 937], [258, 313], [237, 332], [235, 240], [322, 417], [427, 612], [440, 1540], [1480, 1663], [330, 760], [381, 826], [183, 1084], [578, 1342], [542, 1092], [580, 1138], [200, 975], [1279, 4454], [174, 317], [0, 172], [181, 2033], [9, 260], [2, 59], [6, 17], [2, 57], [21, 26], [3, 45], [13, 17], [0, 41], [3, 6], [9, 473], [14, 22], [10, 60], [9, 29], [12, 38], [29, 59], [28, 472], [12, 36], [25, 447], [3, 100], [8, 29], [7, 26], [3, 58], [7, 16], [3, 56], [20, 27], [2, 44], [12, 16], [1, 39], [2, 7], [8, 432], [15, 23], [11, 60], [8, 28], [13, 32], [28, 58], [29, 473], [13, 37], [24, 446], [2, 101], [9, 28], [6, 27], [342, 1142], [50, 119], [343, 1143], [34, 222], [7, 15], [37, 599], [4, 167], [534, 614], [81, 176], [306, 446], [307, 395], [36, 165], [36, 124], [18, 70], [131, 552], [97, 303], [107, 403], [0, 112], [67, 307], [12, 62], [4, 60], [7, 34], [8, 231], [2, 64], [1, 59], [153, 199], [30, 68], [1, 73], [6, 39], [61, 197], [171, 207], [5, 195], [35, 119], [1, 35], [34, 222], [7, 15], [37, 599], [10, 162], [534, 614], [81, 176], [306, 446], [307, 395], [36, 165], [36, 124], [18, 70], [131, 552], [97, 303], [107, 403], [0, 112], [67, 307], [12, 62], [4, 60], [7, 34], [8, 231], [2, 64], [1, 59], [153, 199], [30, 68], [1, 73], [6, 39], [61, 197], [171, 207], [5, 195], [35, 119], [1, 35], [16, 256], [374, 2130], [21, 75], [33, 466], [94, 175], [5, 157], [2, 67], [23, 206], [107, 178], [33, 87], [29, 103], [87, 190], [87, 292], [194, 374], [68, 205], [65, 267], [29, 234], [39, 204], [26, 66], [34, 271], [9, 259], [15, 38], [162, 182], [40, 183], [27, 189], [9, 29], [2, 188], [12, 153], [1, 22], [11, 157], [14, 235], [16, 256], [374, 2130], [21, 75], [33, 466], [12, 153], [27, 54], [1, 22], [9, 212], [1, 188], [94, 175], [5, 157], [2, 66], [18, 319], [107, 178], [86, 197], [104, 192], [87, 190], [87, 292], [194, 374], [68, 205], [65, 267], [29, 234], [162, 182], [40, 183], [8, 25], [3, 33], [11, 199], [26, 66], [34, 271], [9, 259], [13, 58]]):
-        #     for i in farthest:
-        #         glColor3f(1, 1, 1)
-        #         v0, v1, v2 = self.skel_vertices[self.SKEL_section_faces_male[index][3*i:3*i+3]]# + root_dif
-        #         glBegin(GL_TRIANGLES)
-        #         glVertex3f(v0[0], v0[1], v0[2])
-        #         glVertex3f(v1[0], v1[1], v1[2])
-        #         glVertex3f(v2[0], v2[1], v2[2])
-        #         glEnd()
+        # for i in [106843, 106844]:
+        #     glColor3f(1,1,1)
+        #     v0, v1, v2 = self.skel_vertices[self.skel_faces[i*3:i*3+3]]# + root_dif
+        #     # print(self.skel_faces[i*3:i*3+3])
+        #     glBegin(GL_TRIANGLES)
+        #     glVertex3f(v0[0], v0[1], v0[2])
+        #     glVertex3f(v1[0], v1[1], v1[2])
+        #     glVertex3f(v2[0], v2[1], v2[2])
+        #     glEnd()
 
-        #         if i == self.skel_face_index - 1:
-        #             glColor3f(1, 0, 0)
-        #         else:
-        #             glColor3f(0, 0, 1)
-        #         glBegin(GL_LINE_LOOP)
-        #         glVertex3f(v0[0], v0[1], v0[2])
-        #         glVertex3f(v1[0], v1[1], v1[2])
-        #         glVertex3f(v2[0], v2[1], v2[2])
-        #         glEnd()
+        #     if i == self.skel_face_index - 1:
+        #         glColor3f(1, 0, 0)
+        #     else:
+        #         glColor3f(0, 0, 1)
+        #     glBegin(GL_LINE_LOOP)
+        #     glVertex3f(v0[0], v0[1], v0[2])
+        #     glVertex3f(v1[0], v1[1], v1[2])
+        #     glVertex3f(v2[0], v2[1], v2[2])
+        #     glEnd()
+        # glPopMatrix()
+
+        # glPushMatrix()
+        # for i in [[200629, 200652]]:
+        #     glColor3f(1, 1, 1)
+        #     v0, v1 = self.skel_vertices[i]
+        #     mean = (v0 + v1) / 2
+        #     glPushMatrix()
+        #     glTranslatef(mean[0], mean[1], mean[2])
+        #     mygl.draw_sphere(0.005, 10, 10)
+        #     glPopMatrix()
         # glPopMatrix()
 
         
@@ -2446,6 +2647,51 @@ class GLFWApp():
                         glDisableClientState(GL_VERTEX_ARRAY)
                         glDisableClientState(GL_COLOR_ARRAY)
                         glPopMatrix()
+
+                        if i == self.selected_mesh_index and self.selected_face is not None:
+                            glColor4d(10,10,10,1)
+                            for j in range(len(self.SKEL_section_vertex3[i]) // 3):
+                                v0, v1, v2 = self.SKEL_section_vertex3[i][j * 3 : (j + 1) * 3]
+                                glBegin(GL_LINE_LOOP)
+                                glVertex3f(v0[0], v0[1], v0[2])
+                                glVertex3f(v1[0], v1[1], v1[2])
+                                glVertex3f(v2[0], v2[1], v2[2])
+                                glEnd()
+
+                            glPushMatrix()
+                            glColor3f(10, 10, 10)
+                            v0, v1, v2 = self.SKEL_section_vertex3[i][self.selected_face*3:self.selected_face*3+3]
+                            glBegin(GL_TRIANGLES)
+                            glVertex3f(v0[0], v0[1], v0[2])
+                            glVertex3f(v1[0], v1[1], v1[2])
+                            glVertex3f(v2[0], v2[1], v2[2])
+                            glEnd()
+
+                            glColor3f(0, 0, 0)
+                            glBegin(GL_LINE_LOOP)
+                            glVertex3f(v0[0], v0[1], v0[2])
+                            glVertex3f(v1[0], v1[1], v1[2])
+                            glVertex3f(v2[0], v2[1], v2[2])
+                            glEnd()
+
+                            for j, v in enumerate([v0, v1, v2]):
+                                glPushMatrix()
+                                if j == 0:
+                                    glColor3f(10, 0, 0)
+                                elif j == 1:
+                                    glColor3f(0, 10, 0)
+                                else:
+                                    glColor3f(0, 0, 10)
+                                glTranslatef(v[0], v[1], v[2])
+                                mygl.draw_sphere(0.0005, 5, 5)
+                                glPopMatrix()
+
+                            glColor3f(0, 0, 0)
+                            a, b, c = self.selected_point
+                            glTranslatef(a, b, c)
+                            mygl.draw_sphere(0.0005, 5, 5)
+
+                            glPopMatrix()
   
             else:
                 glPushMatrix()
@@ -2716,6 +2962,80 @@ class GLFWApp():
                     self.draw_line_muscle = False
 
                 changed, self.line_width = imgui.slider_float("Line Width", self.line_width, 0.1, 5.0)
+
+                # Show selected SKEL joint
+                if imgui.button("<##muscle"):
+                    self.muscle_index -= 1
+                    if self.muscle_index < 0:
+                        self.muscle_index = len(self.env.muscle_pos) - 1
+                imgui.same_line()
+                imgui.text(f"{self.muscle_index}")
+                imgui.same_line()
+                if imgui.button(">##muscle"):
+                    self.muscle_index += 1
+                    if self.muscle_index >= len(self.env.muscle_pos):
+                        self.muscle_index = 0
+                imgui.same_line()
+                if imgui.button("Find End Vertices"):
+                    name = list(self.env.muscle_info.keys())[self.muscle_index]
+                    wps_info = self.env.muscle_info[name]['waypoints']
+                    origin_body = wps_info[0]['body']
+                    insertion_body = wps_info[-1]['body']
+
+                    wps = self.env.muscle_pos[self.muscle_index]
+                    origin_p = wps[0]
+                    insertion_p = wps[-1]
+
+                    for bn in self.motion_skel.getBodyNodes():
+                        if bn.getName() == origin_body:
+                            origin_bn = bn
+                        if bn.getName() == insertion_body:
+                            insertion_bn = bn
+
+                    # glPushMatrix()
+
+                    # glTranslatef(t_parent[0], t_parent[1], t_parent[2])
+
+                    # rot = R.from_matrix(r_parent)
+                    # rotvec = rot.as_rotvec()
+                    # angle = np.linalg.norm(rotvec)
+                    # axis = rotvec / angle if angle != 0 else np.array([0, 0, 1])
+                    # glRotatef(np.rad2deg(angle), axis[0], axis[1], axis[2])
+                    
+                    # glScalef(self.skel_scale, self.skel_scale, self.skel_scale)
+
+                    min_origin = np.inf
+                    origin_v = None
+                    transform = origin_bn.getWorldTransform().matrix() @ origin_bn.getParentJoint().getTransformFromChildBodyNode().matrix()
+                    t_origin = transform[:3, 3]
+                    r_origin = transform[:3, :3]
+
+                    origin_vertices = self.meshes[origin_body].new_vertices_4
+                    origin_vertices = origin_vertices @ r_origin.T + t_origin
+                    for v in origin_vertices:
+                        dist = np.linalg.norm(v - origin_p)
+                        if dist < min_origin:
+                            min_origin = dist
+                            origin_v = v
+
+                    min_insertion = np.inf
+                    insertion_v = None
+                    transform = insertion_bn.getWorldTransform().matrix() @ insertion_bn.getParentJoint().getTransformFromChildBodyNode().matrix()
+                    t_insertion = transform[:3, 3]
+                    r_insertion = transform[:3, :3]
+
+                    insertion_vertices = self.meshes[insertion_body].new_vertices_4
+                    insertion_vertices = insertion_vertices @ r_insertion.T + t_insertion
+                    for v in insertion_vertices:
+                        dist = np.linalg.norm(v - insertion_p)
+                        if dist < min_insertion:
+                            min_insertion = dist
+                            insertion_v = v
+
+                    self.origin_v = origin_v
+                    self.insertion_v = insertion_v
+                    print(origin_v, insertion_v)
+                    
             _, self.draw_obj = imgui.checkbox("Draw Object", self.draw_obj)
             imgui.same_line()
             imgui.push_item_width(100)
@@ -2954,6 +3274,99 @@ class GLFWApp():
             imgui.tree_pop()
         
         if imgui.tree_node("SKEL Parameters"):
+            if imgui.button("Export Skeleton"):
+                pass
+                filename = "skel_skel.xml"
+                def tw(file, string, tabnum):
+                    for _ in range(tabnum):
+                        file.write("\t")
+                    file.write(string + "\n")
+
+                f = open(f"data/{filename}", 'w')
+                tw(f, "<Skeleton name=\"Skeleton\">", 0)
+
+                for box in self.gui_boxes:
+                    tw(f, "<Node name=\"%s\" parent=\"%s\">" % (box.name, box.parent), 1)
+
+                    tw(f, "<Body type=\"%s\" mass=\"%f\" size=\"%s\" contact=\"%s\" color=\"%s\" obj=\"%s\" stretch=\"%s\">" % 
+                        ("Box", 
+                        7.0, 
+                        " ".join(np.array(box.size).astype(str)), 
+                        "On" if box.isContact else "Off", 
+                        " ".join(np.array(box.color).astype(str)), 
+                        "",
+                        "1",
+                        ), 
+                    2)
+                    
+                    tw(f, "<Transformation linear=\"%s\" translation=\"%s\"/>" % 
+                    (" ".join(R.from_rotvec(box.rot).as_matrix().astype(str).flatten()), 
+                        " ".join(box.pos.astype(str))
+                        ), 
+                        3)
+
+                    tw(f, "</Body>", 2)
+
+                    upper = np.array(box.upper) if box.upper is not None else np.array([1.6, 1.6, 1.6])
+                    lower = np.array(box.lower) if box.lower is not None else np.array([-1.6, -1.6, -1.6])
+
+                    # upper = np.array([0.01, 0.01, 0.01])
+                    # lower = np.array([-0.01, -0.01, -0.01])
+
+                    if box.jointType == "Free":
+                        tw(f, "<Joint type=\"Free\">", 2)
+                    elif box.jointType == "Ball":
+                        tw(f, "<Joint type=\"Ball\" lower=\"%s\" upper=\"%s\">" %
+                                    (" ".join(lower.astype(str)),
+                                    " ".join(upper.astype(str)),
+                                    ),
+                                    2)
+                    elif box.jointType == "Revolute":
+                        tw(f, "<Joint type=\"Revolute\" axis=\"%s\" lower=\"%s\" upper=\"%s\">" %
+                                    (" ".join(box.axis.astype(str)),
+                                    lower.astype(str),
+                                    upper.astype(str),
+                                    ),
+                                    2)
+                        
+                    tw(f, "<Transformation linear=\"%s\" translation=\"%s\"/>" %
+                            (" ".join(box.ori.astype(str).flatten()),
+                            " ".join(np.array(box.joint).astype(str))),
+                            3)
+                    
+                    tw(f, "</Joint>", 2)
+
+                    tw(f, "</Node>", 1)
+                tw(f, "</Skeleton>", 0)
+                f.close()
+
+                from core.dartHelper import saveSkeletonInfo, buildFromInfo
+                skel_info, root_name, _, _, _, _ = saveSkeletonInfo("data/skel_skel.xml")
+                self.env.skel_skel = buildFromInfo(skel_info, root_name)
+                self.skel_skel = self.env.skel_skel.clone()
+                self.env.world.addSkeleton(self.env.skel_skel)
+                self.env.kp_skel = 300.0 * np.ones(self.skel_skel.getNumDofs()) 
+                self.env.kv_skel = 20.0 * np.ones(self.skel_skel.getNumDofs())
+                self.env.kp_skel[:6] = 0.0
+                self.env.kv_skel[:6] = 0.0
+
+                self.gui_boxes = []
+
+                self.test_skel = self.skel_skel.clone()
+                if self.test_skel_dofs is None:
+                    self.test_skel_dofs = np.zeros(self.test_skel.getNumDofs())
+
+            if self.test_skel is not None:
+                if imgui.tree_node("Test rotvecs"):
+                    for i in range(self.skel_skel.getNumDofs()):
+                        imgui.push_item_width(150)
+                        changed, self.test_skel_dofs[i] = imgui.slider_float(f"DOF {i}", self.test_skel_dofs[i], -3.0, 3.0)
+                        imgui.pop_item_width()
+                        imgui.same_line()
+                        if imgui.button(f"Reset##test_dof{i}"):
+                            self.test_skel_dofs[i] = 0.0
+                    imgui.tree_pop()
+                
             _, self.draw_skel_skin = imgui.checkbox("Draw SKEL skin", self.draw_skel_skin)
             imgui.same_line()
             imgui.set_cursor_pos_x(200)
@@ -2973,6 +3386,9 @@ class GLFWApp():
             _, self.draw_skel_joint = imgui.checkbox("Draw SKEL joint", self.draw_skel_joint)
             _, self.draw_skel_joint_rot = imgui.checkbox("Draw SKEL joint rot", self.draw_skel_joint_rot)
             _, self.draw_skel_bone = imgui.checkbox("Draw SKEL bone", self.draw_skel_bone)
+            _, self.draw_dart_skel = imgui.checkbox("Draw SKEL dart", self.draw_dart_skel)
+            _, self.draw_skel_dofs = imgui.checkbox("Draw Test Skeleton", self.draw_skel_dofs)
+            _, self.draw_gui_boxes = imgui.checkbox("Draw GUI boxes", self.draw_gui_boxes)
             if self.draw_skel_skin:
                 changed, self.isDrawHalfSkin = imgui.checkbox("Draw Half Skin", self.isDrawHalfSkin)
                 if changed:
@@ -3145,16 +3561,18 @@ class GLFWApp():
         #     f.write(f"skin_left_faces = {self.skin_left_faces}\n")
         #     f.close()
         
-        ## Show selected SKEL joint
-        # if imgui.button("<##skeljoint"):
-        #     self.skel_joint_index -= 1
-        #     if self.skel_joint_index < 0:
-        #         self.skel_joint_index = len(self.skel_joints) - 1
-        # imgui.same_line()
-        # if imgui.button(">##skeljoint"):
-        #     self.skel_joint_index += 1
-        #     if self.skel_joint_index >= len(self.skel_joints):
-        #         self.skel_joint_index = 0
+        # Show selected SKEL joint
+        if imgui.button("<##skeljoint"):
+            self.skel_joint_index -= 1
+            if self.skel_joint_index < 0:
+                self.skel_joint_index = len(self.skel_joints) - 1
+        imgui.same_line()
+        imgui.text(f"{self.skel_joint_index}")
+        imgui.same_line()
+        if imgui.button(">##skeljoint"):
+            self.skel_joint_index += 1
+            if self.skel_joint_index >= len(self.skel_joints):
+                self.skel_joint_index = 0
 
         if imgui.tree_node("GUI Boxes"):
             if imgui.button("Add Cand Box"):
@@ -3183,53 +3601,53 @@ class GLFWApp():
 
             imgui.tree_pop()
 
-        if imgui.tree_node("Find Farthest faces in SKEL sections"):
-            SKEL_section_index = self.SKEL_section_index_male if self.skel_gender == "male" else self.SKEL_section_index_female
-            if imgui.button("<##face"):
-                self.skel_farthest_section_index -= 1
-                if self.skel_farthest_section_index < 0:
-                    self.skel_farthest_section_index = len(SKEL_section_index) - 1
-            imgui.same_line()
-            imgui.text(list(SKEL_section_index.keys())[self.skel_farthest_section_index])
-            imgui.same_line()
-            if imgui.button(">##face"):
-                self.skel_farthest_section_index += 1
-                if self.skel_farthest_section_index >= len(SKEL_section_index):
-                    self.skel_farthest_section_index = 0
+        # if imgui.tree_node("Find Farthest faces in SKEL sections"):
+        #     SKEL_section_index = self.SKEL_section_index_male if self.skel_gender == "male" else self.SKEL_section_index_female
+        #     if imgui.button("<##face"):
+        #         self.skel_farthest_section_index -= 1
+        #         if self.skel_farthest_section_index < 0:
+        #             self.skel_farthest_section_index = len(SKEL_section_index) - 1
+        #     imgui.same_line()
+        #     imgui.text(list(SKEL_section_index.keys())[self.skel_farthest_section_index])
+        #     imgui.same_line()
+        #     if imgui.button(">##face"):
+        #         self.skel_farthest_section_index += 1
+        #         if self.skel_farthest_section_index >= len(SKEL_section_index):
+        #             self.skel_farthest_section_index = 0
 
-            if imgui.button("Find Farthest faces"):
-                pairs = []
-                for section_index in range(len(SKEL_section_index)):
-                    section_name = list(SKEL_section_index.keys())[section_index]
-                    if self.skel_gender == "male":
-                        SKEL_section_faces = self.SKEL_section_faces_male[section_index]
-                    else:
-                        SKEL_section_faces = self.SKEL_section_faces_female[section_index]
-                    SKEL_section_vertices = self.skel_vertices
+        #     if imgui.button("Find Farthest faces"):
+        #         pairs = []
+        #         for section_index in range(len(SKEL_section_index)):
+        #             section_name = list(SKEL_section_index.keys())[section_index]
+        #             if self.skel_gender == "male":
+        #                 SKEL_section_faces = self.SKEL_section_faces_male[section_index]
+        #             else:
+        #                 SKEL_section_faces = self.SKEL_section_faces_female[section_index]
+        #             SKEL_section_vertices = self.skel_vertices
 
-                    len_faces = SKEL_section_faces.shape[0] // 3
+        #             len_faces = SKEL_section_faces.shape[0] // 3
 
-                    max_d = 0
-                    cand_i = 0
-                    cand_j = 0
-                    for i in range(len_faces):
-                        face_i = SKEL_section_vertices[SKEL_section_faces[3*i:3*i+3]]
-                        mid_i = np.mean(face_i, axis=0)
-                        for j in range(i + 1, len_faces):
-                            face_j = SKEL_section_vertices[SKEL_section_faces[3*j:3*j+3]]
-                            mid_j = np.mean(face_j, axis=0)
-                            d = np.linalg.norm(mid_i - mid_j)
-                            if d > max_d:
-                                max_d = d
-                                cand_i = i
-                                cand_j = j
-                                print(f"Candidates {i}, {j} with distance {d}")
-                        print(f"face {i+1} / {len_faces} done")
-                    print(f"Farthest faces are {cand_i}, {cand_j} in section {section_name}")
+        #             max_d = 0
+        #             cand_i = 0
+        #             cand_j = 0
+        #             for i in range(len_faces):
+        #                 face_i = SKEL_section_vertices[SKEL_section_faces[3*i:3*i+3]]
+        #                 mid_i = np.mean(face_i, axis=0)
+        #                 for j in range(i + 1, len_faces):
+        #                     face_j = SKEL_section_vertices[SKEL_section_faces[3*j:3*j+3]]
+        #                     mid_j = np.mean(face_j, axis=0)
+        #                     d = np.linalg.norm(mid_i - mid_j)
+        #                     if d > max_d:
+        #                         max_d = d
+        #                         cand_i = i
+        #                         cand_j = j
+        #                         print(f"Candidates {i}, {j} with distance {d}")
+        #                 print(f"face {i+1} / {len_faces} done")
+        #             print(f"Farthest faces are {cand_i}, {cand_j} in section {section_name}")
 
-                    pairs.append([cand_i, cand_j])
+        #             pairs.append([cand_i, cand_j])
                 
-                print(pairs)
+        #         print(pairs)
 
 
             imgui.tree_pop()
@@ -3293,7 +3711,6 @@ class GLFWApp():
         self.update_skel()
 
     def keyboardPress(self, key, scancode, action, mods):
-        
         if action == glfw.PRESS:
             if key == glfw.KEY_ESCAPE or key == glfw.KEY_Q:
                 glfw.set_window_should_close(self.window, True)
@@ -3309,22 +3726,26 @@ class GLFWApp():
                 self.skel_face_index -= 1
                 if self.skel_face_index < 0:
                     self.skel_face_index = len(self.skel_faces) // 3 - 1
-                print(self.skel_face_index)
+                i = self.skel_face_index - 1
+                print(i, self.skel_faces[i*3:i*3+3])
             elif key in [glfw.KEY_D, glfw.KEY_F]:
                 self.skel_face_index += 1
                 if self.skel_face_index >= len(self.skel_faces) // 3:
                     self.skel_face_index = 0
-                print(self.skel_face_index)
+                i = self.skel_face_index - 1
+                print(i, self.skel_faces[i*3:i*3+3])
             elif key == glfw.KEY_G:
                 self.skel_face_index += 10
                 if self.skel_face_index >= len(self.skel_faces) // 3:
                     self.skel_face_index = 0
-                print(self.skel_face_index)
+                i = self.skel_face_index - 1
+                print(i, self.skel_faces[i*3:i*3+3])
             elif key == glfw.KEY_H:
                 self.skel_face_index += 100
                 if self.skel_face_index >= len(self.skel_faces) // 3:
                     self.skel_face_index = 0
-                print(self.skel_face_index)
+                i = self.skel_face_index - 1
+                print(i, self.skel_faces[i*3:i*3+3])
 
             elif key == glfw.KEY_X:
                 self.skel_pose[0][37] -= 0.03
@@ -3348,7 +3769,6 @@ class GLFWApp():
             
             ## Rendering Simulation
             self.drawSimFrame()
-            
             self.drawUIFrame()
             
             self.impl.render(imgui.get_draw_data())
