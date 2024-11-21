@@ -1779,4 +1779,29 @@
 		<Waypoint body="ShoulderR" p="-0.10771 1.437881 -0.077962"/>
 		<Waypoint body="ShoulderR" p="-0.189087 1.403752 -0.070357"/>
 	</Unit>
+
+	<!-- <Unit name="R_Latissimus_Dorsi" f0="1000.0" lm="1.2" lt="0.2" pen_angle="0.0" lmax="-0.1">
+		<Line>
+			<Waypoint body="Torso" p="-1e-06 1.261722 -0.120354"/>
+			<Waypoint body="ShoulderR" p="-0.110087 1.277313 -0.139185"/>
+			<Waypoint body="ShoulderR" p="-0.144976 1.30165 -0.106197"/>
+			<Waypoint body="ArmR" p="-0.216426 1.377345 -0.063243"/>
+			<Waypoint body="ArmR" p="-0.197032 1.393126 -0.041378"/>
+		</Line>
+	    <Line>
+			<Waypoint body="Spine" p="-0.00057 1.064079 -0.087461"/>
+			<Waypoint body="Torso" p="-0.096207 1.187381 -0.113129"/>
+			<Waypoint body="Torso" p="-0.146117 1.25155 -0.093926"/>
+			<Waypoint body="ArmR" p="-0.235562 1.381453 -0.069856"/>
+			<Waypoint body="ArmR" p="-0.223372 1.383411 -0.049664"/>
+			<Waypoint body="ArmR" p="-0.212203 1.395907 -0.041369"/>
+		</Line>
+		<Line>
+			<Waypoint body="Pelvis" p="-0.073581 1.026148 -0.072251"/>
+			<Waypoint body="Torso" p="-0.112083 1.135284 -0.073677"/>
+			<Waypoint body="Torso" p="-0.160852 1.249554 -0.05704"/>
+			<Waypoint body="ArmR" p="-0.237998 1.377705 -0.057343"/>
+			<Waypoint body="ArmR" p="-0.219144 1.395716 -0.042593"/>
+		</Line>
+	</Unit> -->
 </Muscle>
