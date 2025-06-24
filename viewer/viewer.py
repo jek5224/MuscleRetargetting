@@ -2,7 +2,10 @@
 import imgui
 import glfw
 import numpy as np
+import trimesh
 import copy
+import os
+os.environ['DISABLE_VIEWER']='1'
 from scipy.spatial.transform import Rotation as R
 import dartpy as dart
 import viewer.gl_function as mygl
@@ -23,11 +26,10 @@ from core.dartHelper import buildFromInfo, exportSkeleton
 from skeleton_section import SKEL_dart_info
 
 import time
-
-from models.smpl import SMPL
 import torch
 
 from skel.skel_model import SKEL
+from skel.alignment.aligner import SkelFitter
 
 # from data.face_info import male_right_faces, female_right_faces
 from data.skel_info import male_skin_right_faces as male_right_faces
@@ -37,74 +39,93 @@ from data.skel_info import female_skin_left_faces as female_left_faces
 from data.skel_info import skel_joint_edges
 from skel.kin_skel import skel_joints_name, pose_param_names, pose_limits
 
-smpl_joint_names = [
-    "Pelvis", 
-    "L_Hip", 
-    "R_Hip", 
-    "Spine_01", 
-    "L_Knee", 
-    "R_Knee", 
-    "Spine_02", 
-    "L_Ankle", 
-    "R_Ankle", 
-    "Spine_03", 
-    "L_Toe", 
-    "R_Toe",
-    "Neck",
-    "L_Collar",
-    "R_Collar",
-    "Head",
-    "L_Shoulder",
-    "R_Shoulder",
-    "L_Elbow",
-    "R_Elbow",
-    "L_Wrist",
-    "R_Wrist",
-    "L_Palm",
-    "R_Palm"
-]
-smpl_links = [
-    (0, 1),
-        (1, 4),
-            (4, 7),
-                (7, 10),    # Right Leg
-    (0, 2),
-        (2, 5),
-            (5, 8),
-                (8, 11),    # Left Leg
-    (0, 3),
-        (3, 6),
-            (6, 9),
-                (9, 12),
-                    (12, 15),   # Neck
-                (9, 13),
-                    (13, 16),
-                        (16, 18),
-                            (18, 20),
-                                (20, 22),   # Right Arm
-                (9, 14),
-                    (14, 17),
-                        (17, 19),
-                            (19, 21),
-                                (21, 23)    # Left Arm
-]
+from hit.utils.model import HitLoader
+
+use_smpl = False
+use_skel = False
+if use_smpl:
+    from models.smpl import SMPL
+
+    smpl_joint_names = [
+        "Pelvis", 
+        "L_Hip", 
+        "R_Hip", 
+        "Spine_01", 
+        "L_Knee", 
+        "R_Knee", 
+        "Spine_02", 
+        "L_Ankle", 
+        "R_Ankle", 
+        "Spine_03", 
+        "L_Toe", 
+        "R_Toe",
+        "Neck",
+        "L_Collar",
+        "R_Collar",
+        "Head",
+        "L_Shoulder",
+        "R_Shoulder",
+        "L_Elbow",
+        "R_Elbow",
+        "L_Wrist",
+        "R_Wrist",
+        "L_Palm",
+        "R_Palm"
+    ]
+
+    smpl_links = [
+        (0, 1),
+            (1, 4),
+                (4, 7),
+                    (7, 10),    # Right Leg
+        (0, 2),
+            (2, 5),
+                (5, 8),
+                    (8, 11),    # Left Leg
+        (0, 3),
+            (3, 6),
+                (6, 9),
+                    (9, 12),
+                        (12, 15),   # Neck
+                    (9, 13),
+                        (13, 16),
+                            (16, 18),
+                                (18, 20),
+                                    (20, 22),   # Right Arm
+                    (9, 14),
+                        (14, 17),
+                            (17, 19),
+                                (19, 21),
+                                    (21, 23)    # Left Arm
+    ]
 
 class line_muscle:
     def __init__(self,
                  origin,
                  insertion,
-                 waypoints,):
+                 waypoints,
+                 waypoint_bodies):
+        
         self.origin = origin['p']
         self.origin_mesh_index = origin['mesh_index'] 
         self.origin_face = origin['face']
         self.origin_barycentric = origin['barycentric']
+        for info in SKEL_dart_info:
+            if self.origin_mesh_index in info[0]:
+                self.origin_body = info[1]
+                break
 
         self.insertion = insertion['p']
         self.insertion_mesh_index = insertion['mesh_index']
         self.insertion_face = insertion['face']
         self.insertion_barycentric = insertion['barycentric']
+        for info in SKEL_dart_info:
+            if self.insertion_mesh_index in info[0]:
+                self.insertion_body = info[1]
+                break
 
         self.waypoints = waypoints
+        self.waypoint_bodies = [self.insertion_body] * len(waypoints)
 
         print("Origin:", origin)
         print("Insertion:", insertion)
@@ -323,6 +344,7 @@ push_width = 150
 
 def initGL():
     glClearColor(1.0, 1.0, 1.0, 1.0)
+    # glClearColor(0.0, 0.0, 0.0, 1.0)
     glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT)
     glEnable(GL_BLEND)
     glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
@@ -415,7 +437,7 @@ class GLFWApp():
         self.is_simulation = False
 
         self.draw_obj = False
-        self.obj_trans = 0.5
+        self.obj_trans = 1.0
         self.obj_axis = {}
 
         self.draw_target_motion = False
@@ -426,7 +448,7 @@ class GLFWApp():
 
         self.draw_body = False
         self.body_trans = 0.5
-        self.draw_muscle = False
+        self.draw_muscle = True
         self.draw_line_muscle = True
         self.muscle_index = 0
         self.origin_v = None
@@ -445,43 +467,44 @@ class GLFWApp():
         self.is_screenshot = False
         self.imagenum = 0
 
-        # SMPL Model 
-        self.draw_smpl = False
-        self.draw_smpl_joint = False
-        self.smpl_joint_index = 0
-        self.draw_smpl_bone = False
-        # self.draw_target_smpl = False
+        if use_smpl:
+            # SMPL Model 
+            self.draw_smpl = False
+            self.draw_smpl_joint = False
+            self.smpl_joint_index = 0
+            self.draw_smpl_bone = False
+            # self.draw_target_smpl = False
 
-        self.smpl_offset = np.zeros(3)
-        
-        self.smpl_joints = None
-        self.smpl_vertices = None
-        self.smpl_colors = None
-
-        self.smpl_zero_joints = None
-        self.smpl_trans = 0.5
-
-        self.smpl_scale = 1
-        self.shape_parameters = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
-        self.smpl_model = SMPL(
-            "data/smpl", batch_size=2, create_transl=False, betas = torch.tensor(np.array([self.shape_parameters, self.shape_parameters], dtype=np.float32))
-        )
-        pos = torch.tensor(np.tile(np.zeros(3, dtype=np.float32), (2, 24, 1)))
-        self.smpl_model_face_idxs = np.array(list(self.smpl_model.faces.flatten()), dtype=int)
-        with torch.no_grad():
-            res = self.smpl_model(betas = torch.tensor(np.array([self.shape_parameters, self.shape_parameters], dtype=np.float32)), body_pose = pos[:, 1:], global_orient=pos[:, 0].unsqueeze(1)) # , pose2rot = False)
+            self.smpl_offset = np.zeros(3)
             
-            self.smpl_joints = res.smpl_joints
-            self.smpl_vertices = res.vertices
+            self.smpl_joints = None
+            self.smpl_vertices = None
+            self.smpl_colors = None
 
-            self.smpl_offset = np.array([0, -torch.min(self.smpl_vertices[0][:, 1]), 0])
+            self.smpl_zero_joints = None
+            self.smpl_trans = 0.5
 
-            self.smpl_colors = np.ones((2, len(self.smpl_vertices[0]), 4)) * 0.8
-            self.smpl_colors[:, :, 3] = self.smpl_trans
+            self.smpl_scale = 1
+            self.shape_parameters = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+            self.smpl_model = SMPL(
+                "data/smpl", batch_size=2, create_transl=False, betas = torch.tensor(np.array([self.shape_parameters, self.shape_parameters], dtype=np.float32))
+            )
+            pos = torch.tensor(np.tile(np.zeros(3, dtype=np.float32), (2, 24, 1)))
+            self.smpl_model_face_idxs = np.array(list(self.smpl_model.faces.flatten()), dtype=int)
+            with torch.no_grad():
+                res = self.smpl_model(betas = torch.tensor(np.array([self.shape_parameters, self.shape_parameters], dtype=np.float32)), body_pose = pos[:, 1:], global_orient=pos[:, 0].unsqueeze(1)) # , pose2rot = False)
+                
+                self.smpl_joints = res.smpl_joints
+                self.smpl_vertices = res.vertices
 
-        self.smpl_vertex3 = [None, None]
-        self.smpl_color4 = [None, None]
-        self.smpl_normal = [None, None]
+                self.smpl_offset = np.array([0, -torch.min(self.smpl_vertices[0][:, 1]), 0])
+
+                self.smpl_colors = np.ones((2, len(self.smpl_vertices[0]), 4)) * 0.8
+                self.smpl_colors[:, :, 3] = self.smpl_trans
+
+            self.smpl_vertex3 = [None, None]
+            self.smpl_color4 = [None, None]
+            self.smpl_normal = [None, None]
 
         self.max_checkpoint_files = []
         self.checkpoint_idx = 0
@@ -497,366 +520,399 @@ class GLFWApp():
         self.skel_skel = None
         self.draw_dart_skel = True
 
-        self.isDrawHalfSkin = True
-        self.skin_direction = "right"
-        self.draw_skel_skin = False
-        self.draw_skel_skel = True
-        self.draw_skel_joint = False
-        self.draw_skel_joint_rot = False
-        self.draw_skel_bone = False
-
-        self.skel_vertex3 = [None, None]
-        self.skel_color4 = [None, None]
-        self.skel_normal = [None, None]
-
-        self.skel_joints = None
-        self.skel_joints_orig = None
-        self.skel_joints_prev = None
-        self.skel_joint_index = 0
-        self.skel_oris = None
-        self.skel_oris_prev = None
-        self.skel_vertices = None
-        self.skel_colors = None
-
-        self.skel_zero_joints = None
-        self.skel_opacity = 1
-
-        self.skin_vertex3 = [None, None]
-        self.skin_color4 = [None, None]
-        self.skin_normal = [None, None]
-
-        self.skin_vertices = None
-        self.skin_colors = None
-
-        self.skin_zero_joints = None
-        self.skin_opacity = 1
-
-        self.device = 'cuda' if torch.cuda.is_available() else 'cpu'
-        self.skel_gender = "male"
-        self.skel = SKEL(gender=self.skel_gender).to(self.device)
-
-        # Set parameters to default values (T pose)
-        self.skel_pose = torch.zeros(1, self.skel.num_q_params).to(self.device) # (1, 46)
-        self.skel_pose_base = torch.zeros(1, self.skel.num_q_params).to(self.device) # (1, 46)
-        # self.skel_pose[0][4] = -0.5
-        # self.skel_pose[0][11] = -0.5
-        for i in range(len(pose_param_names)):
-            j = pose_param_names[i]
-            if j in pose_limits.keys():
-                if pose_limits[j][0] * pose_limits[j][1] < 0:
-                    self.skel_pose_base[0][i] = 0
-                    self.skel_pose[0][i] = 0
-                else:
-                    abs_vals = np.abs(np.array(pose_limits[j]))
-                    base = pose_limits[j][0] if abs_vals[0] < abs_vals[1] else pose_limits[j][1]
-                    self.skel_pose_base[0][i] = base
-                    self.skel_pose[0][i] = base
-            else:
-                self.skel_pose_base[0][i] = 0
-                self.skel_pose[0][i] = 0
-        # # wrist_deviation_l: 45
-        # self.skel_pose[0][29] = 1.247               # shoulder_r_x
-        # self.skel_pose[0][30] = 0.185               # shoulder_r_y
-        # self.skel_pose[0][31] = -0.416               # shoulder_r_z
-        # self.skel_pose[0][33] = -3/4 * np.pi / 2    # pro_sup_r
-
-        # self.skel_pose[0][39] = -1.385              # shoulder_l_x
-        # self.skel_pose[0][40] = -0.231              # shoulder_l_y
-        # self.skel_pose[0][41] = 0.139               # shoulder_l_z
-        # self.skel_pose[0][43] = -np.pi / 2          # pro_sup_l
-        self.skel_betas = torch.zeros(1, self.skel.num_betas).to(self.device) # (1, 10)
-        self.skel_trans = torch.zeros(1, 3).to(self.device)
-
-        # SKEL forward pass
-        skel_output = self.skel(self.skel_pose, self.skel_betas, self.skel_trans)
-
-        self.skel_joints = skel_output.joints[0]
-        self.skel_joints_orig = skel_output.joints_orig[0]
-        self.skel_oris = skel_output.joints_ori[0]
-
-        from skel_f_updated import skel_f_updated_male, skel_f_updated_female
-        self.skel_f_updated_male = np.array(skel_f_updated_male, dtype=int)
-        self.skel_f_updated_female = np.array(skel_f_updated_female, dtype=int)
-        if self.skel_gender == "male":
-            self.skel_faces = self.skel_f_updated_male
-        else:
-            self.skel_faces = self.skel_f_updated_female
-
-        skel_vertices = skel_output.skel_verts.detach().cpu().numpy()[0]
-
-        self.skel_face_start_index = 94777
-        self.skel_face_index =  94777
-
-        # range(88733, 91333), (88733, "Atlas, C1")
-        # list(range(89521, 91333)) + list(range(94777, 95763)), (89521, "Axis, C2")
-
-        self.isSKELSection = True
-        self.SKEL_section_unique = False
-        
-        self.skel_vertices = skel_vertices.copy()
-
-        from skeleton_section import SKEL_face_index_male, SKEL_face_index_female
-        self.SKEL_section_index_male = {}
-        self.SKEL_section_index_female = {}
-        self.skel_farthest_section_index = 0
-        for i, (key_male, key_female) in enumerate(zip(SKEL_face_index_male.keys(), SKEL_face_index_female.keys())):
-            self.SKEL_section_index_male[key_male] = i
-            self.SKEL_section_index_female[key_female] = i
-
-        self.SKEL_section_names_male = list(SKEL_face_index_male.keys())
-        self.SKEL_section_names_female = list(SKEL_face_index_female.keys())
-
-        self.SKEL_section_toggle_male = [True] * len(self.SKEL_section_names_male)
-        self.SKEL_section_faces_male = []
-        self.SKEL_unique_vertices_male = []
-
-        for index in list(SKEL_face_index_male.values()):
-            self.SKEL_section_faces_male.append(self.skel_f_updated_male[3 * index[0]: 3 * index[1]])
-            self.SKEL_unique_vertices_male.append(np.unique(self.SKEL_section_faces_male[-1]))
-
-        self.SKEL_section_toggle_female = [True] * len(self.SKEL_section_names_female)
-        self.SKEL_section_faces_female = []        
-        self.SKEL_unique_vertices_female = []
-    
-        for index in list(SKEL_face_index_female.values()):
-            self.SKEL_section_faces_female.append(self.skel_f_updated_female[3 * index[0]: 3 * index[1]])
-            self.SKEL_unique_vertices_female.append(np.unique(self.SKEL_section_faces_female[-1]))
-
-        self.SKEL_section_colors = []
-        self.SKEL_section_vertex3 = []
-        self.SKEL_section_color4 = []
-        self.SKEL_section_normal = []
-        self.SKEL_section_midpoints = []
-
-
-        # For SKEL box body models
-        self.gui_boxes = []
-        self.cand_gui_box = None
+        self.skel_muscle_activation_levels = None
         self.test_skel = None
         self.test_skel_dofs = None
-        self.draw_skel_dofs = True
-        self.draw_gui_boxes = False
+        self.draw_skel_dofs = False
 
-        # For SKEL muscle models, waypoint GUI
-        ## Currently clicked face, point, mesh index
-        self.selected_face = None
-        self.selected_point = None
-        self.selected_mesh_index = None
+        if use_skel:
+            self.isDrawHalfSkin = True
+            self.skin_direction = "right"
+            self.draw_skel_skin = False
+            self.draw_skel_skel = False
+            self.draw_skel_joint = False
+            self.draw_skel_joint_rot = False
+            self.draw_skel_bone = False
 
-        ## Saved origin/insertion information
-        self.selected_origin = None
-        self.selected_origin_face = None
-        self.selected_origin_mesh_index = None
-        self.selected_origin_barycentric = None
+            self.skel_vertex3 = [None, None]
+            self.skel_color4 = [None, None]
+            self.skel_normal = [None, None]
 
-        self.selected_insertion = None
-        self.selected_insertion_face = None
-        self.selected_insertion_mesh_index = None
-        self.selected_insertion_braycentric = None
+            self.skel_joints = None
+            self.skel_joints_orig = None
+            self.skel_joints_prev = None
+            self.skel_joint_index = 0
+            self.skel_oris = None
+            self.skel_oris_prev = None
+            self.skel_vertices = None
+            self.skel_colors = None
 
-        ## Muscle GUI status variables
-        self.drawReferenceObj = True
-        self.ref_trans = np.array([0.0, 0.0, 0.0])
-        self.ref_scale = 1
+            self.skel_zero_joints = None
+            self.skel_opacity = 1
 
-        self.isOrigin = False
-        self.isInsertion = False
-        self.isWaypoint = False
-        self.translateWaypoint = False
-        self.deleteWaypoint = False
+            self.skin_vertex3 = [None, None]
+            self.skin_color4 = [None, None]
+            self.skin_normal = [None, None]
 
-        self.translateWaypointIndex = None
+            self.skin_vertices = None
+            self.skin_colors = None
 
-        self.exportGaitNet = True
+            self.skin_zero_joints = None
+            self.skin_opacity = 1
+
+            self.device = 'cuda' if torch.cuda.is_available() else 'cpu'
+            self.skel_gender = "male"
+            self.skel = SKEL(gender=self.skel_gender).to(self.device)
+
+            # Set parameters to default values (T pose)
+            self.skel_pose = torch.zeros(1, self.skel.num_q_params).to(self.device) # (1, 46)
+            self.skel_pose_base = torch.zeros(1, self.skel.num_q_params).to(self.device) # (1, 46)
+            # self.skel_pose[0][4] = -0.5
+            # self.skel_pose[0][11] = -0.5
+            for i in range(len(pose_param_names)):
+                j = pose_param_names[i]
+                if j in pose_limits.keys():
+                    if pose_limits[j][0] * pose_limits[j][1] < 0:
+                        self.skel_pose_base[0][i] = 0
+                        self.skel_pose[0][i] = 0
+                    else:
+                        abs_vals = np.abs(np.array(pose_limits[j]))
+                        base = pose_limits[j][0] if abs_vals[0] < abs_vals[1] else pose_limits[j][1]
+                        self.skel_pose_base[0][i] = base
+                        self.skel_pose[0][i] = base
+                else:
+                    self.skel_pose_base[0][i] = 0
+                    self.skel_pose[0][i] = 0
+            # # wrist_deviation_l: 45
+            # self.skel_pose[0][29] = 1.247               # shoulder_r_x
+            # self.skel_pose[0][30] = 0.185               # shoulder_r_y
+            # self.skel_pose[0][31] = -0.416               # shoulder_r_z
+            # self.skel_pose[0][33] = -3/4 * np.pi / 2    # pro_sup_r
+
+            # self.skel_pose[0][39] = -1.385              # shoulder_l_x
+            # self.skel_pose[0][40] = -0.231              # shoulder_l_y
+            # self.skel_pose[0][41] = 0.139               # shoulder_l_z
+            # self.skel_pose[0][43] = -np.pi / 2          # pro_sup_l
+            self.skel_betas = torch.zeros(1, self.skel.num_betas).to(self.device) # (1, 10)
+            self.skel_trans = torch.zeros(1, 3).to(self.device)
+
+            # SKEL forward pass
+            skel_output = self.skel(self.skel_pose, self.skel_betas, self.skel_trans)
+
+            self.skel_joints = skel_output.joints[0]
+            self.skel_joints_orig = skel_output.joints_orig[0]
+            self.skel_oris = skel_output.joints_ori[0]
+
+            from skel_f_updated import skel_f_updated_male, skel_f_updated_female
+            self.skel_f_updated_male = np.array(skel_f_updated_male, dtype=int)
+            self.skel_f_updated_female = np.array(skel_f_updated_female, dtype=int)
+            if self.skel_gender == "male":
+                self.skel_faces = self.skel_f_updated_male
+            else:
+                self.skel_faces = self.skel_f_updated_female
+
+            skel_vertices = skel_output.skel_verts.detach().cpu().numpy()[0]
+
+            self.skel_face_start_index = 94777
+            self.skel_face_index =  94777
+
+            # range(88733, 91333), (88733, "Atlas, C1")
+            # list(range(89521, 91333)) + list(range(94777, 95763)), (89521, "Axis, C2")
+
+            self.isSKELSection = True
+            self.SKEL_section_unique = False
+            
+            self.skel_vertices = skel_vertices.copy()
+
+            from skeleton_section import SKEL_face_index_male, SKEL_face_index_female
+            self.SKEL_section_index_male = {}
+            self.SKEL_section_index_female = {}
+            self.skel_farthest_section_index = 0
+            for i, (key_male, key_female) in enumerate(zip(SKEL_face_index_male.keys(), SKEL_face_index_female.keys())):
+                self.SKEL_section_index_male[key_male] = i
+                self.SKEL_section_index_female[key_female] = i
+
+            self.SKEL_section_names_male = list(SKEL_face_index_male.keys())
+            self.SKEL_section_names_female = list(SKEL_face_index_female.keys())
+
+            self.SKEL_section_toggle_male = [True] * len(self.SKEL_section_names_male)
+            self.SKEL_section_faces_male = []
+            self.SKEL_unique_vertices_male = []
+
+            for index in list(SKEL_face_index_male.values()):
+                self.SKEL_section_faces_male.append(self.skel_f_updated_male[3 * index[0]: 3 * index[1]])
+                self.SKEL_unique_vertices_male.append(np.unique(self.SKEL_section_faces_male[-1]))
+
+            self.SKEL_section_toggle_female = [True] * len(self.SKEL_section_names_female)
+            self.SKEL_section_faces_female = []        
+            self.SKEL_unique_vertices_female = []
         
-        ## Waypoint/Line/Muscle information
-        self.point_size = 5
-        self.hover_waypoint = None
-        self.selected_waypoints = []
+            for index in list(SKEL_face_index_female.values()):
+                self.SKEL_section_faces_female.append(self.skel_f_updated_female[3 * index[0]: 3 * index[1]])
+                self.SKEL_unique_vertices_female.append(np.unique(self.SKEL_section_faces_female[-1]))
 
-        self.selected_lines = []
-        self.selected_line_index = 0
-        
-        self.SKEL_muscles = []
-        self.SKEL_muscle_index = 0
-        self.muscle_name_input = "new_muscle"
+            self.SKEL_section_colors = []
+            self.SKEL_section_vertex3 = []
+            self.SKEL_section_color4 = []
+            self.SKEL_section_normal = []
+            self.SKEL_section_midpoints = []
 
-        self.buffer_waypoints = []
-        self.buffer_origin = None
-        self.buffer_insertion = None
+            # For SKEL box body models
+            self.gui_boxes = []
+            self.cand_gui_box = None
+            self.draw_gui_boxes = False
 
-        SKEL_section_vertices = self.skel_vertices
-        SKEL_section_faces = self.SKEL_section_faces_male if self.skel_gender == "male" else self.SKEL_section_faces_female
-        min_vertex = np.min(SKEL_section_vertices, axis=0)
-        max_vertex = np.max(SKEL_section_vertices, axis=0)
-        for faces in SKEL_section_faces:
-            vertex_normals = np.zeros_like(SKEL_section_vertices)
-            vertex_counts = np.zeros((SKEL_section_vertices.shape[0], 1))
-            SKEL_section_vertex3 = SKEL_section_vertices[faces]
+            # For SKEL muscle models, waypoint GUI
+            ## Currently clicked face, point, mesh index
+            self.selected_face = None
+            self.selected_point = None
+            self.selected_mesh_index = None
 
-            # SKEL_section_midpoint = np.mean(SKEL_section_vertex3, axis=0)
-            unique_vertex = SKEL_section_vertices[np.unique(faces)]
-            SKEL_section_midpoint = np.mean(unique_vertex, axis=0)
-            self.SKEL_section_midpoints.append(SKEL_section_midpoint)
+            self.painted_origins = {}
+            self.painted_insertions = {}
 
-            SKEL_section_colors = np.ones((len(SKEL_section_vertices), 4))
-            SKEL_section_colors[:, :3] = (np.mean(SKEL_section_vertex3, axis=0) - min_vertex) / (max_vertex - min_vertex)
-            # SKEL_section_colors[:, :3] = np.random.rand(3)
-            SKEL_section_colors[:, 3] = self.skel_opacity
-            self.SKEL_section_colors.append(SKEL_section_colors)
+            ## Saved origin/insertion information
+            self.selected_origin = None
+            self.selected_origin_face = None
+            self.selected_origin_mesh_index = None
+            self.selected_origin_barycentric = None
 
-            SKEL_section_color4 = SKEL_section_colors[faces]
-            self.SKEL_section_vertex3.append(SKEL_section_vertex3)
-            self.SKEL_section_color4.append(SKEL_section_color4)
+            self.selected_insertion = None
+            self.selected_insertion_face = None
+            self.selected_insertion_mesh_index = None
+            self.selected_insertion_braycentric = None
 
-            SKEL_section_normal = np.cross(SKEL_section_vertex3[1::3] - SKEL_section_vertex3[0::3], SKEL_section_vertex3[2::3] - SKEL_section_vertex3[0::3])
-            SKEL_section_normal = SKEL_section_normal / np.linalg.norm(SKEL_section_normal, axis=1)[:, np.newaxis]
-            SKEL_section_normal = np.repeat(SKEL_section_normal, 3, axis=0)
-            np.add.at(vertex_normals, faces, SKEL_section_normal)
-            np.add.at(vertex_counts, faces, 1)
+            ## Muscle GUI status variables
+            self.muscleMode = False
+
+            self.draw_hit_smpl = True
+            self.draw_hit_muscle = True
+
+            self.hit_betas = torch.zeros(1, 10).to(self.device)
+            self.hit_poses = torch.zeros(1, 72).to(self.device)
+            self.hit_vertex3 = None
+            self.hit_color4 = None
+            self.hit_normal = None
+            self.hit_smpl_vertex3 = None
+            self.hit_smpl_color4 = None
+            self.hit_smpl_normal = None
+
+            self.drawReferenceObj = False
+            self.ref_trans = np.array([0.0, 0.0, 0.0])
+            self.ref_scale = 1
+
+            self.isOrigin = False
+            self.isInsertion = False
+            self.isWaypoint = False
+            self.translateWaypoint = False
+            self.deleteWaypoint = False
+
+            self.translateWaypointIndex = None
+
+            self.exportGaitNet = True
+
+            ## Waypoint/Line/Muscle information
+            self.point_size = 5
+            self.hover_waypoint = None
+            self.selected_waypoints = []
+
+            self.selected_lines = []
+            self.selected_line_index = 0
+            
+            self.SKEL_muscles = []
+            self.SKEL_muscle_index = 0
+            self.muscle_name_input = "new_muscle"
+
+            self.buffer_waypoints = []
+            self.buffer_origin = None
+            self.buffer_insertion = None
+
+            SKEL_section_vertices = self.skel_vertices
+            SKEL_section_faces = self.SKEL_section_faces_male if self.skel_gender == "male" else self.SKEL_section_faces_female
+            min_vertex = np.min(SKEL_section_vertices, axis=0)
+            max_vertex = np.max(SKEL_section_vertices, axis=0)
+            for faces in SKEL_section_faces:
+                vertex_normals = np.zeros_like(SKEL_section_vertices)
+                vertex_counts = np.zeros((SKEL_section_vertices.shape[0], 1))
+                SKEL_section_vertex3 = SKEL_section_vertices[faces]
+
+                # SKEL_section_midpoint = np.mean(SKEL_section_vertex3, axis=0)
+                unique_vertex = SKEL_section_vertices[np.unique(faces)]
+                SKEL_section_midpoint = np.mean(unique_vertex, axis=0)
+                self.SKEL_section_midpoints.append(SKEL_section_midpoint)
+
+                SKEL_section_colors = np.ones((len(SKEL_section_vertices), 4))
+                SKEL_section_colors[:, :3] = (np.mean(SKEL_section_vertex3, axis=0) - min_vertex) / (max_vertex - min_vertex)
+                # SKEL_section_colors[:, :3] = np.random.rand(3)
+                SKEL_section_colors[:, 3] = self.skel_opacity
+                self.SKEL_section_colors.append(SKEL_section_colors)
+
+                SKEL_section_color4 = SKEL_section_colors[faces]
+                self.SKEL_section_vertex3.append(SKEL_section_vertex3)
+                self.SKEL_section_color4.append(SKEL_section_color4)
+
+                SKEL_section_normal = np.cross(SKEL_section_vertex3[1::3] - SKEL_section_vertex3[0::3], SKEL_section_vertex3[2::3] - SKEL_section_vertex3[0::3])
+                SKEL_section_normal = SKEL_section_normal / np.linalg.norm(SKEL_section_normal, axis=1)[:, np.newaxis]
+                SKEL_section_normal = np.repeat(SKEL_section_normal, 3, axis=0)
+                np.add.at(vertex_normals, faces, SKEL_section_normal)
+                np.add.at(vertex_counts, faces, 1)
+                vertex_counts[vertex_counts == 0] = 1
+                vertex_normals /= vertex_counts
+                self.SKEL_section_normal.append(vertex_normals[faces])
+
+            
+            # Thorax Realignment 
+            L1 = self.SKEL_section_midpoints[68]
+            C7 = self.SKEL_section_midpoints[133]
+            a = (C7[0] - L1[0]) / (C7[1] - L1[1])
+            b = L1[0] - a * L1[1]
+
+            for i, thor in enumerate([80, 82, 83, 81, 79, 76, 75, 72, 74, 77, 73, 78]):
+                fixed = a * self.SKEL_section_midpoints[thor][1] + b
+                offset = fixed - self.SKEL_section_midpoints[thor][0]
+                offset *= 0.5 / (5.5**2) * (i - 5.5) ** 2 + 0.5
+
+                self.SKEL_section_vertex3[thor][:, 0] += offset
+                self.SKEL_section_midpoints[thor][0] += offset
+            
+            # L2_C7 = [70, 68, 80, 82, 83, 81, 79, 76, 75, 72, 74, 77, 73, 78]
+            L2_C7 = [70, 68, 78, 73, 77, 74, 72, 75, 76, 79, 81, 83, 82, 80, 133]
+            for index, i in enumerate(range(len(L2_C7) - 3)):
+                inf = self.SKEL_section_midpoints[L2_C7[i]]
+                sup = self.SKEL_section_midpoints[L2_C7[i + 1]]
+                a = (sup[2] - inf[2]) / (sup[1] - inf[1])
+                b = inf[2] - a * inf[1]
+
+                fix_vert = L2_C7[i + 2]
+                fixed = a * self.SKEL_section_midpoints[fix_vert][1] + b
+                offset = (fixed - self.SKEL_section_midpoints[fix_vert][2]) * (12 - i) / 12
+                
+                self.SKEL_section_vertex3[fix_vert][:, 2] += offset
+                self.SKEL_section_midpoints[fix_vert][2] += offset
+
+                up_vert = L2_C7[i + 3]
+                y_offset = (sup[1] + self.SKEL_section_midpoints[up_vert][1]) / 2 - self.SKEL_section_midpoints[fix_vert][1]
+                self.SKEL_section_vertex3[fix_vert][:, 1] += y_offset
+                self.SKEL_section_midpoints[fix_vert][1] += y_offset
+
+            self.skel_colors = np.ones((2, len(self.skel_vertices), 4))
+            # self.skel_colors[:, :, :3] = (self.skel_vertices - min_vertex) / (max_vertex - min_vertex)
+            self.skel_colors[:, :, 3] = self.skel_opacity
+
+            vertex_normals = np.zeros_like(skel_vertices)
+            vertex_counts = np.zeros((skel_vertices.shape[0], 1))
+            self.skel_vertex3[0] = skel_vertices[self.skel_faces]
+            self.skel_color4[0] = self.skel_colors[0][self.skel_faces]
+
+            ## Compute normal vector according to vertex3
+            self.skel_normal[0] = np.cross(self.skel_vertex3[0][1::3] - self.skel_vertex3[0][0::3], self.skel_vertex3[0][2::3] - self.skel_vertex3[0][0::3])
+            self.skel_normal[0] = self.skel_normal[0] / np.linalg.norm(self.skel_normal[0], axis=1)[:, np.newaxis]
+            self.skel_normal[0] = np.repeat(self.skel_normal[0], 3, axis=0)
+
+            np.add.at(vertex_normals, self.skel_faces, self.skel_normal[0])
+            np.add.at(vertex_counts, self.skel_faces, 1)
             vertex_counts[vertex_counts == 0] = 1
             vertex_normals /= vertex_counts
-            self.SKEL_section_normal.append(vertex_normals[faces])
-
-        
-        # Thorax Realignment 
-        L1 = self.SKEL_section_midpoints[68]
-        C7 = self.SKEL_section_midpoints[133]
-        a = (C7[0] - L1[0]) / (C7[1] - L1[1])
-        b = L1[0] - a * L1[1]
-
-        for i, thor in enumerate([80, 82, 83, 81, 79, 76, 75, 72, 74, 77, 73, 78]):
-            fixed = a * self.SKEL_section_midpoints[thor][1] + b
-            offset = fixed - self.SKEL_section_midpoints[thor][0]
-            offset *= 0.5 / (5.5**2) * (i - 5.5) ** 2 + 0.5
-
-            self.SKEL_section_vertex3[thor][:, 0] += offset
-            self.SKEL_section_midpoints[thor][0] += offset
-        
-        # L2_C7 = [70, 68, 80, 82, 83, 81, 79, 76, 75, 72, 74, 77, 73, 78]
-        L2_C7 = [70, 68, 78, 73, 77, 74, 72, 75, 76, 79, 81, 83, 82, 80, 133]
-        for index, i in enumerate(range(len(L2_C7) - 3)):
-            inf = self.SKEL_section_midpoints[L2_C7[i]]
-            sup = self.SKEL_section_midpoints[L2_C7[i + 1]]
-            a = (sup[2] - inf[2]) / (sup[1] - inf[1])
-            b = inf[2] - a * inf[1]
-
-            fix_vert = L2_C7[i + 2]
-            fixed = a * self.SKEL_section_midpoints[fix_vert][1] + b
-            offset = (fixed - self.SKEL_section_midpoints[fix_vert][2]) * (12 - i) / 12
+            self.skel_normal[0] = vertex_normals[self.skel_faces]
             
-            self.SKEL_section_vertex3[fix_vert][:, 2] += offset
-            self.SKEL_section_midpoints[fix_vert][2] += offset
+            # f = open(f'skel_f_{self.skel_gender}.py', 'w')
+            # f.write(f'skel_f = {self.skel_faces.tolist()}\n')
+            # f.close()
 
-            up_vert = L2_C7[i + 3]
-            y_offset = (sup[1] + self.SKEL_section_midpoints[up_vert][1]) / 2 - self.SKEL_section_midpoints[fix_vert][1]
-            self.SKEL_section_vertex3[fix_vert][:, 1] += y_offset
-            self.SKEL_section_midpoints[fix_vert][1] += y_offset
+            # duplicate_vertices = np.where(vertex_counts == 1)[0]    
+            # vertex_groups = []
+            # while len(duplicate_vertices) > 0:
+            #     group = [duplicate_vertices[0]]
+            #     for i in range(1, len(duplicate_vertices)):
+            #         if np.linalg.norm(skel_vertices[duplicate_vertices[0]] - skel_vertices[duplicate_vertices[i]]) < 0.0001:
+            #             group.append(duplicate_vertices[i])
+            #     vertex_groups.append(group)
+            #     duplicate_vertices = duplicate_vertices[~np.isin(duplicate_vertices, group)]
+            #     print(len(duplicate_vertices))
 
-        self.skel_colors = np.ones((2, len(self.skel_vertices), 4))
-        # self.skel_colors[:, :, :3] = (self.skel_vertices - min_vertex) / (max_vertex - min_vertex)
-        self.skel_colors[:, :, 3] = self.skel_opacity
+            # f = open(f'duplicate_vertices_{self.skel_gender}.py', 'w')
+            # f.write('duplicate_vertices = [\n')
+            # for group in vertex_groups:
+            #     f.write(f"    {group},\n")
+            # f.write(']\n')
+            # f.close()
 
-        vertex_normals = np.zeros_like(skel_vertices)
-        vertex_counts = np.zeros((skel_vertices.shape[0], 1))
-        self.skel_vertex3[0] = skel_vertices[self.skel_faces]
-        self.skel_color4[0] = self.skel_colors[0][self.skel_faces]
+            self.skin_faces = np.array(list(self.skel.skin_f.cpu().flatten()), dtype=int)
+            skin_vertices = skel_output.skin_verts.detach().cpu().numpy()[0]
 
-        ## Compute normal vector according to vertex3
-        self.skel_normal[0] = np.cross(self.skel_vertex3[0][1::3] - self.skel_vertex3[0][0::3], self.skel_vertex3[0][2::3] - self.skel_vertex3[0][0::3])
-        self.skel_normal[0] = self.skel_normal[0] / np.linalg.norm(self.skel_normal[0], axis=1)[:, np.newaxis]
-        self.skel_normal[0] = np.repeat(self.skel_normal[0], 3, axis=0)
+            self.skin_vertices = skin_vertices.copy()
 
-        np.add.at(vertex_normals, self.skel_faces, self.skel_normal[0])
-        np.add.at(vertex_counts, self.skel_faces, 1)
-        vertex_counts[vertex_counts == 0] = 1
-        vertex_normals /= vertex_counts
-        self.skel_normal[0] = vertex_normals[self.skel_faces]
-        
-        # f = open(f'skel_f_{self.skel_gender}.py', 'w')
-        # f.write(f'skel_f = {self.skel_faces.tolist()}\n')
-        # f.close()
-
-        # duplicate_vertices = np.where(vertex_counts == 1)[0]    
-        # vertex_groups = []
-        # while len(duplicate_vertices) > 0:
-        #     group = [duplicate_vertices[0]]
-        #     for i in range(1, len(duplicate_vertices)):
-        #         if np.linalg.norm(skel_vertices[duplicate_vertices[0]] - skel_vertices[duplicate_vertices[i]]) < 0.0001:
-        #             group.append(duplicate_vertices[i])
-        #     vertex_groups.append(group)
-        #     duplicate_vertices = duplicate_vertices[~np.isin(duplicate_vertices, group)]
-        #     print(len(duplicate_vertices))
-
-        # f = open(f'duplicate_vertices_{self.skel_gender}.py', 'w')
-        # f.write('duplicate_vertices = [\n')
-        # for group in vertex_groups:
-        #     f.write(f"    {group},\n")
-        # f.write(']\n')
-        # f.close()
-
-        self.skin_faces = np.array(list(self.skel.skin_f.cpu().flatten()), dtype=int)
-        skin_vertices = skel_output.skin_verts.detach().cpu().numpy()[0]
-
-        self.skin_vertices = skin_vertices.copy()
-
-        if self.isDrawHalfSkin:
-            if self.skel_gender == 'male':
-                if self.skin_direction == "right":
-                    self.skin_half_faces = male_right_faces
+            if self.isDrawHalfSkin:
+                if self.skel_gender == 'male':
+                    if self.skin_direction == "right":
+                        self.skin_half_faces = male_right_faces
+                    else:
+                        self.skin_half_faces = male_left_faces
                 else:
-                    self.skin_half_faces = male_left_faces
-            else:
-                if self.skin_direction == "right":
-                    self.skin_half_faces = female_right_faces
-                else:
-                    self.skin_half_faces = female_left_faces
+                    if self.skin_direction == "right":
+                        self.skin_half_faces = female_right_faces
+                    else:
+                        self.skin_half_faces = female_left_faces
 
-            # # Used for checking half skin faces
-            # self.skin_right_faces = []
-            # self.cand_skin_right_faces = []
-            # self.skin_left_faces = []
-            # if self.skel_gender == 'male':
-            #     threshold = 0.003
-            # else:
-            #     threshold = 0
-            # for i in range(len(self.skin_faces) // 3):
-            #     indices = self.skin_faces[i * 3: (i + 1) * 3]
-            #     vertices = self.skin_vertices[indices]
-            #     num_minus_x = np.sum(vertices[:, 0] < threshold)
-            #     if num_minus_x == 3:
-            #         self.skin_right_faces.extend(indices)
-            #     elif num_minus_x == 1 or num_minus_x == 2:
-            #         self.cand_skin_right_faces.extend(indices)
-            #     else:
-            #         self.skin_left_faces.extend(indices)
-            # print(len(self.skin_right_faces))
-            # print(len(self.skin_left_faces))
-            # self.skin_faces = np.array(self.skin_right_faces, dtype=int)
+                # # Used for checking half skin faces
+                # self.skin_right_faces = []
+                # self.cand_skin_right_faces = []
+                # self.skin_left_faces = []
+                # if self.skel_gender == 'male':
+                #     threshold = 0.003
+                # else:
+                #     threshold = 0
+                # for i in range(len(self.skin_faces) // 3):
+                #     indices = self.skin_faces[i * 3: (i + 1) * 3]
+                #     vertices = self.skin_vertices[indices]
+                #     num_minus_x = np.sum(vertices[:, 0] < threshold)
+                #     if num_minus_x == 3:
+                #         self.skin_right_faces.extend(indices)
+                #     elif num_minus_x == 1 or num_minus_x == 2:
+                #         self.cand_skin_right_faces.extend(indices)
+                #     else:
+                #         self.skin_left_faces.extend(indices)
+                # print(len(self.skin_right_faces))
+                # print(len(self.skin_left_faces))
+                # self.skin_faces = np.array(self.skin_right_faces, dtype=int)
 
-            self.skin_faces = np.array(self.skin_half_faces, dtype=int)
+                self.skin_faces = np.array(self.skin_half_faces, dtype=int)
 
-        self.add_skin_index = 0
+            self.add_skin_index = 0
 
-        self.skin_colors = np.ones((2, len(self.skin_vertices), 4)) * 0.8
-        self.skin_colors[:, :, 3] = self.skin_opacity
+            self.skin_colors = np.ones((2, len(self.skin_vertices), 4)) * 0.8
+            self.skin_colors[:, :, 3] = self.skin_opacity
 
-        vertex_normals = np.zeros_like(skin_vertices)
-        vertex_counts = np.zeros((skin_vertices.shape[0], 1))
-        self.skin_vertex3[0] = skin_vertices[self.skin_faces]
-        self.skin_color4[0] = self.skin_colors[0][self.skin_faces]
+            vertex_normals = np.zeros_like(skin_vertices)
+            vertex_counts = np.zeros((skin_vertices.shape[0], 1))
+            self.skin_vertex3[0] = skin_vertices[self.skin_faces]
+            self.skin_color4[0] = self.skin_colors[0][self.skin_faces]
 
-        ## Compute normal vector according to vertex3
-        self.skin_normal[0] = np.cross(self.skin_vertex3[0][1::3] - self.skin_vertex3[0][0::3], self.skin_vertex3[0][2::3] - self.skin_vertex3[0][0::3])
-        self.skin_normal[0] = self.skin_normal[0] / np.linalg.norm(self.skin_normal[0], axis=1)[:, np.newaxis]
-        self.skin_normal[0] = np.repeat(self.skin_normal[0], 3, axis=0)
-        np.add.at(vertex_normals, self.skin_faces, self.skin_normal[0])
-        np.add.at(vertex_counts, self.skin_faces, 1)
-        vertex_counts[vertex_counts == 0] = 1
-        vertex_normals /= vertex_counts
-        self.skin_normal[0] = vertex_normals[self.skin_faces]
+            ## Compute normal vector according to vertex3
+            self.skin_normal[0] = np.cross(self.skin_vertex3[0][1::3] - self.skin_vertex3[0][0::3], self.skin_vertex3[0][2::3] - self.skin_vertex3[0][0::3])
+            self.skin_normal[0] = self.skin_normal[0] / np.linalg.norm(self.skin_normal[0], axis=1)[:, np.newaxis]
+            self.skin_normal[0] = np.repeat(self.skin_normal[0], 3, axis=0)
+            np.add.at(vertex_normals, self.skin_faces, self.skin_normal[0])
+            np.add.at(vertex_counts, self.skin_faces, 1)
+            vertex_counts[vertex_counts == 0] = 1
+            vertex_normals /= vertex_counts
+            self.skin_normal[0] = vertex_normals[self.skin_faces]
     
+        # OBJ Files
         self.meshes = {}
+
+        self.zygote_muscle_meshes = {}
+        self.zygote_muscle_color = np.array([0.75, 0.25, 0.25])
+        self.zygote_muscle_transparency = 1.0
+        self.is_draw_zygote_muscle = True
+        self.is_draw_zygote_muscle_open_edges = False
+        self.is_draw_one_zygote_muscle = False
+        self.zygote_skeleton_meshes = {}
+        self.zygote_skeleton_color = np.array([0.9, 0.9, 0.9])
+        self.zygote_skeleton_transparency = 1.0
+        self.is_draw_zygote_skeleton = True
+        self.is_draw_one_zygote_skeleton = False
+        self.zygote_muscle_meshes_intersection_bones = {}
 
         imgui.create_context()
         self.window = impl_glfw_init(self.name, self.width, self.height)
@@ -1493,8 +1549,6 @@ class GLFWApp():
                 line.origin = new_origin
                 line.insertion = new_insertion
 
-
-
     def update_smpl(self):
         ## Update SMPL Vertex to character's vertex
         ## Pos 0 : Sim Character, Pos 1 : Ref Character
@@ -1929,76 +1983,115 @@ class GLFWApp():
             self.meshes[k] = MeshLoader()
             self.meshes[k].load(info)
 
+        self.env.meshes = self.meshes
+
+        # bring obj file from 'Zygote_Meshes/Muscle' folder
+        zygote_dir = 'Zygote_Meshes_Revised_Subdivided/'
+        for muscle_file in os.listdir(zygote_dir + 'Muscle'):
+            if muscle_file.endswith('.obj'):
+                muscle_name = muscle_file.split('.')[0]
+
+                self.zygote_muscle_meshes[muscle_name] = MeshLoader()
+                self.zygote_muscle_meshes[muscle_name].load(zygote_dir + 'Muscle/' + muscle_file)
+                self.zygote_muscle_meshes[muscle_name].color = np.array([0.75, 0.25, 0.25])
+                self.zygote_muscle_meshes[muscle_name].trimesh = trimesh.load_mesh(zygote_dir + 'Muscle/' + muscle_file)
+
+        for skeleton_file in os.listdir(zygote_dir + 'Skeleton'):
+            if skeleton_file.endswith('.obj'):
+                skeleton_name = skeleton_file.split('.')[0]
+
+                self.zygote_skeleton_meshes[skeleton_name] = MeshLoader()
+                self.zygote_skeleton_meshes[skeleton_name].load(zygote_dir + 'Skeleton/' + skeleton_file)
+                self.zygote_skeleton_meshes[skeleton_name].color = np.array([0.9, 0.9, 0.9])
+                self.zygote_skeleton_meshes[skeleton_name].trimesh = trimesh.load_mesh(zygote_dir + 'Skeleton/' + skeleton_file)
+
+        # sort zygote_muscle_meshes by name
+        self.zygote_muscle_meshes = dict(sorted(self.zygote_muscle_meshes.items()))
+        self.zygote_skeleton_meshes = dict(sorted(self.zygote_skeleton_meshes.items()))
+        for i, (name, mesh) in enumerate(self.zygote_skeleton_meshes.items()):
+            mesh.cand_parent_index = i
+
         # self.reset(self.reset_value)
         self.zero_reset()
 
+        # Mesh Setting
         for bn in self.env.skel.getBodyNodes():
             transform = bn.getWorldTransform().matrix() @ bn.getParentJoint().getTransformFromChildBodyNode().matrix()
             t_parent = transform[:3, 3]
+
+            if bn.getName() in self.meshes.keys():
+                if len(self.meshes[bn.getName()].vertices_3) > 0:
+                    self.meshes[bn.getName()].vertices_3 -= t_parent
+                    self.meshes[bn.getName()].new_vertices_3 -= t_parent
+                if len(self.meshes[bn.getName()].vertices_4) > 0:
+                    self.meshes[bn.getName()].vertices_4 -= t_parent
+
+            # numChild = bn.getNumChildBodyNodes()
+            # if numChild > 1:
+            #     info = self.env.skel_info[bn.getName()]
+            #     stretch_axis = info['stretch_axises'][0]
+
+            #     max_dot = 0
+            #     for i in range(numChild):
+            #         bn_child = bn.getChildBodyNode(i)
+            #         transform_child = bn_child.getWorldTransform().matrix() @ bn_child.getParentJoint().getTransformFromChildBodyNode().matrix()
+            #         t_child = transform_child[:3, 3]
+
+            #         cand_p2c = t_child - t_parent
+            #         length = np.linalg.norm(cand_p2c)
+            #         cand_p2c = cand_p2c / length
+
+            #         cand_max_dot = np.abs(np.dot(stretch_axis, cand_p2c))
+            #         if cand_max_dot > max_dot:
+            #             max_dot = cand_max_dot
+            #             p2c = cand_p2c
+
+            #     if max_dot < 0.99:
+            #         p2c = self.env.skel_info[bn.getName()]['stretch_axises'][0]
+
+            # elif numChild == 1:
+            #     bn_child = bn.getChildBodyNode(0)
+            #     transform_child = bn_child.getWorldTransform().matrix() @ bn_child.getParentJoint().getTransformFromChildBodyNode().matrix()
+            #     t_child = transform_child[:3, 3]
+
+            #     p2c = t_child - t_parent
+            #     length = np.linalg.norm(p2c)
+            #     p2c = p2c / length
+
+            # else:
+            #     p2c = self.env.skel_info[bn.getName()]['stretch_axises'][0]
+
+            # if bn.getName() in self.meshes.keys():
+            #     self.meshes[bn.getName()].axis = p2c
+            # axis_joint = p2c
+
+            # info = self.env.skel_info[bn.getName()]
+            # stretch = info['stretches'][0]
+            # if stretch == 0:
+            #     axis_stretch = np.array([1, 0, 0])
+            # elif stretch == 1:
+            #     axis_stretch = np.array([0, 1, 0])
+            # else:
+            #     axis_stretch = np.array([0, 0, 1])
+
+            # if np.dot(axis_stretch, info['stretch_axises'][0]) < 0:
+            #     axis_stretch = -axis_stretch
+
+            # axis = np.cross(axis_joint, axis_stretch)
+
+            # rot = R.from_rotvec(axis)
+            # rotmat = R.as_matrix(rot)
             
-            self.meshes[bn.getName()].vertices_4 -= t_parent
-
-            numChild = bn.getNumChildBodyNodes()
-            if numChild > 1:
-                info = self.env.skel_info[bn.getName()]
-                stretch_axis = info['stretch_axises'][0]
-
-                max_dot = 0
-                for i in range(numChild):
-                    bn_child = bn.getChildBodyNode(i)
-                    transform_child = bn_child.getWorldTransform().matrix() @ bn_child.getParentJoint().getTransformFromChildBodyNode().matrix()
-                    t_child = transform_child[:3, 3]
-
-                    cand_p2c = t_child - t_parent
-                    length = np.linalg.norm(cand_p2c)
-                    cand_p2c = cand_p2c / length
-
-                    cand_max_dot = np.abs(np.dot(stretch_axis, cand_p2c))
-                    if cand_max_dot > max_dot:
-                        max_dot = cand_max_dot
-                        p2c = cand_p2c
-
-                if max_dot < 0.99:
-                    p2c = self.env.skel_info[bn.getName()]['stretch_axises'][0]
-
-            elif numChild == 1:
-                bn_child = bn.getChildBodyNode(0)
-                transform_child = bn_child.getWorldTransform().matrix() @ bn_child.getParentJoint().getTransformFromChildBodyNode().matrix()
-                t_child = transform_child[:3, 3]
-
-                p2c = t_child - t_parent
-                length = np.linalg.norm(p2c)
-                p2c = p2c / length
-
-            else:
-                p2c = self.env.skel_info[bn.getName()]['stretch_axises'][0]
-
-            # self.meshes[bn.getName()].axis = p2c
-            axis_joint = p2c
-
-            info = self.env.skel_info[bn.getName()]
-            stretch = info['stretches'][0]
-            if stretch == 0:
-                axis_stretch = np.array([1, 0, 0])
-            elif stretch == 1:
-                axis_stretch = np.array([0, 1, 0])
-            else:
-                axis_stretch = np.array([0, 0, 1])
-
-            if np.dot(axis_stretch, info['stretch_axises'][0]) < 0:
-                axis_stretch = -axis_stretch
-
-            axis = np.cross(axis_joint, axis_stretch)
-
-            rot = R.from_rotvec(axis)
-            rotmat = R.as_matrix(rot)
-            self.meshes[bn.getName()].vertices_4 = np.dot(self.meshes[bn.getName()].vertices_4, rotmat.T)
+            # if bn.getName() in self.meshes.keys():
+            #     if len(self.meshes[bn.getName()].vertices_3) > 0:
+            #         self.meshes[bn.getName()].vertices_3 = np.dot(self.meshes[bn.getName()].vertices_3, rotmat.T)
+            #     if len(self.meshes[bn.getName()].vertices_4) > 0:
+            #         self.meshes[bn.getName()].vertices_4 = np.dot(self.meshes[bn.getName()].vertices_4, rotmat.T)
 
         # self.update_smpl()
-
         # self.fitSkel2SMPL()
-        self.setObjScale()
-        self.newSkeleton()
+        # self.setObjScale()
+        # self.newSkeleton()
     
     def loadNetwork(self, path):
         self.nn, mus_nn, env_str = loading_network(path)
@@ -2017,6 +2110,8 @@ class GLFWApp():
                 self.translate = True
 
             if button == glfw.MOUSE_BUTTON_MIDDLE:
+                self.muscleMode = True
+
                 if self.isWaypoint:
                     if self.hover_waypoint is not None:
                         if self.selected_origin is None:
@@ -2138,6 +2233,7 @@ class GLFWApp():
                     self.translateWaypointIndex = None
                     self.translateWaypoint = False
                     self.isWaypoint = True
+                self.muscleMode = False
 
     def getNewWaypoints(self, start_point, end_point, new_start_point, new_end_point, waypoints):
         original_direction = end_point - start_point
@@ -2357,8 +2453,8 @@ class GLFWApp():
         if self.translate:
             rot = quaternion.as_rotation_matrix(self.trackball.curr_quat)
             self.trans += (1.0 / self.zoom) * rot.transpose() @ np.array([dx, -dy, 0.0])
-
-        if self.selected_origin is not None and self.selected_insertion is not None:
+        
+        elif use_skel and self.selected_origin is not None and self.selected_insertion is not None:
             if self.isWaypoint:  
                 ray_origin, ray_direction = self.get_ray_from_cursor(xpos, ypos, self.width, self.height)
 
@@ -2417,12 +2513,13 @@ class GLFWApp():
             except:
                 _, _, done, _ = self.env.step(np.zeros(self.env.num_action))
         else:
-            _, _, done, _ = self.env.step(np.zeros(self.env.num_action))
+            _, _, done, _ = self.env.step(np.zeros(self.env.num_action), skel_action=self.skel_muscle_activation_levels)
         # if done:
         #     self.is_simulation = False
         self.reward_buffer.append(self.env.get_reward())
 
-        self.update_smpl()
+        if use_smpl:
+            self.update_smpl()
 
     def drawShape(self, shape, color):
         if not shape:
@@ -2439,7 +2536,7 @@ class GLFWApp():
 
         mygl.draw_cube(shape.getSize())
     
-    def drawObj(self, pos, color = np.array([0.5, 0.5, 0.5, 0.5])):
+    def drawObj(self, pos, color = np.array([0.8, 0.8, 0.8, 0.5])):
         self.motion_skel.setPositions(pos)
         
         glPushMatrix()
@@ -2459,31 +2556,34 @@ class GLFWApp():
             angle = np.linalg.norm(rotvec)
             axis = rotvec / angle if angle != 0 else np.array([0, 0, 1])
             glRotatef(np.rad2deg(angle), axis[0], axis[1], axis[2])
-            
+
             glScalef(self.skel_scale, self.skel_scale, self.skel_scale)
 
-            name = list(self.env.muscle_info.keys())[self.muscle_index]
-            wps = self.env.muscle_info[name]['waypoints']
-            origin_body = wps[0]['body']
-            insertion_body = wps[-1]['body']
+            if use_skel:
+                name = list(self.env.muscle_info.keys())[self.muscle_index]
+                wps = self.env.muscle_info[name]['waypoints']
+                origin_body = wps[0]['body']
+                insertion_body = wps[-1]['body']
 
-            if bn.getName() in [origin_body, insertion_body]:
-                self.meshes[bn.getName()].draw(np.array([1, 1, 0, self.obj_trans]))
+                if bn.getName() in [origin_body, insertion_body]:
+                    self.meshes[bn.getName()].draw(np.array([1, 1, 0, self.obj_trans]))
 
-                glColor4d(0,0,0,1)
-                for i in range(len(self.meshes[bn.getName()].new_vertices_4) // 4):
-                    v0, v1, v2, v3 = self.meshes[bn.getName()].new_vertices_4[i * 4 : (i + 1) * 4]
-                    glBegin(GL_LINE_LOOP)
-                    glVertex3f(v0[0], v0[1], v0[2])
-                    glVertex3f(v1[0], v1[1], v1[2])
-                    glVertex3f(v2[0], v2[1], v2[2])
-                    glVertex3f(v3[0], v3[1], v3[2])
-                    glEnd()
+                    glColor4d(0,0,0,1)
+                    for i in range(len(self.meshes[bn.getName()].new_vertices_4) // 4):
+                        v0, v1, v2, v3 = self.meshes[bn.getName()].new_vertices_4[i * 4 : (i + 1) * 4]
+                        glBegin(GL_LINE_LOOP)
+                        glVertex3f(v0[0], v0[1], v0[2])
+                        glVertex3f(v1[0], v1[1], v1[2])
+                        glVertex3f(v2[0], v2[1], v2[2])
+                        glVertex3f(v3[0], v3[1], v3[2])
+                        glEnd()
 
-            else:
+                else:
+                    self.meshes[bn.getName()].draw(np.array([color[0], color[1], color[2], self.obj_trans]))
+
+            # check if bn.getName() in self.meshes.keys()
+            if bn.getName() in self.meshes.keys():
                 self.meshes[bn.getName()].draw(np.array([color[0], color[1], color[2], self.obj_trans]))
-
-            # self.meshes[bn.getName()].draw(np.array([color[0], color[1], color[2], self.obj_trans]))
 
             glPopMatrix()
 
@@ -2515,9 +2615,9 @@ class GLFWApp():
         pass
 
     def drawSKELskel(self, pos, color = np.array([0.5, 0.5, 1, 0.5])):
-        self.skel_skel.setPositions(pos)
+        self.env.skel_skel.setPositions(pos)
 
-        for bn in self.skel_skel.getBodyNodes():
+        for bn in self.env.skel_skel.getBodyNodes():
             glPushMatrix()
             bnWorldTransform = bn.getWorldTransform().matrix().transpose()
             glMultMatrixd(bnWorldTransform)
@@ -2559,7 +2659,7 @@ class GLFWApp():
         #         glPopMatrix()
         #     glPopMatrix()
 
-        for bn in self.skel_skel.getBodyNodes():
+        for bn in self.env.skel_skel.getBodyNodes():
             glPushMatrix()
             glMultMatrixd(bn.getWorldTransform().matrix().transpose())
             
@@ -2672,20 +2772,35 @@ class GLFWApp():
                 glVertex3f(wp[0], wp[1], wp[2])
             glEnd() 
             idx += 1
-       
+    
+    def drawSKELMuscles(self, color=None):
+        if color is not None:
+            glColor4d(color[0], color[1], color[2], color[3])
+
+        glLineWidth(self.line_width)
+        for idx, m_wps in enumerate(self.env.skel_muscle_pos):
+            a = self.skel_muscle_activation_levels[idx]
+            if color is None:
+                glColor4d(1.0 * a,  0.2 * a, 0.2 * a, 0.2 + 0.6 * a)
+            glBegin(GL_LINE_STRIP)
+            for wp in m_wps:
+                glVertex3f(wp[0], wp[1], wp[2])
+            glEnd()
+
     def drawMuscles(self, color=None):
         if color is not None:
             glColor4d(color[0], color[1], color[2], color[3])
         if self.draw_line_muscle:
+            glDisable(GL_LIGHTING)
             glLineWidth(self.line_width)
             for idx, m_wps in enumerate(self.env.muscle_pos):
                 a = self.env.muscle_activation_levels[idx]
                 if color is None:
-                    if idx == self.muscle_index:
-                        glColor4d(10, 0, 0, 1)
-                    else:
-                        glColor4d(1.0 * a,  0.2 * a, 0.2 * a, 0.2 + 0.6 * a)
-                    # glColor4d(1.0 * a,  0.2 * a, 0.2 * a, 0.2 + 0.6 * a)
+                    # if idx == self.muscle_index:
+                    #     glColor4d(10, 0, 0, 1)
+                    # else:
+                    #     glColor4d(1.0 * a,  0.2 * a, 0.2 * a, 0.2 + 0.6 * a)
+                    glColor4d(1.0 * a,  0.2 * a, 0.2 * a, 0.2 + 0.6 * a)
                 glBegin(GL_LINE_STRIP)
                 for wp in m_wps:
                     glVertex3f(wp[0], wp[1], wp[2])
@@ -2698,6 +2813,7 @@ class GLFWApp():
                 #     glTranslatef(m_wps[i][0], m_wps[i][1], m_wps[i][2])
                 #     mygl.draw_sphere(0.003, 10, 10)
                 #     glPopMatrix()
+            glEnable(GL_LIGHTING)
         else:
             for idx, m_wps in enumerate(self.env.muscle_pos):
                 a = self.env.muscle_activation_levels[idx]
@@ -2731,7 +2847,7 @@ class GLFWApp():
                 glPushMatrix()
                 glTranslatef(v[0], v[1], v[2])
                 mygl.draw_sphere(0.002, 5, 5)
-                glPopMatrix()    
+                glPopMatrix()
 
     def drawSimFrame(self):
         initGL()
@@ -2742,6 +2858,7 @@ class GLFWApp():
         glViewport(0, 0, self.width, self.height)
         gluPerspective(self.perspective, (self.width / self.height), 0.1, 100.0)
         gluLookAt(self.eye[0], self.eye[1], self.eye[2], 0.0, 0.0, -1.0, self.up[0], self.up[1], self.up[2])
+
         glMatrixMode(GL_MODELVIEW)
         glLoadIdentity()
 
@@ -2755,29 +2872,42 @@ class GLFWApp():
 
         mygl.drawGround(-1E-3)
 
-        self.drawSKELCharacter()
-        if self.draw_gui_boxes:
-            self.drawGuiBoxes()
-        if self.drawReferenceObj:
-            glPushMatrix()
-            glTranslatef(self.ref_trans[0], self.ref_trans[1], self.ref_trans[2])
-            glScalef(self.ref_scale, self.ref_scale, self.ref_scale)
-            self.drawObj(self.env.skel.getPositions())
-            self.drawMuscles()
-            glPopMatrix()
-
         if self.mouse_down:
             glLineWidth(1.5)
             mygl.draw_axis()
         
-        if self.draw_smpl_bone:
-            self.drawSmplBone()
-        if self.draw_smpl_joint:
-            self.drawSmplJoint()
-        glDepthMask(GL_FALSE)
-        if self.draw_smpl:
-            self.drawSmplCharacter(np.array([0.5, 0.5, 0.5, self.smpl_trans]))
-        glDepthMask(GL_TRUE)
+        if use_smpl:
+            if self.draw_smpl_bone:
+                self.drawSmplBone()
+            if self.draw_smpl_joint:
+                self.drawSmplJoint()
+            glDepthMask(GL_FALSE)
+            if self.draw_smpl:
+                self.drawSmplCharacter(np.array([0.5, 0.5, 0.5, self.smpl_trans]))
+            glDepthMask(GL_TRUE)
+
+        for name, obj in self.zygote_muscle_meshes.items():
+            if obj.is_draw_contours:
+                obj.draw_contours()
+            if obj.is_draw_open_edges:
+                obj.draw_open_edges([0.0, 0.0, 1.0, obj.transparency])
+            if obj.is_draw_centroid:
+                obj.draw_centroid()
+            if obj.is_draw_bounding_box:
+                obj.draw_bounding_box()
+            if obj.is_draw_edges:
+                obj.draw_edges()
+            if obj.is_draw_fiber_architecture:
+                obj.draw_fiber_architecture()
+            if obj.is_draw:
+                obj.draw([obj.color[0], obj.color[1], obj.color[2], obj.transparency])
+        for name, obj in self.zygote_skeleton_meshes.items():
+            if obj.is_draw:
+                obj.draw([obj.color[0], obj.color[1], obj.color[2], obj.transparency])
+            if obj.is_draw_corners:
+                obj.draw_corners()
+            if obj.is_draw_edges:
+                obj.draw_edges()
 
         if self.draw_target_motion:
             self.drawSkeleton(self.env.target_pos, np.array([1.0, 0.3, 0.3, 0.5]))
@@ -2793,8 +2923,8 @@ class GLFWApp():
         if self.draw_body:
             self.drawSkeleton(self.env.skel.getPositions(), np.array([0.5, 0.5, 0.5, self.body_trans]))
 
-        if self.draw_pd_target:
-            self.drawSkeleton(self.env.pd_target, np.array([0.3, 0.3, 1.0, 0.5]))
+        # if self.draw_pd_target:
+        #     self.drawSkeleton(self.env.pd_target, np.array([0.3, 0.3, 1.0, 0.5]))
 
         if self.draw_zero_pose:
             # glColor3f(0, 0, 0)
@@ -2831,20 +2961,35 @@ class GLFWApp():
                 self.drawJoint(np.zeros(self.env.skel.getNumDofs()))
             self.drawSkeleton(np.zeros(self.env.skel.getNumDofs()), np.array([0.3, 1.0, 0.3, 0.5]))
 
-        if self.draw_test_skeleton:
-            if self.draw_bone:
-                self.drawBone(self.test_dofs)
-            if self.draw_joint:
-                self.drawJoint(self.test_dofs)
-            if self.draw_muscle:
-                self.drawTestMuscles(np.array([0.1, 0.1, 0.1, 0.1]))
-            self.drawSkeleton(self.test_dofs, np.array([0.3, 1.0, 1.0, 0.5]))
+        if use_skel:
+            self.drawSKELCharacter()
+            if self.draw_gui_boxes:
+                self.drawGuiBoxes()
+            if self.drawReferenceObj:
+                glPushMatrix()
+                glTranslatef(self.ref_trans[0], self.ref_trans[1], self.ref_trans[2])
+                glScalef(self.ref_scale, self.ref_scale, self.ref_scale)
+                self.drawObj(self.env.skel.getPositions())
+                self.drawMuscles()
+                glPopMatrix()
 
-        if self.draw_dart_skel and self.env.skel_skel is not None:
+            if self.draw_test_skeleton:
+                if self.draw_bone:
+                    self.drawBone(self.test_dofs)
+                if self.draw_joint:
+                    self.drawJoint(self.test_dofs)
+                if self.draw_muscle:
+                    self.drawTestMuscles(np.array([0.1, 0.1, 0.1, 0.1]))
+                self.drawSkeleton(self.test_dofs, np.array([0.3, 1.0, 1.0, 0.5]))
+
+            if self.draw_dart_skel and self.env.skel_skel is not None:
+                if self.env.skel_muscles is not None:
+                    self.drawSKELMuscles()
                 self.drawSKELskel(self.env.skel_skel.getPositions())
+                
         if self.test_skel is not None and self.draw_skel_dofs:
-                self.drawSKELskel(self.test_skel_dofs)
-
+            self.drawSKELskel(self.test_skel_dofs)
+        
         if self.draw_shadow:
             shadow_color = np.array([0.3, 0.3, 0.3, 1.0])
             glPushMatrix()
@@ -2864,7 +3009,7 @@ class GLFWApp():
             if self.draw_pd_target:
                 self.drawSkeleton(self.env.pd_target, np.array([0.3, 0.3, 1.0, 0.2]))
 
-            if self.draw_smpl:
+            if use_smpl and self.draw_smpl:
                 self.drawSmplCharacter()
             
             glPopMatrix()
@@ -2924,7 +3069,6 @@ class GLFWApp():
         if self.cand_gui_box is not None:
             self.cand_gui_box.draw()
             
-
     def reorder_vertices_by_depth(self, vertices, colors, normals):
         # Convert camera position to a NumPy array for easy calculations
         camera_position = self.eye
@@ -3216,8 +3360,33 @@ class GLFWApp():
                         glDisableClientState(GL_VERTEX_ARRAY)
                         glDisableClientState(GL_COLOR_ARRAY)
                         glPopMatrix()
+                        
+                        if i in self.painted_origins.keys():
+                            for face in self.painted_origins[i]:
+                                glColor4d(10,0,0,1)
+                                glPushMatrix()
+                                v0, v1, v2 = self.SKEL_section_vertex3[i][face*3:face*3+3]
+                                glBegin(GL_TRIANGLES)
+                                glVertex3f(v0[0], v0[1], v0[2])
+                                glVertex3f(v1[0], v1[1], v1[2])
+                                glVertex3f(v2[0], v2[1], v2[2])
+                                glEnd()
+                                glPopMatrix()
 
-                        if i == self.selected_mesh_index and self.selected_face is not None:
+                        if i in self.painted_insertions.keys():
+                            for face in self.painted_insertions[i]:
+                                glColor4d(0,0,10,1)
+                                glPushMatrix()
+                                v0, v1, v2 = self.SKEL_section_vertex3[i][face*3:face*3+3]
+                                glBegin(GL_TRIANGLES)
+                                glVertex3f(v0[0], v0[1], v0[2])
+                                glVertex3f(v1[0], v1[1], v1[2])
+                                glVertex3f(v2[0], v2[1], v2[2])
+                                glEnd()
+                                glPopMatrix()
+
+
+                        if i == self.selected_mesh_index is not None:
                             glColor4d(10,10,10,1)
                             for j in range(len(self.SKEL_section_vertex3[i]) // 3):
                                 v0, v1, v2 = self.SKEL_section_vertex3[i][j * 3 : (j + 1) * 3]
@@ -3227,40 +3396,41 @@ class GLFWApp():
                                 glVertex3f(v2[0], v2[1], v2[2])
                                 glEnd()
 
-                            glPushMatrix()
-                            glColor3f(10, 10, 10)
-                            v0, v1, v2 = self.SKEL_section_vertex3[i][self.selected_face*3:self.selected_face*3+3]
-                            glBegin(GL_TRIANGLES)
-                            glVertex3f(v0[0], v0[1], v0[2])
-                            glVertex3f(v1[0], v1[1], v1[2])
-                            glVertex3f(v2[0], v2[1], v2[2])
-                            glEnd()
-
-                            glColor3f(0, 0, 0)
-                            glBegin(GL_LINE_LOOP)
-                            glVertex3f(v0[0], v0[1], v0[2])
-                            glVertex3f(v1[0], v1[1], v1[2])
-                            glVertex3f(v2[0], v2[1], v2[2])
-                            glEnd()
-
-                            for j, v in enumerate([v0, v1, v2]):
+                            if self.selected_face is not None:
                                 glPushMatrix()
-                                if j == 0:
-                                    glColor3f(10, 0, 0)
-                                elif j == 1:
-                                    glColor3f(0, 10, 0)
-                                else:
-                                    glColor3f(0, 0, 10)
-                                glTranslatef(v[0], v[1], v[2])
+                                glColor3f(10, 10, 10)
+                                v0, v1, v2 = self.SKEL_section_vertex3[i][self.selected_face*3:self.selected_face*3+3]
+                                glBegin(GL_TRIANGLES)
+                                glVertex3f(v0[0], v0[1], v0[2])
+                                glVertex3f(v1[0], v1[1], v1[2])
+                                glVertex3f(v2[0], v2[1], v2[2])
+                                glEnd()
+
+                                glColor3f(0, 0, 0)
+                                glBegin(GL_LINE_LOOP)
+                                glVertex3f(v0[0], v0[1], v0[2])
+                                glVertex3f(v1[0], v1[1], v1[2])
+                                glVertex3f(v2[0], v2[1], v2[2])
+                                glEnd()
+
+                                for j, v in enumerate([v0, v1, v2]):
+                                    glPushMatrix()
+                                    if j == 0:
+                                        glColor3f(10, 0, 0)
+                                    elif j == 1:
+                                        glColor3f(0, 10, 0)
+                                    else:
+                                        glColor3f(0, 0, 10)
+                                    glTranslatef(v[0], v[1], v[2])
+                                    mygl.draw_sphere(0.0005, 5, 5)
+                                    glPopMatrix()
+
+                                glColor3f(0, 0, 0)
+                                a, b, c = self.selected_point
+                                glTranslatef(a, b, c)
                                 mygl.draw_sphere(0.0005, 5, 5)
+
                                 glPopMatrix()
-
-                            glColor3f(0, 0, 0)
-                            a, b, c = self.selected_point
-                            glTranslatef(a, b, c)
-                            mygl.draw_sphere(0.0005, 5, 5)
-
-                            glPopMatrix()
                         
             else:
                 glPushMatrix()
@@ -3277,6 +3447,38 @@ class GLFWApp():
                 glDisableClientState(GL_VERTEX_ARRAY)
                 glDisableClientState(GL_COLOR_ARRAY)
                 glPopMatrix()
+
+        if self.draw_hit_muscle and self.hit_vertex3 is not None:
+            glPushMatrix()
+            glEnableClientState(GL_COLOR_ARRAY)
+            glBindBuffer(GL_ARRAY_BUFFER, 0)
+            glColorPointer(4, GL_FLOAT, 0, self.hit_color4)
+            glEnableClientState(GL_VERTEX_ARRAY)
+            glBindBuffer(GL_ARRAY_BUFFER, 0)
+            glVertexPointer(3, GL_FLOAT, 0, self.hit_vertex3)
+            glEnableClientState(GL_NORMAL_ARRAY)
+            glNormalPointer(GL_FLOAT, 0, self.hit_normal)
+            glDrawArrays(GL_TRIANGLES, 0, len(self.hit_vertex3))
+            glDisableClientState(GL_NORMAL_ARRAY)
+            glDisableClientState(GL_VERTEX_ARRAY)
+            glDisableClientState(GL_COLOR_ARRAY)
+            glPopMatrix()
+
+        if self.draw_hit_smpl and self.hit_smpl_vertex3 is not None:
+            glPushMatrix()
+            glEnableClientState(GL_COLOR_ARRAY)
+            glBindBuffer(GL_ARRAY_BUFFER, 0)
+            glColorPointer(4, GL_FLOAT, 0, self.hit_smpl_color4)
+            glEnableClientState(GL_VERTEX_ARRAY)
+            glBindBuffer(GL_ARRAY_BUFFER, 0)
+            glVertexPointer(3, GL_FLOAT, 0, self.hit_smpl_vertex3)
+            glEnableClientState(GL_NORMAL_ARRAY)
+            glNormalPointer(GL_FLOAT, 0, self.hit_smpl_normal)
+            glDrawArrays(GL_TRIANGLES, 0, len(self.hit_smpl_vertex3))
+            glDisableClientState(GL_NORMAL_ARRAY)
+            glDisableClientState(GL_VERTEX_ARRAY)
+            glDisableClientState(GL_COLOR_ARRAY)
+            glPopMatrix()
 
         if self.draw_skel_skin:
             glPushMatrix()
@@ -3445,7 +3647,7 @@ class GLFWApp():
                     waypoint['gaps'][i] = orig_waypoint['gaps'][i] * scale
         
     def newSkeleton(self):
-        current_pos = self.env.skel.getPositions()
+        # current_pos = self.env.skel.getPositions()
         self.env.world.removeSkeleton(self.env.skel)
         self.env.skel = buildFromInfo(self.env.new_skel_info, self.env.root_name)
         self.env.target_skel = self.env.skel.clone()
@@ -3455,11 +3657,54 @@ class GLFWApp():
         self.env.loading_test_muscle_info(self.env.new_muscle_info)
 
         self.motion_skel = self.env.skel.clone()
-        self.motion_skel.setPositions(current_pos)
+        # self.motion_skel.setPositions(current_pos)
+        self.motion_skel.setPositions(self.env.skel.getPositions())
 
         # self.reset(self.env.world.getTime())
         self.zero_reset()
-        
+
+    def update_hit_smpl(self):
+        exp_name = 'hit_male' if self.skel_gender == "male" else 'hit_female'
+        ckpt_choice = 'best'
+        device = torch.device("cuda:0")
+
+        data = {}
+        data['global_orient'] = torch.zeros(1, 3).to(device) # Global orientation of the body
+        data['global_orient'][0] = self.hit_poses[0][:3]
+        data['body_pose'] = torch.zeros(1, 69).to(device) # Per joint rotation of the body (21 joints x 3 axis)
+        data['body_pose'][0] = self.hit_poses[0][3:]
+        data['betas'] = self.hit_betas # Shape parameters, values should be between -2 and 2
+        # data['betas'][0] = self.skel_betas
+        data['transl'] = torch.zeros(1, 3).to(device) # 3D ranslation of the body in meters
+        pelvis = self.env.skel.getBodyNode("Pelvis").getCOM() - self.skel_joints[0].cpu().numpy()
+        data['transl'][0] = torch.Tensor(pelvis)
+
+        # Load HIT model
+        hl = HitLoader.from_expname(exp_name, ckpt_choice=ckpt_choice)
+        hl.load()
+        hl.hit_model.apply_compression = False
+
+        # Run smpl forward pass to get the SMPL mesh
+        smpl_output = hl.smpl(betas=data['betas'], body_pose=data['body_pose'], global_orient=data['global_orient'], trans=data['transl'])
+
+        hit_smpl = trimesh.Trimesh(vertices=smpl_output.vertices[0].detach().cpu().numpy(), faces=hl.smpl.faces)
+        hit_smpl_vertices = hit_smpl.vertices + pelvis
+        hit_smpl_faces = hit_smpl.faces.reshape(-1)
+
+        vertex_normals = np.zeros_like(hit_smpl_vertices)
+        vertex_counts = np.zeros((hit_smpl_vertices.shape[0], 1))
+        self.hit_smpl_vertex3 = hit_smpl_vertices[hit_smpl_faces]
+        self.hit_smpl_color4 = np.ones((len(hit_smpl_vertices), 4))[hit_smpl_faces]
+        self.hit_smpl_color4[:, 3] = 0.5
+        self.hit_smpl_normal = np.cross(self.hit_smpl_vertex3[1::3] - self.hit_smpl_vertex3[0::3], self.hit_smpl_vertex3[2::3] - self.hit_smpl_vertex3[0::3])
+        self.hit_smpl_normal = self.hit_smpl_normal / np.linalg.norm(self.hit_smpl_normal, axis=1)[:, np.newaxis]
+        self.hit_smpl_normal = np.repeat(self.hit_smpl_normal, 3, axis=0)
+        np.add.at(vertex_normals, hit_smpl_faces, self.hit_smpl_normal)
+        np.add.at(vertex_counts, hit_smpl_faces, 1)
+        vertex_counts[vertex_counts == 0] = 1
+        vertex_normals /= vertex_counts
+        self.hit_smpl_normal = vertex_normals[hit_smpl_faces]
+
     def drawUIFrame(self):
         imgui.new_frame()
         
@@ -3504,6 +3749,343 @@ class GLFWApp():
             )
             imgui.tree_pop()
 
+        if imgui.tree_node("Zygote"):
+            if imgui.tree_node("Muscle"):                
+                changed, self.is_draw_zygote_muscle = imgui.checkbox("Draw", self.is_draw_zygote_muscle)
+                if changed:
+                    for name, obj in self.zygote_muscle_meshes.items():
+                        obj.is_draw = self.is_draw_zygote_muscle
+                changed, self.is_draw_zygote_muscle_open_edges = imgui.checkbox("Draw Open Edges", self.is_draw_zygote_muscle_open_edges)
+                if changed:
+                    for name, obj in self.zygote_muscle_meshes.items():
+                        obj.is_draw_open_edges = self.is_draw_zygote_muscle_open_edges
+                    
+                _, self.is_draw_one_zygote_muscle = imgui.checkbox("Draw One Muscle", self.is_draw_one_zygote_muscle)
+                changed, self.zygote_muscle_color = imgui.color_edit3("Color", *self.zygote_muscle_color)
+                if changed:
+                    for name, obj in self.zygote_muscle_meshes.items():
+                        obj.color = self.zygote_muscle_color
+
+                changed, self.zygote_muscle_transparency = imgui.slider_float("Transparency", self.zygote_muscle_transparency, 0.0, 1.0)
+                if changed:
+                    for name, obj in self.zygote_muscle_meshes.items():
+                        obj.transparency = self.zygote_muscle_transparency
+                        if obj.vertex_colors is not None:
+                            obj.vertex_colors[:, 3] = obj.transparency
+
+                if imgui.tree_node("Activation levels"):
+                    if self.env.zygote_activation_levels is not None:
+                        # for i in range(len(self.env.muscle_activation_levels)):
+                        #     imgui.push_item_width(push_width)
+                        #     _, self.env.muscle_activation_levels[i] = imgui.slider_float(f" ##fiber{i}", self.env.muscle_activation_levels[i], 0.0, 1.0)
+                        #     imgui.pop_item_width()
+
+                        for i, (name, obj) in enumerate(self.env.muscle_info.items()):
+                            changed, self.env.zygote_activation_levels[i] = imgui.slider_float(f"{name}##zygote_act{i}", self.env.zygote_activation_levels[i], 0.0, 1.0)
+                            if changed:
+                                start_fiber = self.env.zygote_activation_indices[i]
+                                end_fiber = self.env.zygote_activation_indices[i + 1]
+                                self.env.muscle_activation_levels[start_fiber:end_fiber] = self.env.zygote_activation_levels[i]
+                                # self.env.muscle_activation_levels[start_fiber:end_fiber] = self.env.zygote_activation_levels[i] / (end_fiber - start_fiber)
+                    imgui.tree_pop()
+                if imgui.button("Export Muscle Waypoints", width=wide_button_width):
+                    from core.dartHelper import exportMuscleWaypoints
+                    exportMuscleWaypoints(self.zygote_muscle_meshes, list(self.zygote_skeleton_meshes.keys()))
+                if imgui.button("Import zygote_muscle", width=wide_button_width):
+                    self.env.muscle_info = self.env.saveZygoteMuscleInfo("data/zygote_muscle.xml")
+                    self.env.loading_zygote_muscle_info(self.env.muscle_info)
+                    self.env.muscle_activation_levels = np.zeros(self.env.muscles.getNumMuscles())
+
+                    self.draw_obj = True
+                    self.is_simulation = True
+                    
+                for name, obj in self.zygote_muscle_meshes.items():
+                    if imgui.tree_node(name):
+                        if imgui.button(f"Scalar Field##{name}"):
+                            obj.compute_scalar_field()
+                        if imgui.button(f"Find Contours##{name}"):
+                            obj.find_contours()
+                        imgui.same_line()
+                        imgui.text(obj.link_mode)
+                        changed1, obj.specific_contour_value = imgui.slider_float(f"Ori##{name}", obj.specific_contour_value, 1.0, obj.contour_value_min, flags=imgui.SLIDER_FLAGS_NO_ROUND_TO_FORMAT)
+                        changed2, obj.specific_contour_value = imgui.slider_float(f"Mid##{name}", obj.specific_contour_value, obj.contour_value_min, obj.contour_value_max, flags=imgui.SLIDER_FLAGS_NO_ROUND_TO_FORMAT)
+                        changed3, obj.specific_contour_value = imgui.slider_float(f"Ins##{name}", obj.specific_contour_value, obj.contour_value_max, 10.0, flags=imgui.SLIDER_FLAGS_NO_ROUND_TO_FORMAT)
+                        if imgui.tree_node(f"MinMax##{name}"):
+                            _, obj.contour_value_min = imgui.input_float(f"Min##{name}", obj.contour_value_min)
+                            _, obj.contour_value_max = imgui.input_float(f"Max##{name}", obj.contour_value_max)
+                            imgui.tree_pop()
+                        if changed1 or changed2 or changed3:
+                            obj.find_contour_with_value(obj.specific_contour_value)
+                        # if imgui.button(f"Find Value Contour##{name}"):
+                        #     obj.find_contour_with_value()
+                        if imgui.button(f"Switch Link Mode##{name}"):
+                            if obj.link_mode == 'mean':
+                                obj.link_mode = 'vertex'
+                            else:
+                                obj.link_mode = 'mean'
+
+                        # if imgui.button("Find Interesecting Bones"):  
+                        #     for other_name, other_obj in self.zygote_muscle_meshes.items():
+                        #         other_obj.is_draw = False
+                        #     obj.is_draw = True
+
+                        #     intersecting_meshes = obj.find_intersections(self.zygote_skeleton_meshes)
+                        #     # print(bb_intersect)
+                        #     for skel_name, skel_obj in self.zygote_skeleton_meshes.items():
+                        #         if skel_name in intersecting_meshes:
+                        #             skel_obj.color = np.array([0.0, 0.0, 1.0])
+                        #         else:
+                        #             skel_obj.color = np.array([0.9, 0.9, 0.9])
+                            
+                        #     self.zygote_muscle_meshes_intersection_bones[name] = intersecting_meshes
+
+                        changed, obj.transparency = imgui.slider_float(f"Transparency##{name}", obj.transparency, 0.0, 1.0)
+                        if changed and obj.vertex_colors is not None:
+                            obj.vertex_colors[:, 3] = obj.transparency
+
+                        if imgui.tree_node("Edge Classes"):
+                            for i in range(len(obj.edge_classes)):
+                                imgui.text(f"{obj.edge_classes[i]}")
+                                imgui.same_line()
+                                if imgui.button(f"Flip class##{name}_{i}"):
+                                    obj.edge_classes[i] = 'insertion' if obj.edge_classes[i] == 'origin' else 'origin'
+                            imgui.tree_pop()
+                        if obj.draw_contour_stream is not None:
+                            if imgui.tree_node("Contour Stream"):
+                                if imgui.button("All Stream Off"):
+                                    for i in range(len(obj.draw_contour_stream)):
+                                        obj.draw_contour_stream[i] = False
+                                for i in range(len(obj.draw_contour_stream)):
+                                    _, obj.draw_contour_stream[i] = imgui.checkbox(f"Stream {i}", obj.draw_contour_stream[i])
+                                    imgui.push_item_width(100)
+                                    changed, obj.attach_skeletons[i][0] = imgui.input_int(f"Origin##{name}_stream{i}_origin", obj.attach_skeletons[i][0])
+                                    if changed:
+                                        if obj.attach_skeletons[i][0] < 0:
+                                            obj.attach_skeletons[i][0] = 0
+                                        elif obj.attach_skeletons[i][0] > len(self.zygote_skeleton_meshes) - 1:
+                                            obj.attach_skeletons[i][0] = len(self.zygote_skeleton_meshes) - 1
+                                    changed, obj.attach_skeletons_sub[i][0] = imgui.input_int(f"Subpart##{name}_stream{i}_origin_sub", obj.attach_skeletons_sub[i][0])
+                                    if changed:
+                                        if obj.attach_skeletons_sub[i][0] < 0:
+                                            obj.attach_skeletons_sub[i][0] = 0
+                                        elif obj.attach_skeletons_sub[i][0] > 1:
+                                            obj.attach_skeletons_sub[i][0] = 1
+
+                                    imgui.text(list(self.zygote_skeleton_meshes.keys())[obj.attach_skeletons[i][0]] + f"{obj.attach_skeletons_sub[i][0]}")
+                                    changed, obj.attach_skeletons[i][1] = imgui.input_int(f"Insertion##{name}_stream{i}_insertion", obj.attach_skeletons[i][1])
+                                    if changed:
+                                        if obj.attach_skeletons[i][1] < 0:
+                                            obj.attach_skeletons[i][1] = 0
+                                        elif obj.attach_skeletons[i][1] > len(self.zygote_skeleton_meshes) - 1:
+                                            obj.attach_skeletons[i][1] = len(self.zygote_skeleton_meshes) - 1
+                                    changed, obj.attach_skeletons_sub[i][1] = imgui.input_int(f"Subpart##{name}_stream{i}_insertion_sub", obj.attach_skeletons_sub[i][1])
+                                    if changed:
+                                        if obj.attach_skeletons_sub[i][1] < 0:
+                                            obj.attach_skeletons_sub[i][1] = 0
+                                        elif obj.attach_skeletons_sub[i][1] > 1:
+                                            obj.attach_skeletons_sub[i][1] = 1
+                                    imgui.text(list(self.zygote_skeleton_meshes.keys())[obj.attach_skeletons[i][1]] + f"{obj.attach_skeletons_sub[i][1]}")
+                                    imgui.pop_item_width()
+
+                                    # if imgui.button(f"Print Contour points##{i}"):
+                                    #     print(f"Print {i}th contour stream")
+                                    #     for j, contour in enumerate(obj.contours[i]):
+                                    #         print(f"Contour {j}")
+                                    #         for v in contour:
+                                    #             print(v)
+                                    #         print()
+                                imgui.tree_pop()
+
+                        changed, obj.is_draw = imgui.checkbox("Draw", obj.is_draw)
+                        if changed and obj.is_draw and self.is_draw_one_zygote_muscle:
+                            for other_name, other_obj in self.zygote_muscle_meshes.items():
+                                other_obj.is_draw = False
+                            obj.is_draw = True
+                        _, obj.is_draw_open_edges = imgui.checkbox("Draw Open Edges", obj.is_draw_open_edges)
+                        _, obj.is_draw_scalar_field = imgui.checkbox("Draw Scalar Field", obj.is_draw_scalar_field)
+                        _, obj.is_draw_contours = imgui.checkbox("Draw Contours", obj.is_draw_contours)
+                        _, obj.is_draw_edges = imgui.checkbox("Draw Edges", obj.is_draw_edges)
+                        _, obj.is_draw_centroid = imgui.checkbox("Draw Centroid", obj.is_draw_centroid)
+                        _, obj.is_draw_bounding_box = imgui.checkbox("Draw Bounding Box", obj.is_draw_bounding_box)
+                        _, obj.is_draw_discarded = imgui.checkbox("Draw Discarded", obj.is_draw_discarded)
+                        _, obj.is_draw_fiber_architecture = imgui.checkbox("Draw Fiber Architecture", obj.is_draw_fiber_architecture)
+
+                        if imgui.button("Export Muscle Waypoints", width=wide_button_width):
+                            pass
+                            from core.dartHelper import exportMuscleWaypoints
+                            exportMuscleWaypoints(self.zygote_muscle_meshes, list(self.zygote_skeleton_meshes.keys()))
+                        if imgui.button("Import zygote_muscle", width=wide_button_width):
+                            self.env.muscle_info = self.env.saveZygoteMuscleInfo("data/zygote_muscle.xml")
+                            self.env.loading_zygote_muscle_info(self.env.muscle_info)
+                            self.env.muscle_activation_levels = np.zeros(self.env.muscles.getNumMuscles())
+
+                            self.draw_obj = True
+                            self.is_simulation = True
+
+                        imgui.tree_pop()
+                imgui.tree_pop()
+
+            if imgui.tree_node("Skeleton"):
+                changed, self.is_draw_zygote_skeleton = imgui.checkbox("Draw", self.is_draw_zygote_skeleton)
+                if changed:
+                    for name, obj in self.zygote_skeleton_meshes.items():
+                        obj.is_draw = self.is_draw_zygote_skeleton
+                _, self.is_draw_one_zygote_skeleton = imgui.checkbox("Draw One Skeleton", self.is_draw_one_zygote_skeleton)
+                changed, self.zygote_skeleton_color = imgui.color_edit3("Color", *self.zygote_skeleton_color)
+                if changed:
+                    for name, obj in self.zygote_skeleton_meshes.items():
+                        obj.color = self.zygote_skeleton_color
+                if imgui.button("Draw All"):
+                    for name, obj in self.zygote_skeleton_meshes.items():
+                        obj.is_draw = True
+                changed, self.zygote_skeleton_transparency = imgui.slider_float("Transparency##Skeleton", self.zygote_skeleton_transparency, 0.0, 1.0)
+                if changed:
+                    for name, obj in self.zygote_skeleton_meshes.items():
+                        obj.transparency = self.zygote_skeleton_transparency
+                    
+                for i, (name, obj) in enumerate(self.zygote_skeleton_meshes.items()):
+                    if imgui.tree_node(f"{i}: {name}"):
+                        changed, obj.transparency = imgui.slider_float(f"Transparency##{name}", obj.transparency, 0.0, 1.0)
+                        if changed and obj.vertex_colors is not None:
+                            obj.vertex_colors[:, 3] = obj.transparency
+                        _, obj.is_draw = imgui.checkbox("Draw", obj.is_draw)
+                        _, obj.is_draw_corners = imgui.checkbox("Draw Corners", obj.is_draw_corners)
+                        _, obj.is_draw_edges = imgui.checkbox("Draw Edges", obj.is_draw_edges)
+                        _, obj.is_contact = imgui.checkbox("Contact", obj.is_contact)
+                        if obj.is_draw and self.is_draw_one_zygote_skeleton:
+                            for other_name, other_obj in self.zygote_skeleton_meshes.items():
+                                other_obj.is_draw = False
+                                obj.is_draw = True
+                        imgui.tree_pop()
+
+                        _, obj.num_boxes = imgui.slider_int(f"Num Boxes##{name}", obj.num_boxes, 1, 10)
+
+                        if imgui.button(f"Find BB##{name}"):
+                            obj.find_bounding_box()
+                        if imgui.button(f"Find BB (X)##{name}"):
+                            obj.find_bounding_box(axis='x')
+                        if imgui.button(f"Find BB (Y)##{name}"):
+                            obj.find_bounding_box(axis='y')
+                        if imgui.button(f"Find BB (Z)##{name}"):
+                            obj.find_bounding_box(axis='z')
+                        if imgui.button(f"Find BB (XYZ)##{name}"):
+                            obj.find_bounding_box(axis='xyz')
+
+                        imgui.text(f"Parent: {obj.parent_name}")
+                        if imgui.button(f"<##{name+'_parent'}"):
+                            obj.cand_parent_index -= 1
+                            if obj.cand_parent_index < 0:
+                                obj.cand_parent_index = len(self.zygote_skeleton_meshes) - 1
+                        imgui.same_line()
+                        if imgui.button(f">##{name+'_parent'}"):
+                            obj.cand_parent_index += 1
+                            if obj.cand_parent_index >= len(self.zygote_skeleton_meshes):
+                                obj.cand_parent_index = 0
+                        imgui.same_line()
+                        cand_name = list(self.zygote_skeleton_meshes.keys())[obj.cand_parent_index]
+                        imgui.push_item_width(100)
+                        changed, obj.cand_parent_index = imgui.input_int(f"Parent##{name}", obj.cand_parent_index)
+                        imgui.pop_item_width()
+                        if changed:
+                            if obj.cand_parent_index > len(self.zygote_skeleton_meshes) - 1:
+                                obj.cand_parent_index = len(self.zygote_skeleton_meshes) - 1
+                            elif obj.cand_parent_index < 0:
+                                obj.cand_parent_index = 0
+                        imgui.text("%3d: %s   " % (obj.cand_parent_index, cand_name))
+                        
+                        if imgui.button(f"Set as root##{name}"):
+                            for other_name, other_obj in self.zygote_skeleton_meshes.items():
+                                other_obj.is_root = False
+                            obj.is_root = True
+                            print(f"{name} set as root")
+                        if imgui.button(f"Connect to parent##{name}"):
+
+                            if self.zygote_skeleton_meshes[cand_name].corners is None:
+                                print("First find bounding boxes for parent mesh")
+                            elif obj.corners is None:
+                                print("First find bounding boxes for this mesh")
+                            elif name == cand_name:
+                                print("Self connection")
+                            else:
+                                parent_mesh = self.zygote_skeleton_meshes[cand_name]
+                                parent_corners_list = parent_mesh.corners_list
+                                cand_joints = []
+                                for parent_corners in parent_corners_list:
+                                    for corners in obj.corners_list:
+                                        cand_joint = obj.find_overlap_point(parent_corners, corners)
+                                        if cand_joint is not None: 
+                                            cand_joints.append(cand_joint)
+                                
+                                if len(cand_joints) == 0:
+                                    print("They can't be linked; No overlapping points")
+                                else:
+                                    obj.parent_mesh = parent_mesh
+                                    obj.parent_name = cand_name
+                                    if not name in parent_mesh.children_names:
+                                        parent_mesh.children_names.append(name)
+                                    print(f"{name} connected to {cand_name}")
+                                    if len(cand_joints) == 1:
+                                        obj.joint_to_parent = cand_joints[0]
+                                    else:
+                                        mean = np.mean(obj.vertices)
+                                        distances = np.linalg.norm(cand_joints - mean, axis=1)
+                                        obj.joint_to_parent = cand_joints[np.argmax(distances)]
+                                    obj.is_weld = False
+                        imgui.same_line()
+                        if imgui.button(f"Connect to parent as Weld##{name}"):
+                            if self.zygote_skeleton_meshes[cand_name].corners is None:
+                                print("First find bounding boxes for parent mesh")
+                            elif obj.corners is None:
+                                print("First find bounding boxes for this mesh")
+                            elif name == cand_name:
+                                print("Self connection")
+                            else:
+                                parent_mesh = self.zygote_skeleton_meshes[cand_name]
+                                parent_corners_list = parent_mesh.corners_list
+                                cand_joints = []
+                                for parent_corners in parent_corners_list:
+                                    for corners in obj.corners_list:
+                                        cand_joint = obj.find_overlap_point(parent_corners, corners)
+                                        if cand_joint is not None: 
+                                            cand_joints.append(cand_joint)
+                                
+                                if len(cand_joints) == 0:
+                                    print("They can't be linked; No overlapping points")
+                                else:
+                                    obj.parent_mesh = parent_mesh
+                                    obj.parent_name = cand_name
+                                    parent_mesh.children_names.append(name)
+                                    print(f"{name} connected to {cand_name} as Weld")
+                                    if len(cand_joints) == 1:
+                                        obj.joint_to_parent = cand_joints[0]
+                                    else:
+                                        mean = np.mean(obj.vertices)
+                                        distances = np.linalg.norm(cand_joints - mean, axis=1)
+                                        obj.joint_to_parent = cand_joints[np.argmax(distances)]
+                                    obj.is_weld = True
+
+                        if imgui.button("Export Bounding boxes", width=wide_button_width):
+                            from core.dartHelper import exportBoundingBoxes
+                            exportBoundingBoxes(self.zygote_skeleton_meshes)
+                        if imgui.button("Import zygote_skel", width=wide_button_width):
+                            if self.env.skel is not None:
+                                self.env.world.removeSkeleton(self.env.skel)
+
+                            from core.dartHelper import saveSkeletonInfo
+                            skel_info, root_name, _, _, _, _ = saveSkeletonInfo("data/zygote_skel.xml")
+                            self.env.skel_info = skel_info
+                            self.env.skel = buildFromInfo(skel_info, "zygote")
+                            self.env.world.addSkeleton(self.env.skel)
+                            self.env.kp = 300.0 * np.ones(self.env.skel.getNumDofs())
+                            self.env.kv = 20.0 * np.ones(self.env.skel.getNumDofs())
+                            self.env.kp[:6] = 0.0
+                            self.env.kv[:6] = 0.0
+                            self.env.num_action = len(self.env.get_zero_action()) * (3 if self.env.learning_gain else 1)
+                            self.motion_skel = self.env.skel.clone()
+                    
+                imgui.tree_pop()
+            imgui.tree_pop()
+            
         if imgui.tree_node("Rendering Mode"):
             # imgui.checkbox("Draw Mesh", self.draw_mesh)
             
@@ -3533,78 +4115,82 @@ class GLFWApp():
                 changed, self.line_width = imgui.slider_float("Line Width", self.line_width, 0.1, 5.0)
 
                 # Show selected SKEL joint
-                if imgui.button("<##muscle"):
-                    self.muscle_index -= 1
-                    if self.muscle_index < 0:
-                        self.muscle_index = len(self.env.muscle_pos) - 1
-                imgui.same_line()
-                imgui.text(f"{self.muscle_index} {list(self.env.muscle_info.keys())[self.muscle_index]}")
-                imgui.same_line()
-                imgui.set_cursor_pos_x(1000)
-                if imgui.button(">##muscle"):
-                    self.muscle_index += 1
-                    if self.muscle_index >= len(self.env.muscle_pos):
-                        self.muscle_index = 0
+
+                if self.env.muscle_info is not None:
+                    if imgui.button("<##muscle"):
+                        self.muscle_index -= 1
+                        if self.muscle_index < 0:
+                            self.muscle_index = len(self.env.muscle_pos) - 1
+                    imgui.same_line()
+                    if imgui.button(">##muscle"):
+                        self.muscle_index += 1
+                        if self.muscle_index >= len(self.env.muscle_pos):
+                            self.muscle_index = 0
+                    imgui.same_line()
+                    muscle_name = list(self.env.muscle_info.keys())[self.muscle_index]
+                    imgui.text("%3d: %s" % (self.muscle_index, muscle_name))
                 
-                if imgui.button("Find End Vertices"):
-                    name = list(self.env.muscle_info.keys())[self.muscle_index]
-                    wps_info = self.env.muscle_info[name]['waypoints']
-                    origin_body = wps_info[0]['body']
-                    insertion_body = wps_info[-1]['body']
+                
+                if use_skel:
+                    if imgui.button("Find End Vertices"):
+                        name = list(self.env.muscle_info.keys())[self.muscle_index]
+                        wps_info = self.env.muscle_info[name]['waypoints']
+                        origin_body = wps_info[0]['body']
+                        insertion_body = wps_info[-1]['body']
 
-                    wps = self.env.muscle_pos[self.muscle_index]
-                    origin_p = wps[0]
-                    insertion_p = wps[-1]
+                        wps = self.env.muscle_pos[self.muscle_index]
+                        origin_p = wps[0]
+                        insertion_p = wps[-1]
 
-                    for bn in self.motion_skel.getBodyNodes():
-                        if bn.getName() == origin_body:
-                            origin_bn = bn
-                        if bn.getName() == insertion_body:
-                            insertion_bn = bn
+                        for bn in self.motion_skel.getBodyNodes():
+                            if bn.getName() == origin_body:
+                                origin_bn = bn
+                            if bn.getName() == insertion_body:
+                                insertion_bn = bn
 
-                    # glPushMatrix()
+                        # glPushMatrix()
 
-                    # glTranslatef(t_parent[0], t_parent[1], t_parent[2])
+                        # glTranslatef(t_parent[0], t_parent[1], t_parent[2])
 
-                    # rot = R.from_matrix(r_parent)
-                    # rotvec = rot.as_rotvec()
-                    # angle = np.linalg.norm(rotvec)
-                    # axis = rotvec / angle if angle != 0 else np.array([0, 0, 1])
-                    # glRotatef(np.rad2deg(angle), axis[0], axis[1], axis[2])
-                    
-                    # glScalef(self.skel_scale, self.skel_scale, self.skel_scale)
+                        # rot = R.from_matrix(r_parent)
+                        # rotvec = rot.as_rotvec()
+                        # angle = np.linalg.norm(rotvec)
+                        # axis = rotvec / angle if angle != 0 else np.array([0, 0, 1])
+                        # glRotatef(np.rad2deg(angle), axis[0], axis[1], axis[2])
+                        
+                        # glScalef(self.skel_scale, self.skel_scale, self.skel_scale)
 
-                    min_origin = np.inf
-                    origin_v = None
-                    transform = origin_bn.getWorldTransform().matrix() @ origin_bn.getParentJoint().getTransformFromChildBodyNode().matrix()
-                    t_origin = transform[:3, 3]
-                    r_origin = transform[:3, :3]
+                        min_origin = np.inf
+                        origin_v = None
+                        transform = origin_bn.getWorldTransform().matrix() @ origin_bn.getParentJoint().getTransformFromChildBodyNode().matrix()
+                        t_origin = transform[:3, 3]
+                        r_origin = transform[:3, :3]
 
-                    origin_vertices = self.meshes[origin_body].new_vertices_4
-                    origin_vertices = origin_vertices @ r_origin.T + t_origin
-                    for v in origin_vertices:
-                        dist = np.linalg.norm(v - origin_p)
-                        if dist < min_origin:
-                            min_origin = dist
-                            origin_v = v
+                        origin_vertices = self.meshes[origin_body].new_vertices_4
+                        origin_vertices = origin_vertices @ r_origin.T + t_origin
+                        for v in origin_vertices:
+                            dist = np.linalg.norm(v - origin_p)
+                            if dist < min_origin:
+                                min_origin = dist
+                                origin_v = v
 
-                    min_insertion = np.inf
-                    insertion_v = None
-                    transform = insertion_bn.getWorldTransform().matrix() @ insertion_bn.getParentJoint().getTransformFromChildBodyNode().matrix()
-                    t_insertion = transform[:3, 3]
-                    r_insertion = transform[:3, :3]
+                        min_insertion = np.inf
+                        insertion_v = None
+                        transform = insertion_bn.getWorldTransform().matrix() @ insertion_bn.getParentJoint().getTransformFromChildBodyNode().matrix()
+                        t_insertion = transform[:3, 3]
+                        r_insertion = transform[:3, :3]
 
-                    insertion_vertices = self.meshes[insertion_body].new_vertices_4
-                    insertion_vertices = insertion_vertices @ r_insertion.T + t_insertion
-                    for v in insertion_vertices:
-                        dist = np.linalg.norm(v - insertion_p)
-                        if dist < min_insertion:
-                            min_insertion = dist
-                            insertion_v = v
+                        insertion_vertices = self.meshes[insertion_body].new_vertices_4
+                        insertion_vertices = insertion_vertices @ r_insertion.T + t_insertion
+                        for v in insertion_vertices:
+                            dist = np.linalg.norm(v - insertion_p)
+                            if dist < min_insertion:
+                                min_insertion = dist
+                                insertion_v = v
 
-                    self.origin_v = origin_v
-                    self.insertion_v = insertion_v
-                    print(origin_v, insertion_v)
+                        self.origin_v = origin_v
+                        self.insertion_v = insertion_v
+                        print(origin_v, insertion_v)
                     
             _, self.draw_obj = imgui.checkbox("Draw Object", self.draw_obj)
             imgui.same_line()
@@ -3619,62 +4205,62 @@ class GLFWApp():
             _, self.draw_joint = imgui.checkbox("Draw Joint", self.draw_joint)
             _, self.draw_shadow = imgui.checkbox("Draw Shadow", self.draw_shadow)
 
-
-            _, self.draw_smpl = imgui.checkbox("Draw SMPL", self.draw_smpl)
-            if self.draw_smpl:
+            if use_smpl:
+                _, self.draw_smpl = imgui.checkbox("Draw SMPL", self.draw_smpl)
+                if self.draw_smpl:
+                    imgui.same_line()
+                    imgui.push_item_width(100)
+                    changed, self.smpl_trans = imgui.slider_float("SMPL Transparency",
+                                                                    self.smpl_trans,
+                                                                    min_value = 0.0,
+                                                                    max_value = 1.0,
+                                                                    format='%.3f')
+                    imgui.pop_item_width()
+                    if changed:
+                        self.update_smpl()
+                _, self.draw_smpl_bone = imgui.checkbox("Draw SMPL Bone", self.draw_smpl_bone)
+                _, self.draw_smpl_joint = imgui.checkbox("Draw SMPL Joint", self.draw_smpl_joint)
                 imgui.same_line()
-                imgui.push_item_width(100)
-                changed, self.smpl_trans = imgui.slider_float("SMPL Transparency",
-                                                                self.smpl_trans,
-                                                                min_value = 0.0,
-                                                                max_value = 1.0,
-                                                                format='%.3f')
+                if imgui.button("<##smpl_joint"):
+                    self.smpl_joint_index -= 1
+                    if self.smpl_joint_index < 0:
+                        self.smpl_joint_index = len(self.smpl_joints) - 1
+                imgui.same_line()
+
+                imgui.push_item_width(push_width)
+                # imgui.text("%02d: %s" % (self.smpl_joint_index, smpl_joint_names[self.smpl_joint_index]))
+                imgui.text(f"{self.smpl_joint_index:02d}: {smpl_joint_names[self.smpl_joint_index]:<{10}}")
                 imgui.pop_item_width()
-                if changed:
-                    self.update_smpl()
-            _, self.draw_smpl_bone = imgui.checkbox("Draw SMPL Bone", self.draw_smpl_bone)
-            _, self.draw_smpl_joint = imgui.checkbox("Draw SMPL Joint", self.draw_smpl_joint)
-            imgui.same_line()
-            if imgui.button("<##smpl_joint"):
-                self.smpl_joint_index -= 1
-                if self.smpl_joint_index < 0:
-                    self.smpl_joint_index = len(self.smpl_joints) - 1
-            imgui.same_line()
 
-            imgui.push_item_width(push_width)
-            # imgui.text("%02d: %s" % (self.smpl_joint_index, smpl_joint_names[self.smpl_joint_index]))
-            imgui.text(f"{self.smpl_joint_index:02d}: {smpl_joint_names[self.smpl_joint_index]:<{10}}")
-            imgui.pop_item_width()
+                imgui.same_line()
+                if imgui.button(">##smpl_joint"):
+                    self.smpl_joint_index += 1
+                    if self.smpl_joint_index >= len(self.smpl_joints):
+                        self.smpl_joint_index = 0
+                imgui.same_line()
+                if imgui.button("Print All##SMPL"):
+                    print()
+                    print("skel_joint_ts = np.array([")
+                    for name, info in self.env.skel_info.items():
+                        joint_t = info['joint_t']
+                        # print(np.round(info['joint_t'], 4), f', # {name}')
+                        print(f"[{joint_t[0]:.4f}, {joint_t[1]:.4f}, {joint_t[2]:.4f}], # {name}")
+                    print("])")
 
-            imgui.same_line()
-            if imgui.button(">##smpl_joint"):
-                self.smpl_joint_index += 1
-                if self.smpl_joint_index >= len(self.smpl_joints):
-                    self.smpl_joint_index = 0
-            imgui.same_line()
-            if imgui.button("Print All##SMPL"):
-                print()
-                print("skel_joint_ts = np.array([")
-                for name, info in self.env.skel_info.items():
-                    joint_t = info['joint_t']
-                    # print(np.round(info['joint_t'], 4), f', # {name}')
-                    print(f"[{joint_t[0]:.4f}, {joint_t[1]:.4f}, {joint_t[2]:.4f}], # {name}")
-                print("])")
+                    print("skel_body_ts = np.array([")
+                    for name, info in self.env.new_skel_info.items():
+                        body_t = info['body_t']
+                        #print(np.round(info['body_t'], 4), f', # {name}')
+                        print(f"[{body_t[0]:.4f}, {body_t[1]:.4f}, {body_t[2]:.4f}], # {name}")
+                    print("])")
 
-                print("skel_body_ts = np.array([")
-                for name, info in self.env.new_skel_info.items():
-                    body_t = info['body_t']
-                    #print(np.round(info['body_t'], 4), f', # {name}')
-                    print(f"[{body_t[0]:.4f}, {body_t[1]:.4f}, {body_t[2]:.4f}], # {name}")
-                print("])")
-
-                print()
-                print("SMPL_joint_ts = np.array([")
-                for i, j in enumerate(self.smpl_joints):
-                    joint_t = j.clone().numpy()
-                    # print(np.round(j.clone().numpy(), 4), f', # {smpl_joint_names[i]}')
-                    print(f"[{joint_t[0]:.4f}, {joint_t[1]:.4f}, {joint_t[2]:.4f}], # {smpl_joint_names[i]}")
-                print("])")
+                    print()
+                    print("SMPL_joint_ts = np.array([")
+                    for i, j in enumerate(self.smpl_joints):
+                        joint_t = j.clone().numpy()
+                        # print(np.round(j.clone().numpy(), 4), f', # {smpl_joint_names[i]}')
+                        print(f"[{joint_t[0]:.4f}, {joint_t[1]:.4f}, {joint_t[2]:.4f}], # {smpl_joint_names[i]}")
+                    print("])")
 
             imgui.tree_pop()
             
@@ -3693,136 +4279,137 @@ class GLFWApp():
 
         _, self.is_screenshot = imgui.checkbox("Take Screenshots", self.is_screenshot)
         
-        if imgui.tree_node("Skel info"):
-            _, self.skel_change_symmetry = imgui.checkbox("Change Skeleton Symmetrically", self.skel_change_symmetry)
+        if use_skel:
+            if imgui.tree_node("Skel info"):
+                _, self.skel_change_symmetry = imgui.checkbox("Change Skeleton Symmetrically", self.skel_change_symmetry)
 
-            imgui.push_item_width(push_width)
-            changed, self.skel_scale = imgui.slider_float("Skel scale",
-                                                            self.skel_scale,
-                                                            min_value = 0.8,
-                                                            max_value = 1.2,
-                                                            format='%.3f')
-            imgui.pop_item_width()
+                imgui.push_item_width(push_width)
+                changed, self.skel_scale = imgui.slider_float("Skel scale",
+                                                                self.skel_scale,
+                                                                min_value = 0.8,
+                                                                max_value = 1.2,
+                                                                format='%.3f')
+                imgui.pop_item_width()
 
-            imgui.same_line()
-            imgui.set_cursor_pos_x(300)
-            if changed:
-                self.scaleSkeleton(self.skel_scale)
-                self.newSkeleton()
+                imgui.same_line()
+                imgui.set_cursor_pos_x(300)
+                if changed:
+                    self.scaleSkeleton(self.skel_scale)
+                    self.newSkeleton()
 
-            if imgui.button("Reset##skel_scale"):
-                self.skel_scale = 1
-                self.scaleSkeleton(self.skel_scale)
-                self.newSkeleton()
-                
-            for name, info in self.env.new_skel_info.items():
-                orig_info = self.env.skel_info[name]
-
-                stretches = info['stretches']
-
-                for i in range(len(stretches)):
-                    stretch = stretches[i]
-
-                    if stretch == 0:
-                        name_new = name + " x"
-                    elif stretch == 1:
-                        name_new = name + " y"
-                    elif stretch == 2:
-                        name_new = name + " z"
-
-                    orig_size = orig_info['size'][stretch]
+                if imgui.button("Reset##skel_scale"):
+                    self.skel_scale = 1
+                    self.scaleSkeleton(self.skel_scale)
+                    self.newSkeleton()
                     
-                    imgui.push_item_width(push_width)
-                    changed, info['size'][stretch] = imgui.slider_float(name_new,
-                                                                        info['size'][stretch],
-                                                                        min_value = orig_size * 0.25,
-                                                                        max_value = orig_size * 4,
-                                                                        format='%.3f')
-                    imgui.pop_item_width()
+                for name, info in self.env.new_skel_info.items():
+                    orig_info = self.env.skel_info[name]
 
-                    if changed:
-                        gap = info['gaps'][i]
-                        stretch_axis = info['stretch_axises'][i]
+                    stretches = info['stretches']
 
-                        info['body_t'] = info['joint_t'] + gap + stretch_axis * info['size'][stretch] * 0.5
+                    for i in range(len(stretches)):
+                        stretch = stretches[i]
+
+                        if stretch == 0:
+                            name_new = name + " x"
+                        elif stretch == 1:
+                            name_new = name + " y"
+                        elif stretch == 2:
+                            name_new = name + " z"
+
+                        orig_size = orig_info['size'][stretch]
                         
-                        self.retargetting(name, i)
+                        imgui.push_item_width(push_width)
+                        changed, info['size'][stretch] = imgui.slider_float(name_new,
+                                                                            info['size'][stretch],
+                                                                            min_value = orig_size * 0.25,
+                                                                            max_value = orig_size * 4,
+                                                                            format='%.3f')
+                        imgui.pop_item_width()
 
-                        if self.skel_change_symmetry and name[-1] in ['R', 'L']:
-                            if name[-1] == "R":
-                                name_pair = name[:-1] + "L"
-                            elif name[-1] == "L":
-                                name_pair = name[:-1] + "R"
+                        if changed:
+                            gap = info['gaps'][i]
+                            stretch_axis = info['stretch_axises'][i]
 
-                            info_pair = self.env.new_skel_info[name_pair]
-                            info_pair['size'][stretch] = info['size'][stretch].copy()
-
-                            size_pair = info_pair['size'][stretch]
-                            gap_pair = info_pair['gaps'][i]
-                            stretch_axis_pair = info_pair['stretch_axises'][i]
-
-                            info_pair['body_t'] = info_pair['joint_t'] + gap_pair + stretch_axis_pair * size_pair * 0.5
-
-                            self.retargetting(name_pair, i)
-
-                        self.setObjScale()
-                        self.newSkeleton()
-
-                    imgui.same_line()
-                    imgui.set_cursor_pos_x(300)
-                    if imgui.button("Reset##" + name_new):
-                        info['size'][stretch] = orig_info['size'][stretch].copy()
-                        gap = info['gaps'][i]
-                        stretch_axis = info['stretch_axises'][i]
-
-                        info['body_t'] = info['joint_t'] + gap + stretch_axis * info['size'][stretch] * 0.5
-
-                        self.retargetting(name, i)
-
-                        if self.skel_change_symmetry and name[-1] in ['R', 'L']:
-                            if name[-1] == "R":
-                                name_pair = name[:-1] + "L"
-                            elif name[-1] == "L":
-                                name_pair = name[:-1] + "R"
-
-                            info_pair = self.env.new_skel_info[name_pair]
-                            info_pair['size'][stretch] = self.env.skel_info[name_pair]['size'][stretch].copy()
-
-                            size_pair = info_pair['size'][stretch]
-                            gap_pair = info_pair['gaps'][i]
-                            stretch_axis_pair = info_pair['stretch_axises'][i]
-
-                            info_pair['body_t'] = info_pair['joint_t'] + gap_pair + stretch_axis_pair * size_pair * 0.5
-
-                            self.retargetting(name_pair, i)
+                            info['body_t'] = info['joint_t'] + gap + stretch_axis * info['size'][stretch] * 0.5
                             
-                        self.setObjScale()
-                        self.newSkeleton()
+                            self.retargetting(name, i)
 
-            if imgui.button("Reset Skeleton"):
-                self.skel_scale = 1
-                for name, new_info in self.env.new_skel_info.items():
-                    info = self.env.skel_info[name]
-                    new_info['size'] = info['size'].copy()
-                    new_info['body_t'] = info['body_t'].copy()
-                    new_info['joint_t'] = info['joint_t'].copy()
-                    if new_info['parent_str'] != "None":
-                        new_info['gaps_parent'] = info['gaps_parent'].copy()
+                            if self.skel_change_symmetry and name[-1] in ['R', 'L']:
+                                if name[-1] == "R":
+                                    name_pair = name[:-1] + "L"
+                                elif name[-1] == "L":
+                                    name_pair = name[:-1] + "R"
 
-                for name, new_info in self.env.new_muscle_info.items():
-                    info = self.env.muscle_info[name]
-                    for new_waypoint, waypoint in zip(new_info['waypoints'], info['waypoints']):
-                        if new_waypoint.get('p') is not None:
-                            new_waypoint['p'] = waypoint['p'].copy()
+                                info_pair = self.env.new_skel_info[name_pair]
+                                info_pair['size'][stretch] = info['size'][stretch].copy()
 
-                self.setObjScale()
-                self.newSkeleton()
+                                size_pair = info_pair['size'][stretch]
+                                gap_pair = info_pair['gaps'][i]
+                                stretch_axis_pair = info_pair['stretch_axises'][i]
 
-            if imgui.button("Export Skeleton & Muscle"):
-                exportSkeleton(self.env.new_skel_info, self.env.root_name, "new_skel.xml")
-                self.env.exportMuscle(self.env.new_muscle_info, "new_muscle.xml")
+                                info_pair['body_t'] = info_pair['joint_t'] + gap_pair + stretch_axis_pair * size_pair * 0.5
 
-            imgui.tree_pop()
+                                self.retargetting(name_pair, i)
+
+                            self.setObjScale()
+                            self.newSkeleton()
+
+                        imgui.same_line()
+                        imgui.set_cursor_pos_x(300)
+                        if imgui.button("Reset##" + name_new):
+                            info['size'][stretch] = orig_info['size'][stretch].copy()
+                            gap = info['gaps'][i]
+                            stretch_axis = info['stretch_axises'][i]
+
+                            info['body_t'] = info['joint_t'] + gap + stretch_axis * info['size'][stretch] * 0.5
+
+                            self.retargetting(name, i)
+
+                            if self.skel_change_symmetry and name[-1] in ['R', 'L']:
+                                if name[-1] == "R":
+                                    name_pair = name[:-1] + "L"
+                                elif name[-1] == "L":
+                                    name_pair = name[:-1] + "R"
+
+                                info_pair = self.env.new_skel_info[name_pair]
+                                info_pair['size'][stretch] = self.env.skel_info[name_pair]['size'][stretch].copy()
+
+                                size_pair = info_pair['size'][stretch]
+                                gap_pair = info_pair['gaps'][i]
+                                stretch_axis_pair = info_pair['stretch_axises'][i]
+
+                                info_pair['body_t'] = info_pair['joint_t'] + gap_pair + stretch_axis_pair * size_pair * 0.5
+
+                                self.retargetting(name_pair, i)
+                                
+                            self.setObjScale()
+                            self.newSkeleton()
+
+                if imgui.button("Reset Skeleton"):
+                    self.skel_scale = 1
+                    for name, new_info in self.env.new_skel_info.items():
+                        info = self.env.skel_info[name]
+                        new_info['size'] = info['size'].copy()
+                        new_info['body_t'] = info['body_t'].copy()
+                        new_info['joint_t'] = info['joint_t'].copy()
+                        if new_info['parent_str'] != "None":
+                            new_info['gaps_parent'] = info['gaps_parent'].copy()
+
+                    for name, new_info in self.env.new_muscle_info.items():
+                        info = self.env.muscle_info[name]
+                        for new_waypoint, waypoint in zip(new_info['waypoints'], info['waypoints']):
+                            if new_waypoint.get('p') is not None:
+                                new_waypoint['p'] = waypoint['p'].copy()
+
+                    self.setObjScale()
+                    self.newSkeleton()
+
+                if imgui.button("Export Skeleton & Muscle"):
+                    exportSkeleton(self.env.new_skel_info, self.env.root_name, "new_skel.xml")
+                    self.env.exportMuscle(self.env.new_muscle_info, "new_muscle.xml")
+
+                imgui.tree_pop()
 
         if imgui.tree_node("Test rotvecs"):
             for i in range(self.motion_skel.getNumDofs()):
@@ -3842,706 +4429,961 @@ class GLFWApp():
                     self.env.test_muscle_pos = self.env.test_muscles.getMusclePositions()
             imgui.tree_pop()
         
-        if imgui.tree_node("Muscle GUI"):
-            _, self.drawReferenceObj = imgui.checkbox("Draw Reference Object", self.drawReferenceObj)
-            if self.drawReferenceObj:
-                _, self.ref_trans[:] = imgui.slider_float3("Object Translation", 
-                                                           self.ref_trans[0], 
-                                                           self.ref_trans[1], 
-                                                           self.ref_trans[2],
-                                                           -0.5, 0.5)
-                _, self.ref_scale = imgui.slider_float("OBJ Scale", self.ref_scale, 0.1, 2.0)
-                _, self.obj_trans = imgui.slider_float("OBJ Opacity",
-                                                            self.obj_trans,
-                                                            min_value = 0.0,
-                                                            max_value = 1.0,
-                                                            format='%.3f')
+        if use_skel:
+            if imgui.tree_node("Muscle GUI"):
+                if self.skel_muscle_activation_levels is not None:
+                    if imgui.tree_node("SKEL Muscle Activation Levels"):
+                        for i in range(len(self.skel_muscle_activation_levels)):
+                            imgui.push_item_width(push_width)
+                            _, self.skel_muscle_activation_levels[i] = imgui.slider_float(f"{list(self.env.skel_muscle_info.keys())[i]}", self.skel_muscle_activation_levels[i], 0.0, 1.0)
+                            imgui.pop_item_width()
+                        imgui.tree_pop()
 
-            changed, self.skel_opacity = imgui.slider_float(f"SKEL Opacity", self.skel_opacity, 0, 1)
-            if changed:
-                self.update_skel()
-            _, self.point_size = imgui.slider_int("Point Size", self.point_size, 1, 10)
+                if imgui.tree_node("HIT"):
+                    _, self.draw_hit_smpl = imgui.checkbox("Draw HIT SMPL", self.draw_hit_smpl)
+                    _, self.draw_hit_muscle = imgui.checkbox("Draw HIT Muscle", self.draw_hit_muscle)
+                    # _, self.draw_hit_AT = imgui.checkbox("Draw HIT AT", self.draw_hit_AT)
+                    # _, self.draw_hit_BT = imgui.checkbox("Draw HIT Bone", self.draw_hit_BT)
 
-            imgui.text("Working Line Muscle Information")
-            if imgui.button("Origin", width=100):
-                self.isOrigin = not self.isOrigin
-            imgui.same_line()
-            imgui.text(f"{self.isOrigin}, Attached to {self.SKEL_section_names_male[self.selected_origin_mesh_index] if self.selected_origin_mesh_index is not None else None}")
-            if self.selected_origin is None:
-                imgui.text("")
-                imgui.text("")
-            else:
-                imgui.text(f"Pos: {self.selected_origin}")
-                imgui.text(f"BaryCoord: {self.selected_origin_barycentric}")
-            if imgui.button("Insertion", width=100):
-                self.isInsertion = not self.isInsertion
-            imgui.same_line()
-            imgui.text(f"{self.isInsertion}, Attached to {self.SKEL_section_names_male[self.selected_insertion_mesh_index] if self.selected_insertion_mesh_index is not None else None}")
-            if self.selected_insertion is None:
-                imgui.text("")
-                imgui.text("")
-            else:
-                imgui.text(f"Pos: {self.selected_insertion}")
-                imgui.text(f"BaryCoord: {self.selected_insertion_barycentric}")
-            if imgui.button("Waypoint", width=100):
-                self.isWaypoint = not self.isWaypoint
-            imgui.same_line()
-            imgui.text(f"{self.isWaypoint}, {len(self.selected_waypoints)} wp{'' if len(self.selected_waypoints) <= 1 else 's'}")
-            if imgui.button("Translate", width=100):
-                self.translateWaypoint = not self.translateWaypoint
-            imgui.same_line()
-            imgui.text(str(self.translateWaypoint))
-            if imgui.button("Delete", width=100):
-                self.deleteWaypoint = not self.deleteWaypoint
-            imgui.same_line()
-            imgui.text(str(self.deleteWaypoint))
-            imgui.text("")
-            
-            # Show GaitNet Muscle
-            if imgui.button("<##muscle"):
-                self.muscle_index -= 1
-                if self.muscle_index < 0:
-                    self.muscle_index = len(self.env.muscle_pos) - 1
-            imgui.same_line()
-            imgui.text(f"{self.muscle_index} {list(self.env.muscle_info.keys())[self.muscle_index]}")
-            imgui.same_line()
+                    if imgui.tree_node("HIT betas"):
+                        for i in range(10):
+                            changed, self.hit_betas[0][i] = imgui.slider_float(f"Beta {i}", self.hit_betas[0][i], -5.0, 5.0)
+                            if changed:
+                                self.update_hit_smpl()
 
-            if imgui.button(">##muscle"):
-                self.muscle_index += 1
-                if self.muscle_index >= len(self.env.muscle_pos):
-                    self.muscle_index = 0
+                        imgui.tree_pop()
+                    if imgui.tree_node("HIT poses"):
+                        for i in range(72):
+                            changed, self.hit_poses[0][i] = imgui.slider_float(f"Pose {i}", self.hit_poses[0][i], -5.0, 5.0)
+                            if changed:
+                                self.update_hit_smpl()
+                        imgui.tree_pop()
 
-            if imgui.button("Load from GaitNet Muscle", width=wide_button_width):
-                load_error = False
+                    if imgui.button("HIT Inference"):
+                        pass
+                        exp_name = 'hit_male' if self.skel_gender == "male" else 'hit_female'
+                        ckpt_choice = 'best'
+                        device = torch.device("cuda:0")
+
+                        data = {}
+                        data['global_orient'] = torch.zeros(1, 3).to(device) # Global orientation of the body
+                        data['global_orient'][0] = self.hit_poses[0][:3]
+                        data['body_pose'] = torch.zeros(1, 69).to(device) # Per joint rotation of the body (21 joints x 3 axis)
+                        data['body_pose'][0] = self.hit_poses[0][3:]
+                        data['body_pose'][0][18] -= 0.2
+                        data['body_pose'][0][21] -= 0.1
+                        data['betas'] = self.hit_betas # Shape parameters, values should be between -2 and 2
+                        # data['betas'][0] = self.skel_betas
+                        data['transl'] = torch.zeros(1, 3).to(device) # 3D ranslation of the body in meters
+                        pelvis = self.env.skel.getBodyNode("Pelvis").getCOM() - self.skel_joints[0].cpu().numpy()
+                        data['transl'][0] = torch.Tensor(pelvis)
+
+                        # Load HIT model
+                        hl = HitLoader.from_expname(exp_name, ckpt_choice=ckpt_choice)
+                        hl.load()
+                        hl.hit_model.apply_compression = False
+
+                        # Run smpl forward pass to get the SMPL mesh
+                        smpl_output = hl.smpl(betas=data['betas'], body_pose=data['body_pose'], global_orient=data['global_orient'], trans=data['transl'])
+
+                        # Extract the mesh 
+                        extracted_meshes, _ = hl.hit_model.forward_rigged(data['betas'], 
+                                                                                body_pose=data['body_pose'], 
+                                                                                global_orient=data['global_orient'], 
+                                                                                transl=data['transl'],
+                                                                                mise_resolution0=64)
+                        
+                        self.update_hit_smpl()
+
+                        # Extracted meshes are in the form of a list of 3 trimesh objects corresponding to the 3 tissues 'LT', 'AT', 'BT'
+                        # LT : Lean Tissue (muscle and organs, merged with the visceral and intra-muscular fat)
+                        # AT : Adipose Tissue (subcutaneous fat)
+                        # BT : Bone Tissue (long bones, we only predict the femur, radius-ulna, tibia and fibula)
+                        hit_muscle = extracted_meshes[0]
+                        # hit_AT = extracted_meshes[1]
+                        # hit_BT = extracted_meshes[2]
+
+                        hit_vertices = hit_muscle.vertices
+                        hit_faces = hit_muscle.faces.reshape(-1)
+
+                        print(hit_vertices.shape)
+                        print(hit_faces.shape)
+
+                        vertex_normals = np.zeros_like(hit_vertices)
+                        vertex_counts = np.zeros((hit_vertices.shape[0], 1))
+                        self.hit_vertex3 = hit_vertices[hit_faces]
+                        self.hit_color4 = np.ones((len(hit_vertices), 4))[hit_faces]
+
+                        # ascending = np.arange(0, 1.1, 0.1)  # 0.0 to 1.0 inclusive
+                        # descending = np.arange(0.9, -0.1, -0.1)  # 0.9 to 0.0 inclusive
+
+                        # # Combine ascending and descending sequences to form one complete cycle
+                        # full_cycle = np.concatenate([ascending, descending[1:]])
+                        # array_length = self.hit_color4.shape[0]
+                        # self.hit_color4[:, 0] = np.tile(full_cycle, array_length // len(full_cycle) + 1)[:array_length]
+
+                        self.hit_color4[:, 0] = 0.5
+                        self.hit_color4[:, 1:3] = 0
+                        self.hit_color4[:, 3] = 0.5
+                        ## Compute normal vector according to vertex3
+                        self.hit_normal = np.cross(self.hit_vertex3[1::3] - self.hit_vertex3[0::3], self.hit_vertex3[2::3] - self.hit_vertex3[0::3])
+                        self.hit_normal = self.hit_normal / np.linalg.norm(self.hit_normal, axis=1)[:, np.newaxis]
+                        self.hit_normal = np.repeat(self.hit_normal, 3, axis=0)
+                        np.add.at(vertex_normals, hit_faces, self.hit_normal)
+                        np.add.at(vertex_counts, hit_faces, 1)
+                        vertex_counts[vertex_counts == 0] = 1
+                        vertex_normals /= vertex_counts
+                        self.hit_normal = vertex_normals[hit_faces]
+
+                    if imgui.button("Fit SKEL on HIT"):
+                        device = torch.device("cuda:0")
+
+                        data = {}
+                        data['global_orient'] = torch.zeros(1, 3).to(device) # Global orientation of the body
+                        data['global_orient'][0] = self.hit_poses[0][:3]
+                        data['body_pose'] = torch.zeros(1, 69).to(device) # Per joint rotation of the body (21 joints x 3 axis)
+                        data['body_pose'][0] = self.hit_poses[0][3:]
+                        data['betas'] = self.hit_betas # Shape parameters, values should be between -2 and 2
+                        # data['betas'][0] = self.skel_betas
+                        data['transl'] = torch.zeros(1, 3).to(device) # 3D ranslation of the body in meters
+                        pelvis = self.env.skel.getBodyNode("Pelvis").getCOM() - self.skel_joints[0].cpu().numpy()
+                        data['transl'][0] = torch.Tensor(pelvis)
+
+                        skel_fitter = SkelFitter(self.skel_gender, 
+                                                device='cuda:0', 
+                                                export_meshes=True, 
+                                                config_path=None)
+                        skel_seq = skel_fitter.run_fit(data['transl'].cpu().numpy(), 
+                                                data['betas'].cpu().numpy(), 
+                                                (torch.cat((data['global_orient'], data['body_pose']), dim=1)).cpu().numpy(),
+                                                batch_size=1,
+                                                skel_data_init=None, 
+                                                force_recompute=False)
+                        
+                        self.skel_betas = torch.Tensor(skel_seq['betas'][0].reshape((1, 10))).to(device)
+                        self.skel_pose = torch.Tensor(skel_seq['poses'][0].reshape(self.skel_pose.shape)).to(device)
+                        self.update_skel()
+                        # SKEL_skin_mesh = trimesh.Trimesh(vertices=skel_seq['skin_v'][0], faces=skel_seq['skin_f'])
+                        # SKEL_skel_mesh = trimesh.Trimesh(vertices=skel_seq['skel_v'][0], faces=skel_seq['skel_f'])
+                        # SMPL_mesh = trimesh.Trimesh(vertices=skel_seq['smpl_v'][0], faces=skel_seq['smpl_f'])
+
+                    imgui.tree_pop()
+
+                imgui.text("")
+                _, self.drawReferenceObj = imgui.checkbox("Draw Reference Object", self.drawReferenceObj)
+                if self.drawReferenceObj:
+                    _, self.ref_trans[:] = imgui.slider_float3("Object Translation", 
+                                                            self.ref_trans[0], 
+                                                            self.ref_trans[1], 
+                                                            self.ref_trans[2],
+                                                            -0.5, 0.5)
+                    _, self.ref_scale = imgui.slider_float("OBJ Scale", self.ref_scale, 0.1, 2.0)
+                    _, self.obj_trans = imgui.slider_float("OBJ Opacity",
+                                                                self.obj_trans,
+                                                                min_value = 0.0,
+                                                                max_value = 1.0,
+                                                                format='%.3f')
+
+                changed, self.skel_opacity = imgui.slider_float(f"SKEL Opacity", self.skel_opacity, 0, 1)
+                if changed:
+                    self.update_skel()
+                _, self.point_size = imgui.slider_int("Point Size", self.point_size, 1, 10)
+
+                imgui.text("Working Line Muscle Information")
+                if imgui.button("Origin", width=100):
+                    self.isOrigin = not self.isOrigin
+                imgui.same_line()
+                imgui.text(f"{self.isOrigin}, Attached to {self.SKEL_section_names_male[self.selected_origin_mesh_index] if self.selected_origin_mesh_index is not None else None}")
                 if self.selected_origin is None:
-                    print("Load from GaitNet Muscle: Origin is not selected")
-                    load_error = True
+                    imgui.text("")
+                    imgui.text("")
+                else:
+                    imgui.text(f"Pos: {self.selected_origin}")
+                    imgui.text(f"BaryCoord: {self.selected_origin_barycentric}")
+                if imgui.button("Insertion", width=100):
+                    self.isInsertion = not self.isInsertion
+                imgui.same_line()
+                imgui.text(f"{self.isInsertion}, Attached to {self.SKEL_section_names_male[self.selected_insertion_mesh_index] if self.selected_insertion_mesh_index is not None else None}")
                 if self.selected_insertion is None:
-                    print("Load from GaitNet Muscle: Insertion is not selected")
-                    load_error = True
-
-                if not load_error:
-                    muscle_name = list(self.env.muscle_info.keys())[self.muscle_index]
-                    self.muscle_name_input = muscle_name
-
-                    muscle_info = self.env.muscle_info[muscle_name]
-                    start_point = muscle_info['waypoints'][0]['p']
-                    end_point = muscle_info['waypoints'][-1]['p']
-                    new_start_point = self.selected_origin
-                    new_end_point = self.selected_insertion
-                    self.selected_waypoints = [waypoint['p'] for waypoint in muscle_info['waypoints'][1:-1]]
-
-                    self.selected_waypoints = self.getNewWaypoints(start_point, end_point, new_start_point, new_end_point, self.selected_waypoints)
-            imgui.text("")
-
-            if imgui.button("Save Line", width=wide_button_width):
-                line_error = False
-                if self.selected_origin is None:
-                    print("Save Line: Origin is not selected")
-                    line_error = True
-                if self.selected_insertion is None:
-                    print("Save Line: Insertion is not selected")
-                    line_error = True
+                    imgui.text("")
+                    imgui.text("")
+                else:
+                    imgui.text(f"Pos: {self.selected_insertion}")
+                    imgui.text(f"BaryCoord: {self.selected_insertion_barycentric}")
+                if imgui.button("Waypoint", width=100):
+                    self.isWaypoint = not self.isWaypoint
+                imgui.same_line()
+                imgui.text(f"{self.isWaypoint}, {len(self.selected_waypoints)} wp{'' if len(self.selected_waypoints) <= 1 else 's'}")
+                if imgui.button("Translate", width=100):
+                    self.translateWaypoint = not self.translateWaypoint
+                imgui.same_line()
+                imgui.text(str(self.translateWaypoint))
+                if imgui.button("Delete", width=100):
+                    self.deleteWaypoint = not self.deleteWaypoint
+                imgui.same_line()
+                imgui.text(str(self.deleteWaypoint))
+                imgui.text("")
                 
-                if len(self.selected_waypoints) < 1:
-                    print("Save Line: At least one waypoint is necessary")
-                    line_error = True
-                
-                if not line_error:
-                    origin = {
-                        'p': self.selected_origin,
-                        'mesh_index': self.selected_origin_mesh_index,
-                        'face': self.selected_origin_face,
-                        'barycentric': self.selected_origin_barycentric
-                    }
-                    insertion = {
-                        'p': self.selected_insertion,
-                        'mesh_index': self.selected_insertion_mesh_index,
-                        'face': self.selected_insertion_face,
-                        'barycentric': self.selected_insertion_barycentric
-                    }
-                    line = line_muscle(origin, insertion, self.selected_waypoints)
-                    self.selected_lines.append(line)
+                # Show GaitNet Muscle
+                if imgui.button("<##muscle"):
+                    self.muscle_index -= 1
+                    if self.muscle_index < 0:
+                        self.muscle_index = len(self.env.muscle_pos) - 1
+                imgui.same_line()
+                muscle_name = list(self.env.muscle_info.keys())[self.muscle_index]
+                name_len = 29
+                if len(muscle_name) > name_len:
+                    imgui.text("%3d: %s..." % (self.muscle_index, muscle_name[:name_len]))
+                else:
+                    imgui.text("%3d: %s" % (self.muscle_index, muscle_name + " " * (name_len+3 - len(muscle_name))))
+                imgui.same_line()            
+                if imgui.button(">##muscle"):
+                    self.muscle_index += 1
+                    if self.muscle_index >= len(self.env.muscle_pos):
+                        self.muscle_index = 0
 
-                    self.selected_face = None
-                    self.selected_point = None
-                    self.selected_mesh_index = None
+                if imgui.button("Load from GaitNet Muscle", width=wide_button_width):
+                    load_error = False
+                    if self.selected_origin is None:
+                        print("Load from GaitNet Muscle: Origin is not selected")
+                        load_error = True
+                    if self.selected_insertion is None:
+                        print("Load from GaitNet Muscle: Insertion is not selected")
+                        load_error = True
 
-                    self.selected_origin = None
-                    self.selected_insertion = None
-                    self.selected_waypoints = []
-                    print(f"Save Line: Line saved {line}")
+                    if not load_error:
+                        muscle_name = list(self.env.muscle_info.keys())[self.muscle_index]
+                        self.muscle_name_input = muscle_name
 
-            imgui.text("Saved Lines")
-            imgui.push_item_width(push_width)
-            _, self.selected_line_index = imgui.combo("##lines", self.selected_line_index, [str(i) for i in range(len(self.selected_lines))])
-            imgui.pop_item_width()
-            imgui.same_line()
-            imgui.text(f"{len(self.selected_lines)} lines saved")
-            if imgui.button("Delete line", width=button_width):
-                self.selected_lines = self.selected_lines[:self.selected_line_index] + self.selected_lines[self.selected_line_index+1:]
-                self.selected_line_index = 0
-            imgui.same_line()
-            if imgui.button("Edit line", width=button_width):
-                line_error = False
-                if len(self.selected_lines) == 0:
-                    print("Edit Line: There is no line saved")
-                    line_error = True
+                        muscle_info = self.env.muscle_info[muscle_name]
+                        start_point = muscle_info['waypoints'][0]['p']
+                        end_point = muscle_info['waypoints'][-1]['p']
+                        new_start_point = self.selected_origin
+                        new_end_point = self.selected_insertion
+                        self.selected_waypoints = [waypoint['p'] for waypoint in muscle_info['waypoints'][1:-1]]
 
-                if not line_error:
-                    selected_line = self.selected_lines[self.selected_line_index]
-                    self.selected_origin = selected_line.origin
-                    self.selected_insertion = selected_line.insertion
-                    self.selected_waypoints = selected_line.waypoints
+                        self.selected_waypoints = self.getNewWaypoints(start_point, end_point, new_start_point, new_end_point, self.selected_waypoints)
+                imgui.text("")
+
+                imgui.text("Saved Lines")
+                imgui.push_item_width(push_width)
+                _, self.selected_line_index = imgui.combo("##lines", self.selected_line_index, [str(i) for i in range(len(self.selected_lines))])
+                imgui.pop_item_width()
+                imgui.same_line()
+                imgui.text(f"{len(self.selected_lines)} lines saved")
+                if imgui.button("Save Line", width=wide_button_width):
+                    line_error = False
+                    if self.selected_origin is None:
+                        print("Save Line: Origin is not selected")
+                        line_error = True
+                    if self.selected_insertion is None:
+                        print("Save Line: Insertion is not selected")
+                        line_error = True
+                    
+                    if len(self.selected_waypoints) < 1:
+                        print("Save Line: At least one waypoint is necessary")
+                        line_error = True
+                    
+                    if not line_error:
+                        origin = {
+                            'p': self.selected_origin,
+                            'mesh_index': self.selected_origin_mesh_index,
+                            'face': self.selected_origin_face,
+                            'body': self.SKEL_section_names_male[self.selected_origin_mesh_index],
+                            'barycentric': self.selected_origin_barycentric
+                        }
+                        insertion = {
+                            'p': self.selected_insertion,
+                            'mesh_index': self.selected_insertion_mesh_index,
+                            'face': self.selected_insertion_face,
+                            'body': self.SKEL_section_names_male[self.selected_insertion_mesh_index],
+                            'barycentric': self.selected_insertion_barycentric
+                        }
+
+                        waypoint_bodies = []
+                        for waypoint in self.selected_waypoints:
+                            waypoint_bodies.append(origin['body'])
+                        
+                        line = line_muscle(origin, insertion, self.selected_waypoints, waypoint_bodies)
+                        self.selected_lines.append(line)
+
+                        self.selected_face = None
+                        self.selected_point = None
+                        self.selected_mesh_index = None
+
+                        self.selected_origin = None
+                        self.selected_insertion = None
+                        self.selected_waypoints = []
+                        print(f"Save Line: Line saved {line}")
+                if imgui.button("Delete line", width=button_width):
                     self.selected_lines = self.selected_lines[:self.selected_line_index] + self.selected_lines[self.selected_line_index+1:]
                     self.selected_line_index = 0
-            if imgui.button("Delete All##Line", width=wide_button_width):
-                self.selected_lines = []
-                self.selected_line_index = 0
-            imgui.text("")
+                imgui.same_line()
+                if imgui.button("Edit line", width=button_width):
+                    line_error = False
+                    if len(self.selected_lines) == 0:
+                        print("Edit Line: There is no line saved")
+                        line_error = True
 
-            imgui.push_item_width(push_width)
-            changed, self.muscle_name_input = imgui.input_text_with_hint("##MuscleName", "Muscle Name", self.muscle_name_input, 255)
-            imgui.pop_item_width()
-            imgui.same_line()
-            if imgui.button("Save Muscle", width=button_width):
-                muscle_error = False
-                if len(self.selected_lines) == 0:
-                    print("Save Muscle: There is no line saved")
-                    muscle_error = True
-                    
-                if not muscle_error:
-                    muscle = SKEL_muscle(self.muscle_name_input, self.selected_lines)
-                    self.muscle_name_input = "new_muscle"
-                    self.SKEL_muscles.append(muscle)
+                    if not line_error:
+                        selected_line = self.selected_lines[self.selected_line_index]
+                        self.selected_origin = selected_line.origin
+                        self.selected_insertion = selected_line.insertion
+                        self.selected_waypoints = selected_line.waypoints
+                        self.selected_lines = self.selected_lines[:self.selected_line_index] + self.selected_lines[self.selected_line_index+1:]
+                        self.selected_line_index = 0
+                if imgui.button("Copy Line", width=button_width):
+                    line_error = False
+                    if len(self.selected_lines) == 0:
+                        print("Copy Line: There is no line saved")
+                        line_error = True
 
-                    self.selected_face = None
-                    self.selected_point = None
-                    self.selected_mesh_index = None
+                    if not line_error:
+                        selected_line = self.selected_lines[self.selected_line_index]
+                        self.selected_origin = selected_line.origin.copy()
+                        self.selected_insertion = selected_line.insertion.copy()
+                        self.selected_waypoints = [waypoint.copy() for waypoint in selected_line.waypoints]
+                imgui.same_line()
+                if imgui.button("Copy Waypoints", width=button_width):
+                    line_error = False
+                    if len(self.selected_lines) == 0:
+                        print("Copy Waypoints: There is no line saved")
+                        line_error = True
+                    if self.selected_origin is None:
+                        print("Copy Waypoints: Origin is not selected")
+                        line_error = True
+                    if self.selected_insertion is None:
+                        print("Copy Waypoints: Insertion is not selected")
+                        line_error = True
 
-                    self.selected_origin = None
-                    self.selected_insertion = None
-                    self.selected_waypoints = []
+                    if not line_error:
+                        selected_line = self.selected_lines[self.selected_line_index]
+                        start_point = selected_line.origin
+                        end_point = selected_line.insertion
+                        new_start_point = self.selected_origin
+                        new_end_point = self.selected_insertion
+                        self.selected_waypoints = self.getNewWaypoints(start_point, end_point, new_start_point, new_end_point, selected_line.waypoints)
 
+                if imgui.button("Delete All##Line", width=wide_button_width):
                     self.selected_lines = []
+                    self.selected_line_index = 0
+                imgui.text("")
 
-                    print(f"Save Muscle: Muscle Saved {muscle}")    
+                imgui.push_item_width(push_width)
+                changed, self.muscle_name_input = imgui.input_text_with_hint("##MuscleName", "Muscle Name", self.muscle_name_input, 255)
+                imgui.pop_item_width()
+                imgui.same_line()
+                if imgui.button("Save Muscle", width=button_width):
+                    muscle_error = False
+                    if len(self.selected_lines) == 0:
+                        print("Save Muscle: There is no line saved")
+                        muscle_error = True
+                        
+                    if not muscle_error:
+                        muscle = SKEL_muscle(self.muscle_name_input, self.selected_lines)
+                        self.muscle_name_input = "new_muscle"
+                        self.SKEL_muscles.append(muscle)
 
-            imgui.text("Saved Muscles")
-            imgui.push_item_width(push_width)
-            _, self.SKEL_muscle_index = imgui.combo("##muscles", self.SKEL_muscle_index, [muscle.name for muscle in self.SKEL_muscles])
-            imgui.pop_item_width()
-            imgui.same_line()
-            imgui.text(f"{len(self.SKEL_muscles)} muscles saved")
-            if imgui.button("Delete muscle", width=button_width):
-                self.SKEL_muscles = self.SKEL_muscles[:self.SKEL_muscle_index] + self.SKEL_muscles[self.SKEL_muscle_index+1:]
-                self.SKEL_muscle_index = 0
-            imgui.same_line()
-            if imgui.button("Edit muscle", width=button_width):
-                selected_muscle = self.SKEL_muscles[self.SKEL_muscle_index]
-                self.selected_lines = selected_muscle.lines
-                self.SKEL_muscles = self.SKEL_muscles[:self.SKEL_muscle_index] + self.SKEL_muscles[self.SKEL_muscle_index+1:]
-                self.SKEL_muscle_index = 0
-                self.muscle_name_input = selected_muscle.name
-            if imgui.button("Delete All##Muscle", width=wide_button_width):
-                self.SKEL_muscles = []
-                self.SKEL_muscle_index = 0
-            imgui.text("")
-            if imgui.button("Find Symmetric Muscle", width=wide_button_width):
-                symmetry_error = False
-                if len(self.SKEL_muscles) == 0:
-                    print("Find Symmetric Muscle: There is no muscle saved")
-                    symmetry_error = True
+                        self.selected_face = None
+                        self.selected_point = None
+                        self.selected_mesh_index = None
 
-                if not symmetry_error:
-                    for muscle in self.SKEL_muscles:
-                        if muscle.symmetry:
-                            continue
+                        self.selected_origin = None
+                        self.selected_insertion = None
+                        self.selected_waypoints = []
 
-                        lines = []
-                        for line in muscle.lines:
-                            origin = line.origin
-                            origin_mesh_index = line.origin_mesh_index
-                            origin_face = line.origin_face
-                            # origin_barycentric = line.origin_barycentric
+                        self.selected_lines = []
 
-                            origin_mesh_name = self.SKEL_section_names_male[origin_mesh_index]
-                            if origin_mesh_name[:4] == "Left":
-                                origin_sym_mesh_name = "Right" + origin_mesh_name[4:]
-                            elif origin_mesh_name[:5] == "Right":
-                                origin_sym_mesh_name = "Left" + origin_mesh_name[5:]
+                        print(f"Save Muscle: Muscle Saved {muscle}")    
+
+                imgui.text("Saved Muscles")
+                imgui.push_item_width(push_width)
+                _, self.SKEL_muscle_index = imgui.combo("##muscles", self.SKEL_muscle_index, [muscle.name for muscle in self.SKEL_muscles])
+                imgui.pop_item_width()
+                imgui.same_line()
+                imgui.text(f"{len(self.SKEL_muscles)} muscles saved")
+                if imgui.button("Delete muscle", width=button_width):
+                    self.SKEL_muscles = self.SKEL_muscles[:self.SKEL_muscle_index] + self.SKEL_muscles[self.SKEL_muscle_index+1:]
+                    self.SKEL_muscle_index = 0
+                imgui.same_line()
+                if imgui.button("Edit muscle", width=button_width):
+                    muscle_error = False
+                    if len(self.SKEL_muscles) == 0:
+                        print("Edit Muscle: There is no muscle saved")
+                        muscle_error = True
+                    
+                    if not muscle_error:
+                        selected_muscle = self.SKEL_muscles[self.SKEL_muscle_index]
+                        self.selected_lines = selected_muscle.lines
+                        self.SKEL_muscles = self.SKEL_muscles[:self.SKEL_muscle_index] + self.SKEL_muscles[self.SKEL_muscle_index+1:]
+                        self.SKEL_muscle_index = 0
+                        self.muscle_name_input = selected_muscle.name
+                if imgui.button("Delete All##Muscle", width=wide_button_width):
+                    self.SKEL_muscles = []
+                    self.SKEL_muscle_index = 0
+                imgui.text("")
+                if imgui.button("Find Symmetric Muscle", width=wide_button_width):
+                    symmetry_error = False
+                    if len(self.SKEL_muscles) == 0:
+                        print("Find Symmetric Muscle: There is no muscle saved")
+                        symmetry_error = True
+
+                    if not symmetry_error:
+                        for muscle in self.SKEL_muscles:
+                            if muscle.symmetry:
+                                continue
+
+                            lines = []
+                            for line in muscle.lines:
+                                origin = line.origin
+                                origin_mesh_index = line.origin_mesh_index
+                                origin_face = line.origin_face
+                                # origin_barycentric = line.origin_barycentric
+
+                                origin_mesh_name = self.SKEL_section_names_male[origin_mesh_index]
+                                if origin_mesh_name[:4] == "Left":
+                                    origin_sym_mesh_name = "Right" + origin_mesh_name[4:]
+                                elif origin_mesh_name[:5] == "Right":
+                                    origin_sym_mesh_name = "Left" + origin_mesh_name[5:]
+                                else:
+                                    origin_sym_mesh_name = origin_mesh_name
+
+                                origin_sym_mesh_index = self.SKEL_section_names_male.index(origin_sym_mesh_name)
+                                print("Origin:", origin_mesh_name, ", Symmetry:", origin_sym_mesh_name, origin_sym_mesh_index)
+
+                                origin_mesh = self.SKEL_section_vertex3[origin_mesh_index]
+                                origin_sym_mesh = self.SKEL_section_vertex3[origin_sym_mesh_index]
+
+                                origin_midpoint = np.mean(origin_mesh, axis=0)
+                                origin_sym_midpoint = np.mean(origin_sym_mesh, axis=0)
+                                origin_midpoint = (origin_midpoint + origin_sym_midpoint) / 2
+
+                                origin_vertex3 = self.SKEL_section_vertex3[origin_mesh_index][origin_face*3:origin_face*3+3]
+                                origin_face_point = np.mean(origin_vertex3, axis=0)
+                                origin_sym_face_point = np.array([2*origin_midpoint[0]-origin_face_point[0], origin_face_point[1], origin_face_point[2]])
+
+                                self.origin_midpoint = origin_sym_face_point
+
+                                num_faces = origin_sym_mesh.shape[0] // 3
+                                faces = origin_sym_mesh.reshape(num_faces, 3, 3)
+                                A, B, C = faces[:, 0], faces[:, 1], faces[:, 2]
+                                AB = B - A
+                                AC = C - A
+                                normals = np.cross(AB, AC)
+                                AP = origin_sym_face_point - A
+                                distances_to_plane = np.sum(AP * normals, axis=1) / np.sum(normals * normals, axis=1)
+                                projected_points = origin_sym_face_point - distances_to_plane[:, np.newaxis] * normals
+                                is_inside = np.array([is_point_inside_triangle(A[i], B[i], C[i], projected_points[i]) for i in range(num_faces)])
+                                distances_to_vertices = np.array([
+                                    [np.linalg.norm(origin_sym_face_point - A[i]), np.linalg.norm(origin_sym_face_point - B[i]), np.linalg.norm(origin_sym_face_point - C[i])]
+                                    for i in range(num_faces)
+                                ])
+                                distances_to_projection = np.linalg.norm(projected_points - origin_sym_face_point, axis=1)
+                                distances_to_projection[~is_inside] = np.inf  # Set to inf for faces where the point is outside
+                                distances = np.minimum(distances_to_projection, np.min(distances_to_vertices, axis=1))
+                                closest_face_index = np.argmin(distances)
+                                closest_face = faces[closest_face_index]
+                                closest_point = projected_points[closest_face_index] if is_inside[closest_face_index] else faces[closest_face_index, np.argmin(distances_to_vertices[closest_face_index])]
+                
+                                origin_sym_face = closest_face_index
+                                origin_sym_mesh_index = origin_sym_mesh_index   
+                                origin_sym_barycentric = barycentric_coordinates(closest_face, closest_point)
+                                origin_sym = np.sum(np.array([faces[closest_face_index][i] * origin_sym_barycentric[i] for i in range(3)]), axis=0)
+                                # self.selected_origin_sym = closest_point
+
+                                insertion = line.insertion
+                                insertion_mesh_index = line.insertion_mesh_index
+                                insertion_face = line.insertion_face
+                                # insertion_barycentric = line.insertion_barycentric
+
+                                insertion_mesh_name = self.SKEL_section_names_male[insertion_mesh_index]
+                                if insertion_mesh_name[:4] == "Left":
+                                    insertion_sym_mesh_name = "Right" + insertion_mesh_name[4:]
+                                elif insertion_mesh_name[:5] == "Right":
+                                    insertion_sym_mesh_name = "Left" + insertion_mesh_name[5:]
+                                else:
+                                    insertion_sym_mesh_name = insertion_mesh_name
+
+                                insertion_sym_mesh_index = self.SKEL_section_names_male.index(insertion_sym_mesh_name)
+                                print("Insertion:", insertion_mesh_name, ", Symmetry:", insertion_sym_mesh_name, insertion_sym_mesh_index)
+
+                                insertion_mesh = self.SKEL_section_vertex3[insertion_mesh_index]
+                                insertion_sym_mesh = self.SKEL_section_vertex3[insertion_sym_mesh_index]
+
+                                insertion_midpoint = np.mean(insertion_mesh, axis=0)
+                                insertion_sym_midpoint = np.mean(insertion_sym_mesh, axis=0)
+                                insertion_midpoint = (insertion_midpoint + insertion_sym_midpoint) / 2
+                                
+                                insertion_vertex3 = self.SKEL_section_vertex3[insertion_mesh_index][insertion_face*3:insertion_face*3+3]
+                                insertion_face_point = np.mean(insertion_vertex3, axis=0)
+                                insertion_sym_face_point = np.array([2*insertion_midpoint[0]-insertion_face_point[0], insertion_face_point[1], insertion_face_point[2]])
+
+                                self.insertion_midpoint = insertion_sym_face_point
+
+                                num_faces = insertion_sym_mesh.shape[0] // 3
+                                faces = insertion_sym_mesh.reshape(num_faces, 3, 3)
+                                A, B, C = faces[:, 0], faces[:, 1], faces[:, 2]
+                                AB = B - A
+                                AC = C - A
+                                normals = np.cross(AB, AC)
+                                AP = insertion_sym_face_point - A
+                                distances_to_plane = np.sum(AP * normals, axis=1) / np.sum(normals * normals, axis=1)
+                                projected_points = insertion_sym_face_point - distances_to_plane[:, np.newaxis] * normals
+                                is_inside = np.array([is_point_inside_triangle(A[i], B[i], C[i], projected_points[i]) for i in range(num_faces)])
+                                distances_to_vertices = np.array([
+                                    [np.linalg.norm(insertion_sym_face_point - A[i]), np.linalg.norm(insertion_sym_face_point - B[i]), np.linalg.norm(insertion_sym_face_point - C[i])]
+                                    for i in range(num_faces)
+                                ])
+                                distances_to_projection = np.linalg.norm(projected_points - insertion_sym_face_point, axis=1)
+                                distances_to_projection[~is_inside] = np.inf  # Set to inf for faces where the point is outside
+                                distances = np.minimum(distances_to_projection, np.min(distances_to_vertices, axis=1))
+                                closest_face_index = np.argmin(distances)
+                                closest_face = faces[closest_face_index]
+                                closest_point = projected_points[closest_face_index] if is_inside[closest_face_index] else faces[closest_face_index, np.argmin(distances_to_vertices[closest_face_index])]
+                
+                                insertion_sym_face = closest_face_index
+                                insertion_sym_mesh_index = insertion_sym_mesh_index
+                                insertion_sym_barycentric = barycentric_coordinates(closest_face, closest_point)
+                                insertion_sym = np.sum(np.array([faces[closest_face_index][i] * insertion_sym_barycentric[i] for i in range(3)]), axis=0)
+                                # self.selected_insertion_sym = closest_point
+
+                                sym_origin = {
+                                    'p': origin_sym,
+                                    'mesh_index': origin_sym_mesh_index,
+                                    'body': self.SKEL_section_names_male[origin_sym_mesh_index],
+                                    'face': origin_sym_face,
+                                    'barycentric': origin_sym_barycentric
+                                }
+                                sym_insertion = {
+                                    'p': insertion_sym,
+                                    'mesh_index': insertion_sym_mesh_index,
+                                    'body': self.SKEL_section_names_male[insertion_sym_mesh_index],
+                                    'face': insertion_sym_face,
+                                    'barycentric': insertion_sym_barycentric
+                                }
+
+                                start_point = np.array([-origin[0], origin[1], origin[2]])
+                                end_point = np.array([-insertion[0], insertion[1], insertion[2]])
+                                new_start_point = origin_sym
+                                new_end_point = insertion_sym
+                                waypoints = [np.array([-waypoint[0], waypoint[1], waypoint[2]]) for waypoint in line.waypoints]
+
+                                sym_waypoints = self.getNewWaypoints(start_point, end_point, new_start_point, new_end_point, waypoints)
+
+                                waypoint_bodies = []
+                                for waypoint in sym_waypoints:
+                                    waypoint_bodies.append(sym_origin['body'])
+
+                                lines.append(line_muscle(sym_origin, sym_insertion, sym_waypoints, waypoint_bodies))
+
+                                print("")
+
+                            muscle_name = muscle.name
+                            if muscle_name[0] == "L":
+                                new_muscle_name = "R" + muscle_name[1:]
+                            elif muscle_name[0] == "R":
+                                new_muscle_name = "L" + muscle_name[1:]
                             else:
-                                origin_sym_mesh_name = origin_mesh_name
+                                new_muscle_name = muscle_name + "_sym"
 
-                            origin_sym_mesh_index = self.SKEL_section_names_male.index(origin_sym_mesh_name)
-                            print("Origin:", origin_mesh_name, ", Symmetry:", origin_sym_mesh_name, origin_sym_mesh_index)
+                            new_muscle = SKEL_muscle(new_muscle_name, lines, symmetry=True)
+                            muscle.symmetry = True
+                            self.SKEL_muscles.append(new_muscle)
+                            print("Muscle Added:", new_muscle)
 
-                            origin_mesh = self.SKEL_section_vertex3[origin_mesh_index]
-                            origin_sym_mesh = self.SKEL_section_vertex3[origin_sym_mesh_index]
+                if imgui.radio_button("GaitNet", self.exportGaitNet):
+                    self.exportGaitNet = True
+                imgui.same_line()
+                if imgui.radio_button("New", not self.exportGaitNet):
+                    self.exportGaitNet = False
+                if imgui.button("Export SKEL Muscle", width=wide_button_width, height=wide_button_height):
+                    if len(self.SKEL_muscles) == 0:
+                        print("Export SKEL Muscle: There is no muscle saved")
+                    else:
+                        def tw(file, string, tabnum):
+                            for _ in range(tabnum):
+                                file.write("\t")
+                            file.write(string + "\n")
 
-                            origin_midpoint = np.mean(origin_mesh, axis=0)
-                            origin_sym_midpoint = np.mean(origin_sym_mesh, axis=0)
-                            origin_midpoint = (origin_midpoint + origin_sym_midpoint) / 2
+                        # GaitNet version
+                        if self.exportGaitNet:
+                            filename = "data/skel_muscle.xml"
+                            with open(filename, "w") as file:
+                                tw(file, "<Muscle>", 0)
 
-                            origin_vertex3 = self.SKEL_section_vertex3[origin_mesh_index][origin_face*3:origin_face*3+3]
-                            origin_face_point = np.mean(origin_vertex3, axis=0)
-                            origin_sym_face_point = np.array([2*origin_midpoint[0]-origin_face_point[0], origin_face_point[1], origin_face_point[2]])
+                                for muscle in self.SKEL_muscles:
+                                    for i, line in enumerate(muscle.lines):
+                                        tw(file, f"<Unit name=\"{muscle.name}_{i}\" f0=\"{muscle.f0}\" lm=\"{muscle.lm}\" lt=\"{muscle.lt}\" pen_angle=\"{muscle.pen_angle}\" lmax=\"{muscle.lmax}\">", 1)
+                                        tw(file, f"<Waypoint body=\"{line.origin_body}\" p=\"{' '.join([str(np.round(p, 6)) for p in line.origin])}\"/>", 2)
+                                        for j, wp in enumerate(line.waypoints):
+                                            tw(file, f"<Waypoint body=\"{line.waypoint_bodies[j]}\" p=\"{' '.join([str(np.round(p, 6)) for p in wp])}\"/>", 2)
+                                        tw(file, f"<Waypoint body=\"{line.insertion_body}\" p=\"{' '.join([str(np.round(p, 6)) for p in line.insertion])}\"/>", 2)
+                                        tw(file, "</Unit>", 1)
 
-                            self.origin_midpoint = origin_sym_face_point
-
-                            num_faces = origin_sym_mesh.shape[0] // 3
-                            faces = origin_sym_mesh.reshape(num_faces, 3, 3)
-                            A, B, C = faces[:, 0], faces[:, 1], faces[:, 2]
-                            AB = B - A
-                            AC = C - A
-                            normals = np.cross(AB, AC)
-                            AP = origin_sym_face_point - A
-                            distances_to_plane = np.sum(AP * normals, axis=1) / np.sum(normals * normals, axis=1)
-                            projected_points = origin_sym_face_point - distances_to_plane[:, np.newaxis] * normals
-                            is_inside = np.array([is_point_inside_triangle(A[i], B[i], C[i], projected_points[i]) for i in range(num_faces)])
-                            distances_to_vertices = np.array([
-                                [np.linalg.norm(origin_sym_face_point - A[i]), np.linalg.norm(origin_sym_face_point - B[i]), np.linalg.norm(origin_sym_face_point - C[i])]
-                                for i in range(num_faces)
-                            ])
-                            distances_to_projection = np.linalg.norm(projected_points - origin_sym_face_point, axis=1)
-                            distances_to_projection[~is_inside] = np.inf  # Set to inf for faces where the point is outside
-                            distances = np.minimum(distances_to_projection, np.min(distances_to_vertices, axis=1))
-                            closest_face_index = np.argmin(distances)
-                            closest_face = faces[closest_face_index]
-                            closest_point = projected_points[closest_face_index] if is_inside[closest_face_index] else faces[closest_face_index, np.argmin(distances_to_vertices[closest_face_index])]
-            
-                            origin_sym_face = closest_face_index
-                            origin_sym_mesh_index = origin_sym_mesh_index   
-                            origin_sym_barycentric = barycentric_coordinates(closest_face, closest_point)
-                            origin_sym = np.sum(np.array([faces[closest_face_index][i] * origin_sym_barycentric[i] for i in range(3)]), axis=0)
-                            # self.selected_origin_sym = closest_point
-
-                            insertion = line.insertion
-                            insertion_mesh_index = line.insertion_mesh_index
-                            insertion_face = line.insertion_face
-                            # insertion_barycentric = line.insertion_barycentric
-
-                            insertion_mesh_name = self.SKEL_section_names_male[insertion_mesh_index]
-                            if insertion_mesh_name[:4] == "Left":
-                                insertion_sym_mesh_name = "Right" + insertion_mesh_name[4:]
-                            elif insertion_mesh_name[:5] == "Right":
-                                insertion_sym_mesh_name = "Left" + insertion_mesh_name[5:]
-                            else:
-                                insertion_sym_mesh_name = insertion_mesh_name
-
-                            insertion_sym_mesh_index = self.SKEL_section_names_male.index(insertion_sym_mesh_name)
-                            print("Insertion:", insertion_mesh_name, ", Symmetry:", insertion_sym_mesh_name, insertion_sym_mesh_index)
-
-                            insertion_mesh = self.SKEL_section_vertex3[insertion_mesh_index]
-                            insertion_sym_mesh = self.SKEL_section_vertex3[insertion_sym_mesh_index]
-
-                            insertion_midpoint = np.mean(insertion_mesh, axis=0)
-                            insertion_sym_midpoint = np.mean(insertion_sym_mesh, axis=0)
-                            insertion_midpoint = (insertion_midpoint + insertion_sym_midpoint) / 2
-                            
-                            insertion_vertex3 = self.SKEL_section_vertex3[insertion_mesh_index][insertion_face*3:insertion_face*3+3]
-                            insertion_face_point = np.mean(insertion_vertex3, axis=0)
-                            insertion_sym_face_point = np.array([2*insertion_midpoint[0]-insertion_face_point[0], insertion_face_point[1], insertion_face_point[2]])
-
-                            self.insertion_midpoint = insertion_sym_face_point
-
-                            num_faces = insertion_sym_mesh.shape[0] // 3
-                            faces = insertion_sym_mesh.reshape(num_faces, 3, 3)
-                            A, B, C = faces[:, 0], faces[:, 1], faces[:, 2]
-                            AB = B - A
-                            AC = C - A
-                            normals = np.cross(AB, AC)
-                            AP = insertion_sym_face_point - A
-                            distances_to_plane = np.sum(AP * normals, axis=1) / np.sum(normals * normals, axis=1)
-                            projected_points = insertion_sym_face_point - distances_to_plane[:, np.newaxis] * normals
-                            is_inside = np.array([is_point_inside_triangle(A[i], B[i], C[i], projected_points[i]) for i in range(num_faces)])
-                            distances_to_vertices = np.array([
-                                [np.linalg.norm(insertion_sym_face_point - A[i]), np.linalg.norm(insertion_sym_face_point - B[i]), np.linalg.norm(insertion_sym_face_point - C[i])]
-                                for i in range(num_faces)
-                            ])
-                            distances_to_projection = np.linalg.norm(projected_points - insertion_sym_face_point, axis=1)
-                            distances_to_projection[~is_inside] = np.inf  # Set to inf for faces where the point is outside
-                            distances = np.minimum(distances_to_projection, np.min(distances_to_vertices, axis=1))
-                            closest_face_index = np.argmin(distances)
-                            closest_face = faces[closest_face_index]
-                            closest_point = projected_points[closest_face_index] if is_inside[closest_face_index] else faces[closest_face_index, np.argmin(distances_to_vertices[closest_face_index])]
-            
-                            insertion_sym_face = closest_face_index
-                            insertion_sym_mesh_index = insertion_sym_mesh_index
-                            insertion_sym_barycentric = barycentric_coordinates(closest_face, closest_point)
-                            insertion_sym = np.sum(np.array([faces[closest_face_index][i] * insertion_sym_barycentric[i] for i in range(3)]), axis=0)
-                            # self.selected_insertion_sym = closest_point
-
-                            sym_origin = {
-                                'p': origin_sym,
-                                'mesh_index': origin_sym_mesh_index,
-                                'face': origin_sym_face,
-                                'barycentric': origin_sym_barycentric
-                            }
-                            sym_insertion = {
-                                'p': insertion_sym,
-                                'mesh_index': insertion_sym_mesh_index,
-                                'face': insertion_sym_face,
-                                'barycentric': insertion_sym_barycentric
-                            }
-
-                            start_point = np.array([-origin[0], origin[1], origin[2]])
-                            end_point = np.array([-insertion[0], insertion[1], insertion[2]])
-                            new_start_point = origin_sym
-                            new_end_point = insertion_sym
-                            waypoints = [np.array([-waypoint[0], waypoint[1], waypoint[2]]) for waypoint in line.waypoints]
-
-                            sym_waypoints = self.getNewWaypoints(start_point, end_point, new_start_point, new_end_point, waypoints)
-
-                            lines.append(line_muscle(sym_origin, sym_insertion, sym_waypoints))
-
-                            print("")
-
-                        muscle_name = muscle.name
-                        if muscle_name[0] == "L":
-                            new_muscle_name = "R" + muscle_name[1:]
-                        elif muscle_name[0] == "R":
-                            new_muscle_name = "L" + muscle_name[1:]
+                                tw(file, "</Muscle>", 0)
                         else:
-                            new_muscle_name = muscle_name + "_sym"
+                            # New version
+                            filename = "data/skel_muscle_new.xml"
+                            with open(filename, "w") as file:
+                                tw(file, "<Muscle>", 0)
 
-                        new_muscle = SKEL_muscle(new_muscle_name, lines, symmetry=True)
-                        muscle.symmetry = True
-                        self.SKEL_muscles.append(new_muscle)
-                        print("Muscle Added:", new_muscle)
+                                for muscle in self.SKEL_muscles:
+                                    tw(file, f"<Unit name=\"{muscle.name}\" f0=\"{muscle.f0}\" lm=\"{muscle.lm}\" lt=\"{muscle.lt}\" pen_angle=\"{muscle.pen_angle}\" lmax=\"{muscle.lmax}\">", 1)
+                                    for line in muscle.lines:
+                                        tw(file, f"<Line>", 2)
+                                        tw(file, f"<Waypoint body=\"{line.origin_body}\" p=\"{' '.join([str(np.round(p, 6)) for p in line.origin])}\"/>", 3)
+                                        for j, wp in enumerate(line.waypoints):
+                                            tw(file, f"Waypoint body=\"{line.waypoint_bodies[j]}\" p=\"{' '.join([str(np.round(p, 6)) for p in wp])}\"/>", 3)
+                                        tw(file, f"<Waypoint body=\"{line.insertion_body}\" p=\"{' '.join([str(np.round(p, 6)) for p in line.insertion])}\"/>", 3)
+                                        tw(file, "</Line>", 2)
+                                    tw(file, "</Unit>", 1)
 
-            if imgui.radio_button("GaitNet", self.exportGaitNet):
-                self.exportGaitNet = True
-            imgui.same_line()
-            if imgui.radio_button("New", not self.exportGaitNet):
-                self.exportGaitNet = False
-            if imgui.button("Export SKEL Muscle", width=wide_button_width, height=wide_button_height):
-                if len(self.SKEL_muscles) == 0:
-                    print("Export SKEL Muscle: There is no muscle saved")
-                else:
+                                tw(file, "</Muscle>", 0)
+
+                        file.close()
+                        print("Export SKEL Muscle: skel_muscle.xml saved")
+
+                if imgui.button("Link SKEL Body/Muscle", width=wide_button_width, height=wide_button_height):
+                    if self.env.skel_skel is not None:
+                        self.env.world.removeSkeleton(self.env.skel_skel)
+
+                    from core.dartHelper import saveSkeletonInfo
+                    skel_info, root_name, _, _, _, _ = saveSkeletonInfo("data/skel_skel.xml")
+                    self.env.skel_skel_info = skel_info
+                    self.env.skel_skel = buildFromInfo(skel_info, "SKEL")
+                    self.env.world.addSkeleton(self.env.skel_skel)
+                    self.env.kp_skel = 300.0 * np.ones(self.env.skel_skel.getNumDofs()) 
+                    self.env.kv_skel = 20.0 * np.ones(self.env.skel_skel.getNumDofs())
+                    self.env.kp_skel[:6] = 0.0
+                    self.env.kv_skel[:6] = 0.0
+
+                    self.test_skel = self.env.skel.clone()
+                    if self.test_skel_dofs is None:
+                        self.test_skel_dofs = np.zeros(self.test_skel.getNumDofs())
+
+                    self.env.skel_muscles = dart.dynamics.Muscles(self.env.skel_skel)
+                    self.env.skel_muscle_info = self.env.saveMuscleInfo("data/skel_muscle.xml", is_SKEL=True)
+                    for name, muscle in self.env.skel_muscle_info.items():
+                        muscle_properties = muscle['muscle_properties']
+                        useVelocityForce = muscle['useVelocityForce']
+                        waypoints_info = muscle['waypoints']
+
+                        waypoints = []
+                        for waypoint in waypoints_info:
+                            waypoints.append((waypoint['body'], waypoint['p']))
+
+                        self.env.skel_muscles.addMuscle(name, muscle_properties, useVelocityForce, waypoints)
+
+                    self.skel_muscle_activation_levels = np.zeros(self.env.skel_muscles.getNumMuscles())
+                    self.env.skel_muscles.update()
+                    self.env.skel_muscle_pos = self.env.skel_muscles.getMusclePositions()
+
+                    self.env.skel_ees_name = ["Skull", "Carpals_L", "Carpals_R", "Talus_L", "Talus_R"]
+
+                imgui.tree_pop()
+
+            if imgui.tree_node("SKEL Parameters"):
+                if imgui.button("Export Skeleton"):
+                    pass
+                    filename = "skel_skel.xml"
                     def tw(file, string, tabnum):
                         for _ in range(tabnum):
                             file.write("\t")
                         file.write(string + "\n")
 
-                    # GaitNet version
-                    if self.exportGaitNet:
-                        with open("data/skel_muscle.xml", "w") as file:
-                            tw(file, "<Muscle>", 0)
+                    f = open(f"data/{filename}", 'w')
+                    tw(f, "<Skeleton name=\"Skeleton\">", 0)
 
-                            for muscle in self.SKEL_muscles:
-                                for i, line in enumerate(muscle.lines):
-                                    tw(file, f"<Unit name=\"{muscle.name}_{i}\" f0=\"{muscle.f0}\" lm=\"{muscle.lm}\" lt=\"{muscle.lt}\" pen_angle=\"{muscle.pen_angle}\" lmax=\"{muscle.lmax}\">", 1)
-                                    tw(file, f"<Waypoint p=\"{' '.join([str(np.round(p, 6)) for p in line.origin])}\"/>", 2)
-                                    for wp in line.waypoints:
-                                        tw(file, f"<Waypoint p=\"{' '.join([str(np.round(p, 6)) for p in wp])}\"/>", 2)
-                                    tw(file, f"<Waypoint p=\"{' '.join([str(np.round(p, 6)) for p in line.insertion])}\"/>", 2)
-                                    tw(file, "</Unit>", 1)
+                    for box in self.gui_boxes:
+                        tw(f, "<Node name=\"%s\" parent=\"%s\">" % (box.name, box.parent), 1)
 
-                            tw(file, "</Muscle>", 0)
-                    else:
-                        # New version
-                        with open("skel_muscle.xml", "w") as file:
-                            tw(file, "<Muscle>", 0)
-
-                            for muscle in self.SKEL_muscles:
-                                tw(file, f"<Unit name=\"{muscle.name}\" f0=\"{muscle.f0}\" lm=\"{muscle.lm}\" lt=\"{muscle.lt}\" pen_angle=\"{muscle.pen_angle}\" lmax=\"{muscle.lmax}\">", 1)
-                                for line in muscle.lines:
-                                    tw(file, f"<Line>", 2)
-                                    tw(file, f"<Waypoint p=\"{' '.join([str(np.round(p, 6)) for p in line.origin])}\"/>", 3)
-                                    for wp in line.waypoints:
-                                        tw(file, f"<Waypoint p=\"{' '.join([str(np.round(p, 6)) for p in wp])}\"/>", 3)
-                                    tw(file, f"<Waypoint p=\"{' '.join([str(np.round(p, 6)) for p in line.insertion])}\"/>", 3)
-                                    tw(file, "</Line>", 2)
-                                tw(file, "</Unit>", 1)
-
-                            tw(file, "</Muscle>", 0)
-
-                    file.close()
-                    print("Export SKEL Muscle: skel_muscle.xml saved")
-
-            if imgui.button("Link SKEL Body/Muscle", width=wide_button_width, height=wide_button_height):
-                if self.env.skel_skel is not None:
-                    self.env.world.removeSkeleton(self.env.skel_skel)
-
-                from core.dartHelper import saveSkeletonInfo
-                skel_info, root_name, _, _, _, _ = saveSkeletonInfo("data/skel_skel.xml")
-                self.env.skel_skel = buildFromInfo(skel_info, root_name)
-                self.skel_skel = self.env.skel_skel.clone()
-                self.env.world.addSkeleton(self.env.skel_skel)
-                self.env.kp_skel = 300.0 * np.ones(self.skel_skel.getNumDofs()) 
-                self.env.kv_skel = 20.0 * np.ones(self.skel_skel.getNumDofs())
-                self.env.kp_skel[:6] = 0.0
-                self.env.kv_skel[:6] = 0.0
-
-                self.test_skel = self.skel_skel.clone()
-                if self.test_skel_dofs is None:
-                    self.test_skel_dofs = np.zeros(self.test_skel.getNumDofs())
-
-                current_pos = self.test_skel_dofs
-
-                self.skel_muscles = dart.dynamics.Muscles(self.skel)
-                skel_muscle_info = self.env.saveMuscleInfo("data/skel_muscle.xml")
-                for name, muscle in skel_muscle_info.items():
-                    muscle_properties = muscle['muscle_properties']
-                    useVelocityForce = muscle['useVelocityForce']
-                    waypoints_info = muscle['waypoints']
-
-                    waypoints = []
-                    for waypoint in waypoints_info:
-                        waypoints.append((waypoint['body'], waypoint['p']))
-
-                    self.skel_muscles.addMuscle(name, muscle_properties, useVelocityForce, waypoints)
-
-                self.skel_muscle_activation_levels = np.zeros(self.muscles.getNumMuscles())
-
-            imgui.tree_pop()
-
-        if imgui.tree_node("SKEL Parameters"):
-            if imgui.button("Export Skeleton"):
-                pass
-                filename = "skel_skel.xml"
-                def tw(file, string, tabnum):
-                    for _ in range(tabnum):
-                        file.write("\t")
-                    file.write(string + "\n")
-
-                f = open(f"data/{filename}", 'w')
-                tw(f, "<Skeleton name=\"Skeleton\">", 0)
-
-                for box in self.gui_boxes:
-                    tw(f, "<Node name=\"%s\" parent=\"%s\">" % (box.name, box.parent), 1)
-
-                    tw(f, "<Body type=\"%s\" mass=\"%f\" size=\"%s\" contact=\"%s\" color=\"%s\" obj=\"%s\" stretch=\"%s\">" % 
-                        ("Box", 
-                        7.0, 
-                        " ".join(np.array(box.size).astype(str)), 
-                        "On" if box.isContact else "Off", 
-                        " ".join(np.array(box.color).astype(str)), 
-                        "",
-                        "1",
-                        ), 
-                    2)
-                    
-                    tw(f, "<Transformation linear=\"%s\" translation=\"%s\"/>" % 
-                    (" ".join(R.from_rotvec(box.rot).as_matrix().astype(str).flatten()), 
-                        " ".join(box.pos.astype(str))
-                        ), 
-                        3)
-
-                    tw(f, "</Body>", 2)
-
-                    upper = np.array(box.upper) if box.upper is not None else np.array([1.6, 1.6, 1.6])
-                    lower = np.array(box.lower) if box.lower is not None else np.array([-1.6, -1.6, -1.6])
-
-                    # upper = np.array([0.01, 0.01, 0.01])
-                    # lower = np.array([-0.01, -0.01, -0.01])
-
-                    if box.jointType == "Free":
-                        tw(f, "<Joint type=\"Free\">", 2)
-                    elif box.jointType == "Ball":
-                        tw(f, "<Joint type=\"Ball\" lower=\"%s\" upper=\"%s\">" %
-                                    (" ".join(lower.astype(str)),
-                                    " ".join(upper.astype(str)),
-                                    ),
-                                    2)
-                    elif box.jointType == "Revolute":
-                        tw(f, "<Joint type=\"Revolute\" axis=\"%s\" lower=\"%s\" upper=\"%s\">" %
-                                    (" ".join(box.axis.astype(str)),
-                                    lower.astype(str),
-                                    upper.astype(str),
-                                    ),
-                                    2)
+                        tw(f, "<Body type=\"%s\" mass=\"%f\" size=\"%s\" contact=\"%s\" color=\"%s\" obj=\"%s\" stretch=\"%s\">" % 
+                            ("Box", 
+                            7.0, 
+                            " ".join(np.round(np.array(box.size), 6).astype(str)), 
+                            "On" if box.isContact else "Off", 
+                            " ".join(np.array(box.color).astype(str)), 
+                            "",
+                            "1",
+                            ), 
+                        2)
                         
-                    tw(f, "<Transformation linear=\"%s\" translation=\"%s\"/>" %
-                            (" ".join(box.ori.astype(str).flatten()),
-                            " ".join(np.array(box.joint).astype(str))),
+                        tw(f, "<Transformation linear=\"%s\" translation=\"%s\"/>" % 
+                        (" ".join(np.round(R.from_rotvec(box.rot).as_matrix(), 6).astype(str).flatten()), 
+                            " ".join(np.round(box.pos, 6).astype(str))
+                            ), 
                             3)
+
+                        tw(f, "</Body>", 2)
+
+                        upper = np.round(np.array(box.upper), 6) if box.upper is not None else np.array([1.6, 1.6, 1.6])
+                        lower = np.round(np.array(box.lower), 6) if box.lower is not None else np.array([-1.6, -1.6, -1.6])
+
+                        # upper = np.array([0.01, 0.01, 0.01])
+                        # lower = np.array([-0.01, -0.01, -0.01])
+
+                        if box.jointType == "Free":
+                            tw(f, "<Joint type=\"Free\">", 2)
+                        elif box.jointType == "Ball":
+                            tw(f, "<Joint type=\"Ball\" lower=\"%s\" upper=\"%s\">" %
+                                        (" ".join(np.round(lower, 6).astype(str)),
+                                        " ".join(np.round(upper, 6).astype(str)),
+                                        ),
+                                        2)
+                        elif box.jointType == "Revolute":
+                            tw(f, "<Joint type=\"Revolute\" axis=\"%s\" lower=\"%s\" upper=\"%s\">" %
+                                        (" ".join(box.axis.astype(str)),
+                                        np.round(lower, 6).astype(str),
+                                        np.round(upper, 6).astype(str),
+                                        ),
+                                        2)
+                            
+                        tw(f, "<Transformation linear=\"%s\" translation=\"%s\"/>" %
+                                (" ".join(np.round(box.ori, 6).astype(str).flatten()),
+                                " ".join(np.round(np.array(box.joint), 6).astype(str))),
+                                3)
+                        
+                        tw(f, "</Joint>", 2)
+
+                        tw(f, "</Node>", 1)
+                    tw(f, "</Skeleton>", 0)
+                    f.close()
+
+                    # from core.dartHelper import saveSkeletonInfo, buildFromInfo
+                    # skel_info, root_name, _, _, _, _ = saveSkeletonInfo("data/skel_skel.xml")
+                    # self.env.skel_skel = buildFromInfo(skel_info, root_name)
+                    # self.skel_skel = self.env.skel_skel.clone()
+                    # self.env.world.addSkeleton(self.env.skel_skel)
+                    # self.env.kp_skel = 300.0 * np.ones(self.skel_skel.getNumDofs()) 
+                    # self.env.kv_skel = 20.0 * np.ones(self.skel_skel.getNumDofs())
+                    # self.env.kp_skel[:6] = 0.0
+                    # self.env.kv_skel[:6] = 0.0
+
+                    # self.gui_boxes = []
+
+                    # self.test_skel = self.skel_skel.clone()
+                    # if self.test_skel_dofs is None:
+                    #     self.test_skel_dofs = np.zeros(self.test_skel.getNumDofs())
+
+                if self.test_skel is not None:
+                    if imgui.tree_node("Test rotvecs"):
+                        for i in range(self.skel_skel.getNumDofs()):
+                            imgui.push_item_width(push_width)
+                            changed, self.test_skel_dofs[i] = imgui.slider_float(f"DOF {i}", self.test_skel_dofs[i], -3.0, 3.0)
+                            imgui.pop_item_width()
+                            imgui.same_line()
+                            if imgui.button(f"Reset##test_dof{i}"):
+                                self.test_skel_dofs[i] = 0.0
+                        imgui.tree_pop()
                     
-                    tw(f, "</Joint>", 2)
-
-                    tw(f, "</Node>", 1)
-                tw(f, "</Skeleton>", 0)
-                f.close()
-
-                # from core.dartHelper import saveSkeletonInfo, buildFromInfo
-                # skel_info, root_name, _, _, _, _ = saveSkeletonInfo("data/skel_skel.xml")
-                # self.env.skel_skel = buildFromInfo(skel_info, root_name)
-                # self.skel_skel = self.env.skel_skel.clone()
-                # self.env.world.addSkeleton(self.env.skel_skel)
-                # self.env.kp_skel = 300.0 * np.ones(self.skel_skel.getNumDofs()) 
-                # self.env.kv_skel = 20.0 * np.ones(self.skel_skel.getNumDofs())
-                # self.env.kp_skel[:6] = 0.0
-                # self.env.kv_skel[:6] = 0.0
-
-                # self.gui_boxes = []
-
-                # self.test_skel = self.skel_skel.clone()
-                # if self.test_skel_dofs is None:
-                #     self.test_skel_dofs = np.zeros(self.test_skel.getNumDofs())
-
-            if self.test_skel is not None:
-                if imgui.tree_node("Test rotvecs"):
-                    for i in range(self.skel_skel.getNumDofs()):
-                        imgui.push_item_width(push_width)
-                        changed, self.test_skel_dofs[i] = imgui.slider_float(f"DOF {i}", self.test_skel_dofs[i], -3.0, 3.0)
-                        imgui.pop_item_width()
-                        imgui.same_line()
-                        if imgui.button(f"Reset##test_dof{i}"):
-                            self.test_skel_dofs[i] = 0.0
-                    imgui.tree_pop()
-                
-            _, self.draw_skel_skin = imgui.checkbox("Draw SKEL skin", self.draw_skel_skin)
-            imgui.same_line()
-            imgui.set_cursor_pos_x(200)
-            imgui.push_item_width(100)
-            changed, self.skin_opacity = imgui.slider_float(f"Opacity##skin", self.skin_opacity, 0, 1)
-            if changed:
-                self.update_skel()
-            imgui.pop_item_width()
-            _, self.draw_skel_skel = imgui.checkbox("Draw SKEL skel", self.draw_skel_skel)
-            imgui.same_line()
-            imgui.set_cursor_pos_x(200)
-            imgui.push_item_width(100)
-            changed, self.skel_opacity = imgui.slider_float(f"Opacity##skel", self.skel_opacity, 0, 1)
-            if changed:
-                self.update_skel()
-            imgui.pop_item_width()
-            _, self.draw_skel_joint = imgui.checkbox("Draw SKEL joint", self.draw_skel_joint)
-            _, self.draw_skel_joint_rot = imgui.checkbox("Draw SKEL joint rot", self.draw_skel_joint_rot)
-            _, self.draw_skel_bone = imgui.checkbox("Draw SKEL bone", self.draw_skel_bone)
-            _, self.draw_dart_skel = imgui.checkbox("Draw SKEL dart", self.draw_dart_skel)
-            _, self.draw_skel_dofs = imgui.checkbox("Draw Test Skeleton", self.draw_skel_dofs)
-            _, self.draw_gui_boxes = imgui.checkbox("Draw GUI boxes", self.draw_gui_boxes)
-            if self.draw_skel_skin:
-                changed, self.isDrawHalfSkin = imgui.checkbox("Draw Half Skin", self.isDrawHalfSkin)
+                _, self.draw_skel_skin = imgui.checkbox("Draw SKEL skin", self.draw_skel_skin)
+                imgui.same_line()
+                imgui.set_cursor_pos_x(200)
+                imgui.push_item_width(100)
+                changed, self.skin_opacity = imgui.slider_float(f"Opacity##skin", self.skin_opacity, 0, 1)
                 if changed:
                     self.update_skel()
-                if self.isDrawHalfSkin:
-                    imgui.set_cursor_pos_x(200)
-                    imgui.same_line()
-                    if imgui.radio_button("Left", self.skin_direction == "left"):
-                        self.skin_direction = "left"
-                        self.update_skel()
-                    imgui.same_line()
-                    if imgui.radio_button("Right", self.skin_direction == "right"):
-                        self.skin_direction = "right"
-                        self.update_skel()
-            
-            if imgui.radio_button("Male", self.skel_gender == "male"):
-                self.skel_gender = "male"
-                self.update_skel(gender_changed=True)
-            imgui.same_line()
-            if imgui.radio_button("Female", self.skel_gender == "female"):
-                self.skel_gender = "female"
-                self.update_skel(gender_changed=True)
-
-            changed, self.isSKELSection = imgui.checkbox("Show SKEL section", self.isSKELSection)
-            if changed:
-                self.update_skel()
-
-            if self.isSKELSection:
-                # clicked, self.SKEL_section_index = imgui.listbox('', self.SKEL_section_index, self.SKEL_section_names)
-                # if clicked:
-                #     self.update_skel()
-                if imgui.tree_node("SKEL Sections"):
-                    if self.skel_gender == "male":
-                        SKEL_section_toggle = self.SKEL_section_toggle_male
-                        SKEL_section_names = self.SKEL_section_names_male
-                    else:
-                        SKEL_section_toggle = self.SKEL_section_toggle_female
-                        SKEL_section_names = self.SKEL_section_names_female
-
-                    if imgui.button("Choose All"):
-                        for i in range(len(SKEL_section_toggle)):
-                            SKEL_section_toggle[i] = True
-                    imgui.same_line()
-                    if imgui.button("Choose None"):
-                        for i in range(len(SKEL_section_toggle)):
-                            SKEL_section_toggle[i] = False
-                    imgui.same_line()
-                    changed, self.SKEL_section_unique = imgui.checkbox("Choose One Section", self.SKEL_section_unique)
+                imgui.pop_item_width()
+                _, self.draw_skel_skel = imgui.checkbox("Draw SKEL skel", self.draw_skel_skel)
+                imgui.same_line()
+                imgui.set_cursor_pos_x(200)
+                imgui.push_item_width(100)
+                changed, self.skel_opacity = imgui.slider_float(f"Opacity##skel", self.skel_opacity, 0, 1)
+                if changed:
+                    self.update_skel()
+                imgui.pop_item_width()
+                _, self.draw_skel_joint = imgui.checkbox("Draw SKEL joint", self.draw_skel_joint)
+                _, self.draw_skel_joint_rot = imgui.checkbox("Draw SKEL joint rot", self.draw_skel_joint_rot)
+                _, self.draw_skel_bone = imgui.checkbox("Draw SKEL bone", self.draw_skel_bone)
+                _, self.draw_dart_skel = imgui.checkbox("Draw SKEL dart", self.draw_dart_skel)
+                _, self.draw_skel_dofs = imgui.checkbox("Draw Test Skeleton", self.draw_skel_dofs)
+                _, self.draw_gui_boxes = imgui.checkbox("Draw GUI boxes", self.draw_gui_boxes)
+                if self.draw_skel_skin:
+                    changed, self.isDrawHalfSkin = imgui.checkbox("Draw Half Skin", self.isDrawHalfSkin)
                     if changed:
-                        if self.SKEL_section_unique == True:
-                            SKEL_section_toggle[0] = True
-                            for i in range(1, len(SKEL_section_toggle)):
-                                SKEL_section_toggle[i] = False
+                        self.update_skel()
+                    if self.isDrawHalfSkin:
+                        imgui.set_cursor_pos_x(200)
+                        imgui.same_line()
+                        if imgui.radio_button("Left", self.skin_direction == "left"):
+                            self.skin_direction = "left"
+                            self.update_skel()
+                        imgui.same_line()
+                        if imgui.radio_button("Right", self.skin_direction == "right"):
+                            self.skin_direction = "right"
+                            self.update_skel()
+                
+                if imgui.radio_button("Male", self.skel_gender == "male"):
+                    self.skel_gender = "male"
+                    self.update_skel(gender_changed=True)
+                imgui.same_line()
+                if imgui.radio_button("Female", self.skel_gender == "female"):
+                    self.skel_gender = "female"
+                    self.update_skel(gender_changed=True)
+
+                changed, self.isSKELSection = imgui.checkbox("Show SKEL section", self.isSKELSection)
+                if changed:
+                    self.update_skel()
+
+                if self.isSKELSection:
+                    # clicked, self.SKEL_section_index = imgui.listbox('', self.SKEL_section_index, self.SKEL_section_names)
+                    # if clicked:
+                    #     self.update_skel()
+                    if imgui.tree_node("SKEL Sections"):
+                        if self.skel_gender == "male":
+                            SKEL_section_toggle = self.SKEL_section_toggle_male
+                            SKEL_section_names = self.SKEL_section_names_male
                         else:
+                            SKEL_section_toggle = self.SKEL_section_toggle_female
+                            SKEL_section_names = self.SKEL_section_names_female
+
+                        if imgui.button("Choose All"):
                             for i in range(len(SKEL_section_toggle)):
                                 SKEL_section_toggle[i] = True
+                        imgui.same_line()
+                        if imgui.button("Choose None"):
+                            for i in range(len(SKEL_section_toggle)):
+                                SKEL_section_toggle[i] = False
 
-                    for i in range(len(SKEL_section_toggle)):
-                        changed, SKEL_section_toggle[i] = imgui.checkbox(SKEL_section_names[i], SKEL_section_toggle[i])
+                        for i in range(len(SKEL_section_toggle)):
+                            changed, SKEL_section_toggle[i] = imgui.checkbox(SKEL_section_names[i], SKEL_section_toggle[i])
+                            if changed:
+                                if self.SKEL_section_unique and SKEL_section_toggle[i] == True:
+                                    for j in range(len(SKEL_section_toggle)):
+                                        if j != i:
+                                            SKEL_section_toggle[j] = False
+                                # self.update_skel()
+                        imgui.tree_pop()
+
+                imgui.text("SKEL Betas")
+                for i in range(len(self.skel_betas[0])):
+                    imgui.push_item_width(push_width)
+                    changed, self.skel_betas[0][i] = imgui.slider_float(f"Beta {i}", self.skel_betas[0][i], -5.0, 5.0)
+                    if changed:
+                        self.gui_boxes = []
+                        self.update_skel()
+                    imgui.pop_item_width()
+                    imgui.same_line()
+                    if imgui.button(f"Reset##skelbeta{i}"):
+                        self.gui_boxes = []
+                        self.skel_betas[0][i] = 0.0
+                        self.update_skel()
+                imgui.text("SKEL Pose")
+                for i in range(len(self.skel_pose[0])):
+                    imgui.push_item_width(push_width)
+                    pose_param_name = pose_param_names[i]
+                    if pose_param_name in pose_limits.keys():
+                        lower = pose_limits[pose_param_name][0]
+                        upper = pose_limits[pose_param_name][1]
+                        if lower > upper:
+                            lower, upper = upper, lower
+                    else:
+                        lower = -3.14
+                        upper = 3.14
+                    changed, self.skel_pose[0][i] = imgui.slider_float(pose_param_name, self.skel_pose[0][i], lower, upper)
+                    if changed:
+                        self.update_skel()
+                    imgui.pop_item_width()
+                    imgui.same_line()
+                    if imgui.button(f"Reset##skelpose{i}"):
+                        self.skel_pose[0][i] = self.skel_pose_base[0][i].clone()
+                        self.update_skel()
+                # # Used for selecting half skin faces
+                # if imgui.button("Add this face"):
+                #     if len(self.cand_skin_right_faces) >= 3:
+                #         self.skin_right_faces.extend(self.cand_skin_right_faces[0:3])
+                #         self.cand_skin_right_faces = self.cand_skin_right_faces[3:]
+                #         self.update_skel()
+                # imgui.same_line()
+                # if imgui.button("Remove this face"):
+                #     if len(self.cand_skin_right_faces) >= 3:
+                #         self.skin_left_faces.extend(self.cand_skin_right_faces[0:3])
+                #         self.cand_skin_right_faces = self.cand_skin_right_faces[3:]
+                #         self.update_skel()
+                # imgui.same_line()
+                # if imgui.button("Print faces"):
+                #     print("Right faces")
+                #     print(self.skin_right_faces)
+                #     if len(self.cand_skin_right_faces) > 0:
+                #         print("Remaining right faces")
+                #         print(self.cand_skin_right_faces)
+                #     print("Left faces")
+                #     print(self.skin_left_faces)
+
+                #     f = open(f"{self.skel_gender}_face_info.py", "w")
+                #     f.write(f"skin_right_faces = {self.skin_right_faces}\n")
+                #     f.write(f"skin_left_faces = {self.skin_left_faces}\n")
+                #     f.close()
+                
+                # Show selected SKEL joint
+                if imgui.button("<##skeljoint"):
+                    self.skel_joint_index -= 1
+                    if self.skel_joint_index < 0:
+                        self.skel_joint_index = len(self.skel_joints) - 1
+                imgui.same_line()
+                imgui.text(f"{self.skel_joint_index}")
+                imgui.same_line()
+                if imgui.button(">##skeljoint"):
+                    self.skel_joint_index += 1
+                    if self.skel_joint_index >= len(self.skel_joints):
+                        self.skel_joint_index = 0
+
+                if imgui.tree_node("GUI Boxes"):
+                    if imgui.button("Add Cand Box"):
+                        self.cand_gui_box = Box("box", [0, 0, 0], [0, 0, 0], [0.1, 0.1, 0.1], [0.5, 0.5, 0.5, 0.5], [0, 0, 0])
+                    if self.cand_gui_box:
+                        _, self.cand_gui_box.pos[:] = imgui.slider_float3("Position", *self.cand_gui_box.pos[:], -5.0, 5.0)
+                        changed, self.cand_gui_box.rot[:] = imgui.slider_float3("Rotation", *self.cand_gui_box.rot[:], -5.0, 5.0)
                         if changed:
-                            if self.SKEL_section_unique and SKEL_section_toggle[i] == True:
-                                for j in range(len(SKEL_section_toggle)):
-                                    if j != i:
-                                        SKEL_section_toggle[j] = False
-                            self.update_skel()
-                    imgui.tree_pop()
+                            self.cand_gui_box.updateRot()
+                        _, self.cand_gui_box.size[:] = imgui.slider_float3("Size", *self.cand_gui_box.size[:], 0.001, 5.0)
+                        _, self.cand_gui_box.joint[:] = imgui.slider_float3("Joint", *self.cand_gui_box.joint[:], -5.0, 5.0)
 
-            imgui.text("SKEL Betas")
-            for i in range(len(self.skel_betas[0])):
-                imgui.push_item_width(push_width)
-                changed, self.skel_betas[0][i] = imgui.slider_float(f"Beta {i}", self.skel_betas[0][i], -5.0, 5.0)
-                if changed:
-                    self.gui_boxes = []
-                    self.update_skel()
-                imgui.pop_item_width()
-                imgui.same_line()
-                if imgui.button(f"Reset##skelbeta{i}"):
-                    self.gui_boxes = []
-                    self.skel_betas[0][i] = 0.0
-                    self.update_skel()
-            imgui.text("SKEL Pose")
-            for i in range(len(self.skel_pose[0])):
-                imgui.push_item_width(push_width)
-                pose_param_name = pose_param_names[i]
-                if pose_param_name in pose_limits.keys():
-                    lower = pose_limits[pose_param_name][0]
-                    upper = pose_limits[pose_param_name][1]
-                    if lower > upper:
-                        lower, upper = upper, lower
-                else:
-                    lower = -3.14
-                    upper = 3.14
-                changed, self.skel_pose[0][i] = imgui.slider_float(pose_param_name, self.skel_pose[0][i], lower, upper)
-                if changed:
-                    self.update_skel()
-                imgui.pop_item_width()
-                imgui.same_line()
-                if imgui.button(f"Reset##skelpose{i}"):
-                    self.skel_pose[0][i] = self.skel_pose_base[0][i].clone()
-                    self.update_skel()
-            
-            imgui.tree_pop()
-
-        if imgui.tree_node("Smpl Shape Parameters"):
-            ## Smpl Shape Parameters
-            for i in range(len(self.shape_parameters)):
-                imgui.push_item_width(200)
-                changed, self.shape_parameters[i] = imgui.slider_float("Beta %d" % (i), self.shape_parameters[i], -5.0, 5.0)
-                if changed:
-                    self.update_smpl()
-                    self.fitSkel2SMPL()
-                    self.setObjScale()
-                    self.newSkeleton()
+                    if imgui.button("Print Cand Box"):
+                        if self.cand_gui_box is not None:
+                            print(self.cand_gui_box.name)
+                            print(self.cand_gui_box.pos)
+                        else:
+                            print("No Cand Box")
                     
-                imgui.pop_item_width()
-                imgui.same_line()
-                if imgui.button(f"Reset##smplbeta{i}"):
-                    self.shape_parameters[i] = 0.0
-                    self.update_smpl()
-                    self.fitSkel2SMPL()
-                    self.setObjScale()
-                    self.newSkeleton()
+                    if imgui.button("Delete Cand Box"):
+                        self.cand_gui_box = None
 
-            imgui.push_item_width(200)
-            changed, self.smpl_scale = imgui.slider_float("Scale", self.smpl_scale, 1, 1.5)
-            if changed:
-                self.update_smpl()
-            imgui.pop_item_width()
-            imgui.tree_pop()
+                    if imgui.button("Add Cand to GUI Box"):
+                        self.gui_boxes.append(self.cand_gui_box)
+                        self.cand_gui_box = None
+
+                    imgui.tree_pop()
+                
+                imgui.tree_pop()
+
+        if use_smpl:
+            if imgui.tree_node("SMPL Shape Parameters"):
+                ## Smpl Shape Parameters
+                for i in range(len(self.shape_parameters)):
+                    imgui.push_item_width(200)
+                    changed, self.shape_parameters[i] = imgui.slider_float("Beta %d" % (i), self.shape_parameters[i], -5.0, 5.0)
+                    if changed:
+                        self.update_smpl()
+                        self.fitSkel2SMPL()
+                        self.setObjScale()
+                        self.newSkeleton()
+                        
+                    imgui.pop_item_width()
+                    imgui.same_line()
+                    if imgui.button(f"Reset##smplbeta{i}"):
+                        self.shape_parameters[i] = 0.0
+                        self.update_smpl()
+                        self.fitSkel2SMPL()
+                        self.setObjScale()
+                        self.newSkeleton()
+
+                imgui.push_item_width(200)
+                changed, self.smpl_scale = imgui.slider_float("Scale", self.smpl_scale, 1, 1.5)
+                if changed:
+                    self.update_smpl()
+                imgui.pop_item_width()
+                imgui.tree_pop()
 
         if imgui.tree_node("Checkpoint"):
             if imgui.button("Update Networks"):
@@ -4554,125 +5396,6 @@ class GLFWApp():
 
             if imgui.button("Load Network"):
                 self.loadNetwork(self.max_checkpoint_files[self.checkpoint_idx])
-
-            imgui.tree_pop()
-
-        
-        # # Used for selecting half skin faces
-        # if imgui.button("Add this face"):
-        #     if len(self.cand_skin_right_faces) >= 3:
-        #         self.skin_right_faces.extend(self.cand_skin_right_faces[0:3])
-        #         self.cand_skin_right_faces = self.cand_skin_right_faces[3:]
-        #         self.update_skel()
-        # imgui.same_line()
-        # if imgui.button("Remove this face"):
-        #     if len(self.cand_skin_right_faces) >= 3:
-        #         self.skin_left_faces.extend(self.cand_skin_right_faces[0:3])
-        #         self.cand_skin_right_faces = self.cand_skin_right_faces[3:]
-        #         self.update_skel()
-        # imgui.same_line()
-        # if imgui.button("Print faces"):
-        #     print("Right faces")
-        #     print(self.skin_right_faces)
-        #     if len(self.cand_skin_right_faces) > 0:
-        #         print("Remaining right faces")
-        #         print(self.cand_skin_right_faces)
-        #     print("Left faces")
-        #     print(self.skin_left_faces)
-
-        #     f = open(f"{self.skel_gender}_face_info.py", "w")
-        #     f.write(f"skin_right_faces = {self.skin_right_faces}\n")
-        #     f.write(f"skin_left_faces = {self.skin_left_faces}\n")
-        #     f.close()
-        
-        # Show selected SKEL joint
-        if imgui.button("<##skeljoint"):
-            self.skel_joint_index -= 1
-            if self.skel_joint_index < 0:
-                self.skel_joint_index = len(self.skel_joints) - 1
-        imgui.same_line()
-        imgui.text(f"{self.skel_joint_index}")
-        imgui.same_line()
-        if imgui.button(">##skeljoint"):
-            self.skel_joint_index += 1
-            if self.skel_joint_index >= len(self.skel_joints):
-                self.skel_joint_index = 0
-
-        if imgui.tree_node("GUI Boxes"):
-            if imgui.button("Add Cand Box"):
-                self.cand_gui_box = Box("box", [0, 0, 0], [0, 0, 0], [0.1, 0.1, 0.1], [0.5, 0.5, 0.5, 0.5], [0, 0, 0])
-            if self.cand_gui_box:
-                _, self.cand_gui_box.pos[:] = imgui.slider_float3("Position", *self.cand_gui_box.pos[:], -5.0, 5.0)
-                changed, self.cand_gui_box.rot[:] = imgui.slider_float3("Rotation", *self.cand_gui_box.rot[:], -5.0, 5.0)
-                if changed:
-                    self.cand_gui_box.updateRot()
-                _, self.cand_gui_box.size[:] = imgui.slider_float3("Size", *self.cand_gui_box.size[:], 0.001, 5.0)
-                _, self.cand_gui_box.joint[:] = imgui.slider_float3("Joint", *self.cand_gui_box.joint[:], -5.0, 5.0)
-
-            if imgui.button("Print Cand Box"):
-                if self.cand_gui_box is not None:
-                    print(self.cand_gui_box.name)
-                    print(self.cand_gui_box.pos)
-                else:
-                    print("No Cand Box")
-            
-            if imgui.button("Delete Cand Box"):
-                self.cand_gui_box = None
-
-            if imgui.button("Add Cand to GUI Box"):
-                self.gui_boxes.append(self.cand_gui_box)
-                self.cand_gui_box = None
-
-            imgui.tree_pop()
-
-        # if imgui.tree_node("Find Farthest faces in SKEL sections"):
-        #     SKEL_section_index = self.SKEL_section_index_male if self.skel_gender == "male" else self.SKEL_section_index_female
-        #     if imgui.button("<##face"):
-        #         self.skel_farthest_section_index -= 1
-        #         if self.skel_farthest_section_index < 0:
-        #             self.skel_farthest_section_index = len(SKEL_section_index) - 1
-        #     imgui.same_line()
-        #     imgui.text(list(SKEL_section_index.keys())[self.skel_farthest_section_index])
-        #     imgui.same_line()
-        #     if imgui.button(">##face"):
-        #         self.skel_farthest_section_index += 1
-        #         if self.skel_farthest_section_index >= len(SKEL_section_index):
-        #             self.skel_farthest_section_index = 0
-
-        #     if imgui.button("Find Farthest faces"):
-        #         pairs = []
-        #         for section_index in range(len(SKEL_section_index)):
-        #             section_name = list(SKEL_section_index.keys())[section_index]
-        #             if self.skel_gender == "male":
-        #                 SKEL_section_faces = self.SKEL_section_faces_male[section_index]
-        #             else:
-        #                 SKEL_section_faces = self.SKEL_section_faces_female[section_index]
-        #             SKEL_section_vertices = self.skel_vertices
-
-        #             len_faces = SKEL_section_faces.shape[0] // 3
-
-        #             max_d = 0
-        #             cand_i = 0
-        #             cand_j = 0
-        #             for i in range(len_faces):
-        #                 face_i = SKEL_section_vertices[SKEL_section_faces[3*i:3*i+3]]
-        #                 mid_i = np.mean(face_i, axis=0)
-        #                 for j in range(i + 1, len_faces):
-        #                     face_j = SKEL_section_vertices[SKEL_section_faces[3*j:3*j+3]]
-        #                     mid_j = np.mean(face_j, axis=0)
-        #                     d = np.linalg.norm(mid_i - mid_j)
-        #                     if d > max_d:
-        #                         max_d = d
-        #                         cand_i = i
-        #                         cand_j = j
-        #                         print(f"Candidates {i}, {j} with distance {d}")
-        #                 print(f"face {i+1} / {len_faces} done")
-        #             print(f"Farthest faces are {cand_i}, {cand_j} in section {section_name}")
-
-        #             pairs.append([cand_i, cand_j])
-                
-        #         print(pairs)
-
 
             imgui.tree_pop()
 
@@ -4725,14 +5448,18 @@ class GLFWApp():
     def reset(self, reset_time=None):
         self.env.reset(reset_time)
         self.reward_buffer = [self.env.get_reward()]
-        self.update_smpl()
-        self.update_skel()
+        if use_smpl:
+            self.update_smpl()
+        if use_skel:
+            self.update_skel()
 
     def zero_reset(self):
         self.env.zero_reset()
         self.reward_buffer = [self.env.get_reward()]
-        self.update_smpl()
-        self.update_skel()
+        if use_smpl:
+            self.update_smpl()
+        if use_skel:
+            self.update_skel()
 
     def keyboardPress(self, key, scancode, action, mods):
         if action == glfw.PRESS:
@@ -4787,6 +5514,7 @@ class GLFWApp():
 
     def startLoop(self):        
         while not glfw.window_should_close(self.window):
+            start_time = time.time()
             glfw.poll_events()
             
             self.impl.process_inputs()
@@ -4806,6 +5534,10 @@ class GLFWApp():
             
             self.impl.render(imgui.get_draw_data())
             glfw.swap_buffers(self.window)
+
+            while time.time() - start_time < 1.0 / 30:
+                time.sleep(1E-6)
+
         self.impl.shutdown()
         glfw.terminate()
         return
