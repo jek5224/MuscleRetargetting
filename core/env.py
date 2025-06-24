@@ -97,6 +97,10 @@ class Env(gym.Env):
         self.skel_skel = None
         self.kp_skel = None
         self.kv_skel = None
+        self.skel_skel_info = None
+        self.skel_muscles = None
+        self.skel_muscle_pos = None
+        self.skel_muscle_info = None
 
         self.reset()
         
@@ -105,6 +109,11 @@ class Env(gym.Env):
         self.observation_space = gym.spaces.Box(low=np.float32(-np.inf), high=np.float32(np.inf), shape=(self.num_obs,))
         self.action_space = gym.spaces.Box(low=np.float32(-np.inf), high=np.float32(np.inf), shape=(self.num_action,))
         self.action_scale = 0.04 # default
+
+        self.zygote_activation_indices = None
+        self.zygote_activation_levels = None
+
+        self.meshes = None
 
     def loading_xml(self, metadata):
         ## XML loading
@@ -174,8 +183,8 @@ class Env(gym.Env):
         self.kp[:6] = 0.0
         self.kv[:6] = 0.0
 
-        if self.actuator_type.find("mass") != -1:
-            self.muscle_nn = MuscleNN(self.muscles.getNumMuscleRelatedDofs(), len(self.get_zero_action()), self.muscles.getNumMuscles()) ## Create Dummy Default Network    
+        # if self.actuator_type.find("mass") != -1:
+        #     self.muscle_nn = MuscleNN(self.muscles.getNumMuscleRelatedDofs(), len(self.get_zero_action()), self.muscles.getNumMuscles()) ## Create Dummy Default Network    
 
     def set_muscle_network(self, nn_config = {"sizes" : [256, 256, 256], "learningStd" : False}):
         self.muscle_nn = MuscleNN(self.muscles.getNumMuscleRelatedDofs(), len(self.get_zero_action()), self.muscles.getNumMuscles(), config = {"sizes" : nn_config["sizes"], "learningStd" : nn_config["learningStd"]})
@@ -195,6 +204,79 @@ class Env(gym.Env):
                         new_waypoints.append((waypoint.attrib["body"], np.array([float(p) for p in waypoint.attrib["p"].strip().split(" ")])))
                 self.muscles.addMuscle(child.attrib["name"],[float(child.attrib["f0"]), float(child.attrib["lm"]), float(child.attrib["lt"]), float(child.attrib["pen_angle"]), float(child.attrib["lmax"]), 0.0], False, new_waypoints)
         self.muscle_activation_levels = np.zeros(self.muscles.getNumMuscles())
+    
+    def loading_zygote_muscle_info(self, zygote_muscle_info):
+        self.muscles = dart.dynamics.Muscles(self.skel)
+        self.zygote_activation_indices = [0]
+        # self.zygote_muscles = dart.dynamics.Zygote_Muscles(self.skel)
+
+        for name, muscle in zygote_muscle_info.items():
+            muscle_properties = muscle['muscle_properties']
+            useVelocityForce = muscle['useVelocityForce']
+            fibers = muscle['fibers']
+
+            for i, fiber in enumerate(fibers):
+                waypoints = []
+                waypoints_info = fiber['waypoints']
+                mesh_names = []
+                waypoint_weights = []
+                ps = []
+                for waypoint in waypoints_info:
+                    body = waypoint['body']
+                    p = waypoint['p']
+
+                    waypoints.append((body, p))
+                    ps.append(p)
+                    if body not in mesh_names:
+                        mesh_names.append(body)
+
+                # meshes = [self.meshes[mesh_name] for mesh_name in mesh_names]
+                # for p_i, p in enumerate(ps):
+                #     weights = []
+
+                #     # # Mesh Distance Based
+                #     # for mesh in meshes:
+                #     #     # get minimum distance from p to mesh.vertices
+                #     #     distances = np.linalg.norm(mesh.vertices - p, axis=1)
+                #     #     min_distance = np.min(distances)
+                #     #     weights.append(1.0 / np.sqrt(min_distance))
+
+                #     # Mesh Mean Distance Based
+                #     for mesh in meshes:
+                #         distance = np.linalg.norm(np.mean(mesh.vertices, axis=0) - p)
+                #         weights.append(1.0 / (distance + 1e-6))  # Avoid division by zero
+
+                #     weights = np.array(weights)
+                #     weights /= np.sum(weights)
+                #     waypoint_weights.append(weights)
+
+                # # Distance to Origin and Insertion Based
+                mesh_names = [mesh_names[0], mesh_names[-1]]
+                for p_i, p in enumerate(ps):
+                    l_origin = 0.0
+                    l_insertion = 0.0
+                    for index in range(1, p_i + 1):
+                        l_origin += np.linalg.norm(ps[index] - ps[index - 1])
+                    for index in range(p_i + 1, len(ps)):
+                        l_insertion += np.linalg.norm(ps[index] - ps[index - 1])
+
+                    weights = np.array([l_origin, l_insertion])
+                    weights /= np.sum(weights)
+                    waypoint_weights.append(weights)
+
+                # self.muscles.addMuscle(name + str(i), muscle_properties, useVelocityForce, waypoints)
+                self.muscles.addMuscleWeight(name + str(i), muscle_properties, useVelocityForce, waypoints, mesh_names, waypoint_weights)
+                # print(self.muscles.getNumMuscles())
+
+            self.zygote_activation_indices.append(len(fibers))
+
+        # accumulate indices
+        for i in range(1, len(self.zygote_activation_indices)):
+            self.zygote_activation_indices[i] += self.zygote_activation_indices[i - 1]
+
+        self.muscle_activation_levels = np.zeros(self.muscles.getNumMuscles())
+        self.zygote_activation_levels = np.zeros(len(zygote_muscle_info.keys()))
+        
 
     def loading_muscle_info(self, muscle_info):
         self.muscles = dart.dynamics.Muscles(self.skel)
@@ -226,11 +308,59 @@ class Env(gym.Env):
 
             self.test_muscles.addMuscle(name, muscle_properties, useVelocityForce, waypoints)
 
-    def saveMuscleInfo(self, path):
+    def saveZygoteMuscleInfo(self, path):
         muscle_info = {}
 
-        for skel in self.skel_info.values():
-            skel['muscles'] = []
+        if path is not None:
+            doc = ET.parse(path)
+            if doc is None:
+                print("File not found")
+                return None
+
+        type1_fraction = 0.0
+        muscle = doc.getroot()
+        for unit in muscle:
+            unit_info = {}
+
+            # Unit
+            name = unit.attrib['name']
+
+            fibers = []
+            for fiber in unit:
+                fiber_info = {}
+                waypoints = []
+                for waypoint in fiber:
+                    body = waypoint.attrib['body']
+                    p = np.array([float(p) for p in waypoint.attrib["p"].strip().split(" ")])
+                    waypoints.append({
+                        'body': body,
+                        'p': p,
+                    })
+                fiber_info['waypoints'] = waypoints
+                fibers.append(fiber_info)
+
+            unit_info['fibers'] = fibers
+            unit_info['muscle_properties'] = [float(unit.attrib["f0"]), 
+                                              float(unit.attrib["lm"]), 
+                                              float(unit.attrib["lt"]), 
+                                              float(unit.attrib["pen_angle"]), 
+                                              float(unit.attrib["lmax"]), type1_fraction]
+            unit_info['useVelocityForce'] = False
+
+            muscle_info[name] = unit_info
+        
+
+        return muscle_info
+    
+    def saveMuscleInfo(self, path, is_SKEL=False):
+        muscle_info = {}
+
+        if is_SKEL:
+            for skel in self.skel_skel_info.values():
+                skel['muscles'] = []
+        else:
+            for skel in self.skel_info.values():
+                skel['muscles'] = []
 
         if path is not None:
             doc = ET.parse(path)
@@ -250,7 +380,10 @@ class Env(gym.Env):
                     body = waypoint.attrib['body']
                     p = np.array([float(p) for p in waypoint.attrib["p"].strip().split(" ")])
 
-                    skel = self.skel_info[body]
+                    if is_SKEL:
+                        skel = self.skel_skel_info[body]
+                    else:
+                        skel = self.skel_info[body]
 
                     if not name in skel['muscles']:
                         skel['muscles'].append(name)
@@ -367,9 +500,9 @@ class Env(gym.Env):
     def update_target(self, time):
         self.target_pos = self.bvhs[self.bvh_idx].getPose(time)
         pos_next = self.bvhs[self.bvh_idx].getPose(time + 1.0 / self.controlHz)
-        self.target_vel = self.skel.getPositionDifferences(pos_next, self.target_pos) * self.controlHz
-        self.target_skel.setPositions(self.target_pos)
-        self.target_skel.setVelocities(self.target_vel)
+        # self.target_vel = self.skel.getPositionDifferences(pos_next, self.target_pos) * self.controlHz
+        # self.target_skel.setPositions(self.target_pos)
+        # self.target_skel.setVelocities(self.target_vel)
 
     def update_obs(self):
         w_bn_ang_vel = 0.1
@@ -418,8 +551,8 @@ class Env(gym.Env):
     def zero_reset(self):
         self.target_pos = np.zeros(self.skel.getNumDofs())
         self.target_vel = np.zeros(self.skel.getNumDofs())
-        self.target_skel.setPositions(self.target_pos)
-        self.target_skel.setVelocities(self.target_vel)
+        # self.target_skel.setPositions(self.target_pos)
+        # self.target_skel.setVelocities(self.target_vel)
 
         solver = self.world.getConstraintSolver()
         # solver.setCollisionDetector(dart.collision.BulletCollisionDetector())
@@ -450,8 +583,12 @@ class Env(gym.Env):
             self.muscles.update()
             self.muscle_pos = self.muscles.getMusclePositions()
 
-            self.test_muscles.update()
-            self.test_muscle_pos = self.test_muscles.getMusclePositions()
+            # self.test_muscles.update()
+            # self.test_muscle_pos = self.test_muscles.getMusclePositions()
+
+        if self.skel_muscles != None:
+            self.skel_muscles.update()
+            self.skel_muscle_pos = self.skel_muscles.getMusclePositions()
 
         self.step_counter = 0
         self.pd_target = np.zeros(self.skel.getNumDofs())
@@ -482,6 +619,8 @@ class Env(gym.Env):
         # solver.setCollisionDetector(dart.collision.DARTCollisionDetector())
         solver.clearLastCollisionResult()
 
+        self.target_pos = np.zeros(self.skel.getNumDofs())
+        self.target_vel = np.zeros(self.skel.getNumDofs())
         self.skel.setPositions(self.target_pos)
         self.skel.setVelocities(self.target_vel)
 
@@ -505,33 +644,42 @@ class Env(gym.Env):
             self.muscles.update()
             self.muscle_pos = self.muscles.getMusclePositions()
 
-            self.test_muscles.update()
-            self.test_muscle_pos = self.test_muscles.getMusclePositions()
+            # self.test_muscles.update()
+            # self.test_muscle_pos = self.test_muscles.getMusclePositions()
 
+        if self.skel_muscles != None:
+            self.skel_muscles.update()
+            self.skel_muscle_pos = self.skel_muscles.getMusclePositions()
+            
         self.step_counter = 0
         self.pd_target = np.zeros(self.skel.getNumDofs())
 
         return self.get_obs()   
 
     def get_reward(self):
-        # Joint reward
-        q_diff = self.skel.getPositionDifferences(self.skel.getPositions(), self.target_pos)
-        r_q = np.exp(-20.0 * np.inner(q_diff, q_diff) / len(q_diff))
+        if self.skel_skel is None:
+            # Joint reward
+            r_q = 0
+            # q_diff = self.skel.getPositionDifferences(self.skel.getPositions(), self.target_pos)
+            # r_q = np.exp(-20.0 * np.inner(q_diff, q_diff) / len(q_diff))
 
-        # COM reward 
-        com_diff = self.skel.getCOM() - self.target_skel.getCOM()
-        r_com = np.exp(-10 * np.inner(com_diff, com_diff) / len(com_diff))
+            # COM reward 
+            com_diff = self.skel.getCOM() - self.target_skel.getCOM()
+            r_com = np.exp(-10 * np.inner(com_diff, com_diff) / len(com_diff))
 
-        # EE reward 
-        ee_diff = np.concatenate([(self.skel.getBodyNode(ee).getCOM() - self.target_skel.getBodyNode(ee).getCOM() - com_diff) for ee in self.ees_name])
-        r_ee = np.exp(-40 * np.inner(ee_diff, ee_diff) / len(ee_diff))
+            # EE reward 
+            r_ee = 0.0
+            # ee_diff = np.concatenate([(self.skel.getBodyNode(ee).getCOM() - self.target_skel.getBodyNode(ee).getCOM() - com_diff) for ee in self.ees_name])
+            # r_ee = np.exp(-40 * np.inner(ee_diff, ee_diff) / len(ee_diff))
 
-        w_alive = 0.05
+            w_alive = 0.05
 
-        self.cur_reward = (w_alive + r_q * (1.0 - w_alive)) * (w_alive + r_ee * (1.0 - w_alive)) * (w_alive + r_com * (1.0 - w_alive))
-        return self.cur_reward
+            self.cur_reward = (w_alive + r_q * (1.0 - w_alive)) * (w_alive + r_ee * (1.0 - w_alive)) * (w_alive + r_com * (1.0 - w_alive))
+            return self.cur_reward
+        else:
+            return 0
 
-    def step(self, action):
+    def step(self, action, skel_action=None):
         self.update_target(self.world.getTime())
         pd_target = np.zeros(self.skel.getNumDofs())
         if self.actuator_type.find("ref") != -1:
@@ -546,67 +694,72 @@ class Env(gym.Env):
         #     displacement[6:] = self.action_scale * action 
         # else: ## Learning Gain
         #     displacement[6:] = self.action_scale * action[:len(action)//3]
+
         kp = self.kp
         kv = self.kv
         if self.learning_gain:
             kp[6:] = self.kp[6:] + 0.01 * action[len(action)//3:2*len(action)//3] * self.kp[6:]
             kv[6:] = self.kv[6:] + 0.01 * action[2*len(action)//3:] * self.kv[6:]
-        
-        pd_target = self.skel.getPositionDifferences(pd_target, -displacement)
+
+        # pd_target = self.skel.getPositionDifferences(pd_target, -displacement)
 
         self.pd_target = pd_target
-        
+
         mt = None
-
-        if self.skel_skel is not None:
-            action_skel = np.zeros(self.skel_skel.getNumDofs() - self.skel_skel.getJoint(0).getNumDofs())
-            pd_target_skel = np.zeros(self.skel_skel.getNumDofs())
-            displacement_skel = np.zeros(self.skel_skel.getNumDofs())
-            # print(displacement_skel.shape, action_skel.shape, self.action_scale)
-            displacement_skel[6:] = self.action_scale * action_skel[:len(displacement_skel) - 6]
-
-            kp_skel = self.kp_skel
-            kv_skel = self.kv_skel
-
-            pd_target_skel = self.skel_skel.getPositionDifferences(pd_target_skel, -displacement_skel)
-
         rand_idx = np.random.randint(0, int(self.simulationHz//self.controlHz))
         for i in range(int(self.simulationHz//self.controlHz)):
-            tau = self.skel.getSPDForce(pd_target, kp, kv)
+            # tau = self.skel.getSPDForce(pd_target, kp, kv)
             
             if self.actuator_type.find("pd") != -1:
                 self.skel.setForces(tau)
             elif self.actuator_type.find("mass") != -1:
-                mt = self.muscles.getMuscleTuples()
-                # mt[0]: res_JtA_reduced
-                self.muscle_activation_levels = self.muscle_nn.get_activation(mt[0], tau[6:])
-                self.muscles.setActivations(self.muscle_activation_levels)
-                self.muscles.applyForceToBody()
+                if self.muscles is not None:
+                    mt = self.muscles.getMuscleTuples()
+                    # mt[0]: res_JtA_reduced
+                    if self.muscle_nn is not None:
+                        self.muscle_activation_levels = self.muscle_nn.get_activation(mt[0], tau[6:])
+                    else:
+                        # self.muscle_activation_levels = np.zeros(self.muscles.getNumMuscles())
+                        pass
+                    self.muscles.setActivations(self.muscle_activation_levels)
+                    self.muscles.applyForceToBody()
 
-            if self.skel_skel is not None:
-                tau_skel = self.skel_skel.getSPDForce(pd_target_skel, kp_skel, kv_skel)
-                self.skel_skel.setForces(np.zeros_like(tau_skel))
+            if self.skel_skel is not None and skel_action is not None:
+                self.skel_muscles.setActivations(skel_action)
+                self.skel_muscles.applyForceToBody()
 
             self.world.step()
 
             if self.muscles != None:
                 self.muscles.update()
-                self.test_muscles.update()
+                # self.test_muscles.update()
 
-            if self.actuator_type.find("mass") != -1 and rand_idx == i:
-                self.muscle_buffer[0].append(mt[0]) # reduced_JtA
-                self.muscle_buffer[1].append(tau[6:] - mt[1]) # net_tau_des
-                self.muscle_buffer[2].append(mt[2]) # full_JtA
+            if self.skel_muscles is not None:
+                self.skel_muscles.update()
+
+            # if self.muscles is not None:
+            #     if self.actuator_type.find("mass") != -1 and rand_idx == i:
+            #         self.muscle_buffer[0].append(mt[0]) # reduced_JtA
+            #         self.muscle_buffer[1].append(tau[6:] - mt[1]) # net_tau_des
+            #         self.muscle_buffer[2].append(mt[2]) # full_JtA
+
         self.step_counter += 1        
-                # [self.muscle_buffer[mt_idx].append(mt[mt_idx]) for mt_idx in range(len(mt))]
-                # self.muscle_buffer[-1].append(tau[6:])
+        # [self.muscle_buffer[mt_idx].append(mt[mt_idx]) for mt_idx in range(len(mt))]
+        # self.muscle_buffer[-1].append(tau[6:])
+        self.get_reward()
         
+        # if self.skel_skel is not None:
+        #     self.skel_skel.setPositions(np.concatenate([np.zeros(6), self.skel_skel.getPositions()[6:]]))
+            # self.skel_skel.setVelocities(np.zeros(self.skel_skel.getNumDofs()))
+
         if self.muscles != None:
             self.muscle_pos = self.muscles.getMusclePositions()
-            self.test_muscle_pos = self.test_muscles.getMusclePositions()
+            # self.test_muscle_pos = self.test_muscles.getMusclePositions()
+
+        if self.skel_muscles != None:
+            self.skel_muscle_pos = self.skel_muscles.getMusclePositions()
         
         self.update_obs()
-        self.get_reward()
         
         info = self.get_eoe_condition()
 
