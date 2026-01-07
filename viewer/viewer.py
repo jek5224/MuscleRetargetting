@@ -2897,22 +2897,22 @@ class GLFWApp():
             q_screen_points = []
             contour_2d_norm = None
 
-            # Helper function to compute normalized [0,1] coordinates from bounding box
-            def point_to_unit_square(point_3d, bp_corners, mean, basis_x, basis_y):
-                """Convert 3D point to [0,1]x[0,1] using bounding box corners."""
-                # bp_corners: [v0, v1, v2, v3] where v0=(0,0), v1=(1,0), v2=(1,1), v3=(0,1)
-                v0, v1, v2, v3 = bp_corners
-                # Compute local axes from bounding box edges
-                edge_x = v1 - v0  # horizontal edge
-                edge_y = v3 - v0  # vertical edge
-                len_x = np.linalg.norm(edge_x)
-                len_y = np.linalg.norm(edge_y)
-                if len_x < 1e-10 or len_y < 1e-10:
+            # Helper function to compute normalized [0,1] coordinates using 2D projection
+            def point_to_unit_square_2d(point_3d, mean, basis_x, basis_y, bp_corners):
+                """Convert 3D point to [0,1]x[0,1] using 2D projection."""
+                # Project point to 2D
+                p_2d = np.array([np.dot(point_3d - mean, basis_x), np.dot(point_3d - mean, basis_y)])
+                # Get bounding box extents from corners (project them too)
+                bp_2d = np.array([[np.dot(v - mean, basis_x), np.dot(v - mean, basis_y)] for v in bp_corners])
+                min_x, min_y = bp_2d.min(axis=0)
+                max_x, max_y = bp_2d.max(axis=0)
+                width = max_x - min_x
+                height = max_y - min_y
+                if width < 1e-10 or height < 1e-10:
                     return np.array([0.5, 0.5])
-                # Project point onto local axes
-                rel_p = point_3d - v0
-                u = np.dot(rel_p, edge_x) / (len_x * len_x)
-                v = np.dot(rel_p, edge_y) / (len_y * len_y)
+                # Normalize to [0,1]
+                u = (p_2d[0] - min_x) / width
+                v = (p_2d[1] - min_y) / height
                 return np.array([np.clip(u, 0, 1), np.clip(v, 0, 1)])
 
             if (stream_idx < len(obj.contours) and contour_idx < len(obj.contours[stream_idx]) and
@@ -2947,23 +2947,16 @@ class GLFWApp():
                         sy = left_y0 + (1 - sample[1]) * canvas_size
                         draw_list.add_circle_filled(sx, sy, 4, imgui.get_color_u32_rgba(0.2, 0.8, 0.2, 1.0))
 
-            # Draw Q points from contour_match (cyan) and compute P->unit square mapping
-            p_to_unit_points = []  # For each P, its corresponding unit square position
+            # Draw Q points from contour_match (cyan)
             if contour_match is not None and bp is not None and len(bp) >= 4:
                 for i, (p, q) in enumerate(contour_match):
                     p = np.array(p)
                     q = np.array(q)
-                    # Compute Q's position on unit square using bounding box
-                    q_norm = point_to_unit_square(q, bp, mean, basis_x, basis_y)
+                    # Compute Q's position on unit square using 2D projection
+                    q_norm = point_to_unit_square_2d(q, mean, basis_x, basis_y, bp)
                     qx = left_x0 + q_norm[0] * canvas_size
                     qy = left_y0 + (1 - q_norm[1]) * canvas_size
                     q_screen_points.append((qx, qy))
-
-                    # Also compute P's projection to unit square (for hover visualization)
-                    p_norm = point_to_unit_square(p, bp, mean, basis_x, basis_y)
-                    p_unit_x = left_x0 + p_norm[0] * canvas_size
-                    p_unit_y = left_y0 + (1 - p_norm[1]) * canvas_size
-                    p_to_unit_points.append((p_unit_x, p_unit_y))
 
                     # Check hover on Q points
                     dist = np.sqrt((mouse_pos[0] - qx)**2 + (mouse_pos[1] - qy)**2)
@@ -3024,15 +3017,16 @@ class GLFWApp():
                     if dist < hover_radius and hovered_idx < 0:
                         hovered_idx = i
 
-                # Draw bounding box (blue)
-                if bp is not None and len(bp) >= 4:
-                    bp_2d = np.array([[np.dot(v - mean, basis_x), np.dot(v - mean, basis_y)] for v in bp])
-                    bp_norm = (bp_2d - center_xy) * scale + 0.5
-                    bp_points = [(right_x0 + pt[0] * canvas_size, right_y0 + (1 - pt[1]) * canvas_size) for pt in bp_norm]
-                    for i in range(4):
-                        draw_list.add_line(bp_points[i][0], bp_points[i][1],
-                                          bp_points[(i + 1) % 4][0], bp_points[(i + 1) % 4][1],
-                                          imgui.get_color_u32_rgba(0.3, 0.5, 0.9, 1.0), thickness=1.5)
+                # Draw bounding box (blue) - use min/max of P points to ensure 90-degree corners
+                # The bounding box should tightly fit the contour
+                bb_min_norm = (min_xy - center_xy) * scale + 0.5
+                bb_max_norm = (max_xy - center_xy) * scale + 0.5
+                bb_x0 = right_x0 + bb_min_norm[0] * canvas_size
+                bb_y0 = right_y0 + (1 - bb_max_norm[1]) * canvas_size  # flip Y
+                bb_x1 = right_x0 + bb_max_norm[0] * canvas_size
+                bb_y1 = right_y0 + (1 - bb_min_norm[1]) * canvas_size  # flip Y
+                draw_list.add_rect(bb_x0, bb_y0, bb_x1, bb_y1,
+                                  imgui.get_color_u32_rgba(0.3, 0.5, 0.9, 1.0), thickness=1.5)
 
                 # Draw waypoints (red)
                 if (hasattr(obj, 'waypoints') and obj.waypoints is not None and
