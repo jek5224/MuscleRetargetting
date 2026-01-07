@@ -1358,6 +1358,7 @@ class MeshLoader(ContourMeshMixin, TetrahedronMeshMixin, FiberArchitectureMixin,
         basis_x = basis_x / np.linalg.norm(basis_x)
         basis_z = newell_normal
         basis_y = np.cross(basis_z, basis_x)
+        basis_y = basis_y / (np.linalg.norm(basis_y) + 1e-10)
 
         cand_pairs = [(basis_x, basis_y), (basis_y, -basis_x), (-basis_x, -basis_y), (-basis_y, basis_x)]
         best_pair = None
@@ -1395,6 +1396,7 @@ class MeshLoader(ContourMeshMixin, TetrahedronMeshMixin, FiberArchitectureMixin,
             basis_x = new_basis_x
             basis_x = basis_x / np.linalg.norm(basis_x)
             basis_y = np.cross(basis_z, basis_x)
+            basis_y = basis_y / (np.linalg.norm(basis_y) + 1e-10)
 
             projected_2d = np.array([[np.dot(v - mean, basis_x), np.dot(v - mean, basis_y)] for v in contour_points])
             area = compute_polygon_area(projected_2d)

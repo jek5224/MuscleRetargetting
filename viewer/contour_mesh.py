@@ -1257,6 +1257,11 @@ class ContourMeshMixin:
 
                 new_basis_x, new_basis_y = best_candidate
 
+                # Re-orthogonalize to ensure exactly 90 degrees
+                new_basis_x = new_basis_x / (np.linalg.norm(new_basis_x) + 1e-10)
+                new_basis_y = np.cross(basis_z, new_basis_x)
+                new_basis_y = new_basis_y / (np.linalg.norm(new_basis_y) + 1e-10)
+
                 # Update plane info with aligned basis
                 plane_info['basis_x'] = new_basis_x
                 plane_info['basis_y'] = new_basis_y
