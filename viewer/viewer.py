@@ -3050,24 +3050,18 @@ class GLFWApp():
                             wpy = right_y0 + (1 - wp_norm[1]) * canvas_size
                             draw_list.add_circle_filled(wpx, wpy, 5, imgui.get_color_u32_rgba(0.9, 0.3, 0.3, 1.0))
 
-            # Draw Q highlight if hovered (Q points already drawn above)
-            if hovered_idx >= 0 and hovered_idx < len(q_screen_points):
-                qx, qy = q_screen_points[hovered_idx]
-                draw_list.add_circle_filled(qx, qy, 6, imgui.get_color_u32_rgba(1.0, 1.0, 0.0, 1.0))
-                draw_list.add_circle(qx, qy, 8, imgui.get_color_u32_rgba(1.0, 1.0, 1.0, 1.0), thickness=2.0)
-
             # Draw P vertex points with hover highlighting
             for i in range(len(p_screen_points)):
                 px, py = p_screen_points[i]
                 if i == hovered_idx:
-                    # Highlighted P (orange)
+                    # Highlighted P (orange with white border)
                     draw_list.add_circle_filled(px, py, 6, imgui.get_color_u32_rgba(1.0, 0.5, 0.0, 1.0))
                     draw_list.add_circle(px, py, 8, imgui.get_color_u32_rgba(1.0, 1.0, 1.0, 1.0), thickness=2.0)
-                    # Highlight corresponding Q on unit square (magenta, larger)
+                    # Highlight corresponding Q on unit square (magenta with white border, same style)
                     if i < len(q_screen_points):
                         qx, qy = q_screen_points[i]
-                        draw_list.add_circle_filled(qx, qy, 8, imgui.get_color_u32_rgba(1.0, 0.0, 1.0, 1.0))
-                        draw_list.add_circle(qx, qy, 10, imgui.get_color_u32_rgba(1.0, 1.0, 1.0, 1.0), thickness=2.0)
+                        draw_list.add_circle_filled(qx, qy, 6, imgui.get_color_u32_rgba(1.0, 0.0, 1.0, 1.0))
+                        draw_list.add_circle(qx, qy, 8, imgui.get_color_u32_rgba(1.0, 1.0, 1.0, 1.0), thickness=2.0)
                 else:
                     draw_list.add_circle_filled(px, py, 3, imgui.get_color_u32_rgba(1.0, 0.5, 0.0, 1.0))
 
