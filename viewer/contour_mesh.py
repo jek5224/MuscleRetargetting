@@ -2582,6 +2582,165 @@ class ContourMeshMixin:
 
         print(f"Created {num_streams} streams with {len(self.contours[0]) if self.contours else 0} levels each (after distance filtering)")
 
+    def optimize_contour_stream(self, shape_threshold=0.15, min_contours=3, max_contours=None):
+        """
+        Optimize contour stream by selecting minimal contours that best represent the mesh shape.
+
+        Uses shape metrics (area, perimeter, aspect ratio) to identify significant shape changes
+        and removes redundant contours where neighboring contours are similar.
+
+        Args:
+            shape_threshold: Minimum shape change score to keep a contour (0-1, default 0.15)
+                            Higher values = fewer contours, lower = more contours
+            min_contours: Minimum number of contours to keep per stream (default 3: origin, middle, insertion)
+            max_contours: Maximum number of contours per stream (None = no limit)
+
+        Returns:
+            Number of contours removed
+        """
+        if self.contours is None or len(self.contours) == 0:
+            print("No contours to optimize. Run find_contour_stream first.")
+            return 0
+
+        if self.bounding_planes is None or len(self.bounding_planes) == 0:
+            print("No bounding planes found.")
+            return 0
+
+        total_removed = 0
+
+        for stream_idx in range(len(self.contours)):
+            stream_contours = self.contours[stream_idx]
+            stream_planes = self.bounding_planes[stream_idx]
+
+            if len(stream_contours) <= min_contours:
+                continue  # Already at minimum
+
+            # Calculate shape metrics for each contour
+            metrics = []
+            for i, plane in enumerate(stream_planes):
+                area = plane.get('area', 0)
+
+                # Calculate perimeter from contour vertices
+                if i < len(stream_contours):
+                    contour = np.array(stream_contours[i])
+                    if len(contour) > 1:
+                        perimeter = np.sum(np.linalg.norm(np.diff(contour, axis=0), axis=1))
+                        perimeter += np.linalg.norm(contour[-1] - contour[0])  # Close loop
+                    else:
+                        perimeter = 0
+                else:
+                    perimeter = 0
+
+                # Aspect ratio from bounding plane
+                bp = plane.get('bounding_plane', None)
+                if bp is not None and len(bp) >= 4:
+                    width = np.linalg.norm(np.array(bp[1]) - np.array(bp[0]))
+                    height = np.linalg.norm(np.array(bp[3]) - np.array(bp[0]))
+                    aspect = width / (height + 1e-10)
+                else:
+                    aspect = 1.0
+
+                metrics.append({
+                    'area': area,
+                    'perimeter': perimeter,
+                    'aspect': aspect,
+                    'index': i
+                })
+
+            # Calculate shape change scores between consecutive contours
+            n = len(metrics)
+            shape_scores = [1.0]  # First contour always kept (score = 1)
+
+            for i in range(1, n - 1):
+                prev_m = metrics[i - 1]
+                curr_m = metrics[i]
+                next_m = metrics[i + 1]
+
+                # Area change (relative to neighbors)
+                avg_neighbor_area = (prev_m['area'] + next_m['area']) / 2
+                if avg_neighbor_area > 0:
+                    area_change = abs(curr_m['area'] - avg_neighbor_area) / avg_neighbor_area
+                else:
+                    area_change = 0
+
+                # Perimeter change
+                avg_neighbor_perim = (prev_m['perimeter'] + next_m['perimeter']) / 2
+                if avg_neighbor_perim > 0:
+                    perim_change = abs(curr_m['perimeter'] - avg_neighbor_perim) / avg_neighbor_perim
+                else:
+                    perim_change = 0
+
+                # Aspect ratio change
+                avg_neighbor_aspect = (prev_m['aspect'] + next_m['aspect']) / 2
+                aspect_change = abs(curr_m['aspect'] - avg_neighbor_aspect) / (avg_neighbor_aspect + 1e-10)
+
+                # Combined score (weighted)
+                # Inflection points where shape changes direction are most important
+                score = 0.4 * area_change + 0.3 * perim_change + 0.3 * aspect_change
+
+                # Bonus for inflection points (where shape change reverses direction)
+                if i > 1:
+                    prev_area_trend = metrics[i-1]['area'] - metrics[i-2]['area']
+                    curr_area_trend = curr_m['area'] - prev_m['area']
+                    if prev_area_trend * curr_area_trend < 0:  # Sign change = inflection
+                        score *= 1.5
+
+                shape_scores.append(score)
+
+            shape_scores.append(1.0)  # Last contour always kept
+
+            # Select contours to keep based on shape scores
+            keep_indices = [0, n - 1]  # Always keep first and last
+
+            # Sort middle contours by score (descending)
+            middle_scores = [(i, shape_scores[i]) for i in range(1, n - 1)]
+            middle_scores.sort(key=lambda x: x[1], reverse=True)
+
+            # Add contours with scores above threshold
+            for idx, score in middle_scores:
+                if score >= shape_threshold:
+                    keep_indices.append(idx)
+
+            # Ensure minimum contours
+            while len(keep_indices) < min_contours and len(middle_scores) > 0:
+                for idx, score in middle_scores:
+                    if idx not in keep_indices:
+                        keep_indices.append(idx)
+                        break
+
+            # Apply maximum contours limit
+            if max_contours is not None and len(keep_indices) > max_contours:
+                # Keep first, last, and top (max_contours-2) scoring middle contours
+                keep_indices = [0, n - 1]
+                added = 0
+                for idx, score in middle_scores:
+                    if added >= max_contours - 2:
+                        break
+                    keep_indices.append(idx)
+                    added += 1
+
+            keep_indices = sorted(set(keep_indices))
+
+            # Rebuild stream with selected contours
+            new_contours = [stream_contours[i] for i in keep_indices]
+            new_planes = [stream_planes[i] for i in keep_indices]
+
+            removed = len(stream_contours) - len(new_contours)
+            total_removed += removed
+
+            self.contours[stream_idx] = new_contours
+            self.bounding_planes[stream_idx] = new_planes
+
+            print(f"  Stream {stream_idx}: {len(stream_contours)} -> {len(new_contours)} contours (removed {removed})")
+
+        print(f"Optimization complete: removed {total_removed} contours total")
+
+        # Update draw_contour_stream if it exists
+        if hasattr(self, 'draw_contour_stream') and self.draw_contour_stream is not None:
+            self.draw_contour_stream = [True] * len(self.contours)
+
+        return total_removed
+
     def _find_contour_stream_post_process(self, skeleton_meshes=None):
         """Post-processing for find_contour_stream: fiber architecture, waypoints, etc."""
         # Contours are already normalized - don't reverse or re-align

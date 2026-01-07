@@ -1915,6 +1915,14 @@ class GLFWApp():
                                     print(f"[{name}] Find Streams error: {e}")
                             else:
                                 print(f"[{name}] Prerequisites: Run 'Find Contours' first")
+                        if imgui.button(f"Optimize Streams##{name}", width=col_button_width):
+                            if obj.contours is not None and len(obj.contours) > 0 and obj.bounding_planes is not None and len(obj.bounding_planes) > 0:
+                                try:
+                                    obj.optimize_contour_stream(shape_threshold=0.1, min_contours=3)
+                                except Exception as e:
+                                    print(f"[{name}] Optimize Streams error: {e}")
+                            else:
+                                print(f"[{name}] Prerequisites: Run 'Find Streams' first")
                         if imgui.button(f"Resample Contours##{name}", width=col_button_width):
                             if obj.contours is not None and len(obj.contours) > 0 and obj.bounding_planes is not None:
                                 try:
