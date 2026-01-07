@@ -2889,12 +2889,15 @@ class GLFWApp():
             draw_list = imgui.get_window_draw_list()
             mouse_pos = imgui.get_mouse_pos()
             hovered_idx = -1
+            hovered_type = None  # 'vertex', 'fiber', or 'waypoint'
             hover_radius = 8.0
 
             # Get contour data first (needed for both columns)
             contour_match = None
             p_screen_points = []
             q_screen_points = []
+            fiber_screen_points = []
+            waypoint_screen_points = []
             contour_2d_norm = None
 
             # Helper function to compute normalized [0,1] coordinates by solving linear system
@@ -2945,14 +2948,21 @@ class GLFWApp():
             draw_list.add_rect_filled(left_x0, left_y0, left_x1, left_y1, imgui.get_color_u32_rgba(0.15, 0.15, 0.15, 1.0))
             draw_list.add_rect(left_x0, left_y0, left_x1, left_y1, imgui.get_color_u32_rgba(0.5, 0.5, 0.5, 1.0), thickness=2.0)
 
-            # Draw fiber samples (green)
+            # Draw fiber samples (green) and check hover
+            fiber_samples = []
             if stream_idx < len(obj.fiber_architecture):
                 fiber_samples = obj.fiber_architecture[stream_idx]
-                for sample in fiber_samples:
+                for i, sample in enumerate(fiber_samples):
                     if len(sample) >= 2:
                         sx = left_x0 + sample[0] * canvas_size
                         sy = left_y0 + (1 - sample[1]) * canvas_size
+                        fiber_screen_points.append((sx, sy))
                         draw_list.add_circle_filled(sx, sy, 4, imgui.get_color_u32_rgba(0.2, 0.8, 0.2, 1.0))
+                        # Check hover on fiber samples
+                        dist = np.sqrt((mouse_pos[0] - sx)**2 + (mouse_pos[1] - sy)**2)
+                        if dist < hover_radius and hovered_idx < 0:
+                            hovered_idx = i
+                            hovered_type = 'fiber'
 
             # Compute and draw Q points from contour_match (cyan) - draw immediately so they're not covered
             if contour_match is not None and bp is not None and len(bp) >= 4:
@@ -2971,6 +2981,7 @@ class GLFWApp():
                     dist = np.sqrt((mouse_pos[0] - qx)**2 + (mouse_pos[1] - qy)**2)
                     if dist < hover_radius and hovered_idx < 0:
                         hovered_idx = i
+                        hovered_type = 'vertex'
 
             # Reserve space
             imgui.dummy(canvas_size + 2 * padding, canvas_size + 2 * padding)
@@ -3025,6 +3036,7 @@ class GLFWApp():
                     dist = np.sqrt((mouse_pos[0] - px)**2 + (mouse_pos[1] - py)**2)
                     if dist < hover_radius and hovered_idx < 0:
                         hovered_idx = i
+                        hovered_type = 'vertex'
 
                 # Draw bounding box (blue) - use min/max of P points to ensure 90-degree corners
                 # The bounding box should tightly fit the contour
@@ -3037,37 +3049,76 @@ class GLFWApp():
                 draw_list.add_rect(bb_x0, bb_y0, bb_x1, bb_y1,
                                   imgui.get_color_u32_rgba(0.3, 0.5, 0.9, 1.0), thickness=1.5)
 
-                # Draw waypoints (red)
+                # Draw waypoints (red) and check hover
                 if (hasattr(obj, 'waypoints') and obj.waypoints is not None and
                     stream_idx < len(obj.waypoints) and contour_idx < len(obj.waypoints[stream_idx])):
                     waypoints_3d = obj.waypoints[stream_idx][contour_idx]
                     if waypoints_3d is not None and len(waypoints_3d) > 0:
-                        for wp in waypoints_3d:
+                        for wi, wp in enumerate(waypoints_3d):
                             wp = np.array(wp)
                             wp_2d = np.array([np.dot(wp - mean, basis_x), np.dot(wp - mean, basis_y)])
                             wp_norm = (wp_2d - center_xy) * scale + 0.5
                             wpx = right_x0 + wp_norm[0] * canvas_size
                             wpy = right_y0 + (1 - wp_norm[1]) * canvas_size
+                            waypoint_screen_points.append((wpx, wpy))
                             draw_list.add_circle_filled(wpx, wpy, 5, imgui.get_color_u32_rgba(0.9, 0.3, 0.3, 1.0))
+                            # Check hover on waypoints
+                            dist = np.sqrt((mouse_pos[0] - wpx)**2 + (mouse_pos[1] - wpy)**2)
+                            if dist < hover_radius and hovered_idx < 0:
+                                hovered_idx = wi
+                                hovered_type = 'waypoint'
 
-            # Draw P vertex points with hover highlighting
+            # Draw P vertex points (non-highlighted)
             for i in range(len(p_screen_points)):
                 px, py = p_screen_points[i]
-                if i == hovered_idx:
-                    # Highlighted P (orange with white border)
+                if not (hovered_type == 'vertex' and i == hovered_idx):
+                    draw_list.add_circle_filled(px, py, 3, imgui.get_color_u32_rgba(1.0, 0.5, 0.0, 1.0))
+
+            # Draw highlights based on hover type
+            if hovered_type == 'vertex' and hovered_idx >= 0:
+                # Highlight P (orange with white border)
+                if hovered_idx < len(p_screen_points):
+                    px, py = p_screen_points[hovered_idx]
                     draw_list.add_circle_filled(px, py, 6, imgui.get_color_u32_rgba(1.0, 0.5, 0.0, 1.0))
                     draw_list.add_circle(px, py, 8, imgui.get_color_u32_rgba(1.0, 1.0, 1.0, 1.0), thickness=2.0)
-                    # Highlight corresponding Q on unit square (magenta with white border, same style)
-                    if i < len(q_screen_points):
-                        qx, qy = q_screen_points[i]
-                        draw_list.add_circle_filled(qx, qy, 6, imgui.get_color_u32_rgba(1.0, 0.0, 1.0, 1.0))
-                        draw_list.add_circle(qx, qy, 8, imgui.get_color_u32_rgba(1.0, 1.0, 1.0, 1.0), thickness=2.0)
-                else:
-                    draw_list.add_circle_filled(px, py, 3, imgui.get_color_u32_rgba(1.0, 0.5, 0.0, 1.0))
+                # Highlight corresponding Q (magenta with white border)
+                if hovered_idx < len(q_screen_points):
+                    qx, qy = q_screen_points[hovered_idx]
+                    draw_list.add_circle_filled(qx, qy, 6, imgui.get_color_u32_rgba(1.0, 0.0, 1.0, 1.0))
+                    draw_list.add_circle(qx, qy, 8, imgui.get_color_u32_rgba(1.0, 1.0, 1.0, 1.0), thickness=2.0)
+
+            elif hovered_type == 'fiber' and hovered_idx >= 0:
+                # Highlight fiber sample (bright green with white border)
+                if hovered_idx < len(fiber_screen_points):
+                    fx, fy = fiber_screen_points[hovered_idx]
+                    draw_list.add_circle_filled(fx, fy, 6, imgui.get_color_u32_rgba(0.2, 1.0, 0.2, 1.0))
+                    draw_list.add_circle(fx, fy, 8, imgui.get_color_u32_rgba(1.0, 1.0, 1.0, 1.0), thickness=2.0)
+                # Highlight corresponding waypoint (bright red with white border)
+                if hovered_idx < len(waypoint_screen_points):
+                    wpx, wpy = waypoint_screen_points[hovered_idx]
+                    draw_list.add_circle_filled(wpx, wpy, 6, imgui.get_color_u32_rgba(1.0, 0.3, 0.3, 1.0))
+                    draw_list.add_circle(wpx, wpy, 8, imgui.get_color_u32_rgba(1.0, 1.0, 1.0, 1.0), thickness=2.0)
+
+            elif hovered_type == 'waypoint' and hovered_idx >= 0:
+                # Highlight waypoint (bright red with white border)
+                if hovered_idx < len(waypoint_screen_points):
+                    wpx, wpy = waypoint_screen_points[hovered_idx]
+                    draw_list.add_circle_filled(wpx, wpy, 6, imgui.get_color_u32_rgba(1.0, 0.3, 0.3, 1.0))
+                    draw_list.add_circle(wpx, wpy, 8, imgui.get_color_u32_rgba(1.0, 1.0, 1.0, 1.0), thickness=2.0)
+                # Highlight corresponding fiber sample (bright green with white border)
+                if hovered_idx < len(fiber_screen_points):
+                    fx, fy = fiber_screen_points[hovered_idx]
+                    draw_list.add_circle_filled(fx, fy, 6, imgui.get_color_u32_rgba(0.2, 1.0, 0.2, 1.0))
+                    draw_list.add_circle(fx, fy, 8, imgui.get_color_u32_rgba(1.0, 1.0, 1.0, 1.0), thickness=2.0)
 
             # Show index on hover
             if hovered_idx >= 0:
-                imgui.set_tooltip(f"Vertex {hovered_idx}")
+                if hovered_type == 'vertex':
+                    imgui.set_tooltip(f"Vertex {hovered_idx}")
+                elif hovered_type == 'fiber':
+                    imgui.set_tooltip(f"Fiber {hovered_idx}")
+                elif hovered_type == 'waypoint':
+                    imgui.set_tooltip(f"Waypoint {hovered_idx}")
 
             # Reserve space
             imgui.dummy(canvas_size + 2 * padding, canvas_size + 2 * padding)
