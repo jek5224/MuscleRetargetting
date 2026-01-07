@@ -13,6 +13,7 @@ from sklearn.decomposition import PCA
 from itertools import product
 from sklearn.cluster import KMeans, AgglomerativeClustering
 from collections import defaultdict
+import dartpy as dart
 
 scale = 0.01
 cmap = cm.get_cmap("turbo")
@@ -217,7 +218,13 @@ class MeshLoader(object):
         self.trimesh = None
         self.scalar_field = None
         self.vertex_colors = None
-        self.contours = None 
+        self.contours = None
+        self.contour_mesh_vertices = None
+        self.contour_mesh_faces = None
+        self.contour_mesh_normals = None
+        self.is_draw_contour_mesh = False
+        self.contour_mesh_color = np.array([0.8, 0.5, 0.5])
+        self.contour_mesh_transparency = 0.8
         self.specific_contour = None
         self.specific_contour_value = 1.0
         self.contour_value_min = 1.1
@@ -231,6 +238,9 @@ class MeshLoader(object):
 
         self.fiber_architecture = [self.sobol_sampling_barycentric(16)]
         self.is_draw_fiber_architecture = False
+        self.is_one_fiber = False
+        self.sampling_method = 'sobol_unit_square'  # 'sobol_unit_square' or 'sobol_min_contour'
+        self.cutting_method = 'area_based'  # 'area_based', 'voronoi', 'angular', or 'gradient'
 
         self.waypoints = []
 
@@ -807,7 +817,6 @@ class MeshLoader(object):
     
     def draw_edges(self):
         glPushMatrix()
-        # ------ DRAW EDGES IN WHITE ------
         glColor4f(0, 0, 0, 1.0)
         glLineWidth(0.5)
         glBegin(GL_LINES)
@@ -893,6 +902,7 @@ class MeshLoader(object):
 
             if not self.draw_contour_stream[i]:
                 continue
+
             # glPointSize(1)
             # glBegin(GL_POINTS)
             # for j, v in enumerate(contour_set):
@@ -936,12 +946,12 @@ class MeshLoader(object):
                 glEnd()
 
             glPointSize(4)
-            # for contour in contour_set:
-            #     glBegin(GL_POINTS)
-            #     for i, v in enumerate(contour):
-            #         glColor3f(1 - i / len(contour), 0, 0)
-            #         glVertex3fv(v)
-            #     glEnd()
+            for contour in contour_set:
+                glBegin(GL_POINTS)
+                for i, v in enumerate(contour):
+                    glColor3f(1 - i / len(contour), 0, 0)
+                    glVertex3fv(v)
+                glEnd()
 
         if self.is_draw_discarded:
             t = 0.1
@@ -953,14 +963,14 @@ class MeshLoader(object):
                     for v in contour:
                         glVertex3fv(v)
                     glEnd()
-            
+
         glEnable(GL_LIGHTING)
 
     def draw_centroid(self):
         glDisable(GL_LIGHTING)
         glPushMatrix()
         
-        glPointSize(2)
+        glPointSize(5)
         glColor3f(1, 0, 0)
         glBegin(GL_POINTS)
         for centroid in self.centroids:
@@ -1169,8 +1179,7 @@ class MeshLoader(object):
             return
 
         glDisable(GL_LIGHTING)
-
-        glPointSize(4)
+        glPointSize(3)
         glColor4f(1, 0, 0, 1)
         glBegin(GL_POINTS)
         # for waypoint_group in self.waypoints:
@@ -1183,8 +1192,8 @@ class MeshLoader(object):
                         glVertex3fv(p)
         glEnd()
 
-        glColor4f(0.5, 0, 0, 1)
-        glLineWidth(0.5)
+        glColor4f(0.75, 0, 0, 1)
+        glLineWidth(2)
         glBegin(GL_LINES)
         # for i in range(len(self.waypoints) - 1):
         #     for p1, p2 in zip(self.waypoints[i], self.waypoints[i + 1]):
@@ -1269,40 +1278,8 @@ class MeshLoader(object):
         glPopMatrix()
 
         glEnable(GL_LIGHTING)
-
-    def find_intersections(self, mesh_dict):
-        intersecting_meshes = []
-        bbox1 = self.trimesh.bounding_box
-        for name, mesh in mesh_dict.items():
-            bbox2 = mesh.trimesh.bounding_box
-            min1, max1 = bbox1.bounds
-            min2, max2 = bbox2.bounds
-
-            # Check if the bounding boxes overlap in all three dimensionsall muscle functions as a unit, even if individual fibers do not connect myofibrils directly.
-            x_overlap = max1[0] >= min2[0] and min1[0] <= max2[0]
-            y_overlap = max1[1] >= min2[1] and min1[1] <= max2[1]
-            z_overlap = max1[2] >= min2[2] and min1[2] <= max2[2]
-    
-            if x_overlap and y_overlap and z_overlap:
-                intersecting_meshes.append(name)
-
-        true_intersecting_meshes = []
-        for name, mesh in mesh_dict.items():
-            if name in intersecting_meshes:
-                signed_distances = trimesh.proximity.signed_distance(mesh.trimesh, self.trimesh.vertices)
-                intersection_indices = np.where(signed_distances > 0)[0]
-                intersections = self.trimesh.vertices[intersection_indices]
-
-                if intersections.size > 0:
-                    true_intersecting_meshes.append(name)
-
-        return true_intersecting_meshes
     
     def compute_scalar_field(self):
-        # if len(self.edge_groups) != 2:
-        #     print("For Now, only two edge groups can be handled")
-        #     return
-        
         # # check mean vertex positions of edge_groups and assign origin_indices as edge group with larger y value
         # origin_indices = self.edge_groups[0]
         # insertion_indices = self.edge_groups[1]
@@ -1336,7 +1313,7 @@ class MeshLoader(object):
             prev_basis_x = prev_bounding_plane['basis_x']
             prev_basis_y = prev_bounding_plane['basis_y']
             prev_basis_z = prev_bounding_plane['basis_z']
-
+ 
             prev_newell = prev_bounding_plane['newell_normal']
         elif len(self.bounding_planes) > 0:
             prev_basis_x = self.bounding_planes[-1][0]['basis_x']
@@ -1561,25 +1538,8 @@ class MeshLoader(object):
         
         self.specific_contour = None
 
-        bounding_planes, ordered_contour_vertices, ordered_contour_vertices_orig = self.find_contour(contour_value)
+        _, ordered_contour_vertices, _ = self.find_contour(contour_value)
         self.specific_contour = ordered_contour_vertices
-
-        # contour_vertices = []
-        # for face in self.faces_3:
-        #     v0, v1, v2 = face[:, 0]
-        #     verts = self.vertices[[v0, v1, v2]]
-        #     values = self.scalar_field[[v0, v1, v2]]
-
-        #     edges = [(0, 1), (1, 2), (2, 0)]
-
-        #     for i, j in edges:
-        #         v_start, v_end = values[i], values[j]
-
-        #         if (v_start < contour_value and v_end > contour_value) or (v_start > contour_value and v_end < contour_value):
-        #             t = (contour_value - v_start) / (v_end - v_start)
-        #             p_contour = (1 - t) * verts[i] + t * verts[j]
-        #             contour_vertices.append(p_contour)
-        # self.specific_contour = [contour_vertices]
 
         self.is_draw_contours = True
 
@@ -1662,7 +1622,7 @@ class MeshLoader(object):
                     contour_value = (prev_contour_value + contour_value) / 2.0
                     trial += 1
                 else:
-                    if np.any(np.array(min_lengths) >= length_min_threshold) or trial >= 10:
+                    if np.any(np.array(min_lengths) >= length_min_threshold) or trial >= 3:
                         print("ADDED")
                         print()
                         trial = 0
@@ -1693,23 +1653,40 @@ class MeshLoader(object):
         self.bounding_planes.append(insertion_bounding_planes)
         contours.append(insertion_contours)
         contours_orig.append(insertion_contours_orig)
-            
-        ### TODO: Before assigining to self.contours, check if newly found contours are valid
-        # Check if they are too far, or too rotated
-        # If so, use less scalar step and find contours again until conditions are met
-
+        
         self.draw_contour_stream = [True] * len(contours)
         self.is_draw_contours = True
         self.contours = contours
 
+        # for contour_group in self.contours:
+        #     for contour in contour_group:
+        #         print(len(contour), end=' ')
+        #     print()
+
         # self.trim_contours(contours_orig)
 
-    def trim_contours(self, contours_orig):
+    def trim_contours(self):
+        if len(self.bounding_planes) == 0:
+            print("No Contours found")
+            return
+
         # Select best contours and discard others
         origin_num = len(self.bounding_planes[0])
         insertion_num = len(self.bounding_planes[-1])
         print(f"Number of origins/insertions: {origin_num}/{insertion_num}")
 
+        contours_orig = [contour.copy() for contour in self.contours]
+
+        # Current Formulation
+        # stream_i = 0              -------------------
+        # stream_i = 1             ---------------------
+        # ...
+        # stream_i = n - 1           -------    -------
+
+
+        # It's hard to determine Square-like contours orientation
+        # If they are not properly determined, contour directions twist at the middle
+        # Therefore, re-align square-like contours based on the previous and next contours
         for stream_i, bounding_plane_infos in enumerate(self.bounding_planes):
             for i, bounding_plane_info in enumerate(bounding_plane_infos):
             # bounding_plane_info = bounding_plane_infos[0]
@@ -1719,16 +1696,16 @@ class MeshLoader(object):
                     basis_z = bounding_plane_info['basis_z']
                     mean = bounding_plane_info['mean']
 
+                    # If there are multiple stream in prev or next bounding planes,
+                    # It's better to align to at least one of them than doing nothing!
                     prev_plane_info = None
                     for stream_j in range(stream_i - 1, -1, -1):
-                        # if len(self.bounding_planes[stream_j]) == 1 and not self.bounding_planes[stream_j][0]['square_like']:
                         if not self.bounding_planes[stream_j][0]['square_like']:
                             prev_plane_info = self.bounding_planes[stream_j][0]
                             break
 
                     next_plane_info = None
                     for stream_j in range(stream_i + 1, len(self.bounding_planes)):
-                        # if len(self.bounding_planes[stream_j]) == 1 and not self.bounding_planes[stream_j][0]['square_like']:
                         if not self.bounding_planes[stream_j][0]['square_like']:
                             next_plane_info = self.bounding_planes[stream_j][0]
                             break
@@ -1776,6 +1753,15 @@ class MeshLoader(object):
                         self.contours[stream_i][i], contour_match = self.find_contour_match(contours_orig[stream_i][i], bounding_plane)
                         bounding_plane_info['contour_match'] = contour_match
         
+    def smoothen_contours(self):
+        if len(self.bounding_planes) == 0:
+            print("No Contours found")
+            return
+        
+        contours_orig = [contour.copy() for contour in self.contours]
+
+        # Contour extraction may result in jerky directions
+        # Overall smoothing procedure
         for _ in range(10):
             smooth_bounding_planes = []
             for i, bounding_plane_infos in enumerate(self.bounding_planes):
@@ -1816,7 +1802,6 @@ class MeshLoader(object):
                 # new_basis_x = (prev_x_proj + next_x_proj) / 2
                 new_basis_x /= np.linalg.norm(new_basis_x)
                 new_basis_y = np.cross(basis_z, new_basis_x)
-
 
                 new_basis_x = ((prev_basis_x + next_basis_x) / 2 + basis_x) / 2
                 new_basis_y = ((prev_basis_y + next_basis_y) / 2 + basis_y) / 2
@@ -1865,8 +1850,939 @@ class MeshLoader(object):
 
             self.bounding_planes = smooth_bounding_planes
 
+    def resample_contours(self, num_samples=32):
+        """
+        Resample all contours to have the same number of vertices with consistent topology.
+        Uses arc-length parameterization and uniform sampling.
+        Also updates bounding planes via find_contour_match to maintain linkage.
+
+        Args:
+            num_samples: int - desired number of vertices per contour
+        """
+        if self.contours is None or len(self.contours) == 0:
+            print("No contours found. Please run find_contours first.")
+            return
+
+        if self.bounding_planes is None or len(self.bounding_planes) == 0:
+            print("No bounding planes found. Please run find_contours first.")
+            return
+
+        # Compute reference direction from origin to insertion centroids
+        origin_centroids = [np.mean(c, axis=0) for c in self.contours[0]]
+        insertion_centroids = [np.mean(c, axis=0) for c in self.contours[-1]]
+        origin_center = np.mean(origin_centroids, axis=0)
+        insertion_center = np.mean(insertion_centroids, axis=0)
+        reference_direction = insertion_center - origin_center
+        ref_norm = np.linalg.norm(reference_direction)
+        if ref_norm > 1e-10:
+            reference_direction = reference_direction / ref_norm
+        else:
+            reference_direction = np.array([0, 1, 0])
+
+        resampled_contours = []
+        new_bounding_planes = []
+
+        for level_idx, (contour_group, bounding_plane_group) in enumerate(zip(self.contours, self.bounding_planes)):
+            resampled_group = []
+            new_bp_group = []
+
+            for contour_idx, (contour, bounding_plane_info) in enumerate(zip(contour_group, bounding_plane_group)):
+                # First resample the contour uniformly
+                resampled = self._resample_single_contour(
+                    np.array(contour), num_samples, reference_direction
+                )
+
+                # Get the bounding plane rectangle from existing bounding_plane_info
+                bounding_plane = bounding_plane_info['bounding_plane']
+
+                # Re-run find_contour_match to align resampled contour to bounding plane
+                aligned_contour, contour_match = self.find_contour_match(resampled, bounding_plane)
+
+                # Update bounding plane info with new contour match
+                new_bp_info = bounding_plane_info.copy()
+                new_bp_info['contour_match'] = contour_match
+
+                resampled_group.append(aligned_contour)
+                new_bp_group.append(new_bp_info)
+
+            resampled_contours.append(resampled_group)
+            new_bounding_planes.append(new_bp_group)
+
+        self.contours = resampled_contours
+        self.bounding_planes = new_bounding_planes
+        print(f"Resampled {len(self.contours)} contour levels to {num_samples} vertices each")
+
+    def _resample_single_contour(self, contour_points, num_samples, reference_direction):
+        """
+        Resample a single closed contour to have exactly num_samples vertices.
+        Uses arc-length parameterization with consistent starting point.
+
+        Args:
+            contour_points: numpy array of shape (N, 3)
+            num_samples: int - desired number of output vertices
+            reference_direction: numpy array of shape (3,) - for consistent starting point
+
+        Returns:
+            numpy array of shape (num_samples, 3)
+        """
+        contour = np.array(contour_points)
+        n = len(contour)
+
+        if n < 2:
+            return np.tile(contour[0], (num_samples, 1))
+
+        # Step 1: Compute cumulative arc lengths (closed loop)
+        segments = np.zeros((n, 3))
+        for i in range(n):
+            segments[i] = contour[(i + 1) % n] - contour[i]
+        segment_lengths = np.linalg.norm(segments, axis=1)
+        cumulative_length = np.concatenate([[0], np.cumsum(segment_lengths)])
+        total_length = cumulative_length[-1]
+
+        if total_length < 1e-10:
+            return np.tile(contour[0], (num_samples, 1))
+
+        # Normalize to [0, 1]
+        t_original = cumulative_length / total_length
+
+        # Step 2: Find consistent starting point using reference direction
+        centroid = np.mean(contour, axis=0)
+        directions = contour - centroid
+        dots = directions @ reference_direction
+        start_idx = np.argmax(dots)
+
+        # Roll arrays to start from this index
+        contour = np.roll(contour, -start_idx, axis=0)
+        t_rolled = np.roll(t_original[:-1], -start_idx)
+        t_rolled = t_rolled - t_rolled[0]
+        t_rolled[t_rolled < 0] += 1.0
+        t_original = np.concatenate([np.sort(t_rolled), [1.0]])
+
+        # Step 3: Sample at uniform parameter values
+        t_new = np.linspace(0, 1, num_samples, endpoint=False)
+
+        # Step 4: Interpolate positions
+        resampled = np.zeros((num_samples, 3))
+        for i, t in enumerate(t_new):
+            # Find segment containing t
+            idx = np.searchsorted(t_original, t, side='right') - 1
+            idx = max(0, min(idx, n - 1))
+
+            # Local interpolation parameter
+            t_start = t_original[idx]
+            t_end = t_original[idx + 1] if idx + 1 < len(t_original) else 1.0
+
+            if abs(t_end - t_start) < 1e-10:
+                local_t = 0
+            else:
+                local_t = (t - t_start) / (t_end - t_start)
+
+            # Linear interpolation
+            p0 = contour[idx]
+            p1 = contour[(idx + 1) % n]
+            resampled[i] = (1 - local_t) * p0 + local_t * p1
+
+        return resampled
+
+    def build_contour_mesh(self):
+        """
+        Build a triangle mesh from contours after find_contour_stream has been called.
+        Handles merged streams properly by sharing vertices and stitching at merge points.
+
+        After find_contour_stream, self.contours is organized as:
+        - self.contours[stream_idx][level_idx] = contour vertices
+
+        For muscles like biceps (2 origins -> 1 insertion):
+        - At merged levels, adjacent streams share boundary vertices
+        - Stitching faces connect the streams at shared boundaries
+        """
+        if self.contours is None or len(self.contours) == 0:
+            print("No contours found. Run find_contours, resample_contours, and find_contour_stream first.")
+            return
+
+        num_streams = len(self.contours)
+        if num_streams == 0:
+            print("No streams found.")
+            return
+
+        # First, align all streams to minimize twist
+        aligned_streams = []
+        for stream_idx, stream_contours in enumerate(self.contours):
+            if len(stream_contours) < 2:
+                print(f"Stream {stream_idx} has less than 2 contours, skipping.")
+                aligned_streams.append([])
+                continue
+            aligned_streams.append(self._align_stream_contours(stream_contours))
+
+        # Find number of levels (assuming all streams have same number of levels)
+        num_levels = max(len(s) for s in aligned_streams) if aligned_streams else 0
+        if num_levels < 2:
+            print("Not enough levels to build mesh.")
+            return
+
+        # Build vertices and track indices per stream per level
+        all_vertices = []
+        # stream_level_indices[stream_idx][level_idx] = list of vertex indices for that contour
+        stream_level_indices = [[[] for _ in range(num_levels)] for _ in range(num_streams)]
+
+        # Epsilon for detecting shared vertices
+        eps = 1e-6
+
+        for level_idx in range(num_levels):
+            level_vertices = []  # All vertices at this level (before dedup)
+            level_stream_ranges = []  # (start, end) indices into level_vertices for each stream
+
+            # Collect all vertices at this level from all streams
+            for stream_idx, aligned_stream in enumerate(aligned_streams):
+                if level_idx >= len(aligned_stream) or len(aligned_stream[level_idx]) == 0:
+                    level_stream_ranges.append((len(level_vertices), len(level_vertices)))
+                    continue
+                start = len(level_vertices)
+                for v in aligned_stream[level_idx]:
+                    level_vertices.append(np.array(v))
+                end = len(level_vertices)
+                level_stream_ranges.append((start, end))
+
+            if len(level_vertices) == 0:
+                continue
+
+            # Find duplicate vertices at this level (shared boundaries between streams)
+            level_vertices = np.array(level_vertices)
+            n = len(level_vertices)
+
+            # Map from original index to deduplicated index
+            dedup_map = list(range(n))
+
+            # Find duplicates across different streams
+            for stream_i in range(num_streams):
+                start_i, end_i = level_stream_ranges[stream_i]
+                for stream_j in range(stream_i + 1, num_streams):
+                    start_j, end_j = level_stream_ranges[stream_j]
+                    for i in range(start_i, end_i):
+                        for j in range(start_j, end_j):
+                            if np.linalg.norm(level_vertices[i] - level_vertices[j]) < eps:
+                                # j is a duplicate of i, map j to i's final index
+                                dedup_map[j] = dedup_map[i]
+
+            # Build deduplicated vertex list and create final index mapping
+            final_indices = {}  # original index -> final vertex index (global)
+            for orig_idx in range(n):
+                canonical = dedup_map[orig_idx]
+                if canonical not in final_indices:
+                    final_indices[canonical] = len(all_vertices)
+                    all_vertices.append(level_vertices[canonical])
+                final_indices[orig_idx] = final_indices[canonical]
+
+            # Store vertex indices for each stream at this level
+            for stream_idx in range(num_streams):
+                start, end = level_stream_ranges[stream_idx]
+                indices = [final_indices[i] for i in range(start, end)]
+                stream_level_indices[stream_idx][level_idx] = indices
+
+        if len(all_vertices) == 0:
+            print("No vertices generated.")
+            return
+
+        # Build faces
+        all_faces = []
+
+        # Create faces between consecutive levels for each stream
+        for stream_idx in range(num_streams):
+            for level_idx in range(num_levels - 1):
+                curr_indices = stream_level_indices[stream_idx][level_idx]
+                next_indices = stream_level_indices[stream_idx][level_idx + 1]
+
+                if len(curr_indices) < 2 or len(next_indices) < 2:
+                    continue
+
+                n_curr = len(curr_indices)
+                n_next = len(next_indices)
+
+                if n_curr == n_next:
+                    # Same size - create band with direct indices
+                    for i in range(n_curr):
+                        i_next = (i + 1) % n_curr
+                        v0 = curr_indices[i]
+                        v1 = curr_indices[i_next]
+                        v2 = next_indices[i_next]
+                        v3 = next_indices[i]
+                        # Two triangles for the quad
+                        all_faces.append([v0, v1, v2])
+                        all_faces.append([v0, v2, v3])
+                else:
+                    # Different sizes - variable band
+                    faces = self._create_contour_band_variable_indices(
+                        curr_indices, next_indices
+                    )
+                    all_faces.extend(faces)
+
+        # Create stitching faces between adjacent streams at merged levels
+        for level_idx in range(num_levels):
+            for stream_i in range(num_streams):
+                for stream_j in range(stream_i + 1, num_streams):
+                    indices_i = stream_level_indices[stream_i][level_idx]
+                    indices_j = stream_level_indices[stream_j][level_idx]
+
+                    if len(indices_i) == 0 or len(indices_j) == 0:
+                        continue
+
+                    # Find shared vertex indices (boundary points)
+                    shared_i = []  # positions in indices_i that are shared
+                    shared_j = []  # corresponding positions in indices_j
+
+                    for pi, vi in enumerate(indices_i):
+                        for pj, vj in enumerate(indices_j):
+                            if vi == vj:  # Same vertex index = shared
+                                shared_i.append(pi)
+                                shared_j.append(pj)
+
+                    # If there are exactly 2 shared points, we can create stitching
+                    if len(shared_i) >= 2:
+                        # Streams share boundary - this is a merged level
+                        # The shared vertices are the boundaries where streams meet
+                        # No additional stitching needed since vertices are already shared
+                        pass
+
+        if len(all_faces) == 0:
+            print("No faces generated.")
+            return
+
+        # Convert to numpy arrays
+        self.contour_mesh_vertices = np.array(all_vertices, dtype=np.float32)
+        self.contour_mesh_faces = np.array(all_faces, dtype=np.int32)
+
+        # Compute normals
+        self._compute_contour_mesh_normals()
+
+        print(f"Built contour mesh: {len(self.contour_mesh_vertices)} vertices, "
+              f"{len(self.contour_mesh_faces)} faces from {num_streams} streams")
+
+    def _create_contour_band_variable_indices(self, curr_indices, next_indices):
+        """
+        Create triangular faces between two contours with different vertex counts.
+        Uses direct vertex indices instead of offsets.
+        """
+        n_curr = len(curr_indices)
+        n_next = len(next_indices)
+        faces = []
+
+        # Use ratio-based vertex pairing
+        i_curr = 0
+        i_next = 0
+
+        while i_curr < n_curr or i_next < n_next:
+            # Current progress ratios
+            ratio_curr = i_curr / n_curr if n_curr > 0 else 1
+            ratio_next = i_next / n_next if n_next > 0 else 1
+
+            v0 = curr_indices[i_curr % n_curr]
+            v1 = curr_indices[(i_curr + 1) % n_curr]
+            v2 = next_indices[(i_next + 1) % n_next]
+            v3 = next_indices[i_next % n_next]
+
+            if ratio_curr <= ratio_next and i_curr < n_curr:
+                # Advance on curr contour
+                faces.append([v0, v1, v3])
+                i_curr += 1
+            elif i_next < n_next:
+                # Advance on next contour
+                faces.append([v0, v2, v3])
+                i_next += 1
+            else:
+                break
+
+        return faces
+
+    def _align_stream_contours(self, stream_contours):
+        """
+        Align consecutive contours in a stream to minimize twist.
+        Uses optimal rotation to minimize total distance between corresponding vertices.
+        """
+        if len(stream_contours) < 2:
+            return stream_contours
+
+        aligned = [np.array(stream_contours[0])]  # First contour stays fixed
+
+        for i in range(1, len(stream_contours)):
+            prev_contour = aligned[-1]
+            curr_contour = np.array(stream_contours[i])
+
+            # Find optimal rotation offset
+            best_offset = self._find_best_rotation_offset(prev_contour, curr_contour)
+
+            # Apply rotation
+            aligned_contour = np.roll(curr_contour, -best_offset, axis=0)
+            aligned.append(aligned_contour)
+
+        return aligned
+
+    def _find_best_rotation_offset(self, contour_a, contour_b):
+        """
+        Find the rotation offset for contour_b that minimizes total distance to contour_a.
+        Returns the offset to apply with np.roll.
+        """
+        n_a = len(contour_a)
+        n_b = len(contour_b)
+
+        if n_a != n_b:
+            # Different sizes - use centroid-based alignment
+            return self._find_best_rotation_offset_variable(contour_a, contour_b)
+
+        n = n_a
+        min_distance = float('inf')
+        best_offset = 0
+
+        # Try all rotations and find the one with minimum total distance
+        for offset in range(n):
+            rotated_b = np.roll(contour_b, -offset, axis=0)
+            total_distance = np.sum(np.linalg.norm(contour_a - rotated_b, axis=1))
+
+            if total_distance < min_distance:
+                min_distance = total_distance
+                best_offset = offset
+
+        return best_offset
+
+    def _find_best_rotation_offset_variable(self, contour_a, contour_b):
+        """
+        Find rotation offset for contours with different sizes.
+        Uses direction from centroid to first vertex as reference.
+        """
+        center_a = np.mean(contour_a, axis=0)
+        center_b = np.mean(contour_b, axis=0)
+
+        # Direction from centroid to first vertex of A
+        ref_dir = contour_a[0] - center_a
+        ref_dir = ref_dir / (np.linalg.norm(ref_dir) + 1e-10)
+
+        # Find vertex in B closest to this reference direction
+        dirs_b = contour_b - center_b
+        norms_b = np.linalg.norm(dirs_b, axis=1, keepdims=True)
+        norms_b[norms_b < 1e-10] = 1
+        dirs_b = dirs_b / norms_b
+
+        dots = dirs_b @ ref_dir
+        best_offset = np.argmax(dots)
+
+        return best_offset
+
+    def _create_contour_band_variable(self, start_a, start_b, n_a, n_b):
+        """Create triangular band between two contours with different vertex counts."""
+        faces = []
+
+        # Use ratio-based mapping
+        for i in range(n_a):
+            i_next = (i + 1) % n_a
+
+            # Map to contour B indices
+            j = int(i * n_b / n_a) % n_b
+            j_next = int(i_next * n_b / n_a) % n_b
+
+            # Triangle 1
+            faces.append([start_a + i, start_a + i_next, start_b + j])
+
+            # Triangle 2 (if j changes)
+            if j != j_next:
+                faces.append([start_a + i_next, start_b + j_next, start_b + j])
+
+        return faces
+
+    def _create_contour_band(self, start_a, start_b, num_samples):
+        """Create triangular band between two contours with same vertex count."""
+        faces = []
+        for i in range(num_samples):
+            i_next = (i + 1) % num_samples
+            # Two triangles per quad
+            # Triangle 1: (A[i], A[i+1], B[i])
+            faces.append([start_a + i, start_a + i_next, start_b + i])
+            # Triangle 2: (A[i+1], B[i+1], B[i])
+            faces.append([start_a + i_next, start_b + i_next, start_b + i])
+        return faces
+
+    def _compute_contour_mesh_normals(self):
+        """Compute vertex normals for the contour mesh."""
+        if self.contour_mesh_vertices is None or self.contour_mesh_faces is None:
+            return
+
+        num_vertices = len(self.contour_mesh_vertices)
+        normals = np.zeros((num_vertices, 3), dtype=np.float32)
+
+        for face in self.contour_mesh_faces:
+            v0, v1, v2 = self.contour_mesh_vertices[face]
+            edge1 = v1 - v0
+            edge2 = v2 - v0
+            face_normal = np.cross(edge1, edge2)
+            norm = np.linalg.norm(face_normal)
+            if norm > 1e-10:
+                face_normal = face_normal / norm
+
+            for vi in face:
+                normals[vi] += face_normal
+
+        # Normalize
+        norms = np.linalg.norm(normals, axis=1, keepdims=True)
+        norms[norms < 1e-10] = 1
+        self.contour_mesh_normals = normals / norms
+
+    def draw_contour_mesh(self):
+        """Draw the contour mesh using OpenGL."""
+        if self.contour_mesh_vertices is None or self.contour_mesh_faces is None:
+            return
+
+        glPushMatrix()
+        glEnable(GL_LIGHTING)
+        glEnable(GL_COLOR_MATERIAL)
+        glColorMaterial(GL_FRONT_AND_BACK, GL_AMBIENT_AND_DIFFUSE)
+
+        color = self.contour_mesh_color
+        alpha = self.contour_mesh_transparency
+        glColor4f(color[0], color[1], color[2], alpha)
+
+        glBegin(GL_TRIANGLES)
+        for face in self.contour_mesh_faces:
+            for vi in face:
+                if self.contour_mesh_normals is not None:
+                    glNormal3fv(self.contour_mesh_normals[vi])
+                glVertex3fv(self.contour_mesh_vertices[vi])
+        glEnd()
+
+        glPopMatrix()
+
+    def _cut_contour_voronoi(self, contour, contour_match, parent_means, basis_z, smooth_window=5, parent_areas=None):
+        """
+        Cut a contour into multiple streams using Voronoi-style assignment with smoothing.
+
+        Args:
+            contour: list of 3D points forming the contour
+            contour_match: list of (P, Q) pairs from bounding plane matching
+            parent_means: list of 3D mean points for each parent stream
+            basis_z: normal vector of the contour plane
+            smooth_window: window size for smoothing assignments
+            parent_areas: list of areas for each parent stream (optional)
+
+        Returns:
+            new_contours: list of contour point lists, one per parent stream
+        """
+        n = len(contour)
+        num_streams = len(parent_means)
+
+        if num_streams < 2:
+            return [list(contour)]
+
+        if n == 0 or len(contour_match) == 0:
+            # Return copies of the nearest parent mean as fallback
+            return [[parent_means[s].copy()] for s in range(num_streams)]
+
+        # Project parent means onto the contour plane
+        centroid = np.mean(contour, axis=0)
+        projected_parents = [p - np.dot(p - centroid, basis_z) * basis_z for p in parent_means]
+
+        # Compute area weights (larger area = smaller weight = more pull)
+        if parent_areas is not None and len(parent_areas) == num_streams:
+            total_area = sum(parent_areas)
+            area_weights = [total_area / (area + 1e-10) for area in parent_areas]
+            max_weight = max(area_weights)
+            area_weights = [w / max_weight for w in area_weights]
+        else:
+            area_weights = [1.0] * num_streams
+
+        # Initial assignment: each point to nearest parent stream (weighted by area)
+        assignments = []
+        for point in contour:
+            distances = [np.linalg.norm(point - pp) * area_weights[s] for s, pp in enumerate(projected_parents)]
+            assignments.append(np.argmin(distances))
+
+        # Smooth assignments to remove zig-zag using majority voting
+        smoothed = self._smooth_assignments_circular(assignments, smooth_window)
+
+        # Find transition points and build contours for each stream
+        new_contours = [[] for _ in range(num_streams)]
+        Ps = [pair[0] for pair in contour_match]
+
+        prev_assignment = smoothed[-1]
+        for i in range(n):
+            curr_assignment = smoothed[i]
+
+            # If transition between streams, add midpoint to both
+            if prev_assignment != curr_assignment:
+                prev_P = Ps[i - 1]
+                curr_P = Ps[i]
+                mid_P = (prev_P + curr_P) / 2
+
+                new_contours[prev_assignment].append(mid_P)
+                new_contours[curr_assignment].append(mid_P)
+
+            new_contours[curr_assignment].append(Ps[i])
+            prev_assignment = curr_assignment
+
+        # Ensure no stream is empty - if a stream has no points, assign closest contour points
+        for stream_idx in range(num_streams):
+            if len(new_contours[stream_idx]) == 0:
+                # Find the closest points from the contour to this stream's parent mean
+                parent_mean = projected_parents[stream_idx]
+                distances = [np.linalg.norm(np.array(p) - parent_mean) for p in Ps]
+                closest_idx = np.argmin(distances)
+                # Add a small segment around the closest point
+                new_contours[stream_idx].append(Ps[closest_idx])
+                if closest_idx > 0:
+                    new_contours[stream_idx].insert(0, Ps[closest_idx - 1])
+                if closest_idx < len(Ps) - 1:
+                    new_contours[stream_idx].append(Ps[closest_idx + 1])
+                print(f"Warning: Stream {stream_idx} had no points, added fallback points")
+
+        return new_contours
+
+    def _smooth_assignments_circular(self, assignments, window_size):
+        """
+        Smooth stream assignments using circular majority voting.
+        Removes isolated assignments that cause zig-zag patterns.
+
+        Args:
+            assignments: list of stream indices for each contour point
+            window_size: size of voting window (should be odd)
+
+        Returns:
+            smoothed assignments list
+        """
+        n = len(assignments)
+        if n == 0:
+            return assignments
+
+        smoothed = list(assignments)
+        half_window = window_size // 2
+
+        # Multiple passes for better smoothing
+        for _ in range(3):
+            new_smoothed = list(smoothed)
+            for i in range(n):
+                # Gather votes from circular window
+                votes = {}
+                for j in range(-half_window, half_window + 1):
+                    idx = (i + j) % n
+                    stream = smoothed[idx]
+                    votes[stream] = votes.get(stream, 0) + 1
+
+                # Majority vote
+                new_smoothed[i] = max(votes.keys(), key=lambda k: votes[k])
+            smoothed = new_smoothed
+
+        return smoothed
+
+    def _cut_contour_angular(self, contour, contour_match, parent_means, basis_z):
+        """
+        Cut a contour into multiple streams using angular/radial sectors from centroid.
+
+        Each stream gets a pie-slice shaped sector based on direction to its parent mean.
+        This produces clean, non-zig-zagged cuts.
+
+        Args:
+            contour: list of 3D points forming the contour
+            contour_match: list of (P, Q) pairs from bounding plane matching
+            parent_means: list of 3D mean points for each parent stream
+            basis_z: normal vector of the contour plane
+
+        Returns:
+            new_contours: list of contour point lists, one per parent stream
+        """
+        n = len(contour)
+        num_streams = len(parent_means)
+
+        if num_streams < 2:
+            return [list(contour)]
+
+        if n == 0 or len(contour_match) == 0:
+            return [[parent_means[s].copy()] for s in range(num_streams)]
+
+        # Project parent means onto the contour plane
+        centroid = np.mean(contour, axis=0)
+        projected_parents = [p - np.dot(p - centroid, basis_z) * basis_z for p in parent_means]
+
+        # Build local 2D coordinate system on the plane
+        # basis_x: direction to first parent mean
+        ref_dir = projected_parents[0] - centroid
+        ref_norm = np.linalg.norm(ref_dir)
+        if ref_norm < 1e-10:
+            # Fallback: use arbitrary direction perpendicular to basis_z
+            basis_x = np.array([1, 0, 0]) - np.dot([1, 0, 0], basis_z) * basis_z
+            if np.linalg.norm(basis_x) < 1e-10:
+                basis_x = np.array([0, 1, 0]) - np.dot([0, 1, 0], basis_z) * basis_z
+            basis_x = basis_x / np.linalg.norm(basis_x)
+        else:
+            basis_x = ref_dir / ref_norm
+        basis_y = np.cross(basis_z, basis_x)
+
+        # Calculate angle for each parent mean from centroid
+        parent_angles = []
+        for pp in projected_parents:
+            direction = pp - centroid
+            x_component = np.dot(direction, basis_x)
+            y_component = np.dot(direction, basis_y)
+            angle = np.arctan2(y_component, x_component)
+            parent_angles.append(angle)
+
+        # Sort streams by angle
+        stream_order = np.argsort(parent_angles)
+        sorted_angles = [parent_angles[i] for i in stream_order]
+
+        # Calculate boundary angles (midpoints between consecutive parent angles)
+        boundary_angles = []
+        for i in range(num_streams):
+            angle_a = sorted_angles[i]
+            angle_b = sorted_angles[(i + 1) % num_streams]
+
+            # Handle wrap-around
+            if angle_b < angle_a:
+                angle_b += 2 * np.pi
+
+            mid_angle = (angle_a + angle_b) / 2
+            if mid_angle > np.pi:
+                mid_angle -= 2 * np.pi
+            boundary_angles.append(mid_angle)
+
+        # Assign each contour point to a stream based on its angle
+        Ps = [pair[0] for pair in contour_match]
+        new_contours = [[] for _ in range(num_streams)]
+
+        prev_stream = None
+        for i, P in enumerate(Ps):
+            direction = P - centroid
+            x_component = np.dot(direction, basis_x)
+            y_component = np.dot(direction, basis_y)
+            point_angle = np.arctan2(y_component, x_component)
+
+            # Find which sector this point belongs to
+            assigned_stream = None
+            for j in range(num_streams):
+                # Get boundary range for stream at sorted position j
+                start_boundary = boundary_angles[(j - 1) % num_streams]
+                end_boundary = boundary_angles[j]
+
+                # Normalize angle for comparison
+                test_angle = point_angle
+
+                # Handle wrap-around cases
+                if start_boundary > end_boundary:
+                    # Sector crosses -pi/pi boundary
+                    if test_angle >= start_boundary or test_angle < end_boundary:
+                        assigned_stream = stream_order[j]
+                        break
+                else:
+                    if start_boundary <= test_angle < end_boundary:
+                        assigned_stream = stream_order[j]
+                        break
+
+            if assigned_stream is None:
+                # Fallback: assign to nearest parent
+                distances = [np.linalg.norm(P - pp) for pp in projected_parents]
+                assigned_stream = np.argmin(distances)
+
+            # Add transition midpoint if stream changes
+            if prev_stream is not None and prev_stream != assigned_stream:
+                prev_P = Ps[i - 1]
+                mid_P = (prev_P + P) / 2
+                new_contours[prev_stream].append(mid_P)
+                new_contours[assigned_stream].append(mid_P)
+
+            new_contours[assigned_stream].append(P)
+            prev_stream = assigned_stream
+
+        # Ensure no stream is empty
+        for stream_idx in range(num_streams):
+            if len(new_contours[stream_idx]) == 0:
+                parent_mean = projected_parents[stream_idx]
+                distances = [np.linalg.norm(np.array(p) - parent_mean) for p in Ps]
+                closest_idx = np.argmin(distances)
+                new_contours[stream_idx].append(Ps[closest_idx])
+                if closest_idx > 0:
+                    new_contours[stream_idx].insert(0, Ps[closest_idx - 1])
+                if closest_idx < len(Ps) - 1:
+                    new_contours[stream_idx].append(Ps[closest_idx + 1])
+                print(f"Warning: Stream {stream_idx} had no points in angular cutting, added fallback")
+
+        return new_contours
+
+    def _cut_contour_gradient(self, contour, contour_match, parent_means, basis_z, parent_areas=None):
+        """
+        Cut a contour by finding natural transition points where nearest-parent changes.
+
+        This method:
+        1. Computes distance from each contour point to each parent mean
+        2. Weights distances by parent areas (larger areas = more pull)
+        3. Finds transition points where the nearest parent changes
+        4. Uses these natural boundaries as cut points
+        5. Guarantees contiguous segments (no zig-zag)
+
+        Args:
+            contour: list of 3D points forming the contour
+            contour_match: list of (P, Q) pairs from bounding plane matching
+            parent_means: list of 3D mean points for each parent stream
+            basis_z: normal vector of the contour plane
+            parent_areas: list of areas for each parent stream (optional)
+
+        Returns:
+            new_contours: list of contour point lists, one per parent stream
+        """
+        n = len(contour)
+        num_streams = len(parent_means)
+
+        if num_streams < 2:
+            return [list(contour)]
+
+        if n == 0 or len(contour_match) == 0:
+            return [[parent_means[s].copy()] for s in range(num_streams)]
+
+        Ps = [pair[0] for pair in contour_match]
+        n_pts = len(Ps)
+
+        # Project parent means onto the contour plane
+        centroid = np.mean(contour, axis=0)
+        projected_parents = [p - np.dot(p - centroid, basis_z) * basis_z for p in parent_means]
+
+        # Compute area weights (larger area = smaller weight = more pull)
+        if parent_areas is not None and len(parent_areas) == num_streams:
+            total_area = sum(parent_areas)
+            # Weight = 1 / (normalized_area), so larger areas have smaller effective distance
+            area_weights = [total_area / (area + 1e-10) for area in parent_areas]
+            # Normalize weights
+            max_weight = max(area_weights)
+            area_weights = [w / max_weight for w in area_weights]
+        else:
+            area_weights = [1.0] * num_streams
+
+        # Compute distance from each point to each parent (weighted by area)
+        distances = np.zeros((n_pts, num_streams))
+        for i, P in enumerate(Ps):
+            for s, pp in enumerate(projected_parents):
+                distances[i, s] = np.linalg.norm(np.array(P) - pp) * area_weights[s]
+
+        # Find nearest parent for each point
+        nearest = np.argmin(distances, axis=1)
+
+        # Find all transition points (where nearest parent changes)
+        transitions = []
+        for i in range(n_pts):
+            next_i = (i + 1) % n_pts
+            if nearest[i] != nearest[next_i]:
+                # Transition between i and next_i
+                # Store: (index, from_stream, to_stream)
+                transitions.append((i, nearest[i], nearest[next_i]))
+
+        # If no transitions (all points nearest to same parent), assign all to that parent
+        if len(transitions) == 0:
+            new_contours = [[] for _ in range(num_streams)]
+            dominant = nearest[0]
+            new_contours[dominant] = list(Ps)
+            # Give other streams at least one point
+            for s in range(num_streams):
+                if s != dominant and len(new_contours[s]) == 0:
+                    dist_to_s = distances[:, s]
+                    closest = np.argmin(dist_to_s)
+                    new_contours[s].append(Ps[closest])
+            return new_contours
+
+        # Build contours by following transitions
+        # Start from first transition and collect points for each stream
+        new_contours = [[] for _ in range(num_streams)]
+
+        # Sort transitions by index
+        transitions.sort(key=lambda x: x[0])
+
+        # Each segment goes from one transition to the next
+        for t_idx in range(len(transitions)):
+            start_trans = transitions[t_idx]
+            end_trans = transitions[(t_idx + 1) % len(transitions)]
+
+            start_idx = (start_trans[0] + 1) % n_pts  # First point after transition
+            end_idx = end_trans[0]  # Last point before next transition
+            stream = start_trans[2]  # Stream we're transitioning TO
+
+            # Collect points in this segment
+            if end_idx >= start_idx:
+                for i in range(start_idx, end_idx + 1):
+                    new_contours[stream].append(Ps[i])
+            else:
+                # Wrap around
+                for i in range(start_idx, n_pts):
+                    new_contours[stream].append(Ps[i])
+                for i in range(0, end_idx + 1):
+                    new_contours[stream].append(Ps[i])
+
+            # Add transition midpoint to both streams for smooth connection
+            mid_P = (Ps[start_trans[0]] + Ps[(start_trans[0] + 1) % n_pts]) / 2
+            if len(new_contours[start_trans[1]]) > 0:
+                new_contours[start_trans[1]].append(mid_P)
+            new_contours[stream].insert(0, mid_P)
+
+        # Ensure no stream is empty
+        for stream_idx in range(num_streams):
+            if len(new_contours[stream_idx]) == 0:
+                parent_mean = projected_parents[stream_idx]
+                dist_to_stream = [np.linalg.norm(np.array(p) - parent_mean) for p in Ps]
+                closest_idx = np.argmin(dist_to_stream)
+                new_contours[stream_idx].append(Ps[closest_idx])
+                print(f"Warning: Stream {stream_idx} had no points in gradient cutting, added fallback")
+
+        return new_contours
+
+    def _ensure_contiguous_assignments(self, assignments):
+        """
+        Ensure each stream's points form a contiguous segment.
+        If a stream has multiple disconnected segments, merge them.
+
+        Args:
+            assignments: list of stream indices
+
+        Returns:
+            cleaned assignments with contiguous segments per stream
+        """
+        n = len(assignments)
+        if n == 0:
+            return assignments
+
+        # Find all unique streams
+        streams = list(set(assignments))
+
+        # For each stream, find its segments
+        stream_segments = {s: [] for s in streams}
+
+        current_stream = assignments[0]
+        segment_start = 0
+
+        for i in range(1, n + 1):
+            idx = i % n
+            if i == n or assignments[idx] != current_stream:
+                stream_segments[current_stream].append((segment_start, i - 1))
+                if i < n:
+                    current_stream = assignments[idx]
+                    segment_start = i
+
+        # If any stream has multiple segments, keep only the largest
+        result = list(assignments)
+        for stream, segments in stream_segments.items():
+            if len(segments) > 1:
+                # Find largest segment
+                largest = max(segments, key=lambda s: s[1] - s[0])
+                # Mark other segments for reassignment
+                for seg in segments:
+                    if seg != largest:
+                        for i in range(seg[0], seg[1] + 1):
+                            # Assign to nearest other stream
+                            if i > 0:
+                                result[i] = result[i - 1]
+                            elif i < n - 1:
+                                result[i] = result[i + 1]
+
+        return result
+
+    def find_contour_stream(self):
+        origin_num = len(self.bounding_planes[0])
+        insertion_num = len(self.bounding_planes[-1])
+
+        # Stream Search
         contour_stream_match = []
         check_count = 0
+
+        # Procedure will start from origin or insertion where stream number is larger
         if origin_num >= insertion_num:
             self.draw_contour_stream = [True] * origin_num
             ordered_contours_trim = [[self.vertices[edge_group]] for i, edge_group in enumerate(self.edge_groups) if self.edge_classes[i] == 'origin']  
@@ -1885,6 +2801,10 @@ class MeshLoader(object):
 
             contour_bounding_zip = zip(self.contours[-2::-1], self.bounding_planes[-2::-1])
 
+        division_start = False
+        division_start_index = 0
+        zip_num = len(self.bounding_planes)
+        zip_index = 0
         # contours from reversed self.contours
         for next_contours, next_bounding_planes in contour_bounding_zip:
             # Two cases: 
@@ -1921,7 +2841,7 @@ class MeshLoader(object):
                     linked[i].append(closest)
                     match[closest].append(i)
                     counts[closest] += 1
-            else:
+            else:   # link_mode = 'mean'
                 next_means = np.array([np.mean(contour, axis=0) for contour in next_contours])
                 next_basis_z = [bounding_plane['basis_z'] for bounding_plane in next_bounding_planes]
                 # print(len(ordered_contours_trim), linked, counts)
@@ -1944,6 +2864,7 @@ class MeshLoader(object):
                 print("Something's wrong for next contours linking")
                 return
 
+            # print(linked, match, counts)
             contour_stream_match.append(match)
 
             if len(next_contours) == len(ordered_contours_trim):
@@ -1957,6 +2878,7 @@ class MeshLoader(object):
                     bounding_planes_trim[i].append(bounding_plane)
             else:
                 for i, count in enumerate(counts):
+                    # Multiple contours are linked to the same next_contour
                     if count > 1:
                         target_next_contour = next_contours[i]
                         target_next_bounding_plane_info = next_bounding_planes[i]
@@ -1994,174 +2916,232 @@ class MeshLoader(object):
                         # target_current_contours = [ordered_contours_trim[j][-1] for j in target_current_contours_indices]
                         target_current_bounding_plane_info = [bounding_planes_trim[j][-1] for j in target_current_contours_indices]
                         target_current_contours_areas = [plane_info['area'] for plane_info in target_current_bounding_plane_info]
-                        # target_current_contours_areas = [np.linalg.norm(v1[0] - v0[0]) * 
-                        #                                  np.linalg.norm(v3[1] - v0[1]) for v0, v1, v2, v3 
+                        # target_current_contours_areas = [np.abs(np.linalg.norm(v1[0] - v0[0]) * 
+                        #                                  np.linalg.norm(v3[1] - v0[1])) for v0, v1, v2, v3 
                         #                                  in [plane_info['bounding_plane'] for plane_info in target_current_bounding_plane_info]]
+                        print(target_current_contours_areas)
 
                         target_current_contours_means = [plane_info['mean'] for plane_info in target_current_bounding_plane_info]
                         projected_target_current_contours_means = [mean - np.dot(mean - target_next_mean, target_next_basis_z) * target_next_basis_z for mean in target_current_contours_means]
 
-                        structure_vector = np.array([0.0, 0.0, 0.0])
-                        # longest_distance = 0
-                        start_point = None
-                        end_point = None
-
-                        for mean_i in range(len(projected_target_current_contours_means)):
-                            for mean_j in range(mean_i + 1, len(projected_target_current_contours_means)):
-                                cand_vector = projected_target_current_contours_means[mean_i] - projected_target_current_contours_means[mean_j]
-
-                                if np.dot(cand_vector, np.array([1, 0, 0])) < 0:
-                                    cand_vector *= -1
-                                structure_vector += np.array(cand_vector)
-                        structure_vector /= len(projected_target_current_contours_means)
-                        
-                        projected_means_mean = np.array(projected_target_current_contours_means)
-                        projected_means_mean = np.mean(projected_means_mean, axis=0)
-                        structure_vector /= np.linalg.norm(structure_vector)
-
-                        horizontal_vector = v1 - v0
-                        vertical_vector = v3 - v0
-
-                        horizontal_vector /= np.linalg.norm(horizontal_vector)
-                        vertical_vector /= np.linalg.norm(vertical_vector)
-
-                        horizontal_projection = np.abs(np.dot(structure_vector, horizontal_vector))
-                        vertical_projection = np.abs(np.dot(structure_vector, vertical_vector))
-
-                        if horizontal_projection > vertical_projection:
-                            # print()
-                            # print(f"Horizontal: {horizontal_projection} > {vertical_projection}")
-                            # project target_current_contours_means onto line made by horizontal vector and target_next_mean
-                            target_values = [np.dot(mean - target_next_mean, horizontal_vector) for mean in projected_target_current_contours_means]
-                            target_axis = 0
+                        # Choose cutting method
+                        if self.cutting_method == 'voronoi':
+                            # Voronoi-based cutting with smoothing
+                            new_target_next_contours = self._cut_contour_voronoi(
+                                target_next_contour,
+                                target_next_contour_match,
+                                projected_target_current_contours_means,
+                                target_next_basis_z,
+                                smooth_window=5
+                            )
+                        elif self.cutting_method == 'angular':
+                            # Angular/radial cutting with pie-slice sectors
+                            new_target_next_contours = self._cut_contour_angular(
+                                target_next_contour,
+                                target_next_contour_match,
+                                projected_target_current_contours_means,
+                                target_next_basis_z
+                            )
+                        elif self.cutting_method == 'gradient':
+                            # Gradient-based cutting at natural transition points
+                            new_target_next_contours = self._cut_contour_gradient(
+                                target_next_contour,
+                                target_next_contour_match,
+                                projected_target_current_contours_means,
+                                target_next_basis_z
+                            )
                         else:
-                            target_values = [np.dot(mean - target_next_mean, vertical_vector) for mean in projected_target_current_contours_means]
-                            target_axis = 1
-                        target_order = np.argsort(target_values)
+                            # Area-based cutting (original method)
+                            structure_vector = np.array([0.0, 0.0, 0.0])
+                            # longest_distance = 0
+                            start_point = None
+                            end_point = None
 
-                        # sorted_areas = [target_current_contours_areas[index] for index in target_order]
-                        # sorted_areas = [area + np.mean(sorted_areas) for area in sorted_areas]
+                            for mean_i in range(len(projected_target_current_contours_means)):
+                                for mean_j in range(mean_i + 1, len(projected_target_current_contours_means)):
+                                    cand_vector = projected_target_current_contours_means[mean_i] - projected_target_current_contours_means[mean_j]
 
-                        # sorted_areas = [1 / len(target_order)] * len(target_order)
+                                    if np.dot(cand_vector, np.array([1, 0, 0])) < 0:
+                                        cand_vector *= -1
+                                    structure_vector += np.array(cand_vector)
+                            structure_vector /= len(projected_target_current_contours_means)
 
-                        sorted_areas = []
-                        mul_num = 1.5
-                        for area_i in range(len(target_order)):
-                            if area_i == 0 or area_i == len(target_order) - 1:
-                                sorted_areas.append(1)
+                            # projected_means_mean = np.array(projected_target_current_contours_means)
+                            # projected_means_mean = np.mean(projected_means_mean, axis=0)
+                            structure_vector /= np.linalg.norm(structure_vector)
+
+                            horizontal_vector = v1 - v0
+                            vertical_vector = v3 - v0
+
+                            horizontal_vector /= np.linalg.norm(horizontal_vector)
+                            vertical_vector /= np.linalg.norm(vertical_vector)
+
+                            horizontal_projection = np.abs(np.dot(structure_vector, horizontal_vector))
+                            vertical_projection = np.abs(np.dot(structure_vector, vertical_vector))
+
+                            if horizontal_projection > vertical_projection:
+                                # print()
+                                # print(f"Horizontal: {horizontal_projection} > {vertical_projection}")
+                                # project target_current_contours_means onto line made by horizontal vector and target_next_mean
+                                target_values = [np.dot(mean - target_next_mean, horizontal_vector) for mean in projected_target_current_contours_means]
+                                target_axis = 0
                             else:
-                                sorted_areas.append(mul_num)
-                                
-                        accumul_areas = np.cumsum(sorted_areas, dtype=float)
-                        accumul_areas /= accumul_areas[-1]
+                                target_values = [np.dot(mean - target_next_mean, vertical_vector) for mean in projected_target_current_contours_means]
+                                target_axis = 1
+                            target_order = np.argsort(target_values)
 
-                        target_basis_x = target_next_bounding_plane_info['basis_x']
-                        target_basis_y = target_next_bounding_plane_info['basis_y']
-                        target_basis_z = target_next_bounding_plane_info['basis_z']
-                        proj_basis_xs = [np.dot(basis_x, target_basis_x) * target_basis_x + np.dot(basis_x, target_basis_y) * target_basis_y for basis_x in [basis_x, prev_basis_x, next_basis_x]]
-                        new_basis_x = np.mean(proj_basis_xs, axis=0)
-                        new_basis_x = new_basis_x / np.linalg.norm(new_basis_x)
-                        # new_basis_x = (new_basis_x + target_basis_x) / 2
-                        new_basis_y = np.cross(target_basis_z, new_basis_x)
-                        new_plane_info = {
-                            'basis_x': new_basis_x,
-                            'basis_y': new_basis_y,
-                            'basis_z': target_basis_z,
-                            'newell_normal': target_basis_z,
-                        }
-                        _, new_bounding_plane = self.save_bounding_planes(target_next_contour, target_next_bounding_plane_info['scalar_value'],
-                                                                          prev_bounding_plane=target_next_bounding_plane_info,
-                                                                          bounding_plane_info_orig = new_plane_info)
-                        target_next_bounding_plane_info = new_bounding_plane
 
-                        # print(accumul_areas)
+                            # if accumul_areas is None:
+                            #     sorted_areas = [target_current_contours_areas[index] for index in target_order]
+                            #     accumul_areas = np.cumsum(sorted_areas, dtype=float)
+                            #     accumul_areas /= accumul_areas[-1]
 
-                        prev_inserted_index = None
-                        prev_target_value = None
-                        for index, accumul_area in enumerate(accumul_areas):
-                            if normalized_Qs[-1][target_axis] <= accumul_area:
-                                prev_inserted_index = target_order[index]
-                                prev_target_value = normalized_Qs[-1][target_axis]
-                                break
-                        new_target_next_contours = [[] for _ in range(len(target_current_contours_indices))]
+                            # sorted_areas = [target_current_contours_areas[index] for index in target_order]
+                            # # sorted_areas = [area + np.mean(sorted_areas) for area in sorted_areas]
 
-                        for Q_index, Q in enumerate(normalized_Qs):
-                            target_value = Q[target_axis]
+                            # # sorted_areas = [1 / len(target_order)] * len(target_order)
 
+                            # sorted_areas = []
+                            # mul_num = 1.5
+                            # for area_i in range(len(target_order)):
+                            #     if area_i == 0 or area_i == len(target_order) - 1:
+                            #         sorted_areas.append(1)
+                            #     else:
+                            #         sorted_areas.append(mul_num)
+
+                            # accumul_areas = np.cumsum(sorted_areas, dtype=float)
+                            # accumul_areas /= accumul_areas[-1]
+
+                            if not division_start:
+                                division_start = True
+                                division_start_index = zip_index
+
+                            sorted_areas1 = [target_current_contours_areas[index] for index in target_order]
+                            accumul_areas1 = np.cumsum(sorted_areas1, dtype=float)
+                            accumul_areas1 /= accumul_areas1[-1]
+
+                            sorted_areas2 = []
+                            mul_num = 1.5
+                            for area_i in range(len(target_order)):
+                                if area_i == 0 or area_i == len(target_order) - 1:
+                                    sorted_areas2.append(1)
+                                else:
+                                    sorted_areas2.append(mul_num)
+                            accumul_areas2 = np.cumsum(sorted_areas2, dtype=float)
+                            accumul_areas2 /= accumul_areas2[-1]
+
+                            # ratio2 = (zip_index - division_start_index) / (zip_num - division_start_index)
+                            ratio2 = (zip_index) / (zip_num)
+                            ratio1 = 1 - ratio2
+                            accumul_areas = accumul_areas1 * ratio1 + accumul_areas2 * ratio2
+
+                            # target_basis_x = target_next_bounding_plane_info['basis_x']
+                            # target_basis_y = target_next_bounding_plane_info['basis_y']
+                            # target_basis_z = target_next_bounding_plane_info['basis_z']
+                            # proj_basis_xs = [np.dot(basis_x, target_basis_x) * target_basis_x + np.dot(basis_x, target_basis_y) * target_basis_y for basis_x in [basis_x, prev_basis_x, next_basis_x]]
+                            # new_basis_x = np.mean(proj_basis_xs, axis=0)
+                            # new_basis_x = new_basis_x / np.linalg.norm(new_basis_x)
+                            # # new_basis_x = (new_basis_x + target_basis_x) / 2
+                            # new_basis_y = np.cross(target_basis_z, new_basis_x)
+                            # new_plane_info = {
+                            #     'basis_x': new_basis_x,
+                            #     'basis_y': new_basis_y,
+                            #     'basis_z': target_basis_z,
+                            #     'newell_normal': target_basis_z,
+                            # }
+                            # _, new_bounding_plane = self.save_bounding_planes(target_next_contour, target_next_bounding_plane_info['scalar_value'],
+                            #                                                   prev_bounding_plane=target_next_bounding_plane_info,
+                            #                                                   bounding_plane_info_orig = new_plane_info)
+                            # target_next_bounding_plane_info = new_bounding_plane
+
+                            # print(accumul_areas)
+
+                            prev_inserted_index = None
+                            prev_target_value = None
                             for index, accumul_area in enumerate(accumul_areas):
-                                if target_value <= accumul_area:
-                                    # if index == 0:
-                                    #     print(f'{target_value} <= {accumul_area}')
-                                    # else:
-                                    #     print(f'{accumul_areas[index - 1]} < {target_value} <= {accumul_area}')
-
-                                    inserted_index = target_order[index]
-                                    if prev_inserted_index is not None and prev_inserted_index != inserted_index:
-                                        # print('prev index and current index are different')
-                                        # print(f'prev index: {prev_inserted_index}, current index: {inserted_index}')
-                                        # print(f'prev value: {prev_target_value}, current value: {target_value}')
-                                        prev_P = Ps[Q_index - 1]
-                                        P = Ps[Q_index]
-
-                                        # find index of inserted_index from target_order
-                                        idx1 = np.where(target_order == prev_inserted_index)[0][0]
-                                        idx2 = np.where(target_order == inserted_index)[0][0]
-
-                                        if idx1 <= idx2:
-                                            # forward
-                                            path1 = list(range(idx1, idx2 + 1))
-                                            # reverse
-                                            path2 = np.concatenate([range(idx1, -1, -1), range(len(target_order) - 1, idx2 - 1, -1)])
-                                        else:
-                                            # reverse
-                                            path1 = list(range(idx1, idx2 - 1, -1))
-                                            # forward
-                                            path2 = np.concatenate([range(idx1, len(target_order)), range(0, idx2 + 1)])
-
-                                        # Ascending or Descending Violation must be checked
-                                        wanted_order = path1
-                                        temp_areas = accumul_areas[wanted_order]
-                                        if temp_areas[0] < temp_areas[-1]:
-                                            # Ascending order
-                                            for i in range(len(temp_areas) - 1):
-                                                if temp_areas[i] > temp_areas[i + 1]:
-                                                    wanted_order = path2
-                                                    break
-                                        else:
-                                            # Descending order
-                                            for i in range(len(temp_areas) - 1):
-                                                if temp_areas[i] < temp_areas[i + 1]:
-                                                    wanted_order = path2
-                                                    break
-
-                                        # print(f'path1: {path1}, path2: {path2}')
-                                        # print(f'target order: {target_order[wanted_order]}')
-                                        # print(f'accumul areas: {accumul_areas[wanted_order]}')
-                                        
-                                        if prev_target_value < target_value:
-                                            dividing_values = np.concatenate([[prev_target_value], accumul_areas[wanted_order[:-1]], [target_value]])
-                                        else:
-                                            dividing_values = np.concatenate([[prev_target_value], accumul_areas[wanted_order[1:]], [target_value]])
-                                        # print(f'dividing values: {dividing_values}')
-
-                                        dividing_order = target_order[wanted_order]
-                                        
-                                        for dividing_index in range(len(dividing_order) - 1):
-                                            weight_P = (dividing_values[0] - dividing_values[dividing_index + 1]) / (dividing_values[0] - dividing_values[-1])
-                                            weight_prev_P = 1 - weight_P
-
-                                            mid_P = weight_P * P + weight_prev_P * prev_P
-                                            mid_Q = weight_P * Q + weight_prev_P * normalized_Qs[Q_index - 1]
-
-                                            new_target_next_contours[dividing_order[dividing_index]].append(mid_P)
-                                            new_target_next_contours[dividing_order[dividing_index + 1]].append(mid_P)
-                                            # print(f'mid_P corresponding {mid_Q} inserted into {dividing_order[dividing_index]} and {dividing_order[dividing_index + 1]}')
-                                    
-                                    # print(f'P corresponding {Q} inserted into {inserted_index}')
-                                    new_target_next_contours[inserted_index].append(Ps[Q_index])
-                                    prev_inserted_index = inserted_index
-                                    prev_target_value = target_value
+                                if normalized_Qs[-1][target_axis] <= accumul_area:
+                                    prev_inserted_index = target_order[index]
+                                    prev_target_value = normalized_Qs[-1][target_axis]
                                     break
+                            new_target_next_contours = [[] for _ in range(len(target_current_contours_indices))]
+
+                            for Q_index, Q in enumerate(normalized_Qs):
+                                target_value = Q[target_axis]
+
+                                for index, accumul_area in enumerate(accumul_areas):
+                                    if target_value <= accumul_area:
+                                        # if index == 0:
+                                        #     print(f'{target_value} <= {accumul_area}')
+                                        # else:
+                                        #     print(f'{accumul_areas[index - 1]} < {target_value} <= {accumul_area}')
+
+                                        inserted_index = target_order[index]
+                                        if prev_inserted_index is not None and prev_inserted_index != inserted_index:
+                                            # print('prev index and current index are different')
+                                            # print(f'prev index: {prev_inserted_index}, current index: {inserted_index}')
+                                            # print(f'prev value: {prev_target_value}, current value: {target_value}')
+                                            prev_P = Ps[Q_index - 1]
+                                            P = Ps[Q_index]
+
+                                            # find index of inserted_index from target_order
+                                            idx1 = np.where(target_order == prev_inserted_index)[0][0]
+                                            idx2 = np.where(target_order == inserted_index)[0][0]
+
+                                            if idx1 <= idx2:
+                                                # forward
+                                                path1 = list(range(idx1, idx2 + 1))
+                                                # reverse
+                                                path2 = np.concatenate([range(idx1, -1, -1), range(len(target_order) - 1, idx2 - 1, -1)])
+                                            else:
+                                                # reverse
+                                                path1 = list(range(idx1, idx2 - 1, -1))
+                                                # forward
+                                                path2 = np.concatenate([range(idx1, len(target_order)), range(0, idx2 + 1)])
+
+                                            # Ascending or Descending Violation must be checked
+                                            wanted_order = path1
+                                            temp_areas = accumul_areas[wanted_order]
+                                            if temp_areas[0] < temp_areas[-1]:
+                                                # Ascending order
+                                                for i in range(len(temp_areas) - 1):
+                                                    if temp_areas[i] > temp_areas[i + 1]:
+                                                        wanted_order = path2
+                                                        break
+                                            else:
+                                                # Descending order
+                                                for i in range(len(temp_areas) - 1):
+                                                    if temp_areas[i] < temp_areas[i + 1]:
+                                                        wanted_order = path2
+                                                        break
+
+                                            # print(f'path1: {path1}, path2: {path2}')
+                                            # print(f'target order: {target_order[wanted_order]}')
+                                            # print(f'accumul areas: {accumul_areas[wanted_order]}')
+
+                                            if prev_target_value < target_value:
+                                                dividing_values = np.concatenate([[prev_target_value], accumul_areas[wanted_order[:-1]], [target_value]])
+                                            else:
+                                                dividing_values = np.concatenate([[prev_target_value], accumul_areas[wanted_order[1:]], [target_value]])
+                                            # print(f'dividing values: {dividing_values}')
+
+                                            dividing_order = target_order[wanted_order]
+
+                                            for dividing_index in range(len(dividing_order) - 1):
+                                                weight_P = (dividing_values[0] - dividing_values[dividing_index + 1]) / (dividing_values[0] - dividing_values[-1])
+                                                weight_prev_P = 1 - weight_P
+
+                                                mid_P = weight_P * P + weight_prev_P * prev_P
+                                                mid_Q = weight_P * Q + weight_prev_P * normalized_Qs[Q_index - 1]
+
+                                                new_target_next_contours[dividing_order[dividing_index]].append(mid_P)
+                                                new_target_next_contours[dividing_order[dividing_index + 1]].append(mid_P)
+                                                # print(f'mid_P corresponding {mid_Q} inserted into {dividing_order[dividing_index]} and {dividing_order[dividing_index + 1]}')
+
+                                        # print(f'P corresponding {Q} inserted into {inserted_index}')
+                                        new_target_next_contours[inserted_index].append(Ps[Q_index])
+                                        prev_inserted_index = inserted_index
+                                        prev_target_value = target_value
+                                        break
 
                         # [print(contour) for contour in new_target_next_contours]
 
@@ -2232,6 +3212,18 @@ class MeshLoader(object):
 
             self.contours = ordered_contours_trim
             self.bounding_planes = bounding_planes_trim
+
+            zip_index += 1
+
+
+        # After stream search
+        #
+        #         Stream 1      Stream 2
+        #       ------------/-----------
+        #      ------------/-------------
+        #                ...
+        #      ----------     ---------
+
 
         for stream_i, bounding_plane_stream in enumerate(self.bounding_planes):
             for i, bounding_plane_info in enumerate(bounding_plane_stream):
@@ -2545,32 +3537,42 @@ class MeshLoader(object):
         self.contours = new_contours
         '''
 
-        fiber_nums = []
-        for bounding_plane_stream in self.bounding_planes:
-            max_area = 0
-            min_area = np.inf
-            for bounding_plane in bounding_plane_stream:
-                if bounding_plane['area'] > max_area:
-                    max_area = bounding_plane['area']
-                if bounding_plane['area'] < min_area:
-                    min_area = bounding_plane['area']
+        if self.is_one_fiber:
+            self.fiber_architecture = [np.array([0.5, 0.5])]
+            triplet_num = len(self.contours[0]) // 3
+            self.contours = [[self.contours[0][0], self.contours[0][triplet_num], self.contours[0][triplet_num * 2], self.contours[0][-1]]]
+            self.bounding_planes = [[self.bounding_planes[0][0], self.bounding_planes[0][triplet_num], self.bounding_planes[0][triplet_num * 2], self.bounding_planes[0][-1]]]
+        else:
+            fiber_nums = []
+            for bounding_plane_stream in self.bounding_planes:
+                max_area = 0
+                min_area = np.inf
+                for bounding_plane in bounding_plane_stream:
+                    if bounding_plane['area'] > max_area:
+                        max_area = bounding_plane['area']
+                    if bounding_plane['area'] < min_area:
+                        min_area = bounding_plane['area']
 
-            fiber_num = int(np.sqrt(max_area * 10 / (scale * scale)))
-            # fiber_num = np.sqrt(min_area * 1000 / (scale * scale))
-            # print(fiber_num)
-            fiber_num = max(int(fiber_num), 1)
+                # Choose area based on sampling method
+                if self.sampling_method == 'sobol_min_contour':
+                    # Use min_area to ensure samples fit in smallest contour
+                    fiber_num = int(np.sqrt(min_area * 10 / (scale * scale)))
+                else:
+                    # Use max_area (original behavior)
+                    fiber_num = int(np.sqrt(max_area * 10 / (scale * scale)))
+                fiber_num = max(int(fiber_num), 1)
+                fiber_nums.append(fiber_num)
 
-            # fiber_num = 4
-            # fiber_num = max(int(min_area * 1000 / scale), 4)
-            fiber_nums.append(fiber_num)
-
-        # self.fiber_architecture = [self.sobol_sampling_barycentric(16) for _ in range(len(self.bounding_planes))]
-        # self.fiber_architecture = [[np.array([0.5, 0.5]),
-        #                             np.array([0.1, 0.1]),
-        #                             np.array([0.1, 0.9]),
-        #                             np.array([0.9, 0.9]),
-        #                             np.array([0.9, 0.1])] for _ in range(len(self.bounding_planes))]
-        self.fiber_architecture = [self.sobol_sampling_barycentric(fiber_num) for fiber_num in fiber_nums]
+            # Generate fiber architecture based on sampling method
+            if self.sampling_method == 'sobol_min_contour':
+                # Sample inside smallest contour of each stream
+                self.fiber_architecture = [
+                    self.sobol_sampling_min_contour(bounding_plane_stream, fiber_num)
+                    for bounding_plane_stream, fiber_num in zip(self.bounding_planes, fiber_nums)
+                ]
+            else:
+                # Original: Sobol sampling on unit square
+                self.fiber_architecture = [self.sobol_sampling_barycentric(fiber_num) for fiber_num in fiber_nums]
 
         # for i, bounding_plane_info in enumerate(self.bounding_planes):
         #     if i == 0:
@@ -2615,6 +3617,71 @@ class MeshLoader(object):
         samples = sobol.random(num_samples)
 
         return samples
+
+    def sobol_sampling_min_contour(self, bounding_plane_stream, num_samples):
+        """
+        Sample 2D positions inside the smallest contour of a stream using Sobol + rejection.
+        These positions are valid for all contours in the stream.
+
+        Args:
+            bounding_plane_stream: List of bounding plane dicts for one stream
+            num_samples: Number of samples to generate
+
+        Returns:
+            np.array of shape (num_samples, 2) with positions in [0,1]^2
+        """
+        from scipy.stats.qmc import Sobol
+        from shapely.geometry import Point, Polygon
+
+        # Find the smallest contour (by area)
+        min_area = np.inf
+        smallest_plane = None
+        for bp in bounding_plane_stream:
+            if bp['area'] < min_area:
+                min_area = bp['area']
+                smallest_plane = bp
+
+        # Get 2D projected contour
+        projected_2d = smallest_plane['projected_2d']
+
+        # Normalize to unit square [0,1]^2 for Sobol compatibility
+        min_pt = np.min(projected_2d, axis=0)
+        max_pt = np.max(projected_2d, axis=0)
+        extent = max_pt - min_pt
+
+        # Handle degenerate case
+        if extent[0] < 1e-10 or extent[1] < 1e-10:
+            return self.sobol_sampling_barycentric(num_samples)
+
+        normalized_contour = (projected_2d - min_pt) / extent
+
+        poly = Polygon(normalized_contour)
+        if not poly.is_valid:
+            poly = poly.buffer(0)  # Fix invalid polygons
+
+        # Rejection sampling with Sobol
+        sobol = Sobol(d=2, scramble=True)
+        samples = []
+        max_iterations = 100
+        iteration = 0
+
+        while len(samples) < num_samples and iteration < max_iterations:
+            batch_size = (num_samples - len(samples)) * 4
+            candidates = sobol.random(batch_size)
+            for c in candidates:
+                if poly.contains(Point(c[0], c[1])):
+                    samples.append(c)
+                    if len(samples) >= num_samples:
+                        break
+            iteration += 1
+
+        # If we couldn't get enough samples, fill with centroid or fallback
+        if len(samples) < num_samples:
+            centroid = np.array(poly.centroid.coords[0])
+            while len(samples) < num_samples:
+                samples.append(centroid)
+
+        return np.array(samples[:num_samples])
 
     def find_waypoints(self, bounding_plane_info, fiber_architecture, is_origin=False):
         bounding_vertices = bounding_plane_info['bounding_plane']
