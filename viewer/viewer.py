@@ -2940,15 +2940,20 @@ class GLFWApp():
                     # Project contour to 2D
                     contour_2d = np.array([[np.dot(v - mean, basis_x), np.dot(v - mean, basis_y)] for v in contour])
 
-                    # Find bounding box for normalization
+                    # Find bounding box for normalization (preserve aspect ratio)
                     min_xy = contour_2d.min(axis=0)
                     max_xy = contour_2d.max(axis=0)
                     range_xy = max_xy - min_xy
                     range_xy[range_xy < 1e-10] = 1.0  # Avoid division by zero
 
-                    # Normalize to [0,1] with some margin
+                    # Use uniform scale to preserve aspect ratio
+                    max_range = max(range_xy[0], range_xy[1])
                     margin = 0.1
-                    contour_2d_norm = (contour_2d - min_xy) / range_xy * (1 - 2 * margin) + margin
+                    scale = (1 - 2 * margin) / max_range
+
+                    # Center the contour in the canvas
+                    center_xy = (min_xy + max_xy) / 2
+                    contour_2d_norm = (contour_2d - center_xy) * scale + 0.5
 
                     # Draw contour polygon
                     points = []
@@ -2973,7 +2978,7 @@ class GLFWApp():
                             for wp in waypoints_3d:
                                 wp = np.array(wp)
                                 wp_2d = np.array([np.dot(wp - mean, basis_x), np.dot(wp - mean, basis_y)])
-                                wp_norm = (wp_2d - min_xy) / range_xy * (1 - 2 * margin) + margin
+                                wp_norm = (wp_2d - center_xy) * scale + 0.5
                                 wpx = x0 + wp_norm[0] * canvas_size
                                 wpy = y0 + (1 - wp_norm[1]) * canvas_size
                                 draw_list.add_circle_filled(wpx, wpy, 5, imgui.get_color_u32_rgba(0.9, 0.3, 0.3, 1.0))
@@ -2982,7 +2987,7 @@ class GLFWApp():
                     bp = plane_info.get('bounding_plane', None)
                     if bp is not None and len(bp) >= 4:
                         bp_2d = np.array([[np.dot(v - mean, basis_x), np.dot(v - mean, basis_y)] for v in bp])
-                        bp_norm = (bp_2d - min_xy) / range_xy * (1 - 2 * margin) + margin
+                        bp_norm = (bp_2d - center_xy) * scale + 0.5
                         bp_points = []
                         for pt in bp_norm:
                             bpx = x0 + pt[0] * canvas_size
