@@ -1261,7 +1261,7 @@ class ContourMeshMixin:
                 plane_info['basis_x'] = new_basis_x
                 plane_info['basis_y'] = new_basis_y
 
-                # Recompute bounding plane corners with new basis
+                # Recompute bounding plane corners with new basis (don't modify contour vertices)
                 contour_points = self.contours[level_idx][stream_idx]
                 projected_2d = np.array([[np.dot(v - mean, new_basis_x), np.dot(v - mean, new_basis_y)] for v in contour_points])
                 min_x, max_x = np.min(projected_2d[:, 0]), np.max(projected_2d[:, 0])
@@ -1274,9 +1274,25 @@ class ContourMeshMixin:
                 plane_info['bounding_plane'] = np.array([mean + x * new_basis_x + y * new_basis_y for x, y in bounding_plane_2d])
                 plane_info['projected_2d'] = np.array([mean + x * new_basis_x + y * new_basis_y for x, y in projected_2d])
 
-                # Update contour match
-                preserve = getattr(self, '_contours_normalized', False)
-                self.contours[level_idx][stream_idx], contour_match = self.find_contour_match(contour_points, plane_info['bounding_plane'], preserve_order=preserve)
+                # Update contour match WITHOUT modifying the original contour vertices
+                # Only update the P-Q correspondence for the new bounding plane orientation
+                contour_match = []
+                for v in contour_points:
+                    # Project vertex to bounding plane and find Q
+                    rel_v = v - mean
+                    x_proj = np.dot(rel_v, new_basis_x)
+                    y_proj = np.dot(rel_v, new_basis_y)
+                    # Normalize to [0,1] range based on bounding box
+                    width = max_x - min_x
+                    height = max_y - min_y
+                    if width > 1e-10 and height > 1e-10:
+                        q_x = (x_proj - min_x) / width
+                        q_y = (y_proj - min_y) / height
+                        q = mean + q_x * (max_x - min_x) * new_basis_x + q_y * (max_y - min_y) * new_basis_y
+                        q = plane_info['bounding_plane'][0] + q_x * (plane_info['bounding_plane'][1] - plane_info['bounding_plane'][0]) + q_y * (plane_info['bounding_plane'][3] - plane_info['bounding_plane'][0])
+                    else:
+                        q = mean
+                    contour_match.append([v, q])
                 plane_info['contour_match'] = contour_match
 
                 # Use this rectangle-like plane as reference for next
