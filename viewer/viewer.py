@@ -2897,22 +2897,29 @@ class GLFWApp():
             q_screen_points = []
             contour_2d_norm = None
 
-            # Helper function to compute normalized [0,1] coordinates using 2D projection
+            # Helper function to compute normalized [0,1] coordinates by solving linear system
             def point_to_unit_square_2d(point_3d, mean, basis_x, basis_y, bp_corners):
-                """Convert 3D point to [0,1]x[0,1] using 2D projection."""
-                # Project point to 2D
-                p_2d = np.array([np.dot(point_3d - mean, basis_x), np.dot(point_3d - mean, basis_y)])
-                # Get bounding box extents from corners (project them too)
-                bp_2d = np.array([[np.dot(v - mean, basis_x), np.dot(v - mean, basis_y)] for v in bp_corners])
-                min_x, min_y = bp_2d.min(axis=0)
-                max_x, max_y = bp_2d.max(axis=0)
-                width = max_x - min_x
-                height = max_y - min_y
-                if width < 1e-10 or height < 1e-10:
-                    return np.array([0.5, 0.5])
-                # Normalize to [0,1]
-                u = (p_2d[0] - min_x) / width
-                v = (p_2d[1] - min_y) / height
+                """Convert 3D point to [0,1]x[0,1] by inverting the bounding plane formula.
+
+                Q was created as: Q = bp[0] + u * (bp[1]-bp[0]) + v * (bp[3]-bp[0])
+                So we solve: Q - bp[0] = u * edge_x + v * edge_y
+                This gives proper [0,1] coordinates regardless of basis orthogonality.
+                """
+                v0 = bp_corners[0]
+                edge_x = bp_corners[1] - bp_corners[0]  # horizontal edge
+                edge_y = bp_corners[3] - bp_corners[0]  # vertical edge
+
+                # Solve 2x2 system using least squares (works in 3D)
+                # [edge_x | edge_y] * [u; v] = point - v0
+                rel_p = point_3d - v0
+
+                # Build matrix A = [edge_x, edge_y] as columns (3x2)
+                A = np.column_stack([edge_x, edge_y])
+
+                # Solve using least squares
+                result, _, _, _ = np.linalg.lstsq(A, rel_p, rcond=None)
+                u, v = result[0], result[1]
+
                 return np.array([np.clip(u, 0, 1), np.clip(v, 0, 1)])
 
             if (stream_idx < len(obj.contours) and contour_idx < len(obj.contours[stream_idx]) and
