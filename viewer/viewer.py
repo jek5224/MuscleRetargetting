@@ -2897,6 +2897,24 @@ class GLFWApp():
             q_screen_points = []
             contour_2d_norm = None
 
+            # Helper function to compute normalized [0,1] coordinates from bounding box
+            def point_to_unit_square(point_3d, bp_corners, mean, basis_x, basis_y):
+                """Convert 3D point to [0,1]x[0,1] using bounding box corners."""
+                # bp_corners: [v0, v1, v2, v3] where v0=(0,0), v1=(1,0), v2=(1,1), v3=(0,1)
+                v0, v1, v2, v3 = bp_corners
+                # Compute local axes from bounding box edges
+                edge_x = v1 - v0  # horizontal edge
+                edge_y = v3 - v0  # vertical edge
+                len_x = np.linalg.norm(edge_x)
+                len_y = np.linalg.norm(edge_y)
+                if len_x < 1e-10 or len_y < 1e-10:
+                    return np.array([0.5, 0.5])
+                # Project point onto local axes
+                rel_p = point_3d - v0
+                u = np.dot(rel_p, edge_x) / (len_x * len_x)
+                v = np.dot(rel_p, edge_y) / (len_y * len_y)
+                return np.array([np.clip(u, 0, 1), np.clip(v, 0, 1)])
+
             if (stream_idx < len(obj.contours) and contour_idx < len(obj.contours[stream_idx]) and
                 stream_idx < len(obj.bounding_planes) and contour_idx < len(obj.bounding_planes[stream_idx])):
 
@@ -2908,14 +2926,6 @@ class GLFWApp():
                     basis_x = plane_info['basis_x']
                     basis_y = plane_info['basis_y']
                     bp = plane_info.get('bounding_plane', None)
-
-                    # Get bounding box extents for Q normalization
-                    if bp is not None and len(bp) >= 4:
-                        bp_2d = np.array([[np.dot(v - mean, basis_x), np.dot(v - mean, basis_y)] for v in bp])
-                        bp_min = bp_2d.min(axis=0)
-                        bp_max = bp_2d.max(axis=0)
-                        bp_range = bp_max - bp_min
-                        bp_range[bp_range < 1e-10] = 1.0
 
             # Left column: Unit square with Q points
             imgui.text("Unit Square (Q points)")
@@ -2937,18 +2947,25 @@ class GLFWApp():
                         sy = left_y0 + (1 - sample[1]) * canvas_size
                         draw_list.add_circle_filled(sx, sy, 4, imgui.get_color_u32_rgba(0.2, 0.8, 0.2, 1.0))
 
-            # Draw Q points from contour_match (cyan)
-            if contour_match is not None and bp is not None:
+            # Draw Q points from contour_match (cyan) and compute P->unit square mapping
+            p_to_unit_points = []  # For each P, its corresponding unit square position
+            if contour_match is not None and bp is not None and len(bp) >= 4:
                 for i, (p, q) in enumerate(contour_match):
+                    p = np.array(p)
                     q = np.array(q)
-                    q_2d = np.array([np.dot(q - mean, basis_x), np.dot(q - mean, basis_y)])
-                    # Normalize Q to [0,1] based on bounding box
-                    q_norm = (q_2d - bp_min) / bp_range
+                    # Compute Q's position on unit square using bounding box
+                    q_norm = point_to_unit_square(q, bp, mean, basis_x, basis_y)
                     qx = left_x0 + q_norm[0] * canvas_size
                     qy = left_y0 + (1 - q_norm[1]) * canvas_size
                     q_screen_points.append((qx, qy))
 
-                    # Check hover
+                    # Also compute P's projection to unit square (for hover visualization)
+                    p_norm = point_to_unit_square(p, bp, mean, basis_x, basis_y)
+                    p_unit_x = left_x0 + p_norm[0] * canvas_size
+                    p_unit_y = left_y0 + (1 - p_norm[1]) * canvas_size
+                    p_to_unit_points.append((p_unit_x, p_unit_y))
+
+                    # Check hover on Q points
                     dist = np.sqrt((mouse_pos[0] - qx)**2 + (mouse_pos[1] - qy)**2)
                     if dist < hover_radius and hovered_idx < 0:
                         hovered_idx = i
@@ -3046,6 +3063,15 @@ class GLFWApp():
                     # Highlighted (larger, brighter)
                     draw_list.add_circle_filled(px, py, 6, imgui.get_color_u32_rgba(1.0, 0.5, 0.0, 1.0))
                     draw_list.add_circle(px, py, 8, imgui.get_color_u32_rgba(1.0, 1.0, 1.0, 1.0), thickness=2.0)
+                    # Also show P's projection on unit square (magenta)
+                    if i < len(p_to_unit_points):
+                        pux, puy = p_to_unit_points[i]
+                        draw_list.add_circle_filled(pux, puy, 6, imgui.get_color_u32_rgba(1.0, 0.0, 1.0, 1.0))
+                        draw_list.add_circle(pux, puy, 8, imgui.get_color_u32_rgba(1.0, 1.0, 1.0, 1.0), thickness=2.0)
+                        # Draw line connecting Q to P's projection
+                        if i < len(q_screen_points):
+                            draw_list.add_line(q_screen_points[i][0], q_screen_points[i][1],
+                                              pux, puy, imgui.get_color_u32_rgba(1.0, 0.0, 1.0, 0.5), thickness=1.5)
                 else:
                     draw_list.add_circle_filled(px, py, 3, imgui.get_color_u32_rgba(1.0, 0.5, 0.0, 1.0))
 
