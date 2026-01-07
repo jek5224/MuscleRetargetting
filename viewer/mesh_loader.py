@@ -15,6 +15,13 @@ from sklearn.cluster import KMeans, AgglomerativeClustering
 from collections import defaultdict
 import dartpy as dart
 
+# Import mixins
+from viewer.contour_mesh import ContourMeshMixin
+from viewer.tetrahedron_mesh import TetrahedronMeshMixin
+from viewer.fiber_architecture import FiberArchitectureMixin
+from viewer.muscle_mesh import MuscleMeshMixin
+from viewer.skeleton_mesh import SkeletonMeshMixin
+
 scale = 0.01
 cmap = cm.get_cmap("turbo")
 
@@ -174,7 +181,7 @@ def compute_bounding_plane(vertices_2d):
         [max_x, max_y], [min_x, max_y]
     ])
 
-class MeshLoader(object):
+class MeshLoader(ContourMeshMixin, TetrahedronMeshMixin, FiberArchitectureMixin, MuscleMeshMixin, SkeletonMeshMixin):
     def __init__(self):
         self.obj = None
         self.vertices = []
@@ -265,6 +272,13 @@ class MeshLoader(object):
         self.joint_to_parent = None
         self.is_weld = False
         self.main_box_num = 0
+
+        # Initialize mixin properties
+        self._init_contour_properties()
+        self._init_tetrahedron_properties()
+        self._init_fiber_properties()
+        self._init_muscle_properties()
+        self._init_skeleton_properties()
 
     def find_contour_match(self, muscle_contour_orig, template_contour, prev_P0=None):
         # for each poiint from template_contours, find closest point from muscle_contour
