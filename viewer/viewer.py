@@ -2883,121 +2883,175 @@ class GLFWApp():
             canvas_size = 280
             padding = 20
 
-            # Two columns: fiber samples (left) and contour (right)
+            # Two columns: unit square (left) and contour (right)
             imgui.columns(2, f"inspect_cols##{name}", border=True)
 
-            # Left column: Fiber samples on unit square
-            imgui.text("Fiber Samples (Unit Square)")
-            cursor_pos = imgui.get_cursor_screen_pos()
             draw_list = imgui.get_window_draw_list()
+            mouse_pos = imgui.get_mouse_pos()
+            hovered_idx = -1
+            hover_radius = 8.0
 
-            # Draw unit square background
-            x0, y0 = cursor_pos[0] + padding, cursor_pos[1] + padding
-            x1, y1 = x0 + canvas_size, y0 + canvas_size
+            # Get contour data first (needed for both columns)
+            contour_match = None
+            p_screen_points = []
+            q_screen_points = []
+            contour_2d_norm = None
+
+            if (stream_idx < len(obj.contours) and contour_idx < len(obj.contours[stream_idx]) and
+                stream_idx < len(obj.bounding_planes) and contour_idx < len(obj.bounding_planes[stream_idx])):
+
+                plane_info = obj.bounding_planes[stream_idx][contour_idx]
+                contour_match = plane_info.get('contour_match', None)
+
+                if contour_match is not None and len(contour_match) > 0 and 'basis_x' in plane_info:
+                    mean = plane_info['mean']
+                    basis_x = plane_info['basis_x']
+                    basis_y = plane_info['basis_y']
+                    bp = plane_info.get('bounding_plane', None)
+
+                    # Get bounding box extents for Q normalization
+                    if bp is not None and len(bp) >= 4:
+                        bp_2d = np.array([[np.dot(v - mean, basis_x), np.dot(v - mean, basis_y)] for v in bp])
+                        bp_min = bp_2d.min(axis=0)
+                        bp_max = bp_2d.max(axis=0)
+                        bp_range = bp_max - bp_min
+                        bp_range[bp_range < 1e-10] = 1.0
+
+            # Left column: Unit square with Q points
+            imgui.text("Unit Square (Q points)")
+            cursor_pos_left = imgui.get_cursor_screen_pos()
+
+            left_x0, left_y0 = cursor_pos_left[0] + padding, cursor_pos_left[1] + padding
+            left_x1, left_y1 = left_x0 + canvas_size, left_y0 + canvas_size
 
             # Background
-            draw_list.add_rect_filled(x0, y0, x1, y1, imgui.get_color_u32_rgba(0.15, 0.15, 0.15, 1.0))
-            # Border
-            draw_list.add_rect(x0, y0, x1, y1, imgui.get_color_u32_rgba(0.5, 0.5, 0.5, 1.0), thickness=2.0)
+            draw_list.add_rect_filled(left_x0, left_y0, left_x1, left_y1, imgui.get_color_u32_rgba(0.15, 0.15, 0.15, 1.0))
+            draw_list.add_rect(left_x0, left_y0, left_x1, left_y1, imgui.get_color_u32_rgba(0.5, 0.5, 0.5, 1.0), thickness=2.0)
 
-            # Draw fiber samples
+            # Draw fiber samples (green)
             if stream_idx < len(obj.fiber_architecture):
                 fiber_samples = obj.fiber_architecture[stream_idx]
                 for sample in fiber_samples:
                     if len(sample) >= 2:
-                        # Sample is in [0,1] x [0,1]
-                        sx = x0 + sample[0] * canvas_size
-                        sy = y0 + (1 - sample[1]) * canvas_size  # Flip Y for screen coords
+                        sx = left_x0 + sample[0] * canvas_size
+                        sy = left_y0 + (1 - sample[1]) * canvas_size
                         draw_list.add_circle_filled(sx, sy, 4, imgui.get_color_u32_rgba(0.2, 0.8, 0.2, 1.0))
 
-            # Reserve space for the drawing
+            # Draw Q points from contour_match (cyan)
+            if contour_match is not None and bp is not None:
+                for i, (p, q) in enumerate(contour_match):
+                    q = np.array(q)
+                    q_2d = np.array([np.dot(q - mean, basis_x), np.dot(q - mean, basis_y)])
+                    # Normalize Q to [0,1] based on bounding box
+                    q_norm = (q_2d - bp_min) / bp_range
+                    qx = left_x0 + q_norm[0] * canvas_size
+                    qy = left_y0 + (1 - q_norm[1]) * canvas_size
+                    q_screen_points.append((qx, qy))
+
+                    # Check hover
+                    dist = np.sqrt((mouse_pos[0] - qx)**2 + (mouse_pos[1] - qy)**2)
+                    if dist < hover_radius and hovered_idx < 0:
+                        hovered_idx = i
+
+            # Reserve space
             imgui.dummy(canvas_size + 2 * padding, canvas_size + 2 * padding)
 
-            # Right column: Contour with waypoints
+            # Right column: Contour with P points
             imgui.next_column()
-            imgui.text(f"Contour {contour_idx} with Waypoints")
-            cursor_pos = imgui.get_cursor_screen_pos()
+            imgui.text(f"Contour {contour_idx} (P points)")
+            cursor_pos_right = imgui.get_cursor_screen_pos()
 
-            # Draw contour background
-            x0, y0 = cursor_pos[0] + padding, cursor_pos[1] + padding
-            x1, y1 = x0 + canvas_size, y0 + canvas_size
+            right_x0, right_y0 = cursor_pos_right[0] + padding, cursor_pos_right[1] + padding
+            right_x1, right_y1 = right_x0 + canvas_size, right_y0 + canvas_size
 
             # Background
-            draw_list.add_rect_filled(x0, y0, x1, y1, imgui.get_color_u32_rgba(0.15, 0.15, 0.15, 1.0))
+            draw_list.add_rect_filled(right_x0, right_y0, right_x1, right_y1, imgui.get_color_u32_rgba(0.15, 0.15, 0.15, 1.0))
 
-            # Get contour and project to 2D
-            if (stream_idx < len(obj.contours) and contour_idx < len(obj.contours[stream_idx]) and
-                stream_idx < len(obj.bounding_planes) and contour_idx < len(obj.bounding_planes[stream_idx])):
+            # Draw contour and P points
+            if contour_match is not None and 'basis_x' in plane_info:
+                # Project P points to 2D
+                p_2d_list = []
+                for p, q in contour_match:
+                    p = np.array(p)
+                    p_2d = np.array([np.dot(p - mean, basis_x), np.dot(p - mean, basis_y)])
+                    p_2d_list.append(p_2d)
+                p_2d_arr = np.array(p_2d_list)
 
-                contour = np.array(obj.contours[stream_idx][contour_idx])
-                plane_info = obj.bounding_planes[stream_idx][contour_idx]
+                # Normalization (preserve aspect ratio)
+                min_xy = p_2d_arr.min(axis=0)
+                max_xy = p_2d_arr.max(axis=0)
+                range_xy = max_xy - min_xy
+                range_xy[range_xy < 1e-10] = 1.0
+                max_range = max(range_xy[0], range_xy[1])
+                margin = 0.1
+                scale = (1 - 2 * margin) / max_range
+                center_xy = (min_xy + max_xy) / 2
 
-                if len(contour) > 0 and 'basis_x' in plane_info and 'basis_y' in plane_info:
-                    mean = plane_info['mean']
-                    basis_x = plane_info['basis_x']
-                    basis_y = plane_info['basis_y']
+                # Draw contour lines (yellow)
+                p_screen_points = []
+                for p_2d in p_2d_list:
+                    p_norm = (p_2d - center_xy) * scale + 0.5
+                    px = right_x0 + p_norm[0] * canvas_size
+                    py = right_y0 + (1 - p_norm[1]) * canvas_size
+                    p_screen_points.append((px, py))
 
-                    # Project contour to 2D
-                    contour_2d = np.array([[np.dot(v - mean, basis_x), np.dot(v - mean, basis_y)] for v in contour])
+                for i in range(len(p_screen_points)):
+                    p1 = p_screen_points[i]
+                    p2 = p_screen_points[(i + 1) % len(p_screen_points)]
+                    draw_list.add_line(p1[0], p1[1], p2[0], p2[1],
+                                      imgui.get_color_u32_rgba(0.8, 0.8, 0.2, 1.0), thickness=2.0)
 
-                    # Find bounding box for normalization (preserve aspect ratio)
-                    min_xy = contour_2d.min(axis=0)
-                    max_xy = contour_2d.max(axis=0)
-                    range_xy = max_xy - min_xy
-                    range_xy[range_xy < 1e-10] = 1.0  # Avoid division by zero
+                # Check hover on P points
+                for i, (px, py) in enumerate(p_screen_points):
+                    dist = np.sqrt((mouse_pos[0] - px)**2 + (mouse_pos[1] - py)**2)
+                    if dist < hover_radius and hovered_idx < 0:
+                        hovered_idx = i
 
-                    # Use uniform scale to preserve aspect ratio
-                    max_range = max(range_xy[0], range_xy[1])
-                    margin = 0.1
-                    scale = (1 - 2 * margin) / max_range
+                # Draw bounding box (blue)
+                if bp is not None and len(bp) >= 4:
+                    bp_2d = np.array([[np.dot(v - mean, basis_x), np.dot(v - mean, basis_y)] for v in bp])
+                    bp_norm = (bp_2d - center_xy) * scale + 0.5
+                    bp_points = [(right_x0 + pt[0] * canvas_size, right_y0 + (1 - pt[1]) * canvas_size) for pt in bp_norm]
+                    for i in range(4):
+                        draw_list.add_line(bp_points[i][0], bp_points[i][1],
+                                          bp_points[(i + 1) % 4][0], bp_points[(i + 1) % 4][1],
+                                          imgui.get_color_u32_rgba(0.3, 0.5, 0.9, 1.0), thickness=1.5)
 
-                    # Center the contour in the canvas
-                    center_xy = (min_xy + max_xy) / 2
-                    contour_2d_norm = (contour_2d - center_xy) * scale + 0.5
+                # Draw waypoints (red)
+                if (hasattr(obj, 'waypoints') and obj.waypoints is not None and
+                    stream_idx < len(obj.waypoints) and contour_idx < len(obj.waypoints[stream_idx])):
+                    waypoints_3d = obj.waypoints[stream_idx][contour_idx]
+                    if waypoints_3d is not None and len(waypoints_3d) > 0:
+                        for wp in waypoints_3d:
+                            wp = np.array(wp)
+                            wp_2d = np.array([np.dot(wp - mean, basis_x), np.dot(wp - mean, basis_y)])
+                            wp_norm = (wp_2d - center_xy) * scale + 0.5
+                            wpx = right_x0 + wp_norm[0] * canvas_size
+                            wpy = right_y0 + (1 - wp_norm[1]) * canvas_size
+                            draw_list.add_circle_filled(wpx, wpy, 5, imgui.get_color_u32_rgba(0.9, 0.3, 0.3, 1.0))
 
-                    # Draw contour polygon
-                    points = []
-                    for pt in contour_2d_norm:
-                        px = x0 + pt[0] * canvas_size
-                        py = y0 + (1 - pt[1]) * canvas_size
-                        points.append((px, py))
+            # Draw P and Q vertex points with hover highlighting
+            for i in range(len(q_screen_points)):
+                qx, qy = q_screen_points[i]
+                if i == hovered_idx:
+                    # Highlighted (larger, brighter)
+                    draw_list.add_circle_filled(qx, qy, 6, imgui.get_color_u32_rgba(1.0, 1.0, 0.0, 1.0))
+                    draw_list.add_circle(qx, qy, 8, imgui.get_color_u32_rgba(1.0, 1.0, 1.0, 1.0), thickness=2.0)
+                else:
+                    draw_list.add_circle_filled(qx, qy, 3, imgui.get_color_u32_rgba(0.0, 0.8, 0.8, 1.0))
 
-                    # Draw contour lines
-                    for i in range(len(points)):
-                        p1 = points[i]
-                        p2 = points[(i + 1) % len(points)]
-                        draw_list.add_line(p1[0], p1[1], p2[0], p2[1],
-                                          imgui.get_color_u32_rgba(0.8, 0.8, 0.2, 1.0), thickness=2.0)
+            for i in range(len(p_screen_points)):
+                px, py = p_screen_points[i]
+                if i == hovered_idx:
+                    # Highlighted (larger, brighter)
+                    draw_list.add_circle_filled(px, py, 6, imgui.get_color_u32_rgba(1.0, 0.5, 0.0, 1.0))
+                    draw_list.add_circle(px, py, 8, imgui.get_color_u32_rgba(1.0, 1.0, 1.0, 1.0), thickness=2.0)
+                else:
+                    draw_list.add_circle_filled(px, py, 3, imgui.get_color_u32_rgba(1.0, 0.5, 0.0, 1.0))
 
-                    # Draw waypoints if available
-                    if (hasattr(obj, 'waypoints') and obj.waypoints is not None and
-                        stream_idx < len(obj.waypoints) and contour_idx < len(obj.waypoints[stream_idx])):
-
-                        waypoints_3d = obj.waypoints[stream_idx][contour_idx]
-                        if waypoints_3d is not None and len(waypoints_3d) > 0:
-                            for wp in waypoints_3d:
-                                wp = np.array(wp)
-                                wp_2d = np.array([np.dot(wp - mean, basis_x), np.dot(wp - mean, basis_y)])
-                                wp_norm = (wp_2d - center_xy) * scale + 0.5
-                                wpx = x0 + wp_norm[0] * canvas_size
-                                wpy = y0 + (1 - wp_norm[1]) * canvas_size
-                                draw_list.add_circle_filled(wpx, wpy, 5, imgui.get_color_u32_rgba(0.9, 0.3, 0.3, 1.0))
-
-                    # Draw bounding box
-                    bp = plane_info.get('bounding_plane', None)
-                    if bp is not None and len(bp) >= 4:
-                        bp_2d = np.array([[np.dot(v - mean, basis_x), np.dot(v - mean, basis_y)] for v in bp])
-                        bp_norm = (bp_2d - center_xy) * scale + 0.5
-                        bp_points = []
-                        for pt in bp_norm:
-                            bpx = x0 + pt[0] * canvas_size
-                            bpy = y0 + (1 - pt[1]) * canvas_size
-                            bp_points.append((bpx, bpy))
-                        for i in range(4):
-                            p1 = bp_points[i]
-                            p2 = bp_points[(i + 1) % 4]
-                            draw_list.add_line(p1[0], p1[1], p2[0], p2[1],
-                                              imgui.get_color_u32_rgba(0.3, 0.5, 0.9, 1.0), thickness=1.5)
+            # Show index on hover
+            if hovered_idx >= 0:
+                imgui.set_tooltip(f"Vertex {hovered_idx}")
 
             # Reserve space
             imgui.dummy(canvas_size + 2 * padding, canvas_size + 2 * padding)
