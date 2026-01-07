@@ -2947,7 +2947,7 @@ class GLFWApp():
                         sy = left_y0 + (1 - sample[1]) * canvas_size
                         draw_list.add_circle_filled(sx, sy, 4, imgui.get_color_u32_rgba(0.2, 0.8, 0.2, 1.0))
 
-            # Draw Q points from contour_match (cyan)
+            # Compute and draw Q points from contour_match (cyan) - draw immediately so they're not covered
             if contour_match is not None and bp is not None and len(bp) >= 4:
                 for i, (p, q) in enumerate(contour_match):
                     p = np.array(p)
@@ -2957,6 +2957,8 @@ class GLFWApp():
                     qx = left_x0 + q_norm[0] * canvas_size
                     qy = left_y0 + (1 - q_norm[1]) * canvas_size
                     q_screen_points.append((qx, qy))
+                    # Draw Q point immediately (cyan)
+                    draw_list.add_circle_filled(qx, qy, 3, imgui.get_color_u32_rgba(0.0, 0.8, 0.8, 1.0))
 
                     # Check hover on Q points
                     dist = np.sqrt((mouse_pos[0] - qx)**2 + (mouse_pos[1] - qy)**2)
@@ -3041,16 +3043,13 @@ class GLFWApp():
                             wpy = right_y0 + (1 - wp_norm[1]) * canvas_size
                             draw_list.add_circle_filled(wpx, wpy, 5, imgui.get_color_u32_rgba(0.9, 0.3, 0.3, 1.0))
 
-            # Draw P and Q vertex points with hover highlighting
-            for i in range(len(q_screen_points)):
-                qx, qy = q_screen_points[i]
-                if i == hovered_idx:
-                    # Highlighted (larger, brighter)
-                    draw_list.add_circle_filled(qx, qy, 6, imgui.get_color_u32_rgba(1.0, 1.0, 0.0, 1.0))
-                    draw_list.add_circle(qx, qy, 8, imgui.get_color_u32_rgba(1.0, 1.0, 1.0, 1.0), thickness=2.0)
-                else:
-                    draw_list.add_circle_filled(qx, qy, 3, imgui.get_color_u32_rgba(0.0, 0.8, 0.8, 1.0))
+            # Draw Q highlight if hovered (Q points already drawn above)
+            if hovered_idx >= 0 and hovered_idx < len(q_screen_points):
+                qx, qy = q_screen_points[hovered_idx]
+                draw_list.add_circle_filled(qx, qy, 6, imgui.get_color_u32_rgba(1.0, 1.0, 0.0, 1.0))
+                draw_list.add_circle(qx, qy, 8, imgui.get_color_u32_rgba(1.0, 1.0, 1.0, 1.0), thickness=2.0)
 
+            # Draw P vertex points with hover highlighting
             for i in range(len(p_screen_points)):
                 px, py = p_screen_points[i]
                 if i == hovered_idx:
