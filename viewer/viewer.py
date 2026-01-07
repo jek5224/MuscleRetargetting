@@ -1514,10 +1514,10 @@ class GLFWApp():
             )
             imgui.tree_pop()
 
-        if imgui.tree_node("Zygote"):
+        if imgui.tree_node_ex("Zygote", imgui.TREE_NODE_DEFAULT_OPEN):
             # Scrollable child region for Zygote menu
             imgui.begin_child("ZygoteScroll", width=0, height=500, border=True, flags=imgui.WINDOW_ALWAYS_VERTICAL_SCROLLBAR)
-            if imgui.tree_node("Muscle"):                
+            if imgui.tree_node_ex("Muscle", imgui.TREE_NODE_DEFAULT_OPEN):                
                 changed, self.is_draw_zygote_muscle = imgui.checkbox("Draw", self.is_draw_zygote_muscle)
                 if changed:
                     for name, obj in self.zygote_muscle_meshes.items():
