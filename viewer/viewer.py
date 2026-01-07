@@ -3060,18 +3060,14 @@ class GLFWApp():
             for i in range(len(p_screen_points)):
                 px, py = p_screen_points[i]
                 if i == hovered_idx:
-                    # Highlighted (larger, brighter)
+                    # Highlighted P (orange)
                     draw_list.add_circle_filled(px, py, 6, imgui.get_color_u32_rgba(1.0, 0.5, 0.0, 1.0))
                     draw_list.add_circle(px, py, 8, imgui.get_color_u32_rgba(1.0, 1.0, 1.0, 1.0), thickness=2.0)
-                    # Draw cross-panel line from P to Q (visual connection)
+                    # Highlight corresponding Q on unit square (magenta, larger)
                     if i < len(q_screen_points):
                         qx, qy = q_screen_points[i]
-                        # Draw dashed-style line from P to Q across panels (green)
-                        draw_list.add_line(px, py, qx, qy, imgui.get_color_u32_rgba(0.0, 1.0, 0.0, 0.6), thickness=2.0)
-                        # Add label "Q" near Q point
-                        draw_list.add_text(qx + 10, qy - 5, imgui.get_color_u32_rgba(1.0, 1.0, 0.0, 1.0), "Q (MVC)")
-                        # Add label "P" near P point
-                        draw_list.add_text(px + 10, py - 5, imgui.get_color_u32_rgba(1.0, 0.5, 0.0, 1.0), "P")
+                        draw_list.add_circle_filled(qx, qy, 8, imgui.get_color_u32_rgba(1.0, 0.0, 1.0, 1.0))
+                        draw_list.add_circle(qx, qy, 10, imgui.get_color_u32_rgba(1.0, 1.0, 1.0, 1.0), thickness=2.0)
                 else:
                     draw_list.add_circle_filled(px, py, 3, imgui.get_color_u32_rgba(1.0, 0.5, 0.0, 1.0))
 

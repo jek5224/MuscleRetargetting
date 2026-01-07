@@ -1746,6 +1746,7 @@ class MeshLoader(ContourMeshMixin, TetrahedronMeshMixin, FiberArchitectureMixin,
                         bounding_plane_info['basis_x'] = next_distance / sum_distance * new_basis_x_prev + prev_distance / sum_distance * new_basis_x_next
                         bounding_plane_info['basis_x'] /= np.linalg.norm(bounding_plane_info['basis_x'])
                         bounding_plane_info['basis_y'] = np.cross(basis_z, bounding_plane_info['basis_x'])
+                        bounding_plane_info['basis_y'] = bounding_plane_info['basis_y'] / (np.linalg.norm(bounding_plane_info['basis_y']) + 1e-10)
 
                         basis_x = bounding_plane_info['basis_x']
                         basis_y = bounding_plane_info['basis_y']
@@ -2526,6 +2527,7 @@ class MeshLoader(ContourMeshMixin, TetrahedronMeshMixin, FiberArchitectureMixin,
         else:
             basis_x = ref_dir / ref_norm
         basis_y = np.cross(basis_z, basis_x)
+        basis_y = basis_y / (np.linalg.norm(basis_y) + 1e-10)
 
         # Calculate angle for each parent mean from centroid
         parent_angles = []
@@ -3291,6 +3293,7 @@ class MeshLoader(ContourMeshMixin, TetrahedronMeshMixin, FiberArchitectureMixin,
                         bounding_plane_info['basis_x'] = next_distance / sum_distance * new_basis_x_prev + prev_distance / sum_distance * new_basis_x_next
                         bounding_plane_info['basis_x'] /= np.linalg.norm(bounding_plane_info['basis_x'])
                         bounding_plane_info['basis_y'] = np.cross(basis_z, bounding_plane_info['basis_x'])
+                        bounding_plane_info['basis_y'] = bounding_plane_info['basis_y'] / (np.linalg.norm(bounding_plane_info['basis_y']) + 1e-10)
 
                         basis_x = bounding_plane_info['basis_x']
                         basis_y = bounding_plane_info['basis_y']
