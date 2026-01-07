@@ -248,6 +248,11 @@ class GLFWApp():
         self.inter_muscle_constraint_threshold = 0.01  # 1cm default threshold
         self.coupled_as_unified_volume = True  # Treat all muscles as one unified system
 
+        # 2D Inspect window state
+        self.inspect_2d_open = {}  # Dict: muscle_name -> bool (window open state)
+        self.inspect_2d_stream_idx = {}  # Dict: muscle_name -> selected stream index
+        self.inspect_2d_contour_idx = {}  # Dict: muscle_name -> selected contour index
+
         # GPU acceleration settings
         self.use_gpu_arap = False  # Use GPU (PyTorch) for ARAP solver
         self.use_taichi_arap = True  # Use Taichi for ARAP solver (default)
@@ -1981,6 +1986,25 @@ class GLFWApp():
                             except Exception as e:
                                 print(f"[{name}] Load Tet error: {e}")
 
+                        # Inspect 2D button - opens visualization window for fiber samples and contours
+                        inspect_width = button_width * 2 + imgui.get_style().item_spacing[0]
+                        has_fiber_data = (hasattr(obj, 'fiber_architecture') and obj.fiber_architecture is not None and
+                                         len(obj.fiber_architecture) > 0 and hasattr(obj, 'contours') and
+                                         obj.contours is not None and len(obj.contours) > 0)
+                        if not has_fiber_data:
+                            imgui.push_style_alpha(0.5)
+                        if imgui.button(f"Inspect 2D##{name}", width=inspect_width):
+                            if has_fiber_data:
+                                self.inspect_2d_open[name] = True
+                                if name not in self.inspect_2d_stream_idx:
+                                    self.inspect_2d_stream_idx[name] = 0
+                                if name not in self.inspect_2d_contour_idx:
+                                    self.inspect_2d_contour_idx[name] = 0
+                            else:
+                                print(f"[{name}] No fiber/contour data. Run 'Find Streams' first.")
+                        if not has_fiber_data:
+                            imgui.pop_style_alpha()
+
                         _, obj.is_one_fiber = imgui.checkbox(f"One Fiber##{name}", obj.is_one_fiber)
 
                         # Sampling method selector
@@ -2798,7 +2822,187 @@ class GLFWApp():
             imgui.tree_pop()
 
         imgui.end()
+
+        # Render Inspect 2D windows for each muscle
+        self._render_inspect_2d_windows()
+
         imgui.render()
+
+    def _render_inspect_2d_windows(self):
+        """Render 2D inspection windows for fiber samples and contour waypoints."""
+        muscles_to_close = []
+
+        for name, is_open in list(self.inspect_2d_open.items()):
+            if not is_open:
+                continue
+
+            if name not in self.zygote_muscle_meshes:
+                muscles_to_close.append(name)
+                continue
+
+            obj = self.zygote_muscle_meshes[name]
+
+            # Check if data is available
+            if (not hasattr(obj, 'fiber_architecture') or obj.fiber_architecture is None or
+                len(obj.fiber_architecture) == 0 or not hasattr(obj, 'contours') or
+                obj.contours is None or len(obj.contours) == 0):
+                muscles_to_close.append(name)
+                continue
+
+            # Window setup
+            imgui.set_next_window_size(700, 400, imgui.FIRST_USE_EVER)
+            expanded, opened = imgui.begin(f"Inspect 2D: {name}", True)
+
+            if not opened:
+                muscles_to_close.append(name)
+                imgui.end()
+                continue
+
+            # Stream and contour selection
+            num_streams = len(obj.fiber_architecture)
+            stream_idx = self.inspect_2d_stream_idx.get(name, 0)
+            stream_idx = min(stream_idx, num_streams - 1)
+
+            changed, new_stream_idx = imgui.slider_int(f"Stream##{name}_inspect", stream_idx, 0, max(0, num_streams - 1))
+            if changed:
+                self.inspect_2d_stream_idx[name] = new_stream_idx
+                stream_idx = new_stream_idx
+
+            num_contours = len(obj.contours[stream_idx]) if stream_idx < len(obj.contours) else 0
+            contour_idx = self.inspect_2d_contour_idx.get(name, 0)
+            contour_idx = min(contour_idx, max(0, num_contours - 1))
+
+            changed, new_contour_idx = imgui.slider_int(f"Contour##{name}_inspect", contour_idx, 0, max(0, num_contours - 1))
+            if changed:
+                self.inspect_2d_contour_idx[name] = new_contour_idx
+                contour_idx = new_contour_idx
+
+            imgui.separator()
+
+            # Get canvas dimensions
+            canvas_size = 280
+            padding = 20
+
+            # Two columns: fiber samples (left) and contour (right)
+            imgui.columns(2, f"inspect_cols##{name}", border=True)
+
+            # Left column: Fiber samples on unit square
+            imgui.text("Fiber Samples (Unit Square)")
+            cursor_pos = imgui.get_cursor_screen_pos()
+            draw_list = imgui.get_window_draw_list()
+
+            # Draw unit square background
+            x0, y0 = cursor_pos[0] + padding, cursor_pos[1] + padding
+            x1, y1 = x0 + canvas_size, y0 + canvas_size
+
+            # Background
+            draw_list.add_rect_filled(x0, y0, x1, y1, imgui.get_color_u32_rgba(0.15, 0.15, 0.15, 1.0))
+            # Border
+            draw_list.add_rect(x0, y0, x1, y1, imgui.get_color_u32_rgba(0.5, 0.5, 0.5, 1.0), thickness=2.0)
+
+            # Draw fiber samples
+            if stream_idx < len(obj.fiber_architecture):
+                fiber_samples = obj.fiber_architecture[stream_idx]
+                for sample in fiber_samples:
+                    if len(sample) >= 2:
+                        # Sample is in [0,1] x [0,1]
+                        sx = x0 + sample[0] * canvas_size
+                        sy = y0 + (1 - sample[1]) * canvas_size  # Flip Y for screen coords
+                        draw_list.add_circle_filled(sx, sy, 4, imgui.get_color_u32_rgba(0.2, 0.8, 0.2, 1.0))
+
+            # Reserve space for the drawing
+            imgui.dummy(canvas_size + 2 * padding, canvas_size + 2 * padding)
+
+            # Right column: Contour with waypoints
+            imgui.next_column()
+            imgui.text(f"Contour {contour_idx} with Waypoints")
+            cursor_pos = imgui.get_cursor_screen_pos()
+
+            # Draw contour background
+            x0, y0 = cursor_pos[0] + padding, cursor_pos[1] + padding
+            x1, y1 = x0 + canvas_size, y0 + canvas_size
+
+            # Background
+            draw_list.add_rect_filled(x0, y0, x1, y1, imgui.get_color_u32_rgba(0.15, 0.15, 0.15, 1.0))
+
+            # Get contour and project to 2D
+            if (stream_idx < len(obj.contours) and contour_idx < len(obj.contours[stream_idx]) and
+                stream_idx < len(obj.bounding_planes) and contour_idx < len(obj.bounding_planes[stream_idx])):
+
+                contour = np.array(obj.contours[stream_idx][contour_idx])
+                plane_info = obj.bounding_planes[stream_idx][contour_idx]
+
+                if len(contour) > 0 and 'basis_x' in plane_info and 'basis_y' in plane_info:
+                    mean = plane_info['mean']
+                    basis_x = plane_info['basis_x']
+                    basis_y = plane_info['basis_y']
+
+                    # Project contour to 2D
+                    contour_2d = np.array([[np.dot(v - mean, basis_x), np.dot(v - mean, basis_y)] for v in contour])
+
+                    # Find bounding box for normalization
+                    min_xy = contour_2d.min(axis=0)
+                    max_xy = contour_2d.max(axis=0)
+                    range_xy = max_xy - min_xy
+                    range_xy[range_xy < 1e-10] = 1.0  # Avoid division by zero
+
+                    # Normalize to [0,1] with some margin
+                    margin = 0.1
+                    contour_2d_norm = (contour_2d - min_xy) / range_xy * (1 - 2 * margin) + margin
+
+                    # Draw contour polygon
+                    points = []
+                    for pt in contour_2d_norm:
+                        px = x0 + pt[0] * canvas_size
+                        py = y0 + (1 - pt[1]) * canvas_size
+                        points.append((px, py))
+
+                    # Draw contour lines
+                    for i in range(len(points)):
+                        p1 = points[i]
+                        p2 = points[(i + 1) % len(points)]
+                        draw_list.add_line(p1[0], p1[1], p2[0], p2[1],
+                                          imgui.get_color_u32_rgba(0.8, 0.8, 0.2, 1.0), thickness=2.0)
+
+                    # Draw waypoints if available
+                    if (hasattr(obj, 'waypoints') and obj.waypoints is not None and
+                        stream_idx < len(obj.waypoints) and contour_idx < len(obj.waypoints[stream_idx])):
+
+                        waypoints_3d = obj.waypoints[stream_idx][contour_idx]
+                        if waypoints_3d is not None and len(waypoints_3d) > 0:
+                            for wp in waypoints_3d:
+                                wp = np.array(wp)
+                                wp_2d = np.array([np.dot(wp - mean, basis_x), np.dot(wp - mean, basis_y)])
+                                wp_norm = (wp_2d - min_xy) / range_xy * (1 - 2 * margin) + margin
+                                wpx = x0 + wp_norm[0] * canvas_size
+                                wpy = y0 + (1 - wp_norm[1]) * canvas_size
+                                draw_list.add_circle_filled(wpx, wpy, 5, imgui.get_color_u32_rgba(0.9, 0.3, 0.3, 1.0))
+
+                    # Draw bounding box
+                    bp = plane_info.get('bounding_plane', None)
+                    if bp is not None and len(bp) >= 4:
+                        bp_2d = np.array([[np.dot(v - mean, basis_x), np.dot(v - mean, basis_y)] for v in bp])
+                        bp_norm = (bp_2d - min_xy) / range_xy * (1 - 2 * margin) + margin
+                        bp_points = []
+                        for pt in bp_norm:
+                            bpx = x0 + pt[0] * canvas_size
+                            bpy = y0 + (1 - pt[1]) * canvas_size
+                            bp_points.append((bpx, bpy))
+                        for i in range(4):
+                            p1 = bp_points[i]
+                            p2 = bp_points[(i + 1) % 4]
+                            draw_list.add_line(p1[0], p1[1], p2[0], p2[1],
+                                              imgui.get_color_u32_rgba(0.3, 0.5, 0.9, 1.0), thickness=1.5)
+
+            # Reserve space
+            imgui.dummy(canvas_size + 2 * padding, canvas_size + 2 * padding)
+
+            imgui.columns(1)
+            imgui.end()
+
+        # Close windows that were marked for closing
+        for name in muscles_to_close:
+            self.inspect_2d_open[name] = False
 
     def reset(self, reset_time=None):
         self.env.reset(reset_time)
