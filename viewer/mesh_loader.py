@@ -1557,7 +1557,7 @@ class MeshLoader(ContourMeshMixin, TetrahedronMeshMixin, FiberArchitectureMixin,
 
         self.is_draw_contours = True
 
-    def find_contours(self, scalar_step=0.1):
+    def find_contours(self, scalar_step=0.1, skeleton_meshes=None, use_geodesic_edges=False):
         if self.scalar_field is None:
             print("Please compute scalar field first")
             return
@@ -2788,7 +2788,7 @@ class MeshLoader(ContourMeshMixin, TetrahedronMeshMixin, FiberArchitectureMixin,
 
         return result
 
-    def find_contour_stream(self):
+    def find_contour_stream(self, skeleton_meshes=None):
         origin_num = len(self.bounding_planes[0])
         insertion_num = len(self.bounding_planes[-1])
 
