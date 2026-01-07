@@ -3063,15 +3063,15 @@ class GLFWApp():
                     # Highlighted (larger, brighter)
                     draw_list.add_circle_filled(px, py, 6, imgui.get_color_u32_rgba(1.0, 0.5, 0.0, 1.0))
                     draw_list.add_circle(px, py, 8, imgui.get_color_u32_rgba(1.0, 1.0, 1.0, 1.0), thickness=2.0)
-                    # Also show P's projection on unit square (magenta)
-                    if i < len(p_to_unit_points):
-                        pux, puy = p_to_unit_points[i]
-                        draw_list.add_circle_filled(pux, puy, 6, imgui.get_color_u32_rgba(1.0, 0.0, 1.0, 1.0))
-                        draw_list.add_circle(pux, puy, 8, imgui.get_color_u32_rgba(1.0, 1.0, 1.0, 1.0), thickness=2.0)
-                        # Draw line connecting Q to P's projection
-                        if i < len(q_screen_points):
-                            draw_list.add_line(q_screen_points[i][0], q_screen_points[i][1],
-                                              pux, puy, imgui.get_color_u32_rgba(1.0, 0.0, 1.0, 0.5), thickness=1.5)
+                    # Draw cross-panel line from P to Q (visual connection)
+                    if i < len(q_screen_points):
+                        qx, qy = q_screen_points[i]
+                        # Draw dashed-style line from P to Q across panels (green)
+                        draw_list.add_line(px, py, qx, qy, imgui.get_color_u32_rgba(0.0, 1.0, 0.0, 0.6), thickness=2.0)
+                        # Add label "Q" near Q point
+                        draw_list.add_text(qx + 10, qy - 5, imgui.get_color_u32_rgba(1.0, 1.0, 0.0, 1.0), "Q (MVC)")
+                        # Add label "P" near P point
+                        draw_list.add_text(px + 10, py - 5, imgui.get_color_u32_rgba(1.0, 0.5, 0.0, 1.0), "P")
                 else:
                     draw_list.add_circle_filled(px, py, 3, imgui.get_color_u32_rgba(1.0, 0.5, 0.0, 1.0))
 
