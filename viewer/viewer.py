@@ -1992,7 +1992,7 @@ class GLFWApp():
                                          len(obj.fiber_architecture) > 0 and hasattr(obj, 'contours') and
                                          obj.contours is not None and len(obj.contours) > 0)
                         if not has_fiber_data:
-                            imgui.push_style_alpha(0.5)
+                            imgui.push_style_var(imgui.STYLE_ALPHA, 0.5)
                         if imgui.button(f"Inspect 2D##{name}", width=inspect_width):
                             if has_fiber_data:
                                 self.inspect_2d_open[name] = True
@@ -2003,7 +2003,7 @@ class GLFWApp():
                             else:
                                 print(f"[{name}] No fiber/contour data. Run 'Find Streams' first.")
                         if not has_fiber_data:
-                            imgui.pop_style_alpha()
+                            imgui.pop_style_var()
 
                         _, obj.is_one_fiber = imgui.checkbox(f"One Fiber##{name}", obj.is_one_fiber)
 
