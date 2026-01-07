@@ -905,20 +905,8 @@ class GLFWApp():
 
         self.env.meshes = self.meshes
 
-        # bring obj file from 'Zygote_Meshes/Muscle' folder
+        # Load skeleton meshes from Zygote directory
         zygote_dir = 'Zygote_Meshes_251229/'
-        for muscle_file in os.listdir(zygote_dir + 'Muscle'):
-            if muscle_file.endswith('.obj'):
-                muscle_name = muscle_file.split('.')[0]
-
-                self.zygote_muscle_meshes[muscle_name] = MeshLoader()
-                self.zygote_muscle_meshes[muscle_name].load(zygote_dir + 'Muscle/' + muscle_file)
-                self.zygote_muscle_meshes[muscle_name].color = np.array([0.75, 0.25, 0.25])
-                # Load trimesh and apply same scale as MeshLoader.load() uses
-                muscle_trimesh = trimesh.load_mesh(zygote_dir + 'Muscle/' + muscle_file)
-                muscle_trimesh.vertices *= 0.01  # MESH_SCALE
-                self.zygote_muscle_meshes[muscle_name].trimesh = muscle_trimesh
-
         for skeleton_file in os.listdir(zygote_dir + 'Skeleton'):
             if skeleton_file.endswith('.obj'):
                 skeleton_name = skeleton_file.split('.')[0]
@@ -931,11 +919,14 @@ class GLFWApp():
                 skel_trimesh.vertices *= 0.01  # MESH_SCALE
                 self.zygote_skeleton_meshes[skeleton_name].trimesh = skel_trimesh
 
-        # sort zygote_muscle_meshes by name
-        self.zygote_muscle_meshes = dict(sorted(self.zygote_muscle_meshes.items()))
+        # Sort skeleton meshes by name
         self.zygote_skeleton_meshes = dict(sorted(self.zygote_skeleton_meshes.items()))
         for i, (name, mesh) in enumerate(self.zygote_skeleton_meshes.items()):
             mesh.cand_parent_index = i
+
+        # Auto-load previously loaded muscles
+        self.load_previous_muscles()
+        self.zygote_muscle_meshes = dict(sorted(self.zygote_muscle_meshes.items()))
 
         # Update available muscles list
         self.update_available_muscles()

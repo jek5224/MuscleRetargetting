@@ -1424,6 +1424,14 @@ class MuscleMeshMixin:
         self.attach_skeletons_sub = []
         self.attach_skeleton_names = []
 
+        # VIPER rod simulation properties
+        self.viper_sim = None
+        self.viper_only_mode = False
+        self.is_draw_viper = False
+        self.is_draw_viper_rod_mesh = False
+        self.viper_skinning_computed = False
+        self.viper_rest_mesh_vertices = None
+
     def _sobol_sampling_barycentric_default(self, num_samples):
         """Default sobol sampling for initialization."""
         try:
