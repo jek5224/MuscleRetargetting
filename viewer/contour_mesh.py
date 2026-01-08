@@ -1792,6 +1792,90 @@ class ContourMeshMixin:
 
                         ref_basis_x = new_basis_x.copy()
 
+        # Final step: recompute contour_match for ALL planes using current bounding_plane
+        print("  Recomputing contour_match for all planes...")
+        for level_idx, bounding_plane_infos in enumerate(self.bounding_planes):
+            for stream_idx, bp_info in enumerate(bounding_plane_infos):
+                bp = bp_info.get('bounding_plane')
+                if bp is None or len(bp) < 4:
+                    continue
+
+                # Get P values from existing contour_match or contour_vertices
+                old_contour_match = bp_info.get('contour_match')
+                if old_contour_match is not None and len(old_contour_match) > 0:
+                    Ps = np.array([pair[0] for pair in old_contour_match])
+                else:
+                    contour_vertices = bp_info.get('contour_vertices')
+                    if contour_vertices is None and level_idx < len(self.contours) and stream_idx < len(self.contours[level_idx]):
+                        contour_vertices = self.contours[level_idx][stream_idx]
+                    if contour_vertices is None:
+                        continue
+                    Ps = np.array(contour_vertices)
+
+                n_verts = len(Ps)
+                if n_verts < 4:
+                    continue
+
+                # Find closest P vertex to each bounding plane corner
+                corner_indices = []
+                for corner in bp:
+                    dists = np.linalg.norm(Ps - corner, axis=1)
+                    corner_indices.append(np.argmin(dists))
+
+                # Build contour_match by mapping segments to edges
+                new_contour_match = [None] * n_verts
+                for edge_idx in range(4):
+                    next_edge_idx = (edge_idx + 1) % 4
+                    start_corner_idx = corner_indices[edge_idx]
+                    end_corner_idx = corner_indices[next_edge_idx]
+                    edge_start = bp[edge_idx]
+                    edge_end = bp[next_edge_idx]
+
+                    if end_corner_idx >= start_corner_idx:
+                        segment_indices = list(range(start_corner_idx, end_corner_idx + 1))
+                    else:
+                        segment_indices = list(range(start_corner_idx, n_verts)) + list(range(0, end_corner_idx + 1))
+
+                    if len(segment_indices) < 2:
+                        for seg_idx in segment_indices:
+                            new_contour_match[seg_idx] = [Ps[seg_idx].copy(), edge_start.copy()]
+                        continue
+
+                    arc_lengths = [0.0]
+                    for j in range(1, len(segment_indices)):
+                        prev_idx = segment_indices[j - 1]
+                        curr_idx = segment_indices[j]
+                        arc_lengths.append(arc_lengths[-1] + np.linalg.norm(Ps[curr_idx] - Ps[prev_idx]))
+
+                    total_arc = arc_lengths[-1] if arc_lengths[-1] > 1e-10 else 1.0
+
+                    for j, seg_idx in enumerate(segment_indices):
+                        t = arc_lengths[j] / total_arc
+                        q = edge_start + t * (edge_end - edge_start)
+                        new_contour_match[seg_idx] = [Ps[seg_idx].copy(), q]
+
+                # Fill None entries
+                for v_idx in range(n_verts):
+                    if new_contour_match[v_idx] is None:
+                        p = Ps[v_idx]
+                        best_q = bp[0]
+                        best_dist = np.inf
+                        for e0, e1 in [(0, 1), (1, 2), (2, 3), (3, 0)]:
+                            edge_vec = bp[e1] - bp[e0]
+                            edge_len_sq = np.dot(edge_vec, edge_vec)
+                            if edge_len_sq > 1e-10:
+                                t = np.clip(np.dot(p - bp[e0], edge_vec) / edge_len_sq, 0, 1)
+                                q_cand = bp[e0] + t * edge_vec
+                            else:
+                                q_cand = bp[e0]
+                            d = np.linalg.norm(p - q_cand)
+                            if d < best_dist:
+                                best_dist = d
+                                best_q = q_cand
+                        new_contour_match[v_idx] = [p.copy(), best_q]
+
+                bp_info['contour_match'] = new_contour_match
+
         print("Smoothening complete")
 
     def fix_90_degree_corners(self):
