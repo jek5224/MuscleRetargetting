@@ -1714,19 +1714,17 @@ class ContourMeshMixin:
                                 old_bp = bp_info['bounding_plane']
                                 bp_info['bounding_plane'] = np.roll(old_bp, -best_idx, axis=0)
 
-                                # Recompute contour_match with rotated bounding plane
-                                contour_vertices = bp_info.get('contour_vertices')
-                                if contour_vertices is None and level_idx < len(self.contours) and stream_idx < len(self.contours[level_idx]):
-                                    contour_vertices = self.contours[level_idx][stream_idx]
-
-                                if contour_vertices is not None:
-                                    contour_vertices = np.array(contour_vertices)
+                                # Recompute contour_match: keep original P values, update Q for rotated bounding plane
+                                old_contour_match = bp_info.get('contour_match')
+                                if old_contour_match is not None and len(old_contour_match) > 0:
+                                    # Use P values from existing contour_match
+                                    Ps = np.array([pair[0] for pair in old_contour_match])
                                     bp = bp_info['bounding_plane']
-                                    n_verts = len(contour_vertices)
+                                    n_verts = len(Ps)
 
                                     corner_indices = []
                                     for corner in bp:
-                                        dists = np.linalg.norm(contour_vertices - corner, axis=1)
+                                        dists = np.linalg.norm(Ps - corner, axis=1)
                                         corner_indices.append(np.argmin(dists))
 
                                     new_contour_match = [None] * n_verts
@@ -1743,27 +1741,27 @@ class ContourMeshMixin:
                                             segment_indices = list(range(start_corner_idx, n_verts)) + list(range(0, end_corner_idx + 1))
 
                                         if len(segment_indices) < 2:
-                                            for idx in segment_indices:
-                                                new_contour_match[idx] = [contour_vertices[idx], edge_start.copy()]
+                                            for seg_idx in segment_indices:
+                                                new_contour_match[seg_idx] = [Ps[seg_idx].copy(), edge_start.copy()]
                                             continue
 
                                         arc_lengths = [0.0]
                                         for j in range(1, len(segment_indices)):
                                             prev_idx = segment_indices[j - 1]
                                             curr_idx = segment_indices[j]
-                                            arc_lengths.append(arc_lengths[-1] + np.linalg.norm(contour_vertices[curr_idx] - contour_vertices[prev_idx]))
+                                            arc_lengths.append(arc_lengths[-1] + np.linalg.norm(Ps[curr_idx] - Ps[prev_idx]))
 
                                         total_arc = arc_lengths[-1] if arc_lengths[-1] > 1e-10 else 1.0
 
                                         for j, seg_idx in enumerate(segment_indices):
                                             t = arc_lengths[j] / total_arc
                                             q = edge_start + t * (edge_end - edge_start)
-                                            new_contour_match[seg_idx] = [contour_vertices[seg_idx], q]
+                                            new_contour_match[seg_idx] = [Ps[seg_idx].copy(), q]
 
                                     # Fill None entries
-                                    for idx in range(n_verts):
-                                        if new_contour_match[idx] is None:
-                                            p = contour_vertices[idx]
+                                    for v_idx in range(n_verts):
+                                        if new_contour_match[v_idx] is None:
+                                            p = Ps[v_idx]
                                             best_q = bp[0]
                                             best_dist = np.inf
                                             for e0, e1 in [(0, 1), (1, 2), (2, 3), (3, 0)]:
@@ -1778,7 +1776,7 @@ class ContourMeshMixin:
                                                 if d < best_dist:
                                                     best_dist = d
                                                     best_q = q_cand
-                                            new_contour_match[idx] = [p, best_q]
+                                            new_contour_match[v_idx] = [p.copy(), best_q]
 
                                     bp_info['contour_match'] = new_contour_match
                         else:
