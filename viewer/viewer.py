@@ -899,6 +899,63 @@ class GLFWApp():
 
         return total_error / max(1, constraint_count)
 
+    def draw_inter_muscle_constraint_lines(self):
+        """Draw lines between inter-muscle constraint vertex pairs with strain visualization."""
+        if not hasattr(self, 'inter_muscle_constraints') or len(self.inter_muscle_constraints) == 0:
+            return
+
+        from OpenGL.GL import (glPushMatrix, glPopMatrix, glDisable, glEnable,
+                               glBegin, glEnd, glVertex3fv, glColor4f, glLineWidth,
+                               GL_LIGHTING, GL_LINES, GL_BLEND, glBlendFunc,
+                               GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
+        import numpy as np
+
+        glPushMatrix()
+        glDisable(GL_LIGHTING)
+        glEnable(GL_BLEND)
+        glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
+        glLineWidth(2.0)
+
+        glBegin(GL_LINES)
+        for constraint in self.inter_muscle_constraints:
+            name1, v1_idx, v1_fixed, name2, v2_idx, v2_fixed, rest_dist = constraint
+
+            if name1 not in self.zygote_muscle_meshes or name2 not in self.zygote_muscle_meshes:
+                continue
+
+            mobj1 = self.zygote_muscle_meshes[name1]
+            mobj2 = self.zygote_muscle_meshes[name2]
+
+            if mobj1.tet_vertices is None or mobj2.tet_vertices is None:
+                continue
+            if v1_idx >= len(mobj1.tet_vertices) or v2_idx >= len(mobj2.tet_vertices):
+                continue
+
+            v1 = mobj1.tet_vertices[v1_idx]
+            v2 = mobj2.tet_vertices[v2_idx]
+            current_dist = np.linalg.norm(v2 - v1)
+
+            # Calculate strain: positive = stretched, negative = compressed
+            strain = (current_dist - rest_dist) / rest_dist if rest_dist > 0 else 0
+
+            # Color based on strain with transparency
+            if strain > 0.01:  # Stretched
+                t = min(strain * 5, 1.0)
+                glColor4f(1.0, 1.0 - t * 0.7, 0.3, 0.5)  # Yellow -> Red
+            elif strain < -0.01:  # Compressed
+                t = min(-strain * 5, 1.0)
+                glColor4f(0.3, 1.0, 0.3 + t * 0.7, 0.5)  # Green -> Cyan
+            else:  # Near rest length
+                glColor4f(0.9, 0.9, 0.9, 0.4)  # White/gray
+
+            glVertex3fv(v1)
+            glVertex3fv(v2)
+
+        glEnd()
+        glDisable(GL_BLEND)
+        glEnable(GL_LIGHTING)
+        glPopMatrix()
+
     def setEnv(self, env):  
         self.env = env
         self.motion_skel = self.env.skel.clone()
@@ -1263,8 +1320,15 @@ class GLFWApp():
                     obj.draw_contour_mesh()
                 if obj.is_draw_tet_mesh:
                     obj.draw_tetrahedron_mesh(draw_tets=obj.is_draw_tet_edges)
+                if obj.is_draw_constraints:
+                    obj.draw_constraints()
                 if obj.is_draw:
                     obj.draw([obj.color[0], obj.color[1], obj.color[2], obj.transparency])
+
+        # Draw inter-muscle constraints if enabled
+        if getattr(self, 'draw_inter_muscle_constraints', False):
+            self.draw_inter_muscle_constraint_lines()
+
         for name, obj in self.zygote_skeleton_meshes.items():
             if obj.is_draw:
                 obj.draw([obj.color[0], obj.color[1], obj.color[2], obj.transparency])
@@ -1764,8 +1828,10 @@ class GLFWApp():
                 if imgui.button("Find Constraints", width=wide_button_width):
                     count = self.find_inter_muscle_constraints()
 
-                imgui.same_line()
                 imgui.text(f"{len(self.inter_muscle_constraints)} constraints")
+                _, self.draw_inter_muscle_constraints = imgui.checkbox(
+                    "Draw##inter_constraints", getattr(self, 'draw_inter_muscle_constraints', False)
+                )
 
                 # Unified volume checkbox
                 _, self.coupled_as_unified_volume = imgui.checkbox(
@@ -2157,6 +2223,8 @@ class GLFWApp():
                         _, obj.is_draw_tet_mesh = imgui.checkbox("Draw Tet Mesh", obj.is_draw_tet_mesh)
                         imgui.same_line()
                         _, obj.is_draw_tet_edges = imgui.checkbox("Tet Edges", obj.is_draw_tet_edges)
+                        imgui.same_line()
+                        _, obj.is_draw_constraints = imgui.checkbox("Constraints", obj.is_draw_constraints)
 
                         # Soft body simulation controls (quasistatic, on-demand)
                         if imgui.tree_node(f"Soft Body##{name}"):
@@ -2886,418 +2954,441 @@ class GLFWApp():
             contour_idx = self.inspect_2d_contour_idx.get(name, 0)
             contour_idx = min(contour_idx, max(0, num_contours - 1))
 
-            changed, new_contour_idx = imgui.slider_int(f"Contour##{name}_inspect", contour_idx, 0, max(0, num_contours - 1))
-            if changed:
-                self.inspect_2d_contour_idx[name] = new_contour_idx
-                contour_idx = new_contour_idx
+            # Show All checkbox
+            if not hasattr(self, 'inspect_2d_show_all'):
+                self.inspect_2d_show_all = {}
+            show_all = self.inspect_2d_show_all.get(name, False)
+            changed_show_all, show_all = imgui.checkbox(f"Show All##{name}", show_all)
+            if changed_show_all:
+                self.inspect_2d_show_all[name] = show_all
+
+            if not show_all:
+                imgui.same_line()
+                changed, new_contour_idx = imgui.slider_int(f"Contour##{name}_inspect", contour_idx, 0, max(0, num_contours - 1))
+                if changed:
+                    self.inspect_2d_contour_idx[name] = new_contour_idx
+                    contour_idx = new_contour_idx
 
             imgui.separator()
 
-            # Show bounding plane corner angles (debug info)
-            if (stream_idx < len(obj.bounding_planes) and contour_idx < len(obj.bounding_planes[stream_idx])):
-                bp_info = obj.bounding_planes[stream_idx][contour_idx]
-                bp_corners = bp_info.get('bounding_plane', None)
-                if bp_corners is not None and len(bp_corners) >= 4:
-                    # Compute angles at each corner
-                    angles = []
-                    for i in range(4):
-                        p0 = np.array(bp_corners[(i - 1) % 4])
-                        p1 = np.array(bp_corners[i])
-                        p2 = np.array(bp_corners[(i + 1) % 4])
-                        v1 = p0 - p1
-                        v2 = p2 - p1
-                        cos_angle = np.dot(v1, v2) / (np.linalg.norm(v1) * np.linalg.norm(v2) + 1e-10)
-                        angle_deg = np.degrees(np.arccos(np.clip(cos_angle, -1, 1)))
-                        angles.append(angle_deg)
-                    imgui.text(f"BP Angles: {angles[0]:.1f}, {angles[1]:.1f}, {angles[2]:.1f}, {angles[3]:.1f}")
+            # Determine which contours to draw
+            if show_all:
+                contour_indices = list(range(num_contours))
+                # Begin scrollable region for all contours
+                imgui.begin_child(f"all_contours_scroll##{name}", 0, 0, border=False)
+            else:
+                contour_indices = [contour_idx]
 
-            imgui.separator()
+            for draw_contour_idx in contour_indices:
+                contour_idx = draw_contour_idx  # Use this for the visualization
 
-            # Get canvas dimensions
-            canvas_size = 280
-            padding = 20
+                imgui.text(f"=== Contour {contour_idx} ===")
 
-            # Two columns: unit square (left) and contour (right)
-            imgui.columns(2, f"inspect_cols##{name}", border=True)
+                # Show bounding plane corner angles (debug info)
+                if (stream_idx < len(obj.bounding_planes) and contour_idx < len(obj.bounding_planes[stream_idx])):
+                    bp_info = obj.bounding_planes[stream_idx][contour_idx]
+                    bp_corners = bp_info.get('bounding_plane', None)
+                    if bp_corners is not None and len(bp_corners) >= 4:
+                        # Compute angles at each corner
+                        angles = []
+                        for i in range(4):
+                            p0 = np.array(bp_corners[(i - 1) % 4])
+                            p1 = np.array(bp_corners[i])
+                            p2 = np.array(bp_corners[(i + 1) % 4])
+                            v1 = p0 - p1
+                            v2 = p2 - p1
+                            cos_angle = np.dot(v1, v2) / (np.linalg.norm(v1) * np.linalg.norm(v2) + 1e-10)
+                            angle_deg = np.degrees(np.arccos(np.clip(cos_angle, -1, 1)))
+                            angles.append(angle_deg)
+                        imgui.text(f"BP Angles: {angles[0]:.1f}, {angles[1]:.1f}, {angles[2]:.1f}, {angles[3]:.1f}")
 
-            draw_list = imgui.get_window_draw_list()
-            mouse_pos = imgui.get_mouse_pos()
-            hovered_idx = -1
-            hovered_type = None  # 'vertex', 'fiber', or 'waypoint'
-            hover_radius = 8.0
+                imgui.separator()
 
-            # Get contour data first (needed for both columns)
-            contour_match = None
-            p_screen_points = []
-            q_screen_points = []
-            fiber_screen_points = []
-            waypoint_screen_points = []
-            corner_screen_points_left = []  # Bounding plane corners on unit square
-            corner_screen_points_right = []  # Bounding plane corners on contour
-            corner_to_closest_vertex = []  # (corner_idx, closest_vertex_idx) pairs
-            contour_2d_norm = None
+                # Get canvas dimensions
+                canvas_size = 280
+                padding = 20
 
-            # Helper function to compute normalized [0,1] coordinates by solving linear system
-            def point_to_unit_square_2d(point_3d, mean, basis_x, basis_y, bp_corners):
-                """Convert 3D point to [0,1]x[0,1] by inverting the bounding plane formula.
+                # Two columns: unit square (left) and contour (right)
+                imgui.columns(2, f"inspect_cols##{name}_{contour_idx}", border=True)
 
-                Q was created as: Q = bp[0] + u * (bp[1]-bp[0]) + v * (bp[3]-bp[0])
-                So we solve: Q - bp[0] = u * edge_x + v * edge_y
-                This gives proper [0,1] coordinates regardless of basis orthogonality.
-                """
-                v0 = bp_corners[0]
-                edge_x = bp_corners[1] - bp_corners[0]  # horizontal edge
-                edge_y = bp_corners[3] - bp_corners[0]  # vertical edge
+                draw_list = imgui.get_window_draw_list()
+                mouse_pos = imgui.get_mouse_pos()
+                hovered_idx = -1
+                hovered_type = None  # 'vertex', 'fiber', or 'waypoint'
+                hover_radius = 8.0
 
-                # Solve 2x2 system using least squares (works in 3D)
-                # [edge_x | edge_y] * [u; v] = point - v0
-                rel_p = point_3d - v0
+                # Get contour data first (needed for both columns)
+                contour_match = None
+                p_screen_points = []
+                q_screen_points = []
+                fiber_screen_points = []
+                waypoint_screen_points = []
+                corner_screen_points_left = []  # Bounding plane corners on unit square
+                corner_screen_points_right = []  # Bounding plane corners on contour
+                corner_to_closest_vertex = []  # (corner_idx, closest_vertex_idx) pairs
+                contour_2d_norm = None
 
-                # Build matrix A = [edge_x, edge_y] as columns (3x2)
-                A = np.column_stack([edge_x, edge_y])
+                # Helper function to compute normalized [0,1] coordinates by solving linear system
+                def point_to_unit_square_2d(point_3d, mean, basis_x, basis_y, bp_corners):
+                    """Convert 3D point to [0,1]x[0,1] by inverting the bounding plane formula.
 
-                # Solve using least squares
-                result, _, _, _ = np.linalg.lstsq(A, rel_p, rcond=None)
-                u, v = result[0], result[1]
+                    Q was created as: Q = bp[0] + u * (bp[1]-bp[0]) + v * (bp[3]-bp[0])
+                    So we solve: Q - bp[0] = u * edge_x + v * edge_y
+                    This gives proper [0,1] coordinates regardless of basis orthogonality.
+                    """
+                    v0 = bp_corners[0]
+                    edge_x = bp_corners[1] - bp_corners[0]  # horizontal edge
+                    edge_y = bp_corners[3] - bp_corners[0]  # vertical edge
 
-                return np.array([np.clip(u, 0, 1), np.clip(v, 0, 1)])
+                    # Solve 2x2 system using least squares (works in 3D)
+                    # [edge_x | edge_y] * [u; v] = point - v0
+                    rel_p = point_3d - v0
 
-            if (stream_idx < len(obj.contours) and contour_idx < len(obj.contours[stream_idx]) and
-                stream_idx < len(obj.bounding_planes) and contour_idx < len(obj.bounding_planes[stream_idx])):
+                    # Build matrix A = [edge_x, edge_y] as columns (3x2)
+                    A = np.column_stack([edge_x, edge_y])
 
-                plane_info = obj.bounding_planes[stream_idx][contour_idx]
-                contour_match = plane_info.get('contour_match', None)
+                    # Solve using least squares
+                    result, _, _, _ = np.linalg.lstsq(A, rel_p, rcond=None)
+                    u, v = result[0], result[1]
 
-                if contour_match is not None and len(contour_match) > 0 and 'basis_x' in plane_info:
-                    mean = plane_info['mean']
-                    basis_x = plane_info['basis_x']
-                    basis_y = plane_info['basis_y']
-                    bp = plane_info.get('bounding_plane', None)
+                    return np.array([np.clip(u, 0, 1), np.clip(v, 0, 1)])
 
-            # Left column: Unit square with Q points
-            imgui.text("Unit Square (Q points)")
-            cursor_pos_left = imgui.get_cursor_screen_pos()
+                if (stream_idx < len(obj.contours) and contour_idx < len(obj.contours[stream_idx]) and
+                    stream_idx < len(obj.bounding_planes) and contour_idx < len(obj.bounding_planes[stream_idx])):
 
-            left_x0, left_y0 = cursor_pos_left[0] + padding, cursor_pos_left[1] + padding
-            left_x1, left_y1 = left_x0 + canvas_size, left_y0 + canvas_size
+                    plane_info = obj.bounding_planes[stream_idx][contour_idx]
+                    contour_match = plane_info.get('contour_match', None)
 
-            # Background
-            draw_list.add_rect_filled(left_x0, left_y0, left_x1, left_y1, imgui.get_color_u32_rgba(0.15, 0.15, 0.15, 1.0))
-            draw_list.add_rect(left_x0, left_y0, left_x1, left_y1, imgui.get_color_u32_rgba(0.5, 0.5, 0.5, 1.0), thickness=2.0)
+                    if contour_match is not None and len(contour_match) > 0 and 'basis_x' in plane_info:
+                        mean = plane_info['mean']
+                        basis_x = plane_info['basis_x']
+                        basis_y = plane_info['basis_y']
+                        bp = plane_info.get('bounding_plane', None)
 
-            # Draw fiber samples (green) and check hover
-            fiber_samples = []
-            if stream_idx < len(obj.fiber_architecture):
-                fiber_samples = obj.fiber_architecture[stream_idx]
-                for i, sample in enumerate(fiber_samples):
-                    if len(sample) >= 2:
-                        sx = left_x0 + sample[0] * canvas_size
-                        sy = left_y0 + (1 - sample[1]) * canvas_size
-                        fiber_screen_points.append((sx, sy))
-                        draw_list.add_circle_filled(sx, sy, 4, imgui.get_color_u32_rgba(0.2, 0.8, 0.2, 1.0))
-                        # Check hover on fiber samples
-                        dist = np.sqrt((mouse_pos[0] - sx)**2 + (mouse_pos[1] - sy)**2)
+                # Left column: Unit square with Q points
+                imgui.text("Unit Square (Q points)")
+                cursor_pos_left = imgui.get_cursor_screen_pos()
+
+                left_x0, left_y0 = cursor_pos_left[0] + padding, cursor_pos_left[1] + padding
+                left_x1, left_y1 = left_x0 + canvas_size, left_y0 + canvas_size
+
+                # Background
+                draw_list.add_rect_filled(left_x0, left_y0, left_x1, left_y1, imgui.get_color_u32_rgba(0.15, 0.15, 0.15, 1.0))
+                draw_list.add_rect(left_x0, left_y0, left_x1, left_y1, imgui.get_color_u32_rgba(0.5, 0.5, 0.5, 1.0), thickness=2.0)
+
+                # Draw fiber samples (green) and check hover
+                fiber_samples = []
+                if stream_idx < len(obj.fiber_architecture):
+                    fiber_samples = obj.fiber_architecture[stream_idx]
+                    for i, sample in enumerate(fiber_samples):
+                        if len(sample) >= 2:
+                            sx = left_x0 + sample[0] * canvas_size
+                            sy = left_y0 + (1 - sample[1]) * canvas_size
+                            fiber_screen_points.append((sx, sy))
+                            draw_list.add_circle_filled(sx, sy, 4, imgui.get_color_u32_rgba(0.2, 0.8, 0.2, 1.0))
+                            # Check hover on fiber samples
+                            dist = np.sqrt((mouse_pos[0] - sx)**2 + (mouse_pos[1] - sy)**2)
+                            if dist < hover_radius and hovered_idx < 0:
+                                hovered_idx = i
+                                hovered_type = 'fiber'
+
+                # Compute and draw Q points from contour_match (cyan) - draw immediately so they're not covered
+                if contour_match is not None and bp is not None and len(bp) >= 4:
+                    for i, (p, q) in enumerate(contour_match):
+                        p = np.array(p)
+                        q = np.array(q)
+                        # Compute Q's position on unit square using 2D projection
+                        q_norm = point_to_unit_square_2d(q, mean, basis_x, basis_y, bp)
+                        qx = left_x0 + q_norm[0] * canvas_size
+                        qy = left_y0 + (1 - q_norm[1]) * canvas_size
+                        q_screen_points.append((qx, qy))
+                        # Draw Q point immediately (cyan)
+                        draw_list.add_circle_filled(qx, qy, 3, imgui.get_color_u32_rgba(0.0, 0.8, 0.8, 1.0))
+
+                        # Check hover on Q points
+                        dist = np.sqrt((mouse_pos[0] - qx)**2 + (mouse_pos[1] - qy)**2)
                         if dist < hover_radius and hovered_idx < 0:
                             hovered_idx = i
-                            hovered_type = 'fiber'
+                            hovered_type = 'vertex'
 
-            # Compute and draw Q points from contour_match (cyan) - draw immediately so they're not covered
-            if contour_match is not None and bp is not None and len(bp) >= 4:
-                for i, (p, q) in enumerate(contour_match):
-                    p = np.array(p)
-                    q = np.array(q)
-                    # Compute Q's position on unit square using 2D projection
-                    q_norm = point_to_unit_square_2d(q, mean, basis_x, basis_y, bp)
-                    qx = left_x0 + q_norm[0] * canvas_size
-                    qy = left_y0 + (1 - q_norm[1]) * canvas_size
-                    q_screen_points.append((qx, qy))
-                    # Draw Q point immediately (cyan)
-                    draw_list.add_circle_filled(qx, qy, 3, imgui.get_color_u32_rgba(0.0, 0.8, 0.8, 1.0))
-
-                    # Check hover on Q points
-                    dist = np.sqrt((mouse_pos[0] - qx)**2 + (mouse_pos[1] - qy)**2)
-                    if dist < hover_radius and hovered_idx < 0:
-                        hovered_idx = i
-                        hovered_type = 'vertex'
-
-                # Draw bounding plane corners on unit square (corners are at (0,0), (1,0), (1,1), (0,1))
-                corner_uv = [(0, 0), (1, 0), (1, 1), (0, 1)]  # Unit square corners
-                for ci, (cu, cv) in enumerate(corner_uv):
-                    cx = left_x0 + cu * canvas_size
-                    cy = left_y0 + (1 - cv) * canvas_size
-                    corner_screen_points_left.append((cx, cy))
-                    # Draw corner (purple/magenta diamond)
-                    draw_list.add_quad_filled(cx, cy - 5, cx + 5, cy, cx, cy + 5, cx - 5, cy,
-                                             imgui.get_color_u32_rgba(0.8, 0.2, 0.8, 1.0))
-                    # Check hover on corners
-                    dist = np.sqrt((mouse_pos[0] - cx)**2 + (mouse_pos[1] - cy)**2)
-                    if dist < hover_radius and hovered_idx < 0:
-                        hovered_idx = ci
-                        hovered_type = 'corner'
-
-            # Reserve space
-            imgui.dummy(canvas_size + 2 * padding, canvas_size + 2 * padding)
-
-            # Right column: Contour with P points
-            imgui.next_column()
-            imgui.text(f"Contour {contour_idx} (P points)")
-            cursor_pos_right = imgui.get_cursor_screen_pos()
-
-            right_x0, right_y0 = cursor_pos_right[0] + padding, cursor_pos_right[1] + padding
-            right_x1, right_y1 = right_x0 + canvas_size, right_y0 + canvas_size
-
-            # Background
-            draw_list.add_rect_filled(right_x0, right_y0, right_x1, right_y1, imgui.get_color_u32_rgba(0.15, 0.15, 0.15, 1.0))
-
-            # Draw contour and P points
-            if contour_match is not None and 'basis_x' in plane_info:
-                # Project P points to 2D
-                p_2d_list = []
-                for p, q in contour_match:
-                    p = np.array(p)
-                    p_2d = np.array([np.dot(p - mean, basis_x), np.dot(p - mean, basis_y)])
-                    p_2d_list.append(p_2d)
-                p_2d_arr = np.array(p_2d_list)
-
-                # Normalization (preserve aspect ratio)
-                min_xy = p_2d_arr.min(axis=0)
-                max_xy = p_2d_arr.max(axis=0)
-                range_xy = max_xy - min_xy
-                range_xy[range_xy < 1e-10] = 1.0
-                max_range = max(range_xy[0], range_xy[1])
-                margin = 0.1
-                scale = (1 - 2 * margin) / max_range
-                center_xy = (min_xy + max_xy) / 2
-
-                # Draw contour lines (yellow)
-                p_screen_points = []
-                for p_2d in p_2d_list:
-                    p_norm = (p_2d - center_xy) * scale + 0.5
-                    px = right_x0 + p_norm[0] * canvas_size
-                    py = right_y0 + (1 - p_norm[1]) * canvas_size
-                    p_screen_points.append((px, py))
-
-                for i in range(len(p_screen_points)):
-                    p1 = p_screen_points[i]
-                    p2 = p_screen_points[(i + 1) % len(p_screen_points)]
-                    draw_list.add_line(p1[0], p1[1], p2[0], p2[1],
-                                      imgui.get_color_u32_rgba(0.8, 0.8, 0.2, 1.0), thickness=2.0)
-
-                # Check hover on P points
-                for i, (px, py) in enumerate(p_screen_points):
-                    dist = np.sqrt((mouse_pos[0] - px)**2 + (mouse_pos[1] - py)**2)
-                    if dist < hover_radius and hovered_idx < 0:
-                        hovered_idx = i
-                        hovered_type = 'vertex'
-
-                # Draw actual bounding plane (blue) - project 3D bounding plane corners to 2D
-                if bp is not None and len(bp) >= 4:
-                    bp_screen = []
-                    for corner_3d in bp[:4]:
-                        corner_3d = np.array(corner_3d)
-                        corner_2d = np.array([np.dot(corner_3d - mean, basis_x), np.dot(corner_3d - mean, basis_y)])
-                        corner_norm = (corner_2d - center_xy) * scale + 0.5
-                        cx = right_x0 + corner_norm[0] * canvas_size
-                        cy = right_y0 + (1 - corner_norm[1]) * canvas_size
-                        bp_screen.append((cx, cy))
-                    # Draw bounding plane edges
-                    for i in range(4):
-                        p1 = bp_screen[i]
-                        p2 = bp_screen[(i + 1) % 4]
-                        draw_list.add_line(p1[0], p1[1], p2[0], p2[1],
-                                          imgui.get_color_u32_rgba(0.3, 0.5, 0.9, 1.0), thickness=1.5)
-
-                # Draw bounding plane corners and lines to closest contour vertices
-                if bp is not None and len(bp) >= 4:
-                    # Project actual bounding plane corners to 2D
-                    for ci, corner_3d in enumerate(bp[:4]):
-                        corner_3d = np.array(corner_3d)
-                        corner_2d = np.array([np.dot(corner_3d - mean, basis_x), np.dot(corner_3d - mean, basis_y)])
-                        corner_norm = (corner_2d - center_xy) * scale + 0.5
-                        cx = right_x0 + corner_norm[0] * canvas_size
-                        cy = right_y0 + (1 - corner_norm[1]) * canvas_size
-                        corner_screen_points_right.append((cx, cy))
-
-                        # Find closest contour vertex to this corner
-                        if len(p_screen_points) > 0:
-                            min_dist = np.inf
-                            closest_vi = 0
-                            for vi, (px, py) in enumerate(p_screen_points):
-                                d = np.sqrt((cx - px)**2 + (cy - py)**2)
-                                if d < min_dist:
-                                    min_dist = d
-                                    closest_vi = vi
-                            corner_to_closest_vertex.append((ci, closest_vi))
-
-                            # Draw line from corner to closest vertex (purple, thin)
-                            px, py = p_screen_points[closest_vi]
-                            draw_list.add_line(cx, cy, px, py,
-                                             imgui.get_color_u32_rgba(0.7, 0.3, 0.7, 0.6), thickness=1.0)
-
+                    # Draw bounding plane corners on unit square (corners are at (0,0), (1,0), (1,1), (0,1))
+                    corner_uv = [(0, 0), (1, 0), (1, 1), (0, 1)]  # Unit square corners
+                    for ci, (cu, cv) in enumerate(corner_uv):
+                        cx = left_x0 + cu * canvas_size
+                        cy = left_y0 + (1 - cv) * canvas_size
+                        corner_screen_points_left.append((cx, cy))
                         # Draw corner (purple/magenta diamond)
                         draw_list.add_quad_filled(cx, cy - 5, cx + 5, cy, cx, cy + 5, cx - 5, cy,
                                                  imgui.get_color_u32_rgba(0.8, 0.2, 0.8, 1.0))
-
-                        # Check hover on corners (right side)
+                        # Check hover on corners
                         dist = np.sqrt((mouse_pos[0] - cx)**2 + (mouse_pos[1] - cy)**2)
                         if dist < hover_radius and hovered_idx < 0:
                             hovered_idx = ci
                             hovered_type = 'corner'
 
-                # Draw waypoints (red) and check hover
-                if (hasattr(obj, 'waypoints') and obj.waypoints is not None and
-                    stream_idx < len(obj.waypoints) and contour_idx < len(obj.waypoints[stream_idx])):
-                    waypoints_3d = obj.waypoints[stream_idx][contour_idx]
-                    if waypoints_3d is not None and len(waypoints_3d) > 0:
-                        for wi, wp in enumerate(waypoints_3d):
-                            wp = np.array(wp)
-                            wp_2d = np.array([np.dot(wp - mean, basis_x), np.dot(wp - mean, basis_y)])
-                            wp_norm = (wp_2d - center_xy) * scale + 0.5
-                            wpx = right_x0 + wp_norm[0] * canvas_size
-                            wpy = right_y0 + (1 - wp_norm[1]) * canvas_size
-                            waypoint_screen_points.append((wpx, wpy))
-                            draw_list.add_circle_filled(wpx, wpy, 5, imgui.get_color_u32_rgba(0.9, 0.3, 0.3, 1.0))
-                            # Check hover on waypoints
-                            dist = np.sqrt((mouse_pos[0] - wpx)**2 + (mouse_pos[1] - wpy)**2)
+                # Reserve space
+                imgui.dummy(canvas_size + 2 * padding, canvas_size + 2 * padding)
+
+                # Right column: Contour with P points
+                imgui.next_column()
+                imgui.text(f"Contour {contour_idx} (P points)")
+                cursor_pos_right = imgui.get_cursor_screen_pos()
+
+                right_x0, right_y0 = cursor_pos_right[0] + padding, cursor_pos_right[1] + padding
+                right_x1, right_y1 = right_x0 + canvas_size, right_y0 + canvas_size
+
+                # Background
+                draw_list.add_rect_filled(right_x0, right_y0, right_x1, right_y1, imgui.get_color_u32_rgba(0.15, 0.15, 0.15, 1.0))
+
+                # Draw contour and P points
+                if contour_match is not None and 'basis_x' in plane_info:
+                    # Project P points to 2D
+                    p_2d_list = []
+                    for p, q in contour_match:
+                        p = np.array(p)
+                        p_2d = np.array([np.dot(p - mean, basis_x), np.dot(p - mean, basis_y)])
+                        p_2d_list.append(p_2d)
+                    p_2d_arr = np.array(p_2d_list)
+
+                    # Normalization (preserve aspect ratio)
+                    min_xy = p_2d_arr.min(axis=0)
+                    max_xy = p_2d_arr.max(axis=0)
+                    range_xy = max_xy - min_xy
+                    range_xy[range_xy < 1e-10] = 1.0
+                    max_range = max(range_xy[0], range_xy[1])
+                    margin = 0.1
+                    scale = (1 - 2 * margin) / max_range
+                    center_xy = (min_xy + max_xy) / 2
+
+                    # Draw contour lines (yellow)
+                    p_screen_points = []
+                    for p_2d in p_2d_list:
+                        p_norm = (p_2d - center_xy) * scale + 0.5
+                        px = right_x0 + p_norm[0] * canvas_size
+                        py = right_y0 + (1 - p_norm[1]) * canvas_size
+                        p_screen_points.append((px, py))
+
+                    for i in range(len(p_screen_points)):
+                        p1 = p_screen_points[i]
+                        p2 = p_screen_points[(i + 1) % len(p_screen_points)]
+                        draw_list.add_line(p1[0], p1[1], p2[0], p2[1],
+                                          imgui.get_color_u32_rgba(0.8, 0.8, 0.2, 1.0), thickness=2.0)
+
+                    # Check hover on P points
+                    for i, (px, py) in enumerate(p_screen_points):
+                        dist = np.sqrt((mouse_pos[0] - px)**2 + (mouse_pos[1] - py)**2)
+                        if dist < hover_radius and hovered_idx < 0:
+                            hovered_idx = i
+                            hovered_type = 'vertex'
+
+                    # Draw actual bounding plane (blue) - project 3D bounding plane corners to 2D
+                    if bp is not None and len(bp) >= 4:
+                        bp_screen = []
+                        for corner_3d in bp[:4]:
+                            corner_3d = np.array(corner_3d)
+                            corner_2d = np.array([np.dot(corner_3d - mean, basis_x), np.dot(corner_3d - mean, basis_y)])
+                            corner_norm = (corner_2d - center_xy) * scale + 0.5
+                            cx = right_x0 + corner_norm[0] * canvas_size
+                            cy = right_y0 + (1 - corner_norm[1]) * canvas_size
+                            bp_screen.append((cx, cy))
+                        # Draw bounding plane edges
+                        for i in range(4):
+                            p1 = bp_screen[i]
+                            p2 = bp_screen[(i + 1) % 4]
+                            draw_list.add_line(p1[0], p1[1], p2[0], p2[1],
+                                              imgui.get_color_u32_rgba(0.3, 0.5, 0.9, 1.0), thickness=1.5)
+
+                    # Draw bounding plane corners and lines to closest contour vertices
+                    if bp is not None and len(bp) >= 4:
+                        # Project actual bounding plane corners to 2D
+                        for ci, corner_3d in enumerate(bp[:4]):
+                            corner_3d = np.array(corner_3d)
+                            corner_2d = np.array([np.dot(corner_3d - mean, basis_x), np.dot(corner_3d - mean, basis_y)])
+                            corner_norm = (corner_2d - center_xy) * scale + 0.5
+                            cx = right_x0 + corner_norm[0] * canvas_size
+                            cy = right_y0 + (1 - corner_norm[1]) * canvas_size
+                            corner_screen_points_right.append((cx, cy))
+
+                            # Find closest contour vertex to this corner
+                            if len(p_screen_points) > 0:
+                                min_dist = np.inf
+                                closest_vi = 0
+                                for vi, (px, py) in enumerate(p_screen_points):
+                                    d = np.sqrt((cx - px)**2 + (cy - py)**2)
+                                    if d < min_dist:
+                                        min_dist = d
+                                        closest_vi = vi
+                                corner_to_closest_vertex.append((ci, closest_vi))
+
+                                # Draw line from corner to closest vertex (purple, thin)
+                                px, py = p_screen_points[closest_vi]
+                                draw_list.add_line(cx, cy, px, py,
+                                                 imgui.get_color_u32_rgba(0.7, 0.3, 0.7, 0.6), thickness=1.0)
+
+                            # Draw corner (purple/magenta diamond)
+                            draw_list.add_quad_filled(cx, cy - 5, cx + 5, cy, cx, cy + 5, cx - 5, cy,
+                                                     imgui.get_color_u32_rgba(0.8, 0.2, 0.8, 1.0))
+
+                            # Check hover on corners (right side)
+                            dist = np.sqrt((mouse_pos[0] - cx)**2 + (mouse_pos[1] - cy)**2)
                             if dist < hover_radius and hovered_idx < 0:
-                                hovered_idx = wi
-                                hovered_type = 'waypoint'
+                                hovered_idx = ci
+                                hovered_type = 'corner'
 
-            # Draw P vertex points (non-highlighted)
-            for i in range(len(p_screen_points)):
-                px, py = p_screen_points[i]
-                if not (hovered_type == 'vertex' and i == hovered_idx):
-                    draw_list.add_circle_filled(px, py, 3, imgui.get_color_u32_rgba(1.0, 0.5, 0.0, 1.0))
+                    # Draw waypoints (red) and check hover
+                    if (hasattr(obj, 'waypoints') and obj.waypoints is not None and
+                        stream_idx < len(obj.waypoints) and contour_idx < len(obj.waypoints[stream_idx])):
+                        waypoints_3d = obj.waypoints[stream_idx][contour_idx]
+                        if waypoints_3d is not None and len(waypoints_3d) > 0:
+                            for wi, wp in enumerate(waypoints_3d):
+                                wp = np.array(wp)
+                                wp_2d = np.array([np.dot(wp - mean, basis_x), np.dot(wp - mean, basis_y)])
+                                wp_norm = (wp_2d - center_xy) * scale + 0.5
+                                wpx = right_x0 + wp_norm[0] * canvas_size
+                                wpy = right_y0 + (1 - wp_norm[1]) * canvas_size
+                                waypoint_screen_points.append((wpx, wpy))
+                                draw_list.add_circle_filled(wpx, wpy, 5, imgui.get_color_u32_rgba(0.9, 0.3, 0.3, 1.0))
+                                # Check hover on waypoints
+                                dist = np.sqrt((mouse_pos[0] - wpx)**2 + (mouse_pos[1] - wpy)**2)
+                                if dist < hover_radius and hovered_idx < 0:
+                                    hovered_idx = wi
+                                    hovered_type = 'waypoint'
 
-            # Reserve space
-            imgui.dummy(canvas_size + 2 * padding, canvas_size + 2 * padding)
+                # Draw P vertex points (non-highlighted)
+                for i in range(len(p_screen_points)):
+                    px, py = p_screen_points[i]
+                    if not (hovered_type == 'vertex' and i == hovered_idx):
+                        draw_list.add_circle_filled(px, py, 3, imgui.get_color_u32_rgba(1.0, 0.5, 0.0, 1.0))
 
-            imgui.columns(1)
+                # Reserve space
+                imgui.dummy(canvas_size + 2 * padding, canvas_size + 2 * padding)
 
-            # Draw all highlights AFTER columns are done (ensures they're on top)
-            # Re-get draw list to ensure we're drawing on top layer
-            draw_list = imgui.get_window_draw_list()
+                imgui.columns(1)
 
-            if hovered_type == 'vertex' and hovered_idx >= 0:
-                # Highlight P on contour (orange with white border)
-                if hovered_idx < len(p_screen_points):
-                    px, py = p_screen_points[hovered_idx]
-                    draw_list.add_circle_filled(px, py, 7, imgui.get_color_u32_rgba(1.0, 0.5, 0.0, 1.0))
-                    draw_list.add_circle(px, py, 9, imgui.get_color_u32_rgba(1.0, 1.0, 1.0, 1.0), thickness=2.5)
-                # Highlight corresponding Q on unit square (magenta with white border)
-                if hovered_idx < len(q_screen_points):
-                    qx, qy = q_screen_points[hovered_idx]
-                    draw_list.add_circle_filled(qx, qy, 7, imgui.get_color_u32_rgba(1.0, 0.0, 1.0, 1.0))
-                    draw_list.add_circle(qx, qy, 9, imgui.get_color_u32_rgba(1.0, 1.0, 1.0, 1.0), thickness=2.5)
+                # Draw all highlights AFTER columns are done (ensures they're on top)
+                # Re-get draw list to ensure we're drawing on top layer
+                draw_list = imgui.get_window_draw_list()
 
-            elif hovered_type == 'fiber' and hovered_idx >= 0:
-                # Highlight fiber sample on unit square (bright green with white border)
-                if hovered_idx < len(fiber_screen_points):
-                    fx, fy = fiber_screen_points[hovered_idx]
-                    draw_list.add_circle_filled(fx, fy, 7, imgui.get_color_u32_rgba(0.2, 1.0, 0.2, 1.0))
-                    draw_list.add_circle(fx, fy, 9, imgui.get_color_u32_rgba(1.0, 1.0, 1.0, 1.0), thickness=2.5)
-                # Highlight corresponding waypoint on contour (bright red with white border)
-                if hovered_idx < len(waypoint_screen_points):
-                    wpx, wpy = waypoint_screen_points[hovered_idx]
-                    draw_list.add_circle_filled(wpx, wpy, 7, imgui.get_color_u32_rgba(1.0, 0.3, 0.3, 1.0))
-                    draw_list.add_circle(wpx, wpy, 9, imgui.get_color_u32_rgba(1.0, 1.0, 1.0, 1.0), thickness=2.5)
-                # Draw MVC weight-proportional vertices
-                mvc_w = None
-                if (hasattr(obj, 'mvc_weights') and stream_idx < len(obj.mvc_weights) and
-                    contour_idx < len(obj.mvc_weights[stream_idx])):
-                    mvc_w = obj.mvc_weights[stream_idx][contour_idx]
-                # Fallback: compute on-the-fly if mvc_weights not available
-                if mvc_w is None and contour_match is not None and len(fiber_samples) > 0:
-                    _, _, mvc_w = obj.find_waypoints(plane_info, fiber_samples)
-                if mvc_w is not None and len(mvc_w) > hovered_idx:
-                    weights = np.array(mvc_w[hovered_idx])
-                    if len(weights) > 0 and np.isfinite(weights).all():
-                        max_w = weights.max()
-                        if max_w > 1e-8:
-                            max_radius = 7.0  # Same as hover emphasis
-                            for vi, w in enumerate(weights):
-                                if w > 1e-8:  # Only draw non-zero weights
-                                    rel_size = w / max_w
-                                    radius = max(1.0, max_radius * rel_size)  # Minimum radius of 1
-                                    # Draw on P (contour) side - yellow
-                                    if vi < len(p_screen_points):
-                                        px, py = p_screen_points[vi]
-                                        draw_list.add_circle_filled(px, py, radius, imgui.get_color_u32_rgba(1.0, 1.0, 0.0, 0.8))
-                                    # Draw on Q (unit square) side - yellow
-                                    if vi < len(q_screen_points):
-                                        qx, qy = q_screen_points[vi]
-                                        draw_list.add_circle_filled(qx, qy, radius, imgui.get_color_u32_rgba(1.0, 1.0, 0.0, 0.8))
+                if hovered_type == 'vertex' and hovered_idx >= 0:
+                    # Highlight P on contour (orange with white border)
+                    if hovered_idx < len(p_screen_points):
+                        px, py = p_screen_points[hovered_idx]
+                        draw_list.add_circle_filled(px, py, 7, imgui.get_color_u32_rgba(1.0, 0.5, 0.0, 1.0))
+                        draw_list.add_circle(px, py, 9, imgui.get_color_u32_rgba(1.0, 1.0, 1.0, 1.0), thickness=2.5)
+                    # Highlight corresponding Q on unit square (magenta with white border)
+                    if hovered_idx < len(q_screen_points):
+                        qx, qy = q_screen_points[hovered_idx]
+                        draw_list.add_circle_filled(qx, qy, 7, imgui.get_color_u32_rgba(1.0, 0.0, 1.0, 1.0))
+                        draw_list.add_circle(qx, qy, 9, imgui.get_color_u32_rgba(1.0, 1.0, 1.0, 1.0), thickness=2.5)
 
-            elif hovered_type == 'waypoint' and hovered_idx >= 0:
-                # Highlight waypoint on contour (bright red with white border)
-                if hovered_idx < len(waypoint_screen_points):
-                    wpx, wpy = waypoint_screen_points[hovered_idx]
-                    draw_list.add_circle_filled(wpx, wpy, 7, imgui.get_color_u32_rgba(1.0, 0.3, 0.3, 1.0))
-                    draw_list.add_circle(wpx, wpy, 9, imgui.get_color_u32_rgba(1.0, 1.0, 1.0, 1.0), thickness=2.5)
-                # Highlight corresponding fiber sample on unit square (bright green with white border)
-                if hovered_idx < len(fiber_screen_points):
-                    fx, fy = fiber_screen_points[hovered_idx]
-                    draw_list.add_circle_filled(fx, fy, 7, imgui.get_color_u32_rgba(0.2, 1.0, 0.2, 1.0))
-                    draw_list.add_circle(fx, fy, 9, imgui.get_color_u32_rgba(1.0, 1.0, 1.0, 1.0), thickness=2.5)
-                # Draw MVC weight-proportional vertices
-                mvc_w = None
-                if (hasattr(obj, 'mvc_weights') and stream_idx < len(obj.mvc_weights) and
-                    contour_idx < len(obj.mvc_weights[stream_idx])):
-                    mvc_w = obj.mvc_weights[stream_idx][contour_idx]
-                # Fallback: compute on-the-fly if mvc_weights not available
-                if mvc_w is None and contour_match is not None and len(fiber_samples) > 0:
-                    _, _, mvc_w = obj.find_waypoints(plane_info, fiber_samples)
-                if mvc_w is not None and len(mvc_w) > hovered_idx:
-                    weights = np.array(mvc_w[hovered_idx])
-                    if len(weights) > 0 and np.isfinite(weights).all():
-                        max_w = weights.max()
-                        if max_w > 1e-8:
-                            max_radius = 7.0  # Same as hover emphasis
-                            for vi, w in enumerate(weights):
-                                if w > 1e-8:  # Only draw non-zero weights
-                                    rel_size = w / max_w
-                                    radius = max(1.0, max_radius * rel_size)  # Minimum radius of 1
-                                    # Draw on P (contour) side - yellow
-                                    if vi < len(p_screen_points):
-                                        px, py = p_screen_points[vi]
-                                        draw_list.add_circle_filled(px, py, radius, imgui.get_color_u32_rgba(1.0, 1.0, 0.0, 0.8))
-                                    # Draw on Q (unit square) side - yellow
-                                    if vi < len(q_screen_points):
-                                        qx, qy = q_screen_points[vi]
-                                        draw_list.add_circle_filled(qx, qy, radius, imgui.get_color_u32_rgba(1.0, 1.0, 0.0, 0.8))
+                elif hovered_type == 'fiber' and hovered_idx >= 0:
+                    # Highlight fiber sample on unit square (bright green with white border)
+                    if hovered_idx < len(fiber_screen_points):
+                        fx, fy = fiber_screen_points[hovered_idx]
+                        draw_list.add_circle_filled(fx, fy, 7, imgui.get_color_u32_rgba(0.2, 1.0, 0.2, 1.0))
+                        draw_list.add_circle(fx, fy, 9, imgui.get_color_u32_rgba(1.0, 1.0, 1.0, 1.0), thickness=2.5)
+                    # Highlight corresponding waypoint on contour (bright red with white border)
+                    if hovered_idx < len(waypoint_screen_points):
+                        wpx, wpy = waypoint_screen_points[hovered_idx]
+                        draw_list.add_circle_filled(wpx, wpy, 7, imgui.get_color_u32_rgba(1.0, 0.3, 0.3, 1.0))
+                        draw_list.add_circle(wpx, wpy, 9, imgui.get_color_u32_rgba(1.0, 1.0, 1.0, 1.0), thickness=2.5)
+                    # Draw MVC weight-proportional vertices
+                    mvc_w = None
+                    if (hasattr(obj, 'mvc_weights') and stream_idx < len(obj.mvc_weights) and
+                        contour_idx < len(obj.mvc_weights[stream_idx])):
+                        mvc_w = obj.mvc_weights[stream_idx][contour_idx]
+                    # Fallback: compute on-the-fly if mvc_weights not available
+                    if mvc_w is None and contour_match is not None and len(fiber_samples) > 0:
+                        _, _, mvc_w = obj.find_waypoints(plane_info, fiber_samples)
+                    if mvc_w is not None and len(mvc_w) > hovered_idx:
+                        weights = np.array(mvc_w[hovered_idx])
+                        if len(weights) > 0 and np.isfinite(weights).all():
+                            max_w = weights.max()
+                            if max_w > 1e-8:
+                                max_radius = 7.0  # Same as hover emphasis
+                                for vi, w in enumerate(weights):
+                                    if w > 1e-8:  # Only draw non-zero weights
+                                        rel_size = w / max_w
+                                        radius = max(1.0, max_radius * rel_size)  # Minimum radius of 1
+                                        # Draw on P (contour) side - yellow
+                                        if vi < len(p_screen_points):
+                                            px, py = p_screen_points[vi]
+                                            draw_list.add_circle_filled(px, py, radius, imgui.get_color_u32_rgba(1.0, 1.0, 0.0, 0.8))
+                                        # Draw on Q (unit square) side - yellow
+                                        if vi < len(q_screen_points):
+                                            qx, qy = q_screen_points[vi]
+                                            draw_list.add_circle_filled(qx, qy, radius, imgui.get_color_u32_rgba(1.0, 1.0, 0.0, 0.8))
 
-            elif hovered_type == 'corner' and hovered_idx >= 0:
-                # Highlight corner on unit square (left side) - bright magenta with white border
-                if hovered_idx < len(corner_screen_points_left):
-                    cx, cy = corner_screen_points_left[hovered_idx]
-                    draw_list.add_quad_filled(cx, cy - 8, cx + 8, cy, cx, cy + 8, cx - 8, cy,
-                                             imgui.get_color_u32_rgba(1.0, 0.0, 1.0, 1.0))
-                    draw_list.add_quad(cx, cy - 10, cx + 10, cy, cx, cy + 10, cx - 10, cy,
-                                      imgui.get_color_u32_rgba(1.0, 1.0, 1.0, 1.0), thickness=2.5)
-                # Highlight corner on contour (right side) - bright magenta with white border
-                if hovered_idx < len(corner_screen_points_right):
-                    cx, cy = corner_screen_points_right[hovered_idx]
-                    draw_list.add_quad_filled(cx, cy - 8, cx + 8, cy, cx, cy + 8, cx - 8, cy,
-                                             imgui.get_color_u32_rgba(1.0, 0.0, 1.0, 1.0))
-                    draw_list.add_quad(cx, cy - 10, cx + 10, cy, cx, cy + 10, cx - 10, cy,
-                                      imgui.get_color_u32_rgba(1.0, 1.0, 1.0, 1.0), thickness=2.5)
-                # Highlight the closest contour vertex and draw emphasized line
-                for corner_ci, closest_vi in corner_to_closest_vertex:
-                    if corner_ci == hovered_idx:
-                        # Draw emphasized line from corner to closest vertex
-                        if hovered_idx < len(corner_screen_points_right) and closest_vi < len(p_screen_points):
-                            cx, cy = corner_screen_points_right[hovered_idx]
-                            px, py = p_screen_points[closest_vi]
-                            draw_list.add_line(cx, cy, px, py,
-                                             imgui.get_color_u32_rgba(1.0, 0.0, 1.0, 1.0), thickness=3.0)
-                        # Highlight the closest P vertex
-                        if closest_vi < len(p_screen_points):
-                            px, py = p_screen_points[closest_vi]
-                            draw_list.add_circle_filled(px, py, 7, imgui.get_color_u32_rgba(1.0, 0.5, 0.0, 1.0))
-                            draw_list.add_circle(px, py, 9, imgui.get_color_u32_rgba(1.0, 1.0, 1.0, 1.0), thickness=2.5)
-                        # Highlight the corresponding Q vertex
-                        if closest_vi < len(q_screen_points):
-                            qx, qy = q_screen_points[closest_vi]
+                elif hovered_type == 'waypoint' and hovered_idx >= 0:
+                    # Highlight waypoint on contour (bright red with white border)
+                    if hovered_idx < len(waypoint_screen_points):
+                        wpx, wpy = waypoint_screen_points[hovered_idx]
+                        draw_list.add_circle_filled(wpx, wpy, 7, imgui.get_color_u32_rgba(1.0, 0.3, 0.3, 1.0))
+                        draw_list.add_circle(wpx, wpy, 9, imgui.get_color_u32_rgba(1.0, 1.0, 1.0, 1.0), thickness=2.5)
+                    # Highlight corresponding fiber sample on unit square (bright green with white border)
+                    if hovered_idx < len(fiber_screen_points):
+                        fx, fy = fiber_screen_points[hovered_idx]
+                        draw_list.add_circle_filled(fx, fy, 7, imgui.get_color_u32_rgba(0.2, 1.0, 0.2, 1.0))
+                        draw_list.add_circle(fx, fy, 9, imgui.get_color_u32_rgba(1.0, 1.0, 1.0, 1.0), thickness=2.5)
+                    # Draw MVC weight-proportional vertices
+                    mvc_w = None
+                    if (hasattr(obj, 'mvc_weights') and stream_idx < len(obj.mvc_weights) and
+                        contour_idx < len(obj.mvc_weights[stream_idx])):
+                        mvc_w = obj.mvc_weights[stream_idx][contour_idx]
+                    # Fallback: compute on-the-fly if mvc_weights not available
+                    if mvc_w is None and contour_match is not None and len(fiber_samples) > 0:
+                        _, _, mvc_w = obj.find_waypoints(plane_info, fiber_samples)
+                    if mvc_w is not None and len(mvc_w) > hovered_idx:
+                        weights = np.array(mvc_w[hovered_idx])
+                        if len(weights) > 0 and np.isfinite(weights).all():
+                            max_w = weights.max()
+                            if max_w > 1e-8:
+                                max_radius = 7.0  # Same as hover emphasis
+                                for vi, w in enumerate(weights):
+                                    if w > 1e-8:  # Only draw non-zero weights
+                                        rel_size = w / max_w
+                                        radius = max(1.0, max_radius * rel_size)  # Minimum radius of 1
+                                        # Draw on P (contour) side - yellow
+                                        if vi < len(p_screen_points):
+                                            px, py = p_screen_points[vi]
+                                            draw_list.add_circle_filled(px, py, radius, imgui.get_color_u32_rgba(1.0, 1.0, 0.0, 0.8))
+                                        # Draw on Q (unit square) side - yellow
+                                        if vi < len(q_screen_points):
+                                            qx, qy = q_screen_points[vi]
+                                            draw_list.add_circle_filled(qx, qy, radius, imgui.get_color_u32_rgba(1.0, 1.0, 0.0, 0.8))
+
+                elif hovered_type == 'corner' and hovered_idx >= 0:
+                    # Highlight corner on unit square (left side) - bright magenta with white border
+                    if hovered_idx < len(corner_screen_points_left):
+                        cx, cy = corner_screen_points_left[hovered_idx]
+                        draw_list.add_quad_filled(cx, cy - 8, cx + 8, cy, cx, cy + 8, cx - 8, cy,
+                                                 imgui.get_color_u32_rgba(1.0, 0.0, 1.0, 1.0))
+                        draw_list.add_quad(cx, cy - 10, cx + 10, cy, cx, cy + 10, cx - 10, cy,
+                                          imgui.get_color_u32_rgba(1.0, 1.0, 1.0, 1.0), thickness=2.5)
+                    # Highlight corner on contour (right side) - bright magenta with white border
+                    if hovered_idx < len(corner_screen_points_right):
+                        cx, cy = corner_screen_points_right[hovered_idx]
+                        draw_list.add_quad_filled(cx, cy - 8, cx + 8, cy, cx, cy + 8, cx - 8, cy,
+                                                 imgui.get_color_u32_rgba(1.0, 0.0, 1.0, 1.0))
+                        draw_list.add_quad(cx, cy - 10, cx + 10, cy, cx, cy + 10, cx - 10, cy,
+                                          imgui.get_color_u32_rgba(1.0, 1.0, 1.0, 1.0), thickness=2.5)
+                    # Highlight the closest contour vertex and draw emphasized line
+                    for corner_ci, closest_vi in corner_to_closest_vertex:
+                        if corner_ci == hovered_idx:
+                            # Draw emphasized line from corner to closest vertex
+                            if hovered_idx < len(corner_screen_points_right) and closest_vi < len(p_screen_points):
+                                cx, cy = corner_screen_points_right[hovered_idx]
+                                px, py = p_screen_points[closest_vi]
+                                draw_list.add_line(cx, cy, px, py,
+                                                 imgui.get_color_u32_rgba(1.0, 0.0, 1.0, 1.0), thickness=3.0)
+                            # Highlight the closest P vertex
+                            if closest_vi < len(p_screen_points):
+                                px, py = p_screen_points[closest_vi]
+                                draw_list.add_circle_filled(px, py, 7, imgui.get_color_u32_rgba(1.0, 0.5, 0.0, 1.0))
+                                draw_list.add_circle(px, py, 9, imgui.get_color_u32_rgba(1.0, 1.0, 1.0, 1.0), thickness=2.5)
+                            # Highlight the corresponding Q vertex
+                            if closest_vi < len(q_screen_points):
+                                qx, qy = q_screen_points[closest_vi]
                             draw_list.add_circle_filled(qx, qy, 7, imgui.get_color_u32_rgba(0.0, 0.8, 0.8, 1.0))
                             draw_list.add_circle(qx, qy, 9, imgui.get_color_u32_rgba(1.0, 1.0, 1.0, 1.0), thickness=2.5)
                         break
@@ -3321,6 +3412,14 @@ class GLFWApp():
                             break
                     if closest_vi >= 0:
                         imgui.set_tooltip(f"{corner_name} Corner -> Vertex {closest_vi}")
+
+                imgui.columns(1)  # End columns for this contour
+                if show_all:
+                    imgui.separator()
+
+            # End scrollable region if show_all
+            if show_all:
+                imgui.end_child()
 
             imgui.end()
 

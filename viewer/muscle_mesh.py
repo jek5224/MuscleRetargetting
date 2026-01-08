@@ -1383,6 +1383,7 @@ class MuscleMeshMixin:
         self.tet_surface_face_count = 0
         self.is_draw_tet_mesh = False
         self.is_draw_tet_edges = False
+        self.is_draw_constraints = False
 
         # Soft body simulation properties (quasistatic, on-demand)
         self.soft_body = None  # SoftBodySimulation instance
@@ -1929,11 +1930,15 @@ class MuscleMeshMixin:
             self.soft_body.reset()
             self.tet_vertices = self.soft_body.get_positions().astype(np.float32)
             self._prepare_tet_draw_arrays()
-            if hasattr(self, 'waypoints_original'):
+            # Reset waypoints from original
+            if hasattr(self, 'waypoints_original') and self.waypoints_original is not None:
                 self.waypoints = [
                     [wp.copy() for wp in group]
                     for group in self.waypoints_original
                 ]
+            # Reset contour mesh vertices if available
+            if hasattr(self, 'contour_mesh_vertices_original') and self.contour_mesh_vertices_original is not None:
+                self.contour_mesh_vertices = self.contour_mesh_vertices_original.copy()
 
     # ========== VIPER Rod Simulation Methods ==========
 
@@ -3086,7 +3091,6 @@ class MuscleMeshMixin:
             v2 = p2 - p1
             cos_ang = np.dot(v1, v2) / (np.linalg.norm(v1) * np.linalg.norm(v2) + 1e-10)
             angles.append(np.degrees(np.arccos(np.clip(cos_ang, -1, 1))))
-        print(f"save_bounding_planes: dot_xy={dot_xy:.6f}, angles={[f'{a:.1f}' for a in angles]}")
 
         # Preserve order if contours have been normalized
         preserve = getattr(self, '_contours_normalized', False)
@@ -3257,7 +3261,7 @@ class MuscleMeshMixin:
         # Always fix level 0 (origin) and level N-1 (insertion)
         # Additionally fix nearby levels within distance threshold
         self.contour_level_vertices = {}  # vi -> (stream_idx, end_type) for bone attachment
-        distance_threshold = 0.015  # 15mm from anchor - for additional nearby levels
+        distance_threshold = 0.003  # 3mm from anchor - for additional nearby levels
 
         if hasattr(self, 'contours') and self.contours is not None and len(self.contours) > 0:
             # Collect positions from origin/insertion contours
@@ -3464,6 +3468,14 @@ class MuscleMeshMixin:
         print(f"  Body attachments: {len(self.soft_body_local_anchors)}")
         print(f"  Skinning bones: {len(getattr(self, 'skinning_bones', []))}")
 
+        # Store original waypoints for reset (before any simulation)
+        if hasattr(self, 'waypoints') and self.waypoints is not None and len(self.waypoints) > 0:
+            if not hasattr(self, 'waypoints_original') or self.waypoints_original is None:
+                self.waypoints_original = [
+                    [np.array(wp).copy() for wp in stream]
+                    for stream in self.waypoints
+                ]
+
         # Compute barycentric coordinates for waypoints
         if hasattr(self, 'waypoints') and len(self.waypoints) > 0:
             if getattr(self, 'waypoints_from_tet_sim', True):
@@ -3488,7 +3500,7 @@ class MuscleMeshMixin:
         return True
 
     def sobol_sampling_barycentric(self, num_samples):
-        """Generate Sobol samples in unit circle using concentric mapping."""
+        """Generate Sobol samples in 0.95x0.95 unit square with margin from edges."""
         from scipy.stats.qmc import Sobol
 
         # Generate Sobol samples in unit square [0,1]^2
@@ -3496,33 +3508,11 @@ class MuscleMeshMixin:
         sobol = Sobol(d=2, scramble=True, seed=seed)
         samples = sobol.random(num_samples)
 
-        # Map to [-1, 1]^2
-        samples = samples * 2 - 1
+        # Scale to [0.025, 0.975] to keep samples inside 0.95x0.95 area
+        margin = 0.025
+        samples = margin + samples * (1 - 2 * margin)
 
-        # Concentric mapping from square to disk (preserves low-discrepancy)
-        # This maps the unit square [-1,1]^2 to the unit disk
-        circle_samples = []
-        for sx, sy in samples:
-            if abs(sx) < 1e-10 and abs(sy) < 1e-10:
-                circle_samples.append([0.0, 0.0])
-            elif abs(sx) > abs(sy):
-                r = sx
-                theta = (np.pi / 4) * (sy / sx)
-            else:
-                r = sy
-                theta = (np.pi / 2) - (np.pi / 4) * (sx / sy)
-
-            # Scale down radius to keep samples inside the MVC polygon (radius 0.4)
-            # MVC polygon is at radius 0.4, so samples should be within ~0.35
-            r *= 0.7  # Keep samples well inside the unit circle boundary
-
-            # Convert to Cartesian, then to [0,1] range for MVC compatibility
-            x = r * np.cos(theta)
-            y = r * np.sin(theta)
-            # Map from [-1,1] to [0,1] - center at (0.5, 0.5)
-            circle_samples.append([(x + 1) / 2, (y + 1) / 2])
-
-        return np.array(circle_samples)
+        return samples
 
     def sobol_sampling_square(self, num_samples, margin=0.05):
         """Generate Sobol samples in unit square [0,1]^2 with optional margin.
