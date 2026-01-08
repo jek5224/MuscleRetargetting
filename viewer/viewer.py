@@ -1817,60 +1817,71 @@ class GLFWApp():
                         imgui.columns(2, f"cols##{name}", border=False)
                         imgui.set_column_width(0, 120)
 
-                        # Left column: "Process All" button (height matches 8 buttons on right)
-                        num_process_buttons = 8
+                        # Left column: Process button with vertical slider
+                        num_process_buttons = 9
                         process_all_height = num_process_buttons * imgui.get_frame_height() + (num_process_buttons - 1) * imgui.get_style().item_spacing[1]
-                        if imgui.button(f"Process\nAll##{name}", width=100, height=process_all_height):
+
+                        # Initialize process step slider value
+                        if not hasattr(obj, '_process_step'):
+                            obj._process_step = 8
+
+                        # Vertical slider for step selection (top=1, bottom=8)
+                        changed, obj._process_step = imgui.v_slider_int(
+                            f"##step{name}", 20, process_all_height, obj._process_step, 8, 1)
+                        imgui.same_line()
+
+                        # Process button
+                        step_names = ['', 'Scalar', 'Contours', 'Refine', 'Smooth', 'Streams', 'Resample', 'Mesh', 'Tet']
+                        if imgui.button(f"Process\nto {obj._process_step}\n({step_names[obj._process_step]})##{name}", width=75, height=process_all_height):
                             try:
-                                print(f"[{name}] Running full pipeline...")
+                                max_step = obj._process_step
+                                print(f"[{name}] Running pipeline to step {max_step}...")
+
                                 # Step 1: Scalar Field
-                                if len(obj.edge_groups) > 0 and len(obj.edge_classes) > 0:
-                                    print(f"  [1/7] Computing Scalar Field...")
+                                if max_step >= 1 and len(obj.edge_groups) > 0 and len(obj.edge_classes) > 0:
+                                    print(f"  [1/{max_step}] Computing Scalar Field...")
                                     obj.compute_scalar_field()
-                                else:
-                                    print(f"  [1/7] Skipping Scalar Field (no edge groups)")
 
                                 # Step 2: Find Contours
-                                if obj.scalar_field is not None:
-                                    print(f"  [2/7] Finding Contours...")
+                                if max_step >= 2 and obj.scalar_field is not None:
+                                    print(f"  [2/{max_step}] Finding Contours...")
                                     obj.find_contours(skeleton_meshes=self.zygote_skeleton_meshes)
 
                                 # Step 3: Refine Contours
-                                if obj.contours is not None and len(obj.contours) > 0:
-                                    print(f"  [3/7] Refining Contours...")
+                                if max_step >= 3 and obj.contours is not None and len(obj.contours) > 0:
+                                    print(f"  [3/{max_step}] Refining Contours...")
                                     obj.refine_contours(max_spacing_threshold=0.01)
 
                                 # Step 4: Smoothen Contours
-                                if obj.contours is not None and len(obj.contours) > 0:
-                                    print(f"  [4/7] Smoothening Contours...")
+                                if max_step >= 4 and obj.contours is not None and len(obj.contours) > 0:
+                                    print(f"  [4/{max_step}] Smoothening Contours...")
                                     obj.smoothen_contours()
 
                                 # Step 5: Find Streams
-                                if obj.contours is not None and len(obj.contours) > 0 and obj.bounding_planes is not None:
-                                    print(f"  [5/7] Finding Streams...")
+                                if max_step >= 5 and obj.contours is not None and len(obj.contours) > 0 and obj.bounding_planes is not None:
+                                    print(f"  [5/{max_step}] Finding Streams...")
                                     obj.find_contour_stream(skeleton_meshes=self.zygote_skeleton_meshes)
 
                                 # Step 6: Resample Contours
-                                if obj.contours is not None and len(obj.contours) > 0 and obj.bounding_planes is not None:
-                                    print(f"  [6/7] Resampling Contours...")
+                                if max_step >= 6 and obj.contours is not None and len(obj.contours) > 0 and obj.bounding_planes is not None:
+                                    print(f"  [6/{max_step}] Resampling Contours...")
                                     obj.resample_contours(num_samples=32)
 
-
                                 # Step 7: Build Contour Mesh
-                                if obj.contours is not None and len(obj.contours) > 0 and obj.draw_contour_stream is not None:
-                                    print(f"  [7/7] Building Contour Mesh...")
+                                if max_step >= 7 and obj.contours is not None and len(obj.contours) > 0 and obj.draw_contour_stream is not None:
+                                    print(f"  [7/{max_step}] Building Contour Mesh...")
                                     obj.build_contour_mesh()
 
                                 # Step 8: Tetrahedralize
-                                if obj.contour_mesh_vertices is not None:
-                                    print(f"  [8/8] Tetrahedralizing...")
+                                if max_step >= 8 and obj.contour_mesh_vertices is not None:
+                                    print(f"  [8/{max_step}] Tetrahedralizing...")
                                     obj.soft_body = None
                                     obj.tetrahedralize_contour_mesh()
                                     if obj.tet_vertices is not None:
                                         obj.is_draw_contours = False
                                         obj.is_draw_tet_mesh = True
 
-                                print(f"[{name}] Pipeline complete!")
+                                print(f"[{name}] Pipeline complete (step {max_step})!")
                             except Exception as e:
                                 print(f"[{name}] Pipeline error: {e}")
                                 import traceback
@@ -1880,7 +1891,18 @@ class GLFWApp():
                         imgui.next_column()
                         col_button_width = 180  # Fits in the right column
 
-                        if imgui.button(f"Scalar Field##{name}", width=col_button_width):
+                        # Helper for button coloring based on process step
+                        def colored_button(label, step_num, width):
+                            will_run = step_num <= obj._process_step
+                            if will_run:
+                                imgui.push_style_color(imgui.COLOR_BUTTON, 0.2, 0.6, 0.2, 1.0)
+                                imgui.push_style_color(imgui.COLOR_BUTTON_HOVERED, 0.3, 0.7, 0.3, 1.0)
+                            clicked = imgui.button(label, width=width)
+                            if will_run:
+                                imgui.pop_style_color(2)
+                            return clicked
+
+                        if colored_button(f"Scalar Field##{name}", 1, col_button_width):
                             if len(obj.edge_groups) > 0 and len(obj.edge_classes) > 0:
                                 try:
                                     obj.compute_scalar_field()
@@ -1888,7 +1910,7 @@ class GLFWApp():
                                     print(f"[{name}] Scalar Field error: {e}")
                             else:
                                 print(f"[{name}] Need edge_groups and edge_classes")
-                        if imgui.button(f"Find Contours##{name}", width=col_button_width):
+                        if colored_button(f"Find Contours##{name}", 2, col_button_width):
                             if obj.scalar_field is not None:
                                 try:
                                     obj.find_contours(skeleton_meshes=self.zygote_skeleton_meshes)
@@ -1896,7 +1918,7 @@ class GLFWApp():
                                     print(f"[{name}] Find Contours error: {e}")
                             else:
                                 print(f"[{name}] Prerequisites: Run 'Scalar Field' first")
-                        if imgui.button(f"Refine Contours##{name}", width=col_button_width):
+                        if colored_button(f"Refine Contours##{name}", 3, col_button_width):
                             if obj.contours is not None and len(obj.contours) > 0:
                                 try:
                                     obj.refine_contours(max_spacing_threshold=0.01)
@@ -1904,7 +1926,7 @@ class GLFWApp():
                                     print(f"[{name}] Refine Contours error: {e}")
                             else:
                                 print(f"[{name}] Prerequisites: Run 'Find Contours' first")
-                        if imgui.button(f"Smoothen Contours##{name}", width=col_button_width):
+                        if colored_button(f"Smoothen Contours##{name}", 4, col_button_width):
                             if obj.contours is not None and len(obj.contours) > 0:
                                 try:
                                     obj.smoothen_contours()
@@ -1912,7 +1934,7 @@ class GLFWApp():
                                     print(f"[{name}] Smoothen Contours error: {e}")
                             else:
                                 print(f"[{name}] Prerequisites: Run 'Find Contours' first")
-                        if imgui.button(f"Find Streams##{name}", width=col_button_width):
+                        if colored_button(f"Find Streams##{name}", 5, col_button_width):
                             if obj.contours is not None and len(obj.contours) > 0 and obj.bounding_planes is not None and len(obj.bounding_planes) > 0:
                                 try:
                                     obj.find_contour_stream(skeleton_meshes=self.zygote_skeleton_meshes)
@@ -1928,7 +1950,7 @@ class GLFWApp():
                                     print(f"[{name}] Optimize Streams error: {e}")
                             else:
                                 print(f"[{name}] Prerequisites: Run 'Find Streams' first")
-                        if imgui.button(f"Resample Contours##{name}", width=col_button_width):
+                        if colored_button(f"Resample Contours##{name}", 6, col_button_width):
                             if obj.contours is not None and len(obj.contours) > 0 and obj.bounding_planes is not None:
                                 try:
                                     obj.resample_contours(num_samples=32)
@@ -1936,7 +1958,7 @@ class GLFWApp():
                                     print(f"[{name}] Resample Contours error: {e}")
                             else:
                                 print(f"[{name}] Prerequisites: Run 'Smoothen Contours' first")
-                        if imgui.button(f"Build Contour Mesh##{name}", width=col_button_width):
+                        if colored_button(f"Build Contour Mesh##{name}", 7, col_button_width):
                             if obj.contours is not None and len(obj.contours) > 0 and obj.draw_contour_stream is not None:
                                 try:
                                     obj.build_contour_mesh()
@@ -1946,7 +1968,7 @@ class GLFWApp():
                                 print(f"[{name}] Prerequisites: Run 'Find Streams' first")
 
                         # Tetrahedralization for soft body simulation
-                        if imgui.button(f"Tetrahedralize##{name}", width=col_button_width):
+                        if colored_button(f"Tetrahedralize##{name}", 8, col_button_width):
                             if obj.contour_mesh_vertices is not None:
                                 try:
                                     obj.soft_body = None  # Reset soft body when re-tetrahedralizing
