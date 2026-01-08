@@ -1476,6 +1476,72 @@ class ContourMeshMixin:
 
             self.bounding_planes = smooth_bounding_planes
 
+    def fix_90_degree_corners(self):
+        """
+        Fix all bounding planes to have exactly 90-degree corners.
+
+        Re-orthogonalizes basis vectors and recomputes bounding plane corners
+        to ensure perfect rectangles.
+        """
+        if len(self.bounding_planes) == 0:
+            print("No bounding planes found")
+            return
+
+        for stream_idx, bp_stream in enumerate(self.bounding_planes):
+            for contour_idx, bp_info in enumerate(bp_stream):
+                basis_x = bp_info.get('basis_x')
+                basis_y = bp_info.get('basis_y')
+                basis_z = bp_info.get('basis_z')
+                mean = bp_info.get('mean')
+                old_corners = bp_info.get('bounding_plane')
+
+                if basis_x is None or basis_z is None or mean is None or old_corners is None:
+                    continue
+
+                # Re-orthogonalize: basis_y = cross(basis_z, basis_x), normalized
+                basis_x = basis_x / (np.linalg.norm(basis_x) + 1e-10)
+                new_basis_y = np.cross(basis_z, basis_x)
+                new_basis_y = new_basis_y / (np.linalg.norm(new_basis_y) + 1e-10)
+
+                # Compute the center and extents from old corners
+                center = np.mean(old_corners, axis=0)
+
+                # Project old corners onto the orthonormal basis to get extents
+                x_coords = [np.dot(c - center, basis_x) for c in old_corners]
+                y_coords = [np.dot(c - center, new_basis_y) for c in old_corners]
+
+                min_x, max_x = min(x_coords), max(x_coords)
+                min_y, max_y = min(y_coords), max(y_coords)
+
+                # Recompute corners with orthonormal basis (guaranteed 90 degrees)
+                bounding_plane_2d = np.array([
+                    [min_x, min_y], [max_x, min_y],
+                    [max_x, max_y], [min_x, max_y]
+                ])
+                new_corners = np.array([center + x * basis_x + y * new_basis_y for x, y in bounding_plane_2d])
+
+                # Update the bounding plane info
+                bp_info['basis_y'] = new_basis_y
+                bp_info['bounding_plane'] = new_corners
+
+                # Also update contour_match if it exists
+                contour_match = bp_info.get('contour_match')
+                if contour_match is not None:
+                    # Recompute Q points (projections onto the new bounding plane)
+                    new_contour_match = []
+                    for p, q in contour_match:
+                        # Project P onto the new plane
+                        p = np.array(p)
+                        p_2d = np.array([np.dot(p - center, basis_x), np.dot(p - center, new_basis_y)])
+                        # Clip to bounding box
+                        p_2d[0] = np.clip(p_2d[0], min_x, max_x)
+                        p_2d[1] = np.clip(p_2d[1], min_y, max_y)
+                        new_q = center + p_2d[0] * basis_x + p_2d[1] * new_basis_y
+                        new_contour_match.append([p, new_q])
+                    bp_info['contour_match'] = new_contour_match
+
+        print(f"Fixed 90-degree corners for all bounding planes")
+
     def normalize_contours_to_max(self):
         """
         Normalize all contours before stream finding:
@@ -2807,6 +2873,7 @@ class ContourMeshMixin:
 
         self.normalized_Qs = [[] for _ in range(len(self.bounding_planes))]
         self.waypoints = [[] for _ in range(len(self.bounding_planes))]
+        self.mvc_weights = [[] for _ in range(len(self.bounding_planes))]  # MVC weights per fiber sample
         self.attach_skeletons = [[0, 0] for _ in range(len(self.waypoints))]
         self.attach_skeletons_sub = [[0, 0] for _ in range(len(self.waypoints))]
         # Store stream endpoint positions for auto-detection
@@ -2855,6 +2922,8 @@ class ContourMeshMixin:
                 if positioning_method == 'radial':
                     # Radial interpolation: guaranteed interior for star-shaped contours
                     normalized_Qs, waypoints = self.find_waypoints_radial(bounding_plane, fiber_samples)
+                    # Also compute MVC weights for visualization
+                    _, _, mvc_weights = self.find_waypoints(bounding_plane, fiber_samples)
 
                 elif positioning_method == 'triangulated':
                     # Triangulation + ARAP: preserves topology, prevents triangle flips
@@ -2888,14 +2957,14 @@ class ContourMeshMixin:
                         )
                         if waypoints is None or len(waypoints) == 0:
                             # Fallback to MVC if triangulated method fails
-                            normalized_Qs, waypoints = self.find_waypoints(bounding_plane, fiber_samples)
+                            normalized_Qs, waypoints, mvc_weights = self.find_waypoints(bounding_plane, fiber_samples)
                             deformed_2d = None
                         else:
-                            # Compute normalized_Qs for compatibility (use MVC method)
-                            normalized_Qs, _ = self.find_waypoints(bounding_plane, fiber_samples)
+                            # Compute normalized_Qs and MVC weights for compatibility/visualization
+                            normalized_Qs, _, mvc_weights = self.find_waypoints(bounding_plane, fiber_samples)
                     else:
                         # Fallback to MVC if contour not available
-                        normalized_Qs, waypoints = self.find_waypoints(bounding_plane, fiber_samples)
+                        normalized_Qs, waypoints, mvc_weights = self.find_waypoints(bounding_plane, fiber_samples)
                         self.unit_circle_triangulations[i].append(None)
                         self.fiber_embeddings[i].append(None)
 
@@ -2928,12 +2997,12 @@ class ContourMeshMixin:
                             bounding_plane, fiber_samples, triangulation
                         )
                         if waypoints is None or len(waypoints) == 0:
-                            normalized_Qs, waypoints = self.find_waypoints(bounding_plane, fiber_samples)
+                            normalized_Qs, waypoints, mvc_weights = self.find_waypoints(bounding_plane, fiber_samples)
                             deformed_2d = None
                         else:
-                            normalized_Qs, _ = self.find_waypoints(bounding_plane, fiber_samples)
+                            normalized_Qs, _, mvc_weights = self.find_waypoints(bounding_plane, fiber_samples)
                     else:
-                        normalized_Qs, waypoints = self.find_waypoints(bounding_plane, fiber_samples)
+                        normalized_Qs, waypoints, mvc_weights = self.find_waypoints(bounding_plane, fiber_samples)
                         self.unit_circle_triangulations[i].append(None)
                         self.fiber_embeddings[i].append(None)
 
@@ -2954,27 +3023,28 @@ class ContourMeshMixin:
                         )
                         if waypoints is None or len(waypoints) == 0:
                             # Fallback to MVC if geodesic method fails
-                            normalized_Qs, waypoints = self.find_waypoints(bounding_plane, fiber_samples)
+                            normalized_Qs, waypoints, mvc_weights = self.find_waypoints(bounding_plane, fiber_samples)
                             deformed_2d = None
                         else:
-                            # Compute normalized_Qs for compatibility
-                            normalized_Qs, _ = self.find_waypoints(bounding_plane, fiber_samples)
+                            # Compute normalized_Qs and MVC weights for compatibility/visualization
+                            normalized_Qs, _, mvc_weights = self.find_waypoints(bounding_plane, fiber_samples)
 
                         # Store shared triangulation for visualization (same reference for all)
                         self.unit_circle_triangulations[i].append(shared_geo_triangulation)
                         self.fiber_embeddings[i].append(shared_geo_embedding)
                     else:
-                        normalized_Qs, waypoints = self.find_waypoints(bounding_plane, fiber_samples)
+                        normalized_Qs, waypoints, mvc_weights = self.find_waypoints(bounding_plane, fiber_samples)
                         self.unit_circle_triangulations[i].append(None)
                         self.fiber_embeddings[i].append(None)
 
                     self.triangulated_deformed_2d[i].append(deformed_2d)
 
                 else:  # 'mvc' (default)
-                    normalized_Qs, waypoints = self.find_waypoints(bounding_plane, fiber_samples)
+                    normalized_Qs, waypoints, mvc_weights = self.find_waypoints(bounding_plane, fiber_samples)
 
                 self.normalized_Qs[i].append(normalized_Qs)
                 self.waypoints[i].append(waypoints)
+                self.mvc_weights[i].append(mvc_weights)
 
         self.is_draw = False
         self.is_draw_fiber_architecture = True

@@ -3031,6 +3031,16 @@ class MuscleMeshMixin:
                 min_x, max_x = np.min(projected_2d[:, 0]), np.max(projected_2d[:, 0])
                 min_y, max_y = np.min(projected_2d[:, 1]), np.max(projected_2d[:, 1])
 
+        # Final re-orthogonalization to ensure exactly 90-degree corners
+        basis_x = basis_x / (np.linalg.norm(basis_x) + 1e-10)
+        basis_y = np.cross(basis_z, basis_x)
+        basis_y = basis_y / (np.linalg.norm(basis_y) + 1e-10)
+
+        # Re-project contour points with orthonormal basis to get correct extents
+        projected_2d = np.array([[np.dot(v - mean, basis_x), np.dot(v - mean, basis_y)] for v in contour_points])
+        min_x, max_x = np.min(projected_2d[:, 0]), np.max(projected_2d[:, 0])
+        min_y, max_y = np.min(projected_2d[:, 1]), np.max(projected_2d[:, 1])
+
         bounding_plane_2d = np.array([
             [min_x, min_y], [max_x, min_y],
             [max_x, max_y], [min_x, max_y]

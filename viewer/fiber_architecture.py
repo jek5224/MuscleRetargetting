@@ -1767,12 +1767,13 @@ class FiberArchitectureMixin:
             is_origin: Whether this is at the origin end
 
         Returns:
-            (Qs_2d, waypoints): Q positions (for visualization) and computed waypoints
+            (Qs_2d, waypoints, mvc_weights): Q positions (for visualization), computed waypoints,
+                and MVC weights array (shape: num_fibers x num_vertices)
         """
         # Get contour match (P->Q correspondence)
         contour_match = bounding_plane_info.get('contour_match')
         if contour_match is None:
-            return np.array([]), np.array([])
+            return np.array([]), np.array([]), np.array([])
 
         # Extract P (contour vertices) and Q (bounding plane template positions)
         Ps = np.array([pair[0] for pair in contour_match])  # 3D contour points
@@ -1780,7 +1781,7 @@ class FiberArchitectureMixin:
 
         n_verts = len(Ps)
         if n_verts < 3:
-            return np.array([]), np.array([])
+            return np.array([]), np.array([]), np.array([])
 
         # Project Q to 2D if needed (Q should already be in bounding plane coords)
         basis_x = bounding_plane_info.get('basis_x')
@@ -1884,7 +1885,7 @@ class FiberArchitectureMixin:
         # Apply MVC weights to corresponding contour vertices
         waypoints = np.dot(fs, Ps)
 
-        return Qs_normalized, waypoints
+        return Qs_normalized, waypoints, fs
 
     def find_waypoints_radial(self, bounding_plane_info, fiber_architecture):
         """

@@ -1407,6 +1407,16 @@ class MeshLoader(ContourMeshMixin, TetrahedronMeshMixin, FiberArchitectureMixin,
             x_len = max_x - min_x
             y_len = max_y - min_y
 
+        # Final re-orthogonalization to ensure exactly 90-degree corners
+        basis_x = basis_x / (np.linalg.norm(basis_x) + 1e-10)
+        basis_y = np.cross(basis_z, basis_x)
+        basis_y = basis_y / (np.linalg.norm(basis_y) + 1e-10)
+
+        # Re-project contour points with orthonormal basis to get correct extents
+        projected_2d = np.array([[np.dot(v - mean, basis_x), np.dot(v - mean, basis_y)] for v in contour_points])
+        min_x, max_x = np.min(projected_2d[:, 0]), np.max(projected_2d[:, 0])
+        min_y, max_y = np.min(projected_2d[:, 1]), np.max(projected_2d[:, 1])
+
         bounding_plane_2d = np.array([
             [min_x, min_y], [max_x, min_y],
             [max_x, max_y], [min_x, max_y]
@@ -3602,14 +3612,16 @@ class MeshLoader(ContourMeshMixin, TetrahedronMeshMixin, FiberArchitectureMixin,
 
         self.normalized_Qs = [[] for _ in range(len(self.bounding_planes))]
         self.waypoints = [[] for _ in range(len(self.bounding_planes))]
+        self.mvc_weights = [[] for _ in range(len(self.bounding_planes))]
         self.attach_skeletons = [[0, 0] for _ in range(len(self.waypoints))]
         self.attach_skeletons_sub = [[0, 0] for _ in range(len(self.waypoints))]
 
         for i, bounding_plane_stream in enumerate(self.bounding_planes):
             for bounding_plane in bounding_plane_stream:
-                normalized_Qs, waypoints = self.find_waypoints(bounding_plane, self.fiber_architecture[i])
+                normalized_Qs, waypoints, mvc_weights = self.find_waypoints(bounding_plane, self.fiber_architecture[i])
                 self.normalized_Qs[i].append(normalized_Qs)
                 self.waypoints[i].append(waypoints)
+                self.mvc_weights[i].append(mvc_weights)
 
         # for waypoint_group in self.waypoints:
         #     num_fibers = waypoint_group[0].shape[0]
@@ -3792,7 +3804,7 @@ class MeshLoader(ContourMeshMixin, TetrahedronMeshMixin, FiberArchitectureMixin,
 
         # self.normalized_contours.append(normalized_Qs)
         # self.waypoints.append(waypoints)
-        return normalized_Qs, waypoints
+        return normalized_Qs, waypoints, fs
     
     def find_overlap_point(self, corners1, corners2, grid_points=20):
         """

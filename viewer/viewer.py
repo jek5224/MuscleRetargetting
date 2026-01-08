@@ -2879,6 +2879,26 @@ class GLFWApp():
 
             imgui.separator()
 
+            # Show bounding plane corner angles (debug info)
+            if (stream_idx < len(obj.bounding_planes) and contour_idx < len(obj.bounding_planes[stream_idx])):
+                bp_info = obj.bounding_planes[stream_idx][contour_idx]
+                bp_corners = bp_info.get('bounding_plane', None)
+                if bp_corners is not None and len(bp_corners) >= 4:
+                    # Compute angles at each corner
+                    angles = []
+                    for i in range(4):
+                        p0 = np.array(bp_corners[(i - 1) % 4])
+                        p1 = np.array(bp_corners[i])
+                        p2 = np.array(bp_corners[(i + 1) % 4])
+                        v1 = p0 - p1
+                        v2 = p2 - p1
+                        cos_angle = np.dot(v1, v2) / (np.linalg.norm(v1) * np.linalg.norm(v2) + 1e-10)
+                        angle_deg = np.degrees(np.arccos(np.clip(cos_angle, -1, 1)))
+                        angles.append(angle_deg)
+                    imgui.text(f"BP Angles: {angles[0]:.1f}, {angles[1]:.1f}, {angles[2]:.1f}, {angles[3]:.1f}")
+
+            imgui.separator()
+
             # Get canvas dimensions
             canvas_size = 280
             padding = 20
@@ -2898,6 +2918,9 @@ class GLFWApp():
             q_screen_points = []
             fiber_screen_points = []
             waypoint_screen_points = []
+            corner_screen_points_left = []  # Bounding plane corners on unit square
+            corner_screen_points_right = []  # Bounding plane corners on contour
+            corner_to_closest_vertex = []  # (corner_idx, closest_vertex_idx) pairs
             contour_2d_norm = None
 
             # Helper function to compute normalized [0,1] coordinates by solving linear system
@@ -2983,6 +3006,21 @@ class GLFWApp():
                         hovered_idx = i
                         hovered_type = 'vertex'
 
+                # Draw bounding plane corners on unit square (corners are at (0,0), (1,0), (1,1), (0,1))
+                corner_uv = [(0, 0), (1, 0), (1, 1), (0, 1)]  # Unit square corners
+                for ci, (cu, cv) in enumerate(corner_uv):
+                    cx = left_x0 + cu * canvas_size
+                    cy = left_y0 + (1 - cv) * canvas_size
+                    corner_screen_points_left.append((cx, cy))
+                    # Draw corner (purple/magenta diamond)
+                    draw_list.add_quad_filled(cx, cy - 5, cx + 5, cy, cx, cy + 5, cx - 5, cy,
+                                             imgui.get_color_u32_rgba(0.8, 0.2, 0.8, 1.0))
+                    # Check hover on corners
+                    dist = np.sqrt((mouse_pos[0] - cx)**2 + (mouse_pos[1] - cy)**2)
+                    if dist < hover_radius and hovered_idx < 0:
+                        hovered_idx = ci
+                        hovered_type = 'corner'
+
             # Reserve space
             imgui.dummy(canvas_size + 2 * padding, canvas_size + 2 * padding)
 
@@ -3038,16 +3076,59 @@ class GLFWApp():
                         hovered_idx = i
                         hovered_type = 'vertex'
 
-                # Draw bounding box (blue) - use min/max of P points to ensure 90-degree corners
-                # The bounding box should tightly fit the contour
-                bb_min_norm = (min_xy - center_xy) * scale + 0.5
-                bb_max_norm = (max_xy - center_xy) * scale + 0.5
-                bb_x0 = right_x0 + bb_min_norm[0] * canvas_size
-                bb_y0 = right_y0 + (1 - bb_max_norm[1]) * canvas_size  # flip Y
-                bb_x1 = right_x0 + bb_max_norm[0] * canvas_size
-                bb_y1 = right_y0 + (1 - bb_min_norm[1]) * canvas_size  # flip Y
-                draw_list.add_rect(bb_x0, bb_y0, bb_x1, bb_y1,
-                                  imgui.get_color_u32_rgba(0.3, 0.5, 0.9, 1.0), thickness=1.5)
+                # Draw actual bounding plane (blue) - project 3D bounding plane corners to 2D
+                if bp is not None and len(bp) >= 4:
+                    bp_screen = []
+                    for corner_3d in bp[:4]:
+                        corner_3d = np.array(corner_3d)
+                        corner_2d = np.array([np.dot(corner_3d - mean, basis_x), np.dot(corner_3d - mean, basis_y)])
+                        corner_norm = (corner_2d - center_xy) * scale + 0.5
+                        cx = right_x0 + corner_norm[0] * canvas_size
+                        cy = right_y0 + (1 - corner_norm[1]) * canvas_size
+                        bp_screen.append((cx, cy))
+                    # Draw bounding plane edges
+                    for i in range(4):
+                        p1 = bp_screen[i]
+                        p2 = bp_screen[(i + 1) % 4]
+                        draw_list.add_line(p1[0], p1[1], p2[0], p2[1],
+                                          imgui.get_color_u32_rgba(0.3, 0.5, 0.9, 1.0), thickness=1.5)
+
+                # Draw bounding plane corners and lines to closest contour vertices
+                if bp is not None and len(bp) >= 4:
+                    # Project actual bounding plane corners to 2D
+                    for ci, corner_3d in enumerate(bp[:4]):
+                        corner_3d = np.array(corner_3d)
+                        corner_2d = np.array([np.dot(corner_3d - mean, basis_x), np.dot(corner_3d - mean, basis_y)])
+                        corner_norm = (corner_2d - center_xy) * scale + 0.5
+                        cx = right_x0 + corner_norm[0] * canvas_size
+                        cy = right_y0 + (1 - corner_norm[1]) * canvas_size
+                        corner_screen_points_right.append((cx, cy))
+
+                        # Find closest contour vertex to this corner
+                        if len(p_screen_points) > 0:
+                            min_dist = np.inf
+                            closest_vi = 0
+                            for vi, (px, py) in enumerate(p_screen_points):
+                                d = np.sqrt((cx - px)**2 + (cy - py)**2)
+                                if d < min_dist:
+                                    min_dist = d
+                                    closest_vi = vi
+                            corner_to_closest_vertex.append((ci, closest_vi))
+
+                            # Draw line from corner to closest vertex (purple, thin)
+                            px, py = p_screen_points[closest_vi]
+                            draw_list.add_line(cx, cy, px, py,
+                                             imgui.get_color_u32_rgba(0.7, 0.3, 0.7, 0.6), thickness=1.0)
+
+                        # Draw corner (purple/magenta diamond)
+                        draw_list.add_quad_filled(cx, cy - 5, cx + 5, cy, cx, cy + 5, cx - 5, cy,
+                                                 imgui.get_color_u32_rgba(0.8, 0.2, 0.8, 1.0))
+
+                        # Check hover on corners (right side)
+                        dist = np.sqrt((mouse_pos[0] - cx)**2 + (mouse_pos[1] - cy)**2)
+                        if dist < hover_radius and hovered_idx < 0:
+                            hovered_idx = ci
+                            hovered_type = 'corner'
 
                 # Draw waypoints (red) and check hover
                 if (hasattr(obj, 'waypoints') and obj.waypoints is not None and
@@ -3106,6 +3187,32 @@ class GLFWApp():
                     wpx, wpy = waypoint_screen_points[hovered_idx]
                     draw_list.add_circle_filled(wpx, wpy, 7, imgui.get_color_u32_rgba(1.0, 0.3, 0.3, 1.0))
                     draw_list.add_circle(wpx, wpy, 9, imgui.get_color_u32_rgba(1.0, 1.0, 1.0, 1.0), thickness=2.5)
+                # Draw MVC weight-proportional vertices
+                mvc_w = None
+                if (hasattr(obj, 'mvc_weights') and stream_idx < len(obj.mvc_weights) and
+                    contour_idx < len(obj.mvc_weights[stream_idx])):
+                    mvc_w = obj.mvc_weights[stream_idx][contour_idx]
+                # Fallback: compute on-the-fly if mvc_weights not available
+                if mvc_w is None and contour_match is not None and len(fiber_samples) > 0:
+                    _, _, mvc_w = obj.find_waypoints(plane_info, fiber_samples)
+                if mvc_w is not None and len(mvc_w) > hovered_idx:
+                    weights = np.array(mvc_w[hovered_idx])
+                    if len(weights) > 0 and np.isfinite(weights).all():
+                        max_w = weights.max()
+                        if max_w > 1e-8:
+                            max_radius = 7.0  # Same as hover emphasis
+                            for vi, w in enumerate(weights):
+                                if w > 1e-8:  # Only draw non-zero weights
+                                    rel_size = w / max_w
+                                    radius = max(1.0, max_radius * rel_size)  # Minimum radius of 1
+                                    # Draw on P (contour) side - yellow
+                                    if vi < len(p_screen_points):
+                                        px, py = p_screen_points[vi]
+                                        draw_list.add_circle_filled(px, py, radius, imgui.get_color_u32_rgba(1.0, 1.0, 0.0, 0.8))
+                                    # Draw on Q (unit square) side - yellow
+                                    if vi < len(q_screen_points):
+                                        qx, qy = q_screen_points[vi]
+                                        draw_list.add_circle_filled(qx, qy, radius, imgui.get_color_u32_rgba(1.0, 1.0, 0.0, 0.8))
 
             elif hovered_type == 'waypoint' and hovered_idx >= 0:
                 # Highlight waypoint on contour (bright red with white border)
@@ -3118,6 +3225,68 @@ class GLFWApp():
                     fx, fy = fiber_screen_points[hovered_idx]
                     draw_list.add_circle_filled(fx, fy, 7, imgui.get_color_u32_rgba(0.2, 1.0, 0.2, 1.0))
                     draw_list.add_circle(fx, fy, 9, imgui.get_color_u32_rgba(1.0, 1.0, 1.0, 1.0), thickness=2.5)
+                # Draw MVC weight-proportional vertices
+                mvc_w = None
+                if (hasattr(obj, 'mvc_weights') and stream_idx < len(obj.mvc_weights) and
+                    contour_idx < len(obj.mvc_weights[stream_idx])):
+                    mvc_w = obj.mvc_weights[stream_idx][contour_idx]
+                # Fallback: compute on-the-fly if mvc_weights not available
+                if mvc_w is None and contour_match is not None and len(fiber_samples) > 0:
+                    _, _, mvc_w = obj.find_waypoints(plane_info, fiber_samples)
+                if mvc_w is not None and len(mvc_w) > hovered_idx:
+                    weights = np.array(mvc_w[hovered_idx])
+                    if len(weights) > 0 and np.isfinite(weights).all():
+                        max_w = weights.max()
+                        if max_w > 1e-8:
+                            max_radius = 7.0  # Same as hover emphasis
+                            for vi, w in enumerate(weights):
+                                if w > 1e-8:  # Only draw non-zero weights
+                                    rel_size = w / max_w
+                                    radius = max(1.0, max_radius * rel_size)  # Minimum radius of 1
+                                    # Draw on P (contour) side - yellow
+                                    if vi < len(p_screen_points):
+                                        px, py = p_screen_points[vi]
+                                        draw_list.add_circle_filled(px, py, radius, imgui.get_color_u32_rgba(1.0, 1.0, 0.0, 0.8))
+                                    # Draw on Q (unit square) side - yellow
+                                    if vi < len(q_screen_points):
+                                        qx, qy = q_screen_points[vi]
+                                        draw_list.add_circle_filled(qx, qy, radius, imgui.get_color_u32_rgba(1.0, 1.0, 0.0, 0.8))
+
+            elif hovered_type == 'corner' and hovered_idx >= 0:
+                # Highlight corner on unit square (left side) - bright magenta with white border
+                if hovered_idx < len(corner_screen_points_left):
+                    cx, cy = corner_screen_points_left[hovered_idx]
+                    draw_list.add_quad_filled(cx, cy - 8, cx + 8, cy, cx, cy + 8, cx - 8, cy,
+                                             imgui.get_color_u32_rgba(1.0, 0.0, 1.0, 1.0))
+                    draw_list.add_quad(cx, cy - 10, cx + 10, cy, cx, cy + 10, cx - 10, cy,
+                                      imgui.get_color_u32_rgba(1.0, 1.0, 1.0, 1.0), thickness=2.5)
+                # Highlight corner on contour (right side) - bright magenta with white border
+                if hovered_idx < len(corner_screen_points_right):
+                    cx, cy = corner_screen_points_right[hovered_idx]
+                    draw_list.add_quad_filled(cx, cy - 8, cx + 8, cy, cx, cy + 8, cx - 8, cy,
+                                             imgui.get_color_u32_rgba(1.0, 0.0, 1.0, 1.0))
+                    draw_list.add_quad(cx, cy - 10, cx + 10, cy, cx, cy + 10, cx - 10, cy,
+                                      imgui.get_color_u32_rgba(1.0, 1.0, 1.0, 1.0), thickness=2.5)
+                # Highlight the closest contour vertex and draw emphasized line
+                for corner_ci, closest_vi in corner_to_closest_vertex:
+                    if corner_ci == hovered_idx:
+                        # Draw emphasized line from corner to closest vertex
+                        if hovered_idx < len(corner_screen_points_right) and closest_vi < len(p_screen_points):
+                            cx, cy = corner_screen_points_right[hovered_idx]
+                            px, py = p_screen_points[closest_vi]
+                            draw_list.add_line(cx, cy, px, py,
+                                             imgui.get_color_u32_rgba(1.0, 0.0, 1.0, 1.0), thickness=3.0)
+                        # Highlight the closest P vertex
+                        if closest_vi < len(p_screen_points):
+                            px, py = p_screen_points[closest_vi]
+                            draw_list.add_circle_filled(px, py, 7, imgui.get_color_u32_rgba(1.0, 0.5, 0.0, 1.0))
+                            draw_list.add_circle(px, py, 9, imgui.get_color_u32_rgba(1.0, 1.0, 1.0, 1.0), thickness=2.5)
+                        # Highlight the corresponding Q vertex
+                        if closest_vi < len(q_screen_points):
+                            qx, qy = q_screen_points[closest_vi]
+                            draw_list.add_circle_filled(qx, qy, 7, imgui.get_color_u32_rgba(0.0, 0.8, 0.8, 1.0))
+                            draw_list.add_circle(qx, qy, 9, imgui.get_color_u32_rgba(1.0, 1.0, 1.0, 1.0), thickness=2.5)
+                        break
 
             # Show tooltip
             if hovered_idx >= 0:
@@ -3127,6 +3296,17 @@ class GLFWApp():
                     imgui.set_tooltip(f"Fiber {hovered_idx}")
                 elif hovered_type == 'waypoint':
                     imgui.set_tooltip(f"Waypoint {hovered_idx}")
+                elif hovered_type == 'corner':
+                    corner_names = ['Bottom-Left', 'Bottom-Right', 'Top-Right', 'Top-Left']
+                    corner_name = corner_names[hovered_idx] if hovered_idx < 4 else f"Corner {hovered_idx}"
+                    # Find closest vertex for this corner
+                    closest_vi = -1
+                    for corner_ci, vi in corner_to_closest_vertex:
+                        if corner_ci == hovered_idx:
+                            closest_vi = vi
+                            break
+                    if closest_vi >= 0:
+                        imgui.set_tooltip(f"{corner_name} Corner -> Vertex {closest_vi}")
 
             imgui.end()
 
