@@ -2974,10 +2974,11 @@ class GLFWApp():
             # Determine which contours to draw
             if show_all:
                 contour_indices = list(range(num_contours))
-                # Begin scrollable region for all contours
-                imgui.begin_child(f"all_contours_scroll##{name}", 0, 0, border=False)
             else:
                 contour_indices = [contour_idx]
+
+            # Always use child region for consistent layout (scrollbar space reserved)
+            imgui.begin_child(f"contours_scroll##{name}", 0, 0, border=False)
 
             for draw_contour_idx in contour_indices:
                 contour_idx = draw_contour_idx  # Use this for the visualization
@@ -3007,9 +3008,12 @@ class GLFWApp():
                 # Get canvas dimensions
                 canvas_size = 280
                 padding = 20
+                column_width = canvas_size + 2 * padding + 20  # Fixed column width
 
                 # Two columns: unit square (left) and contour (right)
                 imgui.columns(2, f"inspect_cols##{name}_{contour_idx}", border=True)
+                imgui.set_column_width(0, column_width)
+                imgui.set_column_width(1, column_width)
 
                 draw_list = imgui.get_window_draw_list()
                 mouse_pos = imgui.get_mouse_pos()
@@ -3299,7 +3303,14 @@ class GLFWApp():
                         mvc_w = obj.mvc_weights[stream_idx][contour_idx]
                     # Fallback: compute on-the-fly if mvc_weights not available
                     if mvc_w is None and contour_match is not None and len(fiber_samples) > 0:
-                        _, _, mvc_w = obj.find_waypoints(plane_info, fiber_samples)
+                        try:
+                            # Check if contour_match has valid 3D points (not 2D)
+                            if len(contour_match) > 0 and len(contour_match[0]) >= 2:
+                                first_q = np.array(contour_match[0][1])
+                                if len(first_q) == 3:  # Valid 3D point
+                                    _, _, mvc_w = obj.find_waypoints(plane_info, fiber_samples)
+                        except Exception:
+                            mvc_w = None
                     if mvc_w is not None and len(mvc_w) > hovered_idx:
                         weights = np.array(mvc_w[hovered_idx])
                         if len(weights) > 0 and np.isfinite(weights).all():
@@ -3337,7 +3348,14 @@ class GLFWApp():
                         mvc_w = obj.mvc_weights[stream_idx][contour_idx]
                     # Fallback: compute on-the-fly if mvc_weights not available
                     if mvc_w is None and contour_match is not None and len(fiber_samples) > 0:
-                        _, _, mvc_w = obj.find_waypoints(plane_info, fiber_samples)
+                        try:
+                            # Check if contour_match has valid 3D points (not 2D)
+                            if len(contour_match) > 0 and len(contour_match[0]) >= 2:
+                                first_q = np.array(contour_match[0][1])
+                                if len(first_q) == 3:  # Valid 3D point
+                                    _, _, mvc_w = obj.find_waypoints(plane_info, fiber_samples)
+                        except Exception:
+                            mvc_w = None
                     if mvc_w is not None and len(mvc_w) > hovered_idx:
                         weights = np.array(mvc_w[hovered_idx])
                         if len(weights) > 0 and np.isfinite(weights).all():
@@ -3417,9 +3435,8 @@ class GLFWApp():
                 if show_all:
                     imgui.separator()
 
-            # End scrollable region if show_all
-            if show_all:
-                imgui.end_child()
+            # End scrollable region (always used now)
+            imgui.end_child()
 
             imgui.end()
 
