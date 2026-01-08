@@ -1789,25 +1789,43 @@ class FiberArchitectureMixin:
         basis_x = bounding_plane_info.get('basis_x')
         basis_y = bounding_plane_info.get('basis_y')
         center = bounding_plane_info.get('mean', np.mean(Qs, axis=0))
+        bp = bounding_plane_info.get('bounding_plane')
 
-        if Qs.shape[1] == 3:
-            # Project to 2D using bounding plane basis
-            if basis_x is not None and basis_y is not None:
-                Qs_2d = np.zeros((n_verts, 2))
-                for i, q in enumerate(Qs):
-                    rel = q - center
-                    Qs_2d[i] = [np.dot(rel, basis_x), np.dot(rel, basis_y)]
-            else:
-                Qs_2d = Qs[:, :2]
+        # Use bounding plane parametric coordinates to map Q to [0,1]^2
+        # This matches how fiber samples are generated (Sobol points in unit square)
+        # Formula: Q = bp[0] + u * (bp[1]-bp[0]) + v * (bp[3]-bp[0])
+        # Solve for (u, v) using least squares
+        if bp is not None and len(bp) >= 4:
+            bp = [np.array(c) for c in bp[:4]]
+            edge_x = bp[1] - bp[0]  # u direction
+            edge_y = bp[3] - bp[0]  # v direction
+            A = np.column_stack([edge_x, edge_y])
+
+            Qs_normalized = np.zeros((n_verts, 2))
+            for i, q in enumerate(Qs):
+                q = np.array(q)
+                rel_q = q - bp[0]
+                result, _, _, _ = np.linalg.lstsq(A, rel_q, rcond=None)
+                u, v = result[0], result[1]
+                Qs_normalized[i] = [np.clip(u, 0, 1), np.clip(v, 0, 1)]
         else:
-            Qs_2d = Qs
+            # Fallback to min/max normalization if no bounding plane
+            if Qs.shape[1] == 3:
+                if basis_x is not None and basis_y is not None:
+                    Qs_2d = np.zeros((n_verts, 2))
+                    for i, q in enumerate(Qs):
+                        rel = q - center
+                        Qs_2d[i] = [np.dot(rel, basis_x), np.dot(rel, basis_y)]
+                else:
+                    Qs_2d = Qs[:, :2]
+            else:
+                Qs_2d = Qs
 
-        # Normalize Q to [0,1] range for MVC computation
-        q_min = Qs_2d.min(axis=0)
-        q_max = Qs_2d.max(axis=0)
-        q_range = q_max - q_min
-        q_range[q_range < 1e-10] = 1.0
-        Qs_normalized = (Qs_2d - q_min) / q_range
+            q_min = Qs_2d.min(axis=0)
+            q_max = Qs_2d.max(axis=0)
+            q_range = q_max - q_min
+            q_range[q_range < 1e-10] = 1.0
+            Qs_normalized = (Qs_2d - q_min) / q_range
 
         # MVC computation using Q polygon
         fiber_samples = np.array(fiber_architecture)

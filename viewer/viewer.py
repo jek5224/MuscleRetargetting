@@ -3097,11 +3097,12 @@ class GLFWApp():
                                 hovered_type = 'fiber'
 
                 # Compute and draw Q points from contour_match (cyan) - draw immediately so they're not covered
+                # Use bounding plane parametric coordinates to match MVC computation in find_waypoints()
                 if contour_match is not None and bp is not None and len(bp) >= 4:
                     for i, (p, q) in enumerate(contour_match):
                         p = np.array(p)
                         q = np.array(q)
-                        # Compute Q's position on unit square using 2D projection
+                        # Compute Q's position on unit square using bounding plane parametric coords
                         q_norm = point_to_unit_square_2d(q, mean, basis_x, basis_y, bp)
                         qx = left_x0 + q_norm[0] * canvas_size
                         qy = left_y0 + (1 - q_norm[1]) * canvas_size
@@ -3317,7 +3318,10 @@ class GLFWApp():
                             max_w = weights.max()
                             if max_w > 1e-8:
                                 max_radius = 7.0  # Same as hover emphasis
-                                for vi, w in enumerate(weights):
+                                # Sort by weight descending (draw largest first, smallest on top)
+                                sorted_indices = np.argsort(weights)[::-1]
+                                for vi in sorted_indices:
+                                    w = weights[vi]
                                     if w > 1e-8:  # Only draw non-zero weights
                                         rel_size = w / max_w
                                         radius = max(1.0, max_radius * rel_size)  # Minimum radius of 1
@@ -3362,7 +3366,10 @@ class GLFWApp():
                             max_w = weights.max()
                             if max_w > 1e-8:
                                 max_radius = 7.0  # Same as hover emphasis
-                                for vi, w in enumerate(weights):
+                                # Sort by weight descending (draw largest first, smallest on top)
+                                sorted_indices = np.argsort(weights)[::-1]
+                                for vi in sorted_indices:
+                                    w = weights[vi]
                                     if w > 1e-8:  # Only draw non-zero weights
                                         rel_size = w / max_w
                                         radius = max(1.0, max_radius * rel_size)  # Minimum radius of 1
