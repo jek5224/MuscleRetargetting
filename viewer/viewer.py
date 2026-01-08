@@ -1818,7 +1818,7 @@ class GLFWApp():
                         imgui.set_column_width(0, 120)
 
                         # Left column: Process button with vertical slider
-                        num_process_buttons = 9
+                        num_process_buttons = 8
                         process_all_height = num_process_buttons * imgui.get_frame_height() + (num_process_buttons - 1) * imgui.get_style().item_spacing[1]
 
                         # Initialize process step slider value
@@ -1942,14 +1942,6 @@ class GLFWApp():
                                     print(f"[{name}] Find Streams error: {e}")
                             else:
                                 print(f"[{name}] Prerequisites: Run 'Find Contours' first")
-                        if imgui.button(f"Optimize Streams##{name}", width=col_button_width):
-                            if obj.contours is not None and len(obj.contours) > 0 and obj.bounding_planes is not None and len(obj.bounding_planes) > 0:
-                                try:
-                                    obj.optimize_contour_stream(shape_threshold=0.1, min_contours=3)
-                                except Exception as e:
-                                    print(f"[{name}] Optimize Streams error: {e}")
-                            else:
-                                print(f"[{name}] Prerequisites: Run 'Find Streams' first")
                         if colored_button(f"Resample Contours##{name}", 6, col_button_width):
                             if obj.contours is not None and len(obj.contours) > 0 and obj.bounding_planes is not None:
                                 try:

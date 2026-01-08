@@ -1685,10 +1685,12 @@ class FiberArchitectureMixin:
             template_start_pos = template_contour[result_index[i][1]]
             template_end_pos = template_contour[result_index[(i + 1) % len(result_index)][1]]
 
-            if muscle_end != 0:
+            # Handle wrap-around: when muscle_end < muscle_start, we need to go around the contour
+            if muscle_end >= muscle_start:
                 muscle_list = list(range(muscle_start, muscle_end + 1))
             else:
-                muscle_list = list(range(muscle_start, len(muscle_contour))) + [0]
+                # Wrap around: go from muscle_start to end, then from 0 to muscle_end
+                muscle_list = list(range(muscle_start, len(muscle_contour))) + list(range(0, muscle_end + 1))
 
             segment_t = []
             t_sum = 0

@@ -1317,7 +1317,12 @@ class ContourMeshMixin:
         matching contours in neighboring levels.
 
         Should be run before resampling - uses original contour points.
+
+        NOTE: Currently disabled as it interferes with contour matching.
         """
+        print("smoothen_contours: skipped (disabled)")
+        return
+
         if len(self.bounding_planes) == 0:
             print("No Contours found")
             return
@@ -1452,9 +1457,9 @@ class ContourMeshMixin:
                     bounding_plane = np.array([new_mean + x * new_basis_x + y * new_basis_y for x, y in bounding_plane_2d])
                     projected_2d_3d = np.array([new_mean + x * new_basis_x + y * new_basis_y for x, y in projected_2d])
 
-                    # Update contour with new bounding plane match
-                    preserve = getattr(self, '_contours_normalized', False)
-                    self.contours[i][contour_idx], contour_match = self.find_contour_match(original_contour, bounding_plane, preserve_order=preserve)
+                    # Keep original contour order - only update bounding plane orientation
+                    # Don't call find_contour_match here as it messes up well-found contour matching
+                    contour_match = bounding_plane_info.get('contour_match', bounding_plane)
 
                     new_bounding_plane_info = {
                         'basis_x': new_basis_x,
@@ -2836,6 +2841,274 @@ class ContourMeshMixin:
 
         return total_removed
 
+    def optimize_contour_stream_fit(self, fit_threshold=0.005, min_contours=3, num_samples=1000):
+        """
+        Optimize contour stream by measuring actual fit to original mesh surface.
+        Greedily removes contours while maintaining fit quality.
+
+        Args:
+            fit_threshold: Maximum allowed mean distance from original mesh to contour surface (meters)
+            min_contours: Minimum number of contours to keep per stream
+            num_samples: Number of points to sample on original mesh surface
+
+        Returns:
+            (total_removed, final_fit_error)
+        """
+        if self.contours is None or len(self.contours) == 0:
+            print("No contours to optimize. Run find_contour_stream first.")
+            return 0, 0
+
+        if self.vertices is None or self.faces_3 is None:
+            print("No original mesh data available.")
+            return 0, 0
+
+        # Sample points on original mesh surface
+        sample_points = self._sample_mesh_surface(num_samples)
+        if len(sample_points) == 0:
+            print("Failed to sample mesh surface.")
+            return 0, 0
+
+        print(f"Sampled {len(sample_points)} points on original mesh surface")
+
+        total_removed = 0
+
+        for stream_idx in range(len(self.contours)):
+            stream_contours = self.contours[stream_idx]
+            stream_planes = self.bounding_planes[stream_idx]
+
+            if len(stream_contours) <= min_contours:
+                print(f"  Stream {stream_idx}: already at minimum ({len(stream_contours)} contours)")
+                continue
+
+            original_count = len(stream_contours)
+
+            # Compute initial fit
+            current_fit = self._compute_contour_fit(stream_contours, sample_points)
+            print(f"  Stream {stream_idx}: initial fit = {current_fit*1000:.2f}mm ({len(stream_contours)} contours)")
+
+            # Greedy removal
+            while len(stream_contours) > min_contours:
+                best_removal_idx = None
+                best_fit_after = float('inf')
+
+                # Try removing each middle contour (keep first and last)
+                for i in range(1, len(stream_contours) - 1):
+                    # Create test configuration without contour i
+                    test_contours = stream_contours[:i] + stream_contours[i+1:]
+                    test_fit = self._compute_contour_fit(test_contours, sample_points)
+
+                    if test_fit < best_fit_after:
+                        best_fit_after = test_fit
+                        best_removal_idx = i
+
+                # Check if best removal is acceptable
+                if best_removal_idx is not None and best_fit_after <= fit_threshold:
+                    # Remove the contour
+                    stream_contours = stream_contours[:best_removal_idx] + stream_contours[best_removal_idx+1:]
+                    stream_planes = stream_planes[:best_removal_idx] + stream_planes[best_removal_idx+1:]
+                    current_fit = best_fit_after
+                else:
+                    # Can't remove any more without exceeding threshold
+                    break
+
+            removed = original_count - len(stream_contours)
+            total_removed += removed
+
+            self.contours[stream_idx] = stream_contours
+            self.bounding_planes[stream_idx] = stream_planes
+
+            print(f"  Stream {stream_idx}: {original_count} -> {len(stream_contours)} contours "
+                  f"(removed {removed}, final fit = {current_fit*1000:.2f}mm)")
+
+        print(f"Fit optimization complete: removed {total_removed} contours total")
+
+        # Update draw_contour_stream
+        if hasattr(self, 'draw_contour_stream') and self.draw_contour_stream is not None:
+            self.draw_contour_stream = [True] * len(self.contours)
+
+        # Compute final overall fit
+        final_fit = self._compute_overall_fit(sample_points)
+        return total_removed, final_fit
+
+    def _sample_mesh_surface(self, num_samples):
+        """Sample random points on the original mesh surface."""
+        if self.vertices is None or self.faces_3 is None or len(self.faces_3) == 0:
+            return np.array([])
+
+        # Compute face areas for weighted sampling
+        faces = np.array(self.faces_3)
+        v0 = self.vertices[faces[:, 0]]
+        v1 = self.vertices[faces[:, 1]]
+        v2 = self.vertices[faces[:, 2]]
+
+        # Cross product gives area * 2
+        cross = np.cross(v1 - v0, v2 - v0)
+        areas = np.linalg.norm(cross, axis=1) / 2
+
+        # Normalize to probabilities
+        total_area = np.sum(areas)
+        if total_area < 1e-10:
+            return np.array([])
+        probs = areas / total_area
+
+        # Sample faces weighted by area
+        face_indices = np.random.choice(len(faces), size=num_samples, p=probs)
+
+        # Generate random barycentric coordinates
+        r1 = np.random.random(num_samples)
+        r2 = np.random.random(num_samples)
+        sqrt_r1 = np.sqrt(r1)
+
+        # Barycentric coords that give uniform distribution on triangle
+        u = 1 - sqrt_r1
+        v = sqrt_r1 * (1 - r2)
+        w = sqrt_r1 * r2
+
+        # Compute sample points
+        sampled_v0 = self.vertices[faces[face_indices, 0]]
+        sampled_v1 = self.vertices[faces[face_indices, 1]]
+        sampled_v2 = self.vertices[faces[face_indices, 2]]
+
+        samples = u[:, np.newaxis] * sampled_v0 + v[:, np.newaxis] * sampled_v1 + w[:, np.newaxis] * sampled_v2
+        return samples
+
+    def _compute_contour_fit(self, stream_contours, sample_points):
+        """
+        Compute fit metric: mean distance from sample points to contour surface.
+        Uses interpolation between adjacent contours.
+        """
+        if len(stream_contours) < 2:
+            return float('inf')
+
+        # For each sample point, find distance to nearest point on contour surface
+        distances = []
+
+        for pt in sample_points:
+            min_dist = float('inf')
+
+            # Check distance to each contour level
+            for i, contour in enumerate(stream_contours):
+                contour = np.array(contour)
+                if len(contour) < 3:
+                    continue
+
+                # Distance to contour polygon (approximate as distance to nearest edge)
+                for j in range(len(contour)):
+                    p1 = contour[j]
+                    p2 = contour[(j + 1) % len(contour)]
+
+                    # Point to line segment distance
+                    d = self._point_to_segment_distance(pt, p1, p2)
+                    min_dist = min(min_dist, d)
+
+            # Also check interpolated surfaces between contours
+            for i in range(len(stream_contours) - 1):
+                c1 = np.array(stream_contours[i])
+                c2 = np.array(stream_contours[i + 1])
+
+                if len(c1) != len(c2) or len(c1) < 3:
+                    continue
+
+                # Check distance to quad faces connecting contours
+                for j in range(len(c1)):
+                    j_next = (j + 1) % len(c1)
+                    # Quad: c1[j], c1[j_next], c2[j_next], c2[j]
+                    # Split into two triangles
+                    d1 = self._point_to_triangle_distance(pt, c1[j], c1[j_next], c2[j])
+                    d2 = self._point_to_triangle_distance(pt, c1[j_next], c2[j_next], c2[j])
+                    min_dist = min(min_dist, d1, d2)
+
+            if min_dist < float('inf'):
+                distances.append(min_dist)
+
+        if len(distances) == 0:
+            return float('inf')
+
+        return np.mean(distances)
+
+    def _point_to_segment_distance(self, p, a, b):
+        """Compute distance from point p to line segment ab."""
+        ab = b - a
+        ap = p - a
+        t = np.dot(ap, ab) / (np.dot(ab, ab) + 1e-10)
+        t = np.clip(t, 0, 1)
+        closest = a + t * ab
+        return np.linalg.norm(p - closest)
+
+    def _point_to_triangle_distance(self, p, a, b, c):
+        """Compute distance from point p to triangle abc."""
+        # Project point onto triangle plane
+        ab = b - a
+        ac = c - a
+        normal = np.cross(ab, ac)
+        normal_len = np.linalg.norm(normal)
+        if normal_len < 1e-10:
+            return float('inf')
+        normal = normal / normal_len
+
+        # Distance to plane
+        ap = p - a
+        plane_dist = np.dot(ap, normal)
+        projected = p - plane_dist * normal
+
+        # Check if projected point is inside triangle (barycentric)
+        v0 = c - a
+        v1 = b - a
+        v2 = projected - a
+
+        dot00 = np.dot(v0, v0)
+        dot01 = np.dot(v0, v1)
+        dot02 = np.dot(v0, v2)
+        dot11 = np.dot(v1, v1)
+        dot12 = np.dot(v1, v2)
+
+        denom = dot00 * dot11 - dot01 * dot01
+        if abs(denom) < 1e-10:
+            return float('inf')
+
+        u = (dot11 * dot02 - dot01 * dot12) / denom
+        v = (dot00 * dot12 - dot01 * dot02) / denom
+
+        if u >= 0 and v >= 0 and u + v <= 1:
+            # Inside triangle
+            return abs(plane_dist)
+        else:
+            # Outside - find closest edge
+            d1 = self._point_to_segment_distance(p, a, b)
+            d2 = self._point_to_segment_distance(p, b, c)
+            d3 = self._point_to_segment_distance(p, c, a)
+            return min(d1, d2, d3)
+
+    def _compute_overall_fit(self, sample_points):
+        """Compute overall fit across all streams."""
+        if self.contours is None or len(self.contours) == 0:
+            return float('inf')
+
+        all_contours = []
+        for stream in self.contours:
+            all_contours.extend(stream)
+
+        if len(all_contours) < 2:
+            return float('inf')
+
+        # Flatten: compute mean distance from samples to any contour surface
+        distances = []
+        for pt in sample_points:
+            min_dist = float('inf')
+            for contour in all_contours:
+                contour = np.array(contour)
+                if len(contour) < 3:
+                    continue
+                for j in range(len(contour)):
+                    p1 = contour[j]
+                    p2 = contour[(j + 1) % len(contour)]
+                    d = self._point_to_segment_distance(pt, p1, p2)
+                    min_dist = min(min_dist, d)
+            if min_dist < float('inf'):
+                distances.append(min_dist)
+
+        return np.mean(distances) if distances else float('inf')
+
     def _find_contour_stream_post_process(self, skeleton_meshes=None):
         """Post-processing for find_contour_stream: fiber architecture, waypoints, etc."""
         # Contours are already normalized - don't reverse or re-align
@@ -3068,10 +3341,13 @@ class ContourMeshMixin:
         else:
             print(f"[_find_contour_stream_post_process] Skipping auto_detect_attachments: skeleton_meshes={skeleton_meshes is not None}, len={len(skeleton_meshes) if skeleton_meshes else 0}")
 
-    def find_contour_stream(self, skeleton_meshes=None):
+    def find_contour_stream(self, skeleton_meshes=None, optimize_fit=False, fit_threshold=0.005, min_contours=3):
         # Check for simplified mode - prepare data and skip to post-processing
         if getattr(self, 'simplified_waypoints', False):
             self.find_contour_stream_simplified(skeleton_meshes)
+            # Optimize fit if enabled
+            if optimize_fit:
+                self.optimize_contour_stream_fit(fit_threshold=fit_threshold, min_contours=min_contours)
             # Continue with post-processing below (fiber architecture, waypoints, etc.)
             return self._find_contour_stream_post_process(skeleton_meshes)
 
@@ -4267,6 +4543,10 @@ class ContourMeshMixin:
 
         self.contours = new_contours
         '''
+
+        # Optimize fit if enabled - remove redundant contours while maintaining mesh shape fit
+        if optimize_fit:
+            self.optimize_contour_stream_fit(fit_threshold=fit_threshold, min_contours=min_contours)
 
         # Post-process: fiber architecture, waypoints, etc.
         self._find_contour_stream_post_process(skeleton_meshes)
