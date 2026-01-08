@@ -4032,12 +4032,13 @@ class ContourMeshMixin:
                     # new_basis_x = ((prev_basis_x + next_basis_x) / 2 + basis_x) / 2
                     # new_basis_y = ((prev_basis_y + next_basis_y) / 2 + basis_y) / 2
                     new_basis_x = ((prev_basis_x * next_distance + next_basis_x * prev_distance) / distance_sum + basis_x) / 2
-                    new_basis_y = ((prev_basis_y * next_distance + next_basis_y * prev_distance) / distance_sum + basis_y) / 2
-                    new_basis_z = np.cross(new_basis_x, new_basis_y)
+                    new_basis_z = ((prev_basis_z * next_distance + next_basis_z * prev_distance) / distance_sum + basis_z) / 2
 
                     new_basis_x /= np.linalg.norm(new_basis_x)
-                    new_basis_y /= np.linalg.norm(new_basis_y)
                     new_basis_z /= np.linalg.norm(new_basis_z)
+                    # Re-orthogonalize: compute basis_y from cross product to ensure 90-degree corners
+                    new_basis_y = np.cross(new_basis_z, new_basis_x)
+                    new_basis_y /= (np.linalg.norm(new_basis_y) + 1e-10)
                     new_newell = new_basis_z
 
                     new_mean = prev_mean + np.dot(mean - prev_mean, basis_z) / np.dot(next_mean - prev_mean, basis_z) * (next_mean - prev_mean)

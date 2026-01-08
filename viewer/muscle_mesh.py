@@ -2918,26 +2918,43 @@ class MuscleMeshMixin:
             prev_newell = np.array([0, 1, 0])
 
         newell_normal = compute_newell_normal(contour_points)
-        basis_x, basis_y, mean = compute_best_fitting_plane(contour_points)
-        basis_z = np.cross(basis_x, basis_y)
-
-        if bounding_plane_info_orig is not None:
-            basis_x = bounding_plane_info_orig['basis_x']
-            basis_y = bounding_plane_info_orig['basis_y']
+        mean = np.mean(contour_points, axis=0)
 
         if np.dot(newell_normal, prev_newell) < 0:
             newell_normal *= -1
 
-        basis_x = basis_x - np.dot(basis_x, newell_normal) * newell_normal
-        basis_x = basis_x / np.linalg.norm(basis_x)
         basis_z = newell_normal
-        basis_y = np.cross(basis_z, basis_x)
-        basis_y = basis_y / (np.linalg.norm(basis_y) + 1e-10)
 
-        # Align basis_x with previous level's basis_x to ensure consistent coordinate system
-        # This prevents waypoint jumping due to arbitrary PCA orientation
-        from .contour_mesh import align_basis_to_reference_continuous
-        basis_x, basis_y = align_basis_to_reference_continuous(basis_x, basis_y, prev_basis_x, basis_z)
+        if bounding_plane_info_orig is not None:
+            basis_x = bounding_plane_info_orig['basis_x']
+            basis_y = bounding_plane_info_orig['basis_y']
+        else:
+            # Project contour points onto the plane and do 2D PCA to find principal direction
+            # This ensures basis_x aligns with the long axis of the contour
+
+            # Create initial orthonormal basis on the plane
+            arbitrary = np.array([1, 0, 0])
+            if abs(np.dot(arbitrary, basis_z)) > 0.9:
+                arbitrary = np.array([0, 1, 0])
+            temp_x = arbitrary - np.dot(arbitrary, basis_z) * basis_z
+            temp_x = temp_x / np.linalg.norm(temp_x)
+            temp_y = np.cross(basis_z, temp_x)
+
+            # Project contour points to 2D on this plane
+            projected_2d = np.array([[np.dot(v - mean, temp_x), np.dot(v - mean, temp_y)] for v in contour_points])
+
+            # 2D PCA to find principal direction within the plane
+            centered_2d = projected_2d - np.mean(projected_2d, axis=0)
+            _, _, eigenvectors_2d = np.linalg.svd(centered_2d)
+            principal_2d = eigenvectors_2d[0]  # First principal component in 2D
+
+            # Convert back to 3D basis_x
+            basis_x = principal_2d[0] * temp_x + principal_2d[1] * temp_y
+            basis_x = basis_x / np.linalg.norm(basis_x)
+            basis_y = np.cross(basis_z, basis_x)
+            basis_y = basis_y / (np.linalg.norm(basis_y) + 1e-10)
+
+        # Note: orientation alignment with previous level is handled later in the pca/rotating_calipers branches
 
         # Get bounding box method (default to 'pca' for backward compatibility)
         bbox_method = getattr(self, 'bounding_box_method', 'pca')
@@ -3056,6 +3073,20 @@ class MuscleMeshMixin:
 
         bounding_plane = np.array([optimal_mean + x * basis_x + y * basis_y for x, y in bounding_plane_2d])
         projected_2d = np.array([optimal_mean + x * basis_x + y * basis_y for x, y in projected_2d])
+
+        # Debug: verify 90-degree corners
+        dot_xy = np.dot(basis_x, basis_y)
+        # Compute actual corner angles
+        angles = []
+        for i in range(4):
+            p0 = bounding_plane[(i - 1) % 4]
+            p1 = bounding_plane[i]
+            p2 = bounding_plane[(i + 1) % 4]
+            v1 = p0 - p1
+            v2 = p2 - p1
+            cos_ang = np.dot(v1, v2) / (np.linalg.norm(v1) * np.linalg.norm(v2) + 1e-10)
+            angles.append(np.degrees(np.arccos(np.clip(cos_ang, -1, 1))))
+        print(f"save_bounding_planes: dot_xy={dot_xy:.6f}, angles={[f'{a:.1f}' for a in angles]}")
 
         # Preserve order if contours have been normalized
         preserve = getattr(self, '_contours_normalized', False)

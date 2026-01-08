@@ -280,7 +280,7 @@ class MeshLoader(ContourMeshMixin, TetrahedronMeshMixin, FiberArchitectureMixin,
         self._init_muscle_properties()
         self._init_skeleton_properties()
 
-    def find_contour_match(self, muscle_contour_orig, template_contour, prev_P0=None):
+    def find_contour_match(self, muscle_contour_orig, template_contour, prev_P0=None, preserve_order=False):
         # for each poiint from template_contours, find closest point from muscle_contour
         muscle_contour = muscle_contour_orig.copy()
 
@@ -1292,155 +1292,8 @@ class MeshLoader(ContourMeshMixin, TetrahedronMeshMixin, FiberArchitectureMixin,
         glPopMatrix()
 
         glEnable(GL_LIGHTING)
-    
-    def compute_scalar_field(self):
-        # # check mean vertex positions of edge_groups and assign origin_indices as edge group with larger y value
-        # origin_indices = self.edge_groups[0]
-        # insertion_indices = self.edge_groups[1]
 
-        origin_indices = []
-        insertion_indices = []
-
-        for i, edge_group in enumerate(self.edge_groups):
-            if self.edge_classes[i] == 'origin':
-                origin_indices += edge_group
-            else:
-                insertion_indices += edge_group
-
-        u = solve_scalar_field(self.vertices, self.faces_3, origin_indices, insertion_indices)
-        self.scalar_field = u
-
-        u_min, u_max = np.min(u), np.max(u)
-        normalized_u = (u - u_min) / (u_max - u_min) if u_max > u_min else np.zeros_like(u)
-
-        vertex_colors = cmap(1 - normalized_u)[:, :4]  # Invert jet colormap (red for kmin, blue for kmax)
-
-        # Ensure correct color format (float32)
-        vertex_colors = np.array(vertex_colors, dtype=np.float32)
-        # Set last column (alpha) to 1
-        vertex_colors[:, 3] = self.transparency
-        self.vertex_colors = vertex_colors[self.faces_3[:, :, 0].flatten()]
-        self.is_draw_scalar_field = True
-
-    def save_bounding_planes(self, contour_points, scalar_value, prev_bounding_plane=None, bounding_plane_info_orig=None):
-        if prev_bounding_plane is not None:
-            prev_basis_x = prev_bounding_plane['basis_x']
-            prev_basis_y = prev_bounding_plane['basis_y']
-            prev_basis_z = prev_bounding_plane['basis_z']
- 
-            prev_newell = prev_bounding_plane['newell_normal']
-        elif len(self.bounding_planes) > 0:
-            prev_basis_x = self.bounding_planes[-1][0]['basis_x']
-            prev_basis_y = self.bounding_planes[-1][0]['basis_y']
-            prev_basis_z = self.bounding_planes[-1][0]['basis_z']
-
-            prev_newell = self.bounding_planes[-1][0]['newell_normal']
-        else:
-            prev_basis_x = np.array([1, 0, 0])
-            prev_basis_y = np.array([0, 1, 0])
-            prev_basis_z = np.array([0, 0, 1])
-
-            prev_newell = np.array([0, 1, 0])
-
-        newell_normal = compute_newell_normal(contour_points)
-        basis_x, basis_y, mean = compute_best_fitting_plane(contour_points)
-        basis_z = np.cross(basis_x, basis_y)
-
-        if bounding_plane_info_orig is not None:
-            basis_x = bounding_plane_info_orig['basis_x']
-            basis_y = bounding_plane_info_orig['basis_y']
-
-        if np.dot(newell_normal, prev_newell) < 0:
-            newell_normal *= -1
-
-        # project basis_x vector on plane made by newell_normal and mean
-        basis_x = basis_x - np.dot(basis_x, newell_normal) * newell_normal
-        basis_x = basis_x / np.linalg.norm(basis_x)
-        basis_z = newell_normal
-        basis_y = np.cross(basis_z, basis_x)
-        basis_y = basis_y / (np.linalg.norm(basis_y) + 1e-10)
-
-        cand_pairs = [(basis_x, basis_y), (basis_y, -basis_x), (-basis_x, -basis_y), (-basis_y, basis_x)]
-        best_pair = None
-        min_angle = np.inf
-        for pair in cand_pairs:
-            prev_rot = np.vstack([prev_basis_x, prev_basis_y, prev_basis_z]).T
-            new_rot = np.vstack([pair[0], pair[1], basis_z]).T
-            # angle = np.arccos(np.clip(np.dot(prev_rot[:, 0], new_rot[:, 0]), -1.0, 1.0))
-
-            R_rel = new_rot @ prev_rot.T
-
-            trace = np.trace(R_rel)
-            angle = np.arccos(np.clip((trace - 1) / 2, -1.0, 1.0))
-            if angle < min_angle:
-                min_angle = angle
-                best_pair = pair
-        basis_x, basis_y = best_pair
-
-        projected_2d = np.array([[np.dot(v - mean, basis_x), np.dot(v - mean, basis_y)] for v in contour_points])
-        area = compute_polygon_area(projected_2d)
-        # print(area)
-
-        min_x, max_x = np.min(projected_2d[:, 0]), np.max(projected_2d[:, 0])
-        min_y, max_y = np.min(projected_2d[:, 1]), np.max(projected_2d[:, 1])
-
-        x_len = max_x - min_x
-        y_len = max_y - min_y
-
-        ratio_threshold = 1.5
-        square_like =  max(x_len, y_len) / min(x_len, y_len) < ratio_threshold
-        if square_like:
-            #project prev_basis_x and prev_basis_y to new plane
-            new_basis_x = prev_basis_x - np.dot(prev_basis_x, newell_normal) * newell_normal
-
-            basis_x = new_basis_x
-            basis_x = basis_x / np.linalg.norm(basis_x)
-            basis_y = np.cross(basis_z, basis_x)
-            basis_y = basis_y / (np.linalg.norm(basis_y) + 1e-10)
-
-            projected_2d = np.array([[np.dot(v - mean, basis_x), np.dot(v - mean, basis_y)] for v in contour_points])
-            area = compute_polygon_area(projected_2d)
-
-            min_x, max_x = np.min(projected_2d[:, 0]), np.max(projected_2d[:, 0])
-            min_y, max_y = np.min(projected_2d[:, 1]), np.max(projected_2d[:, 1])
-
-            x_len = max_x - min_x
-            y_len = max_y - min_y
-
-        # Final re-orthogonalization to ensure exactly 90-degree corners
-        basis_x = basis_x / (np.linalg.norm(basis_x) + 1e-10)
-        basis_y = np.cross(basis_z, basis_x)
-        basis_y = basis_y / (np.linalg.norm(basis_y) + 1e-10)
-
-        # Re-project contour points with orthonormal basis to get correct extents
-        projected_2d = np.array([[np.dot(v - mean, basis_x), np.dot(v - mean, basis_y)] for v in contour_points])
-        min_x, max_x = np.min(projected_2d[:, 0]), np.max(projected_2d[:, 0])
-        min_y, max_y = np.min(projected_2d[:, 1]), np.max(projected_2d[:, 1])
-
-        bounding_plane_2d = np.array([
-            [min_x, min_y], [max_x, min_y],
-            [max_x, max_y], [min_x, max_y]
-        ])
-        bounding_plane = np.array([mean + x * basis_x + y * basis_y for x, y in bounding_plane_2d])
-        projected_2d = np.array([mean + x * basis_x + y * basis_y for x, y in projected_2d])
-
-        new_contour, contour_match = self.find_contour_match(contour_points, bounding_plane)
-
-        return new_contour, {
-            'basis_x': basis_x,
-            'basis_y': basis_y,
-            # 'basis_z': newell_normal,
-            'basis_z': basis_z,
-            'mean': mean,
-            'bounding_plane': bounding_plane,
-            'projected_2d': projected_2d,
-            'area': area,
-            'contour_match': contour_match,
-            'scalar_value': scalar_value,
-            'square_like': square_like,
-
-            'newell_normal': newell_normal,
-        }
+    # compute_scalar_field and save_bounding_planes are inherited from MuscleMeshMixin
 
     def find_contour(self, contour_value):
         # Find contour vertices for contour value
@@ -1801,6 +1654,12 @@ class MeshLoader(ContourMeshMixin, TetrahedronMeshMixin, FiberArchitectureMixin,
                     continue
                 
                 bounding_plane_info = bounding_plane_infos[0]
+
+                # Skip non-square bounding planes - don't smooth them
+                if not bounding_plane_info.get('square_like', True):
+                    smooth_bounding_planes.append(bounding_plane_infos)
+                    continue
+
                 prev_plane_info = self.bounding_planes[i - 1][0] if (i > 0 and len(self.bounding_planes[i - 1]) == 1) else bounding_plane_info
                 next_plane_info = self.bounding_planes[i + 1][0] if (i < len(self.bounding_planes) - 1 and len(self.bounding_planes[i + 1]) == 1) else bounding_plane_info
 
@@ -1831,11 +1690,12 @@ class MeshLoader(ContourMeshMixin, TetrahedronMeshMixin, FiberArchitectureMixin,
                 new_basis_y = np.cross(basis_z, new_basis_x)
 
                 new_basis_x = ((prev_basis_x + next_basis_x) / 2 + basis_x) / 2
-                new_basis_y = ((prev_basis_y + next_basis_y) / 2 + basis_y) / 2
                 new_basis_z = ((prev_basis_z + next_basis_z) / 2 + basis_z) / 2
                 new_basis_x /= np.linalg.norm(new_basis_x)
-                new_basis_y /= np.linalg.norm(new_basis_y)
                 new_basis_z /= np.linalg.norm(new_basis_z)
+                # Re-orthogonalize: compute basis_y from cross product to ensure 90-degree corners
+                new_basis_y = np.cross(new_basis_z, new_basis_x)
+                new_basis_y /= (np.linalg.norm(new_basis_y) + 1e-10)
                 new_newell = new_basis_z
 
                 # new_mean is intersection between line made by (prev_mean, next_mean) and plane made by (mean, basis_z)
@@ -2375,432 +2235,8 @@ class MeshLoader(ContourMeshMixin, TetrahedronMeshMixin, FiberArchitectureMixin,
 
         glPopMatrix()
 
-    def _cut_contour_voronoi(self, contour, contour_match, parent_means, basis_z, smooth_window=5, parent_areas=None):
-        """
-        Cut a contour into multiple streams using Voronoi-style assignment with smoothing.
-
-        Args:
-            contour: list of 3D points forming the contour
-            contour_match: list of (P, Q) pairs from bounding plane matching
-            parent_means: list of 3D mean points for each parent stream
-            basis_z: normal vector of the contour plane
-            smooth_window: window size for smoothing assignments
-            parent_areas: list of areas for each parent stream (optional)
-
-        Returns:
-            new_contours: list of contour point lists, one per parent stream
-        """
-        n = len(contour)
-        num_streams = len(parent_means)
-
-        if num_streams < 2:
-            return [list(contour)]
-
-        if n == 0 or len(contour_match) == 0:
-            # Return copies of the nearest parent mean as fallback
-            return [[parent_means[s].copy()] for s in range(num_streams)]
-
-        # Project parent means onto the contour plane
-        centroid = np.mean(contour, axis=0)
-        projected_parents = [p - np.dot(p - centroid, basis_z) * basis_z for p in parent_means]
-
-        # Compute area weights (larger area = smaller weight = more pull)
-        if parent_areas is not None and len(parent_areas) == num_streams:
-            total_area = sum(parent_areas)
-            area_weights = [total_area / (area + 1e-10) for area in parent_areas]
-            max_weight = max(area_weights)
-            area_weights = [w / max_weight for w in area_weights]
-        else:
-            area_weights = [1.0] * num_streams
-
-        # Initial assignment: each point to nearest parent stream (weighted by area)
-        assignments = []
-        for point in contour:
-            distances = [np.linalg.norm(point - pp) * area_weights[s] for s, pp in enumerate(projected_parents)]
-            assignments.append(np.argmin(distances))
-
-        # Smooth assignments to remove zig-zag using majority voting
-        smoothed = self._smooth_assignments_circular(assignments, smooth_window)
-
-        # Find transition points and build contours for each stream
-        new_contours = [[] for _ in range(num_streams)]
-        Ps = [pair[0] for pair in contour_match]
-
-        prev_assignment = smoothed[-1]
-        for i in range(n):
-            curr_assignment = smoothed[i]
-
-            # If transition between streams, add midpoint to both
-            if prev_assignment != curr_assignment:
-                prev_P = Ps[i - 1]
-                curr_P = Ps[i]
-                mid_P = (prev_P + curr_P) / 2
-
-                new_contours[prev_assignment].append(mid_P)
-                new_contours[curr_assignment].append(mid_P)
-
-            new_contours[curr_assignment].append(Ps[i])
-            prev_assignment = curr_assignment
-
-        # Ensure no stream is empty - if a stream has no points, assign closest contour points
-        for stream_idx in range(num_streams):
-            if len(new_contours[stream_idx]) == 0:
-                # Find the closest points from the contour to this stream's parent mean
-                parent_mean = projected_parents[stream_idx]
-                distances = [np.linalg.norm(np.array(p) - parent_mean) for p in Ps]
-                closest_idx = np.argmin(distances)
-                # Add a small segment around the closest point
-                new_contours[stream_idx].append(Ps[closest_idx])
-                if closest_idx > 0:
-                    new_contours[stream_idx].insert(0, Ps[closest_idx - 1])
-                if closest_idx < len(Ps) - 1:
-                    new_contours[stream_idx].append(Ps[closest_idx + 1])
-                print(f"Warning: Stream {stream_idx} had no points, added fallback points")
-
-        return new_contours
-
-    def _smooth_assignments_circular(self, assignments, window_size):
-        """
-        Smooth stream assignments using circular majority voting.
-        Removes isolated assignments that cause zig-zag patterns.
-
-        Args:
-            assignments: list of stream indices for each contour point
-            window_size: size of voting window (should be odd)
-
-        Returns:
-            smoothed assignments list
-        """
-        n = len(assignments)
-        if n == 0:
-            return assignments
-
-        smoothed = list(assignments)
-        half_window = window_size // 2
-
-        # Multiple passes for better smoothing
-        for _ in range(3):
-            new_smoothed = list(smoothed)
-            for i in range(n):
-                # Gather votes from circular window
-                votes = {}
-                for j in range(-half_window, half_window + 1):
-                    idx = (i + j) % n
-                    stream = smoothed[idx]
-                    votes[stream] = votes.get(stream, 0) + 1
-
-                # Majority vote
-                new_smoothed[i] = max(votes.keys(), key=lambda k: votes[k])
-            smoothed = new_smoothed
-
-        return smoothed
-
-    def _cut_contour_angular(self, contour, contour_match, parent_means, basis_z):
-        """
-        Cut a contour into multiple streams using angular/radial sectors from centroid.
-
-        Each stream gets a pie-slice shaped sector based on direction to its parent mean.
-        This produces clean, non-zig-zagged cuts.
-
-        Args:
-            contour: list of 3D points forming the contour
-            contour_match: list of (P, Q) pairs from bounding plane matching
-            parent_means: list of 3D mean points for each parent stream
-            basis_z: normal vector of the contour plane
-
-        Returns:
-            new_contours: list of contour point lists, one per parent stream
-        """
-        n = len(contour)
-        num_streams = len(parent_means)
-
-        if num_streams < 2:
-            return [list(contour)]
-
-        if n == 0 or len(contour_match) == 0:
-            return [[parent_means[s].copy()] for s in range(num_streams)]
-
-        # Project parent means onto the contour plane
-        centroid = np.mean(contour, axis=0)
-        projected_parents = [p - np.dot(p - centroid, basis_z) * basis_z for p in parent_means]
-
-        # Build local 2D coordinate system on the plane
-        # basis_x: direction to first parent mean
-        ref_dir = projected_parents[0] - centroid
-        ref_norm = np.linalg.norm(ref_dir)
-        if ref_norm < 1e-10:
-            # Fallback: use arbitrary direction perpendicular to basis_z
-            basis_x = np.array([1, 0, 0]) - np.dot([1, 0, 0], basis_z) * basis_z
-            if np.linalg.norm(basis_x) < 1e-10:
-                basis_x = np.array([0, 1, 0]) - np.dot([0, 1, 0], basis_z) * basis_z
-            basis_x = basis_x / np.linalg.norm(basis_x)
-        else:
-            basis_x = ref_dir / ref_norm
-        basis_y = np.cross(basis_z, basis_x)
-        basis_y = basis_y / (np.linalg.norm(basis_y) + 1e-10)
-
-        # Calculate angle for each parent mean from centroid
-        parent_angles = []
-        for pp in projected_parents:
-            direction = pp - centroid
-            x_component = np.dot(direction, basis_x)
-            y_component = np.dot(direction, basis_y)
-            angle = np.arctan2(y_component, x_component)
-            parent_angles.append(angle)
-
-        # Sort streams by angle
-        stream_order = np.argsort(parent_angles)
-        sorted_angles = [parent_angles[i] for i in stream_order]
-
-        # Calculate boundary angles (midpoints between consecutive parent angles)
-        boundary_angles = []
-        for i in range(num_streams):
-            angle_a = sorted_angles[i]
-            angle_b = sorted_angles[(i + 1) % num_streams]
-
-            # Handle wrap-around
-            if angle_b < angle_a:
-                angle_b += 2 * np.pi
-
-            mid_angle = (angle_a + angle_b) / 2
-            if mid_angle > np.pi:
-                mid_angle -= 2 * np.pi
-            boundary_angles.append(mid_angle)
-
-        # Assign each contour point to a stream based on its angle
-        Ps = [pair[0] for pair in contour_match]
-        new_contours = [[] for _ in range(num_streams)]
-
-        prev_stream = None
-        for i, P in enumerate(Ps):
-            direction = P - centroid
-            x_component = np.dot(direction, basis_x)
-            y_component = np.dot(direction, basis_y)
-            point_angle = np.arctan2(y_component, x_component)
-
-            # Find which sector this point belongs to
-            assigned_stream = None
-            for j in range(num_streams):
-                # Get boundary range for stream at sorted position j
-                start_boundary = boundary_angles[(j - 1) % num_streams]
-                end_boundary = boundary_angles[j]
-
-                # Normalize angle for comparison
-                test_angle = point_angle
-
-                # Handle wrap-around cases
-                if start_boundary > end_boundary:
-                    # Sector crosses -pi/pi boundary
-                    if test_angle >= start_boundary or test_angle < end_boundary:
-                        assigned_stream = stream_order[j]
-                        break
-                else:
-                    if start_boundary <= test_angle < end_boundary:
-                        assigned_stream = stream_order[j]
-                        break
-
-            if assigned_stream is None:
-                # Fallback: assign to nearest parent
-                distances = [np.linalg.norm(P - pp) for pp in projected_parents]
-                assigned_stream = np.argmin(distances)
-
-            # Add transition midpoint if stream changes
-            if prev_stream is not None and prev_stream != assigned_stream:
-                prev_P = Ps[i - 1]
-                mid_P = (prev_P + P) / 2
-                new_contours[prev_stream].append(mid_P)
-                new_contours[assigned_stream].append(mid_P)
-
-            new_contours[assigned_stream].append(P)
-            prev_stream = assigned_stream
-
-        # Ensure no stream is empty
-        for stream_idx in range(num_streams):
-            if len(new_contours[stream_idx]) == 0:
-                parent_mean = projected_parents[stream_idx]
-                distances = [np.linalg.norm(np.array(p) - parent_mean) for p in Ps]
-                closest_idx = np.argmin(distances)
-                new_contours[stream_idx].append(Ps[closest_idx])
-                if closest_idx > 0:
-                    new_contours[stream_idx].insert(0, Ps[closest_idx - 1])
-                if closest_idx < len(Ps) - 1:
-                    new_contours[stream_idx].append(Ps[closest_idx + 1])
-                print(f"Warning: Stream {stream_idx} had no points in angular cutting, added fallback")
-
-        return new_contours
-
-    def _cut_contour_gradient(self, contour, contour_match, parent_means, basis_z, parent_areas=None):
-        """
-        Cut a contour by finding natural transition points where nearest-parent changes.
-
-        This method:
-        1. Computes distance from each contour point to each parent mean
-        2. Weights distances by parent areas (larger areas = more pull)
-        3. Finds transition points where the nearest parent changes
-        4. Uses these natural boundaries as cut points
-        5. Guarantees contiguous segments (no zig-zag)
-
-        Args:
-            contour: list of 3D points forming the contour
-            contour_match: list of (P, Q) pairs from bounding plane matching
-            parent_means: list of 3D mean points for each parent stream
-            basis_z: normal vector of the contour plane
-            parent_areas: list of areas for each parent stream (optional)
-
-        Returns:
-            new_contours: list of contour point lists, one per parent stream
-        """
-        n = len(contour)
-        num_streams = len(parent_means)
-
-        if num_streams < 2:
-            return [list(contour)]
-
-        if n == 0 or len(contour_match) == 0:
-            return [[parent_means[s].copy()] for s in range(num_streams)]
-
-        Ps = [pair[0] for pair in contour_match]
-        n_pts = len(Ps)
-
-        # Project parent means onto the contour plane
-        centroid = np.mean(contour, axis=0)
-        projected_parents = [p - np.dot(p - centroid, basis_z) * basis_z for p in parent_means]
-
-        # Compute area weights (larger area = smaller weight = more pull)
-        if parent_areas is not None and len(parent_areas) == num_streams:
-            total_area = sum(parent_areas)
-            # Weight = 1 / (normalized_area), so larger areas have smaller effective distance
-            area_weights = [total_area / (area + 1e-10) for area in parent_areas]
-            # Normalize weights
-            max_weight = max(area_weights)
-            area_weights = [w / max_weight for w in area_weights]
-        else:
-            area_weights = [1.0] * num_streams
-
-        # Compute distance from each point to each parent (weighted by area)
-        distances = np.zeros((n_pts, num_streams))
-        for i, P in enumerate(Ps):
-            for s, pp in enumerate(projected_parents):
-                distances[i, s] = np.linalg.norm(np.array(P) - pp) * area_weights[s]
-
-        # Find nearest parent for each point
-        nearest = np.argmin(distances, axis=1)
-
-        # Find all transition points (where nearest parent changes)
-        transitions = []
-        for i in range(n_pts):
-            next_i = (i + 1) % n_pts
-            if nearest[i] != nearest[next_i]:
-                # Transition between i and next_i
-                # Store: (index, from_stream, to_stream)
-                transitions.append((i, nearest[i], nearest[next_i]))
-
-        # If no transitions (all points nearest to same parent), assign all to that parent
-        if len(transitions) == 0:
-            new_contours = [[] for _ in range(num_streams)]
-            dominant = nearest[0]
-            new_contours[dominant] = list(Ps)
-            # Give other streams at least one point
-            for s in range(num_streams):
-                if s != dominant and len(new_contours[s]) == 0:
-                    dist_to_s = distances[:, s]
-                    closest = np.argmin(dist_to_s)
-                    new_contours[s].append(Ps[closest])
-            return new_contours
-
-        # Build contours by following transitions
-        # Start from first transition and collect points for each stream
-        new_contours = [[] for _ in range(num_streams)]
-
-        # Sort transitions by index
-        transitions.sort(key=lambda x: x[0])
-
-        # Each segment goes from one transition to the next
-        for t_idx in range(len(transitions)):
-            start_trans = transitions[t_idx]
-            end_trans = transitions[(t_idx + 1) % len(transitions)]
-
-            start_idx = (start_trans[0] + 1) % n_pts  # First point after transition
-            end_idx = end_trans[0]  # Last point before next transition
-            stream = start_trans[2]  # Stream we're transitioning TO
-
-            # Collect points in this segment
-            if end_idx >= start_idx:
-                for i in range(start_idx, end_idx + 1):
-                    new_contours[stream].append(Ps[i])
-            else:
-                # Wrap around
-                for i in range(start_idx, n_pts):
-                    new_contours[stream].append(Ps[i])
-                for i in range(0, end_idx + 1):
-                    new_contours[stream].append(Ps[i])
-
-            # Add transition midpoint to both streams for smooth connection
-            mid_P = (Ps[start_trans[0]] + Ps[(start_trans[0] + 1) % n_pts]) / 2
-            if len(new_contours[start_trans[1]]) > 0:
-                new_contours[start_trans[1]].append(mid_P)
-            new_contours[stream].insert(0, mid_P)
-
-        # Ensure no stream is empty
-        for stream_idx in range(num_streams):
-            if len(new_contours[stream_idx]) == 0:
-                parent_mean = projected_parents[stream_idx]
-                dist_to_stream = [np.linalg.norm(np.array(p) - parent_mean) for p in Ps]
-                closest_idx = np.argmin(dist_to_stream)
-                new_contours[stream_idx].append(Ps[closest_idx])
-                print(f"Warning: Stream {stream_idx} had no points in gradient cutting, added fallback")
-
-        return new_contours
-
-    def _ensure_contiguous_assignments(self, assignments):
-        """
-        Ensure each stream's points form a contiguous segment.
-        If a stream has multiple disconnected segments, merge them.
-
-        Args:
-            assignments: list of stream indices
-
-        Returns:
-            cleaned assignments with contiguous segments per stream
-        """
-        n = len(assignments)
-        if n == 0:
-            return assignments
-
-        # Find all unique streams
-        streams = list(set(assignments))
-
-        # For each stream, find its segments
-        stream_segments = {s: [] for s in streams}
-
-        current_stream = assignments[0]
-        segment_start = 0
-
-        for i in range(1, n + 1):
-            idx = i % n
-            if i == n or assignments[idx] != current_stream:
-                stream_segments[current_stream].append((segment_start, i - 1))
-                if i < n:
-                    current_stream = assignments[idx]
-                    segment_start = i
-
-        # If any stream has multiple segments, keep only the largest
-        result = list(assignments)
-        for stream, segments in stream_segments.items():
-            if len(segments) > 1:
-                # Find largest segment
-                largest = max(segments, key=lambda s: s[1] - s[0])
-                # Mark other segments for reassignment
-                for seg in segments:
-                    if seg != largest:
-                        for i in range(seg[0], seg[1] + 1):
-                            # Assign to nearest other stream
-                            if i > 0:
-                                result[i] = result[i - 1]
-                            elif i < n - 1:
-                                result[i] = result[i + 1]
-
-        return result
+    # _cut_contour_voronoi, _cut_contour_angular, _cut_contour_gradient,
+    # _smooth_assignments_circular are inherited from MuscleMeshMixin
 
     def find_contour_stream(self, skeleton_meshes=None):
         origin_num = len(self.bounding_planes[0])
@@ -3383,12 +2819,13 @@ class MeshLoader(ContourMeshMixin, TetrahedronMeshMixin, FiberArchitectureMixin,
                     # new_basis_x = ((prev_basis_x + next_basis_x) / 2 + basis_x) / 2
                     # new_basis_y = ((prev_basis_y + next_basis_y) / 2 + basis_y) / 2
                     new_basis_x = ((prev_basis_x * next_distance + next_basis_x * prev_distance) / distance_sum + basis_x) / 2
-                    new_basis_y = ((prev_basis_y * next_distance + next_basis_y * prev_distance) / distance_sum + basis_y) / 2
-                    new_basis_z = np.cross(new_basis_x, new_basis_y)
+                    new_basis_z = ((prev_basis_z * next_distance + next_basis_z * prev_distance) / distance_sum + basis_z) / 2
 
                     new_basis_x /= np.linalg.norm(new_basis_x)
-                    new_basis_y /= np.linalg.norm(new_basis_y)
                     new_basis_z /= np.linalg.norm(new_basis_z)
+                    # Re-orthogonalize: compute basis_y from cross product to ensure 90-degree corners
+                    new_basis_y = np.cross(new_basis_z, new_basis_x)
+                    new_basis_y /= (np.linalg.norm(new_basis_y) + 1e-10)
                     new_newell = new_basis_z
 
                     new_mean = prev_mean + np.dot(mean - prev_mean, basis_z) / np.dot(next_mean - prev_mean, basis_z) * (next_mean - prev_mean)
