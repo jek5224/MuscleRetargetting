@@ -263,9 +263,8 @@ def sample_fibers_angular(num_fibers, num_vertices, radius_range=(0.1, 0.9), uni
             angle = 2 * np.pi * vertex_idx / num_vertices
 
         # Compute 2D position on the radial line
-        # Use 0.4 scale (not 0.5) to keep fibers inside 0.8x0.8 area (0.1 to 0.9)
-        x = 0.5 + radius * 0.4 * np.cos(angle)
-        y = 0.5 + radius * 0.4 * np.sin(angle)
+        x = 0.5 + radius * 0.5 * np.cos(angle)
+        y = 0.5 + radius * 0.5 * np.sin(angle)
 
         fiber_samples_2d[i] = [x, y]
         fiber_samples_params[i] = [vertex_idx, radius]
@@ -1755,93 +1754,138 @@ class FiberArchitectureMixin:
 
     def find_waypoints(self, bounding_plane_info, fiber_architecture, is_origin=False):
         """
-        Compute waypoints using Mean Value Coordinates (MVC).
-        Original implementation from mesh_loader.py.
+        Compute waypoints using Mean Value Coordinates (MVC) with original P->Q
+        bounding plane correspondence.
+
+        Uses Q points (normalized template positions in bounding plane) directly
+        as the MVC polygon. MVC weights are computed from fiber samples to Q polygon,
+        then applied to corresponding contour vertices (P).
+
+        Args:
+            bounding_plane_info: Dictionary with bounding plane data including 'contour_match'
+            fiber_architecture: Fiber sampling points (inside unit square in 2D, [0,1] range)
+            is_origin: Whether this is at the origin end
+
+        Returns:
+            (Qs_2d, waypoints, mvc_weights): Q positions (for visualization), computed waypoints,
+                and MVC weights array (shape: num_fibers x num_vertices)
         """
-        bounding_vertices = bounding_plane_info['bounding_plane']
-        v0, v1, v2, v3 = bounding_vertices
-        y = bounding_plane_info['scalar_value']
-        y = (y - 1) / (10 - 1)
-        w0 = np.array([0, 0, y])
-        w1 = np.array([1, 0, y])
-        w2 = np.array([1, 1, y])
-        w3 = np.array([0, 1, y])
+        # Get contour match (P->Q correspondence)
+        contour_match = bounding_plane_info.get('contour_match')
+        if contour_match is None:
+            return np.array([]), np.array([]), np.array([])
 
-        # make 3x4 matrix from v0, v1, v2, v3
-        A = np.array([v0, v1, v2, v3]).T
-        B = np.array([w0, w1, w2, w3]).T
-        A_pinv = np.linalg.pinv(A)
-        H = B @ A_pinv
+        # Extract P (contour vertices) and Q (bounding plane template positions)
+        Ps = np.array([pair[0] for pair in contour_match])  # 3D contour points
+        Qs = np.array([pair[1] for pair in contour_match])  # 2D/3D template points
 
-        # convert all contour points and save as normalized_contour_points
-        contour_match = bounding_plane_info['contour_match']
-        Ps = np.array([pair[0] for pair in contour_match])
-        Qs = np.array([pair[1] for pair in contour_match])
-        normalized_Qs = np.dot(H, np.array(Qs).T).T
+        n_verts = len(Ps)
+        if n_verts < 3:
+            return np.array([]), np.array([]), np.array([])
+
+        # Project Q to 2D if needed (Q should already be in bounding plane coords)
+        basis_x = bounding_plane_info.get('basis_x')
+        basis_y = bounding_plane_info.get('basis_y')
+        center = bounding_plane_info.get('mean', np.mean(Qs, axis=0))
+
+        if Qs.shape[1] == 3:
+            # Project to 2D using bounding plane basis
+            if basis_x is not None and basis_y is not None:
+                Qs_2d = np.zeros((n_verts, 2))
+                for i, q in enumerate(Qs):
+                    rel = q - center
+                    Qs_2d[i] = [np.dot(rel, basis_x), np.dot(rel, basis_y)]
+            else:
+                Qs_2d = Qs[:, :2]
+        else:
+            Qs_2d = Qs
+
+        # Normalize Q to [0,1] range for MVC computation
+        q_min = Qs_2d.min(axis=0)
+        q_max = Qs_2d.max(axis=0)
+        q_range = q_max - q_min
+        q_range[q_range < 1e-10] = 1.0
+        Qs_normalized = (Qs_2d - q_min) / q_range
+
+        # MVC computation using Q polygon
+        fiber_samples = np.array(fiber_architecture)
+        EPS = 1e-10
+        mvc_polygon = Qs_normalized
 
         fs = []
-        for v in fiber_architecture:
+        for v in fiber_samples:
             f_found = False
-            s_v = []
-            for Q in normalized_Qs:
-                s_v.append(Q[:2] - v)
+            s_v = [Q - v for Q in mvc_polygon]
 
-            for i in range(len(normalized_Qs)):
-                i_plus = ((i + 1) % len(normalized_Qs))
+            # Check for special cases
+            for i in range(n_verts):
+                i_plus = (i + 1) % n_verts
                 r_i = np.linalg.norm(s_v[i])
                 A_i = np.linalg.det(np.array([s_v[i], s_v[i_plus]])) / 2
                 D_i = np.dot(s_v[i], s_v[i_plus])
-                if r_i == 0:
-                    f = np.zeros(len(normalized_Qs))
+
+                if r_i < EPS:  # Point coincides with vertex
+                    f = np.zeros(n_verts)
                     f[i] = 1
                     fs.append(f)
                     f_found = True
                     break
-                if A_i == 0 and D_i < 0:
+
+                if abs(A_i) < EPS and D_i < 0:  # Point on edge
                     r_i_plus = np.linalg.norm(s_v[i_plus])
-                    f_i = np.zeros(len(normalized_Qs))
+                    f_i = np.zeros(n_verts)
                     f_i[i] = 1
-
-                    f_i_plus = np.zeros(len(normalized_Qs))
+                    f_i_plus = np.zeros(n_verts)
                     f_i_plus[i_plus] = 1
-
-                    fs.append((r_i_plus * f_i + r_i * f_i_plus) / (r_i + r_i_plus))
+                    denom = r_i + r_i_plus
+                    if denom < EPS:
+                        fs.append((f_i + f_i_plus) / 2)
+                    else:
+                        fs.append((r_i_plus * f_i + r_i * f_i_plus) / denom)
                     f_found = True
                     break
 
             if f_found:
                 continue
 
-            f = np.zeros(len(normalized_Qs))
+            # General MVC computation
+            f = np.zeros(n_verts)
             W = 0
-            for i in range(len(normalized_Qs)):
-                i_plus = ((i + 1) % len(normalized_Qs))
-                i_minus = ((i - 1) % len(normalized_Qs))
+            for i in range(n_verts):
+                i_plus = (i + 1) % n_verts
+                i_minus = (i - 1) % n_verts
                 r_i = np.linalg.norm(s_v[i])
                 w = 0
 
+                if r_i < EPS:
+                    continue
+
                 A_i_minus = np.linalg.det(np.array([s_v[i_minus], s_v[i]])) / 2
-                if A_i_minus != 0:
+                if abs(A_i_minus) > EPS:
                     r_i_minus = np.linalg.norm(s_v[i_minus])
                     D_i_minus = np.dot(s_v[i_minus], s_v[i])
                     w += (r_i_minus - D_i_minus / r_i) / A_i_minus
 
                 A_i = np.linalg.det(np.array([s_v[i], s_v[i_plus]])) / 2
-                if A_i != 0:
+                if abs(A_i) > EPS:
                     r_i_plus = np.linalg.norm(s_v[i_plus])
                     D_i = np.dot(s_v[i], s_v[i_plus])
                     w += (r_i_plus - D_i / r_i) / A_i
 
-                f_i = np.zeros(len(normalized_Qs))
-                f_i[i] = w
-                f += f_i
+                f[i] = w
                 W += w
-            fs.append(f / W)
+
+            if abs(W) < EPS:
+                fs.append(np.ones(n_verts) / n_verts)
+            else:
+                fs.append(f / W)
 
         fs = np.array(fs)
+
+        # Apply MVC weights to corresponding contour vertices
         waypoints = np.dot(fs, Ps)
 
-        return normalized_Qs, waypoints, fs
+        return Qs_normalized, waypoints, fs
 
     def find_waypoints_radial(self, bounding_plane_info, fiber_architecture):
         """
@@ -1913,8 +1957,8 @@ class FiberArchitectureMixin:
             if fiber_theta < 0:
                 fiber_theta += 2 * math.pi
 
-            # Fiber radius (0 = center, 1 = edge of 0.8x0.8 area)
-            fiber_radius = math.sqrt((x - 0.5)**2 + (y - 0.5)**2) / 0.4
+            # Fiber radius (0 = center, 1 = edge)
+            fiber_radius = math.sqrt((x - 0.5)**2 + (y - 0.5)**2) / 0.5
             fiber_radius = min(fiber_radius, 0.99)  # Cap for strict interior
 
             # Find which two vertices bracket this angle
@@ -2002,9 +2046,8 @@ class FiberArchitectureMixin:
             # For 2D visualization: compute position on unit circle
             angle = unit_circle_angles[vertex_idx]
 
-            # Use 0.4 scale to keep fibers inside 0.8x0.8 area
-            angular_2d[m] = [0.5 + radius * 0.4 * np.cos(angle),
-                            0.5 + radius * 0.4 * np.sin(angle)]
+            angular_2d[m] = [0.5 + radius * 0.5 * np.cos(angle),
+                            0.5 + radius * 0.5 * np.sin(angle)]
 
         return angular_2d, waypoints
 
