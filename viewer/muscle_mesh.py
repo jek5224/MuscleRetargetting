@@ -1419,7 +1419,7 @@ class MuscleMeshMixin:
 
         self.link_mode = 'mean'
         self.min_contour_distance = 0.005  # Minimum distance between contours in a stream (5mm default)
-        self.bounding_box_method = 'pca'  # 'pca' (original) or 'rotating_calipers' (minimum area)
+        self.bounding_box_method = 'rotating_calipers'  # 'rotating_calipers' (minimum area) or 'pca' (original)
 
         self.attach_skeletons = []
         self.attach_skeletons_sub = []
@@ -2917,15 +2917,24 @@ class MuscleMeshMixin:
             prev_basis_z = self.bounding_planes[-1][0]['basis_z']
             prev_newell = self.bounding_planes[-1][0]['newell_normal']
         else:
-            prev_basis_x = np.array([1, 0, 0])
-            prev_basis_y = np.array([0, 1, 0])
-            prev_basis_z = np.array([0, 0, 1])
-            prev_newell = np.array([0, 1, 0])
+            # No reference - compute initial z from contour normal, x/y will be determined by PCA
+            temp_newell = compute_newell_normal(contour_points)
+            prev_basis_z = temp_newell / (np.linalg.norm(temp_newell) + 1e-10)
+            # Create arbitrary orthonormal x/y
+            arbitrary = np.array([1, 0, 0])
+            if abs(np.dot(arbitrary, prev_basis_z)) > 0.9:
+                arbitrary = np.array([0, 1, 0])
+            prev_basis_x = arbitrary - np.dot(arbitrary, prev_basis_z) * prev_basis_z
+            prev_basis_x = prev_basis_x / (np.linalg.norm(prev_basis_x) + 1e-10)
+            prev_basis_y = np.cross(prev_basis_z, prev_basis_x)
+            prev_newell = prev_basis_z.copy()
 
         newell_normal = compute_newell_normal(contour_points)
         mean = np.mean(contour_points, axis=0)
 
-        if np.dot(newell_normal, prev_newell) < 0:
+        # Align newell_normal with previous basis_z (not just prev_newell)
+        # This ensures z-axis consistency for newly found/refined contours
+        if np.dot(newell_normal, prev_basis_z) < 0:
             newell_normal *= -1
 
         basis_z = newell_normal
@@ -2961,91 +2970,109 @@ class MuscleMeshMixin:
 
         # Note: orientation alignment with previous level is handled later in the pca/rotating_calipers branches
 
-        # Get bounding box method (default to 'pca' for backward compatibility)
-        bbox_method = getattr(self, 'bounding_box_method', 'pca')
+        # Get bounding box method (default to 'rotating_calipers' for better fitting)
+        bbox_method = getattr(self, 'bounding_box_method', 'rotating_calipers')
 
         if bbox_method == 'rotating_calipers':
             # Use rotating calipers for minimum area bounding box
-            # First project to 2D using initial basis
-            projected_2d_initial = np.array([[np.dot(v - mean, basis_x), np.dot(v - mean, basis_y)] for v in contour_points])
+            # For robustness, first find the farthest point pair in 2D (on the plane)
+            from scipy.spatial.distance import cdist
 
-            # Find minimum area bounding box
-            bbox_result = compute_minimum_area_bbox(projected_2d_initial)
+            # First project all points onto the plane defined by basis_z
+            projected_on_plane = []
+            for v in contour_points:
+                rel = v - mean
+                # Project onto plane: keep only components perpendicular to basis_z
+                proj = rel - np.dot(rel, basis_z) * basis_z
+                projected_on_plane.append(proj + mean)
+            projected_on_plane = np.array(projected_on_plane)
 
-            # The bbox basis is in the initial 2D coordinate system
-            # We need to transform it back to 3D
-            bbox_basis_x_2d = bbox_result['basis_x']
-            bbox_basis_y_2d = bbox_result['basis_y']
+            # Find farthest pair of points in the projected 2D plane
+            if len(projected_on_plane) > 2:
+                dists = cdist(projected_on_plane, projected_on_plane)
+                i, j = np.unravel_index(np.argmax(dists), dists.shape)
+                farthest_dir = projected_on_plane[j] - projected_on_plane[i]
+                farthest_len = np.linalg.norm(farthest_dir)
 
-            # New 3D basis vectors
-            new_basis_x = bbox_basis_x_2d[0] * basis_x + bbox_basis_x_2d[1] * basis_y
-            new_basis_y = bbox_basis_y_2d[0] * basis_x + bbox_basis_y_2d[1] * basis_y
+                if farthest_len > 1e-10:
+                    # Use farthest direction as basis_x (long axis)
+                    new_basis_x = farthest_dir / farthest_len
+                    new_basis_y = np.cross(basis_z, new_basis_x)
+                    new_basis_y = new_basis_y / (np.linalg.norm(new_basis_y) + 1e-10)
+                else:
+                    new_basis_x, new_basis_y = basis_x, basis_y
+            else:
+                new_basis_x, new_basis_y = basis_x, basis_y
 
-            # Normalize
-            new_basis_x = new_basis_x / np.linalg.norm(new_basis_x)
-            new_basis_y = new_basis_y / np.linalg.norm(new_basis_y)
+            # Only allow sign flips to align with previous orientation (not swaps)
+            proj_prev_x = prev_basis_x - np.dot(prev_basis_x, basis_z) * basis_z
+            proj_norm = np.linalg.norm(proj_prev_x)
+            if proj_norm > 1e-6:
+                proj_prev_x = proj_prev_x / proj_norm
+                if np.dot(new_basis_x, proj_prev_x) < 0:
+                    new_basis_x = -new_basis_x
+                # Recompute basis_y to maintain right-handed system
+                new_basis_y = np.cross(basis_z, new_basis_x)
+                new_basis_y = new_basis_y / (np.linalg.norm(new_basis_y) + 1e-10)
 
-            # Choose orientation closest to previous (for consistency)
-            cand_pairs = [(new_basis_x, new_basis_y), (new_basis_y, -new_basis_x),
-                          (-new_basis_x, -new_basis_y), (-new_basis_y, new_basis_x)]
-            best_pair = None
-            min_angle = np.inf
-            for pair in cand_pairs:
-                prev_rot = np.vstack([prev_basis_x, prev_basis_y, prev_basis_z]).T
-                new_rot = np.vstack([pair[0], pair[1], basis_z]).T
-                R_rel = new_rot @ prev_rot.T
-                trace = np.trace(R_rel)
-                angle = np.arccos(np.clip((trace - 1) / 2, -1.0, 1.0))
-                if angle < min_angle:
-                    min_angle = angle
-                    best_pair = pair
-            basis_x, basis_y = best_pair
+            basis_x, basis_y = new_basis_x, new_basis_y
 
-            # Reproject with new basis
+            # Reproject with final basis
             projected_2d = np.array([[np.dot(v - mean, basis_x), np.dot(v - mean, basis_y)] for v in contour_points])
             area = compute_polygon_area(projected_2d)
 
             min_x, max_x = np.min(projected_2d[:, 0]), np.max(projected_2d[:, 0])
             min_y, max_y = np.min(projected_2d[:, 1]), np.max(projected_2d[:, 1])
-
             x_len = max_x - min_x
             y_len = max_y - min_y
+
             ratio_threshold = 2.0
             square_like = max(x_len, y_len) / min(x_len, y_len) < ratio_threshold if min(x_len, y_len) > 1e-10 else False
 
         else:
-            # Original PCA-based method
-            cand_pairs = [(basis_x, basis_y), (basis_y, -basis_x), (-basis_x, -basis_y), (-basis_y, basis_x)]
-            best_pair = None
-            min_angle = np.inf
-            for pair in cand_pairs:
-                prev_rot = np.vstack([prev_basis_x, prev_basis_y, prev_basis_z]).T
-                new_rot = np.vstack([pair[0], pair[1], basis_z]).T
-                R_rel = new_rot @ prev_rot.T
-                trace = np.trace(R_rel)
-                angle = np.arccos(np.clip((trace - 1) / 2, -1.0, 1.0))
-                if angle < min_angle:
-                    min_angle = angle
-                    best_pair = pair
-            basis_x, basis_y = best_pair
-
+            # PCA-based method: ensure basis_x is ALWAYS the long direction
+            # First project and find extents
             projected_2d = np.array([[np.dot(v - mean, basis_x), np.dot(v - mean, basis_y)] for v in contour_points])
-            area = compute_polygon_area(projected_2d)
 
             min_x, max_x = np.min(projected_2d[:, 0]), np.max(projected_2d[:, 0])
             min_y, max_y = np.min(projected_2d[:, 1]), np.max(projected_2d[:, 1])
 
             x_len = max_x - min_x
             y_len = max_y - min_y
+
+            # If y is longer than x, swap axes so basis_x is always the long direction
+            if y_len > x_len:
+                basis_x, basis_y = basis_y, -basis_x
+                # Recompute projection with swapped axes
+                projected_2d = np.array([[np.dot(v - mean, basis_x), np.dot(v - mean, basis_y)] for v in contour_points])
+                min_x, max_x = np.min(projected_2d[:, 0]), np.max(projected_2d[:, 0])
+                min_y, max_y = np.min(projected_2d[:, 1]), np.max(projected_2d[:, 1])
+                x_len, y_len = y_len, x_len
+
+            # Now only allow sign flips (not swaps) to align with previous orientation
+            # This preserves basis_x as the long direction
+            proj_prev_x = prev_basis_x - np.dot(prev_basis_x, basis_z) * basis_z
+            proj_norm = np.linalg.norm(proj_prev_x)
+            if proj_norm > 1e-6:
+                proj_prev_x = proj_prev_x / proj_norm
+                # Only flip signs, don't swap axes
+                if np.dot(basis_x, proj_prev_x) < 0:
+                    basis_x = -basis_x
+                # Recompute basis_y to maintain right-handed system
+                basis_y = np.cross(basis_z, basis_x)
+                basis_y = basis_y / (np.linalg.norm(basis_y) + 1e-10)
+
+            area = compute_polygon_area(projected_2d)
 
             ratio_threshold = 2.0
             square_like = max(x_len, y_len) / min(x_len, y_len) < ratio_threshold if min(x_len, y_len) > 1e-10 else False
             if square_like:
                 new_basis_x = prev_basis_x - np.dot(prev_basis_x, newell_normal) * newell_normal
-                basis_x = new_basis_x
-                basis_x = basis_x / np.linalg.norm(basis_x)
-                basis_y = np.cross(basis_z, basis_x)
-                basis_y = basis_y / (np.linalg.norm(basis_y) + 1e-10)
+                norm = np.linalg.norm(new_basis_x)
+                if norm > 1e-6:
+                    basis_x = new_basis_x / norm
+                    basis_y = np.cross(basis_z, basis_x)
+                    basis_y = basis_y / (np.linalg.norm(basis_y) + 1e-10)
 
                 projected_2d = np.array([[np.dot(v - mean, basis_x), np.dot(v - mean, basis_y)] for v in contour_points])
                 area = compute_polygon_area(projected_2d)
