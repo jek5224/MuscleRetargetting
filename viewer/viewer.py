@@ -1976,6 +1976,7 @@ class GLFWApp():
                                     print(f"[{name}] Scalar Field error: {e}")
                             else:
                                 print(f"[{name}] Need edge_groups and edge_classes")
+
                         if colored_button(f"Find Contours##{name}", 2, col_button_width):
                             if obj.scalar_field is not None:
                                 try:
@@ -2087,6 +2088,14 @@ class GLFWApp():
 
                         _, obj.is_one_fiber = imgui.checkbox(f"One Fiber##{name}", obj.is_one_fiber)
 
+                        # Bounding box method selector
+                        bbox_methods = ['rotating_calipers', 'pca']
+                        current_method = getattr(obj, 'bounding_box_method', 'rotating_calipers')
+                        current_idx = bbox_methods.index(current_method) if current_method in bbox_methods else 0
+                        changed, new_idx = imgui.combo(f"BBox Method##{name}", current_idx, bbox_methods)
+                        if changed:
+                            obj.bounding_box_method = bbox_methods[new_idx]
+
                         # Sampling method selector
                         sampling_methods = ['sobol_unit_square', 'sobol_min_contour']
                         current_idx = sampling_methods.index(obj.sampling_method) if obj.sampling_method in sampling_methods else 0
@@ -2146,7 +2155,9 @@ class GLFWApp():
 
                         if imgui.tree_node("Edge Classes"):
                             for i in range(len(obj.edge_classes)):
-                                imgui.text(f"{obj.edge_classes[i]}")
+                                # Fixed width: "insertion" is 9 chars, pad "origin" to match
+                                label = f"{obj.edge_classes[i]:9s}"
+                                imgui.text(label)
                                 imgui.same_line()
                                 if imgui.button(f"Flip class##{name}_{i}"):
                                     obj.edge_classes[i] = 'insertion' if obj.edge_classes[i] == 'origin' else 'origin'
@@ -2931,8 +2942,10 @@ class GLFWApp():
                 muscles_to_close.append(name)
                 continue
 
-            # Window setup
-            imgui.set_next_window_size(700, 400, imgui.FIRST_USE_EVER)
+            # Window setup - size to fit two 280px canvases with padding
+            # Width: 2 * (280 + 2*20 + 20) + window padding = ~720
+            # Height: sliders(~75) + labels(~40) + canvas(280+2*20) + margins = ~450
+            imgui.set_next_window_size(720, 480, imgui.FIRST_USE_EVER)
             expanded, opened = imgui.begin(f"Inspect 2D: {name}", True)
 
             if not opened:
