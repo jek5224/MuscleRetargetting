@@ -247,6 +247,7 @@ class GLFWApp():
         self.inter_muscle_constraints = []
         self.inter_muscle_constraint_threshold = 0.01  # 1cm default threshold
         self.coupled_as_unified_volume = True  # Treat all muscles as one unified system
+        self.show_inter_muscle_constraints = False  # Visualize constraint lines
 
         # 2D Inspect window state
         self.inspect_2d_open = {}  # Dict: muscle_name -> bool (window open state)
@@ -899,6 +900,53 @@ class GLFWApp():
 
         return total_error / max(1, constraint_count)
 
+    def draw_inter_muscle_constraints(self):
+        """Draw lines between constrained vertices of different muscles."""
+        if not self.inter_muscle_constraints:
+            return
+
+        glDisable(GL_LIGHTING)
+        glLineWidth(1.5)
+        glBegin(GL_LINES)
+
+        for constraint in self.inter_muscle_constraints:
+            name1, v1_idx, v1_fixed, name2, v2_idx, v2_fixed, rest_dist = constraint
+
+            # Get muscle objects
+            mobj1 = self.zygote_muscle_meshes.get(name1)
+            mobj2 = self.zygote_muscle_meshes.get(name2)
+            if mobj1 is None or mobj2 is None:
+                continue
+
+            # Get current vertex positions (prefer soft body positions if available)
+            if hasattr(mobj1, 'soft_body') and mobj1.soft_body is not None:
+                pos1 = mobj1.soft_body.get_positions()[v1_idx]
+            elif hasattr(mobj1, 'tet_vertices') and mobj1.tet_vertices is not None:
+                pos1 = mobj1.tet_vertices[v1_idx]
+            else:
+                continue
+
+            if hasattr(mobj2, 'soft_body') and mobj2.soft_body is not None:
+                pos2 = mobj2.soft_body.get_positions()[v2_idx]
+            elif hasattr(mobj2, 'tet_vertices') and mobj2.tet_vertices is not None:
+                pos2 = mobj2.tet_vertices[v2_idx]
+            else:
+                continue
+
+            # Color based on constraint error (green=satisfied, red=violated)
+            current_dist = np.linalg.norm(pos1 - pos2)
+            error = abs(current_dist - rest_dist)
+            error_ratio = min(1.0, error / rest_dist) if rest_dist > 0 else 0
+
+            # Green (satisfied) to Red (violated)
+            glColor4f(error_ratio, 1.0 - error_ratio, 0.0, 0.8)
+
+            glVertex3f(pos1[0], pos1[1], pos1[2])
+            glVertex3f(pos2[0], pos2[1], pos2[2])
+
+        glEnd()
+        glEnable(GL_LIGHTING)
+
     def setEnv(self, env):  
         self.env = env
         self.motion_skel = self.env.skel.clone()
@@ -1272,6 +1320,10 @@ class GLFWApp():
                 obj.draw_corners()
             if obj.is_draw_edges:
                 obj.draw_edges()
+
+        # Draw inter-muscle constraints
+        if self.show_inter_muscle_constraints:
+            self.draw_inter_muscle_constraints()
 
         if self.draw_target_motion:
             self.drawSkeleton(self.env.target_pos, np.array([1.0, 0.3, 0.3, 0.5]))
@@ -1767,6 +1819,11 @@ class GLFWApp():
                 imgui.same_line()
                 imgui.text(f"{len(self.inter_muscle_constraints)} constraints")
 
+                # Show constraints checkbox
+                _, self.show_inter_muscle_constraints = imgui.checkbox(
+                    "Show Constraints", self.show_inter_muscle_constraints
+                )
+
                 # Unified volume checkbox
                 _, self.coupled_as_unified_volume = imgui.checkbox(
                     "Unified Volume", self.coupled_as_unified_volume
@@ -1813,114 +1870,216 @@ class GLFWApp():
 
                 for name, obj in self.zygote_muscle_meshes.items():
                     if imgui.tree_node(name):
-                        # Two-column layout: "Process All" button on left, individual buttons on right
-                        imgui.columns(2, f"cols##{name}", border=False)
-                        imgui.set_column_width(0, 120)
+                        # Initialize process slider value if not exists
+                        if not hasattr(obj, '_process_slider_value'):
+                            obj._process_slider_value = 5  # Default: Find Streams
 
-                        # Left column: "Process All" button (height matches 8 buttons on right)
+                        # Process step names for the slider
+                        process_steps = [
+                            "Scalar Field",
+                            "Find Contours",
+                            "Refine Contours",
+                            "Smoothen Contours",
+                            "Find Streams",
+                            "Resample Contours",
+                            "Build Contour Mesh",
+                            "Tetrahedralize"
+                        ]
+                        num_steps = len(process_steps)
+
+                        # Three-column layout: Process All | Slider | Buttons
+                        imgui.columns(3, f"cols##{name}", border=False)
+                        imgui.set_column_width(0, 80)
+                        imgui.set_column_width(1, 40)
+
+                        # Column 1: "Process All" button
                         num_process_buttons = 8
                         process_all_height = num_process_buttons * imgui.get_frame_height() + (num_process_buttons - 1) * imgui.get_style().item_spacing[1]
-                        if imgui.button(f"Process\nAll##{name}", width=100, height=process_all_height):
+                        if imgui.button(f"Process\nTo##{name}", width=70, height=process_all_height):
+                            steps_to_run = int(obj._process_slider_value)
                             try:
-                                print(f"[{name}] Running full pipeline...")
+                                print(f"[{name}] Running pipeline steps 1-{steps_to_run}...")
+
                                 # Step 1: Scalar Field
-                                if len(obj.edge_groups) > 0 and len(obj.edge_classes) > 0:
-                                    print(f"  [1/7] Computing Scalar Field...")
-                                    obj.compute_scalar_field()
-                                else:
-                                    print(f"  [1/7] Skipping Scalar Field (no edge groups)")
+                                if steps_to_run >= 1:
+                                    if len(obj.edge_groups) > 0 and len(obj.edge_classes) > 0:
+                                        print(f"  [1/{steps_to_run}] Computing Scalar Field...")
+                                        obj.compute_scalar_field()
+                                    else:
+                                        print(f"  [1/{steps_to_run}] Skipping Scalar Field (no edge groups)")
 
                                 # Step 2: Find Contours
-                                if obj.scalar_field is not None:
-                                    print(f"  [2/7] Finding Contours...")
+                                if steps_to_run >= 2 and obj.scalar_field is not None:
+                                    print(f"  [2/{steps_to_run}] Finding Contours...")
                                     obj.find_contours(skeleton_meshes=self.zygote_skeleton_meshes)
 
                                 # Step 3: Refine Contours
-                                if obj.contours is not None and len(obj.contours) > 0:
-                                    print(f"  [3/7] Refining Contours...")
+                                if steps_to_run >= 3 and obj.contours is not None and len(obj.contours) > 0:
+                                    print(f"  [3/{steps_to_run}] Refining Contours...")
                                     obj.refine_contours(max_spacing_threshold=0.01)
 
                                 # Step 4: Smoothen Contours
-                                if obj.contours is not None and len(obj.contours) > 0:
-                                    print(f"  [4/7] Smoothening Contours...")
+                                if steps_to_run >= 4 and obj.contours is not None and len(obj.contours) > 0:
+                                    print(f"  [4/{steps_to_run}] Smoothening Contours...")
                                     obj.smoothen_contours()
 
                                 # Step 5: Find Streams
-                                if obj.contours is not None and len(obj.contours) > 0 and obj.bounding_planes is not None:
-                                    print(f"  [5/7] Finding Streams...")
+                                if steps_to_run >= 5 and obj.contours is not None and len(obj.contours) > 0 and obj.bounding_planes is not None:
+                                    print(f"  [5/{steps_to_run}] Finding Streams...")
                                     obj.find_contour_stream(skeleton_meshes=self.zygote_skeleton_meshes)
 
                                 # Step 6: Resample Contours
-                                if obj.contours is not None and len(obj.contours) > 0 and obj.bounding_planes is not None:
-                                    print(f"  [6/7] Resampling Contours...")
+                                if steps_to_run >= 6 and obj.contours is not None and len(obj.contours) > 0 and obj.bounding_planes is not None:
+                                    print(f"  [6/{steps_to_run}] Resampling Contours...")
                                     obj.resample_contours(num_samples=32)
 
-
                                 # Step 7: Build Contour Mesh
-                                if obj.contours is not None and len(obj.contours) > 0 and obj.draw_contour_stream is not None:
-                                    print(f"  [7/7] Building Contour Mesh...")
+                                if steps_to_run >= 7 and obj.contours is not None and len(obj.contours) > 0 and obj.draw_contour_stream is not None:
+                                    print(f"  [7/{steps_to_run}] Building Contour Mesh...")
                                     obj.build_contour_mesh()
 
                                 # Step 8: Tetrahedralize
-                                if obj.contour_mesh_vertices is not None:
-                                    print(f"  [8/8] Tetrahedralizing...")
+                                if steps_to_run >= 8 and obj.contour_mesh_vertices is not None:
+                                    print(f"  [8/{steps_to_run}] Tetrahedralizing...")
                                     obj.soft_body = None
                                     obj.tetrahedralize_contour_mesh()
                                     if obj.tet_vertices is not None:
                                         obj.is_draw_contours = False
                                         obj.is_draw_tet_mesh = True
 
-                                print(f"[{name}] Pipeline complete!")
+                                print(f"[{name}] Pipeline complete (steps 1-{steps_to_run})!")
                             except Exception as e:
                                 print(f"[{name}] Pipeline error: {e}")
                                 import traceback
                                 traceback.print_exc()
 
-                        # Right column: Individual buttons (use -1 to auto-fill column width)
+                        # Column 2: Vertical slider
                         imgui.next_column()
-                        col_button_width = 180  # Fits in the right column
+                        imgui.push_item_width(20)
+                        # Vertical slider: num_steps at top (all), 1 at bottom (first only)
+                        changed, new_val = imgui.v_slider_int(
+                            f"##vslider{name}",
+                            width=20,
+                            height=process_all_height,
+                            value=int(obj._process_slider_value),
+                            min_value=num_steps,
+                            max_value=1,
+                            format="%d"
+                        )
+                        if changed:
+                            obj._process_slider_value = new_val
+                        imgui.pop_item_width()
 
-                        if imgui.button(f"Scalar Field##{name}", width=col_button_width):
-                            if len(obj.edge_groups) > 0 and len(obj.edge_classes) > 0:
-                                try:
-                                    obj.compute_scalar_field()
-                                except Exception as e:
-                                    print(f"[{name}] Scalar Field error: {e}")
-                            else:
-                                print(f"[{name}] Need edge_groups and edge_classes")
-                        if imgui.button(f"Find Contours##{name}", width=col_button_width):
-                            if obj.scalar_field is not None:
-                                try:
-                                    obj.find_contours(skeleton_meshes=self.zygote_skeleton_meshes)
-                                except Exception as e:
-                                    print(f"[{name}] Find Contours error: {e}")
-                            else:
-                                print(f"[{name}] Prerequisites: Run 'Scalar Field' first")
-                        if imgui.button(f"Refine Contours##{name}", width=col_button_width):
-                            if obj.contours is not None and len(obj.contours) > 0:
-                                try:
-                                    obj.refine_contours(max_spacing_threshold=0.01)
-                                except Exception as e:
-                                    print(f"[{name}] Refine Contours error: {e}")
-                            else:
-                                print(f"[{name}] Prerequisites: Run 'Find Contours' first")
-                        if imgui.button(f"Smoothen Contours##{name}", width=col_button_width):
-                            if obj.contours is not None and len(obj.contours) > 0:
-                                try:
-                                    obj.smoothen_contours()
-                                except Exception as e:
-                                    print(f"[{name}] Smoothen Contours error: {e}")
-                            else:
-                                print(f"[{name}] Prerequisites: Run 'Find Contours' first")
-                        if imgui.button(f"Find Streams##{name}", width=col_button_width):
-                            if obj.contours is not None and len(obj.contours) > 0 and obj.bounding_planes is not None and len(obj.bounding_planes) > 0:
-                                try:
-                                    obj.find_contour_stream(skeleton_meshes=self.zygote_skeleton_meshes)
-                                except Exception as e:
-                                    print(f"[{name}] Find Streams error: {e}")
-                            else:
-                                print(f"[{name}] Prerequisites: Run 'Find Contours' first")
-                        if imgui.button(f"Optimize Streams##{name}", width=col_button_width):
+                        # Column 3: Individual buttons
+                        imgui.next_column()
+                        col_button_width = 160
+
+                        # Highlight buttons up to slider value
+                        slider_val = int(obj._process_slider_value)
+
+                        for step_idx, step_name in enumerate(process_steps):
+                            step_num = step_idx + 1
+                            # Highlight if within slider range
+                            if step_num <= slider_val:
+                                imgui.push_style_color(imgui.COLOR_BUTTON, 0.2, 0.5, 0.2, 1.0)
+
+                            if step_name == "Scalar Field":
+                                if imgui.button(f"Scalar Field##{name}", width=col_button_width):
+                                    if len(obj.edge_groups) > 0 and len(obj.edge_classes) > 0:
+                                        try:
+                                            obj.compute_scalar_field()
+                                        except Exception as e:
+                                            print(f"[{name}] Scalar Field error: {e}")
+                                    else:
+                                        print(f"[{name}] Need edge_groups and edge_classes")
+                            elif step_name == "Find Contours":
+                                if imgui.button(f"Find Contours##{name}", width=col_button_width):
+                                    if obj.scalar_field is not None:
+                                        try:
+                                            obj.find_contours(skeleton_meshes=self.zygote_skeleton_meshes)
+                                        except Exception as e:
+                                            print(f"[{name}] Find Contours error: {e}")
+                                    else:
+                                        print(f"[{name}] Prerequisites: Run 'Scalar Field' first")
+                            elif step_name == "Refine Contours":
+                                if imgui.button(f"Refine Contours##{name}", width=col_button_width):
+                                    if obj.contours is not None and len(obj.contours) > 0:
+                                        try:
+                                            obj.refine_contours(max_spacing_threshold=0.01)
+                                        except Exception as e:
+                                            print(f"[{name}] Refine Contours error: {e}")
+                                    else:
+                                        print(f"[{name}] Prerequisites: Run 'Find Contours' first")
+                            elif step_name == "Smoothen Contours":
+                                if imgui.button(f"Smoothen Contours##{name}", width=col_button_width):
+                                    if obj.contours is not None and len(obj.contours) > 0:
+                                        try:
+                                            obj.smoothen_contours()
+                                        except Exception as e:
+                                            print(f"[{name}] Smoothen Contours error: {e}")
+                                    else:
+                                        print(f"[{name}] Prerequisites: Run 'Find Contours' first")
+                            elif step_name == "Find Streams":
+                                if imgui.button(f"Find Streams##{name}", width=col_button_width):
+                                    if obj.contours is not None and len(obj.contours) > 0 and obj.bounding_planes is not None and len(obj.bounding_planes) > 0:
+                                        try:
+                                            obj.find_contour_stream(skeleton_meshes=self.zygote_skeleton_meshes)
+                                        except Exception as e:
+                                            import traceback
+                                            print(f"[{name}] Find Streams error: {e}")
+                                            traceback.print_exc()
+                                    else:
+                                        print(f"[{name}] Prerequisites: Run 'Find Contours' first")
+                            elif step_name == "Resample Contours":
+                                if imgui.button(f"Resample Contours##{name}", width=col_button_width):
+                                    if obj.contours is not None and len(obj.contours) > 0 and obj.bounding_planes is not None:
+                                        try:
+                                            obj.resample_contours(num_samples=32)
+                                        except Exception as e:
+                                            print(f"[{name}] Resample Contours error: {e}")
+                                    else:
+                                        print(f"[{name}] Prerequisites: Run 'Smoothen Contours' first")
+                            elif step_name == "Build Contour Mesh":
+                                if imgui.button(f"Build Contour Mesh##{name}", width=col_button_width):
+                                    if obj.contours is not None and len(obj.contours) > 0 and obj.draw_contour_stream is not None:
+                                        try:
+                                            obj.build_contour_mesh()
+                                        except Exception as e:
+                                            print(f"[{name}] Build Contour Mesh error: {e}")
+                                    else:
+                                        print(f"[{name}] Prerequisites: Run 'Find Streams' first")
+                            elif step_name == "Tetrahedralize":
+                                if imgui.button(f"Tetrahedralize##{name}", width=col_button_width):
+                                    if obj.contour_mesh_vertices is not None:
+                                        try:
+                                            obj.soft_body = None
+                                            obj.tetrahedralize_contour_mesh()
+                                            if obj.tet_vertices is not None:
+                                                obj.is_draw_contours = False
+                                                obj.is_draw_tet_mesh = True
+                                        except Exception as e:
+                                            print(f"[{name}] Tetrahedralize error: {e}")
+                                    else:
+                                        print(f"[{name}] Prerequisites: Run 'Build Contour Mesh' first")
+
+                            if step_num <= slider_val:
+                                imgui.pop_style_color()
+
+                        # End three-column layout
+                        imgui.columns(1)
+
+                        # Positioning method dropdown (below columns)
+                        positioning_methods = ['mvc', 'radial', 'triangulated', 'harmonic', 'geodesic']
+                        current_method = getattr(obj, 'fiber_positioning_method', 'mvc')
+                        current_idx = positioning_methods.index(current_method) if current_method in positioning_methods else 0
+                        imgui.push_item_width(180)
+                        changed, new_idx = imgui.combo(f"Fiber Positioning##{name}", current_idx, positioning_methods)
+                        imgui.pop_item_width()
+                        if changed:
+                            obj.fiber_positioning_method = positioning_methods[new_idx]
+
+                        # Optimize Streams button (not part of main pipeline)
+                        if imgui.button(f"Optimize Streams##{name}", width=180):
                             if obj.contours is not None and len(obj.contours) > 0 and obj.bounding_planes is not None and len(obj.bounding_planes) > 0:
                                 try:
                                     obj.optimize_contour_stream(shape_threshold=0.1, min_contours=3)
@@ -1928,39 +2087,6 @@ class GLFWApp():
                                     print(f"[{name}] Optimize Streams error: {e}")
                             else:
                                 print(f"[{name}] Prerequisites: Run 'Find Streams' first")
-                        if imgui.button(f"Resample Contours##{name}", width=col_button_width):
-                            if obj.contours is not None and len(obj.contours) > 0 and obj.bounding_planes is not None:
-                                try:
-                                    obj.resample_contours(num_samples=32)
-                                except Exception as e:
-                                    print(f"[{name}] Resample Contours error: {e}")
-                            else:
-                                print(f"[{name}] Prerequisites: Run 'Smoothen Contours' first")
-                        if imgui.button(f"Build Contour Mesh##{name}", width=col_button_width):
-                            if obj.contours is not None and len(obj.contours) > 0 and obj.draw_contour_stream is not None:
-                                try:
-                                    obj.build_contour_mesh()
-                                except Exception as e:
-                                    print(f"[{name}] Build Contour Mesh error: {e}")
-                            else:
-                                print(f"[{name}] Prerequisites: Run 'Find Streams' first")
-
-                        # Tetrahedralization for soft body simulation
-                        if imgui.button(f"Tetrahedralize##{name}", width=col_button_width):
-                            if obj.contour_mesh_vertices is not None:
-                                try:
-                                    obj.soft_body = None  # Reset soft body when re-tetrahedralizing
-                                    obj.tetrahedralize_contour_mesh()
-                                    if obj.tet_vertices is not None:
-                                        obj.is_draw_contours = False
-                                        obj.is_draw_tet_mesh = True
-                                except Exception as e:
-                                    print(f"[{name}] Tetrahedralize error: {e}")
-                            else:
-                                print(f"[{name}] Prerequisites: Run 'Build Contour Mesh' first")
-
-                        # End two-column layout - back to full width for remaining GUI elements
-                        imgui.columns(1)
 
                         if imgui.button(f"Save Tet##{name}", width=button_width):
                             if hasattr(obj, 'tet_vertices') and obj.tet_vertices is not None:
@@ -2948,6 +3074,8 @@ class GLFWApp():
 
                 return np.array([np.clip(u, 0, 1), np.clip(v, 0, 1)])
 
+            concave_mask = []  # Will be populated if contour_match is available
+
             if (stream_idx < len(obj.contours) and contour_idx < len(obj.contours[stream_idx]) and
                 stream_idx < len(obj.bounding_planes) and contour_idx < len(obj.bounding_planes[stream_idx])):
 
@@ -2959,6 +3087,11 @@ class GLFWApp():
                     basis_x = plane_info['basis_x']
                     basis_y = plane_info['basis_y']
                     bp = plane_info.get('bounding_plane', None)
+
+                    # Use all vertices (no convex subset selection)
+                    n_verts = len(contour_match)
+                    concave_mask = [False] * n_verts  # All vertices included
+                    convex_polygon_indices = list(range(n_verts))
 
             # Left column: Unit square with Q points
             imgui.text("Unit Square (Q points)")
@@ -2987,18 +3120,44 @@ class GLFWApp():
                             hovered_idx = i
                             hovered_type = 'fiber'
 
-            # Compute and draw Q points from contour_match (cyan) - draw immediately so they're not covered
-            if contour_match is not None and bp is not None and len(bp) >= 4:
+            # Use stored normalized_Qs from MVC computation (same homography transform)
+            normalized_Qs = None
+            if (hasattr(obj, 'normalized_Qs') and stream_idx < len(obj.normalized_Qs) and
+                contour_idx < len(obj.normalized_Qs[stream_idx])):
+                normalized_Qs = obj.normalized_Qs[stream_idx][contour_idx]
+
+            # Draw Q points from normalized_Qs (cyan) - these match MVC computation
+            if normalized_Qs is not None and len(normalized_Qs) > 0:
+                for i, q_norm in enumerate(normalized_Qs):
+                    # normalized_Qs are in [0,1] range from homography transform
+                    qx = left_x0 + q_norm[0] * canvas_size
+                    qy = left_y0 + (1 - q_norm[1]) * canvas_size
+                    q_screen_points.append((qx, qy))
+                    # Draw Q point - gray for concave, cyan for convex
+                    if i < len(concave_mask) and concave_mask[i]:
+                        draw_list.add_circle_filled(qx, qy, 3, imgui.get_color_u32_rgba(0.5, 0.5, 0.5, 1.0))
+                    else:
+                        draw_list.add_circle_filled(qx, qy, 3, imgui.get_color_u32_rgba(0.0, 0.8, 0.8, 1.0))
+
+                    # Check hover on Q points
+                    dist = np.sqrt((mouse_pos[0] - qx)**2 + (mouse_pos[1] - qy)**2)
+                    if dist < hover_radius and hovered_idx < 0:
+                        hovered_idx = i
+                        hovered_type = 'vertex'
+            elif contour_match is not None and bp is not None and len(bp) >= 4:
+                # Fallback: compute Q positions using point_to_unit_square_2d
                 for i, (p, q) in enumerate(contour_match):
                     p = np.array(p)
                     q = np.array(q)
-                    # Compute Q's position on unit square using 2D projection
                     q_norm = point_to_unit_square_2d(q, mean, basis_x, basis_y, bp)
                     qx = left_x0 + q_norm[0] * canvas_size
                     qy = left_y0 + (1 - q_norm[1]) * canvas_size
                     q_screen_points.append((qx, qy))
-                    # Draw Q point immediately (cyan)
-                    draw_list.add_circle_filled(qx, qy, 3, imgui.get_color_u32_rgba(0.0, 0.8, 0.8, 1.0))
+                    # Draw Q point - gray for concave, cyan for convex
+                    if i < len(concave_mask) and concave_mask[i]:
+                        draw_list.add_circle_filled(qx, qy, 3, imgui.get_color_u32_rgba(0.5, 0.5, 0.5, 1.0))
+                    else:
+                        draw_list.add_circle_filled(qx, qy, 3, imgui.get_color_u32_rgba(0.0, 0.8, 0.8, 1.0))
 
                     # Check hover on Q points
                     dist = np.sqrt((mouse_pos[0] - qx)**2 + (mouse_pos[1] - qy)**2)
@@ -3068,6 +3227,17 @@ class GLFWApp():
                     p2 = p_screen_points[(i + 1) % len(p_screen_points)]
                     draw_list.add_line(p1[0], p1[1], p2[0], p2[1],
                                       imgui.get_color_u32_rgba(0.8, 0.8, 0.2, 1.0), thickness=2.0)
+
+                # Draw found convex polygon in dark gray (thicker line to show clearly)
+                if len(convex_polygon_indices) >= 3:
+                    for i in range(len(convex_polygon_indices)):
+                        idx1 = convex_polygon_indices[i]
+                        idx2 = convex_polygon_indices[(i + 1) % len(convex_polygon_indices)]
+                        if idx1 < len(p_screen_points) and idx2 < len(p_screen_points):
+                            p1 = p_screen_points[idx1]
+                            p2 = p_screen_points[idx2]
+                            draw_list.add_line(p1[0], p1[1], p2[0], p2[1],
+                                              imgui.get_color_u32_rgba(0.3, 0.3, 0.3, 1.0), thickness=4.0)
 
                 # Check hover on P points
                 for i, (px, py) in enumerate(p_screen_points):
@@ -3149,11 +3319,14 @@ class GLFWApp():
                                 hovered_idx = wi
                                 hovered_type = 'waypoint'
 
-            # Draw P vertex points (non-highlighted)
+            # Draw P vertex points (non-highlighted) - gray for concave, orange for convex
             for i in range(len(p_screen_points)):
                 px, py = p_screen_points[i]
                 if not (hovered_type == 'vertex' and i == hovered_idx):
-                    draw_list.add_circle_filled(px, py, 3, imgui.get_color_u32_rgba(1.0, 0.5, 0.0, 1.0))
+                    if i < len(concave_mask) and concave_mask[i]:
+                        draw_list.add_circle_filled(px, py, 3, imgui.get_color_u32_rgba(0.5, 0.5, 0.5, 1.0))
+                    else:
+                        draw_list.add_circle_filled(px, py, 3, imgui.get_color_u32_rgba(1.0, 0.5, 0.0, 1.0))
 
             # Reserve space
             imgui.dummy(canvas_size + 2 * padding, canvas_size + 2 * padding)
@@ -3194,17 +3367,22 @@ class GLFWApp():
                     mvc_w = obj.mvc_weights[stream_idx][contour_idx]
                 # Fallback: compute on-the-fly if mvc_weights not available
                 if mvc_w is None and contour_match is not None and len(fiber_samples) > 0:
-                    _, _, mvc_w = obj.find_waypoints(plane_info, fiber_samples)
+                    pos_method = getattr(obj, 'fiber_positioning_method', 'mvc')
+                    if pos_method == 'mvc':
+                        _, _, mvc_w = obj.find_waypoints(plane_info, fiber_samples)
+                    else:
+                        _, _, mvc_w = obj.find_waypoints(plane_info, fiber_samples)
                 if mvc_w is not None and len(mvc_w) > hovered_idx:
                     weights = np.array(mvc_w[hovered_idx])
                     if len(weights) > 0 and np.isfinite(weights).all():
                         max_w = weights.max()
                         if max_w > 1e-8:
-                            max_radius = 7.0  # Same as hover emphasis
+                            min_radius = 2.0
+                            max_radius = 8.0
                             for vi, w in enumerate(weights):
-                                if w > 1e-8:  # Only draw non-zero weights
+                                if w > 1e-8:  # Skip zero weights
                                     rel_size = w / max_w
-                                    radius = max(1.0, max_radius * rel_size)  # Minimum radius of 1
+                                    radius = min_radius + (max_radius - min_radius) * rel_size
                                     # Draw on P (contour) side - yellow
                                     if vi < len(p_screen_points):
                                         px, py = p_screen_points[vi]
@@ -3232,17 +3410,22 @@ class GLFWApp():
                     mvc_w = obj.mvc_weights[stream_idx][contour_idx]
                 # Fallback: compute on-the-fly if mvc_weights not available
                 if mvc_w is None and contour_match is not None and len(fiber_samples) > 0:
-                    _, _, mvc_w = obj.find_waypoints(plane_info, fiber_samples)
+                    pos_method = getattr(obj, 'fiber_positioning_method', 'mvc')
+                    if pos_method == 'mvc':
+                        _, _, mvc_w = obj.find_waypoints(plane_info, fiber_samples)
+                    else:
+                        _, _, mvc_w = obj.find_waypoints(plane_info, fiber_samples)
                 if mvc_w is not None and len(mvc_w) > hovered_idx:
                     weights = np.array(mvc_w[hovered_idx])
                     if len(weights) > 0 and np.isfinite(weights).all():
                         max_w = weights.max()
                         if max_w > 1e-8:
-                            max_radius = 7.0  # Same as hover emphasis
+                            min_radius = 2.0
+                            max_radius = 8.0
                             for vi, w in enumerate(weights):
-                                if w > 1e-8:  # Only draw non-zero weights
+                                if w > 1e-8:  # Skip zero weights
                                     rel_size = w / max_w
-                                    radius = max(1.0, max_radius * rel_size)  # Minimum radius of 1
+                                    radius = min_radius + (max_radius - min_radius) * rel_size
                                     # Draw on P (contour) side - yellow
                                     if vi < len(p_screen_points):
                                         px, py = p_screen_points[vi]

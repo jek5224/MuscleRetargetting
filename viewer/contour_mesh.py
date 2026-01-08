@@ -2015,14 +2015,19 @@ class ContourMeshMixin:
             for contour_idx, (contour, bounding_plane_info) in enumerate(zip(contour_group, bounding_plane_group)):
                 original_size = len(contour)
 
-                # Get previous first vertex for chaining (if available)
-                # First level uses normalized contour[0] directly, subsequent levels chain
-                prev_first = prev_first_vertices.get(contour_idx, None)
+                # Use bounding plane corner 0 as reference for consistent winding
+                bounding_plane_corners = bounding_plane_info.get('bounding_plane')
+                if bounding_plane_corners is not None and len(bounding_plane_corners) >= 1:
+                    # Use corner 0 as the reference point for this contour
+                    corner_ref = np.array(bounding_plane_corners[0])
+                else:
+                    # Fallback to chaining if no bounding plane available
+                    corner_ref = prev_first_vertices.get(contour_idx, None)
 
-                # Resample the contour uniformly with chained first vertex
-                resampled = self._resample_single_contour(np.array(contour), num_samples, prev_first)
+                # Resample the contour uniformly, starting from vertex closest to corner 0
+                resampled = self._resample_single_contour(np.array(contour), num_samples, corner_ref)
 
-                # Store first vertex for next level
+                # Store first vertex for next level (fallback for contours without bounding planes)
                 prev_first_vertices[contour_idx] = resampled[0].copy()
 
                 print(f"    Contour {contour_idx}: {original_size} -> {len(resampled)} points")
@@ -2052,7 +2057,7 @@ class ContourMeshMixin:
         self.bounding_planes = new_bounding_planes
         print(f"Resampled {len(self.contours)} contour levels to {num_samples} vertices each")
 
-    def _resample_single_contour(self, contour_points, num_samples, prev_first_vertex=None):
+    def _resample_single_contour(self, contour_points, num_samples, reference_point=None):
         """
         Resample a single closed contour to have exactly num_samples vertices.
         Uses arc-length parameterization with consistent starting point.
@@ -2060,8 +2065,10 @@ class ContourMeshMixin:
         Args:
             contour_points: numpy array of shape (N, 3)
             num_samples: int - desired number of output vertices
-            prev_first_vertex: numpy array of shape (3,) - previous level's first vertex (for chaining)
-                              If None, uses contour[0] directly (already set by normalize_contours_to_max)
+            reference_point: numpy array of shape (3,) - reference point for consistent winding
+                            (typically bounding plane corner 0). The contour is rolled to start
+                            from the vertex closest to this point before resampling.
+                            If None, uses contour[0] directly.
 
         Returns:
             numpy array of shape (num_samples, 3)
@@ -2087,9 +2094,9 @@ class ContourMeshMixin:
         t_original = cumulative_length / total_length
 
         # Step 2: Find consistent starting point
-        if prev_first_vertex is not None:
-            # Chain to previous level: find vertex closest to previous first vertex
-            distances = np.linalg.norm(contour - prev_first_vertex, axis=1)
+        if reference_point is not None:
+            # Find vertex closest to reference point (bounding plane corner 0)
+            distances = np.linalg.norm(contour - reference_point, axis=1)
             start_idx = np.argmin(distances)
         else:
             # First level: use normalized contour[0] directly (already correct)
@@ -2881,6 +2888,7 @@ class ContourMeshMixin:
 
         # Get fiber positioning method
         positioning_method = getattr(self, 'fiber_positioning_method', 'mvc')
+        print(f"[find_contour_stream_impl] positioning_method = {positioning_method}")
 
         # Initialize triangulation storage for triangulated/harmonic/geodesic methods
         if positioning_method in ('triangulated', 'harmonic', 'geodesic'):
@@ -3051,7 +3059,14 @@ class ContourMeshMixin:
 
         # Auto-detect skeleton attachments if skeleton_meshes provided
         if skeleton_meshes is not None and len(skeleton_meshes) > 0:
-            self.auto_detect_attachments(skeleton_meshes)
+            print(f"[_find_contour_stream_post_process] Calling auto_detect_attachments with {len(skeleton_meshes)} skeletons")
+            print(f"  contours: {len(self.contours) if self.contours else 'None'} streams")
+            if self.contours and len(self.contours) > 0:
+                print(f"  contours[0]: {len(self.contours[0])} levels")
+            result = self.auto_detect_attachments(skeleton_meshes)
+            print(f"  auto_detect_attachments returned: {result}")
+        else:
+            print(f"[_find_contour_stream_post_process] Skipping auto_detect_attachments: skeleton_meshes={skeleton_meshes is not None}, len={len(skeleton_meshes) if skeleton_meshes else 0}")
 
     def find_contour_stream(self, skeleton_meshes=None):
         # Check for simplified mode - prepare data and skip to post-processing
