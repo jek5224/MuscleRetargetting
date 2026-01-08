@@ -1679,11 +1679,13 @@ class ContourMeshMixin:
                     proj_norm = np.linalg.norm(proj_ref_x)
 
                     if not bp_info.get('square_like', False):
-                        # NON-SQUARE: Only allow 90-degree rotations, DON'T change bounding plane
+                        # NON-SQUARE: Only allow 90-degree rotations
+                        # Bounding plane shape stays same, but corner indices rotate
                         basis_x = bp_info['basis_x']
                         basis_y = bp_info['basis_y']
 
                         # Find which 90-degree rotation best aligns with projected reference
+                        # Track index: 0=0°, 1=90°, 2=180°, 3=270°
                         candidates = [
                             (basis_x, basis_y),      # 0 deg
                             (basis_y, -basis_x),     # 90 deg
@@ -1691,23 +1693,96 @@ class ContourMeshMixin:
                             (-basis_y, basis_x)      # 270 deg
                         ]
 
+                        best_idx = 0
                         if proj_norm > 1e-6:
                             proj_ref_x = proj_ref_x / proj_norm
 
-                            best_candidate = candidates[0]
                             best_dot = -np.inf
-                            for cand_x, cand_y in candidates:
+                            for idx, (cand_x, cand_y) in enumerate(candidates):
                                 dot = np.dot(cand_x, proj_ref_x)
                                 if dot > best_dot:
                                     best_dot = dot
-                                    best_candidate = (cand_x, cand_y)
+                                    best_idx = idx
 
-                            bp_info['basis_x'] = best_candidate[0]
-                            bp_info['basis_y'] = best_candidate[1]
-                            ref_basis_x = best_candidate[0].copy()
+                            bp_info['basis_x'] = candidates[best_idx][0]
+                            bp_info['basis_y'] = candidates[best_idx][1]
+                            ref_basis_x = candidates[best_idx][0].copy()
+
+                            # If rotation != 0, rotate bounding_plane corners and recompute contour_match
+                            if best_idx != 0:
+                                # Rotate bounding_plane corner indices to match axis rotation
+                                old_bp = bp_info['bounding_plane']
+                                bp_info['bounding_plane'] = np.roll(old_bp, -best_idx, axis=0)
+
+                                # Recompute contour_match with rotated bounding plane
+                                contour_vertices = bp_info.get('contour_vertices')
+                                if contour_vertices is None and level_idx < len(self.contours) and stream_idx < len(self.contours[level_idx]):
+                                    contour_vertices = self.contours[level_idx][stream_idx]
+
+                                if contour_vertices is not None:
+                                    contour_vertices = np.array(contour_vertices)
+                                    bp = bp_info['bounding_plane']
+                                    n_verts = len(contour_vertices)
+
+                                    corner_indices = []
+                                    for corner in bp:
+                                        dists = np.linalg.norm(contour_vertices - corner, axis=1)
+                                        corner_indices.append(np.argmin(dists))
+
+                                    new_contour_match = [None] * n_verts
+                                    for edge_idx in range(4):
+                                        next_edge_idx = (edge_idx + 1) % 4
+                                        start_corner_idx = corner_indices[edge_idx]
+                                        end_corner_idx = corner_indices[next_edge_idx]
+                                        edge_start = bp[edge_idx]
+                                        edge_end = bp[next_edge_idx]
+
+                                        if end_corner_idx >= start_corner_idx:
+                                            segment_indices = list(range(start_corner_idx, end_corner_idx + 1))
+                                        else:
+                                            segment_indices = list(range(start_corner_idx, n_verts)) + list(range(0, end_corner_idx + 1))
+
+                                        if len(segment_indices) < 2:
+                                            for idx in segment_indices:
+                                                new_contour_match[idx] = [contour_vertices[idx], edge_start.copy()]
+                                            continue
+
+                                        arc_lengths = [0.0]
+                                        for j in range(1, len(segment_indices)):
+                                            prev_idx = segment_indices[j - 1]
+                                            curr_idx = segment_indices[j]
+                                            arc_lengths.append(arc_lengths[-1] + np.linalg.norm(contour_vertices[curr_idx] - contour_vertices[prev_idx]))
+
+                                        total_arc = arc_lengths[-1] if arc_lengths[-1] > 1e-10 else 1.0
+
+                                        for j, seg_idx in enumerate(segment_indices):
+                                            t = arc_lengths[j] / total_arc
+                                            q = edge_start + t * (edge_end - edge_start)
+                                            new_contour_match[seg_idx] = [contour_vertices[seg_idx], q]
+
+                                    # Fill None entries
+                                    for idx in range(n_verts):
+                                        if new_contour_match[idx] is None:
+                                            p = contour_vertices[idx]
+                                            best_q = bp[0]
+                                            best_dist = np.inf
+                                            for e0, e1 in [(0, 1), (1, 2), (2, 3), (3, 0)]:
+                                                edge_vec = bp[e1] - bp[e0]
+                                                edge_len_sq = np.dot(edge_vec, edge_vec)
+                                                if edge_len_sq > 1e-10:
+                                                    t = np.clip(np.dot(p - bp[e0], edge_vec) / edge_len_sq, 0, 1)
+                                                    q_cand = bp[e0] + t * edge_vec
+                                                else:
+                                                    q_cand = bp[e0]
+                                                d = np.linalg.norm(p - q_cand)
+                                                if d < best_dist:
+                                                    best_dist = d
+                                                    best_q = q_cand
+                                            new_contour_match[idx] = [p, best_q]
+
+                                    bp_info['contour_match'] = new_contour_match
                         else:
                             ref_basis_x = basis_x.copy()
-                        # DON'T touch bounding_plane or contour_match for non-square
 
                     else:
                         # SQUARE-LIKE: Use arbitrary projection and recompute bounding plane
