@@ -2299,23 +2299,62 @@ class ContourMeshMixin:
                     new_basis_y = np.cross(basis_z, new_basis_x)
                     new_basis_y = new_basis_y / (np.linalg.norm(new_basis_y) + 1e-10)
 
-                    old_x = bp['basis_x'].copy()
-                    bp['basis_x'] = new_basis_x
-                    bp['basis_y'] = new_basis_y
+                    # Get contour vertices for recomputation
+                    contour_points = bp.get('contour_vertices')
+                    if contour_points is None:
+                        # Fallback: use projected_2d or skip
+                        bp['basis_x'] = new_basis_x
+                        bp['basis_y'] = new_basis_y
+                        continue
 
-                    # Debug: check final angles
-                    if prev_idx is not None and next_idx is not None:
-                        # Re-project for comparison
-                        prev_x = stream[prev_idx]['basis_x']
-                        next_x = stream[next_idx]['basis_x']
-                        prev_x_p = prev_x - np.dot(prev_x, basis_z) * basis_z
-                        next_x_p = next_x - np.dot(next_x, basis_z) * basis_z
-                        prev_x_p = prev_x_p / (np.linalg.norm(prev_x_p) + 1e-10)
-                        next_x_p = next_x_p / (np.linalg.norm(next_x_p) + 1e-10)
-                        angle_to_prev = np.degrees(np.arccos(np.clip(np.dot(new_basis_x, prev_x_p), -1, 1)))
-                        angle_to_next = np.degrees(np.arccos(np.clip(np.dot(new_basis_x, next_x_p), -1, 1)))
-                        if len([x for x in square_indices if x < i]) < 3:
-                            print(f"          result: to_prev={angle_to_prev:.1f}, to_next={angle_to_next:.1f}")
+                    contour_points = np.array(contour_points)
+                    mean = bp['mean']
+                    basis_x = new_basis_x
+                    basis_y = new_basis_y
+
+                    # Reproject with final basis
+                    projected_2d = np.array([[np.dot(v - mean, basis_x), np.dot(v - mean, basis_y)] for v in contour_points])
+                    area = compute_polygon_area(projected_2d)
+
+                    min_x, max_x = np.min(projected_2d[:, 0]), np.max(projected_2d[:, 0])
+                    min_y, max_y = np.min(projected_2d[:, 1]), np.max(projected_2d[:, 1])
+                    x_len = max_x - min_x
+                    y_len = max_y - min_y
+
+                    ratio_threshold = 2.0
+                    square_like = max(x_len, y_len) / min(x_len, y_len) < ratio_threshold if min(x_len, y_len) > 1e-10 else False
+
+                    # Final re-orthogonalization to ensure exactly 90-degree corners
+                    basis_x = basis_x / (np.linalg.norm(basis_x) + 1e-10)
+                    basis_y = np.cross(basis_z, basis_x)
+                    basis_y = basis_y / (np.linalg.norm(basis_y) + 1e-10)
+
+                    # Re-project contour points with orthonormal basis to get correct extents
+                    projected_2d = np.array([[np.dot(v - mean, basis_x), np.dot(v - mean, basis_y)] for v in contour_points])
+                    min_x, max_x = np.min(projected_2d[:, 0]), np.max(projected_2d[:, 0])
+                    min_y, max_y = np.min(projected_2d[:, 1]), np.max(projected_2d[:, 1])
+
+                    bounding_plane_2d = np.array([
+                        [min_x, min_y], [max_x, min_y],
+                        [max_x, max_y], [min_x, max_y]
+                    ])
+
+                    # Optimize plane position along z-axis to minimize total distance from vertices
+                    z_coords = np.array([np.dot(v - mean, basis_z) for v in contour_points])
+                    optimal_z_offset = np.median(z_coords)
+                    optimal_mean = mean + optimal_z_offset * basis_z
+
+                    bounding_plane = np.array([optimal_mean + x * basis_x + y * basis_y for x, y in bounding_plane_2d])
+                    projected_2d_3d = np.array([optimal_mean + x * basis_x + y * basis_y for x, y in projected_2d])
+
+                    # Update bp_info
+                    bp['basis_x'] = basis_x
+                    bp['basis_y'] = basis_y
+                    bp['mean'] = optimal_mean
+                    bp['bounding_plane'] = bounding_plane
+                    bp['projected_2d'] = projected_2d_3d
+                    bp['area'] = area
+                    bp['square_like'] = square_like
 
         print("  Bounding plane smoothening complete")
 
