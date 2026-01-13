@@ -5588,7 +5588,8 @@ class ContourMeshMixin:
             self._bp_viz_counter = 0
         self._bp_viz_counter += 1
 
-        filepath = f'temp/bp_transform_{self.name}_{self._bp_viz_counter:03d}.png'
+        obj_name = getattr(self, 'name', getattr(self, 'mesh_name', 'unknown'))
+        filepath = f'temp/bp_transform_{obj_name}_{self._bp_viz_counter:03d}.png'
         plt.tight_layout()
         plt.savefig(filepath, dpi=100)
         plt.close(fig)
