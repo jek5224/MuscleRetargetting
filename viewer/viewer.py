@@ -245,7 +245,7 @@ class GLFWApp():
         # Inter-muscle distance constraints
         # List of (muscle1_name, v1_idx, v1_fixed, muscle2_name, v2_idx, v2_fixed, rest_distance)
         self.inter_muscle_constraints = []
-        self.inter_muscle_constraint_threshold = 0.01  # 1cm default threshold
+        self.inter_muscle_constraint_threshold = 0.015  # 15mm default threshold
         self.coupled_as_unified_volume = True  # Treat all muscles as one unified system
 
         # 2D Inspect window state
@@ -1911,7 +1911,8 @@ class GLFWApp():
                                 # Step 2: Find Contours
                                 if max_step >= 2 and obj.scalar_field is not None:
                                     print(f"  [2/{max_step}] Finding Contours...")
-                                    obj.find_contours(skeleton_meshes=self.zygote_skeleton_meshes)
+                                    obj.find_contours(skeleton_meshes=self.zygote_skeleton_meshes, spacing_scale=obj.contour_spacing_scale)
+                                    obj.is_draw_bounding_box = True
 
                                 # Step 3: Refine Contours
                                 if max_step >= 3 and obj.contours is not None and len(obj.contours) > 0:
@@ -1923,10 +1924,11 @@ class GLFWApp():
                                     print(f"  [4/{max_step}] Smoothening Contours...")
                                     obj.smoothen_contours()
 
-                                # Step 5: Find Streams
+                                # Step 5: Find Streams (Select Levels + Build Streams)
                                 if max_step >= 5 and obj.contours is not None and len(obj.contours) > 0 and obj.bounding_planes is not None:
                                     print(f"  [5/{max_step}] Finding Streams...")
-                                    obj.find_contour_stream(skeleton_meshes=self.zygote_skeleton_meshes)
+                                    obj.select_stream_levels()
+                                    obj.build_streams(skeleton_meshes=self.zygote_skeleton_meshes)
 
                                 # Step 6: Resample Contours
                                 if max_step >= 6 and obj.contours is not None and len(obj.contours) > 0 and obj.bounding_planes is not None:
@@ -1980,7 +1982,8 @@ class GLFWApp():
                         if colored_button(f"Find Contours##{name}", 2, col_button_width):
                             if obj.scalar_field is not None:
                                 try:
-                                    obj.find_contours(skeleton_meshes=self.zygote_skeleton_meshes)
+                                    obj.find_contours(skeleton_meshes=self.zygote_skeleton_meshes, spacing_scale=obj.contour_spacing_scale)
+                                    obj.is_draw_bounding_box = True
                                 except Exception as e:
                                     print(f"[{name}] Find Contours error: {e}")
                             else:
@@ -1993,22 +1996,57 @@ class GLFWApp():
                                     print(f"[{name}] Refine Contours error: {e}")
                             else:
                                 print(f"[{name}] Prerequisites: Run 'Find Contours' first")
-                        if colored_button(f"Smoothen Contours##{name}", 4, col_button_width):
+                        # Smoothen buttons: z, x, bp (3 buttons in same row)
+                        sub_button_width = (col_button_width - 8) // 3  # 3 buttons with small margins
+                        if colored_button(f"z##{name}", 4, sub_button_width):
                             if obj.contours is not None and len(obj.contours) > 0:
                                 try:
-                                    obj.smoothen_contours()
+                                    obj.smoothen_contours_z()
                                 except Exception as e:
-                                    print(f"[{name}] Smoothen Contours error: {e}")
+                                    print(f"[{name}] Smoothen Z error: {e}")
                             else:
                                 print(f"[{name}] Prerequisites: Run 'Find Contours' first")
-                        if colored_button(f"Find Streams##{name}", 5, col_button_width):
+                        imgui.same_line(spacing=4)
+                        if colored_button(f"x##{name}", 4, sub_button_width):
+                            if obj.contours is not None and len(obj.contours) > 0:
+                                try:
+                                    obj.smoothen_contours_x()
+                                except Exception as e:
+                                    print(f"[{name}] Smoothen X error: {e}")
+                            else:
+                                print(f"[{name}] Prerequisites: Run 'Find Contours' first")
+                        imgui.same_line(spacing=4)
+                        if colored_button(f"bp##{name}", 4, sub_button_width):
+                            if obj.contours is not None and len(obj.contours) > 0:
+                                try:
+                                    obj.smoothen_contours_bp()
+                                except Exception as e:
+                                    print(f"[{name}] Smoothen BP error: {e}")
+                            else:
+                                print(f"[{name}] Prerequisites: Run 'Find Contours' first")
+                        # Find Streams buttons: Select Levels, Build Streams (2 buttons in same row)
+                        stream_button_width = (col_button_width - 4) // 2  # 2 buttons with small margin
+                        if colored_button(f"Select##{name}", 5, stream_button_width):
                             if obj.contours is not None and len(obj.contours) > 0 and obj.bounding_planes is not None and len(obj.bounding_planes) > 0:
                                 try:
-                                    obj.find_contour_stream(skeleton_meshes=self.zygote_skeleton_meshes)
+                                    obj.select_stream_levels()
                                 except Exception as e:
-                                    print(f"[{name}] Find Streams error: {e}")
+                                    import traceback
+                                    print(f"[{name}] Select Levels error: {e}")
+                                    traceback.print_exc()
                             else:
                                 print(f"[{name}] Prerequisites: Run 'Find Contours' first")
+                        imgui.same_line(spacing=4)
+                        if colored_button(f"Build##{name}", 5, stream_button_width):
+                            if obj.contours is not None and len(obj.contours) > 0 and obj.bounding_planes is not None and len(obj.bounding_planes) > 0:
+                                try:
+                                    obj.build_streams(skeleton_meshes=self.zygote_skeleton_meshes)
+                                except Exception as e:
+                                    import traceback
+                                    print(f"[{name}] Build Streams error: {e}")
+                                    traceback.print_exc()
+                            else:
+                                print(f"[{name}] Prerequisites: Run 'Select Levels' first")
                         if colored_button(f"Resample Contours##{name}", 6, col_button_width):
                             if obj.contours is not None and len(obj.contours) > 0 and obj.bounding_planes is not None:
                                 try:
@@ -2043,6 +2081,28 @@ class GLFWApp():
                         # End two-column layout - back to full width for remaining GUI elements
                         imgui.columns(1)
 
+                        # Reset process button
+                        reset_width = button_width * 2 + imgui.get_style().item_spacing[0]
+                        if imgui.button(f"Reset Process##{name}", width=reset_width):
+                            obj.reset_process()
+
+                        # Save/Load contours buttons
+                        contour_filepath = f"{self.zygote_muscle_dir}{name}.contours.json"
+                        if imgui.button(f"Save Contour##{name}", width=button_width):
+                            if obj.contours is not None and len(obj.contours) > 0:
+                                try:
+                                    obj.save_contours(contour_filepath)
+                                except Exception as e:
+                                    print(f"[{name}] Save Contours error: {e}")
+                            else:
+                                print(f"[{name}] No contours to save")
+                        imgui.same_line()
+                        if imgui.button(f"Load Contour##{name}", width=button_width):
+                            try:
+                                obj.load_contours(contour_filepath)
+                            except Exception as e:
+                                print(f"[{name}] Load Contours error: {e}")
+
                         if imgui.button(f"Save Tet##{name}", width=button_width):
                             if hasattr(obj, 'tet_vertices') and obj.tet_vertices is not None:
                                 try:
@@ -2067,34 +2127,59 @@ class GLFWApp():
                             except Exception as e:
                                 print(f"[{name}] Load Tet error: {e}")
 
-                        # Inspect 2D button - opens visualization window for fiber samples and contours
+                        # Inspect 2D button - opens visualization window for contours (and fiber samples if available)
                         inspect_width = button_width * 2 + imgui.get_style().item_spacing[0]
-                        has_fiber_data = (hasattr(obj, 'fiber_architecture') and obj.fiber_architecture is not None and
-                                         len(obj.fiber_architecture) > 0 and hasattr(obj, 'contours') and
-                                         obj.contours is not None and len(obj.contours) > 0)
-                        if not has_fiber_data:
+                        has_contour_data = (hasattr(obj, 'contours') and obj.contours is not None and len(obj.contours) > 0)
+                        if not has_contour_data:
                             imgui.push_style_var(imgui.STYLE_ALPHA, 0.5)
                         if imgui.button(f"Inspect 2D##{name}", width=inspect_width):
-                            if has_fiber_data:
+                            if has_contour_data:
                                 self.inspect_2d_open[name] = True
                                 if name not in self.inspect_2d_stream_idx:
                                     self.inspect_2d_stream_idx[name] = 0
                                 if name not in self.inspect_2d_contour_idx:
                                     self.inspect_2d_contour_idx[name] = 0
                             else:
-                                print(f"[{name}] No fiber/contour data. Run 'Find Streams' first.")
-                        if not has_fiber_data:
+                                print(f"[{name}] No contour data. Run 'Find Contours' first.")
+                        if not has_contour_data:
                             imgui.pop_style_var()
+
+                        # Focus camera on muscle button
+                        if imgui.button(f"Focus##{name}", width=inspect_width):
+                            if obj.vertices is not None and len(obj.vertices) > 0:
+                                # Compute bounding box center
+                                min_pt = np.min(obj.vertices, axis=0)
+                                max_pt = np.max(obj.vertices, axis=0)
+                                center = (min_pt + max_pt) / 2
+                                bbox_size = np.linalg.norm(max_pt - min_pt)
+                                # Set camera target (trans is scaled by 0.001 in render, so multiply by 1000)
+                                self.trans = -center * 1000.0
+                                # Adjust eye distance based on bounding box size
+                                distance = bbox_size * 2.0
+                                eye_dir = self.eye / (np.linalg.norm(self.eye) + 1e-10)
+                                self.eye = eye_dir * max(distance, MIN_EYE_DISTANCE)
+                            else:
+                                print(f"[{name}] No vertices to focus on")
 
                         _, obj.is_one_fiber = imgui.checkbox(f"One Fiber##{name}", obj.is_one_fiber)
 
                         # Bounding box method selector
-                        bbox_methods = ['rotating_calipers', 'pca']
-                        current_method = getattr(obj, 'bounding_box_method', 'rotating_calipers')
+                        bbox_methods = ['farthest_vertex', 'pca', 'bbox']
+                        current_method = getattr(obj, 'bounding_box_method', 'farthest_vertex')
                         current_idx = bbox_methods.index(current_method) if current_method in bbox_methods else 0
                         changed, new_idx = imgui.combo(f"BBox Method##{name}", current_idx, bbox_methods)
                         if changed:
                             obj.bounding_box_method = bbox_methods[new_idx]
+
+                        # Contour spacing scale slider (lower = more contours)
+                        changed, obj.contour_spacing_scale = imgui.slider_float(
+                            f"Spacing##{name}", obj.contour_spacing_scale, 0.1, 2.0, "%.2f")
+
+                        # Min level distance for Select Levels (as % of muscle length)
+                        if not hasattr(obj, 'min_level_distance'):
+                            obj.min_level_distance = 0.01  # Default 1%
+                        changed, obj.min_level_distance = imgui.slider_float(
+                            f"Min Dist##{name}", obj.min_level_distance, 0.001, 0.1, "%.3f")
 
                         # Sampling method selector
                         sampling_methods = ['sobol_unit_square', 'sobol_min_contour']
@@ -2225,6 +2310,8 @@ class GLFWApp():
                         _, obj.is_draw_open_edges = imgui.checkbox("Draw Open Edges", obj.is_draw_open_edges)
                         _, obj.is_draw_scalar_field = imgui.checkbox("Draw Scalar Field", obj.is_draw_scalar_field)
                         _, obj.is_draw_contours = imgui.checkbox("Draw Contours", obj.is_draw_contours)
+                        imgui.same_line()
+                        _, obj.is_draw_contour_vertices = imgui.checkbox("Vertices", obj.is_draw_contour_vertices)
                         _, obj.is_draw_edges = imgui.checkbox("Draw Edges", obj.is_draw_edges)
                         _, obj.is_draw_centroid = imgui.checkbox("Draw Centroid", obj.is_draw_centroid)
                         _, obj.is_draw_bounding_box = imgui.checkbox("Draw Bounding Box", obj.is_draw_bounding_box)
@@ -2935,12 +3022,14 @@ class GLFWApp():
 
             obj = self.zygote_muscle_meshes[name]
 
-            # Check if data is available
-            if (not hasattr(obj, 'fiber_architecture') or obj.fiber_architecture is None or
-                len(obj.fiber_architecture) == 0 or not hasattr(obj, 'contours') or
-                obj.contours is None or len(obj.contours) == 0):
+            # Check if data is available (only contours required, fiber_architecture optional)
+            if (not hasattr(obj, 'contours') or obj.contours is None or len(obj.contours) == 0):
                 muscles_to_close.append(name)
                 continue
+
+            # Check if fiber_architecture is available (optional - for fiber sample display)
+            has_fiber = (hasattr(obj, 'fiber_architecture') and obj.fiber_architecture is not None and
+                        len(obj.fiber_architecture) > 0)
 
             # Window setup - size to fit two 280px canvases with padding
             # Width: 2 * (280 + 2*20 + 20) + window padding = ~720
@@ -2953,17 +3042,66 @@ class GLFWApp():
                 imgui.end()
                 continue
 
+            # Detect data structure format:
+            # - Pre-stream (2D draw_contour_stream): contours[level_idx][stream_idx], bounding_planes[level_idx][stream_idx]
+            # - Post-stream (1D draw_contour_stream): contours[stream_idx][level_idx], bounding_planes[stream_idx][level_idx]
+            is_pre_stream = (hasattr(obj, 'draw_contour_stream') and
+                            obj.draw_contour_stream is not None and
+                            len(obj.draw_contour_stream) > 0 and
+                            isinstance(obj.draw_contour_stream[0], (list, tuple)))
+
+            # Helper functions to access data in correct format
+            def get_num_streams():
+                if is_pre_stream:
+                    # Pre-stream: streams are the inner index, count from first level
+                    return len(obj.contours[0]) if len(obj.contours) > 0 else 0
+                else:
+                    # Post-stream: streams are the outer index
+                    return len(obj.contours)
+
+            def get_num_contours(s_idx):
+                if is_pre_stream:
+                    # Pre-stream: contours are levels (outer index)
+                    return len(obj.contours)
+                else:
+                    # Post-stream: contours are inner index
+                    return len(obj.contours[s_idx]) if s_idx < len(obj.contours) else 0
+
+            def get_contour(s_idx, c_idx):
+                if is_pre_stream:
+                    # contours[level_idx][stream_idx]
+                    if c_idx < len(obj.contours) and s_idx < len(obj.contours[c_idx]):
+                        return obj.contours[c_idx][s_idx]
+                    return None
+                else:
+                    # contours[stream_idx][level_idx]
+                    if s_idx < len(obj.contours) and c_idx < len(obj.contours[s_idx]):
+                        return obj.contours[s_idx][c_idx]
+                    return None
+
+            def get_bounding_plane(s_idx, c_idx):
+                if is_pre_stream:
+                    # bounding_planes[level_idx][stream_idx]
+                    if c_idx < len(obj.bounding_planes) and s_idx < len(obj.bounding_planes[c_idx]):
+                        return obj.bounding_planes[c_idx][s_idx]
+                    return None
+                else:
+                    # bounding_planes[stream_idx][level_idx]
+                    if s_idx < len(obj.bounding_planes) and c_idx < len(obj.bounding_planes[s_idx]):
+                        return obj.bounding_planes[s_idx][c_idx]
+                    return None
+
             # Stream and contour selection
-            num_streams = len(obj.fiber_architecture)
+            num_streams = get_num_streams()
             stream_idx = self.inspect_2d_stream_idx.get(name, 0)
-            stream_idx = min(stream_idx, num_streams - 1)
+            stream_idx = min(stream_idx, max(0, num_streams - 1))
 
             changed, new_stream_idx = imgui.slider_int(f"Stream##{name}_inspect", stream_idx, 0, max(0, num_streams - 1))
             if changed:
                 self.inspect_2d_stream_idx[name] = new_stream_idx
                 stream_idx = new_stream_idx
 
-            num_contours = len(obj.contours[stream_idx]) if stream_idx < len(obj.contours) else 0
+            num_contours = get_num_contours(stream_idx)
             contour_idx = self.inspect_2d_contour_idx.get(name, 0)
             contour_idx = min(contour_idx, max(0, num_contours - 1))
 
@@ -2999,8 +3137,8 @@ class GLFWApp():
                 imgui.text(f"=== Contour {contour_idx} ===")
 
                 # Show bounding plane corner angles (debug info)
-                if (stream_idx < len(obj.bounding_planes) and contour_idx < len(obj.bounding_planes[stream_idx])):
-                    bp_info = obj.bounding_planes[stream_idx][contour_idx]
+                bp_info = get_bounding_plane(stream_idx, contour_idx)
+                if bp_info is not None:
                     bp_corners = bp_info.get('bounding_plane', None)
                     if bp_corners is not None and len(bp_corners) >= 4:
                         # Compute angles at each corner
@@ -3070,10 +3208,8 @@ class GLFWApp():
 
                     return np.array([np.clip(u, 0, 1), np.clip(v, 0, 1)])
 
-                if (stream_idx < len(obj.contours) and contour_idx < len(obj.contours[stream_idx]) and
-                    stream_idx < len(obj.bounding_planes) and contour_idx < len(obj.bounding_planes[stream_idx])):
-
-                    plane_info = obj.bounding_planes[stream_idx][contour_idx]
+                plane_info = get_bounding_plane(stream_idx, contour_idx)
+                if plane_info is not None:
                     contour_match = plane_info.get('contour_match', None)
 
                     if contour_match is not None and len(contour_match) > 0 and 'basis_x' in plane_info:
@@ -3095,7 +3231,7 @@ class GLFWApp():
 
                 # Draw fiber samples (green) and check hover
                 fiber_samples = []
-                if stream_idx < len(obj.fiber_architecture):
+                if has_fiber and stream_idx < len(obj.fiber_architecture):
                     fiber_samples = obj.fiber_architecture[stream_idx]
                     for i, sample in enumerate(fiber_samples):
                         if len(sample) >= 2:

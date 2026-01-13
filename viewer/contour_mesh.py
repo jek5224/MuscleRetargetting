@@ -1938,14 +1938,12 @@ class ContourMeshMixin:
         # ========== FORWARD PASS: start_level → insertion ==========
         print("  Forward pass...")
 
-        # Handle starting level specially if it has 1 contour
+        # Handle starting level specially - flip z to point toward next contours
         if start_level < num_levels - 1:
             curr_count = contour_counts[start_level]
-            next_count = contour_counts[start_level + 1]
 
-            if curr_count == 1:
-                # Compare z with direction to next contour
-                curr_bp = self.bounding_planes[start_level][0]
+            for contour_idx in range(curr_count):
+                curr_bp = self.bounding_planes[start_level][contour_idx]
                 curr_mean = curr_bp['mean']
                 curr_z = curr_bp['basis_z']
 
@@ -1959,7 +1957,7 @@ class ContourMeshMixin:
                     direction = direction / direction_norm
 
                     if np.dot(curr_z, direction) < 0:
-                        print(f"    Level {start_level}: flipping z and x")
+                        print(f"    Level {start_level}, contour {contour_idx}: flipping z and x (toward next)")
                         curr_bp['basis_z'] = -curr_bp['basis_z']
                         curr_bp['basis_x'] = -curr_bp['basis_x']
 
@@ -1991,13 +1989,6 @@ class ContourMeshMixin:
         # ========== BACKWARD PASS: start_level → origin ==========
         print("  Backward pass...")
 
-        # Handle starting level specially if it has 1 contour (backward direction)
-        if start_level > 0:
-            curr_count = contour_counts[start_level]
-            prev_count = contour_counts[start_level - 1]  # "prev" in backward = toward origin
-
-            # Starting level already processed in forward, now process level start_level-1
-
         # Continue backward from start_level-1 to origin
         for level_idx in range(start_level - 1, -1, -1):
             next_level = level_idx + 1  # "next" in backward = toward insertion
@@ -2019,9 +2010,33 @@ class ContourMeshMixin:
                 next_z = self.bounding_planes[next_level][next_idx]['basis_z']
 
                 if np.dot(curr_z, next_z) < 0:
-                    print(f"    Level {level_idx}, contour {contour_idx}: flipping z and x")
+                    print(f"    Level {level_idx}, contour {contour_idx}: flipping z and x (align with next)")
                     curr_bp['basis_z'] = -curr_bp['basis_z']
                     curr_bp['basis_x'] = -curr_bp['basis_x']
+
+        # ========== Final check: ensure origin contours point toward insertion ==========
+        print("  Final origin check...")
+        if num_levels > 1:
+            origin_count = contour_counts[0]
+            for contour_idx in range(origin_count):
+                curr_bp = self.bounding_planes[0][contour_idx]
+                curr_mean = curr_bp['mean']
+                curr_z = curr_bp['basis_z']
+
+                # Find closest contour at level 1
+                next_idx = find_closest_contour(curr_bp, 1)
+                next_mean = self.bounding_planes[1][next_idx]['mean']
+
+                # Check if z points toward next level
+                direction = next_mean - curr_mean
+                direction_norm = np.linalg.norm(direction)
+                if direction_norm > 1e-10:
+                    direction = direction / direction_norm
+
+                    if np.dot(curr_z, direction) < 0:
+                        print(f"    Origin contour {contour_idx}: flipping z and x (toward insertion)")
+                        curr_bp['basis_z'] = -curr_bp['basis_z']
+                        curr_bp['basis_x'] = -curr_bp['basis_x']
 
         print("  Z-axis smoothening complete")
 
@@ -4383,58 +4398,64 @@ class ContourMeshMixin:
                 max_error = max(max_error, error)
             return max_error
 
-        # Greedy selection for each group
-        all_selected_levels = set()
+        # ========== Step 1: Identify MUST-USE levels ==========
+        # At contour count transitions, use the level with FEWER contours
+        # Example: [2,2,2,1,1,1] -> index 3 (first with 1)
+        # Example: [1,1,1,2,2,2] -> index 2 (last with 1)
+        # Example: [2,2,1,1,2,2] -> index 2 (first with 1) and index 3 (last with 1)
 
-        for group_idx, group in enumerate(groups):
-            levels = group['levels']
-            has_origin = 0 in levels
-            has_insertion = (num_levels - 1) in levels
+        must_use_levels = set()
+        must_use_levels.add(0)  # Origin
+        must_use_levels.add(num_levels - 1)  # Insertion
 
-            if len(levels) == 1:
-                all_selected_levels.add(levels[0])
-                print(f"  Group {group_idx}: 1 level (required)")
-                continue
+        contour_counts = [len(self.contours[i]) for i in range(num_levels)]
+        print(f"Contour counts: {contour_counts}")
 
-            selected = set()
-            if has_origin:
-                selected.add(0)
+        for i in range(len(groups) - 1):
+            curr_group = groups[i]
+            next_group = groups[i + 1]
+            curr_k = curr_group['k']
+            next_k = next_group['k']
+
+            if curr_k < next_k:
+                # Merge point: curr has fewer contours, use last of curr group
+                must_use_levels.add(curr_group['levels'][-1])
+                print(f"  Must-use level {curr_group['levels'][-1]} (last of group with k={curr_k}, before split to k={next_k})")
             else:
-                selected.add(levels[0])
+                # Split point: next has fewer contours, use first of next group
+                must_use_levels.add(next_group['levels'][0])
+                print(f"  Must-use level {next_group['levels'][0]} (first of group with k={next_k}, after merge from k={curr_k})")
 
-            if has_insertion:
-                selected.add(num_levels - 1)
-            else:
-                selected.add(levels[-1])
+        print(f"Must-use levels: {sorted(must_use_levels)}")
 
-            # Greedy: add level with max error until all errors < threshold
-            while True:
-                max_error = 0
-                max_error_level = None
-                selected_sorted = sorted(selected)
+        # ========== Step 2: Error-based selection with must-use as anchors ==========
+        all_selected_levels = set(must_use_levels)
 
-                for gap_idx in range(len(selected_sorted) - 1):
-                    prev_idx = selected_sorted[gap_idx]
-                    next_idx = selected_sorted[gap_idx + 1]
+        # Greedy: add levels with max interpolation error until all errors < threshold
+        while True:
+            max_error = 0
+            max_error_level = None
+            selected_sorted = sorted(all_selected_levels)
 
-                    for level_idx in levels:
-                        if level_idx in selected:
-                            continue
-                        if level_idx <= prev_idx or level_idx >= next_idx:
-                            continue
+            for gap_idx in range(len(selected_sorted) - 1):
+                prev_idx = selected_sorted[gap_idx]
+                next_idx = selected_sorted[gap_idx + 1]
 
-                        error = compute_interpolation_error(level_idx, prev_idx, next_idx)
-                        if error > max_error:
-                            max_error = error
-                            max_error_level = level_idx
+                # Check all levels between prev and next
+                for level_idx in range(prev_idx + 1, next_idx):
+                    if level_idx in all_selected_levels:
+                        continue
 
-                if max_error <= error_threshold or max_error_level is None:
-                    break
+                    error = compute_interpolation_error(level_idx, prev_idx, next_idx)
+                    if error > max_error:
+                        max_error = error
+                        max_error_level = level_idx
 
-                selected.add(max_error_level)
+            if max_error <= error_threshold or max_error_level is None:
+                break
 
-            all_selected_levels.update(selected)
-            print(f"  Group {group_idx}: {len(selected)}/{len(levels)} levels selected")
+            all_selected_levels.add(max_error_level)
+            print(f"  Added level {max_error_level} (error={max_error:.6f})")
 
         selected_levels_list = sorted(all_selected_levels)
         print(f"\nSelected {len(selected_levels_list)} levels from {num_levels} total:")
@@ -4616,22 +4637,29 @@ class ContourMeshMixin:
             contour_stream_match.append(match)
 
             if len(next_contours) == len(ordered_contours_trim):
-                for i in range(len(ordered_contours_trim)):
-                    closest = linked[i][0]
+                # Skip distance check if levels were pre-selected
+                skip_level = False
+                if not getattr(self, 'selected_stream_levels', None):
+                    # Check distance for ALL streams first to ensure consistent behavior
+                    # Only skip this level if ALL streams have dist < min_dist
+                    skip_level = True
+                    for i in range(len(ordered_contours_trim)):
+                        closest = linked[i][0]
+                        prev_mean = bounding_planes_trim[i][-1]['mean']
+                        next_mean = next_bounding_planes[closest]['mean']
+                        dist = np.linalg.norm(next_mean - prev_mean)
+                        if dist >= min_dist:
+                            skip_level = False
+                            break
 
-                    # Check distance from previous contour in this stream
-                    prev_mean = bounding_planes_trim[i][-1]['mean']
-                    next_mean = next_bounding_planes[closest]['mean']
-                    dist = np.linalg.norm(next_mean - prev_mean)
-
-                    # Skip if too close to previous contour
-                    if dist < min_dist:
-                        continue
-
-                    ordered_contours_trim[i].append(next_contours[closest])
-                    ordered_contours_trim_orig[i].append(next_contours[closest].copy())
-                    # Use original bounding plane directly (don't regenerate)
-                    bounding_planes_trim[i].append(next_bounding_planes[closest])
+                if not skip_level:
+                    # Add contours for ALL streams at this level
+                    for i in range(len(ordered_contours_trim)):
+                        closest = linked[i][0]
+                        ordered_contours_trim[i].append(next_contours[closest])
+                        ordered_contours_trim_orig[i].append(next_contours[closest].copy())
+                        # Use original bounding plane directly (don't regenerate)
+                        bounding_planes_trim[i].append(next_bounding_planes[closest])
             else:
                 for i, count in enumerate(counts):
                     # Multiple contours are linked to the same next_contour
@@ -5233,14 +5261,16 @@ class ContourMeshMixin:
 
                         for index, j in enumerate(target_current_contours_indices):
                             if len(new_target_next_contours[index]) > 0:
-                                # Check distance from previous contour in this stream
-                                prev_mean = bounding_planes_trim[j][-1]['mean']
-                                next_mean = np.mean(new_target_next_contours[index], axis=0)
-                                dist = np.linalg.norm(next_mean - prev_mean)
+                                # Skip distance check if levels were pre-selected
+                                if not getattr(self, 'selected_stream_levels', None):
+                                    # Check distance from previous contour in this stream
+                                    prev_mean = bounding_planes_trim[j][-1]['mean']
+                                    next_mean = np.mean(new_target_next_contours[index], axis=0)
+                                    dist = np.linalg.norm(next_mean - prev_mean)
 
-                                # Skip if too close to previous contour
-                                if dist < min_dist:
-                                    continue
+                                    # Skip if too close to previous contour
+                                    if dist < min_dist:
+                                        continue
 
                                 ordered_contours_trim[j].append(new_target_next_contours[index])
                                 ordered_contours_trim_orig[j].append(new_target_next_contours[index].copy())
@@ -5299,14 +5329,16 @@ class ContourMeshMixin:
                     else:
                         target_current_contours_index = [j for j in range(len(linked)) if linked[j][0] == i][0]
 
-                        # Check distance from previous contour in this stream
-                        prev_mean = bounding_planes_trim[target_current_contours_index][-1]['mean']
-                        next_mean = next_bounding_planes[i]['mean']
-                        dist = np.linalg.norm(next_mean - prev_mean)
+                        # Skip distance check if levels were pre-selected
+                        if not getattr(self, 'selected_stream_levels', None):
+                            # Check distance from previous contour in this stream
+                            prev_mean = bounding_planes_trim[target_current_contours_index][-1]['mean']
+                            next_mean = next_bounding_planes[i]['mean']
+                            dist = np.linalg.norm(next_mean - prev_mean)
 
-                        # Skip if too close to previous contour
-                        if dist < min_dist:
-                            continue
+                            # Skip if too close to previous contour
+                            if dist < min_dist:
+                                continue
 
                         ordered_contours_trim[target_current_contours_index].append(next_contours[i])
                         ordered_contours_trim_orig[target_current_contours_index].append(next_contours[i].copy())
@@ -5528,6 +5560,74 @@ class ContourMeshMixin:
 
         print(f"After stream search: {stream_num} streams, {level_num} levels per stream")
 
+        # ========== Smoothen z and x axes for each stream ==========
+        print("Smoothening stream axes...")
+        for stream_i in range(stream_num):
+            bp_stream = self.bounding_planes[stream_i]
+            stream_len = len(bp_stream)
+            if stream_len < 2:
+                continue
+
+            # Determine direction: origin to insertion
+            # First contour should point toward second contour
+            first_mean = bp_stream[0]['mean']
+            second_mean = bp_stream[1]['mean']
+            forward_dir = second_mean - first_mean
+            forward_norm = np.linalg.norm(forward_dir)
+            if forward_norm > 1e-10:
+                forward_dir = forward_dir / forward_norm
+
+                # Flip first contour's z if it doesn't point forward
+                if np.dot(bp_stream[0]['basis_z'], forward_dir) < 0:
+                    bp_stream[0]['basis_z'] = -bp_stream[0]['basis_z']
+                    bp_stream[0]['basis_x'] = -bp_stream[0]['basis_x']
+                    print(f"  Stream {stream_i}, contour 0: flipped z toward insertion")
+
+            # Forward pass: align each contour's z with previous
+            for i in range(1, stream_len):
+                curr_z = bp_stream[i]['basis_z']
+                prev_z = bp_stream[i - 1]['basis_z']
+
+                if np.dot(curr_z, prev_z) < 0:
+                    bp_stream[i]['basis_z'] = -bp_stream[i]['basis_z']
+                    bp_stream[i]['basis_x'] = -bp_stream[i]['basis_x']
+                    print(f"  Stream {stream_i}, contour {i}: flipped z to align")
+
+            # X-axis smoothing: align with (1,0,0) projected onto plane, then propagate
+            # Start from first contour
+            first_z = bp_stream[0]['basis_z']
+            first_x = bp_stream[0]['basis_x']
+
+            # Project (1,0,0) onto plane perpendicular to z
+            ref_x = np.array([1.0, 0.0, 0.0])
+            ref_x_proj = ref_x - np.dot(ref_x, first_z) * first_z
+            ref_x_norm = np.linalg.norm(ref_x_proj)
+            if ref_x_norm > 0.1:  # Only use if not too parallel to z
+                ref_x_proj = ref_x_proj / ref_x_norm
+                if np.dot(first_x, ref_x_proj) < 0:
+                    bp_stream[0]['basis_x'] = -bp_stream[0]['basis_x']
+                    bp_stream[0]['basis_y'] = -bp_stream[0]['basis_y']
+                    print(f"  Stream {stream_i}, contour 0: flipped x toward (1,0,0)")
+
+            # Propagate x alignment forward
+            for i in range(1, stream_len):
+                curr_x = bp_stream[i]['basis_x']
+                curr_z = bp_stream[i]['basis_z']
+                prev_x = bp_stream[i - 1]['basis_x']
+
+                # Project prev_x onto current plane
+                prev_x_proj = prev_x - np.dot(prev_x, curr_z) * curr_z
+                prev_x_norm = np.linalg.norm(prev_x_proj)
+                if prev_x_norm > 1e-10:
+                    prev_x_proj = prev_x_proj / prev_x_norm
+
+                    if np.dot(curr_x, prev_x_proj) < 0:
+                        bp_stream[i]['basis_x'] = -bp_stream[i]['basis_x']
+                        bp_stream[i]['basis_y'] = -bp_stream[i]['basis_y']
+                        print(f"  Stream {stream_i}, contour {i}: flipped x to align")
+
+        print("Stream axes smoothening complete")
+
         if level_num < 3:
             # Not enough contours to simplify, proceed to post-processing
             print(f"Only {level_num} contours, skipping simplification")
@@ -5712,6 +5812,8 @@ class ContourMeshMixin:
                 return float(obj)
             elif isinstance(obj, np.integer):
                 return int(obj)
+            elif isinstance(obj, (np.bool_, bool)):
+                return bool(obj)
             elif isinstance(obj, dict):
                 return {k: convert_to_serializable(v) for k, v in obj.items()}
             elif isinstance(obj, (list, tuple)):

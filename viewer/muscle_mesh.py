@@ -3087,111 +3087,176 @@ class MuscleMeshMixin:
 
         basis_z = newell_normal
 
+        # Get bounding box method
+        bbox_method = getattr(self, 'bounding_box_method', 'farthest_vertex')
+
         if bounding_plane_info_orig is not None:
-            basis_x = bounding_plane_info_orig['basis_x']
-            basis_y = bounding_plane_info_orig['basis_y']
+            # For cut planes, use bbox method to find optimal orientation
             basis_z = bounding_plane_info_orig['basis_z']
             newell_normal = bounding_plane_info_orig['newell_normal']
-        else:
-            # Note: orientation alignment with previous level is handled later in the pca/rotating_calipers branches
 
-            # Get bounding box method (default to 'rotating_calipers' for better fitting)
-            bbox_method = getattr(self, 'bounding_box_method', 'farthest_vertex')
+            # Use bbox method for cut planes
+            # Create initial orthonormal basis on the plane
+            arbitrary = np.array([1, 0, 0])
+            if abs(np.dot(arbitrary, basis_z)) > 0.9:
+                arbitrary = np.array([0, 1, 0])
+            temp_x = arbitrary - np.dot(arbitrary, basis_z) * basis_z
+            temp_x = temp_x / (np.linalg.norm(temp_x) + 1e-10)
+            temp_y = np.cross(basis_z, temp_x)
 
-            if bbox_method == 'pca':
-                # Project contour points onto the plane and do 2D PCA to find principal direction
-                # This ensures basis_x aligns with the long axis of the contour
+            # Project contour points to 2D on this plane
+            projected_2d = np.array([[np.dot(v - mean, temp_x), np.dot(v - mean, temp_y)] for v in contour_points])
 
-                # Create initial orthonormal basis on the plane
-                arbitrary = np.array([1, 0, 0])
-                if abs(np.dot(arbitrary, basis_z)) > 0.9:
-                    arbitrary = np.array([0, 1, 0])
-                temp_x = arbitrary - np.dot(arbitrary, basis_z) * basis_z
-                temp_x = temp_x / np.linalg.norm(temp_x)
-                temp_y = np.cross(basis_z, temp_x)
+            # Use minimum area bbox to find optimal orientation
+            bbox_result = compute_minimum_area_bbox(projected_2d)
+            bbox_basis_x_2d = bbox_result['basis_x']
+            bbox_basis_y_2d = bbox_result['basis_y']
 
-                # Project contour points to 2D on this plane
-                projected_2d = np.array([[np.dot(v - mean, temp_x), np.dot(v - mean, temp_y)] for v in contour_points])
+            # Convert back to 3D
+            basis_x = bbox_basis_x_2d[0] * temp_x + bbox_basis_x_2d[1] * temp_y
+            basis_x = basis_x / (np.linalg.norm(basis_x) + 1e-10)
+            basis_y = np.cross(basis_z, basis_x)
+            basis_y = basis_y / (np.linalg.norm(basis_y) + 1e-10)
 
-                # 2D PCA to find principal direction within the plane
-                centered_2d = projected_2d - np.mean(projected_2d, axis=0)
-                _, _, eigenvectors_2d = np.linalg.svd(centered_2d)
-                principal_2d = eigenvectors_2d[0]  # First principal component in 2D
+            # Align with previous bounding plane orientation (sign flip only)
+            prev_x = bounding_plane_info_orig['basis_x']
+            proj_prev_x = prev_x - np.dot(prev_x, basis_z) * basis_z
+            proj_norm = np.linalg.norm(proj_prev_x)
+            if proj_norm > 1e-6:
+                proj_prev_x = proj_prev_x / proj_norm
+                if np.dot(basis_x, proj_prev_x) < 0:
+                    basis_x = -basis_x
+                    basis_y = np.cross(basis_z, basis_x)
+                    basis_y = basis_y / (np.linalg.norm(basis_y) + 1e-10)
 
-                # Convert back to 3D basis_x
-                basis_x = principal_2d[0] * temp_x + principal_2d[1] * temp_y
-                basis_x = basis_x / np.linalg.norm(basis_x)
-                basis_y = np.cross(basis_z, basis_x)
-                basis_y = basis_y / (np.linalg.norm(basis_y) + 1e-10)
-                 
-            elif bbox_method == 'farthest_vertex':
-                # Step 1: Find farthest vertex pair in 3D to determine basis_x
-                from scipy.spatial.distance import cdist
+        elif bbox_method == 'bbox':
+            # Minimum area bounding box using rotating calipers
+            # Create initial orthonormal basis on the plane
+            arbitrary = np.array([1, 0, 0])
+            if abs(np.dot(arbitrary, basis_z)) > 0.9:
+                arbitrary = np.array([0, 1, 0])
+            temp_x = arbitrary - np.dot(arbitrary, basis_z) * basis_z
+            temp_x = temp_x / (np.linalg.norm(temp_x) + 1e-10)
+            temp_y = np.cross(basis_z, temp_x)
 
-                if len(contour_points) > 2:
-                    dists = cdist(contour_points, contour_points)
-                    i, j = np.unravel_index(np.argmax(dists), dists.shape)
-                    farthest_dir = contour_points[j] - contour_points[i]
-                    farthest_len = np.linalg.norm(farthest_dir)
+            # Project contour points to 2D on this plane
+            projected_2d = np.array([[np.dot(v - mean, temp_x), np.dot(v - mean, temp_y)] for v in contour_points])
 
-                    if farthest_len > 1e-10:
-                        new_basis_x = farthest_dir / farthest_len
-                    else:
-                        new_basis_x = prev_basis_x.copy()
+            # Use minimum area bbox to find optimal orientation
+            bbox_result = compute_minimum_area_bbox(projected_2d)
+            bbox_basis_x_2d = bbox_result['basis_x']
+            bbox_basis_y_2d = bbox_result['basis_y']
+
+            # Convert back to 3D
+            basis_x = bbox_basis_x_2d[0] * temp_x + bbox_basis_x_2d[1] * temp_y
+            basis_x = basis_x / (np.linalg.norm(basis_x) + 1e-10)
+            basis_y = np.cross(basis_z, basis_x)
+            basis_y = basis_y / (np.linalg.norm(basis_y) + 1e-10)
+
+            # Align with previous bounding plane orientation (sign flip only)
+            proj_prev_x = prev_basis_x - np.dot(prev_basis_x, basis_z) * basis_z
+            proj_norm = np.linalg.norm(proj_prev_x)
+            if proj_norm > 1e-6:
+                proj_prev_x = proj_prev_x / proj_norm
+                if np.dot(basis_x, proj_prev_x) < 0:
+                    basis_x = -basis_x
+                    basis_y = np.cross(basis_z, basis_x)
+                    basis_y = basis_y / (np.linalg.norm(basis_y) + 1e-10)
+
+        elif bbox_method == 'pca':
+            # Project contour points onto the plane and do 2D PCA to find principal direction
+            # This ensures basis_x aligns with the long axis of the contour
+
+            # Create initial orthonormal basis on the plane
+            arbitrary = np.array([1, 0, 0])
+            if abs(np.dot(arbitrary, basis_z)) > 0.9:
+                arbitrary = np.array([0, 1, 0])
+            temp_x = arbitrary - np.dot(arbitrary, basis_z) * basis_z
+            temp_x = temp_x / np.linalg.norm(temp_x)
+            temp_y = np.cross(basis_z, temp_x)
+
+            # Project contour points to 2D on this plane
+            projected_2d = np.array([[np.dot(v - mean, temp_x), np.dot(v - mean, temp_y)] for v in contour_points])
+
+            # 2D PCA to find principal direction within the plane
+            centered_2d = projected_2d - np.mean(projected_2d, axis=0)
+            _, _, eigenvectors_2d = np.linalg.svd(centered_2d)
+            principal_2d = eigenvectors_2d[0]  # First principal component in 2D
+
+            # Convert back to 3D basis_x
+            basis_x = principal_2d[0] * temp_x + principal_2d[1] * temp_y
+            basis_x = basis_x / np.linalg.norm(basis_x)
+            basis_y = np.cross(basis_z, basis_x)
+            basis_y = basis_y / (np.linalg.norm(basis_y) + 1e-10)
+
+        elif bbox_method == 'farthest_vertex':
+            # Step 1: Find farthest vertex pair in 3D to determine basis_x
+            from scipy.spatial.distance import cdist
+
+            if len(contour_points) > 2:
+                dists = cdist(contour_points, contour_points)
+                i, j = np.unravel_index(np.argmax(dists), dists.shape)
+                farthest_dir = contour_points[j] - contour_points[i]
+                farthest_len = np.linalg.norm(farthest_dir)
+
+                if farthest_len > 1e-10:
+                    new_basis_x = farthest_dir / farthest_len
                 else:
                     new_basis_x = prev_basis_x.copy()
+            else:
+                new_basis_x = prev_basis_x.copy()
 
-                # Step 2: Find basis_z that minimizes sum of squared distances to plane
-                # The plane must contain basis_x, so basis_z is perpendicular to basis_x
-                # Find optimal basis_z in the 2D subspace perpendicular to basis_x
+            # Step 2: Find basis_z that minimizes sum of squared distances to plane
+            # The plane must contain basis_x, so basis_z is perpendicular to basis_x
+            # Find optimal basis_z in the 2D subspace perpendicular to basis_x
 
-                # Create orthonormal basis perpendicular to new_basis_x
-                arbitrary = np.array([1.0, 0.0, 0.0])
-                if abs(np.dot(arbitrary, new_basis_x)) > 0.9:
-                    arbitrary = np.array([0.0, 1.0, 0.0])
-                v1 = arbitrary - np.dot(arbitrary, new_basis_x) * new_basis_x
-                v1 = v1 / (np.linalg.norm(v1) + 1e-10)
-                v2 = np.cross(new_basis_x, v1)
-                v2 = v2 / (np.linalg.norm(v2) + 1e-10)
+            # Create orthonormal basis perpendicular to new_basis_x
+            arbitrary = np.array([1.0, 0.0, 0.0])
+            if abs(np.dot(arbitrary, new_basis_x)) > 0.9:
+                arbitrary = np.array([0.0, 1.0, 0.0])
+            v1 = arbitrary - np.dot(arbitrary, new_basis_x) * new_basis_x
+            v1 = v1 / (np.linalg.norm(v1) + 1e-10)
+            v2 = np.cross(new_basis_x, v1)
+            v2 = v2 / (np.linalg.norm(v2) + 1e-10)
 
-                # Compute covariance matrix of points relative to mean
-                centered = np.array(contour_points) - mean
-                C = np.dot(centered.T, centered) / len(contour_points)
+            # Compute covariance matrix of points relative to mean
+            centered = np.array(contour_points) - mean
+            C = np.dot(centered.T, centered) / len(contour_points)
 
-                # Project covariance onto 2D subspace {v1, v2}
-                C_2d = np.array([
-                    [np.dot(v1, np.dot(C, v1)), np.dot(v1, np.dot(C, v2))],
-                    [np.dot(v2, np.dot(C, v1)), np.dot(v2, np.dot(C, v2))]
-                ])
+            # Project covariance onto 2D subspace {v1, v2}
+            C_2d = np.array([
+                [np.dot(v1, np.dot(C, v1)), np.dot(v1, np.dot(C, v2))],
+                [np.dot(v2, np.dot(C, v1)), np.dot(v2, np.dot(C, v2))]
+            ])
 
-                # Find eigenvector with smallest eigenvalue (minimum variance direction = plane normal)
-                eigenvalues, eigenvectors = np.linalg.eigh(C_2d)
-                min_idx = np.argmin(eigenvalues)
-                min_eigenvec_2d = eigenvectors[:, min_idx]
+            # Find eigenvector with smallest eigenvalue (minimum variance direction = plane normal)
+            eigenvalues, eigenvectors = np.linalg.eigh(C_2d)
+            min_idx = np.argmin(eigenvalues)
+            min_eigenvec_2d = eigenvectors[:, min_idx]
 
-                # Convert back to 3D
-                new_basis_z = min_eigenvec_2d[0] * v1 + min_eigenvec_2d[1] * v2
-                new_basis_z = new_basis_z / (np.linalg.norm(new_basis_z) + 1e-10)
+            # Convert back to 3D
+            new_basis_z = min_eigenvec_2d[0] * v1 + min_eigenvec_2d[1] * v2
+            new_basis_z = new_basis_z / (np.linalg.norm(new_basis_z) + 1e-10)
 
-                # Align with previous basis_z direction
-                if np.dot(new_basis_z, prev_basis_z) < 0:
-                    new_basis_z = -new_basis_z
+            # Align with previous basis_z direction
+            if np.dot(new_basis_z, prev_basis_z) < 0:
+                new_basis_z = -new_basis_z
 
-                # Step 3: Compute basis_y = cross(basis_z, basis_x)
-                new_basis_y = np.cross(new_basis_z, new_basis_x)
-                new_basis_y = new_basis_y / (np.linalg.norm(new_basis_y) + 1e-10)
+            # Step 3: Compute basis_y = cross(basis_z, basis_x)
+            new_basis_y = np.cross(new_basis_z, new_basis_x)
+            new_basis_y = new_basis_y / (np.linalg.norm(new_basis_y) + 1e-10)
 
-                # Align basis_x with previous orientation (sign flip only)
-                proj_prev_x = prev_basis_x - np.dot(prev_basis_x, new_basis_z) * new_basis_z
-                proj_norm = np.linalg.norm(proj_prev_x)
-                if proj_norm > 1e-6:
-                    proj_prev_x = proj_prev_x / proj_norm
-                    if np.dot(new_basis_x, proj_prev_x) < 0:
-                        new_basis_x = -new_basis_x
-                        new_basis_y = np.cross(new_basis_z, new_basis_x)
-                        new_basis_y = new_basis_y / (np.linalg.norm(new_basis_y) + 1e-10)
+            # Align basis_x with previous orientation (sign flip only)
+            proj_prev_x = prev_basis_x - np.dot(prev_basis_x, new_basis_z) * new_basis_z
+            proj_norm = np.linalg.norm(proj_prev_x)
+            if proj_norm > 1e-6:
+                proj_prev_x = proj_prev_x / proj_norm
+                if np.dot(new_basis_x, proj_prev_x) < 0:
+                    new_basis_x = -new_basis_x
+                    new_basis_y = np.cross(new_basis_z, new_basis_x)
+                    new_basis_y = new_basis_y / (np.linalg.norm(new_basis_y) + 1e-10)
 
-                basis_x, basis_y, basis_z = new_basis_x, new_basis_y, new_basis_z
+            basis_x, basis_y, basis_z = new_basis_x, new_basis_y, new_basis_z
 
         # Reproject with final basis
         projected_2d = np.array([[np.dot(v - mean, basis_x), np.dot(v - mean, basis_y)] for v in contour_points])
