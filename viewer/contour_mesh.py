@@ -5407,18 +5407,20 @@ class ContourMeshMixin:
             return self._cut_contour_for_streams(target_contour, target_bp, projected_refs, stream_indices)
 
         def objective(params):
-            """Maximize overlap between sources and target (symmetric difference)."""
+            """Maximize overlap with target, minimize source overlap and rotation."""
             # params: [scale, tx0, ty0, theta0, tx1, ty1, theta1, ...]
             scale = params[0]
             if scale <= 0:
                 return 1e10
 
             transformed_polygons = []
+            thetas = []
 
             for i in range(n_pieces):
                 tx = params[1 + i * 3]
                 ty = params[1 + i * 3 + 1]
                 theta = params[1 + i * 3 + 2]
+                thetas.append(theta)
 
                 transformed = transform_shape(source_2d_shapes[i], scale, tx, ty, theta)
 
@@ -5449,10 +5451,25 @@ class ContourMeshMixin:
             except:
                 intersection_area = 0
 
-            # Minimize symmetric difference: (union + target - 2*intersection)
-            # Perfect coverage: intersection = union = target, objective = 0
+            # Main objective: minimize symmetric difference
             union_area = union_poly.area
-            return union_area + target_area - 2 * intersection_area
+            coverage_cost = union_area + target_area - 2 * intersection_area
+
+            # Regularization 1: Penalize overlap between sources
+            overlap_cost = 0.0
+            if len(transformed_polygons) >= 2:
+                total_individual_area = sum(p.area for p in transformed_polygons)
+                # Overlap = sum of individual areas - union area
+                overlap_cost = total_individual_area - union_area
+
+            # Regularization 2: Penalize large rotations
+            rotation_cost = sum(abs(t) for t in thetas)
+
+            # Weights for regularization (relative to target_area for scale invariance)
+            overlap_weight = 0.5  # Penalize overlap
+            rotation_weight = 0.01 * target_area  # Penalize rotation (scaled)
+
+            return coverage_cost + overlap_weight * overlap_cost + rotation_weight * rotation_cost
 
         # ========== Step 4: Initial guess and optimize ==========
         # Initial: scale=1.0, translations from projected means, rotation = 0
