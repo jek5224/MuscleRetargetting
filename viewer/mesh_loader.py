@@ -41,6 +41,7 @@ class MeshLoader(ContourMeshMixin, TetrahedronMeshMixin, FiberArchitectureMixin,
         self.is_draw_open_edges = False
         self.is_draw_scalar_field = True
         self.is_draw_contours = False
+        self.is_draw_contour_vertices = False
         self.is_draw_edges = False
         self.is_draw_centroid = False
         self.is_draw_bounding_box = False
@@ -577,10 +578,18 @@ class MeshLoader(ContourMeshMixin, TetrahedronMeshMixin, FiberArchitectureMixin,
         glLineWidth(0.5)
         glDisable(GL_LIGHTING)
         for i, bounding_planes in enumerate(self.bounding_planes):
-            if self.draw_contour_stream is not None and not self.draw_contour_stream[i]:
-                continue
-
-            for plane_info in bounding_planes:
+            for j, plane_info in enumerate(bounding_planes):
+                # Check visibility: 2D structure (before find_contour_stream) or 1D (after)
+                if self.draw_contour_stream is not None:
+                    if isinstance(self.draw_contour_stream[0], (list, tuple)):
+                        # 2D: draw_contour_stream[level_idx][stream_idx]
+                        if i < len(self.draw_contour_stream) and j < len(self.draw_contour_stream[i]):
+                            if not self.draw_contour_stream[i][j]:
+                                continue
+                    else:
+                        # 1D: draw_contour_stream[stream_idx] (after find_contour_stream)
+                        if not self.draw_contour_stream[i]:
+                            continue
                 glPushMatrix()
 
                 glPushMatrix()
@@ -631,20 +640,26 @@ class MeshLoader(ContourMeshMixin, TetrahedronMeshMixin, FiberArchitectureMixin,
                 glPopMatrix()
         glEnable(GL_LIGHTING)
 
-        glColor3f(0, 0, 0)
-        glDisable(GL_LIGHTING)
-        for i, bounding_plane_stream in enumerate(self.bounding_planes):
-            if self.draw_contour_stream is not None and not self.draw_contour_stream[i]:
-                continue
-            for i in range(len(bounding_plane_stream) - 1):
-                glBegin(GL_LINES)
-                for p1, p2 in zip(bounding_plane_stream[i]['bounding_plane'], bounding_plane_stream[i + 1]['bounding_plane']):
-                    glVertex3fv(p1)
-                    glVertex3fv(p2)
-                glVertex3fv(bounding_plane_stream[i]['mean'])
-                glVertex3fv(bounding_plane_stream[i + 1]['mean'])
-                glEnd()
-        glEnable(GL_LIGHTING)
+        # Only draw connecting lines after find_contour_stream (streams have been built)
+        # Use _stream_endpoints as indicator that streams are built, not draw_contour_stream
+        streams_built = (hasattr(self, '_stream_endpoints') and
+                         self._stream_endpoints is not None and
+                         len(self._stream_endpoints) > 0)
+        if streams_built:
+            glColor3f(0, 0, 0)
+            glDisable(GL_LIGHTING)
+            for i, bounding_plane_stream in enumerate(self.bounding_planes):
+                if self.draw_contour_stream is not None and not self.draw_contour_stream[i]:
+                    continue
+                for j in range(len(bounding_plane_stream) - 1):
+                    glBegin(GL_LINES)
+                    for p1, p2 in zip(bounding_plane_stream[j]['bounding_plane'], bounding_plane_stream[j + 1]['bounding_plane']):
+                        glVertex3fv(p1)
+                        glVertex3fv(p2)
+                    glVertex3fv(bounding_plane_stream[j]['mean'])
+                    glVertex3fv(bounding_plane_stream[j + 1]['mean'])
+                    glEnd()
+            glEnable(GL_LIGHTING)
                 
         if self.is_draw_discarded:
             t = 0.1
