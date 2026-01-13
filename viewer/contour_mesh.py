@@ -4986,6 +4986,42 @@ class ContourMeshMixin:
 
         print(f"Levels updated: {len(self.stream_contours[0])} per stream")
 
+    def build_fibers(self, skeleton_meshes=None):
+        """
+        Step 3: Build final fiber structure from selected streams.
+
+        Converts stream_contours/stream_bounding_planes to the format
+        used by downstream operations (mesh building, visualization).
+        """
+        if not hasattr(self, 'stream_contours') or self.stream_contours is None:
+            print("Run cut_streams and select_levels first")
+            return
+
+        max_stream_count = self.max_stream_count
+        num_levels = len(self.stream_contours[0])
+
+        print(f"\n=== Build Fibers ===")
+        print(f"Streams: {max_stream_count}, Levels: {num_levels}")
+
+        # Convert to format expected by downstream: [stream_i][level_i]
+        self.contours = self.stream_contours
+        self.bounding_planes = self.stream_bounding_planes
+
+        # Set up draw flags
+        self.draw_contour_stream = [[True] * num_levels for _ in range(max_stream_count)]
+
+        # Set visualization flags
+        self.is_draw = False
+        self.is_draw_fiber_architecture = True
+
+        # Auto-detect skeleton attachments if skeleton_meshes provided
+        if skeleton_meshes is not None and len(skeleton_meshes) > 0:
+            print(f"Calling auto_detect_attachments with {len(skeleton_meshes)} skeletons")
+            result = self.auto_detect_attachments(skeleton_meshes)
+            print(f"auto_detect_attachments returned: {result}")
+
+        print(f"Build fibers complete: {max_stream_count} streams x {num_levels} levels")
+
     def _cut_contour_for_streams(self, contour, bp, projected_refs, stream_indices):
         """
         Cut a contour into pieces for multiple streams using area-based method.
