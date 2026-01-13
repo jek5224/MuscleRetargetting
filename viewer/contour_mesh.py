@@ -5391,8 +5391,19 @@ class ContourMeshMixin:
             rotated = shape_2d @ rotation.T
             return rotated + np.array([tx, ty])
 
+        # Pre-compute target polygon
+        try:
+            target_poly = Polygon(target_2d)
+            if not target_poly.is_valid:
+                target_poly = target_poly.buffer(0)
+            target_area = target_poly.area
+        except:
+            print("  [BP Transform] WARNING: Could not create target polygon, falling back")
+            projected_refs = [src_bp['mean'] for src_bp in source_bps]
+            return self._cut_contour_for_streams(target_contour, target_bp, projected_refs, stream_indices)
+
         def objective(params):
-            """Minimize area difference between target and union of sources."""
+            """Maximize overlap between sources and target (symmetric difference)."""
             # params: [tx0, ty0, theta0, tx1, ty1, theta1, ...]
             transformed_polygons = []
 
@@ -5407,7 +5418,9 @@ class ContourMeshMixin:
                 if len(transformed) >= 3:
                     try:
                         poly = Polygon(transformed)
-                        if poly.is_valid:
+                        if not poly.is_valid:
+                            poly = poly.buffer(0)
+                        if poly.is_valid and poly.area > 0:
                             transformed_polygons.append(poly)
                     except:
                         pass
@@ -5418,19 +5431,20 @@ class ContourMeshMixin:
             # Compute union of all source polygons
             try:
                 union_poly = unary_union(transformed_polygons)
-                union_area = union_poly.area
             except:
-                union_area = sum(p.area for p in transformed_polygons)
+                return 1e10
 
-            # Target polygon area
+            # Compute intersection with target (measures actual coverage)
             try:
-                target_poly = Polygon(target_2d)
-                target_area = target_poly.area if target_poly.is_valid else 0
+                intersection = union_poly.intersection(target_poly)
+                intersection_area = intersection.area
             except:
-                target_area = 0
+                intersection_area = 0
 
-            # Minimize absolute area difference
-            return abs(target_area - union_area)
+            # Minimize symmetric difference: (union + target - 2*intersection)
+            # Perfect coverage: intersection = union = target, objective = 0
+            union_area = union_poly.area
+            return union_area + target_area - 2 * intersection_area
 
         # ========== Step 4: Initial guess and optimize ==========
         # Initial: translations from projected means, rotation = 0
