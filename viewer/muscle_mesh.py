@@ -1491,7 +1491,7 @@ class MuscleMeshMixin:
         self.is_draw_fiber_architecture = False
         self.is_one_fiber = False
         self.sampling_method = 'sobol_unit_square'
-        self.cutting_method = 'area_based'
+        self.cutting_method = 'bp'
 
         self.waypoints = []
         self.waypoints_from_tet_sim = True

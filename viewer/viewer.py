@@ -2029,7 +2029,7 @@ class GLFWApp():
                         if colored_button(f"Cut##{name}", 4, stream3_button_width):
                             if obj.contours is not None and len(obj.contours) > 0 and obj.bounding_planes is not None and len(obj.bounding_planes) > 0:
                                 try:
-                                    obj.cut_streams()
+                                    obj.cut_streams(cut_method=obj.cutting_method)
                                 except Exception as e:
                                     import traceback
                                     print(f"[{name}] Cut Streams error: {e}")
@@ -2206,7 +2206,7 @@ class GLFWApp():
                             obj.sampling_method = sampling_methods[new_idx]
 
                         # Cutting method selector
-                        cutting_methods = ['area_based', 'voronoi', 'angular', 'gradient', 'ratio', 'cumulative_area', 'projected_area']
+                        cutting_methods = ['bp', 'area_based', 'voronoi', 'angular', 'gradient', 'ratio', 'cumulative_area', 'projected_area']
                         current_cut_idx = cutting_methods.index(obj.cutting_method) if obj.cutting_method in cutting_methods else 0
                         changed, new_cut_idx = imgui.combo(f"Cutting##{name}", current_cut_idx, cutting_methods)
                         if changed:

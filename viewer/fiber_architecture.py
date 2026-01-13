@@ -1584,7 +1584,7 @@ class FiberArchitectureMixin:
         self.is_draw_fiber_architecture = False
         self.is_one_fiber = False
         self.sampling_method = 'sobol_unit_square'  # 'sobol_unit_square' or 'sobol_min_contour'
-        self.cutting_method = 'area_based'  # 'area_based', 'voronoi', 'angular', 'gradient', 'ratio', 'cumulative_area', or 'projected_area'
+        self.cutting_method = 'bp'  # 'bp', 'area_based', 'voronoi', 'angular', 'gradient', 'ratio', 'cumulative_area', or 'projected_area'
 
         # Waypoints
         self.waypoints = []
