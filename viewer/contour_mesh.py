@@ -5581,7 +5581,7 @@ class ContourMeshMixin:
         ax2.grid(True, alpha=0.3)
 
         # Save figure
-        os.makedirs('temp', exist_ok=True)
+        os.makedirs('bp_viz', exist_ok=True)
 
         # Use a counter to save multiple visualizations
         if not hasattr(self, '_bp_viz_counter'):
@@ -5589,7 +5589,7 @@ class ContourMeshMixin:
         self._bp_viz_counter += 1
 
         obj_name = getattr(self, 'name', getattr(self, 'mesh_name', 'unknown'))
-        filepath = f'temp/bp_transform_{obj_name}_{self._bp_viz_counter:03d}.png'
+        filepath = f'bp_viz/bp_transform_{obj_name}_{self._bp_viz_counter:03d}.png'
         plt.tight_layout()
         plt.savefig(filepath, dpi=100)
         plt.close(fig)
