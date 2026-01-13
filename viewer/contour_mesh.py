@@ -2184,16 +2184,19 @@ class ContourMeshMixin:
                 # Single contour per level - treat as one stream
                 streams = [[self.bounding_planes[lvl][0] for lvl in group_levels]]
                 stream_level_map = [[lvl for lvl in group_levels]]
+                stream_contour_map = [[0 for _ in group_levels]]  # contour index is always 0
             else:
                 # Multiple contours - establish streams by distance
                 # Build streams using greedy matching from first level
                 streams = [[] for _ in range(group_count)]
                 stream_level_map = [[] for _ in range(group_count)]
+                stream_contour_map = [[] for _ in range(group_count)]
 
                 # Initialize streams with first level's contours
                 for c_idx in range(group_count):
                     streams[c_idx].append(self.bounding_planes[group_start][c_idx])
                     stream_level_map[c_idx].append(group_start)
+                    stream_contour_map[c_idx].append(c_idx)
 
                 # Match subsequent levels
                 for lvl in group_levels[1:]:
@@ -2222,10 +2225,12 @@ class ContourMeshMixin:
                     for c_idx, s_idx in assignments:
                         streams[s_idx].append(self.bounding_planes[lvl][c_idx])
                         stream_level_map[s_idx].append(lvl)
+                        stream_contour_map[s_idx].append(c_idx)
 
             # ========== Step 3: Process each stream ==========
             for stream_idx, stream in enumerate(streams):
                 levels_in_stream = stream_level_map[stream_idx]
+                contours_in_stream = stream_contour_map[stream_idx]
                 print(f"    Stream {stream_idx}: {len(stream)} contours")
 
                 # Check if any non-square-like exists
@@ -2405,6 +2410,14 @@ class ContourMeshMixin:
                     bp['projected_2d'] = projected_2d_3d
                     bp['area'] = area
                     bp['square_like'] = square_like
+
+                    # Update contour_match and self.contours
+                    level_idx = levels_in_stream[i]
+                    contour_idx = contours_in_stream[i]
+                    preserve = getattr(self, '_contours_normalized', False)
+                    new_contour, contour_match = self.find_contour_match(contour_points, bounding_plane, preserve_order=preserve)
+                    bp['contour_match'] = contour_match
+                    self.contours[level_idx][contour_idx] = new_contour
 
         print("  Bounding plane smoothening complete")
 
