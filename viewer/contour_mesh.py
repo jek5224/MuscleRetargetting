@@ -434,23 +434,24 @@ class ContourMeshMixin:
                 glEnd()
 
                 # Draw vertices with color gradient: red (first) -> black (last)
-                glPointSize(6 if is_highlighted else 5)
-                glBegin(GL_POINTS)
-                n_verts = len(contour)
-                for k, v in enumerate(contour):
-                    if is_highlighted:
-                        # Blue tint for highlighted, green for first vertex
-                        if k == 0:
-                            glColor3f(0.2, 0.8, 0.4)  # Muted green
+                if getattr(self, 'is_draw_contour_vertices', False):
+                    glPointSize(6 if is_highlighted else 5)
+                    glBegin(GL_POINTS)
+                    n_verts = len(contour)
+                    for k, v in enumerate(contour):
+                        if is_highlighted:
+                            # Blue tint for highlighted, green for first vertex
+                            if k == 0:
+                                glColor3f(0.2, 0.8, 0.4)  # Muted green
+                            else:
+                                glColor3f(0.3, 0.6, 0.9)  # Subtle blue
                         else:
-                            glColor3f(0.3, 0.6, 0.9)  # Subtle blue
-                    else:
-                        # Interpolate from red (1,0,0) to black (0,0,0)
-                        t = k / max(n_verts - 1, 1)
-                        vert_color = (1 - t, 0, 0)  # red -> black
-                        glColor3f(*vert_color)
-                    glVertex3fv(v)
-                glEnd()
+                            # Interpolate from red (1,0,0) to black (0,0,0)
+                            t = k / max(n_verts - 1, 1)
+                            vert_color = (1 - t, 0, 0)  # red -> black
+                            glColor3f(*vert_color)
+                        glVertex3fv(v)
+                    glEnd()
 
                 # Draw small x, y, z axes from bounding plane info
                 if (self.bounding_planes is not None and
