@@ -2024,7 +2024,7 @@ class GLFWApp():
                                     print(f"[{name}] Smoothen BP error: {e}")
                             else:
                                 print(f"[{name}] Prerequisites: Run 'Find Contours' first")
-                        # Find Streams buttons: Select Levels, Build Streams (2 buttons in same row)
+                        # Old Find Streams buttons: Select Levels, Build Streams (2 buttons in same row)
                         stream_button_width = (col_button_width - 4) // 2  # 2 buttons with small margin
                         if colored_button(f"Select##{name}", 5, stream_button_width):
                             if obj.contours is not None and len(obj.contours) > 0 and obj.bounding_planes is not None and len(obj.bounding_planes) > 0:
@@ -2047,6 +2047,41 @@ class GLFWApp():
                                     traceback.print_exc()
                             else:
                                 print(f"[{name}] Prerequisites: Run 'Select Levels' first")
+
+                        # New 3-step stream building: Cut / Select / Build
+                        stream3_button_width = (col_button_width - 8) // 3  # 3 buttons with margins
+                        if colored_button(f"Cut##{name}", 4, stream3_button_width):
+                            if obj.contours is not None and len(obj.contours) > 0 and obj.bounding_planes is not None and len(obj.bounding_planes) > 0:
+                                try:
+                                    obj.cut_streams()
+                                except Exception as e:
+                                    import traceback
+                                    print(f"[{name}] Cut Streams error: {e}")
+                                    traceback.print_exc()
+                            else:
+                                print(f"[{name}] Prerequisites: Run 'Find Contours' first")
+                        imgui.same_line(spacing=4)
+                        if colored_button(f"Sel##{name}", 4, stream3_button_width):
+                            if hasattr(obj, 'stream_contours') and obj.stream_contours is not None:
+                                try:
+                                    obj.select_levels()
+                                except Exception as e:
+                                    import traceback
+                                    print(f"[{name}] Select Levels error: {e}")
+                                    traceback.print_exc()
+                            else:
+                                print(f"[{name}] Prerequisites: Run 'Cut' first")
+                        imgui.same_line(spacing=4)
+                        if colored_button(f"Bld##{name}", 4, stream3_button_width):
+                            if hasattr(obj, 'stream_contours') and obj.stream_contours is not None:
+                                try:
+                                    obj.build_fibers(skeleton_meshes=self.zygote_skeleton_meshes)
+                                except Exception as e:
+                                    import traceback
+                                    print(f"[{name}] Build Fibers error: {e}")
+                                    traceback.print_exc()
+                            else:
+                                print(f"[{name}] Prerequisites: Run 'Cut' and 'Sel' first")
                         if colored_button(f"Resample Contours##{name}", 6, col_button_width):
                             if obj.contours is not None and len(obj.contours) > 0 and obj.bounding_planes is not None:
                                 try:
