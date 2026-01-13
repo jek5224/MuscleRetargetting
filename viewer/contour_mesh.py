@@ -5700,9 +5700,24 @@ class ContourMeshMixin:
         Save contours and bounding planes to a file.
 
         Args:
-            filepath: Path to save the contour data (.npz format)
+            filepath: Path to save the contour data (JSON format)
         """
         import json
+
+        def convert_to_serializable(obj):
+            """Recursively convert numpy arrays and other non-serializable types."""
+            if isinstance(obj, np.ndarray):
+                return obj.tolist()
+            elif isinstance(obj, np.floating):
+                return float(obj)
+            elif isinstance(obj, np.integer):
+                return int(obj)
+            elif isinstance(obj, dict):
+                return {k: convert_to_serializable(v) for k, v in obj.items()}
+            elif isinstance(obj, (list, tuple)):
+                return [convert_to_serializable(item) for item in obj]
+            else:
+                return obj
 
         if self.contours is None or len(self.contours) == 0:
             print("No contours to save")
@@ -5712,32 +5727,9 @@ class ContourMeshMixin:
             print("No bounding planes to save")
             return
 
-        # Convert contours to saveable format
-        contours_data = []
-        for level in self.contours:
-            level_data = []
-            for contour in level:
-                if isinstance(contour, np.ndarray):
-                    level_data.append(contour.tolist())
-                else:
-                    level_data.append(contour)
-            contours_data.append(level_data)
-
-        # Convert bounding planes to saveable format
-        bp_data = []
-        for level in self.bounding_planes:
-            level_bp = []
-            for bp in level:
-                bp_dict = {}
-                for key, value in bp.items():
-                    if isinstance(value, np.ndarray):
-                        bp_dict[key] = value.tolist()
-                    elif isinstance(value, (list, tuple)) and len(value) > 0 and isinstance(value[0], np.ndarray):
-                        bp_dict[key] = [v.tolist() if isinstance(v, np.ndarray) else v for v in value]
-                    else:
-                        bp_dict[key] = value
-                level_bp.append(bp_dict)
-            bp_data.append(level_bp)
+        # Convert all data to serializable format
+        contours_data = convert_to_serializable(self.contours)
+        bp_data = convert_to_serializable(self.bounding_planes)
 
         # Save additional state
         save_data = {
@@ -5749,7 +5741,7 @@ class ContourMeshMixin:
 
         # Save stream endpoints if available
         if hasattr(self, '_stream_endpoints') and self._stream_endpoints is not None:
-            save_data['_stream_endpoints'] = self._stream_endpoints
+            save_data['_stream_endpoints'] = convert_to_serializable(self._stream_endpoints)
 
         with open(filepath, 'w') as f:
             json.dump(save_data, f)
