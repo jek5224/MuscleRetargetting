@@ -5496,10 +5496,10 @@ class ContourMeshMixin:
         init_cost = objective(x0)
         print(f"  [BP Transform] initial cost={init_cost:.4f}")
 
-        # ========== Step 5: Optimize from best initial configuration ==========
+        # ========== Step 5: Optimize from initial configuration ==========
         result = minimize(
             objective,
-            best_init_params,
+            x0,
             method='Powell',
             options={'maxiter': 500, 'ftol': 1e-6}
         )
