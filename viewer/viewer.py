@@ -2026,8 +2026,8 @@ class GLFWApp():
                                 print(f"[{name}] Prerequisites: Run 'Find Contours' first")
                         # Cut method selector
                         if not hasattr(obj, 'cut_method'):
-                            obj.cut_method = 0  # 0=mesh (default), 1=area
-                        cut_methods = ['mesh', 'area']
+                            obj.cut_method = 0  # 0=bp (default), 1=mesh, 2=area
+                        cut_methods = ['bp', 'mesh', 'area']
                         imgui.text("Cut:")
                         imgui.same_line()
                         imgui.push_item_width(60)

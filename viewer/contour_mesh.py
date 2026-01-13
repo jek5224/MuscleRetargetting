@@ -4479,7 +4479,7 @@ class ContourMeshMixin:
 
         print(f"Contours updated: now {len(self.contours)} levels")
 
-    def cut_streams(self, cut_method='mesh'):
+    def cut_streams(self, cut_method='bp'):
         """
         Step 1: Pre-cut all contours to max stream count.
 
@@ -4492,7 +4492,8 @@ class ContourMeshMixin:
         self.stream_bounding_planes[stream_i][level_i] are available.
 
         Args:
-            cut_method: 'mesh' (default) for topology-aware cutting at contour corners,
+            cut_method: 'bp' (default) for bounding plane transform optimization,
+                       'mesh' for topology-aware cutting at contour corners,
                        'area' for position-based equal-area cutting
         """
         if self.contours is None or len(self.contours) < 2:
@@ -4647,7 +4648,14 @@ class ContourMeshMixin:
                         projected_refs = [m - np.dot(m - target_mean, target_z) * target_z for m in ref_means]
 
                         # Cut contour using selected method
-                        if cut_method == 'mesh':
+                        if cut_method == 'bp':
+                            # Get source contours and bounding planes from previous level
+                            source_contours = [stream_contours[s][-1] for s in streams_for_contour]
+                            source_bps = [stream_bounding_planes[s][-1] for s in streams_for_contour]
+                            cut_contours = self._cut_contour_bp_transform(
+                                target_contour, target_bp, source_contours, source_bps, streams_for_contour
+                            )
+                        elif cut_method == 'mesh':
                             cut_contours = self._cut_contour_mesh_aware(
                                 target_contour, target_bp, projected_refs, streams_for_contour
                             )
@@ -5304,6 +5312,166 @@ class ContourMeshMixin:
             # Map to actual stream using ordering
             assigned_stream = stream_order[piece_idx]
             new_contours[assigned_stream].append(v)
+
+        # Ensure each piece has at least some vertices
+        for i in range(n_pieces):
+            if len(new_contours[i]) == 0:
+                new_contours[i] = [target_mean]
+
+        return new_contours
+
+    def _cut_contour_bp_transform(self, target_contour, target_bp, source_contours, source_bps, stream_indices):
+        """
+        Cut a contour using bounding plane transformation and optimization.
+
+        Places source contour 2D shapes on target plane, optimizes their positions
+        to best cover the target contour, then assigns vertices by distance.
+
+        Args:
+            target_contour: The contour vertices to cut (merged contour)
+            target_bp: Bounding plane info for target contour
+            source_contours: List of source contours (from previous level)
+            source_bps: List of bounding planes for source contours
+            stream_indices: Which stream indices these pieces are for
+
+        Returns:
+            List of cut contour pieces (one per stream)
+        """
+        from scipy.optimize import minimize
+        from shapely.geometry import Polygon
+        from shapely.ops import unary_union
+
+        n_pieces = len(stream_indices)
+        if n_pieces == 1:
+            return [target_contour]
+
+        target_contour = np.array(target_contour)
+
+        # ========== Step 1: Project target contour to 2D ==========
+        target_mean = target_bp['mean']
+        target_x = target_bp['basis_x']
+        target_y = target_bp['basis_y']
+
+        target_2d = np.array([
+            [np.dot(v - target_mean, target_x), np.dot(v - target_mean, target_y)]
+            for v in target_contour
+        ])
+
+        # ========== Step 2: Project source contours to 2D in their own planes ==========
+        source_2d_shapes = []
+        initial_translations = []
+
+        for i, (src_contour, src_bp) in enumerate(zip(source_contours, source_bps)):
+            src_contour = np.array(src_contour)
+            src_mean = src_bp['mean']
+            src_x = src_bp['basis_x']
+            src_y = src_bp['basis_y']
+
+            # Project source contour to its own 2D plane
+            src_2d = np.array([
+                [np.dot(v - src_mean, src_x), np.dot(v - src_mean, src_y)]
+                for v in src_contour
+            ])
+            source_2d_shapes.append(src_2d)
+
+            # Initial translation: project source mean onto target plane
+            src_mean_on_target_x = np.dot(src_mean - target_mean, target_x)
+            src_mean_on_target_y = np.dot(src_mean - target_mean, target_y)
+            initial_translations.append([src_mean_on_target_x, src_mean_on_target_y])
+
+        # ========== Step 3: Define optimization objective ==========
+        def transform_shape(shape_2d, tx, ty, theta):
+            """Apply 2D rigid transformation: rotate then translate."""
+            cos_t = np.cos(theta)
+            sin_t = np.sin(theta)
+            rotation = np.array([[cos_t, -sin_t], [sin_t, cos_t]])
+            rotated = shape_2d @ rotation.T
+            return rotated + np.array([tx, ty])
+
+        def objective(params):
+            """Minimize area difference between target and union of sources."""
+            # params: [tx0, ty0, theta0, tx1, ty1, theta1, ...]
+            transformed_polygons = []
+
+            for i in range(n_pieces):
+                tx = params[i * 3]
+                ty = params[i * 3 + 1]
+                theta = params[i * 3 + 2]
+
+                transformed = transform_shape(source_2d_shapes[i], tx, ty, theta)
+
+                # Create polygon (need at least 3 points)
+                if len(transformed) >= 3:
+                    try:
+                        poly = Polygon(transformed)
+                        if poly.is_valid:
+                            transformed_polygons.append(poly)
+                    except:
+                        pass
+
+            if len(transformed_polygons) == 0:
+                return 1e10
+
+            # Compute union of all source polygons
+            try:
+                union_poly = unary_union(transformed_polygons)
+                union_area = union_poly.area
+            except:
+                union_area = sum(p.area for p in transformed_polygons)
+
+            # Target polygon area
+            try:
+                target_poly = Polygon(target_2d)
+                target_area = target_poly.area if target_poly.is_valid else 0
+            except:
+                target_area = 0
+
+            # Minimize absolute area difference
+            return abs(target_area - union_area)
+
+        # ========== Step 4: Initial guess and optimize ==========
+        # Initial: translations from projected means, rotation = 0
+        x0 = []
+        for tx, ty in initial_translations:
+            x0.extend([tx, ty, 0.0])
+
+        # Run optimization
+        result = minimize(
+            objective,
+            x0,
+            method='Powell',
+            options={'maxiter': 500, 'ftol': 1e-6}
+        )
+
+        optimal_params = result.x
+
+        # ========== Step 5: Get final transformed source shapes ==========
+        final_transformed = []
+        for i in range(n_pieces):
+            tx = optimal_params[i * 3]
+            ty = optimal_params[i * 3 + 1]
+            theta = optimal_params[i * 3 + 2]
+            transformed = transform_shape(source_2d_shapes[i], tx, ty, theta)
+            final_transformed.append(transformed)
+
+        # ========== Step 6: Assign target vertices by distance ==========
+        new_contours = [[] for _ in range(n_pieces)]
+
+        for v_idx, v_2d in enumerate(target_2d):
+            # Find distance to each transformed source contour
+            min_dist = np.inf
+            assigned_piece = 0
+
+            for piece_idx, transformed in enumerate(final_transformed):
+                # Compute minimum distance to any point in the source contour
+                if len(transformed) > 0:
+                    distances = np.linalg.norm(transformed - v_2d, axis=1)
+                    dist = np.min(distances)
+                    if dist < min_dist:
+                        min_dist = dist
+                        assigned_piece = piece_idx
+
+            new_contours[assigned_piece].append(target_contour[v_idx])
 
         # Ensure each piece has at least some vertices
         for i in range(n_pieces):
