@@ -2181,7 +2181,8 @@ class ContourMeshMixin:
                 # Check if any non-square-like exists
                 non_square_indices = [i for i, bp in enumerate(stream) if not bp.get('square_like', False)]
                 square_indices = [i for i, bp in enumerate(stream) if bp.get('square_like', False)]
-                print(f"      Non-square: {len(non_square_indices)}, Square: {len(square_indices)}")
+                print(f"      Non-square indices: {non_square_indices[:5]}...{non_square_indices[-5:] if len(non_square_indices) > 5 else ''}")
+                print(f"      Square indices: {square_indices[:5]}...{square_indices[-5:] if len(square_indices) > 5 else ''}")
 
                 if len(non_square_indices) == 0:
                     # All square-like - find most non-square-like by aspect ratio
@@ -2238,38 +2239,27 @@ class ContourMeshMixin:
                             break  # Take closest one going forward
 
                     if prev_idx is None and next_idx is None:
+                        print(f"        [{i}] SKIP: no prev or next found")
                         continue  # Should not happen after selecting reference
+
+                    # Print for first few square contours processed
+                    if len([x for x in square_indices if x < i]) < 3:
+                        print(f"        [{i}] processing: prev={prev_idx}, next={next_idx}")
 
                     # Determine target basis_x
                     # Project prev/next onto current's plane, align next to prev, then interpolate
                     t = -1
 
                     if prev_idx is not None and next_idx is not None:
-                        # Project prev's x and y onto current's plane
+                        # Project prev's x onto current's plane
                         prev_x = stream[prev_idx]['basis_x']
-                        prev_y = stream[prev_idx]['basis_y']
                         prev_x_proj = prev_x - np.dot(prev_x, basis_z) * basis_z
-                        prev_y_proj = prev_y - np.dot(prev_y, basis_z) * basis_z
                         prev_x_proj = prev_x_proj / (np.linalg.norm(prev_x_proj) + 1e-10)
-                        prev_y_proj = prev_y_proj / (np.linalg.norm(prev_y_proj) + 1e-10)
 
-                        # Project next's x and y onto current's plane
+                        # Project next's x onto current's plane
                         next_x = stream[next_idx]['basis_x']
-                        next_y = stream[next_idx]['basis_y']
                         next_x_proj = next_x - np.dot(next_x, basis_z) * basis_z
-                        next_y_proj = next_y - np.dot(next_y, basis_z) * basis_z
                         next_x_proj = next_x_proj / (np.linalg.norm(next_x_proj) + 1e-10)
-                        next_y_proj = next_y_proj / (np.linalg.norm(next_y_proj) + 1e-10)
-
-                        # Align next to prev (find best 90° rotation of next that matches prev)
-                        candidates = [next_x_proj, next_y_proj, -next_x_proj, -next_y_proj]
-                        aligned_next = next_x_proj
-                        best_dot = -np.inf
-                        for cand in candidates:
-                            dot = np.dot(cand, prev_x_proj)
-                            if dot > best_dot:
-                                best_dot = dot
-                                aligned_next = cand
 
                         # Interpolation ratio based on distance
                         total_dist = prev_dist + next_dist
@@ -2278,8 +2268,23 @@ class ContourMeshMixin:
                         else:
                             t = 0.5
 
-                        new_basis_x = (1 - t) * prev_x_proj + t * aligned_next
-                        new_basis_x = new_basis_x / (np.linalg.norm(new_basis_x) + 1e-10)
+                        # Compute signed angle from prev to next (rotation around basis_z)
+                        cos_angle = np.clip(np.dot(prev_x_proj, next_x_proj), -1, 1)
+                        cross = np.cross(prev_x_proj, next_x_proj)
+                        sin_angle = np.dot(cross, basis_z)
+                        angle = np.arctan2(sin_angle, cos_angle)
+
+                        # Interpolate the rotation angle
+                        interp_angle = angle * t
+
+                        # Rotate prev_x_proj by interp_angle around basis_z (Rodrigues formula)
+                        cos_t = np.cos(interp_angle)
+                        sin_t = np.sin(interp_angle)
+                        new_basis_x = prev_x_proj * cos_t + np.cross(basis_z, prev_x_proj) * sin_t
+
+                        # Debug
+                        if len([x for x in square_indices if x < i]) < 3:
+                            print(f"          angle={np.degrees(angle):.1f}, interp={np.degrees(interp_angle):.1f}, t={t:.2f}")
 
                     elif prev_idx is not None:
                         # Propagate from prev - project onto current's plane
@@ -2297,10 +2302,20 @@ class ContourMeshMixin:
                     old_x = bp['basis_x'].copy()
                     bp['basis_x'] = new_basis_x
                     bp['basis_y'] = new_basis_y
-                    angle_change = np.degrees(np.arccos(np.clip(np.dot(old_x, new_basis_x), -1, 1)))
-                    if angle_change > 1.0:  # Only print if significant change
-                        t_val = t if (prev_idx is not None and next_idx is not None) else -1
-                        print(f"      Contour {i}: rotated {angle_change:.1f} deg (prev={prev_idx}, next={next_idx}, t={t_val:.2f})")
+
+                    # Debug: check final angles
+                    if prev_idx is not None and next_idx is not None:
+                        # Re-project for comparison
+                        prev_x = stream[prev_idx]['basis_x']
+                        next_x = stream[next_idx]['basis_x']
+                        prev_x_p = prev_x - np.dot(prev_x, basis_z) * basis_z
+                        next_x_p = next_x - np.dot(next_x, basis_z) * basis_z
+                        prev_x_p = prev_x_p / (np.linalg.norm(prev_x_p) + 1e-10)
+                        next_x_p = next_x_p / (np.linalg.norm(next_x_p) + 1e-10)
+                        angle_to_prev = np.degrees(np.arccos(np.clip(np.dot(new_basis_x, prev_x_p), -1, 1)))
+                        angle_to_next = np.degrees(np.arccos(np.clip(np.dot(new_basis_x, next_x_p), -1, 1)))
+                        if len([x for x in square_indices if x < i]) < 3:
+                            print(f"          result: to_prev={angle_to_prev:.1f}, to_next={angle_to_next:.1f}")
 
         print("  Bounding plane smoothening complete")
 
