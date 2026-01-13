@@ -1975,6 +1975,122 @@ class ContourMeshMixin:
 
         print("  Z-axis smoothening complete")
 
+    def smoothen_contours_x(self):
+        """
+        Align x-axes consistently across all contour levels.
+
+        Algorithm:
+        1. Find starting level: level with minimum contour count closest to origin
+        2. For starting contour: compare x with (1,0,0), flip x and y if dot < 0
+        3. Forward pass (starting → insertion): compare x with previous level's x
+        4. Backward pass (starting → origin): compare x with next level's x
+
+        When contour counts match: one-to-one correspondence by index
+        When counts differ: compare with closest contour by mean position
+        """
+        if len(self.bounding_planes) < 2:
+            print("Need at least 2 contour levels")
+            return
+
+        print("Smoothening x-axes...")
+
+        num_levels = len(self.bounding_planes)
+
+        # Find contour counts per level
+        contour_counts = [len(self.bounding_planes[i]) for i in range(num_levels)]
+        print(f"  Contour counts: {contour_counts}")
+
+        # Find starting level: minimum contour count, closest to origin (level 0)
+        min_count = min(contour_counts)
+        start_level = None
+        for i in range(num_levels):
+            if contour_counts[i] == min_count:
+                start_level = i
+                break
+
+        print(f"  Starting level: {start_level} (count={min_count})")
+
+        # Helper: find closest contour in other_level to target contour
+        def find_closest_contour(target_bp, other_level):
+            target_mean = target_bp['mean']
+            best_idx = 0
+            best_dist = np.inf
+            for i, bp in enumerate(self.bounding_planes[other_level]):
+                dist = np.linalg.norm(bp['mean'] - target_mean)
+                if dist < best_dist:
+                    best_dist = dist
+                    best_idx = i
+            return best_idx
+
+        # Reference vector for initial alignment
+        ref_x = np.array([1.0, 0.0, 0.0])
+
+        # ========== STARTING LEVEL: compare with (1,0,0) ==========
+        for contour_idx in range(contour_counts[start_level]):
+            curr_bp = self.bounding_planes[start_level][contour_idx]
+            curr_x = curr_bp['basis_x']
+
+            if np.dot(curr_x, ref_x) < 0:
+                print(f"    Level {start_level}, contour {contour_idx}: flipping x and y (initial)")
+                curr_bp['basis_x'] = -curr_bp['basis_x']
+                curr_bp['basis_y'] = -curr_bp['basis_y']
+
+        # ========== FORWARD PASS: start_level+1 → insertion ==========
+        print("  Forward pass...")
+
+        for level_idx in range(start_level + 1, num_levels):
+            prev_level = level_idx - 1
+            curr_count = contour_counts[level_idx]
+            prev_count = contour_counts[prev_level]
+
+            for contour_idx in range(curr_count):
+                curr_bp = self.bounding_planes[level_idx][contour_idx]
+                curr_x = curr_bp['basis_x']
+
+                # Find corresponding previous contour
+                if curr_count == prev_count:
+                    # One-to-one correspondence by index
+                    prev_idx = contour_idx
+                else:
+                    # Different counts: find closest
+                    prev_idx = find_closest_contour(curr_bp, prev_level)
+
+                prev_x = self.bounding_planes[prev_level][prev_idx]['basis_x']
+
+                if np.dot(curr_x, prev_x) < 0:
+                    print(f"    Level {level_idx}, contour {contour_idx}: flipping x and y")
+                    curr_bp['basis_x'] = -curr_bp['basis_x']
+                    curr_bp['basis_y'] = -curr_bp['basis_y']
+
+        # ========== BACKWARD PASS: start_level-1 → origin ==========
+        print("  Backward pass...")
+
+        for level_idx in range(start_level - 1, -1, -1):
+            next_level = level_idx + 1  # "next" in backward = toward insertion
+            curr_count = contour_counts[level_idx]
+            next_count = contour_counts[next_level]
+
+            for contour_idx in range(curr_count):
+                curr_bp = self.bounding_planes[level_idx][contour_idx]
+                curr_x = curr_bp['basis_x']
+
+                # Find corresponding next contour (toward insertion)
+                if curr_count == next_count:
+                    # One-to-one correspondence by index
+                    next_idx = contour_idx
+                else:
+                    # Different counts: find closest
+                    next_idx = find_closest_contour(curr_bp, next_level)
+
+                next_x = self.bounding_planes[next_level][next_idx]['basis_x']
+
+                if np.dot(curr_x, next_x) < 0:
+                    print(f"    Level {level_idx}, contour {contour_idx}: flipping x and y")
+                    curr_bp['basis_x'] = -curr_bp['basis_x']
+                    curr_bp['basis_y'] = -curr_bp['basis_y']
+
+        print("  X-axis smoothening complete")
+
     def fix_90_degree_corners(self):
         """
         Fix all bounding planes to have exactly 90-degree corners.
