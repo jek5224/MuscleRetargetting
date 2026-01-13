@@ -2192,6 +2192,12 @@ class GLFWApp():
                         changed, obj.min_level_distance = imgui.slider_float(
                             f"Min Dist##{name}", obj.min_level_distance, 0.001, 0.1, "%.3f")
 
+                        # Error threshold for level selection (as % of muscle length)
+                        if not hasattr(obj, 'level_select_error_threshold'):
+                            obj.level_select_error_threshold = 0.005  # Default 0.5%
+                        changed, obj.level_select_error_threshold = imgui.slider_float(
+                            f"Err Thresh##{name}", obj.level_select_error_threshold, 0.001, 0.05, "%.3f")
+
                         # Sampling method selector
                         sampling_methods = ['sobol_unit_square', 'sobol_min_contour']
                         current_idx = sampling_methods.index(obj.sampling_method) if obj.sampling_method in sampling_methods else 0
