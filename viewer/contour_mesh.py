@@ -2263,10 +2263,10 @@ class ContourMeshMixin:
                     non_square_indices = [best_idx]
                     print(f"      Selected contour {best_idx} as reference (ratio_diff={best_ratio_diff:.3f})")
 
-                # ========== Interpolate square-like contours ==========
+                # ========== Interpolate square-like contours (basis_x only) ==========
                 for i, bp in enumerate(stream):
                     if not bp.get('square_like', False):
-                        continue  # Skip non-square-like
+                        continue  # Skip non-square-like for interpolation
 
                     curr_mean = bp['mean']
                     basis_z = bp['basis_z']
@@ -2351,23 +2351,34 @@ class ContourMeshMixin:
                         next_x = stream[next_idx]['basis_x']
                         new_basis_x = next_x - np.dot(next_x, basis_z) * basis_z
                         new_basis_x = new_basis_x / (np.linalg.norm(new_basis_x) + 1e-10)
+
                     new_basis_y = np.cross(basis_z, new_basis_x)
                     new_basis_y = new_basis_y / (np.linalg.norm(new_basis_y) + 1e-10)
+
+                    # Update basis vectors for square-like contours
+                    bp['basis_x'] = new_basis_x
+                    bp['basis_y'] = new_basis_y
+
+                # ========== Recompute bounding planes for ALL contours ==========
+                for i, bp in enumerate(stream):
+                    basis_z = bp['basis_z']
+                    basis_x = bp['basis_x']
+                    basis_y = bp['basis_y']
 
                     # Get contour vertices for recomputation
                     contour_points = bp.get('contour_vertices')
                     if contour_points is None:
-                        # Fallback: use projected_2d or skip
-                        bp['basis_x'] = new_basis_x
-                        bp['basis_y'] = new_basis_y
                         continue
 
                     contour_points = np.array(contour_points)
                     mean = bp['mean']
-                    basis_x = new_basis_x
-                    basis_y = new_basis_y
 
-                    # Reproject with final basis
+                    # Final re-orthogonalization to ensure exactly 90-degree corners
+                    basis_x = basis_x / (np.linalg.norm(basis_x) + 1e-10)
+                    basis_y = np.cross(basis_z, basis_x)
+                    basis_y = basis_y / (np.linalg.norm(basis_y) + 1e-10)
+
+                    # Reproject contour points with orthonormal basis
                     projected_2d = np.array([[np.dot(v - mean, basis_x), np.dot(v - mean, basis_y)] for v in contour_points])
                     area = compute_polygon_area(projected_2d)
 
@@ -2378,16 +2389,6 @@ class ContourMeshMixin:
 
                     ratio_threshold = 2.0
                     square_like = max(x_len, y_len) / min(x_len, y_len) < ratio_threshold if min(x_len, y_len) > 1e-10 else False
-
-                    # Final re-orthogonalization to ensure exactly 90-degree corners
-                    basis_x = basis_x / (np.linalg.norm(basis_x) + 1e-10)
-                    basis_y = np.cross(basis_z, basis_x)
-                    basis_y = basis_y / (np.linalg.norm(basis_y) + 1e-10)
-
-                    # Re-project contour points with orthonormal basis to get correct extents
-                    projected_2d = np.array([[np.dot(v - mean, basis_x), np.dot(v - mean, basis_y)] for v in contour_points])
-                    min_x, max_x = np.min(projected_2d[:, 0]), np.max(projected_2d[:, 0])
-                    min_y, max_y = np.min(projected_2d[:, 1]), np.max(projected_2d[:, 1])
 
                     bounding_plane_2d = np.array([
                         [min_x, min_y], [max_x, min_y],
@@ -2417,13 +2418,9 @@ class ContourMeshMixin:
                     preserve = getattr(self, '_contours_normalized', False)
                     new_contour, contour_match = self.find_contour_match(contour_points, bounding_plane, preserve_order=preserve)
                     bp['contour_match'] = contour_match
-                    bp['contour_vertices'] = new_contour  # Update contour_vertices in bp
+                    bp['contour_vertices'] = new_contour
                     self.contours[level_idx][contour_idx] = new_contour
-                    # Explicitly update self.bounding_planes to ensure drawing uses new values
                     self.bounding_planes[level_idx][contour_idx] = bp
-
-                    if len([x for x in square_indices if x < i]) < 3:
-                        print(f"          Updated bp[{level_idx}][{contour_idx}]: bounding_plane corners updated")
 
         print("  Bounding plane smoothening complete")
 
