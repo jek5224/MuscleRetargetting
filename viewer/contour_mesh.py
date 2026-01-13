@@ -2417,7 +2417,13 @@ class ContourMeshMixin:
                     preserve = getattr(self, '_contours_normalized', False)
                     new_contour, contour_match = self.find_contour_match(contour_points, bounding_plane, preserve_order=preserve)
                     bp['contour_match'] = contour_match
+                    bp['contour_vertices'] = new_contour  # Update contour_vertices in bp
                     self.contours[level_idx][contour_idx] = new_contour
+                    # Explicitly update self.bounding_planes to ensure drawing uses new values
+                    self.bounding_planes[level_idx][contour_idx] = bp
+
+                    if len([x for x in square_indices if x < i]) < 3:
+                        print(f"          Updated bp[{level_idx}][{contour_idx}]: bounding_plane corners updated")
 
         print("  Bounding plane smoothening complete")
 
