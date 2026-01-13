@@ -5516,8 +5516,15 @@ class ContourMeshMixin:
 
         # Error-based contour selection: keep contours that are critical for shape reconstruction
         stream_num = len(self.contours)
-        # Use minimum length across all streams to avoid index out of range
-        level_num = min(len(bp_stream) for bp_stream in self.bounding_planes) if self.bounding_planes else 0
+        level_num = len(self.bounding_planes[0]) if self.bounding_planes else 0
+
+        # Debug: verify all streams have the same length
+        stream_lengths = [len(bp_stream) for bp_stream in self.bounding_planes]
+        contour_lengths = [len(c_stream) for c_stream in self.contours]
+        if len(set(stream_lengths)) > 1 or len(set(contour_lengths)) > 1:
+            print(f"WARNING: Inconsistent stream lengths!")
+            print(f"  bounding_planes lengths: {stream_lengths}")
+            print(f"  contours lengths: {contour_lengths}")
 
         print(f"After stream search: {stream_num} streams, {level_num} levels per stream")
 
@@ -5581,10 +5588,6 @@ class ContourMeshMixin:
                         # Compute error across all streams
                         total_error = 0
                         for stream_i in range(stream_num):
-                            # Bounds check for streams with different lengths
-                            if next_idx >= len(self.bounding_planes[stream_i]) or mid_idx >= len(self.contours[stream_i]):
-                                continue
-
                             contour_actual = np.array(self.contours[stream_i][mid_idx])
                             bp_prev = self.bounding_planes[stream_i][prev_idx]
                             bp_next = self.bounding_planes[stream_i][next_idx]
