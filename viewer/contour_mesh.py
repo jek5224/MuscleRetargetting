@@ -2180,6 +2180,8 @@ class ContourMeshMixin:
 
                 # Check if any non-square-like exists
                 non_square_indices = [i for i, bp in enumerate(stream) if not bp.get('square_like', False)]
+                square_indices = [i for i, bp in enumerate(stream) if bp.get('square_like', False)]
+                print(f"      Non-square: {len(non_square_indices)}, Square: {len(square_indices)}")
 
                 if len(non_square_indices) == 0:
                     # All square-like - find most non-square-like by aspect ratio
@@ -2239,22 +2241,34 @@ class ContourMeshMixin:
                         continue  # Should not happen after selecting reference
 
                     # Determine target basis_x
+                    t = -1  # Will be set to interpolation ratio if both prev and next exist
+                    curr_x = bp['basis_x']  # Current orientation to align to
+                    curr_y = bp['basis_y']
+
                     if prev_idx is not None and next_idx is not None:
                         # Interpolate between prev and next
                         prev_x = stream[prev_idx]['basis_x']
                         next_x = stream[next_idx]['basis_x']
 
-                        # Align next_x to prev_x (find best 90° rotation)
-                        prev_y = stream[prev_idx]['basis_y']
-                        next_y = stream[next_idx]['basis_y']
-                        candidates = [next_x, next_y, -next_x, -next_y]
-                        best_aligned = next_x
+                        # Align prev_x to current (find best 90° rotation)
+                        candidates_prev = [prev_x, stream[prev_idx]['basis_y'], -prev_x, -stream[prev_idx]['basis_y']]
+                        aligned_prev = prev_x
                         best_dot = -np.inf
-                        for cand in candidates:
-                            dot = np.dot(cand, prev_x)
+                        for cand in candidates_prev:
+                            dot = np.dot(cand, curr_x)
                             if dot > best_dot:
                                 best_dot = dot
-                                best_aligned = cand
+                                aligned_prev = cand
+
+                        # Align next_x to current (find best 90° rotation)
+                        candidates_next = [next_x, stream[next_idx]['basis_y'], -next_x, -stream[next_idx]['basis_y']]
+                        aligned_next = next_x
+                        best_dot = -np.inf
+                        for cand in candidates_next:
+                            dot = np.dot(cand, curr_x)
+                            if dot > best_dot:
+                                best_dot = dot
+                                aligned_next = cand
 
                         # Interpolation ratio based on distance
                         total_dist = prev_dist + next_dist
@@ -2263,15 +2277,33 @@ class ContourMeshMixin:
                         else:
                             t = 0.5
 
-                        target_x = (1 - t) * prev_x + t * best_aligned
+                        target_x = (1 - t) * aligned_prev + t * aligned_next
                         target_x = target_x / (np.linalg.norm(target_x) + 1e-10)
 
                     elif prev_idx is not None:
-                        # Propagate from prev
-                        target_x = stream[prev_idx]['basis_x'].copy()
+                        # Propagate from prev - align to current first
+                        prev_x = stream[prev_idx]['basis_x']
+                        candidates = [prev_x, stream[prev_idx]['basis_y'], -prev_x, -stream[prev_idx]['basis_y']]
+                        target_x = prev_x
+                        best_dot = -np.inf
+                        for cand in candidates:
+                            dot = np.dot(cand, curr_x)
+                            if dot > best_dot:
+                                best_dot = dot
+                                target_x = cand
+                        target_x = target_x.copy()
                     else:
-                        # Propagate from next
-                        target_x = stream[next_idx]['basis_x'].copy()
+                        # Propagate from next - align to current first
+                        next_x = stream[next_idx]['basis_x']
+                        candidates = [next_x, stream[next_idx]['basis_y'], -next_x, -stream[next_idx]['basis_y']]
+                        target_x = next_x
+                        best_dot = -np.inf
+                        for cand in candidates:
+                            dot = np.dot(cand, curr_x)
+                            if dot > best_dot:
+                                best_dot = dot
+                                target_x = cand
+                        target_x = target_x.copy()
 
                     # Project target_x onto current plane (perpendicular to basis_z)
                     proj_x = target_x - np.dot(target_x, basis_z) * basis_z
@@ -2283,8 +2315,13 @@ class ContourMeshMixin:
                     new_basis_y = np.cross(basis_z, new_basis_x)
                     new_basis_y = new_basis_y / (np.linalg.norm(new_basis_y) + 1e-10)
 
+                    old_x = bp['basis_x'].copy()
                     bp['basis_x'] = new_basis_x
                     bp['basis_y'] = new_basis_y
+                    angle_change = np.degrees(np.arccos(np.clip(np.dot(old_x, new_basis_x), -1, 1)))
+                    if angle_change > 1.0:  # Only print if significant change
+                        t_val = t if (prev_idx is not None and next_idx is not None) else -1
+                        print(f"      Contour {i}: rotated {angle_change:.1f} deg (prev={prev_idx}, next={next_idx}, t={t_val:.2f})")
 
         print("  Bounding plane smoothening complete")
 
