@@ -5471,16 +5471,46 @@ class ContourMeshMixin:
 
             return coverage_cost + overlap_weight * overlap_cost + rotation_weight * rotation_cost
 
-        # ========== Step 4: Initial guess and optimize ==========
-        # Initial: scale=1.0, translations from projected means, rotation = 0
-        x0 = [1.0]  # Initial scale
-        for tx, ty in initial_translations:
-            x0.extend([tx, ty, 0.0])
+        # ========== Step 4: Find best initial configuration ==========
+        # Try multiple initial rotations to avoid local minima
+        candidate_rotations = [0, np.pi/2, np.pi, -np.pi/2]
 
-        # Run optimization
+        best_init_cost = np.inf
+        best_init_params = None
+
+        # For small number of pieces, try all combinations
+        if n_pieces <= 3:
+            import itertools
+            for rot_combo in itertools.product(candidate_rotations, repeat=n_pieces):
+                x0 = [1.0]  # Initial scale
+                for i, (tx, ty) in enumerate(initial_translations):
+                    x0.extend([tx, ty, rot_combo[i]])
+                cost = objective(x0)
+                if cost < best_init_cost:
+                    best_init_cost = cost
+                    best_init_params = x0.copy()
+        else:
+            # For more pieces, just try each rotation individually
+            for rot in candidate_rotations:
+                x0 = [1.0]
+                for tx, ty in initial_translations:
+                    x0.extend([tx, ty, rot])
+                cost = objective(x0)
+                if cost < best_init_cost:
+                    best_init_cost = cost
+                    best_init_params = x0.copy()
+
+        if best_init_params is None:
+            best_init_params = [1.0]
+            for tx, ty in initial_translations:
+                best_init_params.extend([tx, ty, 0.0])
+
+        print(f"  [BP Transform] best initial cost={best_init_cost:.4f}")
+
+        # ========== Step 5: Optimize from best initial configuration ==========
         result = minimize(
             objective,
-            x0,
+            best_init_params,
             method='Powell',
             options={'maxiter': 500, 'ftol': 1e-6}
         )
@@ -5490,7 +5520,7 @@ class ContourMeshMixin:
         print(f"  [BP Transform] optimization: success={result.success}, final_cost={result.fun:.4f}")
         print(f"  [BP Transform] scale={optimal_scale:.4f}")
 
-        # ========== Step 5: Get final transformed source shapes ==========
+        # ========== Step 6: Get final transformed source shapes ==========
         final_transformed = []
         for i in range(n_pieces):
             tx = optimal_params[1 + i * 3]
@@ -5500,13 +5530,13 @@ class ContourMeshMixin:
             final_transformed.append(transformed)
             print(f"  [BP Transform] piece {i}: tx={tx:.4f}, ty={ty:.4f}, theta={np.degrees(theta):.1f}°")
 
-        # ========== Step 5.5: Save visualization for debugging ==========
+        # ========== Step 6.5: Save visualization for debugging ==========
         self._save_bp_transform_visualization(
             target_2d, target_poly, source_2d_shapes, final_transformed,
             stream_indices, optimal_scale
         )
 
-        # ========== Step 6: Assign target vertices by distance ==========
+        # ========== Step 7: Assign target vertices by distance ==========
         new_contours = [[] for _ in range(n_pieces)]
 
         for v_idx, v_2d in enumerate(target_2d):
