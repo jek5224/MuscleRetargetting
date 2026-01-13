@@ -2241,31 +2241,32 @@ class ContourMeshMixin:
                         continue  # Should not happen after selecting reference
 
                     # Determine target basis_x
-                    t = -1  # Will be set to interpolation ratio if both prev and next exist
-                    curr_x = bp['basis_x']  # Current orientation to align to
-                    curr_y = bp['basis_y']
+                    # Project prev/next onto current's plane, align next to prev, then interpolate
+                    t = -1
 
                     if prev_idx is not None and next_idx is not None:
-                        # Interpolate between prev and next
+                        # Project prev's x and y onto current's plane
                         prev_x = stream[prev_idx]['basis_x']
+                        prev_y = stream[prev_idx]['basis_y']
+                        prev_x_proj = prev_x - np.dot(prev_x, basis_z) * basis_z
+                        prev_y_proj = prev_y - np.dot(prev_y, basis_z) * basis_z
+                        prev_x_proj = prev_x_proj / (np.linalg.norm(prev_x_proj) + 1e-10)
+                        prev_y_proj = prev_y_proj / (np.linalg.norm(prev_y_proj) + 1e-10)
+
+                        # Project next's x and y onto current's plane
                         next_x = stream[next_idx]['basis_x']
+                        next_y = stream[next_idx]['basis_y']
+                        next_x_proj = next_x - np.dot(next_x, basis_z) * basis_z
+                        next_y_proj = next_y - np.dot(next_y, basis_z) * basis_z
+                        next_x_proj = next_x_proj / (np.linalg.norm(next_x_proj) + 1e-10)
+                        next_y_proj = next_y_proj / (np.linalg.norm(next_y_proj) + 1e-10)
 
-                        # Align prev_x to current (find best 90° rotation)
-                        candidates_prev = [prev_x, stream[prev_idx]['basis_y'], -prev_x, -stream[prev_idx]['basis_y']]
-                        aligned_prev = prev_x
+                        # Align next to prev (find best 90° rotation of next that matches prev)
+                        candidates = [next_x_proj, next_y_proj, -next_x_proj, -next_y_proj]
+                        aligned_next = next_x_proj
                         best_dot = -np.inf
-                        for cand in candidates_prev:
-                            dot = np.dot(cand, curr_x)
-                            if dot > best_dot:
-                                best_dot = dot
-                                aligned_prev = cand
-
-                        # Align next_x to current (find best 90° rotation)
-                        candidates_next = [next_x, stream[next_idx]['basis_y'], -next_x, -stream[next_idx]['basis_y']]
-                        aligned_next = next_x
-                        best_dot = -np.inf
-                        for cand in candidates_next:
-                            dot = np.dot(cand, curr_x)
+                        for cand in candidates:
+                            dot = np.dot(cand, prev_x_proj)
                             if dot > best_dot:
                                 best_dot = dot
                                 aligned_next = cand
@@ -2277,41 +2278,19 @@ class ContourMeshMixin:
                         else:
                             t = 0.5
 
-                        target_x = (1 - t) * aligned_prev + t * aligned_next
-                        target_x = target_x / (np.linalg.norm(target_x) + 1e-10)
+                        new_basis_x = (1 - t) * prev_x_proj + t * aligned_next
+                        new_basis_x = new_basis_x / (np.linalg.norm(new_basis_x) + 1e-10)
 
                     elif prev_idx is not None:
-                        # Propagate from prev - align to current first
+                        # Propagate from prev - project onto current's plane
                         prev_x = stream[prev_idx]['basis_x']
-                        candidates = [prev_x, stream[prev_idx]['basis_y'], -prev_x, -stream[prev_idx]['basis_y']]
-                        target_x = prev_x
-                        best_dot = -np.inf
-                        for cand in candidates:
-                            dot = np.dot(cand, curr_x)
-                            if dot > best_dot:
-                                best_dot = dot
-                                target_x = cand
-                        target_x = target_x.copy()
+                        new_basis_x = prev_x - np.dot(prev_x, basis_z) * basis_z
+                        new_basis_x = new_basis_x / (np.linalg.norm(new_basis_x) + 1e-10)
                     else:
-                        # Propagate from next - align to current first
+                        # Propagate from next - project onto current's plane
                         next_x = stream[next_idx]['basis_x']
-                        candidates = [next_x, stream[next_idx]['basis_y'], -next_x, -stream[next_idx]['basis_y']]
-                        target_x = next_x
-                        best_dot = -np.inf
-                        for cand in candidates:
-                            dot = np.dot(cand, curr_x)
-                            if dot > best_dot:
-                                best_dot = dot
-                                target_x = cand
-                        target_x = target_x.copy()
-
-                    # Project target_x onto current plane (perpendicular to basis_z)
-                    proj_x = target_x - np.dot(target_x, basis_z) * basis_z
-                    proj_norm = np.linalg.norm(proj_x)
-                    if proj_norm < 1e-10:
-                        continue
-
-                    new_basis_x = proj_x / proj_norm
+                        new_basis_x = next_x - np.dot(next_x, basis_z) * basis_z
+                        new_basis_x = new_basis_x / (np.linalg.norm(new_basis_x) + 1e-10)
                     new_basis_y = np.cross(basis_z, new_basis_x)
                     new_basis_y = new_basis_y / (np.linalg.norm(new_basis_y) + 1e-10)
 
