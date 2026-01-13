@@ -2091,6 +2091,203 @@ class ContourMeshMixin:
 
         print("  X-axis smoothening complete")
 
+    def smoothen_contours_bp(self):
+        """
+        Smooth bounding plane orientations for square-like contours.
+
+        Algorithm:
+        1. Group levels by contour count
+        2. For each group, establish streams (one-to-one correspondence by distance)
+        3. For each stream:
+           - Find square-like contours
+           - Interpolate basis_x from nearest non-square-like neighbors (rotate around z)
+           - If all contours are square-like, pick most non-square-like as reference
+        """
+        if len(self.bounding_planes) < 2:
+            print("Need at least 2 contour levels")
+            return
+
+        print("Smoothening bounding planes...")
+
+        num_levels = len(self.bounding_planes)
+        contour_counts = [len(self.bounding_planes[i]) for i in range(num_levels)]
+        print(f"  Contour counts: {contour_counts}")
+
+        # ========== Step 1: Group levels by contour count ==========
+        groups = []  # List of (start_level, end_level, count)
+        i = 0
+        while i < num_levels:
+            count = contour_counts[i]
+            start = i
+            while i < num_levels and contour_counts[i] == count:
+                i += 1
+            groups.append((start, i - 1, count))
+
+        print(f"  Groups: {groups}")
+
+        # ========== Step 2: Process each group ==========
+        for group_start, group_end, group_count in groups:
+            group_levels = list(range(group_start, group_end + 1))
+            print(f"  Processing group levels {group_start}-{group_end} (count={group_count})")
+
+            if group_count == 1:
+                # Single contour per level - treat as one stream
+                streams = [[self.bounding_planes[lvl][0] for lvl in group_levels]]
+                stream_level_map = [[lvl for lvl in group_levels]]
+            else:
+                # Multiple contours - establish streams by distance
+                # Build streams using greedy matching from first level
+                streams = [[] for _ in range(group_count)]
+                stream_level_map = [[] for _ in range(group_count)]
+
+                # Initialize streams with first level's contours
+                for c_idx in range(group_count):
+                    streams[c_idx].append(self.bounding_planes[group_start][c_idx])
+                    stream_level_map[c_idx].append(group_start)
+
+                # Match subsequent levels
+                for lvl in group_levels[1:]:
+                    # For each contour in this level, find closest stream (by last contour mean)
+                    used = set()
+                    assignments = []
+
+                    for c_idx in range(group_count):
+                        bp = self.bounding_planes[lvl][c_idx]
+                        bp_mean = bp['mean']
+
+                        best_stream = -1
+                        best_dist = np.inf
+                        for s_idx in range(group_count):
+                            if s_idx in used:
+                                continue
+                            last_mean = streams[s_idx][-1]['mean']
+                            dist = np.linalg.norm(bp_mean - last_mean)
+                            if dist < best_dist:
+                                best_dist = dist
+                                best_stream = s_idx
+
+                        assignments.append((c_idx, best_stream))
+                        used.add(best_stream)
+
+                    for c_idx, s_idx in assignments:
+                        streams[s_idx].append(self.bounding_planes[lvl][c_idx])
+                        stream_level_map[s_idx].append(lvl)
+
+            # ========== Step 3: Process each stream ==========
+            for stream_idx, stream in enumerate(streams):
+                levels_in_stream = stream_level_map[stream_idx]
+                print(f"    Stream {stream_idx}: {len(stream)} contours")
+
+                # Check if any non-square-like exists
+                non_square_indices = [i for i, bp in enumerate(stream) if not bp.get('square_like', False)]
+
+                if len(non_square_indices) == 0:
+                    # All square-like - find most non-square-like by aspect ratio
+                    print(f"      All square-like, finding reference...")
+                    best_idx = 0
+                    best_ratio_diff = 0
+
+                    for i, bp in enumerate(stream):
+                        corners = bp.get('bounding_plane')
+                        if corners is None or len(corners) < 4:
+                            continue
+                        width = np.linalg.norm(corners[1] - corners[0])
+                        height = np.linalg.norm(corners[3] - corners[0])
+                        if min(width, height) > 1e-10:
+                            ratio = max(width, height) / min(width, height)
+                            ratio_diff = abs(ratio - 1.0)
+                            if ratio_diff > best_ratio_diff:
+                                best_ratio_diff = ratio_diff
+                                best_idx = i
+
+                    # Mark this one as non-square-like (reference)
+                    stream[best_idx]['square_like'] = False
+                    non_square_indices = [best_idx]
+                    print(f"      Selected contour {best_idx} as reference (ratio_diff={best_ratio_diff:.3f})")
+
+                # ========== Interpolate square-like contours ==========
+                for i, bp in enumerate(stream):
+                    if not bp.get('square_like', False):
+                        continue  # Skip non-square-like
+
+                    curr_mean = bp['mean']
+                    basis_z = bp['basis_z']
+
+                    # Find prev non-square-like
+                    prev_idx = None
+                    prev_dist = np.inf
+                    for j in range(i - 1, -1, -1):
+                        if not stream[j].get('square_like', False):
+                            dist = np.linalg.norm(curr_mean - stream[j]['mean'])
+                            if dist < prev_dist:
+                                prev_dist = dist
+                                prev_idx = j
+                            break  # Take closest one going backward
+
+                    # Find next non-square-like
+                    next_idx = None
+                    next_dist = np.inf
+                    for j in range(i + 1, len(stream)):
+                        if not stream[j].get('square_like', False):
+                            dist = np.linalg.norm(curr_mean - stream[j]['mean'])
+                            if dist < next_dist:
+                                next_dist = dist
+                                next_idx = j
+                            break  # Take closest one going forward
+
+                    if prev_idx is None and next_idx is None:
+                        continue  # Should not happen after selecting reference
+
+                    # Determine target basis_x
+                    if prev_idx is not None and next_idx is not None:
+                        # Interpolate between prev and next
+                        prev_x = stream[prev_idx]['basis_x']
+                        next_x = stream[next_idx]['basis_x']
+
+                        # Align next_x to prev_x (find best 90° rotation)
+                        prev_y = stream[prev_idx]['basis_y']
+                        next_y = stream[next_idx]['basis_y']
+                        candidates = [next_x, next_y, -next_x, -next_y]
+                        best_aligned = next_x
+                        best_dot = -np.inf
+                        for cand in candidates:
+                            dot = np.dot(cand, prev_x)
+                            if dot > best_dot:
+                                best_dot = dot
+                                best_aligned = cand
+
+                        # Interpolation ratio based on distance
+                        total_dist = prev_dist + next_dist
+                        if total_dist > 1e-10:
+                            t = prev_dist / total_dist
+                        else:
+                            t = 0.5
+
+                        target_x = (1 - t) * prev_x + t * best_aligned
+                        target_x = target_x / (np.linalg.norm(target_x) + 1e-10)
+
+                    elif prev_idx is not None:
+                        # Propagate from prev
+                        target_x = stream[prev_idx]['basis_x'].copy()
+                    else:
+                        # Propagate from next
+                        target_x = stream[next_idx]['basis_x'].copy()
+
+                    # Project target_x onto current plane (perpendicular to basis_z)
+                    proj_x = target_x - np.dot(target_x, basis_z) * basis_z
+                    proj_norm = np.linalg.norm(proj_x)
+                    if proj_norm < 1e-10:
+                        continue
+
+                    new_basis_x = proj_x / proj_norm
+                    new_basis_y = np.cross(basis_z, new_basis_x)
+                    new_basis_y = new_basis_y / (np.linalg.norm(new_basis_y) + 1e-10)
+
+                    bp['basis_x'] = new_basis_x
+                    bp['basis_y'] = new_basis_y
+
+        print("  Bounding plane smoothening complete")
+
     def fix_90_degree_corners(self):
         """
         Fix all bounding planes to have exactly 90-degree corners.
