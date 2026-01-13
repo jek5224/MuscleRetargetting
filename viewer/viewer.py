@@ -2024,21 +2024,12 @@ class GLFWApp():
                                     print(f"[{name}] Smoothen BP error: {e}")
                             else:
                                 print(f"[{name}] Prerequisites: Run 'Find Contours' first")
-                        # Cut method selector
-                        if not hasattr(obj, 'cut_method'):
-                            obj.cut_method = 0  # 0=bp (default), 1=mesh, 2=area
-                        cut_methods = ['bp', 'mesh', 'area']
-                        imgui.text("Cut:")
-                        imgui.same_line()
-                        imgui.push_item_width(60)
-                        changed, obj.cut_method = imgui.combo(f"##cut_method_{name}", obj.cut_method, cut_methods)
-                        imgui.pop_item_width()
                         # 3-step stream building: Cut / Select / Build
                         stream3_button_width = (col_button_width - 8) // 3  # 3 buttons with margins
                         if colored_button(f"Cut##{name}", 4, stream3_button_width):
                             if obj.contours is not None and len(obj.contours) > 0 and obj.bounding_planes is not None and len(obj.bounding_planes) > 0:
                                 try:
-                                    obj.cut_streams(cut_method=cut_methods[obj.cut_method])
+                                    obj.cut_streams()
                                 except Exception as e:
                                     import traceback
                                     print(f"[{name}] Cut Streams error: {e}")
