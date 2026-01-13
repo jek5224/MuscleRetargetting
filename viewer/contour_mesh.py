@@ -5362,6 +5362,7 @@ class ContourMeshMixin:
         # ========== Step 2: Project source contours to 2D in their own planes ==========
         source_2d_shapes = []
         initial_translations = []
+        initial_rotations = []
 
         for i, (src_contour, src_bp) in enumerate(zip(source_contours, source_bps)):
             src_contour = np.array(src_contour)
@@ -5381,6 +5382,21 @@ class ContourMeshMixin:
             src_mean_on_target_x = np.dot(src_mean - target_mean, target_x)
             src_mean_on_target_y = np.dot(src_mean - target_mean, target_y)
             initial_translations.append([src_mean_on_target_x, src_mean_on_target_y])
+
+            # Initial rotation: align source basis_x with target basis_x on target plane
+            # Project source basis_x onto target plane
+            src_x_on_target = src_x - np.dot(src_x, target_bp['basis_z']) * target_bp['basis_z']
+            src_x_norm = np.linalg.norm(src_x_on_target)
+            if src_x_norm > 1e-10:
+                src_x_on_target = src_x_on_target / src_x_norm
+                # Express in target's 2D coordinates
+                src_x_2d = np.array([np.dot(src_x_on_target, target_x), np.dot(src_x_on_target, target_y)])
+                # Angle from target's x-axis (1,0) to src_x_2d
+                init_theta = np.arctan2(src_x_2d[1], src_x_2d[0])
+            else:
+                init_theta = 0.0
+            initial_rotations.append(init_theta)
+            print(f"  [BP Transform] source {i} initial rotation: {np.degrees(init_theta):.1f}°")
 
         # ========== Step 3: Define optimization objective ==========
         def transform_shape(shape_2d, scale, tx, ty, theta):
@@ -5462,8 +5478,8 @@ class ContourMeshMixin:
                 # Overlap = sum of individual areas - union area
                 overlap_cost = total_individual_area - union_area
 
-            # Regularization 2: Penalize large rotations
-            rotation_cost = sum(abs(t) for t in thetas)
+            # Regularization 2: Penalize deviation from initial rotation
+            rotation_cost = sum(abs(t - initial_rotations[i]) for i, t in enumerate(thetas))
 
             # Weights for regularization (relative to target_area for scale invariance)
             overlap_weight = 0.5  # Penalize overlap
@@ -5471,41 +5487,14 @@ class ContourMeshMixin:
 
             return coverage_cost + overlap_weight * overlap_cost + rotation_weight * rotation_cost
 
-        # ========== Step 4: Find best initial configuration ==========
-        # Try multiple initial rotations to avoid local minima
-        candidate_rotations = [0, np.pi/2, np.pi, -np.pi/2]
+        # ========== Step 4: Build initial configuration ==========
+        # Use computed translations and rotations that align source basis with target basis
+        x0 = [1.0]  # Initial scale
+        for i, (tx, ty) in enumerate(initial_translations):
+            x0.extend([tx, ty, initial_rotations[i]])
 
-        best_init_cost = np.inf
-        best_init_params = None
-
-        # For small number of pieces, try all combinations
-        if n_pieces <= 3:
-            import itertools
-            for rot_combo in itertools.product(candidate_rotations, repeat=n_pieces):
-                x0 = [1.0]  # Initial scale
-                for i, (tx, ty) in enumerate(initial_translations):
-                    x0.extend([tx, ty, rot_combo[i]])
-                cost = objective(x0)
-                if cost < best_init_cost:
-                    best_init_cost = cost
-                    best_init_params = x0.copy()
-        else:
-            # For more pieces, just try each rotation individually
-            for rot in candidate_rotations:
-                x0 = [1.0]
-                for tx, ty in initial_translations:
-                    x0.extend([tx, ty, rot])
-                cost = objective(x0)
-                if cost < best_init_cost:
-                    best_init_cost = cost
-                    best_init_params = x0.copy()
-
-        if best_init_params is None:
-            best_init_params = [1.0]
-            for tx, ty in initial_translations:
-                best_init_params.extend([tx, ty, 0.0])
-
-        print(f"  [BP Transform] best initial cost={best_init_cost:.4f}")
+        init_cost = objective(x0)
+        print(f"  [BP Transform] initial cost={init_cost:.4f}")
 
         # ========== Step 5: Optimize from best initial configuration ==========
         result = minimize(
