@@ -5690,3 +5690,131 @@ class ContourMeshMixin:
         # Post-process: fiber architecture, waypoints, etc.
         self._find_contour_stream_post_process(skeleton_meshes)
 
+    def save_contours(self, filepath):
+        """
+        Save contours and bounding planes to a file.
+
+        Args:
+            filepath: Path to save the contour data (.npz format)
+        """
+        import json
+
+        if self.contours is None or len(self.contours) == 0:
+            print("No contours to save")
+            return
+
+        if self.bounding_planes is None or len(self.bounding_planes) == 0:
+            print("No bounding planes to save")
+            return
+
+        # Convert contours to saveable format
+        contours_data = []
+        for level in self.contours:
+            level_data = []
+            for contour in level:
+                if isinstance(contour, np.ndarray):
+                    level_data.append(contour.tolist())
+                else:
+                    level_data.append(contour)
+            contours_data.append(level_data)
+
+        # Convert bounding planes to saveable format
+        bp_data = []
+        for level in self.bounding_planes:
+            level_bp = []
+            for bp in level:
+                bp_dict = {}
+                for key, value in bp.items():
+                    if isinstance(value, np.ndarray):
+                        bp_dict[key] = value.tolist()
+                    elif isinstance(value, (list, tuple)) and len(value) > 0 and isinstance(value[0], np.ndarray):
+                        bp_dict[key] = [v.tolist() if isinstance(v, np.ndarray) else v for v in value]
+                    else:
+                        bp_dict[key] = value
+                level_bp.append(bp_dict)
+            bp_data.append(level_bp)
+
+        # Save additional state
+        save_data = {
+            'contours': contours_data,
+            'bounding_planes': bp_data,
+            'draw_contour_stream': self.draw_contour_stream if hasattr(self, 'draw_contour_stream') else None,
+            '_contours_normalized': getattr(self, '_contours_normalized', False),
+        }
+
+        # Save stream endpoints if available
+        if hasattr(self, '_stream_endpoints') and self._stream_endpoints is not None:
+            save_data['_stream_endpoints'] = self._stream_endpoints
+
+        with open(filepath, 'w') as f:
+            json.dump(save_data, f)
+
+        print(f"Contours saved to {filepath}")
+        print(f"  {len(self.contours)} contour levels, {len(self.bounding_planes)} bounding plane levels")
+
+    def load_contours(self, filepath):
+        """
+        Load contours and bounding planes from a file.
+
+        Args:
+            filepath: Path to load the contour data from (.npz format)
+        """
+        import json
+
+        with open(filepath, 'r') as f:
+            save_data = json.load(f)
+
+        # Convert contours back to numpy arrays
+        self.contours = []
+        for level in save_data['contours']:
+            level_contours = []
+            for contour in level:
+                level_contours.append(np.array(contour))
+            self.contours.append(level_contours)
+
+        # Convert bounding planes back to numpy arrays
+        self.bounding_planes = []
+        numpy_keys = ['mean', 'basis_x', 'basis_y', 'basis_z', 'bounding_plane', 'projected_2d',
+                      'contour_vertices', 'newell_normal']
+        for level in save_data['bounding_planes']:
+            level_bp = []
+            for bp in level:
+                bp_dict = {}
+                for key, value in bp.items():
+                    if key in numpy_keys and value is not None:
+                        bp_dict[key] = np.array(value)
+                    elif key == 'contour_match' and value is not None:
+                        # contour_match is a list of dicts with numpy arrays
+                        bp_dict[key] = []
+                        for match in value:
+                            match_dict = {}
+                            for mk, mv in match.items():
+                                if isinstance(mv, list) and len(mv) > 0:
+                                    match_dict[mk] = np.array(mv)
+                                else:
+                                    match_dict[mk] = mv
+                            bp_dict[key].append(match_dict)
+                    else:
+                        bp_dict[key] = value
+                level_bp.append(bp_dict)
+            self.bounding_planes.append(level_bp)
+
+        # Restore additional state
+        if save_data.get('draw_contour_stream') is not None:
+            self.draw_contour_stream = save_data['draw_contour_stream']
+        else:
+            self.draw_contour_stream = [True] * len(self.contours)
+
+        if '_contours_normalized' in save_data:
+            self._contours_normalized = save_data['_contours_normalized']
+
+        if '_stream_endpoints' in save_data:
+            self._stream_endpoints = save_data['_stream_endpoints']
+
+        # Enable drawing
+        self.is_draw_contours = True
+        self.is_draw_bounding_box = True
+
+        print(f"Contours loaded from {filepath}")
+        print(f"  {len(self.contours)} contour levels, {len(self.bounding_planes)} bounding plane levels")
+
