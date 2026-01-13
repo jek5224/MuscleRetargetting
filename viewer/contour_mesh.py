@@ -5383,12 +5383,16 @@ class ContourMeshMixin:
             initial_translations.append([src_mean_on_target_x, src_mean_on_target_y])
 
         # ========== Step 3: Define optimization objective ==========
-        def transform_shape(shape_2d, tx, ty, theta):
-            """Apply 2D rigid transformation: rotate then translate."""
+        def transform_shape(shape_2d, scale, tx, ty, theta):
+            """Apply 2D similarity transformation: scale, rotate, then translate."""
+            # Scale (uniform)
+            scaled = shape_2d * scale
+            # Rotate
             cos_t = np.cos(theta)
             sin_t = np.sin(theta)
             rotation = np.array([[cos_t, -sin_t], [sin_t, cos_t]])
-            rotated = shape_2d @ rotation.T
+            rotated = scaled @ rotation.T
+            # Translate
             return rotated + np.array([tx, ty])
 
         # Pre-compute target polygon
@@ -5404,15 +5408,19 @@ class ContourMeshMixin:
 
         def objective(params):
             """Maximize overlap between sources and target (symmetric difference)."""
-            # params: [tx0, ty0, theta0, tx1, ty1, theta1, ...]
+            # params: [scale, tx0, ty0, theta0, tx1, ty1, theta1, ...]
+            scale = params[0]
+            if scale <= 0:
+                return 1e10
+
             transformed_polygons = []
 
             for i in range(n_pieces):
-                tx = params[i * 3]
-                ty = params[i * 3 + 1]
-                theta = params[i * 3 + 2]
+                tx = params[1 + i * 3]
+                ty = params[1 + i * 3 + 1]
+                theta = params[1 + i * 3 + 2]
 
-                transformed = transform_shape(source_2d_shapes[i], tx, ty, theta)
+                transformed = transform_shape(source_2d_shapes[i], scale, tx, ty, theta)
 
                 # Create polygon (need at least 3 points)
                 if len(transformed) >= 3:
@@ -5447,8 +5455,8 @@ class ContourMeshMixin:
             return union_area + target_area - 2 * intersection_area
 
         # ========== Step 4: Initial guess and optimize ==========
-        # Initial: translations from projected means, rotation = 0
-        x0 = []
+        # Initial: scale=1.0, translations from projected means, rotation = 0
+        x0 = [1.0]  # Initial scale
         for tx, ty in initial_translations:
             x0.extend([tx, ty, 0.0])
 
@@ -5461,18 +5469,25 @@ class ContourMeshMixin:
         )
 
         optimal_params = result.x
+        optimal_scale = optimal_params[0]
         print(f"  [BP Transform] optimization: success={result.success}, final_cost={result.fun:.4f}")
-        print(f"  [BP Transform] initial_translations={initial_translations}")
-        print(f"  [BP Transform] optimal_params={optimal_params}")
+        print(f"  [BP Transform] scale={optimal_scale:.4f}")
 
         # ========== Step 5: Get final transformed source shapes ==========
         final_transformed = []
         for i in range(n_pieces):
-            tx = optimal_params[i * 3]
-            ty = optimal_params[i * 3 + 1]
-            theta = optimal_params[i * 3 + 2]
-            transformed = transform_shape(source_2d_shapes[i], tx, ty, theta)
+            tx = optimal_params[1 + i * 3]
+            ty = optimal_params[1 + i * 3 + 1]
+            theta = optimal_params[1 + i * 3 + 2]
+            transformed = transform_shape(source_2d_shapes[i], optimal_scale, tx, ty, theta)
             final_transformed.append(transformed)
+            print(f"  [BP Transform] piece {i}: tx={tx:.4f}, ty={ty:.4f}, theta={np.degrees(theta):.1f}°")
+
+        # ========== Step 5.5: Save visualization for debugging ==========
+        self._save_bp_transform_visualization(
+            target_2d, target_poly, source_2d_shapes, final_transformed,
+            stream_indices, optimal_scale
+        )
 
         # ========== Step 6: Assign target vertices by distance ==========
         new_contours = [[] for _ in range(n_pieces)]
@@ -5500,6 +5515,87 @@ class ContourMeshMixin:
 
         print(f"  [BP Transform] result: {[len(c) for c in new_contours]} vertices per piece")
         return new_contours
+
+    def _save_bp_transform_visualization(self, target_2d, target_poly, source_2d_shapes,
+                                         final_transformed, stream_indices, scale):
+        """
+        Save visualization of BP transform optimization result.
+        Shows target contour, original sources, and transformed sources.
+        """
+        import matplotlib
+        matplotlib.use('Agg')  # Non-interactive backend
+        import matplotlib.pyplot as plt
+        from matplotlib.patches import Polygon as MplPolygon
+        from matplotlib.collections import PatchCollection
+        import os
+
+        fig, axes = plt.subplots(1, 2, figsize=(14, 7))
+
+        # Colors for different pieces
+        colors = plt.cm.tab10(np.linspace(0, 1, len(stream_indices)))
+
+        # ========== Left plot: Original sources (before transform) ==========
+        ax1 = axes[0]
+        ax1.set_title(f'Original Source Contours (scale={scale:.3f})')
+
+        # Plot target contour
+        target_arr = np.array(target_2d)
+        ax1.plot(target_arr[:, 0], target_arr[:, 1], 'k-', linewidth=2, label='Target')
+        ax1.fill(target_arr[:, 0], target_arr[:, 1], alpha=0.1, color='gray')
+
+        # Plot original source contours (centered at origin)
+        for i, src_2d in enumerate(source_2d_shapes):
+            if len(src_2d) >= 3:
+                src_arr = np.array(src_2d)
+                ax1.plot(src_arr[:, 0], src_arr[:, 1], '--', color=colors[i],
+                        linewidth=1.5, label=f'Source {stream_indices[i]} (orig)')
+
+        ax1.set_xlabel('X (target basis_x)')
+        ax1.set_ylabel('Y (target basis_y)')
+        ax1.legend(loc='upper right', fontsize=8)
+        ax1.set_aspect('equal')
+        ax1.grid(True, alpha=0.3)
+
+        # ========== Right plot: Transformed sources ==========
+        ax2 = axes[1]
+        ax2.set_title('Transformed Sources vs Target')
+
+        # Plot target contour
+        ax2.plot(target_arr[:, 0], target_arr[:, 1], 'k-', linewidth=2, label='Target')
+        ax2.fill(target_arr[:, 0], target_arr[:, 1], alpha=0.1, color='gray')
+
+        # Plot transformed source contours
+        for i, transformed in enumerate(final_transformed):
+            if len(transformed) >= 3:
+                trans_arr = np.array(transformed)
+                # Close the polygon for plotting
+                trans_closed = np.vstack([trans_arr, trans_arr[0]])
+                ax2.plot(trans_closed[:, 0], trans_closed[:, 1], '-', color=colors[i],
+                        linewidth=2, label=f'Source {stream_indices[i]} (transformed)')
+                ax2.fill(trans_arr[:, 0], trans_arr[:, 1], alpha=0.3, color=colors[i])
+
+        ax2.set_xlabel('X (target basis_x)')
+        ax2.set_ylabel('Y (target basis_y)')
+        ax2.legend(loc='upper right', fontsize=8)
+        ax2.set_aspect('equal')
+        ax2.grid(True, alpha=0.3)
+
+        # Save figure
+        os.makedirs('temp', exist_ok=True)
+
+        # Use a counter to save multiple visualizations
+        if not hasattr(self, '_bp_viz_counter'):
+            self._bp_viz_counter = 0
+        self._bp_viz_counter += 1
+
+        filepath = f'temp/bp_transform_{self.name}_{self._bp_viz_counter:03d}.png'
+        plt.tight_layout()
+        plt.savefig(filepath, dpi=100)
+        plt.close(fig)
+
+        # Only print for first few
+        if self._bp_viz_counter <= 3:
+            print(f"  [BP Transform] Saved visualization: {filepath}")
 
     def _cut_contour_for_streams(self, contour, bp, projected_refs, stream_indices):
         """
