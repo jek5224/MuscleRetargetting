@@ -4479,7 +4479,7 @@ class ContourMeshMixin:
 
         print(f"Contours updated: now {len(self.contours)} levels")
 
-    def cut_streams(self):
+    def cut_streams(self, cut_method='mesh'):
         """
         Step 1: Pre-cut all contours to max stream count.
 
@@ -4490,6 +4490,10 @@ class ContourMeshMixin:
 
         After this, self.stream_contours[stream_i][level_i] and
         self.stream_bounding_planes[stream_i][level_i] are available.
+
+        Args:
+            cut_method: 'mesh' (default) for topology-aware cutting at contour corners,
+                       'area' for position-based equal-area cutting
         """
         if self.contours is None or len(self.contours) < 2:
             print("Need at least 2 contour levels")
@@ -4508,6 +4512,7 @@ class ContourMeshMixin:
         print(f"Levels: {num_levels}")
         print(f"Origin count: {origin_count}, Insertion count: {insertion_count}")
         print(f"Max stream count: {max_stream_count}")
+        print(f"Cut method: {cut_method}")
 
         # Get contour counts per level
         contour_counts = [len(self.contours[i]) for i in range(num_levels)]
@@ -4641,10 +4646,15 @@ class ContourMeshMixin:
                         target_z = target_bp['basis_z']
                         projected_refs = [m - np.dot(m - target_mean, target_z) * target_z for m in ref_means]
 
-                        # Use area_based cutting method
-                        cut_contours = self._cut_contour_for_streams(
-                            target_contour, target_bp, projected_refs, streams_for_contour
-                        )
+                        # Cut contour using selected method
+                        if cut_method == 'mesh':
+                            cut_contours = self._cut_contour_mesh_aware(
+                                target_contour, target_bp, projected_refs, streams_for_contour
+                            )
+                        else:
+                            cut_contours = self._cut_contour_for_streams(
+                                target_contour, target_bp, projected_refs, streams_for_contour
+                            )
 
                         # Assign cut pieces to streams
                         for idx, stream_i in enumerate(streams_for_contour):
@@ -5117,6 +5127,190 @@ class ContourMeshMixin:
         self._find_contour_stream_post_process(skeleton_meshes)
 
         print(f"Build fibers complete: {max_stream_count} streams x {num_levels} levels")
+
+    def _cut_contour_mesh_aware(self, contour, bp, projected_refs, stream_indices):
+        """
+        Cut a contour into pieces using mesh topology-aware method.
+
+        Finds natural cut points by detecting corners (high curvature vertices)
+        in the contour, which correspond to mesh topology features.
+
+        Args:
+            contour: The contour vertices to cut
+            bp: Bounding plane info for this contour
+            projected_refs: Reference mean positions projected onto this plane
+            stream_indices: Which stream indices these pieces are for
+
+        Returns:
+            List of cut contour pieces (one per stream)
+        """
+        n_pieces = len(stream_indices)
+        if n_pieces == 1:
+            return [contour]
+
+        contour = np.array(contour)
+        n_verts = len(contour)
+
+        if n_verts < 3:
+            # Not enough vertices for curvature analysis
+            return self._cut_contour_for_streams(contour, bp, projected_refs, stream_indices)
+
+        target_mean = bp['mean']
+        target_z = bp['basis_z']
+        v0, v1, v2, v3 = bp['bounding_plane']
+
+        # ========== Step 1: Compute curvature at each vertex ==========
+        # Curvature = angle between incoming and outgoing edges
+        curvatures = np.zeros(n_verts)
+        edge_lengths = np.zeros(n_verts)
+
+        for i in range(n_verts):
+            prev_idx = (i - 1) % n_verts
+            next_idx = (i + 1) % n_verts
+
+            edge_prev = contour[i] - contour[prev_idx]
+            edge_next = contour[next_idx] - contour[i]
+
+            len_prev = np.linalg.norm(edge_prev)
+            len_next = np.linalg.norm(edge_next)
+            edge_lengths[i] = len_prev + len_next
+
+            if len_prev > 1e-10 and len_next > 1e-10:
+                edge_prev = edge_prev / len_prev
+                edge_next = edge_next / len_next
+
+                # Angle between edges (0 = straight, pi = sharp corner)
+                dot = np.clip(np.dot(edge_prev, edge_next), -1, 1)
+                angle = np.arccos(dot)
+                curvatures[i] = np.pi - angle  # Higher = sharper corner
+
+        # ========== Step 2: Find corner candidates ==========
+        # Corners are local maxima of curvature with significant value
+        curvature_threshold = np.percentile(curvatures, 70)  # Top 30% curvatures
+
+        corner_candidates = []
+        for i in range(n_verts):
+            if curvatures[i] < curvature_threshold:
+                continue
+
+            # Check if local maximum (higher than neighbors)
+            prev_idx = (i - 1) % n_verts
+            next_idx = (i + 1) % n_verts
+            if curvatures[i] >= curvatures[prev_idx] and curvatures[i] >= curvatures[next_idx]:
+                corner_candidates.append((i, curvatures[i]))
+
+        # Sort by curvature (highest first)
+        corner_candidates.sort(key=lambda x: -x[1])
+
+        # ========== Step 3: Determine cut axis and target positions ==========
+        horizontal_vector = v1 - v0
+        vertical_vector = v3 - v0
+        horizontal_vector = horizontal_vector / (np.linalg.norm(horizontal_vector) + 1e-10)
+        vertical_vector = vertical_vector / (np.linalg.norm(vertical_vector) + 1e-10)
+
+        # Structure vector from reference points
+        structure_vector = np.array([0.0, 0.0, 0.0])
+        for i in range(len(projected_refs)):
+            for j in range(i + 1, len(projected_refs)):
+                cand_vector = projected_refs[i] - projected_refs[j]
+                if np.dot(cand_vector, np.array([1, 0, 0])) < 0:
+                    cand_vector *= -1
+                structure_vector += cand_vector
+        structure_vector = structure_vector / (np.linalg.norm(structure_vector) + 1e-10)
+
+        h_proj = np.abs(np.dot(structure_vector, horizontal_vector))
+        v_proj = np.abs(np.dot(structure_vector, vertical_vector))
+        cut_axis = horizontal_vector if h_proj > v_proj else vertical_vector
+
+        # Project contour vertices onto cut axis
+        contour_axis_values = np.array([np.dot(p - target_mean, cut_axis) for p in contour])
+        min_val, max_val = contour_axis_values.min(), contour_axis_values.max()
+        axis_range = max_val - min_val
+
+        if axis_range < 1e-10:
+            # Degenerate case - fall back to area-based
+            return self._cut_contour_for_streams(contour, bp, projected_refs, stream_indices)
+
+        normalized_axis = (contour_axis_values - min_val) / axis_range
+
+        # Target cut positions (equal spacing)
+        target_cuts = [(i + 1) / n_pieces for i in range(n_pieces - 1)]
+
+        # ========== Step 4: Select best corners near target positions ==========
+        n_cuts_needed = n_pieces - 1
+        selected_cut_indices = []
+
+        # For each target cut position, find best corner nearby
+        search_radius = 0.15  # Search within 15% of contour range
+
+        for target_pos in target_cuts:
+            best_corner = None
+            best_score = -np.inf
+
+            for corner_idx, curv in corner_candidates:
+                if corner_idx in selected_cut_indices:
+                    continue
+
+                corner_pos = normalized_axis[corner_idx]
+                distance = abs(corner_pos - target_pos)
+
+                if distance > search_radius:
+                    continue
+
+                # Score = curvature bonus - distance penalty
+                score = curv * 2.0 - distance * 5.0
+
+                if score > best_score:
+                    best_score = score
+                    best_corner = corner_idx
+
+            if best_corner is not None:
+                selected_cut_indices.append(best_corner)
+            else:
+                # No good corner found - use position-based cut point
+                # Find vertex closest to target position
+                distances = np.abs(normalized_axis - target_pos)
+                best_vertex = np.argmin(distances)
+                # Avoid duplicates
+                while best_vertex in selected_cut_indices:
+                    distances[best_vertex] = np.inf
+                    best_vertex = np.argmin(distances)
+                selected_cut_indices.append(best_vertex)
+
+        # ========== Step 5: Sort cut indices and create pieces ==========
+        # Sort cuts by their axis position
+        selected_cut_indices.sort(key=lambda idx: normalized_axis[idx])
+
+        # Determine which vertices go to which piece
+        # Order streams by their reference position along cut axis
+        ref_values = [np.dot(r - target_mean, cut_axis) for r in projected_refs]
+        stream_order = np.argsort(ref_values)
+
+        # Create pieces by splitting at cut points
+        new_contours = [[] for _ in range(n_pieces)]
+
+        for v_idx, v in enumerate(contour):
+            v_pos = normalized_axis[v_idx]
+
+            # Determine which piece this vertex belongs to
+            piece_idx = 0
+            for cut_idx in selected_cut_indices:
+                cut_pos = normalized_axis[cut_idx]
+                if v_pos > cut_pos:
+                    piece_idx += 1
+                else:
+                    break
+
+            # Map to actual stream using ordering
+            assigned_stream = stream_order[piece_idx]
+            new_contours[assigned_stream].append(v)
+
+        # Ensure each piece has at least some vertices
+        for i in range(n_pieces):
+            if len(new_contours[i]) == 0:
+                new_contours[i] = [target_mean]
+
+        return new_contours
 
     def _cut_contour_for_streams(self, contour, bp, projected_refs, stream_indices):
         """
