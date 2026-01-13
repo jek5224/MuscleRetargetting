@@ -22,44 +22,60 @@ COLOR_MAP = cm.get_cmap("turbo")
 
 def cotangent_weight_matrix(vertices, faces):
     """
-    Compute the cotangent weight matrix using opposite angles from adjacent triangles.
+    Compute the cotangent weight matrix using vectorized numpy operations.
+    Much faster than the loop-based version.
     """
     n = len(vertices)
-    L = scipy.sparse.lil_matrix((n, n))
-    edge_to_faces = {}
 
-    for face in faces:
-        for i in range(3):
-            v0, v1, v2 = face[i][0], face[(i + 1) % 3][0], face[(i + 2) % 3][0]
-            edge = tuple(sorted([v0, v1]))
-            if edge not in edge_to_faces:
-                edge_to_faces[edge] = []
-            edge_to_faces[edge].append((v2, face))
+    # Extract face vertex indices (handle Nx3x1 or Nx3 format)
+    if faces.ndim == 3:
+        face_indices = faces[:, :, 0].astype(int)
+    else:
+        face_indices = faces.astype(int)
 
-    for (v1, v2), adjacent_faces in edge_to_faces.items():
-        if len(adjacent_faces) < 2:
-            continue
+    # Get vertex positions for all faces (F x 3)
+    v0 = vertices[face_indices[:, 0]]
+    v1 = vertices[face_indices[:, 1]]
+    v2 = vertices[face_indices[:, 2]]
 
-        v_opposite_1, face1 = adjacent_faces[0]
-        v_opposite_2, face2 = adjacent_faces[1]
+    # Edge vectors
+    e0 = v2 - v1  # edge opposite to v0
+    e1 = v0 - v2  # edge opposite to v1
+    e2 = v1 - v0  # edge opposite to v2
 
-        def cotangent_angle(v_a, v_b, v_opposite):
-            edge1 = vertices[v_a] - vertices[v_opposite]
-            edge2 = vertices[v_b] - vertices[v_opposite]
-            dot_product = np.dot(edge1, edge2)
-            norm_product = np.linalg.norm(edge1) * np.linalg.norm(edge2)
-            cosine_angle = np.clip(dot_product / norm_product, -1.0, 1.0)
-            angle = np.arccos(cosine_angle)
-            return 1.0 / np.tan(angle) if angle > 1e-5 else 0
+    # Compute cotangent: cot = cos/sin = dot / |cross|
+    def compute_cot(edge_a, edge_b):
+        dot = np.sum(edge_a * edge_b, axis=1)
+        cross_norm = np.linalg.norm(np.cross(edge_a, edge_b), axis=1)
+        return dot / (cross_norm + 1e-10)
 
-        cot_alpha = cotangent_angle(v1, v2, v_opposite_1)
-        cot_beta = cotangent_angle(v1, v2, v_opposite_2)
-        r_ij = 0.5 * (cot_alpha + cot_beta)
+    # Cotangent at each vertex for opposite edge
+    cot0 = compute_cot(-e2, e1)  # angle at v0, for edge (v1, v2)
+    cot1 = compute_cot(-e0, e2)  # angle at v1, for edge (v2, v0)
+    cot2 = compute_cot(-e1, e0)  # angle at v2, for edge (v0, v1)
 
-        L[v1, v2] += r_ij
-        L[v2, v1] += r_ij
+    # Build sparse matrix indices and values
+    # Each edge gets 0.5 * cot contribution from each adjacent face
+    i_indices = np.concatenate([
+        face_indices[:, 1], face_indices[:, 2],  # edge (v1, v2)
+        face_indices[:, 2], face_indices[:, 0],  # edge (v2, v0)
+        face_indices[:, 0], face_indices[:, 1],  # edge (v0, v1)
+    ])
+    j_indices = np.concatenate([
+        face_indices[:, 2], face_indices[:, 1],  # edge (v1, v2)
+        face_indices[:, 0], face_indices[:, 2],  # edge (v2, v0)
+        face_indices[:, 1], face_indices[:, 0],  # edge (v0, v1)
+    ])
+    values = np.concatenate([
+        0.5 * cot0, 0.5 * cot0,
+        0.5 * cot1, 0.5 * cot1,
+        0.5 * cot2, 0.5 * cot2,
+    ])
 
-    return L.tocsr()
+    # Create sparse matrix (duplicate entries are automatically summed)
+    W = scipy.sparse.csr_matrix((values, (i_indices, j_indices)), shape=(n, n))
+
+    return W
 
 
 def solve_scalar_field(vertices, faces, origin_indices, insertion_indices, kmin=1.0, kmax=10.0):
@@ -878,9 +894,16 @@ class SoftBodySimulation:
             if self.fixed_targets is not None and len(self.fixed_indices) > 0:
                 self.positions[self.fixed_indices] = self.fixed_targets
 
-            # Collision resolution within ARAP loop
+            # Collision resolution within ARAP loop (multiple passes)
             if collision_meshes is not None and len(collision_meshes) > 0:
-                self._resolve_collisions_arap(collision_meshes, collision_margin)
+                total_pushed = 0
+                for pass_i in range(3):  # Multiple passes for deep penetrations
+                    pushed = self._resolve_collisions_arap(collision_meshes, collision_margin)
+                    total_pushed += pushed
+                    if pushed == 0:
+                        break
+                if iteration == 0 and total_pushed > 0:
+                    print(f"    Collision: pushed {total_pushed} verts (margin={collision_margin:.4f})")
 
             # Check convergence
             if len(self.free_indices) > 0:
@@ -925,62 +948,116 @@ class SoftBodySimulation:
                     self.positions[i] = 0.3 * self.positions[i] + 0.7 * neighbor_avg
                     print(f"  Fixed stuck vertex {i} (neighbors={n_neighbors}) by moving toward neighbors")
 
+        # Final collision pass (not undone by ARAP)
+        if collision_meshes is not None and len(collision_meshes) > 0:
+            final_pushed = 0
+            for _ in range(5):
+                pushed = self._resolve_collisions_arap(collision_meshes, collision_margin)
+                final_pushed += pushed
+                if pushed == 0:
+                    break
+            if final_pushed > 0:
+                print(f"    Final collision: pushed {final_pushed} verts")
+
         return max_iterations, max_disp
 
     def _resolve_collisions_arap(self, collision_meshes, margin=0.002):
         """
         Resolve collisions by pushing free vertices out of collision meshes.
         Called within ARAP iteration loop.
+        Uses face normal to determine inside/outside (works for non-watertight meshes).
+        Also checks edge midpoints and face centroids for more robust collision.
         """
+        total_pushed = 0
         for mesh in collision_meshes:
             if mesh is None:
                 continue
 
             try:
-                # Check which free vertices are inside the mesh
+                # === 1. Check free vertices ===
                 free_positions = self.positions[self.free_indices]
+                n_free = len(free_positions)
 
-                # Use trimesh to find closest points and check inside/outside
-                closest_points, distances, face_ids = mesh.nearest.on_surface(free_positions)
+                # === 2. Compute edge midpoints (sample every 4th edge for speed) ===
+                edge_midpoints = []
+                edge_vertex_pairs = []  # (i, j) for each midpoint
+                step = max(1, len(self.edge_i) // 500)  # Limit to ~500 edges
+                for idx in range(0, len(self.edge_i), step):
+                    i, j = self.edge_i[idx], self.edge_j[idx]
+                    mid = (self.positions[i] + self.positions[j]) * 0.5
+                    edge_midpoints.append(mid)
+                    edge_vertex_pairs.append((i, j))
+                edge_midpoints = np.array(edge_midpoints) if edge_midpoints else np.zeros((0, 3))
+                n_edges = len(edge_midpoints)
 
-                # Check if points are inside (negative distance or very close)
-                inside_mask = mesh.contains(free_positions)
+                # === 3. Compute face centroids (if tet_faces available, sample) ===
+                face_centroids = []
+                face_vertex_lists = []
+                if hasattr(self, 'tet_faces') and self.tet_faces is not None and len(self.tet_faces) > 0:
+                    step = max(1, len(self.tet_faces) // 300)  # Limit to ~300 faces
+                    for idx in range(0, len(self.tet_faces), step):
+                        face = self.tet_faces[idx]
+                        centroid = np.mean(self.positions[face], axis=0)
+                        face_centroids.append(centroid)
+                        face_vertex_lists.append(face)
+                face_centroids = np.array(face_centroids) if face_centroids else np.zeros((0, 3))
+                n_faces = len(face_centroids)
 
-                # Also consider points very close to surface
+                # === 4. Batch all points for single query ===
+                all_points = np.vstack([free_positions, edge_midpoints, face_centroids]) if (n_edges > 0 or n_faces > 0) else free_positions
+
+                closest_points, distances, face_ids = mesh.nearest.on_surface(all_points)
+                face_normals = mesh.face_normals[face_ids]
+                to_point = all_points - closest_points
+                dot_products = np.sum(to_point * face_normals, axis=1)
+
+                inside_mask = dot_products < 0
                 too_close = distances < margin
-
                 needs_push = inside_mask | too_close
 
-                if np.any(needs_push):
-                    # Compute push direction (away from closest surface point)
-                    push_dirs = free_positions - closest_points
-                    push_norms = np.linalg.norm(push_dirs, axis=1, keepdims=True)
-
-                    # Normalize, handle zero-length
-                    valid_norm = push_norms.flatten() > 1e-10
-                    push_dirs[valid_norm] = push_dirs[valid_norm] / push_norms[valid_norm]
-
-                    # For points with zero push direction, use face normal
-                    if np.any(~valid_norm & needs_push):
-                        face_normals = mesh.face_normals[face_ids]
-                        push_dirs[~valid_norm] = face_normals[~valid_norm]
-
-                    # Push amount: margin + distance if inside, just margin if too close
-                    push_amounts = np.zeros(len(free_positions))
-                    push_amounts[inside_mask] = distances[inside_mask] + margin
-                    push_amounts[too_close & ~inside_mask] = margin - distances[too_close & ~inside_mask]
-
-                    # Apply push
+                # === 5. Process vertex collisions ===
+                vertex_push = needs_push[:n_free]
+                if np.any(vertex_push):
+                    push_indices = np.where(vertex_push)[0]
                     new_positions = free_positions.copy()
-                    new_positions[needs_push] += (
-                        push_dirs[needs_push] * push_amounts[needs_push, np.newaxis]
+                    new_positions[push_indices] = (
+                        closest_points[push_indices] +
+                        face_normals[push_indices] * margin
                     )
-
                     self.positions[self.free_indices] = new_positions
+                    total_pushed += len(push_indices)
+
+                # === 6. Process edge midpoint collisions -> push both vertices ===
+                if n_edges > 0:
+                    edge_push = needs_push[n_free:n_free + n_edges]
+                    edge_push_idx = np.where(edge_push)[0]
+                    for idx in edge_push_idx:
+                        i, j = edge_vertex_pairs[idx]
+                        push_dir = face_normals[n_free + idx]
+                        push_dist = margin - distances[n_free + idx] if not inside_mask[n_free + idx] else distances[n_free + idx] + margin
+                        # Push both vertices half the distance
+                        self.positions[i] += push_dir * (push_dist * 0.5)
+                        self.positions[j] += push_dir * (push_dist * 0.5)
+                        total_pushed += 2
+
+                # === 7. Process face centroid collisions -> push all face vertices ===
+                if n_faces > 0:
+                    face_push = needs_push[n_free + n_edges:]
+                    face_push_idx = np.where(face_push)[0]
+                    for idx in face_push_idx:
+                        face_verts = face_vertex_lists[idx]
+                        push_dir = face_normals[n_free + n_edges + idx]
+                        push_dist = margin - distances[n_free + n_edges + idx] if not inside_mask[n_free + n_edges + idx] else distances[n_free + n_edges + idx] + margin
+                        # Push all face vertices by 1/3 the distance
+                        for vi in face_verts:
+                            self.positions[vi] += push_dir * (push_dist * 0.35)
+                        total_pushed += len(face_verts)
 
             except Exception as e:
-                # Skip this mesh if collision detection fails
+                print(f"  Collision error: {e}")
                 continue
+
+        return total_pushed
 
     def solve_arap_muscle(self, max_iterations=10, tolerance=1e-6,
                           collision_meshes=None, collision_margin=0.002):
@@ -1365,6 +1442,8 @@ class MuscleMeshMixin:
         self.bounding_planes = []
 
         self.scalar_field = None
+        self._face_scalar_min = None  # Invalidate precomputed ranges
+        self._face_scalar_max = None
         self.vertex_colors = None
         self.contours = None
         self.contour_mesh_vertices = None
@@ -1391,8 +1470,8 @@ class MuscleMeshMixin:
         self.soft_body_damping = 0.3
         self.soft_body_volume_stiffness = 0.0
         self.soft_body_fixed_vertices = []
-        self.soft_body_collision = False
-        self.soft_body_collision_margin = 0.005
+        self.soft_body_collision = True
+        self.soft_body_collision_margin = 0.008  # 8mm margin
         self.use_arap = True
 
         # Cap-to-skeleton mapping
@@ -1419,7 +1498,8 @@ class MuscleMeshMixin:
 
         self.link_mode = 'mean'
         self.min_contour_distance = 0.005  # Minimum distance between contours in a stream (5mm default)
-        self.bounding_box_method = 'rotating_calipers'  # 'rotating_calipers' (minimum area) or 'pca' (original)
+        self.contour_spacing_scale = 0.8  # < 1.0 = more contours, > 1.0 = fewer contours
+        self.bounding_box_method = 'farthest_vertex'  # 'farthest_vertex' or 'pca'
 
         self.attach_skeletons = []
         self.attach_skeletons_sub = []
@@ -2874,6 +2954,71 @@ class MuscleMeshMixin:
 
     # ========== Scalar Field Methods ==========
 
+    def reset_process(self):
+        """Reset all processing-related variables to initial state."""
+        # Scalar field
+        self.scalar_field = None
+        self.vertex_colors = None
+        self.is_draw_scalar_field = False
+
+        # Clear precomputed face scalar ranges
+        if hasattr(self, '_face_scalar_ranges'):
+            self._face_scalar_ranges = None
+        if hasattr(self, '_face_scalar_min'):
+            self._face_scalar_min = None
+        if hasattr(self, '_face_scalar_max'):
+            self._face_scalar_max = None
+
+        # Contours and bounding planes
+        self.contours = None
+        self.bounding_planes = []
+        self.contours_discarded = None
+        self.bounding_planes_discarded = None
+        self.draw_contour_stream = None
+        self.is_draw_contours = False
+        self.is_draw_bounding_box = False
+
+        # Level selection backup
+        self._contours_backup = None
+        self._bounding_planes_backup = None
+        self.selected_stream_levels = None
+
+        # Smoothening state
+        if hasattr(self, '_smoothen_anchor_level'):
+            self._smoothen_anchor_level = None
+
+        # Contour mesh
+        self.contour_mesh_vertices = None
+        self.contour_mesh_faces = None
+        self.contour_mesh_normals = None
+        self.is_draw_contour_mesh = False
+
+        # Tetrahedron mesh
+        self.tet_vertices = None
+        self.tet_faces = None
+        self.tet_tetrahedra = None
+        self.tet_cap_face_indices = []
+        self.tet_anchor_vertices = []
+        self.tet_surface_face_count = 0
+        self.is_draw_tet_mesh = False
+        self.is_draw_tet_edges = False
+        self.tet_cap_attachments = []
+
+        # Soft body
+        self.soft_body = None
+
+        # Fiber architecture
+        self.fiber_architecture = [self._sobol_sampling_barycentric_default(16)]
+        self.is_draw_fiber_architecture = False
+
+        # Other
+        self.structure_vectors = []
+        self.specific_contour = None
+        self.normalized_contours = []
+        self.waypoints = []
+
+        print("Process reset complete")
+
     def compute_scalar_field(self):
         """Compute scalar field from origin/insertion edge groups."""
         origin_indices = []
@@ -2887,6 +3032,9 @@ class MuscleMeshMixin:
 
         u = solve_scalar_field(self.vertices, self.faces_3, origin_indices, insertion_indices)
         self.scalar_field = u
+        # Invalidate precomputed face scalar ranges (will be recomputed on next find_contour)
+        self._face_scalar_min = None
+        self._face_scalar_max = None
 
         u_min, u_max = np.min(u), np.max(u)
         normalized_u = (u - u_min) / (u_max - u_min) if u_max > u_min else np.zeros_like(u)
@@ -2942,143 +3090,123 @@ class MuscleMeshMixin:
         if bounding_plane_info_orig is not None:
             basis_x = bounding_plane_info_orig['basis_x']
             basis_y = bounding_plane_info_orig['basis_y']
+            basis_z = bounding_plane_info_orig['basis_z']
+            newell_normal = bounding_plane_info_orig['newell_normal']
         else:
-            # Project contour points onto the plane and do 2D PCA to find principal direction
-            # This ensures basis_x aligns with the long axis of the contour
+            # Note: orientation alignment with previous level is handled later in the pca/rotating_calipers branches
 
-            # Create initial orthonormal basis on the plane
-            arbitrary = np.array([1, 0, 0])
-            if abs(np.dot(arbitrary, basis_z)) > 0.9:
-                arbitrary = np.array([0, 1, 0])
-            temp_x = arbitrary - np.dot(arbitrary, basis_z) * basis_z
-            temp_x = temp_x / np.linalg.norm(temp_x)
-            temp_y = np.cross(basis_z, temp_x)
+            # Get bounding box method (default to 'rotating_calipers' for better fitting)
+            bbox_method = getattr(self, 'bounding_box_method', 'farthest_vertex')
 
-            # Project contour points to 2D on this plane
-            projected_2d = np.array([[np.dot(v - mean, temp_x), np.dot(v - mean, temp_y)] for v in contour_points])
+            if bbox_method == 'pca':
+                # Project contour points onto the plane and do 2D PCA to find principal direction
+                # This ensures basis_x aligns with the long axis of the contour
 
-            # 2D PCA to find principal direction within the plane
-            centered_2d = projected_2d - np.mean(projected_2d, axis=0)
-            _, _, eigenvectors_2d = np.linalg.svd(centered_2d)
-            principal_2d = eigenvectors_2d[0]  # First principal component in 2D
+                # Create initial orthonormal basis on the plane
+                arbitrary = np.array([1, 0, 0])
+                if abs(np.dot(arbitrary, basis_z)) > 0.9:
+                    arbitrary = np.array([0, 1, 0])
+                temp_x = arbitrary - np.dot(arbitrary, basis_z) * basis_z
+                temp_x = temp_x / np.linalg.norm(temp_x)
+                temp_y = np.cross(basis_z, temp_x)
 
-            # Convert back to 3D basis_x
-            basis_x = principal_2d[0] * temp_x + principal_2d[1] * temp_y
-            basis_x = basis_x / np.linalg.norm(basis_x)
-            basis_y = np.cross(basis_z, basis_x)
-            basis_y = basis_y / (np.linalg.norm(basis_y) + 1e-10)
+                # Project contour points to 2D on this plane
+                projected_2d = np.array([[np.dot(v - mean, temp_x), np.dot(v - mean, temp_y)] for v in contour_points])
 
-        # Note: orientation alignment with previous level is handled later in the pca/rotating_calipers branches
+                # 2D PCA to find principal direction within the plane
+                centered_2d = projected_2d - np.mean(projected_2d, axis=0)
+                _, _, eigenvectors_2d = np.linalg.svd(centered_2d)
+                principal_2d = eigenvectors_2d[0]  # First principal component in 2D
 
-        # Get bounding box method (default to 'rotating_calipers' for better fitting)
-        bbox_method = getattr(self, 'bounding_box_method', 'rotating_calipers')
-
-        if bbox_method == 'rotating_calipers':
-            # Use rotating calipers for minimum area bounding box
-            # For robustness, first find the farthest point pair in 2D (on the plane)
-            from scipy.spatial.distance import cdist
-
-            # First project all points onto the plane defined by basis_z
-            projected_on_plane = []
-            for v in contour_points:
-                rel = v - mean
-                # Project onto plane: keep only components perpendicular to basis_z
-                proj = rel - np.dot(rel, basis_z) * basis_z
-                projected_on_plane.append(proj + mean)
-            projected_on_plane = np.array(projected_on_plane)
-
-            # Find farthest pair of points in the projected 2D plane
-            if len(projected_on_plane) > 2:
-                dists = cdist(projected_on_plane, projected_on_plane)
-                i, j = np.unravel_index(np.argmax(dists), dists.shape)
-                farthest_dir = projected_on_plane[j] - projected_on_plane[i]
-                farthest_len = np.linalg.norm(farthest_dir)
-
-                if farthest_len > 1e-10:
-                    # Use farthest direction as basis_x (long axis)
-                    new_basis_x = farthest_dir / farthest_len
-                    new_basis_y = np.cross(basis_z, new_basis_x)
-                    new_basis_y = new_basis_y / (np.linalg.norm(new_basis_y) + 1e-10)
-                else:
-                    new_basis_x, new_basis_y = basis_x, basis_y
-            else:
-                new_basis_x, new_basis_y = basis_x, basis_y
-
-            # Only allow sign flips to align with previous orientation (not swaps)
-            proj_prev_x = prev_basis_x - np.dot(prev_basis_x, basis_z) * basis_z
-            proj_norm = np.linalg.norm(proj_prev_x)
-            if proj_norm > 1e-6:
-                proj_prev_x = proj_prev_x / proj_norm
-                if np.dot(new_basis_x, proj_prev_x) < 0:
-                    new_basis_x = -new_basis_x
-                # Recompute basis_y to maintain right-handed system
-                new_basis_y = np.cross(basis_z, new_basis_x)
-                new_basis_y = new_basis_y / (np.linalg.norm(new_basis_y) + 1e-10)
-
-            basis_x, basis_y = new_basis_x, new_basis_y
-
-            # Reproject with final basis
-            projected_2d = np.array([[np.dot(v - mean, basis_x), np.dot(v - mean, basis_y)] for v in contour_points])
-            area = compute_polygon_area(projected_2d)
-
-            min_x, max_x = np.min(projected_2d[:, 0]), np.max(projected_2d[:, 0])
-            min_y, max_y = np.min(projected_2d[:, 1]), np.max(projected_2d[:, 1])
-            x_len = max_x - min_x
-            y_len = max_y - min_y
-
-            ratio_threshold = 2.0
-            square_like = max(x_len, y_len) / min(x_len, y_len) < ratio_threshold if min(x_len, y_len) > 1e-10 else False
-
-        else:
-            # PCA-based method: ensure basis_x is ALWAYS the long direction
-            # First project and find extents
-            projected_2d = np.array([[np.dot(v - mean, basis_x), np.dot(v - mean, basis_y)] for v in contour_points])
-
-            min_x, max_x = np.min(projected_2d[:, 0]), np.max(projected_2d[:, 0])
-            min_y, max_y = np.min(projected_2d[:, 1]), np.max(projected_2d[:, 1])
-
-            x_len = max_x - min_x
-            y_len = max_y - min_y
-
-            # If y is longer than x, swap axes so basis_x is always the long direction
-            if y_len > x_len:
-                basis_x, basis_y = basis_y, -basis_x
-                # Recompute projection with swapped axes
-                projected_2d = np.array([[np.dot(v - mean, basis_x), np.dot(v - mean, basis_y)] for v in contour_points])
-                min_x, max_x = np.min(projected_2d[:, 0]), np.max(projected_2d[:, 0])
-                min_y, max_y = np.min(projected_2d[:, 1]), np.max(projected_2d[:, 1])
-                x_len, y_len = y_len, x_len
-
-            # Now only allow sign flips (not swaps) to align with previous orientation
-            # This preserves basis_x as the long direction
-            proj_prev_x = prev_basis_x - np.dot(prev_basis_x, basis_z) * basis_z
-            proj_norm = np.linalg.norm(proj_prev_x)
-            if proj_norm > 1e-6:
-                proj_prev_x = proj_prev_x / proj_norm
-                # Only flip signs, don't swap axes
-                if np.dot(basis_x, proj_prev_x) < 0:
-                    basis_x = -basis_x
-                # Recompute basis_y to maintain right-handed system
+                # Convert back to 3D basis_x
+                basis_x = principal_2d[0] * temp_x + principal_2d[1] * temp_y
+                basis_x = basis_x / np.linalg.norm(basis_x)
                 basis_y = np.cross(basis_z, basis_x)
                 basis_y = basis_y / (np.linalg.norm(basis_y) + 1e-10)
+                 
+            elif bbox_method == 'farthest_vertex':
+                # Step 1: Find farthest vertex pair in 3D to determine basis_x
+                from scipy.spatial.distance import cdist
 
-            area = compute_polygon_area(projected_2d)
+                if len(contour_points) > 2:
+                    dists = cdist(contour_points, contour_points)
+                    i, j = np.unravel_index(np.argmax(dists), dists.shape)
+                    farthest_dir = contour_points[j] - contour_points[i]
+                    farthest_len = np.linalg.norm(farthest_dir)
 
-            ratio_threshold = 2.0
-            square_like = max(x_len, y_len) / min(x_len, y_len) < ratio_threshold if min(x_len, y_len) > 1e-10 else False
-            if square_like:
-                new_basis_x = prev_basis_x - np.dot(prev_basis_x, newell_normal) * newell_normal
-                norm = np.linalg.norm(new_basis_x)
-                if norm > 1e-6:
-                    basis_x = new_basis_x / norm
-                    basis_y = np.cross(basis_z, basis_x)
-                    basis_y = basis_y / (np.linalg.norm(basis_y) + 1e-10)
+                    if farthest_len > 1e-10:
+                        new_basis_x = farthest_dir / farthest_len
+                    else:
+                        new_basis_x = prev_basis_x.copy()
+                else:
+                    new_basis_x = prev_basis_x.copy()
 
-                projected_2d = np.array([[np.dot(v - mean, basis_x), np.dot(v - mean, basis_y)] for v in contour_points])
-                area = compute_polygon_area(projected_2d)
+                # Step 2: Find basis_z that minimizes sum of squared distances to plane
+                # The plane must contain basis_x, so basis_z is perpendicular to basis_x
+                # Find optimal basis_z in the 2D subspace perpendicular to basis_x
 
-                min_x, max_x = np.min(projected_2d[:, 0]), np.max(projected_2d[:, 0])
-                min_y, max_y = np.min(projected_2d[:, 1]), np.max(projected_2d[:, 1])
+                # Create orthonormal basis perpendicular to new_basis_x
+                arbitrary = np.array([1.0, 0.0, 0.0])
+                if abs(np.dot(arbitrary, new_basis_x)) > 0.9:
+                    arbitrary = np.array([0.0, 1.0, 0.0])
+                v1 = arbitrary - np.dot(arbitrary, new_basis_x) * new_basis_x
+                v1 = v1 / (np.linalg.norm(v1) + 1e-10)
+                v2 = np.cross(new_basis_x, v1)
+                v2 = v2 / (np.linalg.norm(v2) + 1e-10)
+
+                # Compute covariance matrix of points relative to mean
+                centered = np.array(contour_points) - mean
+                C = np.dot(centered.T, centered) / len(contour_points)
+
+                # Project covariance onto 2D subspace {v1, v2}
+                C_2d = np.array([
+                    [np.dot(v1, np.dot(C, v1)), np.dot(v1, np.dot(C, v2))],
+                    [np.dot(v2, np.dot(C, v1)), np.dot(v2, np.dot(C, v2))]
+                ])
+
+                # Find eigenvector with smallest eigenvalue (minimum variance direction = plane normal)
+                eigenvalues, eigenvectors = np.linalg.eigh(C_2d)
+                min_idx = np.argmin(eigenvalues)
+                min_eigenvec_2d = eigenvectors[:, min_idx]
+
+                # Convert back to 3D
+                new_basis_z = min_eigenvec_2d[0] * v1 + min_eigenvec_2d[1] * v2
+                new_basis_z = new_basis_z / (np.linalg.norm(new_basis_z) + 1e-10)
+
+                # Align with previous basis_z direction
+                if np.dot(new_basis_z, prev_basis_z) < 0:
+                    new_basis_z = -new_basis_z
+
+                # Step 3: Compute basis_y = cross(basis_z, basis_x)
+                new_basis_y = np.cross(new_basis_z, new_basis_x)
+                new_basis_y = new_basis_y / (np.linalg.norm(new_basis_y) + 1e-10)
+
+                # Align basis_x with previous orientation (sign flip only)
+                proj_prev_x = prev_basis_x - np.dot(prev_basis_x, new_basis_z) * new_basis_z
+                proj_norm = np.linalg.norm(proj_prev_x)
+                if proj_norm > 1e-6:
+                    proj_prev_x = proj_prev_x / proj_norm
+                    if np.dot(new_basis_x, proj_prev_x) < 0:
+                        new_basis_x = -new_basis_x
+                        new_basis_y = np.cross(new_basis_z, new_basis_x)
+                        new_basis_y = new_basis_y / (np.linalg.norm(new_basis_y) + 1e-10)
+
+                basis_x, basis_y, basis_z = new_basis_x, new_basis_y, new_basis_z
+
+        # Reproject with final basis
+        projected_2d = np.array([[np.dot(v - mean, basis_x), np.dot(v - mean, basis_y)] for v in contour_points])
+        area = compute_polygon_area(projected_2d)
+
+        min_x, max_x = np.min(projected_2d[:, 0]), np.max(projected_2d[:, 0])
+        min_y, max_y = np.min(projected_2d[:, 1]), np.max(projected_2d[:, 1])
+        x_len = max_x - min_x
+        y_len = max_y - min_y
+
+        ratio_threshold = 2.0
+        square_like = max(x_len, y_len) / min(x_len, y_len) < ratio_threshold if min(x_len, y_len) > 1e-10 else False
+
+        # Use the axes as found (farthest_vertex or pca), no override for square-like
+        # Square-like handling is done during smoothening, not during initial finding
 
         # Final re-orthogonalization to ensure exactly 90-degree corners
         basis_x = basis_x / (np.linalg.norm(basis_x) + 1e-10)
@@ -3135,6 +3263,7 @@ class MuscleMeshMixin:
             'scalar_value': scalar_value,
             'square_like': square_like,
             'newell_normal': newell_normal,
+            'contour_vertices': new_contour,  # Store contour vertices for later recomputation
         }
 
     def _trim_independent_section(self, contours, bounding_planes, max_spacing_threshold):
