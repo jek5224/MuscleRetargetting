@@ -5342,10 +5342,12 @@ class ContourMeshMixin:
         from shapely.ops import unary_union
 
         n_pieces = len(stream_indices)
+        print(f"  [BP Transform] n_pieces={n_pieces}, stream_indices={stream_indices}")
         if n_pieces == 1:
             return [target_contour]
 
         target_contour = np.array(target_contour)
+        print(f"  [BP Transform] target_contour has {len(target_contour)} vertices")
 
         # ========== Step 1: Project target contour to 2D ==========
         target_mean = target_bp['mean']
@@ -5373,6 +5375,7 @@ class ContourMeshMixin:
                 for v in src_contour
             ])
             source_2d_shapes.append(src_2d)
+            print(f"  [BP Transform] source {i} has {len(src_2d)} vertices")
 
             # Initial translation: project source mean onto target plane
             src_mean_on_target_x = np.dot(src_mean - target_mean, target_x)
@@ -5444,6 +5447,9 @@ class ContourMeshMixin:
         )
 
         optimal_params = result.x
+        print(f"  [BP Transform] optimization: success={result.success}, final_cost={result.fun:.4f}")
+        print(f"  [BP Transform] initial_translations={initial_translations}")
+        print(f"  [BP Transform] optimal_params={optimal_params}")
 
         # ========== Step 5: Get final transformed source shapes ==========
         final_transformed = []
@@ -5478,6 +5484,7 @@ class ContourMeshMixin:
             if len(new_contours[i]) == 0:
                 new_contours[i] = [target_mean]
 
+        print(f"  [BP Transform] result: {[len(c) for c in new_contours]} vertices per piece")
         return new_contours
 
     def _cut_contour_for_streams(self, contour, bp, projected_refs, stream_indices):
