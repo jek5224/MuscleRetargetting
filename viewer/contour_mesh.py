@@ -5379,9 +5379,15 @@ class ContourMeshMixin:
             print(f"  [BP Transform] source {i} has {len(src_2d)} vertices")
 
             # Initial translation: project source mean onto target plane
-            src_mean_on_target_x = np.dot(src_mean - target_mean, target_x)
-            src_mean_on_target_y = np.dot(src_mean - target_mean, target_y)
+            # First project src_mean onto the target plane (along target_z)
+            src_to_target = src_mean - target_mean
+            dist_along_z = np.dot(src_to_target, target_bp['basis_z'])
+            src_mean_projected = src_mean - dist_along_z * target_bp['basis_z']
+            # Now get 2D coordinates on target plane
+            src_mean_on_target_x = np.dot(src_mean_projected - target_mean, target_x)
+            src_mean_on_target_y = np.dot(src_mean_projected - target_mean, target_y)
             initial_translations.append([src_mean_on_target_x, src_mean_on_target_y])
+            print(f"  [BP Transform] source {i} initial pos: ({src_mean_on_target_x:.4f}, {src_mean_on_target_y:.4f})")
 
             # Initial rotation: align source basis_x with target basis_x on target plane
             # Project source basis_x onto target plane
