@@ -4725,6 +4725,11 @@ class ContourMeshMixin:
                         bp_stream[i]['basis_x'] = -bp_stream[i]['basis_x']
                         bp_stream[i]['basis_y'] = -bp_stream[i]['basis_y']
 
+        # Update visualization: convert to [stream_i][level_i] format
+        self.contours = self.stream_contours
+        self.bounding_planes = self.stream_bounding_planes
+        self.draw_contour_stream = [[True] * len(self.stream_contours[0]) for _ in range(max_stream_count)]
+
         print("Cut streams complete")
 
     def select_levels(self, error_threshold=None):
@@ -4984,6 +4989,11 @@ class ContourMeshMixin:
         self.stream_bounding_planes = new_stream_bounding_planes
         self.stream_groups = new_stream_groups
 
+        # Update visualization
+        self.contours = self.stream_contours
+        self.bounding_planes = self.stream_bounding_planes
+        self.draw_contour_stream = [[True] * len(self.stream_contours[0]) for _ in range(max_stream_count)]
+
         print(f"Levels updated: {len(self.stream_contours[0])} per stream")
 
     def build_fibers(self, skeleton_meshes=None):
@@ -5010,15 +5020,8 @@ class ContourMeshMixin:
         # Set up draw flags
         self.draw_contour_stream = [[True] * num_levels for _ in range(max_stream_count)]
 
-        # Set visualization flags
-        self.is_draw = False
-        self.is_draw_fiber_architecture = True
-
-        # Auto-detect skeleton attachments if skeleton_meshes provided
-        if skeleton_meshes is not None and len(skeleton_meshes) > 0:
-            print(f"Calling auto_detect_attachments with {len(skeleton_meshes)} skeletons")
-            result = self.auto_detect_attachments(skeleton_meshes)
-            print(f"auto_detect_attachments returned: {result}")
+        # Call post-processing to compute fiber architecture
+        self._find_contour_stream_post_process(skeleton_meshes)
 
         print(f"Build fibers complete: {max_stream_count} streams x {num_levels} levels")
 
