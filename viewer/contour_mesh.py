@@ -554,11 +554,6 @@ class ContourMeshMixin:
         if not hasattr(self, '_face_scalar_min') or self._face_scalar_min is None:
             self._precompute_face_scalar_ranges()
 
-        # Find contour vertices for contour value
-        contour_vertices = []
-        contour_edges = []
-        vertex_tree = None
-
         # Build geodesic edge set if option enabled
         geodesic_edge_set = None
         if use_geodesic_edges and hasattr(self, '_geodesic_reference_paths') and self._geodesic_reference_paths:
@@ -568,6 +563,9 @@ class ContourMeshMixin:
                 for i in range(len(chain) - 1):
                     edge = tuple(sorted([chain[i], chain[i + 1]]))
                     geodesic_edge_set.add(edge)
+
+        # OPTIMIZATION 1: Collect all candidate edge vertices first, then deduplicate with single KDTree
+        raw_edges = []  # List of (vertex1, vertex2) pairs
 
         for face_idx, face in enumerate(self.faces_3):
             # Skip faces that don't contain contour value (acceleration)
@@ -598,87 +596,139 @@ class ContourMeshMixin:
                     face_cand_vertices.append(p_contour)
 
             if len(face_cand_vertices) == 2 and np.linalg.norm(face_cand_vertices[0] - face_cand_vertices[1]) >= 1e-7:
-            # if len(face_cand_vertices) > 0:
-                edge = []
-                # check if two vertices are already in contour_vertices
-                for vertex in face_cand_vertices:
-                    vertex_found = False
-                    if vertex_tree is not None and len(contour_vertices) > 0:
-                        dist, index = vertex_tree.query(vertex, k=1)
-                        if dist < 1e-7:
-                            edge.append(index)
-                            vertex_found = True
+                raw_edges.append((face_cand_vertices[0], face_cand_vertices[1]))
 
-                    if not vertex_found:
-                        index = len(contour_vertices)
-                        contour_vertices.append(vertex)
-                        vertex_tree = cKDTree(np.array(contour_vertices))
-                        edge.append(index)
+        if len(raw_edges) == 0:
+            return [], [], []
 
-                contour_edges.append(tuple(sorted(edge)))
+        # Collect all vertices
+        all_raw_vertices = []
+        for v1, v2 in raw_edges:
+            all_raw_vertices.append(v1)
+            all_raw_vertices.append(v2)
+        all_raw_vertices = np.array(all_raw_vertices)
 
-        # print(f'Number of contour edges: {len(contour_edges)}')
+        # OPTIMIZED: Build single KDTree and deduplicate in batch
+        # Build KDTree once from all raw vertices
+        raw_tree = cKDTree(all_raw_vertices)
 
-        # Classify contour edges into groups if there are multiple streams
+        # Find clusters of near-identical vertices
+        n_raw = len(all_raw_vertices)
+        vertex_indices = [-1] * n_raw  # Maps raw vertex index to deduplicated index
+        contour_vertices = []
+
+        for i in range(n_raw):
+            if vertex_indices[i] != -1:
+                continue  # Already assigned to a cluster
+
+            # Find all vertices within tolerance of this one
+            nearby = raw_tree.query_ball_point(all_raw_vertices[i], r=1e-7)
+
+            # Assign all nearby vertices to the same deduplicated index
+            new_idx = len(contour_vertices)
+            contour_vertices.append(all_raw_vertices[i])
+            for j in nearby:
+                if vertex_indices[j] == -1:
+                    vertex_indices[j] = new_idx
+
+        # Build edges with deduplicated indices
+        contour_edges = []
+        for i, (v1, v2) in enumerate(raw_edges):
+            idx1 = vertex_indices[i * 2]
+            idx2 = vertex_indices[i * 2 + 1]
+            if idx1 != idx2:  # Skip degenerate edges
+                contour_edges.append(tuple(sorted([idx1, idx2])))
+
+        # OPTIMIZATION 2: Union-Find for edge grouping - O(n * alpha(n)) instead of O(n²)
+        # Initialize parent array for Union-Find
+        n_vertices = len(contour_vertices)
+        parent = list(range(n_vertices))
+        rank = [0] * n_vertices
+
+        def find(x):
+            if parent[x] != x:
+                parent[x] = find(parent[x])  # Path compression
+            return parent[x]
+
+        def union(x, y):
+            px, py = find(x), find(y)
+            if px == py:
+                return
+            # Union by rank
+            if rank[px] < rank[py]:
+                px, py = py, px
+            parent[py] = px
+            if rank[px] == rank[py]:
+                rank[px] += 1
+
+        # Union all connected vertices
+        for e0, e1 in contour_edges:
+            union(e0, e1)
+
+        # Group vertices by their root
+        root_to_vertices = defaultdict(set)
+        for v in range(n_vertices):
+            # Only include vertices that are part of edges
+            root_to_vertices[find(v)].add(v)
+
+        # Filter out singleton groups (vertices not in any edge)
+        edge_vertex_set = set()
+        for e0, e1 in contour_edges:
+            edge_vertex_set.add(e0)
+            edge_vertex_set.add(e1)
+
         contour_edge_groups = []
+        for root, vertices in root_to_vertices.items():
+            group_verts = vertices & edge_vertex_set
+            if len(group_verts) > 0:
+                contour_edge_groups.append(list(group_verts))
+
+        # Assign edges to groups
+        vertex_to_group = {}
+        for i, group in enumerate(contour_edge_groups):
+            for v in group:
+                vertex_to_group[v] = i
+
+        grouped_contour_edges = [[] for _ in contour_edge_groups]
         for edge in contour_edges:
-            group_contained = []
-            for i, group in enumerate(contour_edge_groups):
-                if edge[0] in group or edge[1] in group:
-                    group_contained.append(i)
+            group_idx = vertex_to_group.get(edge[0])
+            if group_idx is not None:
+                grouped_contour_edges[group_idx].append(edge)
 
-            if len(group_contained) == 0:
-                contour_edge_groups.append([edge[0], edge[1]])
-            elif len(group_contained) == 1:
-                group = contour_edge_groups[group_contained[0]]
-                if edge[0] not in group:
-                    group.append(edge[0])
-                if edge[1] not in group:
-                    group.append(edge[1])
-            else:   # this edge is connecting two groups -> merge them into one
-                # append merged group and remove original group_contained
-                merged_group = []
-                for i in group_contained:
-                    merged_group += contour_edge_groups[i]
-                
-                for i in sorted(group_contained, reverse=True):
-                    del contour_edge_groups[i]
-
-                contour_edge_groups.append(merged_group)
-
-        grouped_contour_edges = []
-        for group in contour_edge_groups:
-            grouped_contour_edges.append([edge for edge in contour_edges if edge[0] in group and edge[1] in group])
-        
-        # print(f'Number of contour edge groups: {len(grouped_contour_edges)}')
-
-        # Order the vertices in edge group so that they form a closed loop
+        # OPTIMIZATION 3: Adjacency dict for edge ordering - O(n) instead of O(n²)
         ordered_contour_edge_groups = []
         for i in range(len(grouped_contour_edges)):
-            ordered_edge_group = []
+            if len(grouped_contour_edges[i]) == 0:
+                ordered_contour_edge_groups.append([])
+                continue
+
+            # Build adjacency dict: vertex -> list of connected vertices
+            adjacency = defaultdict(list)
+            for e0, e1 in grouped_contour_edges[i]:
+                adjacency[e0].append(e1)
+                adjacency[e1].append(e0)
+
+            # Start from first edge
             first_edge = grouped_contour_edges[i][0]
-            ordered_edge_group.append(first_edge[0])
-            ordered_edge_group.append(first_edge[1])
-            
-            max_iterations = len(contour_edge_groups[i]) * 2  # Safety limit
+            ordered_edge_group = [first_edge[0], first_edge[1]]
+            visited = {first_edge[0], first_edge[1]}
+
+            # Walk forward using adjacency dict - O(1) lookup per step
+            max_iterations = len(contour_edge_groups[i]) * 2
             iteration = 0
-            while len(ordered_edge_group) < len(contour_edge_groups[i]):
-                connection_found = False
-                for edge in grouped_contour_edges[i][1:]:
-                    if edge[0] == ordered_edge_group[-1] and not edge[1] in ordered_edge_group:
-                        ordered_edge_group.append(edge[1])
-                        connection_found = True
-                    elif edge[1] == ordered_edge_group[-1] and not edge[0] in ordered_edge_group:
-                        ordered_edge_group.append(edge[0])
-                        connection_found = True
-
-                    if connection_found:
+            while len(ordered_edge_group) < len(contour_edge_groups[i]) and iteration < max_iterations:
+                current = ordered_edge_group[-1]
+                neighbors = adjacency.get(current, [])
+                found = False
+                for neighbor in neighbors:
+                    if neighbor not in visited:
+                        ordered_edge_group.append(neighbor)
+                        visited.add(neighbor)
+                        found = True
                         break
-
-                iteration += 1
-                if not connection_found or iteration >= max_iterations:
-                    # No connection found or max iterations reached - break to avoid infinite loop
+                if not found:
                     break
+                iteration += 1
 
             ordered_contour_edge_groups.append(ordered_edge_group)
 
