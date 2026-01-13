@@ -4479,6 +4479,335 @@ class ContourMeshMixin:
 
         print(f"Contours updated: now {len(self.contours)} levels")
 
+    def cut_streams(self):
+        """
+        Step 1: Pre-cut all contours to max stream count.
+
+        - Determines max_stream_count = max(origin_count, insertion_count)
+        - Cuts all contours to have max_stream_count per level
+        - Tracks which streams came from same original contour (stream_groups)
+        - Smooths z, x, bp for each stream
+
+        After this, self.stream_contours[stream_i][level_i] and
+        self.stream_bounding_planes[stream_i][level_i] are available.
+        """
+        if self.contours is None or len(self.contours) < 2:
+            print("Need at least 2 contour levels")
+            return
+
+        if self.bounding_planes is None or len(self.bounding_planes) < 2:
+            print("Need bounding planes - run find_contours first")
+            return
+
+        num_levels = len(self.contours)
+        origin_count = len(self.contours[0])
+        insertion_count = len(self.contours[-1])
+        max_stream_count = max(origin_count, insertion_count)
+
+        print(f"\n=== Cut Streams ===")
+        print(f"Levels: {num_levels}")
+        print(f"Origin count: {origin_count}, Insertion count: {insertion_count}")
+        print(f"Max stream count: {max_stream_count}")
+
+        # Get contour counts per level
+        contour_counts = [len(self.contours[i]) for i in range(num_levels)]
+        print(f"Contour counts: {contour_counts}")
+
+        # Initialize stream structure: [stream_i][level_i]
+        stream_contours = [[] for _ in range(max_stream_count)]
+        stream_bounding_planes = [[] for _ in range(max_stream_count)]
+
+        # Track which streams came from same original contour per level
+        # stream_groups[level_i] = [[stream indices from same original], ...]
+        stream_groups = []
+
+        # Determine processing direction (from larger count end)
+        if origin_count >= insertion_count:
+            level_order = list(range(num_levels))
+            print("Processing: origin → insertion")
+        else:
+            level_order = list(range(num_levels - 1, -1, -1))
+            print("Processing: insertion → origin")
+
+        # Process first level (no cutting needed if it has max_stream_count)
+        first_level = level_order[0]
+        first_count = contour_counts[first_level]
+
+        if first_count == max_stream_count:
+            # No cutting needed, each contour is its own stream
+            for stream_i in range(max_stream_count):
+                stream_contours[stream_i].append(self.contours[first_level][stream_i])
+                stream_bounding_planes[stream_i].append(self.bounding_planes[first_level][stream_i])
+            stream_groups.append([[i] for i in range(max_stream_count)])
+            print(f"  Level {first_level}: {first_count} contours (no cut needed)")
+        else:
+            # Need to cut first level contours
+            print(f"  Level {first_level}: {first_count} contours → cutting to {max_stream_count}")
+            # This shouldn't happen if we start from the end with max_stream_count
+            # But handle it anyway by distributing streams among contours
+            groups = []
+            streams_per_contour = max_stream_count // first_count
+            remainder = max_stream_count % first_count
+            stream_idx = 0
+            for contour_i in range(first_count):
+                group = []
+                n_streams = streams_per_contour + (1 if contour_i < remainder else 0)
+                for _ in range(n_streams):
+                    stream_contours[stream_idx].append(self.contours[first_level][contour_i])
+                    stream_bounding_planes[stream_idx].append(self.bounding_planes[first_level][contour_i].copy())
+                    group.append(stream_idx)
+                    stream_idx += 1
+                groups.append(group)
+            stream_groups.append(groups)
+
+        # Process remaining levels
+        for level_i_idx in range(1, len(level_order)):
+            level_i = level_order[level_i_idx]
+            prev_level = level_order[level_i_idx - 1]
+            curr_count = contour_counts[level_i]
+
+            if curr_count == max_stream_count:
+                # No cutting needed - match by distance
+                # Find best assignment of contours to streams
+                prev_means = [stream_bounding_planes[s][-1]['mean'] for s in range(max_stream_count)]
+                curr_means = [self.bounding_planes[level_i][c]['mean'] for c in range(curr_count)]
+
+                # Greedy assignment by distance
+                assigned = [False] * curr_count
+                for stream_i in range(max_stream_count):
+                    best_contour = None
+                    best_dist = np.inf
+                    for contour_i in range(curr_count):
+                        if assigned[contour_i]:
+                            continue
+                        dist = np.linalg.norm(prev_means[stream_i] - curr_means[contour_i])
+                        if dist < best_dist:
+                            best_dist = dist
+                            best_contour = contour_i
+                    assigned[best_contour] = True
+                    stream_contours[stream_i].append(self.contours[level_i][best_contour])
+                    stream_bounding_planes[stream_i].append(self.bounding_planes[level_i][best_contour])
+
+                stream_groups.append([[i] for i in range(max_stream_count)])
+                print(f"  Level {level_i}: {curr_count} contours (no cut needed)")
+
+            else:
+                # Need to cut contours
+                print(f"  Level {level_i}: {curr_count} contours → cutting to {max_stream_count}")
+
+                # Find which streams map to which contours (by distance)
+                prev_means = [stream_bounding_planes[s][-1]['mean'] for s in range(max_stream_count)]
+                curr_means = [self.bounding_planes[level_i][c]['mean'] for c in range(curr_count)]
+
+                # Assign each stream to closest contour
+                stream_to_contour = []
+                for stream_i in range(max_stream_count):
+                    dists = [np.linalg.norm(prev_means[stream_i] - cm) for cm in curr_means]
+                    closest_contour = np.argmin(dists)
+                    stream_to_contour.append(closest_contour)
+
+                # Group streams by which contour they map to
+                contour_to_streams = [[] for _ in range(curr_count)]
+                for stream_i, contour_i in enumerate(stream_to_contour):
+                    contour_to_streams[contour_i].append(stream_i)
+
+                # Build stream_groups for this level
+                groups = []
+                for contour_i in range(curr_count):
+                    if contour_to_streams[contour_i]:
+                        groups.append(contour_to_streams[contour_i])
+                stream_groups.append(groups)
+
+                # Cut each contour that has multiple streams
+                for contour_i in range(curr_count):
+                    streams_for_contour = contour_to_streams[contour_i]
+                    if len(streams_for_contour) == 0:
+                        continue
+                    elif len(streams_for_contour) == 1:
+                        # No cut needed
+                        stream_i = streams_for_contour[0]
+                        stream_contours[stream_i].append(self.contours[level_i][contour_i])
+                        stream_bounding_planes[stream_i].append(self.bounding_planes[level_i][contour_i])
+                    else:
+                        # Cut this contour into len(streams_for_contour) pieces
+                        target_contour = self.contours[level_i][contour_i]
+                        target_bp = self.bounding_planes[level_i][contour_i]
+
+                        # Get reference means from previous level streams
+                        ref_means = [prev_means[s] for s in streams_for_contour]
+
+                        # Project reference means onto target plane
+                        target_mean = target_bp['mean']
+                        target_z = target_bp['basis_z']
+                        projected_refs = [m - np.dot(m - target_mean, target_z) * target_z for m in ref_means]
+
+                        # Use area_based cutting method
+                        cut_contours = self._cut_contour_for_streams(
+                            target_contour, target_bp, projected_refs, streams_for_contour
+                        )
+
+                        # Assign cut pieces to streams
+                        for idx, stream_i in enumerate(streams_for_contour):
+                            cut_contour = cut_contours[idx]
+                            # Create new bounding plane for cut piece
+                            _, new_bp = self.save_bounding_planes(
+                                cut_contour,
+                                target_bp['scalar_value'],
+                                prev_bounding_plane=stream_bounding_planes[stream_i][-1],
+                                bounding_plane_info_orig=target_bp
+                            )
+                            stream_contours[stream_i].append(cut_contour)
+                            stream_bounding_planes[stream_i].append(new_bp)
+
+        # If we processed in reverse order, reverse the results
+        if origin_count < insertion_count:
+            for stream_i in range(max_stream_count):
+                stream_contours[stream_i] = stream_contours[stream_i][::-1]
+                stream_bounding_planes[stream_i] = stream_bounding_planes[stream_i][::-1]
+            stream_groups = stream_groups[::-1]
+
+        # Store results
+        self.stream_contours = stream_contours
+        self.stream_bounding_planes = stream_bounding_planes
+        self.stream_groups = stream_groups
+        self.max_stream_count = max_stream_count
+
+        print(f"Created {max_stream_count} streams, each with {len(stream_contours[0])} levels")
+
+        # ========== Smooth z, x, bp for each stream ==========
+        print("Smoothening stream axes...")
+        for stream_i in range(max_stream_count):
+            bp_stream = self.stream_bounding_planes[stream_i]
+            stream_len = len(bp_stream)
+            if stream_len < 2:
+                continue
+
+            # Z-axis: first contour should point toward second
+            first_mean = bp_stream[0]['mean']
+            second_mean = bp_stream[1]['mean']
+            forward_dir = second_mean - first_mean
+            forward_norm = np.linalg.norm(forward_dir)
+            if forward_norm > 1e-10:
+                forward_dir = forward_dir / forward_norm
+                if np.dot(bp_stream[0]['basis_z'], forward_dir) < 0:
+                    bp_stream[0]['basis_z'] = -bp_stream[0]['basis_z']
+                    bp_stream[0]['basis_x'] = -bp_stream[0]['basis_x']
+                    print(f"  Stream {stream_i}, level 0: flipped z toward next")
+
+            # Forward pass: align z with previous
+            for i in range(1, stream_len):
+                if np.dot(bp_stream[i]['basis_z'], bp_stream[i-1]['basis_z']) < 0:
+                    bp_stream[i]['basis_z'] = -bp_stream[i]['basis_z']
+                    bp_stream[i]['basis_x'] = -bp_stream[i]['basis_x']
+
+            # X-axis: align with (1,0,0) projected, then propagate
+            first_z = bp_stream[0]['basis_z']
+            first_x = bp_stream[0]['basis_x']
+            ref_x = np.array([1.0, 0.0, 0.0])
+            ref_x_proj = ref_x - np.dot(ref_x, first_z) * first_z
+            ref_x_norm = np.linalg.norm(ref_x_proj)
+            if ref_x_norm > 0.1:
+                ref_x_proj = ref_x_proj / ref_x_norm
+                if np.dot(first_x, ref_x_proj) < 0:
+                    bp_stream[0]['basis_x'] = -bp_stream[0]['basis_x']
+                    bp_stream[0]['basis_y'] = -bp_stream[0]['basis_y']
+
+            # Propagate x alignment
+            for i in range(1, stream_len):
+                curr_x = bp_stream[i]['basis_x']
+                curr_z = bp_stream[i]['basis_z']
+                prev_x = bp_stream[i-1]['basis_x']
+                prev_x_proj = prev_x - np.dot(prev_x, curr_z) * curr_z
+                prev_x_norm = np.linalg.norm(prev_x_proj)
+                if prev_x_norm > 1e-10:
+                    prev_x_proj = prev_x_proj / prev_x_norm
+                    if np.dot(curr_x, prev_x_proj) < 0:
+                        bp_stream[i]['basis_x'] = -bp_stream[i]['basis_x']
+                        bp_stream[i]['basis_y'] = -bp_stream[i]['basis_y']
+
+        print("Cut streams complete")
+
+    def _cut_contour_for_streams(self, contour, bp, projected_refs, stream_indices):
+        """
+        Cut a contour into pieces for multiple streams using area-based method.
+
+        Args:
+            contour: The contour vertices to cut
+            bp: Bounding plane info for this contour
+            projected_refs: Reference mean positions projected onto this plane
+            stream_indices: Which stream indices these pieces are for
+
+        Returns:
+            List of cut contour pieces (one per stream)
+        """
+        n_pieces = len(stream_indices)
+        if n_pieces == 1:
+            return [contour]
+
+        contour = np.array(contour)
+        target_mean = bp['mean']
+        target_z = bp['basis_z']
+        v0, v1, v2, v3 = bp['bounding_plane']
+
+        # Compute structure vector (direction separating the streams)
+        structure_vector = np.array([0.0, 0.0, 0.0])
+        for i in range(len(projected_refs)):
+            for j in range(i + 1, len(projected_refs)):
+                cand_vector = projected_refs[i] - projected_refs[j]
+                if np.dot(cand_vector, np.array([1, 0, 0])) < 0:
+                    cand_vector *= -1
+                structure_vector += cand_vector
+        structure_vector = structure_vector / (np.linalg.norm(structure_vector) + 1e-10)
+
+        # Determine axis to cut along
+        horizontal_vector = v1 - v0
+        vertical_vector = v3 - v0
+        horizontal_vector = horizontal_vector / (np.linalg.norm(horizontal_vector) + 1e-10)
+        vertical_vector = vertical_vector / (np.linalg.norm(vertical_vector) + 1e-10)
+
+        h_proj = np.abs(np.dot(structure_vector, horizontal_vector))
+        v_proj = np.abs(np.dot(structure_vector, vertical_vector))
+
+        if h_proj > v_proj:
+            cut_axis = horizontal_vector
+        else:
+            cut_axis = vertical_vector
+
+        # Order streams along cut axis
+        ref_values = [np.dot(r - target_mean, cut_axis) for r in projected_refs]
+        order = np.argsort(ref_values)
+
+        # Equal area distribution
+        areas = [1.0] * n_pieces
+        cumul_areas = np.cumsum(areas)
+        cumul_areas = cumul_areas / cumul_areas[-1]
+
+        # Project contour points onto cut axis (normalized 0-1)
+        contour_values = [np.dot(p - target_mean, cut_axis) for p in contour]
+        min_val, max_val = min(contour_values), max(contour_values)
+        if max_val - min_val > 1e-10:
+            normalized_values = [(v - min_val) / (max_val - min_val) for v in contour_values]
+        else:
+            normalized_values = [0.5] * len(contour)
+
+        # Assign vertices to pieces
+        new_contours = [[] for _ in range(n_pieces)]
+        for v_idx, v in enumerate(contour):
+            nv = normalized_values[v_idx]
+            for piece_idx, thresh in enumerate(cumul_areas):
+                if nv <= thresh:
+                    assigned_stream = order[piece_idx]
+                    new_contours[assigned_stream].append(v)
+                    break
+
+        # Ensure each piece has at least some vertices
+        for i in range(n_pieces):
+            if len(new_contours[i]) == 0:
+                # Fallback: assign center vertex
+                new_contours[i] = [target_mean]
+
+        return new_contours
+
     def build_streams(self, skeleton_meshes=None):
         """
         Build streams from selected levels.
