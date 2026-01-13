@@ -3263,7 +3263,6 @@ class MuscleMeshMixin:
             'scalar_value': scalar_value,
             'square_like': square_like,
             'newell_normal': newell_normal,
-            'contour_vertices': new_contour,  # Store contour vertices for later recomputation
         }
 
     def _trim_independent_section(self, contours, bounding_planes, max_spacing_threshold):

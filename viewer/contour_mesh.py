@@ -2364,22 +2364,13 @@ class ContourMeshMixin:
                     level_idx = levels_in_stream[i]
                     contour_idx = contours_in_stream[i]
 
-                    # Debug: verify bp is the same object as in self.bounding_planes
-                    is_same = bp is self.bounding_planes[level_idx][contour_idx]
-                    if i < 2:
-                        old_corners = bp.get('bounding_plane')
-                        print(f"        [{i}] level={level_idx}, contour={contour_idx}, same_obj={is_same}")
-                        if old_corners is not None:
-                            print(f"            old corner[0]: {old_corners[0]}")
-
                     basis_z = bp['basis_z']
                     basis_x = bp['basis_x']
                     basis_y = bp['basis_y']
 
-                    # Get contour vertices for recomputation
-                    contour_points = bp.get('contour_vertices')
-                    if contour_points is None:
-                        print(f"        [{i}] SKIP: no contour_vertices")
+                    # Get contour vertices from self.contours
+                    contour_points = self.contours[level_idx][contour_idx]
+                    if contour_points is None or len(contour_points) == 0:
                         continue
 
                     contour_points = np.array(contour_points)
@@ -2428,15 +2419,8 @@ class ContourMeshMixin:
                     preserve = getattr(self, '_contours_normalized', False)
                     new_contour, contour_match = self.find_contour_match(contour_points, bounding_plane, preserve_order=preserve)
                     bp['contour_match'] = contour_match
-                    bp['contour_vertices'] = new_contour
                     self.contours[level_idx][contour_idx] = new_contour
                     self.bounding_planes[level_idx][contour_idx] = bp
-
-                    if i < 2:
-                        print(f"            new corner[0]: {bounding_plane[0]}")
-                        # Verify the update took effect
-                        actual = self.bounding_planes[level_idx][contour_idx]['bounding_plane']
-                        print(f"            actual corner[0]: {actual[0]}")
 
         print("  Bounding plane smoothening complete")
 
