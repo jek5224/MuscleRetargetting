@@ -4725,6 +4725,99 @@ class ContourMeshMixin:
                         bp_stream[i]['basis_x'] = -bp_stream[i]['basis_x']
                         bp_stream[i]['basis_y'] = -bp_stream[i]['basis_y']
 
+            # BP smoothing: interpolate basis_x for square-like contours
+            non_square_indices = [i for i, bp in enumerate(bp_stream) if not bp.get('square_like', False)]
+            square_indices = [i for i, bp in enumerate(bp_stream) if bp.get('square_like', False)]
+
+            if len(non_square_indices) == 0 and len(square_indices) > 0:
+                # All square-like - find most non-square-like as reference
+                best_idx = 0
+                best_ratio_diff = 0
+                for i, bp in enumerate(bp_stream):
+                    corners = bp.get('bounding_plane')
+                    if corners is None or len(corners) < 4:
+                        continue
+                    width = np.linalg.norm(corners[1] - corners[0])
+                    height = np.linalg.norm(corners[3] - corners[0])
+                    if min(width, height) > 1e-10:
+                        ratio = max(width, height) / min(width, height)
+                        ratio_diff = abs(ratio - 1.0)
+                        if ratio_diff > best_ratio_diff:
+                            best_ratio_diff = ratio_diff
+                            best_idx = i
+                bp_stream[best_idx]['square_like'] = False
+                non_square_indices = [best_idx]
+                print(f"  Stream {stream_i}: all square-like, ref={best_idx}")
+
+            # Interpolate square-like contours
+            for i in square_indices:
+                bp = bp_stream[i]
+                curr_mean = bp['mean']
+                basis_z = bp['basis_z']
+
+                # Find prev non-square-like
+                prev_idx = None
+                prev_dist = np.inf
+                for j in range(i - 1, -1, -1):
+                    if not bp_stream[j].get('square_like', False):
+                        prev_dist = np.linalg.norm(curr_mean - bp_stream[j]['mean'])
+                        prev_idx = j
+                        break
+
+                # Find next non-square-like
+                next_idx = None
+                next_dist = np.inf
+                for j in range(i + 1, stream_len):
+                    if not bp_stream[j].get('square_like', False):
+                        next_dist = np.linalg.norm(curr_mean - bp_stream[j]['mean'])
+                        next_idx = j
+                        break
+
+                if prev_idx is None and next_idx is None:
+                    continue
+
+                # Determine target basis_x
+                if prev_idx is not None and next_idx is not None:
+                    # Interpolate between prev and next
+                    prev_x = bp_stream[prev_idx]['basis_x']
+                    prev_x_proj = prev_x - np.dot(prev_x, basis_z) * basis_z
+                    prev_x_proj = prev_x_proj / (np.linalg.norm(prev_x_proj) + 1e-10)
+
+                    next_x = bp_stream[next_idx]['basis_x']
+                    next_x_proj = next_x - np.dot(next_x, basis_z) * basis_z
+                    next_x_proj = next_x_proj / (np.linalg.norm(next_x_proj) + 1e-10)
+
+                    total_dist = prev_dist + next_dist
+                    t = prev_dist / total_dist if total_dist > 1e-10 else 0.5
+
+                    # Compute angle and interpolate
+                    cos_angle = np.clip(np.dot(prev_x_proj, next_x_proj), -1, 1)
+                    cross = np.cross(prev_x_proj, next_x_proj)
+                    sin_angle = np.dot(cross, basis_z)
+                    angle = np.arctan2(sin_angle, cos_angle)
+                    interp_angle = angle * t
+
+                    cos_t = np.cos(interp_angle)
+                    sin_t = np.sin(interp_angle)
+                    new_basis_x = prev_x_proj * cos_t + np.cross(basis_z, prev_x_proj) * sin_t
+                elif prev_idx is not None:
+                    prev_x = bp_stream[prev_idx]['basis_x']
+                    new_basis_x = prev_x - np.dot(prev_x, basis_z) * basis_z
+                    new_basis_x = new_basis_x / (np.linalg.norm(new_basis_x) + 1e-10)
+                else:
+                    next_x = bp_stream[next_idx]['basis_x']
+                    new_basis_x = next_x - np.dot(next_x, basis_z) * basis_z
+                    new_basis_x = new_basis_x / (np.linalg.norm(new_basis_x) + 1e-10)
+
+                new_basis_y = np.cross(basis_z, new_basis_x)
+                new_basis_y = new_basis_y / (np.linalg.norm(new_basis_y) + 1e-10)
+
+                bp['basis_x'] = new_basis_x
+                bp['basis_y'] = new_basis_y
+
+            if len(square_indices) > 0:
+                print(f"  Stream {stream_i}: smoothed {len(square_indices)} square-like contours")
+
         # Update visualization: convert to [stream_i][level_i] format
         self.contours = self.stream_contours
         self.bounding_planes = self.stream_bounding_planes
