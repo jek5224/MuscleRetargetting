@@ -6060,6 +6060,13 @@ class ContourMeshMixin:
             union_area = union_poly.area
             coverage_cost = union_area + target_area - 2 * intersection_area
 
+            # Strong penalty if sources don't cover the target at all
+            # This prevents the optimizer from moving sources far away
+            coverage_ratio = intersection_area / (target_area + 1e-10)
+            if coverage_ratio < 0.1:
+                # Very low coverage - strongly penalize
+                coverage_cost += 10.0 * target_area * (0.1 - coverage_ratio)
+
             # Regularization 1: Penalize overlap between sources
             overlap_cost = 0.0
             if len(transformed_polygons) >= 2:
@@ -6183,10 +6190,32 @@ class ContourMeshMixin:
         print(f"  [BP Transform] initial cost={init_cost:.4f}")
 
         # ========== Step 5: Optimize from initial configuration ==========
+        # Compute bounds to prevent optimizer from going crazy
+        target_size = np.sqrt(target_area)  # Approximate size
+        max_translation = target_size * 3  # Don't go more than 3x size away
+
+        if use_separate_transforms:
+            # Bounds for [scale0, tx0, ty0, theta0, scale1, tx1, ty1, theta1, ...]
+            bounds = []
+            for i in range(n_pieces):
+                bounds.append((0.1, 10.0))  # scale: 0.1 to 10x
+                bounds.append((-max_translation, max_translation))  # tx
+                bounds.append((-max_translation, max_translation))  # ty
+                bounds.append((-np.pi, np.pi))  # theta
+        else:
+            # Bounds for [scale, tx, ty, theta]
+            bounds = [
+                (0.1, 10.0),  # scale
+                (-max_translation, max_translation),  # tx
+                (-max_translation, max_translation),  # ty
+                (-np.pi, np.pi)  # theta
+            ]
+
         result = minimize(
             objective,
             x0,
-            method='Powell',
+            method='L-BFGS-B',
+            bounds=bounds,
             options={'maxiter': 500, 'ftol': 1e-6}
         )
 
