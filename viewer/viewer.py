@@ -3824,66 +3824,40 @@ class GLFWApp():
             draw_list.add_rect_filled(x0, y0, x0 + canvas_size, y0 + canvas_size,
                                      imgui.get_color_u32_rgba(0.1, 0.1, 0.1, 1.0))
 
-            # Draw target
+            # Compute target screen coords
             target_screen = [to_screen(p, x0, y0, canvas_size) for p in target_2d]
-            if len(target_screen) >= 3:
-                for i in range(1, len(target_screen) - 1):
-                    draw_list.add_triangle_filled(
-                        target_screen[0][0], target_screen[0][1],
-                        target_screen[i][0], target_screen[i][1],
-                        target_screen[i+1][0], target_screen[i+1][1],
-                        imgui.get_color_u32_rgba(0.3, 0.3, 0.3, 0.3))
-                for i in range(len(target_screen)):
-                    p1, p2 = target_screen[i], target_screen[(i+1) % len(target_screen)]
-                    draw_list.add_line(p1[0], p1[1], p2[0], p2[1],
-                                      imgui.get_color_u32_rgba(0.9, 0.9, 0.9, 1.0), 2.0)
 
-            # Draw final transformed
+            # Draw final transformed source contours (outline only, semi-transparent)
             for si, final_trans in enumerate(final_transformed):
                 if len(final_trans) >= 3:
                     color = colors[si % len(colors)]
                     final_screen = [to_screen(p, x0, y0, canvas_size) for p in final_trans]
-                    # Fill
-                    for i in range(1, len(final_screen) - 1):
-                        draw_list.add_triangle_filled(
-                            final_screen[0][0], final_screen[0][1],
-                            final_screen[i][0], final_screen[i][1],
-                            final_screen[i+1][0], final_screen[i+1][1],
-                            imgui.get_color_u32_rgba(color[0], color[1], color[2], 0.3))
-                    # Outline
+                    # Outline only (no fill)
                     for i in range(len(final_screen)):
                         p1, p2 = final_screen[i], final_screen[(i+1) % len(final_screen)]
                         draw_list.add_line(p1[0], p1[1], p2[0], p2[1],
-                                          imgui.get_color_u32_rgba(*color), 2.0)
+                                          imgui.get_color_u32_rgba(color[0], color[1], color[2], 0.5), 1.5)
 
             # Draw vertex assignments as colored circles on target contour
             assignments = data.get('assignments', [])
             if assignments and len(target_screen) == len(assignments):
                 for v_idx, (screen_pt, piece_idx) in enumerate(zip(target_screen, assignments)):
                     color = colors[piece_idx % len(colors)]
-                    draw_list.add_circle_filled(screen_pt[0], screen_pt[1], 3.0,
+                    draw_list.add_circle_filled(screen_pt[0], screen_pt[1], 4.0,
                                                imgui.get_color_u32_rgba(*color))
 
-            # Draw centroids as large X markers
+            # Draw centroids as X markers
             centroids = data.get('centroids', [])
             for ci, centroid in enumerate(centroids):
                 c_screen = to_screen(centroid, x0, y0, canvas_size)
                 color = colors[ci % len(colors)]
-                # Draw X marker using lines
-                size = 8
+                size = 6
                 draw_list.add_line(c_screen[0] - size, c_screen[1] - size,
                                   c_screen[0] + size, c_screen[1] + size,
-                                  imgui.get_color_u32_rgba(*color), 3.0)
+                                  imgui.get_color_u32_rgba(*color), 2.0)
                 draw_list.add_line(c_screen[0] - size, c_screen[1] + size,
                                   c_screen[0] + size, c_screen[1] - size,
-                                  imgui.get_color_u32_rgba(*color), 3.0)
-                # Black outline
-                draw_list.add_line(c_screen[0] - size - 1, c_screen[1] - size - 1,
-                                  c_screen[0] + size + 1, c_screen[1] + size + 1,
-                                  imgui.get_color_u32_rgba(0.0, 0.0, 0.0, 1.0), 1.0)
-                draw_list.add_line(c_screen[0] - size - 1, c_screen[1] + size + 1,
-                                  c_screen[0] + size + 1, c_screen[1] - size - 1,
-                                  imgui.get_color_u32_rgba(0.0, 0.0, 0.0, 1.0), 1.0)
+                                  imgui.get_color_u32_rgba(*color), 2.0)
 
             imgui.dummy(canvas_size + 2 * padding, canvas_size + 2 * padding)
             imgui.columns(1)

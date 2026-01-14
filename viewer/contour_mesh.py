@@ -6263,31 +6263,28 @@ class ContourMeshMixin:
         ax1.set_aspect('equal')
         ax1.grid(True, alpha=0.3)
 
-        # Right plot: Final result
+        # Right plot: Final result - simplified view
         ax2 = axes[1]
         scales_str = ', '.join([f'{s:.2f}' for s in scales])
         ax2.set_title(f'Final (scales=[{scales_str}])')
-        ax2.plot(target_arr[:, 0], target_arr[:, 1], 'k-', linewidth=2, label='Target')
-        ax2.fill(target_arr[:, 0], target_arr[:, 1], alpha=0.1, color='gray')
 
+        # Draw transformed source contours (outline only, no fill)
         for i, transformed in enumerate(final_transformed):
             if len(transformed) >= 3:
                 trans_arr = np.array(transformed)
                 trans_closed = np.vstack([trans_arr, trans_arr[0]])
                 ax2.plot(trans_closed[:, 0], trans_closed[:, 1], '-', color=colors[i],
-                        linewidth=2, label=f'Src {stream_indices[i]} (s={scales[i]:.2f})')
-                ax2.fill(trans_arr[:, 0], trans_arr[:, 1], alpha=0.3, color=colors[i])
+                        linewidth=1.5, alpha=0.5, label=f'Src {stream_indices[i]}')
 
         # Draw vertex assignments as colored markers on target contour
         if assignments:
             for v_idx, (v_2d, piece_idx) in enumerate(zip(target_arr, assignments)):
-                ax2.scatter(v_2d[0], v_2d[1], c=[colors[piece_idx]], s=15, zorder=10)
+                ax2.scatter(v_2d[0], v_2d[1], c=[colors[piece_idx]], s=20, zorder=10)
 
         # Draw centroids as large X markers
         if centroids:
             for i, c in enumerate(centroids):
-                ax2.scatter(c[0], c[1], marker='X', c=[colors[i]], s=150, zorder=15,
-                           edgecolors='black', linewidths=1.5)
+                ax2.scatter(c[0], c[1], marker='X', c=[colors[i]], s=100, zorder=15)
 
         ax2.legend(loc='upper right', fontsize=8)
         ax2.set_aspect('equal')
