@@ -4028,7 +4028,8 @@ class GLFWApp():
                             direction = np.array([1.0, 0.0])
 
                     # Extend 10% beyond each endpoint for visibility
-                    extent = max(length * 0.1, max_range * 0.02)
+                    contour_range = np.max(target_2d.max(axis=0) - target_2d.min(axis=0))
+                    extent = max(length * 0.1, contour_range * 0.02)
                     line_start = tuple(best_pt0 - direction * extent)
                     line_end = tuple(best_pt1 + direction * extent)
                     obj._manual_cut_data['initial_line'] = (line_start, line_end)
