@@ -5901,7 +5901,9 @@ class ContourMeshMixin:
                         print(f"  [BP Transform] Could not check adjacency: {e}")
 
         # ========== Step 7: Assign target vertices by distance ==========
-        # Use centroid-based distance (Voronoi partition) to avoid overlap issues
+        # Strategy: if vertex is close to a source contour, assign to it
+        # If far from all sources (ambiguous), use centroid-based assignment
+
         # Compute centroids of transformed sources
         centroids = []
         for piece_idx, transformed in enumerate(final_transformed):
@@ -5910,112 +5912,105 @@ class ContourMeshMixin:
                 centroids.append(centroid)
                 print(f"  [BP Transform] piece {piece_idx} centroid: ({centroid[0]:.4f}, {centroid[1]:.4f})")
             else:
-                # Fallback: use initial translation as centroid
                 centroids.append(np.array(initial_translations[piece_idx]))
                 print(f"  [BP Transform] WARNING: piece {piece_idx} has no vertices, using initial position")
 
-        # First pass: assign each vertex to nearest centroid and compute distances
+        # Compute threshold for "close" - use fraction of centroid distance
+        if len(centroids) >= 2:
+            centroid_dist = np.linalg.norm(centroids[0] - centroids[1])
+            close_threshold = centroid_dist * 0.3  # vertex within 30% of centroid distance
+        else:
+            close_threshold = np.inf
+
+        # First pass: assign based on distance to source contours
         assignments = []
-        all_distances = []  # distances to each centroid for interpolation
+        all_distances = []  # distances to each source for interpolation
+        n_close = 0
+        n_centroid = 0
+
         for v_idx, v_2d in enumerate(target_2d):
-            min_dist = np.inf
-            assigned_piece = 0
-            dists = []
+            # Compute distance to nearest point on each source contour
+            contour_dists = []
+            for piece_idx, transformed in enumerate(final_transformed):
+                if len(transformed) > 0:
+                    distances = np.linalg.norm(transformed - v_2d, axis=1)
+                    min_dist = np.min(distances)
+                    contour_dists.append(min_dist)
+                else:
+                    contour_dists.append(np.inf)
 
-            for piece_idx, centroid in enumerate(centroids):
-                dist = np.linalg.norm(v_2d - centroid)
-                dists.append(dist)
-                if dist < min_dist:
-                    min_dist = dist
-                    assigned_piece = piece_idx
+            all_distances.append(contour_dists)
 
-            assignments.append(assigned_piece)
-            all_distances.append(dists)
+            # Find closest source contour
+            min_contour_dist = min(contour_dists)
+            closest_piece = contour_dists.index(min_contour_dist)
 
-        # For 2 pieces: find exactly 2 split points on the contour
-        # Use signed distance to bisector, find zero-crossings, keep best 2
-        if n_pieces == 2 and len(centroids) == 2:
-            c0, c1 = centroids[0], centroids[1]
-            midpoint = (c0 + c1) / 2
-            direction = c1 - c0  # vector from c0 to c1
+            # Check if clearly close to one source
+            if min_contour_dist < close_threshold:
+                # Close to a source - assign to it
+                assignments.append(closest_piece)
+                n_close += 1
+            else:
+                # Far from all sources - use centroid distance
+                centroid_dists = [np.linalg.norm(v_2d - c) for c in centroids]
+                min_centroid_dist = min(centroid_dists)
+                assigned_piece = centroid_dists.index(min_centroid_dist)
+                assignments.append(assigned_piece)
+                n_centroid += 1
 
-            # Compute signed distance to bisector for each vertex
-            signed_dists = []
-            for v_2d in target_2d:
-                signed_dists.append(np.dot(v_2d - midpoint, direction))
+        print(f"  [BP Transform] assignment: {n_close} by contour proximity, {n_centroid} by centroid")
 
-            # Find all zero-crossings (where sign changes)
-            n = len(signed_dists)
-            crossings = []  # (index, interpolated_t) - crossing between index and index+1
-            for i in range(n):
-                d0 = signed_dists[i]
-                d1 = signed_dists[(i + 1) % n]
-                if d0 * d1 < 0:  # sign change
-                    # Interpolate to find crossing point
-                    t = abs(d0) / (abs(d0) + abs(d1))
-                    crossings.append((i, t, abs(d0) + abs(d1)))  # also store gradient magnitude
+        # Remove islands: ensure contiguous regions
+        # Find runs and merge short ones
+        def remove_islands(arr, min_run=5):
+            """Remove short runs (islands) by merging into neighbors."""
+            if len(arr) < 3:
+                return arr
+            result = list(arr)
+            n = len(result)
+            changed = True
+            iterations = 0
+            while changed and iterations < 20:
+                changed = False
+                iterations += 1
+                # Find runs
+                runs = []
+                i = 0
+                while i < n:
+                    val = result[i]
+                    start = i
+                    while i < n and result[i] == val:
+                        i += 1
+                    runs.append([start, i - start, val])
 
-            print(f"  [BP Transform] found {len(crossings)} bisector crossings")
+                if len(runs) <= 2:
+                    break
 
-            if len(crossings) >= 2:
-                # Keep 2 crossings that are most separated (maximize contour distance between them)
-                best_pair = None
-                best_separation = -1
-                for i in range(len(crossings)):
-                    for j in range(i + 1, len(crossings)):
-                        idx_i = crossings[i][0]
-                        idx_j = crossings[j][0]
-                        # Contour distance (in vertices) between crossings
-                        dist1 = (idx_j - idx_i) % n
-                        dist2 = n - dist1
-                        separation = min(dist1, dist2)  # smaller segment size
-                        # We want to maximize the smaller segment (balanced split)
-                        if separation > best_separation:
-                            best_separation = separation
-                            best_pair = (crossings[i], crossings[j])
+                # Find shortest run
+                shortest_idx = min(range(len(runs)), key=lambda x: runs[x][1])
+                shortest = runs[shortest_idx]
 
-                if best_pair:
-                    cross1, cross2 = best_pair
-                    idx1, idx2 = cross1[0], cross2[0]
-                    # Ensure idx1 < idx2
-                    if idx1 > idx2:
-                        idx1, idx2 = idx2, idx1
+                if shortest[1] >= min_run:
+                    break  # No short runs left
 
-                    # Assign: vertices from idx1+1 to idx2 go to one piece
-                    # vertices from idx2+1 to idx1 (wrapping) go to other piece
-                    # Determine which piece based on signed distance
-                    assignments = []
-                    for i in range(n):
-                        if idx1 < i <= idx2:
-                            # In the segment between crossings
-                            assignments.append(1 if signed_dists[i] > 0 else 0)
-                        else:
-                            # In the other segment
-                            assignments.append(0 if signed_dists[i] <= 0 else 1)
+                # Merge into larger neighbor
+                prev_idx = (shortest_idx - 1) % len(runs)
+                next_idx = (shortest_idx + 1) % len(runs)
 
-                    # Simplify: use majority vote for each segment
-                    seg1_votes = [signed_dists[i] for i in range(idx1 + 1, idx2 + 1)]
-                    seg1_piece = 1 if sum(1 for d in seg1_votes if d > 0) > len(seg1_votes) / 2 else 0
+                # Choose neighbor with more vertices
+                if runs[prev_idx][1] >= runs[next_idx][1]:
+                    merge_val = runs[prev_idx][2]
+                else:
+                    merge_val = runs[next_idx][2]
 
-                    assignments = []
-                    for i in range(n):
-                        if idx1 < i <= idx2:
-                            assignments.append(seg1_piece)
-                        else:
-                            assignments.append(1 - seg1_piece)
+                # Apply merge
+                for j in range(shortest[0], shortest[0] + shortest[1]):
+                    result[j] = merge_val
+                changed = True
 
-            elif len(crossings) == 0:
-                # All on one side - assign all to closest centroid
-                avg_dist = sum(signed_dists) / len(signed_dists)
-                piece = 0 if avg_dist <= 0 else 1
-                assignments = [piece] * n
-            # else: exactly 1 crossing is weird, keep original assignments
+            return result
 
-            # Recompute distances for interpolation
-            all_distances = []
-            for v_2d in target_2d:
-                dists = [np.linalg.norm(v_2d - c) for c in centroids]
-                all_distances.append(dists)
+        assignments = remove_islands(assignments, min_run=5)
 
         # Debug: count assignments per piece
         assignment_counts = [assignments.count(i) for i in range(n_pieces)]
