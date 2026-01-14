@@ -5935,8 +5935,9 @@ class ContourMeshMixin:
                                          initial_translations, initial_rotations,
                                          use_separate_transforms=True):
         """
-        Store visualization data for BP Viz imgui window.
+        Store visualization data for BP Viz imgui window and save to file.
         """
+        # Store for imgui display
         if not hasattr(self, '_bp_viz_data'):
             self._bp_viz_data = []
         self._bp_viz_data.append({
@@ -5949,6 +5950,87 @@ class ContourMeshMixin:
             'initial_rotations': list(initial_rotations),
             'use_separate_transforms': use_separate_transforms,
         })
+
+        # Save to file using matplotlib
+        import matplotlib
+        matplotlib.use('Agg')
+        import matplotlib.pyplot as plt
+        import os
+
+        fig, axes = plt.subplots(1, 2, figsize=(14, 7))
+        colors = plt.cm.tab10(np.linspace(0, 1, len(stream_indices)))
+
+        # Helper to transform shape
+        def transform_shape(shape_2d, scale, tx, ty, theta):
+            cos_t, sin_t = np.cos(theta), np.sin(theta)
+            rot = np.array([[cos_t, -sin_t], [sin_t, cos_t]])
+            scaled = shape_2d * scale
+            rotated = scaled @ rot.T
+            return rotated + np.array([tx, ty])
+
+        # Compute initial transformed shapes
+        initial_transformed = []
+        for i, src_2d in enumerate(source_2d_shapes):
+            tx, ty = initial_translations[i]
+            theta = initial_rotations[i]
+            transformed = transform_shape(src_2d, 1.0, tx, ty, theta)
+            initial_transformed.append(transformed)
+
+        target_arr = np.array(target_2d)
+        mode_str = "SEPARATE" if use_separate_transforms else "COMMON"
+
+        # Left plot: Initial configuration (no dashed original)
+        ax1 = axes[0]
+        ax1.set_title(f'Initial Config [{mode_str}]')
+        ax1.plot(target_arr[:, 0], target_arr[:, 1], 'k-', linewidth=2, label='Target')
+        ax1.fill(target_arr[:, 0], target_arr[:, 1], alpha=0.1, color='gray')
+
+        for i, init_trans in enumerate(initial_transformed):
+            if len(init_trans) >= 3:
+                init_arr = np.array(init_trans)
+                init_closed = np.vstack([init_arr, init_arr[0]])
+                ax1.plot(init_closed[:, 0], init_closed[:, 1], '-', color=colors[i],
+                        linewidth=1.5, label=f'Src {stream_indices[i]}')
+                ax1.fill(init_arr[:, 0], init_arr[:, 1], alpha=0.2, color=colors[i])
+
+        ax1.legend(loc='upper right', fontsize=8)
+        ax1.set_aspect('equal')
+        ax1.grid(True, alpha=0.3)
+
+        # Right plot: Final result
+        ax2 = axes[1]
+        scales_str = ', '.join([f'{s:.2f}' for s in scales])
+        ax2.set_title(f'Final (scales=[{scales_str}])')
+        ax2.plot(target_arr[:, 0], target_arr[:, 1], 'k-', linewidth=2, label='Target')
+        ax2.fill(target_arr[:, 0], target_arr[:, 1], alpha=0.1, color='gray')
+
+        for i, transformed in enumerate(final_transformed):
+            if len(transformed) >= 3:
+                trans_arr = np.array(transformed)
+                trans_closed = np.vstack([trans_arr, trans_arr[0]])
+                ax2.plot(trans_closed[:, 0], trans_closed[:, 1], '-', color=colors[i],
+                        linewidth=2, label=f'Src {stream_indices[i]} (s={scales[i]:.2f})')
+                ax2.fill(trans_arr[:, 0], trans_arr[:, 1], alpha=0.3, color=colors[i])
+
+        ax2.legend(loc='upper right', fontsize=8)
+        ax2.set_aspect('equal')
+        ax2.grid(True, alpha=0.3)
+
+        plt.tight_layout()
+
+        # Save to bp_viz/
+        os.makedirs('bp_viz', exist_ok=True)
+        if not hasattr(self, '_bp_viz_counter'):
+            self._bp_viz_counter = 0
+        self._bp_viz_counter += 1
+
+        obj_name = getattr(self, '_muscle_name', None)
+        if obj_name is None:
+            obj_name = getattr(self, 'name', getattr(self, 'mesh_name', 'unknown'))
+
+        filepath = f'bp_viz/bp_transform_{obj_name}_{self._bp_viz_counter:03d}.png'
+        plt.savefig(filepath, dpi=100)
+        plt.close(fig)
 
     def _cut_contour_for_streams(self, contour, bp, projected_refs, stream_indices):
         """

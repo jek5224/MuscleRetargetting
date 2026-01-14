@@ -3764,7 +3764,7 @@ class GLFWApp():
             ]
 
             # Left column: Original + Initial
-            imgui.text("Original (dashed) + Initial (solid)")
+            imgui.text("Initial Config")
             cursor_pos = imgui.get_cursor_screen_pos()
             x0, y0 = cursor_pos[0] + padding, cursor_pos[1] + padding
 
@@ -3788,29 +3788,7 @@ class GLFWApp():
                     draw_list.add_line(p1[0], p1[1], p2[0], p2[1],
                                       imgui.get_color_u32_rgba(0.9, 0.9, 0.9, 1.0), 2.0)
 
-            # Draw original sources (dashed - draw as dotted)
-            for si, src_2d in enumerate(source_2d_shapes):
-                if len(src_2d) >= 3:
-                    color = colors[si % len(colors)]
-                    src_screen = [to_screen(p, x0, y0, canvas_size) for p in src_2d]
-                    for i in range(len(src_screen)):
-                        p1, p2 = src_screen[i], src_screen[(i+1) % len(src_screen)]
-                        # Draw dashed by drawing short segments
-                        dx, dy = p2[0] - p1[0], p2[1] - p1[1]
-                        length = np.sqrt(dx*dx + dy*dy)
-                        if length > 0:
-                            dash_len = 5
-                            num_dashes = max(1, int(length / (2 * dash_len)))
-                            for d in range(num_dashes):
-                                t1 = d * 2 * dash_len / length
-                                t2 = min((d * 2 + 1) * dash_len / length, 1.0)
-                                if t1 < 1.0:
-                                    draw_list.add_line(
-                                        p1[0] + dx * t1, p1[1] + dy * t1,
-                                        p1[0] + dx * t2, p1[1] + dy * t2,
-                                        imgui.get_color_u32_rgba(*color), 1.5)
-
-            # Draw initial transformed (solid thin)
+            # Draw initial transformed (solid)
             for si, init_trans in enumerate(initial_transformed):
                 if len(init_trans) >= 3:
                     color = colors[si % len(colors)]
