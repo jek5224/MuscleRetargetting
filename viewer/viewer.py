@@ -4062,16 +4062,19 @@ class GLFWApp():
                         draw_list.add_line(p1[0], p1[1], p2[0], p2[1],
                                           imgui.get_color_u32_rgba(color[0], color[1], color[2], 0.8), 1.5)
 
+            # Create invisible button to capture mouse input (prevents window dragging)
+            imgui.set_cursor_screen_pos((x0 - padding, y0 - padding))
+            imgui.invisible_button(f"canvas##{name}", canvas_size + 2 * padding, canvas_size + 2 * padding)
+            canvas_hovered = imgui.is_item_hovered()
+            canvas_active = imgui.is_item_active()
+
             # Handle mouse interaction for drawing line
             mouse_pos = imgui.get_mouse_pos()
-            is_hovered = (x0 <= mouse_pos[0] <= x0 + canvas_size and
-                         y0 <= mouse_pos[1] <= y0 + canvas_size)
 
-            if is_hovered:
-                if imgui.is_mouse_clicked(0):  # Left mouse button
-                    mouse_state['dragging'] = True
-                    mouse_state['start_pos'] = (mouse_pos[0], mouse_pos[1])
-                    mouse_state['end_pos'] = (mouse_pos[0], mouse_pos[1])
+            if canvas_hovered and imgui.is_mouse_clicked(0):
+                mouse_state['dragging'] = True
+                mouse_state['start_pos'] = (mouse_pos[0], mouse_pos[1])
+                mouse_state['end_pos'] = (mouse_pos[0], mouse_pos[1])
 
             if mouse_state['dragging']:
                 mouse_state['end_pos'] = (mouse_pos[0], mouse_pos[1])
@@ -4116,9 +4119,6 @@ class GLFWApp():
                             pt1, pt2 = p1_screen[i], p1_screen[(i+1) % len(p1_screen)]
                             draw_list.add_line(pt1[0], pt1[1], pt2[0], pt2[1],
                                               imgui.get_color_u32_rgba(colors[1][0], colors[1][1], colors[1][2], 1.0), 2.5)
-
-            # Canvas dummy for spacing
-            imgui.dummy(canvas_size + 2 * padding, canvas_size + 2 * padding)
 
             # OK and Cancel buttons
             imgui.separator()
