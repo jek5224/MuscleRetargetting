@@ -5960,52 +5960,73 @@ class ContourMeshMixin:
 
         print(f"  [BP Transform] assignment: {n_close} by contour proximity, {n_centroid} by centroid")
 
-        # Remove islands: for n_pieces, we want exactly n_pieces contiguous runs
-        # Keep merging shortest run until we reach target
-        def remove_islands(arr, target_runs):
-            """Merge runs until we have exactly target_runs contiguous regions."""
-            if len(arr) < 3:
+        # Remove islands: for 2 pieces, find the 2 best split points
+        # This guarantees exactly 2 contiguous regions on a closed contour
+        def remove_islands_2pieces(arr):
+            """For 2 pieces, keep only 2 boundaries to ensure no islands."""
+            n = len(arr)
+            if n < 3:
                 return arr
+
+            # Find all boundary positions (where value changes)
+            boundaries = []
+            for i in range(n):
+                if arr[i] != arr[(i + 1) % n]:
+                    boundaries.append(i)  # boundary after index i
+
+            print(f"  [BP Transform] found {len(boundaries)} boundaries")
+
+            if len(boundaries) <= 2:
+                return arr  # already clean
+
+            # Keep only 2 boundaries - pick the pair with best separation
+            # (maximize the smaller segment for balanced split)
+            best_pair = None
+            best_score = -1
+
+            for i in range(len(boundaries)):
+                for j in range(i + 1, len(boundaries)):
+                    b1, b2 = boundaries[i], boundaries[j]
+                    # Segment sizes
+                    seg1 = (b2 - b1) % n
+                    seg2 = n - seg1
+                    score = min(seg1, seg2)  # balance score
+                    if score > best_score:
+                        best_score = score
+                        best_pair = (b1, b2)
+
+            if best_pair is None:
+                return arr
+
+            b1, b2 = best_pair
+            # Ensure b1 < b2
+            if b1 > b2:
+                b1, b2 = b2, b1
+
+            # Determine which value goes to which segment
+            # Count original values in each segment
+            seg1_indices = list(range(b1 + 1, b2 + 1))
+            seg2_indices = [i for i in range(n) if i not in seg1_indices]
+
+            seg1_votes = [arr[i] for i in seg1_indices]
+            seg2_votes = [arr[i] for i in seg2_indices]
+
+            # Majority vote for each segment
+            seg1_val = 1 if seg1_votes.count(1) > seg1_votes.count(0) else 0
+            seg2_val = 1 - seg1_val  # opposite value
+
+            # Reassign
             result = list(arr)
-            n = len(result)
-
-            for iteration in range(100):  # safety limit
-                # Find runs
-                runs = []
-                i = 0
-                while i < n:
-                    val = result[i]
-                    start = i
-                    while i < n and result[i] == val:
-                        i += 1
-                    runs.append([start, i - start, val])
-
-                print(f"  [BP Transform] island removal iter {iteration}: {len(runs)} runs")
-
-                if len(runs) <= target_runs:
-                    break
-
-                # Find shortest run and merge it
-                shortest_idx = min(range(len(runs)), key=lambda x: runs[x][1])
-                shortest = runs[shortest_idx]
-
-                # Merge into larger neighbor
-                prev_idx = (shortest_idx - 1) % len(runs)
-                next_idx = (shortest_idx + 1) % len(runs)
-
-                # Choose neighbor with more vertices
-                if runs[prev_idx][1] >= runs[next_idx][1]:
-                    merge_val = runs[prev_idx][2]
-                else:
-                    merge_val = runs[next_idx][2]
-
-                # Apply merge
-                for j in range(shortest[0], shortest[0] + shortest[1]):
-                    result[j] = merge_val
+            for i in seg1_indices:
+                result[i] = seg1_val
+            for i in seg2_indices:
+                result[i] = seg2_val
 
             return result
 
-        assignments = remove_islands(assignments, target_runs=n_pieces)
+        if n_pieces == 2:
+            assignments = remove_islands_2pieces(assignments)
+        # For n_pieces > 2, would need different logic
 
         # Debug: count assignments per piece
         assignment_counts = [assignments.count(i) for i in range(n_pieces)]
