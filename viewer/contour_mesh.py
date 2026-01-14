@@ -1111,19 +1111,24 @@ class ContourMeshMixin:
             search_low = scalar_low
             search_high = scalar_high
 
+            print(f"  Searching transition {t['count_curr']}→{t['count_next']} in scalar range [{scalar_low:.6f}, {scalar_high:.6f}]")
+
             for iteration in range(max_iterations):
                 mid_scalar = (search_low + search_high) / 2
 
                 if abs(search_high - search_low) < tolerance:
+                    print(f"    [iter {iteration}] Converged: search range < tolerance")
                     break
 
                 planes_at_mid, contours_at_mid, _ = self.find_contour(mid_scalar, prev_bounding_plane=prev_plane)
 
                 if len(contours_at_mid) == 0:
+                    print(f"    [iter {iteration}] scalar={mid_scalar:.6f}: 0 contours (invalid), narrowing from high")
                     search_high = mid_scalar
                     continue
 
                 count_at_mid = len(contours_at_mid)
+                print(f"    [iter {iteration}] scalar={mid_scalar:.6f}: {count_at_mid} contours, range=[{search_low:.6f}, {search_high:.6f}]")
 
                 if count_at_mid == min_count:
                     best_min_scalar = mid_scalar
@@ -1145,23 +1150,48 @@ class ContourMeshMixin:
                         search_high = mid_scalar
                 elif count_at_mid > max_count:
                     # More than expected, search towards fewer
+                    print(f"    [iter {iteration}] count {count_at_mid} > max {max_count}, unexpected")
                     if t['count_curr'] > t['count_next']:
                         search_low = mid_scalar
                     else:
                         search_high = mid_scalar
                 else:
                     # Less than expected, search towards more
+                    print(f"    [iter {iteration}] count {count_at_mid} < min {min_count}, unexpected")
                     if t['count_curr'] > t['count_next']:
                         search_high = mid_scalar
                     else:
                         search_low = mid_scalar
 
+            # If we didn't find both, use the original endpoints as fallback
+            if best_max_scalar is None and t['count_curr'] == max_count:
+                print(f"    Using original level {level_idx} as max_count={max_count}")
+                best_max_scalar = scalar_low
+                best_max_planes = list(self.bounding_planes[level_idx])
+                best_max_contours = list(self.contours[level_idx])
+            if best_min_scalar is None and t['count_next'] == min_count:
+                print(f"    Using original level {level_idx+1} as min_count={min_count}")
+                best_min_scalar = scalar_high
+                best_min_planes = list(self.bounding_planes[level_idx + 1])
+                best_min_contours = list(self.contours[level_idx + 1])
+
+            print(f"    Result: best_max_scalar={best_max_scalar}, best_min_scalar={best_min_scalar}")
+
             # Collect results to insert (in order by scalar value)
+            # Only insert if scalar is different from original endpoints (avoid duplicates)
             to_insert = []
             if best_max_scalar is not None and best_max_contours is not None:
-                to_insert.append((best_max_scalar, best_max_planes, best_max_contours, max_count))
+                # Don't insert if it's essentially the same as original level
+                if abs(best_max_scalar - scalar_low) > tolerance:
+                    to_insert.append((best_max_scalar, best_max_planes, best_max_contours, max_count))
+                else:
+                    print(f"    Skipping max_scalar={best_max_scalar:.6f} (same as original level)")
             if best_min_scalar is not None and best_min_contours is not None:
-                to_insert.append((best_min_scalar, best_min_planes, best_min_contours, min_count))
+                # Don't insert if it's essentially the same as next level
+                if abs(best_min_scalar - scalar_high) > tolerance:
+                    to_insert.append((best_min_scalar, best_min_planes, best_min_contours, min_count))
+                else:
+                    print(f"    Skipping min_scalar={best_min_scalar:.6f} (same as next level)")
 
             # Sort by scalar value
             to_insert.sort(key=lambda x: x[0])
@@ -1175,7 +1205,7 @@ class ContourMeshMixin:
                 self.contours.insert(insert_idx, contours)
 
             if len(to_insert) == 0:
-                print(f"  Warning: Could not find transition points for level {level_idx}")
+                print(f"  Note: Transition {t['count_curr']}→{t['count_next']} already has sharp boundary (no refinement needed)")
 
         # Update draw_contour_stream
         self.draw_contour_stream = [True] * len(self.contours)
