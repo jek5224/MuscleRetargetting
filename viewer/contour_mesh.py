@@ -5901,15 +5901,13 @@ class ContourMeshMixin:
         )
 
         # ========== Step 7: Assign target vertices by distance ==========
-        new_contours = [[] for _ in range(n_pieces)]
-
+        # First pass: assign each vertex to nearest piece
+        assignments = []
         for v_idx, v_2d in enumerate(target_2d):
-            # Find distance to each transformed source contour
             min_dist = np.inf
             assigned_piece = 0
 
             for piece_idx, transformed in enumerate(final_transformed):
-                # Compute minimum distance to any point in the source contour
                 if len(transformed) > 0:
                     distances = np.linalg.norm(transformed - v_2d, axis=1)
                     dist = np.min(distances)
@@ -5917,7 +5915,26 @@ class ContourMeshMixin:
                         min_dist = dist
                         assigned_piece = piece_idx
 
-            new_contours[assigned_piece].append(target_contour[v_idx])
+            assignments.append(assigned_piece)
+
+        # Second pass: identify boundary vertices and duplicate them
+        # A vertex is at boundary if its neighbors belong to different pieces
+        new_contours = [[] for _ in range(n_pieces)]
+        n_verts = len(target_2d)
+
+        for v_idx in range(n_verts):
+            curr_piece = assignments[v_idx]
+            prev_piece = assignments[(v_idx - 1) % n_verts]
+            next_piece = assignments[(v_idx + 1) % n_verts]
+
+            # Add to primary piece
+            new_contours[curr_piece].append(target_contour[v_idx])
+
+            # If at boundary (neighbor belongs to different piece), duplicate to neighbor's piece
+            if prev_piece != curr_piece:
+                new_contours[prev_piece].append(target_contour[v_idx])
+            if next_piece != curr_piece and next_piece != prev_piece:
+                new_contours[next_piece].append(target_contour[v_idx])
 
         # Ensure each piece has at least some vertices
         for i in range(n_pieces):
