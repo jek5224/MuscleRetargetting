@@ -6259,66 +6259,24 @@ class ContourMeshMixin:
                     contour_dists.append(np.inf)
             all_distances.append(contour_dists)
 
-        # Assign vertices based on cutting line
+        # Assign vertices based on distance to optimized source contours
         assignments = []
 
-        if cut_vertex_indices is not None and n_pieces == 2:
-            # Direct vertex-based assignment: split at the two cut vertices
-            # This guarantees exactly 2 contiguous pieces with no islands
-            idx1, idx2 = cut_vertex_indices
-            n_target = len(target_2d)
+        # For each target vertex, find nearest optimized source contour
+        for v_idx, v_2d in enumerate(target_2d):
+            min_dist = np.inf
+            assigned_piece = 0
+            for piece_idx, transformed in enumerate(final_transformed):
+                if len(transformed) > 0:
+                    # Distance to nearest point on this source contour
+                    dists = np.linalg.norm(transformed - v_2d, axis=1)
+                    min_d = np.min(dists)
+                    if min_d < min_dist:
+                        min_dist = min_d
+                        assigned_piece = piece_idx
+            assignments.append(assigned_piece)
 
-            # Vertices from idx1 to idx2 (exclusive of idx2) go to piece 0
-            # Vertices from idx2 to idx1 (exclusive of idx1) go to piece 1
-            for v_idx in range(n_target):
-                # Check if v_idx is in the range [idx1, idx2) going forward
-                if idx1 <= idx2:
-                    in_piece_0 = (idx1 <= v_idx < idx2)
-                else:
-                    in_piece_0 = (v_idx >= idx1 or v_idx < idx2)
-
-                if in_piece_0:
-                    assignments.append(0)
-                else:
-                    assignments.append(1)
-
-            print(f"  [BP Transform] assignment by cut vertices {idx1}, {idx2}: {assignments.count(0)} to piece 0, {assignments.count(1)} to piece 1")
-
-        elif cutting_line_2d is not None and n_pieces == 2:
-            # Use cutting line for assignment
-            line_point, line_dir = cutting_line_2d
-            # Normal to the cutting line (perpendicular)
-            line_normal = np.array([-line_dir[1], line_dir[0]])
-
-            # Determine which side each centroid is on
-            centroid_sides = []
-            for c in centroids:
-                side = np.dot(c - line_point, line_normal)
-                centroid_sides.append(side)
-
-            # Ensure centroid 0 is on the negative side (for consistent assignment)
-            if centroid_sides[0] > 0:
-                line_normal = -line_normal
-
-            # Assign each vertex based on which side of the line it's on
-            for v_idx, v_2d in enumerate(target_2d):
-                side = np.dot(v_2d - line_point, line_normal)
-                if side < 0:
-                    assignments.append(0)
-                else:
-                    assignments.append(1)
-
-            print(f"  [BP Transform] assignment: {assignments.count(0)} to piece 0, {assignments.count(1)} to piece 1 (by cutting line)")
-
-        else:
-            # Fallback to centroid-based assignment for n_pieces != 2 or no cutting line
-            for v_idx, v_2d in enumerate(target_2d):
-                centroid_dists = [np.linalg.norm(v_2d - c) for c in centroids]
-                min_centroid_dist = min(centroid_dists)
-                assigned_piece = centroid_dists.index(min_centroid_dist)
-                assignments.append(assigned_piece)
-
-            print(f"  [BP Transform] assignment by centroid: {[assignments.count(i) for i in range(n_pieces)]}")
+        print(f"  [BP Transform] assignment by source proximity: {[assignments.count(i) for i in range(n_pieces)]}")
 
         # Remove islands: for 2 pieces, find the 2 best split points
         # This guarantees exactly 2 contiguous regions on a closed contour
@@ -6384,9 +6342,8 @@ class ContourMeshMixin:
 
             return result
 
-        if n_pieces == 2 and cut_vertex_indices is None:
-            # Only need island removal when NOT using direct vertex indices
-            # Direct vertex indices already guarantee no islands
+        if n_pieces == 2:
+            # Remove islands to ensure exactly 2 contiguous pieces
             assignments = remove_islands_2pieces(assignments)
         # For n_pieces > 2, would need different logic
 
