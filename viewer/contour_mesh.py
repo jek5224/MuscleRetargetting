@@ -6064,8 +6064,12 @@ class ContourMeshMixin:
                 # Low coverage - strongly penalize to prevent shrinkage
                 coverage_cost += 100.0 * target_area * (0.5 - coverage_ratio)
 
-            # Only minimize coverage cost (symmetric difference)
-            return coverage_cost
+            # Area matching cost - penalize when source area differs from target area
+            # This encourages the optimizer to adjust scales to match areas
+            area_ratio = union_area / (target_area + 1e-10)
+            area_cost = abs(area_ratio - 1.0) * target_area * 10.0  # Weight = 10
+
+            return coverage_cost + area_cost
 
         # ========== Step 4: Build initial configuration ==========
         # Compute initial scale based on area ratio (sources should roughly cover target)
@@ -6145,10 +6149,14 @@ class ContourMeshMixin:
 
             coverage_cost = union_area + target_area - 2 * intersection_area
 
-            if verbose:
-                print(f"    scales={[f'({sx:.3f},{sy:.3f})' for sx,sy in scales_dbg]}, coverage={coverage_cost:.6f}")
+            # Area matching cost
+            area_ratio = union_area / (target_area + 1e-10)
+            area_cost = abs(area_ratio - 1.0) * target_area * 10.0
 
-            return coverage_cost
+            if verbose:
+                print(f"    scales={[f'({sx:.3f},{sy:.3f})' for sx,sy in scales_dbg]}, coverage={coverage_cost:.6f}, area_cost={area_cost:.6f}")
+
+            return coverage_cost + area_cost
 
         init_cost = objective(x0)
         objective_debug(x0, verbose=True)
