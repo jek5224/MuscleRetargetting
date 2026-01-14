@@ -5895,11 +5895,43 @@ class ContourMeshMixin:
 
             else:
                 # Non-merged region: originally separate contours
-                # Include all levels by default (each stream gets all its original contours)
+                # Each stream selects independently based on its own error
                 for stream_i in range(max_stream_count):
-                    region_selected = set(range(start, end + 1))
+                    region_selected = set()
+                    for level_i in range(start, end + 1):
+                        if level_i in must_use_levels:
+                            region_selected.add(level_i)
+
+                    # Add region boundaries as anchors
+                    region_selected.add(start)
+                    region_selected.add(end)
+
+                    # Greedy selection for this stream
+                    while True:
+                        max_error = 0
+                        max_error_level = None
+                        selected_sorted = sorted(region_selected)
+
+                        for gap_idx in range(len(selected_sorted) - 1):
+                            prev_idx = selected_sorted[gap_idx]
+                            next_idx = selected_sorted[gap_idx + 1]
+
+                            for level_i in range(prev_idx + 1, next_idx):
+                                if level_i in region_selected:
+                                    continue
+
+                                error = compute_stream_error(stream_i, level_i, prev_idx, next_idx)
+                                if error > max_error:
+                                    max_error = error
+                                    max_error_level = level_i
+
+                        if max_error <= error_threshold or max_error_level is None:
+                            break
+
+                        region_selected.add(max_error_level)
+
                     stream_selected[stream_i].update(region_selected)
-                print(f"  Region [{start}-{end}] (non-merged): all {end - start + 1} levels included")
+                    print(f"  Region [{start}-{end}] stream {stream_i} (non-merged): {len(region_selected)} levels selected")
 
         # No equalization - each stream keeps its own selected levels
         # Originally-separate regions: independent selection per stream
