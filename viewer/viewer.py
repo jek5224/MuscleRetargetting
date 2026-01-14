@@ -3986,62 +3986,30 @@ class GLFWApp():
             target_level = obj._manual_cut_data['target_level']
             source_level = obj._manual_cut_data['source_level']
 
-            # Compute initial cut line from minimum distance between sources
-            # Collect all pairs, sort by distance, pick minimum non-zero (skip shared boundary)
-            if 'initial_line' not in obj._manual_cut_data and len(source_2d_list) >= 2:
-                src0 = source_2d_list[0]
-                src1 = source_2d_list[1]
-                n0, n1 = len(src0), len(src1)
-
-                # Collect all distance pairs
-                all_pairs = []  # (distance, pt0, pt1)
-
-                # Vertex-vertex pairs
-                for i0, v0 in enumerate(src0):
-                    for i1, v1 in enumerate(src1):
-                        dist = np.linalg.norm(v0 - v1)
-                        all_pairs.append((dist, v0.copy(), v1.copy()))
-
-                # Vertex-edge pairs (src0 vertex to src1 edge)
-                for i0, v in enumerate(src0):
-                    for j in range(n1):
-                        e0, e1 = src1[j], src1[(j + 1) % n1]
-                        edge_vec = e1 - e0
-                        edge_len_sq = np.dot(edge_vec, edge_vec)
-                        if edge_len_sq < 1e-10:
-                            continue
-                        t = np.clip(np.dot(v - e0, edge_vec) / edge_len_sq, 0, 1)
-                        closest = e0 + t * edge_vec
-                        dist = np.linalg.norm(v - closest)
-                        all_pairs.append((dist, v.copy(), closest.copy()))
-
-                # Vertex-edge pairs (src1 vertex to src0 edge)
-                for i1, v in enumerate(src1):
-                    for j in range(n0):
-                        e0, e1 = src0[j], src0[(j + 1) % n0]
-                        edge_vec = e1 - e0
-                        edge_len_sq = np.dot(edge_vec, edge_vec)
-                        if edge_len_sq < 1e-10:
-                            continue
-                        t = np.clip(np.dot(v - e0, edge_vec) / edge_len_sq, 0, 1)
-                        closest = e0 + t * edge_vec
-                        dist = np.linalg.norm(v - closest)
-                        all_pairs.append((dist, closest.copy(), v.copy()))
-
-                # Sort by distance and take minimum
-                all_pairs.sort(key=lambda x: x[0])
-
+            # Compute initial cut line from narrowest neck inside target contour
+            # Find vertex pairs that are far apart on the contour but close in distance
+            if 'initial_line' not in obj._manual_cut_data:
+                n = len(target_2d)
+                min_dist = float('inf')
                 best_pt0, best_pt1 = None, None
-                if all_pairs:
-                    dist, best_pt0, best_pt1 = all_pairs[0]
-                    print(f"  Initial cut line: min distance = {dist:.6f}")
-                    print(f"    pt0 = {best_pt0}, pt1 = {best_pt1}")
+
+                # For each pair of vertices, check if they could form a narrow neck
+                # Skip adjacent vertices (at least 1/4 of contour length apart in index)
+                min_index_sep = max(3, n // 4)
+
+                for i in range(n):
+                    for j in range(i + min_index_sep, min(i + n - min_index_sep + 1, n)):
+                        v0, v1 = target_2d[i], target_2d[j]
+                        dist = np.linalg.norm(v1 - v0)
+                        if dist < min_dist:
+                            min_dist = dist
+                            best_pt0, best_pt1 = v0.copy(), v1.copy()
 
                 if best_pt0 is not None and best_pt1 is not None:
-                    # Store min distance pair for visualization
-                    obj._manual_cut_data['min_dist_pair'] = (best_pt0.copy(), best_pt1.copy())
+                    print(f"  Initial cut line: narrowest neck = {min_dist:.6f}")
+                    print(f"    pt0 = {best_pt0}, pt1 = {best_pt1}")
 
-                    # Cut line passes through the minimum distance pair
+                    # Cut line passes through the narrowest neck
                     cut_dir = best_pt1 - best_pt0
                     if np.linalg.norm(cut_dir) > 1e-10:
                         cut_dir = cut_dir / np.linalg.norm(cut_dir)
@@ -4145,30 +4113,6 @@ class GLFWApp():
                     draw_list.add_line(p1[0], p1[1], p2[0], p2[1],
                                       imgui.get_color_u32_rgba(1.0, 1.0, 1.0, 1.0), 3.0)
 
-            # Draw source contours (the two contours that merge into target)
-            source_colors = [(0.0, 1.0, 0.5, 0.8), (1.0, 1.0, 0.0, 0.8)]  # Green, Yellow
-            for si, src_2d in enumerate(source_2d_list[:2]):
-                if len(src_2d) >= 3:
-                    src_screen = [to_screen(p, x0, y0, canvas_size) for p in src_2d]
-                    color = source_colors[si % len(source_colors)]
-                    for i in range(len(src_screen)):
-                        p1, p2 = src_screen[i], src_screen[(i+1) % len(src_screen)]
-                        draw_list.add_line(p1[0], p1[1], p2[0], p2[1],
-                                          imgui.get_color_u32_rgba(*color), 2.0)
-
-            # Draw min distance pair points if computed
-            if 'min_dist_pair' in obj._manual_cut_data:
-                pt0, pt1 = obj._manual_cut_data['min_dist_pair']
-                s0 = to_screen(pt0, x0, y0, canvas_size)
-                s1 = to_screen(pt1, x0, y0, canvas_size)
-                # Draw the pair points as circles
-                draw_list.add_circle_filled(s0[0], s0[1], 6.0,
-                                           imgui.get_color_u32_rgba(1.0, 0.0, 0.0, 1.0))
-                draw_list.add_circle_filled(s1[0], s1[1], 6.0,
-                                           imgui.get_color_u32_rgba(1.0, 0.0, 0.0, 1.0))
-                # Draw line connecting them
-                draw_list.add_line(s0[0], s0[1], s1[0], s1[1],
-                                  imgui.get_color_u32_rgba(1.0, 0.0, 0.0, 0.8), 2.0)
 
             # Create invisible button to capture mouse input (prevents window dragging)
             imgui.set_cursor_screen_pos((x0 - padding, y0 - padding))
