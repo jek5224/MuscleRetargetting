@@ -5172,50 +5172,15 @@ class ContourMeshMixin:
                         # Assign cut pieces to streams
                         for idx, stream_i in enumerate(streams_for_contour):
                             cut_contour = cut_contours[idx]
-                            # Create new bounding plane for cut piece
+                            # Create new bounding plane for cut piece using only cut vertices
+                            # z-axis will be computed naturally from the cut contour shape
+                            # User can apply z, x, bp smoothening later
                             _, new_bp = self.save_bounding_planes(
                                 cut_contour,
                                 target_bp['scalar_value'],
-                                prev_bounding_plane=stream_bounding_planes[stream_i][-1],
-                                bounding_plane_info_orig=target_bp
+                                prev_bounding_plane=stream_bounding_planes[stream_i][-1]
                             )
-
-                            # Apply cutting info to bounding plane if available
-                            if cutting_info is not None:
-                                new_bp['is_cut'] = True
-                                # Preserve original z-axis
-                                original_z = cutting_info['original_z']
-                                new_bp['basis_z'] = original_z.copy()
-
-                                # Set x-axis perpendicular to cutting line
-                                cutting_line_3d = cutting_info['cutting_line_3d']
-                                if cutting_line_3d is not None:
-                                    # x-axis is perpendicular to cutting line within the plane
-                                    # The cutting line is already in the plane, so we use cross product
-                                    new_x = np.cross(original_z, cutting_line_3d)
-                                    new_x_norm = np.linalg.norm(new_x)
-                                    if new_x_norm > 1e-10:
-                                        new_x = new_x / new_x_norm
-                                        new_y = np.cross(original_z, new_x)
-                                        new_y = new_y / (np.linalg.norm(new_y) + 1e-10)
-                                        new_bp['basis_x'] = new_x
-                                        new_bp['basis_y'] = new_y
-
-                                        # Recalculate square_like with new basis
-                                        cut_contour_arr = np.array(cut_contour)
-                                        cut_mean = new_bp['mean']
-                                        projected_2d = np.array([
-                                            [np.dot(v - cut_mean, new_x), np.dot(v - cut_mean, new_y)]
-                                            for v in cut_contour_arr
-                                        ])
-                                        min_x, max_x = np.min(projected_2d[:, 0]), np.max(projected_2d[:, 0])
-                                        min_y, max_y = np.min(projected_2d[:, 1]), np.max(projected_2d[:, 1])
-                                        x_len = max_x - min_x
-                                        y_len = max_y - min_y
-                                        ratio_threshold = 2.0
-                                        new_bp['square_like'] = (max(x_len, y_len) / min(x_len, y_len) < ratio_threshold
-                                                                 if min(x_len, y_len) > 1e-10 else False)
-                                        print(f"    Stream {stream_i}: set x-axis perpendicular to cutting line, square_like={new_bp['square_like']}")
+                            new_bp['is_cut'] = True
 
                             stream_contours[stream_i].append(cut_contour)
                             stream_bounding_planes[stream_i].append(new_bp)
@@ -5235,160 +5200,8 @@ class ContourMeshMixin:
 
         print(f"Created {max_stream_count} streams, each with {len(stream_contours[0])} levels")
 
-        # ========== Smooth z, x, bp for each stream ==========
-        print("Smoothening stream axes...")
-        for stream_i in range(max_stream_count):
-            bp_stream = self.stream_bounding_planes[stream_i]
-            stream_len = len(bp_stream)
-            if stream_len < 2:
-                continue
-
-            # Z-axis: first contour should point toward second
-            first_mean = bp_stream[0]['mean']
-            second_mean = bp_stream[1]['mean']
-            forward_dir = second_mean - first_mean
-            forward_norm = np.linalg.norm(forward_dir)
-            if forward_norm > 1e-10:
-                forward_dir = forward_dir / forward_norm
-                if np.dot(bp_stream[0]['basis_z'], forward_dir) < 0:
-                    bp_stream[0]['basis_z'] = -bp_stream[0]['basis_z']
-                    bp_stream[0]['basis_x'] = -bp_stream[0]['basis_x']
-                    print(f"  Stream {stream_i}, level 0: flipped z toward next")
-
-            # Forward pass: align z with previous
-            for i in range(1, stream_len):
-                if np.dot(bp_stream[i]['basis_z'], bp_stream[i-1]['basis_z']) < 0:
-                    bp_stream[i]['basis_z'] = -bp_stream[i]['basis_z']
-                    bp_stream[i]['basis_x'] = -bp_stream[i]['basis_x']
-
-            # X-axis: align with (1,0,0) projected, then propagate
-            first_z = bp_stream[0]['basis_z']
-            first_x = bp_stream[0]['basis_x']
-            ref_x = np.array([1.0, 0.0, 0.0])
-            ref_x_proj = ref_x - np.dot(ref_x, first_z) * first_z
-            ref_x_norm = np.linalg.norm(ref_x_proj)
-            if ref_x_norm > 0.1:
-                ref_x_proj = ref_x_proj / ref_x_norm
-                if np.dot(first_x, ref_x_proj) < 0:
-                    bp_stream[0]['basis_x'] = -bp_stream[0]['basis_x']
-                    bp_stream[0]['basis_y'] = -bp_stream[0]['basis_y']
-
-            # Propagate x alignment
-            for i in range(1, stream_len):
-                curr_x = bp_stream[i]['basis_x']
-                curr_z = bp_stream[i]['basis_z']
-                prev_x = bp_stream[i-1]['basis_x']
-                prev_x_proj = prev_x - np.dot(prev_x, curr_z) * curr_z
-                prev_x_norm = np.linalg.norm(prev_x_proj)
-                if prev_x_norm > 1e-10:
-                    prev_x_proj = prev_x_proj / prev_x_norm
-                    if np.dot(curr_x, prev_x_proj) < 0:
-                        bp_stream[i]['basis_x'] = -bp_stream[i]['basis_x']
-                        bp_stream[i]['basis_y'] = -bp_stream[i]['basis_y']
-
-            # BP smoothing: interpolate basis_x for square-like contours
-            # Cut contours are also smoothened if square-like (same principle as smoothen_bp)
-            # Reference contours: non-square-like
-            reference_indices = [i for i, bp in enumerate(bp_stream)
-                                 if not bp.get('square_like', False)]
-            # Contours to smooth: square-like (including cut contours)
-            smooth_indices = [i for i, bp in enumerate(bp_stream)
-                              if bp.get('square_like', False)]
-
-            # Count cut contours for info
-            cut_count = sum(1 for bp in bp_stream if bp.get('is_cut', False))
-            if cut_count > 0:
-                print(f"  Stream {stream_i}: {cut_count} cut contours (smoothened if square-like)")
-
-            if len(reference_indices) == 0 and len(smooth_indices) > 0:
-                # All square-like - find most non-square-like as reference
-                best_idx = 0
-                best_ratio_diff = 0
-                for i, bp in enumerate(bp_stream):
-                    corners = bp.get('bounding_plane')
-                    if corners is None or len(corners) < 4:
-                        continue
-                    width = np.linalg.norm(corners[1] - corners[0])
-                    height = np.linalg.norm(corners[3] - corners[0])
-                    if min(width, height) > 1e-10:
-                        ratio = max(width, height) / min(width, height)
-                        ratio_diff = abs(ratio - 1.0)
-                        if ratio_diff > best_ratio_diff:
-                            best_ratio_diff = ratio_diff
-                            best_idx = i
-                bp_stream[best_idx]['square_like'] = False
-                reference_indices = [best_idx]
-                smooth_indices = [i for i in smooth_indices if i != best_idx]
-                print(f"  Stream {stream_i}: all square-like, ref={best_idx}")
-
-            # Interpolate square-like contours (including cut contours)
-            for i in smooth_indices:
-                bp = bp_stream[i]
-                curr_mean = bp['mean']
-                basis_z = bp['basis_z']
-
-                # Find prev reference (non-square-like)
-                prev_idx = None
-                prev_dist = np.inf
-                for j in range(i - 1, -1, -1):
-                    if j in reference_indices:
-                        prev_dist = np.linalg.norm(curr_mean - bp_stream[j]['mean'])
-                        prev_idx = j
-                        break
-
-                # Find next reference (non-square-like)
-                next_idx = None
-                next_dist = np.inf
-                for j in range(i + 1, stream_len):
-                    if j in reference_indices:
-                        next_dist = np.linalg.norm(curr_mean - bp_stream[j]['mean'])
-                        next_idx = j
-                        break
-
-                if prev_idx is None and next_idx is None:
-                    continue
-
-                # Determine target basis_x
-                if prev_idx is not None and next_idx is not None:
-                    # Interpolate between prev and next
-                    prev_x = bp_stream[prev_idx]['basis_x']
-                    prev_x_proj = prev_x - np.dot(prev_x, basis_z) * basis_z
-                    prev_x_proj = prev_x_proj / (np.linalg.norm(prev_x_proj) + 1e-10)
-
-                    next_x = bp_stream[next_idx]['basis_x']
-                    next_x_proj = next_x - np.dot(next_x, basis_z) * basis_z
-                    next_x_proj = next_x_proj / (np.linalg.norm(next_x_proj) + 1e-10)
-
-                    total_dist = prev_dist + next_dist
-                    t = prev_dist / total_dist if total_dist > 1e-10 else 0.5
-
-                    # Compute angle and interpolate
-                    cos_angle = np.clip(np.dot(prev_x_proj, next_x_proj), -1, 1)
-                    cross = np.cross(prev_x_proj, next_x_proj)
-                    sin_angle = np.dot(cross, basis_z)
-                    angle = np.arctan2(sin_angle, cos_angle)
-                    interp_angle = angle * t
-
-                    cos_t = np.cos(interp_angle)
-                    sin_t = np.sin(interp_angle)
-                    new_basis_x = prev_x_proj * cos_t + np.cross(basis_z, prev_x_proj) * sin_t
-                elif prev_idx is not None:
-                    prev_x = bp_stream[prev_idx]['basis_x']
-                    new_basis_x = prev_x - np.dot(prev_x, basis_z) * basis_z
-                    new_basis_x = new_basis_x / (np.linalg.norm(new_basis_x) + 1e-10)
-                else:
-                    next_x = bp_stream[next_idx]['basis_x']
-                    new_basis_x = next_x - np.dot(next_x, basis_z) * basis_z
-                    new_basis_x = new_basis_x / (np.linalg.norm(new_basis_x) + 1e-10)
-
-                new_basis_y = np.cross(basis_z, new_basis_x)
-                new_basis_y = new_basis_y / (np.linalg.norm(new_basis_y) + 1e-10)
-
-                bp['basis_x'] = new_basis_x
-                bp['basis_y'] = new_basis_y
-
-            if len(smooth_indices) > 0:
-                print(f"  Stream {stream_i}: smoothed {len(smooth_indices)} square-like contours")
+        # Bounding planes are computed naturally from cut contour vertices
+        # User can apply z, x, bp smoothening manually using the buttons
 
         # Update visualization: convert to [stream_i][level_i] format
         self.contours = self.stream_contours
