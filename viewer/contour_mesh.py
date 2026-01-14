@@ -5923,11 +5923,6 @@ class ContourMeshMixin:
             return self._cut_contour_for_streams(target_contour, target_bp, projected_refs, stream_indices)
 
         total_source_area = sum(source_areas)
-        if total_source_area > 0:
-            source_area_ratios = [a / total_source_area for a in source_areas]
-        else:
-            source_area_ratios = [1.0 / n_pieces] * n_pieces
-        print(f"  [BP Transform] source area ratios: {[f'{r:.3f}' for r in source_area_ratios]}")
 
         # ========== Step 3: Define optimization objective ==========
         def transform_shape(shape_2d, scale, tx, ty, theta):
@@ -6067,41 +6062,8 @@ class ContourMeshMixin:
                 # Low coverage - strongly penalize to prevent shrinkage
                 coverage_cost += 100.0 * target_area * (0.5 - coverage_ratio)
 
-            # Regularization 1: Penalize overlap between sources
-            overlap_cost = 0.0
-            if len(transformed_polygons) >= 2:
-                total_individual_area = sum(p.area for p in transformed_polygons)
-                # Overlap = sum of individual areas - union area
-                overlap_cost = total_individual_area - union_area
-
-            # Regularization 2: Penalize deviation from initial rotation
-            rotation_cost = sum(abs(t - initial_rotations[i]) for i, t in enumerate(thetas))
-
-            # Regularization 3: Penalize deviation from source area ratios
-            # Compute intersection of each transformed source with target
-            area_ratio_cost = 0.0
-            if len(transformed_polygons) >= 2:
-                divided_areas = []
-                for poly in transformed_polygons:
-                    try:
-                        inter = poly.intersection(target_poly)
-                        divided_areas.append(inter.area)
-                    except:
-                        divided_areas.append(0.0)
-                total_divided = sum(divided_areas)
-                if total_divided > 0:
-                    divided_ratios = [a / total_divided for a in divided_areas]
-                    # Sum of squared differences between source and divided ratios
-                    area_ratio_cost = sum((sr - dr) ** 2 for sr, dr in zip(source_area_ratios, divided_ratios))
-
-            # Weights for regularization (all scaled relative to target_area for scale invariance)
-            # coverage_cost is already an area, so weights should be dimensionless or scale appropriately
-            overlap_weight = 2.0  # Moderate penalty for overlap (allow some if needed for coverage)
-            rotation_weight = 0.01  # Small penalty for rotation deviation
-            area_ratio_weight = 0.5  # Penalty for area ratio deviation
-
-            total_cost = coverage_cost + overlap_weight * overlap_cost + rotation_weight * rotation_cost + area_ratio_weight * area_ratio_cost
-            return total_cost
+            # Only minimize coverage cost (symmetric difference)
+            return coverage_cost
 
         # ========== Step 4: Build initial configuration ==========
         # Compute initial scale based on area ratio (sources should roughly cover target)
@@ -6178,12 +6140,11 @@ class ContourMeshMixin:
                 return 1e10
 
             coverage_cost = union_area + target_area - 2 * intersection_area
-            overlap_cost = sum(p.area for p in transformed_polygons) - union_area if len(transformed_polygons) >= 2 else 0
 
             if verbose:
-                print(f"    scales={[f'{s:.3f}' for s in scales_dbg]}, coverage={coverage_cost:.6f}, overlap={overlap_cost:.6f}")
+                print(f"    scales={[f'{s:.3f}' for s in scales_dbg]}, coverage={coverage_cost:.6f}")
 
-            return coverage_cost + 2.0 * overlap_cost
+            return coverage_cost
 
         init_cost = objective(x0)
         objective_debug(x0, verbose=True)
