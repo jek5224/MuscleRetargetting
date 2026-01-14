@@ -3988,16 +3988,11 @@ class GLFWApp():
             imgui.text("Draw a line to cut the target contour")
             imgui.separator()
 
-            # Compute bounds for normalization
-            all_points = [target_2d]
-            for src in source_2d_list:
-                if len(src) > 0:
-                    all_points.append(src)
-            all_points_arr = np.vstack(all_points)
-            min_xy = all_points_arr.min(axis=0)
-            max_xy = all_points_arr.max(axis=0)
+            # Compute bounds for normalization (only target contour)
+            min_xy = target_2d.min(axis=0)
+            max_xy = target_2d.max(axis=0)
             range_xy = max_xy - min_xy
-            max_range = max(range_xy) * 1.2  # Add some padding
+            max_range = max(range_xy) * 1.1  # Small padding
 
             # Canvas setup
             canvas_size = 450
@@ -4027,7 +4022,8 @@ class GLFWApp():
                               x0 + canvas_size + padding, y0 + canvas_size + padding,
                               imgui.get_color_u32_rgba(0.5, 0.5, 0.5, 1.0))
 
-            # Draw target contour (solid white)
+            # Draw target contour (solid white, thick line)
+            colors = [(0.2, 0.6, 1.0), (1.0, 0.4, 0.2)]  # Blue, Orange for cut pieces
             if len(target_2d) >= 3:
                 target_screen = [to_screen(p, x0, y0, canvas_size) for p in target_2d]
                 # Fill with gray
@@ -4037,30 +4033,11 @@ class GLFWApp():
                         target_screen[i][0], target_screen[i][1],
                         target_screen[i+1][0], target_screen[i+1][1],
                         imgui.get_color_u32_rgba(0.3, 0.3, 0.3, 0.5))
-                # Outline
+                # Outline (thick)
                 for i in range(len(target_screen)):
                     p1, p2 = target_screen[i], target_screen[(i+1) % len(target_screen)]
                     draw_list.add_line(p1[0], p1[1], p2[0], p2[1],
-                                      imgui.get_color_u32_rgba(1.0, 1.0, 1.0, 1.0), 2.0)
-
-            # Draw source contours (transparent colored)
-            colors = [(0.2, 0.6, 1.0), (1.0, 0.4, 0.2)]  # Blue, Orange
-            for si, src_2d in enumerate(source_2d_list):
-                if len(src_2d) >= 3:
-                    color = colors[si % len(colors)]
-                    src_screen = [to_screen(p, x0, y0, canvas_size) for p in src_2d]
-                    # Fill with alpha
-                    for i in range(1, len(src_screen) - 1):
-                        draw_list.add_triangle_filled(
-                            src_screen[0][0], src_screen[0][1],
-                            src_screen[i][0], src_screen[i][1],
-                            src_screen[i+1][0], src_screen[i+1][1],
-                            imgui.get_color_u32_rgba(color[0], color[1], color[2], 0.25))
-                    # Outline
-                    for i in range(len(src_screen)):
-                        p1, p2 = src_screen[i], src_screen[(i+1) % len(src_screen)]
-                        draw_list.add_line(p1[0], p1[1], p2[0], p2[1],
-                                          imgui.get_color_u32_rgba(color[0], color[1], color[2], 0.8), 1.5)
+                                      imgui.get_color_u32_rgba(1.0, 1.0, 1.0, 1.0), 3.0)
 
             # Create invisible button to capture mouse input (prevents window dragging)
             imgui.set_cursor_screen_pos((x0 - padding, y0 - padding))

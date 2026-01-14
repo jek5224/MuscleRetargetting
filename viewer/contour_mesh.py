@@ -1311,14 +1311,11 @@ class ContourMeshMixin:
             print(f"    Result: best_large_scalar={best_large_scalar:.6f} (count={large_count}), best_small_scalar={best_small_scalar:.6f} (count={small_count})")
 
             # Collect results to insert (in order by scalar value)
-            # Only insert if scalar is different from original endpoints (avoid duplicates)
+            # Only insert the SMALL count contour - manual cut will handle the large side
             to_insert = []
+            # Skip large count contour - manual cut handles the first SEPARATE division
             if best_large_scalar is not None and best_large_contours is not None:
-                # Don't insert if it's essentially the same as original large level
-                if abs(best_large_scalar - scalar_large) > tolerance:
-                    to_insert.append((best_large_scalar, best_large_planes, best_large_contours, large_count))
-                else:
-                    print(f"    Skipping large_scalar={best_large_scalar:.6f} (same as original level)")
+                print(f"    Skipping large_scalar={best_large_scalar:.6f} (manual cut will handle)")
             if best_small_scalar is not None and best_small_contours is not None:
                 # Don't insert if it's essentially the same as original small level
                 if abs(best_small_scalar - scalar_small) > tolerance:
@@ -5360,11 +5357,11 @@ class ContourMeshMixin:
                 continue  # Parallel lines
 
             diff = p1 - np.array(line_start)
-            t = (line_dir[0] * diff[1] - line_dir[1] * diff[0]) / cross
-            s = (edge_dir[0] * diff[1] - edge_dir[1] * diff[0]) / cross
+            # t = edge parameter (we want t in [0,1] for intersection on edge)
+            # Using standard line intersection formula
+            t = (diff[0] * line_dir[1] - diff[1] * line_dir[0]) / cross
 
             # Check if intersection is within edge (t in [0, 1])
-            # s can be anything since cutting line extends infinitely
             if 0 < t < 1:  # Strictly inside edge (not at vertices)
                 intersection_2d = p1 + t * edge_dir
                 intersections.append((i, t, intersection_2d))
@@ -5479,7 +5476,8 @@ class ContourMeshMixin:
                 continue
 
             diff = p1 - np.array(line_start)
-            t = (line_dir[0] * diff[1] - line_dir[1] * diff[0]) / cross
+            # t = edge parameter (we want t in [0,1] for intersection on edge)
+            t = (diff[0] * line_dir[1] - diff[1] * line_dir[0]) / cross
 
             if 0 < t < 1:
                 intersection_2d = p1 + t * edge_dir
