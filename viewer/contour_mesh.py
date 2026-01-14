@@ -6096,8 +6096,8 @@ class ContourMeshMixin:
                 print(f"  [BP Transform] WARNING: piece {piece_idx} has no vertices, using initial position")
 
         # ========== Step 6.5: Find cutting line ==========
-        # For 2 pieces, find the boundary line between the two optimized source contours
-        # After optimization, the sources are positioned well, so their boundary naturally divides the target
+        # SEPARATE mode: Use nearest non-adjacent vertices on target (waist/concave points)
+        # COMMON mode: Use shared boundary from cut sources (they were cut from one contour)
         cutting_line_2d = None  # (point, direction) in 2D target plane
         cutting_line_3d = None  # direction vector in 3D for bounding plane creation
 
@@ -6106,54 +6106,73 @@ class ContourMeshMixin:
                 src_0 = np.array(final_transformed[0])
                 src_1 = np.array(final_transformed[1])
 
-                if len(src_0) >= 3 and len(src_1) >= 3:
-                    # Find the boundary between two optimized source contours
-                    # The boundary is where the two sources meet/overlap
-                    boundary_points = []
+                if use_separate_transforms:
+                    # SEPARATE mode (first division): Find nearest non-adjacent vertices on target
+                    # These form a natural "waist" at concave regions
+                    n_target = len(target_2d)
+                    min_dist = np.inf
+                    best_pair = None
 
-                    # Compute size for threshold
+                    # Minimum separation to avoid adjacent vertices
+                    min_separation = max(3, n_target // 4)
+
+                    for i in range(n_target):
+                        for j in range(i + min_separation, n_target):
+                            # Check wrap-around distance too
+                            wrap_dist = n_target - j + i
+                            if wrap_dist < min_separation:
+                                continue
+
+                            dist = np.linalg.norm(target_2d[i] - target_2d[j])
+                            if dist < min_dist:
+                                min_dist = dist
+                                best_pair = (i, j)
+
+                    if best_pair is not None:
+                        idx1, idx2 = best_pair
+                        p1 = target_2d[idx1]
+                        p2 = target_2d[idx2]
+                        cut_point = (p1 + p2) / 2
+                        cut_dir = p2 - p1
+                        cut_dir = cut_dir / (np.linalg.norm(cut_dir) + 1e-10)
+                        cutting_line_2d = (cut_point, cut_dir)
+                        print(f"  [BP Transform] SEPARATE: cut at nearest non-adjacent vertices {idx1}, {idx2} (dist={min_dist:.4f})")
+
+                elif len(src_0) >= 3 and len(src_1) >= 3:
+                    # COMMON mode (propagated): Sources were cut from one contour
+                    # Find the shared boundary - vertices that are very close between sources
+                    shared_boundary_points = []
+
+                    # Use small threshold - shared vertices should be nearly identical
                     size_0 = np.max(np.linalg.norm(src_0 - src_0.mean(axis=0), axis=1))
                     size_1 = np.max(np.linalg.norm(src_1 - src_1.mean(axis=0), axis=1))
-                    threshold = 0.3 * min(size_0, size_1)
+                    threshold = 0.05 * min(size_0, size_1)
 
-                    # Find edges of src_0 that are close to src_1
-                    for i in range(len(src_0)):
-                        p0 = src_0[i]
-                        p1 = src_0[(i + 1) % len(src_0)]
-                        edge_mid = (p0 + p1) / 2
+                    # Find vertices in src_0 that have a very close match in src_1
+                    for v0 in src_0:
+                        dists = np.linalg.norm(src_1 - v0, axis=1)
+                        if np.min(dists) < threshold:
+                            shared_boundary_points.append(v0)
 
-                        # Distance from edge midpoint to nearest point on src_1
-                        dists_to_src1 = np.linalg.norm(src_1 - edge_mid, axis=1)
-                        min_dist = np.min(dists_to_src1)
+                    # Also check src_1 vertices close to src_0
+                    for v1 in src_1:
+                        dists = np.linalg.norm(src_0 - v1, axis=1)
+                        if np.min(dists) < threshold:
+                            shared_boundary_points.append(v1)
 
-                        if min_dist < threshold:
-                            boundary_points.append(p0)
-                            boundary_points.append(p1)
-
-                    # Similarly for src_1 edges close to src_0
-                    for i in range(len(src_1)):
-                        p0 = src_1[i]
-                        p1 = src_1[(i + 1) % len(src_1)]
-                        edge_mid = (p0 + p1) / 2
-
-                        dists_to_src0 = np.linalg.norm(src_0 - edge_mid, axis=1)
-                        min_dist = np.min(dists_to_src0)
-
-                        if min_dist < threshold:
-                            boundary_points.append(p0)
-                            boundary_points.append(p1)
-
-                    if len(boundary_points) >= 2:
-                        boundary_points = np.array(boundary_points)
-                        # Fit a line to the boundary points using PCA
-                        boundary_mean = boundary_points.mean(axis=0)
-                        centered = boundary_points - boundary_mean
+                    if len(shared_boundary_points) >= 2:
+                        shared_boundary_points = np.array(shared_boundary_points)
+                        # Fit a line through shared boundary points
+                        boundary_mean = shared_boundary_points.mean(axis=0)
+                        centered = shared_boundary_points - boundary_mean
                         _, _, Vt = np.linalg.svd(centered, full_matrices=False)
-                        boundary_dir = Vt[0]  # Principal direction
+                        boundary_dir = Vt[0]
                         boundary_dir = boundary_dir / (np.linalg.norm(boundary_dir) + 1e-10)
 
                         cutting_line_2d = (boundary_mean, boundary_dir)
-                        print(f"  [BP Transform] Found boundary line from {len(boundary_points)} points")
+                        print(f"  [BP Transform] COMMON: found shared boundary from {len(shared_boundary_points)} points")
+                    else:
+                        print(f"  [BP Transform] COMMON: no shared boundary found (threshold={threshold:.4f})")
 
                 if cutting_line_2d is None:
                     # Fallback: Use perpendicular bisector between centroids
