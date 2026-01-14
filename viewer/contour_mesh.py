@@ -5660,10 +5660,30 @@ class ContourMeshMixin:
             assigned_stream = stream_order[piece_idx]
             new_contours[assigned_stream].append(v)
 
-        # Ensure each piece has at least some vertices
+        # Ensure each piece has at least some vertices and convert to proper numpy arrays
         for i in range(n_pieces):
             if len(new_contours[i]) == 0:
-                new_contours[i] = [target_mean]
+                new_contours[i] = [np.array(target_mean).flatten()[:3]]
+
+            # Convert list of vertices to numpy array with shape (N, 3)
+            valid_vertices = []
+            for v in new_contours[i]:
+                v_arr = np.asarray(v).flatten()
+                if len(v_arr) >= 3:
+                    valid_vertices.append(v_arr[:3])
+                elif len(v_arr) > 0:
+                    padded = np.zeros(3)
+                    padded[:len(v_arr)] = v_arr
+                    valid_vertices.append(padded)
+
+            if len(valid_vertices) == 0:
+                valid_vertices = [np.array(target_mean).flatten()[:3]]
+
+            new_contours[i] = np.array(valid_vertices)
+
+            # Ensure at least 3 vertices for valid contour
+            while len(new_contours[i]) < 3:
+                new_contours[i] = np.vstack([new_contours[i], new_contours[i][-1]])
 
         return new_contours
 
@@ -6681,11 +6701,31 @@ class ContourMeshMixin:
                     new_contours[assigned_stream].append(v)
                     break
 
-        # Ensure each piece has at least some vertices
+        # Ensure each piece has at least some vertices and convert to proper numpy arrays
         for i in range(n_pieces):
             if len(new_contours[i]) == 0:
-                # Fallback: assign center vertex
-                new_contours[i] = [target_mean]
+                new_contours[i] = [np.array(target_mean).flatten()[:3]]
+
+            # Convert list of vertices to numpy array with shape (N, 3)
+            valid_vertices = []
+            for v in new_contours[i]:
+                v_arr = np.asarray(v).flatten()
+                if len(v_arr) >= 3:
+                    valid_vertices.append(v_arr[:3])
+                elif len(v_arr) > 0:
+                    # Pad with zeros if needed
+                    padded = np.zeros(3)
+                    padded[:len(v_arr)] = v_arr
+                    valid_vertices.append(padded)
+
+            if len(valid_vertices) == 0:
+                valid_vertices = [np.array(target_mean).flatten()[:3]]
+
+            new_contours[i] = np.array(valid_vertices)
+
+            # Ensure at least 3 vertices for valid contour
+            while len(new_contours[i]) < 3:
+                new_contours[i] = np.vstack([new_contours[i], new_contours[i][-1]])
 
         return new_contours
 
