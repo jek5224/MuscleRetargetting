@@ -3856,6 +3856,16 @@ class GLFWApp():
                         draw_list.add_line(p1[0], p1[1], p2[0], p2[1],
                                           imgui.get_color_u32_rgba(*color), 2.0)
 
+            # Draw vertex assignments as colored circles on target contour
+            assignments = data.get('assignments', [])
+            if assignments and len(target_screen) == len(assignments):
+                for v_idx, (screen_pt, piece_idx) in enumerate(zip(target_screen, assignments)):
+                    color = colors[piece_idx % len(colors)]
+                    draw_list.add_circle_filled(screen_pt[0], screen_pt[1], 4.0,
+                                               imgui.get_color_u32_rgba(*color))
+                    draw_list.add_circle(screen_pt[0], screen_pt[1], 4.0,
+                                        imgui.get_color_u32_rgba(0.0, 0.0, 0.0, 1.0), 12, 1.0)
+
             imgui.dummy(canvas_size + 2 * padding, canvas_size + 2 * padding)
             imgui.columns(1)
 

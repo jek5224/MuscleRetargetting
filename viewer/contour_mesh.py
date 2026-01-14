@@ -5893,13 +5893,6 @@ class ContourMeshMixin:
                     except Exception as e:
                         print(f"  [BP Transform] Could not check adjacency: {e}")
 
-        # ========== Step 6.6: Save visualization for debugging ==========
-        self._save_bp_transform_visualization(
-            target_2d, target_poly, source_2d_shapes, final_transformed,
-            stream_indices, optimal_scales, initial_translations, initial_rotations,
-            use_separate_transforms
-        )
-
         # ========== Step 7: Assign target vertices by distance ==========
         # First pass: assign each vertex to nearest piece and compute distances
         assignments = []
@@ -5995,13 +5988,20 @@ class ContourMeshMixin:
             if len(new_contours[i]) == 0:
                 new_contours[i] = [target_mean]
 
+        # ========== Step 8: Save visualization with assignments ==========
+        self._save_bp_transform_visualization(
+            target_2d, target_poly, source_2d_shapes, final_transformed,
+            stream_indices, optimal_scales, initial_translations, initial_rotations,
+            use_separate_transforms, assignments
+        )
+
         print(f"  [BP Transform] result: {[len(c) for c in new_contours]} vertices per piece")
         return new_contours
 
     def _save_bp_transform_visualization(self, target_2d, target_poly, source_2d_shapes,
                                          final_transformed, stream_indices, scales,
                                          initial_translations, initial_rotations,
-                                         use_separate_transforms=True):
+                                         use_separate_transforms=True, assignments=None):
         """
         Store visualization data for BP Viz imgui window and save to file.
         """
@@ -6017,6 +6017,7 @@ class ContourMeshMixin:
             'initial_translations': [np.array(t) for t in initial_translations],
             'initial_rotations': list(initial_rotations),
             'use_separate_transforms': use_separate_transforms,
+            'assignments': list(assignments) if assignments else [],
         })
 
         # Save to file using matplotlib
@@ -6084,6 +6085,12 @@ class ContourMeshMixin:
                 ax2.plot(trans_closed[:, 0], trans_closed[:, 1], '-', color=colors[i],
                         linewidth=2, label=f'Src {stream_indices[i]} (s={scales[i]:.2f})')
                 ax2.fill(trans_arr[:, 0], trans_arr[:, 1], alpha=0.3, color=colors[i])
+
+        # Draw vertex assignments as colored markers on target contour
+        if assignments:
+            for v_idx, (v_2d, piece_idx) in enumerate(zip(target_arr, assignments)):
+                ax2.scatter(v_2d[0], v_2d[1], c=[colors[piece_idx]], s=20, zorder=10,
+                           edgecolors='black', linewidths=0.5)
 
         ax2.legend(loc='upper right', fontsize=8)
         ax2.set_aspect('equal')
