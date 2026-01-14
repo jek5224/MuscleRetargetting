@@ -5063,8 +5063,6 @@ class ContourMeshMixin:
 
         # Track which stream combinations have been cut (for first vs propagated division)
         cut_stream_combos = set()
-        # Store cutting lines from first division for use in propagated divisions
-        stored_cutting_lines = {}
 
         # Process remaining levels
         for level_i_idx in range(1, len(level_order)):
@@ -5156,23 +5154,10 @@ class ContourMeshMixin:
                             is_first_division = stream_combo not in cut_stream_combos
                             cut_stream_combos.add(stream_combo)
 
-                            # Get stored cutting line for COMMON mode (from first division)
-                            original_cutting_line = stored_cutting_lines.get(stream_combo)
-
                             cut_contours, cutting_info = self._cut_contour_bp_transform(
                                 target_contour, target_bp, source_contours, source_bps, streams_for_contour,
-                                is_first_division=is_first_division,
-                                original_cutting_line=original_cutting_line
+                                is_first_division=is_first_division
                             )
-
-                            # Store/update cutting line for future COMMON mode cuts
-                            # Update after each cut (first division or propagated) to track the evolving position
-                            if cutting_info is not None:
-                                cutting_line_2d = cutting_info.get('cutting_line_2d')
-                                if cutting_line_2d is not None:
-                                    stored_cutting_lines[stream_combo] = cutting_line_2d
-                                    mode = "SEPARATE" if is_first_division else "COMMON"
-                                    print(f"  [BP Transform] Updated cutting line for stream combo {stream_combo} ({mode})")
                         elif cut_method == 'mesh':
                             cut_contours = self._cut_contour_mesh_aware(
                                 target_contour, target_bp, projected_refs, streams_for_contour
@@ -5682,7 +5667,7 @@ class ContourMeshMixin:
 
         return new_contours
 
-    def _cut_contour_bp_transform(self, target_contour, target_bp, source_contours, source_bps, stream_indices, is_first_division=True, original_cutting_line=None):
+    def _cut_contour_bp_transform(self, target_contour, target_bp, source_contours, source_bps, stream_indices, is_first_division=True):
         """
         Cut a contour using bounding plane transformation and optimization.
 
@@ -5695,11 +5680,10 @@ class ContourMeshMixin:
             source_contours: List of source contours (from previous level)
             source_bps: List of bounding planes for source contours
             stream_indices: Which stream indices these pieces are for
-            is_first_division: True if this is first division (2→1 originally),
-                              False if propagated (1→1 originally).
-                              Affects whether separate or common scales are used.
-            original_cutting_line: For COMMON mode, the cutting line from first division
-                                  as (point, direction) in 2D. Will be transformed with sources.
+            is_first_division: True if this is first division (SEPARATE mode),
+                              False if propagated (COMMON mode).
+                              SEPARATE: each source optimized independently, cut at target waist
+                              COMMON: sources move together, cut at shared boundary vertices
 
         Returns:
             List of cut contour pieces (one per stream)
@@ -6155,77 +6139,30 @@ class ContourMeshMixin:
                         cutting_line_2d = (cut_point, cut_dir)
                         print(f"  [BP Transform] SEPARATE: cut at nearest non-adjacent vertices {idx1}, {idx2} (dist={min_dist:.4f})")
 
-                        # Store cutting line relative to combined_center for COMMON mode reuse
-                        # combined_center is mean of initial_translations
-                        sep_combined_center = np.mean(initial_translations, axis=0)
-                        stored_point_rel = cut_point - sep_combined_center
-                        stored_dir_angle = np.arctan2(cut_dir[1], cut_dir[0])
-                        # Store as tuple (point_rel, dir_angle) for transformation in COMMON mode
-                        self._last_cutting_line_for_storage = (stored_point_rel, stored_dir_angle)
-                        print(f"  [BP Transform] SEPARATE: stored cutting line relative to center")
-
-                elif original_cutting_line is not None:
-                    # COMMON mode with stored cutting line from previous level
-                    # The cutting line was stored relative to previous combined_center
-                    # Transform it using the same transformation as the sources
-                    stored_point_rel, stored_dir_angle = original_cutting_line
-
-                    # In COMMON mode, the transformation is:
-                    # 1. Translate to origin (relative to combined_center)
-                    # 2. Scale
-                    # 3. Rotate by theta
-                    # 4. Translate to (center_tx, center_ty)
-
-                    # Get the COMMON mode transformation parameters
-                    common_scale = max(optimal_params[0], 0.1)
-                    center_tx = optimal_params[1]
-                    center_ty = optimal_params[2]
-                    theta = optimal_params[3]
-
-                    # The stored cutting line point was relative to combined_center
-                    # Apply the same transformation
-                    cos_t = np.cos(theta)
-                    sin_t = np.sin(theta)
-                    rot = np.array([[cos_t, -sin_t], [sin_t, cos_t]])
-
-                    # Transform the relative point: scale, rotate, then add final center
-                    scaled_rel = stored_point_rel * common_scale
-                    rotated_rel = scaled_rel @ rot.T
-                    transformed_point = rotated_rel + np.array([center_tx, center_ty])
-
-                    # Transform the direction: just rotate (direction doesn't scale or translate)
-                    original_dir = np.array([np.cos(stored_dir_angle), np.sin(stored_dir_angle)])
-                    transformed_dir = original_dir @ rot.T
-                    transformed_dir = transformed_dir / (np.linalg.norm(transformed_dir) + 1e-10)
-
-                    cutting_line_2d = (transformed_point, transformed_dir)
-                    print(f"  [BP Transform] COMMON: transformed stored cutting line (theta={np.degrees(theta):.1f}°)")
-
-                    # Update stored cutting line relative to NEW combined_center for next level
-                    # The new combined_center is at (center_tx, center_ty) after optimization
-                    new_combined_center = np.array([center_tx, center_ty])
-                    new_point_rel = transformed_point - new_combined_center
-                    new_dir_angle = np.arctan2(transformed_dir[1], transformed_dir[0])
-                    self._last_cutting_line_for_storage = (new_point_rel, new_dir_angle)
-                    print(f"  [BP Transform] COMMON: updated stored cutting line for next level")
-
                 elif len(src_0) >= 3 and len(src_1) >= 3:
-                    # COMMON mode fallback: Find shared boundary vertices between sources
-                    # After cutting, both pieces have the same boundary vertices
+                    # COMMON mode: Find shared boundary vertices between transformed sources
+                    # The sources share boundary vertices from the original cut
+                    # These vertices move with the sources during optimization
                     boundary_vertices = []
 
                     # Look for vertices in src_0 that are very close to vertices in src_1
                     size_0 = np.max(np.linalg.norm(src_0 - src_0.mean(axis=0), axis=1))
                     size_1 = np.max(np.linalg.norm(src_1 - src_1.mean(axis=0), axis=1))
-                    threshold = 0.01 * min(size_0, size_1)  # Very small threshold
+                    # Use adaptive threshold - start small, increase if needed
+                    for threshold_mult in [0.01, 0.05, 0.1, 0.2]:
+                        threshold = threshold_mult * min(size_0, size_1)
+                        boundary_vertices = []
+                        for v0 in src_0:
+                            dists = np.linalg.norm(src_1 - v0, axis=1)
+                            min_dist = np.min(dists)
+                            if min_dist < threshold:
+                                closest_idx = np.argmin(dists)
+                                # Use midpoint of the two close vertices
+                                boundary_vertices.append((v0 + src_1[closest_idx]) / 2)
+                        if len(boundary_vertices) >= 2:
+                            break
 
-                    for v0 in src_0:
-                        dists = np.linalg.norm(src_1 - v0, axis=1)
-                        min_dist = np.min(dists)
-                        if min_dist < threshold:
-                            boundary_vertices.append(v0)
-
-                    print(f"  [BP Transform] COMMON fallback: found {len(boundary_vertices)} shared boundary vertices")
+                    print(f"  [BP Transform] COMMON: found {len(boundary_vertices)} shared boundary vertices (threshold={threshold:.4f})")
 
                     if len(boundary_vertices) >= 2:
                         boundary_arr = np.array(boundary_vertices)
@@ -6236,7 +6173,7 @@ class ContourMeshMixin:
                         boundary_dir = boundary_dir / (np.linalg.norm(boundary_dir) + 1e-10)
 
                         cutting_line_2d = (boundary_mean, boundary_dir)
-                        print(f"  [BP Transform] COMMON fallback: boundary line fitted")
+                        print(f"  [BP Transform] COMMON: boundary line from shared vertices")
 
                 if cutting_line_2d is None:
                     # Fallback: Use perpendicular bisector between centroids
@@ -6500,16 +6437,11 @@ class ContourMeshMixin:
         #   - cutting_line_3d: the cutting line direction in 3D (for x-axis perpendicular)
         #   - original_z: the original target bounding plane z-axis (to preserve)
         #   - is_cut: True to mark these contours as cut (don't smooth them)
-        #   - cutting_line_2d: for COMMON mode reuse (stored relative to combined_center)
         cutting_info = {
             'cutting_line_3d': cutting_line_3d,
             'original_z': target_bp['basis_z'].copy(),
-            'is_cut': True,
-            'cutting_line_2d': getattr(self, '_last_cutting_line_for_storage', None)
+            'is_cut': True
         }
-        # Clear the temporary storage
-        if hasattr(self, '_last_cutting_line_for_storage'):
-            del self._last_cutting_line_for_storage
 
         return new_contours, cutting_info
 
@@ -6611,13 +6543,14 @@ class ContourMeshMixin:
             ax2.plot(target_arr[:, 0], target_arr[:, 1], 'k-', linewidth=2, label='Target')
             ax2.fill(target_arr[:, 0], target_arr[:, 1], alpha=0.1, color='gray')
 
-        # Draw optimized source contours (thick colored lines)
+        # Draw optimized source contours (filled like initial config)
         for i, transformed in enumerate(final_transformed):
             if len(transformed) >= 3:
                 trans_arr = np.array(transformed)
                 trans_closed = np.vstack([trans_arr, trans_arr[0]])
+                ax2.fill(trans_arr[:, 0], trans_arr[:, 1], alpha=0.3, color=colors[i])
                 ax2.plot(trans_closed[:, 0], trans_closed[:, 1], '-', color=colors[i],
-                        linewidth=2.5, zorder=15, label=f'Opt {stream_indices[i]}')
+                        linewidth=2.0, zorder=15, label=f'Opt {stream_indices[i]}')
 
         # Draw centroids as large X markers
         if centroids:
