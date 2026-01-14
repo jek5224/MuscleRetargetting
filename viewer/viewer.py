@@ -3991,7 +3991,7 @@ class GLFWApp():
             if 'initial_line' not in obj._manual_cut_data:
                 n = len(target_2d)
                 min_dist = float('inf')
-                best_pt0, best_pt1 = None, None
+                best_i, best_j = None, None
 
                 # For each pair of vertices, check if they could form a narrow neck
                 # Skip adjacent vertices (at least 1/4 of contour length apart in index)
@@ -4003,18 +4003,30 @@ class GLFWApp():
                         dist = np.linalg.norm(v1 - v0)
                         if dist < min_dist:
                             min_dist = dist
-                            best_pt0, best_pt1 = v0.copy(), v1.copy()
+                            best_i, best_j = i, j
 
-                if best_pt0 is not None and best_pt1 is not None:
+                if best_i is not None and best_j is not None:
+                    best_pt0 = target_2d[best_i].copy()
+                    best_pt1 = target_2d[best_j].copy()
                     print(f"  Initial cut line: narrowest neck = {min_dist:.6f}")
-                    print(f"    pt0 = {best_pt0}, pt1 = {best_pt1}")
+                    print(f"    pt0[{best_i}] = {best_pt0}, pt1[{best_j}] = {best_pt1}")
 
                     # Cut line passes through the narrowest neck
                     cut_dir = best_pt1 - best_pt0
-                    if np.linalg.norm(cut_dir) > 1e-10:
+                    if np.linalg.norm(cut_dir) > 1e-4:
                         cut_dir = cut_dir / np.linalg.norm(cut_dir)
                     else:
-                        cut_dir = np.array([1.0, 0.0])
+                        # Near-zero distance: use perpendicular to contour tangent at pinch point
+                        # Compute tangent at best_i
+                        prev_i = (best_i - 1) % n
+                        next_i = (best_i + 1) % n
+                        tangent = target_2d[next_i] - target_2d[prev_i]
+                        if np.linalg.norm(tangent) > 1e-10:
+                            tangent = tangent / np.linalg.norm(tangent)
+                            # Perpendicular to tangent
+                            cut_dir = np.array([-tangent[1], tangent[0]])
+                        else:
+                            cut_dir = np.array([1.0, 0.0])
 
                     # Extend line to cross target contour
                     mid_pt = (best_pt0 + best_pt1) / 2
