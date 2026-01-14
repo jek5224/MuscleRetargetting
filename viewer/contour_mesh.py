@@ -5194,38 +5194,60 @@ class ContourMeshMixin:
         insertion_count = len(self.contours[-1])
         max_stream_count = max(origin_count, insertion_count)
 
-        # Determine which side has fewer contours (target for cutting)
-        # and which has more (sources)
-        if origin_count < insertion_count:
-            # Origin has fewer - it's the target, insertion is source
-            target_level = 0
-            source_level = num_levels - 1
-            process_forward = False  # insertion → origin
+        # Determine processing direction (from larger count side)
+        if origin_count >= insertion_count:
+            # Process origin → insertion
+            level_order = list(range(num_levels))
+            process_forward = True
         else:
-            # Insertion has fewer - it's the target, origin is source
-            target_level = num_levels - 1
-            source_level = 0
-            process_forward = True  # origin → insertion
+            # Process insertion → origin
+            level_order = list(range(num_levels - 1, -1, -1))
+            process_forward = False
 
-        target_count = len(self.contours[target_level])
+        # Find the first level where contour count changes (decreases)
+        # Source = level before change (more contours)
+        # Target = level where change happens (fewer contours, merged)
+        source_level = None
+        target_level = None
+
+        prev_level = level_order[0]
+        prev_count = len(self.contours[prev_level])
+
+        for i in range(1, len(level_order)):
+            curr_level = level_order[i]
+            curr_count = len(self.contours[curr_level])
+
+            if curr_count < prev_count:
+                # Found a transition where count decreases
+                source_level = prev_level
+                target_level = curr_level
+                break
+
+            prev_level = curr_level
+            prev_count = curr_count
+
+        if source_level is None or target_level is None:
+            print(f"No transition found where contour count decreases")
+            return
+
         source_count = len(self.contours[source_level])
+        target_count = len(self.contours[target_level])
 
         print(f"\n=== Preparing Manual Cut ===")
-        print(f"Target level: {target_level} ({target_count} contours)")
         print(f"Source level: {source_level} ({source_count} contours)")
+        print(f"Target level: {target_level} ({target_count} contours)")
 
-        # For now, handle the case where target has 1 contour and source has 2
-        # This is the most common case
+        # For now, handle the case where source has 2 and target has 1
         if target_count != 1 or source_count != 2:
-            print(f"Manual cutting currently only supports 1 target → 2 sources")
+            print(f"Manual cutting currently only supports 2 sources → 1 target")
             print(f"Falling back to automatic cutting")
             return
 
-        # Get target contour and its bounding plane
+        # Get target contour and its bounding plane (the merged contour to cut)
         target_contour = np.array(self.contours[target_level][0])
         target_bp = self.bounding_planes[target_level][0]
 
-        # Get source contours and their bounding planes
+        # Get source contours and their bounding planes (the separate contours as reference)
         source_contours = [np.array(self.contours[source_level][i]) for i in range(source_count)]
         source_bps = [self.bounding_planes[source_level][i] for i in range(source_count)]
 
