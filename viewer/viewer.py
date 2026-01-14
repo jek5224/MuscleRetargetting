@@ -4033,6 +4033,7 @@ class GLFWApp():
                     line_start = tuple(best_pt0 - direction * extent)
                     line_end = tuple(best_pt1 + direction * extent)
                     obj._manual_cut_data['initial_line'] = (line_start, line_end)
+                    obj._manual_cut_data['neck_indices'] = (best_i, best_j)
                     if obj._manual_cut_line is None:
                         obj._manual_cut_line = (line_start, line_end)
 

@@ -5280,79 +5280,112 @@ class ContourMeshMixin:
             print("No manual cut data or line available")
             return None
 
-        line_start, line_end = self._manual_cut_line
         target_2d = self._manual_cut_data['target_2d']
         target_contour = self._manual_cut_data['target_contour']
         target_bp = self._manual_cut_data['target_bp']
-
         n_verts = len(target_2d)
 
-        # Find intersections between the cutting line and contour edges
-        intersections = []  # List of (edge_index, t_param, intersection_point_2d)
+        # Ensure shared_cut_vertices exists
+        if not hasattr(self, 'shared_cut_vertices'):
+            self.shared_cut_vertices = []
 
-        for i in range(n_verts):
-            p1 = target_2d[i]
-            p2 = target_2d[(i + 1) % n_verts]
+        # Check if we have neck indices (cut at vertex positions directly)
+        neck_indices = self._manual_cut_data.get('neck_indices')
+        initial_line = self._manual_cut_data.get('initial_line')
 
-            # Line segment intersection
-            # Line: line_start + s * (line_end - line_start)
-            # Edge: p1 + t * (p2 - p1)
-            line_dir = np.array(line_end) - np.array(line_start)
-            edge_dir = p2 - p1
+        # Use neck indices if the line hasn't been manually changed
+        if neck_indices is not None and self._manual_cut_line == initial_line:
+            idx1, idx2 = neck_indices
+            if idx1 > idx2:
+                idx1, idx2 = idx2, idx1
 
-            # Cross product for 2D (scalar)
-            cross = line_dir[0] * edge_dir[1] - line_dir[1] * edge_dir[0]
+            # Cut at vertex positions
+            cut1_3d = target_contour[idx1].copy()
+            cut2_3d = target_contour[idx2].copy()
 
-            if abs(cross) < 1e-10:
-                continue  # Parallel lines
+            # Build two pieces by splitting at these vertex indices
+            # Piece 0: idx1 -> idx2 (inclusive)
+            piece0_verts = [target_contour[i] for i in range(idx1, idx2 + 1)]
 
-            diff = p1 - np.array(line_start)
-            # t = edge parameter (we want t in [0,1] for intersection on edge)
-            # Using standard line intersection formula
-            t = (diff[0] * line_dir[1] - diff[1] * line_dir[0]) / cross
+            # Piece 1: idx2 -> end, then 0 -> idx1 (inclusive)
+            piece1_verts = [target_contour[i] for i in range(idx2, n_verts)]
+            piece1_verts.extend([target_contour[i] for i in range(0, idx1 + 1)])
 
-            # Check if intersection is within edge (t in [0, 1])
-            if 0 < t < 1:  # Strictly inside edge (not at vertices)
-                intersection_2d = p1 + t * edge_dir
-                intersections.append((i, t, intersection_2d))
+            piece0 = np.array(piece0_verts)
+            piece1 = np.array(piece1_verts)
 
-        if len(intersections) != 2:
-            print(f"Expected 2 intersections, got {len(intersections)}")
-            return None
+            print(f"Manual cut (at neck): piece0 has {len(piece0)} vertices, piece1 has {len(piece1)} vertices")
 
-        # Sort intersections by edge index
-        intersections.sort(key=lambda x: x[0])
+            # Register shared cut edge vertices
+            self.shared_cut_vertices.append(cut1_3d)
+            self.shared_cut_vertices.append(cut2_3d)
+        else:
+            # Use line intersection method for manually drawn lines
+            line_start, line_end = self._manual_cut_line
 
-        (edge1_idx, t1, int1_2d), (edge2_idx, t2, int2_2d) = intersections
+            # Find intersections between the cutting line and contour edges
+            intersections = []  # List of (edge_index, t_param, intersection_point_2d)
 
-        # Convert intersection points from 2D back to 3D
-        target_mean = target_bp['mean']
-        target_x = target_bp['basis_x']
-        target_y = target_bp['basis_y']
+            for i in range(n_verts):
+                p1 = target_2d[i]
+                p2 = target_2d[(i + 1) % n_verts]
 
-        int1_3d = target_mean + int1_2d[0] * target_x + int1_2d[1] * target_y
-        int2_3d = target_mean + int2_2d[0] * target_x + int2_2d[1] * target_y
+                # Line segment intersection
+                line_dir = np.array(line_end) - np.array(line_start)
+                edge_dir = p2 - p1
 
-        # Build two contour pieces
-        # Piece 0: from int1 → edge1+1 → ... → edge2 → int2 → int1 (closed)
-        # Piece 1: from int2 → edge2+1 → ... → edge1 → int1 → int2 (closed)
+                # Cross product for 2D (scalar)
+                cross = line_dir[0] * edge_dir[1] - line_dir[1] * edge_dir[0]
 
-        piece0_verts = [int1_3d]
-        for i in range(edge1_idx + 1, edge2_idx + 1):
-            piece0_verts.append(target_contour[i])
-        piece0_verts.append(int2_3d)
+                if abs(cross) < 1e-10:
+                    continue  # Parallel lines
 
-        piece1_verts = [int2_3d]
-        for i in range(edge2_idx + 1, n_verts):
-            piece1_verts.append(target_contour[i])
-        for i in range(0, edge1_idx + 1):
-            piece1_verts.append(target_contour[i])
-        piece1_verts.append(int1_3d)
+                diff = p1 - np.array(line_start)
+                t = (diff[0] * line_dir[1] - diff[1] * line_dir[0]) / cross
 
-        piece0 = np.array(piece0_verts)
-        piece1 = np.array(piece1_verts)
+                # Check if intersection is within edge (t in [0, 1])
+                if 0 < t < 1:  # Strictly inside edge (not at vertices)
+                    intersection_2d = p1 + t * edge_dir
+                    intersections.append((i, t, intersection_2d))
 
-        print(f"Manual cut: piece0 has {len(piece0)} vertices, piece1 has {len(piece1)} vertices")
+            if len(intersections) != 2:
+                print(f"Expected 2 intersections, got {len(intersections)}")
+                return None
+
+            # Sort intersections by edge index
+            intersections.sort(key=lambda x: x[0])
+
+            (edge1_idx, t1, int1_2d), (edge2_idx, t2, int2_2d) = intersections
+
+            # Convert intersection points from 2D back to 3D
+            target_mean = target_bp['mean']
+            target_x = target_bp['basis_x']
+            target_y = target_bp['basis_y']
+
+            int1_3d = target_mean + int1_2d[0] * target_x + int1_2d[1] * target_y
+            int2_3d = target_mean + int2_2d[0] * target_x + int2_2d[1] * target_y
+
+            # Build two contour pieces
+            piece0_verts = [int1_3d]
+            for i in range(edge1_idx + 1, edge2_idx + 1):
+                piece0_verts.append(target_contour[i])
+            piece0_verts.append(int2_3d)
+
+            piece1_verts = [int2_3d]
+            for i in range(edge2_idx + 1, n_verts):
+                piece1_verts.append(target_contour[i])
+            for i in range(0, edge1_idx + 1):
+                piece1_verts.append(target_contour[i])
+            piece1_verts.append(int1_3d)
+
+            piece0 = np.array(piece0_verts)
+            piece1 = np.array(piece1_verts)
+
+            print(f"Manual cut: piece0 has {len(piece0)} vertices, piece1 has {len(piece1)} vertices")
+
+            # Register shared cut edge vertices
+            self.shared_cut_vertices.append(int1_3d)
+            self.shared_cut_vertices.append(int2_3d)
 
         # Determine which piece corresponds to which source contour
         # Simple 3D centroid distance matching
@@ -5383,14 +5416,6 @@ class ContourMeshMixin:
 
         # Store the result
         self._manual_cut_data['cut_result'] = cut_contours
-        self._manual_cut_data['intersection_3d'] = (int1_3d, int2_3d)
-
-        # Register shared cut edge vertices globally
-        # These vertices are shared between the two pieces and must be preserved exactly
-        if not hasattr(self, 'shared_cut_vertices'):
-            self.shared_cut_vertices = []
-        self.shared_cut_vertices.append(int1_3d.copy())
-        self.shared_cut_vertices.append(int2_3d.copy())
         print(f"  Registered {len(self.shared_cut_vertices)} shared cut edge vertices")
 
         # Store cut edge indices for each piece
