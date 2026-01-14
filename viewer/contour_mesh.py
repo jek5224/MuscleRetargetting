@@ -2422,19 +2422,19 @@ class ContourMeshMixin:
                 print(f"    Stream {stream_idx}: {len(stream)} contours")
 
                 # Check if any non-square-like exists
-                # Cut contours (is_cut=True) are treated as references, not smoothed
-                # Reference indices: non-square-like OR cut contours
+                # Cut contours are also smoothened if square-like (same principle as other contours)
+                # Reference indices: non-square-like
                 reference_indices = [i for i, bp in enumerate(stream)
-                                     if not bp.get('square_like', False) or bp.get('is_cut', False)]
-                # Indices to smooth: square-like AND not cut
+                                     if not bp.get('square_like', False)]
+                # Indices to smooth: square-like (including cut contours)
                 smooth_indices = [i for i, bp in enumerate(stream)
-                                  if bp.get('square_like', False) and not bp.get('is_cut', False)]
+                                  if bp.get('square_like', False)]
                 cut_count = sum(1 for bp in stream if bp.get('is_cut', False))
-                print(f"      Reference indices: {len(reference_indices)} (incl. {cut_count} cut)")
+                print(f"      Reference indices: {len(reference_indices)}, Cut contours: {cut_count}")
                 print(f"      Smooth indices: {smooth_indices[:5]}...{smooth_indices[-5:] if len(smooth_indices) > 5 else ''}")
 
                 if len(reference_indices) == 0 and len(smooth_indices) > 0:
-                    # All square-like and no cut - find most non-square-like by aspect ratio
+                    # All square-like - find most non-square-like by aspect ratio
                     print(f"      All square-like, finding reference...")
                     best_idx = 0
                     best_ratio_diff = 0
@@ -2458,13 +2458,13 @@ class ContourMeshMixin:
                     smooth_indices = [i for i in smooth_indices if i != best_idx]
                     print(f"      Selected contour {best_idx} as reference (ratio_diff={best_ratio_diff:.3f})")
 
-                # ========== Interpolate square-like (non-cut) contours (basis_x only) ==========
+                # ========== Interpolate square-like contours (including cut) (basis_x only) ==========
                 for i in smooth_indices:
                     bp = stream[i]
                     curr_mean = bp['mean']
                     basis_z = bp['basis_z']
 
-                    # Find prev reference (non-square-like OR cut)
+                    # Find prev reference (non-square-like)
                     prev_idx = None
                     prev_dist = np.inf
                     for j in range(i - 1, -1, -1):
@@ -2475,7 +2475,7 @@ class ContourMeshMixin:
                                 prev_idx = j
                             break  # Take closest one going backward
 
-                    # Find next reference (non-square-like OR cut)
+                    # Find next reference (non-square-like)
                     next_idx = None
                     next_dist = np.inf
                     for j in range(i + 1, len(stream)):
@@ -2491,7 +2491,7 @@ class ContourMeshMixin:
                         continue  # Should not happen after selecting reference
 
                     # Print for first few square contours processed
-                    if len([x for x in square_indices if x < i]) < 3:
+                    if len([x for x in smooth_indices if x < i]) < 3:
                         print(f"        [{i}] processing: prev={prev_idx}, next={next_idx}")
 
                     # Determine target basis_x
@@ -4996,21 +4996,21 @@ class ContourMeshMixin:
                         bp_stream[i]['basis_y'] = -bp_stream[i]['basis_y']
 
             # BP smoothing: interpolate basis_x for square-like contours
-            # Cut contours (is_cut=True) are NOT smoothed but ARE used as references
-            # Reference contours: non-square-like OR cut contours
+            # Cut contours are also smoothened if square-like (same principle as smoothen_bp)
+            # Reference contours: non-square-like
             reference_indices = [i for i, bp in enumerate(bp_stream)
-                                 if not bp.get('square_like', False) or bp.get('is_cut', False)]
-            # Contours to smooth: square-like AND not cut
+                                 if not bp.get('square_like', False)]
+            # Contours to smooth: square-like (including cut contours)
             smooth_indices = [i for i, bp in enumerate(bp_stream)
-                              if bp.get('square_like', False) and not bp.get('is_cut', False)]
+                              if bp.get('square_like', False)]
 
-            # Count cut contours
+            # Count cut contours for info
             cut_count = sum(1 for bp in bp_stream if bp.get('is_cut', False))
             if cut_count > 0:
-                print(f"  Stream {stream_i}: {cut_count} cut contours (used as references, not smoothed)")
+                print(f"  Stream {stream_i}: {cut_count} cut contours (smoothened if square-like)")
 
             if len(reference_indices) == 0 and len(smooth_indices) > 0:
-                # All square-like and no cut - find most non-square-like as reference
+                # All square-like - find most non-square-like as reference
                 best_idx = 0
                 best_ratio_diff = 0
                 for i, bp in enumerate(bp_stream):
@@ -5030,13 +5030,13 @@ class ContourMeshMixin:
                 smooth_indices = [i for i in smooth_indices if i != best_idx]
                 print(f"  Stream {stream_i}: all square-like, ref={best_idx}")
 
-            # Interpolate square-like (non-cut) contours
+            # Interpolate square-like contours (including cut contours)
             for i in smooth_indices:
                 bp = bp_stream[i]
                 curr_mean = bp['mean']
                 basis_z = bp['basis_z']
 
-                # Find prev reference (non-square-like OR cut)
+                # Find prev reference (non-square-like)
                 prev_idx = None
                 prev_dist = np.inf
                 for j in range(i - 1, -1, -1):
@@ -5045,7 +5045,7 @@ class ContourMeshMixin:
                         prev_idx = j
                         break
 
-                # Find next reference (non-square-like OR cut)
+                # Find next reference (non-square-like)
                 next_idx = None
                 next_dist = np.inf
                 for j in range(i + 1, stream_len):
