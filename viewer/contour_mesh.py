@@ -6754,7 +6754,7 @@ class ContourMeshMixin:
                 x0,
                 method='L-BFGS-B',
                 bounds=bounds,
-                options={'maxiter': 1000, 'ftol': 1e-9, 'gtol': 1e-7}
+                options={'maxiter': 3000, 'ftol': 1e-9, 'gtol': 1e-7}
             )
             print(f"  [BP Transform] optimizer iterations: {result.nit}")
 
