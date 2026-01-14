@@ -6206,8 +6206,7 @@ class ContourMeshMixin:
         # Draw vertex assignments as colored markers on target contour
         if assignments:
             for v_idx, (v_2d, piece_idx) in enumerate(zip(target_arr, assignments)):
-                ax2.scatter(v_2d[0], v_2d[1], c=[colors[piece_idx]], s=20, zorder=10,
-                           edgecolors='black', linewidths=0.5)
+                ax2.scatter(v_2d[0], v_2d[1], c=[colors[piece_idx]], s=15, zorder=10)
 
         # Draw centroids as large X markers
         if centroids:
