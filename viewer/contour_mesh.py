@@ -802,8 +802,41 @@ class ContourMeshMixin:
 
                 poly = Polygon(verts_2d)
                 if not poly.is_valid:
-                    # Try to fix with buffer(0)
+                    # Try to fix with buffer(0) - this resolves self-intersections
                     fixed_poly = poly.buffer(0)
+
+                    # Helper to reorder vertices using fixed polygon exterior
+                    def reorder_verts_from_fixed(fixed_geom, orig_verts, orig_verts_2d):
+                        """Match fixed polygon coords to original vertices (1-to-1)."""
+                        fixed_coords = np.array(fixed_geom.exterior.coords)[:-1]
+
+                        # Use Hungarian algorithm for optimal 1-to-1 matching
+                        from scipy.optimize import linear_sum_assignment
+
+                        # Build cost matrix: distance from each fixed coord to each original vertex
+                        n_fixed = len(fixed_coords)
+                        n_orig = len(orig_verts_2d)
+
+                        if n_fixed > n_orig:
+                            # More fixed coords than original - can't match all
+                            return None
+
+                        cost_matrix = np.zeros((n_fixed, n_orig))
+                        for i, fc in enumerate(fixed_coords):
+                            cost_matrix[i] = np.linalg.norm(orig_verts_2d - fc, axis=1)
+
+                        # Find optimal assignment
+                        row_ind, col_ind = linear_sum_assignment(cost_matrix)
+
+                        # Check if matching is good (all distances should be very small)
+                        max_dist = max(cost_matrix[row_ind[i], col_ind[i]] for i in range(len(row_ind)))
+                        if max_dist > 0.01:  # Threshold for "close enough"
+                            return None
+
+                        # Reorder original vertices according to fixed polygon order
+                        new_verts = [orig_verts[col_ind[i]] for i in range(len(row_ind))]
+                        return np.array(new_verts)
+
                     if fixed_poly.is_empty:
                         print(f"  [find_contour] WARNING: Skipping empty contour at value {contour_value}")
                         continue
@@ -811,16 +844,9 @@ class ContourMeshMixin:
                         # Split into multiple polygons - take the largest one
                         largest = max(fixed_poly.geoms, key=lambda g: g.area)
                         if largest.area > 0:
-                            # Extract exterior coordinates and map back to 3D
-                            fixed_coords = np.array(largest.exterior.coords)[:-1]  # Remove closing point
-                            # Find closest original vertices for each fixed coord
-                            new_verts = []
-                            for fc in fixed_coords:
-                                dists = np.linalg.norm(verts_2d - fc, axis=1)
-                                closest_idx = np.argmin(dists)
-                                new_verts.append(verts[closest_idx])
-                            if len(new_verts) >= 3:
-                                verts = np.array(new_verts)
+                            new_verts = reorder_verts_from_fixed(largest, verts, verts_2d)
+                            if new_verts is not None and len(new_verts) >= 3:
+                                verts = new_verts
                                 print(f"  [find_contour] Fixed MultiPolygon at value {contour_value}: {len(verts)} vertices")
                             else:
                                 print(f"  [find_contour] WARNING: Skipping degenerate contour at value {contour_value}")
@@ -829,15 +855,10 @@ class ContourMeshMixin:
                             print(f"  [find_contour] WARNING: Skipping zero-area contour at value {contour_value}")
                             continue
                     elif fixed_poly.geom_type == 'Polygon' and fixed_poly.area > 0:
-                        # Successfully fixed - extract and remap vertices
-                        fixed_coords = np.array(fixed_poly.exterior.coords)[:-1]
-                        new_verts = []
-                        for fc in fixed_coords:
-                            dists = np.linalg.norm(verts_2d - fc, axis=1)
-                            closest_idx = np.argmin(dists)
-                            new_verts.append(verts[closest_idx])
-                        if len(new_verts) >= 3:
-                            verts = np.array(new_verts)
+                        # Successfully fixed - reorder vertices
+                        new_verts = reorder_verts_from_fixed(fixed_poly, verts, verts_2d)
+                        if new_verts is not None and len(new_verts) >= 3:
+                            verts = new_verts
                             print(f"  [find_contour] Fixed self-intersection at value {contour_value}: {len(verts)} vertices")
                         else:
                             print(f"  [find_contour] WARNING: Skipping degenerate contour at value {contour_value}")
