@@ -736,8 +736,36 @@ class ContourMeshMixin:
         ordered_contour_vertices_orig = []
         bounding_planes = []
         for edge_group in ordered_contour_edge_groups:
-            ordered_contour_vertices.append(np.array(contour_vertices)[edge_group])
-            ordered_contour_vertices_orig.append(np.array(contour_vertices)[edge_group])
+            verts = np.array(contour_vertices)[edge_group]
+
+            # Skip contours with too few vertices
+            if len(verts) < 3:
+                continue
+
+            # Check for self-intersection using Shapely
+            try:
+                from shapely.geometry import Polygon
+                # Project to 2D for self-intersection check (use first two principal axes)
+                centroid = verts.mean(axis=0)
+                centered = verts - centroid
+                # Simple 2D projection using XY or best-fit plane
+                if centered.shape[1] == 3:
+                    # Use SVD to find principal plane
+                    U, S, Vt = np.linalg.svd(centered, full_matrices=False)
+                    verts_2d = centered @ Vt[:2].T
+                else:
+                    verts_2d = centered[:, :2]
+
+                poly = Polygon(verts_2d)
+                if not poly.is_valid:
+                    print(f"  [find_contour] WARNING: Skipping self-intersecting contour at value {contour_value}")
+                    continue
+            except Exception as e:
+                # If check fails, still include the contour
+                pass
+
+            ordered_contour_vertices.append(verts)
+            ordered_contour_vertices_orig.append(verts.copy())
             ordered_contour_vertices[-1], bounding_plane = self.save_bounding_planes(ordered_contour_vertices[-1], contour_value, prev_bounding_plane=prev_bounding_plane)
             bounding_planes.append(bounding_plane)
 
