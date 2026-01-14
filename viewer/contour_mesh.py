@@ -1043,33 +1043,85 @@ class ContourMeshMixin:
         """
         Refine contours at transition points where contour count changes.
 
-        For transitions like 3→2, 2→3, 2→1, find the exact scalar value where
-        the merge/diverge happens. At that scalar, contour count should be
-        min(count_before, count_after).
+        Always process from LARGER count side to SMALLER count side.
+        For transitions like 3→2, 2→1, find the exact scalar value where
+        the merge happens.
         """
         if len(self.bounding_planes) < 2:
             return
 
         print(f"\n=== Transition Point Refinement ===")
 
-        # Find all transition points
-        transitions = []
-        for level_idx in range(len(self.bounding_planes) - 1):
-            count_curr = len(self.bounding_planes[level_idx])
-            count_next = len(self.bounding_planes[level_idx + 1])
+        # Determine processing direction: from larger count side to smaller
+        origin_count = len(self.bounding_planes[0])
+        insertion_count = len(self.bounding_planes[-1])
+        process_forward = origin_count >= insertion_count  # origin → insertion if origin has more
 
-            if count_curr != count_next:
-                scalar_curr = self.bounding_planes[level_idx][0]['scalar_value']
-                scalar_next = self.bounding_planes[level_idx + 1][0]['scalar_value']
-                expected_count = min(count_curr, count_next)
-                transitions.append({
-                    'level_idx': level_idx,
-                    'count_curr': count_curr,
-                    'count_next': count_next,
-                    'scalar_curr': scalar_curr,
-                    'scalar_next': scalar_next,
-                    'expected_count': expected_count
-                })
+        print(f"Origin count: {origin_count}, Insertion count: {insertion_count}")
+        print(f"Processing direction: {'origin → insertion' if process_forward else 'insertion → origin'}")
+
+        # Find all transition points (always expressed as large_count → small_count)
+        transitions = []
+        num_levels = len(self.bounding_planes)
+
+        if process_forward:
+            # Process origin → insertion
+            for level_idx in range(num_levels - 1):
+                count_curr = len(self.bounding_planes[level_idx])
+                count_next = len(self.bounding_planes[level_idx + 1])
+                if count_curr != count_next:
+                    scalar_curr = self.bounding_planes[level_idx][0]['scalar_value']
+                    scalar_next = self.bounding_planes[level_idx + 1][0]['scalar_value']
+                    # Always store as large → small
+                    if count_curr > count_next:
+                        transitions.append({
+                            'level_idx': level_idx,
+                            'large_level': level_idx,
+                            'small_level': level_idx + 1,
+                            'large_count': count_curr,
+                            'small_count': count_next,
+                            'scalar_large': scalar_curr,
+                            'scalar_small': scalar_next,
+                        })
+                    else:
+                        transitions.append({
+                            'level_idx': level_idx,
+                            'large_level': level_idx + 1,
+                            'small_level': level_idx,
+                            'large_count': count_next,
+                            'small_count': count_curr,
+                            'scalar_large': scalar_next,
+                            'scalar_small': scalar_curr,
+                        })
+        else:
+            # Process insertion → origin (reverse order)
+            for level_idx in range(num_levels - 1, 0, -1):
+                count_curr = len(self.bounding_planes[level_idx])
+                count_prev = len(self.bounding_planes[level_idx - 1])
+                if count_curr != count_prev:
+                    scalar_curr = self.bounding_planes[level_idx][0]['scalar_value']
+                    scalar_prev = self.bounding_planes[level_idx - 1][0]['scalar_value']
+                    # Always store as large → small
+                    if count_curr > count_prev:
+                        transitions.append({
+                            'level_idx': level_idx - 1,
+                            'large_level': level_idx,
+                            'small_level': level_idx - 1,
+                            'large_count': count_curr,
+                            'small_count': count_prev,
+                            'scalar_large': scalar_curr,
+                            'scalar_small': scalar_prev,
+                        })
+                    else:
+                        transitions.append({
+                            'level_idx': level_idx - 1,
+                            'large_level': level_idx - 1,
+                            'small_level': level_idx,
+                            'large_count': count_prev,
+                            'small_count': count_curr,
+                            'scalar_large': scalar_prev,
+                            'scalar_small': scalar_curr,
+                        })
 
         if not transitions:
             print("No transition points found.")
@@ -1077,52 +1129,47 @@ class ContourMeshMixin:
 
         print(f"Found {len(transitions)} transition points:")
         for t in transitions:
-            is_merge = t['count_curr'] > t['count_next']
-            transition_type = "MERGE" if is_merge else "DIVERGE"
-            print(f"  Level {t['level_idx']}: {t['count_curr']}→{t['count_next']} [{transition_type}] "
-                  f"(scalar {t['scalar_curr']:.6f}→{t['scalar_next']:.6f}), expect {t['expected_count']}")
+            print(f"  Level {t['level_idx']}: {t['large_count']}→{t['small_count']} "
+                  f"(scalar {t['scalar_large']:.6f}→{t['scalar_small']:.6f})")
 
         # Process transitions in reverse order to maintain indices
         transitions.sort(key=lambda x: x['level_idx'], reverse=True)
 
         for t in transitions:
             level_idx = t['level_idx']
-            scalar_low = t['scalar_curr']
-            scalar_high = t['scalar_next']
-            min_count = min(t['count_curr'], t['count_next'])
-            max_count = max(t['count_curr'], t['count_next'])
+            large_count = t['large_count']
+            small_count = t['small_count']
+            scalar_large = t['scalar_large']
+            scalar_small = t['scalar_small']
 
             max_iterations = 20
             tolerance = 1e-6
 
-            prev_plane = self.bounding_planes[level_idx][0] if len(self.bounding_planes[level_idx]) > 0 else None
+            # Use bounding plane from large count side as reference
+            prev_plane = self.bounding_planes[t['large_level']][0] if len(self.bounding_planes[t['large_level']]) > 0 else None
 
-            # Find both transition points: one with min_count, one with max_count
-            # Binary search to find the boundary
+            # Find both transition points:
+            # - best_large_scalar: last scalar with large_count (just before transition)
+            # - best_small_scalar: first scalar with small_count (just after transition)
+            best_large_scalar = None
+            best_large_contours = None
+            best_large_planes = None
 
-            # Search for scalar with min_count (closer to the merge/diverge point)
-            best_min_scalar = None
-            best_min_contours = None
-            best_min_planes = None
+            best_small_scalar = None
+            best_small_contours = None
+            best_small_planes = None
 
-            # Search for scalar with max_count (farther from merge/diverge point)
-            best_max_scalar = None
-            best_max_contours = None
-            best_max_planes = None
+            # Binary search from large side towards small side
+            search_start = scalar_large
+            search_end = scalar_small
 
-            search_low = scalar_low
-            search_high = scalar_high
+            print(f"  Searching transition {large_count}→{small_count} from scalar {scalar_large:.6f} to {scalar_small:.6f}")
 
-            is_merge = t['count_curr'] > t['count_next']
-            print(f"  Searching {'MERGE' if is_merge else 'DIVERGE'} transition {t['count_curr']}→{t['count_next']} in scalar range [{scalar_low:.6f}, {scalar_high:.6f}]")
-
-            # Phase 1: Binary search to find approximate transition boundary
-            boundary_scalar = None
+            # Phase 1: Binary search to find transition boundary
             for iteration in range(max_iterations):
-                mid_scalar = (search_low + search_high) / 2
+                mid_scalar = (search_start + search_end) / 2
 
-                if abs(search_high - search_low) < tolerance:
-                    boundary_scalar = mid_scalar
+                if abs(search_end - search_start) < tolerance:
                     print(f"    [Phase1 iter {iteration}] Converged at {mid_scalar:.6f}")
                     break
 
@@ -1130,112 +1177,87 @@ class ContourMeshMixin:
 
                 if len(contours_at_mid) == 0:
                     print(f"    [Phase1 iter {iteration}] scalar={mid_scalar:.6f}: 0 contours (invalid)")
-                    search_high = mid_scalar
+                    # Move towards large side (which should have valid contours)
+                    search_end = mid_scalar
                     continue
 
                 count_at_mid = len(contours_at_mid)
 
-                if count_at_mid == min_count:
-                    best_min_scalar = mid_scalar
-                    best_min_contours = contours_at_mid
-                    best_min_planes = planes_at_mid
-                    # Search towards max_count side
-                    if is_merge:
-                        search_high = mid_scalar
-                    else:
-                        search_low = mid_scalar
-                elif count_at_mid == max_count:
-                    best_max_scalar = mid_scalar
-                    best_max_contours = contours_at_mid
-                    best_max_planes = planes_at_mid
-                    # Search towards min_count side
-                    if is_merge:
-                        search_low = mid_scalar
-                    else:
-                        search_high = mid_scalar
-                elif count_at_mid > max_count:
-                    print(f"    [Phase1 iter {iteration}] count {count_at_mid} > max {max_count}, unexpected")
-                    if is_merge:
-                        search_low = mid_scalar
-                    else:
-                        search_high = mid_scalar
+                if count_at_mid == large_count:
+                    best_large_scalar = mid_scalar
+                    best_large_contours = contours_at_mid
+                    best_large_planes = planes_at_mid
+                    # Search towards small side
+                    search_start = mid_scalar
+                elif count_at_mid == small_count:
+                    best_small_scalar = mid_scalar
+                    best_small_contours = contours_at_mid
+                    best_small_planes = planes_at_mid
+                    # Search towards large side
+                    search_end = mid_scalar
+                elif count_at_mid > large_count:
+                    print(f"    [Phase1 iter {iteration}] count {count_at_mid} > large {large_count}, unexpected")
+                    search_start = mid_scalar
                 else:
-                    print(f"    [Phase1 iter {iteration}] count {count_at_mid} < min {min_count}, unexpected")
-                    if is_merge:
-                        search_high = mid_scalar
-                    else:
-                        search_low = mid_scalar
+                    print(f"    [Phase1 iter {iteration}] count {count_at_mid} < small {small_count}, unexpected")
+                    search_end = mid_scalar
 
             # Phase 2: If we only found one side, search explicitly for the other
-            if best_min_scalar is not None and best_max_scalar is None:
-                print(f"    [Phase2] Found min_count={min_count}, searching for max_count={max_count}")
-                # Search in the direction of max_count
-                search_start = best_min_scalar
-                search_end = scalar_high if is_merge else scalar_low
+            if best_small_scalar is not None and best_large_scalar is None:
+                print(f"    [Phase2] Found small_count={small_count}, searching for large_count={large_count}")
+                # Search towards large side
                 for step in range(10):
-                    test_scalar = search_start + (search_end - search_start) * (step + 1) / 10
+                    test_scalar = best_small_scalar + (scalar_large - best_small_scalar) * (step + 1) / 10
                     planes_test, contours_test, _ = self.find_contour(test_scalar, prev_bounding_plane=prev_plane)
-                    if len(contours_test) == max_count:
-                        best_max_scalar = test_scalar
-                        best_max_contours = contours_test
-                        best_max_planes = planes_test
-                        print(f"    [Phase2] Found max_count={max_count} at scalar={test_scalar:.6f}")
+                    if len(contours_test) == large_count:
+                        best_large_scalar = test_scalar
+                        best_large_contours = contours_test
+                        best_large_planes = planes_test
+                        print(f"    [Phase2] Found large_count={large_count} at scalar={test_scalar:.6f}")
                         break
 
-            if best_max_scalar is not None and best_min_scalar is None:
-                print(f"    [Phase2] Found max_count={max_count}, searching for min_count={min_count}")
-                # Search in the direction of min_count
-                search_start = best_max_scalar
-                search_end = scalar_low if is_merge else scalar_high
+            if best_large_scalar is not None and best_small_scalar is None:
+                print(f"    [Phase2] Found large_count={large_count}, searching for small_count={small_count}")
+                # Search towards small side
                 for step in range(10):
-                    test_scalar = search_start + (search_end - search_start) * (step + 1) / 10
+                    test_scalar = best_large_scalar + (scalar_small - best_large_scalar) * (step + 1) / 10
                     planes_test, contours_test, _ = self.find_contour(test_scalar, prev_bounding_plane=prev_plane)
-                    if len(contours_test) == min_count:
-                        best_min_scalar = test_scalar
-                        best_min_contours = contours_test
-                        best_min_planes = planes_test
-                        print(f"    [Phase2] Found min_count={min_count} at scalar={test_scalar:.6f}")
+                    if len(contours_test) == small_count:
+                        best_small_scalar = test_scalar
+                        best_small_contours = contours_test
+                        best_small_planes = planes_test
+                        print(f"    [Phase2] Found small_count={small_count} at scalar={test_scalar:.6f}")
                         break
 
             # Fallback to original endpoints if still not found
-            if best_max_scalar is None and t['count_curr'] == max_count:
-                print(f"    Using original level {level_idx} as max_count={max_count}")
-                best_max_scalar = scalar_low
-                best_max_planes = list(self.bounding_planes[level_idx])
-                best_max_contours = list(self.contours[level_idx])
-            if best_max_scalar is None and t['count_next'] == max_count:
-                print(f"    Using original level {level_idx+1} as max_count={max_count}")
-                best_max_scalar = scalar_high
-                best_max_planes = list(self.bounding_planes[level_idx + 1])
-                best_max_contours = list(self.contours[level_idx + 1])
-            if best_min_scalar is None and t['count_curr'] == min_count:
-                print(f"    Using original level {level_idx} as min_count={min_count}")
-                best_min_scalar = scalar_low
-                best_min_planes = list(self.bounding_planes[level_idx])
-                best_min_contours = list(self.contours[level_idx])
-            if best_min_scalar is None and t['count_next'] == min_count:
-                print(f"    Using original level {level_idx+1} as min_count={min_count}")
-                best_min_scalar = scalar_high
-                best_min_planes = list(self.bounding_planes[level_idx + 1])
-                best_min_contours = list(self.contours[level_idx + 1])
+            if best_large_scalar is None:
+                print(f"    Using original level {t['large_level']} as large_count={large_count}")
+                best_large_scalar = scalar_large
+                best_large_planes = list(self.bounding_planes[t['large_level']])
+                best_large_contours = list(self.contours[t['large_level']])
+            if best_small_scalar is None:
+                print(f"    Using original level {t['small_level']} as small_count={small_count}")
+                best_small_scalar = scalar_small
+                best_small_planes = list(self.bounding_planes[t['small_level']])
+                best_small_contours = list(self.contours[t['small_level']])
 
-            print(f"    Result: best_max_scalar={best_max_scalar}, best_min_scalar={best_min_scalar}")
+            print(f"    Result: best_large_scalar={best_large_scalar:.6f} (count={large_count}), best_small_scalar={best_small_scalar:.6f} (count={small_count})")
 
             # Collect results to insert (in order by scalar value)
             # Only insert if scalar is different from original endpoints (avoid duplicates)
             to_insert = []
-            if best_max_scalar is not None and best_max_contours is not None:
-                # Don't insert if it's essentially the same as original level
-                if abs(best_max_scalar - scalar_low) > tolerance:
-                    to_insert.append((best_max_scalar, best_max_planes, best_max_contours, max_count))
+            if best_large_scalar is not None and best_large_contours is not None:
+                # Don't insert if it's essentially the same as original large level
+                if abs(best_large_scalar - scalar_large) > tolerance:
+                    to_insert.append((best_large_scalar, best_large_planes, best_large_contours, large_count))
                 else:
-                    print(f"    Skipping max_scalar={best_max_scalar:.6f} (same as original level)")
-            if best_min_scalar is not None and best_min_contours is not None:
-                # Don't insert if it's essentially the same as next level
-                if abs(best_min_scalar - scalar_high) > tolerance:
-                    to_insert.append((best_min_scalar, best_min_planes, best_min_contours, min_count))
+                    print(f"    Skipping large_scalar={best_large_scalar:.6f} (same as original level)")
+            if best_small_scalar is not None and best_small_contours is not None:
+                # Don't insert if it's essentially the same as original small level
+                if abs(best_small_scalar - scalar_small) > tolerance:
+                    to_insert.append((best_small_scalar, best_small_planes, best_small_contours, small_count))
                 else:
-                    print(f"    Skipping min_scalar={best_min_scalar:.6f} (same as next level)")
+                    print(f"    Skipping small_scalar={best_small_scalar:.6f} (same as original level)")
 
             # Sort by scalar value
             to_insert.sort(key=lambda x: x[0])
@@ -1249,7 +1271,7 @@ class ContourMeshMixin:
                 self.contours.insert(insert_idx, contours)
 
             if len(to_insert) == 0:
-                print(f"  Note: Transition {t['count_curr']}→{t['count_next']} already has sharp boundary (no refinement needed)")
+                print(f"  Note: Transition {large_count}→{small_count} already has sharp boundary (no refinement needed)")
 
         # Update draw_contour_stream
         self.draw_contour_stream = [True] * len(self.contours)
