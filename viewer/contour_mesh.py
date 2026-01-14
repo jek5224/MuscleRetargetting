@@ -932,6 +932,13 @@ class ContourMeshMixin:
                 print(f"adaptive_step: {current_adaptive_step:.6f}, ratio: {distance_scalar_ratio}")
                 print()
 
+                # Skip this contour value if no valid contours found (all skipped due to self-intersection)
+                if len(bounding_planes) == 0:
+                    print("SKIPPED (no valid contours at this level)")
+                    print()
+                    contour_value += current_adaptive_step
+                    continue
+
                 if np.any(np.array(min_lengths) > length_max_threshold):
                     # Distance too large - need smaller scalar step
                     # Update ratio estimate: distance / scalar_step
