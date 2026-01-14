@@ -6380,20 +6380,17 @@ class ContourMeshMixin:
         print(f"  [BP Transform] initial cost={init_cost:.4f}")
 
         # ========== Step 5: Optimize from initial configuration ==========
-        # Compute bounds to prevent optimizer from going crazy
-        target_size = np.sqrt(target_area)  # Approximate size
-        max_translation = target_size * 3  # Don't go more than 3x size away
-
         if use_separate_transforms:
-            # Bounds for [scale_x0, scale_y0, tx0, ty0, theta0, scale_x1, scale_y1, tx1, ty1, theta1, ...]
-            bounds = []
-            for i in range(n_pieces):
-                bounds.append((0.5, 2.0))  # scale_x: 0.5 to 2x (prevent excessive shrink/grow)
-                bounds.append((0.5, 2.0))  # scale_y: 0.5 to 2x (prevent excessive shrink/grow)
-                bounds.append((-max_translation, max_translation))  # tx
-                bounds.append((-max_translation, max_translation))  # ty
-                bounds.append((-np.pi, np.pi))  # theta
+            # SEPARATE mode: skip optimization, just use initial config
+            # The goal is only to find the cutting line at the target waist
+            optimal_params = x0
+            print(f"  [BP Transform] SEPARATE mode: skipping optimization, using initial config")
         else:
+            # COMMON mode: run optimization to fit sources to target
+            # Compute bounds to prevent optimizer from going crazy
+            target_size = np.sqrt(target_area)  # Approximate size
+            max_translation = target_size * 3  # Don't go more than 3x size away
+
             # Bounds for [scale_x, scale_y, tx, ty, theta]
             bounds = [
                 (0.5, 2.0),  # scale_x: 0.5 to 2x (prevent excessive shrink/grow)
@@ -6403,18 +6400,18 @@ class ContourMeshMixin:
                 (-np.pi, np.pi)  # theta
             ]
 
-        result = minimize(
-            objective,
-            x0,
-            method='L-BFGS-B',
-            bounds=bounds,
-            options={'maxiter': 1000, 'ftol': 1e-9, 'gtol': 1e-7}
-        )
-        print(f"  [BP Transform] optimizer iterations: {result.nit}")
+            result = minimize(
+                objective,
+                x0,
+                method='L-BFGS-B',
+                bounds=bounds,
+                options={'maxiter': 1000, 'ftol': 1e-9, 'gtol': 1e-7}
+            )
+            print(f"  [BP Transform] optimizer iterations: {result.nit}")
 
-        optimal_params = result.x
-        print(f"  [BP Transform] optimization: success={result.success}, final_cost={result.fun:.4f}")
-        objective_debug(optimal_params, verbose=True)
+            optimal_params = result.x
+            print(f"  [BP Transform] optimization: success={result.success}, final_cost={result.fun:.4f}")
+            objective_debug(optimal_params, verbose=True)
 
         # ========== Step 6: Get final transformed source shapes ==========
         min_scale = 0.5  # Minimum allowed scale
@@ -6946,43 +6943,62 @@ class ContourMeshMixin:
         ax1.set_aspect('equal')
         ax1.grid(True, alpha=0.3)
 
-        # Right plot: Final result - simplified view
+        # Right plot: Final result (or initial for SEPARATE mode)
         ax2 = axes[1]
-        # scales is now a list of (scale_x, scale_y) tuples
-        if scales and isinstance(scales[0], (tuple, list)):
-            scales_str = ', '.join([f'({sx:.2f},{sy:.2f})' for sx, sy in scales])
-        else:
-            scales_str = ', '.join([f'{s:.2f}' for s in scales])
-        ax2.set_title(f'Final (scales=[{scales_str}])')
 
-        # Draw target contour colored by assignments
-        if assignments and len(assignments) == len(target_arr):
-            # Draw edges colored by assignment
-            for i in range(len(target_arr)):
-                p1 = target_arr[i]
-                p2 = target_arr[(i + 1) % len(target_arr)]
-                piece_idx = assignments[i]
-                ax2.plot([p1[0], p2[0]], [p1[1], p2[1]], '-', color=colors[piece_idx],
-                        linewidth=2.5, zorder=5)
-            # Draw vertices as colored dots
-            for v_idx, (v_2d, piece_idx) in enumerate(zip(target_arr, assignments)):
-                ax2.scatter(v_2d[0], v_2d[1], c=[colors[piece_idx]], s=25, zorder=10)
-        else:
-            # No assignments - draw target as gray
+        if use_separate_transforms:
+            # SEPARATE mode: show initial config with cutting line
+            ax2.set_title(f'Cutting Line [{mode_str}]')
+
+            # Draw target as gray
             ax2.plot(target_arr[:, 0], target_arr[:, 1], 'k-', linewidth=2, label='Target')
             ax2.fill(target_arr[:, 0], target_arr[:, 1], alpha=0.1, color='gray')
 
-        # Draw optimized source contours (filled like initial config)
-        for i, transformed in enumerate(final_transformed):
-            if len(transformed) >= 3:
-                trans_arr = np.array(transformed)
-                trans_closed = np.vstack([trans_arr, trans_arr[0]])
-                ax2.fill(trans_arr[:, 0], trans_arr[:, 1], alpha=0.3, color=colors[i])
-                ax2.plot(trans_closed[:, 0], trans_closed[:, 1], '-', color=colors[i],
-                        linewidth=2.0, zorder=15, label=f'Opt {stream_indices[i]}')
+            # Draw initial source contours (same as left plot)
+            for i, init_trans in enumerate(initial_transformed):
+                if len(init_trans) >= 3:
+                    init_arr = np.array(init_trans)
+                    init_closed = np.vstack([init_arr, init_arr[0]])
+                    ax2.fill(init_arr[:, 0], init_arr[:, 1], alpha=0.2, color=colors[i])
+                    ax2.plot(init_closed[:, 0], init_closed[:, 1], '-', color=colors[i],
+                            linewidth=1.5, label=f'Src {stream_indices[i]}')
+        else:
+            # COMMON mode: show optimized result
+            # scales is now a list of (scale_x, scale_y) tuples
+            if scales and isinstance(scales[0], (tuple, list)):
+                scales_str = ', '.join([f'({sx:.2f},{sy:.2f})' for sx, sy in scales])
+            else:
+                scales_str = ', '.join([f'{s:.2f}' for s in scales])
+            ax2.set_title(f'Final (scales=[{scales_str}])')
 
-        # Draw centroids as large X markers
-        if centroids:
+            # Draw target contour colored by assignments
+            if assignments and len(assignments) == len(target_arr):
+                # Draw edges colored by assignment
+                for i in range(len(target_arr)):
+                    p1 = target_arr[i]
+                    p2 = target_arr[(i + 1) % len(target_arr)]
+                    piece_idx = assignments[i]
+                    ax2.plot([p1[0], p2[0]], [p1[1], p2[1]], '-', color=colors[piece_idx],
+                            linewidth=2.5, zorder=5)
+                # Draw vertices as colored dots
+                for v_idx, (v_2d, piece_idx) in enumerate(zip(target_arr, assignments)):
+                    ax2.scatter(v_2d[0], v_2d[1], c=[colors[piece_idx]], s=25, zorder=10)
+            else:
+                # No assignments - draw target as gray
+                ax2.plot(target_arr[:, 0], target_arr[:, 1], 'k-', linewidth=2, label='Target')
+                ax2.fill(target_arr[:, 0], target_arr[:, 1], alpha=0.1, color='gray')
+
+            # Draw optimized source contours (filled like initial config)
+            for i, transformed in enumerate(final_transformed):
+                if len(transformed) >= 3:
+                    trans_arr = np.array(transformed)
+                    trans_closed = np.vstack([trans_arr, trans_arr[0]])
+                    ax2.fill(trans_arr[:, 0], trans_arr[:, 1], alpha=0.3, color=colors[i])
+                    ax2.plot(trans_closed[:, 0], trans_closed[:, 1], '-', color=colors[i],
+                            linewidth=2.0, zorder=15, label=f'Opt {stream_indices[i]}')
+
+        # Draw centroids as large X markers (only for COMMON mode)
+        if not use_separate_transforms and centroids:
             for i, c in enumerate(centroids):
                 ax2.scatter(c[0], c[1], marker='X', c=[colors[i]], s=100, zorder=20)
 
