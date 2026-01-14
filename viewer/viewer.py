@@ -4011,9 +4011,26 @@ class GLFWApp():
                     print(f"  Initial cut line: narrowest neck = {min_dist:.6f}")
                     print(f"    pt0[{best_i}] = {best_pt0}, pt1[{best_j}] = {best_pt1}")
 
-                    # Cut line directly connects the two neck points (both on contour)
-                    line_start = tuple(best_pt0)
-                    line_end = tuple(best_pt1)
+                    # Cut line connects the two neck points, extended slightly for visibility
+                    direction = best_pt1 - best_pt0
+                    length = np.linalg.norm(direction)
+                    if length > 1e-10:
+                        direction = direction / length
+                    else:
+                        # If points are same, use perpendicular to tangent
+                        prev_i = (best_i - 1) % n
+                        next_i = (best_i + 1) % n
+                        tangent = target_2d[next_i] - target_2d[prev_i]
+                        if np.linalg.norm(tangent) > 1e-10:
+                            tangent = tangent / np.linalg.norm(tangent)
+                            direction = np.array([-tangent[1], tangent[0]])
+                        else:
+                            direction = np.array([1.0, 0.0])
+
+                    # Extend 10% beyond each endpoint for visibility
+                    extent = max(length * 0.1, max_range * 0.02)
+                    line_start = tuple(best_pt0 - direction * extent)
+                    line_end = tuple(best_pt1 + direction * extent)
                     obj._manual_cut_data['initial_line'] = (line_start, line_end)
                     if obj._manual_cut_line is None:
                         obj._manual_cut_line = (line_start, line_end)
