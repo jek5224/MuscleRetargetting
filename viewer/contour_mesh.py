@@ -5925,10 +5925,10 @@ class ContourMeshMixin:
         total_source_area = sum(source_areas)
 
         # ========== Step 3: Define optimization objective ==========
-        def transform_shape(shape_2d, scale, tx, ty, theta):
-            """Apply 2D similarity transformation: scale, rotate, then translate."""
-            # Scale (uniform)
-            scaled = shape_2d * scale
+        def transform_shape(shape_2d, scale_x, scale_y, tx, ty, theta):
+            """Apply 2D affine transformation: scale (separate x/y), rotate, then translate."""
+            # Scale (separate x and y)
+            scaled = shape_2d * np.array([scale_x, scale_y])
             # Rotate
             cos_t = np.cos(theta)
             sin_t = np.sin(theta)
@@ -5973,8 +5973,8 @@ class ContourMeshMixin:
 
         def objective(params):
             """Maximize overlap with target, minimize source overlap and rotation."""
-            # If separate transforms: params = [scale0, tx0, ty0, theta0, scale1, tx1, ty1, theta1, ...]
-            # If common transform: params = [scale, delta_tx, delta_ty, delta_theta]
+            # If separate transforms: params = [scale_x0, scale_y0, tx0, ty0, theta0, scale_x1, scale_y1, tx1, ty1, theta1, ...]
+            # If common transform: params = [scale_x, scale_y, delta_tx, delta_ty, delta_theta]
             #   - Each source uses initial_pos + delta, maintaining relative positions
             transformed_polygons = []
             thetas = []
@@ -5985,32 +5985,34 @@ class ContourMeshMixin:
             if use_separate_transforms:
                 # Each source has its own transform (first division)
                 for i in range(n_pieces):
-                    scale = params[i * 4]
-                    tx = params[i * 4 + 1]
-                    ty = params[i * 4 + 2]
-                    theta = params[i * 4 + 3]
+                    scale_x = params[i * 5]
+                    scale_y = params[i * 5 + 1]
+                    tx = params[i * 5 + 2]
+                    ty = params[i * 5 + 3]
+                    theta = params[i * 5 + 4]
 
-                    if scale <= 0:
+                    if scale_x <= 0 or scale_y <= 0:
                         return 1e10
-                    if scale < min_scale:
+                    if scale_x < min_scale or scale_y < min_scale:
                         return 1e10  # Reject scales too small
 
-                    scales.append(scale)
+                    scales.append((scale_x, scale_y))
                     thetas.append(theta)
-                    transformed = transform_shape(source_2d_shapes[i], scale, tx, ty, theta)
+                    transformed = transform_shape(source_2d_shapes[i], scale_x, scale_y, tx, ty, theta)
                     add_polygon(transformed, transformed_polygons)
             else:
                 # Common transform - sources move as ONE rigid body
-                # params = [scale, tx, ty, theta] - transform applied to combined center
+                # params = [scale_x, scale_y, tx, ty, theta] - transform applied to combined center
                 # All sources rotate/scale around combined_center, then translate
-                scale = params[0]
-                tx = params[1]  # final x position of combined center
-                ty = params[2]  # final y position of combined center
-                theta = params[3]  # rotation around combined center
+                scale_x = params[0]
+                scale_y = params[1]
+                tx = params[2]  # final x position of combined center
+                ty = params[3]  # final y position of combined center
+                theta = params[4]  # rotation around combined center
 
-                if scale <= 0:
+                if scale_x <= 0 or scale_y <= 0:
                     return 1e10
-                if scale < min_scale:
+                if scale_x < min_scale or scale_y < min_scale:
                     return 1e10  # Reject scales too small
 
                 cos_t = np.cos(theta)
@@ -6024,14 +6026,14 @@ class ContourMeshMixin:
                     # Transform all vertices around combined_center
                     # 1. Translate to origin (relative to combined_center)
                     rel_vertices = abs_vertices - combined_center
-                    # 2. Scale around origin
-                    scaled = rel_vertices * scale
+                    # 2. Scale around origin (separate x/y)
+                    scaled = rel_vertices * np.array([scale_x, scale_y])
                     # 3. Rotate around origin
                     rotated = scaled @ rot.T
                     # 4. Translate to final position
                     transformed = rotated + np.array([tx, ty])
 
-                    scales.append(scale)
+                    scales.append((scale_x, scale_y))
                     thetas.append(theta)
                     add_polygon(transformed, transformed_polygons)
 
@@ -6079,16 +6081,16 @@ class ContourMeshMixin:
 
         # Use computed translations and rotations that align source basis with target basis
         if use_separate_transforms:
-            # params: [scale0, tx0, ty0, theta0, scale1, tx1, ty1, theta1, ...]
+            # params: [scale_x0, scale_y0, tx0, ty0, theta0, scale_x1, scale_y1, tx1, ty1, theta1, ...]
             # Each source has its own transform
             x0 = []
             for i, (tx, ty) in enumerate(initial_translations):
-                x0.extend([initial_scale, tx, ty, initial_rotations[i]])
+                x0.extend([initial_scale, initial_scale, tx, ty, initial_rotations[i]])
         else:
-            # params: [scale, tx, ty, theta]
+            # params: [scale_x, scale_y, tx, ty, theta]
             # (tx, ty) = position of combined center, theta = rotation around it
             # Start at combined_center with no rotation
-            x0 = [initial_scale, combined_center[0], combined_center[1], 0.0]
+            x0 = [initial_scale, initial_scale, combined_center[0], combined_center[1], 0.0]
 
         # Debug: show initial cost breakdown
         def objective_debug(params, verbose=False):
@@ -6101,30 +6103,32 @@ class ContourMeshMixin:
 
             if use_separate_transforms:
                 for i in range(n_pieces):
-                    scale = params[i * 4]
-                    tx = params[i * 4 + 1]
-                    ty = params[i * 4 + 2]
-                    theta = params[i * 4 + 3]
-                    if scale <= 0 or scale < min_scale:
+                    scale_x = params[i * 5]
+                    scale_y = params[i * 5 + 1]
+                    tx = params[i * 5 + 2]
+                    ty = params[i * 5 + 3]
+                    theta = params[i * 5 + 4]
+                    if scale_x <= 0 or scale_y <= 0 or scale_x < min_scale or scale_y < min_scale:
                         return 1e10
-                    scales_dbg.append(scale)
+                    scales_dbg.append((scale_x, scale_y))
                     thetas.append(theta)
-                    transformed = transform_shape(source_2d_shapes[i], scale, tx, ty, theta)
+                    transformed = transform_shape(source_2d_shapes[i], scale_x, scale_y, tx, ty, theta)
                     add_polygon(transformed, transformed_polygons)
             else:
-                scale = params[0]
-                tx, ty, theta = params[1], params[2], params[3]
-                if scale <= 0 or scale < min_scale:
+                scale_x = params[0]
+                scale_y = params[1]
+                tx, ty, theta = params[2], params[3], params[4]
+                if scale_x <= 0 or scale_y <= 0 or scale_x < min_scale or scale_y < min_scale:
                     return 1e10
                 cos_t, sin_t = np.cos(theta), np.sin(theta)
                 rot = np.array([[cos_t, -sin_t], [sin_t, cos_t]])
                 for i in range(n_pieces):
                     abs_vertices = source_2d_shapes[i] + initial_translations[i]
                     rel_vertices = abs_vertices - combined_center
-                    scaled = rel_vertices * scale
+                    scaled = rel_vertices * np.array([scale_x, scale_y])
                     rotated = scaled @ rot.T
                     transformed = rotated + np.array([tx, ty])
-                    scales_dbg.append(scale)
+                    scales_dbg.append((scale_x, scale_y))
                     thetas.append(theta)
                     add_polygon(transformed, transformed_polygons)
 
@@ -6142,7 +6146,7 @@ class ContourMeshMixin:
             coverage_cost = union_area + target_area - 2 * intersection_area
 
             if verbose:
-                print(f"    scales={[f'{s:.3f}' for s in scales_dbg]}, coverage={coverage_cost:.6f}")
+                print(f"    scales={[f'({sx:.3f},{sy:.3f})' for sx,sy in scales_dbg]}, coverage={coverage_cost:.6f}")
 
             return coverage_cost
 
@@ -6156,17 +6160,19 @@ class ContourMeshMixin:
         max_translation = target_size * 3  # Don't go more than 3x size away
 
         if use_separate_transforms:
-            # Bounds for [scale0, tx0, ty0, theta0, scale1, tx1, ty1, theta1, ...]
+            # Bounds for [scale_x0, scale_y0, tx0, ty0, theta0, scale_x1, scale_y1, tx1, ty1, theta1, ...]
             bounds = []
             for i in range(n_pieces):
-                bounds.append((0.5, 2.0))  # scale: 0.5 to 2x (prevent excessive shrink/grow)
+                bounds.append((0.5, 2.0))  # scale_x: 0.5 to 2x (prevent excessive shrink/grow)
+                bounds.append((0.5, 2.0))  # scale_y: 0.5 to 2x (prevent excessive shrink/grow)
                 bounds.append((-max_translation, max_translation))  # tx
                 bounds.append((-max_translation, max_translation))  # ty
                 bounds.append((-np.pi, np.pi))  # theta
         else:
-            # Bounds for [scale, tx, ty, theta]
+            # Bounds for [scale_x, scale_y, tx, ty, theta]
             bounds = [
-                (0.5, 2.0),  # scale: 0.5 to 2x (prevent excessive shrink/grow)
+                (0.5, 2.0),  # scale_x: 0.5 to 2x (prevent excessive shrink/grow)
+                (0.5, 2.0),  # scale_y: 0.5 to 2x (prevent excessive shrink/grow)
                 (-max_translation, max_translation),  # tx
                 (-max_translation, max_translation),  # ty
                 (-np.pi, np.pi)  # theta
@@ -6190,21 +6196,23 @@ class ContourMeshMixin:
         optimal_scales = []
         if use_separate_transforms:
             for i in range(n_pieces):
-                scale = max(optimal_params[i * 4], min_scale)  # Clamp scale
-                tx = optimal_params[i * 4 + 1]
-                ty = optimal_params[i * 4 + 2]
-                theta = optimal_params[i * 4 + 3]
-                optimal_scales.append(scale)
-                transformed = transform_shape(source_2d_shapes[i], scale, tx, ty, theta)
+                scale_x = max(optimal_params[i * 5], min_scale)  # Clamp scale_x
+                scale_y = max(optimal_params[i * 5 + 1], min_scale)  # Clamp scale_y
+                tx = optimal_params[i * 5 + 2]
+                ty = optimal_params[i * 5 + 3]
+                theta = optimal_params[i * 5 + 4]
+                optimal_scales.append((scale_x, scale_y))
+                transformed = transform_shape(source_2d_shapes[i], scale_x, scale_y, tx, ty, theta)
                 final_transformed.append(transformed)
-                print(f"  [BP Transform] piece {i}: scale={scale:.4f}, tx={tx:.4f}, ty={ty:.4f}, theta={np.degrees(theta):.1f}°")
+                print(f"  [BP Transform] piece {i}: scale=({scale_x:.4f},{scale_y:.4f}), tx={tx:.4f}, ty={ty:.4f}, theta={np.degrees(theta):.1f}°")
         else:
             # Common transform - sources move as one rigid body around combined center
-            common_scale = max(optimal_params[0], min_scale)  # Clamp scale
-            center_tx = optimal_params[1]  # final x position of combined center
-            center_ty = optimal_params[2]  # final y position of combined center
-            theta = optimal_params[3]      # rotation around combined center
-            print(f"  [BP Transform] common: scale={common_scale:.4f}, center=({center_tx:.4f}, {center_ty:.4f}), theta={np.degrees(theta):.1f}°")
+            common_scale_x = max(optimal_params[0], min_scale)  # Clamp scale_x
+            common_scale_y = max(optimal_params[1], min_scale)  # Clamp scale_y
+            center_tx = optimal_params[2]  # final x position of combined center
+            center_ty = optimal_params[3]  # final y position of combined center
+            theta = optimal_params[4]      # rotation around combined center
+            print(f"  [BP Transform] common: scale=({common_scale_x:.4f},{common_scale_y:.4f}), center=({center_tx:.4f}, {center_ty:.4f}), theta={np.degrees(theta):.1f}°")
 
             cos_t = np.cos(theta)
             sin_t = np.sin(theta)
@@ -6216,11 +6224,11 @@ class ContourMeshMixin:
 
                 # Transform all vertices around combined_center
                 rel_vertices = abs_vertices - combined_center
-                scaled = rel_vertices * common_scale
+                scaled = rel_vertices * np.array([common_scale_x, common_scale_y])
                 rotated = scaled @ rot.T
                 transformed = rotated + np.array([center_tx, center_ty])
 
-                optimal_scales.append(common_scale)
+                optimal_scales.append((common_scale_x, common_scale_y))
                 final_transformed.append(transformed)
                 print(f"  [BP Transform] piece {i}: transformed around combined center")
 
@@ -6680,7 +6688,11 @@ class ContourMeshMixin:
 
         # Right plot: Final result - simplified view
         ax2 = axes[1]
-        scales_str = ', '.join([f'{s:.2f}' for s in scales])
+        # scales is now a list of (scale_x, scale_y) tuples
+        if scales and isinstance(scales[0], (tuple, list)):
+            scales_str = ', '.join([f'({sx:.2f},{sy:.2f})' for sx, sy in scales])
+        else:
+            scales_str = ', '.join([f'{s:.2f}' for s in scales])
         ax2.set_title(f'Final (scales=[{scales_str}])')
 
         # Draw target contour colored by assignments
