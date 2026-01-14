@@ -5780,6 +5780,13 @@ class ContourMeshMixin:
         must_use_levels.add(0)  # Origin
         must_use_levels.add(num_levels - 1)  # Insertion
 
+        # Find first dividing position (first merge where count decreases)
+        first_dividing_level = None
+        for i in range(num_levels - 1):
+            if original_counts[i] > original_counts[i + 1]:
+                first_dividing_level = i + 1  # First merged contour after division
+                break
+
         for i in range(num_levels - 1):
             if original_counts[i] != original_counts[i + 1]:
                 if original_counts[i] < original_counts[i + 1]:
@@ -5788,6 +5795,11 @@ class ContourMeshMixin:
                 else:
                     must_use_levels.add(i + 1)  # i+1 has fewer
                     print(f"  Must-use level {i+1} (fewer contours after merge)")
+
+        # Enforce first dividing position merged contour
+        if first_dividing_level is not None:
+            must_use_levels.add(first_dividing_level)
+            print(f"  Must-use level {first_dividing_level} (first dividing position - enforced)")
 
         print(f"Must-use levels: {sorted(must_use_levels)}")
 
@@ -5902,9 +5914,13 @@ class ContourMeshMixin:
                         if level_i in must_use_levels:
                             region_selected.add(level_i)
 
-                    # Add region boundaries as anchors
+                    # Add start boundary as anchor
                     region_selected.add(start)
-                    region_selected.add(end)
+                    # Use first dividing level as end anchor if it's right after this region
+                    if first_dividing_level is not None and first_dividing_level == end + 1:
+                        region_selected.add(first_dividing_level)
+                    else:
+                        region_selected.add(end)
 
                     # Greedy selection for this stream
                     while True:
@@ -5932,6 +5948,12 @@ class ContourMeshMixin:
 
                     stream_selected[stream_i].update(region_selected)
                     print(f"  Region [{start}-{end}] stream {stream_i} (non-merged): {len(region_selected)} levels selected")
+
+        # Final enforcement: ensure first dividing level is always included
+        if first_dividing_level is not None:
+            for s in range(max_stream_count):
+                stream_selected[s].add(first_dividing_level)
+            print(f"  Enforced first dividing level {first_dividing_level} in all streams")
 
         # No equalization - each stream keeps its own selected levels
         # Originally-separate regions: independent selection per stream
