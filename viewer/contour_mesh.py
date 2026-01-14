@@ -387,13 +387,17 @@ class ContourMeshMixin:
             for contour in self.specific_contour:
                 glBegin(GL_LINE_LOOP)
                 for v in contour:
-                    glVertex3fv(v)
+                    v_arr = np.asarray(v).flatten()
+                    if len(v_arr) >= 3:
+                        glVertex3fv(v_arr[:3])
                 glEnd()
 
             glBegin(GL_POINTS)
             for contour in self.specific_contour:
                 for v in contour:
-                    glVertex3fv(v)
+                    v_arr = np.asarray(v).flatten()
+                    if len(v_arr) >= 3:
+                        glVertex3fv(v_arr[:3])
             glEnd()
 
             glEnable(GL_LIGHTING)
@@ -463,7 +467,9 @@ class ContourMeshMixin:
 
                 glBegin(GL_LINE_LOOP)
                 for v in contour:
-                    glVertex3fv(v)
+                    v_arr = np.asarray(v).flatten()
+                    if len(v_arr) >= 3:
+                        glVertex3fv(v_arr[:3])
                 glEnd()
 
                 # Draw vertices with color gradient: red (first) -> black (last)
@@ -472,6 +478,9 @@ class ContourMeshMixin:
                     glBegin(GL_POINTS)
                     n_verts = len(contour)
                     for k, v in enumerate(contour):
+                        v_arr = np.asarray(v).flatten()
+                        if len(v_arr) < 3:
+                            continue
                         if is_highlighted:
                             # Blue tint for highlighted, green for first vertex
                             if k == 0:
@@ -483,7 +492,7 @@ class ContourMeshMixin:
                             t = k / max(n_verts - 1, 1)
                             vert_color = (1 - t, 0, 0)  # red -> black
                             glColor3f(*vert_color)
-                        glVertex3fv(v)
+                        glVertex3fv(v_arr[:3])
                     glEnd()
 
                 # Draw small x, y, z axes from bounding plane info
@@ -527,7 +536,9 @@ class ContourMeshMixin:
                 for contour in contour_set:
                     glBegin(GL_LINE_LOOP)
                     for v in contour:
-                        glVertex3fv(v)
+                        v_arr = np.asarray(v).flatten()
+                        if len(v_arr) >= 3:
+                            glVertex3fv(v_arr[:3])
                     glEnd()
 
         glEnable(GL_LIGHTING)
