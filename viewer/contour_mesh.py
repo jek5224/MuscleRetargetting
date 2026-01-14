@@ -1077,7 +1077,9 @@ class ContourMeshMixin:
 
         print(f"Found {len(transitions)} transition points:")
         for t in transitions:
-            print(f"  Level {t['level_idx']}: {t['count_curr']}→{t['count_next']} "
+            is_merge = t['count_curr'] > t['count_next']
+            transition_type = "MERGE" if is_merge else "DIVERGE"
+            print(f"  Level {t['level_idx']}: {t['count_curr']}→{t['count_next']} [{transition_type}] "
                   f"(scalar {t['scalar_curr']:.6f}→{t['scalar_next']:.6f}), expect {t['expected_count']}")
 
         # Process transitions in reverse order to maintain indices
@@ -1111,31 +1113,34 @@ class ContourMeshMixin:
             search_low = scalar_low
             search_high = scalar_high
 
-            print(f"  Searching transition {t['count_curr']}→{t['count_next']} in scalar range [{scalar_low:.6f}, {scalar_high:.6f}]")
+            is_merge = t['count_curr'] > t['count_next']
+            print(f"  Searching {'MERGE' if is_merge else 'DIVERGE'} transition {t['count_curr']}→{t['count_next']} in scalar range [{scalar_low:.6f}, {scalar_high:.6f}]")
 
+            # Phase 1: Binary search to find approximate transition boundary
+            boundary_scalar = None
             for iteration in range(max_iterations):
                 mid_scalar = (search_low + search_high) / 2
 
                 if abs(search_high - search_low) < tolerance:
-                    print(f"    [iter {iteration}] Converged: search range < tolerance")
+                    boundary_scalar = mid_scalar
+                    print(f"    [Phase1 iter {iteration}] Converged at {mid_scalar:.6f}")
                     break
 
                 planes_at_mid, contours_at_mid, _ = self.find_contour(mid_scalar, prev_bounding_plane=prev_plane)
 
                 if len(contours_at_mid) == 0:
-                    print(f"    [iter {iteration}] scalar={mid_scalar:.6f}: 0 contours (invalid), narrowing from high")
+                    print(f"    [Phase1 iter {iteration}] scalar={mid_scalar:.6f}: 0 contours (invalid)")
                     search_high = mid_scalar
                     continue
 
                 count_at_mid = len(contours_at_mid)
-                print(f"    [iter {iteration}] scalar={mid_scalar:.6f}: {count_at_mid} contours, range=[{search_low:.6f}, {search_high:.6f}]")
 
                 if count_at_mid == min_count:
                     best_min_scalar = mid_scalar
                     best_min_contours = contours_at_mid
                     best_min_planes = planes_at_mid
                     # Search towards max_count side
-                    if t['count_curr'] > t['count_next']:
+                    if is_merge:
                         search_high = mid_scalar
                     else:
                         search_low = mid_scalar
@@ -1144,31 +1149,70 @@ class ContourMeshMixin:
                     best_max_contours = contours_at_mid
                     best_max_planes = planes_at_mid
                     # Search towards min_count side
-                    if t['count_curr'] > t['count_next']:
+                    if is_merge:
                         search_low = mid_scalar
                     else:
                         search_high = mid_scalar
                 elif count_at_mid > max_count:
-                    # More than expected, search towards fewer
-                    print(f"    [iter {iteration}] count {count_at_mid} > max {max_count}, unexpected")
-                    if t['count_curr'] > t['count_next']:
+                    print(f"    [Phase1 iter {iteration}] count {count_at_mid} > max {max_count}, unexpected")
+                    if is_merge:
                         search_low = mid_scalar
                     else:
                         search_high = mid_scalar
                 else:
-                    # Less than expected, search towards more
-                    print(f"    [iter {iteration}] count {count_at_mid} < min {min_count}, unexpected")
-                    if t['count_curr'] > t['count_next']:
+                    print(f"    [Phase1 iter {iteration}] count {count_at_mid} < min {min_count}, unexpected")
+                    if is_merge:
                         search_high = mid_scalar
                     else:
                         search_low = mid_scalar
 
-            # If we didn't find both, use the original endpoints as fallback
+            # Phase 2: If we only found one side, search explicitly for the other
+            if best_min_scalar is not None and best_max_scalar is None:
+                print(f"    [Phase2] Found min_count={min_count}, searching for max_count={max_count}")
+                # Search in the direction of max_count
+                search_start = best_min_scalar
+                search_end = scalar_high if is_merge else scalar_low
+                for step in range(10):
+                    test_scalar = search_start + (search_end - search_start) * (step + 1) / 10
+                    planes_test, contours_test, _ = self.find_contour(test_scalar, prev_bounding_plane=prev_plane)
+                    if len(contours_test) == max_count:
+                        best_max_scalar = test_scalar
+                        best_max_contours = contours_test
+                        best_max_planes = planes_test
+                        print(f"    [Phase2] Found max_count={max_count} at scalar={test_scalar:.6f}")
+                        break
+
+            if best_max_scalar is not None and best_min_scalar is None:
+                print(f"    [Phase2] Found max_count={max_count}, searching for min_count={min_count}")
+                # Search in the direction of min_count
+                search_start = best_max_scalar
+                search_end = scalar_low if is_merge else scalar_high
+                for step in range(10):
+                    test_scalar = search_start + (search_end - search_start) * (step + 1) / 10
+                    planes_test, contours_test, _ = self.find_contour(test_scalar, prev_bounding_plane=prev_plane)
+                    if len(contours_test) == min_count:
+                        best_min_scalar = test_scalar
+                        best_min_contours = contours_test
+                        best_min_planes = planes_test
+                        print(f"    [Phase2] Found min_count={min_count} at scalar={test_scalar:.6f}")
+                        break
+
+            # Fallback to original endpoints if still not found
             if best_max_scalar is None and t['count_curr'] == max_count:
                 print(f"    Using original level {level_idx} as max_count={max_count}")
                 best_max_scalar = scalar_low
                 best_max_planes = list(self.bounding_planes[level_idx])
                 best_max_contours = list(self.contours[level_idx])
+            if best_max_scalar is None and t['count_next'] == max_count:
+                print(f"    Using original level {level_idx+1} as max_count={max_count}")
+                best_max_scalar = scalar_high
+                best_max_planes = list(self.bounding_planes[level_idx + 1])
+                best_max_contours = list(self.contours[level_idx + 1])
+            if best_min_scalar is None and t['count_curr'] == min_count:
+                print(f"    Using original level {level_idx} as min_count={min_count}")
+                best_min_scalar = scalar_low
+                best_min_planes = list(self.bounding_planes[level_idx])
+                best_min_contours = list(self.contours[level_idx])
             if best_min_scalar is None and t['count_next'] == min_count:
                 print(f"    Using original level {level_idx+1} as min_count={min_count}")
                 best_min_scalar = scalar_high
