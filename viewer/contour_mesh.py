@@ -6122,61 +6122,75 @@ class ContourMeshMixin:
 
         if n_pieces == 2:
             try:
-                poly_0 = Polygon(final_transformed[0]) if len(final_transformed[0]) >= 3 else None
-                poly_1 = Polygon(final_transformed[1]) if len(final_transformed[1]) >= 3 else None
+                src_0 = np.array(final_transformed[0])
+                src_1 = np.array(final_transformed[1])
 
-                if poly_0 and poly_1:
-                    if not poly_0.is_valid:
-                        poly_0 = poly_0.buffer(0)
-                    if not poly_1.is_valid:
-                        poly_1 = poly_1.buffer(0)
+                if not use_separate_transforms and len(src_0) >= 3 and len(src_1) >= 3:
+                    # COMMON mode: Find the boundary between two source contours
+                    # The boundary is the shared edge where the two sources meet
+                    # Find closest edge pairs between the two contours
 
-                    if not use_separate_transforms:
-                        # COMMON mode: Find the natural boundary line where two sources meet
-                        # The boundary is where the two polygons touch/overlap
-                        try:
-                            intersection = poly_0.intersection(poly_1)
-                            if not intersection.is_empty:
-                                # They overlap - the boundary is the intersection
-                                if hasattr(intersection, 'exterior'):
-                                    # Polygon intersection
-                                    coords = np.array(intersection.exterior.coords)
-                                    if len(coords) >= 2:
-                                        # Use the longest edge of intersection as cutting line
-                                        max_len = 0
-                                        best_dir = None
-                                        for i in range(len(coords) - 1):
-                                            edge = coords[i + 1] - coords[i]
-                                            edge_len = np.linalg.norm(edge)
-                                            if edge_len > max_len:
-                                                max_len = edge_len
-                                                best_dir = edge / (edge_len + 1e-10)
-                                        if best_dir is not None:
-                                            centroid_mid = (centroids[0] + centroids[1]) / 2
-                                            cutting_line_2d = (centroid_mid, best_dir)
-                                elif hasattr(intersection, 'coords'):
-                                    # LineString intersection (they just touch)
-                                    coords = np.array(intersection.coords)
-                                    if len(coords) >= 2:
-                                        direction = coords[-1] - coords[0]
-                                        direction = direction / (np.linalg.norm(direction) + 1e-10)
-                                        mid_pt = coords.mean(axis=0)
-                                        cutting_line_2d = (mid_pt, direction)
-                        except Exception as e:
-                            pass
+                    # For each edge in src_0, find distance to closest point in src_1
+                    # and vice versa to find the shared boundary region
+                    boundary_points = []
 
-                    if cutting_line_2d is None:
-                        # SEPARATE mode or COMMON mode fallback:
-                        # Use perpendicular bisector between centroids
-                        centroid_vec = centroids[1] - centroids[0]
-                        centroid_dist = np.linalg.norm(centroid_vec)
-                        if centroid_dist > 1e-10:
-                            centroid_dir = centroid_vec / centroid_dist
-                            # Cutting line is perpendicular to centroid direction
-                            cutting_dir = np.array([-centroid_dir[1], centroid_dir[0]])
-                            centroid_mid = (centroids[0] + centroids[1]) / 2
-                            cutting_line_2d = (centroid_mid, cutting_dir)
-                            print(f"  [BP Transform] cutting line: perpendicular bisector at ({centroid_mid[0]:.4f}, {centroid_mid[1]:.4f})")
+                    # Find edges of src_0 that are close to src_1
+                    for i in range(len(src_0)):
+                        p0 = src_0[i]
+                        p1 = src_0[(i + 1) % len(src_0)]
+                        edge_mid = (p0 + p1) / 2
+
+                        # Distance from edge midpoint to nearest point on src_1
+                        dists_to_src1 = np.linalg.norm(src_1 - edge_mid, axis=1)
+                        min_dist = np.min(dists_to_src1)
+
+                        # If this edge is close to src_1, it's part of the boundary
+                        # Use a threshold based on the contour sizes
+                        size_0 = np.max(np.linalg.norm(src_0 - src_0.mean(axis=0), axis=1))
+                        size_1 = np.max(np.linalg.norm(src_1 - src_1.mean(axis=0), axis=1))
+                        threshold = 0.3 * min(size_0, size_1)
+
+                        if min_dist < threshold:
+                            boundary_points.append(p0)
+                            boundary_points.append(p1)
+
+                    # Similarly for src_1 edges close to src_0
+                    for i in range(len(src_1)):
+                        p0 = src_1[i]
+                        p1 = src_1[(i + 1) % len(src_1)]
+                        edge_mid = (p0 + p1) / 2
+
+                        dists_to_src0 = np.linalg.norm(src_0 - edge_mid, axis=1)
+                        min_dist = np.min(dists_to_src0)
+
+                        if min_dist < threshold:
+                            boundary_points.append(p0)
+                            boundary_points.append(p1)
+
+                    if len(boundary_points) >= 2:
+                        boundary_points = np.array(boundary_points)
+                        # Fit a line to the boundary points using PCA
+                        boundary_mean = boundary_points.mean(axis=0)
+                        centered = boundary_points - boundary_mean
+                        _, _, Vt = np.linalg.svd(centered, full_matrices=False)
+                        boundary_dir = Vt[0]  # Principal direction
+                        boundary_dir = boundary_dir / (np.linalg.norm(boundary_dir) + 1e-10)
+
+                        cutting_line_2d = (boundary_mean, boundary_dir)
+                        print(f"  [BP Transform] COMMON mode: found boundary line from {len(boundary_points)} points")
+
+                if cutting_line_2d is None:
+                    # SEPARATE mode or COMMON mode fallback:
+                    # Use perpendicular bisector between centroids
+                    centroid_vec = centroids[1] - centroids[0]
+                    centroid_dist = np.linalg.norm(centroid_vec)
+                    if centroid_dist > 1e-10:
+                        centroid_dir = centroid_vec / centroid_dist
+                        # Cutting line is perpendicular to centroid direction
+                        cutting_dir = np.array([-centroid_dir[1], centroid_dir[0]])
+                        centroid_mid = (centroids[0] + centroids[1]) / 2
+                        cutting_line_2d = (centroid_mid, cutting_dir)
+                        print(f"  [BP Transform] cutting line: perpendicular bisector at ({centroid_mid[0]:.4f}, {centroid_mid[1]:.4f})")
 
                 # Convert cutting line direction to 3D
                 if cutting_line_2d is not None:
