@@ -5958,7 +5958,7 @@ class ContourMeshMixin:
             thetas = []
             scales = []
 
-            min_scale = 0.1  # Minimum allowed scale
+            min_scale = 0.01  # Minimum allowed scale (very small)
 
             if use_separate_transforms:
                 # Each source has its own transform (first division)
@@ -6073,29 +6073,110 @@ class ContourMeshMixin:
                     # Sum of squared differences between source and divided ratios
                     area_ratio_cost = sum((sr - dr) ** 2 for sr, dr in zip(source_area_ratios, divided_ratios))
 
-            # Weights for regularization (relative to target_area for scale invariance)
-            overlap_weight = 100.0  # Force no overlap (very high penalty)
-            gap_weight = 50.0 * target_area  # Strong penalty for gaps - sources must be adjacent
-            rotation_weight = 0.01 * target_area  # Penalize rotation (scaled)
-            area_ratio_weight = 10.0 * target_area  # Penalize area ratio deviation
+            # Weights for regularization (all scaled relative to target_area for scale invariance)
+            # coverage_cost is already an area, so weights should be dimensionless or scale appropriately
+            overlap_weight = 2.0  # Moderate penalty for overlap (allow some if needed for coverage)
+            gap_weight = 1.0  # Penalty for gaps between sources
+            rotation_weight = 0.01  # Small penalty for rotation deviation
+            area_ratio_weight = 0.5  # Penalty for area ratio deviation
 
-            return coverage_cost + overlap_weight * overlap_cost + gap_weight * gap_cost + rotation_weight * rotation_cost + area_ratio_weight * area_ratio_cost
+            total_cost = coverage_cost + overlap_weight * overlap_cost + gap_weight * gap_cost + rotation_weight * rotation_cost + area_ratio_weight * area_ratio_cost
+            return total_cost
 
         # ========== Step 4: Build initial configuration ==========
+        # Compute initial scale based on area ratio (sources should roughly cover target)
+        total_source_area = sum(source_areas)
+        if total_source_area > 0 and target_area > 0:
+            # Scale factor to make total source area match target area
+            initial_scale = np.sqrt(target_area / total_source_area)
+            # Clamp to reasonable range
+            initial_scale = np.clip(initial_scale, 0.1, 10.0)
+        else:
+            initial_scale = 1.0
+        print(f"  [BP Transform] initial scale={initial_scale:.4f} (target_area={target_area:.6f}, total_source_area={total_source_area:.6f})")
+
         # Use computed translations and rotations that align source basis with target basis
         if use_separate_transforms:
             # params: [scale0, tx0, ty0, theta0, scale1, tx1, ty1, theta1, ...]
             # Each source has its own transform
             x0 = []
             for i, (tx, ty) in enumerate(initial_translations):
-                x0.extend([1.0, tx, ty, initial_rotations[i]])
+                x0.extend([initial_scale, tx, ty, initial_rotations[i]])
         else:
             # params: [scale, tx, ty, theta]
             # (tx, ty) = position of combined center, theta = rotation around it
             # Start at combined_center with no rotation
-            x0 = [1.0, combined_center[0], combined_center[1], 0.0]
+            x0 = [initial_scale, combined_center[0], combined_center[1], 0.0]
+
+        # Debug: show initial cost breakdown
+        def objective_debug(params, verbose=False):
+            """Same as objective but with optional verbose output."""
+            transformed_polygons = []
+            thetas = []
+            scales_dbg = []
+
+            min_scale = 0.01
+
+            if use_separate_transforms:
+                for i in range(n_pieces):
+                    scale = params[i * 4]
+                    tx = params[i * 4 + 1]
+                    ty = params[i * 4 + 2]
+                    theta = params[i * 4 + 3]
+                    if scale <= 0 or scale < min_scale:
+                        return 1e10
+                    scales_dbg.append(scale)
+                    thetas.append(theta)
+                    transformed = transform_shape(source_2d_shapes[i], scale, tx, ty, theta)
+                    add_polygon(transformed, transformed_polygons)
+            else:
+                scale = params[0]
+                tx, ty, theta = params[1], params[2], params[3]
+                if scale <= 0 or scale < min_scale:
+                    return 1e10
+                cos_t, sin_t = np.cos(theta), np.sin(theta)
+                rot = np.array([[cos_t, -sin_t], [sin_t, cos_t]])
+                for i in range(n_pieces):
+                    abs_vertices = source_2d_shapes[i] + initial_translations[i]
+                    rel_vertices = abs_vertices - combined_center
+                    scaled = rel_vertices * scale
+                    rotated = scaled @ rot.T
+                    transformed = rotated + np.array([tx, ty])
+                    scales_dbg.append(scale)
+                    thetas.append(theta)
+                    add_polygon(transformed, transformed_polygons)
+
+            if len(transformed_polygons) == 0:
+                return 1e10
+
+            try:
+                union_poly = unary_union(transformed_polygons)
+                intersection = union_poly.intersection(target_poly)
+                intersection_area = intersection.area
+                union_area = union_poly.area
+            except:
+                return 1e10
+
+            coverage_cost = union_area + target_area - 2 * intersection_area
+            overlap_cost = sum(p.area for p in transformed_polygons) - union_area if len(transformed_polygons) >= 2 else 0
+            gap_cost = 0.0
+            if len(transformed_polygons) >= 2:
+                for i in range(len(transformed_polygons)):
+                    for j in range(i + 1, len(transformed_polygons)):
+                        try:
+                            dist = transformed_polygons[i].distance(transformed_polygons[j])
+                            if not np.isnan(dist):
+                                gap_cost += dist
+                        except:
+                            pass
+
+            if verbose:
+                print(f"    scales={[f'{s:.3f}' for s in scales_dbg]}, coverage={coverage_cost:.6f}, overlap={overlap_cost:.6f}, gap={gap_cost:.6f}")
+
+            return coverage_cost + 2.0 * overlap_cost + 1.0 * gap_cost
 
         init_cost = objective(x0)
+        objective_debug(x0, verbose=True)
         print(f"  [BP Transform] initial cost={init_cost:.4f}")
 
         # ========== Step 5: Optimize from initial configuration ==========
@@ -6108,9 +6189,10 @@ class ContourMeshMixin:
 
         optimal_params = result.x
         print(f"  [BP Transform] optimization: success={result.success}, final_cost={result.fun:.4f}")
+        objective_debug(optimal_params, verbose=True)
 
         # ========== Step 6: Get final transformed source shapes ==========
-        min_scale = 0.1  # Minimum allowed scale
+        min_scale = 0.01  # Minimum allowed scale (very small)
         final_transformed = []
         optimal_scales = []
         if use_separate_transforms:
