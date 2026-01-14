@@ -5932,9 +5932,71 @@ class ContourMeshMixin:
             assignments.append(assigned_piece)
             all_distances.append(dists)
 
+        # Smooth assignments: remove short "islands" (small runs surrounded by different assignment)
+        # This prevents fragmented cuts like [...,1,1,1,2,2,2,1,1,1,2,2,2,...]
+        min_run_length = 5  # runs shorter than this get merged
+
+        def smooth_assignments_once(arr, min_len):
+            """Remove short runs by merging them into surrounding assignment (one pass)."""
+            if len(arr) < 3:
+                return arr, False
+
+            result = arr.copy()
+            n = len(result)
+            changed = False
+
+            # Find runs (treating array as circular)
+            runs = []  # (start_idx, length, value)
+            i = 0
+            while i < n:
+                val = result[i]
+                run_start = i
+                while i < n and result[i] == val:
+                    i += 1
+                runs.append((run_start, i - run_start, val))
+
+            if len(runs) < 3:
+                return result, False
+
+            # Check if first and last runs have same value (circular connection)
+            if runs[0][2] == runs[-1][2] and len(runs) > 2:
+                # Merge first and last runs for circular handling
+                combined_len = runs[0][1] + runs[-1][1]
+                # Treat as one run starting at runs[-1]
+                runs_circular = runs[1:-1]  # interior runs only
+                # Check each interior run
+                for run_idx, (start, length, val) in enumerate(runs_circular):
+                    if length < min_len:
+                        prev_val = runs_circular[run_idx - 1][2] if run_idx > 0 else runs[0][2]
+                        next_val = runs_circular[run_idx + 1][2] if run_idx < len(runs_circular) - 1 else runs[0][2]
+                        if prev_val == next_val:
+                            for j in range(start, start + length):
+                                result[j] = prev_val
+                            changed = True
+            else:
+                # Non-circular: merge short interior runs
+                for run_idx in range(1, len(runs) - 1):
+                    start, length, val = runs[run_idx]
+                    if length < min_len:
+                        prev_val = runs[run_idx - 1][2]
+                        next_val = runs[run_idx + 1][2]
+                        if prev_val == next_val:
+                            for j in range(start, start + length):
+                                result[j] = prev_val
+                            changed = True
+
+            return result, changed
+
+        # Iterate until no more changes
+        max_iters = 10
+        for _ in range(max_iters):
+            assignments, changed = smooth_assignments_once(assignments, min_run_length)
+            if not changed:
+                break
+
         # Debug: count assignments per piece
         assignment_counts = [assignments.count(i) for i in range(n_pieces)]
-        print(f"  [BP Transform] vertex assignments: {assignment_counts}")
+        print(f"  [BP Transform] vertex assignments (after smoothing): {assignment_counts}")
 
         # Second pass: assign vertices and interpolate at boundaries
         new_contours = [[] for _ in range(n_pieces)]
