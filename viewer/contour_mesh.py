@@ -5546,6 +5546,13 @@ class ContourMeshMixin:
         target_contour = np.array(target_contour)
         print(f"  [BP Transform] target_contour has {len(target_contour)} vertices")
 
+        # Check for degenerate source contours
+        for i, src_contour in enumerate(source_contours):
+            n_src_verts = len(src_contour) if src_contour is not None else 0
+            print(f"  [BP Transform] source_contour[{i}] has {n_src_verts} vertices")
+            if n_src_verts < 3:
+                print(f"  [BP Transform] WARNING: source {i} has only {n_src_verts} vertices (need >= 3)")
+
         # ========== Step 1: Project target contour to 2D ==========
         target_mean = target_bp['mean']
         target_x = target_bp['basis_x']
@@ -5894,27 +5901,40 @@ class ContourMeshMixin:
                         print(f"  [BP Transform] Could not check adjacency: {e}")
 
         # ========== Step 7: Assign target vertices by distance ==========
-        # First pass: assign each vertex to nearest piece and compute distances
+        # Use centroid-based distance (Voronoi partition) to avoid overlap issues
+        # Compute centroids of transformed sources
+        centroids = []
+        for piece_idx, transformed in enumerate(final_transformed):
+            if len(transformed) > 0:
+                centroid = np.mean(transformed, axis=0)
+                centroids.append(centroid)
+                print(f"  [BP Transform] piece {piece_idx} centroid: ({centroid[0]:.4f}, {centroid[1]:.4f})")
+            else:
+                # Fallback: use initial translation as centroid
+                centroids.append(np.array(initial_translations[piece_idx]))
+                print(f"  [BP Transform] WARNING: piece {piece_idx} has no vertices, using initial position")
+
+        # First pass: assign each vertex to nearest centroid and compute distances
         assignments = []
-        all_distances = []  # distances to each piece for interpolation
+        all_distances = []  # distances to each centroid for interpolation
         for v_idx, v_2d in enumerate(target_2d):
             min_dist = np.inf
             assigned_piece = 0
             dists = []
 
-            for piece_idx, transformed in enumerate(final_transformed):
-                if len(transformed) > 0:
-                    distances = np.linalg.norm(transformed - v_2d, axis=1)
-                    dist = np.min(distances)
-                    dists.append(dist)
-                    if dist < min_dist:
-                        min_dist = dist
-                        assigned_piece = piece_idx
-                else:
-                    dists.append(np.inf)
+            for piece_idx, centroid in enumerate(centroids):
+                dist = np.linalg.norm(v_2d - centroid)
+                dists.append(dist)
+                if dist < min_dist:
+                    min_dist = dist
+                    assigned_piece = piece_idx
 
             assignments.append(assigned_piece)
             all_distances.append(dists)
+
+        # Debug: count assignments per piece
+        assignment_counts = [assignments.count(i) for i in range(n_pieces)]
+        print(f"  [BP Transform] vertex assignments: {assignment_counts}")
 
         # Second pass: assign vertices and interpolate at boundaries
         new_contours = [[] for _ in range(n_pieces)]
@@ -5992,7 +6012,7 @@ class ContourMeshMixin:
         self._save_bp_transform_visualization(
             target_2d, target_poly, source_2d_shapes, final_transformed,
             stream_indices, optimal_scales, initial_translations, initial_rotations,
-            use_separate_transforms, assignments
+            use_separate_transforms, assignments, centroids
         )
 
         print(f"  [BP Transform] result: {[len(c) for c in new_contours]} vertices per piece")
@@ -6001,7 +6021,7 @@ class ContourMeshMixin:
     def _save_bp_transform_visualization(self, target_2d, target_poly, source_2d_shapes,
                                          final_transformed, stream_indices, scales,
                                          initial_translations, initial_rotations,
-                                         use_separate_transforms=True, assignments=None):
+                                         use_separate_transforms=True, assignments=None, centroids=None):
         """
         Store visualization data for BP Viz imgui window and save to file.
         """
@@ -6017,6 +6037,7 @@ class ContourMeshMixin:
             'initial_translations': [np.array(t) for t in initial_translations],
             'initial_rotations': list(initial_rotations),
             'use_separate_transforms': use_separate_transforms,
+            'centroids': [np.array(c) for c in centroids] if centroids else [],
             'assignments': list(assignments) if assignments else [],
         })
 
@@ -6091,6 +6112,12 @@ class ContourMeshMixin:
             for v_idx, (v_2d, piece_idx) in enumerate(zip(target_arr, assignments)):
                 ax2.scatter(v_2d[0], v_2d[1], c=[colors[piece_idx]], s=20, zorder=10,
                            edgecolors='black', linewidths=0.5)
+
+        # Draw centroids as large X markers
+        if centroids:
+            for i, c in enumerate(centroids):
+                ax2.scatter(c[0], c[1], marker='X', c=[colors[i]], s=150, zorder=15,
+                           edgecolors='black', linewidths=1.5)
 
         ax2.legend(loc='upper right', fontsize=8)
         ax2.set_aspect('equal')

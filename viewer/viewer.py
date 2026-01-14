@@ -3866,6 +3866,27 @@ class GLFWApp():
                     draw_list.add_circle(screen_pt[0], screen_pt[1], 4.0,
                                         imgui.get_color_u32_rgba(0.0, 0.0, 0.0, 1.0), 12, 1.0)
 
+            # Draw centroids as large X markers
+            centroids = data.get('centroids', [])
+            for ci, centroid in enumerate(centroids):
+                c_screen = to_screen(centroid, x0, y0, canvas_size)
+                color = colors[ci % len(colors)]
+                # Draw X marker using lines
+                size = 8
+                draw_list.add_line(c_screen[0] - size, c_screen[1] - size,
+                                  c_screen[0] + size, c_screen[1] + size,
+                                  imgui.get_color_u32_rgba(*color), 3.0)
+                draw_list.add_line(c_screen[0] - size, c_screen[1] + size,
+                                  c_screen[0] + size, c_screen[1] - size,
+                                  imgui.get_color_u32_rgba(*color), 3.0)
+                # Black outline
+                draw_list.add_line(c_screen[0] - size - 1, c_screen[1] - size - 1,
+                                  c_screen[0] + size + 1, c_screen[1] + size + 1,
+                                  imgui.get_color_u32_rgba(0.0, 0.0, 0.0, 1.0), 1.0)
+                draw_list.add_line(c_screen[0] - size - 1, c_screen[1] + size + 1,
+                                  c_screen[0] + size + 1, c_screen[1] - size - 1,
+                                  imgui.get_color_u32_rgba(0.0, 0.0, 0.0, 1.0), 1.0)
+
             imgui.dummy(canvas_size + 2 * padding, canvas_size + 2 * padding)
             imgui.columns(1)
 
