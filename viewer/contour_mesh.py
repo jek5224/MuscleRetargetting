@@ -5767,11 +5767,21 @@ class ContourMeshMixin:
         # Check for degenerate source contours
         has_degenerate = False
         for i, src_contour in enumerate(source_contours):
-            n_src_verts = len(src_contour) if src_contour is not None else 0
+            src_arr = np.array(src_contour) if src_contour is not None else np.array([])
+            n_src_verts = len(src_arr)
             print(f"  [BP Transform] source_contour[{i}] has {n_src_verts} vertices")
             if n_src_verts < 3:
                 print(f"  [BP Transform] WARNING: source {i} has only {n_src_verts} vertices (need >= 3)")
                 has_degenerate = True
+            elif n_src_verts >= 2:
+                # Check if vertices are nearly identical (degenerate triangle/contour)
+                max_dist = np.max([np.linalg.norm(src_arr[j] - src_arr[0]) for j in range(1, n_src_verts)])
+                if n_src_verts <= 5:
+                    print(f"  [BP Transform] source {i} 3D vertices: {src_arr.tolist()}")
+                print(f"  [BP Transform] source {i} max vertex spread: {max_dist:.6f}")
+                if max_dist < 1e-6:
+                    print(f"  [BP Transform] WARNING: source {i} has nearly identical vertices (degenerate)")
+                    has_degenerate = True
 
         # If any source is degenerate, fall back to simple area-based cutting
         if has_degenerate:
@@ -5857,6 +5867,9 @@ class ContourMeshMixin:
         source_areas = []
         has_invalid = False
         for i, src_2d in enumerate(source_2d_shapes):
+            # Debug: show the actual 2D vertices
+            if len(src_2d) <= 5:
+                print(f"  [BP Transform] source {i} 2D vertices: {src_2d.tolist()}")
             try:
                 src_poly = Polygon(src_2d)
 
