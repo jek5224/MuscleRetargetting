@@ -3109,19 +3109,30 @@ class GLFWApp():
             # Helper functions to access data in correct format
             def get_num_streams():
                 if is_pre_stream:
-                    # Pre-stream: streams are the inner index, count from first level
-                    return len(obj.contours[0]) if len(obj.contours) > 0 else 0
+                    # Pre-stream: streams are the inner index
+                    # Different levels may have different numbers of streams (e.g., origin=1, insertion=2)
+                    # Return maximum across all levels
+                    if len(obj.contours) == 0:
+                        return 0
+                    return max(len(level) for level in obj.contours)
                 else:
                     # Post-stream: streams are the outer index
                     return len(obj.contours)
 
-            def get_num_contours(s_idx):
+            def get_valid_level_indices(s_idx):
+                """Get list of level indices where this stream exists."""
                 if is_pre_stream:
-                    # Pre-stream: contours are levels (outer index)
-                    return len(obj.contours)
+                    indices = []
+                    for level_idx, level in enumerate(obj.contours):
+                        if s_idx < len(level):
+                            indices.append(level_idx)
+                    return indices
                 else:
-                    # Post-stream: contours are inner index
-                    return len(obj.contours[s_idx]) if s_idx < len(obj.contours) else 0
+                    # Post-stream: all levels exist for this stream
+                    return list(range(len(obj.contours[s_idx]))) if s_idx < len(obj.contours) else []
+
+            def get_num_contours(s_idx):
+                return len(get_valid_level_indices(s_idx))
 
             def get_contour(s_idx, c_idx):
                 if is_pre_stream:
@@ -3169,6 +3180,9 @@ class GLFWApp():
             if changed_show_all:
                 self.inspect_2d_show_all[name] = show_all
 
+            # Get valid level indices for this stream
+            valid_levels = get_valid_level_indices(stream_idx)
+
             if not show_all:
                 imgui.same_line()
                 changed, new_contour_idx = imgui.slider_int(f"Contour##{name}_inspect", contour_idx, 0, max(0, num_contours - 1))
@@ -3178,11 +3192,15 @@ class GLFWApp():
 
             imgui.separator()
 
-            # Determine which contours to draw
+            # Determine which contours to draw (use actual level indices)
             if show_all:
-                contour_indices = list(range(num_contours))
+                contour_indices = valid_levels
             else:
-                contour_indices = [contour_idx]
+                # Map slider index to actual level index
+                if contour_idx < len(valid_levels):
+                    contour_indices = [valid_levels[contour_idx]]
+                else:
+                    contour_indices = []
 
             # Always use child region for consistent layout (scrollbar space reserved)
             imgui.begin_child(f"contours_scroll##{name}", 0, 0, border=False)
