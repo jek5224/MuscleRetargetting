@@ -3899,6 +3899,20 @@ class GLFWApp():
                                   c_screen[0] + size, c_screen[1] - size,
                                   imgui.get_color_u32_rgba(*color), 2.0)
 
+            # Draw cutting/boundary line
+            cutting_line_2d = data.get('cutting_line_2d')
+            if cutting_line_2d is not None:
+                line_point, line_dir = cutting_line_2d
+                # Extend line to cover canvas
+                extent = canvas_size * 2
+                p1_2d = line_point - line_dir * extent
+                p2_2d = line_point + line_dir * extent
+                p1_screen = to_screen(p1_2d, x0, y0, canvas_size)
+                p2_screen = to_screen(p2_2d, x0, y0, canvas_size)
+                # Yellow dashed line (simulate with segments)
+                draw_list.add_line(p1_screen[0], p1_screen[1], p2_screen[0], p2_screen[1],
+                                  imgui.get_color_u32_rgba(1.0, 1.0, 0.0, 0.9), 2.0)
+
             imgui.dummy(canvas_size + 2 * padding, canvas_size + 2 * padding)
             imgui.columns(1)
 

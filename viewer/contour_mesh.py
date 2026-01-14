@@ -6426,7 +6426,7 @@ class ContourMeshMixin:
         self._save_bp_transform_visualization(
             target_2d, target_poly, source_2d_shapes, final_transformed,
             stream_indices, optimal_scales, initial_translations, initial_rotations,
-            use_separate_transforms, assignments, centroids
+            use_separate_transforms, assignments, centroids, cutting_line_2d
         )
 
         print(f"  [BP Transform] result: {[len(c) for c in new_contours]} vertices per piece")
@@ -6447,7 +6447,8 @@ class ContourMeshMixin:
     def _save_bp_transform_visualization(self, target_2d, target_poly, source_2d_shapes,
                                          final_transformed, stream_indices, scales,
                                          initial_translations, initial_rotations,
-                                         use_separate_transforms=True, assignments=None, centroids=None):
+                                         use_separate_transforms=True, assignments=None, centroids=None,
+                                         cutting_line_2d=None):
         """
         Store visualization data for BP Viz imgui window and save to file.
         """
@@ -6460,6 +6461,7 @@ class ContourMeshMixin:
             'final_transformed': [np.array(f) for f in final_transformed],
             'stream_indices': list(stream_indices),
             'scales': list(scales),
+            'cutting_line_2d': cutting_line_2d,
             'initial_translations': [np.array(t) for t in initial_translations],
             'initial_rotations': list(initial_rotations),
             'use_separate_transforms': use_separate_transforms,
@@ -6556,6 +6558,17 @@ class ContourMeshMixin:
         if centroids:
             for i, c in enumerate(centroids):
                 ax2.scatter(c[0], c[1], marker='X', c=[colors[i]], s=100, zorder=20)
+
+        # Draw cutting/boundary line
+        if cutting_line_2d is not None:
+            line_point, line_dir = cutting_line_2d
+            # Extend line to cover the plot area
+            all_pts = np.vstack([target_arr] + [np.array(f) for f in final_transformed if len(f) > 0])
+            extent = np.max(np.abs(all_pts - line_point)) * 1.5
+            p1 = line_point - line_dir * extent
+            p2 = line_point + line_dir * extent
+            ax2.plot([p1[0], p2[0]], [p1[1], p2[1]], '--', color='yellow',
+                    linewidth=2.0, zorder=25, label='Cut line')
 
         ax2.legend(loc='upper right', fontsize=8)
         ax2.set_aspect('equal')
