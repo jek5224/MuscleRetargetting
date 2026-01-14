@@ -7911,11 +7911,23 @@ class ContourMeshMixin:
         if hasattr(self, '_stream_endpoints') and self._stream_endpoints is not None:
             save_data['_stream_endpoints'] = convert_to_serializable(self._stream_endpoints)
 
+        # Save stream data if available (after cutting)
+        if hasattr(self, 'stream_contours') and self.stream_contours is not None:
+            save_data['stream_contours'] = convert_to_serializable(self.stream_contours)
+        if hasattr(self, 'stream_bounding_planes') and self.stream_bounding_planes is not None:
+            save_data['stream_bounding_planes'] = convert_to_serializable(self.stream_bounding_planes)
+        if hasattr(self, 'stream_groups') and self.stream_groups is not None:
+            save_data['stream_groups'] = convert_to_serializable(self.stream_groups)
+        if hasattr(self, 'max_stream_count') and self.max_stream_count is not None:
+            save_data['max_stream_count'] = self.max_stream_count
+
         with open(filepath, 'w') as f:
             json.dump(save_data, f)
 
         print(f"Contours saved to {filepath}")
         print(f"  {len(self.contours)} contour levels, {len(self.bounding_planes)} bounding plane levels")
+        if hasattr(self, 'stream_contours') and self.stream_contours is not None:
+            print(f"  {len(self.stream_contours)} streams saved")
 
     def load_contours(self, filepath):
         """
@@ -7983,10 +7995,50 @@ class ContourMeshMixin:
         if '_stream_endpoints' in save_data:
             self._stream_endpoints = save_data['_stream_endpoints']
 
+        # Load stream data if available
+        if 'stream_contours' in save_data:
+            self.stream_contours = []
+            for stream in save_data['stream_contours']:
+                stream_list = []
+                for contour in stream:
+                    stream_list.append(np.array(contour))
+                self.stream_contours.append(stream_list)
+
+        if 'stream_bounding_planes' in save_data:
+            self.stream_bounding_planes = []
+            for stream in save_data['stream_bounding_planes']:
+                stream_bp = []
+                for bp in stream:
+                    bp_dict = {}
+                    for key, value in bp.items():
+                        if key in numpy_keys and value is not None:
+                            bp_dict[key] = np.array(value)
+                        elif key == 'contour_match' and value is not None:
+                            bp_dict[key] = []
+                            for match in value:
+                                if isinstance(match, list) and len(match) == 2:
+                                    bp_dict[key].append([np.array(match[0]), np.array(match[1])])
+                                elif match is None:
+                                    bp_dict[key].append(None)
+                                else:
+                                    bp_dict[key].append(match)
+                        else:
+                            bp_dict[key] = value
+                    stream_bp.append(bp_dict)
+                self.stream_bounding_planes.append(stream_bp)
+
+        if 'stream_groups' in save_data:
+            self.stream_groups = save_data['stream_groups']
+
+        if 'max_stream_count' in save_data:
+            self.max_stream_count = save_data['max_stream_count']
+
         # Enable drawing
         self.is_draw_contours = True
         self.is_draw_bounding_box = True
 
         print(f"Contours loaded from {filepath}")
         print(f"  {len(self.contours)} contour levels, {len(self.bounding_planes)} bounding plane levels")
+        if hasattr(self, 'stream_contours') and self.stream_contours is not None:
+            print(f"  {len(self.stream_contours)} streams loaded")
 
