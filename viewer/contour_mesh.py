@@ -2078,6 +2078,14 @@ class ContourMeshMixin:
             print("Need at least 2 contour levels")
             return
 
+        # Check if we're in stream mode (after cutting)
+        # Stream mode: bounding_planes[stream][level] - each stream has multiple levels
+        # Level mode: bounding_planes[level][contour_idx] - each level has multiple contours
+        if hasattr(self, 'stream_bounding_planes') and self.stream_bounding_planes is not None:
+            print("Smoothening z-axes (stream mode)...")
+            self._smoothen_contours_z_stream_mode()
+            return
+
         print("Smoothening z-axes...")
 
         num_levels = len(self.bounding_planes)
@@ -2213,6 +2221,50 @@ class ContourMeshMixin:
 
         print("  Z-axis smoothening complete")
 
+    def _smoothen_contours_z_stream_mode(self):
+        """
+        Align z-axes for stream mode (after cutting).
+
+        In stream mode: bounding_planes[stream][level]
+        For each stream, align z from origin (level 0) toward insertion (last level).
+        """
+        num_streams = len(self.stream_bounding_planes)
+
+        for stream_i in range(num_streams):
+            bp_stream = self.stream_bounding_planes[stream_i]
+            stream_len = len(bp_stream)
+
+            if stream_len < 2:
+                continue
+
+            # First contour (origin): z should point toward second contour (toward insertion)
+            first_mean = bp_stream[0]['mean']
+            second_mean = bp_stream[1]['mean']
+            forward_dir = second_mean - first_mean
+            forward_norm = np.linalg.norm(forward_dir)
+
+            if forward_norm > 1e-10:
+                forward_dir = forward_dir / forward_norm
+                if np.dot(bp_stream[0]['basis_z'], forward_dir) < 0:
+                    bp_stream[0]['basis_z'] = -bp_stream[0]['basis_z']
+                    bp_stream[0]['basis_x'] = -bp_stream[0]['basis_x']
+                    print(f"  Stream {stream_i}, level 0: flipped z toward insertion")
+
+            # Forward pass: align z with previous level
+            for level in range(1, stream_len):
+                prev_z = bp_stream[level - 1]['basis_z']
+                curr_z = bp_stream[level]['basis_z']
+
+                if np.dot(curr_z, prev_z) < 0:
+                    bp_stream[level]['basis_z'] = -bp_stream[level]['basis_z']
+                    bp_stream[level]['basis_x'] = -bp_stream[level]['basis_x']
+                    print(f"  Stream {stream_i}, level {level}: flipped z to align with prev")
+
+        # Update self.bounding_planes to reflect changes
+        self.bounding_planes = self.stream_bounding_planes
+
+        print("  Z-axis smoothening (stream mode) complete")
+
     def smoothen_contours_x(self):
         """
         Align x-axes consistently across all contour levels.
@@ -2228,6 +2280,12 @@ class ContourMeshMixin:
         """
         if len(self.bounding_planes) < 2:
             print("Need at least 2 contour levels")
+            return
+
+        # Check if we're in stream mode (after cutting)
+        if hasattr(self, 'stream_bounding_planes') and self.stream_bounding_planes is not None:
+            print("Smoothening x-axes (stream mode)...")
+            self._smoothen_contours_x_stream_mode()
             return
 
         print("Smoothening x-axes...")
@@ -2329,6 +2387,65 @@ class ContourMeshMixin:
 
         print("  X-axis smoothening complete")
 
+    def _smoothen_contours_x_stream_mode(self):
+        """
+        Align x-axes for stream mode (after cutting).
+
+        In stream mode: bounding_planes[stream][level]
+        For each stream:
+        1. First contour: align x with (1,0,0) projected onto plane
+        2. Forward pass: align x with previous level's x
+        """
+        num_streams = len(self.stream_bounding_planes)
+
+        for stream_i in range(num_streams):
+            bp_stream = self.stream_bounding_planes[stream_i]
+            stream_len = len(bp_stream)
+
+            if stream_len < 1:
+                continue
+
+            # First contour: align x with (1,0,0) projected onto its plane
+            first_bp = bp_stream[0]
+            first_z = first_bp['basis_z']
+            first_x = first_bp['basis_x']
+
+            ref_x = np.array([1.0, 0.0, 0.0])
+            ref_x_proj = ref_x - np.dot(ref_x, first_z) * first_z
+            ref_x_norm = np.linalg.norm(ref_x_proj)
+
+            if ref_x_norm > 0.1:
+                ref_x_proj = ref_x_proj / ref_x_norm
+                if np.dot(first_x, ref_x_proj) < 0:
+                    first_bp['basis_x'] = -first_bp['basis_x']
+                    first_bp['basis_y'] = -first_bp['basis_y']
+                    print(f"  Stream {stream_i}, level 0: flipped x to align with (1,0,0)")
+
+            # Forward pass: align x with previous level's x
+            for level in range(1, stream_len):
+                curr_bp = bp_stream[level]
+                prev_bp = bp_stream[level - 1]
+
+                curr_x = curr_bp['basis_x']
+                curr_z = curr_bp['basis_z']
+                prev_x = prev_bp['basis_x']
+
+                # Project previous x onto current plane
+                prev_x_proj = prev_x - np.dot(prev_x, curr_z) * curr_z
+                prev_x_norm = np.linalg.norm(prev_x_proj)
+
+                if prev_x_norm > 1e-10:
+                    prev_x_proj = prev_x_proj / prev_x_norm
+                    if np.dot(curr_x, prev_x_proj) < 0:
+                        curr_bp['basis_x'] = -curr_bp['basis_x']
+                        curr_bp['basis_y'] = -curr_bp['basis_y']
+                        print(f"  Stream {stream_i}, level {level}: flipped x to align with prev")
+
+        # Update self.bounding_planes to reflect changes
+        self.bounding_planes = self.stream_bounding_planes
+
+        print("  X-axis smoothening (stream mode) complete")
+
     def smoothen_contours_bp(self):
         """
         Smooth bounding plane orientations for square-like contours.
@@ -2343,6 +2460,12 @@ class ContourMeshMixin:
         """
         if len(self.bounding_planes) < 2:
             print("Need at least 2 contour levels")
+            return
+
+        # Check if we're in stream mode (after cutting)
+        if hasattr(self, 'stream_bounding_planes') and self.stream_bounding_planes is not None:
+            print("Smoothening bounding planes (stream mode)...")
+            self._smoothen_contours_bp_stream_mode()
             return
 
         print("Smoothening bounding planes...")
@@ -2616,6 +2739,128 @@ class ContourMeshMixin:
                     self.bounding_planes[level_idx][contour_idx] = bp
 
         print("  Bounding plane smoothening complete")
+
+    def _smoothen_contours_bp_stream_mode(self):
+        """
+        Smooth bounding plane orientations for stream mode (after cutting).
+
+        In stream mode: bounding_planes[stream][level]
+        For each stream, interpolate basis_x for square-like contours from
+        non-square-like neighbors.
+        """
+        num_streams = len(self.stream_bounding_planes)
+
+        for stream_i in range(num_streams):
+            bp_stream = self.stream_bounding_planes[stream_i]
+            stream_len = len(bp_stream)
+
+            if stream_len < 2:
+                continue
+
+            print(f"  Stream {stream_i}: {stream_len} levels")
+
+            # Find reference indices (non-square-like) and smooth indices (square-like)
+            reference_indices = [i for i, bp in enumerate(bp_stream)
+                                 if not bp.get('square_like', False)]
+            smooth_indices = [i for i, bp in enumerate(bp_stream)
+                              if bp.get('square_like', False)]
+
+            print(f"    Reference: {len(reference_indices)}, Smooth: {len(smooth_indices)}")
+
+            if len(reference_indices) == 0 and len(smooth_indices) > 0:
+                # All square-like - find most non-square-like as reference
+                best_idx = 0
+                best_ratio_diff = 0
+                for i, bp in enumerate(bp_stream):
+                    corners = bp.get('bounding_plane')
+                    if corners is None or len(corners) < 4:
+                        continue
+                    width = np.linalg.norm(corners[1] - corners[0])
+                    height = np.linalg.norm(corners[3] - corners[0])
+                    if min(width, height) > 1e-10:
+                        ratio = max(width, height) / min(width, height)
+                        ratio_diff = abs(ratio - 1.0)
+                        if ratio_diff > best_ratio_diff:
+                            best_ratio_diff = ratio_diff
+                            best_idx = i
+                bp_stream[best_idx]['square_like'] = False
+                reference_indices = [best_idx]
+                smooth_indices = [i for i in smooth_indices if i != best_idx]
+                print(f"    All square-like, using level {best_idx} as reference")
+
+            # Interpolate square-like contours
+            for i in smooth_indices:
+                bp = bp_stream[i]
+                curr_mean = bp['mean']
+                basis_z = bp['basis_z']
+
+                # Find prev reference (non-square-like)
+                prev_idx = None
+                prev_dist = np.inf
+                for j in range(i - 1, -1, -1):
+                    if j in reference_indices:
+                        prev_dist = np.linalg.norm(curr_mean - bp_stream[j]['mean'])
+                        prev_idx = j
+                        break
+
+                # Find next reference (non-square-like)
+                next_idx = None
+                next_dist = np.inf
+                for j in range(i + 1, stream_len):
+                    if j in reference_indices:
+                        next_dist = np.linalg.norm(curr_mean - bp_stream[j]['mean'])
+                        next_idx = j
+                        break
+
+                if prev_idx is None and next_idx is None:
+                    continue
+
+                # Determine target basis_x by interpolation
+                if prev_idx is not None and next_idx is not None:
+                    # Interpolate between prev and next
+                    prev_x = bp_stream[prev_idx]['basis_x']
+                    prev_x_proj = prev_x - np.dot(prev_x, basis_z) * basis_z
+                    prev_x_proj = prev_x_proj / (np.linalg.norm(prev_x_proj) + 1e-10)
+
+                    next_x = bp_stream[next_idx]['basis_x']
+                    next_x_proj = next_x - np.dot(next_x, basis_z) * basis_z
+                    next_x_proj = next_x_proj / (np.linalg.norm(next_x_proj) + 1e-10)
+
+                    total_dist = prev_dist + next_dist
+                    t = prev_dist / total_dist if total_dist > 1e-10 else 0.5
+
+                    # Compute angle and interpolate
+                    cos_angle = np.clip(np.dot(prev_x_proj, next_x_proj), -1, 1)
+                    cross = np.cross(prev_x_proj, next_x_proj)
+                    sin_angle = np.dot(cross, basis_z)
+                    angle = np.arctan2(sin_angle, cos_angle)
+                    interp_angle = angle * t
+
+                    cos_t = np.cos(interp_angle)
+                    sin_t = np.sin(interp_angle)
+                    new_basis_x = prev_x_proj * cos_t + np.cross(basis_z, prev_x_proj) * sin_t
+                elif prev_idx is not None:
+                    prev_x = bp_stream[prev_idx]['basis_x']
+                    new_basis_x = prev_x - np.dot(prev_x, basis_z) * basis_z
+                    new_basis_x = new_basis_x / (np.linalg.norm(new_basis_x) + 1e-10)
+                else:
+                    next_x = bp_stream[next_idx]['basis_x']
+                    new_basis_x = next_x - np.dot(next_x, basis_z) * basis_z
+                    new_basis_x = new_basis_x / (np.linalg.norm(new_basis_x) + 1e-10)
+
+                new_basis_y = np.cross(basis_z, new_basis_x)
+                new_basis_y = new_basis_y / (np.linalg.norm(new_basis_y) + 1e-10)
+
+                bp['basis_x'] = new_basis_x
+                bp['basis_y'] = new_basis_y
+
+            if len(smooth_indices) > 0:
+                print(f"    Smoothed {len(smooth_indices)} square-like contours")
+
+        # Update self.bounding_planes to reflect changes
+        self.bounding_planes = self.stream_bounding_planes
+
+        print("  Bounding plane smoothening (stream mode) complete")
 
     def fix_90_degree_corners(self):
         """
