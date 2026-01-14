@@ -3900,11 +3900,14 @@ class GLFWApp():
                                   imgui.get_color_u32_rgba(*color), 2.0)
 
             # Draw cutting/boundary line (magenta for visibility)
+            # Clip line to target contour bounds
             cutting_line_2d = data.get('cutting_line_2d')
             if cutting_line_2d is not None:
                 line_point, line_dir = cutting_line_2d
-                # Extend line to cover canvas
-                extent = canvas_size * 2
+                # Compute extent based on target contour size
+                target_center = target_2d.mean(axis=0)
+                target_radius = np.max(np.linalg.norm(target_2d - target_center, axis=1))
+                extent = target_radius * 0.9  # Stay within target bounds
                 p1_2d = line_point - line_dir * extent
                 p2_2d = line_point + line_dir * extent
                 p1_screen = to_screen(p1_2d, x0, y0, canvas_size)

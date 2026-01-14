@@ -6625,11 +6625,13 @@ class ContourMeshMixin:
                 ax2.scatter(c[0], c[1], marker='X', c=[colors[i]], s=100, zorder=20)
 
         # Draw cutting/boundary line (magenta for visibility)
+        # Clip line to target contour bounds
         if cutting_line_2d is not None:
             line_point, line_dir = cutting_line_2d
-            # Extend line to cover the plot area
-            all_pts = np.vstack([target_arr] + [np.array(f) for f in final_transformed if len(f) > 0])
-            extent = np.max(np.abs(all_pts - line_point)) * 1.5
+            # Compute extent based on target contour size only
+            target_center = target_arr.mean(axis=0)
+            target_radius = np.max(np.linalg.norm(target_arr - target_center, axis=1))
+            extent = target_radius * 0.9  # Stay within target bounds
             p1 = line_point - line_dir * extent
             p2 = line_point + line_dir * extent
             ax2.plot([p1[0], p2[0]], [p1[1], p2[1]], '--', color='magenta',
