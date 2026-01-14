@@ -5901,40 +5901,94 @@ class ContourMeshMixin:
         )
 
         # ========== Step 7: Assign target vertices by distance ==========
-        # First pass: assign each vertex to nearest piece
+        # First pass: assign each vertex to nearest piece and compute distances
         assignments = []
+        all_distances = []  # distances to each piece for interpolation
         for v_idx, v_2d in enumerate(target_2d):
             min_dist = np.inf
             assigned_piece = 0
+            dists = []
 
             for piece_idx, transformed in enumerate(final_transformed):
                 if len(transformed) > 0:
                     distances = np.linalg.norm(transformed - v_2d, axis=1)
                     dist = np.min(distances)
+                    dists.append(dist)
                     if dist < min_dist:
                         min_dist = dist
                         assigned_piece = piece_idx
+                else:
+                    dists.append(np.inf)
 
             assignments.append(assigned_piece)
+            all_distances.append(dists)
 
-        # Second pass: identify boundary vertices and duplicate them
-        # A vertex is at boundary if its neighbors belong to different pieces
+        # Second pass: assign vertices and interpolate at boundaries
         new_contours = [[] for _ in range(n_pieces)]
         n_verts = len(target_2d)
 
+        prev_piece = assignments[-1]  # Start with last vertex's assignment
         for v_idx in range(n_verts):
             curr_piece = assignments[v_idx]
-            prev_piece = assignments[(v_idx - 1) % n_verts]
-            next_piece = assignments[(v_idx + 1) % n_verts]
 
-            # Add to primary piece
+            # Check if we crossed a boundary from prev vertex to this one
+            if prev_piece != curr_piece and v_idx > 0:
+                # Interpolate to find the boundary point on the edge
+                prev_v_idx = v_idx - 1
+                prev_v_3d = target_contour[prev_v_idx]
+                curr_v_3d = target_contour[v_idx]
+
+                # Use distance difference to interpolate
+                # At boundary, distances to both pieces should be equal
+                prev_d0 = all_distances[prev_v_idx][prev_piece]
+                prev_d1 = all_distances[prev_v_idx][curr_piece]
+                curr_d0 = all_distances[v_idx][prev_piece]
+                curr_d1 = all_distances[v_idx][curr_piece]
+
+                # Linear interpolation: find t where d0(t) = d1(t)
+                # d0(t) = prev_d0 + t * (curr_d0 - prev_d0)
+                # d1(t) = prev_d1 + t * (curr_d1 - prev_d1)
+                # Solve: prev_d0 + t*(curr_d0-prev_d0) = prev_d1 + t*(curr_d1-prev_d1)
+                denom = (curr_d0 - prev_d0) - (curr_d1 - prev_d1)
+                if abs(denom) > 1e-10:
+                    t = (prev_d1 - prev_d0) / denom
+                    t = np.clip(t, 0.0, 1.0)
+                else:
+                    t = 0.5
+
+                # Interpolated boundary point
+                boundary_pt = prev_v_3d + t * (curr_v_3d - prev_v_3d)
+
+                # Add boundary point to BOTH pieces
+                new_contours[prev_piece].append(boundary_pt)
+                new_contours[curr_piece].append(boundary_pt)
+
+            # Add current vertex to its piece
             new_contours[curr_piece].append(target_contour[v_idx])
+            prev_piece = curr_piece
 
-            # If at boundary (neighbor belongs to different piece), duplicate to neighbor's piece
-            if prev_piece != curr_piece:
-                new_contours[prev_piece].append(target_contour[v_idx])
-            if next_piece != curr_piece and next_piece != prev_piece:
-                new_contours[next_piece].append(target_contour[v_idx])
+        # Handle wrap-around: check boundary between last and first vertex
+        if assignments[-1] != assignments[0]:
+            prev_v_3d = target_contour[-1]
+            curr_v_3d = target_contour[0]
+            prev_piece = assignments[-1]
+            curr_piece = assignments[0]
+
+            prev_d0 = all_distances[-1][prev_piece]
+            prev_d1 = all_distances[-1][curr_piece]
+            curr_d0 = all_distances[0][prev_piece]
+            curr_d1 = all_distances[0][curr_piece]
+
+            denom = (curr_d0 - prev_d0) - (curr_d1 - prev_d1)
+            if abs(denom) > 1e-10:
+                t = (prev_d1 - prev_d0) / denom
+                t = np.clip(t, 0.0, 1.0)
+            else:
+                t = 0.5
+
+            boundary_pt = prev_v_3d + t * (curr_v_3d - prev_v_3d)
+            new_contours[prev_piece].append(boundary_pt)
+            new_contours[curr_piece].append(boundary_pt)
 
         # Ensure each piece has at least some vertices
         for i in range(n_pieces):
