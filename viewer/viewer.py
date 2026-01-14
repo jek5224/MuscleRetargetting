@@ -3870,16 +3870,21 @@ class GLFWApp():
                         draw_list.add_line(p1[0], p1[1], p2[0], p2[1],
                                           imgui.get_color_u32_rgba(0.9, 0.9, 0.9, 1.0), 2.0)
 
-            # Draw final transformed source contours (outline only, semi-transparent)
+            # Draw final transformed (optimized) source contours - bright outline
             for si, final_trans in enumerate(final_transformed):
                 if len(final_trans) >= 3:
                     color = colors[si % len(colors)]
                     final_screen = [to_screen(p, x0, y0, canvas_size) for p in final_trans]
-                    # Outline only (no fill)
+                    # Draw white outline first (for visibility against colored target)
                     for i in range(len(final_screen)):
                         p1, p2 = final_screen[i], final_screen[(i+1) % len(final_screen)]
                         draw_list.add_line(p1[0], p1[1], p2[0], p2[1],
-                                          imgui.get_color_u32_rgba(color[0], color[1], color[2], 0.6), 1.5)
+                                          imgui.get_color_u32_rgba(1.0, 1.0, 1.0, 0.9), 3.5)
+                    # Draw colored outline on top
+                    for i in range(len(final_screen)):
+                        p1, p2 = final_screen[i], final_screen[(i+1) % len(final_screen)]
+                        draw_list.add_line(p1[0], p1[1], p2[0], p2[1],
+                                          imgui.get_color_u32_rgba(color[0], color[1], color[2], 1.0), 1.5)
 
             # Draw centroids as X markers
             centroids = data.get('centroids', [])
