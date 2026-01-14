@@ -2854,10 +2854,41 @@ class ContourMeshMixin:
                 bp['basis_x'] = new_basis_x
                 bp['basis_y'] = new_basis_y
 
+                # Recalculate bounding plane corners with new basis
+                contour_points = self.stream_contours[stream_i][i]
+                mean = bp['mean']
+
+                # Project contour to 2D with new basis
+                projected_2d = np.array([
+                    [np.dot(v - mean, new_basis_x), np.dot(v - mean, new_basis_y)]
+                    for v in contour_points
+                ])
+
+                min_x, max_x = np.min(projected_2d[:, 0]), np.max(projected_2d[:, 0])
+                min_y, max_y = np.min(projected_2d[:, 1]), np.max(projected_2d[:, 1])
+
+                bounding_plane_2d = np.array([
+                    [min_x, min_y], [max_x, min_y],
+                    [max_x, max_y], [min_x, max_y]
+                ])
+
+                bounding_plane = np.array([mean + x * new_basis_x + y * new_basis_y for x, y in bounding_plane_2d])
+                projected_2d_3d = np.array([mean + x * new_basis_x + y * new_basis_y for x, y in projected_2d])
+
+                bp['bounding_plane'] = bounding_plane
+                bp['projected_2d'] = projected_2d_3d
+
+                # Update contour_match
+                preserve = getattr(self, '_contours_normalized', False)
+                new_contour, contour_match = self.find_contour_match(contour_points, bounding_plane, preserve_order=preserve)
+                bp['contour_match'] = contour_match
+                self.stream_contours[stream_i][i] = new_contour
+
             if len(smooth_indices) > 0:
                 print(f"    Smoothed {len(smooth_indices)} square-like contours")
 
-        # Update self.bounding_planes to reflect changes
+        # Update self.contours and self.bounding_planes to reflect changes
+        self.contours = self.stream_contours
         self.bounding_planes = self.stream_bounding_planes
 
         print("  Bounding plane smoothening (stream mode) complete")
