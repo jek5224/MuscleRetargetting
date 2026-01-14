@@ -4014,6 +4014,34 @@ class GLFWApp():
                 center = (min_xy + max_xy) / 2
                 return center + (np.array([normalized_x, normalized_y]) - 0.5) * max_range
 
+            def find_line_contour_intersections(line_start, line_end, contour_2d):
+                """Find intersection points of a line with a contour polygon."""
+                intersections = []
+                p1 = np.array(line_start)
+                p2 = np.array(line_end)
+                d = p2 - p1
+
+                for i in range(len(contour_2d)):
+                    q1 = contour_2d[i]
+                    q2 = contour_2d[(i + 1) % len(contour_2d)]
+                    e = q2 - q1
+
+                    # Solve p1 + t*d = q1 + s*e
+                    denom = d[0] * e[1] - d[1] * e[0]
+                    if abs(denom) < 1e-10:
+                        continue
+
+                    t = ((q1[0] - p1[0]) * e[1] - (q1[1] - p1[1]) * e[0]) / denom
+                    s = ((q1[0] - p1[0]) * d[1] - (q1[1] - p1[1]) * d[0]) / denom
+
+                    if 0 <= s <= 1:  # Intersection on contour edge
+                        pt = p1 + t * d
+                        intersections.append((t, pt))
+
+                # Sort by t parameter and return points
+                intersections.sort(key=lambda x: x[0])
+                return [pt for _, pt in intersections]
+
             # Draw canvas background
             draw_list.add_rect_filled(x0 - padding, y0 - padding,
                                       x0 + canvas_size + padding, y0 + canvas_size + padding,
@@ -4070,20 +4098,41 @@ class GLFWApp():
                                         x0, y0, canvas_size)
                     obj._manual_cut_line = (tuple(start_2d), tuple(end_2d))
 
-            # Draw the cutting line (while dragging or from stored line)
+            # Draw the cutting line (clipped to contour)
             if mouse_state['dragging'] and mouse_state['start_pos'] and mouse_state['end_pos']:
-                # Draw current drag line
-                draw_list.add_line(mouse_state['start_pos'][0], mouse_state['start_pos'][1],
-                                  mouse_state['end_pos'][0], mouse_state['end_pos'][1],
-                                  imgui.get_color_u32_rgba(1.0, 0.0, 1.0, 0.9), 3.0)
+                # Convert screen to 2D and find intersections
+                drag_start_2d = from_screen(mouse_state['start_pos'][0], mouse_state['start_pos'][1],
+                                           x0, y0, canvas_size)
+                drag_end_2d = from_screen(mouse_state['end_pos'][0], mouse_state['end_pos'][1],
+                                         x0, y0, canvas_size)
+                intersections = find_line_contour_intersections(drag_start_2d, drag_end_2d, target_2d)
+                if len(intersections) >= 2:
+                    # Draw clipped line between first two intersections
+                    int_start = to_screen(intersections[0], x0, y0, canvas_size)
+                    int_end = to_screen(intersections[1], x0, y0, canvas_size)
+                    draw_list.add_line(int_start[0], int_start[1], int_end[0], int_end[1],
+                                      imgui.get_color_u32_rgba(1.0, 0.0, 1.0, 0.9), 3.0)
+                else:
+                    # No valid intersection yet, draw faint line
+                    draw_list.add_line(mouse_state['start_pos'][0], mouse_state['start_pos'][1],
+                                      mouse_state['end_pos'][0], mouse_state['end_pos'][1],
+                                      imgui.get_color_u32_rgba(1.0, 0.0, 1.0, 0.3), 2.0)
             elif obj._manual_cut_line is not None:
-                # Draw stored line
+                # Draw stored line clipped to contour
                 start_2d, end_2d = obj._manual_cut_line
-                start_screen = to_screen(start_2d, x0, y0, canvas_size)
-                end_screen = to_screen(end_2d, x0, y0, canvas_size)
-                draw_list.add_line(start_screen[0], start_screen[1],
-                                  end_screen[0], end_screen[1],
-                                  imgui.get_color_u32_rgba(1.0, 0.0, 1.0, 0.9), 3.0)
+                intersections = find_line_contour_intersections(start_2d, end_2d, target_2d)
+                if len(intersections) >= 2:
+                    int_start = to_screen(intersections[0], x0, y0, canvas_size)
+                    int_end = to_screen(intersections[1], x0, y0, canvas_size)
+                    draw_list.add_line(int_start[0], int_start[1], int_end[0], int_end[1],
+                                      imgui.get_color_u32_rgba(1.0, 0.0, 1.0, 0.9), 3.0)
+                else:
+                    # Fallback to original line if no intersections
+                    start_screen = to_screen(start_2d, x0, y0, canvas_size)
+                    end_screen = to_screen(end_2d, x0, y0, canvas_size)
+                    draw_list.add_line(start_screen[0], start_screen[1],
+                                      end_screen[0], end_screen[1],
+                                      imgui.get_color_u32_rgba(1.0, 0.0, 1.0, 0.5), 2.0)
 
                 # Draw cut preview if we have a valid line
                 piece0_2d, piece1_2d = obj._compute_cut_preview()
