@@ -7949,16 +7949,16 @@ class ContourMeshMixin:
                     if key in numpy_keys and value is not None:
                         bp_dict[key] = np.array(value)
                     elif key == 'contour_match' and value is not None:
-                        # contour_match is a list of dicts with numpy arrays
+                        # contour_match is a list of [P, Q] pairs where P and Q are 3D points
                         bp_dict[key] = []
                         for match in value:
-                            match_dict = {}
-                            for mk, mv in match.items():
-                                if isinstance(mv, list) and len(mv) > 0:
-                                    match_dict[mk] = np.array(mv)
-                                else:
-                                    match_dict[mk] = mv
-                            bp_dict[key].append(match_dict)
+                            if isinstance(match, list) and len(match) == 2:
+                                # Each match is [P, Q] pair of 3D points
+                                bp_dict[key].append([np.array(match[0]), np.array(match[1])])
+                            elif match is None:
+                                bp_dict[key].append(None)
+                            else:
+                                bp_dict[key].append(match)
                     else:
                         bp_dict[key] = value
                 level_bp.append(bp_dict)
@@ -7968,7 +7968,14 @@ class ContourMeshMixin:
         if save_data.get('draw_contour_stream') is not None:
             self.draw_contour_stream = save_data['draw_contour_stream']
         else:
-            self.draw_contour_stream = [True] * len(self.contours)
+            # Create draw_contour_stream matching the structure of contours
+            # If contours is nested (streams), create nested structure
+            if len(self.contours) > 0 and isinstance(self.contours[0], list):
+                # Nested structure: [stream][level] -> contour
+                self.draw_contour_stream = [[True] * len(stream) for stream in self.contours]
+            else:
+                # Flat structure
+                self.draw_contour_stream = [True] * len(self.contours)
 
         if '_contours_normalized' in save_data:
             self._contours_normalized = save_data['_contours_normalized']
