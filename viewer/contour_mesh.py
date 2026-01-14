@@ -363,6 +363,11 @@ class ContourMeshMixin:
         self.inspector_highlight_stream = None  # Stream index to highlight
         self.inspector_highlight_level = None   # Level index to highlight
 
+        # Manual cutting state
+        self._manual_cut_pending = False  # True when waiting for user to draw cutting line
+        self._manual_cut_data = None      # Dict with all data needed for manual cutting
+        self._manual_cut_line = None      # ((x1, y1), (x2, y2)) - user-drawn cutting line in 2D
+
         # Contour mesh properties
         self.contour_mesh_vertices = None
         self.contour_mesh_faces = None
@@ -5177,6 +5182,308 @@ class ContourMeshMixin:
 
         print(f"Contours updated: now {len(self.contours)} levels")
 
+    def _prepare_manual_cut_data(self, muscle_name=None):
+        """
+        Prepare data for manual cutting window.
+
+        Called when contour count changes along levels and manual cutting is needed.
+        Sets up _manual_cut_data with target/source contours projected to 2D.
+        """
+        num_levels = len(self.contours)
+        origin_count = len(self.contours[0])
+        insertion_count = len(self.contours[-1])
+        max_stream_count = max(origin_count, insertion_count)
+
+        # Determine which side has fewer contours (target for cutting)
+        # and which has more (sources)
+        if origin_count < insertion_count:
+            # Origin has fewer - it's the target, insertion is source
+            target_level = 0
+            source_level = num_levels - 1
+            process_forward = False  # insertion → origin
+        else:
+            # Insertion has fewer - it's the target, origin is source
+            target_level = num_levels - 1
+            source_level = 0
+            process_forward = True  # origin → insertion
+
+        target_count = len(self.contours[target_level])
+        source_count = len(self.contours[source_level])
+
+        print(f"\n=== Preparing Manual Cut ===")
+        print(f"Target level: {target_level} ({target_count} contours)")
+        print(f"Source level: {source_level} ({source_count} contours)")
+
+        # For now, handle the case where target has 1 contour and source has 2
+        # This is the most common case
+        if target_count != 1 or source_count != 2:
+            print(f"Manual cutting currently only supports 1 target → 2 sources")
+            print(f"Falling back to automatic cutting")
+            return
+
+        # Get target contour and its bounding plane
+        target_contour = np.array(self.contours[target_level][0])
+        target_bp = self.bounding_planes[target_level][0]
+
+        # Get source contours and their bounding planes
+        source_contours = [np.array(self.contours[source_level][i]) for i in range(source_count)]
+        source_bps = [self.bounding_planes[source_level][i] for i in range(source_count)]
+
+        # Project target contour to 2D (using its own bounding plane)
+        target_mean = target_bp['mean']
+        target_x = target_bp['basis_x']
+        target_y = target_bp['basis_y']
+
+        target_2d = np.array([
+            [np.dot(v - target_mean, target_x), np.dot(v - target_mean, target_y)]
+            for v in target_contour
+        ])
+
+        # Project source contours to target's 2D plane
+        source_2d_list = []
+        for i, (src_contour, src_bp) in enumerate(zip(source_contours, source_bps)):
+            src_mean = src_bp['mean']
+            src_x = src_bp['basis_x']
+            src_y = src_bp['basis_y']
+
+            # Project source to its own 2D plane first
+            src_2d_own = np.array([
+                [np.dot(v - src_mean, src_x), np.dot(v - src_mean, src_y)]
+                for v in src_contour
+            ])
+
+            # Compute initial translation (project source mean onto target plane)
+            src_to_target = src_mean - target_mean
+            dist_along_z = np.dot(src_to_target, target_bp['basis_z'])
+            src_mean_projected = src_mean - dist_along_z * target_bp['basis_z']
+            init_tx = np.dot(src_mean_projected - target_mean, target_x)
+            init_ty = np.dot(src_mean_projected - target_mean, target_y)
+
+            # Compute initial rotation (align source basis_x with target basis_x)
+            src_x_on_target = src_x - np.dot(src_x, target_bp['basis_z']) * target_bp['basis_z']
+            src_x_norm = np.linalg.norm(src_x_on_target)
+            if src_x_norm > 1e-10:
+                src_x_on_target = src_x_on_target / src_x_norm
+                src_x_2d = np.array([np.dot(src_x_on_target, target_x), np.dot(src_x_on_target, target_y)])
+                init_theta = np.arctan2(src_x_2d[1], src_x_2d[0])
+            else:
+                init_theta = 0.0
+
+            # Apply rotation to source 2D shape
+            cos_t = np.cos(init_theta)
+            sin_t = np.sin(init_theta)
+            rot = np.array([[cos_t, -sin_t], [sin_t, cos_t]])
+            src_2d_rotated = src_2d_own @ rot.T
+
+            # Translate to initial position
+            src_2d_final = src_2d_rotated + np.array([init_tx, init_ty])
+            source_2d_list.append(src_2d_final)
+
+        # Store all data for the manual cutting window
+        self._manual_cut_data = {
+            'muscle_name': muscle_name,
+            'target_level': target_level,
+            'source_level': source_level,
+            'target_contour': target_contour,
+            'target_bp': target_bp,
+            'target_2d': target_2d,
+            'source_contours': source_contours,
+            'source_bps': source_bps,
+            'source_2d_list': source_2d_list,
+            'stream_indices': list(range(source_count)),
+            'process_forward': process_forward,
+        }
+
+        # Set pending flag to open the window
+        self._manual_cut_pending = True
+        self._manual_cut_line = None
+
+        print(f"Manual cutting window ready - draw a cutting line")
+
+    def _apply_manual_cut(self):
+        """
+        Apply the manually drawn cutting line to split the target contour.
+
+        Called when user clicks OK in the manual cutting window.
+        Computes intersection points, adds new vertices, and splits the contour.
+        """
+        if self._manual_cut_data is None or self._manual_cut_line is None:
+            print("No manual cut data or line available")
+            return None
+
+        line_start, line_end = self._manual_cut_line
+        target_2d = self._manual_cut_data['target_2d']
+        target_contour = self._manual_cut_data['target_contour']
+        target_bp = self._manual_cut_data['target_bp']
+
+        n_verts = len(target_2d)
+
+        # Find intersections between the cutting line and contour edges
+        intersections = []  # List of (edge_index, t_param, intersection_point_2d)
+
+        for i in range(n_verts):
+            p1 = target_2d[i]
+            p2 = target_2d[(i + 1) % n_verts]
+
+            # Line segment intersection
+            # Line: line_start + s * (line_end - line_start)
+            # Edge: p1 + t * (p2 - p1)
+            line_dir = np.array(line_end) - np.array(line_start)
+            edge_dir = p2 - p1
+
+            # Cross product for 2D (scalar)
+            cross = line_dir[0] * edge_dir[1] - line_dir[1] * edge_dir[0]
+
+            if abs(cross) < 1e-10:
+                continue  # Parallel lines
+
+            diff = p1 - np.array(line_start)
+            t = (line_dir[0] * diff[1] - line_dir[1] * diff[0]) / cross
+            s = (edge_dir[0] * diff[1] - edge_dir[1] * diff[0]) / cross
+
+            # Check if intersection is within edge (t in [0, 1])
+            # s can be anything since cutting line extends infinitely
+            if 0 < t < 1:  # Strictly inside edge (not at vertices)
+                intersection_2d = p1 + t * edge_dir
+                intersections.append((i, t, intersection_2d))
+
+        if len(intersections) != 2:
+            print(f"Expected 2 intersections, got {len(intersections)}")
+            return None
+
+        # Sort intersections by edge index
+        intersections.sort(key=lambda x: x[0])
+
+        (edge1_idx, t1, int1_2d), (edge2_idx, t2, int2_2d) = intersections
+
+        # Convert intersection points from 2D back to 3D
+        target_mean = target_bp['mean']
+        target_x = target_bp['basis_x']
+        target_y = target_bp['basis_y']
+
+        int1_3d = target_mean + int1_2d[0] * target_x + int1_2d[1] * target_y
+        int2_3d = target_mean + int2_2d[0] * target_x + int2_2d[1] * target_y
+
+        # Build two contour pieces
+        # Piece 0: from int1 → edge1+1 → ... → edge2 → int2 → int1 (closed)
+        # Piece 1: from int2 → edge2+1 → ... → edge1 → int1 → int2 (closed)
+
+        piece0_verts = [int1_3d]
+        for i in range(edge1_idx + 1, edge2_idx + 1):
+            piece0_verts.append(target_contour[i])
+        piece0_verts.append(int2_3d)
+
+        piece1_verts = [int2_3d]
+        for i in range(edge2_idx + 1, n_verts):
+            piece1_verts.append(target_contour[i])
+        for i in range(0, edge1_idx + 1):
+            piece1_verts.append(target_contour[i])
+        piece1_verts.append(int1_3d)
+
+        piece0 = np.array(piece0_verts)
+        piece1 = np.array(piece1_verts)
+
+        print(f"Manual cut: piece0 has {len(piece0)} vertices, piece1 has {len(piece1)} vertices")
+
+        # Determine which piece corresponds to which source contour
+        # Use centroid distance matching
+        source_2d_list = self._manual_cut_data['source_2d_list']
+
+        piece0_2d = np.array([
+            [np.dot(v - target_mean, target_x), np.dot(v - target_mean, target_y)]
+            for v in piece0
+        ])
+        piece1_2d = np.array([
+            [np.dot(v - target_mean, target_x), np.dot(v - target_mean, target_y)]
+            for v in piece1
+        ])
+
+        piece0_centroid = piece0_2d.mean(axis=0)
+        piece1_centroid = piece1_2d.mean(axis=0)
+
+        src0_centroid = source_2d_list[0].mean(axis=0)
+        src1_centroid = source_2d_list[1].mean(axis=0)
+
+        # Match pieces to sources by centroid distance
+        dist_00 = np.linalg.norm(piece0_centroid - src0_centroid)
+        dist_01 = np.linalg.norm(piece0_centroid - src1_centroid)
+
+        if dist_00 < dist_01:
+            # piece0 → source0, piece1 → source1
+            cut_contours = [piece0, piece1]
+        else:
+            # piece0 → source1, piece1 → source0
+            cut_contours = [piece1, piece0]
+
+        # Store the result
+        self._manual_cut_data['cut_result'] = cut_contours
+        self._manual_cut_data['intersection_3d'] = (int1_3d, int2_3d)
+
+        return cut_contours
+
+    def _cancel_manual_cut(self):
+        """Cancel manual cutting and reset state."""
+        self._manual_cut_pending = False
+        self._manual_cut_data = None
+        self._manual_cut_line = None
+        print("Manual cutting cancelled")
+
+    def _compute_cut_preview(self):
+        """
+        Compute preview of how the contour would be cut by the current line.
+        Returns two 2D contour pieces for visualization.
+        """
+        if self._manual_cut_data is None or self._manual_cut_line is None:
+            return None, None
+
+        line_start, line_end = self._manual_cut_line
+        target_2d = self._manual_cut_data['target_2d']
+
+        n_verts = len(target_2d)
+
+        # Find intersections
+        intersections = []
+
+        for i in range(n_verts):
+            p1 = target_2d[i]
+            p2 = target_2d[(i + 1) % n_verts]
+
+            line_dir = np.array(line_end) - np.array(line_start)
+            edge_dir = p2 - p1
+
+            cross = line_dir[0] * edge_dir[1] - line_dir[1] * edge_dir[0]
+
+            if abs(cross) < 1e-10:
+                continue
+
+            diff = p1 - np.array(line_start)
+            t = (line_dir[0] * diff[1] - line_dir[1] * diff[0]) / cross
+
+            if 0 < t < 1:
+                intersection_2d = p1 + t * edge_dir
+                intersections.append((i, t, intersection_2d))
+
+        if len(intersections) != 2:
+            return None, None
+
+        intersections.sort(key=lambda x: x[0])
+        (edge1_idx, t1, int1_2d), (edge2_idx, t2, int2_2d) = intersections
+
+        # Build 2D pieces for preview
+        piece0_2d = [int1_2d]
+        for i in range(edge1_idx + 1, edge2_idx + 1):
+            piece0_2d.append(target_2d[i])
+        piece0_2d.append(int2_2d)
+
+        piece1_2d = [int2_2d]
+        for i in range(edge2_idx + 1, n_verts):
+            piece1_2d.append(target_2d[i])
+        for i in range(0, edge1_idx + 1):
+            piece1_2d.append(target_2d[i])
+        piece1_2d.append(int1_2d)
+
+        return np.array(piece0_2d), np.array(piece1_2d)
+
     def cut_streams(self, cut_method='bp', muscle_name=None):
         """
         Step 1: Pre-cut all contours to max stream count.
@@ -5217,6 +5524,19 @@ class ContourMeshMixin:
         print(f"Origin count: {origin_count}, Insertion count: {insertion_count}")
         print(f"Max stream count: {max_stream_count}")
         print(f"Cut method: {cut_method}")
+
+        # Check if manual cutting is needed (contour count changes along levels)
+        # Only for 'bp' method with max_stream_count >= 2
+        if cut_method == 'bp' and max_stream_count >= 2 and origin_count != insertion_count:
+            # Check if we need to open manual cutting window
+            if not self._manual_cut_pending and self._manual_cut_data is None:
+                # Prepare data for manual cutting and open window
+                self._prepare_manual_cut_data(muscle_name)
+                return  # Wait for user to draw cutting line
+            elif self._manual_cut_pending:
+                # Still waiting for user to finish drawing
+                print("Manual cutting in progress - waiting for user to confirm")
+                return
 
         # Get contour counts per level
         contour_counts = [len(self.contours[i]) for i in range(num_levels)]
@@ -5372,10 +5692,19 @@ class ContourMeshMixin:
                             is_first_division = stream_combo not in cut_stream_combos
                             cut_stream_combos.add(stream_combo)
 
-                            cut_contours, cutting_info = self._cut_contour_bp_transform(
-                                target_contour, target_bp, source_contours, source_bps, streams_for_contour,
-                                is_first_division=is_first_division
-                            )
+                            # Check if we have a saved manual cut result for first division
+                            if is_first_division and self._manual_cut_data is not None and 'cut_result' in self._manual_cut_data:
+                                # Use the manual cut result
+                                cut_contours = self._manual_cut_data['cut_result']
+                                cutting_info = None
+                                print(f"  [BP Transform] Using manual cut result for first division")
+                                # Clear manual cut data after using it
+                                self._manual_cut_data = None
+                            else:
+                                cut_contours, cutting_info = self._cut_contour_bp_transform(
+                                    target_contour, target_bp, source_contours, source_bps, streams_for_contour,
+                                    is_first_division=is_first_division
+                                )
                         elif cut_method == 'mesh':
                             cut_contours = self._cut_contour_mesh_aware(
                                 target_contour, target_bp, projected_refs, streams_for_contour

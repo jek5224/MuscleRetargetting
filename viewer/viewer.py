@@ -3043,6 +3043,9 @@ class GLFWApp():
         # Render BP Viz windows
         self._render_bp_viz_windows()
 
+        # Render Manual Cut windows for each muscle
+        self._render_manual_cut_windows()
+
         imgui.render()
 
     def _render_inspect_2d_windows(self):
@@ -3942,6 +3945,207 @@ class GLFWApp():
 
         for name in muscles_to_close:
             self.bp_viz_open[name] = False
+
+    def _render_manual_cut_windows(self):
+        """Render manual cutting windows for muscles that need user input."""
+        for name, obj in self.zygote_muscle_meshes.items():
+            if not hasattr(obj, '_manual_cut_pending') or not obj._manual_cut_pending:
+                continue
+
+            if obj._manual_cut_data is None:
+                continue
+
+            # Initialize mouse state for this window
+            if not hasattr(self, '_manual_cut_mouse'):
+                self._manual_cut_mouse = {}
+            if name not in self._manual_cut_mouse:
+                self._manual_cut_mouse[name] = {
+                    'dragging': False,
+                    'start_pos': None,
+                    'end_pos': None,
+                }
+
+            mouse_state = self._manual_cut_mouse[name]
+
+            # Window setup
+            muscle_name = obj._manual_cut_data.get('muscle_name', name)
+            imgui.set_next_window_size(600, 550, imgui.FIRST_USE_EVER)
+            expanded, opened = imgui.begin(f"Manual Cut: {muscle_name}", True)
+
+            if not opened:
+                obj._cancel_manual_cut()
+                imgui.end()
+                continue
+
+            # Get data
+            target_2d = obj._manual_cut_data['target_2d']
+            source_2d_list = obj._manual_cut_data['source_2d_list']
+            target_level = obj._manual_cut_data['target_level']
+            source_level = obj._manual_cut_data['source_level']
+
+            imgui.text(f"Target level: {target_level} (1 contour)")
+            imgui.text(f"Source level: {source_level} ({len(source_2d_list)} contours)")
+            imgui.text("Draw a line to cut the target contour")
+            imgui.separator()
+
+            # Compute bounds for normalization
+            all_points = [target_2d]
+            for src in source_2d_list:
+                if len(src) > 0:
+                    all_points.append(src)
+            all_points_arr = np.vstack(all_points)
+            min_xy = all_points_arr.min(axis=0)
+            max_xy = all_points_arr.max(axis=0)
+            range_xy = max_xy - min_xy
+            max_range = max(range_xy) * 1.2  # Add some padding
+
+            # Canvas setup
+            canvas_size = 450
+            padding = 20
+            draw_list = imgui.get_window_draw_list()
+            cursor_pos = imgui.get_cursor_screen_pos()
+            x0, y0 = cursor_pos[0] + padding, cursor_pos[1] + padding
+
+            # Coordinate transform functions
+            def to_screen(p, x0, y0, canvas_size):
+                center = (min_xy + max_xy) / 2
+                normalized = (np.array(p) - center) / max_range + 0.5
+                return (x0 + normalized[0] * canvas_size,
+                        y0 + (1.0 - normalized[1]) * canvas_size)  # Flip Y
+
+            def from_screen(sx, sy, x0, y0, canvas_size):
+                normalized_x = (sx - x0) / canvas_size
+                normalized_y = 1.0 - (sy - y0) / canvas_size  # Flip Y back
+                center = (min_xy + max_xy) / 2
+                return center + (np.array([normalized_x, normalized_y]) - 0.5) * max_range
+
+            # Draw canvas background
+            draw_list.add_rect_filled(x0 - padding, y0 - padding,
+                                      x0 + canvas_size + padding, y0 + canvas_size + padding,
+                                      imgui.get_color_u32_rgba(0.15, 0.15, 0.15, 1.0))
+            draw_list.add_rect(x0 - padding, y0 - padding,
+                              x0 + canvas_size + padding, y0 + canvas_size + padding,
+                              imgui.get_color_u32_rgba(0.5, 0.5, 0.5, 1.0))
+
+            # Draw target contour (solid white)
+            if len(target_2d) >= 3:
+                target_screen = [to_screen(p, x0, y0, canvas_size) for p in target_2d]
+                # Fill with gray
+                for i in range(1, len(target_screen) - 1):
+                    draw_list.add_triangle_filled(
+                        target_screen[0][0], target_screen[0][1],
+                        target_screen[i][0], target_screen[i][1],
+                        target_screen[i+1][0], target_screen[i+1][1],
+                        imgui.get_color_u32_rgba(0.3, 0.3, 0.3, 0.5))
+                # Outline
+                for i in range(len(target_screen)):
+                    p1, p2 = target_screen[i], target_screen[(i+1) % len(target_screen)]
+                    draw_list.add_line(p1[0], p1[1], p2[0], p2[1],
+                                      imgui.get_color_u32_rgba(1.0, 1.0, 1.0, 1.0), 2.0)
+
+            # Draw source contours (transparent colored)
+            colors = [(0.2, 0.6, 1.0), (1.0, 0.4, 0.2)]  # Blue, Orange
+            for si, src_2d in enumerate(source_2d_list):
+                if len(src_2d) >= 3:
+                    color = colors[si % len(colors)]
+                    src_screen = [to_screen(p, x0, y0, canvas_size) for p in src_2d]
+                    # Fill with alpha
+                    for i in range(1, len(src_screen) - 1):
+                        draw_list.add_triangle_filled(
+                            src_screen[0][0], src_screen[0][1],
+                            src_screen[i][0], src_screen[i][1],
+                            src_screen[i+1][0], src_screen[i+1][1],
+                            imgui.get_color_u32_rgba(color[0], color[1], color[2], 0.25))
+                    # Outline
+                    for i in range(len(src_screen)):
+                        p1, p2 = src_screen[i], src_screen[(i+1) % len(src_screen)]
+                        draw_list.add_line(p1[0], p1[1], p2[0], p2[1],
+                                          imgui.get_color_u32_rgba(color[0], color[1], color[2], 0.8), 1.5)
+
+            # Handle mouse interaction for drawing line
+            mouse_pos = imgui.get_mouse_pos()
+            is_hovered = (x0 <= mouse_pos[0] <= x0 + canvas_size and
+                         y0 <= mouse_pos[1] <= y0 + canvas_size)
+
+            if is_hovered:
+                if imgui.is_mouse_clicked(0):  # Left mouse button
+                    mouse_state['dragging'] = True
+                    mouse_state['start_pos'] = (mouse_pos[0], mouse_pos[1])
+                    mouse_state['end_pos'] = (mouse_pos[0], mouse_pos[1])
+
+            if mouse_state['dragging']:
+                mouse_state['end_pos'] = (mouse_pos[0], mouse_pos[1])
+                if imgui.is_mouse_released(0):
+                    mouse_state['dragging'] = False
+                    # Convert to 2D coordinates and store the line
+                    start_2d = from_screen(mouse_state['start_pos'][0], mouse_state['start_pos'][1],
+                                          x0, y0, canvas_size)
+                    end_2d = from_screen(mouse_state['end_pos'][0], mouse_state['end_pos'][1],
+                                        x0, y0, canvas_size)
+                    obj._manual_cut_line = (tuple(start_2d), tuple(end_2d))
+
+            # Draw the cutting line (while dragging or from stored line)
+            if mouse_state['dragging'] and mouse_state['start_pos'] and mouse_state['end_pos']:
+                # Draw current drag line
+                draw_list.add_line(mouse_state['start_pos'][0], mouse_state['start_pos'][1],
+                                  mouse_state['end_pos'][0], mouse_state['end_pos'][1],
+                                  imgui.get_color_u32_rgba(1.0, 0.0, 1.0, 0.9), 3.0)
+            elif obj._manual_cut_line is not None:
+                # Draw stored line
+                start_2d, end_2d = obj._manual_cut_line
+                start_screen = to_screen(start_2d, x0, y0, canvas_size)
+                end_screen = to_screen(end_2d, x0, y0, canvas_size)
+                draw_list.add_line(start_screen[0], start_screen[1],
+                                  end_screen[0], end_screen[1],
+                                  imgui.get_color_u32_rgba(1.0, 0.0, 1.0, 0.9), 3.0)
+
+                # Draw cut preview if we have a valid line
+                piece0_2d, piece1_2d = obj._compute_cut_preview()
+                if piece0_2d is not None and piece1_2d is not None:
+                    # Draw piece 0 (color 0)
+                    if len(piece0_2d) >= 3:
+                        p0_screen = [to_screen(p, x0, y0, canvas_size) for p in piece0_2d]
+                        for i in range(len(p0_screen)):
+                            p1, p2 = p0_screen[i], p0_screen[(i+1) % len(p0_screen)]
+                            draw_list.add_line(p1[0], p1[1], p2[0], p2[1],
+                                              imgui.get_color_u32_rgba(colors[0][0], colors[0][1], colors[0][2], 1.0), 2.5)
+                    # Draw piece 1 (color 1)
+                    if len(piece1_2d) >= 3:
+                        p1_screen = [to_screen(p, x0, y0, canvas_size) for p in piece1_2d]
+                        for i in range(len(p1_screen)):
+                            pt1, pt2 = p1_screen[i], p1_screen[(i+1) % len(p1_screen)]
+                            draw_list.add_line(pt1[0], pt1[1], pt2[0], pt2[1],
+                                              imgui.get_color_u32_rgba(colors[1][0], colors[1][1], colors[1][2], 1.0), 2.5)
+
+            # Canvas dummy for spacing
+            imgui.dummy(canvas_size + 2 * padding, canvas_size + 2 * padding)
+
+            # OK and Cancel buttons
+            imgui.separator()
+            button_width = 100
+
+            if imgui.button("OK", button_width, 30):
+                if obj._manual_cut_line is not None:
+                    # Apply the manual cut
+                    cut_result = obj._apply_manual_cut()
+                    if cut_result is not None:
+                        print(f"Manual cut applied successfully")
+                        # Reset state and continue with cut_streams
+                        obj._manual_cut_pending = False
+                        # Call cut_streams again to continue with COMMON mode
+                        obj.cut_streams(cut_method='bp', muscle_name=muscle_name)
+                    else:
+                        print("Failed to apply manual cut - draw a line that crosses the contour twice")
+                else:
+                    print("Please draw a cutting line first")
+
+            imgui.same_line()
+            if imgui.button("Cancel", button_width, 30):
+                obj._cancel_manual_cut()
+                if name in self._manual_cut_mouse:
+                    del self._manual_cut_mouse[name]
+
+            imgui.end()
 
     def reset(self, reset_time=None):
         self.env.reset(reset_time)
