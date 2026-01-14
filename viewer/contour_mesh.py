@@ -5146,6 +5146,9 @@ class ContourMeshMixin:
                 prev_level_contours = [stream_contours[s][-1].copy() if hasattr(stream_contours[s][-1], 'copy') else np.array(stream_contours[s][-1]) for s in range(max_stream_count)]
                 prev_level_bps = [stream_bounding_planes[s][-1].copy() for s in range(max_stream_count)]
 
+                # Debug: show prev level contour sizes
+                print(f"  [DEBUG] prev_level_contours sizes: {[len(c) for c in prev_level_contours]}")
+
                 # Find which streams map to which contours (by distance)
                 prev_means = [prev_level_bps[s]['mean'] for s in range(max_stream_count)]
                 curr_means = [self.bounding_planes[level_i][c]['mean'] for c in range(curr_count)]
@@ -5222,6 +5225,11 @@ class ContourMeshMixin:
                         # Assign cut pieces to streams
                         for idx, stream_i in enumerate(streams_for_contour):
                             cut_contour = cut_contours[idx]
+
+                            # Debug: warn about small cut contours
+                            if len(cut_contour) <= 5:
+                                print(f"  [WARNING] Level {level_i}: stream {stream_i} got cut contour with only {len(cut_contour)} vertices!")
+
                             # Create new bounding plane for cut piece using only cut vertices
                             # z-axis will be computed naturally from the cut contour shape
                             # User can apply z, x, bp smoothening later
