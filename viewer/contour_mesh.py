@@ -6418,10 +6418,15 @@ class ContourMeshMixin:
             new_contours[prev_piece].append(boundary_pt)
             new_contours[curr_piece].append(boundary_pt)
 
-        # Ensure each piece has at least some vertices
+        # Ensure each piece has at least some vertices and convert to proper numpy arrays
         for i in range(n_pieces):
             if len(new_contours[i]) == 0:
                 new_contours[i] = [target_mean]
+            # Convert list of vertices to numpy array with shape (N, 3)
+            new_contours[i] = np.array([np.asarray(v).flatten()[:3] for v in new_contours[i]])
+            # Ensure at least 3 vertices for valid contour (duplicate if needed)
+            while len(new_contours[i]) < 3:
+                new_contours[i] = np.vstack([new_contours[i], new_contours[i][-1]])
 
         # ========== Step 8: Save visualization with assignments ==========
         self._save_bp_transform_visualization(
