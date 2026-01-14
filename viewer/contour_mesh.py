@@ -802,8 +802,49 @@ class ContourMeshMixin:
 
                 poly = Polygon(verts_2d)
                 if not poly.is_valid:
-                    print(f"  [find_contour] WARNING: Skipping self-intersecting contour at value {contour_value}")
-                    continue
+                    # Try to fix with buffer(0)
+                    fixed_poly = poly.buffer(0)
+                    if fixed_poly.is_empty:
+                        print(f"  [find_contour] WARNING: Skipping empty contour at value {contour_value}")
+                        continue
+                    elif fixed_poly.geom_type == 'MultiPolygon':
+                        # Split into multiple polygons - take the largest one
+                        largest = max(fixed_poly.geoms, key=lambda g: g.area)
+                        if largest.area > 0:
+                            # Extract exterior coordinates and map back to 3D
+                            fixed_coords = np.array(largest.exterior.coords)[:-1]  # Remove closing point
+                            # Find closest original vertices for each fixed coord
+                            new_verts = []
+                            for fc in fixed_coords:
+                                dists = np.linalg.norm(verts_2d - fc, axis=1)
+                                closest_idx = np.argmin(dists)
+                                new_verts.append(verts[closest_idx])
+                            if len(new_verts) >= 3:
+                                verts = np.array(new_verts)
+                                print(f"  [find_contour] Fixed MultiPolygon at value {contour_value}: {len(verts)} vertices")
+                            else:
+                                print(f"  [find_contour] WARNING: Skipping degenerate contour at value {contour_value}")
+                                continue
+                        else:
+                            print(f"  [find_contour] WARNING: Skipping zero-area contour at value {contour_value}")
+                            continue
+                    elif fixed_poly.geom_type == 'Polygon' and fixed_poly.area > 0:
+                        # Successfully fixed - extract and remap vertices
+                        fixed_coords = np.array(fixed_poly.exterior.coords)[:-1]
+                        new_verts = []
+                        for fc in fixed_coords:
+                            dists = np.linalg.norm(verts_2d - fc, axis=1)
+                            closest_idx = np.argmin(dists)
+                            new_verts.append(verts[closest_idx])
+                        if len(new_verts) >= 3:
+                            verts = np.array(new_verts)
+                            print(f"  [find_contour] Fixed self-intersection at value {contour_value}: {len(verts)} vertices")
+                        else:
+                            print(f"  [find_contour] WARNING: Skipping degenerate contour at value {contour_value}")
+                            continue
+                    else:
+                        print(f"  [find_contour] WARNING: Skipping unfixable contour at value {contour_value}")
+                        continue
             except Exception as e:
                 # If check fails, still include the contour
                 pass
