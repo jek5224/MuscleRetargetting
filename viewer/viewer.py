@@ -2029,7 +2029,7 @@ class GLFWApp():
                         if colored_button(f"Cut##{name}", 4, stream3_button_width):
                             if obj.contours is not None and len(obj.contours) > 0 and obj.bounding_planes is not None and len(obj.bounding_planes) > 0:
                                 try:
-                                    obj.cut_streams(cut_method=obj.cutting_method)
+                                    obj.cut_streams(cut_method=obj.cutting_method, muscle_name=name)
                                 except Exception as e:
                                     import traceback
                                     print(f"[{name}] Cut Streams error: {e}")
@@ -2153,6 +2153,18 @@ class GLFWApp():
                             else:
                                 print(f"[{name}] No contour data. Run 'Find Contours' first.")
                         if not has_contour_data:
+                            imgui.pop_style_var()
+
+                        # BP Viz button - opens visualization window (only active after cutting)
+                        has_stream_data = (hasattr(obj, 'stream_contours') and obj.stream_contours is not None and len(obj.stream_contours) > 0)
+                        if not has_stream_data:
+                            imgui.push_style_var(imgui.STYLE_ALPHA, 0.5)
+                        if imgui.button(f"BP Viz##{name}", width=inspect_width):
+                            if has_stream_data:
+                                obj.bp_viz_show_window = True
+                            else:
+                                print(f"[{name}] No stream data. Run 'Cut Streams' first.")
+                        if not has_stream_data:
                             imgui.pop_style_var()
 
                         # Focus camera on muscle button
