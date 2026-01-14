@@ -3614,19 +3614,16 @@ class ContourMeshMixin:
                 # Store resampled contour_match for mesh building
                 new_bp_info['contour_match'] = contour_match
 
-                # Snap vertices near shared cut positions to exact positions
+                # Snap vertices very close to shared cut positions to exact positions
+                # Use tight threshold (1e-4) to only affect actual cut edge vertices
                 if hasattr(self, 'shared_cut_vertices') and len(self.shared_cut_vertices) > 0:
-                    snap_threshold = 0.01  # Distance threshold for snapping
-                    snapped_count = 0
+                    snap_threshold = 1e-4
                     for v_idx in range(len(aligned_contour)):
                         for shared_pos in self.shared_cut_vertices:
                             dist = np.linalg.norm(aligned_contour[v_idx] - shared_pos)
                             if dist < snap_threshold:
                                 aligned_contour[v_idx] = shared_pos.copy()
-                                snapped_count += 1
                                 break
-                    if snapped_count > 0:
-                        print(f"      Snapped {snapped_count} vertices to shared cut positions")
 
                 resampled_group.append(aligned_contour)
                 new_bp_group.append(new_bp_info)
