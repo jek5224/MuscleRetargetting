@@ -3054,6 +3054,36 @@ class MuscleMeshMixin:
         # Import geometric utilities from contour_mesh
         from .contour_mesh import compute_newell_normal, compute_best_fitting_plane, compute_polygon_area, compute_minimum_area_bbox
 
+        # Validate and fix contour_points to ensure it's a proper 2D array with shape (N, 3)
+        contour_points = np.asarray(contour_points)
+        if contour_points.ndim == 0:
+            # 0-dimensional array - create minimal valid contour
+            contour_points = np.array([[0.0, 0.0, 0.0], [0.001, 0.0, 0.0], [0.0, 0.001, 0.0]])
+        elif contour_points.ndim == 1:
+            # 1D array - might be single vertex or flat array
+            if len(contour_points) >= 9:
+                # Try to reshape as (N, 3)
+                n_verts = len(contour_points) // 3
+                contour_points = contour_points[:n_verts*3].reshape(n_verts, 3)
+            elif len(contour_points) >= 3:
+                # Single vertex - duplicate to make valid contour
+                v = contour_points[:3]
+                contour_points = np.array([v, v + [0.001, 0, 0], v + [0, 0.001, 0]])
+            else:
+                contour_points = np.array([[0.0, 0.0, 0.0], [0.001, 0.0, 0.0], [0.0, 0.001, 0.0]])
+        elif contour_points.ndim == 2:
+            if contour_points.shape[1] < 3:
+                # Pad columns with zeros
+                padded = np.zeros((contour_points.shape[0], 3))
+                padded[:, :contour_points.shape[1]] = contour_points
+                contour_points = padded
+            elif contour_points.shape[1] > 3:
+                contour_points = contour_points[:, :3]
+
+        # Ensure at least 3 vertices
+        while len(contour_points) < 3:
+            contour_points = np.vstack([contour_points, contour_points[-1] + [0.001, 0, 0]])
+
         if prev_bounding_plane is not None:
             prev_basis_x = prev_bounding_plane['basis_x']
             prev_basis_y = prev_bounding_plane['basis_y']

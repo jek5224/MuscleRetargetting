@@ -80,31 +80,64 @@ def align_basis_to_reference_continuous(basis_x, basis_y, ref_basis_x, basis_z):
 
 def compute_newell_normal(vertices):
     """Computes the normal vector of a closed loop using Newell's method."""
+    # Validate vertices to ensure proper shape
+    vertices = np.asarray(vertices)
+    if vertices.ndim == 0 or len(vertices) == 0:
+        return np.array([0.0, 0.0, 1.0])  # Default normal
+    if vertices.ndim == 1:
+        # Flat array or single vertex
+        if len(vertices) >= 9:
+            vertices = vertices[:len(vertices)//3*3].reshape(-1, 3)
+        else:
+            return np.array([0.0, 0.0, 1.0])  # Default normal for single vertex
+    if vertices.ndim != 2 or vertices.shape[1] < 3:
+        return np.array([0.0, 0.0, 1.0])  # Default normal for invalid shape
+
     normal = np.zeros(3)
     n = len(vertices)
 
     for i in range(n):
-        v_curr = np.array(vertices[i])
-        v_next = np.array(vertices[(i + 1) % n])
+        v_curr = np.asarray(vertices[i]).flatten()[:3]
+        v_next = np.asarray(vertices[(i + 1) % n]).flatten()[:3]
 
         normal[0] += (v_curr[1] - v_next[1]) * (v_curr[2] + v_next[2])
         normal[1] += (v_curr[2] - v_next[2]) * (v_curr[0] + v_next[0])
         normal[2] += (v_curr[0] - v_next[0]) * (v_curr[1] + v_next[1])
 
-    return normal / np.linalg.norm(normal) if np.linalg.norm(normal) > 0.0 else np.array([0, 0, 0])
+    return normal / np.linalg.norm(normal) if np.linalg.norm(normal) > 0.0 else np.array([0.0, 0.0, 1.0])
 
 
 def compute_best_fitting_plane(vertices):
     """Finds an optimal coordinate system using PCA."""
+    # Validate vertices
+    vertices = np.asarray(vertices)
+    if vertices.ndim == 0 or len(vertices) == 0:
+        return np.array([1.0, 0.0, 0.0]), np.array([0.0, 1.0, 0.0]), np.array([0.0, 0.0, 0.0])
+    if vertices.ndim == 1:
+        if len(vertices) >= 9:
+            vertices = vertices[:len(vertices)//3*3].reshape(-1, 3)
+        elif len(vertices) >= 3:
+            return np.array([1.0, 0.0, 0.0]), np.array([0.0, 1.0, 0.0]), vertices[:3]
+        else:
+            return np.array([1.0, 0.0, 0.0]), np.array([0.0, 1.0, 0.0]), np.array([0.0, 0.0, 0.0])
+    if vertices.ndim != 2 or vertices.shape[1] < 3:
+        return np.array([1.0, 0.0, 0.0]), np.array([0.0, 1.0, 0.0]), np.array([0.0, 0.0, 0.0])
+
+    # Ensure we have at least 3 vertices for SVD
+    if len(vertices) < 3:
+        return np.array([1.0, 0.0, 0.0]), np.array([0.0, 1.0, 0.0]), np.mean(vertices, axis=0)
+
     mean = np.mean(vertices, axis=0)
     centered = vertices - mean
-    _, _, eigenvectors = np.linalg.svd(centered)
-
-    basis_x = eigenvectors[0]
-    basis_y = eigenvectors[1]
-
-    basis_x /= np.linalg.norm(basis_x)
-    basis_y /= np.linalg.norm(basis_y)
+    try:
+        _, _, eigenvectors = np.linalg.svd(centered)
+        basis_x = eigenvectors[0]
+        basis_y = eigenvectors[1]
+        basis_x /= np.linalg.norm(basis_x) + 1e-10
+        basis_y /= np.linalg.norm(basis_y) + 1e-10
+    except:
+        basis_x = np.array([1.0, 0.0, 0.0])
+        basis_y = np.array([0.0, 1.0, 0.0])
 
     return basis_x, basis_y, mean
 
