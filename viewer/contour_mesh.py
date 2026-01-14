@@ -6081,7 +6081,36 @@ class ContourMeshMixin:
             initial_scale = np.clip(initial_scale, 0.1, 10.0)
         else:
             initial_scale = 1.0
-        print(f"  [BP Transform] initial scale={initial_scale:.4f} (target_area={target_area:.6f}, total_source_area={total_source_area:.6f})")
+
+        # Compute separate initial scale_x and scale_y based on bounding box aspect ratios
+        # This helps the optimizer start from a better point if non-uniform scaling is needed
+        target_2d_arr = np.array(target_2d)
+        target_bbox_size = target_2d_arr.max(axis=0) - target_2d_arr.min(axis=0)
+
+        # Combine all source shapes for bounding box
+        all_source_pts = np.vstack([np.array(s) + np.array(t) for s, t in zip(source_2d_shapes, initial_translations)])
+        source_bbox_size = all_source_pts.max(axis=0) - all_source_pts.min(axis=0)
+
+        # Compute aspect ratio difference
+        if source_bbox_size[0] > 1e-10 and source_bbox_size[1] > 1e-10:
+            target_aspect = target_bbox_size[0] / target_bbox_size[1] if target_bbox_size[1] > 1e-10 else 1.0
+            source_aspect = source_bbox_size[0] / source_bbox_size[1]
+
+            # Adjust initial scales to match aspect ratios
+            aspect_ratio = target_aspect / source_aspect if source_aspect > 1e-10 else 1.0
+            # scale_x * aspect_correction and scale_y should give target aspect ratio
+            # sqrt to distribute the correction between both axes
+            aspect_sqrt = np.sqrt(aspect_ratio)
+            initial_scale_x = initial_scale * aspect_sqrt
+            initial_scale_y = initial_scale / aspect_sqrt
+            # Clamp to bounds
+            initial_scale_x = np.clip(initial_scale_x, 0.5, 2.0)
+            initial_scale_y = np.clip(initial_scale_y, 0.5, 2.0)
+        else:
+            initial_scale_x = initial_scale
+            initial_scale_y = initial_scale
+
+        print(f"  [BP Transform] initial scale=({initial_scale_x:.4f},{initial_scale_y:.4f}) (target_area={target_area:.6f}, total_source_area={total_source_area:.6f})")
 
         # Use computed translations and rotations that align source basis with target basis
         if use_separate_transforms:
@@ -6089,12 +6118,12 @@ class ContourMeshMixin:
             # Each source has its own transform
             x0 = []
             for i, (tx, ty) in enumerate(initial_translations):
-                x0.extend([initial_scale, initial_scale, tx, ty, initial_rotations[i]])
+                x0.extend([initial_scale_x, initial_scale_y, tx, ty, initial_rotations[i]])
         else:
             # params: [scale_x, scale_y, tx, ty, theta]
             # (tx, ty) = position of combined center, theta = rotation around it
             # Start at combined_center with no rotation
-            x0 = [initial_scale, initial_scale, combined_center[0], combined_center[1], 0.0]
+            x0 = [initial_scale_x, initial_scale_y, combined_center[0], combined_center[1], 0.0]
 
         # Debug: show initial cost breakdown
         def objective_debug(params, verbose=False):
