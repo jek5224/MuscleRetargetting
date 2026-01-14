@@ -6140,39 +6140,55 @@ class ContourMeshMixin:
 
                 elif len(src_0) >= 3 and len(src_1) >= 3:
                     # COMMON mode (propagated): Sources were cut from one contour
-                    # Find the shared boundary - vertices that are very close between sources
-                    shared_boundary_points = []
+                    # Find the shared boundary by looking for edges that are close to each other
+                    # After first division, sources don't share exact vertices but have adjacent edges
+                    boundary_points = []
 
-                    # Use small threshold - shared vertices should be nearly identical
+                    # Use larger threshold - edges should be close but not identical
                     size_0 = np.max(np.linalg.norm(src_0 - src_0.mean(axis=0), axis=1))
                     size_1 = np.max(np.linalg.norm(src_1 - src_1.mean(axis=0), axis=1))
-                    threshold = 0.05 * min(size_0, size_1)
+                    threshold = 0.3 * min(size_0, size_1)
 
-                    # Find vertices in src_0 that have a very close match in src_1
-                    for v0 in src_0:
-                        dists = np.linalg.norm(src_1 - v0, axis=1)
-                        if np.min(dists) < threshold:
-                            shared_boundary_points.append(v0)
+                    # Find edges of src_0 that are close to src_1
+                    for i in range(len(src_0)):
+                        p0 = src_0[i]
+                        p1 = src_0[(i + 1) % len(src_0)]
+                        edge_mid = (p0 + p1) / 2
 
-                    # Also check src_1 vertices close to src_0
-                    for v1 in src_1:
-                        dists = np.linalg.norm(src_0 - v1, axis=1)
-                        if np.min(dists) < threshold:
-                            shared_boundary_points.append(v1)
+                        # Distance from edge midpoint to nearest point on src_1
+                        dists_to_src1 = np.linalg.norm(src_1 - edge_mid, axis=1)
+                        min_dist = np.min(dists_to_src1)
 
-                    if len(shared_boundary_points) >= 2:
-                        shared_boundary_points = np.array(shared_boundary_points)
-                        # Fit a line through shared boundary points
-                        boundary_mean = shared_boundary_points.mean(axis=0)
-                        centered = shared_boundary_points - boundary_mean
+                        if min_dist < threshold:
+                            boundary_points.append(p0)
+                            boundary_points.append(p1)
+
+                    # Similarly for src_1 edges close to src_0
+                    for i in range(len(src_1)):
+                        p0 = src_1[i]
+                        p1 = src_1[(i + 1) % len(src_1)]
+                        edge_mid = (p0 + p1) / 2
+
+                        dists_to_src0 = np.linalg.norm(src_0 - edge_mid, axis=1)
+                        min_dist = np.min(dists_to_src0)
+
+                        if min_dist < threshold:
+                            boundary_points.append(p0)
+                            boundary_points.append(p1)
+
+                    print(f"  [BP Transform] COMMON: found {len(boundary_points)} boundary points (threshold={threshold:.4f})")
+
+                    if len(boundary_points) >= 2:
+                        boundary_points = np.array(boundary_points)
+                        # Fit a line through boundary points using PCA
+                        boundary_mean = boundary_points.mean(axis=0)
+                        centered = boundary_points - boundary_mean
                         _, _, Vt = np.linalg.svd(centered, full_matrices=False)
                         boundary_dir = Vt[0]
                         boundary_dir = boundary_dir / (np.linalg.norm(boundary_dir) + 1e-10)
 
                         cutting_line_2d = (boundary_mean, boundary_dir)
-                        print(f"  [BP Transform] COMMON: found shared boundary from {len(shared_boundary_points)} points")
-                    else:
-                        print(f"  [BP Transform] COMMON: no shared boundary found (threshold={threshold:.4f})")
+                        print(f"  [BP Transform] COMMON: boundary line fitted")
 
                 if cutting_line_2d is None:
                     # Fallback: Use perpendicular bisector between centroids
@@ -6542,24 +6558,20 @@ class ContourMeshMixin:
             ax2.plot(target_arr[:, 0], target_arr[:, 1], 'k-', linewidth=2, label='Target')
             ax2.fill(target_arr[:, 0], target_arr[:, 1], alpha=0.1, color='gray')
 
-        # Draw optimized source contours (white outline + colored line on top)
+        # Draw optimized source contours (thick colored lines)
         for i, transformed in enumerate(final_transformed):
             if len(transformed) >= 3:
                 trans_arr = np.array(transformed)
                 trans_closed = np.vstack([trans_arr, trans_arr[0]])
-                # White outline for visibility
-                ax2.plot(trans_closed[:, 0], trans_closed[:, 1], '-', color='white',
-                        linewidth=4.0, zorder=15)
-                # Colored line on top
                 ax2.plot(trans_closed[:, 0], trans_closed[:, 1], '-', color=colors[i],
-                        linewidth=1.5, zorder=16, label=f'Opt {stream_indices[i]}')
+                        linewidth=2.5, zorder=15, label=f'Opt {stream_indices[i]}')
 
         # Draw centroids as large X markers
         if centroids:
             for i, c in enumerate(centroids):
                 ax2.scatter(c[0], c[1], marker='X', c=[colors[i]], s=100, zorder=20)
 
-        # Draw cutting/boundary line
+        # Draw cutting/boundary line (magenta for visibility)
         if cutting_line_2d is not None:
             line_point, line_dir = cutting_line_2d
             # Extend line to cover the plot area
@@ -6567,8 +6579,8 @@ class ContourMeshMixin:
             extent = np.max(np.abs(all_pts - line_point)) * 1.5
             p1 = line_point - line_dir * extent
             p2 = line_point + line_dir * extent
-            ax2.plot([p1[0], p2[0]], [p1[1], p2[1]], '--', color='yellow',
-                    linewidth=2.0, zorder=25, label='Cut line')
+            ax2.plot([p1[0], p2[0]], [p1[1], p2[1]], '--', color='magenta',
+                    linewidth=2.5, zorder=25, label='Cut line')
 
         ax2.legend(loc='upper right', fontsize=8)
         ax2.set_aspect('equal')
