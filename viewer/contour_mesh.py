@@ -5644,7 +5644,16 @@ class ContourMeshMixin:
                     src_poly = src_poly.buffer(0)
                 source_areas.append(src_poly.area)
             except:
-                source_areas.append(1.0)  # fallback
+                source_areas.append(0.0)  # fallback
+        print(f"  [BP Transform] source areas: {[f'{a:.6f}' for a in source_areas]}")
+
+        # Check for degenerate areas (too small to be useful)
+        min_area_threshold = 1e-6
+        if any(a < min_area_threshold for a in source_areas):
+            print(f"  [BP Transform] Falling back to area-based cutting due to tiny source areas")
+            projected_refs = [src_bp['mean'] for src_bp in source_bps]
+            return self._cut_contour_for_streams(target_contour, target_bp, projected_refs, stream_indices)
+
         total_source_area = sum(source_areas)
         if total_source_area > 0:
             source_area_ratios = [a / total_source_area for a in source_areas]
