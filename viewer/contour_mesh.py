@@ -6481,36 +6481,70 @@ class ContourMeshMixin:
                 src_1 = np.array(final_transformed[1])
 
                 if use_separate_transforms:
-                    # SEPARATE mode (first division): Find nearest non-adjacent vertices on target
+                    # SEPARATE mode (first division): Find nearest non-adjacent vertex-edge pair on target
                     # These form a natural "waist" at concave regions
                     n_target = len(target_2d)
                     min_dist = np.inf
-                    best_pair = None
+                    best_cut = None  # (cut_point, cut_dir, description)
 
-                    # Minimum separation to avoid adjacent vertices
+                    # Minimum separation to avoid adjacent vertices/edges
                     min_separation = max(3, n_target // 4)
 
+                    # Helper function to compute point-to-segment distance and closest point
+                    def point_to_segment_dist(point, seg_start, seg_end):
+                        """Return (distance, closest_point_on_segment)"""
+                        seg_vec = seg_end - seg_start
+                        seg_len_sq = np.dot(seg_vec, seg_vec)
+                        if seg_len_sq < 1e-10:
+                            return np.linalg.norm(point - seg_start), seg_start
+                        t = np.clip(np.dot(point - seg_start, seg_vec) / seg_len_sq, 0, 1)
+                        closest = seg_start + t * seg_vec
+                        return np.linalg.norm(point - closest), closest
+
+                    # Check vertex-edge pairs (vertex i to edge j->j+1)
                     for i in range(n_target):
-                        for j in range(i + min_separation, n_target):
-                            # Check wrap-around distance too
-                            wrap_dist = n_target - j + i
-                            if wrap_dist < min_separation:
+                        for j in range(n_target):
+                            # Edge is from j to (j+1) % n_target
+                            j_next = (j + 1) % n_target
+
+                            # Check if vertex i is adjacent to edge j->j_next
+                            # Adjacent means i == j or i == j_next
+                            if i == j or i == j_next:
                                 continue
 
-                            dist = np.linalg.norm(target_2d[i] - target_2d[j])
+                            # Check separation in both directions along the contour
+                            # Distance from i to j (forward)
+                            dist_i_to_j = (j - i) % n_target
+                            # Distance from i to j_next (forward)
+                            dist_i_to_jnext = (j_next - i) % n_target
+                            # Distance in the other direction
+                            dist_j_to_i = (i - j) % n_target
+                            dist_jnext_to_i = (i - j_next) % n_target
+
+                            # Both endpoints of edge must be sufficiently separated from vertex i
+                            if min(dist_i_to_j, dist_j_to_i) < min_separation:
+                                continue
+                            if min(dist_i_to_jnext, dist_jnext_to_i) < min_separation:
+                                continue
+
+                            # Compute distance from vertex i to edge j->j_next
+                            dist, closest_pt = point_to_segment_dist(
+                                target_2d[i], target_2d[j], target_2d[j_next]
+                            )
+
                             if dist < min_dist:
                                 min_dist = dist
-                                best_pair = (i, j)
+                                # Cut line goes from vertex to closest point on edge
+                                p1 = target_2d[i]
+                                p2 = closest_pt
+                                cut_point = (p1 + p2) / 2
+                                cut_dir = p2 - p1
+                                cut_dir = cut_dir / (np.linalg.norm(cut_dir) + 1e-10)
+                                best_cut = (cut_point, cut_dir, f"vertex {i} to edge {j}-{j_next}")
 
-                    if best_pair is not None:
-                        idx1, idx2 = best_pair
-                        p1 = target_2d[idx1]
-                        p2 = target_2d[idx2]
-                        cut_point = (p1 + p2) / 2
-                        cut_dir = p2 - p1
-                        cut_dir = cut_dir / (np.linalg.norm(cut_dir) + 1e-10)
-                        cutting_line_2d = (cut_point, cut_dir)
-                        print(f"  [BP Transform] SEPARATE: cut at nearest non-adjacent vertices {idx1}, {idx2} (dist={min_dist:.4f})")
+                    if best_cut is not None:
+                        cutting_line_2d = (best_cut[0], best_cut[1])
+                        print(f"  [BP Transform] SEPARATE: cut at {best_cut[2]} (dist={min_dist:.4f})")
 
                 elif len(src_0) >= 3 and len(src_1) >= 3:
                     # COMMON mode: Find shared boundary vertices between OPTIMIZED sources
