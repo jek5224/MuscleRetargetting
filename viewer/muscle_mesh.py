@@ -3022,6 +3022,9 @@ class MuscleMeshMixin:
         self._manual_cut_data = None
         self._manual_cut_line = None
 
+        # Shared cut edge vertices (for tet mesh connectivity)
+        self.shared_cut_vertices = []
+
         # Other
         self.structure_vectors = []
         self.specific_contour = None

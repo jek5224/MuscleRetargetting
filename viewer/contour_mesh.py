@@ -3614,6 +3614,20 @@ class ContourMeshMixin:
                 # Store resampled contour_match for mesh building
                 new_bp_info['contour_match'] = contour_match
 
+                # Snap vertices near shared cut positions to exact positions
+                if hasattr(self, 'shared_cut_vertices') and len(self.shared_cut_vertices) > 0:
+                    snap_threshold = 0.01  # Distance threshold for snapping
+                    snapped_count = 0
+                    for v_idx in range(len(aligned_contour)):
+                        for shared_pos in self.shared_cut_vertices:
+                            dist = np.linalg.norm(aligned_contour[v_idx] - shared_pos)
+                            if dist < snap_threshold:
+                                aligned_contour[v_idx] = shared_pos.copy()
+                                snapped_count += 1
+                                break
+                    if snapped_count > 0:
+                        print(f"      Snapped {snapped_count} vertices to shared cut positions")
+
                 resampled_group.append(aligned_contour)
                 new_bp_group.append(new_bp_info)
 
@@ -5374,6 +5388,22 @@ class ContourMeshMixin:
         self._manual_cut_data['cut_result'] = cut_contours
         self._manual_cut_data['intersection_3d'] = (int1_3d, int2_3d)
 
+        # Register shared cut edge vertices globally
+        # These vertices are shared between the two pieces and must be preserved exactly
+        if not hasattr(self, 'shared_cut_vertices'):
+            self.shared_cut_vertices = []
+        self.shared_cut_vertices.append(int1_3d.copy())
+        self.shared_cut_vertices.append(int2_3d.copy())
+        print(f"  Registered {len(self.shared_cut_vertices)} shared cut edge vertices")
+
+        # Store cut edge indices for each piece
+        # piece0: cut edges at indices 0 (int1) and last-1 (int2, before closing)
+        # piece1: cut edges at indices 0 (int2) and last-1 (int1, before closing)
+        self._manual_cut_data['cut_edge_indices'] = {
+            0: [0, len(piece0) - 1],  # indices of shared vertices in piece0
+            1: [0, len(piece1) - 1],  # indices of shared vertices in piece1
+        }
+
         return cut_contours
 
     def _cancel_manual_cut(self):
@@ -7109,6 +7139,7 @@ class ContourMeshMixin:
 
         # Second pass: assign vertices and interpolate at boundaries
         new_contours = [[] for _ in range(n_pieces)]
+        shared_boundary_points = []  # Collect shared cut edge vertices
         n_verts = len(target_2d)
 
         prev_piece = assignments[-1]  # Start with last vertex's assignment
@@ -7121,9 +7152,10 @@ class ContourMeshMixin:
                 # Find where cutting line intersects this edge
                 t, boundary_pt = find_edge_cut_point(prev_v_idx, v_idx)
 
-                # Add boundary point to BOTH pieces
+                # Add boundary point to BOTH pieces (shared vertex)
                 new_contours[prev_piece].append(boundary_pt)
                 new_contours[curr_piece].append(boundary_pt)
+                shared_boundary_points.append(boundary_pt.copy())
 
             # Add current vertex to its piece
             new_contours[curr_piece].append(target_contour[v_idx])
@@ -7139,6 +7171,15 @@ class ContourMeshMixin:
 
             new_contours[prev_piece].append(boundary_pt)
             new_contours[curr_piece].append(boundary_pt)
+            shared_boundary_points.append(boundary_pt.copy())
+
+        # Register shared cut edge vertices globally
+        if len(shared_boundary_points) > 0:
+            if not hasattr(self, 'shared_cut_vertices'):
+                self.shared_cut_vertices = []
+            for pt in shared_boundary_points:
+                self.shared_cut_vertices.append(pt)
+            print(f"  [BP Transform] Registered {len(shared_boundary_points)} shared cut edge vertices (total: {len(self.shared_cut_vertices)})")
 
         # Ensure each piece has at least some vertices and convert to proper numpy arrays
         for i in range(n_pieces):
