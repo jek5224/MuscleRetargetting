@@ -6351,6 +6351,37 @@ class ContourMeshMixin:
         assignment_counts = [assignments.count(i) for i in range(n_pieces)]
         print(f"  [BP Transform] vertex assignments (after smoothing): {assignment_counts}")
 
+        # Helper function to find intersection of cutting line with edge
+        def find_edge_cut_point(v_idx_a, v_idx_b):
+            """Find where the cutting line intersects the edge from vertex a to vertex b.
+            Returns interpolation parameter t in [0,1] and the 3D intersection point."""
+            if cutting_line_2d is None:
+                return 0.5, None  # Fallback to midpoint
+
+            line_point, line_dir = cutting_line_2d
+            line_normal = np.array([-line_dir[1], line_dir[0]])  # Perpendicular to line
+
+            # Edge endpoints in 2D
+            p_a = target_2d[v_idx_a]
+            p_b = target_2d[v_idx_b]
+            edge_vec = p_b - p_a
+
+            # Find t where the edge crosses the line
+            # Line equation: dot(p - line_point, line_normal) = 0
+            # Edge point: p_a + t * edge_vec
+            # Solve: dot(p_a + t*edge_vec - line_point, line_normal) = 0
+            denom = np.dot(edge_vec, line_normal)
+            if abs(denom) < 1e-10:
+                # Edge is parallel to cutting line, use midpoint
+                t = 0.5
+            else:
+                t = np.dot(line_point - p_a, line_normal) / denom
+                t = np.clip(t, 0.0, 1.0)
+
+            # Compute 3D intersection point
+            boundary_pt = target_contour[v_idx_a] + t * (target_contour[v_idx_b] - target_contour[v_idx_a])
+            return t, boundary_pt
+
         # Second pass: assign vertices and interpolate at boundaries
         new_contours = [[] for _ in range(n_pieces)]
         n_verts = len(target_2d)
@@ -6361,35 +6392,14 @@ class ContourMeshMixin:
 
             # Check if we crossed a boundary from prev vertex to this one
             if prev_piece != curr_piece and v_idx > 0:
-                # Interpolate to find the boundary point on the edge
                 prev_v_idx = v_idx - 1
-                prev_v_3d = target_contour[prev_v_idx]
-                curr_v_3d = target_contour[v_idx]
+                # Find where cutting line intersects this edge
+                t, boundary_pt = find_edge_cut_point(prev_v_idx, v_idx)
 
-                # Use distance difference to interpolate
-                # At boundary, distances to both pieces should be equal
-                prev_d0 = all_distances[prev_v_idx][prev_piece]
-                prev_d1 = all_distances[prev_v_idx][curr_piece]
-                curr_d0 = all_distances[v_idx][prev_piece]
-                curr_d1 = all_distances[v_idx][curr_piece]
-
-                # Linear interpolation: find t where d0(t) = d1(t)
-                # d0(t) = prev_d0 + t * (curr_d0 - prev_d0)
-                # d1(t) = prev_d1 + t * (curr_d1 - prev_d1)
-                # Solve: prev_d0 + t*(curr_d0-prev_d0) = prev_d1 + t*(curr_d1-prev_d1)
-                denom = (curr_d0 - prev_d0) - (curr_d1 - prev_d1)
-                if abs(denom) > 1e-10:
-                    t = (prev_d1 - prev_d0) / denom
-                    t = np.clip(t, 0.0, 1.0)
-                else:
-                    t = 0.5
-
-                # Interpolated boundary point
-                boundary_pt = prev_v_3d + t * (curr_v_3d - prev_v_3d)
-
-                # Add boundary point to BOTH pieces
-                new_contours[prev_piece].append(boundary_pt)
-                new_contours[curr_piece].append(boundary_pt)
+                if boundary_pt is not None:
+                    # Add boundary point to BOTH pieces
+                    new_contours[prev_piece].append(boundary_pt)
+                    new_contours[curr_piece].append(boundary_pt)
 
             # Add current vertex to its piece
             new_contours[curr_piece].append(target_contour[v_idx])
@@ -6397,26 +6407,15 @@ class ContourMeshMixin:
 
         # Handle wrap-around: check boundary between last and first vertex
         if assignments[-1] != assignments[0]:
-            prev_v_3d = target_contour[-1]
-            curr_v_3d = target_contour[0]
             prev_piece = assignments[-1]
             curr_piece = assignments[0]
 
-            prev_d0 = all_distances[-1][prev_piece]
-            prev_d1 = all_distances[-1][curr_piece]
-            curr_d0 = all_distances[0][prev_piece]
-            curr_d1 = all_distances[0][curr_piece]
+            # Find where cutting line intersects wrap-around edge
+            t, boundary_pt = find_edge_cut_point(n_verts - 1, 0)
 
-            denom = (curr_d0 - prev_d0) - (curr_d1 - prev_d1)
-            if abs(denom) > 1e-10:
-                t = (prev_d1 - prev_d0) / denom
-                t = np.clip(t, 0.0, 1.0)
-            else:
-                t = 0.5
-
-            boundary_pt = prev_v_3d + t * (curr_v_3d - prev_v_3d)
-            new_contours[prev_piece].append(boundary_pt)
-            new_contours[curr_piece].append(boundary_pt)
+            if boundary_pt is not None:
+                new_contours[prev_piece].append(boundary_pt)
+                new_contours[curr_piece].append(boundary_pt)
 
         # Ensure each piece has at least some vertices and convert to proper numpy arrays
         for i in range(n_pieces):
