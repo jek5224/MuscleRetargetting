@@ -6567,23 +6567,39 @@ class ContourMeshMixin:
         scales_str = ', '.join([f'{s:.2f}' for s in scales])
         ax2.set_title(f'Final (scales=[{scales_str}])')
 
-        # Draw transformed source contours (outline only, no fill)
+        # Draw target contour colored by assignments
+        if assignments and len(assignments) == len(target_arr):
+            # Draw edges colored by assignment
+            for i in range(len(target_arr)):
+                p1 = target_arr[i]
+                p2 = target_arr[(i + 1) % len(target_arr)]
+                piece_idx = assignments[i]
+                ax2.plot([p1[0], p2[0]], [p1[1], p2[1]], '-', color=colors[piece_idx],
+                        linewidth=2.5, zorder=5)
+            # Draw vertices as colored dots
+            for v_idx, (v_2d, piece_idx) in enumerate(zip(target_arr, assignments)):
+                ax2.scatter(v_2d[0], v_2d[1], c=[colors[piece_idx]], s=25, zorder=10)
+        else:
+            # No assignments - draw target as gray
+            ax2.plot(target_arr[:, 0], target_arr[:, 1], 'k-', linewidth=2, label='Target')
+            ax2.fill(target_arr[:, 0], target_arr[:, 1], alpha=0.1, color='gray')
+
+        # Draw optimized source contours (white outline + colored line on top)
         for i, transformed in enumerate(final_transformed):
             if len(transformed) >= 3:
                 trans_arr = np.array(transformed)
                 trans_closed = np.vstack([trans_arr, trans_arr[0]])
+                # White outline for visibility
+                ax2.plot(trans_closed[:, 0], trans_closed[:, 1], '-', color='white',
+                        linewidth=4.0, zorder=15)
+                # Colored line on top
                 ax2.plot(trans_closed[:, 0], trans_closed[:, 1], '-', color=colors[i],
-                        linewidth=1.5, alpha=0.5, label=f'Src {stream_indices[i]}')
-
-        # Draw vertex assignments as colored markers on target contour
-        if assignments:
-            for v_idx, (v_2d, piece_idx) in enumerate(zip(target_arr, assignments)):
-                ax2.scatter(v_2d[0], v_2d[1], c=[colors[piece_idx]], s=20, zorder=10)
+                        linewidth=1.5, zorder=16, label=f'Opt {stream_indices[i]}')
 
         # Draw centroids as large X markers
         if centroids:
             for i, c in enumerate(centroids):
-                ax2.scatter(c[0], c[1], marker='X', c=[colors[i]], s=100, zorder=15)
+                ax2.scatter(c[0], c[1], marker='X', c=[colors[i]], s=100, zorder=20)
 
         ax2.legend(loc='upper right', fontsize=8)
         ax2.set_aspect('equal')
