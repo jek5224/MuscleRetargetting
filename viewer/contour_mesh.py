@@ -5556,7 +5556,7 @@ class ContourMeshMixin:
             for v in target_contour
         ])
 
-        # ========== Step 2: Project source contours to 2D in their own planes ==========
+        # ========== Step 2: Project source contours to 2D ==========
         source_2d_shapes = []
         initial_translations = []
         initial_rotations = []
@@ -5564,42 +5564,61 @@ class ContourMeshMixin:
         for i, (src_contour, src_bp) in enumerate(zip(source_contours, source_bps)):
             src_contour = np.array(src_contour)
             src_mean = src_bp['mean']
-            src_x = src_bp['basis_x']
-            src_y = src_bp['basis_y']
 
-            # Project source contour to its own 2D plane
-            src_2d = np.array([
-                [np.dot(v - src_mean, src_x), np.dot(v - src_mean, src_y)]
-                for v in src_contour
-            ])
-            source_2d_shapes.append(src_2d)
-            print(f"  [BP Transform] source {i} has {len(src_2d)} vertices")
+            if is_first_division:
+                # SEPARATE mode: project each source to its own 2D plane
+                # Then compute rotation to align with target basis
+                src_x = src_bp['basis_x']
+                src_y = src_bp['basis_y']
 
-            # Initial translation: project source mean onto target plane
-            # First project src_mean onto the target plane (along target_z)
-            src_to_target = src_mean - target_mean
-            dist_along_z = np.dot(src_to_target, target_bp['basis_z'])
-            src_mean_projected = src_mean - dist_along_z * target_bp['basis_z']
-            # Now get 2D coordinates on target plane
-            src_mean_on_target_x = np.dot(src_mean_projected - target_mean, target_x)
-            src_mean_on_target_y = np.dot(src_mean_projected - target_mean, target_y)
-            initial_translations.append([src_mean_on_target_x, src_mean_on_target_y])
-            print(f"  [BP Transform] source {i} initial pos: ({src_mean_on_target_x:.4f}, {src_mean_on_target_y:.4f})")
+                # Project source contour to its own 2D plane (centered at origin)
+                src_2d = np.array([
+                    [np.dot(v - src_mean, src_x), np.dot(v - src_mean, src_y)]
+                    for v in src_contour
+                ])
+                source_2d_shapes.append(src_2d)
+                print(f"  [BP Transform] source {i} has {len(src_2d)} vertices (own basis)")
 
-            # Initial rotation: align source basis_x with target basis_x on target plane
-            # Project source basis_x onto target plane
-            src_x_on_target = src_x - np.dot(src_x, target_bp['basis_z']) * target_bp['basis_z']
-            src_x_norm = np.linalg.norm(src_x_on_target)
-            if src_x_norm > 1e-10:
-                src_x_on_target = src_x_on_target / src_x_norm
-                # Express in target's 2D coordinates
-                src_x_2d = np.array([np.dot(src_x_on_target, target_x), np.dot(src_x_on_target, target_y)])
-                # Angle from target's x-axis (1,0) to src_x_2d
-                init_theta = np.arctan2(src_x_2d[1], src_x_2d[0])
+                # Initial translation: project source mean onto target plane
+                src_to_target = src_mean - target_mean
+                dist_along_z = np.dot(src_to_target, target_bp['basis_z'])
+                src_mean_projected = src_mean - dist_along_z * target_bp['basis_z']
+                src_mean_on_target_x = np.dot(src_mean_projected - target_mean, target_x)
+                src_mean_on_target_y = np.dot(src_mean_projected - target_mean, target_y)
+                initial_translations.append([src_mean_on_target_x, src_mean_on_target_y])
+                print(f"  [BP Transform] source {i} initial pos: ({src_mean_on_target_x:.4f}, {src_mean_on_target_y:.4f})")
+
+                # Initial rotation: align source basis_x with target basis_x
+                src_x_on_target = src_x - np.dot(src_x, target_bp['basis_z']) * target_bp['basis_z']
+                src_x_norm = np.linalg.norm(src_x_on_target)
+                if src_x_norm > 1e-10:
+                    src_x_on_target = src_x_on_target / src_x_norm
+                    src_x_2d = np.array([np.dot(src_x_on_target, target_x), np.dot(src_x_on_target, target_y)])
+                    init_theta = np.arctan2(src_x_2d[1], src_x_2d[0])
+                else:
+                    init_theta = 0.0
+                initial_rotations.append(init_theta)
+                print(f"  [BP Transform] source {i} initial rotation: {np.degrees(init_theta):.1f}°")
             else:
-                init_theta = 0.0
-            initial_rotations.append(init_theta)
-            print(f"  [BP Transform] source {i} initial rotation: {np.degrees(init_theta):.1f}°")
+                # COMMON mode: project source directly to TARGET's 2D plane
+                # This maintains relative positions between sources
+                src_2d = np.array([
+                    [np.dot(v - target_mean, target_x), np.dot(v - target_mean, target_y)]
+                    for v in src_contour
+                ])
+                # Center at source mean position (for proper transform_shape usage)
+                src_2d_mean = src_2d.mean(axis=0)
+                src_2d_centered = src_2d - src_2d_mean
+                source_2d_shapes.append(src_2d_centered)
+                print(f"  [BP Transform] source {i} has {len(src_2d)} vertices (target basis)")
+
+                # Initial translation is the source's mean position on target plane
+                initial_translations.append([src_2d_mean[0], src_2d_mean[1]])
+                print(f"  [BP Transform] source {i} initial pos: ({src_2d_mean[0]:.4f}, {src_2d_mean[1]:.4f})")
+
+                # No rotation needed - already in target basis
+                initial_rotations.append(0.0)
+                print(f"  [BP Transform] source {i} initial rotation: 0.0° (common basis)")
 
         # Compute source areas and ratios (for area ratio regularization)
         source_areas = []
@@ -5764,7 +5783,7 @@ class ContourMeshMixin:
 
             # Weights for regularization (relative to target_area for scale invariance)
             overlap_weight = 100.0  # Force no overlap (very high penalty)
-            gap_weight = 1.0  # Encourage sources to be close/adjacent
+            gap_weight = 50.0 * target_area  # Strong penalty for gaps - sources must be adjacent
             rotation_weight = 0.01 * target_area  # Penalize rotation (scaled)
             area_ratio_weight = 10.0 * target_area  # Penalize area ratio deviation
 
@@ -5827,7 +5846,26 @@ class ContourMeshMixin:
                 final_transformed.append(transformed)
                 print(f"  [BP Transform] piece {i}: tx={tx:.4f}, ty={ty:.4f}, theta={np.degrees(theta):.1f}°")
 
-        # ========== Step 6.5: Save visualization for debugging ==========
+        # ========== Step 6.5: Check adjacency between transformed sources ==========
+        if len(final_transformed) >= 2:
+            for i in range(len(final_transformed)):
+                for j in range(i + 1, len(final_transformed)):
+                    try:
+                        poly_i = Polygon(final_transformed[i])
+                        poly_j = Polygon(final_transformed[j])
+                        if not poly_i.is_valid:
+                            poly_i = poly_i.buffer(0)
+                        if not poly_j.is_valid:
+                            poly_j = poly_j.buffer(0)
+                        dist = poly_i.distance(poly_j)
+                        if dist > 1e-6:
+                            print(f"  [BP Transform] WARNING: pieces {i} and {j} have gap of {dist:.6f}")
+                        else:
+                            print(f"  [BP Transform] pieces {i} and {j} are adjacent (dist={dist:.6f})")
+                    except Exception as e:
+                        print(f"  [BP Transform] Could not check adjacency: {e}")
+
+        # ========== Step 6.6: Save visualization for debugging ==========
         self._save_bp_transform_visualization(
             target_2d, target_poly, source_2d_shapes, final_transformed,
             stream_indices, optimal_scales, initial_translations, initial_rotations,
@@ -5866,12 +5904,8 @@ class ContourMeshMixin:
                                          initial_translations, initial_rotations,
                                          use_separate_transforms=True):
         """
-        Save visualization of BP transform optimization result.
-        Shows target contour, original sources, initial configuration, and transformed sources.
-        scales: list of scale values, one per source
-        use_separate_transforms: True if each source has independent transform, False if common
+        Store visualization data for BP Viz imgui window.
         """
-        # Store visualization data for later display via BP Viz button
         if not hasattr(self, '_bp_viz_data'):
             self._bp_viz_data = []
         self._bp_viz_data.append({
@@ -5884,122 +5918,6 @@ class ContourMeshMixin:
             'initial_rotations': list(initial_rotations),
             'use_separate_transforms': use_separate_transforms,
         })
-
-        import matplotlib
-        matplotlib.use('Agg')  # Non-interactive backend
-        import matplotlib.pyplot as plt
-        from matplotlib.patches import Polygon as MplPolygon
-        from matplotlib.collections import PatchCollection
-        import os
-
-        fig, axes = plt.subplots(1, 2, figsize=(14, 7))
-
-        # Colors for different pieces
-        colors = plt.cm.tab10(np.linspace(0, 1, len(stream_indices)))
-
-        # Helper to transform shape (same logic as in optimization)
-        def transform_shape(shape_2d, scale, tx, ty, theta):
-            cos_t, sin_t = np.cos(theta), np.sin(theta)
-            rot = np.array([[cos_t, -sin_t], [sin_t, cos_t]])
-            scaled = shape_2d * scale
-            rotated = scaled @ rot.T
-            return rotated + np.array([tx, ty])
-
-        # Compute initial transformed shapes (scale=1.0, initial translations and rotations)
-        initial_transformed = []
-        for i, src_2d in enumerate(source_2d_shapes):
-            tx, ty = initial_translations[i]
-            theta = initial_rotations[i]
-            transformed = transform_shape(src_2d, 1.0, tx, ty, theta)  # scale=1.0 for initial
-            initial_transformed.append(transformed)
-
-        # ========== Left plot: Original sources + Initial configuration ==========
-        ax1 = axes[0]
-        ax1.set_title(f'Original (dashed) + Initial Config (solid)')
-
-        # Plot target contour
-        target_arr = np.array(target_2d)
-        ax1.plot(target_arr[:, 0], target_arr[:, 1], 'k-', linewidth=2, label='Target')
-        ax1.fill(target_arr[:, 0], target_arr[:, 1], alpha=0.1, color='gray')
-
-        # Plot original source contours (centered at origin, dashed)
-        for i, src_2d in enumerate(source_2d_shapes):
-            if len(src_2d) >= 3:
-                src_arr = np.array(src_2d)
-                ax1.plot(src_arr[:, 0], src_arr[:, 1], '--', color=colors[i],
-                        linewidth=1.5, alpha=0.5, label=f'Src {stream_indices[i]} (orig)')
-
-        # Plot initial configuration (after initial translation/rotation, solid thin line)
-        for i, init_trans in enumerate(initial_transformed):
-            if len(init_trans) >= 3:
-                init_arr = np.array(init_trans)
-                init_closed = np.vstack([init_arr, init_arr[0]])
-                ax1.plot(init_closed[:, 0], init_closed[:, 1], '-', color=colors[i],
-                        linewidth=1.5, label=f'Src {stream_indices[i]} (init)')
-                ax1.fill(init_arr[:, 0], init_arr[:, 1], alpha=0.2, color=colors[i])
-
-        ax1.set_xlabel('X (target basis_x)')
-        ax1.set_ylabel('Y (target basis_y)')
-        ax1.legend(loc='upper right', fontsize=8)
-        ax1.set_aspect('equal')
-        ax1.grid(True, alpha=0.3)
-
-        # ========== Right plot: Transformed sources (after optimization) ==========
-        ax2 = axes[1]
-        scales_str = ', '.join([f'{s:.2f}' for s in scales])
-        ax2.set_title(f'Final Result (scales=[{scales_str}])')
-
-        # Plot target contour
-        ax2.plot(target_arr[:, 0], target_arr[:, 1], 'k-', linewidth=2, label='Target')
-        ax2.fill(target_arr[:, 0], target_arr[:, 1], alpha=0.1, color='gray')
-
-        # Plot transformed source contours
-        for i, transformed in enumerate(final_transformed):
-            if len(transformed) >= 3:
-                trans_arr = np.array(transformed)
-                # Close the polygon for plotting
-                trans_closed = np.vstack([trans_arr, trans_arr[0]])
-                ax2.plot(trans_closed[:, 0], trans_closed[:, 1], '-', color=colors[i],
-                        linewidth=2, label=f'Src {stream_indices[i]} (s={scales[i]:.2f})')
-                ax2.fill(trans_arr[:, 0], trans_arr[:, 1], alpha=0.3, color=colors[i])
-
-        ax2.set_xlabel('X (target basis_x)')
-        ax2.set_ylabel('Y (target basis_y)')
-        ax2.legend(loc='upper right', fontsize=8)
-        ax2.set_aspect('equal')
-        ax2.grid(True, alpha=0.3)
-
-        plt.tight_layout()
-
-        # Check if we should show in window or save to file
-        show_in_window = getattr(self, 'bp_viz_show_window', False)
-
-        if show_in_window:
-            # Show in non-blocking window
-            plt.ion()
-            plt.show()
-            plt.pause(0.1)
-        else:
-            # Save figure to file
-            os.makedirs('bp_viz', exist_ok=True)
-
-            # Use a counter to save multiple visualizations
-            if not hasattr(self, '_bp_viz_counter'):
-                self._bp_viz_counter = 0
-            self._bp_viz_counter += 1
-
-            # Get muscle name from stored value or fallback
-            obj_name = getattr(self, '_muscle_name', None)
-            if obj_name is None:
-                obj_name = getattr(self, 'name', getattr(self, 'mesh_name', 'unknown'))
-
-            filepath = f'bp_viz/bp_transform_{obj_name}_{self._bp_viz_counter:03d}.png'
-            plt.savefig(filepath, dpi=100)
-            plt.close(fig)
-
-            # Only print for first few
-            if self._bp_viz_counter <= 3:
-                print(f"  [BP Transform] Saved visualization: {filepath}")
 
     def _cut_contour_for_streams(self, contour, bp, projected_refs, stream_indices):
         """
