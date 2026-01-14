@@ -5960,19 +5960,16 @@ class ContourMeshMixin:
 
         print(f"  [BP Transform] assignment: {n_close} by contour proximity, {n_centroid} by centroid")
 
-        # Remove islands: ensure contiguous regions
-        # Find runs and merge short ones
-        def remove_islands(arr, min_run=5):
-            """Remove short runs (islands) by merging into neighbors."""
+        # Remove islands: for n_pieces, we want exactly n_pieces contiguous runs
+        # Keep merging shortest run until we reach target
+        def remove_islands(arr, target_runs):
+            """Merge runs until we have exactly target_runs contiguous regions."""
             if len(arr) < 3:
                 return arr
             result = list(arr)
             n = len(result)
-            changed = True
-            iterations = 0
-            while changed and iterations < 20:
-                changed = False
-                iterations += 1
+
+            for iteration in range(100):  # safety limit
                 # Find runs
                 runs = []
                 i = 0
@@ -5983,15 +5980,14 @@ class ContourMeshMixin:
                         i += 1
                     runs.append([start, i - start, val])
 
-                if len(runs) <= 2:
+                print(f"  [BP Transform] island removal iter {iteration}: {len(runs)} runs")
+
+                if len(runs) <= target_runs:
                     break
 
-                # Find shortest run
+                # Find shortest run and merge it
                 shortest_idx = min(range(len(runs)), key=lambda x: runs[x][1])
                 shortest = runs[shortest_idx]
-
-                if shortest[1] >= min_run:
-                    break  # No short runs left
 
                 # Merge into larger neighbor
                 prev_idx = (shortest_idx - 1) % len(runs)
@@ -6006,11 +6002,10 @@ class ContourMeshMixin:
                 # Apply merge
                 for j in range(shortest[0], shortest[0] + shortest[1]):
                     result[j] = merge_val
-                changed = True
 
             return result
 
-        assignments = remove_islands(assignments, min_run=5)
+        assignments = remove_islands(assignments, target_runs=n_pieces)
 
         # Debug: count assignments per piece
         assignment_counts = [assignments.count(i) for i in range(n_pieces)]
