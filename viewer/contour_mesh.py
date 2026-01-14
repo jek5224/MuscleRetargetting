@@ -5409,40 +5409,11 @@ class ContourMeshMixin:
                     if len(region_selected) > len([l for l in range(start, end+1) if l in must_use_levels]):
                         print(f"  Stream {stream_i}, region [{start}-{end}]: {len(region_selected)} levels")
 
-        # ========== Step 3: Equalize level counts across streams ==========
-        # Find target count (max across streams)
+        # No equalization - each stream keeps its own selected levels
+        # Originally-separate regions: independent selection per stream
+        # Originally-merged regions: same levels for all streams
         counts = [len(s) for s in stream_selected]
-        target_count = max(counts)
-        print(f"Level counts per stream: {counts}, target: {target_count}")
-
-        # For streams with fewer levels, add more from non-merged regions
-        for stream_i in range(max_stream_count):
-            while len(stream_selected[stream_i]) < target_count:
-                # Find level with highest error that's not selected
-                max_error = 0
-                max_error_level = None
-                selected_sorted = sorted(stream_selected[stream_i])
-
-                for gap_idx in range(len(selected_sorted) - 1):
-                    prev_idx = selected_sorted[gap_idx]
-                    next_idx = selected_sorted[gap_idx + 1]
-
-                    for level_i in range(prev_idx + 1, next_idx):
-                        if level_i in stream_selected[stream_i]:
-                            continue
-                        # Only add from non-merged regions
-                        if original_counts[level_i] < max_stream_count:
-                            continue
-
-                        error = compute_stream_error(stream_i, level_i, prev_idx, next_idx)
-                        if error > max_error:
-                            max_error = error
-                            max_error_level = level_i
-
-                if max_error_level is None:
-                    break
-                stream_selected[stream_i].add(max_error_level)
-                print(f"  Stream {stream_i}: added level {max_error_level} to equalize")
+        print(f"Level counts per stream: {counts} (no equalization)")
 
         # Store results
         self.stream_selected_levels = [sorted(s) for s in stream_selected]
@@ -5476,9 +5447,11 @@ class ContourMeshMixin:
         # Update visualization
         self.contours = self.stream_contours
         self.bounding_planes = self.stream_bounding_planes
-        self.draw_contour_stream = [[True] * len(self.stream_contours[0]) for _ in range(max_stream_count)]
+        # Each stream may have different number of levels now
+        self.draw_contour_stream = [[True] * len(self.stream_contours[s]) for s in range(max_stream_count)]
 
-        print(f"Levels updated: {len(self.stream_contours[0])} per stream")
+        level_counts = [len(self.stream_contours[s]) for s in range(max_stream_count)]
+        print(f"Levels updated: {level_counts} per stream")
 
     def build_fibers(self, skeleton_meshes=None):
         """
@@ -5486,28 +5459,29 @@ class ContourMeshMixin:
 
         Converts stream_contours/stream_bounding_planes to the format
         used by downstream operations (mesh building, visualization).
+        Each stream may have different number of levels.
         """
         if not hasattr(self, 'stream_contours') or self.stream_contours is None:
             print("Run cut_streams and select_levels first")
             return
 
         max_stream_count = self.max_stream_count
-        num_levels = len(self.stream_contours[0])
+        level_counts = [len(self.stream_contours[s]) for s in range(max_stream_count)]
 
         print(f"\n=== Build Fibers ===")
-        print(f"Streams: {max_stream_count}, Levels: {num_levels}")
+        print(f"Streams: {max_stream_count}, Levels per stream: {level_counts}")
 
         # Convert to format expected by downstream: [stream_i][level_i]
         self.contours = self.stream_contours
         self.bounding_planes = self.stream_bounding_planes
 
-        # Set up draw flags
-        self.draw_contour_stream = [[True] * num_levels for _ in range(max_stream_count)]
+        # Set up draw flags - each stream may have different number of levels
+        self.draw_contour_stream = [[True] * level_counts[s] for s in range(max_stream_count)]
 
         # Call post-processing to compute fiber architecture
         self._find_contour_stream_post_process(skeleton_meshes)
 
-        print(f"Build fibers complete: {max_stream_count} streams x {num_levels} levels")
+        print(f"Build fibers complete: {max_stream_count} streams, levels: {level_counts}")
 
     def _cut_contour_mesh_aware(self, contour, bp, projected_refs, stream_indices):
         """
