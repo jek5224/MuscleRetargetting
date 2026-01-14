@@ -2654,7 +2654,7 @@ class ContourMeshMixin:
                         new_basis_x = prev_x_proj * cos_t + np.cross(basis_z, prev_x_proj) * sin_t
 
                         # Debug
-                        if len([x for x in square_indices if x < i]) < 3:
+                        if len([x for x in smooth_indices if x < i]) < 3:
                             print(f"          angle={np.degrees(angle):.1f}, interp={np.degrees(interp_angle):.1f}, t={t:.2f}")
 
                     elif prev_idx is not None:
