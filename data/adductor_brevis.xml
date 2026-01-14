@@ -1,0 +1,7 @@
+<Muscle>
+    <Unit name="L_Adductor_Brevis" f0="151.850000" lm="1.000000" lt="0.200000" pen_angle="0.000000" lmax="-0.100000">
+        <Waypoint body="Pelvis" p="0.031900 0.919600 0.041600 " />
+        <Waypoint body="FemurL" p="0.083100 0.833800 0.004900 " />
+        <Waypoint body="FemurL" p="0.110400 0.826200 -0.008400 " />
+    </Unit>
+</Muscle>

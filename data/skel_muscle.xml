@@ -1,0 +1,12 @@
+<Muscle>
+	<Unit name="L_Gluteus_Medius1_0" f0="1000.0" lm="1.2" lt="0.2" pen_angle="0.0" lmax="-0.1">
+		<Waypoint body="Pelvis" p="0.114273 1.022821 -0.094875"/>
+		<Waypoint body="Femur_L" p="0.131866 0.942484 -0.10719"/>
+		<Waypoint body="Femur_L" p="0.13854 0.899523 -0.102637"/>
+	</Unit>
+	<Unit name="R_Gluteus_Medius1_0" f0="1000.0" lm="1.2" lt="0.2" pen_angle="0.0" lmax="-0.1">
+		<Waypoint body="Pelvis" p="-0.112381 1.029687 -0.090926"/>
+		<Waypoint body="Femur_R" p="-0.136239 0.943789 -0.103806"/>
+		<Waypoint body="Femur_R" p="-0.145991 0.897743 -0.09864"/>
+	</Unit>
+</Muscle>

@@ -1,0 +1,33 @@
+<env>
+    <!-- Simulation Setting  -->
+    <simHz>480</simHz>
+    <controlHz>30</controlHz>
+    <!-- <skeleton>data/skel_retargettable.xml</skeleton> -->
+    <!-- <skeleton>data/skel_base.xml</skeleton> -->
+    <!-- <skeleton>data/skel_retargettable.xml</skeleton> -->
+    <skeleton>data/zygote_skel.xml</skeleton>
+    <!-- <skeleton>data/skel_skel.xml</skeleton> -->
+    <ground>data/ground.xml</ground>
+
+    <!-- Actuator Type : pd_ref_residual, pd_cur_residual, mass_ref_residual -->
+    <!-- <actuator>pd_cur_residual</actuator> --> 
+    <actuator>mass_ref_residual</actuator>
+    
+    <!-- pd setting -->
+    <kp>250</kp>
+    <kv>10</kv>
+    <learningGain>false</learningGain>
+
+    <!-- Muscle Setting -->
+    <!-- <muscle>data/skel_muscle.xml</muscle> -->
+    <!-- <muscle>data/muscle284.xml</muscle> -->
+    <!-- <muscle>data/adductor_brevis.xml</muscle> -->
+    <!-- <muscle>data/muscle_base.xml</muscle> -->
+    <!-- <muscle>data/new_muscle.xml</muscle> -->
+    <!-- <muscle>data/zygote_muscle.xml</muscle> -->
+    <!-- Motion set  -->
+    <bvh>data/motion/walk.bvh</bvh>
+
+    <!-- Environment Setting -->
+    <actionScale>0.04</actionScale>
+</env>

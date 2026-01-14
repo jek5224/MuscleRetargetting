@@ -1,0 +1,7 @@
+<Muscle>
+	<Unit name="new_muscle_0" f0="1000.0" lm="1.2" lt="0.2" pen_angle="0.0" lmax="-0.1">
+		<Waypoint p="0.110203 1.028861 -0.081513"/>
+		<Waypoint p="0.211881 1.23275 -0.106842"/>
+		<Waypoint p="0.317401 1.444342 -0.133128"/>
+	</Unit>
+</Muscle>

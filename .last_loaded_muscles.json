@@ -1,0 +1,14 @@
+[
+  {
+    "name": "L_Biceps_Brachii",
+    "path": "Zygote_Meshes_251229/Muscle/UpArm/L_Biceps_Brachii.obj"
+  },
+  {
+    "name": "L_Extensor_Digitorum_Longus",
+    "path": "Zygote_Meshes_251229/Muscle/LowLeg/L_Extensor_Digitorum_Longus.obj"
+  },
+  {
+    "name": "L_Gastrocnemius",
+    "path": "Zygote_Meshes_251229/Muscle/LowLeg/L_Gastrocnemius.obj"
+  }
+]

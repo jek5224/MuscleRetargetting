@@ -1,0 +1,16 @@
+v1.1.1 
+
+# SKEL .pkl files
+- Remove all the unused key
+- Remove the dependancy to chumpy and trimesh
+- Store the sparce matrices as from scipy.sparse._coo.coo_matrix
+- Rename the `weight` into `skin_weights` for clarity
+
+# BSM
+- Add the /bodyset prefix to the socket parent frame ofthe markers to avoid a crash in AddBiomechanics
+
+v1.1.0 
+
+# BSM
+Add example sequences AMASS (.npz), SKEL (.pkl), OpenSim (.mot)
+Add spine mesh back

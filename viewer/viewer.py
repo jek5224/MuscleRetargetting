@@ -4035,8 +4035,12 @@ class GLFWApp():
                 if all_pairs:
                     dist, best_pt0, best_pt1 = all_pairs[0]
                     print(f"  Initial cut line: min distance = {dist:.6f}")
+                    print(f"    pt0 = {best_pt0}, pt1 = {best_pt1}")
 
                 if best_pt0 is not None and best_pt1 is not None:
+                    # Store min distance pair for visualization
+                    obj._manual_cut_data['min_dist_pair'] = (best_pt0.copy(), best_pt1.copy())
+
                     # Cut line passes through the minimum distance pair
                     cut_dir = best_pt1 - best_pt0
                     if np.linalg.norm(cut_dir) > 1e-10:
@@ -4140,6 +4144,31 @@ class GLFWApp():
                     p1, p2 = target_screen[i], target_screen[(i+1) % len(target_screen)]
                     draw_list.add_line(p1[0], p1[1], p2[0], p2[1],
                                       imgui.get_color_u32_rgba(1.0, 1.0, 1.0, 1.0), 3.0)
+
+            # Draw source contours (the two contours that merge into target)
+            source_colors = [(0.0, 1.0, 0.5, 0.8), (1.0, 1.0, 0.0, 0.8)]  # Green, Yellow
+            for si, src_2d in enumerate(source_2d_list[:2]):
+                if len(src_2d) >= 3:
+                    src_screen = [to_screen(p, x0, y0, canvas_size) for p in src_2d]
+                    color = source_colors[si % len(source_colors)]
+                    for i in range(len(src_screen)):
+                        p1, p2 = src_screen[i], src_screen[(i+1) % len(src_screen)]
+                        draw_list.add_line(p1[0], p1[1], p2[0], p2[1],
+                                          imgui.get_color_u32_rgba(*color), 2.0)
+
+            # Draw min distance pair points if computed
+            if 'min_dist_pair' in obj._manual_cut_data:
+                pt0, pt1 = obj._manual_cut_data['min_dist_pair']
+                s0 = to_screen(pt0, x0, y0, canvas_size)
+                s1 = to_screen(pt1, x0, y0, canvas_size)
+                # Draw the pair points as circles
+                draw_list.add_circle_filled(s0[0], s0[1], 6.0,
+                                           imgui.get_color_u32_rgba(1.0, 0.0, 0.0, 1.0))
+                draw_list.add_circle_filled(s1[0], s1[1], 6.0,
+                                           imgui.get_color_u32_rgba(1.0, 0.0, 0.0, 1.0))
+                # Draw line connecting them
+                draw_list.add_line(s0[0], s0[1], s1[0], s1[1],
+                                  imgui.get_color_u32_rgba(1.0, 0.0, 0.0, 0.8), 2.0)
 
             # Create invisible button to capture mouse input (prevents window dragging)
             imgui.set_cursor_screen_pos((x0 - padding, y0 - padding))

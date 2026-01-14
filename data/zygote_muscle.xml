@@ -1,0 +1,273 @@
+<Muscle>
+	<Unit name="L_Adductor_Brevis" f0="1000.0" lm="1.2" lt="0.2" pen_angle="0.0" lmax="-0.1">
+		<Fiber>
+			<Waypoint body="L_Os_Coxae0" p="0.022057 0.914877 0.042358"/>
+			<Waypoint body="L_Femur0" p="0.029934 0.89756 0.037577"/>
+			<Waypoint body="L_Femur0" p="0.046748 0.857234 0.024839"/>
+			<Waypoint body="L_Femur0" p="0.05522 0.833218 0.016475"/>
+			<Waypoint body="L_Femur0" p="0.066414 0.811503 0.005707"/>
+			<Waypoint body="L_Femur0" p="0.071753 0.804717 0.002275"/>
+			<Waypoint body="L_Femur0" p="0.07793 0.79785 -0.000489"/>
+			<Waypoint body="L_Femur0" p="0.085169 0.790907 -0.002513"/>
+			<Waypoint body="L_Femur0" p="0.0937 0.783597 -0.003675"/>
+			<Waypoint body="L_Femur0" p="0.101481 0.777262 -0.003511"/>
+			<Waypoint body="L_Femur0" p="0.108125 0.771701 -0.002477"/>
+		</Fiber>
+		<Fiber>
+			<Waypoint body="L_Os_Coxae0" p="0.029604 0.91933 0.043374"/>
+			<Waypoint body="L_Femur0" p="0.040205 0.902215 0.040989"/>
+			<Waypoint body="L_Femur0" p="0.063179 0.863098 0.028246"/>
+			<Waypoint body="L_Femur0" p="0.073074 0.842464 0.016392"/>
+			<Waypoint body="L_Femur0" p="0.083226 0.827909 0.005091"/>
+			<Waypoint body="L_Femur0" p="0.087399 0.824378 0.001636"/>
+			<Waypoint body="L_Femur0" p="0.091972 0.821911 -0.001812"/>
+			<Waypoint body="L_Femur0" p="0.09686 0.820384 -0.004722"/>
+			<Waypoint body="L_Femur0" p="0.102167 0.819888 -0.00671"/>
+			<Waypoint body="L_Femur0" p="0.106648 0.819797 -0.007426"/>
+			<Waypoint body="L_Femur0" p="0.109656 0.819532 -0.006984"/>
+		</Fiber>
+		<Fiber>
+			<Waypoint body="L_Os_Coxae0" p="0.02402 0.916215 0.043053"/>
+			<Waypoint body="L_Femur0" p="0.032626 0.898687 0.039204"/>
+			<Waypoint body="L_Femur0" p="0.051205 0.85846 0.027004"/>
+			<Waypoint body="L_Femur0" p="0.060211 0.835385 0.017557"/>
+			<Waypoint body="L_Femur0" p="0.071088 0.815607 0.006676"/>
+			<Waypoint body="L_Femur0" p="0.076013 0.809751 0.003187"/>
+			<Waypoint body="L_Femur0" p="0.081571 0.804147 1.4e-05"/>
+			<Waypoint body="L_Femur0" p="0.087865 0.798588 -0.002567"/>
+			<Waypoint body="L_Femur0" p="0.095231 0.792839 -0.004243"/>
+			<Waypoint body="L_Femur0" p="0.102027 0.787962 -0.00433"/>
+			<Waypoint body="L_Femur0" p="0.10814 0.783851 -0.003293"/>
+		</Fiber>
+		<Fiber>
+			<Waypoint body="L_Os_Coxae0" p="0.016572 0.913381 0.045135"/>
+			<Waypoint body="L_Femur0" p="0.024114 0.893977 0.042292"/>
+			<Waypoint body="L_Femur0" p="0.038401 0.851068 0.033269"/>
+			<Waypoint body="L_Femur0" p="0.046243 0.825079 0.025019"/>
+			<Waypoint body="L_Femur0" p="0.056909 0.799326 0.013691"/>
+			<Waypoint body="L_Femur0" p="0.062023 0.790852 0.009649"/>
+			<Waypoint body="L_Femur0" p="0.067856 0.782073 0.00576"/>
+			<Waypoint body="L_Femur0" p="0.074276 0.771936 0.002534"/>
+			<Waypoint body="L_Femur0" p="0.082228 0.759532 0.000398"/>
+			<Waypoint body="L_Femur0" p="0.091454 0.747381 5.1e-05"/>
+			<Waypoint body="L_Femur0" p="0.104018 0.737012 0.002108"/>
+		</Fiber>
+		<Fiber>
+			<Waypoint body="L_Os_Coxae0" p="0.018883 0.913827 0.043082"/>
+			<Waypoint body="L_Femur0" p="0.0263 0.895719 0.039099"/>
+			<Waypoint body="L_Femur0" p="0.041392 0.854269 0.027748"/>
+			<Waypoint body="L_Femur0" p="0.049436 0.829241 0.019561"/>
+			<Waypoint body="L_Femur0" p="0.060412 0.805412 0.008616"/>
+			<Waypoint body="L_Femur0" p="0.065608 0.797761 0.004783"/>
+			<Waypoint body="L_Femur0" p="0.071539 0.789873 0.001372"/>
+			<Waypoint body="L_Femur0" p="0.078523 0.78135 -0.001178"/>
+			<Waypoint body="L_Femur0" p="0.087178 0.771839 -0.002538"/>
+			<Waypoint body="L_Femur0" p="0.09592 0.762769 -0.002225"/>
+			<Waypoint body="L_Femur0" p="0.10597 0.754532 -0.000253"/>
+		</Fiber>
+		<Fiber>
+			<Waypoint body="L_Os_Coxae0" p="0.024815 0.91733 0.044593"/>
+			<Waypoint body="L_Femur0" p="0.03432 0.898917 0.042117"/>
+			<Waypoint body="L_Femur0" p="0.054304 0.858205 0.030861"/>
+			<Waypoint body="L_Femur0" p="0.063754 0.835717 0.020174"/>
+			<Waypoint body="L_Femur0" p="0.074548 0.817194 0.008594"/>
+			<Waypoint body="L_Femur0" p="0.079298 0.811886 0.004945"/>
+			<Waypoint body="L_Femur0" p="0.084666 0.807151 0.001472"/>
+			<Waypoint body="L_Femur0" p="0.090493 0.802596 -0.001513"/>
+			<Waypoint body="L_Femur0" p="0.097081 0.798124 -0.00358"/>
+			<Waypoint body="L_Femur0" p="0.102921 0.794404 -0.003696"/>
+			<Waypoint body="L_Femur0" p="0.107654 0.791019 -0.002728"/>
+		</Fiber>
+	</Unit>
+	<Unit name="L_Obturator_Internus" f0="1000.0" lm="1.2" lt="0.2" pen_angle="0.0" lmax="-0.1">
+		<Fiber>
+			<Waypoint body="L_Os_Coxae0" p="0.030957 0.900946 0.004253"/>
+			<Waypoint body="L_Femur0" p="0.034389 0.900876 -0.003213"/>
+			<Waypoint body="L_Femur0" p="0.04099 0.90264 -0.016268"/>
+			<Waypoint body="L_Femur0" p="0.043533 0.902863 -0.022132"/>
+			<Waypoint body="L_Femur0" p="0.048032 0.902967 -0.034247"/>
+			<Waypoint body="L_Femur0" p="0.050419 0.903197 -0.04108"/>
+			<Waypoint body="L_Femur0" p="0.052687 0.903353 -0.047861"/>
+			<Waypoint body="L_Femur0" p="0.055165 0.903224 -0.054661"/>
+			<Waypoint body="L_Femur0" p="0.058376 0.90272 -0.061432"/>
+			<Waypoint body="L_Femur0" p="0.063694 0.901998 -0.067336"/>
+			<Waypoint body="L_Femur0" p="0.072277 0.902839 -0.066916"/>
+			<Waypoint body="L_Femur0" p="0.080757 0.904225 -0.063156"/>
+			<Waypoint body="L_Femur0" p="0.088585 0.906193 -0.059712"/>
+			<Waypoint body="L_Femur0" p="0.0963 0.908485 -0.056406"/>
+			<Waypoint body="L_Femur0" p="0.103819 0.910794 -0.053043"/>
+			<Waypoint body="L_Femur0" p="0.110946 0.912791 -0.049394"/>
+			<Waypoint body="L_Femur0" p="0.117576 0.91419 -0.045136"/>
+			<Waypoint body="L_Femur0" p="0.123866 0.914983 -0.040436"/>
+			<Waypoint body="L_Femur0" p="0.13699 0.915019 -0.03026"/>
+		</Fiber>
+		<Fiber>
+			<Waypoint body="L_Os_Coxae0" p="0.035034 0.923523 0.020731"/>
+			<Waypoint body="L_Femur0" p="0.035401 0.92327 0.012029"/>
+			<Waypoint body="L_Femur0" p="0.040532 0.920799 -0.006191"/>
+			<Waypoint body="L_Femur0" p="0.042719 0.919494 -0.014438"/>
+			<Waypoint body="L_Femur0" p="0.046423 0.916212 -0.031524"/>
+			<Waypoint body="L_Femur0" p="0.048622 0.914782 -0.040344"/>
+			<Waypoint body="L_Femur0" p="0.050578 0.913469 -0.048442"/>
+			<Waypoint body="L_Femur0" p="0.052917 0.912297 -0.056176"/>
+			<Waypoint body="L_Femur0" p="0.055964 0.911143 -0.06391"/>
+			<Waypoint body="L_Femur0" p="0.062176 0.910515 -0.07022"/>
+			<Waypoint body="L_Femur0" p="0.071528 0.910966 -0.068576"/>
+			<Waypoint body="L_Femur0" p="0.079851 0.912013 -0.064658"/>
+			<Waypoint body="L_Femur0" p="0.087583 0.913413 -0.061375"/>
+			<Waypoint body="L_Femur0" p="0.095284 0.915017 -0.057934"/>
+			<Waypoint body="L_Femur0" p="0.102987 0.916595 -0.054287"/>
+			<Waypoint body="L_Femur0" p="0.110474 0.917828 -0.050342"/>
+			<Waypoint body="L_Femur0" p="0.117458 0.918563 -0.045775"/>
+			<Waypoint body="L_Femur0" p="0.12403 0.91877 -0.040893"/>
+			<Waypoint body="L_Femur0" p="0.137559 0.918312 -0.030924"/>
+		</Fiber>
+		<Fiber>
+			<Waypoint body="L_Os_Coxae0" p="0.033202 0.906783 0.006902"/>
+			<Waypoint body="L_Femur0" p="0.035045 0.906819 5.7e-05"/>
+			<Waypoint body="L_Femur0" p="0.040921 0.907581 -0.013612"/>
+			<Waypoint body="L_Femur0" p="0.043346 0.907335 -0.02015"/>
+			<Waypoint body="L_Femur0" p="0.0477 0.906397 -0.033647"/>
+			<Waypoint body="L_Femur0" p="0.050055 0.906182 -0.040975"/>
+			<Waypoint body="L_Femur0" p="0.052219 0.905992 -0.048058"/>
+			<Waypoint body="L_Femur0" p="0.054546 0.905549 -0.055122"/>
+			<Waypoint body="L_Femur0" p="0.057527 0.904843 -0.062284"/>
+			<Waypoint body="L_Femur0" p="0.063076 0.904111 -0.068489"/>
+			<Waypoint body="L_Femur0" p="0.072129 0.904832 -0.067727"/>
+			<Waypoint body="L_Femur0" p="0.080693 0.906172 -0.063919"/>
+			<Waypoint body="L_Femur0" p="0.088529 0.908025 -0.060537"/>
+			<Waypoint body="L_Femur0" p="0.096229 0.910149 -0.057169"/>
+			<Waypoint body="L_Femur0" p="0.103781 0.91228 -0.053676"/>
+			<Waypoint body="L_Femur0" p="0.110995 0.91408 -0.049894"/>
+			<Waypoint body="L_Femur0" p="0.117702 0.915288 -0.045498"/>
+			<Waypoint body="L_Femur0" p="0.124045 0.915914 -0.040712"/>
+			<Waypoint body="L_Femur0" p="0.137236 0.915827 -0.030567"/>
+		</Fiber>
+		<Fiber>
+			<Waypoint body="L_Os_Coxae0" p="0.020347 0.881547 -0.003091"/>
+			<Waypoint body="L_Femur0" p="0.0229 0.883685 -0.009052"/>
+			<Waypoint body="L_Femur0" p="0.033002 0.890167 -0.020858"/>
+			<Waypoint body="L_Femur0" p="0.037118 0.892207 -0.026946"/>
+			<Waypoint body="L_Femur0" p="0.044614 0.894872 -0.037591"/>
+			<Waypoint body="L_Femur0" p="0.048504 0.896017 -0.04292"/>
+			<Waypoint body="L_Femur0" p="0.051737 0.897195 -0.048496"/>
+			<Waypoint body="L_Femur0" p="0.054542 0.897395 -0.054762"/>
+			<Waypoint body="L_Femur0" p="0.057342 0.897164 -0.061811"/>
+			<Waypoint body="L_Femur0" p="0.063041 0.896251 -0.068818"/>
+			<Waypoint body="L_Femur0" p="0.073592 0.896737 -0.069434"/>
+			<Waypoint body="L_Femur0" p="0.083003 0.898673 -0.065758"/>
+			<Waypoint body="L_Femur0" p="0.091018 0.901484 -0.062269"/>
+			<Waypoint body="L_Femur0" p="0.098601 0.904435 -0.058728"/>
+			<Waypoint body="L_Femur0" p="0.105917 0.907186 -0.05508"/>
+			<Waypoint body="L_Femur0" p="0.112796 0.909614 -0.051123"/>
+			<Waypoint body="L_Femur0" p="0.11914 0.911242 -0.046587"/>
+			<Waypoint body="L_Femur0" p="0.125094 0.912297 -0.041668"/>
+			<Waypoint body="L_Femur0" p="0.137564 0.912628 -0.031109"/>
+		</Fiber>
+		<Fiber>
+			<Waypoint body="L_Os_Coxae0" p="0.033776 0.890114 -0.009459"/>
+			<Waypoint body="L_Femur0" p="0.035814 0.891592 -0.013885"/>
+			<Waypoint body="L_Femur0" p="0.041363 0.895232 -0.022425"/>
+			<Waypoint body="L_Femur0" p="0.043646 0.896251 -0.026814"/>
+			<Waypoint body="L_Femur0" p="0.048118 0.897798 -0.036223"/>
+			<Waypoint body="L_Femur0" p="0.050677 0.898778 -0.042005"/>
+			<Waypoint body="L_Femur0" p="0.052991 0.899648 -0.048141"/>
+			<Waypoint body="L_Femur0" p="0.055321 0.899899 -0.054612"/>
+			<Waypoint body="L_Femur0" p="0.058207 0.899576 -0.061424"/>
+			<Waypoint body="L_Femur0" p="0.063631 0.898838 -0.067592"/>
+			<Waypoint body="L_Femur0" p="0.072849 0.899685 -0.067606"/>
+			<Waypoint body="L_Femur0" p="0.08171 0.901327 -0.063918"/>
+			<Waypoint body="L_Femur0" p="0.089655 0.903656 -0.06046"/>
+			<Waypoint body="L_Femur0" p="0.097319 0.906259 -0.057065"/>
+			<Waypoint body="L_Femur0" p="0.104733 0.908814 -0.053617"/>
+			<Waypoint body="L_Femur0" p="0.111713 0.911059 -0.049887"/>
+			<Waypoint body="L_Femur0" p="0.118176 0.91267 -0.045576"/>
+			<Waypoint body="L_Femur0" p="0.124296 0.913639 -0.040821"/>
+			<Waypoint body="L_Femur0" p="0.137125 0.913801 -0.030494"/>
+		</Fiber>
+		<Fiber>
+			<Waypoint body="L_Os_Coxae0" p="0.026302 0.90726 0.011487"/>
+			<Waypoint body="L_Femur0" p="0.028193 0.907937 0.004704"/>
+			<Waypoint body="L_Femur0" p="0.035636 0.909216 -0.010923"/>
+			<Waypoint body="L_Femur0" p="0.03876 0.909097 -0.018393"/>
+			<Waypoint body="L_Femur0" p="0.044421 0.908055 -0.033417"/>
+			<Waypoint body="L_Femur0" p="0.047404 0.907691 -0.041173"/>
+			<Waypoint body="L_Femur0" p="0.050034 0.907262 -0.04849"/>
+			<Waypoint body="L_Femur0" p="0.052695 0.906682 -0.055802"/>
+			<Waypoint body="L_Femur0" p="0.05595 0.90591 -0.063416"/>
+			<Waypoint body="L_Femur0" p="0.062367 0.905263 -0.070009"/>
+			<Waypoint body="L_Femur0" p="0.072284 0.905854 -0.069257"/>
+			<Waypoint body="L_Femur0" p="0.080997 0.907244 -0.065345"/>
+			<Waypoint body="L_Femur0" p="0.088808 0.909108 -0.061925"/>
+			<Waypoint body="L_Femur0" p="0.096484 0.911195 -0.058423"/>
+			<Waypoint body="L_Femur0" p="0.104044 0.913197 -0.054746"/>
+			<Waypoint body="L_Femur0" p="0.111301 0.914873 -0.050748"/>
+			<Waypoint body="L_Femur0" p="0.118043 0.91595 -0.046151"/>
+			<Waypoint body="L_Femur0" p="0.124387 0.916469 -0.041213"/>
+			<Waypoint body="L_Femur0" p="0.137562 0.916282 -0.031008"/>
+		</Fiber>
+		<Fiber>
+			<Waypoint body="L_Os_Coxae0" p="0.039929 0.921041 0.018259"/>
+			<Waypoint body="L_Femur0" p="0.040655 0.918376 0.008976"/>
+			<Waypoint body="L_Femur0" p="0.045934 0.915872 -0.007788"/>
+			<Waypoint body="L_Femur0" p="0.047774 0.914275 -0.015445"/>
+			<Waypoint body="L_Femur0" p="0.050795 0.911357 -0.031344"/>
+			<Waypoint body="L_Femur0" p="0.052355 0.910437 -0.03969"/>
+			<Waypoint body="L_Femur0" p="0.053918 0.90968 -0.047395"/>
+			<Waypoint body="L_Femur0" p="0.055836 0.908878 -0.054755"/>
+			<Waypoint body="L_Femur0" p="0.058524 0.90797 -0.061847"/>
+			<Waypoint body="L_Femur0" p="0.063241 0.907117 -0.067868"/>
+			<Waypoint body="L_Femur0" p="0.071345 0.907885 -0.066349"/>
+			<Waypoint body="L_Femur0" p="0.079552 0.908955 -0.062546"/>
+			<Waypoint body="L_Femur0" p="0.087341 0.910404 -0.059291"/>
+			<Waypoint body="L_Femur0" p="0.095108 0.912188 -0.056084"/>
+			<Waypoint body="L_Femur0" p="0.102756 0.91411 -0.052724"/>
+			<Waypoint body="L_Femur0" p="0.110112 0.915691 -0.049103"/>
+			<Waypoint body="L_Femur0" p="0.116971 0.916712 -0.044815"/>
+			<Waypoint body="L_Femur0" p="0.123488 0.917173 -0.040133"/>
+			<Waypoint body="L_Femur0" p="0.137005 0.916995 -0.030199"/>
+		</Fiber>
+		<Fiber>
+			<Waypoint body="L_Os_Coxae0" p="0.029886 0.895 -0.001318"/>
+			<Waypoint body="L_Femur0" p="0.032021 0.896232 -0.006864"/>
+			<Waypoint body="L_Femur0" p="0.038733 0.899548 -0.018196"/>
+			<Waypoint body="L_Femur0" p="0.041498 0.900297 -0.023879"/>
+			<Waypoint body="L_Femur0" p="0.046698 0.901026 -0.035396"/>
+			<Waypoint body="L_Femur0" p="0.049526 0.901548 -0.04179"/>
+			<Waypoint body="L_Femur0" p="0.052022 0.902019 -0.048255"/>
+			<Waypoint body="L_Femur0" p="0.05449 0.90196 -0.054983"/>
+			<Waypoint body="L_Femur0" p="0.057457 0.901485 -0.062072"/>
+			<Waypoint body="L_Femur0" p="0.063157 0.900737 -0.068477"/>
+			<Waypoint body="L_Femur0" p="0.072714 0.901447 -0.068277"/>
+			<Waypoint body="L_Femur0" p="0.081578 0.903027 -0.064511"/>
+			<Waypoint body="L_Femur0" p="0.089489 0.905243 -0.061069"/>
+			<Waypoint body="L_Femur0" p="0.09715 0.907704 -0.057633"/>
+			<Waypoint body="L_Femur0" p="0.104603 0.9101 -0.054097"/>
+			<Waypoint body="L_Femur0" p="0.111665 0.912174 -0.050262"/>
+			<Waypoint body="L_Femur0" p="0.118207 0.913605 -0.045835"/>
+			<Waypoint body="L_Femur0" p="0.124387 0.914432 -0.041008"/>
+			<Waypoint body="L_Femur0" p="0.137303 0.914508 -0.030707"/>
+		</Fiber>
+		<Fiber>
+			<Waypoint body="L_Os_Coxae0" p="0.031473 0.890213 -0.006934"/>
+			<Waypoint body="L_Femur0" p="0.033465 0.891866 -0.011696"/>
+			<Waypoint body="L_Femur0" p="0.039762 0.895979 -0.021138"/>
+			<Waypoint body="L_Femur0" p="0.042341 0.897063 -0.026055"/>
+			<Waypoint body="L_Femur0" p="0.047314 0.898459 -0.036178"/>
+			<Waypoint body="L_Femur0" p="0.050088 0.899334 -0.042072"/>
+			<Waypoint body="L_Femur0" p="0.052543 0.90014 -0.048237"/>
+			<Waypoint body="L_Femur0" p="0.054951 0.90029 -0.054766"/>
+			<Waypoint body="L_Femur0" p="0.057843 0.899926 -0.061701"/>
+			<Waypoint body="L_Femur0" p="0.063395 0.899165 -0.068044"/>
+			<Waypoint body="L_Femur0" p="0.07289 0.899921 -0.068036"/>
+			<Waypoint body="L_Femur0" p="0.08182 0.901577 -0.064323"/>
+			<Waypoint body="L_Femur0" p="0.08977 0.90392 -0.060871"/>
+			<Waypoint body="L_Femur0" p="0.097424 0.906514 -0.057446"/>
+			<Waypoint body="L_Femur0" p="0.104837 0.909043 -0.053945"/>
+			<Waypoint body="L_Femur0" p="0.11183 0.911253 -0.050152"/>
+			<Waypoint body="L_Femur0" p="0.118298 0.912815 -0.045773"/>
+			<Waypoint body="L_Femur0" p="0.124415 0.913748 -0.040974"/>
+			<Waypoint body="L_Femur0" p="0.137233 0.913904 -0.030634"/>
+		</Fiber>
+	</Unit>
+</Muscle>

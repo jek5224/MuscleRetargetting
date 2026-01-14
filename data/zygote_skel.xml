@@ -1,0 +1,226 @@
+<Skeleton name="Saccrum_Coccyx">
+	<Node name="Saccrum_Coccyx0" parent="None">
+		<Body type="Box" mass="0.350280" size="0.133674 0.077752 0.059765" contact="Off" color="0.9 0.9 0.9 1.0" obj="Zygote_Meshes_251229/Skeleton/Saccrum_Coccyx.obj">
+			<Transformation linear="1.0 0.0 0.0 0.0 -0.793813 0.608161 0.0 -0.608161 -0.793813" translation="0.0 1.006084 -0.074451"/>
+		</Body>
+		<Joint type="FixedFree">
+			<Transformation linear="1.0 0.0 0.0 0.0 1.0 0.0 0.0 0.0 1.0" translation="-1.2e-05 0.985771 -0.081843"/>
+		</Joint>
+	</Node>
+	<Node name="Saccrum_Coccyx1" parent="Saccrum_Coccyx0">
+		<Body type="Box" mass="0.204606" size="0.098611 0.098355 0.03741" contact="Off" color="0.9 0.9 0.9 1.0" obj="None">
+			<Transformation linear="0.009449 0.999955 -9.3e-05 -0.974893 0.009233 0.222481 0.222472 -0.002012 0.974937" translation="0.000291 0.943046 -0.085572"/>
+		</Body>
+		<Joint type="Weld">
+			<Transformation linear="1.0 0.0 0.0 0.0 1.0 0.0 0.0 0.0 1.0" translation="0.000618 0.978919 -0.087299"/>
+		</Joint>
+	</Node>
+	<Node name="L_Os_Coxae0" parent="Saccrum_Coccyx0">
+		<Body type="Box" mass="0.519916" size="0.163601 0.122263 0.046094" contact="Off" color="0.9 0.9 0.9 1.0" obj="Zygote_Meshes_251229/Skeleton/L_Os_Coxae.obj">
+			<Transformation linear="-0.607997 -0.132998 -0.782721 -0.113902 -0.961059 0.251777 -0.785727 0.242233 0.569172" translation="0.091013 1.016184 -0.042004"/>
+		</Body>
+		<Joint type="Weld">
+			<Transformation linear="1.0 0.0 0.0 0.0 1.0 0.0 0.0 0.0 1.0" translation="0.051105 1.001125 -0.079119"/>
+		</Joint>
+	</Node>
+	<Node name="L_Os_Coxae1" parent="L_Os_Coxae0">
+		<Body type="Box" mass="1.059504" size="0.150194 0.133919 0.093412" contact="Off" color="0.9 0.9 0.9 1.0" obj="None">
+			<Transformation linear="-0.354857 0.527142 -0.772139 -0.017012 0.822109 0.569075 0.934766 0.215076 -0.282763" translation="0.048313 0.93742 -0.011927"/>
+		</Body>
+		<Joint type="Weld">
+			<Transformation linear="1.0 0.0 0.0 0.0 1.0 0.0 0.0 0.0 1.0" translation="0.075303 0.97725 -0.045741"/>
+		</Joint>
+	</Node>
+	<Node name="L_Femur0" parent="L_Os_Coxae0">
+		<Body type="Box" mass="1.664858" size="0.443702 0.097229 0.068436" contact="Off" color="0.9 0.9 0.9 1.0" obj="Zygote_Meshes_251229/Skeleton/L_Femur.obj">
+			<Transformation linear="0.050255 0.967423 0.248129 0.998725 -0.04748 -0.017161 -0.004821 0.248675 -0.968575" translation="0.108077 0.734214 -0.008953"/>
+		</Body>
+		<Joint type="Ball" lower="-1.57 -1.57 -1.57" upper="1.57 1.57 1.57">
+			<Transformation linear="1.0 0.0 0.0 0.0 1.0 0.0 0.0 0.0 1.0" translation="0.092104 0.955046 -0.040046"/>
+		</Joint>
+	</Node>
+	<Node name="L_Tibia_Fibula0" parent="L_Femur0">
+		<Body type="Box" mass="1.743281" size="0.456938 0.090211 0.074997" contact="Off" color="0.9 0.9 0.9 1.0" obj="Zygote_Meshes_251229/Skeleton/L_Tibia_Fibula.obj">
+			<Transformation linear="-0.04762 -0.877804 -0.476648 -0.996598 0.009618 0.081855 -0.067268 0.478924 -0.875275" translation="0.09418 0.290275 -0.031168"/>
+		</Body>
+		<Joint type="Revolute" axis="1.0 0.0 0.0" lower="0.0" upper="2.5">
+			<Transformation linear="1.0 0.0 0.0 0.0 1.0 0.0 0.0 0.0 1.0" translation="0.100558 0.515247 -0.014824"/>
+		</Joint>
+	</Node>
+	<Node name="L_Patella0" parent="L_Tibia_Fibula0">
+		<Body type="Box" mass="0.046753" size="0.098013 0.040678 0.020795" contact="Off" color="0.9 0.9 0.9 1.0" obj="Zygote_Meshes_251229/Skeleton/L_Patella.obj">
+			<Transformation linear="0.0867 0.985298 -0.147209 -0.98222 0.059844 -0.177942 -0.166517 0.16002 0.972968" translation="0.094932 0.507074 0.024837"/>
+		</Body>
+		<Joint type="Weld">
+			<Transformation linear="1.0 0.0 0.0 0.0 1.0 0.0 0.0 0.0 1.0" translation="0.092968 0.486945 0.019277"/>
+		</Joint>
+	</Node>
+	<Node name="L_Talus0" parent="L_Tibia_Fibula0">
+		<Body type="Box" mass="0.151573" size="0.100888 0.062188 0.042842" contact="Off" color="0.9 0.9 0.9 1.0" obj="Zygote_Meshes_251229/Skeleton/L_Talus.obj">
+			<Transformation linear="-0.005952 0.825119 -0.564927 0.316257 -0.534387 -0.783845 -0.948655 -0.183327 -0.257769" translation="0.090064 0.05924 -0.022702"/>
+		</Body>
+		<Joint type="Ball" lower="-1.57 -1.57 -1.57" upper="1.57 1.57 1.57">
+			<Transformation linear="1.0 0.0 0.0 0.0 1.0 0.0 0.0 0.0 1.0" translation="0.08597 0.0752 -0.040573"/>
+		</Joint>
+	</Node>
+	<Node name="L_Calcaneus0" parent="L_Talus0">
+		<Body type="Box" mass="0.087435" size="0.043681 0.080854 0.043903" contact="Off" color="0.9 0.9 0.9 1.0" obj="Zygote_Meshes_251229/Skeleton/L_Calcaneus.obj">
+			<Transformation linear="1.0 0.0 0.0 0.0 -0.301546 0.953452 0.0 -0.953452 -0.301546" translation="0.084896 0.047084 -0.061287"/>
+		</Body>
+		<Joint type="Weld">
+			<Transformation linear="1.0 0.0 0.0 0.0 1.0 0.0 0.0 0.0 1.0" translation="0.088914 0.057219 -0.044564"/>
+		</Joint>
+	</Node>
+	<Node name="L_Metatarsal0" parent="L_Talus0">
+		<Body type="Box" mass="0.236524" size="0.082851 0.053482 0.094659" contact="Off" color="0.9 0.9 0.9 1.0" obj="Zygote_Meshes_251229/Skeleton/L_Metatarsal.obj">
+			<Transformation linear="1.0 0.0 0.0 0.0 1.0 0.0 0.0 0.0 1.0" translation="0.095887 0.03706 0.027849"/>
+		</Body>
+		<Joint type="Weld">
+			<Transformation linear="1.0 0.0 0.0 0.0 1.0 0.0 0.0 0.0 1.0" translation="0.091491 0.046876 0.003199"/>
+		</Joint>
+	</Node>
+	<Node name="L_Toe10" parent="L_Metatarsal0">
+		<Body type="Box" mass="0.009468" size="0.059129 0.019792 0.014348" contact="Off" color="0.9 0.9 0.9 1.0" obj="Zygote_Meshes_251229/Skeleton/L_Toe1.obj">
+			<Transformation linear="-0.092759 -0.994387 0.050894 -0.219731 -0.029411 -0.975117 0.971141 -0.101634 -0.215769" translation="0.061455 0.012779 0.100466"/>
+		</Body>
+		<Joint type="Revolute" axis="1.0 0.0 0.0" lower="-1.57" upper="0.3">
+			<Transformation linear="1.0 0.0 0.0 0.0 1.0 0.0 0.0 0.0 1.0" translation="0.063007 0.017811 0.073386"/>
+		</Joint>
+	</Node>
+	<Node name="L_Toe20" parent="L_Metatarsal0">
+		<Body type="Box" mass="0.003523" size="0.050097 0.012171 0.010245" contact="Off" color="0.9 0.9 0.9 1.0" obj="Zygote_Meshes_251229/Skeleton/L_Toe2.obj">
+			<Transformation linear="-0.138552 0.989789 -0.033477 0.165299 -0.010216 -0.986191 -0.976463 -0.142173 -0.162196" translation="0.090422 0.013863 0.094003"/>
+		</Body>
+		<Joint type="Revolute" axis="1.0 0.0 0.0" lower="-1.57" upper="0.3">
+			<Transformation linear="1.0 0.0 0.0 0.0 1.0 0.0 0.0 0.0 1.0" translation="0.087636 0.017253 0.072394"/>
+		</Joint>
+	</Node>
+	<Node name="L_Toe30" parent="L_Metatarsal0">
+		<Body type="Box" mass="0.003783" size="0.046266 0.013087 0.011079" contact="Off" color="0.9 0.9 0.9 1.0" obj="Zygote_Meshes_251229/Skeleton/L_Toe3.obj">
+			<Transformation linear="0.206816 0.0 -0.97838 0.0 1.0 0.0 0.97838 0.0 0.206816" translation="0.108421 0.012806 0.085383"/>
+		</Body>
+		<Joint type="Revolute" axis="1.0 0.0 0.0" lower="-1.57" upper="0.3">
+			<Transformation linear="1.0 0.0 0.0 0.0 1.0 0.0 0.0 0.0 1.0" translation="0.105151 0.014834 0.069104"/>
+		</Joint>
+	</Node>
+	<Node name="L_Toe40" parent="L_Metatarsal0">
+		<Body type="Box" mass="0.002667" size="0.038638 0.011704 0.01046" contact="Off" color="0.9 0.9 0.9 1.0" obj="Zygote_Meshes_251229/Skeleton/L_Toe4.obj">
+			<Transformation linear="-0.226364 0.0 0.974043 0.0 1.0 0.0 -0.974043 0.0 -0.226364" translation="0.12223 0.013722 0.070467"/>
+		</Body>
+		<Joint type="Revolute" axis="1.0 0.0 0.0" lower="-1.57" upper="0.3">
+			<Transformation linear="1.0 0.0 0.0 0.0 1.0 0.0 0.0 0.0 1.0" translation="0.12072 0.014946 0.063752"/>
+		</Joint>
+	</Node>
+	<Node name="L_Toe50" parent="L_Metatarsal0">
+		<Body type="Box" mass="0.002844" size="0.032208 0.013918 0.01125" contact="Off" color="0.9 0.9 0.9 1.0" obj="Zygote_Meshes_251229/Skeleton/L_Toe5.obj">
+			<Transformation linear="-0.128036 0.0 0.99177 0.0 1.0 0.0 -0.99177 0.0 -0.128036" translation="0.135435 0.012009 0.061798"/>
+		</Body>
+		<Joint type="Revolute" axis="1.0 0.0 0.0" lower="-1.57" upper="0.3">
+			<Transformation linear="1.0 0.0 0.0 0.0 1.0 0.0 0.0 0.0 1.0" translation="0.133532 0.014643 0.059741"/>
+		</Joint>
+	</Node>
+	<Node name="R_Os_Coxae0" parent="Saccrum_Coccyx0">
+		<Body type="Box" mass="0.519916" size="0.163601 0.122263 0.046094" contact="Off" color="0.9 0.9 0.9 1.0" obj="Zygote_Meshes_251229/Skeleton/R_Os_Coxae.obj">
+			<Transformation linear="0.607997 0.132998 -0.782721 -0.113902 -0.961059 -0.251777 -0.785727 0.242233 -0.569172" translation="-0.091013 1.016184 -0.042004"/>
+		</Body>
+		<Joint type="Weld">
+			<Transformation linear="1.0 0.0 0.0 0.0 1.0 0.0 0.0 0.0 1.0" translation="-0.051105 1.001125 -0.079119"/>
+		</Joint>
+	</Node>
+	<Node name="R_Os_Coxae1" parent="R_Os_Coxae0">
+		<Body type="Box" mass="1.059505" size="0.150194 0.133919 0.093412" contact="Off" color="0.9 0.9 0.9 1.0" obj="None">
+			<Transformation linear="0.354857 -0.527142 -0.772139 -0.017012 0.822109 -0.569075 0.934766 0.215076 0.282763" translation="-0.048313 0.93742 -0.011927"/>
+		</Body>
+		<Joint type="Weld">
+			<Transformation linear="1.0 0.0 0.0 0.0 1.0 0.0 0.0 0.0 1.0" translation="-0.075303 0.97725 -0.045741"/>
+		</Joint>
+	</Node>
+	<Node name="R_Femur0" parent="R_Os_Coxae0">
+		<Body type="Box" mass="1.664858" size="0.443702 0.097229 0.068436" contact="Off" color="0.9 0.9 0.9 1.0" obj="Zygote_Meshes_251229/Skeleton/R_Femur.obj">
+			<Transformation linear="-0.050255 -0.967423 0.248128 0.998725 -0.04748 0.017161 -0.004821 0.248674 0.968575" translation="-0.108077 0.734214 -0.008953"/>
+		</Body>
+		<Joint type="Ball" lower="-1.57 -1.57 -1.57" upper="1.57 1.57 1.57">
+			<Transformation linear="1.0 0.0 0.0 0.0 1.0 0.0 0.0 0.0 1.0" translation="-0.092104 0.955046 -0.040046"/>
+		</Joint>
+	</Node>
+	<Node name="R_Tibia_Fibula0" parent="R_Femur0">
+		<Body type="Box" mass="1.694464" size="0.459042 0.08609 0.076036" contact="Off" color="0.9 0.9 0.9 1.0" obj="Zygote_Meshes_251229/Skeleton/R_Tibia_Fibula.obj">
+			<Transformation linear="-0.03309 0.860297 0.508719 0.996442 -0.011078 0.08355 0.077513 0.509673 -0.856869" translation="-0.095942 0.291616 -0.032775"/>
+		</Body>
+		<Joint type="Revolute" axis="1.0 0.0 0.0" lower="0.0" upper="2.5">
+			<Transformation linear="1.0 0.0 0.0 0.0 1.0 0.0 0.0 0.0 1.0" translation="-0.101082 0.516358 -0.013996"/>
+		</Joint>
+	</Node>
+	<Node name="R_Patella0" parent="R_Tibia_Fibula0">
+		<Body type="Box" mass="0.046753" size="0.098013 0.040678 0.020795" contact="Off" color="0.9 0.9 0.9 1.0" obj="Zygote_Meshes_251229/Skeleton/R_Patella.obj">
+			<Transformation linear="-0.0867 -0.985298 -0.14721 -0.98222 0.059844 0.177942 -0.166517 0.16002 -0.972968" translation="-0.094932 0.507074 0.024837"/>
+		</Body>
+		<Joint type="Weld">
+			<Transformation linear="1.0 0.0 0.0 0.0 1.0 0.0 0.0 0.0 1.0" translation="-0.093608 0.487933 0.019573"/>
+		</Joint>
+	</Node>
+	<Node name="R_Talus0" parent="R_Tibia_Fibula0">
+		<Body type="Box" mass="0.154950" size="0.101427 0.062282 0.043498" contact="Off" color="0.9 0.9 0.9 1.0" obj="Zygote_Meshes_251229/Skeleton/R_Talus.obj">
+			<Transformation linear="0.032004 -0.837876 -0.544922 0.295652 -0.512866 0.805952 -0.95476 -0.186901 0.231306" translation="-0.089758 0.059388 -0.022868"/>
+		</Body>
+		<Joint type="Ball" lower="-1.57 -1.57 -1.57" upper="1.57 1.57 1.57">
+			<Transformation linear="1.0 0.0 0.0 0.0 1.0 0.0 0.0 0.0 1.0" translation="-0.085538 0.075393 -0.041198"/>
+		</Joint>
+	</Node>
+	<Node name="R_Calcaneus0" parent="R_Talus0">
+		<Body type="Box" mass="0.083803" size="0.043684 0.043862 0.077562" contact="Off" color="0.9 0.9 0.9 1.0" obj="Zygote_Meshes_251229/Skeleton/R_Calcaneus.obj">
+			<Transformation linear="1.0 0.0 0.0 0.0 1.0 0.0 0.0 0.0 1.0" translation="-0.084897 0.042975 -0.061382"/>
+		</Body>
+		<Joint type="Weld">
+			<Transformation linear="1.0 0.0 0.0 0.0 1.0 0.0 0.0 0.0 1.0" translation="-0.089862 0.052664 -0.045566"/>
+		</Joint>
+	</Node>
+	<Node name="R_Metatarsal0" parent="R_Talus0">
+		<Body type="Box" mass="0.236524" size="0.082851 0.053482 0.094659" contact="Off" color="0.9 0.9 0.9 1.0" obj="Zygote_Meshes_251229/Skeleton/R_Metatarsal.obj">
+			<Transformation linear="1.0 0.0 0.0 0.0 1.0 0.0 0.0 0.0 1.0" translation="-0.095887 0.03706 0.027849"/>
+		</Body>
+		<Joint type="Weld">
+			<Transformation linear="1.0 0.0 0.0 0.0 1.0 0.0 0.0 0.0 1.0" translation="-0.091913 0.047247 0.003299"/>
+		</Joint>
+	</Node>
+	<Node name="R_Toe10" parent="R_Metatarsal0">
+		<Body type="Box" mass="0.009486" size="0.059141 0.019821 0.014351" contact="Off" color="0.9 0.9 0.9 1.0" obj="Zygote_Meshes_251229/Skeleton/R_Toe1.obj">
+			<Transformation linear="0.091913 0.994439 0.051419 -0.219222 -0.030163 0.975209 0.971336 -0.100907 0.21523" translation="-0.06146 0.012789 0.100467"/>
+		</Body>
+		<Joint type="Revolute" axis="1.0 0.0 0.0" lower="-1.57" upper="0.3">
+			<Transformation linear="1.0 0.0 0.0 0.0 1.0 0.0 0.0 0.0 1.0" translation="-0.063003 0.017804 0.07338"/>
+		</Joint>
+	</Node>
+	<Node name="R_Toe20" parent="R_Metatarsal0">
+		<Body type="Box" mass="0.003523" size="0.050097 0.012171 0.010245" contact="Off" color="0.9 0.9 0.9 1.0" obj="Zygote_Meshes_251229/Skeleton/R_Toe2.obj">
+			<Transformation linear="0.138552 -0.989789 -0.033477 0.165299 -0.010216 0.986191 -0.976463 -0.142172 0.162196" translation="-0.090422 0.013863 0.094003"/>
+		</Body>
+		<Joint type="Revolute" axis="1.0 0.0 0.0" lower="-1.57" upper="0.3">
+			<Transformation linear="1.0 0.0 0.0 0.0 1.0 0.0 0.0 0.0 1.0" translation="-0.087636 0.017253 0.072394"/>
+		</Joint>
+	</Node>
+	<Node name="R_Toe30" parent="R_Metatarsal0">
+		<Body type="Box" mass="0.003783" size="0.046266 0.013087 0.011079" contact="Off" color="0.9 0.9 0.9 1.0" obj="Zygote_Meshes_251229/Skeleton/R_Toe3.obj">
+			<Transformation linear="-0.206816 0.0 -0.97838 0.0 1.0 0.0 0.97838 0.0 -0.206816" translation="-0.108421 0.012806 0.085383"/>
+		</Body>
+		<Joint type="Revolute" axis="1.0 0.0 0.0" lower="-1.57" upper="0.3">
+			<Transformation linear="1.0 0.0 0.0 0.0 1.0 0.0 0.0 0.0 1.0" translation="-0.105151 0.014834 0.069104"/>
+		</Joint>
+	</Node>
+	<Node name="R_Toe40" parent="R_Metatarsal0">
+		<Body type="Box" mass="0.002667" size="0.038638 0.011704 0.01046" contact="Off" color="0.9 0.9 0.9 1.0" obj="Zygote_Meshes_251229/Skeleton/R_Toe4.obj">
+			<Transformation linear="0.226364 0.0 0.974043 0.0 1.0 -0.0 -0.974043 0.0 0.226364" translation="-0.12223 0.013722 0.070467"/>
+		</Body>
+		<Joint type="Revolute" axis="1.0 0.0 0.0" lower="-1.57" upper="0.3">
+			<Transformation linear="1.0 0.0 0.0 0.0 1.0 0.0 0.0 0.0 1.0" translation="-0.12072 0.014946 0.063752"/>
+		</Joint>
+	</Node>
+	<Node name="R_Toe50" parent="R_Metatarsal0">
+		<Body type="Box" mass="0.002844" size="0.032208 0.013918 0.011251" contact="Off" color="0.9 0.9 0.9 1.0" obj="Zygote_Meshes_251229/Skeleton/R_Toe5.obj">
+			<Transformation linear="0.128036 0.0 0.99177 0.0 1.0 -0.0 -0.99177 0.0 0.128036" translation="-0.135435 0.012009 0.061798"/>
+		</Body>
+		<Joint type="Revolute" axis="1.0 0.0 0.0" lower="-1.57" upper="0.3">
+			<Transformation linear="1.0 0.0 0.0 0.0 1.0 0.0 0.0 0.0 1.0" translation="-0.133532 0.014643 0.059741"/>
+		</Joint>
+	</Node>
+</Skeleton>

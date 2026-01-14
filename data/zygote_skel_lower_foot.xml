@@ -1,0 +1,474 @@
+<Skeleton name="Sacrum">
+	<Node name="Sacrum0" parent="None">
+		<Body type="Box" mass="0.277707" size="0.134131 0.062513 0.058733" contact="Off" color="0.9 0.9 0.9 1.0" obj="Zygote_Meshes_Revised/Skeleton/Sacrum.obj">
+			<Transformation linear="1.0 0.0 0.0 0.0 -0.621819 0.783161 0.0 -0.783161 -0.621819" translation="-0.0 1.012885 -0.069367"/>
+		</Body>
+		<Joint type="FixedFree">
+			<Transformation linear="1.0 0.0 0.0 0.0 1.0 0.0 0.0 0.0 1.0" translation="-0.0 0.992517 -0.082322"/>
+		</Joint>
+	</Node>
+	<Node name="Sacrum1" parent="Sacrum0">
+		<Body type="Box" mass="0.196986" size="0.10315 0.069487 0.048737" contact="Off" color="0.9 0.9 0.9 1.0" obj="None">
+			<Transformation linear="0.999999 -0.001019 -0.000768 0.000993 0.999449 -0.033165 0.000801 0.033165 0.99945" translation="2.8e-05 0.971344 -0.088021"/>
+		</Body>
+		<Joint type="Weld">
+			<Transformation linear="1.0 0.0 0.0 0.0 1.0 0.0 0.0 0.0 1.0" translation="2.8e-05 0.992692 -0.078712"/>
+		</Joint>
+	</Node>
+	<Node name="Coccyx0" parent="Sacrum0">
+		<Body type="Box" mass="0.019826" size="0.054448 0.049551 0.013031" contact="Off" color="0.9 0.9 0.9 1.0" obj="Zygote_Meshes_Revised/Skeleton/Coccyx.obj">
+			<Transformation linear="0.0 1.0 0.0 -0.885812 0.0 0.464044 0.464044 -0.0 0.885812" translation="0.0 0.919075 -0.084587"/>
+		</Body>
+		<Joint type="Weld">
+			<Transformation linear="1.0 0.0 0.0 0.0 1.0 0.0 0.0 0.0 1.0" translation="-1.4e-05 0.940217 -0.094231"/>
+		</Joint>
+	</Node>
+	<Node name="L_Os_Coxae0" parent="Sacrum0">
+		<Body type="Box" mass="0.557564" size="0.163296 0.125986 0.048061" contact="Off" color="0.9 0.9 0.9 1.0" obj="Zygote_Meshes_Revised/Skeleton/L_Os_Coxae.obj">
+			<Transformation linear="0.618757 0.081893 -0.781303 0.13367 0.969074 0.207434 0.774127 -0.232788 0.588674" translation="0.089293 1.014738 -0.04037"/>
+		</Body>
+		<Joint type="Weld">
+			<Transformation linear="1.0 0.0 0.0 0.0 1.0 0.0 0.0 0.0 1.0" translation="0.050864 1.009907 -0.075207"/>
+		</Joint>
+	</Node>
+	<Node name="L_Os_Coxae1" parent="L_Os_Coxae0">
+		<Body type="Box" mass="0.575393" size="0.135252 0.128658 0.058638" contact="Off" color="0.9 0.9 0.9 1.0" obj="None">
+			<Transformation linear="-0.636457 0.331737 -0.696328 -0.16827 0.82132 0.545086 0.752733 0.464095 -0.466914" translation="0.046951 0.923069 -0.003689"/>
+		</Body>
+		<Joint type="Weld">
+			<Transformation linear="1.0 0.0 0.0 0.0 1.0 0.0 0.0 0.0 1.0" translation="0.08849 0.96941 -0.023387"/>
+		</Joint>
+	</Node>
+	<Node name="L_Femur_Patella0" parent="L_Os_Coxae0">
+		<Body type="Box" mass="2.042645" size="0.443644 0.097723 0.083552" contact="Off" color="0.9 0.9 0.9 1.0" obj="Zygote_Meshes_Revised/Skeleton/L_Femur_Patella.obj">
+			<Transformation linear="0.062854 0.964869 0.255102 0.997397 -0.051678 -0.050286 -0.035336 0.257598 -0.965606" translation="0.107303 0.734011 -0.00837"/>
+		</Body>
+		<Joint type="Ball" lower="-1.570796 -1.570796 -1.570796" upper="1.570796 1.570796 1.570796">
+			<Transformation linear="1.0 0.0 0.0 0.0 1.0 0.0 0.0 0.0 1.0" translation="0.092371 0.953363 -0.036561"/>
+		</Joint>
+	</Node>
+	<Node name="L_Tibia0" parent="L_Femur_Patella0">
+		<Body type="Box" mass="1.397421" size="0.443373 0.079503 0.070302" contact="Off" color="0.9 0.9 0.9 1.0" obj="Zygote_Meshes_Revised/Skeleton/L_Tibia.obj">
+			<Transformation linear="-0.052365 -0.993537 -0.100707 -0.996388 0.045229 0.071877 -0.066857 0.104107 -0.992316" translation="0.085645 0.29903 -0.022717"/>
+		</Body>
+		<Joint type="Revolute"  axis="1 0 0" lower="0" upper="2.5">
+			<Transformation linear="1.0 0.0 0.0 0.0 1.0 0.0 0.0 0.0 1.0" translation="0.096147 0.516203 -0.011779"/>
+		</Joint>
+	</Node>
+	<Node name="L_Fibula0" parent="L_Tibia0">
+		<Body type="Box" mass="0.167911" size="0.438766 0.028055 0.02419" contact="Off" color="0.9 0.9 0.9 1.0" obj="Zygote_Meshes_Revised/Skeleton/L_Fibula.obj">
+			<Transformation linear="0.069324 0.296966 0.952368 0.996138 -0.072178 -0.050004 0.053891 0.952156 -0.300823" translation="0.119062 0.27996 -0.043951"/>
+		</Body>
+		<Joint type="Weld">
+			<Transformation linear="1.0 0.0 0.0 0.0 1.0 0.0 0.0 0.0 1.0" translation="0.114252 0.270958 -0.044031"/>
+		</Joint>
+	</Node>
+	<Node name="L_Talus0" parent="L_Tibia0">
+		<Body type="Box" mass="0.052640" size="0.06176 0.035319 0.042795" contact="Off" color="0.9 0.9 0.9 1.0" obj="Zygote_Meshes_Revised/Skeleton/L_Talus.obj">
+			<Transformation linear="0.089875 0.0 0.995953 0.0 1.0 -0.0 -0.995953 0.0 0.089875" translation="0.081363 0.073917 -0.042225"/>
+		</Body>
+		<Joint type="Ball" lower="-1.570796 0 -1.570796" upper="1.570796 0 1.570796">
+			<Transformation linear="1.0 0.0 0.0 0.0 1.0 0.0 0.0 0.0 1.0" translation="0.081879 0.084987 -0.040739"/>
+		</Joint>
+	</Node>
+	<Node name="L_Calcaneus0" parent="L_Talus0">
+		<Body type="Box" mass="0.092592" size="0.044128 0.081565 0.045619" contact="On" color="0.9 0.9 0.9 1.0" obj="Zygote_Meshes_Revised/Skeleton/L_Calcaneus.obj">
+			<Transformation linear="1.0 0.0 0.0 0.0 -0.331318 0.943519 0.0 -0.943519 -0.331318" translation="0.084721 0.04641 -0.061047"/>
+		</Body>
+		<Joint type="Weld">
+			<Transformation linear="1.0 0.0 0.0 0.0 1.0 0.0 0.0 0.0 1.0" translation="0.082253 0.065042 -0.046057"/>
+		</Joint>
+	</Node>
+	<Node name="L_Tarsal0" parent="L_Talus0">
+		<Body type="Box" mass="0.070241" size="0.064161 0.050845 0.038183" contact="Off" color="0.9 0.9 0.9 1.0" obj="Zygote_Meshes_Revised/Skeleton/L_Tarsal.obj">
+			<Transformation linear="0.77054 -0.323089 0.549438 -0.370242 0.474795 0.79843 -0.518834 -0.818647 0.246227" translation="0.086724 0.052483 -0.006247"/>
+		</Body>
+		<Joint type="Weld">
+			<Transformation linear="1.0 0.0 0.0 0.0 1.0 0.0 0.0 0.0 1.0" translation="0.083727 0.064953 -0.020288"/>
+		</Joint>
+	</Node>
+	<Node name="L_F_Metatarsal_10" parent="L_Tarsal0">
+		<Body type="Box" mass="0.023037" size="0.064103 0.029855 0.021346" contact="Off" color="0.9 0.9 0.9 1.0" obj="Zygote_Meshes_Revised/Skeleton/L_F_Metatarsal_1.obj">
+			<Transformation linear="-0.164253 0.096342 0.981702 -0.497177 -0.867647 0.001964 0.85196 -0.487757 0.190413" translation="0.06785 0.031962 0.045911"/>
+		</Body>
+		<Joint type="Weld">
+			<Transformation linear="1.0 0.0 0.0 0.0 1.0 0.0 0.0 0.0 1.0" translation="0.071757 0.044991 0.021336"/>
+		</Joint>
+	</Node>
+	<Node name="L_F_Proximal_Phalanx_10" parent="L_F_Metatarsal_10">
+		<Body type="Box" mass="0.005883" size="0.036429 0.019796 0.014466" contact="On" color="0.9 0.9 0.9 1.0" obj="Zygote_Meshes_Revised/Skeleton/L_F_Proximal_Phalanx_1.obj">
+			<Transformation linear="-0.103586 -0.994513 0.014609 -0.194777 0.00588 -0.98083 0.975362 -0.104446 -0.194318" translation="0.062452 0.015717 0.089511"/>
+		</Body>
+		<Joint type="Ball" lower="-1.570796 -1.570796 -1.570796" upper="1.570796 1.570796 1.570796">
+			<Transformation linear="1.0 0.0 0.0 0.0 1.0 0.0 0.0 0.0 1.0" translation="0.064267 0.020647 0.074068"/>
+		</Joint>
+	</Node>
+	<Node name="L_F_Distal_Phalanx_10" parent="L_F_Proximal_Phalanx_10">
+		<Body type="Box" mass="0.002805" size="0.027222 0.019263 0.009487" contact="On" color="0.9 0.9 0.9 1.0" obj="Zygote_Meshes_Revised/Skeleton/L_F_Distal_Phalanx_1.obj">
+			<Transformation linear="-0.134077 -0.985214 -0.10666 0.244196 -0.137161 0.959977 -0.960412 0.102665 0.258975" translation="0.061605 0.009161 0.116835"/>
+		</Body>
+		<Joint type="Weld">
+			<Transformation linear="1.0 0.0 0.0 0.0 1.0 0.0 0.0 0.0 1.0" translation="0.062273 0.01211 0.105434"/>
+		</Joint>
+	</Node>
+	<Node name="L_F_Metatarsal_20" parent="L_Tarsal0">
+		<Body type="Box" mass="0.011749" size="0.073528 0.020876 0.013573" contact="Off" color="0.9 0.9 0.9 1.0" obj="Zygote_Meshes_Revised/Skeleton/L_F_Metatarsal_2.obj">
+			<Transformation linear="0.001523 -0.296206 0.955123 -0.571134 -0.784278 -0.242312 0.820856 -0.545134 -0.170367" translation="0.087093 0.036375 0.038484"/>
+		</Body>
+		<Joint type="Weld">
+			<Transformation linear="1.0 0.0 0.0 0.0 1.0 0.0 0.0 0.0 1.0" translation="0.086704 0.052289 0.015208"/>
+		</Joint>
+	</Node>
+	<Node name="L_F_Proximal_Phalanx_20" parent="L_F_Metatarsal_20">
+		<Body type="Box" mass="0.001911" size="0.026677 0.012317 0.010314" contact="On" color="0.9 0.9 0.9 1.0" obj="Zygote_Meshes_Revised/Skeleton/L_F_Proximal_Phalanx_2.obj">
+			<Transformation linear="-0.112213 0.993678 -0.003476 0.055362 0.00276 -0.998463 -0.992141 -0.112233 -0.055322" translation="0.088516 0.016645 0.082355"/>
+		</Body>
+		<Joint type="Ball" lower="-1.570796 -1.570796 -1.570796" upper="1.570796 1.570796 1.570796">
+			<Transformation linear="1.0 0.0 0.0 0.0 1.0 0.0 0.0 0.0 1.0" translation="0.08816 0.019993 0.070489"/>
+		</Joint>
+	</Node>
+	<Node name="L_F_Middle_Phalanx_20" parent="L_F_Proximal_Phalanx_20">
+		<Body type="Box" mass="0.000594" size="0.014498 0.009744 0.007463" contact="Off" color="0.9 0.9 0.9 1.0" obj="Zygote_Meshes_Revised/Skeleton/L_F_Middle_Phalanx_2.obj">
+			<Transformation linear="0.169787 -0.985473 0.003874 -0.151115 -0.02992 -0.988063 0.973826 0.167175 -0.154" translation="0.090889 0.014196 0.10157"/>
+		</Body>
+		<Joint type="Weld">
+			<Transformation linear="1.0 0.0 0.0 0.0 1.0 0.0 0.0 0.0 1.0" translation="0.09028 0.014769 0.094914"/>
+		</Joint>
+	</Node>
+	<Node name="L_F_Distal_Phalanx_20" parent="L_F_Middle_Phalanx_20">
+		<Body type="Box" mass="0.000399" size="0.01231 0.008649 0.006641" contact="On" color="0.9 0.9 0.9 1.0" obj="Zygote_Meshes_Revised/Skeleton/L_F_Distal_Phalanx_2.obj">
+			<Transformation linear="-0.108179 -0.989743 -0.093307 0.338287 -0.124906 0.932717 -0.934804 0.069335 0.348329" translation="0.093473 0.010271 0.112874"/>
+		</Body>
+		<Joint type="Weld">
+			<Transformation linear="1.0 0.0 0.0 0.0 1.0 0.0 0.0 0.0 1.0" translation="0.09242 0.012014 0.107735"/>
+		</Joint>
+	</Node>
+	<Node name="L_F_Metatarsal_30" parent="L_Tarsal0">
+		<Body type="Box" mass="0.010336" size="0.066994 0.020695 0.01322" contact="Off" color="0.9 0.9 0.9 1.0" obj="Zygote_Meshes_Revised/Skeleton/L_F_Metatarsal_3.obj">
+			<Transformation linear="0.05359 -0.424029 0.904062 -0.542724 -0.772335 -0.330074 0.838199 -0.472968 -0.27152" translation="0.101249 0.03142 0.033759"/>
+		</Body>
+		<Joint type="Weld">
+			<Transformation linear="1.0 0.0 0.0 0.0 1.0 0.0 0.0 0.0 1.0" translation="0.099246 0.046344 0.010008"/>
+		</Joint>
+	</Node>
+	<Node name="L_F_Proximal_Phalanx_30" parent="L_F_Metatarsal_30">
+		<Body type="Box" mass="0.001393" size="0.023273 0.011283 0.009409" contact="On" color="0.9 0.9 0.9 1.0" obj="Zygote_Meshes_Revised/Skeleton/L_F_Proximal_Phalanx_3.obj">
+			<Transformation linear="0.16287 0.968109 -0.190365 -0.023968 0.196767 0.980157 0.986356 -0.155075 0.055251" translation="0.105554 0.014818 0.074144"/>
+		</Body>
+		<Joint type="Ball" lower="-1.570796 -1.570796 -1.570796" upper="1.570796 1.570796 1.570796">
+			<Transformation linear="1.0 0.0 0.0 0.0 1.0 0.0 0.0 0.0 1.0" translation="0.104777 0.018032 0.06369"/>
+		</Joint>
+	</Node>
+	<Node name="L_F_Middle_Phalanx_30" parent="L_F_Proximal_Phalanx_30">
+		<Body type="Box" mass="0.000507" size="0.01461 0.009163 0.006711" contact="Off" color="0.9 0.9 0.9 1.0" obj="Zygote_Meshes_Revised/Skeleton/L_F_Middle_Phalanx_3.obj">
+			<Transformation linear="0.160749 -0.965106 0.206714 -0.117204 -0.226621 -0.966906 0.980012 0.131201 -0.149543" translation="0.108696 0.012822 0.091732"/>
+		</Body>
+		<Joint type="Weld">
+			<Transformation linear="1.0 0.0 0.0 0.0 1.0 0.0 0.0 0.0 1.0" translation="0.10755 0.013271 0.08505"/>
+		</Joint>
+	</Node>
+	<Node name="L_F_Distal_Phalanx_30" parent="L_F_Middle_Phalanx_30">
+		<Body type="Box" mass="0.000378" size="0.011784 0.008735 0.006518" contact="On" color="0.9 0.9 0.9 1.0" obj="Zygote_Meshes_Revised/Skeleton/L_F_Distal_Phalanx_3.obj">
+			<Transformation linear="0.294946 0.947873 -0.120596 -0.336394 0.221137 0.915389 0.894341 -0.229423 0.384082" translation="0.112289 0.009149 0.102644"/>
+		</Body>
+		<Joint type="Weld">
+			<Transformation linear="1.0 0.0 0.0 0.0 1.0 0.0 0.0 0.0 1.0" translation="0.110909 0.011033 0.097929"/>
+		</Joint>
+	</Node>
+	<Node name="L_F_Metatarsal_40" parent="L_Tarsal0">
+		<Body type="Box" mass="0.009126" size="0.060876 0.018611 0.014285" contact="Off" color="0.9 0.9 0.9 1.0" obj="Zygote_Meshes_Revised/Skeleton/L_F_Metatarsal_4.obj">
+			<Transformation linear="0.18944 -0.627529 0.755195 -0.467869 -0.733884 -0.492456 0.863256 -0.260041 -0.432628" translation="0.112014 0.027704 0.025293"/>
+		</Body>
+		<Joint type="Weld">
+			<Transformation linear="1.0 0.0 0.0 0.0 1.0 0.0 0.0 0.0 1.0" translation="0.106942 0.039594 0.003377"/>
+		</Joint>
+	</Node>
+	<Node name="L_F_Proximal_Phalanx_40" parent="L_F_Metatarsal_40">
+		<Body type="Box" mass="0.001212" size="0.021631 0.01057 0.009397" contact="On" color="0.9 0.9 0.9 1.0" obj="Zygote_Meshes_Revised/Skeleton/L_F_Proximal_Phalanx_4.obj">
+			<Transformation linear="-0.166861 0.976207 -0.138484 -0.010092 -0.142137 -0.989796 -0.985929 -0.163761 0.033569" translation="0.119827 0.015167 0.062504"/>
+		</Body>
+		<Joint type="Ball" lower="-1.570796 -1.570796 -1.570796" upper="1.570796 1.570796 1.570796">
+			<Transformation linear="1.0 0.0 0.0 0.0 1.0 0.0 0.0 0.0 1.0" translation="0.117889 0.017856 0.052871"/>
+		</Joint>
+	</Node>
+	<Node name="L_F_Middle_Phalanx_40" parent="L_F_Proximal_Phalanx_40">
+		<Body type="Box" mass="0.000388" size="0.010584 0.007132 0.009126" contact="Off" color="0.9 0.9 0.9 1.0" obj="Zygote_Meshes_Revised/Skeleton/L_F_Middle_Phalanx_4.obj">
+			<Transformation linear="0.043781 0.0 0.999041 0.0 1.0 -0.0 -0.999041 0.0 0.043781" translation="0.122952 0.01402 0.076622"/>
+		</Body>
+		<Joint type="Weld">
+			<Transformation linear="1.0 0.0 0.0 0.0 1.0 0.0 0.0 0.0 1.0" translation="0.121912 0.014173 0.07221"/>
+		</Joint>
+	</Node>
+	<Node name="L_F_Distal_Phalanx_40" parent="L_F_Middle_Phalanx_40">
+		<Body type="Box" mass="0.000219" size="0.009287 0.007832 0.00533" contact="On" color="0.9 0.9 0.9 1.0" obj="Zygote_Meshes_Revised/Skeleton/L_F_Distal_Phalanx_4.obj">
+			<Transformation linear="0.382228 0.917884 -0.106729 -0.354921 0.252466 0.900162 0.85319 -0.306187 0.422276" translation="0.125691 0.010825 0.085543"/>
+		</Body>
+		<Joint type="Weld">
+			<Transformation linear="1.0 0.0 0.0 0.0 1.0 0.0 0.0 0.0 1.0" translation="0.125736 0.011991 0.081271"/>
+		</Joint>
+	</Node>
+	<Node name="L_F_Metatarsal_50" parent="L_Tarsal0">
+		<Body type="Box" mass="0.012465" size="0.069712 0.019919 0.015919" contact="Off" color="0.9 0.9 0.9 1.0" obj="Zygote_Meshes_Revised/Skeleton/L_F_Metatarsal_5.obj">
+			<Transformation linear="-0.305817 0.383567 -0.871408 0.283336 -0.837125 -0.467912 -0.908954 -0.389997 0.147329" translation="0.121649 0.023417 0.015001"/>
+		</Body>
+		<Joint type="Weld">
+			<Transformation linear="1.0 0.0 0.0 0.0 1.0 0.0 0.0 0.0 1.0" translation="0.111563 0.033169 -0.006672"/>
+		</Joint>
+	</Node>
+	<Node name="L_F_Proximal_Phalanx_50" parent="L_F_Metatarsal_50">
+		<Body type="Box" mass="0.001240" size="0.021788 0.011266 0.008956" contact="On" color="0.9 0.9 0.9 1.0" obj="Zygote_Meshes_Revised/Skeleton/L_F_Proximal_Phalanx_5.obj">
+			<Transformation linear="-0.151744 -0.98222 -0.110537 0.162787 -0.13514 0.977363 -0.974923 0.130315 0.180399" translation="0.134954 0.013393 0.056431"/>
+		</Body>
+		<Joint type="Ball" lower="-1.570796 -1.570796 -1.570796" upper="1.570796 1.570796 1.570796">
+			<Transformation linear="1.0 0.0 0.0 0.0 1.0 0.0 0.0 0.0 1.0" translation="0.13177 0.01579 0.046848"/>
+		</Joint>
+	</Node>
+	<Node name="L_F_Middle_Phalanx_50" parent="L_F_Proximal_Phalanx_50">
+		<Body type="Box" mass="0.000153" size="0.007886 0.00522 0.00661" contact="Off" color="0.9 0.9 0.9 1.0" obj="Zygote_Meshes_Revised/Skeleton/L_F_Middle_Phalanx_5.obj">
+			<Transformation linear="0.923286 0.0 0.384112 0.0 1.0 -0.0 -0.384112 0.0 0.923286" translation="0.137279 0.010925 0.067733"/>
+		</Body>
+		<Joint type="Weld">
+			<Transformation linear="1.0 0.0 0.0 0.0 1.0 0.0 0.0 0.0 1.0" translation="0.13702 0.0111 0.065649"/>
+		</Joint>
+	</Node>
+	<Node name="L_F_Distal_Phalanx_50" parent="L_F_Middle_Phalanx_50">
+		<Body type="Box" mass="0.000200" size="0.009057 0.007492 0.005239" contact="On" color="0.9 0.9 0.9 1.0" obj="Zygote_Meshes_Revised/Skeleton/L_F_Distal_Phalanx_5.obj">
+			<Transformation linear="-0.054018 0.961411 0.269762 -0.391166 -0.268939 0.880148 0.918734 -0.057978 0.390599" translation="0.137352 0.007526 0.07403"/>
+		</Body>
+		<Joint type="Weld">
+			<Transformation linear="1.0 0.0 0.0 0.0 1.0 0.0 0.0 0.0 1.0" translation="0.13632 0.009695 0.070771"/>
+		</Joint>
+	</Node>
+	<Node name="R_Os_Coxae0" parent="Sacrum0">
+		<Body type="Box" mass="0.620350" size="0.163382 0.128868 0.05225" contact="Off" color="0.9 0.9 0.9 1.0" obj="Zygote_Meshes_Revised/Skeleton/R_Os_Coxae.obj">
+			<Transformation linear="-0.617521 -0.085525 -0.781891 0.127195 0.970129 -0.206571 0.776202 -0.227014 -0.588196" translation="-0.088736 1.013473 -0.039749"/>
+		</Body>
+		<Joint type="Weld">
+			<Transformation linear="1.0 0.0 0.0 0.0 1.0 0.0 0.0 0.0 1.0" translation="-0.049856 1.010249 -0.074247"/>
+		</Joint>
+	</Node>
+	<Node name="R_Os_Coxae1" parent="R_Os_Coxae0">
+		<Body type="Box" mass="0.567063" size="0.134845 0.12671 0.058854" contact="Off" color="0.9 0.9 0.9 1.0" obj="None">
+			<Transformation linear="0.616666 -0.369941 -0.694886 -0.114368 0.831238 -0.544026 0.778873 0.414955 0.470287" translation="-0.046448 0.923313 -0.002837"/>
+		</Body>
+		<Joint type="Weld">
+			<Transformation linear="1.0 0.0 0.0 0.0 1.0 0.0 0.0 0.0 1.0" translation="-0.087097 0.966956 -0.023787"/>
+		</Joint>
+	</Node>
+	<Node name="R_Femur_Patella0" parent="R_Os_Coxae0">
+		<Body type="Box" mass="2.042645" size="0.443644 0.097723 0.083552" contact="Off" color="0.9 0.9 0.9 1.0" obj="Zygote_Meshes_Revised/Skeleton/R_Femur_Patella.obj">
+			<Transformation linear="-0.062854 -0.964869 0.255102 0.997397 -0.051678 0.050286 -0.035336 0.257598 0.965606" translation="-0.107303 0.734011 -0.00837"/>
+		</Body>
+		<Joint type="Ball" lower="-1.570796 -1.570796 -1.570796" upper="1.570796 1.570796 1.570796">
+			<Transformation linear="1.0 0.0 0.0 0.0 1.0 0.0 0.0 0.0 1.0" translation="-0.094632 0.952801 -0.029552"/>
+		</Joint>
+	</Node>
+	<Node name="R_Tibia0" parent="R_Femur_Patella0">
+		<Body type="Box" mass="1.397421" size="0.443373 0.079503 0.070302" contact="Off" color="0.9 0.9 0.9 1.0" obj="Zygote_Meshes_Revised/Skeleton/R_Tibia.obj">
+			<Transformation linear="0.052365 0.993537 -0.100707 -0.996388 0.045229 -0.071877 -0.066857 0.104107 0.992316" translation="-0.085645 0.29903 -0.022717"/>
+		</Body>
+		<Joint type="Revolute" axis="1 0 0" lower="0" upper="2.5">
+			<Transformation linear="1.0 0.0 0.0 0.0 1.0 0.0 0.0 0.0 1.0" translation="-0.096147 0.516203 -0.011779"/>
+		</Joint>
+	</Node>
+	<Node name="R_Fibula0" parent="R_Tibia0">
+		<Body type="Box" mass="0.167911" size="0.438766 0.028055 0.02419" contact="Off" color="0.9 0.9 0.9 1.0" obj="Zygote_Meshes_Revised/Skeleton/R_Fibula.obj">
+			<Transformation linear="-0.069324 -0.296966 0.952368 0.996138 -0.072178 0.050004 0.053891 0.952156 0.300823" translation="-0.119062 0.27996 -0.043951"/>
+		</Body>
+		<Joint type="Weld">
+			<Transformation linear="1.0 0.0 0.0 0.0 1.0 0.0 0.0 0.0 1.0" translation="-0.114252 0.270958 -0.044031"/>
+		</Joint>
+	</Node>
+	<Node name="R_Talus0" parent="R_Tibia0">
+		<Body type="Box" mass="0.052640" size="0.06176 0.035319 0.042795" contact="Off" color="0.9 0.9 0.9 1.0" obj="Zygote_Meshes_Revised/Skeleton/R_Talus.obj">
+			<Transformation linear="-0.089875 0.0 0.995953 0.0 1.0 0.0 -0.995953 0.0 -0.089875" translation="-0.081363 0.073917 -0.042225"/>
+		</Body>
+		<Joint type="Ball" lower="-1.570796 0 -1.570796" upper="1.570796 0 1.570796">
+			<Transformation linear="1.0 0.0 0.0 0.0 1.0 0.0 0.0 0.0 1.0" translation="-0.081879 0.084987 -0.040739"/>
+		</Joint>
+	</Node>
+	<Node name="R_Calcaneus0" parent="R_Talus0">
+		<Body type="Box" mass="0.092592" size="0.044128 0.081565 0.045619" contact="On" color="0.9 0.9 0.9 1.0" obj="Zygote_Meshes_Revised/Skeleton/R_Calcaneus.obj">
+			<Transformation linear="1.0 0.0 0.0 0.0 -0.331319 0.943519 0.0 -0.943519 -0.331319" translation="-0.084721 0.04641 -0.061047"/>
+		</Body>
+		<Joint type="Weld">
+			<Transformation linear="1.0 0.0 0.0 0.0 1.0 0.0 0.0 0.0 1.0" translation="-0.082253 0.065042 -0.046057"/>
+		</Joint>
+	</Node>
+	<Node name="R_Tarsal0" parent="R_Talus0">
+		<Body type="Box" mass="0.070241" size="0.064161 0.050845 0.038183" contact="Off" color="0.9 0.9 0.9 1.0" obj="Zygote_Meshes_Revised/Skeleton/R_Tarsal.obj">
+			<Transformation linear="-0.77054 0.323089 0.549437 -0.370242 0.474795 -0.79843 -0.518834 -0.818647 -0.246227" translation="-0.086724 0.052483 -0.006247"/>
+		</Body>
+		<Joint type="Weld">
+			<Transformation linear="1.0 0.0 0.0 0.0 1.0 0.0 0.0 0.0 1.0" translation="-0.083727 0.064953 -0.020288"/>
+		</Joint>
+	</Node>
+	<Node name="R_F_Metatarsal_50" parent="R_Tarsal0">
+		<Body type="Box" mass="0.012465" size="0.069712 0.019919 0.015919" contact="Off" color="0.9 0.9 0.9 1.0" obj="Zygote_Meshes_Revised/Skeleton/R_F_Metatarsal_5.obj">
+			<Transformation linear="0.305817 -0.383566 -0.871409 0.283336 -0.837126 0.467911 -0.908954 -0.389997 -0.147329" translation="-0.121649 0.023417 0.015001"/>
+		</Body>
+		<Joint type="Weld">
+			<Transformation linear="1.0 0.0 0.0 0.0 1.0 0.0 0.0 0.0 1.0" translation="-0.111563 0.033169 -0.006672"/>
+		</Joint>
+	</Node>
+	<Node name="R_F_Proximal_Phalanx_50" parent="R_F_Metatarsal_50">
+		<Body type="Box" mass="0.001240" size="0.021788 0.011266 0.008956" contact="On" color="0.9 0.9 0.9 1.0" obj="Zygote_Meshes_Revised/Skeleton/R_F_Proximal_Phalanx_5.obj">
+			<Transformation linear="0.151744 0.982219 -0.110538 0.162787 -0.135141 -0.977362 -0.974923 0.130315 -0.1804" translation="-0.134954 0.013393 0.056431"/>
+		</Body>
+		<Joint type="Ball" lower="-1.570796 -1.570796 -1.570796" upper="1.570796 1.570796 1.570796">
+			<Transformation linear="1.0 0.0 0.0 0.0 1.0 0.0 0.0 0.0 1.0" translation="-0.13177 0.01579 0.046848"/>
+		</Joint>
+	</Node>
+	<Node name="R_F_Middle_Phalanx_50" parent="R_F_Proximal_Phalanx_50">
+		<Body type="Box" mass="0.000153" size="0.007886 0.00522 0.00661" contact="Off" color="0.9 0.9 0.9 1.0" obj="Zygote_Meshes_Revised/Skeleton/R_F_Middle_Phalanx_5.obj">
+			<Transformation linear="-0.923286 0.0 0.384112 0.0 1.0 0.0 -0.384112 0.0 -0.923286" translation="-0.137279 0.010925 0.067733"/>
+		</Body>
+		<Joint type="Weld">
+			<Transformation linear="1.0 0.0 0.0 0.0 1.0 0.0 0.0 0.0 1.0" translation="-0.13702 0.0111 0.065649"/>
+		</Joint>
+	</Node>
+	<Node name="R_F_Distal_Phalanx_50" parent="R_F_Middle_Phalanx_50">
+		<Body type="Box" mass="0.000200" size="0.009057 0.007492 0.005239" contact="On" color="0.9 0.9 0.9 1.0" obj="Zygote_Meshes_Revised/Skeleton/R_F_Distal_Phalanx_5.obj">
+			<Transformation linear="0.054018 -0.961411 0.269762 -0.391166 -0.268939 -0.880148 0.918734 -0.057978 -0.390599" translation="-0.137352 0.007526 0.07403"/>
+		</Body>
+		<Joint type="Weld">
+			<Transformation linear="1.0 0.0 0.0 0.0 1.0 0.0 0.0 0.0 1.0" translation="-0.13632 0.009695 0.070771"/>
+		</Joint>
+	</Node>
+	<Node name="R_F_Metatarsal_40" parent="R_Tarsal0">
+		<Body type="Box" mass="0.009126" size="0.060876 0.018611 0.014285" contact="Off" color="0.9 0.9 0.9 1.0" obj="Zygote_Meshes_Revised/Skeleton/R_F_Metatarsal_4.obj">
+			<Transformation linear="-0.18944 0.627529 0.755195 -0.467869 -0.733884 0.492456 0.863256 -0.260041 0.432628" translation="-0.112014 0.027704 0.025293"/>
+		</Body>
+		<Joint type="Weld">
+			<Transformation linear="1.0 0.0 0.0 0.0 1.0 0.0 0.0 0.0 1.0" translation="-0.106942 0.039594 0.003377"/>
+		</Joint>
+	</Node>
+	<Node name="R_F_Proximal_Phalanx_40" parent="R_F_Metatarsal_40">
+		<Body type="Box" mass="0.001212" size="0.021631 0.01057 0.009397" contact="On" color="0.9 0.9 0.9 1.0" obj="Zygote_Meshes_Revised/Skeleton/R_F_Proximal_Phalanx_4.obj">
+			<Transformation linear="0.166862 -0.976207 -0.138485 -0.010092 -0.142138 0.989795 -0.985929 -0.163761 -0.033569" translation="-0.119827 0.015167 0.062504"/>
+		</Body>
+		<Joint type="Ball" lower="-1.570796 -1.570796 -1.570796" upper="1.570796 1.570796 1.570796">
+			<Transformation linear="1.0 0.0 0.0 0.0 1.0 0.0 0.0 0.0 1.0" translation="-0.117889 0.017856 0.052871"/>
+		</Joint>
+	</Node>
+	<Node name="R_F_Middle_Phalanx_40" parent="R_F_Proximal_Phalanx_40">
+		<Body type="Box" mass="0.000388" size="0.010584 0.007132 0.009126" contact="Off" color="0.9 0.9 0.9 1.0" obj="Zygote_Meshes_Revised/Skeleton/R_F_Middle_Phalanx_4.obj">
+			<Transformation linear="-0.043781 0.0 0.999041 0.0 1.0 0.0 -0.999041 0.0 -0.043781" translation="-0.122951 0.01402 0.076622"/>
+		</Body>
+		<Joint type="Weld">
+			<Transformation linear="1.0 0.0 0.0 0.0 1.0 0.0 0.0 0.0 1.0" translation="-0.121912 0.014173 0.07221"/>
+		</Joint>
+	</Node>
+	<Node name="R_F_Distal_Phalanx_40" parent="R_F_Middle_Phalanx_40">
+		<Body type="Box" mass="0.000219" size="0.009287 0.007832 0.00533" contact="On" color="0.9 0.9 0.9 1.0" obj="Zygote_Meshes_Revised/Skeleton/R_F_Distal_Phalanx_4.obj">
+			<Transformation linear="-0.382228 -0.917884 -0.106729 -0.354921 0.252466 -0.900162 0.85319 -0.306186 -0.422276" translation="-0.125691 0.010825 0.085543"/>
+		</Body>
+		<Joint type="Weld">
+			<Transformation linear="1.0 0.0 0.0 0.0 1.0 0.0 0.0 0.0 1.0" translation="-0.125736 0.011991 0.081271"/>
+		</Joint>
+	</Node>
+	<Node name="R_F_Middle_Phalanx_40" parent="R_F_Proximal_Phalanx_40">
+		<Body type="Box" mass="0.000388" size="0.010584 0.007132 0.009126" contact="Off" color="0.9 0.9 0.9 1.0" obj="Zygote_Meshes_Revised/Skeleton/R_F_Middle_Phalanx_4.obj">
+			<Transformation linear="-0.043781 0.0 0.999041 0.0 1.0 0.0 -0.999041 0.0 -0.043781" translation="-0.122951 0.01402 0.076622"/>
+		</Body>
+		<Joint type="Weld">
+			<Transformation linear="1.0 0.0 0.0 0.0 1.0 0.0 0.0 0.0 1.0" translation="-0.121912 0.014173 0.07221"/>
+		</Joint>
+	</Node>
+	<Node name="R_F_Distal_Phalanx_40" parent="R_F_Middle_Phalanx_40">
+		<Body type="Box" mass="0.000219" size="0.009287 0.007832 0.00533" contact="On" color="0.9 0.9 0.9 1.0" obj="Zygote_Meshes_Revised/Skeleton/R_F_Distal_Phalanx_4.obj">
+			<Transformation linear="-0.382228 -0.917884 -0.106729 -0.354921 0.252466 -0.900162 0.85319 -0.306186 -0.422276" translation="-0.125691 0.010825 0.085543"/>
+		</Body>
+		<Joint type="Weld">
+			<Transformation linear="1.0 0.0 0.0 0.0 1.0 0.0 0.0 0.0 1.0" translation="-0.125736 0.011991 0.081271"/>
+		</Joint>
+	</Node>
+	<Node name="R_F_Metatarsal_30" parent="R_Tarsal0">
+		<Body type="Box" mass="0.010336" size="0.066994 0.020695 0.01322" contact="Off" color="0.9 0.9 0.9 1.0" obj="Zygote_Meshes_Revised/Skeleton/R_F_Metatarsal_3.obj">
+			<Transformation linear="-0.053591 0.424029 0.904062 -0.542724 -0.772335 0.330074 0.838199 -0.472968 0.271521" translation="-0.101249 0.03142 0.033759"/>
+		</Body>
+		<Joint type="Weld">
+			<Transformation linear="1.0 0.0 0.0 0.0 1.0 0.0 0.0 0.0 1.0" translation="-0.099246 0.046344 0.010008"/>
+		</Joint>
+	</Node>
+	<Node name="R_F_Proximal_Phalanx_30" parent="R_F_Metatarsal_30">
+		<Body type="Box" mass="0.001393" size="0.023273 0.011283 0.009409" contact="On" color="0.9 0.9 0.9 1.0" obj="Zygote_Meshes_Revised/Skeleton/R_F_Proximal_Phalanx_3.obj">
+			<Transformation linear="-0.16287 -0.968109 -0.190365 -0.023968 0.196766 -0.980158 0.986356 -0.155075 -0.055251" translation="-0.105554 0.014818 0.074144"/>
+		</Body>
+		<Joint type="Ball" lower="-1.570796 -1.570796 -1.570796" upper="1.570796 1.570796 1.570796">
+			<Transformation linear="1.0 0.0 0.0 0.0 1.0 0.0 0.0 0.0 1.0" translation="-0.104778 0.018032 0.06369"/>
+		</Joint>
+	</Node>
+	<Node name="R_F_Middle_Phalanx_30" parent="R_F_Proximal_Phalanx_30">
+		<Body type="Box" mass="0.000507" size="0.01461 0.009163 0.006711" contact="Off" color="0.9 0.9 0.9 1.0" obj="Zygote_Meshes_Revised/Skeleton/R_F_Middle_Phalanx_3.obj">
+			<Transformation linear="-0.160749 0.965106 0.206714 -0.117204 -0.226621 0.966906 0.980012 0.131201 0.149543" translation="-0.108696 0.012822 0.091732"/>
+		</Body>
+		<Joint type="Weld">
+			<Transformation linear="1.0 0.0 0.0 0.0 1.0 0.0 0.0 0.0 1.0" translation="-0.10755 0.013271 0.08505"/>
+		</Joint>
+	</Node>
+	<Node name="R_F_Distal_Phalanx_30" parent="R_F_Middle_Phalanx_30">
+		<Body type="Box" mass="0.000378" size="0.011784 0.008735 0.006518" contact="On" color="0.9 0.9 0.9 1.0" obj="Zygote_Meshes_Revised/Skeleton/R_F_Distal_Phalanx_3.obj">
+			<Transformation linear="-0.294946 -0.947873 -0.120596 -0.336393 0.221138 -0.915389 0.894342 -0.229422 -0.384082" translation="-0.112289 0.009149 0.102644"/>
+		</Body>
+		<Joint type="Weld">
+			<Transformation linear="1.0 0.0 0.0 0.0 1.0 0.0 0.0 0.0 1.0" translation="-0.110909 0.011033 0.097929"/>
+		</Joint>
+	</Node>
+	<Node name="R_F_Metatarsal_20" parent="R_Tarsal0">
+		<Body type="Box" mass="0.011749" size="0.073528 0.020876 0.013573" contact="Off" color="0.9 0.9 0.9 1.0" obj="Zygote_Meshes_Revised/Skeleton/R_F_Metatarsal_2.obj">
+			<Transformation linear="-0.001523 0.296206 0.955123 -0.571134 -0.784278 0.242312 0.820856 -0.545134 0.170367" translation="-0.087093 0.036375 0.038484"/>
+		</Body>
+		<Joint type="Weld">
+			<Transformation linear="1.0 0.0 0.0 0.0 1.0 0.0 0.0 0.0 1.0" translation="-0.086704 0.052289 0.015208"/>
+		</Joint>
+	</Node>
+	<Node name="R_F_Proximal_Phalanx_20" parent="R_F_Metatarsal_20">
+		<Body type="Box" mass="0.001911" size="0.026677 0.012317 0.010314" contact="On" color="0.9 0.9 0.9 1.0" obj="Zygote_Meshes_Revised/Skeleton/R_F_Proximal_Phalanx_2.obj">
+			<Transformation linear="0.112213 -0.993678 -0.003476 0.055362 0.002759 0.998463 -0.992141 -0.112233 0.055322" translation="-0.088516 0.016645 0.082355"/>
+		</Body>
+		<Joint type="Ball" lower="-1.570796 -1.570796 -1.570796" upper="1.570796 1.570796 1.570796">
+			<Transformation linear="1.0 0.0 0.0 0.0 1.0 0.0 0.0 0.0 1.0" translation="-0.08816 0.019993 0.070489"/>
+		</Joint>
+	</Node>
+	<Node name="R_F_Middle_Phalanx_20" parent="R_F_Proximal_Phalanx_20">
+		<Body type="Box" mass="0.000594" size="0.014498 0.009744 0.007463" contact="Off" color="0.9 0.9 0.9 1.0" obj="Zygote_Meshes_Revised/Skeleton/R_F_Middle_Phalanx_2.obj">
+			<Transformation linear="-0.169788 0.985473 0.003874 -0.151115 -0.029919 0.988063 0.973826 0.167175 0.153999" translation="-0.090889 0.014196 0.10157"/>
+		</Body>
+		<Joint type="Weld">
+			<Transformation linear="1.0 0.0 0.0 0.0 1.0 0.0 0.0 0.0 1.0" translation="-0.09028 0.014769 0.094914"/>
+		</Joint>
+	</Node>
+	<Node name="R_F_Distal_Phalanx_20" parent="R_F_Middle_Phalanx_20">
+		<Body type="Box" mass="0.000399" size="0.01231 0.008649 0.006641" contact="On" color="0.9 0.9 0.9 1.0" obj="Zygote_Meshes_Revised/Skeleton/R_F_Distal_Phalanx_2.obj">
+			<Transformation linear="0.108178 0.989743 -0.093307 0.338287 -0.124905 -0.932717 -0.934804 0.069335 -0.348329" translation="-0.093473 0.010271 0.112874"/>
+		</Body>
+		<Joint type="Weld">
+			<Transformation linear="1.0 0.0 0.0 0.0 1.0 0.0 0.0 0.0 1.0" translation="-0.09242 0.012014 0.107735"/>
+		</Joint>
+	</Node>
+	<Node name="R_F_Metatarsal_10" parent="R_Tarsal0">
+		<Body type="Box" mass="0.023037" size="0.064103 0.029855 0.021346" contact="Off" color="0.9 0.9 0.9 1.0" obj="Zygote_Meshes_Revised/Skeleton/R_F_Metatarsal_1.obj">
+			<Transformation linear="0.164253 -0.096342 0.981702 -0.497177 -0.867647 -0.001963 0.85196 -0.487757 -0.190413" translation="-0.06785 0.031962 0.045911"/>
+		</Body>
+		<Joint type="Weld">
+			<Transformation linear="1.0 0.0 0.0 0.0 1.0 0.0 0.0 0.0 1.0" translation="-0.071757 0.044991 0.021336"/>
+		</Joint>
+	</Node>
+	<Node name="R_F_Proximal_Phalanx_10" parent="R_F_Metatarsal_10">
+		<Body type="Box" mass="0.005883" size="0.036429 0.019796 0.014466" contact="On" color="0.9 0.9 0.9 1.0" obj="Zygote_Meshes_Revised/Skeleton/R_F_Proximal_Phalanx_1.obj">
+			<Transformation linear="0.103586 0.994513 0.014609 -0.194777 0.005879 0.98083 0.975362 -0.104446 0.194318" translation="-0.062452 0.015717 0.089511"/>
+		</Body>
+		<Joint type="Ball" lower="-1.570796 -1.570796 -1.570796" upper="1.570796 1.570796 1.570796">
+			<Transformation linear="1.0 0.0 0.0 0.0 1.0 0.0 0.0 0.0 1.0" translation="-0.064267 0.020647 0.074068"/>
+		</Joint>
+	</Node>
+	<Node name="R_F_Distal_Phalanx_10" parent="R_F_Proximal_Phalanx_10">
+		<Body type="Box" mass="0.002805" size="0.027222 0.019263 0.009487" contact="On" color="0.9 0.9 0.9 1.0" obj="Zygote_Meshes_Revised/Skeleton/R_F_Distal_Phalanx_1.obj">
+			<Transformation linear="0.134077 0.985214 -0.10666 0.244196 -0.137161 -0.959977 -0.960412 0.102665 -0.258975" translation="-0.061605 0.009161 0.116835"/>
+		</Body>
+		<Joint type="Weld">
+			<Transformation linear="1.0 0.0 0.0 0.0 1.0 0.0 0.0 0.0 1.0" translation="-0.062273 0.01211 0.105434"/>
+		</Joint>
+	</Node>
+</Skeleton>
