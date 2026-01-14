@@ -6000,6 +6000,17 @@ class ContourMeshMixin:
                 final_transformed.append(transformed)
                 print(f"  [BP Transform] piece {i}: transformed around combined center")
 
+        # Compute centroids of transformed sources (needed for cutting line and assignment)
+        centroids = []
+        for piece_idx, transformed in enumerate(final_transformed):
+            if len(transformed) > 0:
+                centroid = np.mean(transformed, axis=0)
+                centroids.append(centroid)
+                print(f"  [BP Transform] piece {piece_idx} centroid: ({centroid[0]:.4f}, {centroid[1]:.4f})")
+            else:
+                centroids.append(np.array(initial_translations[piece_idx]))
+                print(f"  [BP Transform] WARNING: piece {piece_idx} has no vertices, using initial position")
+
         # ========== Step 6.5: Find cutting line ==========
         # For 2 pieces, find the line that separates the two transformed source contours
         cutting_line_2d = None  # (point, direction) in 2D target plane
