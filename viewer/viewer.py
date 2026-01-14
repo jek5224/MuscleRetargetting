@@ -3678,10 +3678,17 @@ class GLFWApp():
                 viz_idx = new_idx
 
             imgui.text(f"Showing {viz_idx + 1} / {num_viz}")
-            imgui.separator()
 
             # Get current visualization data
             data = viz_data[viz_idx]
+            use_separate = data.get('use_separate_transforms', True)
+            mode_str = "SEPARATE" if use_separate else "COMMON"
+            if use_separate:
+                imgui.text_colored(mode_str, 0.2, 0.8, 0.2, 1.0)  # green
+            else:
+                imgui.text_colored(mode_str, 0.8, 0.8, 0.2, 1.0)  # yellow
+            imgui.separator()
+
             target_2d = data['target_2d']
             source_2d_shapes = data['source_2d_shapes']
             final_transformed = data['final_transformed']

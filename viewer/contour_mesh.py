@@ -5830,7 +5830,8 @@ class ContourMeshMixin:
         # ========== Step 6.5: Save visualization for debugging ==========
         self._save_bp_transform_visualization(
             target_2d, target_poly, source_2d_shapes, final_transformed,
-            stream_indices, optimal_scales, initial_translations, initial_rotations
+            stream_indices, optimal_scales, initial_translations, initial_rotations,
+            use_separate_transforms
         )
 
         # ========== Step 7: Assign target vertices by distance ==========
@@ -5862,11 +5863,13 @@ class ContourMeshMixin:
 
     def _save_bp_transform_visualization(self, target_2d, target_poly, source_2d_shapes,
                                          final_transformed, stream_indices, scales,
-                                         initial_translations, initial_rotations):
+                                         initial_translations, initial_rotations,
+                                         use_separate_transforms=True):
         """
         Save visualization of BP transform optimization result.
         Shows target contour, original sources, initial configuration, and transformed sources.
         scales: list of scale values, one per source
+        use_separate_transforms: True if each source has independent transform, False if common
         """
         # Store visualization data for later display via BP Viz button
         if not hasattr(self, '_bp_viz_data'):
@@ -5879,6 +5882,7 @@ class ContourMeshMixin:
             'scales': list(scales),
             'initial_translations': [np.array(t) for t in initial_translations],
             'initial_rotations': list(initial_rotations),
+            'use_separate_transforms': use_separate_transforms,
         })
 
         import matplotlib
