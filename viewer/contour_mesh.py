@@ -5635,22 +5635,45 @@ class ContourMeshMixin:
                 initial_rotations.append(0.0)
                 print(f"  [BP Transform] source {i} initial rotation: 0.0° (common basis)")
 
-        # Compute source areas and ratios (for area ratio regularization)
+        # Validate source polygons - check for self-intersection, holes, tiny area
         source_areas = []
-        for src_2d in source_2d_shapes:
+        has_invalid = False
+        for i, src_2d in enumerate(source_2d_shapes):
             try:
                 src_poly = Polygon(src_2d)
+
+                # Check for self-intersection
                 if not src_poly.is_valid:
+                    print(f"  [BP Transform] WARNING: source {i} is self-intersecting")
+                    # Try to fix with buffer(0)
                     src_poly = src_poly.buffer(0)
-                source_areas.append(src_poly.area)
-            except:
-                source_areas.append(0.0)  # fallback
+                    if not src_poly.is_valid:
+                        print(f"  [BP Transform] WARNING: source {i} could not be fixed")
+                        has_invalid = True
+
+                # Check for holes (interior rings)
+                if hasattr(src_poly, 'interiors') and len(list(src_poly.interiors)) > 0:
+                    print(f"  [BP Transform] WARNING: source {i} has holes")
+                    has_invalid = True
+
+                # Check if it became a MultiPolygon after buffer(0)
+                if src_poly.geom_type == 'MultiPolygon':
+                    print(f"  [BP Transform] WARNING: source {i} split into multiple polygons")
+                    has_invalid = True
+
+                source_areas.append(src_poly.area if src_poly.is_valid else 0.0)
+            except Exception as e:
+                print(f"  [BP Transform] WARNING: source {i} polygon error: {e}")
+                source_areas.append(0.0)
+                has_invalid = True
+
         print(f"  [BP Transform] source areas: {[f'{a:.6f}' for a in source_areas]}")
 
-        # Check for degenerate areas (too small to be useful)
+        # Fall back if any source is invalid or has tiny area
         min_area_threshold = 1e-6
-        if any(a < min_area_threshold for a in source_areas):
-            print(f"  [BP Transform] Falling back to area-based cutting due to tiny source areas")
+        if has_invalid or any(a < min_area_threshold for a in source_areas):
+            reason = "invalid geometry" if has_invalid else "tiny source areas"
+            print(f"  [BP Transform] Falling back to area-based cutting due to {reason}")
             projected_refs = [src_bp['mean'] for src_bp in source_bps]
             return self._cut_contour_for_streams(target_contour, target_bp, projected_refs, stream_indices)
 
