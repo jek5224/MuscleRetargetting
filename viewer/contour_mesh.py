@@ -5937,12 +5937,13 @@ class ContourMeshMixin:
             # Translate
             return rotated + np.array([tx, ty])
 
-        # Pre-compute target polygon
+        # Pre-compute target polygon and centroid
         try:
             target_poly = Polygon(target_2d)
             if not target_poly.is_valid:
                 target_poly = target_poly.buffer(0)
             target_area = target_poly.area
+            target_centroid = np.array([target_poly.centroid.x, target_poly.centroid.y])
         except:
             print("  [BP Transform] WARNING: Could not create target polygon, falling back")
             projected_refs = [src_bp['mean'] for src_bp in source_bps]
@@ -6069,7 +6070,17 @@ class ContourMeshMixin:
             area_ratio = union_area / (target_area + 1e-10)
             area_cost = abs(area_ratio - 1.0) * target_area * 10.0  # Weight = 10
 
-            return coverage_cost + area_cost
+            # Centroid distance cost - CRITICAL when there's no overlap!
+            # This provides gradient to pull sources towards target even with zero intersection
+            try:
+                source_centroid = np.array([union_poly.centroid.x, union_poly.centroid.y])
+                centroid_dist = np.linalg.norm(source_centroid - target_centroid)
+                # Scale by target size so it's comparable to area-based costs
+                centroid_cost = centroid_dist * np.sqrt(target_area) * 5.0  # Weight = 5
+            except:
+                centroid_cost = 0
+
+            return coverage_cost + area_cost + centroid_cost
 
         # ========== Step 4: Build initial configuration ==========
         # Compute initial scale based on area ratio (sources should roughly cover target)
@@ -6182,10 +6193,18 @@ class ContourMeshMixin:
             area_ratio = union_area / (target_area + 1e-10)
             area_cost = abs(area_ratio - 1.0) * target_area * 10.0
 
-            if verbose:
-                print(f"    scales={[f'({sx:.3f},{sy:.3f})' for sx,sy in scales_dbg]}, coverage={coverage_cost:.6f}, area_cost={area_cost:.6f}")
+            # Centroid distance cost
+            try:
+                source_centroid = np.array([union_poly.centroid.x, union_poly.centroid.y])
+                centroid_dist = np.linalg.norm(source_centroid - target_centroid)
+                centroid_cost = centroid_dist * np.sqrt(target_area) * 5.0
+            except:
+                centroid_cost = 0
 
-            return coverage_cost + area_cost
+            if verbose:
+                print(f"    scales={[f'({sx:.3f},{sy:.3f})' for sx,sy in scales_dbg]}, coverage={coverage_cost:.6f}, area={area_cost:.6f}, centroid={centroid_cost:.6f}")
+
+            return coverage_cost + area_cost + centroid_cost
 
         init_cost = objective(x0)
         objective_debug(x0, verbose=True)
