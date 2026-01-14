@@ -7367,17 +7367,46 @@ class ContourMeshMixin:
                 ax2.scatter(c[0], c[1], marker='X', c=[colors[i]], s=100, zorder=20)
 
         # Draw cutting/boundary line (magenta for visibility)
-        # Clip line to target contour bounds
+        # Clip line to actual contour intersections
         if cutting_line_2d is not None:
             line_point, line_dir = cutting_line_2d
-            # Compute extent based on target contour size only
+            # Extend line far enough to intersect contour
             target_center = target_arr.mean(axis=0)
             target_radius = np.max(np.linalg.norm(target_arr - target_center, axis=1))
-            extent = target_radius * 0.9  # Stay within target bounds
-            p1 = line_point - line_dir * extent
-            p2 = line_point + line_dir * extent
-            ax2.plot([p1[0], p2[0]], [p1[1], p2[1]], '--', color='magenta',
-                    linewidth=2.5, zorder=25, label='Cut line')
+            extent = target_radius * 2.0
+            line_start = line_point - line_dir * extent
+            line_end = line_point + line_dir * extent
+
+            # Find intersections with target contour
+            intersections = []
+            n_verts = len(target_arr)
+            d = line_end - line_start
+            for i in range(n_verts):
+                q1 = target_arr[i]
+                q2 = target_arr[(i + 1) % n_verts]
+                e = q2 - q1
+                denom = d[0] * e[1] - d[1] * e[0]
+                if abs(denom) < 1e-10:
+                    continue
+                t = ((q1[0] - line_start[0]) * e[1] - (q1[1] - line_start[1]) * e[0]) / denom
+                s = ((q1[0] - line_start[0]) * d[1] - (q1[1] - line_start[1]) * d[0]) / denom
+                if 0 <= s <= 1:  # Intersection on contour edge
+                    pt = line_start + t * d
+                    intersections.append((t, pt))
+            intersections.sort(key=lambda x: x[0])
+
+            if len(intersections) >= 2:
+                # Draw line between first two intersection points (clipped to contour)
+                p1 = intersections[0][1]
+                p2 = intersections[1][1]
+                ax2.plot([p1[0], p2[0]], [p1[1], p2[1]], '-', color='magenta',
+                        linewidth=2.5, zorder=25, label='Cut line')
+            else:
+                # Fallback to extent-based drawing
+                p1 = line_point - line_dir * target_radius * 0.9
+                p2 = line_point + line_dir * target_radius * 0.9
+                ax2.plot([p1[0], p2[0]], [p1[1], p2[1]], '--', color='magenta',
+                        linewidth=2.5, zorder=25, label='Cut line')
 
         ax2.legend(loc='upper right', fontsize=8)
         ax2.set_aspect('equal')
