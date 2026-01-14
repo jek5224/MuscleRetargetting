@@ -3708,9 +3708,14 @@ class GLFWApp():
             # Compute initial transformed shapes
             initial_transformed = []
             for i, src_2d in enumerate(source_2d_shapes):
-                tx, ty = initial_translations[i]
-                theta = initial_rotations[i]
-                transformed = transform_shape(src_2d, 1.0, tx, ty, theta)
+                if use_separate:
+                    # Separate mode: apply individual rotation
+                    tx, ty = initial_translations[i]
+                    theta = initial_rotations[i]
+                    transformed = transform_shape(src_2d, 1.0, tx, ty, theta)
+                else:
+                    # Common mode: just absolute position (no rotation yet)
+                    transformed = src_2d + initial_translations[i]
                 initial_transformed.append(transformed)
 
             # Compute bounds for normalization (include all shapes)

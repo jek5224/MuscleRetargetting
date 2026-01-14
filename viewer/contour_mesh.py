@@ -5722,24 +5722,24 @@ class ContourMeshMixin:
 
                 cos_t = np.cos(theta)
                 sin_t = np.sin(theta)
+                rot = np.array([[cos_t, -sin_t], [sin_t, cos_t]])
 
                 for i in range(n_pieces):
-                    # Get source's offset from combined center
-                    offset_x = initial_translations[i][0] - combined_center[0]
-                    offset_y = initial_translations[i][1] - combined_center[1]
+                    # Get absolute vertices (centered shape + its mean position)
+                    abs_vertices = source_2d_shapes[i] + initial_translations[i]
 
-                    # Scale and rotate the offset around combined center
-                    new_offset_x = scale * (cos_t * offset_x - sin_t * offset_y)
-                    new_offset_y = scale * (sin_t * offset_x + cos_t * offset_y)
-
-                    # Final position = new center + rotated/scaled offset
-                    final_tx = tx + new_offset_x
-                    final_ty = ty + new_offset_y
+                    # Transform all vertices around combined_center
+                    # 1. Translate to origin (relative to combined_center)
+                    rel_vertices = abs_vertices - combined_center
+                    # 2. Scale around origin
+                    scaled = rel_vertices * scale
+                    # 3. Rotate around origin
+                    rotated = scaled @ rot.T
+                    # 4. Translate to final position
+                    transformed = rotated + np.array([tx, ty])
 
                     scales.append(scale)
                     thetas.append(theta)
-                    # Transform individual shape (scale, rotate) then translate to final position
-                    transformed = transform_shape(source_2d_shapes[i], scale, final_tx, final_ty, theta)
                     add_polygon(transformed, transformed_polygons)
 
             if len(transformed_polygons) == 0:
@@ -5858,24 +5858,21 @@ class ContourMeshMixin:
 
             cos_t = np.cos(theta)
             sin_t = np.sin(theta)
+            rot = np.array([[cos_t, -sin_t], [sin_t, cos_t]])
 
             for i in range(n_pieces):
-                # Get source's offset from original combined center
-                offset_x = initial_translations[i][0] - combined_center[0]
-                offset_y = initial_translations[i][1] - combined_center[1]
+                # Get absolute vertices (centered shape + its mean position)
+                abs_vertices = source_2d_shapes[i] + initial_translations[i]
 
-                # Scale and rotate the offset
-                new_offset_x = common_scale * (cos_t * offset_x - sin_t * offset_y)
-                new_offset_y = common_scale * (sin_t * offset_x + cos_t * offset_y)
-
-                # Final position
-                final_tx = center_tx + new_offset_x
-                final_ty = center_ty + new_offset_y
+                # Transform all vertices around combined_center
+                rel_vertices = abs_vertices - combined_center
+                scaled = rel_vertices * common_scale
+                rotated = scaled @ rot.T
+                transformed = rotated + np.array([center_tx, center_ty])
 
                 optimal_scales.append(common_scale)
-                transformed = transform_shape(source_2d_shapes[i], common_scale, final_tx, final_ty, theta)
                 final_transformed.append(transformed)
-                print(f"  [BP Transform] piece {i}: tx={final_tx:.4f}, ty={final_ty:.4f}, theta={np.degrees(theta):.1f}°")
+                print(f"  [BP Transform] piece {i}: transformed around combined center")
 
         # ========== Step 6.5: Check adjacency between transformed sources ==========
         if len(final_transformed) >= 2:
@@ -5971,9 +5968,14 @@ class ContourMeshMixin:
         # Compute initial transformed shapes
         initial_transformed = []
         for i, src_2d in enumerate(source_2d_shapes):
-            tx, ty = initial_translations[i]
-            theta = initial_rotations[i]
-            transformed = transform_shape(src_2d, 1.0, tx, ty, theta)
+            if use_separate_transforms:
+                # Separate mode: apply individual rotation
+                tx, ty = initial_translations[i]
+                theta = initial_rotations[i]
+                transformed = transform_shape(src_2d, 1.0, tx, ty, theta)
+            else:
+                # Common mode: just absolute position (no rotation yet)
+                transformed = src_2d + initial_translations[i]
             initial_transformed.append(transformed)
 
         target_arr = np.array(target_2d)
