@@ -6096,58 +6096,25 @@ class ContourMeshMixin:
                 print(f"  [BP Transform] WARNING: piece {piece_idx} has no vertices, using initial position")
 
         # ========== Step 6.5: Find cutting line ==========
-        # For 2 pieces, find the line that separates the two transformed source contours
+        # For 2 pieces, find the boundary line between the two optimized source contours
+        # After optimization, the sources are positioned well, so their boundary naturally divides the target
         cutting_line_2d = None  # (point, direction) in 2D target plane
         cutting_line_3d = None  # direction vector in 3D for bounding plane creation
-        cut_vertex_indices = None  # (idx1, idx2) - indices of vertices to cut through
 
         if n_pieces == 2:
             try:
                 src_0 = np.array(final_transformed[0])
                 src_1 = np.array(final_transformed[1])
 
-                if use_separate_transforms:
-                    # SEPARATE mode (first division): Find two nearest non-adjacent vertices
-                    # These form a natural "waist" at concave regions
-                    n_target = len(target_2d)
-                    min_dist = np.inf
-                    best_pair = None
-
-                    # Minimum separation: vertices must be at least this far apart in index
-                    # to avoid cutting adjacent or nearly-adjacent vertices
-                    min_separation = max(3, n_target // 4)
-
-                    for i in range(n_target):
-                        for j in range(i + min_separation, n_target):
-                            # Also check wrap-around distance
-                            wrap_dist = n_target - j + i
-                            if wrap_dist < min_separation:
-                                continue
-
-                            dist = np.linalg.norm(target_2d[i] - target_2d[j])
-                            if dist < min_dist:
-                                min_dist = dist
-                                best_pair = (i, j)
-
-                    if best_pair is not None:
-                        idx1, idx2 = best_pair
-                        p1 = target_2d[idx1]
-                        p2 = target_2d[idx2]
-                        cut_point = (p1 + p2) / 2
-                        cut_dir = p2 - p1
-                        cut_dir = cut_dir / (np.linalg.norm(cut_dir) + 1e-10)
-                        cutting_line_2d = (cut_point, cut_dir)
-                        cut_vertex_indices = best_pair
-                        print(f"  [BP Transform] SEPARATE mode: cut at vertices {idx1}, {idx2} (dist={min_dist:.4f})")
-
-                elif len(src_0) >= 3 and len(src_1) >= 3:
-                    # COMMON mode: Find the boundary between two source contours
-                    # The boundary is the shared edge where the two sources meet
-                    # Find closest edge pairs between the two contours
-
-                    # For each edge in src_0, find distance to closest point in src_1
-                    # and vice versa to find the shared boundary region
+                if len(src_0) >= 3 and len(src_1) >= 3:
+                    # Find the boundary between two optimized source contours
+                    # The boundary is where the two sources meet/overlap
                     boundary_points = []
+
+                    # Compute size for threshold
+                    size_0 = np.max(np.linalg.norm(src_0 - src_0.mean(axis=0), axis=1))
+                    size_1 = np.max(np.linalg.norm(src_1 - src_1.mean(axis=0), axis=1))
+                    threshold = 0.3 * min(size_0, size_1)
 
                     # Find edges of src_0 that are close to src_1
                     for i in range(len(src_0)):
@@ -6158,12 +6125,6 @@ class ContourMeshMixin:
                         # Distance from edge midpoint to nearest point on src_1
                         dists_to_src1 = np.linalg.norm(src_1 - edge_mid, axis=1)
                         min_dist = np.min(dists_to_src1)
-
-                        # If this edge is close to src_1, it's part of the boundary
-                        # Use a threshold based on the contour sizes
-                        size_0 = np.max(np.linalg.norm(src_0 - src_0.mean(axis=0), axis=1))
-                        size_1 = np.max(np.linalg.norm(src_1 - src_1.mean(axis=0), axis=1))
-                        threshold = 0.3 * min(size_0, size_1)
 
                         if min_dist < threshold:
                             boundary_points.append(p0)
@@ -6192,7 +6153,7 @@ class ContourMeshMixin:
                         boundary_dir = boundary_dir / (np.linalg.norm(boundary_dir) + 1e-10)
 
                         cutting_line_2d = (boundary_mean, boundary_dir)
-                        print(f"  [BP Transform] COMMON mode: found boundary line from {len(boundary_points)} points")
+                        print(f"  [BP Transform] Found boundary line from {len(boundary_points)} points")
 
                 if cutting_line_2d is None:
                     # Fallback: Use perpendicular bisector between centroids
@@ -6259,24 +6220,43 @@ class ContourMeshMixin:
                     contour_dists.append(np.inf)
             all_distances.append(contour_dists)
 
-        # Assign vertices based on distance to optimized source contours
+        # Assign vertices based on cutting line (boundary between optimized sources)
         assignments = []
 
-        # For each target vertex, find nearest optimized source contour
-        for v_idx, v_2d in enumerate(target_2d):
-            min_dist = np.inf
-            assigned_piece = 0
-            for piece_idx, transformed in enumerate(final_transformed):
-                if len(transformed) > 0:
-                    # Distance to nearest point on this source contour
-                    dists = np.linalg.norm(transformed - v_2d, axis=1)
-                    min_d = np.min(dists)
-                    if min_d < min_dist:
-                        min_dist = min_d
-                        assigned_piece = piece_idx
-            assignments.append(assigned_piece)
+        if cutting_line_2d is not None and n_pieces == 2:
+            # Use the boundary line from optimized sources
+            line_point, line_dir = cutting_line_2d
+            # Normal to the cutting line (perpendicular)
+            line_normal = np.array([-line_dir[1], line_dir[0]])
 
-        print(f"  [BP Transform] assignment by source proximity: {[assignments.count(i) for i in range(n_pieces)]}")
+            # Determine which side each centroid is on
+            centroid_sides = []
+            for c in centroids:
+                side = np.dot(c - line_point, line_normal)
+                centroid_sides.append(side)
+
+            # Ensure centroid 0 is on the negative side (for consistent assignment)
+            if centroid_sides[0] > 0:
+                line_normal = -line_normal
+
+            # Assign each vertex based on which side of the boundary line it's on
+            for v_idx, v_2d in enumerate(target_2d):
+                side = np.dot(v_2d - line_point, line_normal)
+                if side < 0:
+                    assignments.append(0)
+                else:
+                    assignments.append(1)
+
+            print(f"  [BP Transform] assignment by boundary line: {assignments.count(0)} to piece 0, {assignments.count(1)} to piece 1")
+
+        else:
+            # Fallback: assign by nearest centroid
+            for v_idx, v_2d in enumerate(target_2d):
+                centroid_dists = [np.linalg.norm(v_2d - c) for c in centroids]
+                assigned_piece = centroid_dists.index(min(centroid_dists))
+                assignments.append(assigned_piece)
+
+            print(f"  [BP Transform] assignment by centroid: {[assignments.count(i) for i in range(n_pieces)]}")
 
         # Remove islands: for 2 pieces, find the 2 best split points
         # This guarantees exactly 2 contiguous regions on a closed contour
