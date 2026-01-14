@@ -3080,12 +3080,31 @@ class GLFWApp():
                 continue
 
             # Detect data structure format:
-            # - Pre-stream (2D draw_contour_stream): contours[level_idx][stream_idx], bounding_planes[level_idx][stream_idx]
-            # - Post-stream (1D draw_contour_stream): contours[stream_idx][level_idx], bounding_planes[stream_idx][level_idx]
-            is_pre_stream = (hasattr(obj, 'draw_contour_stream') and
-                            obj.draw_contour_stream is not None and
-                            len(obj.draw_contour_stream) > 0 and
-                            isinstance(obj.draw_contour_stream[0], (list, tuple)))
+            # - Pre-stream (before cutting): contours[level_idx][stream_idx], bounding_planes[level_idx][stream_idx]
+            # - Post-stream (after build_fibers): contours[stream_idx][level_idx], bounding_planes[stream_idx][level_idx]
+            #
+            # Detection: If stream_contours exists and has data, we're in post-stream mode.
+            # Also check if contours structure matches stream_contours (indicating build_fibers was called).
+            has_stream_contours = (hasattr(obj, 'stream_contours') and
+                                   obj.stream_contours is not None and
+                                   len(obj.stream_contours) > 0)
+
+            # If contours == stream_contours (same object or same structure), it's post-stream
+            is_post_stream = False
+            if has_stream_contours:
+                # Check if contours is the same as stream_contours (build_fibers assigns directly)
+                if obj.contours is obj.stream_contours:
+                    is_post_stream = True
+                # Also check if structure matches: outer dim is small (num streams), inner is larger (num levels)
+                elif len(obj.contours) > 0 and len(obj.contours) <= 10:  # Typically few streams
+                    # In post-stream, contours[stream][level], so inner should have many elements
+                    if isinstance(obj.contours[0], (list, np.ndarray)) and len(obj.contours[0]) > 0:
+                        # Check if inner elements are contour arrays (have 3D points)
+                        inner = obj.contours[0][0]
+                        if isinstance(inner, np.ndarray) and inner.ndim == 2 and inner.shape[1] == 3:
+                            is_post_stream = True
+
+            is_pre_stream = not is_post_stream
 
             # Helper functions to access data in correct format
             def get_num_streams():
