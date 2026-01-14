@@ -6035,23 +6035,10 @@ class ContourMeshMixin:
 
             # Regularization 1: Penalize overlap between sources
             overlap_cost = 0.0
-            gap_cost = 0.0  # Penalize gaps between sources (reward closeness)
             if len(transformed_polygons) >= 2:
                 total_individual_area = sum(p.area for p in transformed_polygons)
                 # Overlap = sum of individual areas - union area
                 overlap_cost = total_individual_area - union_area
-
-                # Gap cost: sum of minimum distances between all pairs of sources
-                for i in range(len(transformed_polygons)):
-                    for j in range(i + 1, len(transformed_polygons)):
-                        try:
-                            p_i, p_j = transformed_polygons[i], transformed_polygons[j]
-                            if p_i.is_valid and p_j.is_valid and not p_i.is_empty and not p_j.is_empty:
-                                dist = p_i.distance(p_j)
-                                if not np.isnan(dist):
-                                    gap_cost += dist
-                        except:
-                            pass
 
             # Regularization 2: Penalize deviation from initial rotation
             rotation_cost = sum(abs(t - initial_rotations[i]) for i, t in enumerate(thetas))
@@ -6076,11 +6063,10 @@ class ContourMeshMixin:
             # Weights for regularization (all scaled relative to target_area for scale invariance)
             # coverage_cost is already an area, so weights should be dimensionless or scale appropriately
             overlap_weight = 2.0  # Moderate penalty for overlap (allow some if needed for coverage)
-            gap_weight = 1.0  # Penalty for gaps between sources
             rotation_weight = 0.01  # Small penalty for rotation deviation
             area_ratio_weight = 0.5  # Penalty for area ratio deviation
 
-            total_cost = coverage_cost + overlap_weight * overlap_cost + gap_weight * gap_cost + rotation_weight * rotation_cost + area_ratio_weight * area_ratio_cost
+            total_cost = coverage_cost + overlap_weight * overlap_cost + rotation_weight * rotation_cost + area_ratio_weight * area_ratio_cost
             return total_cost
 
         # ========== Step 4: Build initial configuration ==========
@@ -6159,21 +6145,11 @@ class ContourMeshMixin:
 
             coverage_cost = union_area + target_area - 2 * intersection_area
             overlap_cost = sum(p.area for p in transformed_polygons) - union_area if len(transformed_polygons) >= 2 else 0
-            gap_cost = 0.0
-            if len(transformed_polygons) >= 2:
-                for i in range(len(transformed_polygons)):
-                    for j in range(i + 1, len(transformed_polygons)):
-                        try:
-                            dist = transformed_polygons[i].distance(transformed_polygons[j])
-                            if not np.isnan(dist):
-                                gap_cost += dist
-                        except:
-                            pass
 
             if verbose:
-                print(f"    scales={[f'{s:.3f}' for s in scales_dbg]}, coverage={coverage_cost:.6f}, overlap={overlap_cost:.6f}, gap={gap_cost:.6f}")
+                print(f"    scales={[f'{s:.3f}' for s in scales_dbg]}, coverage={coverage_cost:.6f}, overlap={overlap_cost:.6f}")
 
-            return coverage_cost + 2.0 * overlap_cost + 1.0 * gap_cost
+            return coverage_cost + 2.0 * overlap_cost
 
         init_cost = objective(x0)
         objective_debug(x0, verbose=True)
