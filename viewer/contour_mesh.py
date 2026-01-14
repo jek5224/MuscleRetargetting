@@ -5985,7 +5985,7 @@ class ContourMeshMixin:
             thetas = []
             scales = []
 
-            min_scale = 0.01  # Minimum allowed scale (very small)
+            min_scale = 0.5  # Minimum allowed scale
 
             if use_separate_transforms:
                 # Each source has its own transform (first division)
@@ -6060,12 +6060,12 @@ class ContourMeshMixin:
             union_area = union_poly.area
             coverage_cost = union_area + target_area - 2 * intersection_area
 
-            # Strong penalty if sources don't cover the target at all
-            # This prevents the optimizer from moving sources far away
+            # Strong penalty if sources don't cover the target well
+            # This prevents the optimizer from shrinking sources or moving them away
             coverage_ratio = intersection_area / (target_area + 1e-10)
-            if coverage_ratio < 0.1:
-                # Very low coverage - strongly penalize
-                coverage_cost += 10.0 * target_area * (0.1 - coverage_ratio)
+            if coverage_ratio < 0.5:
+                # Low coverage - strongly penalize to prevent shrinkage
+                coverage_cost += 100.0 * target_area * (0.5 - coverage_ratio)
 
             # Regularization 1: Penalize overlap between sources
             overlap_cost = 0.0
@@ -6135,7 +6135,7 @@ class ContourMeshMixin:
             thetas = []
             scales_dbg = []
 
-            min_scale = 0.01
+            min_scale = 0.5
 
             if use_separate_transforms:
                 for i in range(n_pieces):
@@ -6198,14 +6198,14 @@ class ContourMeshMixin:
             # Bounds for [scale0, tx0, ty0, theta0, scale1, tx1, ty1, theta1, ...]
             bounds = []
             for i in range(n_pieces):
-                bounds.append((0.1, 10.0))  # scale: 0.1 to 10x
+                bounds.append((0.5, 2.0))  # scale: 0.5 to 2x (prevent excessive shrink/grow)
                 bounds.append((-max_translation, max_translation))  # tx
                 bounds.append((-max_translation, max_translation))  # ty
                 bounds.append((-np.pi, np.pi))  # theta
         else:
             # Bounds for [scale, tx, ty, theta]
             bounds = [
-                (0.1, 10.0),  # scale
+                (0.5, 2.0),  # scale: 0.5 to 2x (prevent excessive shrink/grow)
                 (-max_translation, max_translation),  # tx
                 (-max_translation, max_translation),  # ty
                 (-np.pi, np.pi)  # theta
@@ -6224,7 +6224,7 @@ class ContourMeshMixin:
         objective_debug(optimal_params, verbose=True)
 
         # ========== Step 6: Get final transformed source shapes ==========
-        min_scale = 0.01  # Minimum allowed scale (very small)
+        min_scale = 0.5  # Minimum allowed scale
         final_transformed = []
         optimal_scales = []
         if use_separate_transforms:
@@ -6318,32 +6318,29 @@ class ContourMeshMixin:
                         print(f"  [BP Transform] SEPARATE: cut at nearest non-adjacent vertices {idx1}, {idx2} (dist={min_dist:.4f})")
 
                 elif len(src_0) >= 3 and len(src_1) >= 3:
-                    # COMMON mode: Use INITIAL source positions (not optimized) for cutting line
-                    # This is more stable because optimization can fail/go bad
-                    # Get initial source shapes at their initial positions
-                    init_src_0 = source_2d_shapes[0] + np.array(initial_translations[0])
-                    init_src_1 = source_2d_shapes[1] + np.array(initial_translations[1])
-
-                    # Find shared boundary vertices between initial sources
+                    # COMMON mode: Find shared boundary vertices between OPTIMIZED sources
+                    # The cutting line moves together with the sources during optimization
                     boundary_vertices = []
-                    size_0 = np.max(np.linalg.norm(init_src_0 - init_src_0.mean(axis=0), axis=1))
-                    size_1 = np.max(np.linalg.norm(init_src_1 - init_src_1.mean(axis=0), axis=1))
+
+                    # Look for vertices in src_0 that are very close to vertices in src_1
+                    size_0 = np.max(np.linalg.norm(src_0 - src_0.mean(axis=0), axis=1))
+                    size_1 = np.max(np.linalg.norm(src_1 - src_1.mean(axis=0), axis=1))
 
                     # Use adaptive threshold - start small, increase if needed
                     for threshold_mult in [0.01, 0.05, 0.1, 0.2]:
                         threshold = threshold_mult * min(size_0, size_1)
                         boundary_vertices = []
-                        for v0 in init_src_0:
-                            dists = np.linalg.norm(init_src_1 - v0, axis=1)
+                        for v0 in src_0:
+                            dists = np.linalg.norm(src_1 - v0, axis=1)
                             min_dist = np.min(dists)
                             if min_dist < threshold:
                                 closest_idx = np.argmin(dists)
                                 # Use midpoint of the two close vertices
-                                boundary_vertices.append((v0 + init_src_1[closest_idx]) / 2)
+                                boundary_vertices.append((v0 + src_1[closest_idx]) / 2)
                         if len(boundary_vertices) >= 2:
                             break
 
-                    print(f"  [BP Transform] COMMON: found {len(boundary_vertices)} shared boundary vertices (threshold={threshold:.4f}) [using INITIAL positions]")
+                    print(f"  [BP Transform] COMMON: found {len(boundary_vertices)} shared boundary vertices (threshold={threshold:.4f})")
 
                     if len(boundary_vertices) >= 2:
                         boundary_arr = np.array(boundary_vertices)
@@ -6357,18 +6354,16 @@ class ContourMeshMixin:
                         print(f"  [BP Transform] COMMON: boundary line from shared vertices")
 
                 if cutting_line_2d is None:
-                    # Fallback: Use perpendicular bisector between INITIAL centroids (not optimized)
-                    init_centroid_0 = np.array(initial_translations[0])
-                    init_centroid_1 = np.array(initial_translations[1])
-                    centroid_vec = init_centroid_1 - init_centroid_0
+                    # Fallback: Use perpendicular bisector between optimized centroids
+                    centroid_vec = centroids[1] - centroids[0]
                     centroid_dist = np.linalg.norm(centroid_vec)
                     if centroid_dist > 1e-10:
                         centroid_dir = centroid_vec / centroid_dist
                         # Cutting line is perpendicular to centroid direction
                         cutting_dir = np.array([-centroid_dir[1], centroid_dir[0]])
-                        centroid_mid = (init_centroid_0 + init_centroid_1) / 2
+                        centroid_mid = (centroids[0] + centroids[1]) / 2
                         cutting_line_2d = (centroid_mid, cutting_dir)
-                        print(f"  [BP Transform] cutting line: perpendicular bisector at ({centroid_mid[0]:.4f}, {centroid_mid[1]:.4f}) [using INITIAL centroids]")
+                        print(f"  [BP Transform] cutting line: perpendicular bisector at ({centroid_mid[0]:.4f}, {centroid_mid[1]:.4f})")
 
                 # Convert cutting line direction to 3D
                 if cutting_line_2d is not None:
@@ -6423,22 +6418,20 @@ class ContourMeshMixin:
                     contour_dists.append(np.inf)
             all_distances.append(contour_dists)
 
-        # Assign vertices based on cutting line (using INITIAL source positions, not optimized)
+        # Assign vertices based on cutting line (moves with optimized sources)
         assignments = []
 
         if cutting_line_2d is not None and n_pieces == 2:
-            # Use the cutting line computed from initial positions
+            # Use the cutting line from optimized sources
             line_point, line_dir = cutting_line_2d
             # Normal to the cutting line (perpendicular)
             line_normal = np.array([-line_dir[1], line_dir[0]])
 
-            # Determine which side each INITIAL centroid is on
-            init_centroid_0 = np.array(initial_translations[0])
-            init_centroid_1 = np.array(initial_translations[1])
-            centroid_sides = [
-                np.dot(init_centroid_0 - line_point, line_normal),
-                np.dot(init_centroid_1 - line_point, line_normal)
-            ]
+            # Determine which side each optimized centroid is on
+            centroid_sides = []
+            for c in centroids:
+                side = np.dot(c - line_point, line_normal)
+                centroid_sides.append(side)
 
             # Ensure centroid 0 is on the negative side (for consistent assignment)
             if centroid_sides[0] > 0:
