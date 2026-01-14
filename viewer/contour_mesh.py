@@ -5141,8 +5141,13 @@ class ContourMeshMixin:
                 # Need to cut contours
                 print(f"  Level {level_i}: {curr_count} contours → cutting to {max_stream_count}")
 
+                # IMPORTANT: Save previous level's contours BEFORE any cuts
+                # Otherwise stream_contours[s][-1] changes as we process contours
+                prev_level_contours = [stream_contours[s][-1].copy() if hasattr(stream_contours[s][-1], 'copy') else np.array(stream_contours[s][-1]) for s in range(max_stream_count)]
+                prev_level_bps = [stream_bounding_planes[s][-1].copy() for s in range(max_stream_count)]
+
                 # Find which streams map to which contours (by distance)
-                prev_means = [stream_bounding_planes[s][-1]['mean'] for s in range(max_stream_count)]
+                prev_means = [prev_level_bps[s]['mean'] for s in range(max_stream_count)]
                 curr_means = [self.bounding_planes[level_i][c]['mean'] for c in range(curr_count)]
 
                 # Assign each stream to closest contour
@@ -5190,8 +5195,9 @@ class ContourMeshMixin:
                         # Cut contour using selected method
                         if cut_method == 'bp':
                             # Get source contours and bounding planes from previous level
-                            source_contours = [stream_contours[s][-1] for s in streams_for_contour]
-                            source_bps = [stream_bounding_planes[s][-1] for s in streams_for_contour]
+                            # Use saved prev_level data to avoid getting cut results from earlier contours at this level
+                            source_contours = [prev_level_contours[s] for s in streams_for_contour]
+                            source_bps = [prev_level_bps[s] for s in streams_for_contour]
 
                             # Check if this is first division for this stream combination
                             stream_combo = tuple(sorted(streams_for_contour))
