@@ -5344,34 +5344,31 @@ class ContourMeshMixin:
         print(f"Manual cut: piece0 has {len(piece0)} vertices, piece1 has {len(piece1)} vertices")
 
         # Determine which piece corresponds to which source contour
-        # Use centroid distance matching
-        source_2d_list = self._manual_cut_data['source_2d_list']
+        # Simple 3D centroid distance matching
+        source_contours = self._manual_cut_data['source_contours']
 
-        piece0_2d = np.array([
-            [np.dot(v - target_mean, target_x), np.dot(v - target_mean, target_y)]
-            for v in piece0
-        ])
-        piece1_2d = np.array([
-            [np.dot(v - target_mean, target_x), np.dot(v - target_mean, target_y)]
-            for v in piece1
-        ])
+        # Compute 3D centroids
+        piece0_centroid = piece0.mean(axis=0)
+        piece1_centroid = piece1.mean(axis=0)
+        src0_centroid = source_contours[0].mean(axis=0)
+        src1_centroid = source_contours[1].mean(axis=0)
 
-        piece0_centroid = piece0_2d.mean(axis=0)
-        piece1_centroid = piece1_2d.mean(axis=0)
-
-        src0_centroid = source_2d_list[0].mean(axis=0)
-        src1_centroid = source_2d_list[1].mean(axis=0)
-
-        # Match pieces to sources by centroid distance
+        # Match by distance
         dist_00 = np.linalg.norm(piece0_centroid - src0_centroid)
         dist_01 = np.linalg.norm(piece0_centroid - src1_centroid)
+        dist_10 = np.linalg.norm(piece1_centroid - src0_centroid)
+        dist_11 = np.linalg.norm(piece1_centroid - src1_centroid)
 
-        if dist_00 < dist_01:
-            # piece0 → source0, piece1 → source1
+        print(f"  Piece centroids: {piece0_centroid}, {piece1_centroid}")
+        print(f"  Source centroids: {src0_centroid}, {src1_centroid}")
+        print(f"  Distances: d00={dist_00:.4f}, d01={dist_01:.4f}, d10={dist_10:.4f}, d11={dist_11:.4f}")
+
+        if dist_00 + dist_11 < dist_01 + dist_10:
             cut_contours = [piece0, piece1]
+            print(f"  Matching: piece0 → src0, piece1 → src1")
         else:
-            # piece0 → source1, piece1 → source0
             cut_contours = [piece1, piece0]
+            print(f"  Matching: piece0 → src1, piece1 → src0 (swapped)")
 
         # Store the result
         self._manual_cut_data['cut_result'] = cut_contours
@@ -5523,7 +5520,6 @@ class ContourMeshMixin:
 
         if first_count == max_stream_count:
             # No cutting needed - assign each contour to its own stream
-            # Use contour order (will be refined by subsequent levels)
             for stream_i in range(max_stream_count):
                 stream_contours[stream_i].append(self.contours[first_level][stream_i])
                 stream_bounding_planes[stream_i].append(self.bounding_planes[first_level][stream_i])
@@ -5657,6 +5653,9 @@ class ContourMeshMixin:
                                 cut_contours = self._manual_cut_data['cut_result']
                                 cutting_info = None
                                 print(f"  [BP Transform] Using manual cut result for first division")
+                                print(f"  [BP Transform] streams_for_contour = {streams_for_contour}")
+                                print(f"  [BP Transform] cut_contours[0] will go to stream {streams_for_contour[0]}")
+                                print(f"  [BP Transform] cut_contours[1] will go to stream {streams_for_contour[1]}")
                                 # Clear manual cut data after using it
                                 self._manual_cut_data = None
                             else:
@@ -5675,17 +5674,35 @@ class ContourMeshMixin:
                             )
                             cutting_info = None
 
-                        # Assign cut pieces to streams
-                        for idx, stream_i in enumerate(streams_for_contour):
-                            cut_contour = cut_contours[idx]
+                        # Assign cut pieces to streams by distance matching
+                        # For each stream, find the cut piece closest to its previous contour
+                        cut_centroids = [np.mean(c, axis=0) for c in cut_contours]
+                        prev_centroids = [np.mean(stream_contours[s][-1], axis=0) for s in streams_for_contour]
+
+                        # Greedy matching: each stream gets the closest unassigned piece
+                        used_pieces = set()
+                        for stream_i in streams_for_contour:
+                            prev_centroid = np.mean(stream_contours[stream_i][-1], axis=0)
+
+                            # Find closest unused piece
+                            best_idx = None
+                            best_dist = float('inf')
+                            for idx, cut_centroid in enumerate(cut_centroids):
+                                if idx in used_pieces:
+                                    continue
+                                dist = np.linalg.norm(cut_centroid - prev_centroid)
+                                if dist < best_dist:
+                                    best_dist = dist
+                                    best_idx = idx
+
+                            used_pieces.add(best_idx)
+                            cut_contour = cut_contours[best_idx]
 
                             # Debug: warn about small cut contours
                             if len(cut_contour) <= 5:
                                 print(f"  [WARNING] Level {level_i}: stream {stream_i} got cut contour with only {len(cut_contour)} vertices!")
 
-                            # Create new bounding plane for cut piece using only cut vertices
-                            # z-axis will be computed naturally from the cut contour shape
-                            # User can apply z, x, bp smoothening later
+                            # Create new bounding plane for cut piece
                             _, new_bp = self.save_bounding_planes(
                                 cut_contour,
                                 target_bp['scalar_value'],
@@ -5839,9 +5856,6 @@ class ContourMeshMixin:
                 # All streams must select same levels in this region
                 # Use combined error across all streams
                 region_selected = set()
-                # Always include region boundaries as anchors
-                region_selected.add(start)
-                region_selected.add(end)
                 for level_i in range(start, end + 1):
                     if level_i in must_use_levels:
                         region_selected.add(level_i)
@@ -5880,45 +5894,12 @@ class ContourMeshMixin:
                     stream_selected[s].update(region_selected)
 
             else:
-                # Each stream can select independently in this region
+                # Non-merged region: originally separate contours
+                # Include all levels by default (each stream gets all its original contours)
                 for stream_i in range(max_stream_count):
-                    region_selected = set()
-                    # Always include region boundaries as anchors
-                    region_selected.add(start)
-                    region_selected.add(end)
-                    for level_i in range(start, end + 1):
-                        if level_i in must_use_levels:
-                            region_selected.add(level_i)
-
-                    # Greedy selection for this stream
-                    while True:
-                        max_error = 0
-                        max_error_level = None
-                        selected_sorted = sorted(region_selected)
-
-                        for gap_idx in range(len(selected_sorted) - 1):
-                            prev_idx = selected_sorted[gap_idx]
-                            next_idx = selected_sorted[gap_idx + 1]
-
-                            for level_i in range(prev_idx + 1, next_idx):
-                                if level_i in region_selected:
-                                    continue
-                                if level_i < start or level_i > end:
-                                    continue
-
-                                error = compute_stream_error(stream_i, level_i, prev_idx, next_idx)
-                                if error > max_error:
-                                    max_error = error
-                                    max_error_level = level_i
-
-                        if max_error <= error_threshold or max_error_level is None:
-                            break
-
-                        region_selected.add(max_error_level)
-
+                    region_selected = set(range(start, end + 1))
                     stream_selected[stream_i].update(region_selected)
-                    if len(region_selected) > len([l for l in range(start, end+1) if l in must_use_levels]):
-                        print(f"  Stream {stream_i}, region [{start}-{end}]: {len(region_selected)} levels")
+                print(f"  Region [{start}-{end}] (non-merged): all {end - start + 1} levels included")
 
         # No equalization - each stream keeps its own selected levels
         # Originally-separate regions: independent selection per stream

@@ -3969,7 +3969,7 @@ class GLFWApp():
 
             # Window setup
             muscle_name = obj._manual_cut_data.get('muscle_name', name)
-            imgui.set_next_window_size(600, 550, imgui.FIRST_USE_EVER)
+            imgui.set_next_window_size(700, 700, imgui.FIRST_USE_EVER)
             expanded, opened = imgui.begin(f"Manual Cut: {muscle_name}", True)
 
             if not opened:
@@ -3995,7 +3995,7 @@ class GLFWApp():
             max_range = max(range_xy) * 1.1  # Small padding
 
             # Canvas setup
-            canvas_size = 450
+            canvas_size = 550
             padding = 20
             draw_list = imgui.get_window_draw_list()
             cursor_pos = imgui.get_cursor_screen_pos()
@@ -4022,18 +4022,11 @@ class GLFWApp():
                               x0 + canvas_size + padding, y0 + canvas_size + padding,
                               imgui.get_color_u32_rgba(0.5, 0.5, 0.5, 1.0))
 
-            # Draw target contour (solid white, thick line)
+            # Draw target contour (outline only)
             colors = [(0.2, 0.6, 1.0), (1.0, 0.4, 0.2)]  # Blue, Orange for cut pieces
             if len(target_2d) >= 3:
                 target_screen = [to_screen(p, x0, y0, canvas_size) for p in target_2d]
-                # Fill with gray
-                for i in range(1, len(target_screen) - 1):
-                    draw_list.add_triangle_filled(
-                        target_screen[0][0], target_screen[0][1],
-                        target_screen[i][0], target_screen[i][1],
-                        target_screen[i+1][0], target_screen[i+1][1],
-                        imgui.get_color_u32_rgba(0.3, 0.3, 0.3, 0.5))
-                # Outline (thick)
+                # Outline (thick white)
                 for i in range(len(target_screen)):
                     p1, p2 = target_screen[i], target_screen[(i+1) % len(target_screen)]
                     draw_list.add_line(p1[0], p1[1], p2[0], p2[1],
@@ -4054,7 +4047,20 @@ class GLFWApp():
                 mouse_state['end_pos'] = (mouse_pos[0], mouse_pos[1])
 
             if mouse_state['dragging']:
-                mouse_state['end_pos'] = (mouse_pos[0], mouse_pos[1])
+                end_x, end_y = mouse_pos[0], mouse_pos[1]
+                # Check if shift is pressed for axis-aligned line
+                shift_pressed = (glfw.get_key(self.window, glfw.KEY_LEFT_SHIFT) == glfw.PRESS or
+                                 glfw.get_key(self.window, glfw.KEY_RIGHT_SHIFT) == glfw.PRESS)
+                if shift_pressed:
+                    start_x, start_y = mouse_state['start_pos']
+                    dx = abs(end_x - start_x)
+                    dy = abs(end_y - start_y)
+                    # Snap to horizontal or vertical based on which direction is dominant
+                    if dx > dy:
+                        end_y = start_y  # Horizontal line
+                    else:
+                        end_x = start_x  # Vertical line
+                mouse_state['end_pos'] = (end_x, end_y)
                 if imgui.is_mouse_released(0):
                     mouse_state['dragging'] = False
                     # Convert to 2D coordinates and store the line

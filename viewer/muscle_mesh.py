@@ -3011,6 +3011,17 @@ class MuscleMeshMixin:
         self.fiber_architecture = [self._sobol_sampling_barycentric_default(16)]
         self.is_draw_fiber_architecture = False
 
+        # Stream data
+        self.stream_contours = None
+        self.stream_bounding_planes = None
+        self.stream_groups = None
+        self.max_stream_count = None
+
+        # Manual cutting state
+        self._manual_cut_pending = False
+        self._manual_cut_data = None
+        self._manual_cut_line = None
+
         # Other
         self.structure_vectors = []
         self.specific_contour = None
