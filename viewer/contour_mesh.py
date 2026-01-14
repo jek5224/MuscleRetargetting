@@ -5855,8 +5855,11 @@ class ContourMeshMixin:
                 for i in range(len(transformed_polygons)):
                     for j in range(i + 1, len(transformed_polygons)):
                         try:
-                            dist = transformed_polygons[i].distance(transformed_polygons[j])
-                            gap_cost += dist
+                            p_i, p_j = transformed_polygons[i], transformed_polygons[j]
+                            if p_i.is_valid and p_j.is_valid and not p_i.is_empty and not p_j.is_empty:
+                                dist = p_i.distance(p_j)
+                                if not np.isnan(dist):
+                                    gap_cost += dist
                         except:
                             pass
 
@@ -5961,19 +5964,25 @@ class ContourMeshMixin:
             for i in range(len(final_transformed)):
                 for j in range(i + 1, len(final_transformed)):
                     try:
+                        if len(final_transformed[i]) < 3 or len(final_transformed[j]) < 3:
+                            continue
                         poly_i = Polygon(final_transformed[i])
                         poly_j = Polygon(final_transformed[j])
                         if not poly_i.is_valid:
                             poly_i = poly_i.buffer(0)
                         if not poly_j.is_valid:
                             poly_j = poly_j.buffer(0)
+                        if poly_i.is_empty or poly_j.is_empty:
+                            continue
                         dist = poly_i.distance(poly_j)
+                        if np.isnan(dist):
+                            continue
                         if dist > 1e-6:
                             print(f"  [BP Transform] WARNING: pieces {i} and {j} have gap of {dist:.6f}")
                         else:
                             print(f"  [BP Transform] pieces {i} and {j} are adjacent (dist={dist:.6f})")
                     except Exception as e:
-                        print(f"  [BP Transform] Could not check adjacency: {e}")
+                        pass  # Silently skip invalid polygon checks
 
         # ========== Step 7: Assign target vertices by distance ==========
         # Strategy: if vertex is close to a source contour, assign to it
