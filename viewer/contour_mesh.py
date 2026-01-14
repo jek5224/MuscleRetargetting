@@ -5328,6 +5328,9 @@ class ContourMeshMixin:
                 # All streams must select same levels in this region
                 # Use combined error across all streams
                 region_selected = set()
+                # Always include region boundaries as anchors
+                region_selected.add(start)
+                region_selected.add(end)
                 for level_i in range(start, end + 1):
                     if level_i in must_use_levels:
                         region_selected.add(level_i)
@@ -5369,6 +5372,9 @@ class ContourMeshMixin:
                 # Each stream can select independently in this region
                 for stream_i in range(max_stream_count):
                     region_selected = set()
+                    # Always include region boundaries as anchors
+                    region_selected.add(start)
+                    region_selected.add(end)
                     for level_i in range(start, end + 1):
                         if level_i in must_use_levels:
                             region_selected.add(level_i)
