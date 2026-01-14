@@ -2156,15 +2156,20 @@ class GLFWApp():
                             imgui.pop_style_var()
 
                         # BP Viz button - opens visualization window (only active after cutting)
-                        has_stream_data = (hasattr(obj, 'stream_contours') and obj.stream_contours is not None and len(obj.stream_contours) > 0)
-                        if not has_stream_data:
+                        has_bp_viz_data = (hasattr(obj, '_bp_viz_data') and obj._bp_viz_data is not None and len(obj._bp_viz_data) > 0)
+                        if not has_bp_viz_data:
                             imgui.push_style_var(imgui.STYLE_ALPHA, 0.5)
                         if imgui.button(f"BP Viz##{name}", width=inspect_width):
-                            if has_stream_data:
-                                obj.bp_viz_show_window = True
+                            if has_bp_viz_data:
+                                if not hasattr(self, 'bp_viz_open'):
+                                    self.bp_viz_open = {}
+                                self.bp_viz_open[name] = True
+                                if not hasattr(self, 'bp_viz_idx'):
+                                    self.bp_viz_idx = {}
+                                self.bp_viz_idx[name] = 0
                             else:
-                                print(f"[{name}] No stream data. Run 'Cut Streams' first.")
-                        if not has_stream_data:
+                                print(f"[{name}] No BP viz data. Run 'Cut Streams' first.")
+                        if not has_bp_viz_data:
                             imgui.pop_style_var()
 
                         # Focus camera on muscle button
@@ -3035,6 +3040,9 @@ class GLFWApp():
         # Render Inspect 2D windows for each muscle
         self._render_inspect_2d_windows()
 
+        # Render BP Viz windows
+        self._render_bp_viz_windows()
+
         imgui.render()
 
     def _render_inspect_2d_windows(self):
@@ -3628,6 +3636,243 @@ class GLFWApp():
         # Close windows that were marked for closing
         for name in muscles_to_close:
             self.inspect_2d_open[name] = False
+
+    def _render_bp_viz_windows(self):
+        """Render BP Transform visualization windows."""
+        if not hasattr(self, 'bp_viz_open'):
+            return
+
+        muscles_to_close = []
+
+        for name, is_open in list(self.bp_viz_open.items()):
+            if not is_open:
+                continue
+
+            if name not in self.zygote_muscle_meshes:
+                muscles_to_close.append(name)
+                continue
+
+            obj = self.zygote_muscle_meshes[name]
+
+            if not hasattr(obj, '_bp_viz_data') or not obj._bp_viz_data:
+                muscles_to_close.append(name)
+                continue
+
+            viz_data = obj._bp_viz_data
+            num_viz = len(viz_data)
+
+            imgui.set_next_window_size(750, 420, imgui.FIRST_USE_EVER)
+            expanded, opened = imgui.begin(f"BP Viz: {name}", True)
+
+            if not opened:
+                muscles_to_close.append(name)
+                imgui.end()
+                continue
+
+            # Slider to select visualization
+            viz_idx = self.bp_viz_idx.get(name, 0)
+            viz_idx = min(viz_idx, max(0, num_viz - 1))
+            changed, new_idx = imgui.slider_int(f"Visualization##{name}", viz_idx, 0, max(0, num_viz - 1))
+            if changed:
+                self.bp_viz_idx[name] = new_idx
+                viz_idx = new_idx
+
+            imgui.text(f"Showing {viz_idx + 1} / {num_viz}")
+            imgui.separator()
+
+            # Get current visualization data
+            data = viz_data[viz_idx]
+            target_2d = data['target_2d']
+            source_2d_shapes = data['source_2d_shapes']
+            final_transformed = data['final_transformed']
+            stream_indices = data['stream_indices']
+            scales = data['scales']
+            initial_translations = data['initial_translations']
+            initial_rotations = data['initial_rotations']
+
+            # Helper to transform shape
+            def transform_shape(shape_2d, scale, tx, ty, theta):
+                cos_t, sin_t = np.cos(theta), np.sin(theta)
+                rot = np.array([[cos_t, -sin_t], [sin_t, cos_t]])
+                scaled = shape_2d * scale
+                rotated = scaled @ rot.T
+                return rotated + np.array([tx, ty])
+
+            # Compute initial transformed shapes
+            initial_transformed = []
+            for i, src_2d in enumerate(source_2d_shapes):
+                tx, ty = initial_translations[i]
+                theta = initial_rotations[i]
+                transformed = transform_shape(src_2d, 1.0, tx, ty, theta)
+                initial_transformed.append(transformed)
+
+            # Compute bounds for normalization (include all shapes)
+            all_points = [target_2d]
+            for src in source_2d_shapes:
+                if len(src) > 0:
+                    all_points.append(src)
+            for init in initial_transformed:
+                if len(init) > 0:
+                    all_points.append(init)
+            for final in final_transformed:
+                if len(final) > 0:
+                    all_points.append(final)
+
+            all_points_arr = np.vstack(all_points)
+            min_xy = all_points_arr.min(axis=0)
+            max_xy = all_points_arr.max(axis=0)
+            range_xy = max_xy - min_xy
+            range_xy[range_xy < 1e-10] = 1.0
+            max_range = max(range_xy[0], range_xy[1])
+            margin = 0.1
+            scale_factor = (1 - 2 * margin) / max_range
+            center_xy = (min_xy + max_xy) / 2
+
+            def to_screen(pt_2d, x0, y0, canvas_size):
+                norm = (pt_2d - center_xy) * scale_factor + 0.5
+                sx = x0 + norm[0] * canvas_size
+                sy = y0 + (1 - norm[1]) * canvas_size
+                return (sx, sy)
+
+            # Canvas setup
+            canvas_size = 300
+            padding = 15
+
+            imgui.columns(2, f"bp_viz_cols##{name}", border=True)
+            imgui.set_column_width(0, canvas_size + 2 * padding + 30)
+            imgui.set_column_width(1, canvas_size + 2 * padding + 30)
+
+            draw_list = imgui.get_window_draw_list()
+
+            # Colors for sources (using tab10-like colors)
+            colors = [
+                (0.12, 0.47, 0.71, 1.0),  # blue
+                (1.0, 0.5, 0.05, 1.0),    # orange
+                (0.17, 0.63, 0.17, 1.0),  # green
+                (0.84, 0.15, 0.16, 1.0),  # red
+                (0.58, 0.40, 0.74, 1.0),  # purple
+                (0.55, 0.34, 0.29, 1.0),  # brown
+                (0.89, 0.47, 0.76, 1.0),  # pink
+                (0.50, 0.50, 0.50, 1.0),  # gray
+            ]
+
+            # Left column: Original + Initial
+            imgui.text("Original (dashed) + Initial (solid)")
+            cursor_pos = imgui.get_cursor_screen_pos()
+            x0, y0 = cursor_pos[0] + padding, cursor_pos[1] + padding
+
+            # Background
+            draw_list.add_rect_filled(x0, y0, x0 + canvas_size, y0 + canvas_size,
+                                     imgui.get_color_u32_rgba(0.1, 0.1, 0.1, 1.0))
+
+            # Draw target (black outline, gray fill)
+            target_screen = [to_screen(p, x0, y0, canvas_size) for p in target_2d]
+            if len(target_screen) >= 3:
+                # Fill
+                for i in range(1, len(target_screen) - 1):
+                    draw_list.add_triangle_filled(
+                        target_screen[0][0], target_screen[0][1],
+                        target_screen[i][0], target_screen[i][1],
+                        target_screen[i+1][0], target_screen[i+1][1],
+                        imgui.get_color_u32_rgba(0.3, 0.3, 0.3, 0.3))
+                # Outline
+                for i in range(len(target_screen)):
+                    p1, p2 = target_screen[i], target_screen[(i+1) % len(target_screen)]
+                    draw_list.add_line(p1[0], p1[1], p2[0], p2[1],
+                                      imgui.get_color_u32_rgba(0.9, 0.9, 0.9, 1.0), 2.0)
+
+            # Draw original sources (dashed - draw as dotted)
+            for si, src_2d in enumerate(source_2d_shapes):
+                if len(src_2d) >= 3:
+                    color = colors[si % len(colors)]
+                    src_screen = [to_screen(p, x0, y0, canvas_size) for p in src_2d]
+                    for i in range(len(src_screen)):
+                        p1, p2 = src_screen[i], src_screen[(i+1) % len(src_screen)]
+                        # Draw dashed by drawing short segments
+                        dx, dy = p2[0] - p1[0], p2[1] - p1[1]
+                        length = np.sqrt(dx*dx + dy*dy)
+                        if length > 0:
+                            dash_len = 5
+                            num_dashes = max(1, int(length / (2 * dash_len)))
+                            for d in range(num_dashes):
+                                t1 = d * 2 * dash_len / length
+                                t2 = min((d * 2 + 1) * dash_len / length, 1.0)
+                                if t1 < 1.0:
+                                    draw_list.add_line(
+                                        p1[0] + dx * t1, p1[1] + dy * t1,
+                                        p1[0] + dx * t2, p1[1] + dy * t2,
+                                        imgui.get_color_u32_rgba(*color), 1.5)
+
+            # Draw initial transformed (solid thin)
+            for si, init_trans in enumerate(initial_transformed):
+                if len(init_trans) >= 3:
+                    color = colors[si % len(colors)]
+                    init_screen = [to_screen(p, x0, y0, canvas_size) for p in init_trans]
+                    # Fill with alpha
+                    for i in range(1, len(init_screen) - 1):
+                        draw_list.add_triangle_filled(
+                            init_screen[0][0], init_screen[0][1],
+                            init_screen[i][0], init_screen[i][1],
+                            init_screen[i+1][0], init_screen[i+1][1],
+                            imgui.get_color_u32_rgba(color[0], color[1], color[2], 0.2))
+                    # Outline
+                    for i in range(len(init_screen)):
+                        p1, p2 = init_screen[i], init_screen[(i+1) % len(init_screen)]
+                        draw_list.add_line(p1[0], p1[1], p2[0], p2[1],
+                                          imgui.get_color_u32_rgba(*color), 1.5)
+
+            imgui.dummy(canvas_size + 2 * padding, canvas_size + 2 * padding)
+
+            # Right column: Final result
+            imgui.next_column()
+            scales_str = ', '.join([f'{s:.2f}' for s in scales])
+            imgui.text(f"Final (scales=[{scales_str}])")
+            cursor_pos = imgui.get_cursor_screen_pos()
+            x0, y0 = cursor_pos[0] + padding, cursor_pos[1] + padding
+
+            # Background
+            draw_list.add_rect_filled(x0, y0, x0 + canvas_size, y0 + canvas_size,
+                                     imgui.get_color_u32_rgba(0.1, 0.1, 0.1, 1.0))
+
+            # Draw target
+            target_screen = [to_screen(p, x0, y0, canvas_size) for p in target_2d]
+            if len(target_screen) >= 3:
+                for i in range(1, len(target_screen) - 1):
+                    draw_list.add_triangle_filled(
+                        target_screen[0][0], target_screen[0][1],
+                        target_screen[i][0], target_screen[i][1],
+                        target_screen[i+1][0], target_screen[i+1][1],
+                        imgui.get_color_u32_rgba(0.3, 0.3, 0.3, 0.3))
+                for i in range(len(target_screen)):
+                    p1, p2 = target_screen[i], target_screen[(i+1) % len(target_screen)]
+                    draw_list.add_line(p1[0], p1[1], p2[0], p2[1],
+                                      imgui.get_color_u32_rgba(0.9, 0.9, 0.9, 1.0), 2.0)
+
+            # Draw final transformed
+            for si, final_trans in enumerate(final_transformed):
+                if len(final_trans) >= 3:
+                    color = colors[si % len(colors)]
+                    final_screen = [to_screen(p, x0, y0, canvas_size) for p in final_trans]
+                    # Fill
+                    for i in range(1, len(final_screen) - 1):
+                        draw_list.add_triangle_filled(
+                            final_screen[0][0], final_screen[0][1],
+                            final_screen[i][0], final_screen[i][1],
+                            final_screen[i+1][0], final_screen[i+1][1],
+                            imgui.get_color_u32_rgba(color[0], color[1], color[2], 0.3))
+                    # Outline
+                    for i in range(len(final_screen)):
+                        p1, p2 = final_screen[i], final_screen[(i+1) % len(final_screen)]
+                        draw_list.add_line(p1[0], p1[1], p2[0], p2[1],
+                                          imgui.get_color_u32_rgba(*color), 2.0)
+
+            imgui.dummy(canvas_size + 2 * padding, canvas_size + 2 * padding)
+            imgui.columns(1)
+
+            imgui.end()
+
+        for name in muscles_to_close:
+            self.bp_viz_open[name] = False
 
     def reset(self, reset_time=None):
         self.env.reset(reset_time)

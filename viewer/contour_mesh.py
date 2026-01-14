@@ -960,6 +960,148 @@ class ContourMeshMixin:
         # if skeleton_meshes is not None and len(skeleton_meshes) > 0:
         #     self.auto_detect_attachments(skeleton_meshes)
 
+    def _refine_transition_points(self):
+        """
+        Refine contours at transition points where contour count changes.
+
+        For transitions like 3→2, 2→3, 2→1, find the exact scalar value where
+        the merge/diverge happens. At that scalar, contour count should be
+        min(count_before, count_after).
+        """
+        if len(self.bounding_planes) < 2:
+            return
+
+        print(f"\n=== Transition Point Refinement ===")
+
+        # Find all transition points
+        transitions = []
+        for level_idx in range(len(self.bounding_planes) - 1):
+            count_curr = len(self.bounding_planes[level_idx])
+            count_next = len(self.bounding_planes[level_idx + 1])
+
+            if count_curr != count_next:
+                scalar_curr = self.bounding_planes[level_idx][0]['scalar_value']
+                scalar_next = self.bounding_planes[level_idx + 1][0]['scalar_value']
+                expected_count = min(count_curr, count_next)
+                transitions.append({
+                    'level_idx': level_idx,
+                    'count_curr': count_curr,
+                    'count_next': count_next,
+                    'scalar_curr': scalar_curr,
+                    'scalar_next': scalar_next,
+                    'expected_count': expected_count
+                })
+
+        if not transitions:
+            print("No transition points found.")
+            return
+
+        print(f"Found {len(transitions)} transition points:")
+        for t in transitions:
+            print(f"  Level {t['level_idx']}: {t['count_curr']}→{t['count_next']} "
+                  f"(scalar {t['scalar_curr']:.6f}→{t['scalar_next']:.6f}), expect {t['expected_count']}")
+
+        # Process transitions in reverse order to maintain indices
+        transitions.sort(key=lambda x: x['level_idx'], reverse=True)
+
+        for t in transitions:
+            level_idx = t['level_idx']
+            scalar_low = t['scalar_curr']
+            scalar_high = t['scalar_next']
+            min_count = min(t['count_curr'], t['count_next'])
+            max_count = max(t['count_curr'], t['count_next'])
+
+            max_iterations = 20
+            tolerance = 1e-6
+
+            prev_plane = self.bounding_planes[level_idx][0] if len(self.bounding_planes[level_idx]) > 0 else None
+
+            # Find both transition points: one with min_count, one with max_count
+            # Binary search to find the boundary
+
+            # Search for scalar with min_count (closer to the merge/diverge point)
+            best_min_scalar = None
+            best_min_contours = None
+            best_min_planes = None
+
+            # Search for scalar with max_count (farther from merge/diverge point)
+            best_max_scalar = None
+            best_max_contours = None
+            best_max_planes = None
+
+            search_low = scalar_low
+            search_high = scalar_high
+
+            for iteration in range(max_iterations):
+                mid_scalar = (search_low + search_high) / 2
+
+                if abs(search_high - search_low) < tolerance:
+                    break
+
+                planes_at_mid, contours_at_mid, _ = self.find_contour(mid_scalar, prev_bounding_plane=prev_plane)
+
+                if len(contours_at_mid) == 0:
+                    search_high = mid_scalar
+                    continue
+
+                count_at_mid = len(contours_at_mid)
+
+                if count_at_mid == min_count:
+                    best_min_scalar = mid_scalar
+                    best_min_contours = contours_at_mid
+                    best_min_planes = planes_at_mid
+                    # Search towards max_count side
+                    if t['count_curr'] > t['count_next']:
+                        search_high = mid_scalar
+                    else:
+                        search_low = mid_scalar
+                elif count_at_mid == max_count:
+                    best_max_scalar = mid_scalar
+                    best_max_contours = contours_at_mid
+                    best_max_planes = planes_at_mid
+                    # Search towards min_count side
+                    if t['count_curr'] > t['count_next']:
+                        search_low = mid_scalar
+                    else:
+                        search_high = mid_scalar
+                elif count_at_mid > max_count:
+                    # More than expected, search towards fewer
+                    if t['count_curr'] > t['count_next']:
+                        search_low = mid_scalar
+                    else:
+                        search_high = mid_scalar
+                else:
+                    # Less than expected, search towards more
+                    if t['count_curr'] > t['count_next']:
+                        search_high = mid_scalar
+                    else:
+                        search_low = mid_scalar
+
+            # Collect results to insert (in order by scalar value)
+            to_insert = []
+            if best_max_scalar is not None and best_max_contours is not None:
+                to_insert.append((best_max_scalar, best_max_planes, best_max_contours, max_count))
+            if best_min_scalar is not None and best_min_contours is not None:
+                to_insert.append((best_min_scalar, best_min_planes, best_min_contours, min_count))
+
+            # Sort by scalar value
+            to_insert.sort(key=lambda x: x[0])
+
+            # Insert in reverse order to maintain indices
+            for scalar, planes, contours, count in reversed(to_insert):
+                insert_idx = level_idx + 1
+                print(f"  Inserting transition contour at scalar {scalar:.6f} "
+                      f"(count={count}) at index {insert_idx}")
+                self.bounding_planes.insert(insert_idx, planes)
+                self.contours.insert(insert_idx, contours)
+
+            if len(to_insert) == 0:
+                print(f"  Warning: Could not find transition points for level {level_idx}")
+
+        # Update draw_contour_stream
+        self.draw_contour_stream = [True] * len(self.contours)
+        print(f"=== Transition Refinement Done: {len(self.bounding_planes)} contour levels ===\n")
+
     def refine_contours(self, max_spacing_threshold, max_refinement_depth=3):
         """
         Refine contours by inserting new contours where physical spacing exceeds threshold.
@@ -974,6 +1116,9 @@ class ContourMeshMixin:
         """
         if len(self.bounding_planes) < 2:
             return
+
+        # First, refine transition points where contour count changes
+        self._refine_transition_points()
 
         print(f"\n=== Contour Refinement Pass ===")
         print(f"Max spacing threshold: {max_spacing_threshold}")
@@ -4365,21 +4510,56 @@ class ContourMeshMixin:
 
         # Helper function to compute centroid interpolation error
         def compute_interpolation_error(level_idx, prev_idx, next_idx):
-            max_error = 0
-            for contour_idx in range(len(self.contours[level_idx])):
-                actual_mean = self.bounding_planes[level_idx][contour_idx]['mean']
-                prev_means = [bp['mean'] for bp in self.bounding_planes[prev_idx]]
-                next_means = [bp['mean'] for bp in self.bounding_planes[next_idx]]
+            from scipy.optimize import linear_sum_assignment
 
-                if len(prev_means) > 0:
-                    prev_dists = [np.linalg.norm(actual_mean - m) for m in prev_means]
-                    prev_mean = prev_means[np.argmin(prev_dists)]
+            max_error = 0
+            curr_means = [bp['mean'] for bp in self.bounding_planes[level_idx]]
+            prev_means = [bp['mean'] for bp in self.bounding_planes[prev_idx]]
+            next_means = [bp['mean'] for bp in self.bounding_planes[next_idx]]
+
+            curr_count = len(curr_means)
+            prev_count = len(prev_means)
+            next_count = len(next_means)
+
+            # Use optimal assignment when counts match, otherwise use closest
+            if curr_count == prev_count and prev_count > 1:
+                # Optimal assignment between curr and prev
+                cost_matrix = np.zeros((curr_count, prev_count))
+                for i in range(curr_count):
+                    for j in range(prev_count):
+                        cost_matrix[i, j] = np.linalg.norm(np.array(curr_means[i]) - np.array(prev_means[j]))
+                _, prev_assignment = linear_sum_assignment(cost_matrix)
+            else:
+                prev_assignment = None
+
+            if curr_count == next_count and next_count > 1:
+                # Optimal assignment between curr and next
+                cost_matrix = np.zeros((curr_count, next_count))
+                for i in range(curr_count):
+                    for j in range(next_count):
+                        cost_matrix[i, j] = np.linalg.norm(np.array(curr_means[i]) - np.array(next_means[j]))
+                _, next_assignment = linear_sum_assignment(cost_matrix)
+            else:
+                next_assignment = None
+
+            for contour_idx in range(curr_count):
+                actual_mean = np.array(curr_means[contour_idx])
+
+                # Get matched prev mean
+                if prev_assignment is not None:
+                    prev_mean = np.array(prev_means[prev_assignment[contour_idx]])
+                elif len(prev_means) > 0:
+                    prev_dists = [np.linalg.norm(actual_mean - np.array(m)) for m in prev_means]
+                    prev_mean = np.array(prev_means[np.argmin(prev_dists)])
                 else:
                     prev_mean = actual_mean
 
-                if len(next_means) > 0:
-                    next_dists = [np.linalg.norm(actual_mean - m) for m in next_means]
-                    next_mean = next_means[np.argmin(next_dists)]
+                # Get matched next mean
+                if next_assignment is not None:
+                    next_mean = np.array(next_means[next_assignment[contour_idx]])
+                elif len(next_means) > 0:
+                    next_dists = [np.linalg.norm(actual_mean - np.array(m)) for m in next_means]
+                    next_mean = np.array(next_means[np.argmin(next_dists)])
                 else:
                     next_mean = actual_mean
 
@@ -4479,7 +4659,7 @@ class ContourMeshMixin:
 
         print(f"Contours updated: now {len(self.contours)} levels")
 
-    def cut_streams(self, cut_method='bp'):
+    def cut_streams(self, cut_method='bp', muscle_name=None):
         """
         Step 1: Pre-cut all contours to max stream count.
 
@@ -4495,7 +4675,12 @@ class ContourMeshMixin:
             cut_method: 'bp' (default) for bounding plane transform optimization,
                        'mesh' for topology-aware cutting at contour corners,
                        'area' for position-based equal-area cutting
+            muscle_name: Name of the muscle (for visualization file naming)
         """
+        # Store muscle name for visualization
+        if muscle_name is not None:
+            self._muscle_name = muscle_name
+
         if self.contours is None or len(self.contours) < 2:
             print("Need at least 2 contour levels")
             return
@@ -4540,7 +4725,8 @@ class ContourMeshMixin:
         first_count = contour_counts[first_level]
 
         if first_count == max_stream_count:
-            # No cutting needed, each contour is its own stream
+            # No cutting needed - assign each contour to its own stream
+            # Use contour order (will be refined by subsequent levels)
             for stream_i in range(max_stream_count):
                 stream_contours[stream_i].append(self.contours[first_level][stream_i])
                 stream_bounding_planes[stream_i].append(self.bounding_planes[first_level][stream_i])
@@ -4566,6 +4752,9 @@ class ContourMeshMixin:
                 groups.append(group)
             stream_groups.append(groups)
 
+        # Track which stream combinations have been cut (for first vs propagated division)
+        cut_stream_combos = set()
+
         # Process remaining levels
         for level_i_idx in range(1, len(level_order)):
             level_i = level_order[level_i_idx]
@@ -4573,26 +4762,24 @@ class ContourMeshMixin:
             curr_count = contour_counts[level_i]
 
             if curr_count == max_stream_count:
-                # No cutting needed - match by distance
-                # Find best assignment of contours to streams
+                # No cutting needed - match by distance using optimal assignment
+                from scipy.optimize import linear_sum_assignment
+
                 prev_means = [stream_bounding_planes[s][-1]['mean'] for s in range(max_stream_count)]
                 curr_means = [self.bounding_planes[level_i][c]['mean'] for c in range(curr_count)]
 
-                # Greedy assignment by distance
-                assigned = [False] * curr_count
+                # Build cost matrix (distance from each stream to each contour)
+                cost_matrix = np.zeros((max_stream_count, curr_count))
                 for stream_i in range(max_stream_count):
-                    best_contour = None
-                    best_dist = np.inf
                     for contour_i in range(curr_count):
-                        if assigned[contour_i]:
-                            continue
-                        dist = np.linalg.norm(prev_means[stream_i] - curr_means[contour_i])
-                        if dist < best_dist:
-                            best_dist = dist
-                            best_contour = contour_i
-                    assigned[best_contour] = True
-                    stream_contours[stream_i].append(self.contours[level_i][best_contour])
-                    stream_bounding_planes[stream_i].append(self.bounding_planes[level_i][best_contour])
+                        cost_matrix[stream_i, contour_i] = np.linalg.norm(prev_means[stream_i] - curr_means[contour_i])
+
+                # Optimal assignment using Hungarian algorithm
+                row_ind, col_ind = linear_sum_assignment(cost_matrix)
+
+                for stream_i, contour_i in zip(row_ind, col_ind):
+                    stream_contours[stream_i].append(self.contours[level_i][contour_i])
+                    stream_bounding_planes[stream_i].append(self.bounding_planes[level_i][contour_i])
 
                 stream_groups.append([[i] for i in range(max_stream_count)])
                 print(f"  Level {level_i}: {curr_count} contours (no cut needed)")
@@ -4652,8 +4839,15 @@ class ContourMeshMixin:
                             # Get source contours and bounding planes from previous level
                             source_contours = [stream_contours[s][-1] for s in streams_for_contour]
                             source_bps = [stream_bounding_planes[s][-1] for s in streams_for_contour]
+
+                            # Check if this is first division for this stream combination
+                            stream_combo = tuple(sorted(streams_for_contour))
+                            is_first_division = stream_combo not in cut_stream_combos
+                            cut_stream_combos.add(stream_combo)
+
                             cut_contours = self._cut_contour_bp_transform(
-                                target_contour, target_bp, source_contours, source_bps, streams_for_contour
+                                target_contour, target_bp, source_contours, source_bps, streams_for_contour,
+                                is_first_division=is_first_division
                             )
                         elif cut_method == 'mesh':
                             cut_contours = self._cut_contour_mesh_aware(
@@ -5320,7 +5514,7 @@ class ContourMeshMixin:
 
         return new_contours
 
-    def _cut_contour_bp_transform(self, target_contour, target_bp, source_contours, source_bps, stream_indices):
+    def _cut_contour_bp_transform(self, target_contour, target_bp, source_contours, source_bps, stream_indices, is_first_division=True):
         """
         Cut a contour using bounding plane transformation and optimization.
 
@@ -5333,6 +5527,9 @@ class ContourMeshMixin:
             source_contours: List of source contours (from previous level)
             source_bps: List of bounding planes for source contours
             stream_indices: Which stream indices these pieces are for
+            is_first_division: True if this is first division (2→1 originally),
+                              False if propagated (1→1 originally).
+                              Affects whether separate or common scales are used.
 
         Returns:
             List of cut contour pieces (one per stream)
@@ -5404,6 +5601,23 @@ class ContourMeshMixin:
             initial_rotations.append(init_theta)
             print(f"  [BP Transform] source {i} initial rotation: {np.degrees(init_theta):.1f}°")
 
+        # Compute source areas and ratios (for area ratio regularization)
+        source_areas = []
+        for src_2d in source_2d_shapes:
+            try:
+                src_poly = Polygon(src_2d)
+                if not src_poly.is_valid:
+                    src_poly = src_poly.buffer(0)
+                source_areas.append(src_poly.area)
+            except:
+                source_areas.append(1.0)  # fallback
+        total_source_area = sum(source_areas)
+        if total_source_area > 0:
+            source_area_ratios = [a / total_source_area for a in source_areas]
+        else:
+            source_area_ratios = [1.0 / n_pieces] * n_pieces
+        print(f"  [BP Transform] source area ratios: {[f'{r:.3f}' for r in source_area_ratios]}")
+
         # ========== Step 3: Define optimization objective ==========
         def transform_shape(shape_2d, scale, tx, ty, theta):
             """Apply 2D similarity transformation: scale, rotate, then translate."""
@@ -5428,34 +5642,68 @@ class ContourMeshMixin:
             projected_refs = [src_bp['mean'] for src_bp in source_bps]
             return self._cut_contour_for_streams(target_contour, target_bp, projected_refs, stream_indices)
 
+        # First division: each source has separate transform (scale, tx, ty, theta)
+        # Propagated division: all sources share the same transform (move as one rigid body)
+        use_separate_transforms = is_first_division
+        print(f"  [BP Transform] is_first_division={is_first_division}, use_separate_transforms={use_separate_transforms}")
+
+        def add_polygon(transformed, polygon_list):
+            """Helper to create and add a polygon from transformed points."""
+            if len(transformed) >= 3:
+                try:
+                    poly = Polygon(transformed)
+                    if not poly.is_valid:
+                        poly = poly.buffer(0)
+                    if poly.is_valid and poly.area > 0:
+                        polygon_list.append(poly)
+                except:
+                    pass
+
         def objective(params):
             """Maximize overlap with target, minimize source overlap and rotation."""
-            # params: [scale, tx0, ty0, theta0, tx1, ty1, theta1, ...]
-            scale = params[0]
-            if scale <= 0:
-                return 1e10
-
+            # If separate transforms: params = [scale0, tx0, ty0, theta0, scale1, tx1, ty1, theta1, ...]
+            # If common transform: params = [scale, delta_tx, delta_ty, delta_theta]
+            #   - Each source uses initial_pos + delta, maintaining relative positions
             transformed_polygons = []
             thetas = []
+            scales = []
 
-            for i in range(n_pieces):
-                tx = params[1 + i * 3]
-                ty = params[1 + i * 3 + 1]
-                theta = params[1 + i * 3 + 2]
-                thetas.append(theta)
+            if use_separate_transforms:
+                # Each source has its own transform (first division)
+                for i in range(n_pieces):
+                    scale = params[i * 4]
+                    tx = params[i * 4 + 1]
+                    ty = params[i * 4 + 2]
+                    theta = params[i * 4 + 3]
 
-                transformed = transform_shape(source_2d_shapes[i], scale, tx, ty, theta)
+                    if scale <= 0:
+                        return 1e10
 
-                # Create polygon (need at least 3 points)
-                if len(transformed) >= 3:
-                    try:
-                        poly = Polygon(transformed)
-                        if not poly.is_valid:
-                            poly = poly.buffer(0)
-                        if poly.is_valid and poly.area > 0:
-                            transformed_polygons.append(poly)
-                    except:
-                        pass
+                    scales.append(scale)
+                    thetas.append(theta)
+                    transformed = transform_shape(source_2d_shapes[i], scale, tx, ty, theta)
+                    add_polygon(transformed, transformed_polygons)
+            else:
+                # Common transform - sources move together maintaining relative positions
+                # params = [scale, delta_tx, delta_ty, delta_theta]
+                scale = params[0]
+                delta_tx = params[1]
+                delta_ty = params[2]
+                delta_theta = params[3]
+
+                if scale <= 0:
+                    return 1e10
+
+                for i in range(n_pieces):
+                    # Each source uses its initial position + common delta
+                    tx = initial_translations[i][0] + delta_tx
+                    ty = initial_translations[i][1] + delta_ty
+                    theta = initial_rotations[i] + delta_theta
+
+                    scales.append(scale)
+                    thetas.append(theta)
+                    transformed = transform_shape(source_2d_shapes[i], scale, tx, ty, theta)
+                    add_polygon(transformed, transformed_polygons)
 
             if len(transformed_polygons) == 0:
                 return 1e10
@@ -5479,25 +5727,62 @@ class ContourMeshMixin:
 
             # Regularization 1: Penalize overlap between sources
             overlap_cost = 0.0
+            gap_cost = 0.0  # Penalize gaps between sources (reward closeness)
             if len(transformed_polygons) >= 2:
                 total_individual_area = sum(p.area for p in transformed_polygons)
                 # Overlap = sum of individual areas - union area
                 overlap_cost = total_individual_area - union_area
 
+                # Gap cost: sum of minimum distances between all pairs of sources
+                for i in range(len(transformed_polygons)):
+                    for j in range(i + 1, len(transformed_polygons)):
+                        try:
+                            dist = transformed_polygons[i].distance(transformed_polygons[j])
+                            gap_cost += dist
+                        except:
+                            pass
+
             # Regularization 2: Penalize deviation from initial rotation
             rotation_cost = sum(abs(t - initial_rotations[i]) for i, t in enumerate(thetas))
 
-            # Weights for regularization (relative to target_area for scale invariance)
-            overlap_weight = 0.5  # Penalize overlap
-            rotation_weight = 0.01 * target_area  # Penalize rotation (scaled)
+            # Regularization 3: Penalize deviation from source area ratios
+            # Compute intersection of each transformed source with target
+            area_ratio_cost = 0.0
+            if len(transformed_polygons) >= 2:
+                divided_areas = []
+                for poly in transformed_polygons:
+                    try:
+                        inter = poly.intersection(target_poly)
+                        divided_areas.append(inter.area)
+                    except:
+                        divided_areas.append(0.0)
+                total_divided = sum(divided_areas)
+                if total_divided > 0:
+                    divided_ratios = [a / total_divided for a in divided_areas]
+                    # Sum of squared differences between source and divided ratios
+                    area_ratio_cost = sum((sr - dr) ** 2 for sr, dr in zip(source_area_ratios, divided_ratios))
 
-            return coverage_cost + overlap_weight * overlap_cost + rotation_weight * rotation_cost
+            # Weights for regularization (relative to target_area for scale invariance)
+            overlap_weight = 100.0  # Force no overlap (very high penalty)
+            gap_weight = 1.0  # Encourage sources to be close/adjacent
+            rotation_weight = 0.01 * target_area  # Penalize rotation (scaled)
+            area_ratio_weight = 10.0 * target_area  # Penalize area ratio deviation
+
+            return coverage_cost + overlap_weight * overlap_cost + gap_weight * gap_cost + rotation_weight * rotation_cost + area_ratio_weight * area_ratio_cost
 
         # ========== Step 4: Build initial configuration ==========
         # Use computed translations and rotations that align source basis with target basis
-        x0 = [1.0]  # Initial scale
-        for i, (tx, ty) in enumerate(initial_translations):
-            x0.extend([tx, ty, initial_rotations[i]])
+        if use_separate_transforms:
+            # params: [scale0, tx0, ty0, theta0, scale1, tx1, ty1, theta1, ...]
+            # Each source has its own transform
+            x0 = []
+            for i, (tx, ty) in enumerate(initial_translations):
+                x0.extend([1.0, tx, ty, initial_rotations[i]])
+        else:
+            # params: [scale, delta_tx, delta_ty, delta_theta]
+            # Sources move together - deltas are offsets from initial positions
+            # Start with no offset (delta = 0)
+            x0 = [1.0, 0.0, 0.0, 0.0]
 
         init_cost = objective(x0)
         print(f"  [BP Transform] initial cost={init_cost:.4f}")
@@ -5511,24 +5796,41 @@ class ContourMeshMixin:
         )
 
         optimal_params = result.x
-        optimal_scale = optimal_params[0]
         print(f"  [BP Transform] optimization: success={result.success}, final_cost={result.fun:.4f}")
-        print(f"  [BP Transform] scale={optimal_scale:.4f}")
 
         # ========== Step 6: Get final transformed source shapes ==========
         final_transformed = []
-        for i in range(n_pieces):
-            tx = optimal_params[1 + i * 3]
-            ty = optimal_params[1 + i * 3 + 1]
-            theta = optimal_params[1 + i * 3 + 2]
-            transformed = transform_shape(source_2d_shapes[i], optimal_scale, tx, ty, theta)
-            final_transformed.append(transformed)
-            print(f"  [BP Transform] piece {i}: tx={tx:.4f}, ty={ty:.4f}, theta={np.degrees(theta):.1f}°")
+        optimal_scales = []
+        if use_separate_transforms:
+            for i in range(n_pieces):
+                scale = optimal_params[i * 4]
+                tx = optimal_params[i * 4 + 1]
+                ty = optimal_params[i * 4 + 2]
+                theta = optimal_params[i * 4 + 3]
+                optimal_scales.append(scale)
+                transformed = transform_shape(source_2d_shapes[i], scale, tx, ty, theta)
+                final_transformed.append(transformed)
+                print(f"  [BP Transform] piece {i}: scale={scale:.4f}, tx={tx:.4f}, ty={ty:.4f}, theta={np.degrees(theta):.1f}°")
+        else:
+            # Common transform - sources move together with same delta
+            common_scale = optimal_params[0]
+            delta_tx = optimal_params[1]
+            delta_ty = optimal_params[2]
+            delta_theta = optimal_params[3]
+            print(f"  [BP Transform] common: scale={common_scale:.4f}, delta_tx={delta_tx:.4f}, delta_ty={delta_ty:.4f}, delta_theta={np.degrees(delta_theta):.1f}°")
+            for i in range(n_pieces):
+                tx = initial_translations[i][0] + delta_tx
+                ty = initial_translations[i][1] + delta_ty
+                theta = initial_rotations[i] + delta_theta
+                optimal_scales.append(common_scale)
+                transformed = transform_shape(source_2d_shapes[i], common_scale, tx, ty, theta)
+                final_transformed.append(transformed)
+                print(f"  [BP Transform] piece {i}: tx={tx:.4f}, ty={ty:.4f}, theta={np.degrees(theta):.1f}°")
 
         # ========== Step 6.5: Save visualization for debugging ==========
         self._save_bp_transform_visualization(
             target_2d, target_poly, source_2d_shapes, final_transformed,
-            stream_indices, optimal_scale
+            stream_indices, optimal_scales, initial_translations, initial_rotations
         )
 
         # ========== Step 7: Assign target vertices by distance ==========
@@ -5559,11 +5861,26 @@ class ContourMeshMixin:
         return new_contours
 
     def _save_bp_transform_visualization(self, target_2d, target_poly, source_2d_shapes,
-                                         final_transformed, stream_indices, scale):
+                                         final_transformed, stream_indices, scales,
+                                         initial_translations, initial_rotations):
         """
         Save visualization of BP transform optimization result.
-        Shows target contour, original sources, and transformed sources.
+        Shows target contour, original sources, initial configuration, and transformed sources.
+        scales: list of scale values, one per source
         """
+        # Store visualization data for later display via BP Viz button
+        if not hasattr(self, '_bp_viz_data'):
+            self._bp_viz_data = []
+        self._bp_viz_data.append({
+            'target_2d': np.array(target_2d),
+            'source_2d_shapes': [np.array(s) for s in source_2d_shapes],
+            'final_transformed': [np.array(f) for f in final_transformed],
+            'stream_indices': list(stream_indices),
+            'scales': list(scales),
+            'initial_translations': [np.array(t) for t in initial_translations],
+            'initial_rotations': list(initial_rotations),
+        })
+
         import matplotlib
         matplotlib.use('Agg')  # Non-interactive backend
         import matplotlib.pyplot as plt
@@ -5576,21 +5893,46 @@ class ContourMeshMixin:
         # Colors for different pieces
         colors = plt.cm.tab10(np.linspace(0, 1, len(stream_indices)))
 
-        # ========== Left plot: Original sources (before transform) ==========
+        # Helper to transform shape (same logic as in optimization)
+        def transform_shape(shape_2d, scale, tx, ty, theta):
+            cos_t, sin_t = np.cos(theta), np.sin(theta)
+            rot = np.array([[cos_t, -sin_t], [sin_t, cos_t]])
+            scaled = shape_2d * scale
+            rotated = scaled @ rot.T
+            return rotated + np.array([tx, ty])
+
+        # Compute initial transformed shapes (scale=1.0, initial translations and rotations)
+        initial_transformed = []
+        for i, src_2d in enumerate(source_2d_shapes):
+            tx, ty = initial_translations[i]
+            theta = initial_rotations[i]
+            transformed = transform_shape(src_2d, 1.0, tx, ty, theta)  # scale=1.0 for initial
+            initial_transformed.append(transformed)
+
+        # ========== Left plot: Original sources + Initial configuration ==========
         ax1 = axes[0]
-        ax1.set_title(f'Original Source Contours (scale={scale:.3f})')
+        ax1.set_title(f'Original (dashed) + Initial Config (solid)')
 
         # Plot target contour
         target_arr = np.array(target_2d)
         ax1.plot(target_arr[:, 0], target_arr[:, 1], 'k-', linewidth=2, label='Target')
         ax1.fill(target_arr[:, 0], target_arr[:, 1], alpha=0.1, color='gray')
 
-        # Plot original source contours (centered at origin)
+        # Plot original source contours (centered at origin, dashed)
         for i, src_2d in enumerate(source_2d_shapes):
             if len(src_2d) >= 3:
                 src_arr = np.array(src_2d)
                 ax1.plot(src_arr[:, 0], src_arr[:, 1], '--', color=colors[i],
-                        linewidth=1.5, label=f'Source {stream_indices[i]} (orig)')
+                        linewidth=1.5, alpha=0.5, label=f'Src {stream_indices[i]} (orig)')
+
+        # Plot initial configuration (after initial translation/rotation, solid thin line)
+        for i, init_trans in enumerate(initial_transformed):
+            if len(init_trans) >= 3:
+                init_arr = np.array(init_trans)
+                init_closed = np.vstack([init_arr, init_arr[0]])
+                ax1.plot(init_closed[:, 0], init_closed[:, 1], '-', color=colors[i],
+                        linewidth=1.5, label=f'Src {stream_indices[i]} (init)')
+                ax1.fill(init_arr[:, 0], init_arr[:, 1], alpha=0.2, color=colors[i])
 
         ax1.set_xlabel('X (target basis_x)')
         ax1.set_ylabel('Y (target basis_y)')
@@ -5598,9 +5940,10 @@ class ContourMeshMixin:
         ax1.set_aspect('equal')
         ax1.grid(True, alpha=0.3)
 
-        # ========== Right plot: Transformed sources ==========
+        # ========== Right plot: Transformed sources (after optimization) ==========
         ax2 = axes[1]
-        ax2.set_title('Transformed Sources vs Target')
+        scales_str = ', '.join([f'{s:.2f}' for s in scales])
+        ax2.set_title(f'Final Result (scales=[{scales_str}])')
 
         # Plot target contour
         ax2.plot(target_arr[:, 0], target_arr[:, 1], 'k-', linewidth=2, label='Target')
@@ -5613,7 +5956,7 @@ class ContourMeshMixin:
                 # Close the polygon for plotting
                 trans_closed = np.vstack([trans_arr, trans_arr[0]])
                 ax2.plot(trans_closed[:, 0], trans_closed[:, 1], '-', color=colors[i],
-                        linewidth=2, label=f'Source {stream_indices[i]} (transformed)')
+                        linewidth=2, label=f'Src {stream_indices[i]} (s={scales[i]:.2f})')
                 ax2.fill(trans_arr[:, 0], trans_arr[:, 1], alpha=0.3, color=colors[i])
 
         ax2.set_xlabel('X (target basis_x)')
@@ -5622,23 +5965,37 @@ class ContourMeshMixin:
         ax2.set_aspect('equal')
         ax2.grid(True, alpha=0.3)
 
-        # Save figure
-        os.makedirs('bp_viz', exist_ok=True)
-
-        # Use a counter to save multiple visualizations
-        if not hasattr(self, '_bp_viz_counter'):
-            self._bp_viz_counter = 0
-        self._bp_viz_counter += 1
-
-        obj_name = getattr(self, 'name', getattr(self, 'mesh_name', 'unknown'))
-        filepath = f'bp_viz/bp_transform_{obj_name}_{self._bp_viz_counter:03d}.png'
         plt.tight_layout()
-        plt.savefig(filepath, dpi=100)
-        plt.close(fig)
 
-        # Only print for first few
-        if self._bp_viz_counter <= 3:
-            print(f"  [BP Transform] Saved visualization: {filepath}")
+        # Check if we should show in window or save to file
+        show_in_window = getattr(self, 'bp_viz_show_window', False)
+
+        if show_in_window:
+            # Show in non-blocking window
+            plt.ion()
+            plt.show()
+            plt.pause(0.1)
+        else:
+            # Save figure to file
+            os.makedirs('bp_viz', exist_ok=True)
+
+            # Use a counter to save multiple visualizations
+            if not hasattr(self, '_bp_viz_counter'):
+                self._bp_viz_counter = 0
+            self._bp_viz_counter += 1
+
+            # Get muscle name from stored value or fallback
+            obj_name = getattr(self, '_muscle_name', None)
+            if obj_name is None:
+                obj_name = getattr(self, 'name', getattr(self, 'mesh_name', 'unknown'))
+
+            filepath = f'bp_viz/bp_transform_{obj_name}_{self._bp_viz_counter:03d}.png'
+            plt.savefig(filepath, dpi=100)
+            plt.close(fig)
+
+            # Only print for first few
+            if self._bp_viz_counter <= 3:
+                print(f"  [BP Transform] Saved visualization: {filepath}")
 
     def _cut_contour_for_streams(self, contour, bp, projected_refs, stream_indices):
         """
