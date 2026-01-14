@@ -2422,13 +2422,19 @@ class ContourMeshMixin:
                 print(f"    Stream {stream_idx}: {len(stream)} contours")
 
                 # Check if any non-square-like exists
-                non_square_indices = [i for i, bp in enumerate(stream) if not bp.get('square_like', False)]
-                square_indices = [i for i, bp in enumerate(stream) if bp.get('square_like', False)]
-                print(f"      Non-square indices: {non_square_indices[:5]}...{non_square_indices[-5:] if len(non_square_indices) > 5 else ''}")
-                print(f"      Square indices: {square_indices[:5]}...{square_indices[-5:] if len(square_indices) > 5 else ''}")
+                # Cut contours (is_cut=True) are treated as references, not smoothed
+                # Reference indices: non-square-like OR cut contours
+                reference_indices = [i for i, bp in enumerate(stream)
+                                     if not bp.get('square_like', False) or bp.get('is_cut', False)]
+                # Indices to smooth: square-like AND not cut
+                smooth_indices = [i for i, bp in enumerate(stream)
+                                  if bp.get('square_like', False) and not bp.get('is_cut', False)]
+                cut_count = sum(1 for bp in stream if bp.get('is_cut', False))
+                print(f"      Reference indices: {len(reference_indices)} (incl. {cut_count} cut)")
+                print(f"      Smooth indices: {smooth_indices[:5]}...{smooth_indices[-5:] if len(smooth_indices) > 5 else ''}")
 
-                if len(non_square_indices) == 0:
-                    # All square-like - find most non-square-like by aspect ratio
+                if len(reference_indices) == 0 and len(smooth_indices) > 0:
+                    # All square-like and no cut - find most non-square-like by aspect ratio
                     print(f"      All square-like, finding reference...")
                     best_idx = 0
                     best_ratio_diff = 0
@@ -2448,33 +2454,32 @@ class ContourMeshMixin:
 
                     # Mark this one as non-square-like (reference)
                     stream[best_idx]['square_like'] = False
-                    non_square_indices = [best_idx]
+                    reference_indices = [best_idx]
+                    smooth_indices = [i for i in smooth_indices if i != best_idx]
                     print(f"      Selected contour {best_idx} as reference (ratio_diff={best_ratio_diff:.3f})")
 
-                # ========== Interpolate square-like contours (basis_x only) ==========
-                for i, bp in enumerate(stream):
-                    if not bp.get('square_like', False):
-                        continue  # Skip non-square-like for interpolation
-
+                # ========== Interpolate square-like (non-cut) contours (basis_x only) ==========
+                for i in smooth_indices:
+                    bp = stream[i]
                     curr_mean = bp['mean']
                     basis_z = bp['basis_z']
 
-                    # Find prev non-square-like
+                    # Find prev reference (non-square-like OR cut)
                     prev_idx = None
                     prev_dist = np.inf
                     for j in range(i - 1, -1, -1):
-                        if not stream[j].get('square_like', False):
+                        if j in reference_indices:
                             dist = np.linalg.norm(curr_mean - stream[j]['mean'])
                             if dist < prev_dist:
                                 prev_dist = dist
                                 prev_idx = j
                             break  # Take closest one going backward
 
-                    # Find next non-square-like
+                    # Find next reference (non-square-like OR cut)
                     next_idx = None
                     next_dist = np.inf
                     for j in range(i + 1, len(stream)):
-                        if not stream[j].get('square_like', False):
+                        if j in reference_indices:
                             dist = np.linalg.norm(curr_mean - stream[j]['mean'])
                             if dist < next_dist:
                                 next_dist = dist
@@ -4873,7 +4878,7 @@ class ContourMeshMixin:
                             is_first_division = stream_combo not in cut_stream_combos
                             cut_stream_combos.add(stream_combo)
 
-                            cut_contours = self._cut_contour_bp_transform(
+                            cut_contours, cutting_info = self._cut_contour_bp_transform(
                                 target_contour, target_bp, source_contours, source_bps, streams_for_contour,
                                 is_first_division=is_first_division
                             )
@@ -4881,10 +4886,12 @@ class ContourMeshMixin:
                             cut_contours = self._cut_contour_mesh_aware(
                                 target_contour, target_bp, projected_refs, streams_for_contour
                             )
+                            cutting_info = None
                         else:
                             cut_contours = self._cut_contour_for_streams(
                                 target_contour, target_bp, projected_refs, streams_for_contour
                             )
+                            cutting_info = None
 
                         # Assign cut pieces to streams
                         for idx, stream_i in enumerate(streams_for_contour):
@@ -4896,6 +4903,29 @@ class ContourMeshMixin:
                                 prev_bounding_plane=stream_bounding_planes[stream_i][-1],
                                 bounding_plane_info_orig=target_bp
                             )
+
+                            # Apply cutting info to bounding plane if available
+                            if cutting_info is not None:
+                                new_bp['is_cut'] = True
+                                # Preserve original z-axis
+                                original_z = cutting_info['original_z']
+                                new_bp['basis_z'] = original_z.copy()
+
+                                # Set x-axis perpendicular to cutting line
+                                cutting_line_3d = cutting_info['cutting_line_3d']
+                                if cutting_line_3d is not None:
+                                    # x-axis is perpendicular to cutting line within the plane
+                                    # The cutting line is already in the plane, so we use cross product
+                                    new_x = np.cross(original_z, cutting_line_3d)
+                                    new_x_norm = np.linalg.norm(new_x)
+                                    if new_x_norm > 1e-10:
+                                        new_x = new_x / new_x_norm
+                                        new_y = np.cross(original_z, new_x)
+                                        new_y = new_y / (np.linalg.norm(new_y) + 1e-10)
+                                        new_bp['basis_x'] = new_x
+                                        new_bp['basis_y'] = new_y
+                                        print(f"    Stream {stream_i}: set x-axis perpendicular to cutting line")
+
                             stream_contours[stream_i].append(cut_contour)
                             stream_bounding_planes[stream_i].append(new_bp)
 
@@ -4966,11 +4996,21 @@ class ContourMeshMixin:
                         bp_stream[i]['basis_y'] = -bp_stream[i]['basis_y']
 
             # BP smoothing: interpolate basis_x for square-like contours
-            non_square_indices = [i for i, bp in enumerate(bp_stream) if not bp.get('square_like', False)]
-            square_indices = [i for i, bp in enumerate(bp_stream) if bp.get('square_like', False)]
+            # Cut contours (is_cut=True) are NOT smoothed but ARE used as references
+            # Reference contours: non-square-like OR cut contours
+            reference_indices = [i for i, bp in enumerate(bp_stream)
+                                 if not bp.get('square_like', False) or bp.get('is_cut', False)]
+            # Contours to smooth: square-like AND not cut
+            smooth_indices = [i for i, bp in enumerate(bp_stream)
+                              if bp.get('square_like', False) and not bp.get('is_cut', False)]
 
-            if len(non_square_indices) == 0 and len(square_indices) > 0:
-                # All square-like - find most non-square-like as reference
+            # Count cut contours
+            cut_count = sum(1 for bp in bp_stream if bp.get('is_cut', False))
+            if cut_count > 0:
+                print(f"  Stream {stream_i}: {cut_count} cut contours (used as references, not smoothed)")
+
+            if len(reference_indices) == 0 and len(smooth_indices) > 0:
+                # All square-like and no cut - find most non-square-like as reference
                 best_idx = 0
                 best_ratio_diff = 0
                 for i, bp in enumerate(bp_stream):
@@ -4986,29 +5026,30 @@ class ContourMeshMixin:
                             best_ratio_diff = ratio_diff
                             best_idx = i
                 bp_stream[best_idx]['square_like'] = False
-                non_square_indices = [best_idx]
+                reference_indices = [best_idx]
+                smooth_indices = [i for i in smooth_indices if i != best_idx]
                 print(f"  Stream {stream_i}: all square-like, ref={best_idx}")
 
-            # Interpolate square-like contours
-            for i in square_indices:
+            # Interpolate square-like (non-cut) contours
+            for i in smooth_indices:
                 bp = bp_stream[i]
                 curr_mean = bp['mean']
                 basis_z = bp['basis_z']
 
-                # Find prev non-square-like
+                # Find prev reference (non-square-like OR cut)
                 prev_idx = None
                 prev_dist = np.inf
                 for j in range(i - 1, -1, -1):
-                    if not bp_stream[j].get('square_like', False):
+                    if j in reference_indices:
                         prev_dist = np.linalg.norm(curr_mean - bp_stream[j]['mean'])
                         prev_idx = j
                         break
 
-                # Find next non-square-like
+                # Find next reference (non-square-like OR cut)
                 next_idx = None
                 next_dist = np.inf
                 for j in range(i + 1, stream_len):
-                    if not bp_stream[j].get('square_like', False):
+                    if j in reference_indices:
                         next_dist = np.linalg.norm(curr_mean - bp_stream[j]['mean'])
                         next_idx = j
                         break
@@ -5055,8 +5096,8 @@ class ContourMeshMixin:
                 bp['basis_x'] = new_basis_x
                 bp['basis_y'] = new_basis_y
 
-            if len(square_indices) > 0:
-                print(f"  Stream {stream_i}: smoothed {len(square_indices)} square-like contours")
+            if len(smooth_indices) > 0:
+                print(f"  Stream {stream_i}: smoothed {len(smooth_indices)} square-like contours")
 
         # Update visualization: convert to [stream_i][level_i] format
         self.contours = self.stream_contours
@@ -5959,7 +6000,81 @@ class ContourMeshMixin:
                 final_transformed.append(transformed)
                 print(f"  [BP Transform] piece {i}: transformed around combined center")
 
-        # ========== Step 6.5: Check adjacency between transformed sources ==========
+        # ========== Step 6.5: Find cutting line ==========
+        # For 2 pieces, find the line that separates the two transformed source contours
+        cutting_line_2d = None  # (point, direction) in 2D target plane
+        cutting_line_3d = None  # direction vector in 3D for bounding plane creation
+
+        if n_pieces == 2:
+            try:
+                poly_0 = Polygon(final_transformed[0]) if len(final_transformed[0]) >= 3 else None
+                poly_1 = Polygon(final_transformed[1]) if len(final_transformed[1]) >= 3 else None
+
+                if poly_0 and poly_1:
+                    if not poly_0.is_valid:
+                        poly_0 = poly_0.buffer(0)
+                    if not poly_1.is_valid:
+                        poly_1 = poly_1.buffer(0)
+
+                    if not use_separate_transforms:
+                        # COMMON mode: Find the natural boundary line where two sources meet
+                        # The boundary is where the two polygons touch/overlap
+                        try:
+                            intersection = poly_0.intersection(poly_1)
+                            if not intersection.is_empty:
+                                # They overlap - the boundary is the intersection
+                                if hasattr(intersection, 'exterior'):
+                                    # Polygon intersection
+                                    coords = np.array(intersection.exterior.coords)
+                                    if len(coords) >= 2:
+                                        # Use the longest edge of intersection as cutting line
+                                        max_len = 0
+                                        best_dir = None
+                                        for i in range(len(coords) - 1):
+                                            edge = coords[i + 1] - coords[i]
+                                            edge_len = np.linalg.norm(edge)
+                                            if edge_len > max_len:
+                                                max_len = edge_len
+                                                best_dir = edge / (edge_len + 1e-10)
+                                        if best_dir is not None:
+                                            centroid_mid = (centroids[0] + centroids[1]) / 2
+                                            cutting_line_2d = (centroid_mid, best_dir)
+                                elif hasattr(intersection, 'coords'):
+                                    # LineString intersection (they just touch)
+                                    coords = np.array(intersection.coords)
+                                    if len(coords) >= 2:
+                                        direction = coords[-1] - coords[0]
+                                        direction = direction / (np.linalg.norm(direction) + 1e-10)
+                                        mid_pt = coords.mean(axis=0)
+                                        cutting_line_2d = (mid_pt, direction)
+                        except Exception as e:
+                            pass
+
+                    if cutting_line_2d is None:
+                        # SEPARATE mode or COMMON mode fallback:
+                        # Use perpendicular bisector between centroids
+                        centroid_vec = centroids[1] - centroids[0]
+                        centroid_dist = np.linalg.norm(centroid_vec)
+                        if centroid_dist > 1e-10:
+                            centroid_dir = centroid_vec / centroid_dist
+                            # Cutting line is perpendicular to centroid direction
+                            cutting_dir = np.array([-centroid_dir[1], centroid_dir[0]])
+                            centroid_mid = (centroids[0] + centroids[1]) / 2
+                            cutting_line_2d = (centroid_mid, cutting_dir)
+                            print(f"  [BP Transform] cutting line: perpendicular bisector at ({centroid_mid[0]:.4f}, {centroid_mid[1]:.4f})")
+
+                # Convert cutting line direction to 3D
+                if cutting_line_2d is not None:
+                    cut_dir_2d = cutting_line_2d[1]
+                    # The cutting line direction in 3D: expressed in target basis
+                    cutting_line_3d = cut_dir_2d[0] * target_x + cut_dir_2d[1] * target_y
+                    cutting_line_3d = cutting_line_3d / (np.linalg.norm(cutting_line_3d) + 1e-10)
+                    print(f"  [BP Transform] cutting line 3D direction: {cutting_line_3d}")
+
+            except Exception as e:
+                print(f"  [BP Transform] WARNING: Could not find cutting line: {e}")
+
+        # Check adjacency between transformed sources
         if len(final_transformed) >= 2:
             for i in range(len(final_transformed)):
                 for j in range(i + 1, len(final_transformed)):
@@ -5984,36 +6099,13 @@ class ContourMeshMixin:
                     except Exception as e:
                         pass  # Silently skip invalid polygon checks
 
-        # ========== Step 7: Assign target vertices by distance ==========
-        # Strategy: if vertex is close to a source contour, assign to it
-        # If far from all sources (ambiguous), use centroid-based assignment
+        # ========== Step 7: Assign target vertices by cutting line ==========
+        # Strategy: Use cutting line to assign vertices based on which side they're on
+        # This is cleaner than the hybrid contour proximity + centroid approach
 
-        # Compute centroids of transformed sources
-        centroids = []
-        for piece_idx, transformed in enumerate(final_transformed):
-            if len(transformed) > 0:
-                centroid = np.mean(transformed, axis=0)
-                centroids.append(centroid)
-                print(f"  [BP Transform] piece {piece_idx} centroid: ({centroid[0]:.4f}, {centroid[1]:.4f})")
-            else:
-                centroids.append(np.array(initial_translations[piece_idx]))
-                print(f"  [BP Transform] WARNING: piece {piece_idx} has no vertices, using initial position")
-
-        # Compute threshold for "close" - use fraction of centroid distance
-        if len(centroids) >= 2:
-            centroid_dist = np.linalg.norm(centroids[0] - centroids[1])
-            close_threshold = centroid_dist * 0.3  # vertex within 30% of centroid distance
-        else:
-            close_threshold = np.inf
-
-        # First pass: assign based on distance to source contours
-        assignments = []
+        # First compute distances for boundary interpolation
         all_distances = []  # distances to each source for interpolation
-        n_close = 0
-        n_centroid = 0
-
         for v_idx, v_2d in enumerate(target_2d):
-            # Compute distance to nearest point on each source contour
             contour_dists = []
             for piece_idx, transformed in enumerate(final_transformed):
                 if len(transformed) > 0:
@@ -6022,27 +6114,46 @@ class ContourMeshMixin:
                     contour_dists.append(min_dist)
                 else:
                     contour_dists.append(np.inf)
-
             all_distances.append(contour_dists)
 
-            # Find closest source contour
-            min_contour_dist = min(contour_dists)
-            closest_piece = contour_dists.index(min_contour_dist)
+        # Assign vertices based on cutting line
+        assignments = []
 
-            # Check if clearly close to one source
-            if min_contour_dist < close_threshold:
-                # Close to a source - assign to it
-                assignments.append(closest_piece)
-                n_close += 1
-            else:
-                # Far from all sources - use centroid distance
+        if cutting_line_2d is not None and n_pieces == 2:
+            # Use cutting line for assignment
+            line_point, line_dir = cutting_line_2d
+            # Normal to the cutting line (perpendicular)
+            line_normal = np.array([-line_dir[1], line_dir[0]])
+
+            # Determine which side each centroid is on
+            centroid_sides = []
+            for c in centroids:
+                side = np.dot(c - line_point, line_normal)
+                centroid_sides.append(side)
+
+            # Ensure centroid 0 is on the negative side (for consistent assignment)
+            if centroid_sides[0] > 0:
+                line_normal = -line_normal
+
+            # Assign each vertex based on which side of the line it's on
+            for v_idx, v_2d in enumerate(target_2d):
+                side = np.dot(v_2d - line_point, line_normal)
+                if side < 0:
+                    assignments.append(0)
+                else:
+                    assignments.append(1)
+
+            print(f"  [BP Transform] assignment: {assignments.count(0)} to piece 0, {assignments.count(1)} to piece 1 (by cutting line)")
+
+        else:
+            # Fallback to centroid-based assignment for n_pieces != 2 or no cutting line
+            for v_idx, v_2d in enumerate(target_2d):
                 centroid_dists = [np.linalg.norm(v_2d - c) for c in centroids]
                 min_centroid_dist = min(centroid_dists)
                 assigned_piece = centroid_dists.index(min_centroid_dist)
                 assignments.append(assigned_piece)
-                n_centroid += 1
 
-        print(f"  [BP Transform] assignment: {n_close} by contour proximity, {n_centroid} by centroid")
+            print(f"  [BP Transform] assignment by centroid: {[assignments.count(i) for i in range(n_pieces)]}")
 
         # Remove islands: for 2 pieces, find the 2 best split points
         # This guarantees exactly 2 contiguous regions on a closed contour
@@ -6196,7 +6307,19 @@ class ContourMeshMixin:
         )
 
         print(f"  [BP Transform] result: {[len(c) for c in new_contours]} vertices per piece")
-        return new_contours
+
+        # Return cut contours along with cutting info for bounding plane creation
+        # cutting_info contains:
+        #   - cutting_line_3d: the cutting line direction in 3D (for x-axis perpendicular)
+        #   - original_z: the original target bounding plane z-axis (to preserve)
+        #   - is_cut: True to mark these contours as cut (don't smooth them)
+        cutting_info = {
+            'cutting_line_3d': cutting_line_3d,
+            'original_z': target_bp['basis_z'].copy(),
+            'is_cut': True
+        }
+
+        return new_contours, cutting_info
 
     def _save_bp_transform_visualization(self, target_2d, target_poly, source_2d_shapes,
                                          final_transformed, stream_indices, scales,
