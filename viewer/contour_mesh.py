@@ -5666,6 +5666,12 @@ class ContourMeshMixin:
         use_separate_transforms = is_first_division
         print(f"  [BP Transform] is_first_division={is_first_division}, use_separate_transforms={use_separate_transforms}")
 
+        # For common mode, compute combined center of all sources
+        # All sources will rotate/scale around this center
+        if not use_separate_transforms:
+            combined_center = np.mean(initial_translations, axis=0)
+            print(f"  [BP Transform] combined center: ({combined_center[0]:.4f}, {combined_center[1]:.4f})")
+
         def add_polygon(transformed, polygon_list):
             """Helper to create and add a polygon from transformed points."""
             if len(transformed) >= 3:
@@ -5703,25 +5709,37 @@ class ContourMeshMixin:
                     transformed = transform_shape(source_2d_shapes[i], scale, tx, ty, theta)
                     add_polygon(transformed, transformed_polygons)
             else:
-                # Common transform - sources move together maintaining relative positions
-                # params = [scale, delta_tx, delta_ty, delta_theta]
+                # Common transform - sources move as ONE rigid body
+                # params = [scale, tx, ty, theta] - transform applied to combined center
+                # All sources rotate/scale around combined_center, then translate
                 scale = params[0]
-                delta_tx = params[1]
-                delta_ty = params[2]
-                delta_theta = params[3]
+                tx = params[1]  # final x position of combined center
+                ty = params[2]  # final y position of combined center
+                theta = params[3]  # rotation around combined center
 
                 if scale <= 0:
                     return 1e10
 
+                cos_t = np.cos(theta)
+                sin_t = np.sin(theta)
+
                 for i in range(n_pieces):
-                    # Each source uses its initial position + common delta
-                    tx = initial_translations[i][0] + delta_tx
-                    ty = initial_translations[i][1] + delta_ty
-                    theta = initial_rotations[i] + delta_theta
+                    # Get source's offset from combined center
+                    offset_x = initial_translations[i][0] - combined_center[0]
+                    offset_y = initial_translations[i][1] - combined_center[1]
+
+                    # Scale and rotate the offset around combined center
+                    new_offset_x = scale * (cos_t * offset_x - sin_t * offset_y)
+                    new_offset_y = scale * (sin_t * offset_x + cos_t * offset_y)
+
+                    # Final position = new center + rotated/scaled offset
+                    final_tx = tx + new_offset_x
+                    final_ty = ty + new_offset_y
 
                     scales.append(scale)
                     thetas.append(theta)
-                    transformed = transform_shape(source_2d_shapes[i], scale, tx, ty, theta)
+                    # Transform individual shape (scale, rotate) then translate to final position
+                    transformed = transform_shape(source_2d_shapes[i], scale, final_tx, final_ty, theta)
                     add_polygon(transformed, transformed_polygons)
 
             if len(transformed_polygons) == 0:
@@ -5798,10 +5816,10 @@ class ContourMeshMixin:
             for i, (tx, ty) in enumerate(initial_translations):
                 x0.extend([1.0, tx, ty, initial_rotations[i]])
         else:
-            # params: [scale, delta_tx, delta_ty, delta_theta]
-            # Sources move together - deltas are offsets from initial positions
-            # Start with no offset (delta = 0)
-            x0 = [1.0, 0.0, 0.0, 0.0]
+            # params: [scale, tx, ty, theta]
+            # (tx, ty) = position of combined center, theta = rotation around it
+            # Start at combined_center with no rotation
+            x0 = [1.0, combined_center[0], combined_center[1], 0.0]
 
         init_cost = objective(x0)
         print(f"  [BP Transform] initial cost={init_cost:.4f}")
@@ -5831,20 +5849,33 @@ class ContourMeshMixin:
                 final_transformed.append(transformed)
                 print(f"  [BP Transform] piece {i}: scale={scale:.4f}, tx={tx:.4f}, ty={ty:.4f}, theta={np.degrees(theta):.1f}°")
         else:
-            # Common transform - sources move together with same delta
+            # Common transform - sources move as one rigid body around combined center
             common_scale = optimal_params[0]
-            delta_tx = optimal_params[1]
-            delta_ty = optimal_params[2]
-            delta_theta = optimal_params[3]
-            print(f"  [BP Transform] common: scale={common_scale:.4f}, delta_tx={delta_tx:.4f}, delta_ty={delta_ty:.4f}, delta_theta={np.degrees(delta_theta):.1f}°")
+            center_tx = optimal_params[1]  # final x position of combined center
+            center_ty = optimal_params[2]  # final y position of combined center
+            theta = optimal_params[3]      # rotation around combined center
+            print(f"  [BP Transform] common: scale={common_scale:.4f}, center=({center_tx:.4f}, {center_ty:.4f}), theta={np.degrees(theta):.1f}°")
+
+            cos_t = np.cos(theta)
+            sin_t = np.sin(theta)
+
             for i in range(n_pieces):
-                tx = initial_translations[i][0] + delta_tx
-                ty = initial_translations[i][1] + delta_ty
-                theta = initial_rotations[i] + delta_theta
+                # Get source's offset from original combined center
+                offset_x = initial_translations[i][0] - combined_center[0]
+                offset_y = initial_translations[i][1] - combined_center[1]
+
+                # Scale and rotate the offset
+                new_offset_x = common_scale * (cos_t * offset_x - sin_t * offset_y)
+                new_offset_y = common_scale * (sin_t * offset_x + cos_t * offset_y)
+
+                # Final position
+                final_tx = center_tx + new_offset_x
+                final_ty = center_ty + new_offset_y
+
                 optimal_scales.append(common_scale)
-                transformed = transform_shape(source_2d_shapes[i], common_scale, tx, ty, theta)
+                transformed = transform_shape(source_2d_shapes[i], common_scale, final_tx, final_ty, theta)
                 final_transformed.append(transformed)
-                print(f"  [BP Transform] piece {i}: tx={tx:.4f}, ty={ty:.4f}, theta={np.degrees(theta):.1f}°")
+                print(f"  [BP Transform] piece {i}: tx={final_tx:.4f}, ty={final_ty:.4f}, theta={np.degrees(theta):.1f}°")
 
         # ========== Step 6.5: Check adjacency between transformed sources ==========
         if len(final_transformed) >= 2:
