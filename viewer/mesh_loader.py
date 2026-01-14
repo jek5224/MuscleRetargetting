@@ -579,15 +579,16 @@ class MeshLoader(ContourMeshMixin, TetrahedronMeshMixin, FiberArchitectureMixin,
         glDisable(GL_LIGHTING)
         for i, bounding_planes in enumerate(self.bounding_planes):
             for j, plane_info in enumerate(bounding_planes):
-                # Check visibility: 2D structure (before find_contour_stream) or 1D (after)
+                # Check visibility based on draw_contour_stream structure
                 if self.draw_contour_stream is not None:
                     if isinstance(self.draw_contour_stream[0], (list, tuple)):
-                        # 2D: draw_contour_stream[level_idx][stream_idx]
+                        # 2D structure: draw_contour_stream[stream_idx][level_idx]
+                        # After build_fibers: bounding_planes[stream_i][level_i]
                         if i < len(self.draw_contour_stream) and j < len(self.draw_contour_stream[i]):
                             if not self.draw_contour_stream[i][j]:
                                 continue
                     else:
-                        # 1D: draw_contour_stream[stream_idx] (after find_contour_stream)
+                        # 1D: draw_contour_stream[stream_idx]
                         if not self.draw_contour_stream[i]:
                             continue
                 glPushMatrix()
