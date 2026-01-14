@@ -5768,6 +5768,8 @@ class ContourMeshMixin:
             thetas = []
             scales = []
 
+            min_scale = 0.1  # Minimum allowed scale
+
             if use_separate_transforms:
                 # Each source has its own transform (first division)
                 for i in range(n_pieces):
@@ -5778,6 +5780,8 @@ class ContourMeshMixin:
 
                     if scale <= 0:
                         return 1e10
+                    if scale < min_scale:
+                        return 1e10  # Reject scales too small
 
                     scales.append(scale)
                     thetas.append(theta)
@@ -5794,6 +5798,8 @@ class ContourMeshMixin:
 
                 if scale <= 0:
                     return 1e10
+                if scale < min_scale:
+                    return 1e10  # Reject scales too small
 
                 cos_t = np.cos(theta)
                 sin_t = np.sin(theta)
@@ -5911,11 +5917,12 @@ class ContourMeshMixin:
         print(f"  [BP Transform] optimization: success={result.success}, final_cost={result.fun:.4f}")
 
         # ========== Step 6: Get final transformed source shapes ==========
+        min_scale = 0.1  # Minimum allowed scale
         final_transformed = []
         optimal_scales = []
         if use_separate_transforms:
             for i in range(n_pieces):
-                scale = optimal_params[i * 4]
+                scale = max(optimal_params[i * 4], min_scale)  # Clamp scale
                 tx = optimal_params[i * 4 + 1]
                 ty = optimal_params[i * 4 + 2]
                 theta = optimal_params[i * 4 + 3]
@@ -5925,7 +5932,7 @@ class ContourMeshMixin:
                 print(f"  [BP Transform] piece {i}: scale={scale:.4f}, tx={tx:.4f}, ty={ty:.4f}, theta={np.degrees(theta):.1f}°")
         else:
             # Common transform - sources move as one rigid body around combined center
-            common_scale = optimal_params[0]
+            common_scale = max(optimal_params[0], min_scale)  # Clamp scale
             center_tx = optimal_params[1]  # final x position of combined center
             center_ty = optimal_params[2]  # final y position of combined center
             theta = optimal_params[3]      # rotation around combined center
