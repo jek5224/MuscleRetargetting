@@ -3963,6 +3963,9 @@ class GLFWApp():
                     'dragging': False,
                     'start_pos': None,
                     'end_pos': None,
+                    'zoom': 1.0,
+                    'pan': [0.0, 0.0],
+                    'panning': False,
                 }
 
             mouse_state = self._manual_cut_mouse[name]
@@ -3983,9 +3986,78 @@ class GLFWApp():
             target_level = obj._manual_cut_data['target_level']
             source_level = obj._manual_cut_data['source_level']
 
+            # Compute initial cut line from minimum distance between sources
+            # Collect all pairs, sort by distance, pick minimum non-zero (skip shared boundary)
+            if 'initial_line' not in obj._manual_cut_data and len(source_2d_list) >= 2:
+                src0 = source_2d_list[0]
+                src1 = source_2d_list[1]
+                n0, n1 = len(src0), len(src1)
+
+                # Collect all distance pairs
+                all_pairs = []  # (distance, pt0, pt1)
+
+                # Vertex-vertex pairs
+                for i0, v0 in enumerate(src0):
+                    for i1, v1 in enumerate(src1):
+                        dist = np.linalg.norm(v0 - v1)
+                        all_pairs.append((dist, v0.copy(), v1.copy()))
+
+                # Vertex-edge pairs (src0 vertex to src1 edge)
+                for i0, v in enumerate(src0):
+                    for j in range(n1):
+                        e0, e1 = src1[j], src1[(j + 1) % n1]
+                        edge_vec = e1 - e0
+                        edge_len_sq = np.dot(edge_vec, edge_vec)
+                        if edge_len_sq < 1e-10:
+                            continue
+                        t = np.clip(np.dot(v - e0, edge_vec) / edge_len_sq, 0, 1)
+                        closest = e0 + t * edge_vec
+                        dist = np.linalg.norm(v - closest)
+                        all_pairs.append((dist, v.copy(), closest.copy()))
+
+                # Vertex-edge pairs (src1 vertex to src0 edge)
+                for i1, v in enumerate(src1):
+                    for j in range(n0):
+                        e0, e1 = src0[j], src0[(j + 1) % n0]
+                        edge_vec = e1 - e0
+                        edge_len_sq = np.dot(edge_vec, edge_vec)
+                        if edge_len_sq < 1e-10:
+                            continue
+                        t = np.clip(np.dot(v - e0, edge_vec) / edge_len_sq, 0, 1)
+                        closest = e0 + t * edge_vec
+                        dist = np.linalg.norm(v - closest)
+                        all_pairs.append((dist, closest.copy(), v.copy()))
+
+                # Sort by distance and take minimum
+                all_pairs.sort(key=lambda x: x[0])
+
+                best_pt0, best_pt1 = None, None
+                if all_pairs:
+                    dist, best_pt0, best_pt1 = all_pairs[0]
+                    print(f"  Initial cut line: min distance = {dist:.6f}")
+
+                if best_pt0 is not None and best_pt1 is not None:
+                    # Cut line passes through the minimum distance pair
+                    cut_dir = best_pt1 - best_pt0
+                    if np.linalg.norm(cut_dir) > 1e-10:
+                        cut_dir = cut_dir / np.linalg.norm(cut_dir)
+                    else:
+                        cut_dir = np.array([1.0, 0.0])
+
+                    # Extend line to cross target contour
+                    mid_pt = (best_pt0 + best_pt1) / 2
+                    extent = np.max(target_2d.max(axis=0) - target_2d.min(axis=0)) * 2
+                    line_start = tuple(mid_pt - cut_dir * extent)
+                    line_end = tuple(mid_pt + cut_dir * extent)
+                    obj._manual_cut_data['initial_line'] = (line_start, line_end)
+                    # Set as initial cut line
+                    if obj._manual_cut_line is None:
+                        obj._manual_cut_line = (line_start, line_end)
+
             imgui.text(f"Target level: {target_level} (1 contour)")
             imgui.text(f"Source level: {source_level} ({len(source_2d_list)} contours)")
-            imgui.text("Draw a line to cut the target contour")
+            imgui.text("Draw a line to cut. Scroll to zoom, middle-drag to pan.")
+            imgui.text(f"Zoom: {mouse_state['zoom']:.1f}x")
             imgui.separator()
 
             # Compute bounds for normalization (only target contour)
@@ -4001,18 +4073,27 @@ class GLFWApp():
             cursor_pos = imgui.get_cursor_screen_pos()
             x0, y0 = cursor_pos[0] + padding, cursor_pos[1] + padding
 
-            # Coordinate transform functions
+            # Get zoom and pan from mouse state
+            zoom = mouse_state['zoom']
+            pan = mouse_state['pan']
+
+            # Coordinate transform functions (with zoom and pan)
             def to_screen(p, x0, y0, canvas_size):
                 center = (min_xy + max_xy) / 2
                 normalized = (np.array(p) - center) / max_range + 0.5
+                # Apply zoom and pan
+                normalized = (normalized - 0.5) * zoom + 0.5 + np.array(pan)
                 return (x0 + normalized[0] * canvas_size,
                         y0 + (1.0 - normalized[1]) * canvas_size)  # Flip Y
 
             def from_screen(sx, sy, x0, y0, canvas_size):
                 normalized_x = (sx - x0) / canvas_size
                 normalized_y = 1.0 - (sy - y0) / canvas_size  # Flip Y back
+                # Reverse zoom and pan
+                normalized = np.array([normalized_x, normalized_y])
+                normalized = (normalized - 0.5 - np.array(pan)) / zoom + 0.5
                 center = (min_xy + max_xy) / 2
-                return center + (np.array([normalized_x, normalized_y]) - 0.5) * max_range
+                return center + (normalized - 0.5) * max_range
 
             def find_line_contour_intersections(line_start, line_end, contour_2d):
                 """Find intersection points of a line with a contour polygon."""
@@ -4069,6 +4150,39 @@ class GLFWApp():
             # Handle mouse interaction for drawing line
             mouse_pos = imgui.get_mouse_pos()
 
+            # Mouse wheel zoom
+            if canvas_hovered:
+                io = imgui.get_io()
+                if io.mouse_wheel != 0:
+                    zoom_factor = 1.1 if io.mouse_wheel > 0 else 0.9
+                    # Zoom towards mouse position
+                    mouse_norm_x = (mouse_pos[0] - x0) / canvas_size
+                    mouse_norm_y = 1.0 - (mouse_pos[1] - y0) / canvas_size
+                    # Adjust pan to zoom towards mouse
+                    old_zoom = mouse_state['zoom']
+                    new_zoom = old_zoom * zoom_factor
+                    new_zoom = max(0.5, min(10.0, new_zoom))  # Clamp zoom
+                    if new_zoom != old_zoom:
+                        # Pan adjustment to keep mouse point fixed
+                        mouse_state['pan'][0] += (mouse_norm_x - 0.5) * (1 - zoom_factor / old_zoom * new_zoom) / new_zoom
+                        mouse_state['pan'][1] += (mouse_norm_y - 0.5) * (1 - zoom_factor / old_zoom * new_zoom) / new_zoom
+                        mouse_state['zoom'] = new_zoom
+
+            # Middle mouse pan
+            if canvas_hovered and imgui.is_mouse_clicked(2):  # Middle button
+                mouse_state['panning'] = True
+                mouse_state['pan_start'] = (mouse_pos[0], mouse_pos[1])
+                mouse_state['pan_orig'] = mouse_state['pan'].copy()
+
+            if mouse_state.get('panning', False):
+                dx = (mouse_pos[0] - mouse_state['pan_start'][0]) / canvas_size
+                dy = -(mouse_pos[1] - mouse_state['pan_start'][1]) / canvas_size  # Flip Y
+                mouse_state['pan'][0] = mouse_state['pan_orig'][0] + dx
+                mouse_state['pan'][1] = mouse_state['pan_orig'][1] + dy
+                if imgui.is_mouse_released(2):
+                    mouse_state['panning'] = False
+
+            # Left click for drawing cut line
             if canvas_hovered and imgui.is_mouse_clicked(0):
                 mouse_state['dragging'] = True
                 mouse_state['start_pos'] = (mouse_pos[0], mouse_pos[1])
@@ -4131,7 +4245,7 @@ class GLFWApp():
                             draw_list.add_line(pt1[0], pt1[1], pt2[0], pt2[1],
                                               imgui.get_color_u32_rgba(colors[1][0], colors[1][1], colors[1][2], 1.0), 2.5)
 
-            # OK and Cancel buttons
+            # OK, Reset, and Cancel buttons
             imgui.separator()
             button_width = 100
 
@@ -4149,6 +4263,16 @@ class GLFWApp():
                         print("Failed to apply manual cut - draw a line that crosses the contour twice")
                 else:
                     print("Please draw a cutting line first")
+
+            imgui.same_line()
+            if imgui.button("Reset", button_width, 30):
+                # Reset to initial line and view
+                if 'initial_line' in obj._manual_cut_data:
+                    obj._manual_cut_line = obj._manual_cut_data['initial_line']
+                if name in self._manual_cut_mouse:
+                    self._manual_cut_mouse[name]['dragging'] = False
+                    self._manual_cut_mouse[name]['zoom'] = 1.0
+                    self._manual_cut_mouse[name]['pan'] = [0.0, 0.0]
 
             imgui.same_line()
             if imgui.button("Cancel", button_width, 30):
