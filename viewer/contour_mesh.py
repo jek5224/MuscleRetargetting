@@ -5547,11 +5547,19 @@ class ContourMeshMixin:
         print(f"  [BP Transform] target_contour has {len(target_contour)} vertices")
 
         # Check for degenerate source contours
+        has_degenerate = False
         for i, src_contour in enumerate(source_contours):
             n_src_verts = len(src_contour) if src_contour is not None else 0
             print(f"  [BP Transform] source_contour[{i}] has {n_src_verts} vertices")
             if n_src_verts < 3:
                 print(f"  [BP Transform] WARNING: source {i} has only {n_src_verts} vertices (need >= 3)")
+                has_degenerate = True
+
+        # If any source is degenerate, fall back to simple area-based cutting
+        if has_degenerate:
+            print(f"  [BP Transform] Falling back to area-based cutting due to degenerate sources")
+            projected_refs = [src_bp['mean'] for src_bp in source_bps]
+            return self._cut_contour_for_streams(target_contour, target_bp, projected_refs, stream_indices)
 
         # ========== Step 1: Project target contour to 2D ==========
         target_mean = target_bp['mean']
