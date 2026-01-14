@@ -6355,30 +6355,28 @@ class ContourMeshMixin:
         def find_edge_cut_point(v_idx_a, v_idx_b):
             """Find where the cutting line intersects the edge from vertex a to vertex b.
             Returns interpolation parameter t in [0,1] and the 3D intersection point."""
-            if cutting_line_2d is None:
-                return 0.5, None  # Fallback to midpoint
+            # Default to midpoint
+            t = 0.5
 
-            line_point, line_dir = cutting_line_2d
-            line_normal = np.array([-line_dir[1], line_dir[0]])  # Perpendicular to line
+            if cutting_line_2d is not None:
+                line_point, line_dir = cutting_line_2d
+                line_normal = np.array([-line_dir[1], line_dir[0]])  # Perpendicular to line
 
-            # Edge endpoints in 2D
-            p_a = target_2d[v_idx_a]
-            p_b = target_2d[v_idx_b]
-            edge_vec = p_b - p_a
+                # Edge endpoints in 2D
+                p_a = target_2d[v_idx_a]
+                p_b = target_2d[v_idx_b]
+                edge_vec = p_b - p_a
 
-            # Find t where the edge crosses the line
-            # Line equation: dot(p - line_point, line_normal) = 0
-            # Edge point: p_a + t * edge_vec
-            # Solve: dot(p_a + t*edge_vec - line_point, line_normal) = 0
-            denom = np.dot(edge_vec, line_normal)
-            if abs(denom) < 1e-10:
-                # Edge is parallel to cutting line, use midpoint
-                t = 0.5
-            else:
-                t = np.dot(line_point - p_a, line_normal) / denom
-                t = np.clip(t, 0.0, 1.0)
+                # Find t where the edge crosses the line
+                # Line equation: dot(p - line_point, line_normal) = 0
+                # Edge point: p_a + t * edge_vec
+                # Solve: dot(p_a + t*edge_vec - line_point, line_normal) = 0
+                denom = np.dot(edge_vec, line_normal)
+                if abs(denom) > 1e-10:
+                    t = np.dot(line_point - p_a, line_normal) / denom
+                    t = np.clip(t, 0.0, 1.0)
 
-            # Compute 3D intersection point
+            # Compute 3D intersection point (always returns valid point)
             boundary_pt = target_contour[v_idx_a] + t * (target_contour[v_idx_b] - target_contour[v_idx_a])
             return t, boundary_pt
 
@@ -6396,10 +6394,9 @@ class ContourMeshMixin:
                 # Find where cutting line intersects this edge
                 t, boundary_pt = find_edge_cut_point(prev_v_idx, v_idx)
 
-                if boundary_pt is not None:
-                    # Add boundary point to BOTH pieces
-                    new_contours[prev_piece].append(boundary_pt)
-                    new_contours[curr_piece].append(boundary_pt)
+                # Add boundary point to BOTH pieces
+                new_contours[prev_piece].append(boundary_pt)
+                new_contours[curr_piece].append(boundary_pt)
 
             # Add current vertex to its piece
             new_contours[curr_piece].append(target_contour[v_idx])
@@ -6413,16 +6410,33 @@ class ContourMeshMixin:
             # Find where cutting line intersects wrap-around edge
             t, boundary_pt = find_edge_cut_point(n_verts - 1, 0)
 
-            if boundary_pt is not None:
-                new_contours[prev_piece].append(boundary_pt)
-                new_contours[curr_piece].append(boundary_pt)
+            new_contours[prev_piece].append(boundary_pt)
+            new_contours[curr_piece].append(boundary_pt)
 
         # Ensure each piece has at least some vertices and convert to proper numpy arrays
         for i in range(n_pieces):
             if len(new_contours[i]) == 0:
-                new_contours[i] = [target_mean]
+                new_contours[i] = [np.array(target_mean).flatten()[:3]]
+
             # Convert list of vertices to numpy array with shape (N, 3)
-            new_contours[i] = np.array([np.asarray(v).flatten()[:3] for v in new_contours[i]])
+            valid_vertices = []
+            for v in new_contours[i]:
+                v_arr = np.asarray(v).flatten()
+                if len(v_arr) >= 3:
+                    valid_vertices.append(v_arr[:3])
+                elif len(v_arr) > 0:
+                    # Pad with zeros if needed
+                    padded = np.zeros(3)
+                    padded[:len(v_arr)] = v_arr
+                    valid_vertices.append(padded)
+                # Skip empty/invalid vertices
+
+            if len(valid_vertices) == 0:
+                # Fallback to target mean
+                valid_vertices = [np.array(target_mean).flatten()[:3]]
+
+            new_contours[i] = np.array(valid_vertices)
+
             # Ensure at least 3 vertices for valid contour (duplicate if needed)
             while len(new_contours[i]) < 3:
                 new_contours[i] = np.vstack([new_contours[i], new_contours[i][-1]])
