@@ -4924,7 +4924,22 @@ class ContourMeshMixin:
                                         new_y = new_y / (np.linalg.norm(new_y) + 1e-10)
                                         new_bp['basis_x'] = new_x
                                         new_bp['basis_y'] = new_y
-                                        print(f"    Stream {stream_i}: set x-axis perpendicular to cutting line")
+
+                                        # Recalculate square_like with new basis
+                                        cut_contour_arr = np.array(cut_contour)
+                                        cut_mean = new_bp['mean']
+                                        projected_2d = np.array([
+                                            [np.dot(v - cut_mean, new_x), np.dot(v - cut_mean, new_y)]
+                                            for v in cut_contour_arr
+                                        ])
+                                        min_x, max_x = np.min(projected_2d[:, 0]), np.max(projected_2d[:, 0])
+                                        min_y, max_y = np.min(projected_2d[:, 1]), np.max(projected_2d[:, 1])
+                                        x_len = max_x - min_x
+                                        y_len = max_y - min_y
+                                        ratio_threshold = 2.0
+                                        new_bp['square_like'] = (max(x_len, y_len) / min(x_len, y_len) < ratio_threshold
+                                                                 if min(x_len, y_len) > 1e-10 else False)
+                                        print(f"    Stream {stream_i}: set x-axis perpendicular to cutting line, square_like={new_bp['square_like']}")
 
                             stream_contours[stream_i].append(cut_contour)
                             stream_bounding_planes[stream_i].append(new_bp)
