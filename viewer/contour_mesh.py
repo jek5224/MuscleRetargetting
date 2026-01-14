@@ -5165,12 +5165,14 @@ class ContourMeshMixin:
                                 original_cutting_line=original_cutting_line
                             )
 
-                            # Store cutting line from first division for future COMMON mode cuts
-                            if is_first_division and cutting_info is not None:
+                            # Store/update cutting line for future COMMON mode cuts
+                            # Update after each cut (first division or propagated) to track the evolving position
+                            if cutting_info is not None:
                                 cutting_line_2d = cutting_info.get('cutting_line_2d')
                                 if cutting_line_2d is not None:
                                     stored_cutting_lines[stream_combo] = cutting_line_2d
-                                    print(f"  [BP Transform] Stored cutting line for stream combo {stream_combo}")
+                                    mode = "SEPARATE" if is_first_division else "COMMON"
+                                    print(f"  [BP Transform] Updated cutting line for stream combo {stream_combo} ({mode})")
                         elif cut_method == 'mesh':
                             cut_contours = self._cut_contour_mesh_aware(
                                 target_contour, target_bp, projected_refs, streams_for_contour
@@ -6163,8 +6165,8 @@ class ContourMeshMixin:
                         print(f"  [BP Transform] SEPARATE: stored cutting line relative to center")
 
                 elif original_cutting_line is not None:
-                    # COMMON mode with stored cutting line from first division
-                    # The cutting line was stored relative to source centroids
+                    # COMMON mode with stored cutting line from previous level
+                    # The cutting line was stored relative to previous combined_center
                     # Transform it using the same transformation as the sources
                     stored_point_rel, stored_dir_angle = original_cutting_line
 
@@ -6198,6 +6200,14 @@ class ContourMeshMixin:
 
                     cutting_line_2d = (transformed_point, transformed_dir)
                     print(f"  [BP Transform] COMMON: transformed stored cutting line (theta={np.degrees(theta):.1f}°)")
+
+                    # Update stored cutting line relative to NEW combined_center for next level
+                    # The new combined_center is at (center_tx, center_ty) after optimization
+                    new_combined_center = np.array([center_tx, center_ty])
+                    new_point_rel = transformed_point - new_combined_center
+                    new_dir_angle = np.arctan2(transformed_dir[1], transformed_dir[0])
+                    self._last_cutting_line_for_storage = (new_point_rel, new_dir_angle)
+                    print(f"  [BP Transform] COMMON: updated stored cutting line for next level")
 
                 elif len(src_0) >= 3 and len(src_1) >= 3:
                     # COMMON mode fallback: Find shared boundary vertices between sources
