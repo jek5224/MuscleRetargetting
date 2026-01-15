@@ -792,9 +792,12 @@ class ContourMeshMixin:
             if len(verts) < 3:
                 continue
 
-            # Check for self-intersection using Shapely
+            # Check for severe self-intersection using Shapely
+            # Note: We allow mild self-intersection (pinch points) since those are
+            # exactly what we want for transition contours
             try:
                 from shapely.geometry import Polygon
+                from shapely.validation import make_valid
                 # Project to 2D for self-intersection check (use first two principal axes)
                 centroid = verts.mean(axis=0)
                 centered = verts - centroid
@@ -808,9 +811,19 @@ class ContourMeshMixin:
 
                 poly = Polygon(verts_2d)
                 if not poly.is_valid:
-                    # Skip self-intersecting contours
-                    print(f"  [find_contour] WARNING: Skipping self-intersecting contour at value {contour_value}")
-                    continue
+                    # Try to fix it - if it can be made valid, it's probably just a pinch
+                    try:
+                        fixed_poly = make_valid(poly)
+                        # Only skip if the fixed polygon is very different (lost significant area)
+                        if fixed_poly.is_empty or fixed_poly.area < poly.convex_hull.area * 0.1:
+                            print(f"  [find_contour] WARNING: Skipping severely invalid contour at value {contour_value}")
+                            continue
+                        # Otherwise, accept it - it's probably just a pinched/figure-8 shape
+                    except:
+                        pass  # If make_valid fails, just accept the contour
+            except ImportError:
+                # Shapely not available, skip check
+                pass
             except Exception as e:
                 # If check fails, still include the contour
                 pass
