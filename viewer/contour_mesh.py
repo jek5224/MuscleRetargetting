@@ -8468,9 +8468,12 @@ class ContourMeshMixin:
 
         # Build level info string: "Cut Lv.X using Lv.Y"
         # target_level = contour being cut, source_level = reference contours
+        print(f"  [BP Viz] target_level={target_level}, source_level={source_level}")
         level_info = ""
         if target_level is not None and source_level is not None:
             level_info = f" | Cut Lv.{target_level} using Lv.{source_level}"
+        else:
+            level_info = " | (levels unknown)"
 
         # Left plot: Initial configuration (no dashed original)
         ax1 = axes[0]
