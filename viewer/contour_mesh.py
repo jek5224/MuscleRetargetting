@@ -1253,28 +1253,68 @@ class ContourMeshMixin:
             # Search for scalar value where merged contour has minimum neck width
             def measure_neck_width(contour):
                 """Measure the narrowest neck width of a contour.
-                Returns (min_width, neck_point1, neck_point2) or (inf, None, None) if no neck found.
+
+                A "neck" is defined as two points that are:
+                1. Close in Euclidean distance (the neck width)
+                2. Far apart on the contour path (they're on opposite sides)
+
+                We use a neck score = euclidean_dist / path_fraction
+                Lower score = better neck (small distance, large path separation)
+
+                Returns (neck_score, neck_width, neck_point1, neck_point2) or (inf, inf, None, None) if no neck found.
                 """
-                if contour is None or len(contour) < 6:
-                    return float('inf'), None, None
+                if contour is None or len(contour) < 8:
+                    return float('inf'), float('inf'), None, None
 
                 contour = np.array(contour)
                 n = len(contour)
-                min_index_sep = max(3, n // 4)  # Minimum separation on contour path
 
-                min_width = float('inf')
+                # Compute cumulative arc length for path distance
+                edge_lengths = np.linalg.norm(np.diff(contour, axis=0, append=[contour[0:1]]), axis=1)
+                total_length = np.sum(edge_lengths)
+                cumulative = np.zeros(n + 1)
+                cumulative[1:] = np.cumsum(edge_lengths)
+
+                def path_distance(i, j):
+                    """Compute shorter path distance between vertices i and j on closed contour."""
+                    if i > j:
+                        i, j = j, i
+                    d1 = cumulative[j] - cumulative[i]
+                    d2 = total_length - d1
+                    return min(d1, d2)
+
+                # Look for neck: points with small Euclidean distance but large path distance
+                best_score = float('inf')
+                best_width = float('inf')
                 best_p1, best_p2 = None, None
+                best_i, best_j = -1, -1
+
+                # Minimum path fraction for a valid neck (must be on "opposite" sides)
+                min_path_fraction = 0.25  # At least 25% of contour between points
 
                 for i in range(n):
-                    for j in range(i + min_index_sep, min(i + n - min_index_sep + 1, n)):
-                        # Vertices far apart on contour path
-                        p1, p2 = contour[i], contour[j]
-                        dist = np.linalg.norm(p2 - p1)
-                        if dist < min_width:
-                            min_width = dist
-                            best_p1, best_p2 = p1, p2
+                    for j in range(i + 1, n):
+                        path_dist = path_distance(i, j)
+                        path_fraction = path_dist / total_length
 
-                return min_width, best_p1, best_p2
+                        # Skip if points are too close on the path
+                        if path_fraction < min_path_fraction:
+                            continue
+
+                        p1, p2 = contour[i], contour[j]
+                        euclidean_dist = np.linalg.norm(p2 - p1)
+
+                        # Neck score: lower is better
+                        # Small euclidean distance + large path fraction = good neck
+                        neck_score = euclidean_dist / (path_fraction ** 2)
+
+                        if neck_score < best_score:
+                            best_score = neck_score
+                            best_width = euclidean_dist
+                            best_p1, best_p2 = p1, p2
+                            best_i, best_j = i, j
+
+                return best_score, best_width, best_p1, best_p2
 
             # Search for narrowest neck within merged region
             # The narrowest neck is typically near the merge point (best_large_scalar)
@@ -1283,46 +1323,98 @@ class ContourMeshMixin:
                 print(f"    [Phase3] Search range: {best_small_scalar:.6f} (merged) to {best_large_scalar:.6f} (split)")
 
                 # Search from best_small_scalar towards best_large_scalar (the merge point)
-                # The narrowest neck should be closer to where contours just merged
                 search_range = best_large_scalar - best_small_scalar
-                num_samples = 20
+
                 narrowest_scalar = best_small_scalar
+                narrowest_score = float('inf')
                 narrowest_width = float('inf')
                 narrowest_contours = best_small_contours
                 narrowest_planes = best_small_planes
 
-                # Measure initial neck width
+                # Measure initial neck
                 if len(best_small_contours) > 0:
-                    initial_width, _, _ = measure_neck_width(best_small_contours[0])
+                    initial_score, initial_width, _, _ = measure_neck_width(best_small_contours[0])
+                    narrowest_score = initial_score
                     narrowest_width = initial_width
-                    print(f"    [Phase3] Initial neck width at {best_small_scalar:.6f}: {initial_width:.6f}")
+                    print(f"    [Phase3] Initial: scalar={best_small_scalar:.6f}, width={initial_width:.4f}, score={initial_score:.4f}")
 
-                # Sample towards the merge point (best_large_scalar) to find narrower neck
-                for sample_i in range(num_samples):
-                    # Sample from best_small_scalar towards best_large_scalar
-                    # t goes from near 0 to near 1 (but not quite 1, as that would split)
-                    t = (sample_i + 1) / (num_samples + 2)  # Stay away from the split point
+                # Two-phase search:
+                # Phase A: Coarse sampling to find promising region
+                # Phase B: Fine sampling around the best region
+
+                # Phase A: Coarse search with 15 samples
+                coarse_samples = 15
+                coarse_results = []
+                last_valid_t = 0.0
+
+                for sample_i in range(coarse_samples):
+                    t = (sample_i + 1) / (coarse_samples + 1)
                     test_scalar = best_small_scalar + t * search_range
 
                     planes_test, contours_test, _ = self.find_contour(test_scalar, prev_bounding_plane=prev_plane)
 
                     if len(contours_test) != small_count:
-                        # Count changed - we're past the merge point
-                        print(f"    [Phase3] At {test_scalar:.6f}: count={len(contours_test)} != small_count={small_count}, stopping")
+                        print(f"    [Phase3] Coarse: t={t:.3f} scalar={test_scalar:.6f}: count changed to {len(contours_test)}, stopping")
                         break
 
-                    # Measure neck width of merged contour(s)
+                    last_valid_t = t
+
+                    # Measure neck of merged contour(s)
+                    total_score = 0
                     total_width = 0
                     for c in contours_test:
-                        w, _, _ = measure_neck_width(c)
-                        total_width += w
+                        score, width, _, _ = measure_neck_width(c)
+                        total_score += score
+                        total_width += width
 
-                    if total_width < narrowest_width:
+                    coarse_results.append((t, test_scalar, total_score, total_width, contours_test, planes_test))
+
+                    if total_score < narrowest_score:
+                        narrowest_score = total_score
                         narrowest_width = total_width
                         narrowest_scalar = test_scalar
                         narrowest_contours = contours_test
                         narrowest_planes = planes_test
-                        print(f"    [Phase3] Found narrower neck at {test_scalar:.6f}: width={total_width:.6f}")
+
+                # Phase B: Fine search around the best coarse result
+                if coarse_results:
+                    # Find best coarse result
+                    best_coarse = min(coarse_results, key=lambda x: x[2])
+                    best_t = best_coarse[0]
+
+                    # Search in a window around best_t
+                    t_step = 1.0 / (coarse_samples + 1)
+                    fine_start = max(0, best_t - t_step)
+                    fine_end = min(last_valid_t, best_t + t_step)
+
+                    fine_samples = 10
+                    print(f"    [Phase3] Fine search: t in [{fine_start:.3f}, {fine_end:.3f}]")
+
+                    for sample_i in range(fine_samples):
+                        t = fine_start + (sample_i + 1) / (fine_samples + 1) * (fine_end - fine_start)
+                        test_scalar = best_small_scalar + t * search_range
+
+                        planes_test, contours_test, _ = self.find_contour(test_scalar, prev_bounding_plane=prev_plane)
+
+                        if len(contours_test) != small_count:
+                            continue
+
+                        total_score = 0
+                        total_width = 0
+                        for c in contours_test:
+                            score, width, _, _ = measure_neck_width(c)
+                            total_score += score
+                            total_width += width
+
+                        if total_score < narrowest_score:
+                            narrowest_score = total_score
+                            narrowest_width = total_width
+                            narrowest_scalar = test_scalar
+                            narrowest_contours = contours_test
+                            narrowest_planes = planes_test
+                            print(f"    [Phase3] Fine: Found better at t={t:.3f} scalar={test_scalar:.6f}: width={total_width:.4f}, score={total_score:.4f}")
+
+                print(f"    [Phase3] Best: scalar={narrowest_scalar:.6f}, width={narrowest_width:.4f}, score={narrowest_score:.4f}")
 
                 # Update best_small with narrowest neck result
                 if narrowest_scalar != best_small_scalar:
