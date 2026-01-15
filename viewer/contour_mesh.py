@@ -6146,45 +6146,24 @@ class ContourMeshMixin:
             for v in target_contour
         ])
 
-        # Project source contours to target's 2D plane
+        # Project source contours onto target plane, then to 2D
+        # This ensures source contours are properly visualized relative to target
+        target_z = target_bp['basis_z']  # Normal to target plane
         source_2d_list = []
         for i, (src_contour, src_bp) in enumerate(zip(source_contours, source_bps)):
-            src_mean = src_bp['mean']
-            src_x = src_bp['basis_x']
-            src_y = src_bp['basis_y']
-
-            # Project source to its own 2D plane first
-            src_2d_own = np.array([
-                [np.dot(v - src_mean, src_x), np.dot(v - src_mean, src_y)]
-                for v in src_contour
-            ])
-
-            # Compute initial translation (project source mean onto target plane)
-            src_to_target = src_mean - target_mean
-            dist_along_z = np.dot(src_to_target, target_bp['basis_z'])
-            src_mean_projected = src_mean - dist_along_z * target_bp['basis_z']
-            init_tx = np.dot(src_mean_projected - target_mean, target_x)
-            init_ty = np.dot(src_mean_projected - target_mean, target_y)
-
-            # Compute initial rotation (align source basis_x with target basis_x)
-            src_x_on_target = src_x - np.dot(src_x, target_bp['basis_z']) * target_bp['basis_z']
-            src_x_norm = np.linalg.norm(src_x_on_target)
-            if src_x_norm > 1e-10:
-                src_x_on_target = src_x_on_target / src_x_norm
-                src_x_2d = np.array([np.dot(src_x_on_target, target_x), np.dot(src_x_on_target, target_y)])
-                init_theta = np.arctan2(src_x_2d[1], src_x_2d[0])
-            else:
-                init_theta = 0.0
-
-            # Apply rotation to source 2D shape
-            cos_t = np.cos(init_theta)
-            sin_t = np.sin(init_theta)
-            rot = np.array([[cos_t, -sin_t], [sin_t, cos_t]])
-            src_2d_rotated = src_2d_own @ rot.T
-
-            # Translate to initial position
-            src_2d_final = src_2d_rotated + np.array([init_tx, init_ty])
-            source_2d_list.append(src_2d_final)
+            # Project source vertices ONTO target plane, then to 2D
+            src_2d = []
+            for v in src_contour:
+                # Project onto target plane (along normal direction)
+                diff = v - target_mean
+                dist_along_normal = np.dot(diff, target_z)
+                v_on_plane = v - dist_along_normal * target_z
+                # Convert to 2D
+                diff_on_plane = v_on_plane - target_mean
+                x = np.dot(diff_on_plane, target_x)
+                y = np.dot(diff_on_plane, target_y)
+                src_2d.append([x, y])
+            source_2d_list.append(np.array(src_2d))
 
         # Store all data for the manual cutting window
         self._manual_cut_data = {
