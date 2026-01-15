@@ -1585,12 +1585,12 @@ class ContourMeshMixin:
 
                 # Create projection basis using the narrowest neck plane
                 bp_ref = None
-                if best_small_planes and len(best_small_planes) > 0:
+                if best_small_planes and len(best_small_planes) > 0 and isinstance(best_small_planes[0], dict):
                     bp_ref = best_small_planes[0]
-                elif len(original_large_planes) > 0:
+                elif len(original_large_planes) > 0 and isinstance(original_large_planes[0], dict):
                     bp_ref = original_large_planes[0]
 
-                if bp_ref and 'basis_z' in bp_ref and 'mean' in bp_ref:
+                if bp_ref and isinstance(bp_ref, dict) and 'basis_z' in bp_ref and 'mean' in bp_ref:
                     normal = bp_ref['basis_z']
                     mean = bp_ref['mean']
                     # Create projection basis
@@ -1623,14 +1623,20 @@ class ContourMeshMixin:
                 })
 
             # Collect results to insert (in order by scalar value)
-            # Only insert the SMALL count contour - manual cut will handle the large side
+            # Only insert the SMALL count contour (narrowest neck) - manual cut will handle the large side
             to_insert = []
             # Skip large count contour - manual cut handles the first SEPARATE division
             if best_large_scalar is not None and best_large_contours is not None:
                 print(f"    Skipping large_scalar={best_large_scalar:.6f} (manual cut will handle)")
-            if best_small_scalar is not None and best_small_contours is not None:
+            if best_small_scalar is not None and best_small_contours is not None and best_small_planes is not None:
+                # Validate that planes contains dicts, not floats
+                planes_valid = (isinstance(best_small_planes, list) and
+                               len(best_small_planes) > 0 and
+                               isinstance(best_small_planes[0], dict))
+                if not planes_valid:
+                    print(f"    WARNING: Invalid planes data, skipping insert")
                 # Don't insert if it's essentially the same as original small level
-                if abs(best_small_scalar - scalar_small) > tolerance:
+                elif abs(best_small_scalar - scalar_small) > tolerance:
                     to_insert.append((best_small_scalar, best_small_planes, best_small_contours, small_count))
                 else:
                     print(f"    Skipping small_scalar={best_small_scalar:.6f} (same as original level)")
@@ -1647,7 +1653,8 @@ class ContourMeshMixin:
                 # Mark these as merge point contours (for debugging)
                 # Note: Do NOT set is_cut=True here - they need to be cut first!
                 for bp in planes:
-                    bp['is_merge_point'] = True
+                    if isinstance(bp, dict):
+                        bp['is_merge_point'] = True
                 print(f"  [MERGE POINT] Inserted {len(planes)} contours at level {insert_idx}")
 
                 self.bounding_planes.insert(insert_idx, planes)
