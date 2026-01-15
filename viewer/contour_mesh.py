@@ -1358,9 +1358,11 @@ class ContourMeshMixin:
                         'neck_point': neck_info['neck_point'],
                         'neck_width': neck_info['neck_width'],
                         'contour_idx': c_idx,
-                        # Store 3D data for adding to contours
-                        'contours_3d': contours_small,
+                        # Store 3D data for adding to contours (both sides of transition)
+                        'contours_3d': contours_small,  # Target (merged)
                         'planes_3d': planes_small,
+                        'contours_large_3d': contours_large,  # Source (split)
+                        'planes_large_3d': planes_large,
                     })
                     print(f"  Added neck in contour {c_idx}: width={neck_info['neck_width']:.4f}")
 
@@ -1373,9 +1375,11 @@ class ContourMeshMixin:
                     'scalar_small': split_scalar,
                     'target_contours_2d': target_2d,
                     'source_contours_2d': source_2d,
-                    # Store 3D data for adding to contours
-                    'contours_3d': contours_small,
+                    # Store 3D data for adding to contours (both sides of transition)
+                    'contours_3d': contours_small,  # Target (merged)
                     'planes_3d': planes_small,
+                    'contours_large_3d': contours_large,  # Source (split)
+                    'planes_large_3d': planes_large,
                 })
                 print(f"  Added to Neck Viz: {small_count}→{large_count} (no specific neck found)")
 
@@ -1384,7 +1388,7 @@ class ContourMeshMixin:
     def add_transitions_to_contours(self):
         """
         Add found transition contours to self.contours for cutting.
-        Inserts them at the correct position based on scalar value.
+        Inserts BOTH the target (merged) and source (split) contours at their scalar positions.
         """
         if not hasattr(self, '_neck_viz_data') or not self._neck_viz_data:
             print("No transitions found. Run find_transitions first.")
@@ -1394,18 +1398,33 @@ class ContourMeshMixin:
             print("No contours found. Run find_contours first.")
             return
 
-        print(f"\n=== Adding {len(self._neck_viz_data)} transition contours ===")
+        print(f"\n=== Adding transition contours ===")
 
-        # Collect unique transition scalars (avoid duplicates from multiple necks at same scalar)
-        transitions_to_add = {}
+        # Collect unique scalars to add (both small/target and large/source sides)
+        scalars_to_add = {}
         for data in self._neck_viz_data:
-            scalar = data['scalar_small']
-            if scalar not in transitions_to_add:
-                transitions_to_add[scalar] = {
+            # Add small (target/merged) side
+            scalar_small = data['scalar_small']
+            if scalar_small not in scalars_to_add:
+                scalars_to_add[scalar_small] = {
                     'contours': data['contours_3d'],
                     'planes': data['planes_3d'],
-                    'scalar': scalar,
+                    'scalar': scalar_small,
+                    'type': 'target',
                 }
+
+            # Add large (source/split) side if available
+            scalar_large = data.get('scalar_large')
+            contours_large = data.get('contours_large_3d')
+            planes_large = data.get('planes_large_3d')
+            if scalar_large and contours_large and planes_large:
+                if scalar_large not in scalars_to_add:
+                    scalars_to_add[scalar_large] = {
+                        'contours': contours_large,
+                        'planes': planes_large,
+                        'scalar': scalar_large,
+                        'type': 'source',
+                    }
 
         # Get scalar values for existing contour levels
         existing_scalars = []
@@ -1415,11 +1434,11 @@ class ContourMeshMixin:
             else:
                 existing_scalars.append((level_idx, level_idx))
 
-        # Sort transitions by scalar
-        sorted_transitions = sorted(transitions_to_add.values(), key=lambda x: x['scalar'])
+        # Sort by scalar
+        sorted_to_add = sorted(scalars_to_add.values(), key=lambda x: x['scalar'])
 
         added_count = 0
-        for t in sorted_transitions:
+        for t in sorted_to_add:
             scalar = t['scalar']
 
             # Check if this scalar already exists in contours (within tolerance)
@@ -1430,7 +1449,7 @@ class ContourMeshMixin:
                     break
 
             if already_exists:
-                print(f"  Skipping scalar {scalar:.4f} (already exists)")
+                print(f"  Skipping {t['type']} at scalar {scalar:.4f} (already exists)")
                 continue
 
             # Find insertion position
@@ -1448,13 +1467,12 @@ class ContourMeshMixin:
 
             # Update existing_scalars for next iteration
             existing_scalars.insert(insert_idx, (scalar, insert_idx))
-            # Update indices after insertion
             existing_scalars = [(s, i) for i, (s, _) in enumerate(existing_scalars)]
 
-            print(f"  Added transition at scalar {scalar:.4f} (position {insert_idx})")
+            print(f"  Added {t['type']} at scalar {scalar:.4f} ({len(t['contours'])} contours, pos {insert_idx})")
             added_count += 1
 
-        print(f"=== Added {added_count} transition contours ===\n")
+        print(f"=== Added {added_count} contour levels ===\n")
 
     def _refine_transition_points(self):
         """
