@@ -1573,18 +1573,22 @@ class ContourMeshMixin:
                 best_small_planes = narrowest_planes
 
                 # Store neck visualization data
-                # Target = merged contour(s) just BEFORE division (small_count)
-                # Source = split contour(s) just AFTER division (large_count)
+                # Target = narrowest neck contour (merged, before division)
+                # Source = ORIGINAL contours from large_level (for visualization only, not inserted)
                 target_contours_2d = []
                 source_contours_2d = []
 
-                # Create projection basis using best_large_planes (source side)
-                # This ensures both target and source are projected consistently
+                # Use ORIGINAL contours from large_level for source visualization
+                # These are the existing contours right after division - don't generate new ones
+                original_large_contours = self.contours[t['large_level']]
+                original_large_planes = self.bounding_planes[t['large_level']]
+
+                # Create projection basis using the narrowest neck plane
                 bp_ref = None
-                if best_large_planes and len(best_large_planes) > 0:
-                    bp_ref = best_large_planes[0]
-                elif best_small_planes and len(best_small_planes) > 0:
+                if best_small_planes and len(best_small_planes) > 0:
                     bp_ref = best_small_planes[0]
+                elif len(original_large_planes) > 0:
+                    bp_ref = original_large_planes[0]
 
                 if bp_ref and 'basis_z' in bp_ref and 'mean' in bp_ref:
                     normal = bp_ref['basis_z']
@@ -1598,25 +1602,24 @@ class ContourMeshMixin:
                     v = np.cross(normal, u)
                     v = v / (np.linalg.norm(v) + 1e-10)
 
-                    # Project target contours (merged, before division)
+                    # Project target contours (narrowest neck, merged)
                     if best_small_contours:
                         for c in best_small_contours:
                             c_2d = np.array([[np.dot(p - mean, u), np.dot(p - mean, v)] for p in c])
                             target_contours_2d.append(c_2d)
 
-                    # Project source contours (split, after division)
-                    if best_large_contours:
-                        for c in best_large_contours:
-                            c_2d = np.array([[np.dot(p - mean, u), np.dot(p - mean, v)] for p in c])
-                            source_contours_2d.append(c_2d)
+                    # Project source contours (ORIGINAL from large_level, for visualization only)
+                    for c in original_large_contours:
+                        c_2d = np.array([[np.dot(p - mean, u), np.dot(p - mean, v)] for p in c])
+                        source_contours_2d.append(c_2d)
 
                 self._neck_viz_data.append({
                     'large_count': large_count,
                     'small_count': small_count,
-                    'scalar_large': best_large_scalar,
-                    'scalar_small': best_small_scalar,
-                    'target_contours_2d': target_contours_2d,  # Merged (before division)
-                    'source_contours_2d': source_contours_2d,  # Split (after division)
+                    'scalar_large': scalar_large,  # Original scalar from existing level
+                    'scalar_small': best_small_scalar,  # Narrowest neck scalar
+                    'target_contours_2d': target_contours_2d,  # Narrowest neck (merged)
+                    'source_contours_2d': source_contours_2d,  # Original split contours (viz only)
                 })
 
             # Collect results to insert (in order by scalar value)
