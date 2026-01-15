@@ -5819,17 +5819,122 @@ class ContourMeshMixin:
         print(f"Manual cutting window ready - draw a cutting line")
         return True  # Manual cutting is needed
 
+    def _get_source_cutting_boundary(self, source_contours, source_bps, target_bp):
+        """
+        Extract the cutting boundary from source contours for COMMON mode.
+
+        For COMMON mode, source contours were already cut at the previous level.
+        This function finds the boundary line between adjacent source contours
+        (the line where they were cut) and projects it to target's 2D frame.
+
+        Returns:
+            List of 2D points [[x1, y1], [x2, y2]] representing the cutting line,
+            or None if boundary cannot be determined.
+        """
+        if len(source_contours) < 2:
+            return None
+
+        target_mean = target_bp['mean']
+        target_x = target_bp['basis_x']
+        target_y = target_bp['basis_y']
+
+        # Find shared/closest vertices between adjacent source contours
+        # These should be along the cutting boundary
+        boundary_points_3d = []
+
+        for i in range(len(source_contours) - 1):
+            contour_a = np.array(source_contours[i])
+            contour_b = np.array(source_contours[i + 1])
+
+            # Find the closest pair of points between the two contours
+            # These are likely on the cutting boundary
+            min_dist = float('inf')
+            closest_pair = None
+
+            for pt_a in contour_a:
+                for pt_b in contour_b:
+                    dist = np.linalg.norm(pt_a - pt_b)
+                    if dist < min_dist:
+                        min_dist = dist
+                        closest_pair = (pt_a, pt_b)
+
+            if closest_pair is not None:
+                # Use midpoint if very close, otherwise use both points
+                if min_dist < 0.001:  # Essentially the same point (shared vertex)
+                    boundary_points_3d.append(closest_pair[0])
+                else:
+                    midpoint = (closest_pair[0] + closest_pair[1]) / 2
+                    boundary_points_3d.append(midpoint)
+
+        # Also check for shared vertices (exact matches)
+        # This handles cases where contours share cut vertices
+        for i in range(len(source_contours) - 1):
+            contour_a = np.array(source_contours[i])
+            contour_b = np.array(source_contours[i + 1])
+
+            for pt_a in contour_a:
+                for pt_b in contour_b:
+                    if np.allclose(pt_a, pt_b, atol=1e-6):
+                        # Found shared vertex
+                        if not any(np.allclose(pt_a, bp, atol=1e-6) for bp in boundary_points_3d):
+                            boundary_points_3d.append(pt_a)
+
+        if len(boundary_points_3d) < 2:
+            # Not enough boundary points found, try using centroids
+            # The cutting line should roughly pass between contour centroids
+            centroids = [np.mean(c, axis=0) for c in source_contours]
+            if len(centroids) >= 2:
+                # Create a perpendicular line at the midpoint between centroids
+                midpoint = (centroids[0] + centroids[1]) / 2
+                direction = centroids[1] - centroids[0]
+                direction = direction / (np.linalg.norm(direction) + 1e-8)
+                # Perpendicular direction in the target plane
+                perp = np.cross(direction, target_bp['basis_z'])
+                perp = perp / (np.linalg.norm(perp) + 1e-8)
+                # Create line extending from midpoint
+                extent = 0.1  # Will be extended in 2D
+                boundary_points_3d = [midpoint - perp * extent, midpoint + perp * extent]
+
+        if len(boundary_points_3d) < 2:
+            return None
+
+        # Project boundary points to target's 2D frame
+        boundary_2d = []
+        for pt in boundary_points_3d:
+            x = np.dot(pt - target_mean, target_x)
+            y = np.dot(pt - target_mean, target_y)
+            boundary_2d.append([x, y])
+
+        # Return the two most extreme points (endpoints of the cutting line)
+        if len(boundary_2d) == 2:
+            return boundary_2d
+        else:
+            # Find the two points that are furthest apart
+            boundary_2d = np.array(boundary_2d)
+            max_dist = 0
+            best_pair = [boundary_2d[0].tolist(), boundary_2d[1].tolist()]
+            for i in range(len(boundary_2d)):
+                for j in range(i + 1, len(boundary_2d)):
+                    dist = np.linalg.norm(boundary_2d[i] - boundary_2d[j])
+                    if dist > max_dist:
+                        max_dist = dist
+                        best_pair = [boundary_2d[i].tolist(), boundary_2d[j].tolist()]
+            return best_pair
+
     def _prepare_manual_cut_data_for_level(self, muscle_name, level_i, contour_i, streams_for_contour,
                                             target_contour, target_bp, source_contours, source_bps,
-                                            source_level):
+                                            source_level, initial_cut_line=None, is_common_mode=False):
         """
         Prepare manual cutting data for a specific level/contour during cut_streams.
-        Called when a SEPARATE case is encountered mid-processing.
+        Called when cutting is needed mid-processing (both SEPARATE and COMMON modes).
 
         Args:
             source_level: The actual level where source contours come from (prev_level in processing order)
+            initial_cut_line: For COMMON mode, the initial cutting line from source boundary (2D coords)
+            is_common_mode: True if this is COMMON mode (sources already cut)
         """
-        print(f"\n=== Preparing Manual Cut Data for Level {level_i}, Contour {contour_i} ===")
+        mode_str = "COMMON" if is_common_mode else "SEPARATE"
+        print(f"\n=== Preparing Manual Cut Data for Level {level_i}, Contour {contour_i} ({mode_str}) ===")
         print(f"Streams: {streams_for_contour} → 1 target")
         print(f"Source level: {source_level} (target level: {level_i})")
 
@@ -5877,13 +5982,20 @@ class ContourMeshMixin:
             'current_pieces_3d': [np.array(target_contour).copy()],
             'cut_lines': [],
             'from_cut_streams': True,  # Flag to indicate this came from mid-processing
+            'is_common_mode': is_common_mode,  # Track mode for UI display
         }
 
         # Set pending flag to open the window
         self._manual_cut_pending = True
-        self._manual_cut_line = None
 
-        print(f"Manual cutting window ready for level {level_i} - draw a cutting line")
+        # For COMMON mode, initialize with the source boundary cutting line
+        if initial_cut_line is not None and len(initial_cut_line) >= 2:
+            self._manual_cut_line = initial_cut_line
+            print(f"COMMON mode: initialized with source boundary cutting line")
+        else:
+            self._manual_cut_line = None
+
+        print(f"Manual cutting window ready for level {level_i} ({mode_str}) - draw a cutting line")
 
     def _apply_manual_cut(self):
         """
@@ -6754,92 +6866,96 @@ class ContourMeshMixin:
                             cut_status_str = ', '.join([f's{streams_for_contour[i]}:{"cut" if c else "uncut"}' for i, c in enumerate(source_cut_status)])
                             print(f"  [BP Transform] Mode: {mode_str} ({cut_status_str})")
 
-                            # Check if we have a saved manual cut result for first division
+                            # Check if we have a saved manual cut result
                             # Use composite key (level_i, contour_i) to handle multiple levels
+                            # Check for BOTH SEPARATE and COMMON modes (always show manual cutting window)
                             has_manual_result = False
                             result_key = (level_i, contour_i)
-                            if is_first_division:
-                                # Check new format (M→N results dict) with composite key
-                                if hasattr(self, '_manual_cut_results') and self._manual_cut_results and result_key in self._manual_cut_results:
-                                    result = self._manual_cut_results[result_key]
-                                    cut_contours = result['cut_contours']
-                                    cutting_info = None
-                                    has_manual_result = True
+                            # Check new format (M→N results dict) with composite key
+                            if hasattr(self, '_manual_cut_results') and self._manual_cut_results and result_key in self._manual_cut_results:
+                                result = self._manual_cut_results[result_key]
+                                cut_contours = result['cut_contours']
+                                cutting_info = None
+                                has_manual_result = True
 
-                                    # Check if this is a 1:1 mapping (user deselected sources)
-                                    is_1to1 = result.get('is_1to1', False)
-                                    result_source_indices = result.get('source_indices', [])
+                                # Check if this is a 1:1 mapping (user deselected sources)
+                                is_1to1 = result.get('is_1to1', False)
+                                result_source_indices = result.get('source_indices', [])
 
-                                    if is_1to1 and len(result_source_indices) == 1:
-                                        # 1:1 case: only assign to the single selected source/stream
-                                        selected_stream = result_source_indices[0]
-                                        print(f"  [BP Transform] 1:1 mapping for level {level_i}, contour {contour_i}")
-                                        print(f"  [BP Transform] Only stream {selected_stream} gets this contour")
+                                if is_1to1 and len(result_source_indices) == 1:
+                                    # 1:1 case: only assign to the single selected source/stream
+                                    selected_stream = result_source_indices[0]
+                                    print(f"  [BP Transform] 1:1 mapping for level {level_i}, contour {contour_i}")
+                                    print(f"  [BP Transform] Only stream {selected_stream} gets this contour")
 
-                                        # Override streams_for_contour to only include the selected stream
-                                        original_streams = list(streams_for_contour)
-                                        streams_for_contour = [selected_stream] if selected_stream in original_streams else original_streams[:1]
+                                    # Override streams_for_contour to only include the selected stream
+                                    original_streams = list(streams_for_contour)
+                                    streams_for_contour = [selected_stream] if selected_stream in original_streams else original_streams[:1]
 
-                                        # Warn about orphaned streams
-                                        orphaned = [s for s in original_streams if s not in streams_for_contour]
-                                        if orphaned:
-                                            print(f"  [WARNING] Streams {orphaned} were originally assigned here but user deselected them")
-                                            print(f"  [WARNING] These streams may not have proper contours at this level!")
-                                    else:
-                                        print(f"  [BP Transform] Using manual cut result for level {level_i}, contour {contour_i}")
-                                        print(f"  [BP Transform] streams_for_contour = {streams_for_contour}")
-                                        for i, s in enumerate(streams_for_contour):
-                                            if i < len(cut_contours):
-                                                print(f"  [BP Transform] cut_contours[{i}] will go to stream {s}")
-                                    # Don't delete - keep for potential re-runs
-                                # Check old format (single target result in _manual_cut_data)
-                                elif self._manual_cut_data is not None and 'cut_result' in self._manual_cut_data:
-                                    cut_contours = self._manual_cut_data['cut_result']
-                                    cutting_info = None
-                                    has_manual_result = True
-                                    print(f"  [BP Transform] Using manual cut result for first division (legacy format)")
+                                    # Warn about orphaned streams
+                                    orphaned = [s for s in original_streams if s not in streams_for_contour]
+                                    if orphaned:
+                                        print(f"  [WARNING] Streams {orphaned} were originally assigned here but user deselected them")
+                                        print(f"  [WARNING] These streams may not have proper contours at this level!")
+                                else:
+                                    print(f"  [BP Transform] Using manual cut result for level {level_i}, contour {contour_i}")
                                     print(f"  [BP Transform] streams_for_contour = {streams_for_contour}")
-                                    print(f"  [BP Transform] cut_contours[0] will go to stream {streams_for_contour[0]}")
-                                    print(f"  [BP Transform] cut_contours[1] will go to stream {streams_for_contour[1]}")
-                                    # Clear manual cut data after using it
-                                    self._manual_cut_data = None
+                                    for i, s in enumerate(streams_for_contour):
+                                        if i < len(cut_contours):
+                                            print(f"  [BP Transform] cut_contours[{i}] will go to stream {s}")
+                                # Don't delete - keep for potential re-runs
+                            # Check old format (single target result in _manual_cut_data)
+                            elif self._manual_cut_data is not None and 'cut_result' in self._manual_cut_data:
+                                cut_contours = self._manual_cut_data['cut_result']
+                                cutting_info = None
+                                has_manual_result = True
+                                print(f"  [BP Transform] Using manual cut result (legacy format)")
+                                print(f"  [BP Transform] streams_for_contour = {streams_for_contour}")
+                                print(f"  [BP Transform] cut_contours[0] will go to stream {streams_for_contour[0]}")
+                                print(f"  [BP Transform] cut_contours[1] will go to stream {streams_for_contour[1]}")
+                                # Clear manual cut data after using it
+                                self._manual_cut_data = None
 
                             if not has_manual_result:
-                                if is_first_division:
-                                    # SEPARATE mode without manual result - need to open manual cutting window
-                                    print(f"  [BP Transform] SEPARATE mode needs manual cutting - preparing window")
+                                # Always show manual cutting window (for both SEPARATE and COMMON modes)
+                                print(f"  [BP Transform] {mode_str} mode needs manual cutting - preparing window")
 
-                                    # Store current progress so we can resume
-                                    self._cut_streams_progress = {
-                                        'level_i': level_i,
-                                        'contour_i': contour_i,
-                                        'streams_for_contour': streams_for_contour,
-                                        'stream_contours': stream_contours,
-                                        'stream_bounding_planes': stream_bounding_planes,
-                                        'stream_groups': stream_groups,
-                                        'cut_stream_combos': cut_stream_combos,
-                                        'level_order': level_order,
-                                        'level_i_idx': level_i_idx,
-                                    }
+                                # Store current progress so we can resume
+                                self._cut_streams_progress = {
+                                    'level_i': level_i,
+                                    'contour_i': contour_i,
+                                    'streams_for_contour': streams_for_contour,
+                                    'stream_contours': stream_contours,
+                                    'stream_bounding_planes': stream_bounding_planes,
+                                    'stream_groups': stream_groups,
+                                    'cut_stream_combos': cut_stream_combos,
+                                    'level_order': level_order,
+                                    'level_i_idx': level_i_idx,
+                                }
 
-                                    # Prepare manual cut data for this specific transition
-                                    self._prepare_manual_cut_data_for_level(
-                                        muscle_name, level_i, contour_i, streams_for_contour,
-                                        target_contour, target_bp, source_contours, source_bps,
-                                        prev_level  # Pass actual source level
+                                # For COMMON mode, get the initial cutting line from source boundaries
+                                initial_cut_line = None
+                                if not is_first_division:
+                                    # COMMON mode: extract cutting boundary from source contours
+                                    # The boundary is where the source contours were previously cut
+                                    initial_cut_line = self._get_source_cutting_boundary(
+                                        source_contours, source_bps, target_bp
                                     )
-                                    print(f"  [DEBUG] >>> RETURNING for manual cutting at level_i={level_i}, contour_i={contour_i}")
-                                    print(f"  [DEBUG] >>> stream_bounding_planes lengths at return: {[len(sbp) for sbp in stream_bounding_planes]}")
-                                    # Show source_bps scalar values to verify what we're using as source
-                                    source_scalars = [bp.get('scalar_value', 'unknown') for bp in source_bps]
-                                    print(f"  [DEBUG] >>> source_bps scalars: {source_scalars}")
-                                    return  # Wait for user to draw cutting line
-                                else:
-                                    cut_contours, cutting_info = self._cut_contour_bp_transform(
-                                        target_contour, target_bp, source_contours, source_bps, streams_for_contour,
-                                        is_first_division=is_first_division,
-                                        target_level=level_i, source_level=prev_level
-                                    )
+
+                                # Prepare manual cut data for this specific transition
+                                self._prepare_manual_cut_data_for_level(
+                                    muscle_name, level_i, contour_i, streams_for_contour,
+                                    target_contour, target_bp, source_contours, source_bps,
+                                    prev_level,  # Pass actual source level
+                                    initial_cut_line=initial_cut_line,
+                                    is_common_mode=(not is_first_division)
+                                )
+                                print(f"  [DEBUG] >>> RETURNING for manual cutting at level_i={level_i}, contour_i={contour_i}")
+                                print(f"  [DEBUG] >>> stream_bounding_planes lengths at return: {[len(sbp) for sbp in stream_bounding_planes]}")
+                                # Show source_bps scalar values to verify what we're using as source
+                                source_scalars = [bp.get('scalar_value', 'unknown') for bp in source_bps]
+                                print(f"  [DEBUG] >>> source_bps scalars: {source_scalars}")
+                                return  # Wait for user to draw cutting line
                         elif cut_method == 'mesh':
                             cut_contours = self._cut_contour_mesh_aware(
                                 target_contour, target_bp, projected_refs, streams_for_contour
