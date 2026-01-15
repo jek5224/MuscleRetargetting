@@ -7945,10 +7945,14 @@ class ContourMeshMixin:
                                         print(f"  [WARNING] These streams may not have proper contours at this level!")
                                 else:
                                     print(f"  [BP Transform] Using manual cut result for level {level_i}, contour {contour_i}")
-                                    print(f"  [BP Transform] streams_for_contour = {streams_for_contour}")
+                                    print(f"  [BP Transform] streams_for_contour = {streams_for_contour} ({len(streams_for_contour)} streams)")
+                                    print(f"  [BP Transform] cut_contours has {len(cut_contours)} pieces")
+                                    if len(cut_contours) < len(streams_for_contour):
+                                        print(f"  [WARNING] MISMATCH! {len(streams_for_contour)} streams need pieces but only {len(cut_contours)} available!")
+                                        print(f"  [WARNING] {len(streams_for_contour) - len(cut_contours)} streams will get FALLBACK (uncut target)")
                                     for i, s in enumerate(streams_for_contour):
                                         if i < len(cut_contours):
-                                            print(f"  [BP Transform] cut_contours[{i}] will go to stream {s}")
+                                            print(f"  [BP Transform] cut_contours[{i}] ({len(cut_contours[i])} verts) will go to stream {s}")
                                 # Don't delete - keep for potential re-runs
                             # Check old format (single target result in _manual_cut_data)
                             elif self._manual_cut_data is not None and 'cut_result' in self._manual_cut_data:
@@ -8043,8 +8047,10 @@ class ContourMeshMixin:
                             # Guard: if no available piece found (more streams than pieces)
                             if best_idx is None:
                                 print(f"  [WARNING] Level {level_i}: No available cut piece for stream {stream_i} (more streams than cut pieces)")
-                                # Use the full target contour as fallback
-                                cut_contour = target_contour
+                                print(f"  [WARNING]   cut_contours has {len(cut_contours)} pieces, used_pieces={used_pieces}")
+                                print(f"  [WARNING]   Using FULL target contour as fallback - this stream will have UNCUT contour!")
+                                # Use a COPY of target contour as fallback to avoid shared references
+                                cut_contour = np.array(target_contour)
                             else:
                                 used_pieces.add(best_idx)
                                 cut_contour = cut_contours[best_idx]
