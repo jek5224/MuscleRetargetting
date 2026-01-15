@@ -8046,11 +8046,22 @@ class ContourMeshMixin:
 
                             # Guard: if no available piece found (more streams than pieces)
                             if best_idx is None:
-                                print(f"  [WARNING] Level {level_i}: No available cut piece for stream {stream_i} (more streams than cut pieces)")
-                                print(f"  [WARNING]   cut_contours has {len(cut_contours)} pieces, used_pieces={used_pieces}")
-                                print(f"  [WARNING]   Using FULL target contour as fallback - this stream will have UNCUT contour!")
-                                # Use a COPY of target contour as fallback to avoid shared references
-                                cut_contour = np.array(target_contour)
+                                print(f"  [ERROR] Level {level_i}: No cut piece for stream {stream_i}!")
+                                print(f"  [ERROR]   cut_contours has {len(cut_contours)} pieces but {len(streams_for_contour)} streams need them")
+                                print(f"  [ERROR]   This is a bug - returning to request proper cutting")
+                                # Clear the invalid result so it doesn't get reused
+                                result_key = (level_i, contour_i)
+                                if hasattr(self, '_manual_cut_results') and result_key in self._manual_cut_results:
+                                    del self._manual_cut_results[result_key]
+                                # Request manual cutting for this transition
+                                self._prepare_manual_cut_data_for_level(
+                                    muscle_name, level_i, contour_i, streams_for_contour,
+                                    target_contour, target_bp, source_contours, source_bps,
+                                    prev_level,
+                                    initial_cut_line=None,
+                                    is_common_mode=False  # Force SEPARATE mode
+                                )
+                                return  # Wait for proper cutting
                             else:
                                 used_pieces.add(best_idx)
                                 cut_contour = cut_contours[best_idx]
@@ -8070,7 +8081,7 @@ class ContourMeshMixin:
                             stream_contours[stream_i].append(cut_contour)
                             stream_bounding_planes[stream_i].append(new_bp)
                             # Debug: show what was appended
-                            print(f"  [DEBUG] Cut & appended to stream {stream_i}: scalar {new_bp.get('scalar_value', 'unknown')} (from level {level_i})")
+                            print(f"  [DEBUG] Cut & appended to stream {stream_i}: {len(cut_contour)} verts, scalar {new_bp.get('scalar_value', 'unknown')}")
 
                 # Debug: show state after processing this level's cuts
                 print(f"  [DEBUG] === After processing level_i={level_i} cuts ===")
