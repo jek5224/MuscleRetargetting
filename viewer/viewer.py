@@ -4022,7 +4022,7 @@ class GLFWApp():
             target_i = obj._manual_cut_data.get('target_i', 0)
             source_indices = obj._manual_cut_data.get('source_indices', [])
             required_pieces_display = obj._manual_cut_data.get('required_pieces', 2)
-            imgui.set_next_window_size(700, 700, imgui.FIRST_USE_EVER)
+            imgui.set_next_window_size(1050, 750, imgui.FIRST_USE_EVER)  # Wider for source viewer
             # Show target index and source info in title for M→N cases
             title_suffix = f" (Target {target_i}, {len(source_indices)}→1)" if len(source_indices) > 0 else ""
             expanded, opened = imgui.begin(f"Manual Cut: {muscle_name}{title_suffix}", True)
@@ -4312,12 +4312,131 @@ class GLFWApp():
                             draw_list.add_line(pt1[0], pt1[1], pt2[0], pt2[1],
                                               imgui.get_color_u32_rgba(piece_colors[1][0], piece_colors[1][1], piece_colors[1][2], 1.0), 2.5)
 
+            # ===== Source Contour Viewer Panel (right side) =====
+            source_contours_3d = obj._manual_cut_data.get('source_contours', [])
+            if len(source_contours_3d) > 0:
+                # Initialize source viewer state
+                if 'source_view_idx' not in mouse_state:
+                    mouse_state['source_view_idx'] = 0
+
+                # Source viewer panel position (to the right of main canvas)
+                src_panel_x = x0 + canvas_size + padding + 30
+                src_panel_y = y0 - padding
+                src_canvas_size = 280
+                src_padding = 15
+
+                # Draw panel background
+                draw_list.add_rect_filled(
+                    src_panel_x - src_padding, src_panel_y - src_padding,
+                    src_panel_x + src_canvas_size + src_padding, src_panel_y + src_canvas_size + src_padding + 80,
+                    imgui.get_color_u32_rgba(0.12, 0.12, 0.12, 1.0))
+                draw_list.add_rect(
+                    src_panel_x - src_padding, src_panel_y - src_padding,
+                    src_panel_x + src_canvas_size + src_padding, src_panel_y + src_canvas_size + src_padding + 80,
+                    imgui.get_color_u32_rgba(0.4, 0.4, 0.4, 1.0))
+
+                # Title
+                draw_list.add_text(src_panel_x, src_panel_y - src_padding + 5,
+                                  imgui.get_color_u32_rgba(0.9, 0.9, 0.9, 1.0),
+                                  f"Source Contours ({len(source_contours_3d)})")
+
+                # Adjust canvas position for title
+                src_canvas_y = src_panel_y + 20
+
+                # Get current source contour to display
+                src_idx = mouse_state['source_view_idx']
+                src_idx = max(0, min(src_idx, len(source_contours_3d) - 1))
+                mouse_state['source_view_idx'] = src_idx
+
+                # Project source contour to 2D using its bounding plane
+                source_bps = obj._manual_cut_data.get('source_bps', [])
+                if src_idx < len(source_bps):
+                    src_bp = source_bps[src_idx]
+                    src_contour_3d = source_contours_3d[src_idx]
+                    src_mean = src_bp['mean']
+                    src_basis_x = src_bp['basis_x']
+                    src_basis_y = src_bp['basis_y']
+
+                    # Project to 2D
+                    src_2d = []
+                    for pt in src_contour_3d:
+                        diff = pt - src_mean
+                        x = np.dot(diff, src_basis_x)
+                        y = np.dot(diff, src_basis_y)
+                        src_2d.append([x, y])
+                    src_2d = np.array(src_2d)
+
+                    # Compute bounds for source contour
+                    src_min = src_2d.min(axis=0)
+                    src_max = src_2d.max(axis=0)
+                    src_range = src_max - src_min
+                    src_max_range = max(src_range) * 1.2 if max(src_range) > 0 else 1.0
+
+                    # Transform function for source canvas
+                    def src_to_screen(p):
+                        center = (src_min + src_max) / 2
+                        normalized = (np.array(p) - center) / src_max_range + 0.5
+                        return (src_panel_x + normalized[0] * src_canvas_size,
+                                src_canvas_y + (1.0 - normalized[1]) * src_canvas_size)
+
+                    # Draw source canvas background
+                    draw_list.add_rect_filled(
+                        src_panel_x, src_canvas_y,
+                        src_panel_x + src_canvas_size, src_canvas_y + src_canvas_size,
+                        imgui.get_color_u32_rgba(0.08, 0.08, 0.08, 1.0))
+
+                    # Draw source contour with matching color
+                    src_color = piece_colors[src_idx % len(piece_colors)]
+                    if len(src_2d) >= 3:
+                        for i in range(len(src_2d)):
+                            p1 = src_to_screen(src_2d[i])
+                            p2 = src_to_screen(src_2d[(i + 1) % len(src_2d)])
+                            draw_list.add_line(p1[0], p1[1], p2[0], p2[1],
+                                              imgui.get_color_u32_rgba(*src_color, 1.0), 2.5)
+
+                    # Draw centroid marker
+                    src_centroid = src_2d.mean(axis=0)
+                    cx, cy = src_to_screen(src_centroid)
+                    draw_list.add_circle_filled(cx, cy, 5, imgui.get_color_u32_rgba(*src_color, 0.8))
+
+                # Navigation controls below the source canvas
+                nav_y = src_canvas_y + src_canvas_size + 10
+                imgui.set_cursor_screen_pos((src_panel_x, nav_y))
+
+                # Left/Right buttons and slider
+                imgui.push_item_width(src_canvas_size)
+                if len(source_contours_3d) > 1:
+                    # Left button
+                    if imgui.button(f"<##{name}_src_prev", 30, 25):
+                        mouse_state['source_view_idx'] = max(0, src_idx - 1)
+                    imgui.same_line()
+
+                    # Slider
+                    imgui.push_item_width(src_canvas_size - 80)
+                    changed, new_idx = imgui.slider_int(f"##{name}_src_slider", src_idx, 0, len(source_contours_3d) - 1)
+                    if changed:
+                        mouse_state['source_view_idx'] = new_idx
+                    imgui.pop_item_width()
+                    imgui.same_line()
+
+                    # Right button
+                    if imgui.button(f">##{name}_src_next", 30, 25):
+                        mouse_state['source_view_idx'] = min(len(source_contours_3d) - 1, src_idx + 1)
+
+                # Show source index label
+                imgui.set_cursor_screen_pos((src_panel_x, nav_y + 30))
+                src_label_color = piece_colors[src_idx % len(piece_colors)]
+                imgui.text_colored(f"Source {src_idx + 1} / {len(source_contours_3d)}", *src_label_color, 1.0)
+
+                imgui.pop_item_width()
+
             # Get piece info
             current_pieces = obj._manual_cut_data.get('current_pieces', [target_2d])
             required_pieces = obj._manual_cut_data.get('required_pieces', 2)
             source_indices_display = obj._manual_cut_data.get('source_indices', [])
 
             # Show source→target info
+            imgui.set_cursor_screen_pos((cursor_pos[0], y0 + canvas_size + padding + 10))
             imgui.separator()
             imgui.text(f"Cutting: {len(source_indices_display)} sources -> 1 target")
             imgui.text(f"Pieces: {len(current_pieces)} / {required_pieces} needed")
