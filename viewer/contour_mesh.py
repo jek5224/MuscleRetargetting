@@ -8028,10 +8028,72 @@ class ContourMeshMixin:
                         cut_centroids = [np.mean(c, axis=0) for c in cut_contours]
                         prev_centroids = [np.mean(stream_contours[s][-1], axis=0) for s in streams_for_contour]
 
+                        # Handle case where cutting produced more pieces than current streams
+                        # This happens in COMMON mode when user cuts aggressively
+                        if len(cut_contours) > len(streams_for_contour):
+                            extra_pieces = len(cut_contours) - len(streams_for_contour)
+                            print(f"  [EXPANSION] Cut produced {len(cut_contours)} pieces but only {len(streams_for_contour)} streams")
+                            print(f"  [EXPANSION] Creating {extra_pieces} new streams to accommodate all pieces")
+
+                            # Create new stream indices
+                            old_max_stream_count = max_stream_count
+                            new_stream_indices = []
+                            for i in range(extra_pieces):
+                                new_idx = max_stream_count + i
+                                new_stream_indices.append(new_idx)
+
+                                # Initialize new stream with empty lists
+                                stream_contours.append([])
+                                stream_bounding_planes.append([])
+
+                                # Copy previous levels from parent stream (first stream in streams_for_contour)
+                                # New streams "branch off" from existing streams at this cut point
+                                parent_stream = streams_for_contour[i % len(streams_for_contour)]
+                                for level_data in stream_contours[parent_stream][:-1]:  # All but last (which we're replacing)
+                                    # New streams share the same contours up to the branch point
+                                    stream_contours[-1].append(level_data.copy() if hasattr(level_data, 'copy') else np.array(level_data))
+                                for bp_data in stream_bounding_planes[parent_stream][:-1]:
+                                    stream_bounding_planes[-1].append(copy.deepcopy(bp_data))
+
+                                # Extend prev_level data for new streams
+                                prev_level_contours.append(prev_level_contours[parent_stream].copy() if hasattr(prev_level_contours[parent_stream], 'copy') else np.array(prev_level_contours[parent_stream]))
+                                prev_level_bps.append(copy.deepcopy(prev_level_bps[parent_stream]))
+
+                            # Update max_stream_count
+                            max_stream_count = old_max_stream_count + extra_pieces
+
+                            # Add new streams to streams_for_contour for this transition
+                            streams_for_contour = list(streams_for_contour) + new_stream_indices
+                            contour_to_streams[contour_i] = streams_for_contour
+
+                            # Update stream_groups for this level to include new streams
+                            # New streams belong to the same group as their parent (same contour)
+                            if len(stream_groups) > 0:
+                                # Rebuild groups for this level
+                                groups = []
+                                for ci in range(curr_count):
+                                    if contour_to_streams[ci]:
+                                        groups.append(list(contour_to_streams[ci]))
+                                stream_groups[-1] = groups
+                                print(f"  [EXPANSION] Updated stream_groups[-1]: {groups}")
+
+                            # Update prev_centroids to include new streams
+                            prev_centroids = [np.mean(prev_level_contours[s], axis=0) for s in streams_for_contour]
+
+                            print(f"  [EXPANSION] max_stream_count: {old_max_stream_count} -> {max_stream_count}")
+                            print(f"  [EXPANSION] streams_for_contour: {streams_for_contour}")
+
                         # Greedy matching: each stream gets the closest unassigned piece
                         used_pieces = set()
                         for stream_i in streams_for_contour:
-                            prev_centroid = np.mean(stream_contours[stream_i][-1], axis=0)
+                            # For new streams or streams without data, use prev_level_contours
+                            if len(stream_contours[stream_i]) > 0:
+                                prev_centroid = np.mean(stream_contours[stream_i][-1], axis=0)
+                            elif stream_i < len(prev_level_contours):
+                                prev_centroid = np.mean(prev_level_contours[stream_i], axis=0)
+                            else:
+                                # Fallback: use first stream's centroid (shouldn't happen)
+                                prev_centroid = np.mean(prev_level_contours[0], axis=0)
 
                             # Find closest unused piece
                             best_idx = None
@@ -8071,10 +8133,18 @@ class ContourMeshMixin:
                                 print(f"  [WARNING] Level {level_i}: stream {stream_i} got cut contour with only {len(cut_contour)} vertices!")
 
                             # Create new bounding plane for cut piece
+                            # Use prev_level_bps for new streams that don't have data yet
+                            if len(stream_bounding_planes[stream_i]) > 0:
+                                ref_bp = stream_bounding_planes[stream_i][-1]
+                            elif stream_i < len(prev_level_bps):
+                                ref_bp = prev_level_bps[stream_i]
+                            else:
+                                ref_bp = prev_level_bps[0]  # Fallback
+
                             _, new_bp = self.save_bounding_planes(
                                 cut_contour,
                                 target_bp['scalar_value'],
-                                prev_bounding_plane=stream_bounding_planes[stream_i][-1]
+                                prev_bounding_plane=ref_bp
                             )
                             new_bp['is_cut'] = True
 
