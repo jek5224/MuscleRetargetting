@@ -1487,119 +1487,90 @@ class ContourMeshMixin:
 
                 return best_width, best_score, best_p1, best_p2
 
-            # Search for narrowest neck in the ENTIRE merged region
-            # FIRST: Check existing contours from self.contours (find_contours already placed good samples)
-            # THEN: Do additional fine search if needed
+            # Phase 3: Find the narrowest neck contour
+            # Key insight: The narrowest neck is RIGHT at the transition boundary
+            # Search from the boundary (where contours just merged) into the merged region
             if best_small_scalar is not None and best_small_contours is not None and best_large_scalar is not None:
-                print(f"    [Phase3] Searching for narrowest neck in FULL merged region...")
-            else:
-                print(f"    [Phase3] SKIPPED - missing data: best_small_scalar={best_small_scalar is not None}, best_small_contours={best_small_contours is not None}, best_large_scalar={best_large_scalar is not None}")
+                print(f"    [Phase3] Finding narrowest neck contour near transition boundary...")
 
-            if best_small_scalar is not None and best_small_contours is not None and best_large_scalar is not None:
+                # The transition boundary is between best_large_scalar and best_small_scalar
+                # Narrowest neck is on the merged side, very close to the boundary
+                boundary_scalar = (best_large_scalar + best_small_scalar) / 2
 
-                def evaluate_scalar(test_scalar):
-                    """Evaluate neck width at a given scalar value.
-                    Returns (total_width, total_score, contours, planes) - width first for sorting.
-                    """
-                    planes_test, contours_test, _ = self.find_contour(test_scalar, prev_bounding_plane=prev_plane)
-                    if len(contours_test) != small_count:
-                        return None, None, None, None
-                    total_width = 0
-                    total_score = 0
-                    for c in contours_test:
-                        width, score, _, _ = measure_neck_width(c)
-                        total_width += width
-                        total_score += score
-                    return total_width, total_score, contours_test, planes_test
+                # Determine search direction: from boundary towards the merged (small_count) side
+                if best_large_scalar > best_small_scalar:
+                    # Large is at higher scalar, small at lower - search towards lower
+                    search_direction = -1
+                    boundary_to_small = best_small_scalar - boundary_scalar
+                else:
+                    # Large is at lower scalar, small at higher - search towards higher
+                    search_direction = 1
+                    boundary_to_small = best_small_scalar - boundary_scalar
 
-                # STEP 1: Check existing contour levels with small_count WITHIN the transition region
-                # Only search between scalar_large and scalar_small (with small margin)
-                search_margin = abs(scalar_large - scalar_small) * 0.1
-                search_min = min(scalar_large, scalar_small) - search_margin
-                search_max = max(scalar_large, scalar_small) + search_margin
-                print(f"    [Phase3] Checking levels for count={small_count} in scalar range [{search_min:.6f}, {search_max:.6f}]...")
-                existing_candidates = []
+                # Fine search near the boundary
+                # Start from boundary, move towards merged side, find first valid + measure neck
+                search_range = abs(best_large_scalar - best_small_scalar)
+                num_samples = 100  # Very fine sampling near boundary
 
-                for level_i in range(len(self.contours)):
-                    if len(self.contours[level_i]) == small_count:
-                        level_planes = self.bounding_planes[level_i]
-                        level_contours = self.contours[level_i]
-
-                        if len(level_planes) > 0 and 'scalar_value' in level_planes[0]:
-                            level_scalar = level_planes[0]['scalar_value']
-                        else:
-                            continue
-
-                        # Only consider levels within the transition region
-                        if level_scalar < search_min or level_scalar > search_max:
-                            continue
-
-                        # Measure neck width for this level
-                        total_width = 0
-                        for c in level_contours:
-                            width, score, p1, p2 = measure_neck_width(c)
-                            total_width += width
-
-                        existing_candidates.append((level_scalar, total_width, level_i, level_contours, level_planes))
-                        print(f"      Level {level_i}: scalar={level_scalar:.6f}, width={total_width:.4f}")
-
-                # Initialize with best_small as fallback
                 narrowest_scalar = best_small_scalar
                 narrowest_width = float('inf')
                 narrowest_contours = best_small_contours
                 narrowest_planes = best_small_planes
 
+                # Measure initial
                 if len(best_small_contours) > 0:
                     narrowest_width, _, _, _ = measure_neck_width(best_small_contours[0])
+                    print(f"      Initial: scalar={best_small_scalar:.6f}, width={narrowest_width:.4f}")
 
-                # Find best among existing candidates (if any)
-                if existing_candidates:
-                    existing_candidates.sort(key=lambda x: x[1])  # Sort by width
-                    best_existing = existing_candidates[0]
-                    print(f"    [Phase3] Best existing: level {best_existing[2]}, scalar={best_existing[0]:.6f}, width={best_existing[1]:.4f}")
+                # Search from boundary towards merged side
+                # Sample more densely near boundary (where narrowest neck should be)
+                found_valid = False
+                consecutive_wider = 0
 
-                    # Use best existing as starting point
-                    narrowest_scalar = best_existing[0]
-                    narrowest_width = best_existing[1]
-                    narrowest_contours = best_existing[3]
-                    narrowest_planes = best_existing[4]
-                else:
-                    print(f"    [Phase3] No existing candidates in range, using best_small as starting point")
+                for sample_i in range(num_samples):
+                    # Exponential sampling: dense near boundary, sparse further away
+                    # t goes from 0 (at boundary) to 1 (at best_small_scalar and beyond)
+                    t = (sample_i / num_samples) ** 0.5  # Square root for denser sampling near 0
 
-                # STEP 2: Dense search across the ENTIRE transition region
-                # The narrowest neck should be near where the contour is about to split
-                # Search from just past large_count boundary to small_count boundary
-                fine_start = min(scalar_large, scalar_small)
-                fine_end = max(scalar_large, scalar_small)
-                fine_samples = 50  # Dense sampling across full range
+                    # Interpolate from boundary towards (and past) best_small_scalar
+                    test_scalar = boundary_scalar + t * boundary_to_small * 1.5  # Go 50% past
 
-                print(f"    [Phase3] Dense search across transition: [{fine_start:.6f}, {fine_end:.6f}]")
+                    planes_test, contours_test, _ = self.find_contour(test_scalar, prev_bounding_plane=prev_plane)
 
-                for sample_i in range(fine_samples + 1):
-                    t = sample_i / fine_samples
-                    test_scalar = fine_start + t * (fine_end - fine_start)
-
-                    width, score, contours_test, planes_test = evaluate_scalar(test_scalar)
-                    if width is None:
+                    if len(contours_test) != small_count:
                         continue
 
-                    if width < narrowest_width:
-                        narrowest_width = width
+                    found_valid = True
+
+                    # Measure neck width
+                    total_width = 0
+                    for c in contours_test:
+                        width, _, _, _ = measure_neck_width(c)
+                        total_width += width
+
+                    if total_width < narrowest_width:
+                        narrowest_width = total_width
                         narrowest_scalar = test_scalar
                         narrowest_contours = contours_test
                         narrowest_planes = planes_test
-                        print(f"      Dense: Found narrower at {test_scalar:.6f}, width={width:.4f}")
+                        consecutive_wider = 0
+                        print(f"      Found narrower: scalar={test_scalar:.6f}, width={total_width:.4f}")
+                    else:
+                        consecutive_wider += 1
+                        # If we've found valid contours and width is increasing, we've passed the neck
+                        if consecutive_wider > 10:
+                            print(f"      Stopping: neck width increasing (passed narrowest point)")
+                            break
 
-                print(f"    [Phase3] Best: scalar={narrowest_scalar:.6f}, width={narrowest_width:.4f}")
+                if not found_valid:
+                    print(f"    [Phase3] WARNING: No valid contours found in search range")
+
+                print(f"    [Phase3] Best narrowest neck: scalar={narrowest_scalar:.6f}, width={narrowest_width:.4f}")
 
                 # Update best_small with narrowest neck result
-                if narrowest_scalar != best_small_scalar:
-                    print(f"    [Phase3] Using narrowest neck at {narrowest_scalar:.6f} (width={narrowest_width:.6f})")
-                    best_small_scalar = narrowest_scalar
-                    best_small_contours = narrowest_contours
-                    best_small_planes = narrowest_planes
-                else:
-                    print(f"    [Phase3] Initial contour already has narrowest neck")
+                best_small_scalar = narrowest_scalar
+                best_small_contours = narrowest_contours
+                best_small_planes = narrowest_planes
 
                 # Store neck visualization data
                 # Target = merged contour(s) just BEFORE division (small_count)
