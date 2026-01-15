@@ -1239,7 +1239,22 @@ class ContourMeshMixin:
                             indent = "  " * (depth + 1)
                             print(f"{indent}Jump {prev_count} → {count} - subdividing [{prev_scalar:.6f}, {scalar:.6f}]")
                             sub_results = find_transitions_recursive(prev_scalar, scalar, samples, depth + 1)
-                            results.extend(sub_results)
+                            if len(sub_results) == 0:
+                                # Subdivision didn't find intermediate steps - add the jump as-is
+                                print(f"{indent}  WARNING: Could not find intermediate transitions for {prev_count} → {count}")
+                                # Add individual transitions for each step
+                                for step_count in range(min(prev_count, count) + 1, max(prev_count, count) + 1):
+                                    from_count = step_count - 1 if prev_count < count else step_count
+                                    to_count = step_count if prev_count < count else step_count - 1
+                                    results.append({
+                                        'scalar_a': prev_scalar,
+                                        'scalar_b': scalar,
+                                        'count_a': from_count,
+                                        'count_b': to_count,
+                                    })
+                                    print(f"{indent}  Added fallback: {from_count} → {to_count}")
+                            else:
+                                results.extend(sub_results)
 
                 prev_count = count
                 prev_scalar = scalar
