@@ -1996,6 +1996,32 @@ class GLFWApp():
                                     print(f"[{name}] Refine Contours error: {e}")
                             else:
                                 print(f"[{name}] Prerequisites: Run 'Find Contours' first")
+
+                        # Find Transitions button - fast scan for contour count changes
+                        if colored_button(f"Find Transitions##{name}", 5, col_button_width):
+                            if hasattr(obj, 'scalar_field') and obj.scalar_field is not None:
+                                try:
+                                    # Use origin/insertion scalar values if available
+                                    scalar_min = getattr(obj, 'origin_contour_value', 0.0)
+                                    scalar_max = getattr(obj, 'insertion_contour_value', 1.0)
+                                    if scalar_min > scalar_max:
+                                        scalar_min, scalar_max = scalar_max, scalar_min
+                                    obj.find_all_transitions(scalar_min=scalar_min, scalar_max=scalar_max, num_samples=100)
+                                    # Auto-open Neck Viz if transitions found
+                                    if hasattr(obj, '_neck_viz_data') and obj._neck_viz_data and len(obj._neck_viz_data) > 0:
+                                        if not hasattr(self, 'neck_viz_open'):
+                                            self.neck_viz_open = {}
+                                        self.neck_viz_open[name] = True
+                                        if not hasattr(self, 'neck_viz_idx'):
+                                            self.neck_viz_idx = {}
+                                        self.neck_viz_idx[name] = 0
+                                except Exception as e:
+                                    print(f"[{name}] Find Transitions error: {e}")
+                                    import traceback
+                                    traceback.print_exc()
+                            else:
+                                print(f"[{name}] Prerequisites: Run 'Scalar Field' first")
+
                         # Smoothen buttons: z, x, bp (3 buttons in same row)
                         sub_button_width = (col_button_width - 8) // 3  # 3 buttons with small margins
                         if colored_button(f"z##{name}", 4, sub_button_width):
