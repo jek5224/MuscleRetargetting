@@ -3726,7 +3726,7 @@ class GLFWApp():
             self.inspect_2d_open[name] = False
 
     def _render_neck_viz_windows(self):
-        """Render narrowest neck visualization windows."""
+        """Render transition visualization windows showing source and target contours."""
         if not hasattr(self, 'neck_viz_open'):
             return
 
@@ -3749,7 +3749,7 @@ class GLFWApp():
             viz_data = obj._neck_viz_data
             num_viz = len(viz_data)
 
-            imgui.set_next_window_size(450, 500, imgui.FIRST_USE_EVER)
+            imgui.set_next_window_size(450, 520, imgui.FIRST_USE_EVER)
             expanded, opened = imgui.begin(f"Neck Viz: {name}", True)
 
             if not opened:
@@ -3767,33 +3767,43 @@ class GLFWApp():
 
             # Get current visualization data
             data = viz_data[viz_idx]
-            transition_str = f"{data['large_count']}→{data['small_count']}"
+            large_count = data.get('large_count', 0)
+            small_count = data.get('small_count', 0)
+            transition_str = f"{large_count}→{small_count}"
             imgui.text(f"Transition {viz_idx + 1}/{num_viz}: {transition_str}")
 
-            neck_width = data.get('neck_width', float('inf'))
-            scalar = data.get('scalar', 0)
-            if neck_width < float('inf'):
-                imgui.text(f"Neck width: {neck_width:.4f}")
-            else:
-                imgui.text_colored("No neck found", 1.0, 0.5, 0.0, 1.0)
-            imgui.text(f"Scalar: {scalar:.6f}")
+            scalar_large = data.get('scalar_large', 0)
+            scalar_small = data.get('scalar_small', 0)
+            imgui.text(f"Source (after split): {large_count} contours @ scalar {scalar_large:.4f}")
+            imgui.text(f"Target (before split): {small_count} contours @ scalar {scalar_small:.4f}")
             imgui.separator()
 
             # Get contour data
-            contour_2d = data.get('contour_2d')
-            neck_p1 = data.get('neck_p1')
-            neck_p2 = data.get('neck_p2')
+            target_contours = data.get('target_contours_2d', [])
+            source_contours = data.get('source_contours_2d', [])
 
-            if contour_2d is None or len(contour_2d) < 3:
+            if not target_contours and not source_contours:
                 imgui.text("No contour data available")
                 imgui.end()
                 continue
 
-            contour_2d = np.array(contour_2d)
+            # Collect all points to compute bounds
+            all_points = []
+            for c in target_contours:
+                if c is not None and len(c) > 0:
+                    all_points.extend(c)
+            for c in source_contours:
+                if c is not None and len(c) > 0:
+                    all_points.extend(c)
 
-            # Compute bounds for normalization
-            min_xy = contour_2d.min(axis=0)
-            max_xy = contour_2d.max(axis=0)
+            if len(all_points) < 3:
+                imgui.text("Insufficient contour data")
+                imgui.end()
+                continue
+
+            all_points = np.array(all_points)
+            min_xy = all_points.min(axis=0)
+            max_xy = all_points.max(axis=0)
             range_xy = max_xy - min_xy
             range_xy[range_xy < 1e-10] = 1.0
             max_range = max(range_xy[0], range_xy[1])
@@ -3819,52 +3829,54 @@ class GLFWApp():
             draw_list.add_rect_filled(x0, y0, x0 + canvas_size, y0 + canvas_size,
                                      imgui.get_color_u32_rgba(0.1, 0.1, 0.1, 1.0))
 
-            # Draw contour
-            contour_screen = [to_screen(p, x0, y0, canvas_size) for p in contour_2d]
-            if len(contour_screen) >= 3:
-                # Fill with semi-transparent gray
+            # Draw TARGET contours (merged, before division) in BLUE
+            target_color = imgui.get_color_u32_rgba(0.3, 0.5, 1.0, 1.0)
+            target_fill = imgui.get_color_u32_rgba(0.2, 0.3, 0.6, 0.3)
+            for contour_2d in target_contours:
+                if contour_2d is None or len(contour_2d) < 3:
+                    continue
+                contour_2d = np.array(contour_2d)
+                contour_screen = [to_screen(p, x0, y0, canvas_size) for p in contour_2d]
+                # Fill
                 for i in range(1, len(contour_screen) - 1):
                     draw_list.add_triangle_filled(
                         contour_screen[0][0], contour_screen[0][1],
                         contour_screen[i][0], contour_screen[i][1],
                         contour_screen[i+1][0], contour_screen[i+1][1],
-                        imgui.get_color_u32_rgba(0.3, 0.3, 0.3, 0.4))
-                # Outline in white
+                        target_fill)
+                # Outline
                 for i in range(len(contour_screen)):
                     p1, p2 = contour_screen[i], contour_screen[(i+1) % len(contour_screen)]
-                    draw_list.add_line(p1[0], p1[1], p2[0], p2[1],
-                                      imgui.get_color_u32_rgba(0.9, 0.9, 0.9, 1.0), 2.0)
+                    draw_list.add_line(p1[0], p1[1], p2[0], p2[1], target_color, 2.5)
 
-            # Draw neck line and points if available
-            if neck_p1 is not None and neck_p2 is not None:
-                neck_p1 = np.array(neck_p1)
-                neck_p2 = np.array(neck_p2)
-                p1_screen = to_screen(neck_p1, x0, y0, canvas_size)
-                p2_screen = to_screen(neck_p2, x0, y0, canvas_size)
-
-                # Draw neck line in bright red
-                draw_list.add_line(p1_screen[0], p1_screen[1], p2_screen[0], p2_screen[1],
-                                  imgui.get_color_u32_rgba(1.0, 0.2, 0.2, 1.0), 3.0)
-
-                # Draw neck points as circles
-                draw_list.add_circle_filled(p1_screen[0], p1_screen[1], 6.0,
-                                           imgui.get_color_u32_rgba(1.0, 0.0, 0.0, 1.0))
-                draw_list.add_circle_filled(p2_screen[0], p2_screen[1], 6.0,
-                                           imgui.get_color_u32_rgba(1.0, 0.0, 0.0, 1.0))
-
-                # Draw label near neck
-                mid_screen = ((p1_screen[0] + p2_screen[0]) / 2, (p1_screen[1] + p2_screen[1]) / 2)
-                draw_list.add_text(mid_screen[0] + 10, mid_screen[1] - 10,
-                                  imgui.get_color_u32_rgba(1.0, 1.0, 0.0, 1.0),
-                                  f"w={neck_width:.3f}")
+            # Draw SOURCE contours (split, after division) in ORANGE/RED
+            source_colors = [
+                imgui.get_color_u32_rgba(1.0, 0.4, 0.1, 1.0),  # Orange
+                imgui.get_color_u32_rgba(1.0, 0.8, 0.0, 1.0),  # Yellow
+                imgui.get_color_u32_rgba(0.0, 1.0, 0.4, 1.0),  # Green
+                imgui.get_color_u32_rgba(1.0, 0.0, 0.5, 1.0),  # Pink
+                imgui.get_color_u32_rgba(0.6, 0.2, 1.0, 1.0),  # Purple
+            ]
+            for ci, contour_2d in enumerate(source_contours):
+                if contour_2d is None or len(contour_2d) < 3:
+                    continue
+                contour_2d = np.array(contour_2d)
+                contour_screen = [to_screen(p, x0, y0, canvas_size) for p in contour_2d]
+                color = source_colors[ci % len(source_colors)]
+                # Outline only (no fill to see overlap with target)
+                for i in range(len(contour_screen)):
+                    p1, p2 = contour_screen[i], contour_screen[(i+1) % len(contour_screen)]
+                    draw_list.add_line(p1[0], p1[1], p2[0], p2[1], color, 2.0)
 
             imgui.dummy(canvas_size + 2 * padding, canvas_size + 2 * padding)
 
-            # Show additional info
+            # Legend
             imgui.separator()
-            level_i = data.get('level_i', -1)
-            if level_i >= 0:
-                imgui.text(f"Inserted at level: {level_i}")
+            imgui.text_colored("Target (before split)", 0.3, 0.5, 1.0, 1.0)
+            imgui.same_line()
+            imgui.text(" | ")
+            imgui.same_line()
+            imgui.text_colored("Source (after split)", 1.0, 0.4, 0.1, 1.0)
 
             imgui.end()
 
