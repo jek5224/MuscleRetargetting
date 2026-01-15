@@ -2030,12 +2030,13 @@ class GLFWApp():
                             if obj.contours is not None and len(obj.contours) > 0 and obj.bounding_planes is not None and len(obj.bounding_planes) > 0:
                                 try:
                                     obj.cut_streams(cut_method=obj.cutting_method, muscle_name=name)
-                                    # Apply smoothening after streams are found
-                                    if hasattr(obj, 'stream_bounding_planes') and obj.stream_bounding_planes is not None:
-                                        print(f"[{name}] Applying smoothening...")
-                                        obj.smoothen_contours_z()
-                                        obj.smoothen_contours_x()
-                                        obj.smoothen_contours_bp()
+                                    # Only apply smoothening if cut_streams completed (not waiting for manual cut)
+                                    if not obj._manual_cut_pending and obj._manual_cut_data is None:
+                                        if hasattr(obj, 'stream_bounding_planes') and obj.stream_bounding_planes is not None:
+                                            print(f"[{name}] Applying smoothening...")
+                                            obj.smoothen_contours_z()
+                                            obj.smoothen_contours_x()
+                                            obj.smoothen_contours_bp()
                                 except Exception as e:
                                     import traceback
                                     print(f"[{name}] Cut Streams error: {e}")
@@ -4672,16 +4673,19 @@ class GLFWApp():
                             # Close window and continue
                             obj._manual_cut_pending = False
                             obj.cut_streams(cut_method='bp', muscle_name=muscle_name)
-                            if hasattr(obj, 'stream_bounding_planes') and obj.stream_bounding_planes is not None:
-                                print(f"[{muscle_name}] Applying smoothening...")
-                                obj.smoothen_contours_z()
-                                obj.smoothen_contours_x()
-                                obj.smoothen_contours_bp()
+                            # Only apply smoothening if cut_streams completed (not waiting for another manual cut)
+                            if not obj._manual_cut_pending and obj._manual_cut_data is None:
+                                if hasattr(obj, 'stream_bounding_planes') and obj.stream_bounding_planes is not None:
+                                    print(f"[{muscle_name}] Applying smoothening...")
+                                    obj.smoothen_contours_z()
+                                    obj.smoothen_contours_x()
+                                    obj.smoothen_contours_bp()
 
-                            if name in self._manual_cut_mouse:
-                                del self._manual_cut_mouse[name]
-                            imgui.end()
-                            continue
+                                if name in self._manual_cut_mouse:
+                                    del self._manual_cut_mouse[name]
+                                imgui.end()
+                                continue
+                            # cut_streams returned early for another manual cut - don't close window
                         else:
                             print(f"Optimization incomplete: {filled_count}/{len(source_contours_full)} pieces filled")
                     else:
@@ -4818,15 +4822,18 @@ class GLFWApp():
                         if cut_result is not None:
                             obj._manual_cut_pending = False
                             obj.cut_streams(cut_method='bp', muscle_name=muscle_name)
-                            if hasattr(obj, 'stream_bounding_planes') and obj.stream_bounding_planes is not None:
-                                print(f"[{muscle_name}] Applying smoothening...")
-                                obj.smoothen_contours_z()
-                                obj.smoothen_contours_x()
-                                obj.smoothen_contours_bp()
-                            if name in self._manual_cut_mouse:
-                                del self._manual_cut_mouse[name]
-                            imgui.end()
-                            continue
+                            # Only apply smoothening if cut_streams completed (not waiting for another manual cut)
+                            if not obj._manual_cut_pending and obj._manual_cut_data is None:
+                                if hasattr(obj, 'stream_bounding_planes') and obj.stream_bounding_planes is not None:
+                                    print(f"[{muscle_name}] Applying smoothening...")
+                                    obj.smoothen_contours_z()
+                                    obj.smoothen_contours_x()
+                                    obj.smoothen_contours_bp()
+                                if name in self._manual_cut_mouse:
+                                    del self._manual_cut_mouse[name]
+                                imgui.end()
+                                continue
+                            # cut_streams returned early for another manual cut - don't close window
 
                 imgui.same_line()
                 if imgui.button("Back", button_width, 30):
