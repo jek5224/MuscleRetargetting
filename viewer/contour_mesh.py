@@ -5820,13 +5820,18 @@ class ContourMeshMixin:
         return True  # Manual cutting is needed
 
     def _prepare_manual_cut_data_for_level(self, muscle_name, level_i, contour_i, streams_for_contour,
-                                            target_contour, target_bp, source_contours, source_bps):
+                                            target_contour, target_bp, source_contours, source_bps,
+                                            source_level):
         """
         Prepare manual cutting data for a specific level/contour during cut_streams.
         Called when a SEPARATE case is encountered mid-processing.
+
+        Args:
+            source_level: The actual level where source contours come from (prev_level in processing order)
         """
         print(f"\n=== Preparing Manual Cut Data for Level {level_i}, Contour {contour_i} ===")
         print(f"Streams: {streams_for_contour} → 1 target")
+        print(f"Source level: {source_level} (target level: {level_i})")
 
         # Project target contour to 2D
         target_mean = target_bp['mean']
@@ -5855,7 +5860,7 @@ class ContourMeshMixin:
         self._manual_cut_data = {
             'muscle_name': muscle_name,
             'target_level': level_i,
-            'source_level': level_i - 1,  # Sources are from previous level
+            'source_level': source_level,  # Actual source level from processing order
             'target_i': contour_i,
             'source_indices': list(streams_for_contour),
             'target_contour': np.array(target_contour),
@@ -6452,6 +6457,14 @@ class ContourMeshMixin:
             prev_level = level_order[level_i_idx - 1]
             curr_count = contour_counts[level_i]
 
+            # Debug: show current state before processing this level
+            print(f"  [DEBUG] === Before processing level_i={level_i} (prev_level={prev_level}) ===")
+            print(f"  [DEBUG] stream_bounding_planes lengths: {[len(sbp) for sbp in stream_bounding_planes]}")
+            for s in range(min(max_stream_count, 2)):  # Show first 2 streams
+                if len(stream_bounding_planes[s]) > 0:
+                    last_scalar = stream_bounding_planes[s][-1].get('scalar_value', 'unknown')
+                    print(f"  [DEBUG] stream {s} last scalar_value: {last_scalar}")
+
             if curr_count == max_stream_count:
                 # No cutting needed - match by distance using optimal assignment
                 from scipy.optimize import linear_sum_assignment
@@ -6471,6 +6484,9 @@ class ContourMeshMixin:
                 for stream_i, contour_i in zip(row_ind, col_ind):
                     stream_contours[stream_i].append(self.contours[level_i][contour_i])
                     stream_bounding_planes[stream_i].append(self.bounding_planes[level_i][contour_i])
+                    # Debug: show what was appended
+                    appended_scalar = self.bounding_planes[level_i][contour_i].get('scalar_value', 'unknown')
+                    print(f"  [DEBUG] Appended to stream {stream_i}: contour {contour_i} with scalar {appended_scalar}")
 
                 stream_groups.append([[i] for i in range(max_stream_count)])
                 print(f"  Level {level_i}: {curr_count} contours (no cut needed)")
@@ -6484,8 +6500,12 @@ class ContourMeshMixin:
                 prev_level_contours = [stream_contours[s][-1].copy() if hasattr(stream_contours[s][-1], 'copy') else np.array(stream_contours[s][-1]) for s in range(max_stream_count)]
                 prev_level_bps = [stream_bounding_planes[s][-1].copy() for s in range(max_stream_count)]
 
-                # Debug: show prev level contour sizes
+                # Debug: show prev level info
+                print(f"  [DEBUG] Processing level_i={level_i}, prev_level={prev_level}")
                 print(f"  [DEBUG] prev_level_contours sizes: {[len(c) for c in prev_level_contours]}")
+                # Check actual scalar values to verify source level
+                prev_scalars = [bp.get('scalar_value', 'unknown') for bp in prev_level_bps[:3]]
+                print(f"  [DEBUG] prev_level_bps scalars (first 3): {prev_scalars}")
 
                 # Find which streams map to which contours (by distance + grouping)
                 # M sources (streams) → N targets (contours), M > N
@@ -6683,10 +6703,13 @@ class ContourMeshMixin:
                     if len(streams_for_contour) == 0:
                         continue
                     elif len(streams_for_contour) == 1:
-                        # No cut needed
+                        # No cut needed - single stream maps to single contour
                         stream_i = streams_for_contour[0]
                         stream_contours[stream_i].append(self.contours[level_i][contour_i])
                         stream_bounding_planes[stream_i].append(self.bounding_planes[level_i][contour_i])
+                        # Debug: show what was appended
+                        appended_scalar = self.bounding_planes[level_i][contour_i].get('scalar_value', 'unknown')
+                        print(f"  [DEBUG] 1:1 appended to stream {stream_i}: contour {contour_i} with scalar {appended_scalar}")
                     else:
                         # Cut this contour into len(streams_for_contour) pieces
                         target_contour = self.contours[level_i][contour_i]
@@ -6802,8 +6825,14 @@ class ContourMeshMixin:
                                     # Prepare manual cut data for this specific transition
                                     self._prepare_manual_cut_data_for_level(
                                         muscle_name, level_i, contour_i, streams_for_contour,
-                                        target_contour, target_bp, source_contours, source_bps
+                                        target_contour, target_bp, source_contours, source_bps,
+                                        prev_level  # Pass actual source level
                                     )
+                                    print(f"  [DEBUG] >>> RETURNING for manual cutting at level_i={level_i}, contour_i={contour_i}")
+                                    print(f"  [DEBUG] >>> stream_bounding_planes lengths at return: {[len(sbp) for sbp in stream_bounding_planes]}")
+                                    # Show source_bps scalar values to verify what we're using as source
+                                    source_scalars = [bp.get('scalar_value', 'unknown') for bp in source_bps]
+                                    print(f"  [DEBUG] >>> source_bps scalars: {source_scalars}")
                                     return  # Wait for user to draw cutting line
                                 else:
                                     cut_contours, cutting_info = self._cut_contour_bp_transform(
@@ -6866,6 +6895,16 @@ class ContourMeshMixin:
 
                             stream_contours[stream_i].append(cut_contour)
                             stream_bounding_planes[stream_i].append(new_bp)
+                            # Debug: show what was appended
+                            print(f"  [DEBUG] Cut & appended to stream {stream_i}: scalar {new_bp.get('scalar_value', 'unknown')} (from level {level_i})")
+
+                # Debug: show state after processing this level's cuts
+                print(f"  [DEBUG] === After processing level_i={level_i} cuts ===")
+                print(f"  [DEBUG] stream_bounding_planes lengths: {[len(sbp) for sbp in stream_bounding_planes]}")
+                for s in range(min(max_stream_count, 2)):
+                    if len(stream_bounding_planes[s]) > 0:
+                        last_scalar = stream_bounding_planes[s][-1].get('scalar_value', 'unknown')
+                        print(f"  [DEBUG] stream {s} last scalar_value: {last_scalar}")
 
         # If we processed in reverse order, reverse the results
         if origin_count < insertion_count:
