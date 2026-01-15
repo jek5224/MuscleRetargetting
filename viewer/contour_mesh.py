@@ -6037,7 +6037,29 @@ class ContourMeshMixin:
         print(f"\n=== Preparing Manual Cut Data for Level {level_i}, Contour {contour_i} ({mode_str}) ===")
         print(f"Streams: {streams_for_contour} → 1 target")
         print(f"Source level: {source_level} (target level: {level_i})")
+
+        # DEBUG: Show all contours at this level
+        total_contours_at_level = len(self.contours[level_i])
+        print(f"[DEBUG] Level {level_i} has {total_contours_at_level} contours total")
+        for ci in range(total_contours_at_level):
+            c_verts = len(self.contours[level_i][ci])
+            is_target = "*** TARGET ***" if ci == contour_i else ""
+            print(f"  Contour {ci}: {c_verts} vertices {is_target}")
+        print(f"[DEBUG] To see this contour in Inspect 2D: Level={level_i}, Contour={contour_i}")
+
         print(f"Target contour: {len(target_contour)} vertices")
+
+        # DEBUG: Show 3D bounding box of target contour
+        if len(target_contour) > 0:
+            tc_arr = np.array(target_contour)
+            tc_min = tc_arr.min(axis=0)
+            tc_max = tc_arr.max(axis=0)
+            tc_range = tc_max - tc_min
+            print(f"[DEBUG] Target contour 3D bounds:")
+            print(f"  min: [{tc_min[0]:.4f}, {tc_min[1]:.4f}, {tc_min[2]:.4f}]")
+            print(f"  max: [{tc_max[0]:.4f}, {tc_max[1]:.4f}, {tc_max[2]:.4f}]")
+            print(f"  range: [{tc_range[0]:.4f}, {tc_range[1]:.4f}, {tc_range[2]:.4f}]")
+
         print(f"Source contours: {len(source_contours)} sources with {[len(s) for s in source_contours]} vertices each")
         for i, src_bp in enumerate(source_bps):
             print(f"  Source {i} scalar: {src_bp.get('scalar_value', 'unknown')}, is_cut: {src_bp.get('is_cut', False)}")
@@ -6051,6 +6073,16 @@ class ContourMeshMixin:
             [np.dot(v - target_mean, target_x), np.dot(v - target_mean, target_y)]
             for v in target_contour
         ])
+
+        # DEBUG: Show 2D projection bounds
+        if len(target_2d) > 0:
+            t2d_min = target_2d.min(axis=0)
+            t2d_max = target_2d.max(axis=0)
+            t2d_range = t2d_max - t2d_min
+            print(f"[DEBUG] Target contour 2D projection bounds:")
+            print(f"  min: [{t2d_min[0]:.6f}, {t2d_min[1]:.6f}]")
+            print(f"  max: [{t2d_max[0]:.6f}, {t2d_max[1]:.6f}]")
+            print(f"  range: [{t2d_range[0]:.6f}, {t2d_range[1]:.6f}]")
 
         # Project source contours to 2D (each in its own coordinate frame, then transformed)
         source_2d_list = []
