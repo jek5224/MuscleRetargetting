@@ -804,10 +804,39 @@ class ContourMeshMixin:
                     break
                 iteration += 1
 
-            # Log if we couldn't use all edges (may indicate disconnected components)
-            if len(used_edges) < len(edge_set):
-                missing = len(edge_set) - len(used_edges)
-                print(f"  [find_contour] Note: Contour walk incomplete ({len(used_edges)}/{len(edge_set)} edges used, {missing} unused)")
+            # If there are still unused edges, try to find branches from visited vertices
+            # This handles figure-8 shapes where the junction wasn't traversed
+            restart_count = 0
+            while len(used_edges) < len(edge_set) and restart_count < 10:
+                restart_count += 1
+                # Find a vertex in our walk that has unused edges (branch point)
+                found_branch = False
+                for v in ordered_edge_group:
+                    for neighbor, edge_tuple in adjacency.get(v, []):
+                        if edge_tuple not in used_edges:
+                            # Found a branch - walk from here
+                            used_edges.add(edge_tuple)
+                            # Walk forward from this branch
+                            branch_walk = [neighbor]
+                            while True:
+                                current = branch_walk[-1]
+                                found = False
+                                for n2, et2 in adjacency.get(current, []):
+                                    if et2 not in used_edges:
+                                        branch_walk.append(n2)
+                                        used_edges.add(et2)
+                                        found = True
+                                        break
+                                if not found:
+                                    break
+                            # Append the branch to our main walk
+                            ordered_edge_group.extend(branch_walk)
+                            found_branch = True
+                            break
+                    if found_branch:
+                        break
+                if not found_branch:
+                    break
 
             ordered_contour_edge_groups.append(ordered_edge_group)
 
