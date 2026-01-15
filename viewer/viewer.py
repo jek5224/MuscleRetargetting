@@ -4231,10 +4231,19 @@ class GLFWApp():
                         draw_list.add_line(p1[0], p1[1], p2[0], p2[1],
                                           imgui.get_color_u32_rgba(*color, 1.0), 3.0)
 
-                    # Add label for target contour (first piece only, at centroid)
-                    if piece_idx == 0:
-                        centroid = np.mean(piece_2d, axis=0)
-                        cx, cy = to_screen(centroid, x0, y0, canvas_size)
+                    # Add label at centroid
+                    centroid = np.mean(piece_2d, axis=0)
+                    cx, cy = to_screen(centroid, x0, y0, canvas_size)
+                    if len(current_pieces) > 1:
+                        # Multiple pieces - show piece index with colored background
+                        label = f"P{piece_idx}"
+                        # Draw background rect for visibility
+                        draw_list.add_rect_filled(cx - 12, cy - 10, cx + 12, cy + 10,
+                                                  imgui.get_color_u32_rgba(*color, 0.8))
+                        draw_list.add_text(cx - 8, cy - 7,
+                                          imgui.get_color_u32_rgba(0.0, 0.0, 0.0, 1.0), label)
+                    else:
+                        # Single piece - show as target
                         draw_list.add_text(cx + 10, cy - 10,
                                           imgui.get_color_u32_rgba(1.0, 1.0, 1.0, 1.0),
                                           f"Target (Lv.{target_level})")
@@ -4757,85 +4766,120 @@ class GLFWApp():
                         print("Failed to apply cut - line must cross a piece twice")
                 imgui.same_line()
 
-            # OK button - enabled when there's a valid cutting line
-            ok_enabled = has_valid_line
-            if not ok_enabled:
-                imgui.push_style_var(imgui.STYLE_ALPHA, 0.5)
+            # Check if we're in assignment mode (after cutting)
+            in_assignment_mode = obj._manual_cut_data.get('assignment_mode', False)
+            piece_assignments = obj._manual_cut_data.get('piece_assignments', {})
 
-            if imgui.button("OK", button_width, 30):
-                if ok_enabled:
-                    # Apply the cut
-                    success = obj._apply_iterative_cut()
-                    if not success:
-                        print("Failed to apply cut - line must cross a piece twice")
-                        if not ok_enabled:
-                            imgui.pop_style_var()
-                        imgui.end()
-                        continue
-                    obj._manual_cut_line = None
+            if in_assignment_mode:
+                # === ASSIGNMENT MODE UI ===
+                imgui.text("Assign sources to pieces:")
+                imgui.separator()
 
-                    # Match pieces to sources and identify 1:1 matches
-                    obj._match_and_exclude_sources()
+                # Piece colors (same as visualization)
+                piece_colors = [
+                    (1.0, 1.0, 1.0),  # White
+                    (0.2, 0.6, 1.0),  # Blue
+                    (1.0, 0.4, 0.2),  # Orange
+                    (0.2, 1.0, 0.4),  # Green
+                    (1.0, 0.8, 0.2),  # Yellow
+                    (0.8, 0.2, 1.0),  # Purple
+                ]
 
-                    # Check remaining state
-                    remaining_sources = obj._manual_cut_data.get('selected_sources', [])
-                    matched_pairs = obj._manual_cut_data.get('matched_pairs', [])
-                    current_pieces_3d = obj._manual_cut_data.get('current_pieces_3d', [])
+                # Show each piece with source checkboxes
+                for piece_idx in range(len(current_pieces)):
+                    assigned = piece_assignments.get(piece_idx, [])
+                    # Draw color indicator
+                    color = piece_colors[piece_idx % len(piece_colors)]
+                    imgui.push_style_color(imgui.COLOR_BUTTON, *color, 1.0)
+                    imgui.push_style_color(imgui.COLOR_BUTTON_HOVERED, *color, 1.0)
+                    imgui.push_style_color(imgui.COLOR_BUTTON_ACTIVE, *color, 1.0)
+                    imgui.button(f"P{piece_idx}##color", 30, 20)
+                    imgui.pop_style_color(3)
+                    imgui.same_line()
+                    imgui.text("->")
+                    imgui.same_line()
 
-                    print(f"After cut: {len(matched_pairs)} matched, {len(remaining_sources)} sources remaining")
+                    # Checkboxes for each source
+                    for src_idx in range(len(source_contours_3d)):
+                        is_assigned = src_idx in assigned
+                        changed, new_val = imgui.checkbox(f"S{src_idx}##p{piece_idx}", is_assigned)
+                        if changed:
+                            if new_val:
+                                # Add source to this piece, remove from others
+                                for p in piece_assignments:
+                                    if src_idx in piece_assignments[p]:
+                                        piece_assignments[p].remove(src_idx)
+                                if piece_idx not in piece_assignments:
+                                    piece_assignments[piece_idx] = []
+                                piece_assignments[piece_idx].append(src_idx)
+                            else:
+                                if src_idx in piece_assignments.get(piece_idx, []):
+                                    piece_assignments[piece_idx].remove(src_idx)
+                            obj._manual_cut_data['piece_assignments'] = piece_assignments
+                        imgui.same_line()
+                    imgui.new_line()
 
-                    if len(remaining_sources) == 0:
-                        # All sources matched - finalize
-                        cut_result, all_cuts_done = obj._finalize_manual_cuts()
-                        if cut_result is not None:
-                            print(f"All pieces matched - finalizing")
-                            obj._manual_cut_pending = False
-                            obj.cut_streams(cut_method='bp', muscle_name=muscle_name)
-                            if hasattr(obj, 'stream_bounding_planes') and obj.stream_bounding_planes is not None:
-                                print(f"[{muscle_name}] Applying smoothening...")
-                                obj.smoothen_contours_z()
-                                obj.smoothen_contours_x()
-                                obj.smoothen_contours_bp()
-                            if name in self._manual_cut_mouse:
-                                del self._manual_cut_mouse[name]
-                            imgui.end()
-                            continue
-                    elif len(remaining_sources) == 1:
-                        # Only 1 source left - it gets the remaining unmatched piece
-                        # Find unmatched piece and assign it
-                        matched_piece_indices = set(p[0] for p in matched_pairs)
-                        for i, piece in enumerate(current_pieces_3d):
-                            if i not in matched_piece_indices:
-                                matched_pairs.append((i, remaining_sources[0]))
-                                obj._manual_cut_data['matched_pairs'] = matched_pairs
-                                obj._manual_cut_data['selected_sources'] = []
-                                break
+                imgui.separator()
 
-                        # Finalize
-                        cut_result, all_cuts_done = obj._finalize_manual_cuts()
-                        if cut_result is not None:
-                            print(f"Last piece matched - finalizing")
-                            obj._manual_cut_pending = False
-                            obj.cut_streams(cut_method='bp', muscle_name=muscle_name)
-                            if hasattr(obj, 'stream_bounding_planes') and obj.stream_bounding_planes is not None:
-                                print(f"[{muscle_name}] Applying smoothening...")
-                                obj.smoothen_contours_z()
-                                obj.smoothen_contours_x()
-                                obj.smoothen_contours_bp()
-                            if name in self._manual_cut_mouse:
-                                del self._manual_cut_mouse[name]
-                            imgui.end()
-                            continue
+                # Confirm button - processes assignments
+                if imgui.button("Confirm", button_width, 30):
+                    # Process assignments: 1:1 finalized, 2:1 opens sub-window
+                    obj._process_piece_assignments()
+
+                    # Check what to do next
+                    pending_subcuts = obj._manual_cut_data.get('pending_subcuts', [])
+                    if len(pending_subcuts) > 0:
+                        # Open sub-window for first pending 2:1 case
+                        obj._open_subcut_for_piece(pending_subcuts[0])
                     else:
-                        # Multiple sources remaining - prepare new window for remaining piece
-                        # Find the unmatched piece that has multiple sources
-                        obj._prepare_next_subcut_window()
-                        print(f"Preparing window for remaining {len(remaining_sources)} sources")
-                else:
-                    print(f"Draw a cutting line first")
+                        # All done - finalize
+                        cut_result, _ = obj._finalize_manual_cuts()
+                        if cut_result is not None:
+                            obj._manual_cut_pending = False
+                            obj.cut_streams(cut_method='bp', muscle_name=muscle_name)
+                            if hasattr(obj, 'stream_bounding_planes') and obj.stream_bounding_planes is not None:
+                                print(f"[{muscle_name}] Applying smoothening...")
+                                obj.smoothen_contours_z()
+                                obj.smoothen_contours_x()
+                                obj.smoothen_contours_bp()
+                            if name in self._manual_cut_mouse:
+                                del self._manual_cut_mouse[name]
+                            imgui.end()
+                            continue
 
-            if not ok_enabled:
-                imgui.pop_style_var()
+                imgui.same_line()
+                if imgui.button("Back", button_width, 30):
+                    # Go back to cutting mode
+                    obj._manual_cut_data['assignment_mode'] = False
+                    obj._manual_cut_data['piece_assignments'] = {}
+            else:
+                # === CUTTING MODE UI ===
+                # Cut button - applies cut and enters assignment mode
+                cut_enabled = has_valid_line
+                if not cut_enabled:
+                    imgui.push_style_var(imgui.STYLE_ALPHA, 0.5)
+
+                if imgui.button("Cut", button_width, 30):
+                    if cut_enabled:
+                        # Apply the cut
+                        success = obj._apply_iterative_cut()
+                        if success:
+                            obj._manual_cut_line = None
+
+                            # Enter assignment mode
+                            obj._manual_cut_data['assignment_mode'] = True
+
+                            # Initialize assignments by distance
+                            obj._init_piece_assignments_by_distance()
+
+                            print(f"Cut applied. Now assign sources to pieces.")
+                        else:
+                            print("Failed to apply cut - line must cross a piece twice")
+                    else:
+                        print("Draw a cutting line first")
+
+                if not cut_enabled:
+                    imgui.pop_style_var()
 
             imgui.same_line()
             if imgui.button("Reset", button_width, 30):
