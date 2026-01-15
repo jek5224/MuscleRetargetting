@@ -8615,7 +8615,13 @@ class ContourMeshMixin:
         if obj_name is None:
             obj_name = getattr(self, 'name', getattr(self, 'mesh_name', 'unknown'))
 
-        filepath = f'bp_viz/bp_transform_{obj_name}_{self._bp_viz_counter:03d}.png'
+        # Include level info in filename for clarity
+        level_str = ""
+        if target_level is not None and source_level is not None:
+            level_str = f"_cut{target_level}_using{source_level}"
+
+        filepath = f'bp_viz/bp_transform_{obj_name}_{self._bp_viz_counter:03d}{level_str}.png'
+        print(f"  [BP Viz] Saving to {filepath}")
         plt.savefig(filepath, dpi=100)
         plt.close(fig)
 
