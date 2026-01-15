@@ -1512,9 +1512,12 @@ class ContourMeshMixin:
                         total_score += score
                     return total_width, total_score, contours_test, planes_test
 
-                # STEP 1: Check ALL existing contour levels with small_count
-                # find_contours already placed samples at transition regions
-                print(f"    [Phase3] Checking existing {len(self.contours)} levels for count={small_count}...")
+                # STEP 1: Check existing contour levels with small_count WITHIN the transition region
+                # Only search between scalar_large and scalar_small (with small margin)
+                search_margin = abs(scalar_large - scalar_small) * 0.1
+                search_min = min(scalar_large, scalar_small) - search_margin
+                search_max = max(scalar_large, scalar_small) + search_margin
+                print(f"    [Phase3] Checking levels for count={small_count} in scalar range [{search_min:.6f}, {search_max:.6f}]...")
                 existing_candidates = []
 
                 for level_i in range(len(self.contours)):
@@ -1525,6 +1528,10 @@ class ContourMeshMixin:
                         if len(level_planes) > 0 and 'scalar_value' in level_planes[0]:
                             level_scalar = level_planes[0]['scalar_value']
                         else:
+                            continue
+
+                        # Only consider levels within the transition region
+                        if level_scalar < search_min or level_scalar > search_max:
                             continue
 
                         # Measure neck width for this level
@@ -1545,7 +1552,7 @@ class ContourMeshMixin:
                 if len(best_small_contours) > 0:
                     narrowest_width, _, _, _ = measure_neck_width(best_small_contours[0])
 
-                # Find best among existing candidates
+                # Find best among existing candidates (if any)
                 if existing_candidates:
                     existing_candidates.sort(key=lambda x: x[1])  # Sort by width
                     best_existing = existing_candidates[0]
@@ -1556,36 +1563,32 @@ class ContourMeshMixin:
                     narrowest_width = best_existing[1]
                     narrowest_contours = best_existing[3]
                     narrowest_planes = best_existing[4]
+                else:
+                    print(f"    [Phase3] No existing candidates in range, using best_small as starting point")
 
-                    # STEP 2: Fine search around best existing scalar
-                    # Search in a small window to find even narrower neck
-                    if len(existing_candidates) >= 2:
-                        # Find scalars of neighboring levels
-                        scalar_range = abs(existing_candidates[-1][0] - existing_candidates[0][0])
-                    else:
-                        scalar_range = abs(scalar_large - scalar_small)
+                # STEP 2: Dense search across the ENTIRE transition region
+                # The narrowest neck should be near where the contour is about to split
+                # Search from just past large_count boundary to small_count boundary
+                fine_start = min(scalar_large, scalar_small)
+                fine_end = max(scalar_large, scalar_small)
+                fine_samples = 50  # Dense sampling across full range
 
-                    fine_range = scalar_range * 0.1  # 10% of range
-                    fine_start = narrowest_scalar - fine_range
-                    fine_end = narrowest_scalar + fine_range
-                    fine_samples = 30
+                print(f"    [Phase3] Dense search across transition: [{fine_start:.6f}, {fine_end:.6f}]")
 
-                    print(f"    [Phase3] Fine search around best: [{fine_start:.6f}, {fine_end:.6f}]")
+                for sample_i in range(fine_samples + 1):
+                    t = sample_i / fine_samples
+                    test_scalar = fine_start + t * (fine_end - fine_start)
 
-                    for sample_i in range(fine_samples + 1):
-                        t = sample_i / fine_samples
-                        test_scalar = fine_start + t * (fine_end - fine_start)
+                    width, score, contours_test, planes_test = evaluate_scalar(test_scalar)
+                    if width is None:
+                        continue
 
-                        width, score, contours_test, planes_test = evaluate_scalar(test_scalar)
-                        if width is None:
-                            continue
-
-                        if width < narrowest_width:
-                            narrowest_width = width
-                            narrowest_scalar = test_scalar
-                            narrowest_contours = contours_test
-                            narrowest_planes = planes_test
-                            print(f"      Fine: Found narrower at {test_scalar:.6f}, width={width:.4f}")
+                    if width < narrowest_width:
+                        narrowest_width = width
+                        narrowest_scalar = test_scalar
+                        narrowest_contours = contours_test
+                        narrowest_planes = planes_test
+                        print(f"      Dense: Found narrower at {test_scalar:.6f}, width={width:.4f}")
 
                 print(f"    [Phase3] Best: scalar={narrowest_scalar:.6f}, width={narrowest_width:.4f}")
 
