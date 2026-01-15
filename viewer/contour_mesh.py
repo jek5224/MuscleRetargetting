@@ -6458,21 +6458,23 @@ class ContourMeshMixin:
                             source_bps = [prev_level_bps[s] for s in streams_for_contour]
 
                             # Determine SEPARATE vs COMMON mode:
-                            # - SEPARATE: source contours are original (is_cut=False) → manual cutting
-                            # - COMMON: source contours are already cut (is_cut=True) → optimization
+                            # - SEPARATE: ANY source contour is original (is_cut=False) → manual cutting needed
+                            # - COMMON: ALL source contours are already cut (is_cut=True) → optimization only
                             stream_combo = tuple(sorted(streams_for_contour))
 
-                            # Check if any source has is_cut flag
-                            any_source_cut = any(source_bps[i].get('is_cut', False) for i in range(len(source_bps)))
+                            # Check which sources are cut and which are not
+                            source_cut_status = [source_bps[i].get('is_cut', False) for i in range(len(source_bps))]
+                            any_source_not_cut = any(not cut for cut in source_cut_status)
+                            all_sources_cut = all(source_cut_status)
 
-                            # is_first_division = SEPARATE mode if:
-                            # 1. This stream combo hasn't been cut before, AND
-                            # 2. All source contours are original (not cut)
-                            is_first_division = (stream_combo not in cut_stream_combos) and (not any_source_cut)
+                            # SEPARATE mode if ANY source has not been cut yet
+                            # This handles mixed cases: 1 SEPARATE + 2 COMMON → still needs manual cutting
+                            is_first_division = any_source_not_cut
                             cut_stream_combos.add(stream_combo)
 
                             mode_str = "SEPARATE" if is_first_division else "COMMON"
-                            print(f"  [BP Transform] Mode: {mode_str} (combo_seen={stream_combo in cut_stream_combos}, any_cut={any_source_cut})")
+                            cut_status_str = ', '.join([f's{streams_for_contour[i]}:{"cut" if c else "uncut"}' for i, c in enumerate(source_cut_status)])
+                            print(f"  [BP Transform] Mode: {mode_str} ({cut_status_str})")
 
                             # Check if we have a saved manual cut result for first division
                             # Use composite key (level_i, contour_i) to handle multiple levels
