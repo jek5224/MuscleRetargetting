@@ -5192,20 +5192,86 @@ class ContourMeshMixin:
         print(f"Source level: {source_level} ({source_count} contours)")
         print(f"Target level: {target_level} ({target_count} contours)")
 
-        # Handle M→1 case (multiple sources → one target)
-        # For M→N with N > 1, this will be called per target that needs cutting
-        if target_count != 1:
-            print(f"Manual cutting for M→N (N>1) not yet supported here")
-            print(f"Falling back to automatic cutting")
+        # Handle M→N case (M sources → N targets, M > N)
+        # Find which sources map to which targets using distance-based matching
+        source_means = [self.bounding_planes[source_level][i]['mean'] for i in range(source_count)]
+        target_means = [self.bounding_planes[target_level][i]['mean'] for i in range(target_count)]
+
+        # Build distance matrix: [source_i, target_i]
+        dist_matrix = np.zeros((source_count, target_count))
+        for s_i in range(source_count):
+            for t_i in range(target_count):
+                dist_matrix[s_i, t_i] = np.linalg.norm(source_means[s_i] - target_means[t_i])
+
+        # Step 1: Ensure each target has at least one source (pigeonhole)
+        assigned_sources = set()
+        target_to_sources = [[] for _ in range(target_count)]
+
+        for target_i in range(target_count):
+            best_source = None
+            best_dist = float('inf')
+            for source_i in range(source_count):
+                if source_i in assigned_sources:
+                    continue
+                if dist_matrix[source_i, target_i] < best_dist:
+                    best_dist = dist_matrix[source_i, target_i]
+                    best_source = source_i
+            if best_source is not None:
+                target_to_sources[target_i].append(best_source)
+                assigned_sources.add(best_source)
+
+        # Step 2: Assign remaining sources to their closest targets
+        for source_i in range(source_count):
+            if source_i in assigned_sources:
+                continue
+            closest_target = np.argmin(dist_matrix[source_i])
+            target_to_sources[closest_target].append(source_i)
+            assigned_sources.add(source_i)
+
+        print(f"M→N mapping ({source_count}→{target_count}):")
+        for t_i in range(target_count):
+            print(f"  Target {t_i} ← Sources {target_to_sources[t_i]}")
+
+        # Find which targets need manual cutting:
+        # - Multiple sources assigned, AND
+        # - Sources are not already cut (is_cut=False)
+        targets_needing_cut = []
+        for target_i in range(target_count):
+            sources = target_to_sources[target_i]
+            if len(sources) <= 1:
+                continue  # No cutting needed
+
+            # Check if sources are already cut (if so, use COMMON mode, not manual)
+            any_source_cut = any(
+                self.bounding_planes[source_level][s_i].get('is_cut', False)
+                for s_i in sources
+            )
+            if not any_source_cut:
+                targets_needing_cut.append((target_i, sources))
+
+        # Check if we have a queue of pending cuts, or initialize one
+        if not hasattr(self, '_pending_manual_cuts') or self._pending_manual_cuts is None:
+            self._pending_manual_cuts = targets_needing_cut
+            self._manual_cut_results = {}  # Store results for each target
+
+        # If no targets need manual cutting, return
+        if len(self._pending_manual_cuts) == 0:
+            print(f"No targets need manual cutting (all sources already cut)")
             return
 
-        # Get target contour and its bounding plane (the merged contour to cut)
-        target_contour = np.array(self.contours[target_level][0])
-        target_bp = self.bounding_planes[target_level][0]
+        # Get the next target to cut
+        current_cut = self._pending_manual_cuts[0]
+        target_i, source_indices = current_cut
 
-        # Get source contours and their bounding planes (the separate contours as reference)
-        source_contours = [np.array(self.contours[source_level][i]) for i in range(source_count)]
-        source_bps = [self.bounding_planes[source_level][i] for i in range(source_count)]
+        print(f"Preparing manual cut for target {target_i} with sources {source_indices}")
+
+        # Get target contour and its bounding plane
+        target_contour = np.array(self.contours[target_level][target_i])
+        target_bp = self.bounding_planes[target_level][target_i]
+
+        # Get source contours and their bounding planes for this target
+        source_contours = [np.array(self.contours[source_level][s_i]) for s_i in source_indices]
+        source_bps = [self.bounding_planes[source_level][s_i] for s_i in source_indices]
 
         # Project target contour to 2D (using its own bounding plane)
         target_mean = target_bp['mean']
@@ -5262,16 +5328,18 @@ class ContourMeshMixin:
             'muscle_name': muscle_name,
             'target_level': target_level,
             'source_level': source_level,
+            'target_i': target_i,  # Which target contour is being cut
+            'source_indices': source_indices,  # Which source contours map to this target
             'target_contour': target_contour,
             'target_bp': target_bp,
             'target_2d': target_2d,
             'source_contours': source_contours,
             'source_bps': source_bps,
             'source_2d_list': source_2d_list,
-            'stream_indices': list(range(source_count)),
+            'stream_indices': source_indices,  # Use actual source indices
             'process_forward': process_forward,
             # For iterative cutting: K pieces needed, track current pieces
-            'required_pieces': source_count,
+            'required_pieces': len(source_indices),  # Number of pieces needed = number of sources
             'current_pieces': [target_2d.copy()],  # Start with one piece (original target)
             'current_pieces_3d': [target_contour.copy()],  # 3D versions for final result
             'cut_lines': [],  # List of applied cut lines
@@ -5447,6 +5515,11 @@ class ContourMeshMixin:
         self._manual_cut_pending = False
         self._manual_cut_data = None
         self._manual_cut_line = None
+        # Also clear pending cuts queue
+        if hasattr(self, '_pending_manual_cuts'):
+            self._pending_manual_cuts = None
+        if hasattr(self, '_manual_cut_results'):
+            self._manual_cut_results = None
         print("Manual cutting cancelled")
 
     def _apply_iterative_cut(self):
@@ -5563,22 +5636,27 @@ class ContourMeshMixin:
     def _finalize_manual_cuts(self):
         """
         Finalize all iterative cuts and match pieces to source contours.
-        Returns the cut result for use by cut_streams.
+
+        Returns (cut_result, all_cuts_done):
+        - cut_result: list of cut contours for this target
+        - all_cuts_done: True if all pending manual cuts are complete
         """
         if self._manual_cut_data is None:
-            return None
+            return None, True
 
         current_pieces_3d = self._manual_cut_data.get('current_pieces_3d', [])
         source_contours = self._manual_cut_data.get('source_contours', [])
         required_pieces = self._manual_cut_data.get('required_pieces', 2)
+        target_i = self._manual_cut_data.get('target_i', 0)
+        source_indices = self._manual_cut_data.get('source_indices', [])
 
         if len(current_pieces_3d) != required_pieces:
             print(f"Have {len(current_pieces_3d)} pieces but need {required_pieces}")
-            return None
+            return None, False
 
         if len(source_contours) != required_pieces:
             print(f"Have {len(source_contours)} sources but need {required_pieces}")
-            return None
+            return None, False
 
         # Match pieces to source contours by centroid distance
         # Use Hungarian algorithm for optimal matching
@@ -5601,14 +5679,35 @@ class ContourMeshMixin:
         for piece_idx, source_idx in zip(row_ind, col_ind):
             cut_contours[source_idx] = current_pieces_3d[piece_idx]
 
-        print(f"Finalized {required_pieces} pieces, matched to sources")
+        print(f"Finalized {required_pieces} pieces for target {target_i}, matched to sources {source_indices}")
         for i in range(required_pieces):
-            print(f"  Source {i}: piece with {len(cut_contours[i])} vertices")
+            print(f"  Source {source_indices[i]}: piece with {len(cut_contours[i])} vertices")
 
-        # Store the result
+        # Store the result for this target
         self._manual_cut_data['cut_result'] = cut_contours
 
-        return cut_contours
+        # Store result in the global results dict (for M→N with N > 1)
+        if not hasattr(self, '_manual_cut_results'):
+            self._manual_cut_results = {}
+        self._manual_cut_results[target_i] = {
+            'cut_contours': cut_contours,
+            'source_indices': source_indices,
+        }
+
+        # Remove this target from the pending cuts queue
+        if hasattr(self, '_pending_manual_cuts') and self._pending_manual_cuts:
+            self._pending_manual_cuts.pop(0)
+
+        # Check if there are more cuts pending
+        more_cuts_pending = hasattr(self, '_pending_manual_cuts') and len(self._pending_manual_cuts) > 0
+        all_cuts_done = not more_cuts_pending
+
+        if all_cuts_done:
+            print(f"All manual cuts complete")
+        else:
+            print(f"More cuts pending: {len(self._pending_manual_cuts)} remaining")
+
+        return cut_contours, all_cuts_done
 
     def _compute_cut_preview(self):
         """
@@ -5898,23 +5997,52 @@ class ContourMeshMixin:
                             source_contours = [prev_level_contours[s] for s in streams_for_contour]
                             source_bps = [prev_level_bps[s] for s in streams_for_contour]
 
-                            # Check if this is first division for this stream combination
+                            # Determine SEPARATE vs COMMON mode:
+                            # - SEPARATE: source contours are original (is_cut=False) → manual cutting
+                            # - COMMON: source contours are already cut (is_cut=True) → optimization
                             stream_combo = tuple(sorted(streams_for_contour))
-                            is_first_division = stream_combo not in cut_stream_combos
+
+                            # Check if any source has is_cut flag
+                            any_source_cut = any(source_bps[i].get('is_cut', False) for i in range(len(source_bps)))
+
+                            # is_first_division = SEPARATE mode if:
+                            # 1. This stream combo hasn't been cut before, AND
+                            # 2. All source contours are original (not cut)
+                            is_first_division = (stream_combo not in cut_stream_combos) and (not any_source_cut)
                             cut_stream_combos.add(stream_combo)
 
+                            mode_str = "SEPARATE" if is_first_division else "COMMON"
+                            print(f"  [BP Transform] Mode: {mode_str} (combo_seen={stream_combo in cut_stream_combos}, any_cut={any_source_cut})")
+
                             # Check if we have a saved manual cut result for first division
-                            if is_first_division and self._manual_cut_data is not None and 'cut_result' in self._manual_cut_data:
-                                # Use the manual cut result
-                                cut_contours = self._manual_cut_data['cut_result']
-                                cutting_info = None
-                                print(f"  [BP Transform] Using manual cut result for first division")
-                                print(f"  [BP Transform] streams_for_contour = {streams_for_contour}")
-                                print(f"  [BP Transform] cut_contours[0] will go to stream {streams_for_contour[0]}")
-                                print(f"  [BP Transform] cut_contours[1] will go to stream {streams_for_contour[1]}")
-                                # Clear manual cut data after using it
-                                self._manual_cut_data = None
-                            else:
+                            # For M→N with N > 1, check _manual_cut_results by target index (contour_i)
+                            has_manual_result = False
+                            if is_first_division:
+                                # Check new format (M→N results dict)
+                                if hasattr(self, '_manual_cut_results') and self._manual_cut_results and contour_i in self._manual_cut_results:
+                                    result = self._manual_cut_results[contour_i]
+                                    cut_contours = result['cut_contours']
+                                    cutting_info = None
+                                    has_manual_result = True
+                                    print(f"  [BP Transform] Using manual cut result for target {contour_i}")
+                                    print(f"  [BP Transform] streams_for_contour = {streams_for_contour}")
+                                    for i, s in enumerate(streams_for_contour):
+                                        print(f"  [BP Transform] cut_contours[{i}] will go to stream {s}")
+                                    # Remove used result
+                                    del self._manual_cut_results[contour_i]
+                                # Check old format (single target result in _manual_cut_data)
+                                elif self._manual_cut_data is not None and 'cut_result' in self._manual_cut_data:
+                                    cut_contours = self._manual_cut_data['cut_result']
+                                    cutting_info = None
+                                    has_manual_result = True
+                                    print(f"  [BP Transform] Using manual cut result for first division (legacy format)")
+                                    print(f"  [BP Transform] streams_for_contour = {streams_for_contour}")
+                                    print(f"  [BP Transform] cut_contours[0] will go to stream {streams_for_contour[0]}")
+                                    print(f"  [BP Transform] cut_contours[1] will go to stream {streams_for_contour[1]}")
+                                    # Clear manual cut data after using it
+                                    self._manual_cut_data = None
+
+                            if not has_manual_result:
                                 cut_contours, cutting_info = self._cut_contour_bp_transform(
                                     target_contour, target_bp, source_contours, source_bps, streams_for_contour,
                                     is_first_division=is_first_division
@@ -5991,6 +6119,12 @@ class ContourMeshMixin:
         self.contours = self.stream_contours
         self.bounding_planes = self.stream_bounding_planes
         self.draw_contour_stream = [[True] * len(self.stream_contours[0]) for _ in range(max_stream_count)]
+
+        # Clean up manual cut tracking data
+        if hasattr(self, '_pending_manual_cuts'):
+            self._pending_manual_cuts = None
+        if hasattr(self, '_manual_cut_results'):
+            self._manual_cut_results = None
 
         print("Cut streams complete")
 

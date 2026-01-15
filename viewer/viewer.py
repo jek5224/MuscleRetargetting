@@ -3978,8 +3978,13 @@ class GLFWApp():
 
             # Window setup
             muscle_name = obj._manual_cut_data.get('muscle_name', name)
+            target_i = obj._manual_cut_data.get('target_i', 0)
+            source_indices = obj._manual_cut_data.get('source_indices', [])
+            required_pieces_display = obj._manual_cut_data.get('required_pieces', 2)
             imgui.set_next_window_size(700, 700, imgui.FIRST_USE_EVER)
-            expanded, opened = imgui.begin(f"Manual Cut: {muscle_name}", True)
+            # Show target index and source info in title for M→N cases
+            title_suffix = f" (Target {target_i}, {len(source_indices)}→1)" if len(source_indices) > 0 else ""
+            expanded, opened = imgui.begin(f"Manual Cut: {muscle_name}{title_suffix}", True)
 
             if not opened:
                 obj._cancel_manual_cut()
@@ -4294,17 +4299,26 @@ class GLFWApp():
 
             if imgui.button("OK", button_width, 30):
                 if ok_enabled:
-                    # Finalize all cuts
-                    cut_result = obj._finalize_manual_cuts()
+                    # Finalize all cuts for this target
+                    cut_result, all_cuts_done = obj._finalize_manual_cuts()
                     if cut_result is not None:
-                        print(f"Manual cuts finalized successfully")
-                        obj._manual_cut_pending = False
-                        obj.cut_streams(cut_method='bp', muscle_name=muscle_name)
-                        if hasattr(obj, 'stream_bounding_planes') and obj.stream_bounding_planes is not None:
-                            print(f"[{muscle_name}] Applying smoothening...")
-                            obj.smoothen_contours_z()
-                            obj.smoothen_contours_x()
-                            obj.smoothen_contours_bp()
+                        print(f"Manual cuts finalized for this target")
+                        if all_cuts_done:
+                            # All pending manual cuts complete - run cut_streams
+                            obj._manual_cut_pending = False
+                            obj.cut_streams(cut_method='bp', muscle_name=muscle_name)
+                            if hasattr(obj, 'stream_bounding_planes') and obj.stream_bounding_planes is not None:
+                                print(f"[{muscle_name}] Applying smoothening...")
+                                obj.smoothen_contours_z()
+                                obj.smoothen_contours_x()
+                                obj.smoothen_contours_bp()
+                        else:
+                            # More targets need manual cutting - prepare next window
+                            print(f"Preparing next manual cut window...")
+                            obj._manual_cut_data = None  # Clear current data
+                            obj._manual_cut_line = None
+                            obj._manual_cut_pending = False
+                            obj._prepare_manual_cut_data(muscle_name)  # Prepare next target
                 else:
                     print(f"Need {required_pieces - len(current_pieces)} more cut(s)")
 
