@@ -4738,35 +4738,8 @@ class GLFWApp():
                     continue
                 imgui.same_line()
 
-            # Calculate how many pieces we'll have after applying pending cut
-            has_valid_line = obj._manual_cut_line is not None
-            pieces_after_cut = len(current_pieces) + 1 if has_valid_line else len(current_pieces)
-
-            # Need more cuts only if even after this cut we won't have enough
-            need_more_cuts_after = pieces_after_cut < required_pieces
-
-            # Next Cut button - only show when we need MORE than one additional cut
-            if need_more_cuts_after and has_valid_line and num_selected > 1:
-                if imgui.button("Next Cut", button_width, 30):
-                    # Apply cut to current pieces and continue
-                    success = obj._apply_iterative_cut()
-                    if success:
-                        # Clear line and recommendation for next cut
-                        obj._manual_cut_line = None
-                        if 'initial_line' in obj._manual_cut_data:
-                            del obj._manual_cut_data['initial_line']
-
-                        # Match pieces to sources and exclude matched ones
-                        obj._match_and_exclude_sources()
-
-                        new_pieces = len(obj._manual_cut_data['current_pieces'])
-                        new_selected = len(obj._manual_cut_data.get('selected_sources', []))
-                        print(f"Cut applied. Pieces: {new_pieces}, Remaining sources: {new_selected}")
-                    else:
-                        print("Failed to apply cut - line must cross a piece twice")
-                imgui.same_line()
-
             # Check if we're in assignment mode (after cutting)
+            has_valid_line = obj._manual_cut_line is not None
             in_assignment_mode = obj._manual_cut_data.get('assignment_mode', False)
             piece_assignments = obj._manual_cut_data.get('piece_assignments', {})
 
