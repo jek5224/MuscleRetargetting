@@ -4577,11 +4577,24 @@ class GLFWApp():
                     print(f"Skipping cut for target (1:1 mapping with source {selected_sources[0]})")
                     # Store the 1:1 result - the single selected source maps directly to target
                     selected_src_idx = selected_sources[0]
-                    source_contour = obj._manual_cut_data['source_contours'][selected_src_idx]
+                    target_i = obj._manual_cut_data.get('target_i', 0)
+                    target_level = obj._manual_cut_data.get('target_level', 0)
+                    source_indices = obj._manual_cut_data.get('source_indices', [])
 
-                    # Store as cut result (single piece = original target, mapped to single source)
-                    obj._manual_cut_data['cut_result'] = [obj._manual_cut_data['target_contour']]
-                    obj._manual_cut_data['selected_source_for_result'] = [selected_src_idx]
+                    # Store result in _manual_cut_results (persistent storage)
+                    # Use the actual source index from source_indices, not the local index
+                    actual_source_idx = source_indices[selected_src_idx] if selected_src_idx < len(source_indices) else selected_src_idx
+
+                    if not hasattr(obj, '_manual_cut_results') or obj._manual_cut_results is None:
+                        obj._manual_cut_results = {}
+
+                    result_key = (target_level, target_i)
+                    obj._manual_cut_results[result_key] = {
+                        'cut_contours': [obj._manual_cut_data['target_contour']],  # Single piece = target
+                        'source_indices': [actual_source_idx],  # Maps to this source
+                        'is_1to1': True,  # Flag for 1:1 mapping
+                    }
+                    print(f"Stored 1:1 result with key {result_key}, source {actual_source_idx}")
 
                     # Move to next target or finish
                     if hasattr(obj, '_pending_manual_cuts') and obj._pending_manual_cuts:

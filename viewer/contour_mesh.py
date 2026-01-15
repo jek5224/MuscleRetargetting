@@ -6696,10 +6696,32 @@ class ContourMeshMixin:
                                     cut_contours = result['cut_contours']
                                     cutting_info = None
                                     has_manual_result = True
-                                    print(f"  [BP Transform] Using manual cut result for level {level_i}, contour {contour_i}")
-                                    print(f"  [BP Transform] streams_for_contour = {streams_for_contour}")
-                                    for i, s in enumerate(streams_for_contour):
-                                        print(f"  [BP Transform] cut_contours[{i}] will go to stream {s}")
+
+                                    # Check if this is a 1:1 mapping (user deselected sources)
+                                    is_1to1 = result.get('is_1to1', False)
+                                    result_source_indices = result.get('source_indices', [])
+
+                                    if is_1to1 and len(result_source_indices) == 1:
+                                        # 1:1 case: only assign to the single selected source/stream
+                                        selected_stream = result_source_indices[0]
+                                        print(f"  [BP Transform] 1:1 mapping for level {level_i}, contour {contour_i}")
+                                        print(f"  [BP Transform] Only stream {selected_stream} gets this contour")
+
+                                        # Override streams_for_contour to only include the selected stream
+                                        original_streams = list(streams_for_contour)
+                                        streams_for_contour = [selected_stream] if selected_stream in original_streams else original_streams[:1]
+
+                                        # Warn about orphaned streams
+                                        orphaned = [s for s in original_streams if s not in streams_for_contour]
+                                        if orphaned:
+                                            print(f"  [WARNING] Streams {orphaned} were originally assigned here but user deselected them")
+                                            print(f"  [WARNING] These streams may not have proper contours at this level!")
+                                    else:
+                                        print(f"  [BP Transform] Using manual cut result for level {level_i}, contour {contour_i}")
+                                        print(f"  [BP Transform] streams_for_contour = {streams_for_contour}")
+                                        for i, s in enumerate(streams_for_contour):
+                                            if i < len(cut_contours):
+                                                print(f"  [BP Transform] cut_contours[{i}] will go to stream {s}")
                                     # Don't delete - keep for potential re-runs
                                 # Check old format (single target result in _manual_cut_data)
                                 elif self._manual_cut_data is not None and 'cut_result' in self._manual_cut_data:
