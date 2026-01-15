@@ -4113,9 +4113,34 @@ class GLFWApp():
             imgui.text(f"Zoom: {mouse_state['zoom']:.1f}x")
             imgui.separator()
 
-            # Compute bounds for normalization (only target contour)
-            min_xy = target_2d.min(axis=0)
-            max_xy = target_2d.max(axis=0)
+            # Compute bounds for normalization (include target AND projected sources)
+            all_points_2d = [target_2d]
+
+            # Project all source contours onto target plane and include in bounds
+            source_contours_3d_for_bounds = obj._manual_cut_data.get('source_contours', [])
+            source_bps_for_bounds = obj._manual_cut_data.get('source_bps', [])
+            target_bp = obj._manual_cut_data['target_bp']
+            target_mean_bounds = target_bp['mean']
+            target_x_bounds = target_bp['basis_x']
+            target_y_bounds = target_bp['basis_y']
+            target_z_bounds = target_bp['basis_z']
+
+            for src_contour_3d in source_contours_3d_for_bounds:
+                src_projected = []
+                for pt in src_contour_3d:
+                    diff = pt - target_mean_bounds
+                    proj_pt = pt - np.dot(diff, target_z_bounds) * target_z_bounds
+                    diff_proj = proj_pt - target_mean_bounds
+                    x_coord = np.dot(diff_proj, target_x_bounds)
+                    y_coord = np.dot(diff_proj, target_y_bounds)
+                    src_projected.append([x_coord, y_coord])
+                if len(src_projected) > 0:
+                    all_points_2d.append(np.array(src_projected))
+
+            # Compute combined bounds
+            all_points_combined = np.vstack(all_points_2d)
+            min_xy = all_points_combined.min(axis=0)
+            max_xy = all_points_combined.max(axis=0)
             range_xy = max_xy - min_xy
             max_range = max(range_xy) * 1.1  # Small padding
 
