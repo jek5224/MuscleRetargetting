@@ -5541,7 +5541,7 @@ class ContourMeshMixin:
 
         if source_level is None or target_level is None:
             print(f"No transition found where contour count decreases")
-            return
+            return False  # No manual cutting needed
 
         source_count = len(self.contours[source_level])
         target_count = len(self.contours[target_level])
