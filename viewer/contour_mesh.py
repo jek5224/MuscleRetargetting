@@ -6265,6 +6265,87 @@ class ContourMeshMixin:
         # If only 1 source remains and there's a piece for it, we're done
         # (the UI will show 1:1 case)
 
+    def _prepare_next_subcut_window(self):
+        """
+        Prepare a new cutting window for the remaining unmatched piece.
+
+        Called after a cut when there's still 1 piece with multiple sources.
+        Updates _manual_cut_data to show only the unmatched piece as the new target.
+        Stores original context for final combining of results.
+        """
+        if self._manual_cut_data is None:
+            return
+
+        current_pieces_3d = self._manual_cut_data.get('current_pieces_3d', [])
+        current_pieces = self._manual_cut_data.get('current_pieces', [])
+        source_contours = self._manual_cut_data.get('source_contours', [])
+        source_bps = self._manual_cut_data.get('source_bps', [])
+        source_2d_list = self._manual_cut_data.get('source_2d_list', [])
+        matched_pairs = self._manual_cut_data.get('matched_pairs', [])
+        selected_sources = self._manual_cut_data.get('selected_sources', [])
+        stream_indices = self._manual_cut_data.get('stream_indices', [])
+        target_bp = self._manual_cut_data.get('target_bp')
+
+        # Find unmatched piece indices
+        matched_piece_indices = set(p[0] for p in matched_pairs)
+        unmatched_pieces = [(i, current_pieces_3d[i], current_pieces[i])
+                           for i in range(len(current_pieces_3d))
+                           if i not in matched_piece_indices]
+
+        if len(unmatched_pieces) == 0:
+            print("[Prepare Next] No unmatched pieces found")
+            return
+
+        # Use the first unmatched piece as the new target
+        # (there should typically only be one with multiple sources)
+        piece_idx, new_target_3d, new_target_2d = unmatched_pieces[0]
+
+        print(f"[Prepare Next] Using piece {piece_idx} as new target for {len(selected_sources)} sources")
+
+        # Store original context for combining results later
+        # Save the finalized pieces from matched_pairs
+        finalized_pieces = {}
+        for p_idx, s_idx in matched_pairs:
+            if p_idx < len(current_pieces_3d):
+                finalized_pieces[s_idx] = current_pieces_3d[p_idx]
+        self._manual_cut_data['parent_finalized_pieces'] = finalized_pieces
+
+        # Map from new source index to original source index
+        original_source_indices = list(selected_sources)
+        self._manual_cut_data['original_source_indices'] = original_source_indices
+
+        # Get source data for remaining sources only
+        new_source_contours = [source_contours[s] for s in selected_sources]
+        new_source_bps = [source_bps[s] for s in selected_sources]
+        new_source_2d_list = [source_2d_list[s] for s in selected_sources]
+        new_stream_indices = [stream_indices[s] for s in selected_sources]
+
+        # Update manual cut data for the new sub-window
+        self._manual_cut_data['target_contour'] = np.array(new_target_3d)
+        self._manual_cut_data['target_2d'] = np.array(new_target_2d)
+        self._manual_cut_data['current_pieces'] = [np.array(new_target_2d)]
+        self._manual_cut_data['current_pieces_3d'] = [np.array(new_target_3d)]
+        self._manual_cut_data['cut_lines'] = []
+
+        # Update source info to show only remaining sources
+        self._manual_cut_data['source_contours'] = new_source_contours
+        self._manual_cut_data['source_bps'] = new_source_bps
+        self._manual_cut_data['source_2d_list'] = new_source_2d_list
+        self._manual_cut_data['stream_indices'] = new_stream_indices
+        self._manual_cut_data['source_indices'] = list(range(len(selected_sources)))
+
+        # Update requirements
+        self._manual_cut_data['required_pieces'] = len(selected_sources)
+        self._manual_cut_data['selected_sources'] = list(range(len(selected_sources)))
+
+        # Reset matched_pairs for sub-window (new context)
+        self._manual_cut_data['matched_pairs'] = []
+
+        # Clear the cutting line for fresh start
+        self._manual_cut_line = None
+
+        print(f"[Prepare Next] New window: {len(selected_sources)} sources -> 1 target (piece {piece_idx})")
+
     def _apply_iterative_cut(self):
         """
         Apply the current cut line to one of the current pieces.
@@ -6398,9 +6479,10 @@ class ContourMeshMixin:
         """
         Finalize all iterative cuts and match pieces to source contours.
 
-        Handles matched_pairs from incremental cut-and-match workflow:
+        Handles:
         - matched_pairs: already finalized piece-source pairs
-        - remaining pieces matched to remaining sources
+        - parent_finalized_pieces: pieces from parent context (before sub-window)
+        - original_source_indices: mapping from current to original source indices
 
         Returns (cut_result, all_cuts_done):
         - cut_result: list of cut contours for this target
@@ -6416,6 +6498,10 @@ class ContourMeshMixin:
         source_indices = self._manual_cut_data.get('source_indices', [])
         matched_pairs = self._manual_cut_data.get('matched_pairs', [])
         selected_sources = self._manual_cut_data.get('selected_sources', list(range(len(source_contours))))
+
+        # Check for parent context (from _prepare_next_subcut_window)
+        parent_finalized_pieces = self._manual_cut_data.get('parent_finalized_pieces', {})
+        original_source_indices = self._manual_cut_data.get('original_source_indices', None)
 
         # With matched_pairs, we may have fewer remaining pieces to match
         num_pieces = len(current_pieces_3d)
@@ -6474,21 +6560,58 @@ class ContourMeshMixin:
                     cut_contours[src_idx] = remaining_pieces[0][1]
 
         print(f"Finalized {num_sources} pieces for target {target_i} ({num_matched} pre-matched)")
-        for i in range(required_pieces):
-            print(f"  Source {source_indices[i]}: piece with {len(cut_contours[i])} vertices")
+
+        # Combine with parent context if we're in a sub-window
+        if parent_finalized_pieces and original_source_indices:
+            # We need to:
+            # 1. Remap current cut_contours to original source indices
+            # 2. Combine with parent_finalized_pieces
+            total_original_sources = len(parent_finalized_pieces) + len(cut_contours)
+            final_contours = [None] * total_original_sources
+
+            # Fill in parent's finalized pieces
+            for orig_src_idx, piece in parent_finalized_pieces.items():
+                if orig_src_idx < total_original_sources:
+                    final_contours[orig_src_idx] = piece
+                    print(f"  Parent context: source {orig_src_idx}")
+
+            # Fill in current context pieces (mapped to original indices)
+            for local_idx, piece in enumerate(cut_contours):
+                if piece is not None and local_idx < len(original_source_indices):
+                    orig_src_idx = original_source_indices[local_idx]
+                    if orig_src_idx < total_original_sources:
+                        final_contours[orig_src_idx] = piece
+                        print(f"  Sub-window: local {local_idx} -> original source {orig_src_idx}")
+
+            cut_contours = final_contours
+            num_sources = len(cut_contours)
+            print(f"Combined: {num_sources} total pieces")
+        else:
+            for i in range(min(required_pieces, len(cut_contours))):
+                if cut_contours[i] is not None:
+                    print(f"  Source {source_indices[i] if i < len(source_indices) else i}: piece with {len(cut_contours[i])} vertices")
 
         # Store the result for this target
         self._manual_cut_data['cut_result'] = cut_contours
 
-        # Store result in the global results dict (for M→N with N > 1)
+        # Store result in the global results dict (for M->N with N > 1)
         # Use composite key (level, contour_i) to handle multiple levels
         if not hasattr(self, '_manual_cut_results'):
             self._manual_cut_results = {}
         target_level = self._manual_cut_data.get('target_level', 0)
         result_key = (target_level, target_i)
+
+        # Get original stream indices if in sub-window context
+        if original_source_indices:
+            # Build full stream indices including parent context
+            all_stream_indices = self._manual_cut_data.get('original_stream_indices',
+                                                           list(range(len(cut_contours))))
+        else:
+            all_stream_indices = self._manual_cut_data.get('stream_indices', source_indices)
+
         self._manual_cut_results[result_key] = {
             'cut_contours': cut_contours,
-            'source_indices': source_indices,
+            'source_indices': all_stream_indices,
         }
         print(f"Stored manual cut result with key {result_key}")
 

@@ -4757,30 +4757,38 @@ class GLFWApp():
                         print("Failed to apply cut - line must cross a piece twice")
                 imgui.same_line()
 
-            # OK button - enabled when we have enough pieces OR have a line that will give us enough
-            ok_enabled = pieces_after_cut >= required_pieces
+            # OK button - enabled when there's a valid cutting line
+            ok_enabled = has_valid_line
             if not ok_enabled:
                 imgui.push_style_var(imgui.STYLE_ALPHA, 0.5)
 
             if imgui.button("OK", button_width, 30):
                 if ok_enabled:
-                    # If we have a pending line that needs to be applied, apply it first
-                    if has_valid_line and len(current_pieces) < required_pieces:
-                        success = obj._apply_iterative_cut()
-                        if not success:
-                            print("Failed to apply final cut")
-                            if not ok_enabled:
-                                imgui.pop_style_var()
-                            imgui.end()  # Must close window before continue
-                            continue
-                        obj._manual_cut_line = None
+                    # Apply the cut
+                    success = obj._apply_iterative_cut()
+                    if not success:
+                        print("Failed to apply cut - line must cross a piece twice")
+                        if not ok_enabled:
+                            imgui.pop_style_var()
+                        imgui.end()
+                        continue
+                    obj._manual_cut_line = None
 
-                    # Finalize all cuts for this target
-                    cut_result, all_cuts_done = obj._finalize_manual_cuts()
-                    if cut_result is not None:
-                        print(f"Manual cuts finalized for this target")
-                        if all_cuts_done:
-                            # All pending manual cuts complete - run cut_streams
+                    # Match pieces to sources and identify 1:1 matches
+                    obj._match_and_exclude_sources()
+
+                    # Check remaining state
+                    remaining_sources = obj._manual_cut_data.get('selected_sources', [])
+                    matched_pairs = obj._manual_cut_data.get('matched_pairs', [])
+                    current_pieces_3d = obj._manual_cut_data.get('current_pieces_3d', [])
+
+                    print(f"After cut: {len(matched_pairs)} matched, {len(remaining_sources)} sources remaining")
+
+                    if len(remaining_sources) == 0:
+                        # All sources matched - finalize
+                        cut_result, all_cuts_done = obj._finalize_manual_cuts()
+                        if cut_result is not None:
+                            print(f"All pieces matched - finalizing")
                             obj._manual_cut_pending = False
                             obj.cut_streams(cut_method='bp', muscle_name=muscle_name)
                             if hasattr(obj, 'stream_bounding_planes') and obj.stream_bounding_planes is not None:
@@ -4788,13 +4796,41 @@ class GLFWApp():
                                 obj.smoothen_contours_z()
                                 obj.smoothen_contours_x()
                                 obj.smoothen_contours_bp()
-                        else:
-                            # More targets need manual cutting - prepare next window
-                            print(f"Preparing next manual cut window...")
-                            obj._manual_cut_data = None  # Clear current data
-                            obj._manual_cut_line = None
+                            if name in self._manual_cut_mouse:
+                                del self._manual_cut_mouse[name]
+                            imgui.end()
+                            continue
+                    elif len(remaining_sources) == 1:
+                        # Only 1 source left - it gets the remaining unmatched piece
+                        # Find unmatched piece and assign it
+                        matched_piece_indices = set(p[0] for p in matched_pairs)
+                        for i, piece in enumerate(current_pieces_3d):
+                            if i not in matched_piece_indices:
+                                matched_pairs.append((i, remaining_sources[0]))
+                                obj._manual_cut_data['matched_pairs'] = matched_pairs
+                                obj._manual_cut_data['selected_sources'] = []
+                                break
+
+                        # Finalize
+                        cut_result, all_cuts_done = obj._finalize_manual_cuts()
+                        if cut_result is not None:
+                            print(f"Last piece matched - finalizing")
                             obj._manual_cut_pending = False
-                            obj._prepare_manual_cut_data(muscle_name)  # Prepare next target
+                            obj.cut_streams(cut_method='bp', muscle_name=muscle_name)
+                            if hasattr(obj, 'stream_bounding_planes') and obj.stream_bounding_planes is not None:
+                                print(f"[{muscle_name}] Applying smoothening...")
+                                obj.smoothen_contours_z()
+                                obj.smoothen_contours_x()
+                                obj.smoothen_contours_bp()
+                            if name in self._manual_cut_mouse:
+                                del self._manual_cut_mouse[name]
+                            imgui.end()
+                            continue
+                    else:
+                        # Multiple sources remaining - prepare new window for remaining piece
+                        # Find the unmatched piece that has multiple sources
+                        obj._prepare_next_subcut_window()
+                        print(f"Preparing window for remaining {len(remaining_sources)} sources")
                 else:
                     print(f"Draw a cutting line first")
 
