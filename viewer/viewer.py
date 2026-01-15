@@ -4637,32 +4637,68 @@ class GLFWApp():
                         )
 
                         # Combine matched pieces with optimized pieces
-                        source_contours_full = obj._manual_cut_data.get('source_contours', [])
-                        all_pieces = [None] * len(source_contours_full)
+                        # IMPORTANT: In sub-window context, also include parent_finalized_pieces
+                        parent_finalized_pieces = obj._manual_cut_data.get('parent_finalized_pieces', {})
+                        original_source_indices = obj._manual_cut_data.get('original_source_indices', None)
 
-                        # Fill in pre-matched pieces
-                        for piece_idx, src_idx in matched_pairs:
-                            if piece_idx < len(current_pieces_3d) and src_idx < len(all_pieces):
-                                all_pieces[src_idx] = current_pieces_3d[piece_idx]
+                        if parent_finalized_pieces and original_source_indices:
+                            # Sub-window context: need to combine with parent's 1:1 pieces
+                            source_contours_full = obj._manual_cut_data.get('source_contours', [])
+                            total_pieces = len(parent_finalized_pieces) + len(source_contours_full)
+                            all_pieces = [None] * total_pieces
 
-                        # Fill in optimized pieces for remaining sources
-                        opt_idx = 0
-                        for src_idx in selected_sources:
-                            if all_pieces[src_idx] is None and final_pieces is not None and opt_idx < len(final_pieces):
-                                all_pieces[src_idx] = final_pieces[opt_idx]
-                                opt_idx += 1
+                            # Fill in parent's finalized pieces (1:1 assignments from parent)
+                            for orig_src_idx, piece in parent_finalized_pieces.items():
+                                if orig_src_idx < total_pieces:
+                                    all_pieces[orig_src_idx] = piece
+
+                            # Fill in pre-matched pieces (mapped to original indices)
+                            for piece_idx, local_src_idx in matched_pairs:
+                                if piece_idx < len(current_pieces_3d) and local_src_idx < len(original_source_indices):
+                                    orig_src_idx = original_source_indices[local_src_idx]
+                                    if orig_src_idx < total_pieces:
+                                        all_pieces[orig_src_idx] = current_pieces_3d[piece_idx]
+
+                            # Fill in optimized pieces for remaining sources (mapped to original indices)
+                            opt_idx = 0
+                            for local_src_idx in selected_sources:
+                                if local_src_idx < len(original_source_indices):
+                                    orig_src_idx = original_source_indices[local_src_idx]
+                                    if orig_src_idx < total_pieces and all_pieces[orig_src_idx] is None:
+                                        if final_pieces is not None and opt_idx < len(final_pieces):
+                                            all_pieces[orig_src_idx] = final_pieces[opt_idx]
+                                            opt_idx += 1
+
+                            # Get original stream indices from parent context
+                            all_stream_indices = list(range(total_pieces))
+                        else:
+                            # Normal context (not a sub-window)
+                            source_contours_full = obj._manual_cut_data.get('source_contours', [])
+                            all_pieces = [None] * len(source_contours_full)
+
+                            # Fill in pre-matched pieces
+                            for piece_idx, src_idx in matched_pairs:
+                                if piece_idx < len(current_pieces_3d) and src_idx < len(all_pieces):
+                                    all_pieces[src_idx] = current_pieces_3d[piece_idx]
+
+                            # Fill in optimized pieces for remaining sources
+                            opt_idx = 0
+                            for src_idx in selected_sources:
+                                if all_pieces[src_idx] is None and final_pieces is not None and opt_idx < len(final_pieces):
+                                    all_pieces[src_idx] = final_pieces[opt_idx]
+                                    opt_idx += 1
+
+                            all_stream_indices = obj._manual_cut_data.get('stream_indices', stream_indices)
 
                         # Check if we have all pieces
                         filled_count = sum(1 for p in all_pieces if p is not None)
-                        if filled_count >= len(source_contours_full):
-                            # Store result with ALL pieces (matched + optimized)
+                        if filled_count >= len(all_pieces):
+                            # Store result with ALL pieces (matched + optimized + parent finalized)
                             if not hasattr(obj, '_manual_cut_results') or obj._manual_cut_results is None:
                                 obj._manual_cut_results = {}
 
                             target_i = obj._manual_cut_data.get('target_i', 0)
                             result_key = (target_level, target_i)
-                            # Use all source indices, not just selected
-                            all_stream_indices = obj._manual_cut_data.get('stream_indices', stream_indices)
                             obj._manual_cut_results[result_key] = {
                                 'cut_contours': all_pieces,
                                 'source_indices': all_stream_indices,
@@ -4670,7 +4706,9 @@ class GLFWApp():
                             }
                             print(f"Optimization complete: {len(all_pieces)} pieces ({len(matched_pairs)} pre-matched, {len(final_pieces) if final_pieces else 0} optimized)")
 
-                            # Close window and continue
+                            # Clear stale data before continuing
+                            obj._manual_cut_data = None
+                            obj._manual_cut_original_state = None
                             obj._manual_cut_pending = False
                             obj.cut_streams(cut_method='bp', muscle_name=muscle_name)
                             # Only apply smoothening if cut_streams completed (not waiting for another manual cut)
@@ -4687,7 +4725,7 @@ class GLFWApp():
                                 continue
                             # cut_streams returned early for another manual cut - don't close window
                         else:
-                            print(f"Optimization incomplete: {filled_count}/{len(source_contours_full)} pieces filled")
+                            print(f"Optimization incomplete: {filled_count}/{len(all_pieces)} pieces filled")
                     else:
                         print(f"Need at least 2 source contours for optimization")
                 imgui.same_line()
