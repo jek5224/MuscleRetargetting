@@ -3188,7 +3188,6 @@ class GLFWApp():
                 contour_in_level = self.inspect_2d_stream_idx.get(name, 0)
                 contour_in_level = min(contour_in_level, max(0, max_contours - 1))
 
-                imgui.same_line()
                 changed, new_contour_in_level = imgui.slider_int(f"Contour##{name}_inspect", contour_in_level, 0, max(0, max_contours - 1))
                 if changed:
                     self.inspect_2d_stream_idx[name] = new_contour_in_level
@@ -3231,7 +3230,6 @@ class GLFWApp():
                     self.inspect_2d_show_all[name] = show_all
 
                 if not show_all:
-                    imgui.same_line()
                     changed, new_contour_idx = imgui.slider_int(f"Contour##{name}_inspect", contour_idx, 0, max(0, num_levels - 1))
                     if changed:
                         self.inspect_2d_contour_idx[name] = new_contour_idx
