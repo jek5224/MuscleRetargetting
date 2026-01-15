@@ -1608,11 +1608,11 @@ class ContourMeshMixin:
                 print(f"  Inserting transition contour at scalar {scalar:.6f} "
                       f"(count={count}) at index {insert_idx}")
 
-                # Mark these contours as needing cut (they're at merge points)
-                # This ensures cut_streams knows to use COMMON mode (propagated cuts)
+                # Mark these as merge point contours (for debugging)
+                # Note: Do NOT set is_cut=True here - they need to be cut first!
                 for bp in planes:
-                    bp['is_cut'] = True
-                    bp['is_merge_point'] = True  # Additional flag for debugging
+                    bp['is_merge_point'] = True
+                print(f"  [MERGE POINT] Inserted {len(planes)} contours at level {insert_idx}")
 
                 self.bounding_planes.insert(insert_idx, planes)
                 self.contours.insert(insert_idx, contours)
@@ -5491,17 +5491,38 @@ class ContourMeshMixin:
         num_levels = len(self.contours)
         origin_count = len(self.contours[0])
         insertion_count = len(self.contours[-1])
-        max_stream_count = max(origin_count, insertion_count)
+        # Use max across ALL levels (handles narrowest neck case where intermediate levels have more contours)
+        all_counts = [len(self.contours[i]) for i in range(num_levels)]
+        max_stream_count = max(all_counts)
+        max_count_level = all_counts.index(max_stream_count)
 
-        # Determine processing direction (from larger count side)
-        if origin_count >= insertion_count:
-            # Process origin → insertion
+        # Determine processing direction (from level with most contours)
+        # If intermediate level has most contours, need to process from there in both directions
+        if max_count_level == 0:
+            # Max is at origin - process origin → insertion
             level_order = list(range(num_levels))
             process_forward = True
-        else:
-            # Process insertion → origin
+        elif max_count_level == num_levels - 1:
+            # Max is at insertion - process insertion → origin
             level_order = list(range(num_levels - 1, -1, -1))
             process_forward = False
+        else:
+            # Max is at intermediate level (narrowest neck case)
+            # Process from max level towards origin first, then towards insertion
+            # For now, just process towards whichever endpoint has fewer contours first
+            if origin_count <= insertion_count:
+                level_order = list(range(max_count_level, -1, -1)) + list(range(max_count_level + 1, num_levels))
+            else:
+                level_order = list(range(max_count_level, num_levels)) + list(range(max_count_level - 1, -1, -1))
+            process_forward = True  # Direction doesn't matter as much for intermediate max
+            print(f"[NARROWEST NECK] Max contours at intermediate level {max_count_level}")
+
+        # Debug: show all contour counts and merge point status
+        print(f"[DEBUG] Contour counts per level:")
+        for lvl in range(num_levels):
+            count = len(self.contours[lvl])
+            is_merge = any(bp.get('is_merge_point', False) for bp in self.bounding_planes[lvl])
+            print(f"  Level {lvl}: {count} contours{' (MERGE POINT)' if is_merge else ''}")
 
         # Find the first level where contour count changes (decreases)
         # Source = level before change (more contours)
@@ -5681,18 +5702,24 @@ class ContourMeshMixin:
         # - Multiple sources assigned, AND
         # - Sources are not already cut (is_cut=False)
         targets_needing_cut = []
+        print(f"[DEBUG] Checking which targets need manual cutting:")
         for target_i in range(target_count):
             sources = target_to_sources[target_i]
+            target_is_merge = self.bounding_planes[target_level][target_i].get('is_merge_point', False)
+            print(f"  Target {target_i}: {len(sources)} sources, is_merge_point={target_is_merge}")
             if len(sources) <= 1:
+                print(f"    -> Skipped (only 1 source)")
                 continue  # No cutting needed
 
             # Check if sources are already cut (if so, use COMMON mode, not manual)
-            any_source_cut = any(
-                self.bounding_planes[source_level][s_i].get('is_cut', False)
-                for s_i in sources
-            )
+            source_cut_status = [self.bounding_planes[source_level][s_i].get('is_cut', False) for s_i in sources]
+            any_source_cut = any(source_cut_status)
+            print(f"    -> Sources {sources}, is_cut={source_cut_status}")
             if not any_source_cut:
                 targets_needing_cut.append((target_i, sources))
+                print(f"    -> NEEDS MANUAL CUT")
+            else:
+                print(f"    -> Skipped (sources already cut)")
 
         # Initialize pending cuts queue (always reinitialize if empty or None)
         if not hasattr(self, '_pending_manual_cuts') or self._pending_manual_cuts is None or len(self._pending_manual_cuts) == 0:
@@ -6339,17 +6366,21 @@ class ContourMeshMixin:
         num_levels = len(self.contours)
         origin_count = len(self.contours[0])
         insertion_count = len(self.contours[-1])
-        max_stream_count = max(origin_count, insertion_count)
+        # Use max across ALL levels, not just endpoints (handles narrowest neck case)
+        all_counts = [len(self.contours[i]) for i in range(num_levels)]
+        max_stream_count = max(all_counts)
 
         print(f"\n=== Cut Streams ===")
         print(f"Levels: {num_levels}")
         print(f"Origin count: {origin_count}, Insertion count: {insertion_count}")
+        print(f"All contour counts: {all_counts}")
         print(f"Max stream count: {max_stream_count}")
         print(f"Cut method: {cut_method}")
 
         # Check if manual cutting is needed (contour count changes along levels)
-        # Only for 'bp' method with max_stream_count >= 2
-        if cut_method == 'bp' and max_stream_count >= 2 and origin_count != insertion_count:
+        # Only for 'bp' method with max_stream_count >= 2 and varying counts
+        contour_count_varies = len(set(all_counts)) > 1
+        if cut_method == 'bp' and max_stream_count >= 2 and contour_count_varies:
             # Check if we need to open manual cutting window
             if not self._manual_cut_pending and self._manual_cut_data is None:
                 # Prepare data for manual cutting and open window
@@ -6375,13 +6406,24 @@ class ContourMeshMixin:
         # stream_groups[level_i] = [[stream indices from same original], ...]
         stream_groups = []
 
-        # Determine processing direction (from larger count end)
-        if origin_count >= insertion_count:
+        # Determine processing direction (from level with most contours)
+        max_count_level = all_counts.index(max_stream_count)
+        if max_count_level == 0:
+            # Max is at origin - process origin → insertion
             level_order = list(range(num_levels))
             print("Processing: origin → insertion")
-        else:
+        elif max_count_level == num_levels - 1:
+            # Max is at insertion - process insertion → origin
             level_order = list(range(num_levels - 1, -1, -1))
             print("Processing: insertion → origin")
+        else:
+            # Max is at intermediate level (narrowest neck case)
+            # Process from max level in both directions
+            if origin_count <= insertion_count:
+                level_order = list(range(max_count_level, -1, -1)) + list(range(max_count_level + 1, num_levels))
+            else:
+                level_order = list(range(max_count_level, num_levels)) + list(range(max_count_level - 1, -1, -1))
+            print(f"Processing: from intermediate level {max_count_level} (narrowest neck)")
 
         # Process first level (no cutting needed if it has max_stream_count)
         first_level = level_order[0]
@@ -6683,8 +6725,13 @@ class ContourMeshMixin:
                             # - COMMON: ALL source contours are already cut (is_cut=True) → optimization only
                             stream_combo = tuple(sorted(streams_for_contour))
 
+                            # Debug: check if this is a merge point contour
+                            target_is_merge_point = target_bp.get('is_merge_point', False)
+                            print(f"  [DEBUG] Level {level_i}, contour {contour_i}: is_merge_point={target_is_merge_point}")
+
                             # Check which sources are cut and which are not
                             source_cut_status = [source_bps[i].get('is_cut', False) for i in range(len(source_bps))]
+                            print(f"  [DEBUG] source_cut_status={source_cut_status}, sources are from stream bps, not original bps")
                             any_source_not_cut = any(not cut for cut in source_cut_status)
                             all_sources_cut = all(source_cut_status)
 
