@@ -1002,6 +1002,71 @@ class ContourMeshMixin:
                         print("ADDED")
                         print()
                         trial = 0
+
+                        # Check if contour count changed - if so, add transition samples
+                        prev_count = len(self.bounding_planes[-1]) if len(self.bounding_planes) > 0 else 0
+                        curr_count = len(bounding_planes)
+
+                        if prev_count != curr_count and prev_count > 0 and curr_count > 0:
+                            print(f"  [TRANSITION] Count changed: {prev_count} -> {curr_count}")
+                            print(f"  [TRANSITION] Adding samples between {prev_contour_value:.6f} and {contour_value:.6f}")
+
+                            # Binary search to find exact transition point and add samples on both sides
+                            transition_samples = 5
+                            low_scalar = prev_contour_value
+                            high_scalar = contour_value
+                            low_count = prev_count
+                            high_count = curr_count
+
+                            # Find the transition point with binary search
+                            for _ in range(10):  # Max 10 iterations
+                                mid_scalar = (low_scalar + high_scalar) / 2
+                                mid_planes, mid_contours, mid_contours_orig = self.find_contour(
+                                    mid_scalar, prev_bounding_plane=prev_plane, use_geodesic_edges=use_geodesic_edges)
+                                mid_count = len(mid_planes)
+
+                                if mid_count == low_count:
+                                    low_scalar = mid_scalar
+                                elif mid_count == high_count:
+                                    high_scalar = mid_scalar
+                                else:
+                                    # Found an intermediate count - this is interesting
+                                    print(f"  [TRANSITION] Found intermediate count {mid_count} at {mid_scalar:.6f}")
+                                    break
+
+                                if high_scalar - low_scalar < 0.001:
+                                    break
+
+                            print(f"  [TRANSITION] Transition between {low_scalar:.6f} (count={low_count}) and {high_scalar:.6f} (count={high_count})")
+
+                            # Add samples on the "merged" side (smaller count) to find narrowest neck
+                            # Sample from high_scalar towards higher values (deeper into merged region)
+                            merged_scalar = high_scalar if high_count < low_count else low_scalar
+                            merged_count = min(low_count, high_count)
+
+                            sample_range = abs(contour_value - prev_contour_value) * 2  # Search wider range
+                            for sample_i in range(transition_samples):
+                                t = (sample_i + 1) / (transition_samples + 1)
+                                # Sample in direction away from transition point
+                                if high_count < low_count:
+                                    # Merged region is at higher scalar
+                                    test_scalar = high_scalar + t * sample_range * 0.5
+                                else:
+                                    # Merged region is at lower scalar
+                                    test_scalar = low_scalar - t * sample_range * 0.5
+
+                                if test_scalar < 1.0 or test_scalar > 10.0:
+                                    continue
+
+                                sample_planes, sample_contours, sample_contours_orig = self.find_contour(
+                                    test_scalar, prev_bounding_plane=prev_plane, use_geodesic_edges=use_geodesic_edges)
+
+                                if len(sample_planes) == merged_count and len(sample_planes) > 0:
+                                    print(f"  [TRANSITION] Added sample at {test_scalar:.6f} (count={len(sample_planes)})")
+                                    self.bounding_planes.append(sample_planes)
+                                    contours.append(sample_contours)
+                                    contours_orig.append(sample_contours_orig)
+
                         self.bounding_planes.append(bounding_planes)
                         contours.append(ordered_contour_vertices)
                         contours_orig.append(ordered_contour_vertices_orig)
@@ -1036,7 +1101,30 @@ class ContourMeshMixin:
         self.bounding_planes.append(insertion_bounding_planes)
         contours.append(insertion_contours)
         contours_orig.append(insertion_contours_orig)
-        
+
+        # Sort all levels by scalar value (transition samples may be out of order)
+        # Get scalar value for each level (use first contour's mean projected onto z-axis)
+        level_scalars = []
+        for level_i, planes in enumerate(self.bounding_planes):
+            if len(planes) > 0 and 'scalar_value' in planes[0]:
+                level_scalars.append((planes[0]['scalar_value'], level_i))
+            elif len(planes) > 0:
+                # Estimate scalar from mean position
+                level_scalars.append((planes[0]['mean'][2] if len(planes[0]['mean']) > 2 else level_i, level_i))
+            else:
+                level_scalars.append((level_i, level_i))
+
+        # Sort by scalar value
+        level_scalars.sort(key=lambda x: x[0])
+        sorted_indices = [x[1] for x in level_scalars]
+
+        # Check if reordering is needed
+        if sorted_indices != list(range(len(sorted_indices))):
+            print(f"  [SORT] Reordering {len(sorted_indices)} levels by scalar value")
+            self.bounding_planes = [self.bounding_planes[i] for i in sorted_indices]
+            contours = [contours[i] for i in sorted_indices]
+            contours_orig = [contours_orig[i] for i in sorted_indices]
+
         self.draw_contour_stream = [True] * len(contours)
         self.is_draw_contours = True
         self.contours = contours
