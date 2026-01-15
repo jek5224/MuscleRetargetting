@@ -1675,9 +1675,81 @@ class ContourMeshMixin:
             if len(to_insert) == 0:
                 print(f"  Note: Transition {large_count}→{small_count} already has sharp boundary (no refinement needed)")
 
+        # If no transitions found, still analyze all single-contour levels for necks
+        # This allows Neck Viz to work even without count changes
+        if len(self._neck_viz_data) == 0:
+            print("  [Neck Viz] No transitions found, analyzing all single-contour levels...")
+            for level_i in range(len(self.contours)):
+                if len(self.contours[level_i]) == 1:
+                    contour = self.contours[level_i][0]
+                    bp = self.bounding_planes[level_i][0] if len(self.bounding_planes[level_i]) > 0 else None
+
+                    if bp is None or 'normal' not in bp or 'mean' not in bp:
+                        continue
+
+                    # Measure neck
+                    # Define measure_neck_width locally for this context
+                    def measure_neck_width_simple(c):
+                        if c is None or len(c) < 8:
+                            return float('inf'), None, None
+                        c = np.array(c)
+                        n = len(c)
+                        edge_lengths = np.linalg.norm(np.diff(c, axis=0, append=c[0:1]), axis=1)
+                        total_length = np.sum(edge_lengths)
+                        if total_length < 1e-10:
+                            return float('inf'), None, None
+                        cumulative = np.zeros(n + 1)
+                        cumulative[1:] = np.cumsum(edge_lengths)
+                        min_path_fraction = 0.15
+                        best_width = float('inf')
+                        best_p1, best_p2 = None, None
+                        step = max(1, n // 100)
+                        for i in range(0, n, step):
+                            for j in range(i + 1, n, step):
+                                d1 = cumulative[j] - cumulative[i]
+                                d2 = total_length - d1
+                                short_path = min(d1, d2)
+                                if short_path / total_length < min_path_fraction:
+                                    continue
+                                dist = np.linalg.norm(c[j] - c[i])
+                                if dist < best_width:
+                                    best_width = dist
+                                    best_p1, best_p2 = c[i], c[j]
+                        return best_width, best_p1, best_p2
+
+                    width, p1, p2 = measure_neck_width_simple(contour)
+
+                    # Project to 2D
+                    normal = bp['normal']
+                    mean = bp['mean']
+                    up = np.array([0, 1, 0])
+                    if abs(np.dot(normal, up)) > 0.9:
+                        up = np.array([1, 0, 0])
+                    u = np.cross(normal, up)
+                    u = u / (np.linalg.norm(u) + 1e-10)
+                    v = np.cross(normal, u)
+                    v = v / (np.linalg.norm(v) + 1e-10)
+
+                    contour_2d = np.array([[np.dot(pt - mean, u), np.dot(pt - mean, v)] for pt in contour])
+                    neck_p1_2d = np.array([np.dot(p1 - mean, u), np.dot(p1 - mean, v)]) if p1 is not None else None
+                    neck_p2_2d = np.array([np.dot(p2 - mean, u), np.dot(p2 - mean, v)]) if p2 is not None else None
+
+                    scalar = bp.get('scalar_value', 0)
+                    self._neck_viz_data.append({
+                        'large_count': 1,
+                        'small_count': 1,
+                        'scalar': scalar,
+                        'neck_width': width,
+                        'contour_2d': contour_2d,
+                        'neck_p1': neck_p1_2d,
+                        'neck_p2': neck_p2_2d,
+                        'level_i': level_i,
+                    })
+            print(f"  [Neck Viz] Found {len(self._neck_viz_data)} single-contour levels")
+
         # Update draw_contour_stream
         self.draw_contour_stream = [True] * len(self.contours)
-        print(f"=== Transition Refinement Done: {len(self.bounding_planes)} contour levels ===\n")
+        print(f"=== Transition Refinement Done: {len(self.bounding_planes)} contour levels ===")
 
     def refine_contours(self, max_spacing_threshold, max_refinement_depth=3):
         """
