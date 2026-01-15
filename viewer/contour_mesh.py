@@ -1382,8 +1382,7 @@ class ContourMeshMixin:
                 # Search outward from best_small_scalar in both directions until count changes
 
                 # Get scalar range from mesh
-                all_scalars = self.mesh_data.vertices[:, self.scalar_field_index]
-                scalar_min, scalar_max = np.min(all_scalars), np.max(all_scalars)
+                scalar_min, scalar_max = np.min(self.scalar_field), np.max(self.scalar_field)
 
                 # Find valid range boundary towards large side (merge point)
                 range_end_large = best_large_scalar
