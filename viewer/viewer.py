@@ -4231,6 +4231,14 @@ class GLFWApp():
                         draw_list.add_line(p1[0], p1[1], p2[0], p2[1],
                                           imgui.get_color_u32_rgba(*color, 1.0), 3.0)
 
+                    # Add label for target contour (first piece only, at centroid)
+                    if piece_idx == 0:
+                        centroid = np.mean(piece_2d, axis=0)
+                        cx, cy = to_screen(centroid, x0, y0, canvas_size)
+                        draw_list.add_text(cx + 10, cy - 10,
+                                          imgui.get_color_u32_rgba(1.0, 1.0, 1.0, 1.0),
+                                          f"Target (Lv.{target_level})")
+
             # Draw selected source contour transparently on the main canvas
             source_contours_3d = obj._manual_cut_data.get('source_contours', [])
             source_bps = obj._manual_cut_data.get('source_bps', [])
@@ -4283,6 +4291,10 @@ class GLFWApp():
                         if not is_selected:
                             draw_list.add_line(cx - 4, cy - 4, cx + 4, cy + 4, imgui.get_color_u32_rgba(1.0, 0.3, 0.3, 0.8), 2)
                             draw_list.add_line(cx - 4, cy + 4, cx + 4, cy - 4, imgui.get_color_u32_rgba(1.0, 0.3, 0.3, 0.8), 2)
+                        # Add source label near centroid
+                        draw_list.add_text(cx + 10, cy + 5,
+                                          imgui.get_color_u32_rgba(*src_color, 1.0),
+                                          f"Source {src_idx} (Lv.{source_level})")
 
             # Create invisible button to capture mouse input (prevents window dragging)
             imgui.set_cursor_screen_pos((x0 - padding, y0 - padding))
@@ -4413,10 +4425,10 @@ class GLFWApp():
                     src_panel_x + src_canvas_size + src_padding, src_panel_y + src_canvas_size + src_padding + 120,
                     imgui.get_color_u32_rgba(0.4, 0.4, 0.4, 1.0))
 
-                # Title
+                # Title with level info
                 draw_list.add_text(src_panel_x, src_panel_y - src_padding + 5,
                                   imgui.get_color_u32_rgba(0.9, 0.9, 0.9, 1.0),
-                                  f"Source Contours ({len(source_contours_3d)})")
+                                  f"Source Contours (Lv.{source_level}, {len(source_contours_3d)} total)")
 
                 # Adjust canvas position for title
                 src_canvas_y = src_panel_y + 20
