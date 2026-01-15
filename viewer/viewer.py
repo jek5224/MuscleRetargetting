@@ -2001,11 +2001,17 @@ class GLFWApp():
                         if colored_button(f"Find Transitions##{name}", 5, col_button_width):
                             if hasattr(obj, 'scalar_field') and obj.scalar_field is not None:
                                 try:
-                                    # Use origin/insertion scalar values if available
-                                    scalar_min = getattr(obj, 'origin_contour_value', 0.0)
-                                    scalar_max = getattr(obj, 'insertion_contour_value', 1.0)
-                                    if scalar_min > scalar_max:
-                                        scalar_min, scalar_max = scalar_max, scalar_min
+                                    # Use actual scalar field range
+                                    scalar_min = float(obj.scalar_field.min())
+                                    scalar_max = float(obj.scalar_field.max())
+                                    # Optionally narrow to origin/insertion if set
+                                    if hasattr(obj, 'origin_contour_value') and hasattr(obj, 'insertion_contour_value'):
+                                        o_val = obj.origin_contour_value
+                                        i_val = obj.insertion_contour_value
+                                        if o_val != i_val:  # Only use if they're different
+                                            scalar_min = min(o_val, i_val)
+                                            scalar_max = max(o_val, i_val)
+                                    print(f"[{name}] Scanning scalar range: {scalar_min:.4f} to {scalar_max:.4f}")
                                     obj.find_all_transitions(scalar_min=scalar_min, scalar_max=scalar_max, num_samples=100)
                                     # Auto-open Neck Viz if transitions found
                                     if hasattr(obj, '_neck_viz_data') and obj._neck_viz_data and len(obj._neck_viz_data) > 0:
