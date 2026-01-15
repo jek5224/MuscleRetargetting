@@ -4269,18 +4269,31 @@ class GLFWApp():
                             draw_list.add_line(pt1[0], pt1[1], pt2[0], pt2[1],
                                               imgui.get_color_u32_rgba(piece_colors[1][0], piece_colors[1][1], piece_colors[1][2], 1.0), 2.5)
 
+            # Get piece info
+            current_pieces = obj._manual_cut_data.get('current_pieces', [target_2d])
+            required_pieces = obj._manual_cut_data.get('required_pieces', 2)
+            source_indices_display = obj._manual_cut_data.get('source_indices', [])
+
+            # Show source→target info
+            imgui.separator()
+            imgui.text(f"Cutting: {len(source_indices_display)} sources -> 1 target")
+            imgui.text(f"Pieces: {len(current_pieces)} / {required_pieces} needed")
+
             # Buttons: Next Cut, OK, Reset, Cancel
             imgui.separator()
             button_width = 80
 
-            current_pieces = obj._manual_cut_data.get('current_pieces', [target_2d])
-            required_pieces = obj._manual_cut_data.get('required_pieces', 2)
-            need_more_cuts = len(current_pieces) < required_pieces
+            # Calculate how many pieces we'll have after applying pending cut
+            has_valid_line = obj._manual_cut_line is not None
+            pieces_after_cut = len(current_pieces) + 1 if has_valid_line else len(current_pieces)
 
-            # Next Cut button - apply current line and continue
-            if need_more_cuts and obj._manual_cut_line is not None:
+            # Need more cuts only if even after this cut we won't have enough
+            need_more_cuts_after = pieces_after_cut < required_pieces
+
+            # Next Cut button - only show when we need MORE than one additional cut
+            if need_more_cuts_after and has_valid_line:
                 if imgui.button("Next Cut", button_width, 30):
-                    # Apply cut to current pieces and update
+                    # Apply cut to current pieces and continue
                     success = obj._apply_iterative_cut()
                     if success:
                         # Clear line and recommendation for next cut
@@ -4292,13 +4305,23 @@ class GLFWApp():
                         print("Failed to apply cut - line must cross a piece twice")
                 imgui.same_line()
 
-            # OK button - only enabled when we have enough pieces
-            ok_enabled = len(current_pieces) >= required_pieces
+            # OK button - enabled when we have enough pieces OR have a line that will give us enough
+            ok_enabled = pieces_after_cut >= required_pieces
             if not ok_enabled:
                 imgui.push_style_var(imgui.STYLE_ALPHA, 0.5)
 
             if imgui.button("OK", button_width, 30):
                 if ok_enabled:
+                    # If we have a pending line that needs to be applied, apply it first
+                    if has_valid_line and len(current_pieces) < required_pieces:
+                        success = obj._apply_iterative_cut()
+                        if not success:
+                            print("Failed to apply final cut")
+                            if not ok_enabled:
+                                imgui.pop_style_var()
+                            continue
+                        obj._manual_cut_line = None
+
                     # Finalize all cuts for this target
                     cut_result, all_cuts_done = obj._finalize_manual_cuts()
                     if cut_result is not None:
@@ -4320,7 +4343,7 @@ class GLFWApp():
                             obj._manual_cut_pending = False
                             obj._prepare_manual_cut_data(muscle_name)  # Prepare next target
                 else:
-                    print(f"Need {required_pieces - len(current_pieces)} more cut(s)")
+                    print(f"Draw a cutting line first")
 
             if not ok_enabled:
                 imgui.pop_style_var()
