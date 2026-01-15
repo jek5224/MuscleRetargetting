@@ -6941,6 +6941,20 @@ class ContourMeshMixin:
             print("Need bounding planes - run find_contours first")
             return
 
+        # Save original contours at start of manual cutting session
+        # This prevents issues when self.contours is overwritten by smoothening
+        has_manual_results = hasattr(self, '_manual_cut_results') and self._manual_cut_results and len(self._manual_cut_results) > 0
+        if not has_manual_results:
+            # Starting fresh - save original contours and bounding planes
+            self._original_contours = [list(level) for level in self.contours]
+            self._original_bounding_planes = [list(level) for level in self.bounding_planes]
+            print("[cut_streams] Saved original contours for manual cutting session")
+        elif hasattr(self, '_original_contours') and self._original_contours:
+            # Resuming - restore original contours (in case smoothening corrupted them)
+            self.contours = [list(level) for level in self._original_contours]
+            self.bounding_planes = [list(level) for level in self._original_bounding_planes]
+            print("[cut_streams] Restored original contours from backup")
+
         num_levels = len(self.contours)
         origin_count = len(self.contours[0])
         insertion_count = len(self.contours[-1])
@@ -7527,6 +7541,10 @@ class ContourMeshMixin:
             self._manual_cut_data = None
         if hasattr(self, '_cut_streams_progress'):
             self._cut_streams_progress = None
+        if hasattr(self, '_original_contours'):
+            self._original_contours = None
+        if hasattr(self, '_original_bounding_planes'):
+            self._original_bounding_planes = None
 
         print("Cut streams complete")
 
