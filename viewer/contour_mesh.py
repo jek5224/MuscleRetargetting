@@ -1277,12 +1277,15 @@ class ContourMeshMixin:
                 return min_width, best_p1, best_p2
 
             # Search for narrowest neck within merged region
-            if best_small_scalar is not None and best_small_contours is not None:
+            # The narrowest neck is typically near the merge point (best_large_scalar)
+            if best_small_scalar is not None and best_small_contours is not None and best_large_scalar is not None:
                 print(f"    [Phase3] Searching for narrowest neck in merged region...")
+                print(f"    [Phase3] Search range: {best_small_scalar:.6f} (merged) to {best_large_scalar:.6f} (split)")
 
-                # Sample scalars between best_small_scalar and a bit further into merged region
-                search_range = abs(scalar_small - best_small_scalar)
-                num_samples = 15
+                # Search from best_small_scalar towards best_large_scalar (the merge point)
+                # The narrowest neck should be closer to where contours just merged
+                search_range = best_large_scalar - best_small_scalar
+                num_samples = 20
                 narrowest_scalar = best_small_scalar
                 narrowest_width = float('inf')
                 narrowest_contours = best_small_contours
@@ -1294,16 +1297,19 @@ class ContourMeshMixin:
                     narrowest_width = initial_width
                     print(f"    [Phase3] Initial neck width at {best_small_scalar:.6f}: {initial_width:.6f}")
 
-                # Sample towards the small side to find narrower neck
+                # Sample towards the merge point (best_large_scalar) to find narrower neck
                 for sample_i in range(num_samples):
-                    # Sample from just after best_small_scalar towards scalar_small
-                    t = (sample_i + 1) / (num_samples + 1)
-                    test_scalar = best_small_scalar + t * search_range * 0.5  # Only search first half
+                    # Sample from best_small_scalar towards best_large_scalar
+                    # t goes from near 0 to near 1 (but not quite 1, as that would split)
+                    t = (sample_i + 1) / (num_samples + 2)  # Stay away from the split point
+                    test_scalar = best_small_scalar + t * search_range
 
                     planes_test, contours_test, _ = self.find_contour(test_scalar, prev_bounding_plane=prev_plane)
 
                     if len(contours_test) != small_count:
-                        continue  # Skip if count doesn't match
+                        # Count changed - we're past the merge point
+                        print(f"    [Phase3] At {test_scalar:.6f}: count={len(contours_test)} != small_count={small_count}, stopping")
+                        break
 
                     # Measure neck width of merged contour(s)
                     total_width = 0
