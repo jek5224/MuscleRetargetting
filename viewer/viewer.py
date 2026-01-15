@@ -3248,6 +3248,10 @@ class GLFWApp():
             # Always use child region for consistent layout (scrollbar space reserved)
             imgui.begin_child(f"contours_scroll##{name}", 0, 0, border=False)
 
+            # Initialize hover state (may not be set if contour_indices is empty)
+            hovered_idx = -1
+            hovered_type = None
+
             for stream_idx, level_idx in contour_indices:
                 contour_idx = level_idx  # For display purposes
 
