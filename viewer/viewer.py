@@ -4362,6 +4362,7 @@ class GLFWApp():
                             print("Failed to apply final cut")
                             if not ok_enabled:
                                 imgui.pop_style_var()
+                            imgui.end()  # Must close window before continue
                             continue
                         obj._manual_cut_line = None
 

@@ -5958,9 +5958,27 @@ class ContourMeshMixin:
                 diff = p1 - np.array(line_start)
                 t = (diff[0] * line_dir[1] - diff[1] * line_dir[0]) / cross
 
-                if 0 < t < 1:
-                    intersection_2d = p1 + t * edge_dir
-                    piece_intersections.append((i, t, intersection_2d))
+                # Use small epsilon to handle lines passing exactly through vertices
+                eps = 1e-9
+                if -eps < t < 1 + eps:
+                    # Clamp t to valid range for computing intersection point
+                    t_clamped = max(0, min(1, t))
+                    intersection_2d = p1 + t_clamped * edge_dir
+                    piece_intersections.append((i, t_clamped, intersection_2d))
+
+            # Deduplicate nearby intersections (when line passes through a vertex,
+            # it may register on both adjacent edges)
+            if len(piece_intersections) > 2:
+                deduped = []
+                for inter in piece_intersections:
+                    is_dup = False
+                    for existing in deduped:
+                        if np.linalg.norm(inter[2] - existing[2]) < 1e-8:
+                            is_dup = True
+                            break
+                    if not is_dup:
+                        deduped.append(inter)
+                piece_intersections = deduped
 
             if len(piece_intersections) == 2:
                 cut_piece_idx = piece_idx
