@@ -4206,6 +4206,58 @@ class GLFWApp():
                         draw_list.add_line(p1[0], p1[1], p2[0], p2[1],
                                           imgui.get_color_u32_rgba(*color, 1.0), 3.0)
 
+            # Draw selected source contour transparently on the main canvas
+            source_contours_3d = obj._manual_cut_data.get('source_contours', [])
+            source_bps = obj._manual_cut_data.get('source_bps', [])
+            selected_sources = obj._manual_cut_data.get('selected_sources', list(range(len(source_contours_3d))))
+
+            if 'source_view_idx' in mouse_state and len(source_contours_3d) > 0:
+                src_idx = mouse_state.get('source_view_idx', 0)
+                if src_idx < len(source_contours_3d) and src_idx < len(source_bps):
+                    src_bp = source_bps[src_idx]
+                    src_contour_3d = source_contours_3d[src_idx]
+
+                    # Project source contour onto TARGET's bounding plane for overlay
+                    target_bp = obj._manual_cut_data['target_bp']
+                    target_mean = target_bp['mean']
+                    target_x = target_bp['basis_x']
+                    target_y = target_bp['basis_y']
+                    target_z = target_bp['basis_z']
+
+                    # Project each point of source contour onto target plane
+                    src_on_target_2d = []
+                    for pt in src_contour_3d:
+                        # Project onto target plane
+                        diff = pt - target_mean
+                        proj_pt = pt - np.dot(diff, target_z) * target_z
+                        # Convert to 2D in target's coordinate system
+                        diff_proj = proj_pt - target_mean
+                        x_coord = np.dot(diff_proj, target_x)
+                        y_coord = np.dot(diff_proj, target_y)
+                        src_on_target_2d.append([x_coord, y_coord])
+                    src_on_target_2d = np.array(src_on_target_2d)
+
+                    # Draw source contour transparently on main canvas
+                    src_color = piece_colors[src_idx % len(piece_colors)]
+                    is_selected = src_idx in selected_sources
+                    alpha = 0.6 if is_selected else 0.25
+                    thickness = 2.5 if is_selected else 1.5
+
+                    if len(src_on_target_2d) >= 3:
+                        for i in range(len(src_on_target_2d)):
+                            p1 = to_screen(src_on_target_2d[i], x0, y0, canvas_size)
+                            p2 = to_screen(src_on_target_2d[(i + 1) % len(src_on_target_2d)], x0, y0, canvas_size)
+                            draw_list.add_line(p1[0], p1[1], p2[0], p2[1],
+                                              imgui.get_color_u32_rgba(*src_color, alpha), thickness)
+
+                        # Draw centroid marker
+                        src_centroid = src_on_target_2d.mean(axis=0)
+                        cx, cy = to_screen(src_centroid, x0, y0, canvas_size)
+                        draw_list.add_circle_filled(cx, cy, 6, imgui.get_color_u32_rgba(*src_color, alpha))
+                        # Add X marker if not selected
+                        if not is_selected:
+                            draw_list.add_line(cx - 4, cy - 4, cx + 4, cy + 4, imgui.get_color_u32_rgba(1.0, 0.3, 0.3, 0.8), 2)
+                            draw_list.add_line(cx - 4, cy + 4, cx + 4, cy - 4, imgui.get_color_u32_rgba(1.0, 0.3, 0.3, 0.8), 2)
 
             # Create invisible button to capture mouse input (prevents window dragging)
             imgui.set_cursor_screen_pos((x0 - padding, y0 - padding))
@@ -4326,14 +4378,14 @@ class GLFWApp():
                 src_canvas_size = 280
                 src_padding = 15
 
-                # Draw panel background
+                # Draw panel background (taller to fit checkbox and summary)
                 draw_list.add_rect_filled(
                     src_panel_x - src_padding, src_panel_y - src_padding,
-                    src_panel_x + src_canvas_size + src_padding, src_panel_y + src_canvas_size + src_padding + 80,
+                    src_panel_x + src_canvas_size + src_padding, src_panel_y + src_canvas_size + src_padding + 120,
                     imgui.get_color_u32_rgba(0.12, 0.12, 0.12, 1.0))
                 draw_list.add_rect(
                     src_panel_x - src_padding, src_panel_y - src_padding,
-                    src_panel_x + src_canvas_size + src_padding, src_panel_y + src_canvas_size + src_padding + 80,
+                    src_panel_x + src_canvas_size + src_padding, src_panel_y + src_canvas_size + src_padding + 120,
                     imgui.get_color_u32_rgba(0.4, 0.4, 0.4, 1.0))
 
                 # Title
@@ -4429,11 +4481,54 @@ class GLFWApp():
                 src_label_color = piece_colors[src_idx % len(piece_colors)]
                 imgui.text_colored(f"Source {src_idx + 1} / {len(source_contours_3d)}", *src_label_color, 1.0)
 
+                # Checkbox to include/exclude this source
+                imgui.set_cursor_screen_pos((src_panel_x, nav_y + 50))
+
+                # Initialize selected_sources if not present
+                if 'selected_sources' not in obj._manual_cut_data:
+                    obj._manual_cut_data['selected_sources'] = list(range(len(source_contours_3d)))
+
+                selected_sources = obj._manual_cut_data['selected_sources']
+                is_selected = src_idx in selected_sources
+
+                changed, new_selected = imgui.checkbox(f"Include Source {src_idx + 1}##{name}", is_selected)
+                if changed:
+                    if new_selected and src_idx not in selected_sources:
+                        selected_sources.append(src_idx)
+                        selected_sources.sort()
+                    elif not new_selected and src_idx in selected_sources:
+                        # Don't allow deselecting if only 1 source remains
+                        if len(selected_sources) > 1:
+                            selected_sources.remove(src_idx)
+                        else:
+                            print("Cannot deselect: at least 1 source required")
+
+                    # Update required_pieces and reset cuts
+                    obj._manual_cut_data['selected_sources'] = selected_sources
+                    new_required = len(selected_sources)
+                    obj._manual_cut_data['required_pieces'] = new_required
+
+                    # Reset current pieces to original target
+                    obj._manual_cut_data['current_pieces'] = [target_2d.copy()]
+                    obj._manual_cut_data['current_pieces_3d'] = [obj._manual_cut_data['target_contour'].copy()]
+                    obj._manual_cut_data['cut_lines'] = []
+                    if 'initial_line' in obj._manual_cut_data:
+                        del obj._manual_cut_data['initial_line']
+                    obj._manual_cut_line = None
+
+                    print(f"Source selection changed: {len(selected_sources)} sources selected, need {new_required} pieces")
+
+                # Show selection summary
+                imgui.set_cursor_screen_pos((src_panel_x, nav_y + 70))
+                num_selected = len(obj._manual_cut_data.get('selected_sources', []))
+                imgui.text(f"Selected: {num_selected} / {len(source_contours_3d)}")
+
                 imgui.pop_item_width()
 
-            # Get piece info
+            # Get piece info (use selected_sources count for required_pieces)
             current_pieces = obj._manual_cut_data.get('current_pieces', [target_2d])
-            required_pieces = obj._manual_cut_data.get('required_pieces', 2)
+            selected_sources = obj._manual_cut_data.get('selected_sources', list(range(len(obj._manual_cut_data.get('source_contours', [])))))
+            required_pieces = len(selected_sources) if len(selected_sources) > 0 else obj._manual_cut_data.get('required_pieces', 2)
             source_indices_display = obj._manual_cut_data.get('source_indices', [])
 
             # Show source→target info
