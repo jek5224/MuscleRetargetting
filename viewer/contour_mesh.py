@@ -3,6 +3,7 @@
 # Scalar field and bounding plane methods moved to muscle_mesh.py
 
 import numpy as np
+import copy
 from OpenGL.GL import *
 import matplotlib.cm as cm
 from scipy.spatial import cKDTree
@@ -6491,7 +6492,6 @@ class ContourMeshMixin:
             print("[Reset] No original state saved")
             return False
 
-        import copy
         self._manual_cut_data = copy.deepcopy(self._manual_cut_original_state)
         self._manual_cut_line = None
         print("[Reset] Restored to original state")
