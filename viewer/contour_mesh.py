@@ -1157,32 +1157,54 @@ class ContourMeshMixin:
 
         self._neck_viz_data = []
 
-        # Step 1: Coarse scan to find all transitions
-        scalar_step = (scalar_max - scalar_min) / num_samples
-        prev_count = None
-        prev_scalar = None
-        transitions = []
+        # Recursive function to find transitions, subdividing when count change > 1
+        def find_transitions_recursive(s_min, s_max, samples, depth=0):
+            """Find transitions in range. If count changes by >1, subdivide and search finer."""
+            if depth > 10:  # Safety limit
+                return []
 
-        for i in range(num_samples + 1):
-            scalar = scalar_min + i * scalar_step
-            _, contours, _ = self.find_contour(scalar)
-            count = len(contours)
+            results = []
+            step = (s_max - s_min) / samples
+            prev_count = None
+            prev_scalar = None
 
-            if prev_count is not None and count != prev_count:
-                # Skip transitions involving 0 contours (invalid edge cases)
-                if prev_count == 0 or count == 0:
-                    print(f"  (Skip: {prev_count} → {count} - invalid 0 contour)")
-                else:
-                    transitions.append({
-                        'scalar_a': prev_scalar,
-                        'scalar_b': scalar,
-                        'count_a': prev_count,
-                        'count_b': count,
-                    })
-                    print(f"  Transition: {prev_count} → {count} between {prev_scalar:.4f} and {scalar:.4f}")
+            for i in range(samples + 1):
+                scalar = s_min + i * step
+                _, contours, _ = self.find_contour(scalar)
+                count = len(contours)
 
-            prev_count = count
-            prev_scalar = scalar
+                if prev_count is not None and count != prev_count:
+                    # Skip 0 contours
+                    if prev_count == 0 or count == 0:
+                        pass
+                    else:
+                        diff = abs(count - prev_count)
+                        if diff == 1:
+                            # Normal transition, add it
+                            results.append({
+                                'scalar_a': prev_scalar,
+                                'scalar_b': scalar,
+                                'count_a': prev_count,
+                                'count_b': count,
+                            })
+                            indent = "  " * (depth + 1)
+                            print(f"{indent}Transition: {prev_count} → {count} at {prev_scalar:.6f}-{scalar:.6f}")
+                        else:
+                            # Count changed by more than 1 - search finer in this region
+                            indent = "  " * (depth + 1)
+                            print(f"{indent}Jump {prev_count} → {count} - subdividing [{prev_scalar:.6f}, {scalar:.6f}]")
+                            sub_results = find_transitions_recursive(prev_scalar, scalar, samples, depth + 1)
+                            results.extend(sub_results)
+
+                prev_count = count
+                prev_scalar = scalar
+
+            return results
+
+        transitions = find_transitions_recursive(scalar_min, scalar_max, num_samples)
+
+        # Sort by scalar value
+        transitions.sort(key=lambda t: t['scalar_a'])
 
         print(f"Found {len(transitions)} transitions ({time.time() - start_time:.2f}s)")
 
