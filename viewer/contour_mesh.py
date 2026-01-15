@@ -1137,6 +1137,56 @@ class ContourMeshMixin:
         # if skeleton_meshes is not None and len(skeleton_meshes) > 0:
         #     self.auto_detect_attachments(skeleton_meshes)
 
+    def _find_neck_in_contour(self, contour_2d, min_separation=0.25):
+        """
+        Find pinch point (neck) in a 2D contour where opposite sides come close.
+
+        Args:
+            contour_2d: Nx2 array of 2D points
+            min_separation: Minimum fraction of contour to consider as "opposite" side
+
+        Returns:
+            dict with neck_point, neck_width, or None if no neck found
+        """
+        if len(contour_2d) < 10:
+            return None
+
+        n = len(contour_2d)
+        min_sep_idx = int(n * min_separation)  # At least 25% around contour
+
+        # For each point, find the closest point on the "opposite" side
+        best_neck = None
+        best_width = float('inf')
+
+        # Compute contour perimeter for threshold
+        perimeter = 0
+        for i in range(n):
+            perimeter += np.linalg.norm(contour_2d[(i+1) % n] - contour_2d[i])
+
+        # Neck threshold: if distance < 10% of perimeter, it's a potential neck
+        neck_threshold = perimeter * 0.15
+
+        for i in range(n):
+            p_i = contour_2d[i]
+
+            # Search opposite side (at least min_sep_idx away in both directions)
+            for j in range(i + min_sep_idx, i + n - min_sep_idx):
+                j_mod = j % n
+                p_j = contour_2d[j_mod]
+
+                dist = np.linalg.norm(p_i - p_j)
+
+                if dist < neck_threshold and dist < best_width:
+                    best_width = dist
+                    best_neck = {
+                        'neck_point': (p_i + p_j) / 2,
+                        'neck_width': dist,
+                        'idx_a': i,
+                        'idx_b': j_mod,
+                    }
+
+        return best_neck
+
     def find_all_transitions(self, scalar_min=0.0, scalar_max=1.0, num_samples=100):
         """
         Quickly scan scalar range to find all contour count transitions.
@@ -1291,15 +1341,35 @@ class ContourMeshMixin:
                     c_2d.append([np.dot(d, u), np.dot(d, v)])
                 source_2d.append(np.array(c_2d))
 
-            self._neck_viz_data.append({
-                'large_count': large_count,
-                'small_count': small_count,
-                'scalar_large': large_scalar,
-                'scalar_small': split_scalar,
-                'target_contours_2d': target_2d,
-                'source_contours_2d': source_2d,
-            })
-            print(f"  Added to Neck Viz: {small_count}→{large_count}")
+            # Find ALL necks in the merged contour(s) - not just one per transition
+            # A neck is where a contour has a narrow pinch point
+            for c_idx, c_2d in enumerate(target_2d):
+                neck_info = self._find_neck_in_contour(c_2d)
+                if neck_info is not None:
+                    self._neck_viz_data.append({
+                        'large_count': large_count,
+                        'small_count': small_count,
+                        'scalar_large': large_scalar,
+                        'scalar_small': split_scalar,
+                        'target_contours_2d': [c_2d],  # Just this contour
+                        'source_contours_2d': source_2d,
+                        'neck_point': neck_info['neck_point'],
+                        'neck_width': neck_info['neck_width'],
+                        'contour_idx': c_idx,
+                    })
+                    print(f"  Added neck in contour {c_idx}: width={neck_info['neck_width']:.4f}")
+
+            # If no specific necks found, add the whole transition anyway
+            if not any(d.get('scalar_small') == split_scalar for d in self._neck_viz_data):
+                self._neck_viz_data.append({
+                    'large_count': large_count,
+                    'small_count': small_count,
+                    'scalar_large': large_scalar,
+                    'scalar_small': split_scalar,
+                    'target_contours_2d': target_2d,
+                    'source_contours_2d': source_2d,
+                })
+                print(f"  Added to Neck Viz: {small_count}→{large_count} (no specific neck found)")
 
         print(f"\n=== Done: {len(self._neck_viz_data)} transitions in {time.time()-start_time:.2f}s ===")
 
