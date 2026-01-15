@@ -4900,6 +4900,14 @@ class ContourMeshMixin:
                 self.waypoints[i].append(waypoints)
                 self.mvc_weights[i].append(mvc_weights)
 
+        # Populate stream endpoints for bounding box visualization
+        self._stream_endpoints = []
+        for stream_i, bp_stream in enumerate(self.bounding_planes):
+            if len(bp_stream) >= 2:
+                origin_pos = bp_stream[0]['mean']
+                insertion_pos = bp_stream[-1]['mean']
+                self._stream_endpoints.append((origin_pos, insertion_pos))
+
         self.is_draw = False
         self.is_draw_fiber_architecture = True
 
