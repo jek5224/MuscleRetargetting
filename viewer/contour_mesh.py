@@ -6824,6 +6824,11 @@ class ContourMeshMixin:
         # Check if this came from mid-processing cut_streams
         from_cut_streams = self._manual_cut_data.get('from_cut_streams', False)
 
+        # Clear _manual_cut_data now that result is stored in _manual_cut_results
+        # This prevents it from being incorrectly used as "legacy format" for the next level
+        self._manual_cut_data = None
+        self._manual_cut_original_state = None
+
         if from_cut_streams:
             # Mid-processing manual cut - always return all_cuts_done=True
             # This will trigger cut_streams to run again, which will continue processing
