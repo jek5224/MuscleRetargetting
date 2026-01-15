@@ -2012,7 +2012,7 @@ class GLFWApp():
                                             scalar_min = min(o_val, i_val)
                                             scalar_max = max(o_val, i_val)
                                     print(f"[{name}] Scanning scalar range: {scalar_min:.4f} to {scalar_max:.4f}")
-                                    obj.find_all_transitions(scalar_min=scalar_min, scalar_max=scalar_max, num_samples=100)
+                                    obj.find_all_transitions(scalar_min=scalar_min, scalar_max=scalar_max, num_samples=200)
                                     # Auto-open Neck Viz if transitions found
                                     if hasattr(obj, '_neck_viz_data') and obj._neck_viz_data and len(obj._neck_viz_data) > 0:
                                         if not hasattr(self, 'neck_viz_open'):

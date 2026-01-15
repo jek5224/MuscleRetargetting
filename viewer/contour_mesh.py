@@ -1169,13 +1169,17 @@ class ContourMeshMixin:
             count = len(contours)
 
             if prev_count is not None and count != prev_count:
-                transitions.append({
-                    'scalar_a': prev_scalar,
-                    'scalar_b': scalar,
-                    'count_a': prev_count,
-                    'count_b': count,
-                })
-                print(f"  Transition: {prev_count} → {count} between {prev_scalar:.4f} and {scalar:.4f}")
+                # Skip transitions involving 0 contours (invalid edge cases)
+                if prev_count == 0 or count == 0:
+                    print(f"  (Skip: {prev_count} → {count} - invalid 0 contour)")
+                else:
+                    transitions.append({
+                        'scalar_a': prev_scalar,
+                        'scalar_b': scalar,
+                        'count_a': prev_count,
+                        'count_b': count,
+                    })
+                    print(f"  Transition: {prev_count} → {count} between {prev_scalar:.4f} and {scalar:.4f}")
 
             prev_count = count
             prev_scalar = scalar
