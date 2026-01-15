@@ -1145,26 +1145,19 @@ class ContourMeshMixin:
     def find_all_transitions(self, scalar_min=0.0, scalar_max=1.0, num_samples=100):
         """
         Quickly scan scalar range to find all contour count transitions.
-        For each transition, find the "right before division" contour.
+        For each transition, find the contour RIGHT BEFORE division (with visible pinch).
 
-        This is a fast standalone operation that doesn't modify self.contours.
-        Results are stored in self._neck_viz_data for visualization.
-
-        Args:
-            scalar_min: Start of scalar range to scan
-            scalar_max: End of scalar range to scan
-            num_samples: Number of samples for initial coarse scan
+        Results are stored in self._neck_viz_data for Neck Viz visualization.
         """
         import time
         start_time = time.time()
 
         print(f"\n=== Fast Transition Scan ===")
-        print(f"Scanning scalar range [{scalar_min:.4f}, {scalar_max:.4f}] with {num_samples} samples...")
+        print(f"Scanning scalar range [{scalar_min:.4f}, {scalar_max:.4f}]...")
 
-        # Initialize neck visualization data
         self._neck_viz_data = []
 
-        # Phase 1: Coarse scan to find where contour counts change
+        # Step 1: Coarse scan to find all transitions
         scalar_step = (scalar_max - scalar_min) / num_samples
         prev_count = None
         prev_scalar = None
@@ -1172,179 +1165,122 @@ class ContourMeshMixin:
 
         for i in range(num_samples + 1):
             scalar = scalar_min + i * scalar_step
-            planes, contours, _ = self.find_contour(scalar)
+            _, contours, _ = self.find_contour(scalar)
             count = len(contours)
 
             if prev_count is not None and count != prev_count:
-                # Found a transition
                 transitions.append({
-                    'scalar_before': prev_scalar,
-                    'scalar_after': scalar,
-                    'count_before': prev_count,
-                    'count_after': count,
+                    'scalar_a': prev_scalar,
+                    'scalar_b': scalar,
+                    'count_a': prev_count,
+                    'count_b': count,
                 })
-                print(f"  Found transition at ~{scalar:.4f}: {prev_count} → {count}")
+                print(f"  Transition: {prev_count} → {count} between {prev_scalar:.4f} and {scalar:.4f}")
 
             prev_count = count
             prev_scalar = scalar
 
-        print(f"Phase 1 complete: {len(transitions)} transitions found ({time.time() - start_time:.2f}s)")
+        print(f"Found {len(transitions)} transitions ({time.time() - start_time:.2f}s)")
 
-        if len(transitions) == 0:
-            print("No transitions found in scalar range.")
+        if not transitions:
             return
 
-        # Phase 2: For each transition, find the "right before division" contour
-        # Use binary search to find exact transition point, then get contour just before
-
-        def measure_neck_width(contour):
-            """Measure narrowest neck width of a contour."""
-            if contour is None or len(contour) < 8:
-                return float('inf'), None, None
-            contour = np.array(contour)
-            n = len(contour)
-            edge_lengths = np.linalg.norm(np.diff(contour, axis=0, append=contour[0:1]), axis=1)
-            total_length = np.sum(edge_lengths)
-            if total_length < 1e-10:
-                return float('inf'), None, None
-            cumulative = np.zeros(n + 1)
-            cumulative[1:] = np.cumsum(edge_lengths)
-
-            min_path_fraction = 0.15
-            best_width = float('inf')
-            best_p1, best_p2 = None, None
-            step = max(1, n // 100)
-
-            for i in range(0, n, step):
-                for j in range(i + 1, n, step):
-                    d1 = cumulative[j] - cumulative[i]
-                    d2 = total_length - d1
-                    short_path = min(d1, d2)
-                    if short_path / total_length < min_path_fraction:
-                        continue
-                    dist = np.linalg.norm(contour[j] - contour[i])
-                    if dist < best_width:
-                        best_width = dist
-                        best_p1, best_p2 = contour[i].copy(), contour[j].copy()
-
-            return best_width, best_p1, best_p2
-
+        # Step 2: For each transition, binary search to find exact split point,
+        # then get contour just before split (on the smaller count side)
         for t_idx, t in enumerate(transitions):
-            print(f"\nProcessing transition {t_idx + 1}/{len(transitions)}: {t['count_before']} → {t['count_after']}")
+            count_a, count_b = t['count_a'], t['count_b']
+            scalar_a, scalar_b = t['scalar_a'], t['scalar_b']
 
-            # Determine which side has fewer contours (merged side)
-            if t['count_before'] < t['count_after']:
-                small_count = t['count_before']
-                large_count = t['count_after']
-                small_scalar = t['scalar_before']
-                large_scalar = t['scalar_after']
+            # Identify which side has fewer contours (merged) vs more (split)
+            if count_a < count_b:
+                small_count, large_count = count_a, count_b
+                # small is at scalar_a, large is at scalar_b
+                # Binary search: find largest scalar where count == small_count
+                lo, hi = scalar_a, scalar_b
+                for _ in range(30):
+                    mid = (lo + hi) / 2
+                    _, c_mid, _ = self.find_contour(mid)
+                    if len(c_mid) == small_count:
+                        lo = mid  # Still small, move towards large
+                    else:
+                        hi = mid  # Became large, move back
+                split_scalar = lo  # Last scalar with small_count
+                large_scalar = scalar_b
             else:
-                small_count = t['count_after']
-                large_count = t['count_before']
-                small_scalar = t['scalar_after']
-                large_scalar = t['scalar_before']
-
-            # Binary search to find exact transition point
-            lo, hi = min(small_scalar, large_scalar), max(small_scalar, large_scalar)
-            for _ in range(20):  # ~20 iterations for good precision
-                mid = (lo + hi) / 2
-                _, contours_mid, _ = self.find_contour(mid)
-                if len(contours_mid) == small_count:
-                    if small_scalar < large_scalar:
-                        lo = mid
+                small_count, large_count = count_b, count_a
+                # small is at scalar_b, large is at scalar_a
+                # Binary search: find smallest scalar where count == small_count
+                lo, hi = scalar_a, scalar_b
+                for _ in range(30):
+                    mid = (lo + hi) / 2
+                    _, c_mid, _ = self.find_contour(mid)
+                    if len(c_mid) == small_count:
+                        hi = mid  # Still small, move towards large
                     else:
-                        hi = mid
-                else:
-                    if small_scalar < large_scalar:
-                        hi = mid
-                    else:
-                        lo = mid
+                        lo = mid  # Became large, move back
+                split_scalar = hi  # Last scalar with small_count
+                large_scalar = scalar_a
 
-            # Now search from small side towards large side to find best "before division" contour
-            search_steps = 50
-            best_scalar = small_scalar
-            best_contours = None
-            best_planes = None
-            best_width = float('inf')
+            print(f"\nTransition {t_idx+1}: {small_count}→{large_count}")
+            print(f"  Split point: {split_scalar:.6f}")
 
-            for step_i in range(search_steps):
-                frac = step_i / search_steps
-                test_scalar = small_scalar + frac * (large_scalar - small_scalar)
-                planes_test, contours_test, _ = self.find_contour(test_scalar)
+            # Get contours at split point (right before division) and after split
+            planes_small, contours_small, _ = self.find_contour(split_scalar)
+            planes_large, contours_large, _ = self.find_contour(large_scalar)
 
-                if len(contours_test) != small_count:
-                    break  # Crossed into split region
-
-                # Measure neck width
-                total_width = 0
-                for c in contours_test:
-                    w, _, _ = measure_neck_width(c)
-                    total_width += w
-
-                if total_width < best_width:
-                    best_width = total_width
-                    best_scalar = test_scalar
-                    best_contours = contours_test
-                    best_planes = planes_test
-
-            if best_contours is None:
-                print(f"  WARNING: Could not find valid contour for transition")
+            if len(contours_small) != small_count:
+                print(f"  WARNING: Expected {small_count} contours, got {len(contours_small)}")
                 continue
 
-            print(f"  Best before split: scalar={best_scalar:.6f}, width={best_width:.4f}")
+            # Use the first plane as reference for projection
+            if not planes_small or not isinstance(planes_small[0], dict):
+                print(f"  WARNING: Invalid planes data")
+                continue
 
-            # Get the large side contours for visualization
-            _, large_contours, _ = self.find_contour(large_scalar)
+            bp = planes_small[0]
+            mean = bp['mean']
+            normal = bp['basis_z']
 
-            # Create projection for visualization
-            if best_planes and len(best_planes) > 0:
-                bp_ref = best_planes[0]
-                if isinstance(bp_ref, dict) and 'basis_z' in bp_ref and 'mean' in bp_ref:
-                    normal = bp_ref['basis_z']
-                    mean = bp_ref['mean']
+            # Create orthonormal basis for 2D projection
+            up = np.array([0, 1, 0])
+            if abs(np.dot(normal, up)) > 0.9:
+                up = np.array([1, 0, 0])
+            u = np.cross(normal, up)
+            u = u / (np.linalg.norm(u) + 1e-10)
+            v = np.cross(normal, u)
+            v = v / (np.linalg.norm(v) + 1e-10)
 
-                    # Create projection basis
-                    up = np.array([0, 1, 0])
-                    if abs(np.dot(normal, up)) > 0.9:
-                        up = np.array([1, 0, 0])
-                    u = np.cross(normal, up)
-                    u = u / (np.linalg.norm(u) + 1e-10)
-                    v = np.cross(normal, u)
-                    v = v / (np.linalg.norm(v) + 1e-10)
+            # Project target contours (before split - small_count)
+            target_2d = []
+            for c in contours_small:
+                c_2d = np.array([[np.dot(p - mean, u), np.dot(p - mean, v)] for p in c])
+                target_2d.append(c_2d)
 
-                    # Project target contours (before split)
-                    target_contours_2d = []
-                    for c in best_contours:
-                        c_2d = np.array([[np.dot(p - mean, u), np.dot(p - mean, v)] for p in c])
-                        target_contours_2d.append(c_2d)
+            # Project source contours (after split - large_count) onto same plane
+            source_2d = []
+            for c in contours_large:
+                c_2d = []
+                for p in c:
+                    # Project point onto target plane
+                    diff = p - mean
+                    dist = np.dot(diff, normal)
+                    p_proj = p - dist * normal
+                    # Convert to 2D
+                    d = p_proj - mean
+                    c_2d.append([np.dot(d, u), np.dot(d, v)])
+                source_2d.append(np.array(c_2d))
 
-                    # Project source contours (after split) onto target plane
-                    source_contours_2d = []
-                    for c in large_contours:
-                        c_2d = []
-                        for p in c:
-                            diff = p - mean
-                            dist_along_normal = np.dot(diff, normal)
-                            p_on_plane = p - dist_along_normal * normal
-                            diff_on_plane = p_on_plane - mean
-                            x = np.dot(diff_on_plane, u)
-                            y = np.dot(diff_on_plane, v)
-                            c_2d.append([x, y])
-                        source_contours_2d.append(np.array(c_2d))
+            self._neck_viz_data.append({
+                'large_count': large_count,
+                'small_count': small_count,
+                'scalar_large': large_scalar,
+                'scalar_small': split_scalar,
+                'target_contours_2d': target_2d,
+                'source_contours_2d': source_2d,
+            })
+            print(f"  Added to Neck Viz: {small_count}→{large_count}")
 
-                    self._neck_viz_data.append({
-                        'large_count': large_count,
-                        'small_count': small_count,
-                        'scalar_large': large_scalar,
-                        'scalar_small': best_scalar,
-                        'target_contours_2d': target_contours_2d,
-                        'source_contours_2d': source_contours_2d,
-                    })
-                    print(f"  Added to Neck Viz: {small_count}→{large_count}")
-
-        elapsed = time.time() - start_time
-        print(f"\n=== Fast Transition Scan Complete ===")
-        print(f"Found {len(self._neck_viz_data)} visualizable transitions in {elapsed:.2f}s")
+        print(f"\n=== Done: {len(self._neck_viz_data)} transitions in {time.time()-start_time:.2f}s ===")
 
     def _refine_transition_points(self):
         """
