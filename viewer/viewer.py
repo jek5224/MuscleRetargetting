@@ -2030,6 +2030,12 @@ class GLFWApp():
                             if obj.contours is not None and len(obj.contours) > 0 and obj.bounding_planes is not None and len(obj.bounding_planes) > 0:
                                 try:
                                     obj.cut_streams(cut_method=obj.cutting_method, muscle_name=name)
+                                    # Apply smoothening after streams are found
+                                    if hasattr(obj, 'stream_bounding_planes') and obj.stream_bounding_planes is not None:
+                                        print(f"[{name}] Applying smoothening...")
+                                        obj.smoothen_contours_z()
+                                        obj.smoothen_contours_x()
+                                        obj.smoothen_contours_bp()
                                 except Exception as e:
                                     import traceback
                                     print(f"[{name}] Cut Streams error: {e}")
@@ -4243,6 +4249,12 @@ class GLFWApp():
                         obj._manual_cut_pending = False
                         # Call cut_streams again to continue with COMMON mode
                         obj.cut_streams(cut_method='bp', muscle_name=muscle_name)
+                        # Apply smoothening after streams are found
+                        if hasattr(obj, 'stream_bounding_planes') and obj.stream_bounding_planes is not None:
+                            print(f"[{muscle_name}] Applying smoothening...")
+                            obj.smoothen_contours_z()
+                            obj.smoothen_contours_x()
+                            obj.smoothen_contours_bp()
                     else:
                         print("Failed to apply manual cut - draw a line that crosses the contour twice")
                 else:
