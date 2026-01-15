@@ -5795,10 +5795,37 @@ class ContourMeshMixin:
         target_i, source_indices = current_cut
 
         print(f"Preparing manual cut for target {target_i} with sources {source_indices}")
+        print(f"  target_level={target_level}, source_level={source_level}")
+        print(f"  target contours at level: {len(self.contours[target_level])}")
+        print(f"  source contours at level: {len(self.contours[source_level])}")
 
         # Get target contour and its bounding plane
         target_contour = np.array(self.contours[target_level][target_i])
         target_bp = self.bounding_planes[target_level][target_i]
+
+        # Debug: show target contour info
+        print(f"  target_contour vertices: {len(target_contour)}")
+        print(f"  target_bp is_merge_point: {target_bp.get('is_merge_point', False)}")
+        print(f"  target_bp scalar_value: {target_bp.get('scalar_value', 'unknown')}")
+
+        # Debug: check target contour connectivity
+        if len(target_contour) > 2:
+            # Check for large gaps in the contour (might indicate discontinuity)
+            max_gap = 0
+            for i in range(len(target_contour)):
+                gap = np.linalg.norm(target_contour[i] - target_contour[(i+1) % len(target_contour)])
+                if gap > max_gap:
+                    max_gap = gap
+            avg_step = np.mean([np.linalg.norm(target_contour[i] - target_contour[(i+1) % len(target_contour)])
+                               for i in range(len(target_contour))])
+            print(f"  target_contour max_gap: {max_gap:.6f}, avg_step: {avg_step:.6f}, ratio: {max_gap/avg_step:.2f}")
+
+        # Debug: check 2D projection bounds
+        target_x = target_bp['basis_x']
+        target_y = target_bp['basis_y']
+        print(f"  target_bp basis_x norm: {np.linalg.norm(target_x):.4f}")
+        print(f"  target_bp basis_y norm: {np.linalg.norm(target_y):.4f}")
+        print(f"  target_bp basis_x·basis_y: {np.dot(target_x, target_y):.6f}")
 
         # Get source contours and their bounding planes for this target
         source_contours = [np.array(self.contours[source_level][s_i]) for s_i in source_indices]

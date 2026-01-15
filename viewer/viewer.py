@@ -3997,8 +3997,11 @@ class GLFWApp():
 
             current_pieces = obj._manual_cut_data.get('current_pieces', [target_2d])
             required_pieces = obj._manual_cut_data.get('required_pieces', 2)
+            target_bp = obj._manual_cut_data['target_bp']
+            is_merge_point = target_bp.get('is_merge_point', False)
             imgui.text(f"Target level: {target_level} | Source level: {source_level}")
             imgui.text(f"Pieces: {len(current_pieces)} / {required_pieces} required")
+            imgui.text(f"Target verts: {len(target_2d)} | is_merge_point: {is_merge_point}")
             imgui.text("Draw a line to cut. Scroll to zoom, middle-drag to pan.")
             imgui.text(f"Zoom: {mouse_state['zoom']:.1f}x")
             imgui.separator()
