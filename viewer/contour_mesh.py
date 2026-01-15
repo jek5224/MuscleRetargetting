@@ -5941,6 +5941,10 @@ class ContourMeshMixin:
         print(f"\n=== Preparing Manual Cut Data for Level {level_i}, Contour {contour_i} ({mode_str}) ===")
         print(f"Streams: {streams_for_contour} → 1 target")
         print(f"Source level: {source_level} (target level: {level_i})")
+        print(f"Target contour: {len(target_contour)} vertices")
+        print(f"Source contours: {len(source_contours)} sources with {[len(s) for s in source_contours]} vertices each")
+        for i, src_bp in enumerate(source_bps):
+            print(f"  Source {i} scalar: {src_bp.get('scalar_value', 'unknown')}, is_cut: {src_bp.get('is_cut', False)}")
 
         # Project target contour to 2D
         target_mean = target_bp['mean']
