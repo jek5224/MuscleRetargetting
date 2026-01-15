@@ -1610,8 +1610,9 @@ class ContourMeshMixin:
                 contour_2d = None
                 if narrowest_contours and len(narrowest_contours) > 0 and narrowest_planes and len(narrowest_planes) > 0:
                     bp = narrowest_planes[0]
-                    if 'normal' in bp and 'mean' in bp:
-                        normal = bp['normal']
+                    # Note: bounding planes store normal as 'basis_z', not 'normal'
+                    if 'basis_z' in bp and 'mean' in bp:
+                        normal = bp['basis_z']
                         mean = bp['mean']
                         # Create projection basis
                         up = np.array([0, 1, 0])
@@ -1684,7 +1685,8 @@ class ContourMeshMixin:
                     contour = self.contours[level_i][0]
                     bp = self.bounding_planes[level_i][0] if len(self.bounding_planes[level_i]) > 0 else None
 
-                    if bp is None or 'normal' not in bp or 'mean' not in bp:
+                    # Note: bounding planes store normal as 'basis_z', not 'normal'
+                    if bp is None or 'basis_z' not in bp or 'mean' not in bp:
                         continue
 
                     # Measure neck
@@ -1720,7 +1722,7 @@ class ContourMeshMixin:
                     width, p1, p2 = measure_neck_width_simple(contour)
 
                     # Project to 2D
-                    normal = bp['normal']
+                    normal = bp['basis_z']
                     mean = bp['mean']
                     up = np.array([0, 1, 0])
                     if abs(np.dot(normal, up)) > 0.9:
