@@ -6808,7 +6808,8 @@ class ContourMeshMixin:
                                 else:
                                     cut_contours, cutting_info = self._cut_contour_bp_transform(
                                         target_contour, target_bp, source_contours, source_bps, streams_for_contour,
-                                        is_first_division=is_first_division
+                                        is_first_division=is_first_division,
+                                        target_level=level_i, source_level=prev_level
                                     )
                         elif cut_method == 'mesh':
                             cut_contours = self._cut_contour_mesh_aware(
@@ -7396,7 +7397,7 @@ class ContourMeshMixin:
 
         return new_contours
 
-    def _cut_contour_bp_transform(self, target_contour, target_bp, source_contours, source_bps, stream_indices, is_first_division=True):
+    def _cut_contour_bp_transform(self, target_contour, target_bp, source_contours, source_bps, stream_indices, is_first_division=True, target_level=None, source_level=None):
         """
         Cut a contour using bounding plane transformation and optimization.
 
@@ -8388,7 +8389,8 @@ class ContourMeshMixin:
         self._save_bp_transform_visualization(
             target_2d, target_poly, source_2d_shapes, final_transformed,
             stream_indices, optimal_scales, initial_translations, initial_rotations,
-            use_separate_transforms, assignments, centroids, cutting_line_2d
+            use_separate_transforms, assignments, centroids, cutting_line_2d,
+            target_level=target_level, source_level=source_level
         )
 
         print(f"  [BP Transform] result: {[len(c) for c in new_contours]} vertices per piece")
@@ -8410,7 +8412,7 @@ class ContourMeshMixin:
                                          final_transformed, stream_indices, scales,
                                          initial_translations, initial_rotations,
                                          use_separate_transforms=True, assignments=None, centroids=None,
-                                         cutting_line_2d=None):
+                                         cutting_line_2d=None, target_level=None, source_level=None):
         """
         Store visualization data for BP Viz imgui window and save to file.
         """
@@ -8464,18 +8466,25 @@ class ContourMeshMixin:
         target_arr = np.array(target_2d)
         mode_str = "SEPARATE" if use_separate_transforms else "COMMON"
 
+        # Build level info string
+        level_info = ""
+        if target_level is not None and source_level is not None:
+            level_info = f" | Target Lv.{target_level} <- Source Lv.{source_level}"
+
         # Left plot: Initial configuration (no dashed original)
         ax1 = axes[0]
-        ax1.set_title(f'Initial Config [{mode_str}]')
-        ax1.plot(target_arr[:, 0], target_arr[:, 1], 'k-', linewidth=2, label='Target')
+        ax1.set_title(f'Initial Config [{mode_str}]{level_info}')
+        target_label = f'Target (Lv.{target_level})' if target_level is not None else 'Target'
+        ax1.plot(target_arr[:, 0], target_arr[:, 1], 'k-', linewidth=2, label=target_label)
         ax1.fill(target_arr[:, 0], target_arr[:, 1], alpha=0.1, color='gray')
 
         for i, init_trans in enumerate(initial_transformed):
             if len(init_trans) >= 3:
                 init_arr = np.array(init_trans)
                 init_closed = np.vstack([init_arr, init_arr[0]])
+                src_label = f'Src {stream_indices[i]} (Lv.{source_level})' if source_level is not None else f'Src {stream_indices[i]}'
                 ax1.plot(init_closed[:, 0], init_closed[:, 1], '-', color=colors[i],
-                        linewidth=1.5, label=f'Src {stream_indices[i]}')
+                        linewidth=1.5, label=src_label)
                 ax1.fill(init_arr[:, 0], init_arr[:, 1], alpha=0.2, color=colors[i])
 
         ax1.legend(loc='upper right', fontsize=8)
@@ -8487,10 +8496,10 @@ class ContourMeshMixin:
 
         if use_separate_transforms:
             # SEPARATE mode: show initial config with cutting line
-            ax2.set_title(f'Cutting Line [{mode_str}]')
+            ax2.set_title(f'Cutting Line [{mode_str}]{level_info}')
 
             # Draw target as gray
-            ax2.plot(target_arr[:, 0], target_arr[:, 1], 'k-', linewidth=2, label='Target')
+            ax2.plot(target_arr[:, 0], target_arr[:, 1], 'k-', linewidth=2, label=target_label)
             ax2.fill(target_arr[:, 0], target_arr[:, 1], alpha=0.1, color='gray')
 
             # Draw initial source contours (same as left plot)
@@ -8499,8 +8508,9 @@ class ContourMeshMixin:
                     init_arr = np.array(init_trans)
                     init_closed = np.vstack([init_arr, init_arr[0]])
                     ax2.fill(init_arr[:, 0], init_arr[:, 1], alpha=0.2, color=colors[i])
+                    src_label = f'Src {stream_indices[i]} (Lv.{source_level})' if source_level is not None else f'Src {stream_indices[i]}'
                     ax2.plot(init_closed[:, 0], init_closed[:, 1], '-', color=colors[i],
-                            linewidth=1.5, label=f'Src {stream_indices[i]}')
+                            linewidth=1.5, label=src_label)
         else:
             # COMMON mode: show optimized result
             # scales is now a list of (scale_x, scale_y) tuples
@@ -8508,7 +8518,7 @@ class ContourMeshMixin:
                 scales_str = ', '.join([f'({sx:.2f},{sy:.2f})' for sx, sy in scales])
             else:
                 scales_str = ', '.join([f'{s:.2f}' for s in scales])
-            ax2.set_title(f'Final (scales=[{scales_str}])')
+            ax2.set_title(f'Final (scales=[{scales_str}]){level_info}')
 
             # Draw target contour colored by assignments
             if assignments and len(assignments) == len(target_arr):
@@ -8524,7 +8534,7 @@ class ContourMeshMixin:
                     ax2.scatter(v_2d[0], v_2d[1], c=[colors[piece_idx]], s=25, zorder=10)
             else:
                 # No assignments - draw target as gray
-                ax2.plot(target_arr[:, 0], target_arr[:, 1], 'k-', linewidth=2, label='Target')
+                ax2.plot(target_arr[:, 0], target_arr[:, 1], 'k-', linewidth=2, label=target_label)
                 ax2.fill(target_arr[:, 0], target_arr[:, 1], alpha=0.1, color='gray')
 
             # Draw optimized source contours (filled like initial config)
@@ -8533,8 +8543,9 @@ class ContourMeshMixin:
                     trans_arr = np.array(transformed)
                     trans_closed = np.vstack([trans_arr, trans_arr[0]])
                     ax2.fill(trans_arr[:, 0], trans_arr[:, 1], alpha=0.3, color=colors[i])
+                    opt_label = f'Opt {stream_indices[i]} (Lv.{source_level})' if source_level is not None else f'Opt {stream_indices[i]}'
                     ax2.plot(trans_closed[:, 0], trans_closed[:, 1], '-', color=colors[i],
-                            linewidth=2.0, zorder=15, label=f'Opt {stream_indices[i]}')
+                            linewidth=2.0, zorder=15, label=opt_label)
 
         # Draw centroids as large X markers (only for COMMON mode)
         if not use_separate_transforms and centroids:
