@@ -3209,6 +3209,9 @@ class GLFWApp():
                 else:
                     contour_indices = []  # Show nothing
 
+                # Pre-stream doesn't have show_all feature
+                show_all = False
+
             else:
                 # Post-stream: Stream slider + Contour (level) slider
                 num_streams = get_max_contours_at_level()
