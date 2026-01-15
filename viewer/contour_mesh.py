@@ -1360,24 +1360,10 @@ class ContourMeshMixin:
 
                 return best_score, best_width, best_p1, best_p2
 
-            # Search for narrowest neck within merged region
-            # Search BOTH directions: towards merge point AND away from it
+            # Search for narrowest neck in the ENTIRE merged region
+            # The narrowest neck could be anywhere, not just near the transition
             if best_small_scalar is not None and best_small_contours is not None and best_large_scalar is not None:
-                print(f"    [Phase3] Searching for narrowest neck in merged region...")
-                print(f"    [Phase3] best_small={best_small_scalar:.6f}, best_large={best_large_scalar:.6f}, scalar_small={scalar_small:.6f}")
-
-                narrowest_scalar = best_small_scalar
-                narrowest_score = float('inf')
-                narrowest_width = float('inf')
-                narrowest_contours = best_small_contours
-                narrowest_planes = best_small_planes
-
-                # Measure initial neck
-                if len(best_small_contours) > 0:
-                    initial_score, initial_width, _, _ = measure_neck_width(best_small_contours[0])
-                    narrowest_score = initial_score
-                    narrowest_width = initial_width
-                    print(f"    [Phase3] Initial: scalar={best_small_scalar:.6f}, width={initial_width:.4f}, score={initial_score:.4f}")
+                print(f"    [Phase3] Searching for narrowest neck in FULL merged region...")
 
                 def evaluate_scalar(test_scalar):
                     """Evaluate neck score at a given scalar value."""
@@ -1392,25 +1378,79 @@ class ContourMeshMixin:
                         total_width += width
                     return total_score, total_width, contours_test, planes_test
 
-                # Direction 1: Search towards merge point (best_large_scalar)
-                # This is where the neck is likely narrowest
-                range_to_merge = best_large_scalar - best_small_scalar
-                print(f"    [Phase3] Searching towards merge point (range={range_to_merge:.6f})...")
+                # Find the FULL range where contour count equals small_count
+                # Search outward from best_small_scalar in both directions until count changes
 
-                all_results = [(0.0, best_small_scalar, narrowest_score, narrowest_width)]
+                # Get scalar range from mesh
+                all_scalars = self.mesh_data.vertices[:, self.scalar_field_index]
+                scalar_min, scalar_max = np.min(all_scalars), np.max(all_scalars)
 
-                # Coarse search towards merge point
-                coarse_samples = 25
-                for sample_i in range(coarse_samples):
-                    t = (sample_i + 1) / (coarse_samples + 1)
-                    test_scalar = best_small_scalar + t * range_to_merge
+                # Find valid range boundary towards large side (merge point)
+                range_end_large = best_large_scalar
+
+                # Find valid range boundary towards small side
+                # Keep searching until contour count changes or we hit mesh boundary
+                range_end_small = best_small_scalar
+                search_step = abs(scalar_large - scalar_small) * 0.05  # 5% steps
+
+                # Search towards smaller scalar values
+                test_scalar = best_small_scalar
+                for _ in range(50):  # Max 50 steps
+                    test_scalar -= search_step
+                    if test_scalar < scalar_min:
+                        range_end_small = scalar_min
+                        break
+                    planes_test, contours_test, _ = self.find_contour(test_scalar, prev_bounding_plane=prev_plane)
+                    if len(contours_test) != small_count:
+                        # Count changed, stop here
+                        range_end_small = test_scalar + search_step
+                        break
+                    range_end_small = test_scalar
+
+                # Also search towards larger scalar values (past merge point)
+                test_scalar = best_large_scalar
+                for _ in range(50):
+                    test_scalar += search_step
+                    if test_scalar > scalar_max:
+                        range_end_large = scalar_max
+                        break
+                    planes_test, contours_test, _ = self.find_contour(test_scalar, prev_bounding_plane=prev_plane)
+                    if len(contours_test) != small_count:
+                        range_end_large = test_scalar - search_step
+                        break
+                    range_end_large = test_scalar
+
+                full_range = abs(range_end_large - range_end_small)
+                print(f"    [Phase3] Full merged region: [{min(range_end_small, range_end_large):.6f}, {max(range_end_small, range_end_large):.6f}] (range={full_range:.6f})")
+
+                narrowest_scalar = best_small_scalar
+                narrowest_score = float('inf')
+                narrowest_width = float('inf')
+                narrowest_contours = best_small_contours
+                narrowest_planes = best_small_planes
+
+                # Measure initial neck
+                if len(best_small_contours) > 0:
+                    initial_score, initial_width, _, _ = measure_neck_width(best_small_contours[0])
+                    narrowest_score = initial_score
+                    narrowest_width = initial_width
+                    print(f"    [Phase3] Initial: scalar={best_small_scalar:.6f}, width={initial_width:.4f}, score={initial_score:.4f}")
+
+                # Coarse search across ENTIRE merged region
+                coarse_samples = 40
+                all_results = []
+                search_start = min(range_end_small, range_end_large)
+                search_end = max(range_end_small, range_end_large)
+
+                for sample_i in range(coarse_samples + 1):
+                    t = sample_i / coarse_samples
+                    test_scalar = search_start + t * (search_end - search_start)
 
                     score, width, contours_test, planes_test = evaluate_scalar(test_scalar)
                     if score is None:
-                        print(f"    [Phase3] Direction1: t={t:.3f} count changed, stopping")
-                        break
+                        continue
 
-                    all_results.append((t, test_scalar, score, width))
+                    all_results.append((test_scalar, score, width, contours_test, planes_test))
 
                     if score < narrowest_score:
                         narrowest_score = score
@@ -1419,52 +1459,24 @@ class ContourMeshMixin:
                         narrowest_contours = contours_test
                         narrowest_planes = planes_test
 
-                # Direction 2: Search away from merge point (towards scalar_small)
-                # Sometimes the narrowest neck is further into the merged region
-                range_away = scalar_small - best_small_scalar
-                if abs(range_away) > 1e-6:
-                    print(f"    [Phase3] Searching away from merge point (range={range_away:.6f})...")
+                print(f"    [Phase3] Coarse search: {len(all_results)} valid samples, best so far: scalar={narrowest_scalar:.6f}, score={narrowest_score:.4f}")
 
-                    for sample_i in range(coarse_samples // 2):  # Fewer samples in this direction
-                        t = (sample_i + 1) / (coarse_samples // 2 + 1)
-                        test_scalar = best_small_scalar + t * range_away * 0.5  # Only search first half
+                # Fine search around best result
+                if all_results:
+                    best_result = min(all_results, key=lambda x: x[1])
+                    best_scalar_coarse = best_result[0]
 
-                        score, width, contours_test, planes_test = evaluate_scalar(test_scalar)
-                        if score is None:
-                            break
+                    # Search in a window around best point
+                    fine_range = full_range / coarse_samples * 2  # 2 coarse steps wide
+                    fine_start = max(search_start, best_scalar_coarse - fine_range)
+                    fine_end = min(search_end, best_scalar_coarse + fine_range)
 
-                        all_results.append((-t, test_scalar, score, width))
+                    fine_samples = 20
+                    print(f"    [Phase3] Fine search: [{fine_start:.6f}, {fine_end:.6f}]")
 
-                        if score < narrowest_score:
-                            narrowest_score = score
-                            narrowest_width = width
-                            narrowest_scalar = test_scalar
-                            narrowest_contours = contours_test
-                            narrowest_planes = planes_test
-
-                # Find best result and do fine search around it
-                if len(all_results) > 1:
-                    best_result = min(all_results, key=lambda x: x[2])
-                    best_t, best_scalar_coarse, _, _ = best_result
-
-                    # Determine which direction and search range
-                    if best_t >= 0:
-                        base_range = range_to_merge
-                    else:
-                        base_range = range_away * 0.5
-                        best_t = -best_t
-
-                    # Fine search around best point
-                    t_step = 1.0 / (coarse_samples + 1)
-                    fine_start = max(0.001, best_t - t_step * 1.5)
-                    fine_end = min(0.999, best_t + t_step * 1.5)
-
-                    fine_samples = 15
-                    print(f"    [Phase3] Fine search around best (t={best_t:.3f})...")
-
-                    for sample_i in range(fine_samples):
-                        t = fine_start + (sample_i + 0.5) / fine_samples * (fine_end - fine_start)
-                        test_scalar = best_small_scalar + t * base_range
+                    for sample_i in range(fine_samples + 1):
+                        t = sample_i / fine_samples
+                        test_scalar = fine_start + t * (fine_end - fine_start)
 
                         score, width, contours_test, planes_test = evaluate_scalar(test_scalar)
                         if score is None:
@@ -1476,7 +1488,6 @@ class ContourMeshMixin:
                             narrowest_scalar = test_scalar
                             narrowest_contours = contours_test
                             narrowest_planes = planes_test
-                            print(f"    [Phase3] Fine: Found better at scalar={test_scalar:.6f}: width={width:.4f}, score={score:.4f}")
 
                 print(f"    [Phase3] Best: scalar={narrowest_scalar:.6f}, width={narrowest_width:.4f}, score={narrowest_score:.4f}")
 
