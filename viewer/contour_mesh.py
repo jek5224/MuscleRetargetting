@@ -1348,6 +1348,10 @@ class ContourMeshMixin:
 
             # Phase 3: Find narrowest neck within merged region
             # Search for scalar value where merged contour has minimum neck width
+            print(f"    [Phase3] Starting narrowest neck search for {large_count}→{small_count}")
+            print(f"    [Phase3] best_large_scalar={best_large_scalar}, best_small_scalar={best_small_scalar}")
+            print(f"    [Phase3] best_large_contours={len(best_large_contours) if best_large_contours else None}, best_small_contours={len(best_small_contours) if best_small_contours else None}")
+
             def measure_neck_width(contour):
                 """Measure the narrowest neck width of a contour.
 
@@ -1485,6 +1489,10 @@ class ContourMeshMixin:
             # THEN: Do additional fine search if needed
             if best_small_scalar is not None and best_small_contours is not None and best_large_scalar is not None:
                 print(f"    [Phase3] Searching for narrowest neck in FULL merged region...")
+            else:
+                print(f"    [Phase3] SKIPPED - missing data: best_small_scalar={best_small_scalar is not None}, best_small_contours={best_small_contours is not None}, best_large_scalar={best_large_scalar is not None}")
+
+            if best_small_scalar is not None and best_small_contours is not None and best_large_scalar is not None:
 
                 def evaluate_scalar(test_scalar):
                     """Evaluate neck width at a given scalar value.
