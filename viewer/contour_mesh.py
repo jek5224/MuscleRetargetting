@@ -6475,6 +6475,180 @@ class ContourMeshMixin:
         print(f"Iterative cut: piece {cut_piece_idx} -> 2 pieces, total now {len(new_pieces)}")
         return True
 
+    def _init_piece_assignments_by_distance(self):
+        """
+        Initialize piece assignments based on centroid distance.
+
+        After a cut creates pieces, this assigns each source to the closest piece
+        by centroid distance. Used for the initial state of the assignment UI.
+        """
+        if self._manual_cut_data is None:
+            return
+
+        current_pieces_3d = self._manual_cut_data.get('current_pieces_3d', [])
+        source_contours = self._manual_cut_data.get('source_contours', [])
+        target_bp = self._manual_cut_data.get('target_bp')
+
+        num_pieces = len(current_pieces_3d)
+        num_sources = len(source_contours)
+
+        if num_pieces == 0 or num_sources == 0:
+            return
+
+        # Compute piece centroids
+        piece_centroids = [np.mean(piece, axis=0) for piece in current_pieces_3d]
+
+        # Compute source centroids projected onto target plane
+        target_mean = target_bp['mean']
+        target_z = target_bp['basis_z']
+
+        source_centroids = []
+        for src in source_contours:
+            src_centroid = np.mean(src, axis=0)
+            # Project onto target plane
+            projected = src_centroid - np.dot(src_centroid - target_mean, target_z) * target_z
+            source_centroids.append(projected)
+
+        # Assign each source to its closest piece
+        piece_assignments = {i: [] for i in range(num_pieces)}
+
+        for src_idx, src_centroid in enumerate(source_centroids):
+            min_dist = float('inf')
+            best_piece = 0
+            for p_idx, piece_centroid in enumerate(piece_centroids):
+                dist = np.linalg.norm(src_centroid - piece_centroid)
+                if dist < min_dist:
+                    min_dist = dist
+                    best_piece = p_idx
+            piece_assignments[best_piece].append(src_idx)
+
+        self._manual_cut_data['piece_assignments'] = piece_assignments
+        print(f"[Init Assignments] {num_sources} sources -> {num_pieces} pieces: {piece_assignments}")
+
+    def _process_piece_assignments(self):
+        """
+        Process confirmed piece-source assignments from the UI.
+
+        - 1:1 assignments (piece with 1 source): finalized immediately
+        - N:1 assignments (piece with N > 1 sources): queued for sub-window cutting
+
+        Updates:
+        - matched_pairs: list of finalized (piece_idx, source_idx) pairs
+        - pending_subcuts: list of {piece_idx, sources} for N:1 cases
+        """
+        if self._manual_cut_data is None:
+            return
+
+        piece_assignments = self._manual_cut_data.get('piece_assignments', {})
+        current_pieces_3d = self._manual_cut_data.get('current_pieces_3d', [])
+
+        matched_pairs = self._manual_cut_data.get('matched_pairs', [])
+        pending_subcuts = []
+
+        for piece_idx, assigned_sources in piece_assignments.items():
+            if len(assigned_sources) == 0:
+                # No sources assigned - skip
+                continue
+            elif len(assigned_sources) == 1:
+                # 1:1 - finalize
+                src_idx = assigned_sources[0]
+                matched_pairs.append((piece_idx, src_idx))
+                print(f"[Process] 1:1 finalized: piece {piece_idx} -> source {src_idx}")
+            else:
+                # N:1 - queue for sub-window
+                pending_subcuts.append({
+                    'piece_idx': piece_idx,
+                    'sources': assigned_sources
+                })
+                print(f"[Process] N:1 queued: piece {piece_idx} <- sources {assigned_sources}")
+
+        self._manual_cut_data['matched_pairs'] = matched_pairs
+        self._manual_cut_data['pending_subcuts'] = pending_subcuts
+        self._manual_cut_data['assignment_mode'] = False
+
+        print(f"[Process] {len(matched_pairs)} finalized, {len(pending_subcuts)} pending sub-cuts")
+
+    def _open_subcut_for_piece(self, subcut_info):
+        """
+        Open a sub-window for a piece that has multiple sources assigned.
+
+        Takes the piece as the new target and filters sources to only those assigned.
+
+        Args:
+            subcut_info: dict with 'piece_idx' and 'sources' (list of source indices)
+        """
+        if self._manual_cut_data is None:
+            return
+
+        piece_idx = subcut_info['piece_idx']
+        assigned_sources = subcut_info['sources']
+
+        current_pieces_3d = self._manual_cut_data.get('current_pieces_3d', [])
+        current_pieces = self._manual_cut_data.get('current_pieces', [])
+        source_contours = self._manual_cut_data.get('source_contours', [])
+        source_bps = self._manual_cut_data.get('source_bps', [])
+        source_2d_list = self._manual_cut_data.get('source_2d_list', [])
+        stream_indices = self._manual_cut_data.get('stream_indices', [])
+        matched_pairs = self._manual_cut_data.get('matched_pairs', [])
+        pending_subcuts = self._manual_cut_data.get('pending_subcuts', [])
+
+        if piece_idx >= len(current_pieces_3d):
+            print(f"[SubCut] Invalid piece index {piece_idx}")
+            return
+
+        # Get the piece that becomes the new target
+        new_target_3d = current_pieces_3d[piece_idx]
+        new_target_2d = current_pieces[piece_idx]
+
+        # Store parent context for final combining
+        # Save finalized pieces from matched_pairs
+        parent_finalized = self._manual_cut_data.get('parent_finalized_pieces', {})
+        for p_idx, s_idx in matched_pairs:
+            if p_idx < len(current_pieces_3d):
+                parent_finalized[s_idx] = current_pieces_3d[p_idx]
+        self._manual_cut_data['parent_finalized_pieces'] = parent_finalized
+
+        # Map from new local source index to original source index
+        original_source_indices = list(assigned_sources)
+        self._manual_cut_data['original_source_indices'] = original_source_indices
+
+        # Get source data for assigned sources only
+        new_source_contours = [source_contours[s] for s in assigned_sources]
+        new_source_bps = [source_bps[s] for s in assigned_sources]
+        new_source_2d_list = [source_2d_list[s] for s in assigned_sources]
+        new_stream_indices = [stream_indices[s] for s in assigned_sources]
+
+        # Remove this subcut from pending list
+        new_pending = [s for s in pending_subcuts if s['piece_idx'] != piece_idx]
+        self._manual_cut_data['pending_subcuts'] = new_pending
+
+        # Update manual cut data for the sub-window
+        self._manual_cut_data['target_contour'] = np.array(new_target_3d)
+        self._manual_cut_data['target_2d'] = np.array(new_target_2d)
+        self._manual_cut_data['current_pieces'] = [np.array(new_target_2d)]
+        self._manual_cut_data['current_pieces_3d'] = [np.array(new_target_3d)]
+        self._manual_cut_data['cut_lines'] = []
+
+        # Update source info to show only assigned sources
+        self._manual_cut_data['source_contours'] = new_source_contours
+        self._manual_cut_data['source_bps'] = new_source_bps
+        self._manual_cut_data['source_2d_list'] = new_source_2d_list
+        self._manual_cut_data['stream_indices'] = new_stream_indices
+
+        # Update requirements
+        self._manual_cut_data['required_pieces'] = len(assigned_sources)
+        self._manual_cut_data['selected_sources'] = list(range(len(assigned_sources)))
+
+        # Reset matched_pairs for sub-window (new local context)
+        self._manual_cut_data['matched_pairs'] = []
+        self._manual_cut_data['piece_assignments'] = {}
+        self._manual_cut_data['assignment_mode'] = False
+
+        # Clear cutting line
+        self._manual_cut_line = None
+
+        print(f"[SubCut] Opened sub-window: {len(assigned_sources)} sources -> piece {piece_idx}")
+
     def _finalize_manual_cuts(self):
         """
         Finalize all iterative cuts and match pieces to source contours.
