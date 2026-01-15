@@ -4024,8 +4024,8 @@ class GLFWApp():
             required_pieces_display = obj._manual_cut_data.get('required_pieces', 2)
             # Window size: main canvas (550+40) + gap (30) + source panel (280+30) + margins = ~960
             imgui.set_next_window_size(960, 780, imgui.FIRST_USE_EVER)
-            # Show target index and source info in title for M→N cases
-            title_suffix = f" (Target {target_i}, {len(source_indices)}→1)" if len(source_indices) > 0 else ""
+            # Show target index and source info in title for M->N cases
+            title_suffix = f" (Target {target_i}, {len(source_indices)}->1)" if len(source_indices) > 0 else ""
             expanded, opened = imgui.begin(f"Manual Cut: {muscle_name}{title_suffix}", True)
 
             if not opened:
@@ -4568,7 +4568,7 @@ class GLFWApp():
             required_pieces = len(selected_sources) if len(selected_sources) > 0 else obj._manual_cut_data.get('required_pieces', 2)
             source_indices_display = obj._manual_cut_data.get('source_indices', [])
 
-            # Show source→target info
+            # Show source->target info
             imgui.set_cursor_screen_pos((cursor_pos[0], y0 + canvas_size + padding + 10))
             imgui.separator()
             num_selected = len(selected_sources)
@@ -4589,12 +4589,12 @@ class GLFWApp():
                 # Show different label based on whether manual cuts have been made
                 num_current_pieces = len(current_pieces)
                 if num_current_pieces > 1:
-                    opt_label = f"Opt Rest ({num_current_pieces}→{required_pieces})"
+                    opt_label = f"Opt Rest ({num_current_pieces}->{required_pieces})"
                 else:
                     opt_label = "Optimize"
 
                 if imgui.button(opt_label, button_width + 20, 30):
-                    print(f"Running optimization on {num_current_pieces} current pieces → {required_pieces} needed...")
+                    print(f"Running optimization on {num_current_pieces} current pieces -> {required_pieces} needed...")
 
                     # Get source data
                     source_contours = obj._manual_cut_data.get('source_contours', [])
@@ -4611,27 +4611,51 @@ class GLFWApp():
                     selected_stream_indices = [stream_indices[i] for i in selected_sources if i < len(stream_indices)]
 
                     if len(selected_source_contours) >= 2:
-                        # Optimize remaining pieces
+                        # Get matched pairs for combining with optimized pieces
+                        matched_pairs = obj._manual_cut_data.get('matched_pairs', [])
+
+                        # Optimize remaining (unmatched) pieces
                         final_pieces = obj._optimize_remaining_pieces(
                             current_pieces_3d,
                             selected_source_contours, selected_source_bps,
                             selected_stream_indices, target_bp,
-                            target_level, source_level
+                            target_level, source_level,
+                            matched_pairs=matched_pairs
                         )
 
-                        if final_pieces is not None and len(final_pieces) >= required_pieces:
-                            # Store result
+                        # Combine matched pieces with optimized pieces
+                        source_contours_full = obj._manual_cut_data.get('source_contours', [])
+                        all_pieces = [None] * len(source_contours_full)
+
+                        # Fill in pre-matched pieces
+                        for piece_idx, src_idx in matched_pairs:
+                            if piece_idx < len(current_pieces_3d) and src_idx < len(all_pieces):
+                                all_pieces[src_idx] = current_pieces_3d[piece_idx]
+
+                        # Fill in optimized pieces for remaining sources
+                        opt_idx = 0
+                        for src_idx in selected_sources:
+                            if all_pieces[src_idx] is None and final_pieces is not None and opt_idx < len(final_pieces):
+                                all_pieces[src_idx] = final_pieces[opt_idx]
+                                opt_idx += 1
+
+                        # Check if we have all pieces
+                        filled_count = sum(1 for p in all_pieces if p is not None)
+                        if filled_count >= len(source_contours_full):
+                            # Store result with ALL pieces (matched + optimized)
                             if not hasattr(obj, '_manual_cut_results') or obj._manual_cut_results is None:
                                 obj._manual_cut_results = {}
 
                             target_i = obj._manual_cut_data.get('target_i', 0)
                             result_key = (target_level, target_i)
+                            # Use all source indices, not just selected
+                            all_stream_indices = obj._manual_cut_data.get('stream_indices', stream_indices)
                             obj._manual_cut_results[result_key] = {
-                                'cut_contours': final_pieces,
-                                'source_indices': selected_stream_indices,
+                                'cut_contours': all_pieces,
+                                'source_indices': all_stream_indices,
                                 'is_1to1': False,
                             }
-                            print(f"Optimization complete: {len(final_pieces)} pieces stored")
+                            print(f"Optimization complete: {len(all_pieces)} pieces ({len(matched_pairs)} pre-matched, {len(final_pieces) if final_pieces else 0} optimized)")
 
                             # Close window and continue
                             obj._manual_cut_pending = False
@@ -4647,7 +4671,7 @@ class GLFWApp():
                             imgui.end()
                             continue
                         else:
-                            print(f"Optimization failed or returned invalid result")
+                            print(f"Optimization incomplete: {filled_count}/{len(source_contours_full)} pieces filled")
                     else:
                         print(f"Need at least 2 source contours for optimization")
                 imgui.same_line()
@@ -4722,7 +4746,13 @@ class GLFWApp():
                         obj._manual_cut_line = None
                         if 'initial_line' in obj._manual_cut_data:
                             del obj._manual_cut_data['initial_line']
-                        print(f"Cut applied. Pieces: {len(obj._manual_cut_data['current_pieces'])} / {required_pieces}")
+
+                        # Match pieces to sources and exclude matched ones
+                        obj._match_and_exclude_sources()
+
+                        new_pieces = len(obj._manual_cut_data['current_pieces'])
+                        new_selected = len(obj._manual_cut_data.get('selected_sources', []))
+                        print(f"Cut applied. Pieces: {new_pieces}, Remaining sources: {new_selected}")
                     else:
                         print("Failed to apply cut - line must cross a piece twice")
                 imgui.same_line()

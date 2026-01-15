@@ -6168,6 +6168,103 @@ class ContourMeshMixin:
             self._manual_cut_results = None
         print("Manual cutting cancelled")
 
+    def _match_and_exclude_sources(self):
+        """
+        After a cut, match pieces to sources and exclude matched (1:1) pairs.
+
+        This allows the user to cut off one piece, have it matched to its source,
+        and then continue working with remaining sources and pieces.
+
+        Updates:
+        - matched_pairs: list of (piece_idx, source_idx) that are finalized
+        - selected_sources: remaining sources that still need matching
+        - Keeps current_pieces and current_pieces_3d unchanged (for display)
+        """
+        if self._manual_cut_data is None:
+            return
+
+        current_pieces_3d = self._manual_cut_data.get('current_pieces_3d', [])
+        source_contours = self._manual_cut_data.get('source_contours', [])
+        source_bps = self._manual_cut_data.get('source_bps', [])
+        selected_sources = self._manual_cut_data.get('selected_sources', list(range(len(source_contours))))
+        target_bp = self._manual_cut_data.get('target_bp')
+
+        # Get or initialize matched_pairs
+        matched_pairs = self._manual_cut_data.get('matched_pairs', [])
+        matched_piece_indices = set(p[0] for p in matched_pairs)
+        matched_source_indices = set(p[1] for p in matched_pairs)
+
+        num_pieces = len(current_pieces_3d)
+        num_sources = len(selected_sources)
+
+        if num_pieces == 0 or num_sources == 0:
+            return
+
+        print(f"[Match & Exclude] {num_pieces} pieces, {num_sources} remaining sources")
+
+        # Compute piece centroids (only unmatched pieces)
+        piece_centroids = []
+        unmatched_piece_indices = []
+        for i, piece in enumerate(current_pieces_3d):
+            if i not in matched_piece_indices:
+                piece_centroids.append(np.mean(piece, axis=0))
+                unmatched_piece_indices.append(i)
+
+        # Compute source centroids for selected sources (projected onto target plane)
+        target_mean = target_bp['mean']
+        target_z = target_bp['basis_z']
+
+        source_centroids = []
+        for src_local_idx in selected_sources:
+            if src_local_idx in matched_source_indices:
+                continue
+            src = source_contours[src_local_idx]
+            src_centroid = np.mean(src, axis=0)
+            projected = src_centroid - np.dot(src_centroid - target_mean, target_z) * target_z
+            source_centroids.append((src_local_idx, projected))
+
+        if len(piece_centroids) == 0 or len(source_centroids) == 0:
+            return
+
+        # Assign sources to pieces by distance
+        piece_to_sources = {i: [] for i in unmatched_piece_indices}
+        for src_local_idx, src_centroid in source_centroids:
+            min_dist = float('inf')
+            best_piece = unmatched_piece_indices[0]
+            for p_idx, piece_centroid in zip(unmatched_piece_indices, piece_centroids):
+                dist = np.linalg.norm(src_centroid - piece_centroid)
+                if dist < min_dist:
+                    min_dist = dist
+                    best_piece = p_idx
+            piece_to_sources[best_piece].append(src_local_idx)
+
+        print(f"[Match & Exclude] Piece->Source mapping: {piece_to_sources}")
+
+        # Find pieces that have exactly 1 source assigned (1:1 match)
+        new_matches = []
+        sources_to_remove = []
+
+        for piece_idx, assigned_sources in piece_to_sources.items():
+            if len(assigned_sources) == 1:
+                # 1:1 match - finalize this pair
+                src_idx = assigned_sources[0]
+                new_matches.append((piece_idx, src_idx))
+                sources_to_remove.append(src_idx)
+                print(f"[Match & Exclude] Matched piece {piece_idx} <-> source {src_idx}")
+
+        # Update matched_pairs
+        matched_pairs.extend(new_matches)
+        self._manual_cut_data['matched_pairs'] = matched_pairs
+
+        # Update selected_sources to exclude matched ones
+        new_selected = [s for s in selected_sources if s not in sources_to_remove]
+        self._manual_cut_data['selected_sources'] = new_selected
+
+        print(f"[Match & Exclude] Remaining sources: {new_selected}")
+
+        # If only 1 source remains and there's a piece for it, we're done
+        # (the UI will show 1:1 case)
+
     def _apply_iterative_cut(self):
         """
         Apply the current cut line to one of the current pieces.
@@ -6301,6 +6398,10 @@ class ContourMeshMixin:
         """
         Finalize all iterative cuts and match pieces to source contours.
 
+        Handles matched_pairs from incremental cut-and-match workflow:
+        - matched_pairs: already finalized piece-source pairs
+        - remaining pieces matched to remaining sources
+
         Returns (cut_result, all_cuts_done):
         - cut_result: list of cut contours for this target
         - all_cuts_done: True if all pending manual cuts are complete
@@ -6313,37 +6414,66 @@ class ContourMeshMixin:
         required_pieces = self._manual_cut_data.get('required_pieces', 2)
         target_i = self._manual_cut_data.get('target_i', 0)
         source_indices = self._manual_cut_data.get('source_indices', [])
+        matched_pairs = self._manual_cut_data.get('matched_pairs', [])
+        selected_sources = self._manual_cut_data.get('selected_sources', list(range(len(source_contours))))
 
-        if len(current_pieces_3d) != required_pieces:
-            print(f"Have {len(current_pieces_3d)} pieces but need {required_pieces}")
-            return None, False
+        # With matched_pairs, we may have fewer remaining pieces to match
+        num_pieces = len(current_pieces_3d)
+        num_sources = len(source_contours)
+        num_matched = len(matched_pairs)
 
-        if len(source_contours) != required_pieces:
-            print(f"Have {len(source_contours)} sources but need {required_pieces}")
-            return None, False
+        # Initialize cut_contours with slots for all sources
+        cut_contours = [None] * num_sources
 
-        # Match pieces to source contours by centroid distance
-        # Use Hungarian algorithm for optimal matching
-        from scipy.optimize import linear_sum_assignment
+        # First, fill in already matched pairs
+        matched_piece_indices = set()
+        for piece_idx, src_idx in matched_pairs:
+            if piece_idx < num_pieces and src_idx < num_sources:
+                cut_contours[src_idx] = current_pieces_3d[piece_idx]
+                matched_piece_indices.add(piece_idx)
+                print(f"  Using pre-matched: piece {piece_idx} -> source {src_idx}")
 
-        piece_centroids = [np.mean(p, axis=0) for p in current_pieces_3d]
-        source_centroids = [np.mean(s, axis=0) for s in source_contours]
+        # Get remaining (unmatched) pieces and sources
+        remaining_pieces = [(i, current_pieces_3d[i]) for i in range(num_pieces) if i not in matched_piece_indices]
+        remaining_sources = [i for i in range(num_sources) if cut_contours[i] is None]
 
-        # Build cost matrix
-        cost_matrix = np.zeros((required_pieces, required_pieces))
-        for i in range(required_pieces):
-            for j in range(required_pieces):
-                cost_matrix[i, j] = np.linalg.norm(piece_centroids[i] - source_centroids[j])
+        if len(remaining_pieces) > 0 and len(remaining_sources) > 0:
+            # Match remaining pieces to remaining sources by centroid distance
+            from scipy.optimize import linear_sum_assignment
 
-        # Optimal assignment
-        row_ind, col_ind = linear_sum_assignment(cost_matrix)
+            piece_centroids = [np.mean(p[1], axis=0) for p in remaining_pieces]
+            source_centroids = [np.mean(source_contours[s], axis=0) for s in remaining_sources]
 
-        # Reorder pieces to match source order
-        cut_contours = [None] * required_pieces
-        for piece_idx, source_idx in zip(row_ind, col_ind):
-            cut_contours[source_idx] = current_pieces_3d[piece_idx]
+            # Build cost matrix
+            n_rem_pieces = len(remaining_pieces)
+            n_rem_sources = len(remaining_sources)
+            n = max(n_rem_pieces, n_rem_sources)
+            cost_matrix = np.full((n, n), 1e10)
+            for i in range(n_rem_pieces):
+                for j in range(n_rem_sources):
+                    cost_matrix[i, j] = np.linalg.norm(piece_centroids[i] - source_centroids[j])
 
-        print(f"Finalized {required_pieces} pieces for target {target_i}, matched to sources {source_indices}")
+            # Optimal assignment
+            row_ind, col_ind = linear_sum_assignment(cost_matrix)
+
+            # Assign remaining pieces
+            for i, j in zip(row_ind, col_ind):
+                if i < n_rem_pieces and j < n_rem_sources:
+                    piece_idx, piece_3d = remaining_pieces[i]
+                    src_idx = remaining_sources[j]
+                    cut_contours[src_idx] = piece_3d
+                    print(f"  Matched remaining: piece {piece_idx} -> source {src_idx}")
+
+        # Check if we have all contours filled
+        missing = [i for i in range(num_sources) if cut_contours[i] is None]
+        if missing:
+            print(f"Warning: Missing contours for sources {missing}")
+            # Fill with any available piece
+            for src_idx in missing:
+                if len(remaining_pieces) > 0:
+                    cut_contours[src_idx] = remaining_pieces[0][1]
+
+        print(f"Finalized {num_sources} pieces for target {target_i} ({num_matched} pre-matched)")
         for i in range(required_pieces):
             print(f"  Source {source_indices[i]}: piece with {len(cut_contours[i])} vertices")
 
@@ -7553,7 +7683,8 @@ class ContourMeshMixin:
         return new_contours
 
     def _optimize_remaining_pieces(self, current_pieces_3d, source_contours, source_bps,
-                                    stream_indices, target_bp, target_level, source_level):
+                                    stream_indices, target_bp, target_level, source_level,
+                                    matched_pairs=None):
         """
         Optimize remaining pieces after manual cuts.
 
@@ -7561,35 +7692,52 @@ class ContourMeshMixin:
         further subdivision as needed to match the number of sources.
 
         Workflow:
-        1. Assign sources to pieces by distance (centroid matching)
-        2. For any piece with multiple sources, use BP transform to subdivide
-        3. Return final list of pieces matching sources
+        1. Exclude pre-matched pieces/sources (from matched_pairs)
+        2. Assign remaining sources to remaining pieces by distance
+        3. For any piece with multiple sources, use BP transform to subdivide
+        4. Return final list of pieces for remaining sources
 
         Args:
             current_pieces_3d: List of 3D contour pieces (after manual cuts)
-            source_contours: Source contours to match
+            source_contours: Source contours to match (only remaining/selected ones)
             source_bps: Source bounding planes
             stream_indices: Stream indices for sources
             target_bp: Target bounding plane
             target_level: Target level index
             source_level: Source level index
+            matched_pairs: List of (piece_idx, source_idx) already matched (optional)
 
         Returns:
-            List of final cut contours, one per source
+            List of final cut contours, one per remaining source
         """
         import numpy as np
 
-        num_pieces = len(current_pieces_3d)
+        if matched_pairs is None:
+            matched_pairs = []
+
+        # Get indices of already matched pieces
+        matched_piece_indices = set(p[0] for p in matched_pairs)
+
+        # Filter to unmatched pieces only
+        unmatched_pieces = [(i, current_pieces_3d[i]) for i in range(len(current_pieces_3d))
+                           if i not in matched_piece_indices]
+
+        num_unmatched_pieces = len(unmatched_pieces)
         num_sources = len(source_contours)
 
-        print(f"[Optimize Remaining] {num_pieces} pieces → {num_sources} sources needed")
+        print(f"[Optimize Remaining] {num_unmatched_pieces} unmatched pieces -> {num_sources} sources needed")
 
-        if num_pieces >= num_sources:
-            # Already have enough pieces, just return them matched by distance
-            return self._match_pieces_to_sources(current_pieces_3d, source_contours, source_bps)
+        if num_unmatched_pieces == 0:
+            print(f"[Optimize Remaining] No unmatched pieces to optimize")
+            return []
 
-        # Compute piece centroids
-        piece_centroids = [np.mean(p, axis=0) for p in current_pieces_3d]
+        if num_unmatched_pieces >= num_sources:
+            # Already have enough unmatched pieces, just return them matched by distance
+            unmatched_pieces_3d = [p[1] for p in unmatched_pieces]
+            return self._match_pieces_to_sources(unmatched_pieces_3d, source_contours, source_bps)
+
+        # Compute piece centroids for unmatched pieces
+        piece_centroids = [np.mean(p[1], axis=0) for p in unmatched_pieces]
 
         # Compute source centroids (projected onto target plane)
         target_mean = target_bp['mean']
@@ -7601,9 +7749,9 @@ class ContourMeshMixin:
             projected = src_centroid - np.dot(src_centroid - target_mean, target_z) * target_z
             source_centroids.append(projected)
 
-        # Assign sources to pieces by distance
+        # Assign sources to unmatched pieces by distance
         # Each source goes to its closest piece
-        piece_to_sources = [[] for _ in range(num_pieces)]
+        piece_to_sources = [[] for _ in range(num_unmatched_pieces)]
         for src_i, src_centroid in enumerate(source_centroids):
             min_dist = float('inf')
             best_piece = 0
@@ -7619,18 +7767,18 @@ class ContourMeshMixin:
         # Build final pieces list
         final_pieces = []
 
-        for piece_i, assigned_sources in enumerate(piece_to_sources):
-            piece_3d = current_pieces_3d[piece_i]
+        for local_idx, assigned_sources in enumerate(piece_to_sources):
+            orig_piece_idx, piece_3d = unmatched_pieces[local_idx]
 
             if len(assigned_sources) == 0:
-                # No sources assigned to this piece - keep it anyway
-                final_pieces.append(piece_3d)
+                # No sources assigned to this piece - skip it
+                continue
             elif len(assigned_sources) == 1:
                 # One source - no further cutting needed
                 final_pieces.append(piece_3d)
             else:
                 # Multiple sources - need to subdivide this piece
-                print(f"[Optimize Remaining] Piece {piece_i} has {len(assigned_sources)} sources - subdividing")
+                print(f"[Optimize Remaining] Piece {orig_piece_idx} has {len(assigned_sources)} sources - subdividing")
 
                 # Get the sources assigned to this piece
                 sub_source_contours = [source_contours[s] for s in assigned_sources]
@@ -7652,7 +7800,7 @@ class ContourMeshMixin:
                     final_pieces.extend(sub_pieces)
                 else:
                     # Optimization failed - just use the original piece
-                    print(f"[Optimize Remaining] Subdivision failed for piece {piece_i}, using original")
+                    print(f"[Optimize Remaining] Subdivision failed for piece {orig_piece_idx}, using original")
                     final_pieces.append(piece_3d)
 
         print(f"[Optimize Remaining] Final: {len(final_pieces)} pieces")
