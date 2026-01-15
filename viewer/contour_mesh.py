@@ -6565,8 +6565,14 @@ class ContourMeshMixin:
                                     best_dist = dist
                                     best_idx = idx
 
-                            used_pieces.add(best_idx)
-                            cut_contour = cut_contours[best_idx]
+                            # Guard: if no available piece found (more streams than pieces)
+                            if best_idx is None:
+                                print(f"  [WARNING] Level {level_i}: No available cut piece for stream {stream_i} (more streams than cut pieces)")
+                                # Use the full target contour as fallback
+                                cut_contour = target_contour
+                            else:
+                                used_pieces.add(best_idx)
+                                cut_contour = cut_contours[best_idx]
 
                             # Debug: warn about small cut contours
                             if len(cut_contour) <= 5:
