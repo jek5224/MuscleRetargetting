@@ -3116,11 +3116,19 @@ class GLFWApp():
             is_pre_stream = not is_post_stream
 
             # Helper functions to access data in correct format
-            def get_num_streams():
+            def get_num_levels():
+                """Get number of levels."""
                 if is_pre_stream:
-                    # Pre-stream: streams are the inner index
-                    # Different levels may have different numbers of streams (e.g., origin=1, insertion=2)
-                    # Return maximum across all levels
+                    return len(obj.contours)
+                else:
+                    # Post-stream: levels are the inner index
+                    if len(obj.contours) > 0:
+                        return len(obj.contours[0])
+                    return 0
+
+            def get_max_contours_at_level():
+                """Get maximum number of contours at any level (for pre-stream)."""
+                if is_pre_stream:
                     if len(obj.contours) == 0:
                         return 0
                     return max(len(level) for level in obj.contours)
@@ -3128,99 +3136,125 @@ class GLFWApp():
                     # Post-stream: streams are the outer index
                     return len(obj.contours)
 
-            def get_valid_level_indices(s_idx):
-                """Get list of level indices where this stream exists."""
+            def get_num_contours_at_level(level_idx):
+                """Get number of contours at a specific level (for pre-stream)."""
                 if is_pre_stream:
-                    indices = []
-                    for level_idx, level in enumerate(obj.contours):
-                        if s_idx < len(level):
-                            indices.append(level_idx)
-                    return indices
+                    if level_idx < len(obj.contours):
+                        return len(obj.contours[level_idx])
+                    return 0
                 else:
-                    # Post-stream: all levels exist for this stream
-                    return list(range(len(obj.contours[s_idx]))) if s_idx < len(obj.contours) else []
+                    return len(obj.contours)
 
-            def get_num_contours(s_idx):
-                return len(get_valid_level_indices(s_idx))
-
-            def get_contour(s_idx, c_idx):
+            def get_contour(s_idx, level_idx):
                 if is_pre_stream:
-                    # contours[level_idx][stream_idx]
-                    if c_idx < len(obj.contours) and s_idx < len(obj.contours[c_idx]):
-                        return obj.contours[c_idx][s_idx]
+                    # contours[level_idx][contour_idx] - s_idx is contour within level
+                    if level_idx < len(obj.contours) and s_idx < len(obj.contours[level_idx]):
+                        return obj.contours[level_idx][s_idx]
                     return None
                 else:
                     # contours[stream_idx][level_idx]
-                    if s_idx < len(obj.contours) and c_idx < len(obj.contours[s_idx]):
-                        return obj.contours[s_idx][c_idx]
+                    if s_idx < len(obj.contours) and level_idx < len(obj.contours[s_idx]):
+                        return obj.contours[s_idx][level_idx]
                     return None
 
-            def get_bounding_plane(s_idx, c_idx):
+            def get_bounding_plane(s_idx, level_idx):
                 if is_pre_stream:
-                    # bounding_planes[level_idx][stream_idx]
-                    if c_idx < len(obj.bounding_planes) and s_idx < len(obj.bounding_planes[c_idx]):
-                        return obj.bounding_planes[c_idx][s_idx]
+                    # bounding_planes[level_idx][contour_idx] - s_idx is contour within level
+                    if level_idx < len(obj.bounding_planes) and s_idx < len(obj.bounding_planes[level_idx]):
+                        return obj.bounding_planes[level_idx][s_idx]
                     return None
                 else:
                     # bounding_planes[stream_idx][level_idx]
-                    if s_idx < len(obj.bounding_planes) and c_idx < len(obj.bounding_planes[s_idx]):
-                        return obj.bounding_planes[s_idx][c_idx]
+                    if s_idx < len(obj.bounding_planes) and level_idx < len(obj.bounding_planes[s_idx]):
+                        return obj.bounding_planes[s_idx][level_idx]
                     return None
 
-            # Stream and contour selection
-            num_streams = get_num_streams()
-            stream_idx = self.inspect_2d_stream_idx.get(name, 0)
-            stream_idx = min(stream_idx, max(0, num_streams - 1))
+            # Different UI for pre-stream vs post-stream
+            if is_pre_stream:
+                # Pre-stream: Level slider (contour) + Contour-within-level slider (stream)
+                num_levels = get_num_levels()
+                max_contours = get_max_contours_at_level()
 
-            changed, new_stream_idx = imgui.slider_int(f"Stream##{name}_inspect", stream_idx, 0, max(0, num_streams - 1))
-            if changed:
-                self.inspect_2d_stream_idx[name] = new_stream_idx
-                stream_idx = new_stream_idx
+                # Level slider (labeled as "Level")
+                level_idx = self.inspect_2d_contour_idx.get(name, 0)
+                level_idx = min(level_idx, max(0, num_levels - 1))
 
-            num_contours = get_num_contours(stream_idx)
-            contour_idx = self.inspect_2d_contour_idx.get(name, 0)
-            contour_idx = min(contour_idx, max(0, num_contours - 1))
-
-            # Show All checkbox
-            if not hasattr(self, 'inspect_2d_show_all'):
-                self.inspect_2d_show_all = {}
-            show_all = self.inspect_2d_show_all.get(name, False)
-            changed_show_all, show_all = imgui.checkbox(f"Show All##{name}", show_all)
-            if changed_show_all:
-                self.inspect_2d_show_all[name] = show_all
-
-            # Get valid level indices for this stream
-            valid_levels = get_valid_level_indices(stream_idx)
-
-            if not show_all:
-                imgui.same_line()
-                changed, new_contour_idx = imgui.slider_int(f"Contour##{name}_inspect", contour_idx, 0, max(0, num_contours - 1))
+                changed, new_level_idx = imgui.slider_int(f"Level##{name}_inspect", level_idx, 0, max(0, num_levels - 1))
                 if changed:
-                    self.inspect_2d_contour_idx[name] = new_contour_idx
-                    contour_idx = new_contour_idx
+                    self.inspect_2d_contour_idx[name] = new_level_idx
+                    level_idx = new_level_idx
 
-            imgui.separator()
+                # Contour-within-level slider (labeled as "Contour")
+                contour_in_level = self.inspect_2d_stream_idx.get(name, 0)
+                contour_in_level = min(contour_in_level, max(0, max_contours - 1))
 
-            # Determine which contours to draw (use actual level indices)
-            if show_all:
-                contour_indices = valid_levels
-            else:
-                # Map slider index to actual level index
-                if contour_idx < len(valid_levels):
-                    contour_indices = [valid_levels[contour_idx]]
+                imgui.same_line()
+                changed, new_contour_in_level = imgui.slider_int(f"Contour##{name}_inspect", contour_in_level, 0, max(0, max_contours - 1))
+                if changed:
+                    self.inspect_2d_stream_idx[name] = new_contour_in_level
+                    contour_in_level = new_contour_in_level
+
+                # Show info about contours at this level
+                num_at_level = get_num_contours_at_level(level_idx)
+                imgui.text(f"Level {level_idx}: {num_at_level} contour(s)")
+
+                imgui.separator()
+
+                # Determine if we should show anything
+                # Show nothing if contour_in_level >= num_at_level
+                if contour_in_level < num_at_level:
+                    contour_indices = [(contour_in_level, level_idx)]  # (stream_idx, level_idx)
                 else:
-                    contour_indices = []
+                    contour_indices = []  # Show nothing
+
+            else:
+                # Post-stream: Stream slider + Contour (level) slider
+                num_streams = get_max_contours_at_level()
+                stream_idx = self.inspect_2d_stream_idx.get(name, 0)
+                stream_idx = min(stream_idx, max(0, num_streams - 1))
+
+                changed, new_stream_idx = imgui.slider_int(f"Stream##{name}_inspect", stream_idx, 0, max(0, num_streams - 1))
+                if changed:
+                    self.inspect_2d_stream_idx[name] = new_stream_idx
+                    stream_idx = new_stream_idx
+
+                num_levels = get_num_levels()
+                contour_idx = self.inspect_2d_contour_idx.get(name, 0)
+                contour_idx = min(contour_idx, max(0, num_levels - 1))
+
+                # Show All checkbox
+                if not hasattr(self, 'inspect_2d_show_all'):
+                    self.inspect_2d_show_all = {}
+                show_all = self.inspect_2d_show_all.get(name, False)
+                changed_show_all, show_all = imgui.checkbox(f"Show All##{name}", show_all)
+                if changed_show_all:
+                    self.inspect_2d_show_all[name] = show_all
+
+                if not show_all:
+                    imgui.same_line()
+                    changed, new_contour_idx = imgui.slider_int(f"Contour##{name}_inspect", contour_idx, 0, max(0, num_levels - 1))
+                    if changed:
+                        self.inspect_2d_contour_idx[name] = new_contour_idx
+                        contour_idx = new_contour_idx
+
+                imgui.separator()
+
+                # Determine which contours to draw
+                if show_all:
+                    contour_indices = [(stream_idx, i) for i in range(num_levels)]
+                else:
+                    contour_indices = [(stream_idx, contour_idx)]
 
             # Always use child region for consistent layout (scrollbar space reserved)
             imgui.begin_child(f"contours_scroll##{name}", 0, 0, border=False)
 
-            for draw_contour_idx in contour_indices:
-                contour_idx = draw_contour_idx  # Use this for the visualization
+            for stream_idx, level_idx in contour_indices:
+                contour_idx = level_idx  # For display purposes
 
-                imgui.text(f"=== Contour {contour_idx} ===")
+                imgui.text(f"=== Level {level_idx}, Contour {stream_idx} ===")
 
                 # Show bounding plane corner angles (debug info)
-                bp_info = get_bounding_plane(stream_idx, contour_idx)
+                bp_info = get_bounding_plane(stream_idx, level_idx)
                 if bp_info is not None:
                     bp_corners = bp_info.get('bounding_plane', None)
                     if bp_corners is not None and len(bp_corners) >= 4:
@@ -3245,7 +3279,7 @@ class GLFWApp():
                 column_width = canvas_size + 2 * padding + 20  # Fixed column width
 
                 # Two columns: unit square (left) and contour (right)
-                imgui.columns(2, f"inspect_cols##{name}_{contour_idx}", border=True)
+                imgui.columns(2, f"inspect_cols##{name}_{level_idx}_{stream_idx}", border=True)
                 imgui.set_column_width(0, column_width)
                 imgui.set_column_width(1, column_width)
 
@@ -3291,7 +3325,7 @@ class GLFWApp():
 
                     return np.array([np.clip(u, 0, 1), np.clip(v, 0, 1)])
 
-                plane_info = get_bounding_plane(stream_idx, contour_idx)
+                plane_info = get_bounding_plane(stream_idx, level_idx)
                 if plane_info is not None:
                     contour_match = plane_info.get('contour_match', None)
 
@@ -3368,7 +3402,7 @@ class GLFWApp():
 
                 # Right column: Contour with P points
                 imgui.next_column()
-                imgui.text(f"Contour {contour_idx} (P points)")
+                imgui.text(f"Level {level_idx} (P points)")
                 cursor_pos_right = imgui.get_cursor_screen_pos()
 
                 right_x0, right_y0 = cursor_pos_right[0] + padding, cursor_pos_right[1] + padding
@@ -3474,8 +3508,8 @@ class GLFWApp():
 
                     # Draw waypoints (red) and check hover
                     if (hasattr(obj, 'waypoints') and obj.waypoints is not None and
-                        stream_idx < len(obj.waypoints) and contour_idx < len(obj.waypoints[stream_idx])):
-                        waypoints_3d = obj.waypoints[stream_idx][contour_idx]
+                        stream_idx < len(obj.waypoints) and level_idx < len(obj.waypoints[stream_idx])):
+                        waypoints_3d = obj.waypoints[stream_idx][level_idx]
                         if waypoints_3d is not None and len(waypoints_3d) > 0:
                             for wi, wp in enumerate(waypoints_3d):
                                 wp = np.array(wp)
@@ -3532,8 +3566,8 @@ class GLFWApp():
                     # Draw MVC weight-proportional vertices
                     mvc_w = None
                     if (hasattr(obj, 'mvc_weights') and stream_idx < len(obj.mvc_weights) and
-                        contour_idx < len(obj.mvc_weights[stream_idx])):
-                        mvc_w = obj.mvc_weights[stream_idx][contour_idx]
+                        level_idx < len(obj.mvc_weights[stream_idx])):
+                        mvc_w = obj.mvc_weights[stream_idx][level_idx]
                     # Fallback: compute on-the-fly if mvc_weights not available
                     if mvc_w is None and contour_match is not None and len(fiber_samples) > 0:
                         try:
@@ -3580,8 +3614,8 @@ class GLFWApp():
                     # Draw MVC weight-proportional vertices
                     mvc_w = None
                     if (hasattr(obj, 'mvc_weights') and stream_idx < len(obj.mvc_weights) and
-                        contour_idx < len(obj.mvc_weights[stream_idx])):
-                        mvc_w = obj.mvc_weights[stream_idx][contour_idx]
+                        level_idx < len(obj.mvc_weights[stream_idx])):
+                        mvc_w = obj.mvc_weights[stream_idx][level_idx]
                     # Fallback: compute on-the-fly if mvc_weights not available
                     if mvc_w is None and contour_match is not None and len(fiber_samples) > 0:
                         try:
