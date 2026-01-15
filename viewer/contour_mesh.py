@@ -5836,6 +5836,15 @@ class ContourMeshMixin:
         }
         print(f"Stored manual cut result with key {result_key}")
 
+        # Check if this came from mid-processing cut_streams
+        from_cut_streams = self._manual_cut_data.get('from_cut_streams', False)
+
+        if from_cut_streams:
+            # Mid-processing manual cut - always return all_cuts_done=True
+            # This will trigger cut_streams to run again, which will continue processing
+            print(f"Mid-processing manual cut complete - will resume cut_streams")
+            return cut_contours, True
+
         # Remove this target from the pending cuts queue
         if hasattr(self, '_pending_manual_cuts') and self._pending_manual_cuts:
             self._pending_manual_cuts.pop(0)
@@ -6057,9 +6066,9 @@ class ContourMeshMixin:
                 # Debug: show prev level contour sizes
                 print(f"  [DEBUG] prev_level_contours sizes: {[len(c) for c in prev_level_contours]}")
 
-                # Find which streams map to which contours (by distance)
+                # Find which streams map to which contours (by distance + grouping)
                 # M sources (streams) → N targets (contours), M > N
-                # Ensure every target has at least one source (pigeonhole)
+                # Use previous level's groupings to prefer keeping grouped streams together
                 prev_means = [prev_level_bps[s]['mean'] for s in range(max_stream_count)]
                 curr_means = [self.bounding_planes[level_i][c]['mean'] for c in range(curr_count)]
 
@@ -6069,32 +6078,82 @@ class ContourMeshMixin:
                     for contour_i in range(curr_count):
                         dist_matrix[stream_i, contour_i] = np.linalg.norm(prev_means[stream_i] - curr_means[contour_i])
 
-                # Step 1: Ensure each target has at least one source
-                # For each target, assign its closest unassigned source
+                # Get previous level's groupings (which streams came from same contour)
+                prev_groups = stream_groups[-1] if stream_groups else [[i] for i in range(max_stream_count)]
+
+                # Build a mapping: stream_i -> group_id (which group it belonged to at prev level)
+                stream_to_group = {}
+                for group_id, group in enumerate(prev_groups):
+                    for s in group:
+                        stream_to_group[s] = group_id
+
+                print(f"  [DEBUG] prev_groups: {prev_groups}")
+                print(f"  [DEBUG] stream_to_group: {stream_to_group}")
+
+                # Use grouping-aware assignment:
+                # 1. Use Hungarian algorithm to assign one stream per contour as base
+                # 2. Then assign remaining streams preferring same contour as their groupmates
+                from scipy.optimize import linear_sum_assignment
+
+                # Step 1: Use Hungarian for initial N assignments (one per target)
+                # We need to pick N streams out of M, minimize total distance
+                # Use a modified approach: assign each target its closest stream using Hungarian
+                row_ind, col_ind = linear_sum_assignment(dist_matrix)
+
+                # Take first curr_count assignments (each target gets exactly one)
                 assigned_streams = set()
                 contour_to_streams = [[] for _ in range(curr_count)]
 
-                for contour_i in range(curr_count):
-                    # Find closest unassigned stream to this contour
-                    best_stream = None
-                    best_dist = float('inf')
-                    for stream_i in range(max_stream_count):
-                        if stream_i in assigned_streams:
-                            continue
-                        if dist_matrix[stream_i, contour_i] < best_dist:
-                            best_dist = dist_matrix[stream_i, contour_i]
-                            best_stream = stream_i
-                    if best_stream is not None:
-                        contour_to_streams[contour_i].append(best_stream)
-                        assigned_streams.add(best_stream)
+                for stream_i, contour_i in zip(row_ind, col_ind):
+                    if len(contour_to_streams[contour_i]) == 0:  # First assignment for this contour
+                        contour_to_streams[contour_i].append(stream_i)
+                        assigned_streams.add(stream_i)
 
-                # Step 2: Assign remaining streams to their closest targets
+                # Ensure all contours have at least one stream (should be guaranteed by Hungarian)
+                for contour_i in range(curr_count):
+                    if len(contour_to_streams[contour_i]) == 0:
+                        # Find closest unassigned stream
+                        best_stream = None
+                        best_dist = float('inf')
+                        for stream_i in range(max_stream_count):
+                            if stream_i in assigned_streams:
+                                continue
+                            if dist_matrix[stream_i, contour_i] < best_dist:
+                                best_dist = dist_matrix[stream_i, contour_i]
+                                best_stream = stream_i
+                        if best_stream is not None:
+                            contour_to_streams[contour_i].append(best_stream)
+                            assigned_streams.add(best_stream)
+
+                # Step 2: Assign remaining streams using grouping preference
+                # Prefer to assign a stream to the same contour as its groupmates
                 for stream_i in range(max_stream_count):
                     if stream_i in assigned_streams:
                         continue
-                    closest_contour = np.argmin(dist_matrix[stream_i])
-                    contour_to_streams[closest_contour].append(stream_i)
+
+                    # Find which contours already have streams from our group
+                    my_group_id = stream_to_group.get(stream_i, -1)
+                    groupmate_contours = []
+
+                    for contour_i in range(curr_count):
+                        for assigned_stream in contour_to_streams[contour_i]:
+                            if stream_to_group.get(assigned_stream, -2) == my_group_id:
+                                groupmate_contours.append(contour_i)
+                                break
+
+                    if groupmate_contours:
+                        # Prefer contour where groupmate is, pick closest one
+                        best_contour = min(groupmate_contours, key=lambda c: dist_matrix[stream_i, c])
+                        print(f"  [DEBUG] Stream {stream_i} assigned to contour {best_contour} (groupmate preference)")
+                    else:
+                        # No groupmate assigned yet, use distance
+                        best_contour = np.argmin(dist_matrix[stream_i])
+                        print(f"  [DEBUG] Stream {stream_i} assigned to contour {best_contour} (distance)")
+
+                    contour_to_streams[best_contour].append(stream_i)
                     assigned_streams.add(stream_i)
+
+                print(f"  [DEBUG] Final contour_to_streams: {contour_to_streams}")
 
                 # Build stream_to_contour mapping for consistency
                 stream_to_contour = [None] * max_stream_count
@@ -6291,6 +6350,10 @@ class ContourMeshMixin:
             self._pending_manual_cuts = None
         if hasattr(self, '_manual_cut_results'):
             self._manual_cut_results = None
+        if hasattr(self, '_manual_cut_data'):
+            self._manual_cut_data = None
+        if hasattr(self, '_cut_streams_progress'):
+            self._cut_streams_progress = None
 
         print("Cut streams complete")
 
