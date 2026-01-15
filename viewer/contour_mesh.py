@@ -1572,6 +1572,11 @@ class ContourMeshMixin:
                 best_small_contours = narrowest_contours
                 best_small_planes = narrowest_planes
 
+                # DEBUG: Check types
+                print(f"    [DEBUG] narrowest_planes type: {type(narrowest_planes)}, len: {len(narrowest_planes) if hasattr(narrowest_planes, '__len__') else 'N/A'}")
+                if narrowest_planes and len(narrowest_planes) > 0:
+                    print(f"    [DEBUG] narrowest_planes[0] type: {type(narrowest_planes[0])}")
+
                 # Store neck visualization data
                 # Target = narrowest neck contour (merged, before division)
                 # Source = ORIGINAL contours from large_level (for visualization only, not inserted)
@@ -1580,8 +1585,12 @@ class ContourMeshMixin:
 
                 # Use ORIGINAL contours from large_level for source visualization
                 # These are the existing contours right after division - don't generate new ones
+                print(f"    [DEBUG] t['large_level'] = {t['large_level']}")
                 original_large_contours = self.contours[t['large_level']]
                 original_large_planes = self.bounding_planes[t['large_level']]
+                print(f"    [DEBUG] original_large_planes type: {type(original_large_planes)}, len: {len(original_large_planes)}")
+                if original_large_planes and len(original_large_planes) > 0:
+                    print(f"    [DEBUG] original_large_planes[0] type: {type(original_large_planes[0])}")
 
                 # Create projection basis using the narrowest neck plane
                 bp_ref = None
