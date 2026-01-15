@@ -1003,69 +1003,77 @@ class ContourMeshMixin:
                         print()
                         trial = 0
 
-                        # Check if contour count changed - if so, add transition samples
+                        # Check if contour count changed - if so, find ALL intermediate counts
                         prev_count = len(self.bounding_planes[-1]) if len(self.bounding_planes) > 0 else 0
                         curr_count = len(bounding_planes)
 
                         if prev_count != curr_count and prev_count > 0 and curr_count > 0:
                             print(f"  [TRANSITION] Count changed: {prev_count} -> {curr_count}")
-                            print(f"  [TRANSITION] Adding samples between {prev_contour_value:.6f} and {contour_value:.6f}")
+                            print(f"  [TRANSITION] Searching for ALL intermediate counts between {prev_contour_value:.6f} and {contour_value:.6f}")
 
-                            # Binary search to find exact transition point and add samples on both sides
-                            transition_samples = 5
-                            low_scalar = prev_contour_value
-                            high_scalar = contour_value
-                            low_count = prev_count
-                            high_count = curr_count
+                            # Dense sample to find ALL intermediate counts (e.g., 4->2->1)
+                            dense_samples = 30
+                            scalar_range = contour_value - prev_contour_value
 
-                            # Find the transition point with binary search
-                            for _ in range(10):  # Max 10 iterations
-                                mid_scalar = (low_scalar + high_scalar) / 2
-                                mid_planes, mid_contours, mid_contours_orig = self.find_contour(
-                                    mid_scalar, prev_bounding_plane=prev_plane, use_geodesic_edges=use_geodesic_edges)
-                                mid_count = len(mid_planes)
+                            # Collect all (scalar, count, planes, contours, contours_orig) tuples
+                            all_samples = []
+                            seen_counts = {prev_count, curr_count}
 
-                                if mid_count == low_count:
-                                    low_scalar = mid_scalar
-                                elif mid_count == high_count:
-                                    high_scalar = mid_scalar
-                                else:
-                                    # Found an intermediate count - this is interesting
-                                    print(f"  [TRANSITION] Found intermediate count {mid_count} at {mid_scalar:.6f}")
-                                    break
-
-                                if high_scalar - low_scalar < 0.001:
-                                    break
-
-                            print(f"  [TRANSITION] Transition between {low_scalar:.6f} (count={low_count}) and {high_scalar:.6f} (count={high_count})")
-
-                            # Add samples on the "merged" side (smaller count) to find narrowest neck
-                            # Sample from high_scalar towards higher values (deeper into merged region)
-                            merged_scalar = high_scalar if high_count < low_count else low_scalar
-                            merged_count = min(low_count, high_count)
-
-                            sample_range = abs(contour_value - prev_contour_value) * 2  # Search wider range
-                            for sample_i in range(transition_samples):
-                                t = (sample_i + 1) / (transition_samples + 1)
-                                # Sample in direction away from transition point
-                                if high_count < low_count:
-                                    # Merged region is at higher scalar
-                                    test_scalar = high_scalar + t * sample_range * 0.5
-                                else:
-                                    # Merged region is at lower scalar
-                                    test_scalar = low_scalar - t * sample_range * 0.5
-
-                                if test_scalar < 1.0 or test_scalar > 10.0:
-                                    continue
+                            for sample_i in range(dense_samples):
+                                t = (sample_i + 1) / (dense_samples + 1)
+                                test_scalar = prev_contour_value + t * scalar_range
 
                                 sample_planes, sample_contours, sample_contours_orig = self.find_contour(
                                     test_scalar, prev_bounding_plane=prev_plane, use_geodesic_edges=use_geodesic_edges)
 
-                                if len(sample_planes) == merged_count and len(sample_planes) > 0:
-                                    print(f"  [TRANSITION] Added sample at {test_scalar:.6f} (count={len(sample_planes)})")
-                                    self.bounding_planes.append(sample_planes)
-                                    contours.append(sample_contours)
-                                    contours_orig.append(sample_contours_orig)
+                                if len(sample_planes) > 0:
+                                    sample_count = len(sample_planes)
+                                    all_samples.append((test_scalar, sample_count, sample_planes, sample_contours, sample_contours_orig))
+
+                                    if sample_count not in seen_counts:
+                                        print(f"  [TRANSITION] Found intermediate count {sample_count} at {test_scalar:.6f}")
+                                        seen_counts.add(sample_count)
+
+                            # Group samples by count
+                            count_to_samples = {}
+                            for scalar, count, planes, conts, conts_orig in all_samples:
+                                if count not in count_to_samples:
+                                    count_to_samples[count] = []
+                                count_to_samples[count].append((scalar, planes, conts, conts_orig))
+
+                            print(f"  [TRANSITION] Found counts: {sorted(count_to_samples.keys(), reverse=True)}")
+
+                            # For each intermediate count, add samples to capture the narrowest neck
+                            for count in sorted(count_to_samples.keys(), reverse=True):
+                                if count == prev_count:
+                                    continue  # Skip the count we already have
+
+                                samples_at_count = count_to_samples[count]
+                                if len(samples_at_count) == 0:
+                                    continue
+
+                                # Sort by scalar
+                                samples_at_count.sort(key=lambda x: x[0])
+
+                                # Add samples at this count level - pick evenly spaced ones
+                                # Also add the first and last to capture boundaries
+                                indices_to_add = set()
+                                indices_to_add.add(0)  # First
+                                indices_to_add.add(len(samples_at_count) - 1)  # Last
+
+                                # Add some in the middle
+                                num_middle = min(3, len(samples_at_count) - 2)
+                                for i in range(num_middle):
+                                    idx = (i + 1) * len(samples_at_count) // (num_middle + 1)
+                                    indices_to_add.add(idx)
+
+                                for idx in sorted(indices_to_add):
+                                    if idx < len(samples_at_count):
+                                        scalar, planes, conts, conts_orig = samples_at_count[idx]
+                                        print(f"  [TRANSITION] Added sample at {scalar:.6f} (count={count})")
+                                        self.bounding_planes.append(planes)
+                                        contours.append(conts)
+                                        contours_orig.append(conts_orig)
 
                         self.bounding_planes.append(bounding_planes)
                         contours.append(ordered_contour_vertices)
