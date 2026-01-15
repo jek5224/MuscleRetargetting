@@ -1529,11 +1529,11 @@ class ContourMeshMixin:
 
                 for sample_i in range(num_samples):
                     # Exponential sampling: dense near boundary, sparse further away
-                    # t goes from 0 (at boundary) to 1 (at best_small_scalar and beyond)
-                    t = (sample_i / num_samples) ** 0.5  # Square root for denser sampling near 0
+                    # frac goes from 0 (at boundary) to 1 (at best_small_scalar and beyond)
+                    frac = (sample_i / num_samples) ** 0.5  # Square root for denser sampling near 0
 
                     # Interpolate from boundary towards (and past) best_small_scalar
-                    test_scalar = boundary_scalar + t * boundary_to_small * 1.5  # Go 50% past
+                    test_scalar = boundary_scalar + frac * boundary_to_small * 1.5  # Go 50% past
 
                     planes_test, contours_test, _ = self.find_contour(test_scalar, prev_bounding_plane=prev_plane)
 
@@ -1572,27 +1572,16 @@ class ContourMeshMixin:
                 best_small_contours = narrowest_contours
                 best_small_planes = narrowest_planes
 
-                # DEBUG: Check types - using flush to ensure output before crash
-                import sys
-                print(f"    [DEBUG] narrowest_planes type: {type(narrowest_planes)}, len: {len(narrowest_planes) if hasattr(narrowest_planes, '__len__') else 'N/A'}"); sys.stdout.flush()
-                if narrowest_planes and len(narrowest_planes) > 0:
-                    print(f"    [DEBUG] narrowest_planes[0] type: {type(narrowest_planes[0])}"); sys.stdout.flush()
-                print(f"    [DEBUG] Point A"); sys.stdout.flush()
-
                 # Store neck visualization data
+                # Target = narrowest neck contour (merged, before division)
+                # Source = ORIGINAL contours from large_level (for visualization only, not inserted)
                 target_contours_2d = []
                 source_contours_2d = []
-                print(f"    [DEBUG] Point B"); sys.stdout.flush()
 
                 # Use ORIGINAL contours from large_level for source visualization
-                print(f"    [DEBUG] t['large_level'] = {t['large_level']}"); sys.stdout.flush()
+                # These are the existing contours right after division - don't generate new ones
                 original_large_contours = self.contours[t['large_level']]
-                print(f"    [DEBUG] Point C"); sys.stdout.flush()
                 original_large_planes = self.bounding_planes[t['large_level']]
-                print(f"    [DEBUG] Point D - original_large_planes type: {type(original_large_planes)}, len: {len(original_large_planes)}"); sys.stdout.flush()
-                if original_large_planes and len(original_large_planes) > 0:
-                    print(f"    [DEBUG] original_large_planes[0] type: {type(original_large_planes[0])}"); sys.stdout.flush()
-                print(f"    [DEBUG] Point E"); sys.stdout.flush()
 
                 # Create projection basis using the narrowest neck plane
                 bp_ref = None
