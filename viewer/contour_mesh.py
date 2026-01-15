@@ -1249,6 +1249,84 @@ class ContourMeshMixin:
 
             print(f"    Result: best_large_scalar={best_large_scalar:.6f} (count={large_count}), best_small_scalar={best_small_scalar:.6f} (count={small_count})")
 
+            # Phase 3: Find narrowest neck within merged region
+            # Search for scalar value where merged contour has minimum neck width
+            def measure_neck_width(contour):
+                """Measure the narrowest neck width of a contour.
+                Returns (min_width, neck_point1, neck_point2) or (inf, None, None) if no neck found.
+                """
+                if contour is None or len(contour) < 6:
+                    return float('inf'), None, None
+
+                contour = np.array(contour)
+                n = len(contour)
+                min_index_sep = max(3, n // 4)  # Minimum separation on contour path
+
+                min_width = float('inf')
+                best_p1, best_p2 = None, None
+
+                for i in range(n):
+                    for j in range(i + min_index_sep, min(i + n - min_index_sep + 1, n)):
+                        # Vertices far apart on contour path
+                        p1, p2 = contour[i], contour[j]
+                        dist = np.linalg.norm(p2 - p1)
+                        if dist < min_width:
+                            min_width = dist
+                            best_p1, best_p2 = p1, p2
+
+                return min_width, best_p1, best_p2
+
+            # Search for narrowest neck within merged region
+            if best_small_scalar is not None and best_small_contours is not None:
+                print(f"    [Phase3] Searching for narrowest neck in merged region...")
+
+                # Sample scalars between best_small_scalar and a bit further into merged region
+                search_range = abs(scalar_small - best_small_scalar)
+                num_samples = 15
+                narrowest_scalar = best_small_scalar
+                narrowest_width = float('inf')
+                narrowest_contours = best_small_contours
+                narrowest_planes = best_small_planes
+
+                # Measure initial neck width
+                if len(best_small_contours) > 0:
+                    initial_width, _, _ = measure_neck_width(best_small_contours[0])
+                    narrowest_width = initial_width
+                    print(f"    [Phase3] Initial neck width at {best_small_scalar:.6f}: {initial_width:.6f}")
+
+                # Sample towards the small side to find narrower neck
+                for sample_i in range(num_samples):
+                    # Sample from just after best_small_scalar towards scalar_small
+                    t = (sample_i + 1) / (num_samples + 1)
+                    test_scalar = best_small_scalar + t * search_range * 0.5  # Only search first half
+
+                    planes_test, contours_test, _ = self.find_contour(test_scalar, prev_bounding_plane=prev_plane)
+
+                    if len(contours_test) != small_count:
+                        continue  # Skip if count doesn't match
+
+                    # Measure neck width of merged contour(s)
+                    total_width = 0
+                    for c in contours_test:
+                        w, _, _ = measure_neck_width(c)
+                        total_width += w
+
+                    if total_width < narrowest_width:
+                        narrowest_width = total_width
+                        narrowest_scalar = test_scalar
+                        narrowest_contours = contours_test
+                        narrowest_planes = planes_test
+                        print(f"    [Phase3] Found narrower neck at {test_scalar:.6f}: width={total_width:.6f}")
+
+                # Update best_small with narrowest neck result
+                if narrowest_scalar != best_small_scalar:
+                    print(f"    [Phase3] Using narrowest neck at {narrowest_scalar:.6f} (width={narrowest_width:.6f})")
+                    best_small_scalar = narrowest_scalar
+                    best_small_contours = narrowest_contours
+                    best_small_planes = narrowest_planes
+                else:
+                    print(f"    [Phase3] Initial contour already has narrowest neck")
+
             # Collect results to insert (in order by scalar value)
             # Only insert the SMALL count contour - manual cut will handle the large side
             to_insert = []
