@@ -4579,9 +4579,71 @@ class GLFWApp():
             if num_selected == 1:
                 imgui.text_colored("(1:1 mapping - no cutting needed, click Skip)", 0.5, 1.0, 0.5, 1.0)
 
-            # Buttons: Skip, Next Cut, OK, Reset, Cancel
+            # Buttons: Optimize, Skip, Next Cut, OK, Reset, Cancel
             imgui.separator()
             button_width = 80
+
+            # Optimize button - run automatic optimization to get cutting line
+            if num_selected >= 2:
+                if imgui.button("Optimize", button_width, 30):
+                    print(f"Running automatic optimization for cutting line...")
+                    # Get source data
+                    source_contours = obj._manual_cut_data.get('source_contours', [])
+                    source_bps = obj._manual_cut_data.get('source_bps', [])
+                    target_contour = obj._manual_cut_data.get('target_contour')
+                    target_bp = obj._manual_cut_data.get('target_bp')
+                    stream_indices = obj._manual_cut_data.get('stream_indices', list(range(len(source_contours))))
+                    target_level = obj._manual_cut_data.get('target_level')
+                    source_level = obj._manual_cut_data.get('source_level')
+
+                    # Filter by selected sources
+                    selected_source_contours = [source_contours[i] for i in selected_sources if i < len(source_contours)]
+                    selected_source_bps = [source_bps[i] for i in selected_sources if i < len(source_bps)]
+                    selected_stream_indices = [stream_indices[i] for i in selected_sources if i < len(stream_indices)]
+
+                    if len(selected_source_contours) >= 2:
+                        # Run bp transform optimization
+                        cut_contours, cutting_info = obj._cut_contour_bp_transform(
+                            target_contour, target_bp,
+                            selected_source_contours, selected_source_bps,
+                            selected_stream_indices,
+                            is_first_division=False,  # Use COMMON mode optimization
+                            target_level=target_level,
+                            source_level=source_level
+                        )
+
+                        if cut_contours is not None and len(cut_contours) >= 2:
+                            # Store result directly
+                            if not hasattr(obj, '_manual_cut_results') or obj._manual_cut_results is None:
+                                obj._manual_cut_results = {}
+
+                            target_i = obj._manual_cut_data.get('target_i', 0)
+                            result_key = (target_level, target_i)
+                            obj._manual_cut_results[result_key] = {
+                                'cut_contours': cut_contours,
+                                'source_indices': selected_stream_indices,
+                                'is_1to1': False,
+                            }
+                            print(f"Optimization complete: {len(cut_contours)} pieces stored")
+
+                            # Close window and continue
+                            obj._manual_cut_pending = False
+                            obj.cut_streams(cut_method='bp', muscle_name=muscle_name)
+                            if hasattr(obj, 'stream_bounding_planes') and obj.stream_bounding_planes is not None:
+                                print(f"[{muscle_name}] Applying smoothening...")
+                                obj.smoothen_contours_z()
+                                obj.smoothen_contours_x()
+                                obj.smoothen_contours_bp()
+
+                            if name in self._manual_cut_mouse:
+                                del self._manual_cut_mouse[name]
+                            imgui.end()
+                            continue
+                        else:
+                            print(f"Optimization failed or returned invalid result")
+                    else:
+                        print(f"Need at least 2 source contours for optimization")
+                imgui.same_line()
 
             # Skip button - for 1-to-1 case (only 1 source selected, no cutting needed)
             if num_selected == 1:
