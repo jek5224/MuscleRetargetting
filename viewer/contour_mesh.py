@@ -1399,10 +1399,13 @@ class ContourMeshMixin:
             return
 
         print(f"\n=== Adding transition contours ===")
+        print(f"  Processing {len(self._neck_viz_data)} neck_viz entries")
 
         # Collect unique scalars to add (both small/target and large/source sides)
         scalars_to_add = {}
-        for data in self._neck_viz_data:
+        for i, data in enumerate(self._neck_viz_data):
+            print(f"  Entry {i}: scalar_small={data.get('scalar_small'):.4f}, scalar_large={data.get('scalar_large')}, "
+                  f"contours_3d={len(data.get('contours_3d', []))}, contours_large_3d={len(data.get('contours_large_3d', []) or [])}")
             # Add small (target/merged) side
             scalar_small = data['scalar_small']
             if scalar_small not in scalars_to_add:
@@ -1417,7 +1420,7 @@ class ContourMeshMixin:
             scalar_large = data.get('scalar_large')
             contours_large = data.get('contours_large_3d')
             planes_large = data.get('planes_large_3d')
-            if scalar_large and contours_large and planes_large:
+            if scalar_large is not None and contours_large is not None and planes_large is not None and len(contours_large) > 0:
                 if scalar_large not in scalars_to_add:
                     scalars_to_add[scalar_large] = {
                         'contours': contours_large,
