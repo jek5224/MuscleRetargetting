@@ -1884,7 +1884,7 @@ class GLFWApp():
                         imgui.set_column_width(0, 120)
 
                         # Left column: Process button with vertical slider
-                        num_process_buttons = 12  # Taller to accommodate more buttons on right
+                        num_process_buttons = 9  # Match number of buttons on right
                         process_all_height = num_process_buttons * imgui.get_frame_height() + (num_process_buttons - 1) * imgui.get_style().item_spacing[1]
 
                         # Initialize process step slider value
