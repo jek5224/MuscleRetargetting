@@ -5827,6 +5827,11 @@ class ContourMeshMixin:
         print(f"  target_bp basis_y norm: {np.linalg.norm(target_y):.4f}")
         print(f"  target_bp basis_x·basis_y: {np.dot(target_x, target_y):.6f}")
 
+        # Debug: check if contour is properly closed
+        if len(target_contour) > 0:
+            closure_gap = np.linalg.norm(target_contour[-1] - target_contour[0])
+            print(f"  contour closure gap: {closure_gap:.6f} (should be ~avg_step for closed loop)")
+
         # Get source contours and their bounding planes for this target
         source_contours = [np.array(self.contours[source_level][s_i]) for s_i in source_indices]
         source_bps = [self.bounding_planes[source_level][s_i] for s_i in source_indices]
