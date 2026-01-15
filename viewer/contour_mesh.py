@@ -745,61 +745,69 @@ class ContourMeshMixin:
             if group_idx is not None:
                 grouped_contour_edges[group_idx].append(edge)
 
-        # OPTIMIZATION 3: Adjacency dict for edge ordering - O(n) instead of O(n²)
+        # OPTIMIZATION 3: Edge-based ordering - handles figure-8 contours correctly
+        # Key insight: use EDGE-based walking, not vertex-based, so junction vertices
+        # can be visited multiple times (once per connected edge)
         ordered_contour_edge_groups = []
         for i in range(len(grouped_contour_edges)):
             if len(grouped_contour_edges[i]) == 0:
                 ordered_contour_edge_groups.append([])
                 continue
 
-            # Build adjacency dict: vertex -> list of connected vertices
+            # Build adjacency dict: vertex -> list of (neighbor, edge_tuple)
+            # This lets us track which EDGES we've used, not just vertices
             adjacency = defaultdict(list)
+            edge_set = set()
             for e0, e1 in grouped_contour_edges[i]:
-                adjacency[e0].append(e1)
-                adjacency[e1].append(e0)
+                edge_tuple = tuple(sorted([e0, e1]))
+                if edge_tuple not in edge_set:  # Deduplicate edges
+                    edge_set.add(edge_tuple)
+                    adjacency[e0].append((e1, edge_tuple))
+                    adjacency[e1].append((e0, edge_tuple))
+
+            # Edge-based walk: track used edges, not visited vertices
+            used_edges = set()
 
             # Start from first edge
-            first_edge = grouped_contour_edges[i][0]
+            first_edge = tuple(sorted([grouped_contour_edges[i][0][0], grouped_contour_edges[i][0][1]]))
             ordered_edge_group = [first_edge[0], first_edge[1]]
-            visited = {first_edge[0], first_edge[1]}
+            used_edges.add(first_edge)
 
-            # Walk forward using adjacency dict - O(1) lookup per step
-            max_iterations = len(contour_edge_groups[i]) * 2
+            # Walk forward using unused edges
+            max_iterations = len(edge_set) * 2
             iteration = 0
-            while len(ordered_edge_group) < len(contour_edge_groups[i]) and iteration < max_iterations:
+            while iteration < max_iterations:
                 current = ordered_edge_group[-1]
-                neighbors = adjacency.get(current, [])
                 found = False
-                for neighbor in neighbors:
-                    if neighbor not in visited:
+                for neighbor, edge_tuple in adjacency.get(current, []):
+                    if edge_tuple not in used_edges:
                         ordered_edge_group.append(neighbor)
-                        visited.add(neighbor)
+                        used_edges.add(edge_tuple)
                         found = True
                         break
                 if not found:
                     break
                 iteration += 1
 
-            # Also walk backward from start to complete the contour
+            # Also walk backward from start using unused edges
             iteration = 0
-            while len(ordered_edge_group) < len(contour_edge_groups[i]) and iteration < max_iterations:
+            while iteration < max_iterations:
                 current = ordered_edge_group[0]
-                neighbors = adjacency.get(current, [])
                 found = False
-                for neighbor in neighbors:
-                    if neighbor not in visited:
+                for neighbor, edge_tuple in adjacency.get(current, []):
+                    if edge_tuple not in used_edges:
                         ordered_edge_group.insert(0, neighbor)
-                        visited.add(neighbor)
+                        used_edges.add(edge_tuple)
                         found = True
                         break
                 if not found:
                     break
                 iteration += 1
 
-            # Log if we couldn't complete the contour (may indicate branches/gaps)
-            if len(ordered_edge_group) < len(contour_edge_groups[i]):
-                missing = len(contour_edge_groups[i]) - len(ordered_edge_group)
-                print(f"  [find_contour] Note: Contour walk incomplete ({len(ordered_edge_group)}/{len(contour_edge_groups[i])} vertices, {missing} missing)")
+            # Log if we couldn't use all edges (may indicate disconnected components)
+            if len(used_edges) < len(edge_set):
+                missing = len(edge_set) - len(used_edges)
+                print(f"  [find_contour] Note: Contour walk incomplete ({len(used_edges)}/{len(edge_set)} edges used, {missing} unused)")
 
             ordered_contour_edge_groups.append(ordered_edge_group)
 
