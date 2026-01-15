@@ -5429,6 +5429,66 @@ class ContourMeshMixin:
 
         print(f"Manual cutting window ready - draw a cutting line")
 
+    def _prepare_manual_cut_data_for_level(self, muscle_name, level_i, contour_i, streams_for_contour,
+                                            target_contour, target_bp, source_contours, source_bps):
+        """
+        Prepare manual cutting data for a specific level/contour during cut_streams.
+        Called when a SEPARATE case is encountered mid-processing.
+        """
+        print(f"\n=== Preparing Manual Cut Data for Level {level_i}, Contour {contour_i} ===")
+        print(f"Streams: {streams_for_contour} → 1 target")
+
+        # Project target contour to 2D
+        target_mean = target_bp['mean']
+        target_x = target_bp['basis_x']
+        target_y = target_bp['basis_y']
+
+        target_2d = np.array([
+            [np.dot(v - target_mean, target_x), np.dot(v - target_mean, target_y)]
+            for v in target_contour
+        ])
+
+        # Project source contours to 2D (each in its own coordinate frame, then transformed)
+        source_2d_list = []
+        for i, (src_contour, src_bp) in enumerate(zip(source_contours, source_bps)):
+            src_contour = np.array(src_contour)
+            src_mean = src_bp['mean']
+
+            # Project source vertices to target's 2D frame
+            src_2d = np.array([
+                [np.dot(v - target_mean, target_x), np.dot(v - target_mean, target_y)]
+                for v in src_contour
+            ])
+            source_2d_list.append(src_2d)
+
+        # Store all data for the manual cutting window
+        self._manual_cut_data = {
+            'muscle_name': muscle_name,
+            'target_level': level_i,
+            'source_level': level_i - 1,  # Sources are from previous level
+            'target_i': contour_i,
+            'source_indices': list(streams_for_contour),
+            'target_contour': np.array(target_contour),
+            'target_bp': target_bp,
+            'target_2d': target_2d,
+            'source_contours': [np.array(c) for c in source_contours],
+            'source_bps': source_bps,
+            'source_2d_list': source_2d_list,
+            'stream_indices': list(streams_for_contour),
+            'process_forward': True,  # Direction doesn't matter at this point
+            'required_pieces': len(streams_for_contour),
+            'current_pieces': [target_2d.copy()],
+            'current_pieces_3d': [np.array(target_contour).copy()],
+            'cut_lines': [],
+            'from_cut_streams': True,  # Flag to indicate this came from mid-processing
+        }
+
+        # Set pending flag to open the window
+        self._manual_cut_pending = True
+        self._manual_cut_line = None
+
+        print(f"Manual cutting window ready for level {level_i} - draw a cutting line")
+
     def _apply_manual_cut(self):
         """
         Apply the manually drawn cutting line to split the target contour.
@@ -5765,12 +5825,16 @@ class ContourMeshMixin:
         self._manual_cut_data['cut_result'] = cut_contours
 
         # Store result in the global results dict (for M→N with N > 1)
+        # Use composite key (level, contour_i) to handle multiple levels
         if not hasattr(self, '_manual_cut_results'):
             self._manual_cut_results = {}
-        self._manual_cut_results[target_i] = {
+        target_level = self._manual_cut_data.get('target_level', 0)
+        result_key = (target_level, target_i)
+        self._manual_cut_results[result_key] = {
             'cut_contours': cut_contours,
             'source_indices': source_indices,
         }
+        print(f"Stored manual cut result with key {result_key}")
 
         # Remove this target from the pending cuts queue
         if hasattr(self, '_pending_manual_cuts') and self._pending_manual_cuts:
@@ -6093,21 +6157,21 @@ class ContourMeshMixin:
                             print(f"  [BP Transform] Mode: {mode_str} (combo_seen={stream_combo in cut_stream_combos}, any_cut={any_source_cut})")
 
                             # Check if we have a saved manual cut result for first division
-                            # For M→N with N > 1, check _manual_cut_results by target index (contour_i)
+                            # Use composite key (level_i, contour_i) to handle multiple levels
                             has_manual_result = False
+                            result_key = (level_i, contour_i)
                             if is_first_division:
-                                # Check new format (M→N results dict)
-                                if hasattr(self, '_manual_cut_results') and self._manual_cut_results and contour_i in self._manual_cut_results:
-                                    result = self._manual_cut_results[contour_i]
+                                # Check new format (M→N results dict) with composite key
+                                if hasattr(self, '_manual_cut_results') and self._manual_cut_results and result_key in self._manual_cut_results:
+                                    result = self._manual_cut_results[result_key]
                                     cut_contours = result['cut_contours']
                                     cutting_info = None
                                     has_manual_result = True
-                                    print(f"  [BP Transform] Using manual cut result for target {contour_i}")
+                                    print(f"  [BP Transform] Using manual cut result for level {level_i}, contour {contour_i}")
                                     print(f"  [BP Transform] streams_for_contour = {streams_for_contour}")
                                     for i, s in enumerate(streams_for_contour):
                                         print(f"  [BP Transform] cut_contours[{i}] will go to stream {s}")
-                                    # Remove used result
-                                    del self._manual_cut_results[contour_i]
+                                    # Don't delete - keep for potential re-runs
                                 # Check old format (single target result in _manual_cut_data)
                                 elif self._manual_cut_data is not None and 'cut_result' in self._manual_cut_data:
                                     cut_contours = self._manual_cut_data['cut_result']
@@ -6121,10 +6185,34 @@ class ContourMeshMixin:
                                     self._manual_cut_data = None
 
                             if not has_manual_result:
-                                cut_contours, cutting_info = self._cut_contour_bp_transform(
-                                    target_contour, target_bp, source_contours, source_bps, streams_for_contour,
-                                    is_first_division=is_first_division
-                                )
+                                if is_first_division:
+                                    # SEPARATE mode without manual result - need to open manual cutting window
+                                    print(f"  [BP Transform] SEPARATE mode needs manual cutting - preparing window")
+
+                                    # Store current progress so we can resume
+                                    self._cut_streams_progress = {
+                                        'level_i': level_i,
+                                        'contour_i': contour_i,
+                                        'streams_for_contour': streams_for_contour,
+                                        'stream_contours': stream_contours,
+                                        'stream_bounding_planes': stream_bounding_planes,
+                                        'stream_groups': stream_groups,
+                                        'cut_stream_combos': cut_stream_combos,
+                                        'level_order': level_order,
+                                        'level_i_idx': level_i_idx,
+                                    }
+
+                                    # Prepare manual cut data for this specific transition
+                                    self._prepare_manual_cut_data_for_level(
+                                        muscle_name, level_i, contour_i, streams_for_contour,
+                                        target_contour, target_bp, source_contours, source_bps
+                                    )
+                                    return  # Wait for user to draw cutting line
+                                else:
+                                    cut_contours, cutting_info = self._cut_contour_bp_transform(
+                                        target_contour, target_bp, source_contours, source_bps, streams_for_contour,
+                                        is_first_division=is_first_division
+                                    )
                         elif cut_method == 'mesh':
                             cut_contours = self._cut_contour_mesh_aware(
                                 target_contour, target_bp, projected_refs, streams_for_contour
