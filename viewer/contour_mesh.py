@@ -1607,6 +1607,13 @@ class ContourMeshMixin:
                 insert_idx = level_idx + 1
                 print(f"  Inserting transition contour at scalar {scalar:.6f} "
                       f"(count={count}) at index {insert_idx}")
+
+                # Mark these contours as needing cut (they're at merge points)
+                # This ensures cut_streams knows to use COMMON mode (propagated cuts)
+                for bp in planes:
+                    bp['is_cut'] = True
+                    bp['is_merge_point'] = True  # Additional flag for debugging
+
                 self.bounding_planes.insert(insert_idx, planes)
                 self.contours.insert(insert_idx, contours)
 
