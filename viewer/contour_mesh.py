@@ -6609,19 +6609,60 @@ class ContourMeshMixin:
         piece_idx = subcut_info['piece_idx']
         assigned_sources = subcut_info['sources']
 
-        current_pieces_3d = self._manual_cut_data.get('current_pieces_3d', [])
-        current_pieces = self._manual_cut_data.get('current_pieces', [])
-        source_contours = self._manual_cut_data.get('source_contours', [])
-        source_bps = self._manual_cut_data.get('source_bps', [])
-        source_2d_list = self._manual_cut_data.get('source_2d_list', [])
-        stream_indices = self._manual_cut_data.get('stream_indices', [])
+        # Check if we have saved parent context (for subsequent sub-cuts)
+        # This is needed when there are multiple pending sub-cuts (e.g., 5→1 case)
+        parent_context = self._manual_cut_data.get('parent_context', None)
+        parent_finalized = self._manual_cut_data.get('parent_finalized_pieces', {})
+
+        if parent_context is not None:
+            # FIRST: Save results from previous sub-cut before switching context
+            # matched_pairs from the previous sub-cut refers to ITS pieces, not parent's
+            prev_matched_pairs = self._manual_cut_data.get('matched_pairs', [])
+            prev_pieces_3d = self._manual_cut_data.get('current_pieces_3d', [])
+            prev_original_indices = self._manual_cut_data.get('original_source_indices', [])
+
+            for p_idx, local_s_idx in prev_matched_pairs:
+                if p_idx < len(prev_pieces_3d) and local_s_idx < len(prev_original_indices):
+                    orig_s_idx = prev_original_indices[local_s_idx]
+                    parent_finalized[orig_s_idx] = prev_pieces_3d[p_idx]
+                    print(f"[SubCut] Saved from previous sub-cut: piece {p_idx} -> original source {orig_s_idx}")
+
+            self._manual_cut_data['parent_finalized_pieces'] = parent_finalized
+
+            # NOW use saved parent context for the new sub-cut
+            current_pieces_3d = parent_context['pieces_3d']
+            current_pieces = parent_context['pieces_2d']
+            source_contours = parent_context['source_contours']
+            source_bps = parent_context['source_bps']
+            source_2d_list = parent_context['source_2d_list']
+            stream_indices = parent_context['stream_indices']
+            current_source_labels = parent_context['source_labels']
+        else:
+            # First sub-cut - use current data and save parent context
+            current_pieces_3d = self._manual_cut_data.get('current_pieces_3d', [])
+            current_pieces = self._manual_cut_data.get('current_pieces', [])
+            source_contours = self._manual_cut_data.get('source_contours', [])
+            source_bps = self._manual_cut_data.get('source_bps', [])
+            source_2d_list = self._manual_cut_data.get('source_2d_list', [])
+            stream_indices = self._manual_cut_data.get('stream_indices', [])
+            current_source_labels = self._manual_cut_data.get('source_labels', list(range(len(source_contours))))
+
+            # Save parent context for subsequent sub-cuts
+            self._manual_cut_data['parent_context'] = {
+                'pieces_3d': [np.array(p).copy() for p in current_pieces_3d],
+                'pieces_2d': [np.array(p).copy() for p in current_pieces],
+                'source_contours': [np.array(c).copy() for c in source_contours],
+                'source_bps': [copy.deepcopy(bp) for bp in source_bps],
+                'source_2d_list': [np.array(s).copy() for s in source_2d_list],
+                'stream_indices': list(stream_indices),
+                'source_labels': list(current_source_labels),
+            }
+
         matched_pairs = self._manual_cut_data.get('matched_pairs', [])
         pending_subcuts = self._manual_cut_data.get('pending_subcuts', [])
-        # Get current source labels (original indices for display)
-        current_source_labels = self._manual_cut_data.get('source_labels', list(range(len(source_contours))))
 
         if piece_idx >= len(current_pieces_3d):
-            print(f"[SubCut] Invalid piece index {piece_idx}")
+            print(f"[SubCut] Invalid piece index {piece_idx}, only have {len(current_pieces_3d)} pieces")
             return
 
         # Get the piece that becomes the new target
@@ -6629,14 +6670,16 @@ class ContourMeshMixin:
         new_target_2d = current_pieces[piece_idx]
 
         # Store parent context for final combining
-        # Save finalized pieces from matched_pairs
-        parent_finalized = self._manual_cut_data.get('parent_finalized_pieces', {})
-        for p_idx, s_idx in matched_pairs:
-            if p_idx < len(current_pieces_3d):
-                # s_idx is local, map to original using source_labels
-                orig_s_idx = current_source_labels[s_idx] if s_idx < len(current_source_labels) else s_idx
-                parent_finalized[orig_s_idx] = current_pieces_3d[p_idx]
-        self._manual_cut_data['parent_finalized_pieces'] = parent_finalized
+        # Save finalized pieces from matched_pairs (only for FIRST sub-cut)
+        # For subsequent sub-cuts, this is already handled at the top of this function
+        if parent_context is None:
+            for p_idx, s_idx in matched_pairs:
+                if p_idx < len(current_pieces_3d):
+                    # s_idx is local, map to original using source_labels
+                    orig_s_idx = current_source_labels[s_idx] if s_idx < len(current_source_labels) else s_idx
+                    parent_finalized[orig_s_idx] = current_pieces_3d[p_idx]
+                    print(f"[SubCut] Saved parent 1:1: piece {p_idx} -> original source {orig_s_idx}")
+            self._manual_cut_data['parent_finalized_pieces'] = parent_finalized
 
         # Map from new local source index to original source index
         # Use current_source_labels to get the true original indices
