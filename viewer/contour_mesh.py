@@ -1487,90 +1487,65 @@ class ContourMeshMixin:
 
                 return best_width, best_score, best_p1, best_p2
 
-            # Phase 3: Find the narrowest neck contour
-            # Key insight: The narrowest neck is RIGHT at the transition boundary
-            # Search from the boundary (where contours just merged) into the merged region
+            # Phase 3: Find the contour RIGHT BEFORE DIVISION
+            # Key insight: Search from small side TOWARDS large side (split point)
+            # Find the last valid contour with small_count before it becomes large_count
             if best_small_scalar is not None and best_small_contours is not None and best_large_scalar is not None:
-                print(f"    [Phase3] Finding narrowest neck contour near transition boundary...")
+                print(f"    [Phase3] Finding contour right before division...")
+                print(f"      Transition: {small_count} → {large_count}")
+                print(f"      small_scalar={best_small_scalar:.6f}, large_scalar={best_large_scalar:.6f}")
 
-                # The transition boundary is between best_large_scalar and best_small_scalar
-                # Narrowest neck is on the merged side, very close to the boundary
-                boundary_scalar = (best_large_scalar + best_small_scalar) / 2
-
-                # Determine search direction: from boundary towards the merged (small_count) side
-                if best_large_scalar > best_small_scalar:
-                    # Large is at higher scalar, small at lower - search towards lower
-                    search_direction = -1
-                    boundary_to_small = best_small_scalar - boundary_scalar
-                else:
-                    # Large is at lower scalar, small at higher - search towards higher
-                    search_direction = 1
-                    boundary_to_small = best_small_scalar - boundary_scalar
-
-                # Fine search near the boundary
-                # Start from boundary, move towards merged side, find first valid + measure neck
+                # Search from small side towards large side (towards the split)
+                # We want to find the contour with small_count that's CLOSEST to becoming large_count
                 search_range = abs(best_large_scalar - best_small_scalar)
-                num_samples = 100  # Very fine sampling near boundary
+                num_samples = 100
 
-                narrowest_scalar = best_small_scalar
-                narrowest_width = float('inf')
-                narrowest_contours = best_small_contours
-                narrowest_planes = best_small_planes
+                # Start with the original small contour as fallback
+                best_before_split_scalar = best_small_scalar
+                best_before_split_contours = best_small_contours
+                best_before_split_planes = best_small_planes
+                best_before_split_width = float('inf')
 
-                # Measure initial
                 if len(best_small_contours) > 0:
-                    narrowest_width, _, _, _ = measure_neck_width(best_small_contours[0])
-                    print(f"      Initial: scalar={best_small_scalar:.6f}, width={narrowest_width:.4f}")
+                    best_before_split_width, _, _, _ = measure_neck_width(best_small_contours[0])
+                    print(f"      Initial: scalar={best_small_scalar:.6f}, width={best_before_split_width:.4f}")
 
-                # Search from boundary towards merged side
-                # Sample more densely near boundary (where narrowest neck should be)
-                found_valid = False
-                consecutive_wider = 0
-
+                # Search from small_scalar towards large_scalar
+                # Find contours that still have small_count but are close to splitting
                 for sample_i in range(num_samples):
-                    # Exponential sampling: dense near boundary, sparse further away
-                    # frac goes from 0 (at boundary) to 1 (at best_small_scalar and beyond)
-                    frac = (sample_i / num_samples) ** 0.5  # Square root for denser sampling near 0
-
-                    # Interpolate from boundary towards (and past) best_small_scalar
-                    test_scalar = boundary_scalar + frac * boundary_to_small * 1.5  # Go 50% past
+                    # Linear interpolation from small towards large
+                    frac = sample_i / num_samples
+                    test_scalar = best_small_scalar + frac * (best_large_scalar - best_small_scalar)
 
                     planes_test, contours_test, _ = self.find_contour(test_scalar, prev_bounding_plane=prev_plane)
 
                     if len(contours_test) != small_count:
-                        continue
+                        # We've crossed into the split region - stop here
+                        print(f"      Reached split at scalar={test_scalar:.6f} (count={len(contours_test)})")
+                        break
 
-                    found_valid = True
-
-                    # Measure neck width
+                    # This contour still has small_count - it's a valid "before split" contour
+                    # Measure neck width to find the one with most visible pinch
                     total_width = 0
                     for c in contours_test:
                         width, _, _, _ = measure_neck_width(c)
                         total_width += width
 
-                    if total_width < narrowest_width:
-                        narrowest_width = total_width
-                        narrowest_scalar = test_scalar
-                        narrowest_contours = contours_test
-                        narrowest_planes = planes_test
-                        consecutive_wider = 0
-                        print(f"      Found narrower: scalar={test_scalar:.6f}, width={total_width:.4f}")
-                    else:
-                        consecutive_wider += 1
-                        # If we've found valid contours and width is increasing, we've passed the neck
-                        if consecutive_wider > 10:
-                            print(f"      Stopping: neck width increasing (passed narrowest point)")
-                            break
+                    # Keep track of the contour closest to split that still has small_count
+                    # Prefer contours with visible pinch (narrower width)
+                    if total_width < best_before_split_width:
+                        best_before_split_width = total_width
+                        best_before_split_scalar = test_scalar
+                        best_before_split_contours = contours_test
+                        best_before_split_planes = planes_test
+                        print(f"      Better: scalar={test_scalar:.6f}, width={total_width:.4f}")
 
-                if not found_valid:
-                    print(f"    [Phase3] WARNING: No valid contours found in search range")
+                print(f"    [Phase3] Best before split: scalar={best_before_split_scalar:.6f}, width={best_before_split_width:.4f}")
 
-                print(f"    [Phase3] Best narrowest neck: scalar={narrowest_scalar:.6f}, width={narrowest_width:.4f}")
-
-                # Update best_small with narrowest neck result
-                best_small_scalar = narrowest_scalar
-                best_small_contours = narrowest_contours
-                best_small_planes = narrowest_planes
+                # Update best_small with the "right before split" result
+                best_small_scalar = best_before_split_scalar
+                best_small_contours = best_before_split_contours
+                best_small_planes = best_before_split_planes
 
                 # Store neck visualization data
                 # Target = narrowest neck contour (merged, before division)
