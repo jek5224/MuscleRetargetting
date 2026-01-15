@@ -5778,6 +5778,7 @@ class ContourMeshMixin:
             'process_forward': process_forward,
             # For iterative cutting: K pieces needed, track current pieces
             'required_pieces': len(source_indices),  # Number of pieces needed = number of sources
+            'selected_sources': list(range(len(source_indices))),  # All sources selected by default
             'current_pieces': [target_2d.copy()],  # Start with one piece (original target)
             'current_pieces_3d': [target_contour.copy()],  # 3D versions for final result
             'cut_lines': [],  # List of applied cut lines
@@ -5837,6 +5838,7 @@ class ContourMeshMixin:
             'stream_indices': list(streams_for_contour),
             'process_forward': True,  # Direction doesn't matter at this point
             'required_pieces': len(streams_for_contour),
+            'selected_sources': list(range(len(streams_for_contour))),  # All sources selected by default
             'current_pieces': [target_2d.copy()],
             'current_pieces_3d': [np.array(target_contour).copy()],
             'cut_lines': [],
