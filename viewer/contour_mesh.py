@@ -6157,6 +6157,14 @@ class ContourMeshMixin:
         source_contours = [np.array(self.contours[source_level][s_i]) for s_i in source_indices]
         source_bps = [self.bounding_planes[source_level][s_i] for s_i in source_indices]
 
+        print(f"  Source contours: {len(source_contours)} contours")
+        for i, (sc, sbp) in enumerate(zip(source_contours, source_bps)):
+            print(f"    Source {i}: {len(sc)} vertices, scalar={sbp.get('scalar_value', 'unknown')}")
+            if len(sc) > 0:
+                sc_mean = np.mean(sc, axis=0)
+                print(f"      mean position: [{sc_mean[0]:.4f}, {sc_mean[1]:.4f}, {sc_mean[2]:.4f}]")
+                print(f"      bp mean: [{sbp['mean'][0]:.4f}, {sbp['mean'][1]:.4f}, {sbp['mean'][2]:.4f}]")
+
         # Project target contour to 2D (using its own bounding plane)
         target_mean = target_bp['mean']
         target_x = target_bp['basis_x']
@@ -6185,6 +6193,18 @@ class ContourMeshMixin:
                 y = np.dot(diff_on_plane, target_y)
                 src_2d.append([x, y])
             source_2d_list.append(np.array(src_2d))
+
+        # Debug: show projected source bounds
+        print(f"  Source 2D projections:")
+        for i, src_2d in enumerate(source_2d_list):
+            if len(src_2d) > 0:
+                src_min = src_2d.min(axis=0)
+                src_max = src_2d.max(axis=0)
+                print(f"    Source {i}: 2D bounds [{src_min[0]:.4f}, {src_min[1]:.4f}] to [{src_max[0]:.4f}, {src_max[1]:.4f}]")
+        if len(target_2d) > 0:
+            tgt_min = target_2d.min(axis=0)
+            tgt_max = target_2d.max(axis=0)
+            print(f"    Target: 2D bounds [{tgt_min[0]:.4f}, {tgt_min[1]:.4f}] to [{tgt_max[0]:.4f}, {tgt_max[1]:.4f}]")
 
         # Store all data for the manual cutting window
         self._manual_cut_data = {
