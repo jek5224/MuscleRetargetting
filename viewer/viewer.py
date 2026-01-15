@@ -4022,7 +4022,8 @@ class GLFWApp():
             target_i = obj._manual_cut_data.get('target_i', 0)
             source_indices = obj._manual_cut_data.get('source_indices', [])
             required_pieces_display = obj._manual_cut_data.get('required_pieces', 2)
-            imgui.set_next_window_size(1050, 750, imgui.FIRST_USE_EVER)  # Wider for source viewer
+            # Window size: main canvas (550+40) + gap (30) + source panel (280+30) + margins = ~960
+            imgui.set_next_window_size(960, 780, imgui.FIRST_USE_EVER)
             # Show target index and source info in title for M→N cases
             title_suffix = f" (Target {target_i}, {len(source_indices)}→1)" if len(source_indices) > 0 else ""
             expanded, opened = imgui.begin(f"Manual Cut: {muscle_name}{title_suffix}", True)
