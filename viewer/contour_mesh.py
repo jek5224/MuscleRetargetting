@@ -5530,9 +5530,47 @@ class ContourMeshMixin:
         print(f"Target level: {target_level} ({target_count} contours)")
 
         # Handle M→N case (M sources → N targets, M > N)
-        # Find which sources map to which targets using distance-based matching
+        # Find which sources map to which targets using distance AND area matching
         source_means = [self.bounding_planes[source_level][i]['mean'] for i in range(source_count)]
         target_means = [self.bounding_planes[target_level][i]['mean'] for i in range(target_count)]
+
+        # Compute areas for each contour (using 2D projection)
+        def compute_contour_area(contour, bp):
+            """Compute 2D area of contour projected onto bounding plane."""
+            mean = bp['mean']
+            basis_x = bp['basis_x']
+            basis_y = bp['basis_y']
+            # Project to 2D
+            pts_2d = []
+            for pt in contour:
+                diff = pt - mean
+                x = np.dot(diff, basis_x)
+                y = np.dot(diff, basis_y)
+                pts_2d.append([x, y])
+            pts_2d = np.array(pts_2d)
+            # Shoelace formula for polygon area
+            n = len(pts_2d)
+            area = 0.0
+            for i in range(n):
+                j = (i + 1) % n
+                area += pts_2d[i, 0] * pts_2d[j, 1]
+                area -= pts_2d[j, 0] * pts_2d[i, 1]
+            return abs(area) / 2.0
+
+        source_areas = []
+        for s_i in range(source_count):
+            contour = self.contours[source_level][s_i]
+            bp = self.bounding_planes[source_level][s_i]
+            source_areas.append(compute_contour_area(contour, bp))
+
+        target_areas = []
+        for t_i in range(target_count):
+            contour = self.contours[target_level][t_i]
+            bp = self.bounding_planes[target_level][t_i]
+            target_areas.append(compute_contour_area(contour, bp))
+
+        print(f"Source areas: {[f'{a:.6f}' for a in source_areas]}")
+        print(f"Target areas: {[f'{a:.6f}' for a in target_areas]}")
 
         # Build distance matrix: [source_i, target_i]
         dist_matrix = np.zeros((source_count, target_count))
@@ -5540,30 +5578,93 @@ class ContourMeshMixin:
             for t_i in range(target_count):
                 dist_matrix[s_i, t_i] = np.linalg.norm(source_means[s_i] - target_means[t_i])
 
-        # Step 1: Ensure each target has at least one source (pigeonhole)
-        assigned_sources = set()
+        # Normalize distances for scoring
+        max_dist = np.max(dist_matrix) if np.max(dist_matrix) > 0 else 1.0
+
+        # Use combined distance + area matching with iterative assignment
+        # Goal: assign sources to targets such that:
+        #   1. Centroids are close
+        #   2. Sum of source areas ≈ target area
         target_to_sources = [[] for _ in range(target_count)]
 
-        for target_i in range(target_count):
-            best_source = None
-            best_dist = float('inf')
-            for source_i in range(source_count):
-                if source_i in assigned_sources:
-                    continue
-                if dist_matrix[source_i, target_i] < best_dist:
-                    best_dist = dist_matrix[source_i, target_i]
-                    best_source = source_i
-            if best_source is not None:
-                target_to_sources[target_i].append(best_source)
-                assigned_sources.add(best_source)
-
-        # Step 2: Assign remaining sources to their closest targets
+        # Step 1: Initial assignment - each source to its closest target
         for source_i in range(source_count):
-            if source_i in assigned_sources:
-                continue
             closest_target = np.argmin(dist_matrix[source_i])
             target_to_sources[closest_target].append(source_i)
-            assigned_sources.add(source_i)
+
+        # Step 2: Iterative refinement - reassign sources to better match areas
+        max_iterations = 20
+        for iteration in range(max_iterations):
+            improved = False
+
+            for source_i in range(source_count):
+                # Find current assignment
+                current_target = None
+                for t_i in range(target_count):
+                    if source_i in target_to_sources[t_i]:
+                        current_target = t_i
+                        break
+
+                if current_target is None:
+                    continue
+
+                # Check if this source has siblings (don't move if it's the only one)
+                if len(target_to_sources[current_target]) <= 1:
+                    continue
+
+                # Compute current score
+                def compute_assignment_score(t2s):
+                    """Score assignment based on distance and area matching."""
+                    total_score = 0.0
+                    for t_i in range(target_count):
+                        if len(t2s[t_i]) == 0:
+                            # Unassigned target is very bad
+                            total_score += 1000.0
+                            continue
+                        # Distance component: average normalized distance
+                        avg_dist = np.mean([dist_matrix[s_i, t_i] / max_dist for s_i in t2s[t_i]])
+                        # Area component: ratio of sum(source_areas) to target_area
+                        source_area_sum = sum(source_areas[s_i] for s_i in t2s[t_i])
+                        area_ratio = source_area_sum / target_areas[t_i] if target_areas[t_i] > 0 else 1.0
+                        area_error = abs(area_ratio - 1.0)  # Want ratio close to 1.0
+                        # Combined score (lower is better)
+                        total_score += avg_dist + 0.5 * area_error
+                    return total_score
+
+                current_score = compute_assignment_score(target_to_sources)
+
+                # Try moving to each other target
+                best_new_target = None
+                best_new_score = current_score
+
+                for new_target in range(target_count):
+                    if new_target == current_target:
+                        continue
+
+                    # Create candidate assignment
+                    candidate = [list(t) for t in target_to_sources]
+                    candidate[current_target].remove(source_i)
+                    candidate[new_target].append(source_i)
+
+                    # Skip if this leaves current_target empty
+                    if len(candidate[current_target]) == 0:
+                        continue
+
+                    new_score = compute_assignment_score(candidate)
+                    if new_score < best_new_score - 0.001:  # Small threshold to avoid tiny changes
+                        best_new_score = new_score
+                        best_new_target = new_target
+
+                # Apply best move if found
+                if best_new_target is not None:
+                    target_to_sources[current_target].remove(source_i)
+                    target_to_sources[best_new_target].append(source_i)
+                    improved = True
+
+            if not improved:
+                break
+
+        print(f"Source-target assignment refined in {iteration + 1} iterations")
 
         print(f"M→N mapping ({source_count}→{target_count}):")
         for t_i in range(target_count):
@@ -6421,16 +6522,104 @@ class ContourMeshMixin:
                     if groupmate_contours:
                         # Prefer contour where groupmate is, pick closest one
                         best_contour = min(groupmate_contours, key=lambda c: dist_matrix[stream_i, c])
-                        print(f"  [DEBUG] Stream {stream_i} assigned to contour {best_contour} (groupmate preference)")
                     else:
                         # No groupmate assigned yet, use distance
                         best_contour = np.argmin(dist_matrix[stream_i])
-                        print(f"  [DEBUG] Stream {stream_i} assigned to contour {best_contour} (distance)")
 
                     contour_to_streams[best_contour].append(stream_i)
                     assigned_streams.add(stream_i)
 
-                print(f"  [DEBUG] Final contour_to_streams: {contour_to_streams}")
+                # Step 3: Iterative refinement using area ratios
+                # Compute areas for previous level (source) contours
+                def compute_contour_area_2d(contour, bp):
+                    """Compute 2D area of contour projected onto bounding plane."""
+                    mean = bp['mean']
+                    basis_x = bp['basis_x']
+                    basis_y = bp['basis_y']
+                    pts_2d = []
+                    for pt in contour:
+                        diff = pt - mean
+                        x = np.dot(diff, basis_x)
+                        y = np.dot(diff, basis_y)
+                        pts_2d.append([x, y])
+                    pts_2d = np.array(pts_2d)
+                    n = len(pts_2d)
+                    area = 0.0
+                    for i in range(n):
+                        j = (i + 1) % n
+                        area += pts_2d[i, 0] * pts_2d[j, 1]
+                        area -= pts_2d[j, 0] * pts_2d[i, 1]
+                    return abs(area) / 2.0
+
+                # Get prev level areas (from streams)
+                prev_areas = []
+                for stream_i in range(max_stream_count):
+                    prev_areas.append(compute_contour_area_2d(prev_level_contours[stream_i], prev_level_bps[stream_i]))
+
+                # Get current level areas (targets)
+                curr_areas = []
+                for contour_i in range(curr_count):
+                    curr_areas.append(compute_contour_area_2d(
+                        self.contours[level_i][contour_i],
+                        self.bounding_planes[level_i][contour_i]
+                    ))
+
+                # Normalize distances for scoring
+                max_dist = np.max(dist_matrix) if np.max(dist_matrix) > 0 else 1.0
+
+                def compute_assignment_score(c2s):
+                    """Score assignment based on distance and area matching."""
+                    total_score = 0.0
+                    for c_i in range(curr_count):
+                        if len(c2s[c_i]) == 0:
+                            total_score += 1000.0
+                            continue
+                        avg_dist = np.mean([dist_matrix[s_i, c_i] / max_dist for s_i in c2s[c_i]])
+                        source_area_sum = sum(prev_areas[s_i] for s_i in c2s[c_i])
+                        area_ratio = source_area_sum / curr_areas[c_i] if curr_areas[c_i] > 0 else 1.0
+                        area_error = abs(area_ratio - 1.0)
+                        total_score += avg_dist + 0.5 * area_error
+                    return total_score
+
+                # Iterative refinement
+                for refine_iter in range(20):
+                    improved = False
+                    for stream_i in range(max_stream_count):
+                        # Find current assignment
+                        current_contour = None
+                        for c_i in range(curr_count):
+                            if stream_i in contour_to_streams[c_i]:
+                                current_contour = c_i
+                                break
+                        if current_contour is None or len(contour_to_streams[current_contour]) <= 1:
+                            continue
+
+                        current_score = compute_assignment_score(contour_to_streams)
+                        best_new_contour = None
+                        best_new_score = current_score
+
+                        for new_contour in range(curr_count):
+                            if new_contour == current_contour:
+                                continue
+                            candidate = [list(c) for c in contour_to_streams]
+                            candidate[current_contour].remove(stream_i)
+                            candidate[new_contour].append(stream_i)
+                            if len(candidate[current_contour]) == 0:
+                                continue
+                            new_score = compute_assignment_score(candidate)
+                            if new_score < best_new_score - 0.001:
+                                best_new_score = new_score
+                                best_new_contour = new_contour
+
+                        if best_new_contour is not None:
+                            contour_to_streams[current_contour].remove(stream_i)
+                            contour_to_streams[best_new_contour].append(stream_i)
+                            improved = True
+
+                    if not improved:
+                        break
+
+                print(f"  [DEBUG] Final contour_to_streams (after area refinement): {contour_to_streams}")
 
                 # Build stream_to_contour mapping for consistency
                 stream_to_contour = [None] * max_stream_count
