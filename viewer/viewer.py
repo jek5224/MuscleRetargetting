@@ -2021,6 +2021,9 @@ class GLFWApp():
                                         if not hasattr(self, 'neck_viz_idx'):
                                             self.neck_viz_idx = {}
                                         self.neck_viz_idx[name] = 0
+                                        print(f"[{name}] Neck Viz opened with {len(obj._neck_viz_data)} transitions")
+                                    else:
+                                        print(f"[{name}] No transitions found to visualize")
                                 except Exception as e:
                                     print(f"[{name}] Find Transitions error: {e}")
                                     import traceback
@@ -2207,7 +2210,7 @@ class GLFWApp():
                                     self.neck_viz_idx = {}
                                 self.neck_viz_idx[name] = 0
                             else:
-                                print(f"[{name}] No neck viz data. Run 'Refine Contours' first.")
+                                print(f"[{name}] No neck viz data. Run 'Find Transitions' first.")
                         if not has_neck_viz_data:
                             imgui.pop_style_var()
 
