@@ -6679,7 +6679,8 @@ class ContourMeshMixin:
         if has_degenerate:
             print(f"  [BP Transform] Falling back to area-based cutting due to degenerate sources")
             projected_refs = [src_bp['mean'] for src_bp in source_bps]
-            return self._cut_contour_for_streams(target_contour, target_bp, projected_refs, stream_indices)
+            cut_contours = self._cut_contour_for_streams(target_contour, target_bp, projected_refs, stream_indices)
+            return cut_contours, None
 
         # ========== Step 1: Project target contour to 2D ==========
         target_mean = target_bp['mean']
@@ -6798,7 +6799,8 @@ class ContourMeshMixin:
             reason = "invalid geometry" if has_invalid else "tiny source areas"
             print(f"  [BP Transform] Falling back to area-based cutting due to {reason}")
             projected_refs = [src_bp['mean'] for src_bp in source_bps]
-            return self._cut_contour_for_streams(target_contour, target_bp, projected_refs, stream_indices)
+            cut_contours = self._cut_contour_for_streams(target_contour, target_bp, projected_refs, stream_indices)
+            return cut_contours, None
 
         total_source_area = sum(source_areas)
 
@@ -6824,7 +6826,8 @@ class ContourMeshMixin:
         except:
             print("  [BP Transform] WARNING: Could not create target polygon, falling back")
             projected_refs = [src_bp['mean'] for src_bp in source_bps]
-            return self._cut_contour_for_streams(target_contour, target_bp, projected_refs, stream_indices)
+            cut_contours = self._cut_contour_for_streams(target_contour, target_bp, projected_refs, stream_indices)
+            return cut_contours, None
 
         # First division: each source has separate transform (scale, tx, ty, theta)
         # Propagated division: all sources share the same transform (move as one rigid body)
