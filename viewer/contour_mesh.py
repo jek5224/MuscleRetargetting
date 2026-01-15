@@ -6460,6 +6460,16 @@ class ContourMeshMixin:
                 src_2d.append([x, y])
             source_2d_list.append(np.array(src_2d))
 
+        # Debug: show projected source bounds
+        print(f"[DEBUG] Source 2D projections onto target plane:")
+        for i, src_2d in enumerate(source_2d_list):
+            if len(src_2d) > 0:
+                src_min = src_2d.min(axis=0)
+                src_max = src_2d.max(axis=0)
+                src_range = src_max - src_min
+                print(f"  Source {i}: 2D bounds [{src_min[0]:.6f}, {src_min[1]:.6f}] to [{src_max[0]:.6f}, {src_max[1]:.6f}], range [{src_range[0]:.6f}, {src_range[1]:.6f}]")
+        print(f"  Target: 2D bounds [{t2d_min[0]:.6f}, {t2d_min[1]:.6f}] to [{t2d_max[0]:.6f}, {t2d_max[1]:.6f}]")
+
         # Store all data for the manual cutting window
         self._manual_cut_data = {
             'muscle_name': muscle_name,
@@ -7879,14 +7889,28 @@ class ContourMeshMixin:
                             any_source_not_cut = any(not cut for cut in source_cut_status)
                             all_sources_cut = all(source_cut_status)
 
-                            # SEPARATE mode if ANY source has not been cut yet
+                            # Also check contour sizes - if sizes vary significantly, treat as SEPARATE
+                            # This catches cases where is_cut=True from earlier transitions but contours weren't
+                            # cut at the most recent transition (e.g., 1:1 mappings that inherited is_cut)
+                            source_sizes = [len(source_contours[i]) for i in range(len(source_contours))]
+                            if len(source_sizes) > 1:
+                                min_size, max_size = min(source_sizes), max(source_sizes)
+                                size_ratio = max_size / min_size if min_size > 0 else float('inf')
+                                # If largest is more than 3x the smallest, sizes are inconsistent
+                                sizes_inconsistent = size_ratio > 3.0
+                                print(f"  [DEBUG] source_sizes={source_sizes}, ratio={size_ratio:.2f}, inconsistent={sizes_inconsistent}")
+                            else:
+                                sizes_inconsistent = False
+
+                            # SEPARATE mode if ANY source has not been cut yet OR sizes are inconsistent
                             # This handles mixed cases: 1 SEPARATE + 2 COMMON → still needs manual cutting
-                            is_first_division = any_source_not_cut
+                            is_first_division = any_source_not_cut or sizes_inconsistent
                             cut_stream_combos.add(stream_combo)
 
                             mode_str = "SEPARATE" if is_first_division else "COMMON"
+                            reason = "uncut sources" if any_source_not_cut else ("size inconsistency" if sizes_inconsistent else "all cut")
                             cut_status_str = ', '.join([f's{streams_for_contour[i]}:{"cut" if c else "uncut"}' for i, c in enumerate(source_cut_status)])
-                            print(f"  [BP Transform] Mode: {mode_str} ({cut_status_str})")
+                            print(f"  [BP Transform] Mode: {mode_str} ({cut_status_str}, reason: {reason})")
 
                             # Check if we have a saved manual cut result
                             # Use composite key (level_i, contour_i) to handle multiple levels
