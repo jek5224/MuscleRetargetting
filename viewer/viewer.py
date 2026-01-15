@@ -3184,17 +3184,20 @@ class GLFWApp():
                     self.inspect_2d_contour_idx[name] = new_level_idx
                     level_idx = new_level_idx
 
-                # Contour-within-level slider (labeled as "Contour")
-                contour_in_level = self.inspect_2d_stream_idx.get(name, 0)
-                contour_in_level = min(contour_in_level, max(0, max_contours - 1))
+                # Get number of contours at current level for slider boundary
+                num_at_level = get_num_contours_at_level(level_idx)
 
-                changed, new_contour_in_level = imgui.slider_int(f"Contour##{name}_inspect", contour_in_level, 0, max(0, max_contours - 1))
+                # Contour-within-level slider (labeled as "Contour")
+                # Slider max is based on contours at this level, not global max
+                contour_in_level = self.inspect_2d_stream_idx.get(name, 0)
+                contour_in_level = min(contour_in_level, max(0, num_at_level - 1))
+
+                changed, new_contour_in_level = imgui.slider_int(f"Contour##{name}_inspect", contour_in_level, 0, max(0, num_at_level - 1))
                 if changed:
                     self.inspect_2d_stream_idx[name] = new_contour_in_level
                     contour_in_level = new_contour_in_level
 
                 # Show info about contours at this level
-                num_at_level = get_num_contours_at_level(level_idx)
                 imgui.text(f"Level {level_idx}: {num_at_level} contour(s)")
 
                 imgui.separator()
