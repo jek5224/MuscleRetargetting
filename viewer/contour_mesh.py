@@ -1481,13 +1481,17 @@ class ContourMeshMixin:
             # Insert into contours and bounding_planes
             self.contours.insert(insert_idx, t['contours'])
             self.bounding_planes.insert(insert_idx, t['planes'])
-            self.draw_contour_stream.insert(insert_idx, True)
+            # draw_contour_stream is list of lists, one bool per contour at each level
+            self.draw_contour_stream.insert(insert_idx, [True] * len(t['contours']))
 
             # Update existing_scalars for next iteration
             existing_scalars.insert(insert_idx, (scalar, insert_idx))
             existing_scalars = [(s, i) for i, (s, _) in enumerate(existing_scalars)]
 
             print(f"  Added {t['type']} at scalar {scalar:.4f} ({len(t['contours'])} contours, pos {insert_idx})")
+            # Debug: show contour vertex counts
+            for ci, c in enumerate(t['contours']):
+                print(f"    contour {ci}: {len(c)} vertices")
             added_count += 1
 
         print(f"=== Added {added_count} contour levels ===\n")
@@ -5951,6 +5955,22 @@ class ContourMeshMixin:
         print(f"Source level: {source_level} ({source_count} contours)")
         print(f"Target level: {target_level} ({target_count} contours)")
 
+        # Debug: show full contour structure at these levels
+        print(f"  Source contours at level {source_level}:")
+        for si in range(source_count):
+            sc = self.contours[source_level][si]
+            sbp = self.bounding_planes[source_level][si]
+            scalar = sbp.get('scalar_value', 'unknown')
+            mean = sbp['mean']
+            print(f"    [{si}]: {len(sc)} verts, scalar={scalar}, mean=[{mean[0]:.4f}, {mean[1]:.4f}, {mean[2]:.4f}]")
+        print(f"  Target contours at level {target_level}:")
+        for ti in range(target_count):
+            tc = self.contours[target_level][ti]
+            tbp = self.bounding_planes[target_level][ti]
+            scalar = tbp.get('scalar_value', 'unknown')
+            mean = tbp['mean']
+            print(f"    [{ti}]: {len(tc)} verts, scalar={scalar}, mean=[{mean[0]:.4f}, {mean[1]:.4f}, {mean[2]:.4f}]")
+
         # Handle M→N case (M sources → N targets, M > N)
         # Find which sources map to which targets using distance AND area matching
         source_means = [self.bounding_planes[source_level][i]['mean'] for i in range(source_count)]
@@ -6250,6 +6270,7 @@ class ContourMeshMixin:
         # Set pending flag to open the window
         self._manual_cut_pending = True
         self._manual_cut_line = None
+        self._debug_source_printed = False  # Reset debug flag for viewer output
 
         print(f"Manual cutting window ready - draw a cutting line")
         return True  # Manual cutting is needed
@@ -6468,6 +6489,7 @@ class ContourMeshMixin:
 
         # Set pending flag to open the window
         self._manual_cut_pending = True
+        self._debug_source_printed = False  # Reset debug flag for viewer output
 
         # For COMMON mode, initialize with the source boundary cutting line
         if initial_cut_line is not None and len(initial_cut_line) >= 2:
@@ -7943,6 +7965,12 @@ class ContourMeshMixin:
                                     )
 
                                 # Prepare manual cut data for this specific transition
+                                print(f"  [DEBUG] >>> Calling _prepare_manual_cut_data_for_level:")
+                                print(f"  [DEBUG] >>>   streams_for_contour={streams_for_contour}")
+                                print(f"  [DEBUG] >>>   source_contours: {len(source_contours)} contours")
+                                for sc_idx, sc in enumerate(source_contours):
+                                    print(f"  [DEBUG] >>>     source[{sc_idx}]: {len(sc)} verts, mean=[{np.mean(sc, axis=0)[0]:.4f}, {np.mean(sc, axis=0)[1]:.4f}, {np.mean(sc, axis=0)[2]:.4f}]")
+                                print(f"  [DEBUG] >>>   target_contour: {len(target_contour)} verts")
                                 self._prepare_manual_cut_data_for_level(
                                     muscle_name, level_i, contour_i, streams_for_contour,
                                     target_contour, target_bp, source_contours, source_bps,

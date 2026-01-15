@@ -10,5 +10,9 @@
   {
     "name": "L_Gastrocnemius",
     "path": "Zygote_Meshes_251229/Muscle/LowLeg/L_Gastrocnemius.obj"
+  },
+  {
+    "name": "L_Soleus",
+    "path": "Zygote_Meshes_251229/Muscle/LowLeg/L_Soleus.obj"
   }
 ]

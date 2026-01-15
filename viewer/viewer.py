@@ -4349,6 +4349,14 @@ class GLFWApp():
 
             # ===== Source Contour Viewer Panel (right side) =====
             source_contours_3d = obj._manual_cut_data.get('source_contours', [])
+            # Debug: print source contours info when window first opens
+            if not hasattr(obj, '_debug_source_printed') or not obj._debug_source_printed:
+                print(f"[DEBUG Viewer] source_contours_3d: {len(source_contours_3d)} contours")
+                for sci, sc in enumerate(source_contours_3d):
+                    print(f"  source[{sci}]: {len(sc)} verts")
+                source_bps_check = obj._manual_cut_data.get('source_bps', [])
+                print(f"[DEBUG Viewer] source_bps: {len(source_bps_check)} entries")
+                obj._debug_source_printed = True
             if len(source_contours_3d) > 0:
                 # Initialize source viewer state
                 if 'source_view_idx' not in mouse_state:
