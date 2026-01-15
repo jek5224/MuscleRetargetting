@@ -8046,13 +8046,14 @@ class ContourMeshMixin:
                                 stream_contours.append([])
                                 stream_bounding_planes.append([])
 
-                                # Copy previous levels from parent stream (first stream in streams_for_contour)
+                                # Copy ALL previous levels from parent stream
                                 # New streams "branch off" from existing streams at this cut point
+                                # They share the same contour history up to the current level
                                 parent_stream = streams_for_contour[i % len(streams_for_contour)]
-                                for level_data in stream_contours[parent_stream][:-1]:  # All but last (which we're replacing)
+                                for level_data in stream_contours[parent_stream]:
                                     # New streams share the same contours up to the branch point
                                     stream_contours[-1].append(level_data.copy() if hasattr(level_data, 'copy') else np.array(level_data))
-                                for bp_data in stream_bounding_planes[parent_stream][:-1]:
+                                for bp_data in stream_bounding_planes[parent_stream]:
                                     stream_bounding_planes[-1].append(copy.deepcopy(bp_data))
 
                                 # Extend prev_level data for new streams
