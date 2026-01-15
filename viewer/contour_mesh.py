@@ -1296,7 +1296,7 @@ class ContourMeshMixin:
             print(f"  Split point: {split_scalar:.6f}")
 
             # Get contours at split point (right before division) and after split
-            planes_small, contours_small, _ = self.find_contour(split_scalar)
+            planes_small, contours_small, contours_small_orig = self.find_contour(split_scalar)
             planes_large, contours_large, _ = self.find_contour(large_scalar)
 
             if len(contours_small) != small_count:
@@ -1343,9 +1343,11 @@ class ContourMeshMixin:
 
             # Find ALL necks in the merged contour(s) - not just one per transition
             # A neck is where a contour has a narrow pinch point
+            found_necks = []
             for c_idx, c_2d in enumerate(target_2d):
                 neck_info = self._find_neck_in_contour(c_2d)
                 if neck_info is not None:
+                    found_necks.append((c_idx, neck_info))
                     self._neck_viz_data.append({
                         'large_count': large_count,
                         'small_count': small_count,
@@ -1356,11 +1358,14 @@ class ContourMeshMixin:
                         'neck_point': neck_info['neck_point'],
                         'neck_width': neck_info['neck_width'],
                         'contour_idx': c_idx,
+                        # Store 3D data for adding to contours
+                        'contours_3d': contours_small,
+                        'planes_3d': planes_small,
                     })
                     print(f"  Added neck in contour {c_idx}: width={neck_info['neck_width']:.4f}")
 
             # If no specific necks found, add the whole transition anyway
-            if not any(d.get('scalar_small') == split_scalar for d in self._neck_viz_data):
+            if not found_necks:
                 self._neck_viz_data.append({
                     'large_count': large_count,
                     'small_count': small_count,
@@ -1368,10 +1373,88 @@ class ContourMeshMixin:
                     'scalar_small': split_scalar,
                     'target_contours_2d': target_2d,
                     'source_contours_2d': source_2d,
+                    # Store 3D data for adding to contours
+                    'contours_3d': contours_small,
+                    'planes_3d': planes_small,
                 })
                 print(f"  Added to Neck Viz: {small_count}→{large_count} (no specific neck found)")
 
         print(f"\n=== Done: {len(self._neck_viz_data)} transitions in {time.time()-start_time:.2f}s ===")
+
+    def add_transitions_to_contours(self):
+        """
+        Add found transition contours to self.contours for cutting.
+        Inserts them at the correct position based on scalar value.
+        """
+        if not hasattr(self, '_neck_viz_data') or not self._neck_viz_data:
+            print("No transitions found. Run find_transitions first.")
+            return
+
+        if not hasattr(self, 'contours') or not self.contours:
+            print("No contours found. Run find_contours first.")
+            return
+
+        print(f"\n=== Adding {len(self._neck_viz_data)} transition contours ===")
+
+        # Collect unique transition scalars (avoid duplicates from multiple necks at same scalar)
+        transitions_to_add = {}
+        for data in self._neck_viz_data:
+            scalar = data['scalar_small']
+            if scalar not in transitions_to_add:
+                transitions_to_add[scalar] = {
+                    'contours': data['contours_3d'],
+                    'planes': data['planes_3d'],
+                    'scalar': scalar,
+                }
+
+        # Get scalar values for existing contour levels
+        existing_scalars = []
+        for level_idx, planes in enumerate(self.bounding_planes):
+            if planes and isinstance(planes[0], dict) and 'scalar_value' in planes[0]:
+                existing_scalars.append((planes[0]['scalar_value'], level_idx))
+            else:
+                existing_scalars.append((level_idx, level_idx))
+
+        # Sort transitions by scalar
+        sorted_transitions = sorted(transitions_to_add.values(), key=lambda x: x['scalar'])
+
+        added_count = 0
+        for t in sorted_transitions:
+            scalar = t['scalar']
+
+            # Check if this scalar already exists in contours (within tolerance)
+            already_exists = False
+            for ex_scalar, _ in existing_scalars:
+                if abs(ex_scalar - scalar) < 0.001:
+                    already_exists = True
+                    break
+
+            if already_exists:
+                print(f"  Skipping scalar {scalar:.4f} (already exists)")
+                continue
+
+            # Find insertion position
+            insert_idx = 0
+            for ex_scalar, _ in existing_scalars:
+                if scalar > ex_scalar:
+                    insert_idx += 1
+                else:
+                    break
+
+            # Insert into contours and bounding_planes
+            self.contours.insert(insert_idx, t['contours'])
+            self.bounding_planes.insert(insert_idx, t['planes'])
+            self.draw_contour_stream.insert(insert_idx, True)
+
+            # Update existing_scalars for next iteration
+            existing_scalars.insert(insert_idx, (scalar, insert_idx))
+            # Update indices after insertion
+            existing_scalars = [(s, i) for i, (s, _) in enumerate(existing_scalars)]
+
+            print(f"  Added transition at scalar {scalar:.4f} (position {insert_idx})")
+            added_count += 1
+
+        print(f"=== Added {added_count} transition contours ===\n")
 
     def _refine_transition_points(self):
         """

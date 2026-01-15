@@ -1884,7 +1884,7 @@ class GLFWApp():
                         imgui.set_column_width(0, 120)
 
                         # Left column: Process button with vertical slider
-                        num_process_buttons = 9  # Match number of buttons on right
+                        num_process_buttons = 10  # Match number of buttons on right
                         process_all_height = num_process_buttons * imgui.get_frame_height() + (num_process_buttons - 1) * imgui.get_style().item_spacing[1]
 
                         # Initialize process step slider value
@@ -2030,6 +2030,28 @@ class GLFWApp():
                                     traceback.print_exc()
                             else:
                                 print(f"[{name}] Prerequisites: Run 'Scalar Field' first")
+
+                        # Add Transitions to Contours button
+                        has_transitions = hasattr(obj, '_neck_viz_data') and obj._neck_viz_data and len(obj._neck_viz_data) > 0
+                        has_contours = obj.contours is not None and len(obj.contours) > 0
+                        if not (has_transitions and has_contours):
+                            imgui.push_style_var(imgui.STYLE_ALPHA, 0.5)
+                        if colored_button(f"Add Transitions##{name}", 6, col_button_width):
+                            if has_transitions and has_contours:
+                                try:
+                                    obj.add_transitions_to_contours()
+                                    print(f"[{name}] Transition contours added for cutting")
+                                except Exception as e:
+                                    print(f"[{name}] Add Transitions error: {e}")
+                                    import traceback
+                                    traceback.print_exc()
+                            else:
+                                if not has_transitions:
+                                    print(f"[{name}] Run 'Find Transitions' first")
+                                else:
+                                    print(f"[{name}] Run 'Contours' first")
+                        if not (has_transitions and has_contours):
+                            imgui.pop_style_var()
 
                         # Smoothen buttons: z, x, bp (3 buttons in same row)
                         sub_button_width = (col_button_width - 8) // 3  # 3 buttons with small margins
