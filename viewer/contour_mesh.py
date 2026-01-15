@@ -5192,9 +5192,10 @@ class ContourMeshMixin:
         print(f"Source level: {source_level} ({source_count} contours)")
         print(f"Target level: {target_level} ({target_count} contours)")
 
-        # For now, handle the case where source has 2 and target has 1
-        if target_count != 1 or source_count != 2:
-            print(f"Manual cutting currently only supports 2 sources → 1 target")
+        # Handle M→1 case (multiple sources → one target)
+        # For M→N with N > 1, this will be called per target that needs cutting
+        if target_count != 1:
+            print(f"Manual cutting for M→N (N>1) not yet supported here")
             print(f"Falling back to automatic cutting")
             return
 
@@ -5269,6 +5270,11 @@ class ContourMeshMixin:
             'source_2d_list': source_2d_list,
             'stream_indices': list(range(source_count)),
             'process_forward': process_forward,
+            # For iterative cutting: K pieces needed, track current pieces
+            'required_pieces': source_count,
+            'current_pieces': [target_2d.copy()],  # Start with one piece (original target)
+            'current_pieces_3d': [target_contour.copy()],  # 3D versions for final result
+            'cut_lines': [],  # List of applied cut lines
         }
 
         # Set pending flag to open the window
@@ -5442,6 +5448,167 @@ class ContourMeshMixin:
         self._manual_cut_data = None
         self._manual_cut_line = None
         print("Manual cutting cancelled")
+
+    def _apply_iterative_cut(self):
+        """
+        Apply the current cut line to one of the current pieces.
+        Used for iterative cutting when K > 2 pieces are needed.
+        Returns True on success, False on failure.
+        """
+        if self._manual_cut_data is None or self._manual_cut_line is None:
+            return False
+
+        line_start, line_end = self._manual_cut_line
+        current_pieces = self._manual_cut_data.get('current_pieces', [])
+        current_pieces_3d = self._manual_cut_data.get('current_pieces_3d', [])
+        target_bp = self._manual_cut_data['target_bp']
+
+        if len(current_pieces) == 0:
+            return False
+
+        # Find which piece the line intersects (first one with 2 intersections)
+        cut_piece_idx = None
+        intersections = None
+
+        for piece_idx, piece_2d in enumerate(current_pieces):
+            n_verts = len(piece_2d)
+            piece_intersections = []
+
+            for i in range(n_verts):
+                p1 = piece_2d[i]
+                p2 = piece_2d[(i + 1) % n_verts]
+
+                line_dir = np.array(line_end) - np.array(line_start)
+                edge_dir = p2 - p1
+                cross = line_dir[0] * edge_dir[1] - line_dir[1] * edge_dir[0]
+
+                if abs(cross) < 1e-10:
+                    continue
+
+                diff = p1 - np.array(line_start)
+                t = (diff[0] * line_dir[1] - diff[1] * line_dir[0]) / cross
+
+                if 0 < t < 1:
+                    intersection_2d = p1 + t * edge_dir
+                    piece_intersections.append((i, t, intersection_2d))
+
+            if len(piece_intersections) == 2:
+                cut_piece_idx = piece_idx
+                intersections = piece_intersections
+                break
+
+        if cut_piece_idx is None:
+            print("No piece found with 2 intersections")
+            return False
+
+        # Cut the found piece into two
+        piece_2d = current_pieces[cut_piece_idx]
+        piece_3d = current_pieces_3d[cut_piece_idx]
+        n_verts = len(piece_2d)
+
+        intersections.sort(key=lambda x: x[0])
+        (edge1_idx, t1, int1_2d), (edge2_idx, t2, int2_2d) = intersections
+
+        # Convert 2D intersection points to 3D
+        target_mean = target_bp['mean']
+        target_x = target_bp['basis_x']
+        target_y = target_bp['basis_y']
+
+        int1_3d = target_mean + int1_2d[0] * target_x + int1_2d[1] * target_y
+        int2_3d = target_mean + int2_2d[0] * target_x + int2_2d[1] * target_y
+
+        # Build two pieces (2D)
+        new_piece0_2d = [int1_2d]
+        for i in range(edge1_idx + 1, edge2_idx + 1):
+            new_piece0_2d.append(piece_2d[i])
+        new_piece0_2d.append(int2_2d)
+
+        new_piece1_2d = [int2_2d]
+        for i in range(edge2_idx + 1, n_verts):
+            new_piece1_2d.append(piece_2d[i])
+        for i in range(0, edge1_idx + 1):
+            new_piece1_2d.append(piece_2d[i])
+        new_piece1_2d.append(int1_2d)
+
+        # Build two pieces (3D)
+        new_piece0_3d = [int1_3d]
+        for i in range(edge1_idx + 1, edge2_idx + 1):
+            new_piece0_3d.append(piece_3d[i])
+        new_piece0_3d.append(int2_3d)
+
+        new_piece1_3d = [int2_3d]
+        for i in range(edge2_idx + 1, n_verts):
+            new_piece1_3d.append(piece_3d[i])
+        for i in range(0, edge1_idx + 1):
+            new_piece1_3d.append(piece_3d[i])
+        new_piece1_3d.append(int1_3d)
+
+        # Replace the cut piece with the two new pieces
+        new_pieces = current_pieces[:cut_piece_idx] + [np.array(new_piece0_2d), np.array(new_piece1_2d)] + current_pieces[cut_piece_idx + 1:]
+        new_pieces_3d = current_pieces_3d[:cut_piece_idx] + [np.array(new_piece0_3d), np.array(new_piece1_3d)] + current_pieces_3d[cut_piece_idx + 1:]
+
+        self._manual_cut_data['current_pieces'] = new_pieces
+        self._manual_cut_data['current_pieces_3d'] = new_pieces_3d
+        self._manual_cut_data['cut_lines'].append((line_start, line_end))
+
+        # Register shared cut vertices
+        if not hasattr(self, 'shared_cut_vertices'):
+            self.shared_cut_vertices = []
+        self.shared_cut_vertices.append(int1_3d)
+        self.shared_cut_vertices.append(int2_3d)
+
+        print(f"Iterative cut: piece {cut_piece_idx} -> 2 pieces, total now {len(new_pieces)}")
+        return True
+
+    def _finalize_manual_cuts(self):
+        """
+        Finalize all iterative cuts and match pieces to source contours.
+        Returns the cut result for use by cut_streams.
+        """
+        if self._manual_cut_data is None:
+            return None
+
+        current_pieces_3d = self._manual_cut_data.get('current_pieces_3d', [])
+        source_contours = self._manual_cut_data.get('source_contours', [])
+        required_pieces = self._manual_cut_data.get('required_pieces', 2)
+
+        if len(current_pieces_3d) != required_pieces:
+            print(f"Have {len(current_pieces_3d)} pieces but need {required_pieces}")
+            return None
+
+        if len(source_contours) != required_pieces:
+            print(f"Have {len(source_contours)} sources but need {required_pieces}")
+            return None
+
+        # Match pieces to source contours by centroid distance
+        # Use Hungarian algorithm for optimal matching
+        from scipy.optimize import linear_sum_assignment
+
+        piece_centroids = [np.mean(p, axis=0) for p in current_pieces_3d]
+        source_centroids = [np.mean(s, axis=0) for s in source_contours]
+
+        # Build cost matrix
+        cost_matrix = np.zeros((required_pieces, required_pieces))
+        for i in range(required_pieces):
+            for j in range(required_pieces):
+                cost_matrix[i, j] = np.linalg.norm(piece_centroids[i] - source_centroids[j])
+
+        # Optimal assignment
+        row_ind, col_ind = linear_sum_assignment(cost_matrix)
+
+        # Reorder pieces to match source order
+        cut_contours = [None] * required_pieces
+        for piece_idx, source_idx in zip(row_ind, col_ind):
+            cut_contours[source_idx] = current_pieces_3d[piece_idx]
+
+        print(f"Finalized {required_pieces} pieces, matched to sources")
+        for i in range(required_pieces):
+            print(f"  Source {i}: piece with {len(cut_contours[i])} vertices")
+
+        # Store the result
+        self._manual_cut_data['cut_result'] = cut_contours
+
+        return cut_contours
 
     def _compute_cut_preview(self):
         """
@@ -5650,20 +5817,49 @@ class ContourMeshMixin:
                 print(f"  [DEBUG] prev_level_contours sizes: {[len(c) for c in prev_level_contours]}")
 
                 # Find which streams map to which contours (by distance)
+                # M sources (streams) → N targets (contours), M > N
+                # Ensure every target has at least one source (pigeonhole)
                 prev_means = [prev_level_bps[s]['mean'] for s in range(max_stream_count)]
                 curr_means = [self.bounding_planes[level_i][c]['mean'] for c in range(curr_count)]
 
-                # Assign each stream to closest contour
-                stream_to_contour = []
+                # Compute distance matrix: dist[stream_i][contour_i]
+                dist_matrix = np.zeros((max_stream_count, curr_count))
                 for stream_i in range(max_stream_count):
-                    dists = [np.linalg.norm(prev_means[stream_i] - cm) for cm in curr_means]
-                    closest_contour = np.argmin(dists)
-                    stream_to_contour.append(closest_contour)
+                    for contour_i in range(curr_count):
+                        dist_matrix[stream_i, contour_i] = np.linalg.norm(prev_means[stream_i] - curr_means[contour_i])
 
-                # Group streams by which contour they map to
+                # Step 1: Ensure each target has at least one source
+                # For each target, assign its closest unassigned source
+                assigned_streams = set()
                 contour_to_streams = [[] for _ in range(curr_count)]
-                for stream_i, contour_i in enumerate(stream_to_contour):
-                    contour_to_streams[contour_i].append(stream_i)
+
+                for contour_i in range(curr_count):
+                    # Find closest unassigned stream to this contour
+                    best_stream = None
+                    best_dist = float('inf')
+                    for stream_i in range(max_stream_count):
+                        if stream_i in assigned_streams:
+                            continue
+                        if dist_matrix[stream_i, contour_i] < best_dist:
+                            best_dist = dist_matrix[stream_i, contour_i]
+                            best_stream = stream_i
+                    if best_stream is not None:
+                        contour_to_streams[contour_i].append(best_stream)
+                        assigned_streams.add(best_stream)
+
+                # Step 2: Assign remaining streams to their closest targets
+                for stream_i in range(max_stream_count):
+                    if stream_i in assigned_streams:
+                        continue
+                    closest_contour = np.argmin(dist_matrix[stream_i])
+                    contour_to_streams[closest_contour].append(stream_i)
+                    assigned_streams.add(stream_i)
+
+                # Build stream_to_contour mapping for consistency
+                stream_to_contour = [None] * max_stream_count
+                for contour_i, streams in enumerate(contour_to_streams):
+                    for stream_i in streams:
+                        stream_to_contour[stream_i] = contour_i
 
                 # Build stream_groups for this level
                 groups = []

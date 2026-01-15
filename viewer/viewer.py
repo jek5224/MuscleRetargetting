@@ -3992,30 +3992,42 @@ class GLFWApp():
             target_level = obj._manual_cut_data['target_level']
             source_level = obj._manual_cut_data['source_level']
 
-            # Compute initial cut line from narrowest neck inside target contour
-            # Find vertex pairs that are far apart on the contour but close in distance
-            if 'initial_line' not in obj._manual_cut_data:
-                n = len(target_2d)
-                min_dist = float('inf')
-                best_i, best_j = None, None
+            # Compute recommended cut line from narrowest neck across all current pieces
+            # Find vertex pairs that are far apart on contour but close in distance
+            def find_narrowest_neck(pieces):
+                """Find narrowest neck across all pieces. Returns (piece_idx, pt0, pt1, indices)."""
+                global_min_dist = float('inf')
+                best_piece_idx = None
+                best_pt0, best_pt1 = None, None
+                best_indices = None
 
-                # For each pair of vertices, check if they could form a narrow neck
-                # Skip adjacent vertices (at least 1/4 of contour length apart in index)
-                min_index_sep = max(3, n // 4)
+                for piece_idx, piece_2d in enumerate(pieces):
+                    n = len(piece_2d)
+                    if n < 6:
+                        continue
+                    min_index_sep = max(3, n // 4)
 
-                for i in range(n):
-                    for j in range(i + min_index_sep, min(i + n - min_index_sep + 1, n)):
-                        v0, v1 = target_2d[i], target_2d[j]
-                        dist = np.linalg.norm(v1 - v0)
-                        if dist < min_dist:
-                            min_dist = dist
-                            best_i, best_j = i, j
+                    for i in range(n):
+                        for j in range(i + min_index_sep, min(i + n - min_index_sep + 1, n)):
+                            v0, v1 = piece_2d[i], piece_2d[j]
+                            dist = np.linalg.norm(v1 - v0)
+                            if dist < global_min_dist:
+                                global_min_dist = dist
+                                best_piece_idx = piece_idx
+                                best_pt0, best_pt1 = v0.copy(), v1.copy()
+                                best_indices = (i, j)
 
-                if best_i is not None and best_j is not None:
-                    best_pt0 = target_2d[best_i].copy()
-                    best_pt1 = target_2d[best_j].copy()
-                    print(f"  Initial cut line: narrowest neck = {min_dist:.6f}")
-                    print(f"    pt0[{best_i}] = {best_pt0}, pt1[{best_j}] = {best_pt1}")
+                return best_piece_idx, best_pt0, best_pt1, best_indices, global_min_dist
+
+            # Find initial line or update recommendation after cuts
+            need_new_recommendation = 'initial_line' not in obj._manual_cut_data
+            if need_new_recommendation:
+                current_pieces = obj._manual_cut_data.get('current_pieces', [target_2d])
+                piece_idx, best_pt0, best_pt1, best_indices, min_dist = find_narrowest_neck(current_pieces)
+
+                if best_pt0 is not None and best_pt1 is not None:
+                    print(f"  Recommended cut line: narrowest neck = {min_dist:.6f} (piece {piece_idx})")
+                    print(f"    pt0[{best_indices[0]}] = {best_pt0}, pt1[{best_indices[1]}] = {best_pt1}")
 
                     # Cut line connects the two neck points, extended slightly for visibility
                     direction = best_pt1 - best_pt0
@@ -4024,9 +4036,11 @@ class GLFWApp():
                         direction = direction / length
                     else:
                         # If points are same, use perpendicular to tangent
-                        prev_i = (best_i - 1) % n
-                        next_i = (best_i + 1) % n
-                        tangent = target_2d[next_i] - target_2d[prev_i]
+                        piece_2d = current_pieces[piece_idx]
+                        n = len(piece_2d)
+                        prev_i = (best_indices[0] - 1) % n
+                        next_i = (best_indices[0] + 1) % n
+                        tangent = piece_2d[next_i] - piece_2d[prev_i]
                         if np.linalg.norm(tangent) > 1e-10:
                             tangent = tangent / np.linalg.norm(tangent)
                             direction = np.array([-tangent[1], tangent[0]])
@@ -4039,12 +4053,15 @@ class GLFWApp():
                     line_start = tuple(best_pt0 - direction * extent)
                     line_end = tuple(best_pt1 + direction * extent)
                     obj._manual_cut_data['initial_line'] = (line_start, line_end)
-                    obj._manual_cut_data['neck_indices'] = (best_i, best_j)
+                    obj._manual_cut_data['neck_indices'] = best_indices
+                    obj._manual_cut_data['neck_piece_idx'] = piece_idx
                     if obj._manual_cut_line is None:
                         obj._manual_cut_line = (line_start, line_end)
 
-            imgui.text(f"Target level: {target_level} (1 contour)")
-            imgui.text(f"Source level: {source_level} ({len(source_2d_list)} contours)")
+            current_pieces = obj._manual_cut_data.get('current_pieces', [target_2d])
+            required_pieces = obj._manual_cut_data.get('required_pieces', 2)
+            imgui.text(f"Target level: {target_level} | Source level: {source_level}")
+            imgui.text(f"Pieces: {len(current_pieces)} / {required_pieces} required")
             imgui.text("Draw a line to cut. Scroll to zoom, middle-drag to pan.")
             imgui.text(f"Zoom: {mouse_state['zoom']:.1f}x")
             imgui.separator()
@@ -4120,15 +4137,27 @@ class GLFWApp():
                               x0 + canvas_size + padding, y0 + canvas_size + padding,
                               imgui.get_color_u32_rgba(0.5, 0.5, 0.5, 1.0))
 
-            # Draw target contour (outline only)
-            colors = [(0.2, 0.6, 1.0), (1.0, 0.4, 0.2)]  # Blue, Orange for cut pieces
-            if len(target_2d) >= 3:
-                target_screen = [to_screen(p, x0, y0, canvas_size) for p in target_2d]
-                # Outline (thick white)
-                for i in range(len(target_screen)):
-                    p1, p2 = target_screen[i], target_screen[(i+1) % len(target_screen)]
-                    draw_list.add_line(p1[0], p1[1], p2[0], p2[1],
-                                      imgui.get_color_u32_rgba(1.0, 1.0, 1.0, 1.0), 3.0)
+            # Draw all current pieces
+            # Colors for different pieces: cycle through these
+            piece_colors = [
+                (1.0, 1.0, 1.0),  # White (first piece / uncut)
+                (0.2, 0.6, 1.0),  # Blue
+                (1.0, 0.4, 0.2),  # Orange
+                (0.2, 1.0, 0.4),  # Green
+                (1.0, 0.8, 0.2),  # Yellow
+                (0.8, 0.2, 1.0),  # Purple
+            ]
+            current_pieces = obj._manual_cut_data.get('current_pieces', [target_2d])
+            required_pieces = obj._manual_cut_data.get('required_pieces', 2)
+
+            for piece_idx, piece_2d in enumerate(current_pieces):
+                if len(piece_2d) >= 3:
+                    piece_screen = [to_screen(p, x0, y0, canvas_size) for p in piece_2d]
+                    color = piece_colors[piece_idx % len(piece_colors)]
+                    for i in range(len(piece_screen)):
+                        p1, p2 = piece_screen[i], piece_screen[(i+1) % len(piece_screen)]
+                        draw_list.add_line(p1[0], p1[1], p2[0], p2[1],
+                                          imgui.get_color_u32_rgba(*color, 1.0), 3.0)
 
 
             # Create invisible button to capture mouse input (prevents window dragging)
@@ -4235,36 +4264,62 @@ class GLFWApp():
                             draw_list.add_line(pt1[0], pt1[1], pt2[0], pt2[1],
                                               imgui.get_color_u32_rgba(colors[1][0], colors[1][1], colors[1][2], 1.0), 2.5)
 
-            # OK, Reset, and Cancel buttons
+            # Buttons: Next Cut, OK, Reset, Cancel
             imgui.separator()
-            button_width = 100
+            button_width = 80
+
+            current_pieces = obj._manual_cut_data.get('current_pieces', [target_2d])
+            required_pieces = obj._manual_cut_data.get('required_pieces', 2)
+            need_more_cuts = len(current_pieces) < required_pieces
+
+            # Next Cut button - apply current line and continue
+            if need_more_cuts and obj._manual_cut_line is not None:
+                if imgui.button("Next Cut", button_width, 30):
+                    # Apply cut to current pieces and update
+                    success = obj._apply_iterative_cut()
+                    if success:
+                        # Clear line and recommendation for next cut
+                        obj._manual_cut_line = None
+                        if 'initial_line' in obj._manual_cut_data:
+                            del obj._manual_cut_data['initial_line']
+                        print(f"Cut applied. Pieces: {len(obj._manual_cut_data['current_pieces'])} / {required_pieces}")
+                    else:
+                        print("Failed to apply cut - line must cross a piece twice")
+                imgui.same_line()
+
+            # OK button - only enabled when we have enough pieces
+            ok_enabled = len(current_pieces) >= required_pieces
+            if not ok_enabled:
+                imgui.push_style_var(imgui.STYLE_ALPHA, 0.5)
 
             if imgui.button("OK", button_width, 30):
-                if obj._manual_cut_line is not None:
-                    # Apply the manual cut
-                    cut_result = obj._apply_manual_cut()
+                if ok_enabled:
+                    # Finalize all cuts
+                    cut_result = obj._finalize_manual_cuts()
                     if cut_result is not None:
-                        print(f"Manual cut applied successfully")
-                        # Reset state and continue with cut_streams
+                        print(f"Manual cuts finalized successfully")
                         obj._manual_cut_pending = False
-                        # Call cut_streams again to continue with COMMON mode
                         obj.cut_streams(cut_method='bp', muscle_name=muscle_name)
-                        # Apply smoothening after streams are found
                         if hasattr(obj, 'stream_bounding_planes') and obj.stream_bounding_planes is not None:
                             print(f"[{muscle_name}] Applying smoothening...")
                             obj.smoothen_contours_z()
                             obj.smoothen_contours_x()
                             obj.smoothen_contours_bp()
-                    else:
-                        print("Failed to apply manual cut - draw a line that crosses the contour twice")
                 else:
-                    print("Please draw a cutting line first")
+                    print(f"Need {required_pieces - len(current_pieces)} more cut(s)")
+
+            if not ok_enabled:
+                imgui.pop_style_var()
 
             imgui.same_line()
             if imgui.button("Reset", button_width, 30):
-                # Reset to initial line and view
+                # Reset all cuts and view
+                obj._manual_cut_data['current_pieces'] = [target_2d.copy()]
+                obj._manual_cut_data['current_pieces_3d'] = [obj._manual_cut_data['target_contour'].copy()]
+                obj._manual_cut_data['cut_lines'] = []
                 if 'initial_line' in obj._manual_cut_data:
-                    obj._manual_cut_line = obj._manual_cut_data['initial_line']
+                    del obj._manual_cut_data['initial_line']
+                obj._manual_cut_line = None
                 if name in self._manual_cut_mouse:
                     self._manual_cut_mouse[name]['dragging'] = False
                     self._manual_cut_mouse[name]['zoom'] = 1.0
