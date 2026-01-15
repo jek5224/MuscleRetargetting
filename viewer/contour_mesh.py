@@ -1881,10 +1881,10 @@ class ContourMeshMixin:
         if len(self.bounding_planes) < 2:
             return
 
-        # First, refine transition points where contour count changes
-        self._refine_transition_points()
+        # NOTE: Transition point refinement is now handled separately by find_all_transitions()
+        # This function only handles gap-filling (adding contours where spacing is too large)
 
-        print(f"\n=== Contour Refinement Pass ===")
+        print(f"\n=== Contour Gap-Filling Pass ===")
         print(f"Max spacing threshold: {max_spacing_threshold}")
         print(f"Number of contour levels: {len(self.bounding_planes)}")
 

@@ -1884,7 +1884,7 @@ class GLFWApp():
                         imgui.set_column_width(0, 120)
 
                         # Left column: Process button with vertical slider
-                        num_process_buttons = 8
+                        num_process_buttons = 12  # Taller to accommodate more buttons on right
                         process_all_height = num_process_buttons * imgui.get_frame_height() + (num_process_buttons - 1) * imgui.get_style().item_spacing[1]
 
                         # Initialize process step slider value
@@ -1896,8 +1896,8 @@ class GLFWApp():
                             f"##step{name}", 20, process_all_height, obj._process_step, 8, 1)
                         imgui.same_line()
 
-                        # Process button
-                        step_names = ['', 'Scalar', 'Contours', 'Refine', 'Smooth', 'Streams', 'Resample', 'Mesh', 'Tet']
+                        # Process button (Find Transitions is separate - use that button manually)
+                        step_names = ['', 'Scalar', 'Contours', 'Fill Gap', 'Smooth', 'Streams', 'Resample', 'Mesh', 'Tet']
                         if imgui.button(f"Process\nto {obj._process_step}\n({step_names[obj._process_step]})##{name}", width=75, height=process_all_height):
                             try:
                                 max_step = obj._process_step
@@ -1914,9 +1914,9 @@ class GLFWApp():
                                     obj.find_contours(skeleton_meshes=self.zygote_skeleton_meshes, spacing_scale=obj.contour_spacing_scale)
                                     obj.is_draw_bounding_box = True
 
-                                # Step 3: Refine Contours
+                                # Step 3: Fill Gaps (add contours where spacing is too large)
                                 if max_step >= 3 and obj.contours is not None and len(obj.contours) > 0:
-                                    print(f"  [3/{max_step}] Refining Contours...")
+                                    print(f"  [3/{max_step}] Filling Gaps...")
                                     obj.refine_contours(max_spacing_threshold=0.01)
 
                                 # Step 4: Smoothen Contours
@@ -1988,12 +1988,12 @@ class GLFWApp():
                                     print(f"[{name}] Find Contours error: {e}")
                             else:
                                 print(f"[{name}] Prerequisites: Run 'Scalar Field' first")
-                        if colored_button(f"Refine Contours##{name}", 3, col_button_width):
+                        if colored_button(f"Fill Gaps##{name}", 3, col_button_width):
                             if obj.contours is not None and len(obj.contours) > 0:
                                 try:
                                     obj.refine_contours(max_spacing_threshold=0.01)
                                 except Exception as e:
-                                    print(f"[{name}] Refine Contours error: {e}")
+                                    print(f"[{name}] Fill Gaps error: {e}")
                             else:
                                 print(f"[{name}] Prerequisites: Run 'Find Contours' first")
 
