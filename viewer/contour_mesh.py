@@ -1609,9 +1609,20 @@ class ContourMeshMixin:
                             target_contours_2d.append(c_2d)
 
                     # Project source contours (ORIGINAL from large_level, for visualization only)
+                    # First project source vertices ONTO the target plane, then to 2D
                     for c in original_large_contours:
-                        c_2d = np.array([[np.dot(p - mean, u), np.dot(p - mean, v)] for p in c])
-                        source_contours_2d.append(c_2d)
+                        c_2d = []
+                        for p in c:
+                            # Project point onto target plane (along normal direction)
+                            diff = p - mean
+                            dist_along_normal = np.dot(diff, normal)
+                            p_on_plane = p - dist_along_normal * normal
+                            # Now convert to 2D
+                            diff_on_plane = p_on_plane - mean
+                            x = np.dot(diff_on_plane, u)
+                            y = np.dot(diff_on_plane, v)
+                            c_2d.append([x, y])
+                        source_contours_2d.append(np.array(c_2d))
 
                 self._neck_viz_data.append({
                     'large_count': large_count,
@@ -6084,18 +6095,25 @@ class ContourMeshMixin:
             print(f"  max: [{t2d_max[0]:.6f}, {t2d_max[1]:.6f}]")
             print(f"  range: [{t2d_range[0]:.6f}, {t2d_range[1]:.6f}]")
 
-        # Project source contours to 2D (each in its own coordinate frame, then transformed)
+        # Project source contours to 2D (project onto target plane first, then to 2D)
+        target_z = target_bp['basis_z']  # Normal to target plane
         source_2d_list = []
         for i, (src_contour, src_bp) in enumerate(zip(source_contours, source_bps)):
             src_contour = np.array(src_contour)
-            src_mean = src_bp['mean']
 
-            # Project source vertices to target's 2D frame
-            src_2d = np.array([
-                [np.dot(v - target_mean, target_x), np.dot(v - target_mean, target_y)]
-                for v in src_contour
-            ])
-            source_2d_list.append(src_2d)
+            # Project source vertices ONTO target plane, then to 2D
+            src_2d = []
+            for v in src_contour:
+                # Project onto target plane (along normal direction)
+                diff = v - target_mean
+                dist_along_normal = np.dot(diff, target_z)
+                v_on_plane = v - dist_along_normal * target_z
+                # Convert to 2D
+                diff_on_plane = v_on_plane - target_mean
+                x = np.dot(diff_on_plane, target_x)
+                y = np.dot(diff_on_plane, target_y)
+                src_2d.append([x, y])
+            source_2d_list.append(np.array(src_2d))
 
         # Store all data for the manual cutting window
         self._manual_cut_data = {
