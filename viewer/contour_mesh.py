@@ -6956,7 +6956,10 @@ class ContourMeshMixin:
         contour_count_varies = len(set(all_counts)) > 1
         if cut_method == 'bp' and max_stream_count >= 2 and contour_count_varies:
             # Check if we need to open manual cutting window
-            if not self._manual_cut_pending and self._manual_cut_data is None:
+            # Skip _prepare_manual_cut_data if we have results in _manual_cut_results
+            # (means we're resuming after a mid-processing cut was completed)
+            has_manual_results = hasattr(self, '_manual_cut_results') and self._manual_cut_results and len(self._manual_cut_results) > 0
+            if not self._manual_cut_pending and self._manual_cut_data is None and not has_manual_results:
                 # Prepare data for manual cutting and open window
                 needs_manual = self._prepare_manual_cut_data(muscle_name)
                 if needs_manual:
@@ -6967,6 +6970,8 @@ class ContourMeshMixin:
                 # Still waiting for user to finish drawing
                 print("Manual cutting in progress - waiting for user to confirm")
                 return
+            elif has_manual_results:
+                print(f"Resuming cut_streams with {len(self._manual_cut_results)} manual cut results")
 
         # Get contour counts per level
         contour_counts = [len(self.contours[i]) for i in range(num_levels)]
