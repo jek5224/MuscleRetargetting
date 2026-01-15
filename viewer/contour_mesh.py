@@ -5803,6 +5803,7 @@ class ContourMeshMixin:
             'source_bps': source_bps,
             'source_2d_list': source_2d_list,
             'stream_indices': source_indices,  # Use actual source indices
+            'source_labels': list(range(len(source_indices))),  # Original source indices for display
             'process_forward': process_forward,
             # For iterative cutting: K pieces needed, track current pieces
             'required_pieces': len(source_indices),  # Number of pieces needed = number of sources
@@ -5811,6 +5812,8 @@ class ContourMeshMixin:
             'current_pieces_3d': [target_contour.copy()],  # 3D versions for final result
             'cut_lines': [],  # List of applied cut lines
         }
+        # Save original state for full reset
+        self._manual_cut_original_state = copy.deepcopy(self._manual_cut_data)
 
         # Set pending flag to open the window
         self._manual_cut_pending = True
@@ -5975,6 +5978,7 @@ class ContourMeshMixin:
             'source_bps': source_bps,
             'source_2d_list': source_2d_list,
             'stream_indices': list(streams_for_contour),
+            'source_labels': list(range(len(streams_for_contour))),  # Original source indices for display
             'process_forward': True,  # Direction doesn't matter at this point
             'required_pieces': len(streams_for_contour),
             'selected_sources': list(range(len(streams_for_contour))),  # All sources selected by default
@@ -5984,6 +5988,8 @@ class ContourMeshMixin:
             'from_cut_streams': True,  # Flag to indicate this came from mid-processing
             'is_common_mode': is_common_mode,  # Track mode for UI display
         }
+        # Save original state for full reset
+        self._manual_cut_original_state = copy.deepcopy(self._manual_cut_data)
 
         # Set pending flag to open the window
         self._manual_cut_pending = True
@@ -6475,6 +6481,22 @@ class ContourMeshMixin:
         print(f"Iterative cut: piece {cut_piece_idx} -> 2 pieces, total now {len(new_pieces)}")
         return True
 
+    def _reset_to_original_state(self):
+        """
+        Reset manual cutting to the original state (before any cuts or sub-windows).
+
+        Restores the initial 3->1 (or M->N) state saved when the window was first opened.
+        """
+        if not hasattr(self, '_manual_cut_original_state') or self._manual_cut_original_state is None:
+            print("[Reset] No original state saved")
+            return False
+
+        import copy
+        self._manual_cut_data = copy.deepcopy(self._manual_cut_original_state)
+        self._manual_cut_line = None
+        print("[Reset] Restored to original state")
+        return True
+
     def _init_piece_assignments_by_distance(self):
         """
         Initialize piece assignments based on centroid distance.
@@ -6591,6 +6613,8 @@ class ContourMeshMixin:
         stream_indices = self._manual_cut_data.get('stream_indices', [])
         matched_pairs = self._manual_cut_data.get('matched_pairs', [])
         pending_subcuts = self._manual_cut_data.get('pending_subcuts', [])
+        # Get current source labels (original indices for display)
+        current_source_labels = self._manual_cut_data.get('source_labels', list(range(len(source_contours))))
 
         if piece_idx >= len(current_pieces_3d):
             print(f"[SubCut] Invalid piece index {piece_idx}")
@@ -6605,11 +6629,15 @@ class ContourMeshMixin:
         parent_finalized = self._manual_cut_data.get('parent_finalized_pieces', {})
         for p_idx, s_idx in matched_pairs:
             if p_idx < len(current_pieces_3d):
-                parent_finalized[s_idx] = current_pieces_3d[p_idx]
+                # s_idx is local, map to original using source_labels
+                orig_s_idx = current_source_labels[s_idx] if s_idx < len(current_source_labels) else s_idx
+                parent_finalized[orig_s_idx] = current_pieces_3d[p_idx]
         self._manual_cut_data['parent_finalized_pieces'] = parent_finalized
 
         # Map from new local source index to original source index
-        original_source_indices = list(assigned_sources)
+        # Use current_source_labels to get the true original indices
+        original_source_indices = [current_source_labels[s] if s < len(current_source_labels) else s
+                                   for s in assigned_sources]
         self._manual_cut_data['original_source_indices'] = original_source_indices
 
         # Get source data for assigned sources only
@@ -6617,6 +6645,9 @@ class ContourMeshMixin:
         new_source_bps = [source_bps[s] for s in assigned_sources]
         new_source_2d_list = [source_2d_list[s] for s in assigned_sources]
         new_stream_indices = [stream_indices[s] for s in assigned_sources]
+
+        # Create new source labels from original indices
+        new_source_labels = original_source_indices.copy()
 
         # Remove this subcut from pending list
         new_pending = [s for s in pending_subcuts if s['piece_idx'] != piece_idx]
@@ -6634,6 +6665,7 @@ class ContourMeshMixin:
         self._manual_cut_data['source_bps'] = new_source_bps
         self._manual_cut_data['source_2d_list'] = new_source_2d_list
         self._manual_cut_data['stream_indices'] = new_stream_indices
+        self._manual_cut_data['source_labels'] = new_source_labels  # Original indices for display
 
         # Update requirements
         self._manual_cut_data['required_pieces'] = len(assigned_sources)
@@ -6647,7 +6679,7 @@ class ContourMeshMixin:
         # Clear cutting line
         self._manual_cut_line = None
 
-        print(f"[SubCut] Opened sub-window: {len(assigned_sources)} sources -> piece {piece_idx}")
+        print(f"[SubCut] Opened sub-window: sources {original_source_indices} -> piece {piece_idx}")
 
     def _finalize_manual_cuts(self):
         """

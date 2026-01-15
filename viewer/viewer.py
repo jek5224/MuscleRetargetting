@@ -4252,6 +4252,7 @@ class GLFWApp():
             source_contours_3d = obj._manual_cut_data.get('source_contours', [])
             source_bps = obj._manual_cut_data.get('source_bps', [])
             selected_sources = obj._manual_cut_data.get('selected_sources', list(range(len(source_contours_3d))))
+            source_labels = obj._manual_cut_data.get('source_labels', list(range(len(source_contours_3d))))
 
             if 'source_view_idx' in mouse_state and len(source_contours_3d) > 0:
                 src_idx = mouse_state.get('source_view_idx', 0)
@@ -4300,10 +4301,11 @@ class GLFWApp():
                         if not is_selected:
                             draw_list.add_line(cx - 4, cy - 4, cx + 4, cy + 4, imgui.get_color_u32_rgba(1.0, 0.3, 0.3, 0.8), 2)
                             draw_list.add_line(cx - 4, cy + 4, cx + 4, cy - 4, imgui.get_color_u32_rgba(1.0, 0.3, 0.3, 0.8), 2)
-                        # Add source label near centroid
+                        # Add source label near centroid (use original index from source_labels)
+                        src_label = source_labels[src_idx] if src_idx < len(source_labels) else src_idx
                         draw_list.add_text(cx + 10, cy + 5,
                                           imgui.get_color_u32_rgba(*src_color, 1.0),
-                                          f"Source {src_idx} (Lv.{source_level})")
+                                          f"Source {src_label} (Lv.{source_level})")
 
             # Create invisible button to capture mouse input (prevents window dragging)
             imgui.set_cursor_screen_pos((x0 - padding, y0 - padding))
@@ -4522,10 +4524,11 @@ class GLFWApp():
                     if imgui.button(f">##{name}_src_next", 30, 25):
                         mouse_state['source_view_idx'] = min(len(source_contours_3d) - 1, src_idx + 1)
 
-                # Show source index label
+                # Show source index label (use original index from source_labels)
                 imgui.set_cursor_screen_pos((src_panel_x, nav_y + 30))
                 src_label_color = piece_colors[src_idx % len(piece_colors)]
-                imgui.text_colored(f"Source {src_idx + 1} / {len(source_contours_3d)}", *src_label_color, 1.0)
+                src_orig_label = source_labels[src_idx] if src_idx < len(source_labels) else src_idx
+                imgui.text_colored(f"Source {src_orig_label} ({src_idx + 1}/{len(source_contours_3d)})", *src_label_color, 1.0)
 
                 # Checkbox to include/exclude this source
                 imgui.set_cursor_screen_pos((src_panel_x, nav_y + 50))
@@ -4537,7 +4540,7 @@ class GLFWApp():
                 selected_sources = obj._manual_cut_data['selected_sources']
                 is_selected = src_idx in selected_sources
 
-                changed, new_selected = imgui.checkbox(f"Include Source {src_idx + 1}##{name}", is_selected)
+                changed, new_selected = imgui.checkbox(f"Include S{src_orig_label}##{name}", is_selected)
                 if changed:
                     if new_selected and src_idx not in selected_sources:
                         selected_sources.append(src_idx)
@@ -4758,6 +4761,9 @@ class GLFWApp():
                     (0.8, 0.2, 1.0),  # Purple
                 ]
 
+                # Get source labels (original indices for display)
+                source_labels = obj._manual_cut_data.get('source_labels', list(range(len(source_contours_3d))))
+
                 # Show each piece with source checkboxes
                 for piece_idx in range(len(current_pieces)):
                     assigned = piece_assignments.get(piece_idx, [])
@@ -4772,10 +4778,12 @@ class GLFWApp():
                     imgui.text("->")
                     imgui.same_line()
 
-                    # Checkboxes for each source
+                    # Checkboxes for each source (use original labels for display)
                     for src_idx in range(len(source_contours_3d)):
                         is_assigned = src_idx in assigned
-                        changed, new_val = imgui.checkbox(f"S{src_idx}##p{piece_idx}", is_assigned)
+                        # Display original source index from source_labels
+                        src_label = source_labels[src_idx] if src_idx < len(source_labels) else src_idx
+                        changed, new_val = imgui.checkbox(f"S{src_label}##p{piece_idx}", is_assigned)
                         if changed:
                             if new_val:
                                 # Add source to this piece, remove from others
@@ -4856,13 +4864,8 @@ class GLFWApp():
 
             imgui.same_line()
             if imgui.button("Reset", button_width, 30):
-                # Reset all cuts and view
-                obj._manual_cut_data['current_pieces'] = [target_2d.copy()]
-                obj._manual_cut_data['current_pieces_3d'] = [obj._manual_cut_data['target_contour'].copy()]
-                obj._manual_cut_data['cut_lines'] = []
-                if 'initial_line' in obj._manual_cut_data:
-                    del obj._manual_cut_data['initial_line']
-                obj._manual_cut_line = None
+                # Reset to original state (before any cuts or sub-windows)
+                obj._reset_to_original_state()
                 if name in self._manual_cut_mouse:
                     self._manual_cut_mouse[name]['dragging'] = False
                     self._manual_cut_mouse[name]['zoom'] = 1.0
