@@ -4260,14 +4260,14 @@ class GLFWApp():
                         for i in range(len(p0_screen)):
                             p1, p2 = p0_screen[i], p0_screen[(i+1) % len(p0_screen)]
                             draw_list.add_line(p1[0], p1[1], p2[0], p2[1],
-                                              imgui.get_color_u32_rgba(colors[0][0], colors[0][1], colors[0][2], 1.0), 2.5)
+                                              imgui.get_color_u32_rgba(piece_colors[0][0], piece_colors[0][1], piece_colors[0][2], 1.0), 2.5)
                     # Draw piece 1 (color 1)
                     if len(piece1_2d) >= 3:
                         p1_screen = [to_screen(p, x0, y0, canvas_size) for p in piece1_2d]
                         for i in range(len(p1_screen)):
                             pt1, pt2 = p1_screen[i], p1_screen[(i+1) % len(p1_screen)]
                             draw_list.add_line(pt1[0], pt1[1], pt2[0], pt2[1],
-                                              imgui.get_color_u32_rgba(colors[1][0], colors[1][1], colors[1][2], 1.0), 2.5)
+                                              imgui.get_color_u32_rgba(piece_colors[1][0], piece_colors[1][1], piece_colors[1][2], 1.0), 2.5)
 
             # Buttons: Next Cut, OK, Reset, Cancel
             imgui.separator()
