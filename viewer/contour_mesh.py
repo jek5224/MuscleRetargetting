@@ -780,6 +780,27 @@ class ContourMeshMixin:
                     break
                 iteration += 1
 
+            # Also walk backward from start to complete the contour
+            iteration = 0
+            while len(ordered_edge_group) < len(contour_edge_groups[i]) and iteration < max_iterations:
+                current = ordered_edge_group[0]
+                neighbors = adjacency.get(current, [])
+                found = False
+                for neighbor in neighbors:
+                    if neighbor not in visited:
+                        ordered_edge_group.insert(0, neighbor)
+                        visited.add(neighbor)
+                        found = True
+                        break
+                if not found:
+                    break
+                iteration += 1
+
+            # Log if we couldn't complete the contour (may indicate branches/gaps)
+            if len(ordered_edge_group) < len(contour_edge_groups[i]):
+                missing = len(contour_edge_groups[i]) - len(ordered_edge_group)
+                print(f"  [find_contour] Note: Contour walk incomplete ({len(ordered_edge_group)}/{len(contour_edge_groups[i])} vertices, {missing} missing)")
+
             ordered_contour_edge_groups.append(ordered_edge_group)
 
         ordered_contour_vertices = []
