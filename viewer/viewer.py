@@ -4848,13 +4848,15 @@ class GLFWApp():
                         obj._open_subcut_for_piece(pending_subcuts[0])
                     else:
                         # All done - finalize
+                        # Extract values BEFORE finalize in case it modifies _manual_cut_data
+                        target_level = obj._manual_cut_data.get('target_level', 0)
+                        target_i = obj._manual_cut_data.get('target_i', 0)
+                        stream_indices = obj._manual_cut_data.get('stream_indices', [])
+
                         cut_result, _ = obj._finalize_manual_cuts()
                         if cut_result is not None:
                             # CRITICAL: Store result in _manual_cut_results before calling cut_streams
                             # Otherwise cut_streams can't find the result and prepares wrong data
-                            target_level = obj._manual_cut_data.get('target_level', 0)
-                            target_i = obj._manual_cut_data.get('target_i', 0)
-                            stream_indices = obj._manual_cut_data.get('stream_indices', [])
 
                             if not hasattr(obj, '_manual_cut_results') or obj._manual_cut_results is None:
                                 obj._manual_cut_results = {}
