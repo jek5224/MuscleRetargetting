@@ -1572,25 +1572,27 @@ class ContourMeshMixin:
                 best_small_contours = narrowest_contours
                 best_small_planes = narrowest_planes
 
-                # DEBUG: Check types
-                print(f"    [DEBUG] narrowest_planes type: {type(narrowest_planes)}, len: {len(narrowest_planes) if hasattr(narrowest_planes, '__len__') else 'N/A'}")
+                # DEBUG: Check types - using flush to ensure output before crash
+                import sys
+                print(f"    [DEBUG] narrowest_planes type: {type(narrowest_planes)}, len: {len(narrowest_planes) if hasattr(narrowest_planes, '__len__') else 'N/A'}"); sys.stdout.flush()
                 if narrowest_planes and len(narrowest_planes) > 0:
-                    print(f"    [DEBUG] narrowest_planes[0] type: {type(narrowest_planes[0])}")
+                    print(f"    [DEBUG] narrowest_planes[0] type: {type(narrowest_planes[0])}"); sys.stdout.flush()
+                print(f"    [DEBUG] Point A"); sys.stdout.flush()
 
                 # Store neck visualization data
-                # Target = narrowest neck contour (merged, before division)
-                # Source = ORIGINAL contours from large_level (for visualization only, not inserted)
                 target_contours_2d = []
                 source_contours_2d = []
+                print(f"    [DEBUG] Point B"); sys.stdout.flush()
 
                 # Use ORIGINAL contours from large_level for source visualization
-                # These are the existing contours right after division - don't generate new ones
-                print(f"    [DEBUG] t['large_level'] = {t['large_level']}")
+                print(f"    [DEBUG] t['large_level'] = {t['large_level']}"); sys.stdout.flush()
                 original_large_contours = self.contours[t['large_level']]
+                print(f"    [DEBUG] Point C"); sys.stdout.flush()
                 original_large_planes = self.bounding_planes[t['large_level']]
-                print(f"    [DEBUG] original_large_planes type: {type(original_large_planes)}, len: {len(original_large_planes)}")
+                print(f"    [DEBUG] Point D - original_large_planes type: {type(original_large_planes)}, len: {len(original_large_planes)}"); sys.stdout.flush()
                 if original_large_planes and len(original_large_planes) > 0:
-                    print(f"    [DEBUG] original_large_planes[0] type: {type(original_large_planes[0])}")
+                    print(f"    [DEBUG] original_large_planes[0] type: {type(original_large_planes[0])}"); sys.stdout.flush()
+                print(f"    [DEBUG] Point E"); sys.stdout.flush()
 
                 # Create projection basis using the narrowest neck plane
                 bp_ref = None
