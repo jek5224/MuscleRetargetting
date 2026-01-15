@@ -4583,18 +4583,27 @@ class GLFWApp():
             imgui.separator()
             button_width = 80
 
-            # Optimize button - run automatic optimization to get cutting line
+            # Optimize button - run automatic optimization on current pieces
+            # Can be used after manual cuts to optimize remaining subdivisions
             if num_selected >= 2:
-                if imgui.button("Optimize", button_width, 30):
-                    print(f"Running automatic optimization for cutting line...")
+                # Show different label based on whether manual cuts have been made
+                num_current_pieces = len(current_pieces)
+                if num_current_pieces > 1:
+                    opt_label = f"Opt Rest ({num_current_pieces}→{required_pieces})"
+                else:
+                    opt_label = "Optimize"
+
+                if imgui.button(opt_label, button_width + 20, 30):
+                    print(f"Running optimization on {num_current_pieces} current pieces → {required_pieces} needed...")
+
                     # Get source data
                     source_contours = obj._manual_cut_data.get('source_contours', [])
                     source_bps = obj._manual_cut_data.get('source_bps', [])
-                    target_contour = obj._manual_cut_data.get('target_contour')
                     target_bp = obj._manual_cut_data.get('target_bp')
                     stream_indices = obj._manual_cut_data.get('stream_indices', list(range(len(source_contours))))
                     target_level = obj._manual_cut_data.get('target_level')
                     source_level = obj._manual_cut_data.get('source_level')
+                    current_pieces_3d = obj._manual_cut_data.get('current_pieces_3d', [obj._manual_cut_data.get('target_contour')])
 
                     # Filter by selected sources
                     selected_source_contours = [source_contours[i] for i in selected_sources if i < len(source_contours)]
@@ -4602,29 +4611,27 @@ class GLFWApp():
                     selected_stream_indices = [stream_indices[i] for i in selected_sources if i < len(stream_indices)]
 
                     if len(selected_source_contours) >= 2:
-                        # Run bp transform optimization
-                        cut_contours, cutting_info = obj._cut_contour_bp_transform(
-                            target_contour, target_bp,
+                        # Optimize remaining pieces
+                        final_pieces = obj._optimize_remaining_pieces(
+                            current_pieces_3d,
                             selected_source_contours, selected_source_bps,
-                            selected_stream_indices,
-                            is_first_division=False,  # Use COMMON mode optimization
-                            target_level=target_level,
-                            source_level=source_level
+                            selected_stream_indices, target_bp,
+                            target_level, source_level
                         )
 
-                        if cut_contours is not None and len(cut_contours) >= 2:
-                            # Store result directly
+                        if final_pieces is not None and len(final_pieces) >= required_pieces:
+                            # Store result
                             if not hasattr(obj, '_manual_cut_results') or obj._manual_cut_results is None:
                                 obj._manual_cut_results = {}
 
                             target_i = obj._manual_cut_data.get('target_i', 0)
                             result_key = (target_level, target_i)
                             obj._manual_cut_results[result_key] = {
-                                'cut_contours': cut_contours,
+                                'cut_contours': final_pieces,
                                 'source_indices': selected_stream_indices,
                                 'is_1to1': False,
                             }
-                            print(f"Optimization complete: {len(cut_contours)} pieces stored")
+                            print(f"Optimization complete: {len(final_pieces)} pieces stored")
 
                             # Close window and continue
                             obj._manual_cut_pending = False

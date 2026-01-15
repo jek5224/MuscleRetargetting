@@ -7552,6 +7552,163 @@ class ContourMeshMixin:
 
         return new_contours
 
+    def _optimize_remaining_pieces(self, current_pieces_3d, source_contours, source_bps,
+                                    stream_indices, target_bp, target_level, source_level):
+        """
+        Optimize remaining pieces after manual cuts.
+
+        Takes current pieces (some may have been manually cut) and optimizes
+        further subdivision as needed to match the number of sources.
+
+        Workflow:
+        1. Assign sources to pieces by distance (centroid matching)
+        2. For any piece with multiple sources, use BP transform to subdivide
+        3. Return final list of pieces matching sources
+
+        Args:
+            current_pieces_3d: List of 3D contour pieces (after manual cuts)
+            source_contours: Source contours to match
+            source_bps: Source bounding planes
+            stream_indices: Stream indices for sources
+            target_bp: Target bounding plane
+            target_level: Target level index
+            source_level: Source level index
+
+        Returns:
+            List of final cut contours, one per source
+        """
+        import numpy as np
+
+        num_pieces = len(current_pieces_3d)
+        num_sources = len(source_contours)
+
+        print(f"[Optimize Remaining] {num_pieces} pieces → {num_sources} sources needed")
+
+        if num_pieces >= num_sources:
+            # Already have enough pieces, just return them matched by distance
+            return self._match_pieces_to_sources(current_pieces_3d, source_contours, source_bps)
+
+        # Compute piece centroids
+        piece_centroids = [np.mean(p, axis=0) for p in current_pieces_3d]
+
+        # Compute source centroids (projected onto target plane)
+        target_mean = target_bp['mean']
+        target_z = target_bp['basis_z']
+        source_centroids = []
+        for src in source_contours:
+            src_centroid = np.mean(src, axis=0)
+            # Project to target plane
+            projected = src_centroid - np.dot(src_centroid - target_mean, target_z) * target_z
+            source_centroids.append(projected)
+
+        # Assign sources to pieces by distance
+        # Each source goes to its closest piece
+        piece_to_sources = [[] for _ in range(num_pieces)]
+        for src_i, src_centroid in enumerate(source_centroids):
+            min_dist = float('inf')
+            best_piece = 0
+            for p_i, piece_centroid in enumerate(piece_centroids):
+                dist = np.linalg.norm(src_centroid - piece_centroid)
+                if dist < min_dist:
+                    min_dist = dist
+                    best_piece = p_i
+            piece_to_sources[best_piece].append(src_i)
+
+        print(f"[Optimize Remaining] Source assignments: {piece_to_sources}")
+
+        # Build final pieces list
+        final_pieces = []
+
+        for piece_i, assigned_sources in enumerate(piece_to_sources):
+            piece_3d = current_pieces_3d[piece_i]
+
+            if len(assigned_sources) == 0:
+                # No sources assigned to this piece - keep it anyway
+                final_pieces.append(piece_3d)
+            elif len(assigned_sources) == 1:
+                # One source - no further cutting needed
+                final_pieces.append(piece_3d)
+            else:
+                # Multiple sources - need to subdivide this piece
+                print(f"[Optimize Remaining] Piece {piece_i} has {len(assigned_sources)} sources - subdividing")
+
+                # Get the sources assigned to this piece
+                sub_source_contours = [source_contours[s] for s in assigned_sources]
+                sub_source_bps = [source_bps[s] for s in assigned_sources]
+                sub_stream_indices = [stream_indices[s] for s in assigned_sources]
+
+                # Create a temporary bounding plane for this piece
+                piece_bp = self.save_bounding_planes(piece_3d, target_bp.get('scalar_value', 0), prev_bounding_plane=target_bp)[1]
+
+                # Run optimization on this piece
+                sub_pieces, _ = self._cut_contour_bp_transform(
+                    piece_3d, piece_bp,
+                    sub_source_contours, sub_source_bps, sub_stream_indices,
+                    is_first_division=False,
+                    target_level=target_level, source_level=source_level
+                )
+
+                if sub_pieces is not None:
+                    final_pieces.extend(sub_pieces)
+                else:
+                    # Optimization failed - just use the original piece
+                    print(f"[Optimize Remaining] Subdivision failed for piece {piece_i}, using original")
+                    final_pieces.append(piece_3d)
+
+        print(f"[Optimize Remaining] Final: {len(final_pieces)} pieces")
+        return final_pieces
+
+    def _match_pieces_to_sources(self, pieces_3d, source_contours, source_bps):
+        """
+        Match pieces to sources by centroid distance.
+
+        Returns pieces reordered to match source order.
+        """
+        import numpy as np
+        from scipy.optimize import linear_sum_assignment
+
+        num_pieces = len(pieces_3d)
+        num_sources = len(source_contours)
+
+        if num_pieces == 0 or num_sources == 0:
+            return pieces_3d
+
+        # Compute centroids
+        piece_centroids = [np.mean(p, axis=0) for p in pieces_3d]
+        source_centroids = [np.mean(s, axis=0) for s in source_contours]
+
+        # Build cost matrix
+        n = max(num_pieces, num_sources)
+        cost_matrix = np.full((n, n), 1e10)
+        for i in range(num_pieces):
+            for j in range(num_sources):
+                cost_matrix[i, j] = np.linalg.norm(piece_centroids[i] - source_centroids[j])
+
+        # Solve assignment
+        row_ind, col_ind = linear_sum_assignment(cost_matrix)
+
+        # Reorder pieces to match sources
+        matched_pieces = [None] * num_sources
+        for p_i, s_i in zip(row_ind, col_ind):
+            if p_i < num_pieces and s_i < num_sources:
+                matched_pieces[s_i] = pieces_3d[p_i]
+
+        # Fill any None with closest unassigned piece
+        used = set(row_ind[:num_pieces])
+        for s_i in range(num_sources):
+            if matched_pieces[s_i] is None:
+                # Find any available piece
+                for p_i in range(num_pieces):
+                    if p_i not in used:
+                        matched_pieces[s_i] = pieces_3d[p_i]
+                        used.add(p_i)
+                        break
+                # If still None, use first piece
+                if matched_pieces[s_i] is None and num_pieces > 0:
+                    matched_pieces[s_i] = pieces_3d[0]
+
+        return matched_pieces
+
     def _cut_contour_bp_transform(self, target_contour, target_bp, source_contours, source_bps, stream_indices, is_first_division=True, target_level=None, source_level=None):
         """
         Cut a contour using bounding plane transformation and optimization.
