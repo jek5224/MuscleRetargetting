@@ -1354,11 +1354,11 @@ class ContourMeshMixin:
                 1. Close in Euclidean distance (the neck width)
                 2. Far apart on the contour path (they're on opposite sides)
 
-                We use multiple metrics:
-                - neck_ratio = euclidean_dist / geodesic_dist (lower = more pinched)
-                - path_balance = how evenly the neck divides the contour (closer to 0.5 = better)
+                Primary metric: actual neck WIDTH (smaller = better)
+                Secondary: path balance (closer to 0.5 = better)
 
-                Returns (neck_score, neck_width, neck_point1, neck_point2) or (inf, inf, None, None) if no neck found.
+                Returns (neck_width, neck_score, neck_point1, neck_point2) or (inf, inf, None, None) if no neck found.
+                Note: Returns width FIRST for easier comparison.
                 """
                 if contour is None or len(contour) < 8:
                     return float('inf'), float('inf'), None, None
@@ -1367,7 +1367,6 @@ class ContourMeshMixin:
                 n = len(contour)
 
                 # Compute cumulative arc length for path distance
-                # Append first point to close the loop
                 edge_lengths = np.linalg.norm(np.diff(contour, axis=0, append=contour[0:1]), axis=1)
                 total_length = np.sum(edge_lengths)
                 if total_length < 1e-10:
@@ -1385,15 +1384,19 @@ class ContourMeshMixin:
                     return min(d1, d2), max(d1, d2)
 
                 # Look for neck: points with small Euclidean distance but large path distance
-                best_score = float('inf')
                 best_width = float('inf')
+                best_score = float('inf')
                 best_p1, best_p2 = None, None
+                best_i, best_j = -1, -1
 
                 # Minimum path fraction for a valid neck (must be on "opposite" sides)
-                min_path_fraction = 0.20  # At least 20% of contour between points
+                min_path_fraction = 0.15  # At least 15% of contour between points
 
-                # Use sampling for efficiency on large contours
-                step = max(1, n // 100)  # Sample ~100 points
+                # Collect all candidate necks, then pick the best
+                candidates = []
+
+                # Dense sampling for small contours, adaptive for large
+                step = max(1, n // 150)  # Sample ~150 points
 
                 for i in range(0, n, step):
                     for j in range(i + 1, n, step):
@@ -1407,30 +1410,42 @@ class ContourMeshMixin:
                         p1, p2 = contour[i], contour[j]
                         euclidean_dist = np.linalg.norm(p2 - p1)
 
-                        # Neck ratio: euclidean / geodesic (lower = more pinched)
-                        # This is scale-invariant
-                        neck_ratio = euclidean_dist / short_path if short_path > 1e-10 else float('inf')
-
-                        # Path balance: how close to 50-50 split (0 to 0.5, higher is better)
+                        # Path balance: how close to 50-50 split (0.5 is perfect)
                         balance = min(short_path, long_path) / total_length
 
-                        # Combined score: prioritize low neck_ratio, bonus for balanced split
-                        # neck_score = neck_ratio / (balance^0.5)
-                        neck_score = neck_ratio / (balance ** 0.5 + 0.1)
+                        # Neck quality: low euclidean distance AND good balance
+                        # Normalize by total_length for scale invariance
+                        normalized_width = euclidean_dist / total_length
 
-                        if neck_score < best_score:
-                            best_score = neck_score
-                            best_width = euclidean_dist
-                            best_p1, best_p2 = p1, p2
+                        candidates.append((euclidean_dist, normalized_width, balance, i, j, p1, p2))
+
+                if not candidates:
+                    return float('inf'), float('inf'), None, None
+
+                # Sort by width first, then by balance
+                # Pick top candidates by width, then choose best balance among them
+                candidates.sort(key=lambda x: x[0])  # Sort by actual width
+
+                # Take top 20% by width
+                top_count = max(1, len(candidates) // 5)
+                top_candidates = candidates[:top_count]
+
+                # Among top candidates, pick the one with best balance
+                best_candidate = max(top_candidates, key=lambda x: x[2])  # Best balance
+                best_width = best_candidate[0]
+                best_i, best_j = best_candidate[3], best_candidate[4]
+                best_p1, best_p2 = best_candidate[5], best_candidate[6]
+
+                # Compute score for comparison (lower is better)
+                normalized_width = best_width / total_length
+                balance = best_candidate[2]
+                best_score = normalized_width / (balance + 0.1)
 
                 # Refine around best point with finer sampling
-                if best_p1 is not None and step > 1:
-                    # Find indices of best points
-                    best_i = np.argmin(np.linalg.norm(contour - best_p1, axis=1))
-                    best_j = np.argmin(np.linalg.norm(contour - best_p2, axis=1))
+                if step > 1:
+                    search_radius = step * 3
+                    refined_candidates = []
 
-                    # Search in neighborhood
-                    search_radius = step * 2
                     for di in range(-search_radius, search_radius + 1):
                         for dj in range(-search_radius, search_radius + 1):
                             i = (best_i + di) % n
@@ -1446,16 +1461,23 @@ class ContourMeshMixin:
 
                             p1, p2 = contour[i], contour[j]
                             euclidean_dist = np.linalg.norm(p2 - p1)
-                            neck_ratio = euclidean_dist / short_path if short_path > 1e-10 else float('inf')
                             balance = min(short_path, long_path) / total_length
-                            neck_score = neck_ratio / (balance ** 0.5 + 0.1)
 
-                            if neck_score < best_score:
-                                best_score = neck_score
-                                best_width = euclidean_dist
-                                best_p1, best_p2 = p1, p2
+                            refined_candidates.append((euclidean_dist, balance, p1, p2))
 
-                return best_score, best_width, best_p1, best_p2
+                    if refined_candidates:
+                        # Sort by width, pick best
+                        refined_candidates.sort(key=lambda x: x[0])
+                        top_refined = refined_candidates[:max(1, len(refined_candidates) // 3)]
+                        best_refined = max(top_refined, key=lambda x: x[1])
+
+                        if best_refined[0] <= best_width:
+                            best_width = best_refined[0]
+                            best_p1, best_p2 = best_refined[2], best_refined[3]
+                            normalized_width = best_width / total_length
+                            best_score = normalized_width / (best_refined[1] + 0.1)
+
+                return best_width, best_score, best_p1, best_p2
 
             # Search for narrowest neck in the ENTIRE merged region
             # The narrowest neck could be anywhere, not just near the transition
@@ -1463,17 +1485,19 @@ class ContourMeshMixin:
                 print(f"    [Phase3] Searching for narrowest neck in FULL merged region...")
 
                 def evaluate_scalar(test_scalar):
-                    """Evaluate neck score at a given scalar value."""
+                    """Evaluate neck width at a given scalar value.
+                    Returns (total_width, total_score, contours, planes) - width first for sorting.
+                    """
                     planes_test, contours_test, _ = self.find_contour(test_scalar, prev_bounding_plane=prev_plane)
                     if len(contours_test) != small_count:
                         return None, None, None, None
-                    total_score = 0
                     total_width = 0
+                    total_score = 0
                     for c in contours_test:
-                        score, width, _, _ = measure_neck_width(c)
-                        total_score += score
+                        width, score, _, _ = measure_neck_width(c)
                         total_width += width
-                    return total_score, total_width, contours_test, planes_test
+                        total_score += score
+                    return total_width, total_score, contours_test, planes_test
 
                 # Find the FULL range where contour count equals small_count
                 # Search outward from best_small_scalar in both directions until count changes
@@ -1520,16 +1544,16 @@ class ContourMeshMixin:
                 print(f"    [Phase3] Full merged region: [{min(range_end_small, range_end_large):.6f}, {max(range_end_small, range_end_large):.6f}] (range={full_range:.6f})")
 
                 narrowest_scalar = best_small_scalar
-                narrowest_score = float('inf')
                 narrowest_width = float('inf')
+                narrowest_score = float('inf')
                 narrowest_contours = best_small_contours
                 narrowest_planes = best_small_planes
 
                 # Measure initial neck
                 if len(best_small_contours) > 0:
-                    initial_score, initial_width, _, _ = measure_neck_width(best_small_contours[0])
-                    narrowest_score = initial_score
+                    initial_width, initial_score, _, _ = measure_neck_width(best_small_contours[0])
                     narrowest_width = initial_width
+                    narrowest_score = initial_score
                     print(f"    [Phase3] Initial: scalar={best_small_scalar:.6f}, width={initial_width:.4f}, score={initial_score:.4f}")
 
                 # Coarse search across ENTIRE merged region
@@ -1542,23 +1566,25 @@ class ContourMeshMixin:
                     t = sample_i / coarse_samples
                     test_scalar = search_start + t * (search_end - search_start)
 
-                    score, width, contours_test, planes_test = evaluate_scalar(test_scalar)
-                    if score is None:
+                    width, score, contours_test, planes_test = evaluate_scalar(test_scalar)
+                    if width is None:
                         continue
 
-                    all_results.append((test_scalar, score, width, contours_test, planes_test))
+                    all_results.append((test_scalar, width, score, contours_test, planes_test))
 
-                    if score < narrowest_score:
-                        narrowest_score = score
+                    # Primary: minimize width. Secondary: minimize score
+                    if width < narrowest_width or (width == narrowest_width and score < narrowest_score):
                         narrowest_width = width
+                        narrowest_score = score
                         narrowest_scalar = test_scalar
                         narrowest_contours = contours_test
                         narrowest_planes = planes_test
 
-                print(f"    [Phase3] Coarse search: {len(all_results)} valid samples, best so far: scalar={narrowest_scalar:.6f}, score={narrowest_score:.4f}")
+                print(f"    [Phase3] Coarse search: {len(all_results)} valid samples, best so far: scalar={narrowest_scalar:.6f}, width={narrowest_width:.4f}")
 
                 # Fine search around best result
                 if all_results:
+                    # Sort by width (index 1), pick best
                     best_result = min(all_results, key=lambda x: x[1])
                     best_scalar_coarse = best_result[0]
 
@@ -1574,18 +1600,19 @@ class ContourMeshMixin:
                         t = sample_i / fine_samples
                         test_scalar = fine_start + t * (fine_end - fine_start)
 
-                        score, width, contours_test, planes_test = evaluate_scalar(test_scalar)
-                        if score is None:
+                        width, score, contours_test, planes_test = evaluate_scalar(test_scalar)
+                        if width is None:
                             continue
 
-                        if score < narrowest_score:
-                            narrowest_score = score
+                        # Primary: minimize width
+                        if width < narrowest_width or (width == narrowest_width and score < narrowest_score):
                             narrowest_width = width
+                            narrowest_score = score
                             narrowest_scalar = test_scalar
                             narrowest_contours = contours_test
                             narrowest_planes = planes_test
 
-                print(f"    [Phase3] Best: scalar={narrowest_scalar:.6f}, width={narrowest_width:.4f}, score={narrowest_score:.4f}")
+                print(f"    [Phase3] Best: scalar={narrowest_scalar:.6f}, width={narrowest_width:.4f}")
 
                 # Update best_small with narrowest neck result
                 if narrowest_scalar != best_small_scalar:
