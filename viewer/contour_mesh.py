@@ -8466,25 +8466,27 @@ class ContourMeshMixin:
         target_arr = np.array(target_2d)
         mode_str = "SEPARATE" if use_separate_transforms else "COMMON"
 
-        # Build level info string
+        # Build level info string: "Cut Lv.X using Lv.Y"
+        # target_level = contour being cut, source_level = reference contours
         level_info = ""
         if target_level is not None and source_level is not None:
-            level_info = f" | Target Lv.{target_level} <- Source Lv.{source_level}"
+            level_info = f" | Cut Lv.{target_level} using Lv.{source_level}"
 
         # Left plot: Initial configuration (no dashed original)
         ax1 = axes[0]
         ax1.set_title(f'Initial Config [{mode_str}]{level_info}')
-        target_label = f'Target (Lv.{target_level})' if target_level is not None else 'Target'
-        ax1.plot(target_arr[:, 0], target_arr[:, 1], 'k-', linewidth=2, label=target_label)
+        # Label shows which contour is being cut
+        cut_label = f'Lv.{target_level} (cut)' if target_level is not None else 'Target'
+        ax1.plot(target_arr[:, 0], target_arr[:, 1], 'k-', linewidth=2, label=cut_label)
         ax1.fill(target_arr[:, 0], target_arr[:, 1], alpha=0.1, color='gray')
 
         for i, init_trans in enumerate(initial_transformed):
             if len(init_trans) >= 3:
                 init_arr = np.array(init_trans)
                 init_closed = np.vstack([init_arr, init_arr[0]])
-                src_label = f'Src {stream_indices[i]} (Lv.{source_level})' if source_level is not None else f'Src {stream_indices[i]}'
+                ref_label = f'Lv.{source_level} s{stream_indices[i]} (ref)' if source_level is not None else f'Src {stream_indices[i]}'
                 ax1.plot(init_closed[:, 0], init_closed[:, 1], '-', color=colors[i],
-                        linewidth=1.5, label=src_label)
+                        linewidth=1.5, label=ref_label)
                 ax1.fill(init_arr[:, 0], init_arr[:, 1], alpha=0.2, color=colors[i])
 
         ax1.legend(loc='upper right', fontsize=8)
@@ -8499,7 +8501,7 @@ class ContourMeshMixin:
             ax2.set_title(f'Cutting Line [{mode_str}]{level_info}')
 
             # Draw target as gray
-            ax2.plot(target_arr[:, 0], target_arr[:, 1], 'k-', linewidth=2, label=target_label)
+            ax2.plot(target_arr[:, 0], target_arr[:, 1], 'k-', linewidth=2, label=cut_label)
             ax2.fill(target_arr[:, 0], target_arr[:, 1], alpha=0.1, color='gray')
 
             # Draw initial source contours (same as left plot)
@@ -8508,9 +8510,9 @@ class ContourMeshMixin:
                     init_arr = np.array(init_trans)
                     init_closed = np.vstack([init_arr, init_arr[0]])
                     ax2.fill(init_arr[:, 0], init_arr[:, 1], alpha=0.2, color=colors[i])
-                    src_label = f'Src {stream_indices[i]} (Lv.{source_level})' if source_level is not None else f'Src {stream_indices[i]}'
+                    ref_label = f'Lv.{source_level} s{stream_indices[i]} (ref)' if source_level is not None else f'Src {stream_indices[i]}'
                     ax2.plot(init_closed[:, 0], init_closed[:, 1], '-', color=colors[i],
-                            linewidth=1.5, label=src_label)
+                            linewidth=1.5, label=ref_label)
         else:
             # COMMON mode: show optimized result
             # scales is now a list of (scale_x, scale_y) tuples
@@ -8534,7 +8536,7 @@ class ContourMeshMixin:
                     ax2.scatter(v_2d[0], v_2d[1], c=[colors[piece_idx]], s=25, zorder=10)
             else:
                 # No assignments - draw target as gray
-                ax2.plot(target_arr[:, 0], target_arr[:, 1], 'k-', linewidth=2, label=target_label)
+                ax2.plot(target_arr[:, 0], target_arr[:, 1], 'k-', linewidth=2, label=cut_label)
                 ax2.fill(target_arr[:, 0], target_arr[:, 1], alpha=0.1, color='gray')
 
             # Draw optimized source contours (filled like initial config)
@@ -8543,7 +8545,7 @@ class ContourMeshMixin:
                     trans_arr = np.array(transformed)
                     trans_closed = np.vstack([trans_arr, trans_arr[0]])
                     ax2.fill(trans_arr[:, 0], trans_arr[:, 1], alpha=0.3, color=colors[i])
-                    opt_label = f'Opt {stream_indices[i]} (Lv.{source_level})' if source_level is not None else f'Opt {stream_indices[i]}'
+                    opt_label = f'Lv.{source_level} s{stream_indices[i]} (opt)' if source_level is not None else f'Opt {stream_indices[i]}'
                     ax2.plot(trans_closed[:, 0], trans_closed[:, 1], '-', color=colors[i],
                             linewidth=2.0, zorder=15, label=opt_label)
 
