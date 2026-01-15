@@ -1650,11 +1650,16 @@ class ContourMeshMixin:
                 print(f"  Inserting transition contour at scalar {scalar:.6f} "
                       f"(count={count}) at index {insert_idx}")
 
+                # Final validation before insert - ensure ALL planes are valid dicts
+                all_valid = all(isinstance(bp, dict) and 'mean' in bp and 'basis_z' in bp for bp in planes)
+                if not all_valid:
+                    print(f"  WARNING: Skipping insertion - planes contain invalid data")
+                    continue
+
                 # Mark these as merge point contours (for debugging)
                 # Note: Do NOT set is_cut=True here - they need to be cut first!
                 for bp in planes:
-                    if isinstance(bp, dict):
-                        bp['is_merge_point'] = True
+                    bp['is_merge_point'] = True
                 print(f"  [MERGE POINT] Inserted {len(planes)} contours at level {insert_idx}")
 
                 self.bounding_planes.insert(insert_idx, planes)
@@ -1698,6 +1703,13 @@ class ContourMeshMixin:
         for level_idx in range(len(self.bounding_planes) - 1):
             current_planes = self.bounding_planes[level_idx]
             next_planes = self.bounding_planes[level_idx + 1]
+            # Validate planes are dicts with 'mean' key
+            if not all(isinstance(p, dict) and 'mean' in p for p in current_planes):
+                print(f"  Level {level_idx}: INVALID planes data")
+                continue
+            if not all(isinstance(p, dict) and 'mean' in p for p in next_planes):
+                print(f"  Level {level_idx+1}: INVALID planes data")
+                continue
             centroid_current = np.mean([p['mean'] for p in current_planes], axis=0)
             centroid_next = np.mean([p['mean'] for p in next_planes], axis=0)
             spacing = np.linalg.norm(centroid_next - centroid_current)
@@ -1716,6 +1728,12 @@ class ContourMeshMixin:
             for level_idx in range(len(self.bounding_planes) - 1):
                 current_planes = self.bounding_planes[level_idx]
                 next_planes = self.bounding_planes[level_idx + 1]
+
+                # Validate planes are dicts
+                if not all(isinstance(p, dict) and 'mean' in p and 'scalar_value' in p for p in current_planes):
+                    continue
+                if not all(isinstance(p, dict) and 'mean' in p and 'scalar_value' in p for p in next_planes):
+                    continue
 
                 # Get scalar values
                 current_scalar = current_planes[0]['scalar_value'] if len(current_planes) > 0 else None
