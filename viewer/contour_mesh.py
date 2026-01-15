@@ -804,41 +804,60 @@ class ContourMeshMixin:
                     break
                 iteration += 1
 
-            # If there are still unused edges, try to find branches from visited vertices
-            # This handles figure-8 shapes where the junction wasn't traversed
+            # Collect all segments (main walk + any branches as separate contours)
+            all_segments = [ordered_edge_group]
+
+            # If there are still unused edges, find branches and add as separate contours
+            # This handles figure-8 shapes - return as two separate loops, not one degenerate shape
             restart_count = 0
             while len(used_edges) < len(edge_set) and restart_count < 10:
                 restart_count += 1
-                # Find a vertex in our walk that has unused edges (branch point)
+                # Find any unused edge and walk from there
                 found_branch = False
-                for v in ordered_edge_group:
-                    for neighbor, edge_tuple in adjacency.get(v, []):
-                        if edge_tuple not in used_edges:
-                            # Found a branch - walk from here
-                            used_edges.add(edge_tuple)
-                            # Walk forward from this branch
-                            branch_walk = [neighbor]
-                            while True:
-                                current = branch_walk[-1]
-                                found = False
-                                for n2, et2 in adjacency.get(current, []):
-                                    if et2 not in used_edges:
-                                        branch_walk.append(n2)
-                                        used_edges.add(et2)
-                                        found = True
-                                        break
-                                if not found:
+                for edge_tuple in edge_set:
+                    if edge_tuple not in used_edges:
+                        # Start a new segment from this edge
+                        used_edges.add(edge_tuple)
+                        branch_walk = [edge_tuple[0], edge_tuple[1]]
+
+                        # Walk forward
+                        while True:
+                            current = branch_walk[-1]
+                            found = False
+                            for n2, et2 in adjacency.get(current, []):
+                                if et2 not in used_edges:
+                                    branch_walk.append(n2)
+                                    used_edges.add(et2)
+                                    found = True
                                     break
-                            # Append the branch to our main walk
-                            ordered_edge_group.extend(branch_walk)
-                            found_branch = True
-                            break
-                    if found_branch:
+                            if not found:
+                                break
+
+                        # Walk backward
+                        while True:
+                            current = branch_walk[0]
+                            found = False
+                            for n2, et2 in adjacency.get(current, []):
+                                if et2 not in used_edges:
+                                    branch_walk.insert(0, n2)
+                                    used_edges.add(et2)
+                                    found = True
+                                    break
+                            if not found:
+                                break
+
+                        # Add as separate contour if it has enough vertices
+                        if len(branch_walk) >= 3:
+                            all_segments.append(branch_walk)
+                        found_branch = True
                         break
+
                 if not found_branch:
                     break
 
-            ordered_contour_edge_groups.append(ordered_edge_group)
+            # Add all segments as separate contours
+            for segment in all_segments:
+                ordered_contour_edge_groups.append(segment)
 
         ordered_contour_vertices = []
         ordered_contour_vertices_orig = []
