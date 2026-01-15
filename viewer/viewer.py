@@ -3712,7 +3712,6 @@ class GLFWApp():
                     if closest_vi >= 0:
                         imgui.set_tooltip(f"{corner_name} Corner -> Vertex {closest_vi}")
 
-                imgui.columns(1)  # End columns for this contour
                 if show_all:
                     imgui.separator()
 
@@ -4234,9 +4233,10 @@ class GLFWApp():
                         mouse_state['pan'][1] += (mouse_norm_y - 0.5) * (1 - zoom_factor / old_zoom * new_zoom) / new_zoom
                         mouse_state['zoom'] = new_zoom
 
-            # Middle mouse pan
-            if canvas_hovered and imgui.is_mouse_clicked(2):  # Middle button
+            # Middle mouse or right mouse pan
+            if canvas_hovered and (imgui.is_mouse_clicked(2) or imgui.is_mouse_clicked(1)):  # Middle or right button
                 mouse_state['panning'] = True
+                mouse_state['pan_button'] = 2 if imgui.is_mouse_clicked(2) else 1  # Track which button
                 mouse_state['pan_start'] = (mouse_pos[0], mouse_pos[1])
                 mouse_state['pan_orig'] = mouse_state['pan'].copy()
 
@@ -4245,7 +4245,8 @@ class GLFWApp():
                 dy = -(mouse_pos[1] - mouse_state['pan_start'][1]) / canvas_size  # Flip Y
                 mouse_state['pan'][0] = mouse_state['pan_orig'][0] + dx
                 mouse_state['pan'][1] = mouse_state['pan_orig'][1] + dy
-                if imgui.is_mouse_released(2):
+                pan_button = mouse_state.get('pan_button', 2)
+                if imgui.is_mouse_released(pan_button):
                     mouse_state['panning'] = False
 
             # Left click for drawing cut line
