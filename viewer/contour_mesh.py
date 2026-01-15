@@ -1271,7 +1271,8 @@ class ContourMeshMixin:
                 n = len(contour)
 
                 # Compute cumulative arc length for path distance
-                edge_lengths = np.linalg.norm(np.diff(contour, axis=0, append=[contour[0:1]]), axis=1)
+                # Append first point to close the loop
+                edge_lengths = np.linalg.norm(np.diff(contour, axis=0, append=contour[0:1]), axis=1)
                 total_length = np.sum(edge_lengths)
                 if total_length < 1e-10:
                     return float('inf'), float('inf'), None, None
