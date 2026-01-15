@@ -5687,15 +5687,16 @@ class ContourMeshMixin:
             if not any_source_cut:
                 targets_needing_cut.append((target_i, sources))
 
-        # Check if we have a queue of pending cuts, or initialize one
-        if not hasattr(self, '_pending_manual_cuts') or self._pending_manual_cuts is None:
+        # Initialize pending cuts queue (always reinitialize if empty or None)
+        if not hasattr(self, '_pending_manual_cuts') or self._pending_manual_cuts is None or len(self._pending_manual_cuts) == 0:
             self._pending_manual_cuts = targets_needing_cut
-            self._manual_cut_results = {}  # Store results for each target
+            if not hasattr(self, '_manual_cut_results') or self._manual_cut_results is None:
+                self._manual_cut_results = {}  # Store results for each target
 
-        # If no targets need manual cutting, return
-        if len(self._pending_manual_cuts) == 0:
-            print(f"No targets need manual cutting (all sources already cut)")
-            return
+        # If no targets need manual cutting, return False (no window needed)
+        if len(targets_needing_cut) == 0:
+            print(f"No targets need manual cutting (all 1:1 or already cut)")
+            return False
 
         # Get the next target to cut
         current_cut = self._pending_manual_cuts[0]
@@ -5789,6 +5790,7 @@ class ContourMeshMixin:
         self._manual_cut_line = None
 
         print(f"Manual cutting window ready - draw a cutting line")
+        return True  # Manual cutting is needed
 
     def _prepare_manual_cut_data_for_level(self, muscle_name, level_i, contour_i, streams_for_contour,
                                             target_contour, target_bp, source_contours, source_bps):
@@ -6344,8 +6346,11 @@ class ContourMeshMixin:
             # Check if we need to open manual cutting window
             if not self._manual_cut_pending and self._manual_cut_data is None:
                 # Prepare data for manual cutting and open window
-                self._prepare_manual_cut_data(muscle_name)
-                return  # Wait for user to draw cutting line
+                needs_manual = self._prepare_manual_cut_data(muscle_name)
+                if needs_manual:
+                    return  # Wait for user to draw cutting line
+                # If no manual cutting needed, continue with automatic processing
+                print("No manual cutting required - proceeding with automatic cut")
             elif self._manual_cut_pending:
                 # Still waiting for user to finish drawing
                 print("Manual cutting in progress - waiting for user to confirm")
