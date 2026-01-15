@@ -1094,78 +1094,6 @@ class ContourMeshMixin:
                         print()
                         trial = 0
 
-                        # Check if contour count changed - if so, find ALL intermediate counts
-                        prev_count = len(self.bounding_planes[-1]) if len(self.bounding_planes) > 0 else 0
-                        curr_count = len(bounding_planes)
-
-                        if prev_count != curr_count and prev_count > 0 and curr_count > 0:
-                            print(f"  [TRANSITION] Count changed: {prev_count} -> {curr_count}")
-                            print(f"  [TRANSITION] Searching for ALL intermediate counts between {prev_contour_value:.6f} and {contour_value:.6f}")
-
-                            # Dense sample to find ALL intermediate counts (e.g., 4->2->1)
-                            dense_samples = 30
-                            scalar_range = contour_value - prev_contour_value
-
-                            # Collect all (scalar, count, planes, contours, contours_orig) tuples
-                            all_samples = []
-                            seen_counts = {prev_count, curr_count}
-
-                            for sample_i in range(dense_samples):
-                                t = (sample_i + 1) / (dense_samples + 1)
-                                test_scalar = prev_contour_value + t * scalar_range
-
-                                sample_planes, sample_contours, sample_contours_orig = self.find_contour(
-                                    test_scalar, prev_bounding_plane=prev_plane, use_geodesic_edges=use_geodesic_edges)
-
-                                if len(sample_planes) > 0:
-                                    sample_count = len(sample_planes)
-                                    all_samples.append((test_scalar, sample_count, sample_planes, sample_contours, sample_contours_orig))
-
-                                    if sample_count not in seen_counts:
-                                        print(f"  [TRANSITION] Found intermediate count {sample_count} at {test_scalar:.6f}")
-                                        seen_counts.add(sample_count)
-
-                            # Group samples by count
-                            count_to_samples = {}
-                            for scalar, count, planes, conts, conts_orig in all_samples:
-                                if count not in count_to_samples:
-                                    count_to_samples[count] = []
-                                count_to_samples[count].append((scalar, planes, conts, conts_orig))
-
-                            print(f"  [TRANSITION] Found counts: {sorted(count_to_samples.keys(), reverse=True)}")
-
-                            # For each intermediate count, add samples to capture the narrowest neck
-                            for count in sorted(count_to_samples.keys(), reverse=True):
-                                if count == prev_count:
-                                    continue  # Skip the count we already have
-
-                                samples_at_count = count_to_samples[count]
-                                if len(samples_at_count) == 0:
-                                    continue
-
-                                # Sort by scalar
-                                samples_at_count.sort(key=lambda x: x[0])
-
-                                # Add samples at this count level - pick evenly spaced ones
-                                # Also add the first and last to capture boundaries
-                                indices_to_add = set()
-                                indices_to_add.add(0)  # First
-                                indices_to_add.add(len(samples_at_count) - 1)  # Last
-
-                                # Add some in the middle
-                                num_middle = min(3, len(samples_at_count) - 2)
-                                for i in range(num_middle):
-                                    idx = (i + 1) * len(samples_at_count) // (num_middle + 1)
-                                    indices_to_add.add(idx)
-
-                                for idx in sorted(indices_to_add):
-                                    if idx < len(samples_at_count):
-                                        scalar, planes, conts, conts_orig = samples_at_count[idx]
-                                        print(f"  [TRANSITION] Added sample at {scalar:.6f} (count={count})")
-                                        self.bounding_planes.append(planes)
-                                        contours.append(conts)
-                                        contours_orig.append(conts_orig)
-
                         self.bounding_planes.append(bounding_planes)
                         contours.append(ordered_contour_vertices)
                         contours_orig.append(ordered_contour_vertices_orig)
@@ -1200,29 +1128,6 @@ class ContourMeshMixin:
         self.bounding_planes.append(insertion_bounding_planes)
         contours.append(insertion_contours)
         contours_orig.append(insertion_contours_orig)
-
-        # Sort all levels by scalar value (transition samples may be out of order)
-        # Get scalar value for each level (use first contour's mean projected onto z-axis)
-        level_scalars = []
-        for level_i, planes in enumerate(self.bounding_planes):
-            if len(planes) > 0 and 'scalar_value' in planes[0]:
-                level_scalars.append((planes[0]['scalar_value'], level_i))
-            elif len(planes) > 0:
-                # Estimate scalar from mean position
-                level_scalars.append((planes[0]['mean'][2] if len(planes[0]['mean']) > 2 else level_i, level_i))
-            else:
-                level_scalars.append((level_i, level_i))
-
-        # Sort by scalar value
-        level_scalars.sort(key=lambda x: x[0])
-        sorted_indices = [x[1] for x in level_scalars]
-
-        # Check if reordering is needed
-        if sorted_indices != list(range(len(sorted_indices))):
-            print(f"  [SORT] Reordering {len(sorted_indices)} levels by scalar value")
-            self.bounding_planes = [self.bounding_planes[i] for i in sorted_indices]
-            contours = [contours[i] for i in sorted_indices]
-            contours_orig = [contours_orig[i] for i in sorted_indices]
 
         self.draw_contour_stream = [True] * len(contours)
         self.is_draw_contours = True
