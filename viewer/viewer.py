@@ -4559,12 +4559,57 @@ class GLFWApp():
             # Show source→target info
             imgui.set_cursor_screen_pos((cursor_pos[0], y0 + canvas_size + padding + 10))
             imgui.separator()
-            imgui.text(f"Cutting: {len(source_indices_display)} sources -> 1 target")
+            num_selected = len(selected_sources)
+            imgui.text(f"Selected: {num_selected} sources -> 1 target")
             imgui.text(f"Pieces: {len(current_pieces)} / {required_pieces} needed")
 
-            # Buttons: Next Cut, OK, Reset, Cancel
+            # Show hint for 1-to-1 case
+            if num_selected == 1:
+                imgui.text_colored("(1:1 mapping - no cutting needed, click Skip)", 0.5, 1.0, 0.5, 1.0)
+
+            # Buttons: Skip, Next Cut, OK, Reset, Cancel
             imgui.separator()
             button_width = 80
+
+            # Skip button - for 1-to-1 case (only 1 source selected, no cutting needed)
+            if num_selected == 1:
+                if imgui.button("Skip (1:1)", button_width, 30):
+                    print(f"Skipping cut for target (1:1 mapping with source {selected_sources[0]})")
+                    # Store the 1:1 result - the single selected source maps directly to target
+                    selected_src_idx = selected_sources[0]
+                    source_contour = obj._manual_cut_data['source_contours'][selected_src_idx]
+
+                    # Store as cut result (single piece = original target, mapped to single source)
+                    obj._manual_cut_data['cut_result'] = [obj._manual_cut_data['target_contour']]
+                    obj._manual_cut_data['selected_source_for_result'] = [selected_src_idx]
+
+                    # Move to next target or finish
+                    if hasattr(obj, '_pending_manual_cuts') and obj._pending_manual_cuts:
+                        obj._pending_manual_cuts.pop(0)  # Remove current from queue
+                        if len(obj._pending_manual_cuts) > 0:
+                            # More targets to process - prepare next target's data
+                            print(f"Moving to next target ({len(obj._pending_manual_cuts)} remaining)...")
+                            obj._manual_cut_data = None
+                            obj._manual_cut_line = None
+                            obj._manual_cut_pending = False
+                            obj._prepare_manual_cut_data(muscle_name)  # Prepare next target
+                        else:
+                            # All done
+                            print(f"All manual cuts complete (including skipped 1:1)")
+                            obj._manual_cut_pending = False
+                            obj._manual_cut_data = None
+                            obj._manual_cut_line = None
+                            # Run cut_streams to finish
+                            obj.cut_streams(cut_method='bp', muscle_name=muscle_name)
+                    else:
+                        obj._manual_cut_pending = False
+                        obj._manual_cut_data = None
+
+                    if name in self._manual_cut_mouse:
+                        del self._manual_cut_mouse[name]
+                    imgui.end()
+                    continue
+                imgui.same_line()
 
             # Calculate how many pieces we'll have after applying pending cut
             has_valid_line = obj._manual_cut_line is not None
@@ -4574,7 +4619,7 @@ class GLFWApp():
             need_more_cuts_after = pieces_after_cut < required_pieces
 
             # Next Cut button - only show when we need MORE than one additional cut
-            if need_more_cuts_after and has_valid_line:
+            if need_more_cuts_after and has_valid_line and num_selected > 1:
                 if imgui.button("Next Cut", button_width, 30):
                     # Apply cut to current pieces and continue
                     success = obj._apply_iterative_cut()
