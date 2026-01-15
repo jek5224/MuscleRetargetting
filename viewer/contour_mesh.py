@@ -1153,6 +1153,9 @@ class ContourMeshMixin:
         if len(self.bounding_planes) < 2:
             return
 
+        # Initialize neck visualization data
+        self._neck_viz_data = []
+
         print(f"\n=== Transition Point Refinement ===")
 
         # Determine processing direction: from larger count side to smaller
@@ -1594,6 +1597,49 @@ class ContourMeshMixin:
                     best_small_planes = narrowest_planes
                 else:
                     print(f"    [Phase3] Initial contour already has narrowest neck")
+
+                # Store neck visualization data
+                # Re-measure to get neck points for visualization
+                neck_p1, neck_p2 = None, None
+                if narrowest_contours and len(narrowest_contours) > 0:
+                    width, score, p1, p2 = measure_neck_width(narrowest_contours[0])
+                    if p1 is not None and p2 is not None:
+                        neck_p1, neck_p2 = p1, p2
+
+                # Project contour to 2D for visualization
+                contour_2d = None
+                if narrowest_contours and len(narrowest_contours) > 0 and narrowest_planes and len(narrowest_planes) > 0:
+                    bp = narrowest_planes[0]
+                    if 'normal' in bp and 'mean' in bp:
+                        normal = bp['normal']
+                        mean = bp['mean']
+                        # Create projection basis
+                        up = np.array([0, 1, 0])
+                        if abs(np.dot(normal, up)) > 0.9:
+                            up = np.array([1, 0, 0])
+                        u = np.cross(normal, up)
+                        u = u / (np.linalg.norm(u) + 1e-10)
+                        v = np.cross(normal, u)
+                        v = v / (np.linalg.norm(v) + 1e-10)
+                        # Project contour
+                        contour_3d = narrowest_contours[0]
+                        contour_2d = np.array([[np.dot(p - mean, u), np.dot(p - mean, v)] for p in contour_3d])
+                        # Also project neck points if they exist
+                        if neck_p1 is not None:
+                            neck_p1 = np.array([np.dot(neck_p1 - mean, u), np.dot(neck_p1 - mean, v)])
+                        if neck_p2 is not None:
+                            neck_p2 = np.array([np.dot(neck_p2 - mean, u), np.dot(neck_p2 - mean, v)])
+
+                self._neck_viz_data.append({
+                    'large_count': large_count,
+                    'small_count': small_count,
+                    'scalar': narrowest_scalar,
+                    'neck_width': narrowest_width,
+                    'contour_2d': contour_2d,
+                    'neck_p1': neck_p1,
+                    'neck_p2': neck_p2,
+                    'level_i': -1,  # Will be updated when inserted
+                })
 
             # Collect results to insert (in order by scalar value)
             # Only insert the SMALL count contour - manual cut will handle the large side
