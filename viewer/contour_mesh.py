@@ -7260,40 +7260,79 @@ class ContourMeshMixin:
                         print(f"  [BP Transform] SEPARATE: cut at {best_cut[2]} (dist={min_dist:.4f})")
 
                 elif len(src_0) >= 3 and len(src_1) >= 3:
-                    # COMMON mode: Find shared boundary vertices between OPTIMIZED sources
-                    # The cutting line moves together with the sources during optimization
-                    boundary_vertices = []
+                    # COMMON mode: Find boundary between transformed sources
+                    # Method 1: Find closest vertex-edge pairs between the two shapes
+                    n_src0 = len(src_0)
+                    n_src1 = len(src_1)
 
-                    # Look for vertices in src_0 that are very close to vertices in src_1
-                    size_0 = np.max(np.linalg.norm(src_0 - src_0.mean(axis=0), axis=1))
-                    size_1 = np.max(np.linalg.norm(src_1 - src_1.mean(axis=0), axis=1))
+                    # Find closest points between the two source shapes
+                    closest_pairs = []  # List of (point_on_src0_boundary, point_on_src1_boundary, distance)
 
-                    # Use adaptive threshold - start small, increase if needed
-                    for threshold_mult in [0.01, 0.05, 0.1, 0.2]:
-                        threshold = threshold_mult * min(size_0, size_1)
-                        boundary_vertices = []
-                        for v0 in src_0:
-                            dists = np.linalg.norm(src_1 - v0, axis=1)
-                            min_dist = np.min(dists)
-                            if min_dist < threshold:
-                                closest_idx = np.argmin(dists)
-                                # Use midpoint of the two close vertices
-                                boundary_vertices.append((v0 + src_1[closest_idx]) / 2)
-                        if len(boundary_vertices) >= 2:
-                            break
+                    # Helper function for point-to-segment distance
+                    def point_to_segment(point, seg_start, seg_end):
+                        seg_vec = seg_end - seg_start
+                        seg_len_sq = np.dot(seg_vec, seg_vec)
+                        if seg_len_sq < 1e-10:
+                            return np.linalg.norm(point - seg_start), seg_start
+                        t = np.clip(np.dot(point - seg_start, seg_vec) / seg_len_sq, 0, 1)
+                        closest = seg_start + t * seg_vec
+                        return np.linalg.norm(point - closest), closest
 
-                    print(f"  [BP Transform] COMMON: found {len(boundary_vertices)} shared boundary vertices (threshold={threshold:.4f})")
+                    # Check src_0 vertices against src_1 edges
+                    for i in range(n_src0):
+                        v0 = src_0[i]
+                        best_dist = np.inf
+                        best_pt = None
+                        for j in range(n_src1):
+                            j_next = (j + 1) % n_src1
+                            dist, closest = point_to_segment(v0, src_1[j], src_1[j_next])
+                            if dist < best_dist:
+                                best_dist = dist
+                                best_pt = closest
+                        if best_pt is not None:
+                            closest_pairs.append((v0, best_pt, best_dist))
 
-                    if len(boundary_vertices) >= 2:
-                        boundary_arr = np.array(boundary_vertices)
-                        boundary_mean = boundary_arr.mean(axis=0)
-                        centered = boundary_arr - boundary_mean
-                        _, _, Vt = np.linalg.svd(centered, full_matrices=False)
-                        boundary_dir = Vt[0]
-                        boundary_dir = boundary_dir / (np.linalg.norm(boundary_dir) + 1e-10)
+                    # Check src_1 vertices against src_0 edges
+                    for i in range(n_src1):
+                        v1 = src_1[i]
+                        best_dist = np.inf
+                        best_pt = None
+                        for j in range(n_src0):
+                            j_next = (j + 1) % n_src0
+                            dist, closest = point_to_segment(v1, src_0[j], src_0[j_next])
+                            if dist < best_dist:
+                                best_dist = dist
+                                best_pt = closest
+                        if best_pt is not None:
+                            closest_pairs.append((best_pt, v1, best_dist))
 
-                        cutting_line_2d = (boundary_mean, boundary_dir)
-                        print(f"  [BP Transform] COMMON: boundary line from shared vertices")
+                    # Sort by distance and take the closest pairs
+                    closest_pairs.sort(key=lambda x: x[2])
+
+                    # Use the closest pairs to define the boundary line
+                    # Take pairs within a threshold of the minimum distance
+                    if len(closest_pairs) >= 2:
+                        min_dist = closest_pairs[0][2]
+                        # Include pairs up to 2x the minimum distance
+                        boundary_threshold = max(min_dist * 2, 0.001)
+                        boundary_points = []
+                        for p0, p1, d in closest_pairs:
+                            if d <= boundary_threshold:
+                                # Use midpoint as boundary point
+                                boundary_points.append((p0 + p1) / 2)
+
+                        print(f"  [BP Transform] COMMON: found {len(boundary_points)} boundary points (min_dist={min_dist:.6f})")
+
+                        if len(boundary_points) >= 2:
+                            boundary_arr = np.array(boundary_points)
+                            boundary_mean = boundary_arr.mean(axis=0)
+                            centered = boundary_arr - boundary_mean
+                            _, _, Vt = np.linalg.svd(centered, full_matrices=False)
+                            boundary_dir = Vt[0]
+                            boundary_dir = boundary_dir / (np.linalg.norm(boundary_dir) + 1e-10)
+
+                            cutting_line_2d = (boundary_mean, boundary_dir)
+                            print(f"  [BP Transform] COMMON: boundary line from closest vertex-edge pairs")
 
                 if cutting_line_2d is None:
                     # Fallback: Use perpendicular bisector between optimized centroids
