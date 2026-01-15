@@ -4717,32 +4717,24 @@ class GLFWApp():
                     }
                     print(f"Stored 1:1 result with key {result_key}, source {actual_source_idx}")
 
-                    # Move to next target or finish
-                    if hasattr(obj, '_pending_manual_cuts') and obj._pending_manual_cuts:
-                        obj._pending_manual_cuts.pop(0)  # Remove current from queue
-                        if len(obj._pending_manual_cuts) > 0:
-                            # More targets to process - prepare next target's data
-                            print(f"Moving to next target ({len(obj._pending_manual_cuts)} remaining)...")
-                            obj._manual_cut_data = None
-                            obj._manual_cut_line = None
-                            obj._manual_cut_pending = False
-                            obj._prepare_manual_cut_data(muscle_name)  # Prepare next target
-                        else:
-                            # All done
-                            print(f"All manual cuts complete (including skipped 1:1)")
-                            obj._manual_cut_pending = False
-                            obj._manual_cut_data = None
-                            obj._manual_cut_line = None
-                            # Run cut_streams to finish
-                            obj.cut_streams(cut_method='bp', muscle_name=muscle_name)
-                    else:
-                        obj._manual_cut_pending = False
-                        obj._manual_cut_data = None
+                    # Continue with cut_streams - it will find the next cut point or finish
+                    obj._manual_cut_data = None
+                    obj._manual_cut_line = None
+                    obj._manual_cut_pending = False
+                    obj.cut_streams(cut_method='bp', muscle_name=muscle_name)
 
-                    if name in self._manual_cut_mouse:
-                        del self._manual_cut_mouse[name]
-                    imgui.end()
-                    continue
+                    # Only apply smoothening if cut_streams completed (not waiting for another manual cut)
+                    if not obj._manual_cut_pending and obj._manual_cut_data is None:
+                        if hasattr(obj, 'stream_bounding_planes') and obj.stream_bounding_planes is not None:
+                            print(f"[{muscle_name}] Applying smoothening...")
+                            obj.smoothen_contours_z()
+                            obj.smoothen_contours_x()
+                            obj.smoothen_contours_bp()
+                        if name in self._manual_cut_mouse:
+                            del self._manual_cut_mouse[name]
+                        imgui.end()
+                        continue
+                    # cut_streams returned early for another manual cut - don't close window
                 imgui.same_line()
 
             # Check if we're in assignment mode (after cutting)
@@ -4820,6 +4812,26 @@ class GLFWApp():
                         # All done - finalize
                         cut_result, _ = obj._finalize_manual_cuts()
                         if cut_result is not None:
+                            # CRITICAL: Store result in _manual_cut_results before calling cut_streams
+                            # Otherwise cut_streams can't find the result and prepares wrong data
+                            target_level = obj._manual_cut_data.get('target_level', 0)
+                            target_i = obj._manual_cut_data.get('target_i', 0)
+                            stream_indices = obj._manual_cut_data.get('stream_indices', [])
+
+                            if not hasattr(obj, '_manual_cut_results') or obj._manual_cut_results is None:
+                                obj._manual_cut_results = {}
+
+                            result_key = (target_level, target_i)
+                            obj._manual_cut_results[result_key] = {
+                                'cut_contours': cut_result,
+                                'source_indices': stream_indices,
+                                'is_1to1': False,
+                            }
+                            print(f"[Confirm] Stored result with key {result_key}, {len(cut_result)} pieces")
+
+                            # Clear _manual_cut_data to prevent stale data issues
+                            obj._manual_cut_data = None
+                            obj._manual_cut_original_state = None
                             obj._manual_cut_pending = False
                             obj.cut_streams(cut_method='bp', muscle_name=muscle_name)
                             # Only apply smoothening if cut_streams completed (not waiting for another manual cut)

@@ -6945,14 +6945,14 @@ class ContourMeshMixin:
         # This prevents issues when self.contours is overwritten by smoothening
         has_manual_results = hasattr(self, '_manual_cut_results') and self._manual_cut_results and len(self._manual_cut_results) > 0
         if not has_manual_results:
-            # Starting fresh - save original contours and bounding planes
-            self._original_contours = [list(level) for level in self.contours]
-            self._original_bounding_planes = [list(level) for level in self.bounding_planes]
+            # Starting fresh - save original contours and bounding planes (DEEP COPY!)
+            self._original_contours = [[np.array(c).copy() for c in level] for level in self.contours]
+            self._original_bounding_planes = [[copy.deepcopy(bp) for bp in level] for level in self.bounding_planes]
             print("[cut_streams] Saved original contours for manual cutting session")
         elif hasattr(self, '_original_contours') and self._original_contours:
             # Resuming - restore original contours (in case smoothening corrupted them)
-            self.contours = [list(level) for level in self._original_contours]
-            self.bounding_planes = [list(level) for level in self._original_bounding_planes]
+            self.contours = [[np.array(c).copy() for c in level] for level in self._original_contours]
+            self.bounding_planes = [[copy.deepcopy(bp) for bp in level] for level in self._original_bounding_planes]
             print("[cut_streams] Restored original contours from backup")
 
         num_levels = len(self.contours)
