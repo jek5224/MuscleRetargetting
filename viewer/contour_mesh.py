@@ -5496,26 +5496,19 @@ class ContourMeshMixin:
         max_stream_count = max(all_counts)
         max_count_level = all_counts.index(max_stream_count)
 
-        # Determine processing direction (from level with most contours)
-        # If intermediate level has most contours, need to process from there in both directions
-        if max_count_level == 0:
-            # Max is at origin - process origin → insertion
+        # Determine processing direction (from larger count END)
+        # Always process sequentially from one endpoint to the other
+        if origin_count >= insertion_count:
+            # Process origin → insertion
             level_order = list(range(num_levels))
             process_forward = True
-        elif max_count_level == num_levels - 1:
-            # Max is at insertion - process insertion → origin
+        else:
+            # Process insertion → origin
             level_order = list(range(num_levels - 1, -1, -1))
             process_forward = False
-        else:
-            # Max is at intermediate level (narrowest neck case)
-            # Process from max level towards origin first, then towards insertion
-            # For now, just process towards whichever endpoint has fewer contours first
-            if origin_count <= insertion_count:
-                level_order = list(range(max_count_level, -1, -1)) + list(range(max_count_level + 1, num_levels))
-            else:
-                level_order = list(range(max_count_level, num_levels)) + list(range(max_count_level - 1, -1, -1))
-            process_forward = True  # Direction doesn't matter as much for intermediate max
-            print(f"[NARROWEST NECK] Max contours at intermediate level {max_count_level}")
+
+        if max_count_level != 0 and max_count_level != num_levels - 1:
+            print(f"[NARROWEST NECK] Max contours ({max_stream_count}) at intermediate level {max_count_level}")
 
         # Debug: show all contour counts and merge point status
         print(f"[DEBUG] Contour counts per level:")
@@ -6406,24 +6399,18 @@ class ContourMeshMixin:
         # stream_groups[level_i] = [[stream indices from same original], ...]
         stream_groups = []
 
-        # Determine processing direction (from level with most contours)
+        # Determine processing direction (from larger count END)
+        # Always process sequentially from one endpoint to the other
         max_count_level = all_counts.index(max_stream_count)
-        if max_count_level == 0:
-            # Max is at origin - process origin → insertion
+        if origin_count >= insertion_count:
             level_order = list(range(num_levels))
             print("Processing: origin → insertion")
-        elif max_count_level == num_levels - 1:
-            # Max is at insertion - process insertion → origin
+        else:
             level_order = list(range(num_levels - 1, -1, -1))
             print("Processing: insertion → origin")
-        else:
-            # Max is at intermediate level (narrowest neck case)
-            # Process from max level in both directions
-            if origin_count <= insertion_count:
-                level_order = list(range(max_count_level, -1, -1)) + list(range(max_count_level + 1, num_levels))
-            else:
-                level_order = list(range(max_count_level, num_levels)) + list(range(max_count_level - 1, -1, -1))
-            print(f"Processing: from intermediate level {max_count_level} (narrowest neck)")
+
+        if max_count_level != 0 and max_count_level != num_levels - 1:
+            print(f"[NARROWEST NECK] Max contours ({max_stream_count}) at intermediate level {max_count_level}")
 
         # Process first level (no cutting needed if it has max_stream_count)
         first_level = level_order[0]
