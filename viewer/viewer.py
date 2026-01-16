@@ -3973,15 +3973,26 @@ class GLFWApp():
                 current_pieces = obj._manual_cut_data.get('current_pieces', [target_2d])
                 contour_range = np.max(target_2d.max(axis=0) - target_2d.min(axis=0))
 
-                # Use _find_neck_in_contour for each piece
+                # Find narrowest neck across all pieces (no threshold - always find narrowest)
                 best_neck = None
                 best_piece_idx = None
                 for piece_idx, piece_2d in enumerate(current_pieces):
-                    if hasattr(obj, '_find_neck_in_contour'):
-                        neck_info = obj._find_neck_in_contour(piece_2d)
-                        if neck_info is not None:
-                            if best_neck is None or neck_info['neck_width'] < best_neck['neck_width']:
-                                best_neck = neck_info
+                    n = len(piece_2d)
+                    if n < 10:
+                        continue
+                    min_sep_idx = int(n * 0.25)  # At least 25% around contour
+
+                    for i in range(n):
+                        for j in range(i + min_sep_idx, i + n - min_sep_idx):
+                            j_mod = j % n
+                            dist = np.linalg.norm(piece_2d[i] - piece_2d[j_mod])
+                            if best_neck is None or dist < best_neck['neck_width']:
+                                best_neck = {
+                                    'neck_point': (piece_2d[i] + piece_2d[j_mod]) / 2,
+                                    'neck_width': dist,
+                                    'idx_a': i,
+                                    'idx_b': j_mod,
+                                }
                                 best_piece_idx = piece_idx
 
                 if best_neck is not None:
