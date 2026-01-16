@@ -7511,10 +7511,13 @@ class ContourMeshMixin:
             pending_by_level[subcut_target_level] = new_pending
         self._manual_cut_data['pending_subcuts_by_level'] = pending_by_level
 
-        # Increment subcut_level for the new sub-window
-        new_level = current_level + 1
+        # Set subcut_level for the new sub-window
+        # IMPORTANT: Use parent_level (from subcut_info) not current_level (from subcut_level)
+        # This ensures sibling sub-cuts at the same level get the correct level number
+        # (e.g., if A and B are both children of level 0, both should be at level 1)
+        new_level = parent_level + 1
         self._manual_cut_data['subcut_level'] = new_level
-        print(f"[SubCut] Moving to level {new_level} (from level {current_level})")
+        print(f"[SubCut] Moving to level {new_level} (parent_level={parent_level})")
 
         # Update manual cut data for the sub-window
         self._manual_cut_data['target_contour'] = np.array(new_target_3d)
@@ -7689,8 +7692,13 @@ class ContourMeshMixin:
         # Get original stream indices if in sub-window context
         if original_source_indices:
             # Build full stream indices including parent context
-            all_stream_indices = self._manual_cut_data.get('original_stream_indices',
-                                                           list(range(len(cut_contours))))
+            # IMPORTANT: Use parent_context which has the original stream_indices
+            parent_context = self._manual_cut_data.get('parent_context', None)
+            if parent_context and 'stream_indices' in parent_context:
+                all_stream_indices = parent_context['stream_indices']
+            else:
+                # Fallback to current stream_indices
+                all_stream_indices = self._manual_cut_data.get('stream_indices', list(range(len(cut_contours))))
         else:
             all_stream_indices = self._manual_cut_data.get('stream_indices', source_indices)
 

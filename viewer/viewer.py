@@ -5145,7 +5145,13 @@ class GLFWApp():
                                         opt_idx += 1
 
                         # Get original stream indices from parent context
-                        all_stream_indices = list(range(total_pieces))
+                        # IMPORTANT: Use the actual stream indices, not just [0, 1, ..., M-1]
+                        parent_context = obj._manual_cut_data.get('parent_context', None)
+                        if parent_context and 'stream_indices' in parent_context:
+                            all_stream_indices = parent_context['stream_indices']
+                        else:
+                            # Fallback to initial stream_indices if parent_context not available
+                            all_stream_indices = obj._manual_cut_data.get('stream_indices', list(range(total_pieces)))
                     else:
                         # Normal context (not a sub-window)
                         source_contours_full = obj._manual_cut_data.get('source_contours', [])
@@ -5446,10 +5452,12 @@ class GLFWApp():
                     # Process assignments: 1:1 finalized, 2:1 opens sub-window
                     obj._process_piece_assignments()
 
-                    # Check what to do next
-                    pending_subcuts = obj._manual_cut_data.get('pending_subcuts', [])
+                    # Check what to do next - use level-by-level pending for consistency
+                    current_subcut_level = obj._manual_cut_data.get('current_subcut_level', 0)
+                    pending_by_level = obj._manual_cut_data.get('pending_subcuts_by_level', {})
+                    pending_subcuts = pending_by_level.get(current_subcut_level + 1, [])
                     if len(pending_subcuts) > 0:
-                        # Open sub-window for first pending 2:1 case
+                        # Open sub-window for first pending N:1 case
                         obj._open_subcut_for_piece(pending_subcuts[0])
                     else:
                         # All done - finalize
