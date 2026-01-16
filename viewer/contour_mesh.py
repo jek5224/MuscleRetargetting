@@ -7458,10 +7458,19 @@ class ContourMeshMixin:
         self._manual_cut_data['piece_assignments'] = {}
         self._manual_cut_data['assignment_mode'] = False
 
-        # Clear cutting line
+        # Clear cutting line and initial_line so neck finding runs for new target
         self._manual_cut_line = None
+        if 'initial_line' in self._manual_cut_data:
+            del self._manual_cut_data['initial_line']
+        if 'neck_candidates' in self._manual_cut_data:
+            del self._manual_cut_data['neck_candidates']
+        if 'selected_neck_idx' in self._manual_cut_data:
+            del self._manual_cut_data['selected_neck_idx']
+        if 'current_neck_info' in self._manual_cut_data:
+            del self._manual_cut_data['current_neck_info']
 
         print(f"[SubCut] Opened sub-window: sources {original_source_indices} -> piece {piece_idx}")
+        print(f"[SubCut] New target shape: {new_target_2d.shape}, {len(new_source_contours)} sources")
 
     def _finalize_manual_cuts(self):
         """
