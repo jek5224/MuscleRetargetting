@@ -7006,21 +7006,34 @@ class ContourMeshMixin:
         line_start_arr = np.array(line_start)
         line_end_arr = np.array(line_end)
 
+        print(f"[CUT] Line: {line_start_arr} to {line_end_arr}")
+
         for piece_idx, piece_2d in enumerate(current_pieces):
             n_verts = len(piece_2d)
 
             # Find vertices closest to line endpoints
             start_idx = None
             end_idx = None
-            vertex_tol = 1e-6
+            start_dist = float('inf')
+            end_dist = float('inf')
 
             for i in range(n_verts):
-                if np.linalg.norm(piece_2d[i] - line_start_arr) < vertex_tol:
+                d_start = np.linalg.norm(piece_2d[i] - line_start_arr)
+                d_end = np.linalg.norm(piece_2d[i] - line_end_arr)
+                if d_start < start_dist:
+                    start_dist = d_start
                     start_idx = i
-                if np.linalg.norm(piece_2d[i] - line_end_arr) < vertex_tol:
+                if d_end < end_dist:
+                    end_dist = d_end
                     end_idx = i
 
-            if start_idx is not None and end_idx is not None and start_idx != end_idx:
+            print(f"[CUT] Piece {piece_idx}: closest vertex to start = {start_idx} (dist={start_dist:.6f}), to end = {end_idx} (dist={end_dist:.6f})")
+
+            # Use tolerance based on contour scale
+            contour_range = np.ptp(piece_2d, axis=0).max()
+            vertex_tol = contour_range * 0.001  # 0.1% of contour size
+
+            if start_dist < vertex_tol and end_dist < vertex_tol and start_idx != end_idx:
                 # Direct vertex-to-vertex cut - build pieces directly
                 piece_3d = current_pieces_3d[piece_idx]
 
@@ -7051,6 +7064,7 @@ class ContourMeshMixin:
                 return True
 
         # Fallback: Find which piece the line intersects (first one with 2 intersections)
+        print(f"[CUT] Fallback: checking edge intersections")
         cut_piece_idx = None
         intersections = None
 
@@ -7058,25 +7072,29 @@ class ContourMeshMixin:
             n_verts = len(piece_2d)
             piece_intersections = []
 
+            line_start_np = np.array(line_start)
+            line_end_np = np.array(line_end)
+            line_dir = line_end_np - line_start_np
+
             for i in range(n_verts):
                 p1 = piece_2d[i]
                 p2 = piece_2d[(i + 1) % n_verts]
 
-                line_dir = np.array(line_end) - np.array(line_start)
                 edge_dir = p2 - p1
                 cross = line_dir[0] * edge_dir[1] - line_dir[1] * edge_dir[0]
 
                 if abs(cross) < 1e-10:
                     continue
 
-                diff = p1 - np.array(line_start)
+                diff = p1 - line_start_np
                 # t = parameter along edge (0 to 1 means on edge)
+                # s = parameter along cutting line (0 to 1 means on segment)
+                # Using standard line-line intersection formula
                 t = (diff[0] * line_dir[1] - diff[1] * line_dir[0]) / cross
-                # s = parameter along cutting line segment (0 to 1 means on segment)
-                s = (edge_dir[0] * diff[1] - edge_dir[1] * diff[0]) / cross
+                s = (diff[0] * edge_dir[1] - diff[1] * edge_dir[0]) / cross
 
                 # Use small epsilon to handle lines passing exactly through vertices
-                eps = 1e-9
+                eps = 1e-6
                 # Check both: intersection on edge AND on cutting line segment
                 if -eps < t < 1 + eps and -eps < s < 1 + eps:
                     # Clamp t to valid range for computing intersection point
@@ -7098,13 +7116,15 @@ class ContourMeshMixin:
                         deduped.append(inter)
                 piece_intersections = deduped
 
+            print(f"[CUT] Piece {piece_idx}: found {len(piece_intersections)} intersections")
+
             if len(piece_intersections) == 2:
                 cut_piece_idx = piece_idx
                 intersections = piece_intersections
                 break
 
         if cut_piece_idx is None:
-            print("No piece found with 2 intersections")
+            print(f"[CUT] No piece found with exactly 2 intersections")
             return False
 
         # Cut the found piece into two
