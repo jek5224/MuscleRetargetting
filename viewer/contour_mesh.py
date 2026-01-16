@@ -7084,14 +7084,26 @@ class ContourMeshMixin:
                 print(f"[Process] 1:1 finalized: piece {piece_idx} -> source {src_idx}")
             else:
                 # N:1 - queue for sub-window
-                # IMPORTANT: Store ORIGINAL source indices, not local indices
-                # This ensures correct mapping when opening nested sub-cuts
+                # IMPORTANT: Store actual source DATA, not just indices
+                # This ensures correct data when opening nested sub-cuts
                 source_labels = self._manual_cut_data.get('source_labels', list(range(len(self._manual_cut_data.get('source_contours', [])))))
+                source_contours = self._manual_cut_data.get('source_contours', [])
+                source_bps = self._manual_cut_data.get('source_bps', [])
+                source_2d_list = self._manual_cut_data.get('source_2d_list', [])
+                stream_indices = self._manual_cut_data.get('stream_indices', [])
+
                 original_sources = [source_labels[s] if s < len(source_labels) else s for s in assigned_sources]
+
+                # Store actual data for the assigned sources
                 pending_subcuts.append({
                     'piece_idx': piece_idx,
                     'sources': assigned_sources,  # Local indices for piece lookup
                     'original_sources': original_sources,  # Original indices for display/mapping
+                    # Store actual source data to avoid index confusion in nested sub-cuts
+                    'source_contours': [np.array(source_contours[s]).copy() for s in assigned_sources],
+                    'source_bps': [copy.deepcopy(source_bps[s]) for s in assigned_sources],
+                    'source_2d_list': [np.array(source_2d_list[s]).copy() for s in assigned_sources],
+                    'stream_indices': [stream_indices[s] for s in assigned_sources],
                 })
                 print(f"[Process] N:1 queued: piece {piece_idx} <- local sources {assigned_sources} (original: {original_sources})")
 
@@ -7201,11 +7213,22 @@ class ContourMeshMixin:
                                        for s in assigned_sources]
         self._manual_cut_data['original_source_indices'] = original_source_indices
 
-        # Get source data for assigned sources only
-        new_source_contours = [source_contours[s] for s in assigned_sources]
-        new_source_bps = [source_bps[s] for s in assigned_sources]
-        new_source_2d_list = [source_2d_list[s] for s in assigned_sources]
-        new_stream_indices = [stream_indices[s] for s in assigned_sources]
+        # Get source data for assigned sources
+        # IMPORTANT: Use pre-stored source data from subcut_info if available
+        # This avoids index confusion when opening nested sub-cuts
+        if 'source_contours' in subcut_info:
+            # Use pre-stored data (from nested sub-cuts)
+            new_source_contours = subcut_info['source_contours']
+            new_source_bps = subcut_info['source_bps']
+            new_source_2d_list = subcut_info['source_2d_list']
+            new_stream_indices = subcut_info['stream_indices']
+            print(f"[SubCut] Using pre-stored source data from subcut_info")
+        else:
+            # Fall back to indexing (first-level sub-cuts)
+            new_source_contours = [source_contours[s] for s in assigned_sources]
+            new_source_bps = [source_bps[s] for s in assigned_sources]
+            new_source_2d_list = [source_2d_list[s] for s in assigned_sources]
+            new_stream_indices = [stream_indices[s] for s in assigned_sources]
 
         # Create new source labels from original indices
         new_source_labels = original_source_indices.copy()
