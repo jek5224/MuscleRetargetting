@@ -4975,18 +4975,11 @@ class GLFWApp():
             # Hide in preview mode (Accept/Reset are shown instead)
             in_preview_for_button = obj._manual_cut_data.get('optimization_preview', False) if obj._manual_cut_data else False
             if num_selected >= 2 and not in_preview_for_button:
-                # Show different label based on whether manual cuts have been made
-                num_current_pieces = len(current_pieces)
-                if num_current_pieces > 1:
-                    opt_label = f"Opt Rest ({num_current_pieces}->{required_pieces})"
-                else:
-                    opt_label = "Optimize"
-
                 # Determine if we should run optimization (button click or auto-optimize mode)
                 run_optimization = False
                 skip_preview = False  # For Optimize All: skip preview and auto-accept
 
-                if imgui.button(opt_label, button_width + 20, 30):
+                if imgui.button("Optimize", button_width, 30):
                     run_optimization = True
                 imgui.same_line()
 
@@ -5092,7 +5085,7 @@ class GLFWApp():
 
                     # Get the current optimized pieces
                     current_pieces_3d = obj._manual_cut_data.get('current_pieces_3d', [])
-                    final_pieces = current_pieces_3d  # These are the optimized (and possibly edited) pieces
+                    # final_pieces will be set later to exclude matched pieces
 
                     # Get context data
                     source_contours = obj._manual_cut_data.get('source_contours', [])
@@ -5122,11 +5115,17 @@ class GLFWApp():
                                 all_pieces[orig_src_idx] = piece
 
                         # Fill in pre-matched pieces (mapped to original indices)
+                        matched_piece_indices = set()
                         for piece_idx, local_src_idx in matched_pairs:
                             if piece_idx < len(current_pieces_3d) and local_src_idx < len(original_source_indices):
                                 orig_src_idx = original_source_indices[local_src_idx]
                                 if orig_src_idx < total_pieces:
                                     all_pieces[orig_src_idx] = current_pieces_3d[piece_idx]
+                                    matched_piece_indices.add(piece_idx)
+
+                        # Build list of unmatched pieces (excluding already-matched ones)
+                        unmatched_pieces = [current_pieces_3d[i] for i in range(len(current_pieces_3d))
+                                           if i not in matched_piece_indices]
 
                         # Fill in optimized pieces for remaining sources (mapped to original indices)
                         opt_idx = 0
@@ -5134,8 +5133,8 @@ class GLFWApp():
                             if local_src_idx < len(original_source_indices):
                                 orig_src_idx = original_source_indices[local_src_idx]
                                 if orig_src_idx < total_pieces and all_pieces[orig_src_idx] is None:
-                                    if final_pieces is not None and opt_idx < len(final_pieces):
-                                        all_pieces[orig_src_idx] = final_pieces[opt_idx]
+                                    if opt_idx < len(unmatched_pieces):
+                                        all_pieces[orig_src_idx] = unmatched_pieces[opt_idx]
                                         opt_idx += 1
 
                         # Get original stream indices from parent context
@@ -5146,37 +5145,47 @@ class GLFWApp():
                         all_pieces = [None] * len(source_contours_full)
 
                         # Fill in pre-matched pieces
+                        matched_piece_indices = set()
                         for piece_idx, src_idx in matched_pairs:
                             if piece_idx < len(current_pieces_3d) and src_idx < len(all_pieces):
                                 all_pieces[src_idx] = current_pieces_3d[piece_idx]
+                                matched_piece_indices.add(piece_idx)
+
+                        # Build list of unmatched pieces (excluding already-matched ones)
+                        unmatched_pieces = [current_pieces_3d[i] for i in range(len(current_pieces_3d))
+                                           if i not in matched_piece_indices]
 
                         # Fill in optimized pieces for remaining sources
                         opt_idx = 0
                         for src_idx in selected_sources:
-                            if src_idx < len(all_pieces) and all_pieces[src_idx] is None and final_pieces is not None and opt_idx < len(final_pieces):
-                                all_pieces[src_idx] = final_pieces[opt_idx]
+                            if src_idx < len(all_pieces) and all_pieces[src_idx] is None and opt_idx < len(unmatched_pieces):
+                                all_pieces[src_idx] = unmatched_pieces[opt_idx]
                                 opt_idx += 1
 
                         all_stream_indices = obj._manual_cut_data.get('stream_indices', stream_indices)
 
                     # Check if we have all pieces
                     filled_count = sum(1 for p in all_pieces if p is not None)
+                    print(f"[Accept] Filled {filled_count}/{len(all_pieces)} pieces: matched={len(matched_pairs)}, unmatched={len(unmatched_pieces)}")
+                    for i, p in enumerate(all_pieces):
+                        if p is not None:
+                            print(f"  all_pieces[{i}]: {len(p)} verts")
+                        else:
+                            print(f"  all_pieces[{i}]: None")
                     if filled_count >= len(all_pieces):
-                        print(f"[Accept] Finalizing: {len(all_pieces)} pieces ({len(matched_pairs)} pre-matched, {len(final_pieces) if final_pieces else 0} optimized)")
+                        print(f"[Accept] Finalizing: {len(all_pieces)} pieces ({len(matched_pairs)} pre-matched, {len(unmatched_pieces)} optimized)")
 
                         # Check for remaining pending sub-cuts
                         pending_subcuts = obj._manual_cut_data.get('pending_subcuts', [])
 
                         # Update parent_finalized_pieces with THIS sub-cut's results
+                        # Use all_pieces directly since it already has correct mappings
                         updated_finalized = dict(parent_finalized_pieces) if parent_finalized_pieces else {}
                         if original_source_indices:
-                            opt_idx = 0
-                            for local_src_idx in selected_sources:
-                                if local_src_idx < len(original_source_indices):
-                                    orig_src_idx = original_source_indices[local_src_idx]
-                                    if final_pieces is not None and opt_idx < len(final_pieces):
-                                        updated_finalized[orig_src_idx] = final_pieces[opt_idx]
-                                        opt_idx += 1
+                            for local_src_idx in range(len(original_source_indices)):
+                                orig_src_idx = original_source_indices[local_src_idx]
+                                if orig_src_idx < len(all_pieces) and all_pieces[orig_src_idx] is not None:
+                                    updated_finalized[orig_src_idx] = all_pieces[orig_src_idx]
 
                         if len(pending_subcuts) > 0:
                             # MORE sub-cuts pending - open the next one
@@ -5191,6 +5200,8 @@ class GLFWApp():
 
                             target_i = obj._manual_cut_data.get('target_i', 0)
                             result_key = (target_level, target_i)
+                            print(f"[Accept] Storing result: target_level={target_level}, target_i={target_i}")
+                            print(f"[Accept] all_pieces has {len(all_pieces)} entries, all_stream_indices={all_stream_indices}")
                             obj._manual_cut_results[result_key] = {
                                 'cut_contours': all_pieces,
                                 'source_indices': all_stream_indices,
