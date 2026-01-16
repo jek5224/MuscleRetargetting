@@ -7001,78 +7001,11 @@ class ContourMeshMixin:
         if len(current_pieces) == 0:
             return False
 
-        # First, try to find if line endpoints match polygon vertices (vertex-to-vertex cut)
-        # This handles neck cuts where endpoints are at contour vertices
+        # Always use edge intersection - find where the line crosses contour edges
+        # and add new vertices at those intersection points
         line_start_arr = np.array(line_start)
         line_end_arr = np.array(line_end)
-
         print(f"[CUT] Line: {line_start_arr} to {line_end_arr}")
-
-        for piece_idx, piece_2d in enumerate(current_pieces):
-            n_verts = len(piece_2d)
-
-            # Find vertices closest to line endpoints
-            start_idx = None
-            end_idx = None
-            start_dist = float('inf')
-            end_dist = float('inf')
-
-            for i in range(n_verts):
-                d_start = np.linalg.norm(piece_2d[i] - line_start_arr)
-                d_end = np.linalg.norm(piece_2d[i] - line_end_arr)
-                if d_start < start_dist:
-                    start_dist = d_start
-                    start_idx = i
-                if d_end < end_dist:
-                    end_dist = d_end
-                    end_idx = i
-
-            # Use tolerance based on line length - only snap if VERY close to vertices
-            line_length = np.linalg.norm(line_end_arr - line_start_arr)
-            vertex_tol = line_length * 0.05  # 5% of line length - strict, only for exact neck matches
-
-            print(f"[CUT] Piece {piece_idx}: closest vertex to start = {start_idx} (dist={start_dist:.6f}), to end = {end_idx} (dist={end_dist:.6f}), tol={vertex_tol:.6f}, line_len={line_length:.6f}")
-
-            # Use vertex-to-vertex if endpoints are close enough to vertices
-            if start_dist < vertex_tol and end_dist < vertex_tol and start_idx != end_idx:
-                # Direct vertex-to-vertex cut - build pieces directly
-                piece_3d = current_pieces_3d[piece_idx]
-
-                # Ensure consistent ordering: we want to cut at these two vertex indices
-                idx_a, idx_b = start_idx, end_idx
-                if idx_a > idx_b:
-                    idx_a, idx_b = idx_b, idx_a
-
-                # Build two pieces - each is a closed polygon
-                # Piece 0: vertices from idx_a to idx_b (inclusive) - the "short" path
-                new_piece0_2d = [piece_2d[i].copy() for i in range(idx_a, idx_b + 1)]
-                new_piece0_3d = [piece_3d[i].copy() for i in range(idx_a, idx_b + 1)]
-
-                # Piece 1: vertices from idx_b to idx_a (wrapping around) - the "long" path
-                new_piece1_2d = []
-                new_piece1_3d = []
-                i = idx_b
-                while True:
-                    new_piece1_2d.append(piece_2d[i].copy())
-                    new_piece1_3d.append(piece_3d[i].copy())
-                    if i == idx_a:
-                        break
-                    i = (i + 1) % n_verts
-
-                print(f"[CUT] Vertex cut: idx_a={idx_a}, idx_b={idx_b}, piece0 has {len(new_piece0_2d)} verts, piece1 has {len(new_piece1_2d)} verts")
-
-                # Replace the cut piece with the two new pieces
-                new_pieces = current_pieces[:piece_idx] + [np.array(new_piece0_2d), np.array(new_piece1_2d)] + current_pieces[piece_idx + 1:]
-                new_pieces_3d = current_pieces_3d[:piece_idx] + [np.array(new_piece0_3d), np.array(new_piece1_3d)] + current_pieces_3d[piece_idx + 1:]
-
-                self._manual_cut_data['current_pieces'] = new_pieces
-                self._manual_cut_data['current_pieces_3d'] = new_pieces_3d
-                self._manual_cut_data['cut_lines'].append((line_start, line_end))
-                return True
-
-        # Fallback: Find which piece the line intersects using extended line
-        # Extend the line to ensure it crosses the contour even if drawn short
-        print(f"[CUT] Fallback: checking edge intersections (extended line)")
         cut_piece_idx = None
         intersections = None
 
