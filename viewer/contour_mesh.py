@@ -10074,6 +10074,107 @@ class ContourMeshMixin:
         plt.savefig(filepath, dpi=100)
         plt.close(fig)
 
+    def _save_accept_visualization(self, target_contour, target_bp, pieces_3d, source_contours, source_bps,
+                                   stream_indices, target_level=None, source_level=None):
+        """
+        Save visualization when Accept is clicked after optimization.
+        Shows target contour, source contours, and final pieces.
+        """
+        import matplotlib.pyplot as plt
+        import os
+
+        # Project everything to 2D
+        target_mean = target_bp['mean']
+        target_x = target_bp['basis_x']
+        target_y = target_bp['basis_y']
+        target_z = target_bp['basis_z']
+
+        # Project target contour
+        target_2d = np.array([
+            [np.dot(p - target_mean, target_x), np.dot(p - target_mean, target_y)]
+            for p in target_contour
+        ])
+
+        # Project source contours
+        source_2d_list = []
+        for src in source_contours:
+            src_2d = []
+            for p in src:
+                diff = p - target_mean
+                proj_p = p - np.dot(diff, target_z) * target_z
+                diff_proj = proj_p - target_mean
+                src_2d.append([np.dot(diff_proj, target_x), np.dot(diff_proj, target_y)])
+            source_2d_list.append(np.array(src_2d))
+
+        # Project pieces
+        pieces_2d_list = []
+        for piece in pieces_3d:
+            piece_2d = np.array([
+                [np.dot(p - target_mean, target_x), np.dot(p - target_mean, target_y)]
+                for p in piece
+            ])
+            pieces_2d_list.append(piece_2d)
+
+        # Create figure
+        fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 7))
+
+        # Left: Target with sources overlay
+        ax1.set_title(f'Target (Lv.{target_level}) with Sources (Lv.{source_level})')
+        if len(target_2d) > 0:
+            ax1.plot(target_2d[:, 0], target_2d[:, 1], 'k-', linewidth=2, label='Target')
+            ax1.plot([target_2d[-1, 0], target_2d[0, 0]], [target_2d[-1, 1], target_2d[0, 1]], 'k-', linewidth=2)
+
+        colors = plt.cm.tab10(np.linspace(0, 1, max(len(source_2d_list), 1)))
+        for i, src_2d in enumerate(source_2d_list):
+            if len(src_2d) > 0:
+                ax1.plot(src_2d[:, 0], src_2d[:, 1], '--', color=colors[i], linewidth=1.5, label=f'Source {i}')
+                ax1.plot([src_2d[-1, 0], src_2d[0, 0]], [src_2d[-1, 1], src_2d[0, 1]], '--', color=colors[i], linewidth=1.5)
+
+        ax1.legend(loc='upper right', fontsize=8)
+        ax1.set_aspect('equal')
+        ax1.grid(True, alpha=0.3)
+
+        # Right: Final pieces with sources overlay
+        ax2.set_title(f'Final Pieces ({len(pieces_2d_list)}) vs Sources')
+        for i, piece_2d in enumerate(pieces_2d_list):
+            if len(piece_2d) > 0:
+                color = colors[i % len(colors)]
+                ax2.fill(piece_2d[:, 0], piece_2d[:, 1], alpha=0.3, color=color)
+                ax2.plot(piece_2d[:, 0], piece_2d[:, 1], '-', color=color, linewidth=2, label=f'Piece {i}')
+                ax2.plot([piece_2d[-1, 0], piece_2d[0, 0]], [piece_2d[-1, 1], piece_2d[0, 1]], '-', color=color, linewidth=2)
+
+        for i, src_2d in enumerate(source_2d_list):
+            if len(src_2d) > 0:
+                ax2.plot(src_2d[:, 0], src_2d[:, 1], '--', color=colors[i], linewidth=1, alpha=0.6)
+                ax2.plot([src_2d[-1, 0], src_2d[0, 0]], [src_2d[-1, 1], src_2d[0, 1]], '--', color=colors[i], linewidth=1, alpha=0.6)
+
+        ax2.legend(loc='upper right', fontsize=8)
+        ax2.set_aspect('equal')
+        ax2.grid(True, alpha=0.3)
+
+        plt.tight_layout()
+
+        # Save to bp_viz/{muscle_name}/
+        obj_name = getattr(self, '_muscle_name', None)
+        if obj_name is None:
+            obj_name = getattr(self, 'name', getattr(self, 'mesh_name', 'unknown'))
+
+        muscle_dir = f'bp_viz/{obj_name}'
+        os.makedirs(muscle_dir, exist_ok=True)
+
+        if not hasattr(self, '_bp_viz_counter'):
+            self._bp_viz_counter = 0
+        self._bp_viz_counter += 1
+
+        level_str = ""
+        if target_level is not None and source_level is not None:
+            level_str = f"_accept{target_level}_using{source_level}"
+
+        filepath = f'{muscle_dir}/bp_transform_{self._bp_viz_counter:03d}{level_str}.png'
+        print(f"  [BP Viz Accept] Saving to {filepath}")
+        plt.savefig(filepath, dpi=100)
+        plt.close(fig)
+
     def _cut_contour_for_streams(self, contour, bp, projected_refs, stream_indices):
         """
         Cut a contour into pieces for multiple streams using area-based method.

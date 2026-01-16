@@ -3973,69 +3973,172 @@ class GLFWApp():
                 current_pieces = obj._manual_cut_data.get('current_pieces', [target_2d])
                 contour_range = np.max(target_2d.max(axis=0) - target_2d.min(axis=0))
 
-                # Find narrowest neck across all pieces (no threshold - always find narrowest)
-                best_neck = None
-                best_piece_idx = None
-                for piece_idx, piece_2d in enumerate(current_pieces):
+                print(f"[NECK] Looking for neck candidates in {len(current_pieces)} pieces")
+                print(f"[NECK] target_2d has {len(target_2d)} vertices")
+
+                # Find ALL neck candidates with distance < 5% of perimeter
+                if 'neck_candidates' not in obj._manual_cut_data:
+                    all_candidates = []
+                    for piece_idx, piece_2d in enumerate(current_pieces):
+                        n = len(piece_2d)
+                        if n < 10:
+                            continue
+
+                        # Compute perimeter
+                        perimeter = 0
+                        for i in range(n):
+                            perimeter += np.linalg.norm(piece_2d[(i+1) % n] - piece_2d[i])
+
+                        # Threshold: 1% of perimeter
+                        neck_threshold = perimeter * 0.01
+                        min_sep_idx = int(n * 0.25)
+
+                        # Find all pairs below threshold
+                        for i in range(n):
+                            for j in range(i + min_sep_idx, i + n - min_sep_idx):
+                                j_mod = j % n
+                                dist = np.linalg.norm(piece_2d[i] - piece_2d[j_mod])
+                                if dist < neck_threshold:
+                                    all_candidates.append({
+                                        'piece_idx': piece_idx,
+                                        'idx_a': i,
+                                        'idx_b': j_mod,
+                                        'width': dist,
+                                        'point': (piece_2d[i] + piece_2d[j_mod]) / 2,
+                                        'pos_a': piece_2d[i].copy(),
+                                        'pos_b': piece_2d[j_mod].copy(),
+                                    })
+
+                    # Sort by width (narrowest first)
+                    all_candidates.sort(key=lambda x: x['width'])
+
+                    # Remove near-duplicates (candidates within 5 vertices of each other)
+                    filtered = []
+                    for cand in all_candidates:
+                        is_dup = False
+                        for existing in filtered:
+                            if existing['piece_idx'] == cand['piece_idx']:
+                                # Check if indices are close
+                                n = len(current_pieces[cand['piece_idx']])
+                                dist_a = min(abs(cand['idx_a'] - existing['idx_a']),
+                                           n - abs(cand['idx_a'] - existing['idx_a']))
+                                dist_b = min(abs(cand['idx_b'] - existing['idx_b']),
+                                           n - abs(cand['idx_b'] - existing['idx_b']))
+                                if dist_a < 5 and dist_b < 5:
+                                    is_dup = True
+                                    break
+                        if not is_dup:
+                            filtered.append(cand)
+
+                    obj._manual_cut_data['neck_candidates'] = filtered
+                    obj._manual_cut_data['selected_neck_idx'] = 0 if len(filtered) > 0 else -1
+                    print(f"[NECK] Found {len(filtered)} neck candidates (from {len(all_candidates)} raw)")
+
+                # Get current selection
+                candidates = obj._manual_cut_data.get('neck_candidates', [])
+                selected_idx = obj._manual_cut_data.get('selected_neck_idx', 0)
+
+                # Helper to find line-contour intersection points
+                def find_contour_intersections(line_start, line_end, contour):
+                    """Find where a line intersects the contour, return the two intersection points."""
+                    intersections = []
+                    p1 = np.array(line_start)
+                    p2 = np.array(line_end)
+                    d = p2 - p1
+
+                    for i in range(len(contour)):
+                        q1 = contour[i]
+                        q2 = contour[(i + 1) % len(contour)]
+                        e = q2 - q1
+
+                        denom = d[0] * e[1] - d[1] * e[0]
+                        if abs(denom) < 1e-10:
+                            continue
+
+                        t = ((q1[0] - p1[0]) * e[1] - (q1[1] - p1[1]) * e[0]) / denom
+                        s = ((q1[0] - p1[0]) * d[1] - (q1[1] - p1[1]) * d[0]) / denom
+
+                        if 0 <= s <= 1:  # Intersection on contour edge
+                            pt = p1 + t * d
+                            intersections.append((t, pt, i))
+
+                    intersections.sort(key=lambda x: x[0])
+                    return intersections
+
+                if len(candidates) > 0 and selected_idx >= 0 and selected_idx < len(candidates):
+                    cand = candidates[selected_idx]
+                    piece_idx = cand['piece_idx']
+                    i0, i1 = cand['idx_a'], cand['idx_b']
+                    piece_2d = current_pieces[piece_idx]
                     n = len(piece_2d)
-                    if n < 10:
-                        continue
-                    min_sep_idx = int(n * 0.25)  # At least 25% around contour
 
-                    for i in range(n):
-                        for j in range(i + min_sep_idx, i + n - min_sep_idx):
-                            j_mod = j % n
-                            dist = np.linalg.norm(piece_2d[i] - piece_2d[j_mod])
-                            if best_neck is None or dist < best_neck['neck_width']:
-                                best_neck = {
-                                    'neck_point': (piece_2d[i] + piece_2d[j_mod]) / 2,
-                                    'neck_width': dist,
-                                    'idx_a': i,
-                                    'idx_b': j_mod,
-                                }
-                                best_piece_idx = piece_idx
+                    # Get neck vertices
+                    neck_a = piece_2d[i0]
+                    neck_b = piece_2d[i1]
 
-                if best_neck is not None:
-                    i0, i1 = best_neck['idx_a'], best_neck['idx_b']
-                    neck_width = best_neck['neck_width']
-                    piece_2d = current_pieces[best_piece_idx]
-                    n = len(piece_2d)
-
-                    print(f"  Recommended cut line: neck width = {neck_width:.6f} (piece {best_piece_idx})")
-                    print(f"    idx_a={i0}, idx_b={i1}")
-
-                    # Get neighbors at both neck indices
-                    next_i0 = (i0 + 1) % n
-                    next_i1 = (i1 + 1) % n
-
-                    # Check if pinch point (very small width) or normal neck
-                    if neck_width < 1e-6:
-                        # Pinch point: line from neighbor to neighbor across lobes
-                        p_start = piece_2d[next_i0]
-                        p_end = piece_2d[next_i1]
-                        print(f"    Pinch point: line from idx {next_i0} to idx {next_i1}")
-                    else:
-                        # Normal neck: line connects the two neck points directly
-                        p_start = piece_2d[i0]
-                        p_end = piece_2d[i1]
-                        print(f"    Normal neck: line from idx {i0} to idx {i1}")
-
-                    # Extend line slightly beyond endpoints
-                    direction = p_end - p_start
+                    # Determine line direction
+                    direction = neck_b - neck_a
                     dir_len = np.linalg.norm(direction)
                     if dir_len > 1e-10:
                         direction = direction / dir_len
                     else:
-                        direction = np.array([1.0, 0.0])
-                    extent = contour_range * 0.05
-                    line_start = tuple(p_start - direction * extent)
-                    line_end = tuple(p_end + direction * extent)
+                        # Zero-length (pinch): use direction from prev to prev
+                        prev_i0 = (i0 - 1) % n
+                        prev_i1 = (i1 - 1) % n
+                        direction = piece_2d[prev_i1] - piece_2d[prev_i0]
+                        dir_len = np.linalg.norm(direction)
+                        if dir_len > 1e-10:
+                            direction = direction / dir_len
+                        else:
+                            direction = np.array([1.0, 0.0])
+
+                    # Create extended line for intersection finding
+                    neck_center = (neck_a + neck_b) / 2
+                    extent = contour_range * 2.0  # Large extent to ensure intersection
+                    ext_start = neck_center - direction * extent
+                    ext_end = neck_center + direction * extent
+
+                    # Find intersections with contour
+                    intersections = find_contour_intersections(ext_start, ext_end, piece_2d)
+
+                    if len(intersections) >= 2:
+                        # Use the two intersections closest to the neck center
+                        # Find intersections on opposite sides of center (t < 0.5 and t > 0.5)
+                        center_t = 0.5  # Since ext_start and ext_end are symmetric around neck_center
+                        before = [inter for inter in intersections if inter[0] < center_t]
+                        after = [inter for inter in intersections if inter[0] >= center_t]
+
+                        if before and after:
+                            p_start = before[-1][1]  # Last intersection before center
+                            p_end = after[0][1]      # First intersection after center
+                        else:
+                            # Fallback: use first two intersections
+                            p_start = intersections[0][1]
+                            p_end = intersections[1][1]
+                    else:
+                        # Fallback: use extended line
+                        p_start = neck_center - direction * contour_range * 0.5
+                        p_end = neck_center + direction * contour_range * 0.5
+
+                    line_start = tuple(p_start)
+                    line_end = tuple(p_end)
+
+                    # Store neck info for zoomed view
+                    obj._manual_cut_data['current_neck_info'] = {
+                        'neck_a': neck_a.copy(),
+                        'neck_b': neck_b.copy(),
+                        'line_start': p_start.copy(),
+                        'line_end': p_end.copy(),
+                        'piece_idx': piece_idx,
+                        'idx_a': i0,
+                        'idx_b': i1,
+                    }
 
                     obj._manual_cut_data['initial_line'] = (line_start, line_end)
-                    obj._manual_cut_data['neck_indices'] = (i0, i1)
-                    obj._manual_cut_data['neck_piece_idx'] = best_piece_idx
                     if obj._manual_cut_line is None:
                         obj._manual_cut_line = (line_start, line_end)
+                else:
+                    print(f"[NECK] No neck candidates found")
 
             current_pieces = obj._manual_cut_data.get('current_pieces', [target_2d])
             required_pieces = obj._manual_cut_data.get('required_pieces', 2)
@@ -4049,6 +4152,106 @@ class GLFWApp():
             imgui.text_colored(" | FADED = Source ref (guide)", 0.6, 0.6, 0.6, 1.0)
             imgui.text("Draw a line to cut. Scroll to zoom, middle-drag to pan.")
             imgui.text(f"Zoom: {mouse_state['zoom']:.1f}x")
+
+            # Neck candidate selector slider
+            candidates = obj._manual_cut_data.get('neck_candidates', [])
+            if len(candidates) > 0:
+                selected_idx = obj._manual_cut_data.get('selected_neck_idx', 0)
+                cand = candidates[selected_idx] if selected_idx < len(candidates) else None
+                width_str = f"{cand['width']:.6f}" if cand else "N/A"
+                imgui.text(f"Neck candidates: {len(candidates)} | Selected: {selected_idx} (width={width_str})")
+                imgui.push_item_width(200)
+                changed, new_idx = imgui.slider_int(f"##neck_slider_{name}", selected_idx, 0, len(candidates) - 1)
+                if changed:
+                    obj._manual_cut_data['selected_neck_idx'] = new_idx
+                    # Update the cutting line to match selected candidate
+                    if new_idx < len(candidates):
+                        cand = candidates[new_idx]
+                        piece_idx = cand['piece_idx']
+                        i0, i1 = cand['idx_a'], cand['idx_b']
+                        current_pieces = obj._manual_cut_data.get('current_pieces', [target_2d])
+                        piece_2d = current_pieces[piece_idx]
+                        n = len(piece_2d)
+                        contour_range = np.max(target_2d.max(axis=0) - target_2d.min(axis=0))
+
+                        # Get neck vertices
+                        neck_a = piece_2d[i0]
+                        neck_b = piece_2d[i1]
+
+                        # Determine line direction
+                        direction = neck_b - neck_a
+                        dir_len = np.linalg.norm(direction)
+                        if dir_len > 1e-10:
+                            direction = direction / dir_len
+                        else:
+                            # Zero-length (pinch): use direction from prev to prev
+                            prev_i0 = (i0 - 1) % n
+                            prev_i1 = (i1 - 1) % n
+                            direction = piece_2d[prev_i1] - piece_2d[prev_i0]
+                            d_len = np.linalg.norm(direction)
+                            if d_len > 1e-10:
+                                direction = direction / d_len
+                            else:
+                                direction = np.array([1.0, 0.0])
+
+                        # Create extended line for intersection finding
+                        neck_center = (neck_a + neck_b) / 2
+                        extent = contour_range * 2.0
+                        ext_start = neck_center - direction * extent
+                        ext_end = neck_center + direction * extent
+
+                        # Find intersections with contour (inline function)
+                        def find_intersections_inline(line_s, line_e, contour):
+                            inters = []
+                            p1 = np.array(line_s)
+                            p2 = np.array(line_e)
+                            d = p2 - p1
+                            for ci in range(len(contour)):
+                                q1 = contour[ci]
+                                q2 = contour[(ci + 1) % len(contour)]
+                                e = q2 - q1
+                                denom = d[0] * e[1] - d[1] * e[0]
+                                if abs(denom) < 1e-10:
+                                    continue
+                                t = ((q1[0] - p1[0]) * e[1] - (q1[1] - p1[1]) * e[0]) / denom
+                                s = ((q1[0] - p1[0]) * d[1] - (q1[1] - p1[1]) * d[0]) / denom
+                                if 0 <= s <= 1:
+                                    pt = p1 + t * d
+                                    inters.append((t, pt, ci))
+                            inters.sort(key=lambda x: x[0])
+                            return inters
+
+                        intersections = find_intersections_inline(ext_start, ext_end, piece_2d)
+
+                        if len(intersections) >= 2:
+                            center_t = 0.5
+                            before = [inter for inter in intersections if inter[0] < center_t]
+                            after = [inter for inter in intersections if inter[0] >= center_t]
+                            if before and after:
+                                p_start = before[-1][1]
+                                p_end = after[0][1]
+                            else:
+                                p_start = intersections[0][1]
+                                p_end = intersections[1][1]
+                        else:
+                            p_start = neck_center - direction * contour_range * 0.5
+                            p_end = neck_center + direction * contour_range * 0.5
+
+                        # Update cutting line
+                        obj._manual_cut_line = (tuple(p_start), tuple(p_end))
+                        obj._manual_cut_data['initial_line'] = obj._manual_cut_line
+
+                        # Update neck info for zoomed view
+                        obj._manual_cut_data['current_neck_info'] = {
+                            'neck_a': neck_a.copy(),
+                            'neck_b': neck_b.copy(),
+                            'line_start': np.array(p_start).copy(),
+                            'line_end': np.array(p_end).copy(),
+                            'piece_idx': piece_idx,
+                            'idx_a': i0,
+                            'idx_b': i1,
+                        }
+                imgui.pop_item_width()
             imgui.separator()
 
             # Compute bounds for normalization (include target AND projected sources)
@@ -4147,6 +4350,10 @@ class GLFWApp():
                               x0 + canvas_size + padding, y0 + canvas_size + padding,
                               imgui.get_color_u32_rgba(0.5, 0.5, 0.5, 1.0))
 
+            # Clip drawing to canvas area
+            draw_list.push_clip_rect(x0 - padding, y0 - padding,
+                                     x0 + canvas_size + padding, y0 + canvas_size + padding)
+
             # Draw all current pieces
             # Colors for different pieces: cycle through these
             piece_colors = [
@@ -4185,6 +4392,71 @@ class GLFWApp():
                         draw_list.add_text(cx + 10, cy - 10,
                                           imgui.get_color_u32_rgba(1.0, 1.0, 1.0, 1.0),
                                           f"Target (Lv.{target_level})")
+
+            # Draw all neck candidates (faded) and highlight selected one
+            candidates = obj._manual_cut_data.get('neck_candidates', [])
+            selected_neck_idx = obj._manual_cut_data.get('selected_neck_idx', 0)
+            for cand_idx, cand in enumerate(candidates):
+                pos_a = cand['pos_a']
+                pos_b = cand['pos_b']
+                screen_a = to_screen(pos_a, x0, y0, canvas_size)
+                screen_b = to_screen(pos_b, x0, y0, canvas_size)
+                mid_screen = ((screen_a[0] + screen_b[0]) / 2, (screen_a[1] + screen_b[1]) / 2)
+
+                if cand_idx == selected_neck_idx:
+                    # Selected: bright cyan, thicker line
+                    color = imgui.get_color_u32_rgba(0.0, 1.0, 1.0, 1.0)
+                    draw_list.add_line(screen_a[0], screen_a[1], screen_b[0], screen_b[1], color, 3.0)
+                    draw_list.add_circle_filled(screen_a[0], screen_a[1], 5, color)
+                    draw_list.add_circle_filled(screen_b[0], screen_b[1], 5, color)
+                    # Label
+                    draw_list.add_text(mid_screen[0] + 5, mid_screen[1] - 10,
+                                      color, f"#{cand_idx} w={cand['width']:.4f}")
+                else:
+                    # Non-selected: faded yellow
+                    color = imgui.get_color_u32_rgba(1.0, 1.0, 0.0, 0.3)
+                    draw_list.add_line(screen_a[0], screen_a[1], screen_b[0], screen_b[1], color, 1.5)
+                    draw_list.add_circle_filled(screen_a[0], screen_a[1], 3, color)
+                    draw_list.add_circle_filled(screen_b[0], screen_b[1], 3, color)
+
+            # Draw zoomed view indicator rectangle on main canvas
+            neck_info_indicator = obj._manual_cut_data.get('current_neck_info', None)
+            if neck_info_indicator is not None:
+                line_start_ind = neck_info_indicator['line_start']
+                line_end_ind = neck_info_indicator['line_end']
+                piece_idx_ind = neck_info_indicator['piece_idx']
+                current_pieces_ind = obj._manual_cut_data.get('current_pieces', [target_2d])
+
+                if piece_idx_ind < len(current_pieces_ind):
+                    piece_2d_ind = current_pieces_ind[piece_idx_ind]
+
+                    # Calculate the same extent as the zoomed view
+                    target_line_pixels = 120.0
+                    zoom_canvas_size_ind = 200
+                    actual_line_length_ind = np.linalg.norm(line_end_ind - line_start_ind)
+                    if actual_line_length_ind > 1e-10:
+                        world_extent_ind = actual_line_length_ind * (zoom_canvas_size_ind / target_line_pixels)
+                    else:
+                        world_extent_ind = np.max(piece_2d_ind.max(axis=0) - piece_2d_ind.min(axis=0)) * 0.3
+
+                    neck_center_ind = (line_start_ind + line_end_ind) / 2
+                    half_extent = world_extent_ind / 2
+
+                    # Get the corners of the zoomed view in world coordinates
+                    corners_2d = [
+                        neck_center_ind + np.array([-half_extent, -half_extent]),
+                        neck_center_ind + np.array([half_extent, -half_extent]),
+                        neck_center_ind + np.array([half_extent, half_extent]),
+                        neck_center_ind + np.array([-half_extent, half_extent]),
+                    ]
+
+                    # Convert to screen coordinates and draw
+                    corners_screen = [to_screen(c, x0, y0, canvas_size) for c in corners_2d]
+                    indicator_color = imgui.get_color_u32_rgba(0.0, 1.0, 0.5, 0.7)
+                    for i in range(4):
+                        p1 = corners_screen[i]
+                        p2 = corners_screen[(i + 1) % 4]
+                        draw_list.add_line(p1[0], p1[1], p2[0], p2[1], indicator_color, 2.0)
 
             # Draw selected source contour transparently on the main canvas
             source_contours_3d = obj._manual_cut_data.get('source_contours', [])
@@ -4244,6 +4516,9 @@ class GLFWApp():
                         draw_list.add_text(cx + 10, cy + 5,
                                           imgui.get_color_u32_rgba(*src_color, 1.0),
                                           f"Source {src_label} (Lv.{source_level})")
+
+            # End canvas clipping
+            draw_list.pop_clip_rect()
 
             # Create invisible button to capture mouse input (prevents window dragging)
             imgui.set_cursor_screen_pos((x0 - padding, y0 - padding))
@@ -4318,6 +4593,10 @@ class GLFWApp():
                                         x0, y0, canvas_size)
                     obj._manual_cut_line = (tuple(start_2d), tuple(end_2d))
 
+            # Clip cutting line drawing to canvas area
+            draw_list.push_clip_rect(x0 - padding, y0 - padding,
+                                     x0 + canvas_size + padding, y0 + canvas_size + padding)
+
             # Draw the cutting line (from click/drag points)
             if mouse_state['dragging'] and mouse_state['start_pos'] and mouse_state['end_pos']:
                 # Draw line from drag start to current position
@@ -4350,6 +4629,9 @@ class GLFWApp():
                             pt1, pt2 = p1_screen[i], p1_screen[(i+1) % len(p1_screen)]
                             draw_list.add_line(pt1[0], pt1[1], pt2[0], pt2[1],
                                               imgui.get_color_u32_rgba(piece_colors[1][0], piece_colors[1][1], piece_colors[1][2], 1.0), 2.5)
+
+            # End cutting line clipping
+            draw_list.pop_clip_rect()
 
             # ===== Source Contour Viewer Panel (right side) =====
             source_contours_3d = obj._manual_cut_data.get('source_contours', [])
@@ -4519,6 +4801,112 @@ class GLFWApp():
                 imgui.text(f"Selected: {num_selected} / {len(source_contours_3d)}")
 
                 imgui.pop_item_width()
+
+                # ===== Zoomed Neck View Panel (below source panel) =====
+                neck_info = obj._manual_cut_data.get('current_neck_info', None)
+                if neck_info is not None:
+                    # Panel position (below source panel)
+                    zoom_panel_x = src_panel_x - src_padding
+                    zoom_panel_y = src_panel_y + src_canvas_size + src_padding + 130
+                    zoom_canvas_size = 200
+                    zoom_padding = 10
+
+                    # Draw panel background
+                    draw_list.add_rect_filled(
+                        zoom_panel_x, zoom_panel_y,
+                        zoom_panel_x + src_canvas_size + src_padding * 2, zoom_panel_y + zoom_canvas_size + 50,
+                        imgui.get_color_u32_rgba(0.1, 0.1, 0.1, 1.0))
+                    draw_list.add_rect(
+                        zoom_panel_x, zoom_panel_y,
+                        zoom_panel_x + src_canvas_size + src_padding * 2, zoom_panel_y + zoom_canvas_size + 50,
+                        imgui.get_color_u32_rgba(0.5, 0.5, 0.5, 1.0))
+
+                    # Title
+                    draw_list.add_text(zoom_panel_x + zoom_padding, zoom_panel_y + 5,
+                                      imgui.get_color_u32_rgba(0.9, 0.9, 0.9, 1.0),
+                                      "Neck Detail (Zoomed)")
+
+                    # Get neck line info
+                    line_start = neck_info['line_start']
+                    line_end = neck_info['line_end']
+                    piece_idx = neck_info['piece_idx']
+                    current_pieces_zoom = obj._manual_cut_data.get('current_pieces', [target_2d])
+
+                    if piece_idx < len(current_pieces_zoom):
+                        piece_2d = current_pieces_zoom[piece_idx]
+
+                        # Calculate zoom level to keep line at fixed pixel length (e.g., 120 pixels)
+                        target_line_pixels = 120.0
+                        actual_line_length = np.linalg.norm(line_end - line_start)
+                        if actual_line_length > 1e-10:
+                            # Calculate the world space extent that should fit in target_line_pixels
+                            world_extent = actual_line_length * (zoom_canvas_size / target_line_pixels)
+                        else:
+                            world_extent = np.max(piece_2d.max(axis=0) - piece_2d.min(axis=0)) * 0.3
+
+                        # Center on neck midpoint
+                        neck_center = (line_start + line_end) / 2
+
+                        # Zoomed canvas position
+                        zcanvas_x = zoom_panel_x + zoom_padding
+                        zcanvas_y = zoom_panel_y + 25
+                        zcanvas_size = zoom_canvas_size
+
+                        # Draw zoom canvas background
+                        draw_list.add_rect_filled(
+                            zcanvas_x, zcanvas_y,
+                            zcanvas_x + zcanvas_size, zcanvas_y + zcanvas_size,
+                            imgui.get_color_u32_rgba(0.05, 0.05, 0.05, 1.0))
+
+                        # Clip to zoom canvas
+                        draw_list.push_clip_rect(zcanvas_x, zcanvas_y,
+                                                 zcanvas_x + zcanvas_size, zcanvas_y + zcanvas_size)
+
+                        # Transform function for zoomed view
+                        def to_zoom_screen(p):
+                            offset = np.array(p) - neck_center
+                            normalized = offset / world_extent + 0.5
+                            return (zcanvas_x + normalized[0] * zcanvas_size,
+                                    zcanvas_y + (1.0 - normalized[1]) * zcanvas_size)
+
+                        # Draw the piece contour (faded white)
+                        if len(piece_2d) >= 3:
+                            for i in range(len(piece_2d)):
+                                p1 = to_zoom_screen(piece_2d[i])
+                                p2 = to_zoom_screen(piece_2d[(i + 1) % len(piece_2d)])
+                                draw_list.add_line(p1[0], p1[1], p2[0], p2[1],
+                                                  imgui.get_color_u32_rgba(0.6, 0.6, 0.6, 0.8), 1.5)
+
+                        # Draw cutting line (magenta)
+                        zstart = to_zoom_screen(line_start)
+                        zend = to_zoom_screen(line_end)
+                        draw_list.add_line(zstart[0], zstart[1], zend[0], zend[1],
+                                          imgui.get_color_u32_rgba(1.0, 0.0, 1.0, 1.0), 3.0)
+
+                        # Draw endpoints (on contour)
+                        draw_list.add_circle_filled(zstart[0], zstart[1], 5,
+                                                   imgui.get_color_u32_rgba(0.0, 1.0, 0.0, 1.0))
+                        draw_list.add_circle_filled(zend[0], zend[1], 5,
+                                                   imgui.get_color_u32_rgba(0.0, 1.0, 0.0, 1.0))
+
+                        # Draw neck vertices (cyan)
+                        neck_a = neck_info['neck_a']
+                        neck_b = neck_info['neck_b']
+                        za = to_zoom_screen(neck_a)
+                        zb = to_zoom_screen(neck_b)
+                        draw_list.add_circle_filled(za[0], za[1], 4,
+                                                   imgui.get_color_u32_rgba(0.0, 1.0, 1.0, 1.0))
+                        draw_list.add_circle_filled(zb[0], zb[1], 4,
+                                                   imgui.get_color_u32_rgba(0.0, 1.0, 1.0, 1.0))
+
+                        # End clip
+                        draw_list.pop_clip_rect()
+
+                        # Show info below zoomed canvas
+                        info_y = zcanvas_y + zcanvas_size + 5
+                        draw_list.add_text(zcanvas_x, info_y,
+                                          imgui.get_color_u32_rgba(0.7, 0.7, 0.7, 1.0),
+                                          f"Line len: {actual_line_length:.4f}")
 
             # Get piece info (use selected_sources count for required_pieces)
             current_pieces = obj._manual_cut_data.get('current_pieces', [target_2d])
@@ -4728,10 +5116,24 @@ class GLFWApp():
                     target_bp = obj._manual_cut_data.get('target_bp')
                     stream_indices = obj._manual_cut_data.get('stream_indices', list(range(len(source_contours))))
                     target_level = obj._manual_cut_data.get('target_level')
+                    source_level = obj._manual_cut_data.get('source_level')
                     matched_pairs = obj._manual_cut_data.get('matched_pairs', [])
                     parent_finalized_pieces = obj._manual_cut_data.get('parent_finalized_pieces', {})
                     original_source_indices = obj._manual_cut_data.get('original_source_indices', None)
                     selected_sources = obj._manual_cut_data.get('selected_sources', list(range(len(source_contours))))
+
+                    # Save BP visualization on Accept (same as auto-optimize)
+                    if target_bp is not None and len(current_pieces_3d) > 0 and len(source_contours) > 0:
+                        try:
+                            target_contour = obj._manual_cut_data.get('target_contour')
+                            if target_contour is not None:
+                                obj._save_accept_visualization(
+                                    target_contour, target_bp,
+                                    current_pieces_3d, source_contours, source_bps,
+                                    stream_indices, target_level, source_level
+                                )
+                        except Exception as e:
+                            print(f"[Accept] BP viz save failed: {e}")
 
                     # Exit preview mode
                     obj._manual_cut_data['optimization_preview'] = False
