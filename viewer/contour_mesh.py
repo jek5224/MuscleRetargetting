@@ -7319,19 +7319,24 @@ class ContourMeshMixin:
                     continue
 
                 # Store actual data for the assigned sources (with bounds checking)
+                stored_source_contours = [np.array(source_contours[s]).copy() for s in assigned_sources if s < len(source_contours)]
                 subcut_info = {
                     'piece_idx': piece_idx,
                     'sources': assigned_sources,  # Local indices for piece lookup
                     'original_sources': original_sources,  # Original indices for display/mapping
                     'parent_level': current_level,  # Track which level created this sub-cut
                     # Store actual source data to avoid index confusion in nested sub-cuts
-                    'source_contours': [np.array(source_contours[s]).copy() for s in assigned_sources if s < len(source_contours)],
+                    'source_contours': stored_source_contours,
                     'source_bps': [copy.deepcopy(source_bps[s]) for s in assigned_sources if s < len(source_bps)],
                     'source_2d_list': [np.array(source_2d_list[s]).copy() for s in assigned_sources if s < len(source_2d_list)],
                     'stream_indices': [stream_indices[s] for s in assigned_sources if s < len(stream_indices)],
                 }
                 pending_by_level[next_level].append(subcut_info)
                 print(f"[Process] N:1 queued to level {next_level}: piece {piece_idx} <- local sources {assigned_sources} (original: {original_sources})")
+                # Debug: print stored source contour info
+                for ssi, ssc in enumerate(stored_source_contours):
+                    orig_label = original_sources[ssi] if ssi < len(original_sources) else '?'
+                    print(f"[Process]   stored source[{ssi}] (orig S{orig_label}): {len(ssc)} verts")
 
         self._manual_cut_data['matched_pairs'] = matched_pairs
         self._manual_cut_data['pending_subcuts_by_level'] = pending_by_level
@@ -7573,6 +7578,9 @@ class ContourMeshMixin:
 
         print(f"[SubCut] Opened sub-window: sources {original_source_indices} -> piece {piece_idx}")
         print(f"[SubCut] New target shape: {new_target_2d.shape}, {len(new_source_contours)} sources")
+        # Debug: print source contour shapes
+        for sci, sc in enumerate(new_source_contours):
+            print(f"[SubCut] source_contour[{sci}]: {len(sc)} verts, label={new_source_labels[sci] if sci < len(new_source_labels) else '?'}")
 
     def _finalize_manual_cuts(self):
         """
