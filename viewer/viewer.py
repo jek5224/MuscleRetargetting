@@ -3984,7 +3984,7 @@ class GLFWApp():
                 print(f"[NECK] Looking for neck candidates in {len(current_pieces)} pieces")
                 print(f"[NECK] target_2d has {len(target_2d)} vertices")
 
-                # Find ALL neck candidates with distance < 5% of perimeter
+                # Find ALL neck candidates with distance < 3% of perimeter
                 if 'neck_candidates' not in obj._manual_cut_data:
                     all_candidates = []
                     for piece_idx, piece_2d in enumerate(current_pieces):
@@ -3997,8 +3997,8 @@ class GLFWApp():
                         for i in range(n):
                             perimeter += np.linalg.norm(piece_2d[(i+1) % n] - piece_2d[i])
 
-                        # Threshold: 1% of perimeter
-                        neck_threshold = perimeter * 0.01
+                        # Threshold: 3% of perimeter (wider to catch merge point necks)
+                        neck_threshold = perimeter * 0.03
                         # Use smaller index separation (10%) to catch pinch points
                         min_sep_idx = int(n * 0.10)
 
