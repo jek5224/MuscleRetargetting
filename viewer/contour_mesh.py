@@ -7027,14 +7027,14 @@ class ContourMeshMixin:
                     end_dist = d_end
                     end_idx = i
 
-            # Use tolerance based on contour scale - generous to handle coordinate precision issues
-            contour_range = np.ptp(piece_2d, axis=0).max()
-            vertex_tol = contour_range * 0.2  # 20% of contour size - snap to closest vertices
+            # Use tolerance based on line length - if endpoints are close to vertices, snap to them
+            line_length = np.linalg.norm(line_end_arr - line_start_arr)
+            vertex_tol = line_length * 0.3  # 30% of line length - generous for neck cuts
 
-            print(f"[CUT] Piece {piece_idx}: closest vertex to start = {start_idx} (dist={start_dist:.6f}), to end = {end_idx} (dist={end_dist:.6f}), tol={vertex_tol:.6f}")
+            print(f"[CUT] Piece {piece_idx}: closest vertex to start = {start_idx} (dist={start_dist:.6f}), to end = {end_idx} (dist={end_dist:.6f}), tol={vertex_tol:.6f}, line_len={line_length:.6f}")
 
-            # Always use vertex-to-vertex if we found distinct closest vertices
-            if start_idx != end_idx:
+            # Use vertex-to-vertex if endpoints are close enough to vertices
+            if start_dist < vertex_tol and end_dist < vertex_tol and start_idx != end_idx:
                 # Direct vertex-to-vertex cut - build pieces directly
                 piece_3d = current_pieces_3d[piece_idx]
 
