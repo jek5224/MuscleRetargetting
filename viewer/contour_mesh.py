@@ -7579,6 +7579,8 @@ class ContourMeshMixin:
             del self._manual_cut_data['selected_neck_idx']
         if 'current_neck_info' in self._manual_cut_data:
             del self._manual_cut_data['current_neck_info']
+        if 'neck_search_done' in self._manual_cut_data:
+            del self._manual_cut_data['neck_search_done']
 
         print(f"[SubCut] Opened sub-window: sources {original_source_indices} -> piece {piece_idx}")
         print(f"[SubCut] New target shape: {new_target_2d.shape}, {len(new_source_contours)} sources")

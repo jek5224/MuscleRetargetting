@@ -3987,17 +3987,21 @@ class GLFWApp():
             # Only for SEPARATE mode - COMMON mode uses source boundary line
             # Skip for sub-windows (original_source_indices set) - they don't need neck finding
             is_common_mode = obj._manual_cut_data.get('is_common_mode', False)
-            is_subwindow = obj._manual_cut_data.get('original_source_indices', None) is not None
+            original_source_indices = obj._manual_cut_data.get('original_source_indices', None)
+            is_subwindow = original_source_indices is not None
+            subcut_level = obj._manual_cut_data.get('subcut_level', 0)
             need_new_recommendation = 'initial_line' not in obj._manual_cut_data
-            if need_new_recommendation and not is_common_mode and not is_subwindow:
+
+            # Skip neck finding for sub-windows (subcut_level > 0 or original_source_indices set)
+            skip_neck = is_common_mode or is_subwindow or subcut_level > 0
+            if need_new_recommendation and not skip_neck:
                 current_pieces = obj._manual_cut_data.get('current_pieces', [target_2d])
                 contour_range = np.max(target_2d.max(axis=0) - target_2d.min(axis=0))
 
-                print(f"[NECK] Looking for neck candidates in {len(current_pieces)} pieces")
-                print(f"[NECK] target_2d has {len(target_2d)} vertices")
-
                 # Find ALL neck candidates with distance < 3% of perimeter
+                # Only print debug once when actually computing candidates
                 if 'neck_candidates' not in obj._manual_cut_data:
+                    print(f"[NECK] Looking for neck candidates in {len(current_pieces)} pieces, target has {len(target_2d)} vertices")
                     all_candidates = []
                     for piece_idx, piece_2d in enumerate(current_pieces):
                         n = len(piece_2d)
@@ -4127,7 +4131,10 @@ class GLFWApp():
                     if obj._manual_cut_line is None:
                         obj._manual_cut_line = (line_start, line_end)
                 else:
-                    print(f"[NECK] No neck candidates found")
+                    # No candidates found - set flag to prevent re-computation every frame
+                    if 'neck_search_done' not in obj._manual_cut_data:
+                        print(f"[NECK] No neck candidates found")
+                        obj._manual_cut_data['neck_search_done'] = True
 
             current_pieces = obj._manual_cut_data.get('current_pieces', [target_2d])
             required_pieces = obj._manual_cut_data.get('required_pieces', 2)
