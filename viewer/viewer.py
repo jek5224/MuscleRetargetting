@@ -4092,33 +4092,13 @@ class GLFWApp():
                         else:
                             direction = np.array([1.0, 0.0])
 
-                    # Create extended line for intersection finding
-                    neck_center = (neck_a + neck_b) / 2
-                    extent = contour_range * 2.0  # Large extent to ensure intersection
-                    ext_start = neck_center - direction * extent
-                    ext_end = neck_center + direction * extent
+                    # Create short line extending slightly past neck vertices
+                    # Extension: 30% of neck width on each side, with minimum extension
+                    neck_width = np.linalg.norm(neck_b - neck_a)
+                    extension = max(neck_width * 0.3, contour_range * 0.02)
 
-                    # Find intersections with contour
-                    intersections = find_contour_intersections(ext_start, ext_end, piece_2d)
-
-                    if len(intersections) >= 2:
-                        # Use the two intersections closest to the neck center
-                        # Find intersections on opposite sides of center (t < 0.5 and t > 0.5)
-                        center_t = 0.5  # Since ext_start and ext_end are symmetric around neck_center
-                        before = [inter for inter in intersections if inter[0] < center_t]
-                        after = [inter for inter in intersections if inter[0] >= center_t]
-
-                        if before and after:
-                            p_start = before[-1][1]  # Last intersection before center
-                            p_end = after[0][1]      # First intersection after center
-                        else:
-                            # Fallback: use first two intersections
-                            p_start = intersections[0][1]
-                            p_end = intersections[1][1]
-                    else:
-                        # Fallback: use extended line
-                        p_start = neck_center - direction * contour_range * 0.5
-                        p_end = neck_center + direction * contour_range * 0.5
+                    p_start = neck_a - direction * extension
+                    p_end = neck_b + direction * extension
 
                     line_start = tuple(p_start)
                     line_end = tuple(p_end)
@@ -4194,48 +4174,13 @@ class GLFWApp():
                             else:
                                 direction = np.array([1.0, 0.0])
 
-                        # Create extended line for intersection finding
-                        neck_center = (neck_a + neck_b) / 2
-                        extent = contour_range * 2.0
-                        ext_start = neck_center - direction * extent
-                        ext_end = neck_center + direction * extent
+                        # Create short line extending slightly past neck vertices
+                        # Extension: 30% of neck width on each side, with minimum extension
+                        neck_width = np.linalg.norm(neck_b - neck_a)
+                        extension = max(neck_width * 0.3, contour_range * 0.02)
 
-                        # Find intersections with contour (inline function)
-                        def find_intersections_inline(line_s, line_e, contour):
-                            inters = []
-                            p1 = np.array(line_s)
-                            p2 = np.array(line_e)
-                            d = p2 - p1
-                            for ci in range(len(contour)):
-                                q1 = contour[ci]
-                                q2 = contour[(ci + 1) % len(contour)]
-                                e = q2 - q1
-                                denom = d[0] * e[1] - d[1] * e[0]
-                                if abs(denom) < 1e-10:
-                                    continue
-                                t = ((q1[0] - p1[0]) * e[1] - (q1[1] - p1[1]) * e[0]) / denom
-                                s = ((q1[0] - p1[0]) * d[1] - (q1[1] - p1[1]) * d[0]) / denom
-                                if 0 <= s <= 1:
-                                    pt = p1 + t * d
-                                    inters.append((t, pt, ci))
-                            inters.sort(key=lambda x: x[0])
-                            return inters
-
-                        intersections = find_intersections_inline(ext_start, ext_end, piece_2d)
-
-                        if len(intersections) >= 2:
-                            center_t = 0.5
-                            before = [inter for inter in intersections if inter[0] < center_t]
-                            after = [inter for inter in intersections if inter[0] >= center_t]
-                            if before and after:
-                                p_start = before[-1][1]
-                                p_end = after[0][1]
-                            else:
-                                p_start = intersections[0][1]
-                                p_end = intersections[1][1]
-                        else:
-                            p_start = neck_center - direction * contour_range * 0.5
-                            p_end = neck_center + direction * contour_range * 0.5
+                        p_start = neck_a - direction * extension
+                        p_end = neck_b + direction * extension
 
                         # Update cutting line
                         obj._manual_cut_line = (tuple(p_start), tuple(p_end))
