@@ -4022,10 +4022,12 @@ class GLFWApp():
                         prev_i1 = (i1 - 1) % n
                         next_i1 = (i1 + 1) % n
 
-                        # Line goes from neighbor on one branch to neighbor on the other
-                        # Use next_i0 to prev_i1 (or vice versa) to cross the pinch
+                        # Line goes from one lobe to the other lobe to cross the pinch
+                        # Lobe A: vertices from i0+1 to i1-1 (next_i0, ..., prev_i1)
+                        # Lobe B: vertices from i1+1 to i0-1 (next_i1, ..., prev_i0)
+                        # Connect across: next_i0 (lobe A) to next_i1 (lobe B)
                         p_start = piece_2d[next_i0]
-                        p_end = piece_2d[prev_i1]
+                        p_end = piece_2d[next_i1]
                         direction = p_end - p_start
                         if np.linalg.norm(direction) > 1e-10:
                             direction = direction / np.linalg.norm(direction)
@@ -4037,7 +4039,7 @@ class GLFWApp():
                         extent = contour_range * 0.02  # Small extension beyond neighbors
                         line_start = tuple(p_start - direction * extent)
                         line_end = tuple(p_end + direction * extent)
-                        print(f"    Pinch point: line from neighbor {next_i0} to neighbor {prev_i1}")
+                        print(f"    Pinch point: line from neighbor {next_i0} to neighbor {next_i1}")
 
                     if length > 1e-10:
                         # Normal case: extend from neck points
