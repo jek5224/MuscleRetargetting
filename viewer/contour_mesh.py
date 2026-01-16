@@ -1200,6 +1200,12 @@ class ContourMeshMixin:
         print(f"\n=== Fast Transition Scan ===")
         print(f"Scanning scalar range [{scalar_min:.4f}, {scalar_max:.4f}]...")
 
+        # Debug: check contour counts at endpoints
+        _, contours_start, _ = self.find_contour(scalar_min)
+        _, contours_end, _ = self.find_contour(scalar_max)
+        print(f"  Contours at start ({scalar_min:.4f}): {len(contours_start)}")
+        print(f"  Contours at end ({scalar_max:.4f}): {len(contours_end)}")
+
         self._neck_viz_data = []
 
         # Recursive function to find transitions, subdividing when count change > 1
