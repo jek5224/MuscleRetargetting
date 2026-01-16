@@ -9445,22 +9445,28 @@ class ContourMeshMixin:
                     # Look for vertex pairs that are far apart along contour but close in distance
                     n_target = len(target_2d)
                     min_dist = np.inf
-                    best_cut = None  # (p1, p2, i, j)
+                    best_i, best_j = -1, -1
 
-                    # Minimum index separation to avoid adjacent vertices
-                    min_index_sep = max(3, n_target // 4)
+                    # Minimum index separation - at least 3 or 1/4 of contour
+                    min_sep = max(3, n_target // 4)
 
                     # Find vertex-vertex pairs (neck finding)
                     for i in range(n_target):
-                        for j in range(i + min_index_sep, min(i + n_target - min_index_sep + 1, n_target)):
-                            v0, v1 = target_2d[i], target_2d[j]
-                            dist = np.linalg.norm(v1 - v0)
+                        for j in range(n_target):
+                            if i == j:
+                                continue
+                            # Check separation in both directions around contour
+                            sep_fwd = (j - i) % n_target
+                            sep_bwd = (i - j) % n_target
+                            if min(sep_fwd, sep_bwd) < min_sep:
+                                continue
+                            dist = np.linalg.norm(target_2d[j] - target_2d[i])
                             if dist < min_dist:
                                 min_dist = dist
-                                best_cut = (v0.copy(), v1.copy(), i, j)
+                                best_i, best_j = i, j
 
-                    if best_cut is not None:
-                        p1, p2, idx_i, idx_j = best_cut
+                    if best_i >= 0 and best_j >= 0:
+                        p1, p2 = target_2d[best_i], target_2d[best_j]
                         cut_dir = p2 - p1
                         cut_len = np.linalg.norm(cut_dir)
                         if cut_len > 1e-10:
@@ -9469,7 +9475,9 @@ class ContourMeshMixin:
                             cut_dir = np.array([1.0, 0.0])
                         cut_point = (p1 + p2) / 2
                         cutting_line_2d = (cut_point, cut_dir)
-                        print(f"  [BP Transform] SEPARATE: neck at vertices {idx_i}-{idx_j} (dist={min_dist:.4f})")
+                        print(f"  [BP Transform] SEPARATE: neck at vertices {best_i}-{best_j} (dist={min_dist:.4f})")
+                    else:
+                        print(f"  [BP Transform] SEPARATE: WARNING - no neck found on target (n={n_target}, min_sep={min_sep})")
 
                 elif len(src_0) >= 3 and len(src_1) >= 3:
                     # COMMON mode: Find boundary between transformed sources
