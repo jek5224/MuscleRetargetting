@@ -7796,8 +7796,12 @@ class ContourMeshMixin:
             final_pieces[target_idx] = piece
             print(f"[Assembly] unmatched piece {piece_idx} -> final[{target_idx}]")
 
-        # Build stream indices
-        stream_indices = list(range(original_source_count))
+        # Build stream indices from parent_context (preserves original values)
+        parent_context = self._manual_cut_data.get('parent_context', None)
+        if parent_context and 'stream_indices' in parent_context:
+            stream_indices = parent_context['stream_indices']
+        else:
+            stream_indices = self._manual_cut_data.get('stream_indices', list(range(original_source_count)))
 
         # Report any missing pieces
         missing = [i for i in range(original_source_count) if final_pieces[i] is None]
