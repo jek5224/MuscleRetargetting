@@ -4010,21 +4010,41 @@ class GLFWApp():
                     if length > 1e-10:
                         direction = direction / length
                     else:
-                        # If points are same, use perpendicular to tangent
+                        # Points are same (pinch point) - use tangents at both indices
+                        # The cutting line should cross between the two parts of the contour
                         piece_2d = current_pieces[piece_idx]
                         n = len(piece_2d)
-                        prev_i = (best_indices[0] - 1) % n
-                        next_i = (best_indices[0] + 1) % n
-                        tangent = piece_2d[next_i] - piece_2d[prev_i]
-                        if np.linalg.norm(tangent) > 1e-10:
-                            tangent = tangent / np.linalg.norm(tangent)
-                            direction = np.array([-tangent[1], tangent[0]])
-                        else:
-                            direction = np.array([1.0, 0.0])
+                        i0, i1 = best_indices
 
-                    # Extend 10% beyond each endpoint for visibility
+                        # Get tangent at first index
+                        prev_i0 = (i0 - 1) % n
+                        next_i0 = (i0 + 1) % n
+                        tangent0 = piece_2d[next_i0] - piece_2d[prev_i0]
+
+                        # Get tangent at second index
+                        prev_i1 = (i1 - 1) % n
+                        next_i1 = (i1 + 1) % n
+                        tangent1 = piece_2d[next_i1] - piece_2d[prev_i1]
+
+                        # Cutting direction: use vector from neighbor of i0 to neighbor of i1
+                        # This crosses the pinch point properly
+                        direction = piece_2d[next_i0] - piece_2d[next_i1]
+                        if np.linalg.norm(direction) < 1e-10:
+                            direction = piece_2d[prev_i0] - piece_2d[prev_i1]
+                        if np.linalg.norm(direction) < 1e-10:
+                            # Fallback to perpendicular of average tangent
+                            avg_tangent = tangent0 + tangent1
+                            if np.linalg.norm(avg_tangent) > 1e-10:
+                                avg_tangent = avg_tangent / np.linalg.norm(avg_tangent)
+                                direction = np.array([-avg_tangent[1], avg_tangent[0]])
+                            else:
+                                direction = np.array([1.0, 0.0])
+                        else:
+                            direction = direction / np.linalg.norm(direction)
+
+                    # Extend for visibility - use larger extent for pinch points
                     contour_range = np.max(target_2d.max(axis=0) - target_2d.min(axis=0))
-                    extent = max(length * 0.1, contour_range * 0.02)
+                    extent = max(length * 0.1, contour_range * 0.05) if length > 1e-10 else contour_range * 0.1
                     line_start = tuple(best_pt0 - direction * extent)
                     line_end = tuple(best_pt1 + direction * extent)
                     obj._manual_cut_data['initial_line'] = (line_start, line_end)
