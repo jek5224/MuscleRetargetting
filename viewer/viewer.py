@@ -4110,14 +4110,34 @@ class GLFWApp():
                         else:
                             direction = np.array([1.0, 0.0])
 
-                    # Create line extending past neck vertices
-                    # Extension needs to be large enough to cross contour edges
+                    # Create extended line to find edge intersections
                     neck_width = np.linalg.norm(neck_b - neck_a)
-                    # Use 10% of contour range minimum to ensure edge crossings
                     extension = max(neck_width * 0.5, contour_range * 0.10)
+                    ext_start = neck_a - direction * extension
+                    ext_end = neck_b + direction * extension
 
-                    p_start = neck_a - direction * extension
-                    p_end = neck_b + direction * extension
+                    # Find actual contour edge intersections
+                    intersections = find_contour_intersections(ext_start, ext_end, piece_2d)
+
+                    if len(intersections) >= 2:
+                        # Use intersection points ON the contour for cutting
+                        # Find the two intersections closest to the neck
+                        neck_center = (neck_a + neck_b) / 2
+                        # Sort by distance from neck center
+                        inters_with_dist = []
+                        for t, pt, edge_idx in intersections:
+                            dist = np.linalg.norm(pt - neck_center)
+                            inters_with_dist.append((dist, t, pt, edge_idx))
+                        inters_with_dist.sort(key=lambda x: x[0])
+                        # Take the two closest
+                        if len(inters_with_dist) >= 2:
+                            _, _, p_start, _ = inters_with_dist[0]
+                            _, _, p_end, _ = inters_with_dist[1]
+                        else:
+                            p_start, p_end = ext_start, ext_end
+                    else:
+                        # Fallback to extended line
+                        p_start, p_end = ext_start, ext_end
 
                     line_start = tuple(p_start)
                     line_end = tuple(p_end)
@@ -4126,8 +4146,8 @@ class GLFWApp():
                     obj._manual_cut_data['current_neck_info'] = {
                         'neck_a': neck_a.copy(),
                         'neck_b': neck_b.copy(),
-                        'line_start': p_start.copy(),
-                        'line_end': p_end.copy(),
+                        'line_start': np.array(p_start).copy(),
+                        'line_end': np.array(p_end).copy(),
                         'piece_idx': piece_idx,
                         'idx_a': i0,
                         'idx_b': i1,
@@ -4193,14 +4213,44 @@ class GLFWApp():
                             else:
                                 direction = np.array([1.0, 0.0])
 
-                        # Create line extending past neck vertices
-                        # Extension needs to be large enough to cross contour edges
+                        # Create extended line to find edge intersections
                         neck_width = np.linalg.norm(neck_b - neck_a)
-                        # Use 10% of contour range minimum to ensure edge crossings
                         extension = max(neck_width * 0.5, contour_range * 0.10)
+                        ext_start = neck_a - direction * extension
+                        ext_end = neck_b + direction * extension
 
-                        p_start = neck_a - direction * extension
-                        p_end = neck_b + direction * extension
+                        # Find actual contour edge intersections
+                        def find_inters_inline(ls, le, contour):
+                            inters = []
+                            p1, p2 = np.array(ls), np.array(le)
+                            d = p2 - p1
+                            for ci in range(len(contour)):
+                                q1, q2 = contour[ci], contour[(ci + 1) % len(contour)]
+                                e = q2 - q1
+                                denom = d[0] * e[1] - d[1] * e[0]
+                                if abs(denom) < 1e-10:
+                                    continue
+                                t = ((q1[0] - p1[0]) * e[1] - (q1[1] - p1[1]) * e[0]) / denom
+                                s = ((q1[0] - p1[0]) * d[1] - (q1[1] - p1[1]) * d[0]) / denom
+                                if 0 <= s <= 1:
+                                    inters.append((t, p1 + t * d, ci))
+                            return inters
+
+                        intersections = find_inters_inline(ext_start, ext_end, piece_2d)
+
+                        if len(intersections) >= 2:
+                            # Find two intersections closest to neck center
+                            neck_center = (neck_a + neck_b) / 2
+                            inters_with_dist = [(np.linalg.norm(pt - neck_center), t, pt, ei)
+                                               for t, pt, ei in intersections]
+                            inters_with_dist.sort(key=lambda x: x[0])
+                            if len(inters_with_dist) >= 2:
+                                _, _, p_start, _ = inters_with_dist[0]
+                                _, _, p_end, _ = inters_with_dist[1]
+                            else:
+                                p_start, p_end = ext_start, ext_end
+                        else:
+                            p_start, p_end = ext_start, ext_end
 
                         # Update cutting line
                         obj._manual_cut_line = (tuple(p_start), tuple(p_end))
