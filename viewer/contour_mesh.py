@@ -7333,10 +7333,14 @@ class ContourMeshMixin:
                 }
                 pending_by_level[next_level].append(subcut_info)
                 print(f"[Process] N:1 queued to level {next_level}: piece {piece_idx} <- local sources {assigned_sources} (original: {original_sources})")
-                # Debug: print stored source contour info
+                # Debug: print stored source contour and BP info
+                stored_source_bps = subcut_info['source_bps']
                 for ssi, ssc in enumerate(stored_source_contours):
                     orig_label = original_sources[ssi] if ssi < len(original_sources) else '?'
                     print(f"[Process]   stored source[{ssi}] (orig S{orig_label}): {len(ssc)} verts")
+                    if ssi < len(stored_source_bps):
+                        bp = stored_source_bps[ssi]
+                        print(f"[Process]     source_bp mean: {bp['mean']}")
 
         self._manual_cut_data['matched_pairs'] = matched_pairs
         self._manual_cut_data['pending_subcuts_by_level'] = pending_by_level
@@ -7578,9 +7582,18 @@ class ContourMeshMixin:
 
         print(f"[SubCut] Opened sub-window: sources {original_source_indices} -> piece {piece_idx}")
         print(f"[SubCut] New target shape: {new_target_2d.shape}, {len(new_source_contours)} sources")
-        # Debug: print source contour shapes
+        # Debug: print source contour shapes and bounding plane info
         for sci, sc in enumerate(new_source_contours):
-            print(f"[SubCut] source_contour[{sci}]: {len(sc)} verts, label={new_source_labels[sci] if sci < len(new_source_labels) else '?'}")
+            label = new_source_labels[sci] if sci < len(new_source_labels) else '?'
+            print(f"[SubCut] source_contour[{sci}]: {len(sc)} verts, label={label}")
+            if sci < len(new_source_bps):
+                bp = new_source_bps[sci]
+                print(f"[SubCut]   source_bp[{sci}] mean: {bp['mean']}")
+                # Check if this BP looks like target BP
+                target_bp = self._manual_cut_data.get('target_bp', {})
+                if 'mean' in target_bp:
+                    dist = np.linalg.norm(bp['mean'] - target_bp['mean'])
+                    print(f"[SubCut]   distance from target_bp mean: {dist:.6f}")
 
     def _finalize_manual_cuts(self):
         """
