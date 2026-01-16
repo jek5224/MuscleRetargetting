@@ -7084,11 +7084,16 @@ class ContourMeshMixin:
                 print(f"[Process] 1:1 finalized: piece {piece_idx} -> source {src_idx}")
             else:
                 # N:1 - queue for sub-window
+                # IMPORTANT: Store ORIGINAL source indices, not local indices
+                # This ensures correct mapping when opening nested sub-cuts
+                source_labels = self._manual_cut_data.get('source_labels', list(range(len(self._manual_cut_data.get('source_contours', [])))))
+                original_sources = [source_labels[s] if s < len(source_labels) else s for s in assigned_sources]
                 pending_subcuts.append({
                     'piece_idx': piece_idx,
-                    'sources': assigned_sources
+                    'sources': assigned_sources,  # Local indices for piece lookup
+                    'original_sources': original_sources,  # Original indices for display/mapping
                 })
-                print(f"[Process] N:1 queued: piece {piece_idx} <- sources {assigned_sources}")
+                print(f"[Process] N:1 queued: piece {piece_idx} <- local sources {assigned_sources} (original: {original_sources})")
 
         self._manual_cut_data['matched_pairs'] = matched_pairs
         self._manual_cut_data['pending_subcuts'] = pending_subcuts
@@ -7103,13 +7108,15 @@ class ContourMeshMixin:
         Takes the piece as the new target and filters sources to only those assigned.
 
         Args:
-            subcut_info: dict with 'piece_idx' and 'sources' (list of source indices)
+            subcut_info: dict with 'piece_idx', 'sources' (local indices), and 'original_sources' (original indices)
         """
         if self._manual_cut_data is None:
             return
 
         piece_idx = subcut_info['piece_idx']
-        assigned_sources = subcut_info['sources']
+        assigned_sources = subcut_info['sources']  # Local indices for data lookup
+        # Use pre-computed original indices if available (from nested sub-cuts)
+        precomputed_original = subcut_info.get('original_sources', None)
 
         # Check if we have saved parent context (for subsequent sub-cuts)
         # This is needed when there are multiple pending sub-cuts (e.g., 5→1 case)
@@ -7184,9 +7191,14 @@ class ContourMeshMixin:
             self._manual_cut_data['parent_finalized_pieces'] = parent_finalized
 
         # Map from new local source index to original source index
-        # Use current_source_labels to get the true original indices
-        original_source_indices = [current_source_labels[s] if s < len(current_source_labels) else s
-                                   for s in assigned_sources]
+        # Use precomputed original indices if available (from nested sub-cuts)
+        # Otherwise, use current_source_labels to map
+        if precomputed_original is not None:
+            original_source_indices = precomputed_original
+            print(f"[SubCut] Using precomputed original indices: {original_source_indices}")
+        else:
+            original_source_indices = [current_source_labels[s] if s < len(current_source_labels) else s
+                                       for s in assigned_sources]
         self._manual_cut_data['original_source_indices'] = original_source_indices
 
         # Get source data for assigned sources only
