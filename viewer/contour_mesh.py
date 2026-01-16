@@ -5916,7 +5916,6 @@ class ContourMeshMixin:
             print(f"[NARROWEST NECK] Max contours ({max_stream_count}) at intermediate level {max_count_level}")
 
         # Debug: show all contour counts and merge point status
-        print(f"[DEBUG] Contour counts per level:")
         for lvl in range(num_levels):
             count = len(self.contours[lvl])
             is_merge = any(bp.get('is_merge_point', False) for bp in self.bounding_planes[lvl])
@@ -6116,7 +6115,6 @@ class ContourMeshMixin:
         # - Multiple sources assigned, AND
         # - Sources are not already cut (is_cut=False)
         targets_needing_cut = []
-        print(f"[DEBUG] Checking which targets need manual cutting:")
         for target_i in range(target_count):
             sources = target_to_sources[target_i]
             target_is_merge = self.bounding_planes[target_level][target_i].get('is_merge_point', False)
@@ -6396,12 +6394,10 @@ class ContourMeshMixin:
 
         # DEBUG: Show all contours at this level
         total_contours_at_level = len(self.contours[level_i])
-        print(f"[DEBUG] Level {level_i} has {total_contours_at_level} contours total")
         for ci in range(total_contours_at_level):
             c_verts = len(self.contours[level_i][ci])
             is_target = "*** TARGET ***" if ci == contour_i else ""
             print(f"  Contour {ci}: {c_verts} vertices {is_target}")
-        print(f"[DEBUG] To see this contour in Inspect 2D: Level={level_i}, Contour={contour_i}")
 
         print(f"Target contour: {len(target_contour)} vertices")
 
@@ -6411,7 +6407,6 @@ class ContourMeshMixin:
             tc_min = tc_arr.min(axis=0)
             tc_max = tc_arr.max(axis=0)
             tc_range = tc_max - tc_min
-            print(f"[DEBUG] Target contour 3D bounds:")
             print(f"  min: [{tc_min[0]:.4f}, {tc_min[1]:.4f}, {tc_min[2]:.4f}]")
             print(f"  max: [{tc_max[0]:.4f}, {tc_max[1]:.4f}, {tc_max[2]:.4f}]")
             print(f"  range: [{tc_range[0]:.4f}, {tc_range[1]:.4f}, {tc_range[2]:.4f}]")
@@ -6435,7 +6430,6 @@ class ContourMeshMixin:
             t2d_min = target_2d.min(axis=0)
             t2d_max = target_2d.max(axis=0)
             t2d_range = t2d_max - t2d_min
-            print(f"[DEBUG] Target contour 2D projection bounds:")
             print(f"  min: [{t2d_min[0]:.6f}, {t2d_min[1]:.6f}]")
             print(f"  max: [{t2d_max[0]:.6f}, {t2d_max[1]:.6f}]")
             print(f"  range: [{t2d_range[0]:.6f}, {t2d_range[1]:.6f}]")
@@ -6461,7 +6455,6 @@ class ContourMeshMixin:
             source_2d_list.append(np.array(src_2d))
 
         # Debug: show projected source bounds
-        print(f"[DEBUG] Source 2D projections onto target plane:")
         for i, src_2d in enumerate(source_2d_list):
             if len(src_2d) > 0:
                 src_min = src_2d.min(axis=0)
@@ -7637,12 +7630,9 @@ class ContourMeshMixin:
             curr_count = contour_counts[level_i]
 
             # Debug: show current state before processing this level
-            print(f"  [DEBUG] === Before processing level_i={level_i} (prev_level={prev_level}) ===")
-            print(f"  [DEBUG] stream_bounding_planes lengths: {[len(sbp) for sbp in stream_bounding_planes]}")
             for s in range(min(max_stream_count, 2)):  # Show first 2 streams
                 if len(stream_bounding_planes[s]) > 0:
                     last_scalar = stream_bounding_planes[s][-1].get('scalar_value', 'unknown')
-                    print(f"  [DEBUG] stream {s} last scalar_value: {last_scalar}")
 
             if curr_count == max_stream_count:
                 # No cutting needed - match by distance using optimal assignment
@@ -7665,7 +7655,6 @@ class ContourMeshMixin:
                     stream_bounding_planes[stream_i].append(self.bounding_planes[level_i][contour_i])
                     # Debug: show what was appended
                     appended_scalar = self.bounding_planes[level_i][contour_i].get('scalar_value', 'unknown')
-                    print(f"  [DEBUG] Appended to stream {stream_i}: contour {contour_i} with scalar {appended_scalar}")
 
                 stream_groups.append([[i] for i in range(max_stream_count)])
                 print(f"  Level {level_i}: {curr_count} contours (no cut needed)")
@@ -7680,11 +7669,8 @@ class ContourMeshMixin:
                 prev_level_bps = [stream_bounding_planes[s][-1].copy() for s in range(max_stream_count)]
 
                 # Debug: show prev level info
-                print(f"  [DEBUG] Processing level_i={level_i}, prev_level={prev_level}")
-                print(f"  [DEBUG] prev_level_contours sizes: {[len(c) for c in prev_level_contours]}")
                 # Check actual scalar values to verify source level
                 prev_scalars = [bp.get('scalar_value', 'unknown') for bp in prev_level_bps[:3]]
-                print(f"  [DEBUG] prev_level_bps scalars (first 3): {prev_scalars}")
 
                 # Find which streams map to which contours (by distance + grouping)
                 # M sources (streams) → N targets (contours), M > N
@@ -7707,8 +7693,6 @@ class ContourMeshMixin:
                     for s in group:
                         stream_to_group[s] = group_id
 
-                print(f"  [DEBUG] prev_groups: {prev_groups}")
-                print(f"  [DEBUG] stream_to_group: {stream_to_group}")
 
                 # Use grouping-aware assignment:
                 # 1. Use Hungarian algorithm to assign one stream per contour as base
@@ -7861,7 +7845,6 @@ class ContourMeshMixin:
                     if not improved:
                         break
 
-                print(f"  [DEBUG] Final contour_to_streams (after area refinement): {contour_to_streams}")
 
                 # Build stream_to_contour mapping for consistency
                 stream_to_contour = [None] * max_stream_count
@@ -7888,7 +7871,6 @@ class ContourMeshMixin:
                         stream_bounding_planes[stream_i].append(self.bounding_planes[level_i][contour_i])
                         # Debug: show what was appended
                         appended_scalar = self.bounding_planes[level_i][contour_i].get('scalar_value', 'unknown')
-                        print(f"  [DEBUG] 1:1 appended to stream {stream_i}: contour {contour_i} with scalar {appended_scalar}")
                     else:
                         # Cut this contour into len(streams_for_contour) pieces
                         target_contour = self.contours[level_i][contour_i]
@@ -7916,11 +7898,9 @@ class ContourMeshMixin:
 
                             # Debug: check if this is a merge point contour
                             target_is_merge_point = target_bp.get('is_merge_point', False)
-                            print(f"  [DEBUG] Level {level_i}, contour {contour_i}: is_merge_point={target_is_merge_point}")
 
                             # Check which sources are cut and which are not
                             source_cut_status = [source_bps[i].get('is_cut', False) for i in range(len(source_bps))]
-                            print(f"  [DEBUG] source_cut_status={source_cut_status}, sources are from stream bps, not original bps")
                             any_source_not_cut = any(not cut for cut in source_cut_status)
                             all_sources_cut = all(source_cut_status)
 
@@ -7933,7 +7913,6 @@ class ContourMeshMixin:
                                 size_ratio = max_size / min_size if min_size > 0 else float('inf')
                                 # If largest is more than 3x the smallest, sizes are inconsistent
                                 sizes_inconsistent = size_ratio > 3.0
-                                print(f"  [DEBUG] source_sizes={source_sizes}, ratio={size_ratio:.2f}, inconsistent={sizes_inconsistent}")
                             else:
                                 sizes_inconsistent = False
 
@@ -8028,12 +8007,6 @@ class ContourMeshMixin:
                                     )
 
                                 # Prepare manual cut data for this specific transition
-                                print(f"  [DEBUG] >>> Calling _prepare_manual_cut_data_for_level:")
-                                print(f"  [DEBUG] >>>   streams_for_contour={streams_for_contour}")
-                                print(f"  [DEBUG] >>>   source_contours: {len(source_contours)} contours")
-                                for sc_idx, sc in enumerate(source_contours):
-                                    print(f"  [DEBUG] >>>     source[{sc_idx}]: {len(sc)} verts, mean=[{np.mean(sc, axis=0)[0]:.4f}, {np.mean(sc, axis=0)[1]:.4f}, {np.mean(sc, axis=0)[2]:.4f}]")
-                                print(f"  [DEBUG] >>>   target_contour: {len(target_contour)} verts")
                                 self._prepare_manual_cut_data_for_level(
                                     muscle_name, level_i, contour_i, streams_for_contour,
                                     target_contour, target_bp, source_contours, source_bps,
@@ -8041,11 +8014,6 @@ class ContourMeshMixin:
                                     initial_cut_line=initial_cut_line,
                                     is_common_mode=(not is_first_division)
                                 )
-                                print(f"  [DEBUG] >>> RETURNING for manual cutting at level_i={level_i}, contour_i={contour_i}")
-                                print(f"  [DEBUG] >>> stream_bounding_planes lengths at return: {[len(sbp) for sbp in stream_bounding_planes]}")
-                                # Show source_bps scalar values to verify what we're using as source
-                                source_scalars = [bp.get('scalar_value', 'unknown') for bp in source_bps]
-                                print(f"  [DEBUG] >>> source_bps scalars: {source_scalars}")
                                 return  # Wait for user to draw cutting line
                         elif cut_method == 'mesh':
                             cut_contours = self._cut_contour_mesh_aware(
@@ -8187,15 +8155,11 @@ class ContourMeshMixin:
                             stream_contours[stream_i].append(cut_contour)
                             stream_bounding_planes[stream_i].append(new_bp)
                             # Debug: show what was appended
-                            print(f"  [DEBUG] Cut & appended to stream {stream_i}: {len(cut_contour)} verts, scalar {new_bp.get('scalar_value', 'unknown')}")
 
                 # Debug: show state after processing this level's cuts
-                print(f"  [DEBUG] === After processing level_i={level_i} cuts ===")
-                print(f"  [DEBUG] stream_bounding_planes lengths: {[len(sbp) for sbp in stream_bounding_planes]}")
                 for s in range(min(max_stream_count, 2)):
                     if len(stream_bounding_planes[s]) > 0:
                         last_scalar = stream_bounding_planes[s][-1].get('scalar_value', 'unknown')
-                        print(f"  [DEBUG] stream {s} last scalar_value: {last_scalar}")
 
         # If we processed in reverse order, reverse the results
         if origin_count < insertion_count:
@@ -9477,70 +9441,35 @@ class ContourMeshMixin:
                 src_1 = np.array(final_transformed[1])
 
                 if use_separate_transforms:
-                    # SEPARATE mode (first division): Find nearest non-adjacent vertex-edge pair on target
-                    # These form a natural "waist" at concave regions
+                    # SEPARATE mode (first division): Find narrowest neck on target contour
+                    # Look for vertex pairs that are far apart along contour but close in distance
                     n_target = len(target_2d)
                     min_dist = np.inf
-                    best_cut = None  # (cut_point, cut_dir, description)
+                    best_cut = None  # (p1, p2, i, j)
 
-                    # Minimum separation to avoid adjacent vertices/edges
-                    min_separation = max(3, n_target // 4)
+                    # Minimum index separation to avoid adjacent vertices
+                    min_index_sep = max(3, n_target // 4)
 
-                    # Helper function to compute point-to-segment distance and closest point
-                    def point_to_segment_dist(point, seg_start, seg_end):
-                        """Return (distance, closest_point_on_segment)"""
-                        seg_vec = seg_end - seg_start
-                        seg_len_sq = np.dot(seg_vec, seg_vec)
-                        if seg_len_sq < 1e-10:
-                            return np.linalg.norm(point - seg_start), seg_start
-                        t = np.clip(np.dot(point - seg_start, seg_vec) / seg_len_sq, 0, 1)
-                        closest = seg_start + t * seg_vec
-                        return np.linalg.norm(point - closest), closest
-
-                    # Check vertex-edge pairs (vertex i to edge j->j+1)
+                    # Find vertex-vertex pairs (neck finding)
                     for i in range(n_target):
-                        for j in range(n_target):
-                            # Edge is from j to (j+1) % n_target
-                            j_next = (j + 1) % n_target
-
-                            # Check if vertex i is adjacent to edge j->j_next
-                            # Adjacent means i == j or i == j_next
-                            if i == j or i == j_next:
-                                continue
-
-                            # Check separation in both directions along the contour
-                            # Distance from i to j (forward)
-                            dist_i_to_j = (j - i) % n_target
-                            # Distance from i to j_next (forward)
-                            dist_i_to_jnext = (j_next - i) % n_target
-                            # Distance in the other direction
-                            dist_j_to_i = (i - j) % n_target
-                            dist_jnext_to_i = (i - j_next) % n_target
-
-                            # Both endpoints of edge must be sufficiently separated from vertex i
-                            if min(dist_i_to_j, dist_j_to_i) < min_separation:
-                                continue
-                            if min(dist_i_to_jnext, dist_jnext_to_i) < min_separation:
-                                continue
-
-                            # Compute distance from vertex i to edge j->j_next
-                            dist, closest_pt = point_to_segment_dist(
-                                target_2d[i], target_2d[j], target_2d[j_next]
-                            )
-
+                        for j in range(i + min_index_sep, min(i + n_target - min_index_sep + 1, n_target)):
+                            v0, v1 = target_2d[i], target_2d[j]
+                            dist = np.linalg.norm(v1 - v0)
                             if dist < min_dist:
                                 min_dist = dist
-                                # Cut line goes from vertex to closest point on edge
-                                p1 = target_2d[i]
-                                p2 = closest_pt
-                                cut_point = (p1 + p2) / 2
-                                cut_dir = p2 - p1
-                                cut_dir = cut_dir / (np.linalg.norm(cut_dir) + 1e-10)
-                                best_cut = (cut_point, cut_dir, f"vertex {i} to edge {j}-{j_next}")
+                                best_cut = (v0.copy(), v1.copy(), i, j)
 
                     if best_cut is not None:
-                        cutting_line_2d = (best_cut[0], best_cut[1])
-                        print(f"  [BP Transform] SEPARATE: cut at {best_cut[2]} (dist={min_dist:.4f})")
+                        p1, p2, idx_i, idx_j = best_cut
+                        cut_dir = p2 - p1
+                        cut_len = np.linalg.norm(cut_dir)
+                        if cut_len > 1e-10:
+                            cut_dir = cut_dir / cut_len
+                        else:
+                            cut_dir = np.array([1.0, 0.0])
+                        cut_point = (p1 + p2) / 2
+                        cutting_line_2d = (cut_point, cut_dir)
+                        print(f"  [BP Transform] SEPARATE: neck at vertices {idx_i}-{idx_j} (dist={min_dist:.4f})")
 
                 elif len(src_0) >= 3 and len(src_1) >= 3:
                     # COMMON mode: Find boundary between transformed sources
