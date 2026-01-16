@@ -8171,7 +8171,11 @@ class ContourMeshMixin:
                                         print(f"  [WARNING] {len(streams_for_contour) - len(cut_contours)} streams will get FALLBACK (uncut target)")
                                     for i, s in enumerate(streams_for_contour):
                                         if i < len(cut_contours):
-                                            print(f"  [BP Transform] cut_contours[{i}] ({len(cut_contours[i])} verts) will go to stream {s}")
+                                            piece = cut_contours[i]
+                                            if piece is not None:
+                                                print(f"  [BP Transform] cut_contours[{i}] ({len(piece)} verts) will go to stream {s}")
+                                            else:
+                                                print(f"  [BP Transform] cut_contours[{i}] is None! Stream {s} will get fallback")
                                 # Don't delete - keep for potential re-runs
                             # Check old format (single target result in _manual_cut_data)
                             elif self._manual_cut_data is not None and 'cut_result' in self._manual_cut_data:
