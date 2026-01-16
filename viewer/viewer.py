@@ -5106,8 +5106,15 @@ class GLFWApp():
                     if parent_finalized_pieces and original_source_indices:
                         # Sub-window context: need to combine with parent's 1:1 pieces
                         source_contours_full = obj._manual_cut_data.get('source_contours', [])
-                        total_pieces = len(parent_finalized_pieces) + len(source_contours_full)
+                        # Use original_source_count which is set at level 0 and never changes
+                        total_pieces = obj._manual_cut_data.get('original_source_count', 0)
+                        if total_pieces == 0:
+                            # Fallback: compute from max index
+                            max_parent_idx = max(parent_finalized_pieces.keys()) if parent_finalized_pieces else -1
+                            max_current_idx = max(original_source_indices) if original_source_indices else -1
+                            total_pieces = max(max_parent_idx, max_current_idx) + 1
                         all_pieces = [None] * total_pieces
+                        print(f"[Accept] Using total_pieces={total_pieces} (original_source_count)")
 
                         # Fill in parent's finalized pieces (1:1 assignments from parent)
                         for orig_src_idx, piece in parent_finalized_pieces.items():
@@ -5172,48 +5179,48 @@ class GLFWApp():
                             print(f"  all_pieces[{i}]: {len(p)} verts")
                         else:
                             print(f"  all_pieces[{i}]: None")
-                    if filled_count >= len(all_pieces):
-                        print(f"[Accept] Finalizing: {len(all_pieces)} pieces ({len(matched_pairs)} pre-matched, {len(unmatched_pieces)} optimized)")
 
-                        # Check for remaining pending sub-cuts
-                        pending_subcuts = obj._manual_cut_data.get('pending_subcuts', [])
+                    # Update parent_finalized_pieces with THIS sub-cut's results
+                    # Use all_pieces directly since it already has correct mappings
+                    updated_finalized = dict(parent_finalized_pieces) if parent_finalized_pieces else {}
+                    if original_source_indices:
+                        for local_src_idx in range(len(original_source_indices)):
+                            orig_src_idx = original_source_indices[local_src_idx]
+                            if orig_src_idx < len(all_pieces) and all_pieces[orig_src_idx] is not None:
+                                updated_finalized[orig_src_idx] = all_pieces[orig_src_idx]
 
-                        # Update parent_finalized_pieces with THIS sub-cut's results
-                        # Use all_pieces directly since it already has correct mappings
-                        updated_finalized = dict(parent_finalized_pieces) if parent_finalized_pieces else {}
-                        if original_source_indices:
-                            for local_src_idx in range(len(original_source_indices)):
-                                orig_src_idx = original_source_indices[local_src_idx]
-                                if orig_src_idx < len(all_pieces) and all_pieces[orig_src_idx] is not None:
-                                    updated_finalized[orig_src_idx] = all_pieces[orig_src_idx]
+                    # Level-by-level processing: ALWAYS check pending sub-cuts first
+                    # This must happen regardless of whether all pieces are filled
+                    current_subcut_level = obj._manual_cut_data.get('current_subcut_level', 0)
+                    pending_by_level = obj._manual_cut_data.get('pending_subcuts_by_level', {})
+                    current_level_pending = pending_by_level.get(current_subcut_level + 1, [])
 
-                        # Level-by-level processing: check pending sub-cuts at current level first
-                        current_subcut_level = obj._manual_cut_data.get('current_subcut_level', 0)
-                        pending_by_level = obj._manual_cut_data.get('pending_subcuts_by_level', {})
-                        current_level_pending = pending_by_level.get(current_subcut_level + 1, [])
+                    print(f"[Accept] Current subcut level: {current_subcut_level}")
+                    print(f"[Accept] Pending by level: {[(lvl, len(lst)) for lvl, lst in pending_by_level.items()]}")
 
-                        print(f"[Accept] Current subcut level: {current_subcut_level}")
-                        print(f"[Accept] Pending by level: {[(lvl, len(lst)) for lvl, lst in pending_by_level.items()]}")
+                    if len(current_level_pending) > 0:
+                        # More sub-cuts at CURRENT level - process next one
+                        print(f"[SubCut] {len(current_level_pending)} more sub-cuts at level {current_subcut_level + 1}, opening next...")
+                        next_subcut = current_level_pending[0]
+                        obj._manual_cut_data['parent_finalized_pieces'] = updated_finalized
+                        obj._open_subcut_for_piece(next_subcut)
+                    else:
+                        # Check if there are sub-cuts at the NEXT level
+                        next_level = current_subcut_level + 2  # +2 because current sub-cuts queue to level+1
+                        next_level_pending = pending_by_level.get(next_level, [])
 
-                        if len(current_level_pending) > 0:
-                            # More sub-cuts at CURRENT level - process next one
-                            print(f"[SubCut] {len(current_level_pending)} more sub-cuts at level {current_subcut_level + 1}, opening next...")
-                            next_subcut = current_level_pending[0]
+                        if len(next_level_pending) > 0:
+                            # Move to next level
+                            print(f"[SubCut] Level {current_subcut_level + 1} complete, moving to level {next_level} ({len(next_level_pending)} sub-cuts)")
+                            obj._manual_cut_data['current_subcut_level'] = next_level - 1  # Will be incremented in _open_subcut
                             obj._manual_cut_data['parent_finalized_pieces'] = updated_finalized
+                            next_subcut = next_level_pending[0]
                             obj._open_subcut_for_piece(next_subcut)
                         else:
-                            # Check if there are sub-cuts at the NEXT level
-                            next_level = current_subcut_level + 2  # +2 because current sub-cuts queue to level+1
-                            next_level_pending = pending_by_level.get(next_level, [])
+                            # No more pending sub-cuts - check if ready to finalize
+                            if filled_count >= len(all_pieces):
+                                print(f"[Accept] Finalizing: {len(all_pieces)} pieces ({len(matched_pairs)} pre-matched, {len(unmatched_pieces)} optimized)")
 
-                            if len(next_level_pending) > 0:
-                                # Move to next level
-                                print(f"[SubCut] Level {current_subcut_level + 1} complete, moving to level {next_level} ({len(next_level_pending)} sub-cuts)")
-                                obj._manual_cut_data['current_subcut_level'] = next_level - 1  # Will be incremented in _open_subcut
-                                obj._manual_cut_data['parent_finalized_pieces'] = updated_finalized
-                                next_subcut = next_level_pending[0]
-                                obj._open_subcut_for_piece(next_subcut)
-                            else:
                                 # All levels done - store final result and call cut_streams
                                 if not hasattr(obj, '_manual_cut_results') or obj._manual_cut_results is None:
                                     obj._manual_cut_results = {}
@@ -5248,8 +5255,9 @@ class GLFWApp():
                                         del self._manual_cut_mouse[name]
                                     imgui.end()
                                     continue
-                    else:
-                        print(f"[Accept] Incomplete: {filled_count}/{len(all_pieces)} pieces filled")
+                            else:
+                                # No pending sub-cuts but pieces incomplete - this shouldn't happen
+                                print(f"[Accept] WARNING: No pending sub-cuts but only {filled_count}/{len(all_pieces)} pieces filled")
 
                 # Skip remaining preview buttons if auto-accepting (cleaner UI)
                 if not auto_accept:
