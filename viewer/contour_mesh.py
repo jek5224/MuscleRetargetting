@@ -7001,7 +7001,56 @@ class ContourMeshMixin:
         if len(current_pieces) == 0:
             return False
 
-        # Find which piece the line intersects (first one with 2 intersections)
+        # First, try to find if line endpoints match polygon vertices (vertex-to-vertex cut)
+        # This handles neck cuts where endpoints are at contour vertices
+        line_start_arr = np.array(line_start)
+        line_end_arr = np.array(line_end)
+
+        for piece_idx, piece_2d in enumerate(current_pieces):
+            n_verts = len(piece_2d)
+
+            # Find vertices closest to line endpoints
+            start_idx = None
+            end_idx = None
+            vertex_tol = 1e-6
+
+            for i in range(n_verts):
+                if np.linalg.norm(piece_2d[i] - line_start_arr) < vertex_tol:
+                    start_idx = i
+                if np.linalg.norm(piece_2d[i] - line_end_arr) < vertex_tol:
+                    end_idx = i
+
+            if start_idx is not None and end_idx is not None and start_idx != end_idx:
+                # Direct vertex-to-vertex cut - build pieces directly
+                piece_3d = current_pieces_3d[piece_idx]
+
+                # Ensure start_idx < end_idx for consistent ordering
+                if start_idx > end_idx:
+                    start_idx, end_idx = end_idx, start_idx
+
+                # Build two pieces
+                # Piece 0: from start_idx to end_idx (inclusive)
+                new_piece0_2d = [piece_2d[i] for i in range(start_idx, end_idx + 1)]
+                new_piece0_3d = [piece_3d[i] for i in range(start_idx, end_idx + 1)]
+
+                # Piece 1: from end_idx to start_idx (wrapping around)
+                new_piece1_2d = [piece_2d[i] for i in range(end_idx, n_verts)]
+                new_piece1_2d.extend([piece_2d[i] for i in range(0, start_idx + 1)])
+                new_piece1_3d = [piece_3d[i] for i in range(end_idx, n_verts)]
+                new_piece1_3d.extend([piece_3d[i] for i in range(0, start_idx + 1)])
+
+                # Replace the cut piece with the two new pieces
+                new_pieces = current_pieces[:piece_idx] + [np.array(new_piece0_2d), np.array(new_piece1_2d)] + current_pieces[piece_idx + 1:]
+                new_pieces_3d = current_pieces_3d[:piece_idx] + [np.array(new_piece0_3d), np.array(new_piece1_3d)] + current_pieces_3d[piece_idx + 1:]
+
+                self._manual_cut_data['current_pieces'] = new_pieces
+                self._manual_cut_data['current_pieces_3d'] = new_pieces_3d
+                self._manual_cut_data['cut_lines'].append((line_start, line_end))
+
+                print(f"Vertex-to-vertex cut: indices {start_idx} to {end_idx}, created pieces of size {len(new_piece0_2d)} and {len(new_piece1_2d)}")
+                return True
+
+        # Fallback: Find which piece the line intersects (first one with 2 intersections)
         cut_piece_idx = None
         intersections = None
 

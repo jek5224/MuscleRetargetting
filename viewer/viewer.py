@@ -4104,60 +4104,17 @@ class GLFWApp():
                     neck_a = piece_2d[i0]
                     neck_b = piece_2d[i1]
 
-                    # Determine line direction
-                    direction = neck_b - neck_a
-                    dir_len = np.linalg.norm(direction)
-                    if dir_len > 1e-10:
-                        direction = direction / dir_len
-                    else:
-                        # Zero-length (pinch): use direction from prev to prev
-                        prev_i0 = (i0 - 1) % n
-                        prev_i1 = (i1 - 1) % n
-                        direction = piece_2d[prev_i1] - piece_2d[prev_i0]
-                        dir_len = np.linalg.norm(direction)
-                        if dir_len > 1e-10:
-                            direction = direction / dir_len
-                        else:
-                            direction = np.array([1.0, 0.0])
-
-                    # Create extended line to find edge intersections
-                    neck_width = np.linalg.norm(neck_b - neck_a)
-                    extension = max(neck_width * 0.5, contour_range * 0.10)
-                    ext_start = neck_a - direction * extension
-                    ext_end = neck_b + direction * extension
-
-                    # Find actual contour edge intersections
-                    intersections = find_contour_intersections(ext_start, ext_end, piece_2d)
-
-                    if len(intersections) >= 2:
-                        # Use intersection points ON the contour for cutting
-                        # Find the two intersections closest to the neck
-                        neck_center = (neck_a + neck_b) / 2
-                        # Sort by distance from neck center
-                        inters_with_dist = []
-                        for t, pt, edge_idx in intersections:
-                            dist = np.linalg.norm(pt - neck_center)
-                            inters_with_dist.append((dist, t, pt, edge_idx))
-                        inters_with_dist.sort(key=lambda x: x[0])
-                        # Take the two closest
-                        if len(inters_with_dist) >= 2:
-                            _, _, p_start, _ = inters_with_dist[0]
-                            _, _, p_end, _ = inters_with_dist[1]
-                        else:
-                            p_start, p_end = ext_start, ext_end
-                    else:
-                        # Fallback to extended line
-                        p_start, p_end = ext_start, ext_end
-
-                    line_start = tuple(p_start)
-                    line_end = tuple(p_end)
+                    # Use neck vertices directly as cutting line endpoints
+                    # They are already on the contour (vertices of piece_2d)
+                    line_start = tuple(neck_a)
+                    line_end = tuple(neck_b)
 
                     # Store neck info for zoomed view
                     obj._manual_cut_data['current_neck_info'] = {
                         'neck_a': neck_a.copy(),
                         'neck_b': neck_b.copy(),
-                        'line_start': np.array(p_start).copy(),
-                        'line_end': np.array(p_end).copy(),
+                        'line_start': neck_a.copy(),
+                        'line_end': neck_b.copy(),
                         'piece_idx': piece_idx,
                         'idx_a': i0,
                         'idx_b': i1,
