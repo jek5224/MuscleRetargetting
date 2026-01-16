@@ -4110,10 +4110,11 @@ class GLFWApp():
                         else:
                             direction = np.array([1.0, 0.0])
 
-                    # Create short line extending slightly past neck vertices
-                    # Extension: 30% of neck width on each side, with minimum extension
+                    # Create line extending past neck vertices
+                    # Extension needs to be large enough to cross contour edges
                     neck_width = np.linalg.norm(neck_b - neck_a)
-                    extension = max(neck_width * 0.3, contour_range * 0.02)
+                    # Use 10% of contour range minimum to ensure edge crossings
+                    extension = max(neck_width * 0.5, contour_range * 0.10)
 
                     p_start = neck_a - direction * extension
                     p_end = neck_b + direction * extension
@@ -4192,10 +4193,11 @@ class GLFWApp():
                             else:
                                 direction = np.array([1.0, 0.0])
 
-                        # Create short line extending slightly past neck vertices
-                        # Extension: 30% of neck width on each side, with minimum extension
+                        # Create line extending past neck vertices
+                        # Extension needs to be large enough to cross contour edges
                         neck_width = np.linalg.norm(neck_b - neck_a)
-                        extension = max(neck_width * 0.3, contour_range * 0.02)
+                        # Use 10% of contour range minimum to ensure edge crossings
+                        extension = max(neck_width * 0.5, contour_range * 0.10)
 
                         p_start = neck_a - direction * extension
                         p_end = neck_b + direction * extension
