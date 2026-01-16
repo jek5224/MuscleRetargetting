@@ -4704,7 +4704,11 @@ class GLFWApp():
 
                 # Accept button - finalize the optimization result
                 # Also triggered automatically in Optimize All mode
-                accept_clicked = imgui.button("Accept", button_width, 30) or auto_accept
+                # Don't show button if auto-accepting (cleaner UI)
+                if auto_accept:
+                    accept_clicked = True
+                else:
+                    accept_clicked = imgui.button("Accept", button_width, 30)
                 if accept_clicked:
                     if auto_accept:
                         obj._manual_cut_data['auto_accept'] = False  # Clear flag
@@ -4839,59 +4843,61 @@ class GLFWApp():
                     else:
                         print(f"[Accept] Incomplete: {filled_count}/{len(all_pieces)} pieces filled")
 
-                imgui.same_line()
-
-                # Reset button - go back to pre-optimization state
-                if imgui.button("Reset", button_width, 30):
-                    print(f"[Preview] Resetting to pre-optimization state...")
-                    pre_pieces = obj._manual_cut_data.get('pre_optimization_pieces', [])
-                    pre_pieces_3d = obj._manual_cut_data.get('pre_optimization_pieces_3d', [])
-                    if pre_pieces and pre_pieces_3d:
-                        obj._manual_cut_data['current_pieces'] = pre_pieces
-                        obj._manual_cut_data['current_pieces_3d'] = pre_pieces_3d
-                    obj._manual_cut_data['optimization_preview'] = False
-                    obj._manual_cut_data['cut_lines'] = []
-                    obj._manual_cut_line = None
-                    print(f"[Preview] Reset complete - you can draw new cuts or optimize again")
-
-                imgui.same_line()
-
-                # Next Cut button - apply current cutting line to edit optimized pieces
-                has_cut_line = obj._manual_cut_line is not None
-                if has_cut_line:
-                    if imgui.button("Cut", button_width, 30):
-                        print(f"[Preview] Applying cut to edit optimized pieces...")
-
-                        # Save current state for undo before applying cut
-                        edit_history = obj._manual_cut_data.get('edit_history', [])
-                        edit_history.append({
-                            'pieces': [p.copy() for p in obj._manual_cut_data.get('current_pieces', [])],
-                            'pieces_3d': [p.copy() for p in obj._manual_cut_data.get('current_pieces_3d', [])],
-                        })
-                        obj._manual_cut_data['edit_history'] = edit_history
-
-                        # Apply the iterative cut to further subdivide pieces
-                        success = obj._apply_iterative_cut()
-                        if success:
-                            print(f"[Preview] Cut applied - now have {len(obj._manual_cut_data.get('current_pieces', []))} pieces (edit #{len(edit_history)})")
-                            obj._manual_cut_line = None  # Clear line after applying
-                        else:
-                            # Remove the history entry since cut failed
-                            edit_history.pop()
-                            print(f"[Preview] Cut failed - try drawing a different line")
+                # Skip remaining preview buttons if auto-accepting (cleaner UI)
+                if not auto_accept:
                     imgui.same_line()
 
-                # Undo button - revert to previous state
-                edit_history = obj._manual_cut_data.get('edit_history', [])
-                if len(edit_history) > 0:
-                    if imgui.button("Undo", button_width, 30):
-                        prev_state = edit_history.pop()
-                        obj._manual_cut_data['current_pieces'] = prev_state['pieces']
-                        obj._manual_cut_data['current_pieces_3d'] = prev_state['pieces_3d']
-                        obj._manual_cut_data['edit_history'] = edit_history
+                    # Reset button - go back to pre-optimization state
+                    if imgui.button("Reset", button_width, 30):
+                        print(f"[Preview] Resetting to pre-optimization state...")
+                        pre_pieces = obj._manual_cut_data.get('pre_optimization_pieces', [])
+                        pre_pieces_3d = obj._manual_cut_data.get('pre_optimization_pieces_3d', [])
+                        if pre_pieces and pre_pieces_3d:
+                            obj._manual_cut_data['current_pieces'] = pre_pieces
+                            obj._manual_cut_data['current_pieces_3d'] = pre_pieces_3d
+                        obj._manual_cut_data['optimization_preview'] = False
+                        obj._manual_cut_data['cut_lines'] = []
                         obj._manual_cut_line = None
-                        print(f"[Preview] Undid last edit - now have {len(prev_state['pieces'])} pieces")
+                        print(f"[Preview] Reset complete - you can draw new cuts or optimize again")
+
                     imgui.same_line()
+
+                    # Next Cut button - apply current cutting line to edit optimized pieces
+                    has_cut_line = obj._manual_cut_line is not None
+                    if has_cut_line:
+                        if imgui.button("Cut", button_width, 30):
+                            print(f"[Preview] Applying cut to edit optimized pieces...")
+
+                            # Save current state for undo before applying cut
+                            edit_history = obj._manual_cut_data.get('edit_history', [])
+                            edit_history.append({
+                                'pieces': [p.copy() for p in obj._manual_cut_data.get('current_pieces', [])],
+                                'pieces_3d': [p.copy() for p in obj._manual_cut_data.get('current_pieces_3d', [])],
+                            })
+                            obj._manual_cut_data['edit_history'] = edit_history
+
+                            # Apply the iterative cut to further subdivide pieces
+                            success = obj._apply_iterative_cut()
+                            if success:
+                                print(f"[Preview] Cut applied - now have {len(obj._manual_cut_data.get('current_pieces', []))} pieces (edit #{len(edit_history)})")
+                                obj._manual_cut_line = None  # Clear line after applying
+                            else:
+                                # Remove the history entry since cut failed
+                                edit_history.pop()
+                                print(f"[Preview] Cut failed - try drawing a different line")
+                        imgui.same_line()
+
+                    # Undo button - revert to previous state
+                    edit_history = obj._manual_cut_data.get('edit_history', [])
+                    if len(edit_history) > 0:
+                        if imgui.button("Undo", button_width, 30):
+                            prev_state = edit_history.pop()
+                            obj._manual_cut_data['current_pieces'] = prev_state['pieces']
+                            obj._manual_cut_data['current_pieces_3d'] = prev_state['pieces_3d']
+                            obj._manual_cut_data['edit_history'] = edit_history
+                            obj._manual_cut_line = None
+                            print(f"[Preview] Undid last edit - now have {len(prev_state['pieces'])} pieces")
+                        imgui.same_line()
 
             # Skip button - for 1-to-1 case (only 1 source selected, no cutting needed)
             # Also auto-triggered in Optimize All mode
@@ -5104,20 +5110,28 @@ class GLFWApp():
                 if not cut_enabled:
                     imgui.pop_style_var()
 
-            imgui.same_line()
-            if imgui.button("Reset", button_width, 30):
-                # Reset to original state (before any cuts or sub-windows)
-                obj._reset_to_original_state()
-                if name in self._manual_cut_mouse:
-                    self._manual_cut_mouse[name]['dragging'] = False
-                    self._manual_cut_mouse[name]['zoom'] = 1.0
-                    self._manual_cut_mouse[name]['pan'] = [0.0, 0.0]
+            # Hide Reset/Cancel when auto-optimizing (cleaner UI)
+            if not should_auto_optimize:
+                imgui.same_line()
+                if imgui.button("Reset", button_width, 30):
+                    # Reset to original state (before any cuts or sub-windows)
+                    obj._reset_to_original_state()
+                    # Also clear auto-optimize-all flag
+                    if hasattr(obj, '_auto_optimize_all'):
+                        obj._auto_optimize_all = False
+                    if name in self._manual_cut_mouse:
+                        self._manual_cut_mouse[name]['dragging'] = False
+                        self._manual_cut_mouse[name]['zoom'] = 1.0
+                        self._manual_cut_mouse[name]['pan'] = [0.0, 0.0]
 
-            imgui.same_line()
-            if imgui.button("Cancel", button_width, 30):
-                obj._cancel_manual_cut()
-                if name in self._manual_cut_mouse:
-                    del self._manual_cut_mouse[name]
+                imgui.same_line()
+                if imgui.button("Cancel", button_width, 30):
+                    obj._cancel_manual_cut()
+                    # Also clear auto-optimize-all flag
+                    if hasattr(obj, '_auto_optimize_all'):
+                        obj._auto_optimize_all = False
+                    if name in self._manual_cut_mouse:
+                        del self._manual_cut_mouse[name]
 
             imgui.end()
 
