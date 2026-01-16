@@ -8237,6 +8237,12 @@ class ContourMeshMixin:
 
                         # Assign cut pieces to streams by distance matching
                         # For each stream, find the cut piece closest to its previous contour
+                        # Filter out None entries from cut_contours
+                        valid_cut_indices = [i for i, c in enumerate(cut_contours) if c is not None]
+                        valid_cut_contours = [cut_contours[i] for i in valid_cut_indices]
+                        if len(valid_cut_contours) < len(cut_contours):
+                            print(f"  [WARNING] cut_contours has {len(cut_contours) - len(valid_cut_contours)} None entries, using {len(valid_cut_contours)} valid pieces")
+                            cut_contours = valid_cut_contours
                         cut_centroids = [np.mean(c, axis=0) for c in cut_contours]
                         prev_centroids = [np.mean(stream_contours[s][-1], axis=0) for s in streams_for_contour]
 
