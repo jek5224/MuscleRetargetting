@@ -3967,65 +3967,46 @@ class GLFWApp():
             target_level = obj._manual_cut_data['target_level']
             source_level = obj._manual_cut_data['source_level']
 
-            # Compute recommended cut line from narrowest neck across all current pieces
-            # Find vertex pairs that are far apart on contour but close in distance
-            def find_narrowest_neck(pieces):
-                """Find narrowest neck across all pieces. Returns (piece_idx, pt0, pt1, indices)."""
-                global_min_dist = float('inf')
-                best_piece_idx = None
-                best_pt0, best_pt1 = None, None
-                best_indices = None
-
-                for piece_idx, piece_2d in enumerate(pieces):
-                    n = len(piece_2d)
-                    if n < 6:
-                        continue
-                    min_index_sep = max(3, n // 4)
-
-                    for i in range(n):
-                        for j in range(i + min_index_sep, min(i + n - min_index_sep + 1, n)):
-                            v0, v1 = piece_2d[i], piece_2d[j]
-                            dist = np.linalg.norm(v1 - v0)
-                            if dist < global_min_dist:
-                                global_min_dist = dist
-                                best_piece_idx = piece_idx
-                                best_pt0, best_pt1 = v0.copy(), v1.copy()
-                                best_indices = (i, j)
-
-                return best_piece_idx, best_pt0, best_pt1, best_indices, global_min_dist
-
-            # Find initial line or update recommendation after cuts
+            # Find initial line using obj._find_neck_in_contour (same as find_transitions)
             need_new_recommendation = 'initial_line' not in obj._manual_cut_data
             if need_new_recommendation:
                 current_pieces = obj._manual_cut_data.get('current_pieces', [target_2d])
-                piece_idx, best_pt0, best_pt1, best_indices, min_dist = find_narrowest_neck(current_pieces)
+                contour_range = np.max(target_2d.max(axis=0) - target_2d.min(axis=0))
 
-                if best_pt0 is not None and best_pt1 is not None:
-                    print(f"  Recommended cut line: narrowest neck = {min_dist:.6f} (piece {piece_idx})")
-                    print(f"    pt0[{best_indices[0]}] = {best_pt0}, pt1[{best_indices[1]}] = {best_pt1}")
+                # Use _find_neck_in_contour for each piece
+                best_neck = None
+                best_piece_idx = None
+                for piece_idx, piece_2d in enumerate(current_pieces):
+                    if hasattr(obj, '_find_neck_in_contour'):
+                        neck_info = obj._find_neck_in_contour(piece_2d)
+                        if neck_info is not None:
+                            if best_neck is None or neck_info['neck_width'] < best_neck['neck_width']:
+                                best_neck = neck_info
+                                best_piece_idx = piece_idx
 
-                    piece_2d = current_pieces[piece_idx]
+                if best_neck is not None:
+                    i0, i1 = best_neck['idx_a'], best_neck['idx_b']
+                    neck_width = best_neck['neck_width']
+                    piece_2d = current_pieces[best_piece_idx]
                     n = len(piece_2d)
-                    i0, i1 = best_indices
-                    contour_range = np.max(target_2d.max(axis=0) - target_2d.min(axis=0))
+
+                    print(f"  Recommended cut line: neck width = {neck_width:.6f} (piece {best_piece_idx})")
+                    print(f"    idx_a={i0}, idx_b={i1}")
 
                     # Get neighbors at both neck indices
                     next_i0 = (i0 + 1) % n
                     next_i1 = (i1 + 1) % n
 
-                    # Check if it's a pinch point (same position) or a neck with gap
-                    length = np.linalg.norm(best_pt1 - best_pt0)
-
-                    if length < 1e-6:
-                        # Pinch point: line goes from neighbor to neighbor across lobes
-                        # Lobe A: i0+1 to i1-1, Lobe B: i1+1 to i0-1
+                    # Check if pinch point (very small width) or normal neck
+                    if neck_width < 1e-6:
+                        # Pinch point: line from neighbor to neighbor across lobes
                         p_start = piece_2d[next_i0]
                         p_end = piece_2d[next_i1]
                         print(f"    Pinch point: line from idx {next_i0} to idx {next_i1}")
                     else:
-                        # Normal neck: line connects the two neck points
-                        p_start = best_pt0
-                        p_end = best_pt1
+                        # Normal neck: line connects the two neck points directly
+                        p_start = piece_2d[i0]
+                        p_end = piece_2d[i1]
                         print(f"    Normal neck: line from idx {i0} to idx {i1}")
 
                     # Extend line slightly beyond endpoints
@@ -4040,8 +4021,8 @@ class GLFWApp():
                     line_end = tuple(p_end + direction * extent)
 
                     obj._manual_cut_data['initial_line'] = (line_start, line_end)
-                    obj._manual_cut_data['neck_indices'] = best_indices
-                    obj._manual_cut_data['neck_piece_idx'] = piece_idx
+                    obj._manual_cut_data['neck_indices'] = (i0, i1)
+                    obj._manual_cut_data['neck_piece_idx'] = best_piece_idx
                     if obj._manual_cut_line is None:
                         obj._manual_cut_line = (line_start, line_end)
 
