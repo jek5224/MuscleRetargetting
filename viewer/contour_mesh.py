@@ -7001,11 +7001,57 @@ class ContourMeshMixin:
         if len(current_pieces) == 0:
             return False
 
-        # Always use edge intersection - find where the line crosses contour edges
-        # and add new vertices at those intersection points
         line_start_arr = np.array(line_start)
         line_end_arr = np.array(line_end)
-        print(f"[CUT] Line: {line_start_arr} to {line_end_arr}")
+        is_neck_line = self._manual_cut_data.get('is_neck_line', False)
+        neck_info = self._manual_cut_data.get('current_neck_info', None)
+
+        print(f"[CUT] Line: {line_start_arr} to {line_end_arr}, is_neck_line={is_neck_line}")
+
+        # For neck lines, use vertex-to-vertex cutting at the exact neck vertices
+        if is_neck_line and neck_info is not None:
+            piece_idx = neck_info.get('piece_idx', 0)
+            idx_a = neck_info.get('idx_a', 0)
+            idx_b = neck_info.get('idx_b', 0)
+
+            if piece_idx < len(current_pieces) and idx_a != idx_b:
+                piece_2d = current_pieces[piece_idx]
+                piece_3d = current_pieces_3d[piece_idx]
+                n_verts = len(piece_2d)
+
+                # Ensure consistent ordering
+                if idx_a > idx_b:
+                    idx_a, idx_b = idx_b, idx_a
+
+                # Build two pieces - each shares the neck vertices
+                # Piece 0: vertices from idx_a to idx_b (inclusive)
+                new_piece0_2d = [piece_2d[i].copy() for i in range(idx_a, idx_b + 1)]
+                new_piece0_3d = [piece_3d[i].copy() for i in range(idx_a, idx_b + 1)]
+
+                # Piece 1: vertices from idx_b to idx_a (wrapping around)
+                new_piece1_2d = []
+                new_piece1_3d = []
+                i = idx_b
+                while True:
+                    new_piece1_2d.append(piece_2d[i].copy())
+                    new_piece1_3d.append(piece_3d[i].copy())
+                    if i == idx_a:
+                        break
+                    i = (i + 1) % n_verts
+
+                print(f"[CUT] Neck cut: idx_a={idx_a}, idx_b={idx_b}, piece0={len(new_piece0_2d)} verts, piece1={len(new_piece1_2d)} verts")
+
+                # Replace the cut piece with the two new pieces
+                new_pieces = current_pieces[:piece_idx] + [np.array(new_piece0_2d), np.array(new_piece1_2d)] + current_pieces[piece_idx + 1:]
+                new_pieces_3d = current_pieces_3d[:piece_idx] + [np.array(new_piece0_3d), np.array(new_piece1_3d)] + current_pieces_3d[piece_idx + 1:]
+
+                self._manual_cut_data['current_pieces'] = new_pieces
+                self._manual_cut_data['current_pieces_3d'] = new_pieces_3d
+                self._manual_cut_data['cut_lines'].append((line_start, line_end))
+                return True
+
+        # For manually drawn lines, use edge intersection
+        print(f"[CUT] Using edge intersection for manual line")
         cut_piece_idx = None
         intersections = None
 

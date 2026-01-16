@@ -4121,6 +4121,7 @@ class GLFWApp():
                     }
 
                     obj._manual_cut_data['initial_line'] = (line_start, line_end)
+                    obj._manual_cut_data['is_neck_line'] = True  # Flag for vertex-to-vertex cutting
                     if obj._manual_cut_line is None:
                         obj._manual_cut_line = (line_start, line_end)
                 else:
@@ -4574,6 +4575,7 @@ class GLFWApp():
                     end_2d = from_screen(mouse_state['end_pos'][0], mouse_state['end_pos'][1],
                                         x0, y0, canvas_size)
                     obj._manual_cut_line = (tuple(start_2d), tuple(end_2d))
+                    obj._manual_cut_data['is_neck_line'] = False  # User drew this line manually
 
             # Clip cutting line drawing to canvas area
             draw_list.push_clip_rect(x0 - padding, y0 - padding,
