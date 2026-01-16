@@ -7303,7 +7303,9 @@ class ContourMeshMixin:
                 source_2d_list = self._manual_cut_data.get('source_2d_list', [])
                 stream_indices = self._manual_cut_data.get('stream_indices', [])
 
+                print(f"[Process] N:1 debug: source_labels={source_labels}, assigned_sources={assigned_sources}")
                 original_sources = [source_labels[s] if s < len(source_labels) else s for s in assigned_sources]
+                print(f"[Process] N:1 debug: computed original_sources={original_sources}")
 
                 # Filter to valid indices only
                 valid_sources = [s for s in assigned_sources if s < len(source_contours)]
@@ -7369,9 +7371,20 @@ class ContourMeshMixin:
         parent_context = self._manual_cut_data.get('parent_context', None)
         parent_finalized = self._manual_cut_data.get('parent_finalized_pieces', {})
 
-        # ALWAYS get the current pieces (after cutting) - these are what we need to get the target from
-        current_pieces_3d = self._manual_cut_data.get('current_pieces_3d', [])
-        current_pieces = self._manual_cut_data.get('current_pieces', [])
+        # Get pieces - for sibling sub-cuts, use parent level's saved pieces
+        # IMPORTANT: When opening a sibling sub-cut (e.g., 2->1 after 3->1), the current
+        # _manual_cut_data contains pieces from the completed sub-cut, not the parent level.
+        # We need to use the pieces stored in level_contexts[parent_level] instead.
+        if parent_context is not None and parent_level in level_contexts:
+            # Sibling sub-cut - use parent level's pieces
+            parent_level_context = level_contexts[parent_level]
+            current_pieces_3d = parent_level_context.get('current_pieces_3d', [])
+            current_pieces = parent_level_context.get('current_pieces', [])
+            print(f"[SubCut] Using parent level {parent_level} pieces: {len(current_pieces_3d)} 3D, {len(current_pieces)} 2D")
+        else:
+            # First sub-cut or no level context - use current data
+            current_pieces_3d = self._manual_cut_data.get('current_pieces_3d', [])
+            current_pieces = self._manual_cut_data.get('current_pieces', [])
 
         if parent_context is not None:
             # Save results from previous sub-cut before switching context
@@ -7462,8 +7475,9 @@ class ContourMeshMixin:
                 'source_labels': list(source_labels_current),
                 'matched_pairs': list(matched_pairs),
                 'current_pieces_3d': [np.array(p).copy() for p in current_pieces_3d],
+                'current_pieces': [np.array(p).copy() for p in current_pieces],  # Store 2D pieces too
             }
-            print(f"[SubCut] Saved context for level {parent_level}: {len(matched_pairs)} matched pairs")
+            print(f"[SubCut] Saved context for level {parent_level}: {len(matched_pairs)} matched pairs, {len(current_pieces_3d)} pieces")
         else:
             print(f"[SubCut] Level {parent_level} context already saved, skipping")
         self._manual_cut_data['level_contexts'] = level_contexts
@@ -7510,6 +7524,7 @@ class ContourMeshMixin:
 
         # Create new source labels from original indices
         new_source_labels = original_source_indices.copy()
+        print(f"[SubCut] Setting source_labels = {new_source_labels} (from original_source_indices)")
 
         # Remove this subcut from pending lists
         remove_from_pending()
@@ -7646,7 +7661,8 @@ class ContourMeshMixin:
         print(f"Finalized {num_sources} pieces for target {target_i} ({num_matched} pre-matched)")
 
         # Combine with parent context if we're in a sub-window
-        if parent_finalized_pieces and original_source_indices:
+        # Note: parent_finalized_pieces may be empty {} if no 1:1 matches from parent
+        if original_source_indices:
             # We need to:
             # 1. Remap current cut_contours to original source indices
             # 2. Combine with parent_finalized_pieces
