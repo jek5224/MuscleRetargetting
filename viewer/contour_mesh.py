@@ -6729,13 +6729,15 @@ class ContourMeshMixin:
 
             (edge1_idx, t1, int1_2d), (edge2_idx, t2, int2_2d) = intersections
 
-            # Convert intersection points from 2D back to 3D
-            target_mean = target_bp['mean']
-            target_x = target_bp['basis_x']
-            target_y = target_bp['basis_y']
+            # Convert intersection points from 2D to 3D by interpolating on actual 3D edges
+            # (NOT by projecting back to target plane, which can cause displacement)
+            p1_3d_edge1 = target_contour[edge1_idx]
+            p2_3d_edge1 = target_contour[(edge1_idx + 1) % n_verts]
+            int1_3d = p1_3d_edge1 + t1 * (p2_3d_edge1 - p1_3d_edge1)
 
-            int1_3d = target_mean + int1_2d[0] * target_x + int1_2d[1] * target_y
-            int2_3d = target_mean + int2_2d[0] * target_x + int2_2d[1] * target_y
+            p1_3d_edge2 = target_contour[edge2_idx]
+            p2_3d_edge2 = target_contour[(edge2_idx + 1) % n_verts]
+            int2_3d = p1_3d_edge2 + t2 * (p2_3d_edge2 - p1_3d_edge2)
 
             # Build two contour pieces
             piece0_verts = [int1_3d]
@@ -7136,13 +7138,15 @@ class ContourMeshMixin:
         intersections.sort(key=lambda x: x[0])
         (edge1_idx, t1, int1_2d), (edge2_idx, t2, int2_2d) = intersections
 
-        # Convert 2D intersection points to 3D
-        target_mean = target_bp['mean']
-        target_x = target_bp['basis_x']
-        target_y = target_bp['basis_y']
+        # Convert 2D intersection points to 3D by interpolating on actual 3D edges
+        # (NOT by projecting back to target plane, which can cause displacement)
+        p1_3d_edge1 = piece_3d[edge1_idx]
+        p2_3d_edge1 = piece_3d[(edge1_idx + 1) % n_verts]
+        int1_3d = p1_3d_edge1 + t1 * (p2_3d_edge1 - p1_3d_edge1)
 
-        int1_3d = target_mean + int1_2d[0] * target_x + int1_2d[1] * target_y
-        int2_3d = target_mean + int2_2d[0] * target_x + int2_2d[1] * target_y
+        p1_3d_edge2 = piece_3d[edge2_idx]
+        p2_3d_edge2 = piece_3d[(edge2_idx + 1) % n_verts]
+        int2_3d = p1_3d_edge2 + t2 * (p2_3d_edge2 - p1_3d_edge2)
 
         # Build two pieces (2D)
         new_piece0_2d = [int1_2d]
