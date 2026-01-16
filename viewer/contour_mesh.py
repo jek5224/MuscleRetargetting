@@ -1205,11 +1205,13 @@ class ContourMeshMixin:
         scan_min = scalar_min + margin
         scan_max = scalar_max - margin
 
-        # Debug: check contour counts at endpoints (with margin)
-        _, contours_start, _ = self.find_contour(scan_min)
-        _, contours_end, _ = self.find_contour(scan_max)
-        print(f"  Contours at start ({scan_min:.4f}): {len(contours_start)}")
-        print(f"  Contours at end ({scan_max:.4f}): {len(contours_end)}")
+        # Debug: check contour counts at multiple points
+        test_points = [0.0, 0.1, 0.25, 0.5, 0.75, 0.9, 1.0]
+        print(f"  Contour counts across range:")
+        for t in test_points:
+            test_scalar = scan_min + t * (scan_max - scan_min)
+            _, test_contours, _ = self.find_contour(test_scalar)
+            print(f"    {t*100:5.1f}% ({test_scalar:.4f}): {len(test_contours)} contours")
 
         self._neck_viz_data = []
 
