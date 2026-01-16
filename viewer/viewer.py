@@ -5197,8 +5197,12 @@ class GLFWApp():
                         all_stream_indices = obj._manual_cut_data.get('stream_indices', stream_indices)
 
                     # Check if we have all pieces
+                    # Note: all_pieces may have extra None slots for unused indices
+                    # (e.g., streams [3,1,2] need array size 4 but only 3 pieces)
                     filled_count = sum(1 for p in all_pieces if p is not None)
-                    print(f"[Accept] Filled {filled_count}/{len(all_pieces)} pieces: matched={len(matched_pairs)}, unmatched={len(unmatched_pieces)}")
+                    # Get actual required count from parent context's stream indices
+                    required_pieces = len(all_stream_indices_for_size) if original_source_indices and all_stream_indices_for_size else len(all_pieces)
+                    print(f"[Accept] Filled {filled_count}/{required_pieces} pieces (array size {len(all_pieces)}): matched={len(matched_pairs)}, unmatched={len(unmatched_pieces)}")
                     for i, p in enumerate(all_pieces):
                         if p is not None:
                             print(f"  all_pieces[{i}]: {len(p)} verts")
@@ -5239,8 +5243,9 @@ class GLFWApp():
                         obj._open_subcut_for_piece(next_subcut)
                     else:
                         # No more pending sub-cuts - check if ready to finalize
-                        if filled_count >= len(all_pieces):
-                            print(f"[Accept] Finalizing: {len(all_pieces)} pieces ({len(matched_pairs)} pre-matched, {len(unmatched_pieces)} optimized)")
+                        # Compare against required_pieces (actual source count), not array size
+                        if filled_count >= required_pieces:
+                            print(f"[Accept] Finalizing: {required_pieces} pieces ({len(matched_pairs)} pre-matched, {len(unmatched_pieces)} optimized)")
 
                             # All levels done - store final result and call cut_streams
                             if not hasattr(obj, '_manual_cut_results') or obj._manual_cut_results is None:
@@ -5278,7 +5283,7 @@ class GLFWApp():
                                 continue
                         else:
                             # No pending sub-cuts but pieces incomplete - this shouldn't happen
-                            print(f"[Accept] WARNING: No pending sub-cuts but only {filled_count}/{len(all_pieces)} pieces filled")
+                            print(f"[Accept] WARNING: No pending sub-cuts but only {filled_count}/{required_pieces} pieces filled")
 
                 # Skip remaining preview buttons if auto-accepting (cleaner UI)
                 if not auto_accept:
