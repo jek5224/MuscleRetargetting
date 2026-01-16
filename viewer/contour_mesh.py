@@ -1187,10 +1187,15 @@ class ContourMeshMixin:
 
         return best_neck
 
-    def find_all_transitions(self, scalar_min=0.0, scalar_max=1.0, num_samples=100):
+    def find_all_transitions(self, scalar_min=0.0, scalar_max=1.0, num_samples=100,
+                              expected_origin=None, expected_insertion=None):
         """
         Quickly scan scalar range to find all contour count transitions.
         For each transition, find the contour RIGHT BEFORE division (with visible pinch).
+
+        Args:
+            expected_origin: Expected number of contours at origin end (if known)
+            expected_insertion: Expected number of contours at insertion end (if known)
 
         Results are stored in self._neck_viz_data for Neck Viz visualization.
         """
@@ -1205,9 +1210,11 @@ class ContourMeshMixin:
         scan_min = scalar_min + margin
         scan_max = scalar_max - margin
 
-        # Check expected origin/insertion counts
-        expected_origin = getattr(self, 'origin_count', None)
-        expected_insertion = getattr(self, 'insertion_count', None)
+        # Check expected origin/insertion counts (use parameters or try to get from attributes)
+        if expected_origin is None:
+            expected_origin = getattr(self, 'origin_count', None)
+        if expected_insertion is None:
+            expected_insertion = getattr(self, 'insertion_count', None)
         print(f"  Expected: origin={expected_origin}, insertion={expected_insertion}")
 
         # Check actual counts at scan boundaries
@@ -1327,6 +1334,26 @@ class ContourMeshMixin:
             return results
 
         transitions = find_transitions_recursive(scan_min, scan_max, num_samples)
+
+        # If no transitions found, try scanning full scalar field range
+        if not transitions and hasattr(self, 'scalar_field') and self.scalar_field is not None:
+            full_min = float(self.scalar_field.min())
+            full_max = float(self.scalar_field.max())
+            if full_min < scan_min or full_max > scan_max:
+                print(f"  [RETRY] No transitions in [{scan_min:.4f}, {scan_max:.4f}]")
+                print(f"  [RETRY] Trying full field range [{full_min:.4f}, {full_max:.4f}]...")
+                # Check counts at full field extremes
+                _, full_min_contours, _ = self.find_contour(full_min + (full_max - full_min) * 0.001)
+                _, full_max_contours, _ = self.find_contour(full_max - (full_max - full_min) * 0.001)
+                print(f"  [RETRY] Contours at full min: {len(full_min_contours)}, at full max: {len(full_max_contours)}")
+                if len(full_min_contours) != len(full_max_contours):
+                    # There's a transition somewhere in the full range
+                    transitions = find_transitions_recursive(
+                        full_min + (full_max - full_min) * 0.001,
+                        full_max - (full_max - full_min) * 0.001,
+                        num_samples
+                    )
+                    print(f"  [RETRY] Found {len(transitions)} transitions in full range")
 
         # Sort by scalar value
         transitions.sort(key=lambda t: t['scalar_a'])
