@@ -5187,47 +5187,67 @@ class GLFWApp():
                                 if orig_src_idx < len(all_pieces) and all_pieces[orig_src_idx] is not None:
                                     updated_finalized[orig_src_idx] = all_pieces[orig_src_idx]
 
-                        if len(pending_subcuts) > 0:
-                            # MORE sub-cuts pending - open the next one
-                            print(f"[SubCut] {len(pending_subcuts)} more sub-cuts pending, opening next...")
-                            next_subcut = pending_subcuts[0]
+                        # Level-by-level processing: check pending sub-cuts at current level first
+                        current_subcut_level = obj._manual_cut_data.get('current_subcut_level', 0)
+                        pending_by_level = obj._manual_cut_data.get('pending_subcuts_by_level', {})
+                        current_level_pending = pending_by_level.get(current_subcut_level + 1, [])
+
+                        print(f"[Accept] Current subcut level: {current_subcut_level}")
+                        print(f"[Accept] Pending by level: {[(lvl, len(lst)) for lvl, lst in pending_by_level.items()]}")
+
+                        if len(current_level_pending) > 0:
+                            # More sub-cuts at CURRENT level - process next one
+                            print(f"[SubCut] {len(current_level_pending)} more sub-cuts at level {current_subcut_level + 1}, opening next...")
+                            next_subcut = current_level_pending[0]
                             obj._manual_cut_data['parent_finalized_pieces'] = updated_finalized
                             obj._open_subcut_for_piece(next_subcut)
                         else:
-                            # All sub-cuts done - store final result and call cut_streams
-                            if not hasattr(obj, '_manual_cut_results') or obj._manual_cut_results is None:
-                                obj._manual_cut_results = {}
+                            # Check if there are sub-cuts at the NEXT level
+                            next_level = current_subcut_level + 2  # +2 because current sub-cuts queue to level+1
+                            next_level_pending = pending_by_level.get(next_level, [])
 
-                            target_i = obj._manual_cut_data.get('target_i', 0)
-                            result_key = (target_level, target_i)
-                            print(f"[Accept] Storing result: target_level={target_level}, target_i={target_i}")
-                            print(f"[Accept] all_pieces has {len(all_pieces)} entries, all_stream_indices={all_stream_indices}")
-                            obj._manual_cut_results[result_key] = {
-                                'cut_contours': all_pieces,
-                                'source_indices': all_stream_indices,
-                                'is_1to1': False,
-                            }
-                            print(f"[Accept] All sub-cuts complete, stored result with key {result_key}")
+                            if len(next_level_pending) > 0:
+                                # Move to next level
+                                print(f"[SubCut] Level {current_subcut_level + 1} complete, moving to level {next_level} ({len(next_level_pending)} sub-cuts)")
+                                obj._manual_cut_data['current_subcut_level'] = next_level - 1  # Will be incremented in _open_subcut
+                                obj._manual_cut_data['parent_finalized_pieces'] = updated_finalized
+                                next_subcut = next_level_pending[0]
+                                obj._open_subcut_for_piece(next_subcut)
+                            else:
+                                # All levels done - store final result and call cut_streams
+                                if not hasattr(obj, '_manual_cut_results') or obj._manual_cut_results is None:
+                                    obj._manual_cut_results = {}
 
-                            # Clear stale data before continuing
-                            obj._manual_cut_data = None
-                            obj._manual_cut_original_state = None
-                            obj._manual_cut_pending = False
-                            obj.cut_streams(cut_method='bp', muscle_name=muscle_name)
-                            # Only apply smoothening if cut_streams completed
-                            if not obj._manual_cut_pending and obj._manual_cut_data is None:
-                                if hasattr(obj, 'stream_bounding_planes') and obj.stream_bounding_planes is not None:
-                                    print(f"[{muscle_name}] Applying smoothening...")
-                                    obj.smoothen_contours_z()
-                                    obj.smoothen_contours_x()
-                                    obj.smoothen_contours_bp()
-                                # Clear auto-optimize-all flag when all cutting is done
-                                if hasattr(obj, '_auto_optimize_all'):
-                                    obj._auto_optimize_all = False
-                                if name in self._manual_cut_mouse:
-                                    del self._manual_cut_mouse[name]
-                                imgui.end()
-                                continue
+                                target_i = obj._manual_cut_data.get('target_i', 0)
+                                result_key = (target_level, target_i)
+                                print(f"[Accept] Storing result: target_level={target_level}, target_i={target_i}")
+                                print(f"[Accept] all_pieces has {len(all_pieces)} entries, all_stream_indices={all_stream_indices}")
+                                obj._manual_cut_results[result_key] = {
+                                    'cut_contours': all_pieces,
+                                    'source_indices': all_stream_indices,
+                                    'is_1to1': False,
+                                }
+                                print(f"[Accept] All levels complete, stored result with key {result_key}")
+
+                                # Clear stale data before continuing
+                                obj._manual_cut_data = None
+                                obj._manual_cut_original_state = None
+                                obj._manual_cut_pending = False
+                                obj.cut_streams(cut_method='bp', muscle_name=muscle_name)
+                                # Only apply smoothening if cut_streams completed
+                                if not obj._manual_cut_pending and obj._manual_cut_data is None:
+                                    if hasattr(obj, 'stream_bounding_planes') and obj.stream_bounding_planes is not None:
+                                        print(f"[{muscle_name}] Applying smoothening...")
+                                        obj.smoothen_contours_z()
+                                        obj.smoothen_contours_x()
+                                        obj.smoothen_contours_bp()
+                                    # Clear auto-optimize-all flag when all cutting is done
+                                    if hasattr(obj, '_auto_optimize_all'):
+                                        obj._auto_optimize_all = False
+                                    if name in self._manual_cut_mouse:
+                                        del self._manual_cut_mouse[name]
+                                    imgui.end()
+                                    continue
                     else:
                         print(f"[Accept] Incomplete: {filled_count}/{len(all_pieces)} pieces filled")
 

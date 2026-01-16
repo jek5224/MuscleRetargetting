@@ -6618,6 +6618,12 @@ class ContourMeshMixin:
             'cut_lines': [],
             'from_cut_streams': True,  # Flag to indicate this came from mid-processing
             'is_common_mode': is_common_mode,  # Track mode for UI display
+            # Level tracking for hierarchical sub-cuts (breadth-first processing)
+            'subcut_level': 0,                          # Current sub-cut depth (0 = initial M->1)
+            'original_source_count': len(streams_for_contour),  # Total M, NEVER changes through sub-cuts
+            'pending_subcuts_by_level': {},             # {level: [subcut_info, ...]}
+            'current_subcut_level': 0,                  # Which level is currently being processed
+            'level_contexts': {},                       # Per-level context snapshots for final assembly
         }
         # Save original state for full reset
         self._manual_cut_original_state = copy.deepcopy(self._manual_cut_data)
@@ -7251,11 +7257,14 @@ class ContourMeshMixin:
         Process confirmed piece-source assignments from the UI.
 
         - 1:1 assignments (piece with 1 source): finalized immediately
-        - N:1 assignments (piece with N > 1 sources): queued for sub-window cutting
+        - N:1 assignments (piece with N > 1 sources): queued for NEXT level sub-cut
+
+        Uses breadth-first processing: all sub-cuts at current level complete
+        before moving to the next level.
 
         Updates:
         - matched_pairs: list of finalized (piece_idx, source_idx) pairs
-        - pending_subcuts: list of {piece_idx, sources} for N:1 cases
+        - pending_subcuts_by_level: dict {level: [subcut_info, ...]} for N:1 cases
         """
         if self._manual_cut_data is None:
             return
@@ -7264,7 +7273,16 @@ class ContourMeshMixin:
         current_pieces_3d = self._manual_cut_data.get('current_pieces_3d', [])
 
         matched_pairs = self._manual_cut_data.get('matched_pairs', [])
-        pending_subcuts = []
+
+        # Get current level and prepare next level pending list
+        current_level = self._manual_cut_data.get('subcut_level', 0)
+        next_level = current_level + 1
+
+        pending_by_level = self._manual_cut_data.get('pending_subcuts_by_level', {})
+        if next_level not in pending_by_level:
+            pending_by_level[next_level] = []
+
+        print(f"[Process] Current level: {current_level}, queuing N:1 cases to level {next_level}")
 
         for piece_idx, assigned_sources in piece_assignments.items():
             if len(assigned_sources) == 0:
@@ -7276,7 +7294,7 @@ class ContourMeshMixin:
                 matched_pairs.append((piece_idx, src_idx))
                 print(f"[Process] 1:1 finalized: piece {piece_idx} -> source {src_idx}")
             else:
-                # N:1 - queue for sub-window
+                # N:1 - queue for NEXT level (breadth-first)
                 # IMPORTANT: Store actual source DATA, not just indices
                 # This ensures correct data when opening nested sub-cuts
                 source_labels = self._manual_cut_data.get('source_labels', list(range(len(self._manual_cut_data.get('source_contours', [])))))
@@ -7288,32 +7306,38 @@ class ContourMeshMixin:
                 original_sources = [source_labels[s] if s < len(source_labels) else s for s in assigned_sources]
 
                 # Store actual data for the assigned sources
-                pending_subcuts.append({
+                subcut_info = {
                     'piece_idx': piece_idx,
                     'sources': assigned_sources,  # Local indices for piece lookup
                     'original_sources': original_sources,  # Original indices for display/mapping
+                    'parent_level': current_level,  # Track which level created this sub-cut
                     # Store actual source data to avoid index confusion in nested sub-cuts
                     'source_contours': [np.array(source_contours[s]).copy() for s in assigned_sources],
                     'source_bps': [copy.deepcopy(source_bps[s]) for s in assigned_sources],
                     'source_2d_list': [np.array(source_2d_list[s]).copy() for s in assigned_sources],
                     'stream_indices': [stream_indices[s] for s in assigned_sources],
-                })
-                print(f"[Process] N:1 queued: piece {piece_idx} <- local sources {assigned_sources} (original: {original_sources})")
+                }
+                pending_by_level[next_level].append(subcut_info)
+                print(f"[Process] N:1 queued to level {next_level}: piece {piece_idx} <- local sources {assigned_sources} (original: {original_sources})")
 
         self._manual_cut_data['matched_pairs'] = matched_pairs
-        self._manual_cut_data['pending_subcuts'] = pending_subcuts
+        self._manual_cut_data['pending_subcuts_by_level'] = pending_by_level
+        # Also keep pending_subcuts for backward compatibility (current level's pending)
+        self._manual_cut_data['pending_subcuts'] = pending_by_level.get(next_level, [])
         self._manual_cut_data['assignment_mode'] = False
 
-        print(f"[Process] {len(matched_pairs)} finalized, {len(pending_subcuts)} pending sub-cuts")
+        total_pending = sum(len(v) for v in pending_by_level.values())
+        print(f"[Process] {len(matched_pairs)} finalized, {len(pending_by_level.get(next_level, []))} pending at level {next_level}, {total_pending} total pending")
 
     def _open_subcut_for_piece(self, subcut_info):
         """
         Open a sub-window for a piece that has multiple sources assigned.
 
         Takes the piece as the new target and filters sources to only those assigned.
+        Uses level-aware context tracking for breadth-first processing.
 
         Args:
-            subcut_info: dict with 'piece_idx', 'sources' (local indices), and 'original_sources' (original indices)
+            subcut_info: dict with 'piece_idx', 'sources' (local indices), 'original_sources', and 'parent_level'
         """
         if self._manual_cut_data is None:
             return
@@ -7322,6 +7346,12 @@ class ContourMeshMixin:
         assigned_sources = subcut_info['sources']  # Local indices for data lookup
         # Use pre-computed original indices if available (from nested sub-cuts)
         precomputed_original = subcut_info.get('original_sources', None)
+        parent_level = subcut_info.get('parent_level', 0)  # Level that created this sub-cut
+
+        # Get current level tracking info
+        current_level = self._manual_cut_data.get('subcut_level', 0)
+        level_contexts = self._manual_cut_data.get('level_contexts', {})
+        original_source_count = self._manual_cut_data.get('original_source_count', 0)
 
         # Check if we have saved parent context (for subsequent sub-cuts)
         # This is needed when there are multiple pending sub-cuts (e.g., 5→1 case)
@@ -7370,6 +7400,7 @@ class ContourMeshMixin:
 
         matched_pairs = self._manual_cut_data.get('matched_pairs', [])
         pending_subcuts = self._manual_cut_data.get('pending_subcuts', [])
+        pending_by_level = self._manual_cut_data.get('pending_subcuts_by_level', {})
 
         if piece_idx >= len(current_pieces_3d):
             print(f"[SubCut] Invalid piece index {piece_idx}, only have {len(current_pieces_3d)} pieces")
@@ -7378,6 +7409,21 @@ class ContourMeshMixin:
         # Get the piece that becomes the new target
         new_target_3d = current_pieces_3d[piece_idx]
         new_target_2d = current_pieces[piece_idx]
+
+        # Save current level's context before moving to sub-cut
+        # This includes finalized pieces at this level for final assembly
+        source_labels_current = self._manual_cut_data.get('source_labels', [])
+        level_contexts[current_level] = {
+            'source_contours': [np.array(c).copy() for c in self._manual_cut_data.get('source_contours', [])],
+            'source_bps': [copy.deepcopy(bp) for bp in self._manual_cut_data.get('source_bps', [])],
+            'source_2d_list': [np.array(s).copy() for s in self._manual_cut_data.get('source_2d_list', [])],
+            'stream_indices': list(self._manual_cut_data.get('stream_indices', [])),
+            'source_labels': list(source_labels_current),
+            'matched_pairs': list(matched_pairs),
+            'current_pieces_3d': [np.array(p).copy() for p in current_pieces_3d],
+        }
+        self._manual_cut_data['level_contexts'] = level_contexts
+        print(f"[SubCut] Saved context for level {current_level}: {len(matched_pairs)} matched pairs")
 
         # Store parent context for final combining
         # Save finalized pieces from matched_pairs (only for FIRST sub-cut)
@@ -7422,9 +7468,24 @@ class ContourMeshMixin:
         # Create new source labels from original indices
         new_source_labels = original_source_indices.copy()
 
-        # Remove this subcut from pending list
+        # Remove this subcut from pending list (both flat and by-level)
         new_pending = [s for s in pending_subcuts if s['piece_idx'] != piece_idx]
         self._manual_cut_data['pending_subcuts'] = new_pending
+
+        # Also remove from pending_subcuts_by_level
+        # The sub-cut is at the level indicated by parent_level + 1
+        subcut_target_level = parent_level + 1
+        if subcut_target_level in pending_by_level:
+            pending_by_level[subcut_target_level] = [
+                s for s in pending_by_level[subcut_target_level]
+                if not (s['piece_idx'] == piece_idx and s.get('original_sources') == precomputed_original)
+            ]
+        self._manual_cut_data['pending_subcuts_by_level'] = pending_by_level
+
+        # Increment subcut_level for the new sub-window
+        new_level = current_level + 1
+        self._manual_cut_data['subcut_level'] = new_level
+        print(f"[SubCut] Moving to level {new_level} (from level {current_level})")
 
         # Update manual cut data for the sub-window
         self._manual_cut_data['target_contour'] = np.array(new_target_3d)
@@ -7554,8 +7615,15 @@ class ContourMeshMixin:
             # We need to:
             # 1. Remap current cut_contours to original source indices
             # 2. Combine with parent_finalized_pieces
-            total_original_sources = len(parent_finalized_pieces) + len(cut_contours)
+            # Use original_source_count which is set at level 0 and never changes
+            total_original_sources = self._manual_cut_data.get('original_source_count', len(cut_contours))
+            # Fallback: compute from the max of parent keys + current source count
+            if total_original_sources == 0:
+                max_parent_idx = max(parent_finalized_pieces.keys()) if parent_finalized_pieces else -1
+                max_current_idx = max(original_source_indices) if original_source_indices else -1
+                total_original_sources = max(max_parent_idx, max_current_idx) + 1
             final_contours = [None] * total_original_sources
+            print(f"[Finalize] Using total_original_sources={total_original_sources}")
 
             # Fill in parent's finalized pieces
             for orig_src_idx, piece in parent_finalized_pieces.items():
@@ -7631,6 +7699,78 @@ class ContourMeshMixin:
             print(f"More cuts pending: {len(self._pending_manual_cuts)} remaining")
 
         return cut_contours, all_cuts_done
+
+    def _assemble_final_results_from_levels(self):
+        """
+        Assemble final results from all sub-cut levels.
+
+        Traverses level_contexts and parent_finalized_pieces to build the
+        complete result array with pieces at their correct original source indices.
+
+        Returns:
+            (final_pieces, stream_indices) - arrays ready to store in _manual_cut_results
+        """
+        if self._manual_cut_data is None:
+            return None, None
+
+        original_source_count = self._manual_cut_data.get('original_source_count', 0)
+        level_contexts = self._manual_cut_data.get('level_contexts', {})
+        parent_finalized = self._manual_cut_data.get('parent_finalized_pieces', {})
+        current_pieces_3d = self._manual_cut_data.get('current_pieces_3d', [])
+        matched_pairs = self._manual_cut_data.get('matched_pairs', [])
+        original_source_indices = self._manual_cut_data.get('original_source_indices', None)
+        source_labels = self._manual_cut_data.get('source_labels', [])
+
+        print(f"[Assembly] original_source_count={original_source_count}")
+        print(f"[Assembly] level_contexts has {len(level_contexts)} levels: {list(level_contexts.keys())}")
+        print(f"[Assembly] parent_finalized has {len(parent_finalized)} pieces at indices: {list(parent_finalized.keys())}")
+
+        # Initialize final array
+        final_pieces = [None] * original_source_count
+
+        # Fill from parent_finalized_pieces (accumulated from all previous levels)
+        for orig_idx, piece in parent_finalized.items():
+            if orig_idx < original_source_count:
+                final_pieces[orig_idx] = piece
+                print(f"[Assembly] parent_finalized[{orig_idx}] -> final[{orig_idx}]")
+
+        # Fill from current matched_pairs (at current level)
+        for piece_idx, local_src_idx in matched_pairs:
+            if piece_idx < len(current_pieces_3d):
+                # Map local to original index
+                if original_source_indices and local_src_idx < len(original_source_indices):
+                    orig_idx = original_source_indices[local_src_idx]
+                elif local_src_idx < len(source_labels):
+                    orig_idx = source_labels[local_src_idx]
+                else:
+                    orig_idx = local_src_idx
+
+                if orig_idx < original_source_count and final_pieces[orig_idx] is None:
+                    final_pieces[orig_idx] = current_pieces_3d[piece_idx]
+                    print(f"[Assembly] matched_pair piece {piece_idx} -> final[{orig_idx}]")
+
+        # Fill remaining unmatched pieces from current_pieces_3d
+        matched_piece_indices = set(p[0] for p in matched_pairs)
+        unmatched_pieces = [(i, current_pieces_3d[i]) for i in range(len(current_pieces_3d))
+                          if i not in matched_piece_indices]
+        unfilled_indices = [i for i in range(original_source_count) if final_pieces[i] is None]
+
+        for (piece_idx, piece), target_idx in zip(unmatched_pieces, unfilled_indices):
+            final_pieces[target_idx] = piece
+            print(f"[Assembly] unmatched piece {piece_idx} -> final[{target_idx}]")
+
+        # Build stream indices
+        stream_indices = list(range(original_source_count))
+
+        # Report any missing pieces
+        missing = [i for i in range(original_source_count) if final_pieces[i] is None]
+        if missing:
+            print(f"[Assembly] WARNING: {len(missing)} missing pieces at indices {missing}")
+
+        filled = sum(1 for p in final_pieces if p is not None)
+        print(f"[Assembly] Final result: {filled}/{original_source_count} pieces filled")
+
+        return final_pieces, stream_indices
 
     def _compute_cut_preview(self):
         """
