@@ -7027,13 +7027,14 @@ class ContourMeshMixin:
                     end_dist = d_end
                     end_idx = i
 
-            print(f"[CUT] Piece {piece_idx}: closest vertex to start = {start_idx} (dist={start_dist:.6f}), to end = {end_idx} (dist={end_dist:.6f})")
-
-            # Use tolerance based on contour scale
+            # Use tolerance based on contour scale - generous to handle coordinate precision issues
             contour_range = np.ptp(piece_2d, axis=0).max()
-            vertex_tol = contour_range * 0.001  # 0.1% of contour size
+            vertex_tol = contour_range * 0.2  # 20% of contour size - snap to closest vertices
 
-            if start_dist < vertex_tol and end_dist < vertex_tol and start_idx != end_idx:
+            print(f"[CUT] Piece {piece_idx}: closest vertex to start = {start_idx} (dist={start_dist:.6f}), to end = {end_idx} (dist={end_dist:.6f}), tol={vertex_tol:.6f}")
+
+            # Always use vertex-to-vertex if we found distinct closest vertices
+            if start_idx != end_idx:
                 # Direct vertex-to-vertex cut - build pieces directly
                 piece_3d = current_pieces_3d[piece_idx]
 
@@ -7339,43 +7340,39 @@ class ContourMeshMixin:
         parent_context = self._manual_cut_data.get('parent_context', None)
         parent_finalized = self._manual_cut_data.get('parent_finalized_pieces', {})
 
+        # ALWAYS get the current pieces (after cutting) - these are what we need to get the target from
+        current_pieces_3d = self._manual_cut_data.get('current_pieces_3d', [])
+        current_pieces = self._manual_cut_data.get('current_pieces', [])
+
         if parent_context is not None:
-            # FIRST: Save results from previous sub-cut before switching context
-            # matched_pairs from the previous sub-cut refers to ITS pieces, not parent's
+            # Save results from previous sub-cut before switching context
             prev_matched_pairs = self._manual_cut_data.get('matched_pairs', [])
-            prev_pieces_3d = self._manual_cut_data.get('current_pieces_3d', [])
             prev_original_indices = self._manual_cut_data.get('original_source_indices', [])
 
             for p_idx, local_s_idx in prev_matched_pairs:
-                if p_idx < len(prev_pieces_3d) and local_s_idx < len(prev_original_indices):
+                if p_idx < len(current_pieces_3d) and local_s_idx < len(prev_original_indices):
                     orig_s_idx = prev_original_indices[local_s_idx]
-                    parent_finalized[orig_s_idx] = prev_pieces_3d[p_idx]
+                    parent_finalized[orig_s_idx] = current_pieces_3d[p_idx]
                     print(f"[SubCut] Saved from previous sub-cut: piece {p_idx} -> original source {orig_s_idx}")
 
             self._manual_cut_data['parent_finalized_pieces'] = parent_finalized
 
-            # NOW use saved parent context for the new sub-cut
-            current_pieces_3d = parent_context['pieces_3d']
-            current_pieces = parent_context['pieces_2d']
+            # Use parent context for SOURCE data only (not for pieces!)
             source_contours = parent_context['source_contours']
             source_bps = parent_context['source_bps']
             source_2d_list = parent_context['source_2d_list']
             stream_indices = parent_context['stream_indices']
             current_source_labels = parent_context['source_labels']
         else:
-            # First sub-cut - use current data and save parent context
-            current_pieces_3d = self._manual_cut_data.get('current_pieces_3d', [])
-            current_pieces = self._manual_cut_data.get('current_pieces', [])
+            # First sub-cut - use current source data and save parent context
             source_contours = self._manual_cut_data.get('source_contours', [])
             source_bps = self._manual_cut_data.get('source_bps', [])
             source_2d_list = self._manual_cut_data.get('source_2d_list', [])
             stream_indices = self._manual_cut_data.get('stream_indices', [])
             current_source_labels = self._manual_cut_data.get('source_labels', list(range(len(source_contours))))
 
-            # Save parent context for subsequent sub-cuts
+            # Save parent context for subsequent sub-cuts (source data only)
             self._manual_cut_data['parent_context'] = {
-                'pieces_3d': [np.array(p).copy() for p in current_pieces_3d],
-                'pieces_2d': [np.array(p).copy() for p in current_pieces],
                 'source_contours': [np.array(c).copy() for c in source_contours],
                 'source_bps': [copy.deepcopy(bp) for bp in source_bps],
                 'source_2d_list': [np.array(s).copy() for s in source_2d_list],
