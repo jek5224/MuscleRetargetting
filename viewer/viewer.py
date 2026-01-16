@@ -4586,9 +4586,13 @@ class GLFWApp():
             if num_selected == 1:
                 imgui.text_colored("(1:1 mapping - no cutting needed, click Skip)", 0.5, 1.0, 0.5, 1.0)
 
-            # Buttons: Optimize, Skip, Next Cut, OK, Reset, Cancel
+            # Buttons: Optimize, Optimize All, Skip, Next Cut, OK, Reset, Cancel
             imgui.separator()
             button_width = 80
+
+            # Check if auto-optimize-all mode is active
+            auto_optimize_all = getattr(obj, '_auto_optimize_all', False)
+            should_auto_optimize = auto_optimize_all and num_selected >= 2
 
             # Optimize button - run automatic optimization on current pieces
             # Can be used after manual cuts to optimize remaining subdivisions
@@ -4602,7 +4606,29 @@ class GLFWApp():
                 else:
                     opt_label = "Optimize"
 
+                # Determine if we should run optimization (button click or auto-optimize mode)
+                run_optimization = False
+                skip_preview = False  # For Optimize All: skip preview and auto-accept
+
                 if imgui.button(opt_label, button_width + 20, 30):
+                    run_optimization = True
+                imgui.same_line()
+
+                # Optimize All button - optimize and accept without preview
+                if imgui.button("Opt All", button_width, 30):
+                    run_optimization = True
+                    skip_preview = True
+                    obj._auto_optimize_all = True  # Set flag for subsequent windows
+                    print(f"[OptAll] Starting Optimize All mode...")
+                imgui.same_line()
+
+                # Auto-trigger optimization if in auto-optimize-all mode
+                if should_auto_optimize and not run_optimization:
+                    run_optimization = True
+                    skip_preview = True
+                    print(f"[OptAll] Auto-triggering optimization...")
+
+                if run_optimization:
                     print(f"Running optimization on {num_current_pieces} current pieces -> {required_pieces} needed...")
 
                     # Get source data
@@ -4632,8 +4658,6 @@ class GLFWApp():
                             matched_pairs=matched_pairs
                         )
 
-                        # Enter PREVIEW MODE instead of finalizing immediately
-                        # Store optimized pieces for preview and potential editing
                         if final_pieces is not None and len(final_pieces) > 0:
                             # Convert 3D pieces to 2D for display
                             target_mean = target_bp['mean']
@@ -4651,27 +4675,39 @@ class GLFWApp():
                             # Update current pieces with optimized result
                             obj._manual_cut_data['current_pieces'] = optimized_2d
                             obj._manual_cut_data['current_pieces_3d'] = list(final_pieces)
-                            obj._manual_cut_data['optimization_preview'] = True
                             obj._manual_cut_data['pre_optimization_pieces'] = current_pieces.copy()
                             obj._manual_cut_data['pre_optimization_pieces_3d'] = [p.copy() for p in current_pieces_3d]
-                            obj._manual_cut_data['cut_lines'] = []  # Clear cut lines for fresh editing
-                            obj._manual_cut_data['edit_history'] = []  # Initialize edit history for undo
+                            obj._manual_cut_data['cut_lines'] = []
+                            obj._manual_cut_data['edit_history'] = []
                             obj._manual_cut_line = None
 
-                            print(f"[Preview] Optimization produced {len(final_pieces)} pieces - enter preview mode")
-                            print(f"[Preview] You can now Accept, Reset, or edit with cutting lines")
-                            # Don't finalize - stay in preview mode
+                            if skip_preview:
+                                # Optimize All: trigger auto-accept flag
+                                obj._manual_cut_data['optimization_preview'] = True
+                                obj._manual_cut_data['auto_accept'] = True
+                                print(f"[OptAll] Optimization produced {len(final_pieces)} pieces - auto-accepting...")
+                            else:
+                                # Normal: enter preview mode
+                                obj._manual_cut_data['optimization_preview'] = True
+                                print(f"[Preview] Optimization produced {len(final_pieces)} pieces - enter preview mode")
+                                print(f"[Preview] You can now Accept, Reset, or edit with cutting lines")
                         else:
                             print(f"[Error] Optimization failed to produce pieces")
                     else:
                         print(f"Need at least 2 source contours for optimization")
-                imgui.same_line()
 
             # ===== Preview Mode Buttons: Accept / Reset =====
             in_preview_mode = obj._manual_cut_data.get('optimization_preview', False) if obj._manual_cut_data else False
             if in_preview_mode:
+                # Check for auto-accept (from Optimize All)
+                auto_accept = obj._manual_cut_data.get('auto_accept', False)
+
                 # Accept button - finalize the optimization result
-                if imgui.button("Accept", button_width, 30):
+                # Also triggered automatically in Optimize All mode
+                accept_clicked = imgui.button("Accept", button_width, 30) or auto_accept
+                if accept_clicked:
+                    if auto_accept:
+                        obj._manual_cut_data['auto_accept'] = False  # Clear flag
                     print(f"[Preview] Accepting optimization result...")
 
                     # Get the current optimized pieces
@@ -4793,6 +4829,9 @@ class GLFWApp():
                                     obj.smoothen_contours_z()
                                     obj.smoothen_contours_x()
                                     obj.smoothen_contours_bp()
+                                # Clear auto-optimize-all flag when all cutting is done
+                                if hasattr(obj, '_auto_optimize_all'):
+                                    obj._auto_optimize_all = False
                                 if name in self._manual_cut_mouse:
                                     del self._manual_cut_mouse[name]
                                 imgui.end()
@@ -4855,8 +4894,14 @@ class GLFWApp():
                     imgui.same_line()
 
             # Skip button - for 1-to-1 case (only 1 source selected, no cutting needed)
+            # Also auto-triggered in Optimize All mode
             if num_selected == 1:
-                if imgui.button("Skip (1:1)", button_width, 30):
+                skip_clicked = imgui.button("Skip (1:1)", button_width, 30)
+                # Auto-skip in Optimize All mode
+                if auto_optimize_all and not skip_clicked:
+                    skip_clicked = True
+                    print(f"[OptAll] Auto-skipping 1:1 case...")
+                if skip_clicked:
                     print(f"Skipping cut for target (1:1 mapping with source {selected_sources[0]})")
                     # Store the 1:1 result - the single selected source maps directly to target
                     selected_src_idx = selected_sources[0]
@@ -4892,6 +4937,9 @@ class GLFWApp():
                             obj.smoothen_contours_z()
                             obj.smoothen_contours_x()
                             obj.smoothen_contours_bp()
+                        # Clear auto-optimize-all flag when all cutting is done
+                        if hasattr(obj, '_auto_optimize_all'):
+                            obj._auto_optimize_all = False
                         if name in self._manual_cut_mouse:
                             del self._manual_cut_mouse[name]
                         imgui.end()
@@ -5016,6 +5064,9 @@ class GLFWApp():
                                     obj.smoothen_contours_z()
                                     obj.smoothen_contours_x()
                                     obj.smoothen_contours_bp()
+                                # Clear auto-optimize-all flag when all cutting is done
+                                if hasattr(obj, '_auto_optimize_all'):
+                                    obj._auto_optimize_all = False
                                 if name in self._manual_cut_mouse:
                                     del self._manual_cut_mouse[name]
                                 imgui.end()
