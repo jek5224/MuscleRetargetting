@@ -4534,6 +4534,50 @@ class GLFWApp():
             if in_preview_mode:
                 imgui.text_colored("[PREVIEW MODE] Draw lines to edit, or Accept/Reset", 1.0, 0.8, 0.2, 1.0)
 
+                # Show piece-to-source mapping
+                current_pieces_3d_preview = obj._manual_cut_data.get('current_pieces_3d', [])
+                source_contours_preview = obj._manual_cut_data.get('source_contours', [])
+
+                if len(current_pieces_3d_preview) > 0 and len(source_contours_preview) > 0:
+                    imgui.separator()
+                    imgui.text("Piece -> Source mapping:")
+
+                    # Compute centroids for matching
+                    piece_centroids = [np.mean(p, axis=0) for p in current_pieces_3d_preview]
+                    source_centroids = [np.mean(s, axis=0) for s in source_contours_preview]
+
+                    # Piece colors
+                    piece_colors = [
+                        (1.0, 1.0, 1.0, 1.0),  # White
+                        (0.2, 0.6, 1.0, 1.0),  # Blue
+                        (1.0, 0.4, 0.2, 1.0),  # Orange
+                        (0.2, 1.0, 0.4, 1.0),  # Green
+                        (1.0, 0.8, 0.2, 1.0),  # Yellow
+                        (0.8, 0.2, 1.0, 1.0),  # Purple
+                    ]
+
+                    # Match each piece to closest source
+                    source_labels = obj._manual_cut_data.get('source_labels', list(range(len(source_contours_preview))))
+                    used_sources = set()
+                    for piece_idx, piece_centroid in enumerate(piece_centroids):
+                        best_src = None
+                        best_dist = float('inf')
+                        for src_idx, src_centroid in enumerate(source_centroids):
+                            if src_idx in used_sources:
+                                continue
+                            dist = np.linalg.norm(piece_centroid - src_centroid)
+                            if dist < best_dist:
+                                best_dist = dist
+                                best_src = src_idx
+
+                        if best_src is not None:
+                            used_sources.add(best_src)
+                            src_label = source_labels[best_src] if best_src < len(source_labels) else best_src
+                            color = piece_colors[piece_idx % len(piece_colors)]
+                            imgui.text_colored(f"  P{piece_idx} ({len(current_pieces_3d_preview[piece_idx])} verts) -> S{src_label}", *color)
+
+                imgui.separator()
+
             # Show hint for 1-to-1 case
             if num_selected == 1:
                 imgui.text_colored("(1:1 mapping - no cutting needed, click Skip)", 0.5, 1.0, 0.5, 1.0)
@@ -4831,6 +4875,17 @@ class GLFWApp():
             has_valid_line = obj._manual_cut_line is not None
             in_assignment_mode = obj._manual_cut_data.get('assignment_mode', False)
             piece_assignments = obj._manual_cut_data.get('piece_assignments', {})
+            in_preview_mode_check = obj._manual_cut_data.get('optimization_preview', False)
+
+            # Skip normal cutting/assignment UI if in preview mode (Accept/Reset/Cut shown above)
+            if in_preview_mode_check:
+                # In preview mode, just show Cancel button
+                if imgui.button("Cancel", button_width, 30):
+                    obj._cancel_manual_cut()
+                    if name in self._manual_cut_mouse:
+                        del self._manual_cut_mouse[name]
+                imgui.end()
+                continue
 
             if in_assignment_mode:
                 # === ASSIGNMENT MODE UI ===
