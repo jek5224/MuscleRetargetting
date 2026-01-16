@@ -4532,7 +4532,11 @@ class GLFWApp():
             # Show preview mode indicator
             in_preview_mode = obj._manual_cut_data.get('optimization_preview', False)
             if in_preview_mode:
-                imgui.text_colored("[PREVIEW MODE] Draw lines to edit, or Accept/Reset", 1.0, 0.8, 0.2, 1.0)
+                edit_count = len(obj._manual_cut_data.get('edit_history', []))
+                if edit_count > 0:
+                    imgui.text_colored(f"[PREVIEW MODE] {edit_count} edit(s) - Undo/Accept/Reset", 1.0, 0.8, 0.2, 1.0)
+                else:
+                    imgui.text_colored("[PREVIEW MODE] Draw lines to edit, or Accept/Reset", 1.0, 0.8, 0.2, 1.0)
 
                 # Show piece-to-source mapping
                 current_pieces_3d_preview = obj._manual_cut_data.get('current_pieces_3d', [])
@@ -4651,6 +4655,7 @@ class GLFWApp():
                             obj._manual_cut_data['pre_optimization_pieces'] = current_pieces.copy()
                             obj._manual_cut_data['pre_optimization_pieces_3d'] = [p.copy() for p in current_pieces_3d]
                             obj._manual_cut_data['cut_lines'] = []  # Clear cut lines for fresh editing
+                            obj._manual_cut_data['edit_history'] = []  # Initialize edit history for undo
                             obj._manual_cut_line = None
 
                             print(f"[Preview] Optimization produced {len(final_pieces)} pieces - enter preview mode")
@@ -4817,13 +4822,36 @@ class GLFWApp():
                 if has_cut_line:
                     if imgui.button("Cut", button_width, 30):
                         print(f"[Preview] Applying cut to edit optimized pieces...")
+
+                        # Save current state for undo before applying cut
+                        edit_history = obj._manual_cut_data.get('edit_history', [])
+                        edit_history.append({
+                            'pieces': [p.copy() for p in obj._manual_cut_data.get('current_pieces', [])],
+                            'pieces_3d': [p.copy() for p in obj._manual_cut_data.get('current_pieces_3d', [])],
+                        })
+                        obj._manual_cut_data['edit_history'] = edit_history
+
                         # Apply the iterative cut to further subdivide pieces
                         success = obj._apply_iterative_cut()
                         if success:
-                            print(f"[Preview] Cut applied - now have {len(obj._manual_cut_data.get('current_pieces', []))} pieces")
+                            print(f"[Preview] Cut applied - now have {len(obj._manual_cut_data.get('current_pieces', []))} pieces (edit #{len(edit_history)})")
                             obj._manual_cut_line = None  # Clear line after applying
                         else:
+                            # Remove the history entry since cut failed
+                            edit_history.pop()
                             print(f"[Preview] Cut failed - try drawing a different line")
+                    imgui.same_line()
+
+                # Undo button - revert to previous state
+                edit_history = obj._manual_cut_data.get('edit_history', [])
+                if len(edit_history) > 0:
+                    if imgui.button("Undo", button_width, 30):
+                        prev_state = edit_history.pop()
+                        obj._manual_cut_data['current_pieces'] = prev_state['pieces']
+                        obj._manual_cut_data['current_pieces_3d'] = prev_state['pieces_3d']
+                        obj._manual_cut_data['edit_history'] = edit_history
+                        obj._manual_cut_line = None
+                        print(f"[Preview] Undid last edit - now have {len(prev_state['pieces'])} pieces")
                     imgui.same_line()
 
             # Skip button - for 1-to-1 case (only 1 source selected, no cutting needed)
