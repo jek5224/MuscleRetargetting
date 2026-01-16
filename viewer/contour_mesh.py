@@ -7037,20 +7037,28 @@ class ContourMeshMixin:
                 # Direct vertex-to-vertex cut - build pieces directly
                 piece_3d = current_pieces_3d[piece_idx]
 
-                # Ensure start_idx < end_idx for consistent ordering
-                if start_idx > end_idx:
-                    start_idx, end_idx = end_idx, start_idx
+                # Ensure consistent ordering: we want to cut at these two vertex indices
+                idx_a, idx_b = start_idx, end_idx
+                if idx_a > idx_b:
+                    idx_a, idx_b = idx_b, idx_a
 
-                # Build two pieces
-                # Piece 0: from start_idx to end_idx (inclusive)
-                new_piece0_2d = [piece_2d[i] for i in range(start_idx, end_idx + 1)]
-                new_piece0_3d = [piece_3d[i] for i in range(start_idx, end_idx + 1)]
+                # Build two pieces - each is a closed polygon
+                # Piece 0: vertices from idx_a to idx_b (inclusive) - the "short" path
+                new_piece0_2d = [piece_2d[i].copy() for i in range(idx_a, idx_b + 1)]
+                new_piece0_3d = [piece_3d[i].copy() for i in range(idx_a, idx_b + 1)]
 
-                # Piece 1: from end_idx to start_idx (wrapping around)
-                new_piece1_2d = [piece_2d[i] for i in range(end_idx, n_verts)]
-                new_piece1_2d.extend([piece_2d[i] for i in range(0, start_idx + 1)])
-                new_piece1_3d = [piece_3d[i] for i in range(end_idx, n_verts)]
-                new_piece1_3d.extend([piece_3d[i] for i in range(0, start_idx + 1)])
+                # Piece 1: vertices from idx_b to idx_a (wrapping around) - the "long" path
+                new_piece1_2d = []
+                new_piece1_3d = []
+                i = idx_b
+                while True:
+                    new_piece1_2d.append(piece_2d[i].copy())
+                    new_piece1_3d.append(piece_3d[i].copy())
+                    if i == idx_a:
+                        break
+                    i = (i + 1) % n_verts
+
+                print(f"[CUT] Vertex cut: idx_a={idx_a}, idx_b={idx_b}, piece0 has {len(new_piece0_2d)} verts, piece1 has {len(new_piece1_2d)} verts")
 
                 # Replace the cut piece with the two new pieces
                 new_pieces = current_pieces[:piece_idx] + [np.array(new_piece0_2d), np.array(new_piece1_2d)] + current_pieces[piece_idx + 1:]
@@ -7059,8 +7067,6 @@ class ContourMeshMixin:
                 self._manual_cut_data['current_pieces'] = new_pieces
                 self._manual_cut_data['current_pieces_3d'] = new_pieces_3d
                 self._manual_cut_data['cut_lines'].append((line_start, line_end))
-
-                print(f"Vertex-to-vertex cut: indices {start_idx} to {end_idx}, created pieces of size {len(new_piece0_2d)} and {len(new_piece1_2d)}")
                 return True
 
         # Fallback: Find which piece the line intersects (first one with 2 intersections)
