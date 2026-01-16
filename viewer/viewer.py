@@ -4636,14 +4636,14 @@ class GLFWApp():
                     stream_indices = obj._manual_cut_data.get('stream_indices', list(range(len(source_contours))))
                     target_level = obj._manual_cut_data.get('target_level')
                     matched_pairs = obj._manual_cut_data.get('matched_pairs', [])
+                    parent_finalized_pieces = obj._manual_cut_data.get('parent_finalized_pieces', {})
+                    original_source_indices = obj._manual_cut_data.get('original_source_indices', None)
+                    selected_sources = obj._manual_cut_data.get('selected_sources', list(range(len(source_contours))))
 
                     # Exit preview mode
                     obj._manual_cut_data['optimization_preview'] = False
 
                     # Now run the finalization code
-                    original_source_indices = obj._manual_cut_data.get('original_source_indices', None)
-                    selected_sources = obj._manual_cut_data.get('selected_sources', list(range(len(source_contours))))
-
                     if parent_finalized_pieces and original_source_indices:
                         # Sub-window context: need to combine with parent's 1:1 pieces
                         source_contours_full = obj._manual_cut_data.get('source_contours', [])
