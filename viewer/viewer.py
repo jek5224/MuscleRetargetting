@@ -4631,27 +4631,58 @@ class GLFWApp():
 
                             all_stream_indices = obj._manual_cut_data.get('stream_indices', stream_indices)
 
-                        # Check if we have all pieces
+                        # Check if we have all pieces for THIS sub-cut
                         filled_count = sum(1 for p in all_pieces if p is not None)
                         if filled_count >= len(all_pieces):
-                            # Store result with ALL pieces (matched + optimized + parent finalized)
-                            if not hasattr(obj, '_manual_cut_results') or obj._manual_cut_results is None:
-                                obj._manual_cut_results = {}
-
-                            target_i = obj._manual_cut_data.get('target_i', 0)
-                            result_key = (target_level, target_i)
-                            obj._manual_cut_results[result_key] = {
-                                'cut_contours': all_pieces,
-                                'source_indices': all_stream_indices,
-                                'is_1to1': False,
-                            }
                             print(f"Optimization complete: {len(all_pieces)} pieces ({len(matched_pairs)} pre-matched, {len(final_pieces) if final_pieces else 0} optimized)")
 
-                            # Clear stale data before continuing
-                            obj._manual_cut_data = None
-                            obj._manual_cut_original_state = None
-                            obj._manual_cut_pending = False
-                            obj.cut_streams(cut_method='bp', muscle_name=muscle_name)
+                            # Check for remaining pending sub-cuts BEFORE clearing _manual_cut_data
+                            pending_subcuts = obj._manual_cut_data.get('pending_subcuts', [])
+                            parent_context = obj._manual_cut_data.get('parent_context', None)
+
+                            # Update parent_finalized_pieces with THIS sub-cut's results
+                            # Map optimized pieces to original source indices
+                            updated_finalized = dict(parent_finalized_pieces) if parent_finalized_pieces else {}
+                            if original_source_indices:
+                                opt_idx = 0
+                                for local_src_idx in selected_sources:
+                                    if local_src_idx < len(original_source_indices):
+                                        orig_src_idx = original_source_indices[local_src_idx]
+                                        if final_pieces is not None and opt_idx < len(final_pieces):
+                                            updated_finalized[orig_src_idx] = final_pieces[opt_idx]
+                                            opt_idx += 1
+
+                            if len(pending_subcuts) > 0:
+                                # MORE sub-cuts pending - open the next one instead of cut_streams
+                                # Note: pending_subcuts already has current sub-cut removed by _open_subcut_for_piece
+                                print(f"[SubCut] {len(pending_subcuts)} more sub-cuts pending, opening next...")
+                                next_subcut = pending_subcuts[0]
+
+                                # Preserve parent context for the next sub-cut
+                                obj._manual_cut_data['parent_finalized_pieces'] = updated_finalized
+                                # pending_subcuts will be updated by _open_subcut_for_piece
+
+                                # Open the next sub-cut
+                                obj._open_subcut_for_piece(next_subcut)
+                            else:
+                                # All sub-cuts done - store final result and call cut_streams
+                                if not hasattr(obj, '_manual_cut_results') or obj._manual_cut_results is None:
+                                    obj._manual_cut_results = {}
+
+                                target_i = obj._manual_cut_data.get('target_i', 0)
+                                result_key = (target_level, target_i)
+                                obj._manual_cut_results[result_key] = {
+                                    'cut_contours': all_pieces,
+                                    'source_indices': all_stream_indices,
+                                    'is_1to1': False,
+                                }
+                                print(f"[SubCut] All sub-cuts complete, stored result with key {result_key}")
+
+                                # Clear stale data before continuing
+                                obj._manual_cut_data = None
+                                obj._manual_cut_original_state = None
+                                obj._manual_cut_pending = False
+                                obj.cut_streams(cut_method='bp', muscle_name=muscle_name)
                             # Only apply smoothening if cut_streams completed (not waiting for another manual cut)
                             if not obj._manual_cut_pending and obj._manual_cut_data is None:
                                 if hasattr(obj, 'stream_bounding_planes') and obj.stream_bounding_planes is not None:
