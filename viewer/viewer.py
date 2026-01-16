@@ -2002,15 +2002,23 @@ class GLFWApp():
                             if hasattr(obj, 'scalar_field') and obj.scalar_field is not None:
                                 try:
                                     # Use actual scalar field range
-                                    scalar_min = float(obj.scalar_field.min())
-                                    scalar_max = float(obj.scalar_field.max())
-                                    # Optionally narrow to origin/insertion if set
+                                    field_min = float(obj.scalar_field.min())
+                                    field_max = float(obj.scalar_field.max())
+                                    scalar_min = field_min
+                                    scalar_max = field_max
+                                    # Optionally narrow to origin/insertion if set AND within field range
                                     if hasattr(obj, 'origin_contour_value') and hasattr(obj, 'insertion_contour_value'):
                                         o_val = obj.origin_contour_value
                                         i_val = obj.insertion_contour_value
-                                        if o_val != i_val:  # Only use if they're different
-                                            scalar_min = min(o_val, i_val)
-                                            scalar_max = max(o_val, i_val)
+                                        # Only use if different AND within the actual scalar field range
+                                        if o_val != i_val:
+                                            proposed_min = min(o_val, i_val)
+                                            proposed_max = max(o_val, i_val)
+                                            if proposed_min >= field_min and proposed_max <= field_max:
+                                                scalar_min = proposed_min
+                                                scalar_max = proposed_max
+                                            else:
+                                                print(f"[{name}] Origin/insertion values ({o_val}, {i_val}) outside field range [{field_min:.4f}, {field_max:.4f}], using field range")
                                     print(f"[{name}] Scanning scalar range: {scalar_min:.4f} to {scalar_max:.4f}")
                                     obj.find_all_transitions(scalar_min=scalar_min, scalar_max=scalar_max, num_samples=200)
                                     # Auto-add transitions to contours if contours exist
