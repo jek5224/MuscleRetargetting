@@ -6385,7 +6385,7 @@ class ContourMeshMixin:
             'source_bps': source_bps,
             'source_2d_list': source_2d_list,
             'stream_indices': source_indices,  # Use actual source indices
-            'source_labels': list(range(len(source_indices))),  # Original source indices for display
+            'source_labels': list(source_indices),  # Original stream indices for display
             'process_forward': process_forward,
             # For iterative cutting: K pieces needed, track current pieces
             'required_pieces': len(source_indices),  # Number of pieces needed = number of sources
@@ -6609,7 +6609,7 @@ class ContourMeshMixin:
             'source_bps': source_bps,
             'source_2d_list': source_2d_list,
             'stream_indices': list(streams_for_contour),
-            'source_labels': list(range(len(streams_for_contour))),  # Original source indices for display
+            'source_labels': list(streams_for_contour),  # Original stream indices for display
             'process_forward': True,  # Direction doesn't matter at this point
             'required_pieces': len(streams_for_contour),
             'selected_sources': list(range(len(streams_for_contour))),  # All sources selected by default
