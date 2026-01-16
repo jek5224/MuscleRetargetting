@@ -7021,11 +7021,15 @@ class ContourMeshMixin:
                     continue
 
                 diff = p1 - np.array(line_start)
+                # t = parameter along edge (0 to 1 means on edge)
                 t = (diff[0] * line_dir[1] - diff[1] * line_dir[0]) / cross
+                # s = parameter along cutting line segment (0 to 1 means on segment)
+                s = (edge_dir[0] * diff[1] - edge_dir[1] * diff[0]) / cross
 
                 # Use small epsilon to handle lines passing exactly through vertices
                 eps = 1e-9
-                if -eps < t < 1 + eps:
+                # Check both: intersection on edge AND on cutting line segment
+                if -eps < t < 1 + eps and -eps < s < 1 + eps:
                     # Clamp t to valid range for computing intersection point
                     t_clamped = max(0, min(1, t))
                     intersection_2d = p1 + t_clamped * edge_dir
