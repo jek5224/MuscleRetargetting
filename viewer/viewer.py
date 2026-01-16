@@ -3991,12 +3991,16 @@ class GLFWApp():
 
                         # Threshold: 1% of perimeter
                         neck_threshold = perimeter * 0.01
-                        min_sep_idx = int(n * 0.25)
+                        # Use smaller index separation (10%) to catch pinch points
+                        min_sep_idx = int(n * 0.10)
 
                         # Find all pairs below threshold
                         for i in range(n):
                             for j in range(i + min_sep_idx, i + n - min_sep_idx):
                                 j_mod = j % n
+                                # Only add if i < j_mod to avoid duplicates (i,j) and (j,i)
+                                if i >= j_mod:
+                                    continue
                                 dist = np.linalg.norm(piece_2d[i] - piece_2d[j_mod])
                                 if dist < neck_threshold:
                                     all_candidates.append({
@@ -4018,13 +4022,19 @@ class GLFWApp():
                         is_dup = False
                         for existing in filtered:
                             if existing['piece_idx'] == cand['piece_idx']:
-                                # Check if indices are close
+                                # Check if indices are close (in same order or swapped)
                                 n = len(current_pieces[cand['piece_idx']])
+                                # Same order check
                                 dist_a = min(abs(cand['idx_a'] - existing['idx_a']),
                                            n - abs(cand['idx_a'] - existing['idx_a']))
                                 dist_b = min(abs(cand['idx_b'] - existing['idx_b']),
                                            n - abs(cand['idx_b'] - existing['idx_b']))
-                                if dist_a < 5 and dist_b < 5:
+                                # Swapped order check
+                                dist_a_swap = min(abs(cand['idx_a'] - existing['idx_b']),
+                                                n - abs(cand['idx_a'] - existing['idx_b']))
+                                dist_b_swap = min(abs(cand['idx_b'] - existing['idx_a']),
+                                                n - abs(cand['idx_b'] - existing['idx_a']))
+                                if (dist_a < 5 and dist_b < 5) or (dist_a_swap < 5 and dist_b_swap < 5):
                                     is_dup = True
                                     break
                         if not is_dup:
