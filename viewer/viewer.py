@@ -4004,49 +4004,41 @@ class GLFWApp():
                     print(f"  Recommended cut line: narrowest neck = {min_dist:.6f} (piece {piece_idx})")
                     print(f"    pt0[{best_indices[0]}] = {best_pt0}, pt1[{best_indices[1]}] = {best_pt1}")
 
-                    # Cut line connects the two neck points, extended slightly for visibility
-                    direction = best_pt1 - best_pt0
-                    length = np.linalg.norm(direction)
-                    if length > 1e-10:
-                        direction = direction / length
-                    else:
-                        # Points are same (pinch point) - line goes from neighbor to neighbor
-                        # This crosses the pinch point between the two branches of the contour
-                        piece_2d = current_pieces[piece_idx]
-                        n = len(piece_2d)
-                        i0, i1 = best_indices
+                    piece_2d = current_pieces[piece_idx]
+                    n = len(piece_2d)
+                    i0, i1 = best_indices
+                    contour_range = np.max(target_2d.max(axis=0) - target_2d.min(axis=0))
 
-                        # Get neighbors at both indices
-                        prev_i0 = (i0 - 1) % n
-                        next_i0 = (i0 + 1) % n
-                        prev_i1 = (i1 - 1) % n
-                        next_i1 = (i1 + 1) % n
+                    # Get neighbors at both neck indices
+                    next_i0 = (i0 + 1) % n
+                    next_i1 = (i1 + 1) % n
 
-                        # Line goes from one lobe to the other lobe to cross the pinch
-                        # Lobe A: vertices from i0+1 to i1-1 (next_i0, ..., prev_i1)
-                        # Lobe B: vertices from i1+1 to i0-1 (next_i1, ..., prev_i0)
-                        # Connect across: next_i0 (lobe A) to next_i1 (lobe B)
+                    # Check if it's a pinch point (same position) or a neck with gap
+                    length = np.linalg.norm(best_pt1 - best_pt0)
+
+                    if length < 1e-6:
+                        # Pinch point: line goes from neighbor to neighbor across lobes
+                        # Lobe A: i0+1 to i1-1, Lobe B: i1+1 to i0-1
                         p_start = piece_2d[next_i0]
                         p_end = piece_2d[next_i1]
-                        direction = p_end - p_start
-                        if np.linalg.norm(direction) > 1e-10:
-                            direction = direction / np.linalg.norm(direction)
-                        else:
-                            direction = np.array([1.0, 0.0])
+                        print(f"    Pinch point: line from idx {next_i0} to idx {next_i1}")
+                    else:
+                        # Normal neck: line connects the two neck points
+                        p_start = best_pt0
+                        p_end = best_pt1
+                        print(f"    Normal neck: line from idx {i0} to idx {i1}")
 
-                        # For pinch points, set actual endpoints at the neighbors
-                        contour_range = np.max(target_2d.max(axis=0) - target_2d.min(axis=0))
-                        extent = contour_range * 0.02  # Small extension beyond neighbors
-                        line_start = tuple(p_start - direction * extent)
-                        line_end = tuple(p_end + direction * extent)
-                        print(f"    Pinch point: line from neighbor {next_i0} to neighbor {next_i1}")
+                    # Extend line slightly beyond endpoints
+                    direction = p_end - p_start
+                    dir_len = np.linalg.norm(direction)
+                    if dir_len > 1e-10:
+                        direction = direction / dir_len
+                    else:
+                        direction = np.array([1.0, 0.0])
+                    extent = contour_range * 0.05
+                    line_start = tuple(p_start - direction * extent)
+                    line_end = tuple(p_end + direction * extent)
 
-                    if length > 1e-10:
-                        # Normal case: extend from neck points
-                        contour_range = np.max(target_2d.max(axis=0) - target_2d.min(axis=0))
-                        extent = max(length * 0.1, contour_range * 0.02)
-                        line_start = tuple(best_pt0 - direction * extent)
-                        line_end = tuple(best_pt1 + direction * extent)
                     obj._manual_cut_data['initial_line'] = (line_start, line_end)
                     obj._manual_cut_data['neck_indices'] = best_indices
                     obj._manual_cut_data['neck_piece_idx'] = piece_idx
