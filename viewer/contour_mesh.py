@@ -6175,6 +6175,27 @@ class ContourMeshMixin:
         print(f"  target_bp is_merge_point: {target_bp.get('is_merge_point', False)}")
         print(f"  target_bp scalar_value: {target_bp.get('scalar_value', 'unknown')}")
 
+        # For merge points, shift scalar slightly towards source to get non-zero neck width
+        is_merge = target_bp.get('is_merge_point', False)
+        if is_merge and 'scalar_value' in target_bp:
+            target_scalar = target_bp['scalar_value']
+            # Get source scalar to determine direction
+            if len(source_indices) > 0 and 'scalar_value' in self.bounding_planes[source_level][source_indices[0]]:
+                source_scalar = self.bounding_planes[source_level][source_indices[0]]['scalar_value']
+                # Move 0.5% of the way towards source to open up the neck
+                shift_amount = (source_scalar - target_scalar) * 0.005
+                adjusted_scalar = target_scalar + shift_amount
+                print(f"  [MERGE] Adjusting scalar from {target_scalar:.6f} to {adjusted_scalar:.6f} (shift={shift_amount:.6f})")
+
+                # Re-extract contour at adjusted scalar
+                _, adjusted_contours, _ = self.find_contour(adjusted_scalar)
+                if len(adjusted_contours) == 1:
+                    # Found single merged contour at adjusted position
+                    target_contour = np.array(adjusted_contours[0])
+                    print(f"  [MERGE] Using adjusted contour with {len(target_contour)} vertices")
+                else:
+                    print(f"  [MERGE] Adjusted scalar gave {len(adjusted_contours)} contours, keeping original")
+
         # Debug: check target contour connectivity
         if len(target_contour) > 2:
             # Check for large gaps in the contour (might indicate discontinuity)
