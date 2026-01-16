@@ -5106,19 +5106,6 @@ class GLFWApp():
                     original_source_indices = obj._manual_cut_data.get('original_source_indices', None)
                     selected_sources = obj._manual_cut_data.get('selected_sources', list(range(len(source_contours))))
 
-                    # Save BP visualization on Accept (same as auto-optimize)
-                    if target_bp is not None and len(current_pieces_3d) > 0 and len(source_contours) > 0:
-                        try:
-                            target_contour = obj._manual_cut_data.get('target_contour')
-                            if target_contour is not None:
-                                obj._save_accept_visualization(
-                                    target_contour, target_bp,
-                                    current_pieces_3d, source_contours, source_bps,
-                                    stream_indices, target_level, source_level
-                                )
-                        except Exception as e:
-                            print(f"[Accept] BP viz save failed: {e}")
-
                     # Exit preview mode
                     obj._manual_cut_data['optimization_preview'] = False
 
