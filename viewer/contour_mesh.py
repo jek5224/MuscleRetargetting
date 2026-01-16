@@ -1205,6 +1205,58 @@ class ContourMeshMixin:
         scan_min = scalar_min + margin
         scan_max = scalar_max - margin
 
+        # Check expected origin/insertion counts
+        expected_origin = getattr(self, 'origin_count', None)
+        expected_insertion = getattr(self, 'insertion_count', None)
+        print(f"  Expected: origin={expected_origin}, insertion={expected_insertion}")
+
+        # Check actual counts at scan boundaries
+        _, contours_at_min, _ = self.find_contour(scan_min)
+        _, contours_at_max, _ = self.find_contour(scan_max)
+        count_at_min = len(contours_at_min)
+        count_at_max = len(contours_at_max)
+        print(f"  Actual: count at min={count_at_min}, count at max={count_at_max}")
+
+        # If expected counts don't match, extend scan range to find where they do
+        field_min = float(self.scalar_field.min()) if hasattr(self, 'scalar_field') and self.scalar_field is not None else scan_min
+        field_max = float(self.scalar_field.max()) if hasattr(self, 'scalar_field') and self.scalar_field is not None else scan_max
+
+        # Extend towards origin if we're not seeing expected origin count
+        if expected_origin is not None and count_at_min < expected_origin:
+            print(f"  [EXTEND] Looking for {expected_origin} contours below {scan_min:.4f}...")
+            # Binary search to find where expected_origin contours exist
+            search_min = field_min
+            search_max = scan_min
+            for _ in range(20):
+                mid = (search_min + search_max) / 2
+                _, mid_contours, _ = self.find_contour(mid)
+                if len(mid_contours) >= expected_origin:
+                    search_max = mid  # Found enough, search higher
+                    scan_min = mid  # Update scan_min
+                    print(f"    Found {len(mid_contours)} contours at {mid:.4f}")
+                else:
+                    search_min = mid  # Not enough, search lower
+            # Final check
+            _, final_contours, _ = self.find_contour(scan_min)
+            print(f"  [EXTEND] New scan_min={scan_min:.4f} with {len(final_contours)} contours")
+
+        # Extend towards insertion if we're not seeing expected insertion count
+        if expected_insertion is not None and count_at_max < expected_insertion:
+            print(f"  [EXTEND] Looking for {expected_insertion} contours above {scan_max:.4f}...")
+            search_min = scan_max
+            search_max = field_max
+            for _ in range(20):
+                mid = (search_min + search_max) / 2
+                _, mid_contours, _ = self.find_contour(mid)
+                if len(mid_contours) >= expected_insertion:
+                    search_min = mid
+                    scan_max = mid
+                    print(f"    Found {len(mid_contours)} contours at {mid:.4f}")
+                else:
+                    search_max = mid
+            _, final_contours, _ = self.find_contour(scan_max)
+            print(f"  [EXTEND] New scan_max={scan_max:.4f} with {len(final_contours)} contours")
+
         # Debug: check contour counts at multiple points
         test_points = [0.0, 0.1, 0.25, 0.5, 0.75, 0.9, 1.0]
         print(f"  Contour counts across range:")
