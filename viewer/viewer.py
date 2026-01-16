@@ -4529,6 +4529,11 @@ class GLFWApp():
             imgui.text(f"Selected: {num_selected} sources -> 1 target")
             imgui.text(f"Pieces: {len(current_pieces)} / {required_pieces} needed")
 
+            # Show preview mode indicator
+            in_preview_mode = obj._manual_cut_data.get('optimization_preview', False)
+            if in_preview_mode:
+                imgui.text_colored("[PREVIEW MODE] Draw lines to edit, or Accept/Reset", 1.0, 0.8, 0.2, 1.0)
+
             # Show hint for 1-to-1 case
             if num_selected == 1:
                 imgui.text_colored("(1:1 mapping - no cutting needed, click Skip)", 0.5, 1.0, 0.5, 1.0)
@@ -4539,7 +4544,9 @@ class GLFWApp():
 
             # Optimize button - run automatic optimization on current pieces
             # Can be used after manual cuts to optimize remaining subdivisions
-            if num_selected >= 2:
+            # Hide in preview mode (Accept/Reset are shown instead)
+            in_preview_for_button = obj._manual_cut_data.get('optimization_preview', False) if obj._manual_cut_data else False
+            if num_selected >= 2 and not in_preview_for_button:
                 # Show different label based on whether manual cuts have been made
                 num_current_pieces = len(current_pieces)
                 if num_current_pieces > 1:
@@ -4577,130 +4584,203 @@ class GLFWApp():
                             matched_pairs=matched_pairs
                         )
 
-                        # Combine matched pieces with optimized pieces
-                        # IMPORTANT: In sub-window context, also include parent_finalized_pieces
-                        parent_finalized_pieces = obj._manual_cut_data.get('parent_finalized_pieces', {})
-                        original_source_indices = obj._manual_cut_data.get('original_source_indices', None)
+                        # Enter PREVIEW MODE instead of finalizing immediately
+                        # Store optimized pieces for preview and potential editing
+                        if final_pieces is not None and len(final_pieces) > 0:
+                            # Convert 3D pieces to 2D for display
+                            target_mean = target_bp['mean']
+                            target_x = target_bp['basis_x']
+                            target_y = target_bp['basis_y']
 
-                        if parent_finalized_pieces and original_source_indices:
-                            # Sub-window context: need to combine with parent's 1:1 pieces
-                            source_contours_full = obj._manual_cut_data.get('source_contours', [])
-                            total_pieces = len(parent_finalized_pieces) + len(source_contours_full)
-                            all_pieces = [None] * total_pieces
+                            optimized_2d = []
+                            for piece_3d in final_pieces:
+                                piece_2d = np.array([
+                                    [np.dot(v - target_mean, target_x), np.dot(v - target_mean, target_y)]
+                                    for v in piece_3d
+                                ])
+                                optimized_2d.append(piece_2d)
 
-                            # Fill in parent's finalized pieces (1:1 assignments from parent)
-                            for orig_src_idx, piece in parent_finalized_pieces.items():
+                            # Update current pieces with optimized result
+                            obj._manual_cut_data['current_pieces'] = optimized_2d
+                            obj._manual_cut_data['current_pieces_3d'] = list(final_pieces)
+                            obj._manual_cut_data['optimization_preview'] = True
+                            obj._manual_cut_data['pre_optimization_pieces'] = current_pieces.copy()
+                            obj._manual_cut_data['pre_optimization_pieces_3d'] = [p.copy() for p in current_pieces_3d]
+                            obj._manual_cut_data['cut_lines'] = []  # Clear cut lines for fresh editing
+                            obj._manual_cut_line = None
+
+                            print(f"[Preview] Optimization produced {len(final_pieces)} pieces - enter preview mode")
+                            print(f"[Preview] You can now Accept, Reset, or edit with cutting lines")
+                            # Don't finalize - stay in preview mode
+                        else:
+                            print(f"[Error] Optimization failed to produce pieces")
+                    else:
+                        print(f"Need at least 2 source contours for optimization")
+                imgui.same_line()
+
+            # ===== Preview Mode Buttons: Accept / Reset =====
+            in_preview_mode = obj._manual_cut_data.get('optimization_preview', False) if obj._manual_cut_data else False
+            if in_preview_mode:
+                # Accept button - finalize the optimization result
+                if imgui.button("Accept", button_width, 30):
+                    print(f"[Preview] Accepting optimization result...")
+
+                    # Get the current optimized pieces
+                    current_pieces_3d = obj._manual_cut_data.get('current_pieces_3d', [])
+                    final_pieces = current_pieces_3d  # These are the optimized (and possibly edited) pieces
+
+                    # Get context data
+                    source_contours = obj._manual_cut_data.get('source_contours', [])
+                    source_bps = obj._manual_cut_data.get('source_bps', [])
+                    target_bp = obj._manual_cut_data.get('target_bp')
+                    stream_indices = obj._manual_cut_data.get('stream_indices', list(range(len(source_contours))))
+                    target_level = obj._manual_cut_data.get('target_level')
+                    matched_pairs = obj._manual_cut_data.get('matched_pairs', [])
+
+                    # Exit preview mode
+                    obj._manual_cut_data['optimization_preview'] = False
+
+                    # Now run the finalization code
+                    original_source_indices = obj._manual_cut_data.get('original_source_indices', None)
+                    selected_sources = obj._manual_cut_data.get('selected_sources', list(range(len(source_contours))))
+
+                    if parent_finalized_pieces and original_source_indices:
+                        # Sub-window context: need to combine with parent's 1:1 pieces
+                        source_contours_full = obj._manual_cut_data.get('source_contours', [])
+                        total_pieces = len(parent_finalized_pieces) + len(source_contours_full)
+                        all_pieces = [None] * total_pieces
+
+                        # Fill in parent's finalized pieces (1:1 assignments from parent)
+                        for orig_src_idx, piece in parent_finalized_pieces.items():
+                            if orig_src_idx < total_pieces:
+                                all_pieces[orig_src_idx] = piece
+
+                        # Fill in pre-matched pieces (mapped to original indices)
+                        for piece_idx, local_src_idx in matched_pairs:
+                            if piece_idx < len(current_pieces_3d) and local_src_idx < len(original_source_indices):
+                                orig_src_idx = original_source_indices[local_src_idx]
                                 if orig_src_idx < total_pieces:
-                                    all_pieces[orig_src_idx] = piece
+                                    all_pieces[orig_src_idx] = current_pieces_3d[piece_idx]
 
-                            # Fill in pre-matched pieces (mapped to original indices)
-                            for piece_idx, local_src_idx in matched_pairs:
-                                if piece_idx < len(current_pieces_3d) and local_src_idx < len(original_source_indices):
-                                    orig_src_idx = original_source_indices[local_src_idx]
-                                    if orig_src_idx < total_pieces:
-                                        all_pieces[orig_src_idx] = current_pieces_3d[piece_idx]
+                        # Fill in optimized pieces for remaining sources (mapped to original indices)
+                        opt_idx = 0
+                        for local_src_idx in selected_sources:
+                            if local_src_idx < len(original_source_indices):
+                                orig_src_idx = original_source_indices[local_src_idx]
+                                if orig_src_idx < total_pieces and all_pieces[orig_src_idx] is None:
+                                    if final_pieces is not None and opt_idx < len(final_pieces):
+                                        all_pieces[orig_src_idx] = final_pieces[opt_idx]
+                                        opt_idx += 1
 
-                            # Fill in optimized pieces for remaining sources (mapped to original indices)
+                        # Get original stream indices from parent context
+                        all_stream_indices = list(range(total_pieces))
+                    else:
+                        # Normal context (not a sub-window)
+                        source_contours_full = obj._manual_cut_data.get('source_contours', [])
+                        all_pieces = [None] * len(source_contours_full)
+
+                        # Fill in pre-matched pieces
+                        for piece_idx, src_idx in matched_pairs:
+                            if piece_idx < len(current_pieces_3d) and src_idx < len(all_pieces):
+                                all_pieces[src_idx] = current_pieces_3d[piece_idx]
+
+                        # Fill in optimized pieces for remaining sources
+                        opt_idx = 0
+                        for src_idx in selected_sources:
+                            if src_idx < len(all_pieces) and all_pieces[src_idx] is None and final_pieces is not None and opt_idx < len(final_pieces):
+                                all_pieces[src_idx] = final_pieces[opt_idx]
+                                opt_idx += 1
+
+                        all_stream_indices = obj._manual_cut_data.get('stream_indices', stream_indices)
+
+                    # Check if we have all pieces
+                    filled_count = sum(1 for p in all_pieces if p is not None)
+                    if filled_count >= len(all_pieces):
+                        print(f"[Accept] Finalizing: {len(all_pieces)} pieces ({len(matched_pairs)} pre-matched, {len(final_pieces) if final_pieces else 0} optimized)")
+
+                        # Check for remaining pending sub-cuts
+                        pending_subcuts = obj._manual_cut_data.get('pending_subcuts', [])
+
+                        # Update parent_finalized_pieces with THIS sub-cut's results
+                        updated_finalized = dict(parent_finalized_pieces) if parent_finalized_pieces else {}
+                        if original_source_indices:
                             opt_idx = 0
                             for local_src_idx in selected_sources:
                                 if local_src_idx < len(original_source_indices):
                                     orig_src_idx = original_source_indices[local_src_idx]
-                                    if orig_src_idx < total_pieces and all_pieces[orig_src_idx] is None:
-                                        if final_pieces is not None and opt_idx < len(final_pieces):
-                                            all_pieces[orig_src_idx] = final_pieces[opt_idx]
-                                            opt_idx += 1
+                                    if final_pieces is not None and opt_idx < len(final_pieces):
+                                        updated_finalized[orig_src_idx] = final_pieces[opt_idx]
+                                        opt_idx += 1
 
-                            # Get original stream indices from parent context
-                            all_stream_indices = list(range(total_pieces))
+                        if len(pending_subcuts) > 0:
+                            # MORE sub-cuts pending - open the next one
+                            print(f"[SubCut] {len(pending_subcuts)} more sub-cuts pending, opening next...")
+                            next_subcut = pending_subcuts[0]
+                            obj._manual_cut_data['parent_finalized_pieces'] = updated_finalized
+                            obj._open_subcut_for_piece(next_subcut)
                         else:
-                            # Normal context (not a sub-window)
-                            source_contours_full = obj._manual_cut_data.get('source_contours', [])
-                            all_pieces = [None] * len(source_contours_full)
+                            # All sub-cuts done - store final result and call cut_streams
+                            if not hasattr(obj, '_manual_cut_results') or obj._manual_cut_results is None:
+                                obj._manual_cut_results = {}
 
-                            # Fill in pre-matched pieces
-                            for piece_idx, src_idx in matched_pairs:
-                                if piece_idx < len(current_pieces_3d) and src_idx < len(all_pieces):
-                                    all_pieces[src_idx] = current_pieces_3d[piece_idx]
+                            target_i = obj._manual_cut_data.get('target_i', 0)
+                            result_key = (target_level, target_i)
+                            obj._manual_cut_results[result_key] = {
+                                'cut_contours': all_pieces,
+                                'source_indices': all_stream_indices,
+                                'is_1to1': False,
+                            }
+                            print(f"[Accept] All sub-cuts complete, stored result with key {result_key}")
 
-                            # Fill in optimized pieces for remaining sources
-                            opt_idx = 0
-                            for src_idx in selected_sources:
-                                if all_pieces[src_idx] is None and final_pieces is not None and opt_idx < len(final_pieces):
-                                    all_pieces[src_idx] = final_pieces[opt_idx]
-                                    opt_idx += 1
-
-                            all_stream_indices = obj._manual_cut_data.get('stream_indices', stream_indices)
-
-                        # Check if we have all pieces for THIS sub-cut
-                        filled_count = sum(1 for p in all_pieces if p is not None)
-                        if filled_count >= len(all_pieces):
-                            print(f"Optimization complete: {len(all_pieces)} pieces ({len(matched_pairs)} pre-matched, {len(final_pieces) if final_pieces else 0} optimized)")
-
-                            # Check for remaining pending sub-cuts BEFORE clearing _manual_cut_data
-                            pending_subcuts = obj._manual_cut_data.get('pending_subcuts', [])
-                            parent_context = obj._manual_cut_data.get('parent_context', None)
-
-                            # Update parent_finalized_pieces with THIS sub-cut's results
-                            # Map optimized pieces to original source indices
-                            updated_finalized = dict(parent_finalized_pieces) if parent_finalized_pieces else {}
-                            if original_source_indices:
-                                opt_idx = 0
-                                for local_src_idx in selected_sources:
-                                    if local_src_idx < len(original_source_indices):
-                                        orig_src_idx = original_source_indices[local_src_idx]
-                                        if final_pieces is not None and opt_idx < len(final_pieces):
-                                            updated_finalized[orig_src_idx] = final_pieces[opt_idx]
-                                            opt_idx += 1
-
-                            if len(pending_subcuts) > 0:
-                                # MORE sub-cuts pending - open the next one instead of cut_streams
-                                # Note: pending_subcuts already has current sub-cut removed by _open_subcut_for_piece
-                                print(f"[SubCut] {len(pending_subcuts)} more sub-cuts pending, opening next...")
-                                next_subcut = pending_subcuts[0]
-
-                                # Preserve parent context for the next sub-cut
-                                obj._manual_cut_data['parent_finalized_pieces'] = updated_finalized
-                                # pending_subcuts will be updated by _open_subcut_for_piece
-
-                                # Open the next sub-cut
-                                obj._open_subcut_for_piece(next_subcut)
-                            else:
-                                # All sub-cuts done - store final result and call cut_streams
-                                if not hasattr(obj, '_manual_cut_results') or obj._manual_cut_results is None:
-                                    obj._manual_cut_results = {}
-
-                                target_i = obj._manual_cut_data.get('target_i', 0)
-                                result_key = (target_level, target_i)
-                                obj._manual_cut_results[result_key] = {
-                                    'cut_contours': all_pieces,
-                                    'source_indices': all_stream_indices,
-                                    'is_1to1': False,
-                                }
-                                print(f"[SubCut] All sub-cuts complete, stored result with key {result_key}")
-
-                                # Clear stale data before continuing
-                                obj._manual_cut_data = None
-                                obj._manual_cut_original_state = None
-                                obj._manual_cut_pending = False
-                                obj.cut_streams(cut_method='bp', muscle_name=muscle_name)
-                            # Only apply smoothening if cut_streams completed (not waiting for another manual cut)
+                            # Clear stale data before continuing
+                            obj._manual_cut_data = None
+                            obj._manual_cut_original_state = None
+                            obj._manual_cut_pending = False
+                            obj.cut_streams(cut_method='bp', muscle_name=muscle_name)
+                            # Only apply smoothening if cut_streams completed
                             if not obj._manual_cut_pending and obj._manual_cut_data is None:
                                 if hasattr(obj, 'stream_bounding_planes') and obj.stream_bounding_planes is not None:
                                     print(f"[{muscle_name}] Applying smoothening...")
                                     obj.smoothen_contours_z()
                                     obj.smoothen_contours_x()
                                     obj.smoothen_contours_bp()
-
                                 if name in self._manual_cut_mouse:
                                     del self._manual_cut_mouse[name]
                                 imgui.end()
                                 continue
-                            # cut_streams returned early for another manual cut - don't close window
-                        else:
-                            print(f"Optimization incomplete: {filled_count}/{len(all_pieces)} pieces filled")
                     else:
-                        print(f"Need at least 2 source contours for optimization")
+                        print(f"[Accept] Incomplete: {filled_count}/{len(all_pieces)} pieces filled")
+
                 imgui.same_line()
+
+                # Reset button - go back to pre-optimization state
+                if imgui.button("Reset", button_width, 30):
+                    print(f"[Preview] Resetting to pre-optimization state...")
+                    pre_pieces = obj._manual_cut_data.get('pre_optimization_pieces', [])
+                    pre_pieces_3d = obj._manual_cut_data.get('pre_optimization_pieces_3d', [])
+                    if pre_pieces and pre_pieces_3d:
+                        obj._manual_cut_data['current_pieces'] = pre_pieces
+                        obj._manual_cut_data['current_pieces_3d'] = pre_pieces_3d
+                    obj._manual_cut_data['optimization_preview'] = False
+                    obj._manual_cut_data['cut_lines'] = []
+                    obj._manual_cut_line = None
+                    print(f"[Preview] Reset complete - you can draw new cuts or optimize again")
+
+                imgui.same_line()
+
+                # Next Cut button - apply current cutting line to edit optimized pieces
+                has_cut_line = obj._manual_cut_line is not None
+                if has_cut_line:
+                    if imgui.button("Cut", button_width, 30):
+                        print(f"[Preview] Applying cut to edit optimized pieces...")
+                        # Apply the iterative cut to further subdivide pieces
+                        success = obj._apply_iterative_cut()
+                        if success:
+                            print(f"[Preview] Cut applied - now have {len(obj._manual_cut_data.get('current_pieces', []))} pieces")
+                            obj._manual_cut_line = None  # Clear line after applying
+                        else:
+                            print(f"[Preview] Cut failed - try drawing a different line")
+                    imgui.same_line()
 
             # Skip button - for 1-to-1 case (only 1 source selected, no cutting needed)
             if num_selected == 1:
