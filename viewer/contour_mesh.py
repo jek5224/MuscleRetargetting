@@ -7027,9 +7027,9 @@ class ContourMeshMixin:
                     end_dist = d_end
                     end_idx = i
 
-            # Use tolerance based on line length - if endpoints are close to vertices, snap to them
+            # Use tolerance based on line length - only snap if VERY close to vertices
             line_length = np.linalg.norm(line_end_arr - line_start_arr)
-            vertex_tol = line_length * 0.3  # 30% of line length - generous for neck cuts
+            vertex_tol = line_length * 0.05  # 5% of line length - strict, only for exact neck matches
 
             print(f"[CUT] Piece {piece_idx}: closest vertex to start = {start_idx} (dist={start_dist:.6f}), to end = {end_idx} (dist={end_dist:.6f}), tol={vertex_tol:.6f}, line_len={line_length:.6f}")
 
@@ -7070,8 +7070,9 @@ class ContourMeshMixin:
                 self._manual_cut_data['cut_lines'].append((line_start, line_end))
                 return True
 
-        # Fallback: Find which piece the line intersects (first one with 2 intersections)
-        print(f"[CUT] Fallback: checking edge intersections")
+        # Fallback: Find which piece the line intersects using extended line
+        # Extend the line to ensure it crosses the contour even if drawn short
+        print(f"[CUT] Fallback: checking edge intersections (extended line)")
         cut_piece_idx = None
         intersections = None
 
@@ -7082,28 +7083,36 @@ class ContourMeshMixin:
             line_start_np = np.array(line_start)
             line_end_np = np.array(line_end)
             line_dir = line_end_np - line_start_np
+            line_len = np.linalg.norm(line_dir)
+
+            # Extend line by 50% on each end to ensure it crosses the contour
+            if line_len > 1e-10:
+                line_dir_norm = line_dir / line_len
+                ext_start = line_start_np - line_dir_norm * line_len * 0.5
+                ext_end = line_end_np + line_dir_norm * line_len * 0.5
+                ext_line_dir = ext_end - ext_start
+            else:
+                ext_start = line_start_np
+                ext_line_dir = line_dir
 
             for i in range(n_verts):
                 p1 = piece_2d[i]
                 p2 = piece_2d[(i + 1) % n_verts]
 
                 edge_dir = p2 - p1
-                cross = line_dir[0] * edge_dir[1] - line_dir[1] * edge_dir[0]
+                cross = ext_line_dir[0] * edge_dir[1] - ext_line_dir[1] * edge_dir[0]
 
                 if abs(cross) < 1e-10:
                     continue
 
-                diff = p1 - line_start_np
+                diff = p1 - ext_start
                 # t = parameter along edge (0 to 1 means on edge)
-                # s = parameter along cutting line (0 to 1 means on segment)
-                # Using standard line-line intersection formula
-                t = (diff[0] * line_dir[1] - diff[1] * line_dir[0]) / cross
-                s = (diff[0] * edge_dir[1] - diff[1] * edge_dir[0]) / cross
+                t = (diff[0] * ext_line_dir[1] - diff[1] * ext_line_dir[0]) / cross
 
                 # Use small epsilon to handle lines passing exactly through vertices
                 eps = 1e-6
-                # Check both: intersection on edge AND on cutting line segment
-                if -eps < t < 1 + eps and -eps < s < 1 + eps:
+                # Only check that intersection is on the edge (t in [0,1])
+                if -eps < t < 1 + eps:
                     # Clamp t to valid range for computing intersection point
                     t_clamped = max(0, min(1, t))
                     intersection_2d = p1 + t_clamped * edge_dir
