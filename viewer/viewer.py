@@ -4010,43 +4010,41 @@ class GLFWApp():
                     if length > 1e-10:
                         direction = direction / length
                     else:
-                        # Points are same (pinch point) - use tangents at both indices
-                        # The cutting line should cross between the two parts of the contour
+                        # Points are same (pinch point) - line goes from neighbor to neighbor
+                        # This crosses the pinch point between the two branches of the contour
                         piece_2d = current_pieces[piece_idx]
                         n = len(piece_2d)
                         i0, i1 = best_indices
 
-                        # Get tangent at first index
+                        # Get neighbors at both indices
                         prev_i0 = (i0 - 1) % n
                         next_i0 = (i0 + 1) % n
-                        tangent0 = piece_2d[next_i0] - piece_2d[prev_i0]
-
-                        # Get tangent at second index
                         prev_i1 = (i1 - 1) % n
                         next_i1 = (i1 + 1) % n
-                        tangent1 = piece_2d[next_i1] - piece_2d[prev_i1]
 
-                        # Cutting direction: use vector from neighbor of i0 to neighbor of i1
-                        # This crosses the pinch point properly
-                        direction = piece_2d[next_i0] - piece_2d[next_i1]
-                        if np.linalg.norm(direction) < 1e-10:
-                            direction = piece_2d[prev_i0] - piece_2d[prev_i1]
-                        if np.linalg.norm(direction) < 1e-10:
-                            # Fallback to perpendicular of average tangent
-                            avg_tangent = tangent0 + tangent1
-                            if np.linalg.norm(avg_tangent) > 1e-10:
-                                avg_tangent = avg_tangent / np.linalg.norm(avg_tangent)
-                                direction = np.array([-avg_tangent[1], avg_tangent[0]])
-                            else:
-                                direction = np.array([1.0, 0.0])
-                        else:
+                        # Line goes from neighbor on one branch to neighbor on the other
+                        # Use next_i0 to prev_i1 (or vice versa) to cross the pinch
+                        p_start = piece_2d[next_i0]
+                        p_end = piece_2d[prev_i1]
+                        direction = p_end - p_start
+                        if np.linalg.norm(direction) > 1e-10:
                             direction = direction / np.linalg.norm(direction)
+                        else:
+                            direction = np.array([1.0, 0.0])
 
-                    # Extend for visibility - use larger extent for pinch points
-                    contour_range = np.max(target_2d.max(axis=0) - target_2d.min(axis=0))
-                    extent = max(length * 0.1, contour_range * 0.05) if length > 1e-10 else contour_range * 0.1
-                    line_start = tuple(best_pt0 - direction * extent)
-                    line_end = tuple(best_pt1 + direction * extent)
+                        # For pinch points, set actual endpoints at the neighbors
+                        contour_range = np.max(target_2d.max(axis=0) - target_2d.min(axis=0))
+                        extent = contour_range * 0.02  # Small extension beyond neighbors
+                        line_start = tuple(p_start - direction * extent)
+                        line_end = tuple(p_end + direction * extent)
+                        print(f"    Pinch point: line from neighbor {next_i0} to neighbor {prev_i1}")
+
+                    if length > 1e-10:
+                        # Normal case: extend from neck points
+                        contour_range = np.max(target_2d.max(axis=0) - target_2d.min(axis=0))
+                        extent = max(length * 0.1, contour_range * 0.02)
+                        line_start = tuple(best_pt0 - direction * extent)
+                        line_end = tuple(best_pt1 + direction * extent)
                     obj._manual_cut_data['initial_line'] = (line_start, line_end)
                     obj._manual_cut_data['neck_indices'] = best_indices
                     obj._manual_cut_data['neck_piece_idx'] = piece_idx
