@@ -7693,15 +7693,17 @@ class ContourMeshMixin:
             # We need to:
             # 1. Remap current cut_contours to original source indices
             # 2. Combine with parent_finalized_pieces
-            # Use original_source_count which is set at level 0 and never changes
-            total_original_sources = self._manual_cut_data.get('original_source_count', len(cut_contours))
-            # Fallback: compute from the max of parent keys + current source count
-            if total_original_sources == 0:
-                max_parent_idx = max(parent_finalized_pieces.keys()) if parent_finalized_pieces else -1
-                max_current_idx = max(original_source_indices) if original_source_indices else -1
-                total_original_sources = max(max_parent_idx, max_current_idx) + 1
+            # Compute from max stream index (NOT just count)
+            # Stream indices can be larger than count-1, e.g., streams [3,1,2] with count 3
+            # needs array size 4 to fit index 3
+            parent_context = self._manual_cut_data.get('parent_context', None)
+            all_stream_indices_for_size = parent_context.get('stream_indices', []) if parent_context else []
+            max_parent_idx = max(parent_finalized_pieces.keys()) if parent_finalized_pieces else -1
+            max_current_idx = max(original_source_indices) if original_source_indices else -1
+            max_all_streams = max(all_stream_indices_for_size) if all_stream_indices_for_size else -1
+            total_original_sources = max(max_parent_idx, max_current_idx, max_all_streams) + 1
             final_contours = [None] * total_original_sources
-            print(f"[Finalize] Using total_original_sources={total_original_sources}")
+            print(f"[Finalize] Using total_original_sources={total_original_sources} (from max stream index)")
 
             # Fill in parent's finalized pieces
             for orig_src_idx, piece in parent_finalized_pieces.items():

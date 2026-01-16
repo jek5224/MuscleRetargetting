@@ -5123,15 +5123,17 @@ class GLFWApp():
                     if original_source_indices:
                         # Sub-window context: need to combine with parent's 1:1 pieces
                         source_contours_full = obj._manual_cut_data.get('source_contours', [])
-                        # Use original_source_count which is set at level 0 and never changes
-                        total_pieces = obj._manual_cut_data.get('original_source_count', 0)
-                        if total_pieces == 0:
-                            # Fallback: compute from max index
-                            max_parent_idx = max(parent_finalized_pieces.keys()) if parent_finalized_pieces else -1
-                            max_current_idx = max(original_source_indices) if original_source_indices else -1
-                            total_pieces = max(max_parent_idx, max_current_idx) + 1
+                        # Compute total_pieces from max stream index (NOT just count)
+                        # Stream indices can be larger than count-1, e.g., streams [3,1,2] with count 3
+                        # needs array size 4 to fit index 3
+                        parent_context = obj._manual_cut_data.get('parent_context', None)
+                        all_stream_indices_for_size = parent_context.get('stream_indices', []) if parent_context else []
+                        max_parent_idx = max(parent_finalized_pieces.keys()) if parent_finalized_pieces else -1
+                        max_current_idx = max(original_source_indices) if original_source_indices else -1
+                        max_all_streams = max(all_stream_indices_for_size) if all_stream_indices_for_size else -1
+                        total_pieces = max(max_parent_idx, max_current_idx, max_all_streams) + 1
                         all_pieces = [None] * total_pieces
-                        print(f"[Accept] Using total_pieces={total_pieces} (original_source_count)")
+                        print(f"[Accept] Using total_pieces={total_pieces} (from max stream index)")
 
                         # Fill in parent's finalized pieces (1:1 assignments from parent)
                         for orig_src_idx, piece in parent_finalized_pieces.items():
