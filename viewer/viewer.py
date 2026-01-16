@@ -5022,11 +5022,8 @@ class GLFWApp():
                                 continue
                             # cut_streams returned early for another manual cut - don't close window
 
-                imgui.same_line()
-                if imgui.button("Back", button_width, 30):
-                    # Go back to cutting mode
-                    obj._manual_cut_data['assignment_mode'] = False
-                    obj._manual_cut_data['piece_assignments'] = {}
+                # NOTE: No "Back" button - only one cut allowed per window
+                # User must use "Reset" to start over or "Done" to proceed
             else:
                 # === CUTTING MODE UI ===
                 # Cut button - applies cut and enters assignment mode
