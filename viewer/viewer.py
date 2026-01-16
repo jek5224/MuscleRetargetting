@@ -2020,7 +2020,15 @@ class GLFWApp():
                                             else:
                                                 print(f"[{name}] Origin/insertion values ({o_val}, {i_val}) outside field range [{field_min:.4f}, {field_max:.4f}], using field range")
                                     print(f"[{name}] Scanning scalar range: {scalar_min:.4f} to {scalar_max:.4f}")
-                                    obj.find_all_transitions(scalar_min=scalar_min, scalar_max=scalar_max, num_samples=200)
+                                    # Try to get expected origin/insertion counts from existing contours
+                                    exp_origin = None
+                                    exp_insertion = None
+                                    if hasattr(obj, 'contours') and obj.contours is not None and len(obj.contours) > 0:
+                                        exp_origin = len(obj.contours[0])
+                                        exp_insertion = len(obj.contours[-1])
+                                        print(f"[{name}] Expected counts from contours: origin={exp_origin}, insertion={exp_insertion}")
+                                    obj.find_all_transitions(scalar_min=scalar_min, scalar_max=scalar_max, num_samples=200,
+                                                            expected_origin=exp_origin, expected_insertion=exp_insertion)
                                     # Auto-add transitions to contours if contours exist
                                     if obj.contours is not None and len(obj.contours) > 0:
                                         obj.add_transitions_to_contours()
