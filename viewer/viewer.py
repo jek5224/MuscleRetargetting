@@ -3976,8 +3976,10 @@ class GLFWApp():
             source_level = obj._manual_cut_data['source_level']
 
             # Find initial line using obj._find_neck_in_contour (same as find_transitions)
+            # Only for SEPARATE mode - COMMON mode uses source boundary line
+            is_common_mode = obj._manual_cut_data.get('is_common_mode', False)
             need_new_recommendation = 'initial_line' not in obj._manual_cut_data
-            if need_new_recommendation:
+            if need_new_recommendation and not is_common_mode:
                 current_pieces = obj._manual_cut_data.get('current_pieces', [target_2d])
                 contour_range = np.max(target_2d.max(axis=0) - target_2d.min(axis=0))
 
