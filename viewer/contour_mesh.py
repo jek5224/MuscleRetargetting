@@ -7413,8 +7413,36 @@ class ContourMeshMixin:
         pending_subcuts = self._manual_cut_data.get('pending_subcuts', [])
         pending_by_level = self._manual_cut_data.get('pending_subcuts_by_level', {})
 
-        if piece_idx >= len(current_pieces_3d):
-            print(f"[SubCut] Invalid piece index {piece_idx}, only have {len(current_pieces_3d)} pieces")
+        # Helper to remove this subcut from pending lists (used for both success and failure paths)
+        def remove_from_pending():
+            nonlocal pending_subcuts, pending_by_level
+            # Remove from flat list
+            new_pending = [s for s in pending_subcuts if s['piece_idx'] != piece_idx]
+            self._manual_cut_data['pending_subcuts'] = new_pending
+            # Remove from pending_by_level
+            subcut_target_level = parent_level + 1
+            if subcut_target_level in pending_by_level:
+                def sources_match(a, b):
+                    if a is None and b is None:
+                        return True
+                    if a is None or b is None:
+                        return False
+                    if len(a) != len(b):
+                        return False
+                    return all(x == y for x, y in zip(a, b))
+                new_pending_level = []
+                for s in pending_by_level[subcut_target_level]:
+                    if s['piece_idx'] == piece_idx and sources_match(s.get('original_sources'), precomputed_original):
+                        print(f"[SubCut] Removing subcut from level {subcut_target_level}: piece {piece_idx}")
+                    else:
+                        new_pending_level.append(s)
+                pending_by_level[subcut_target_level] = new_pending_level
+            self._manual_cut_data['pending_subcuts_by_level'] = pending_by_level
+
+        if piece_idx >= len(current_pieces_3d) or piece_idx >= len(current_pieces):
+            print(f"[SubCut] Invalid piece index {piece_idx}, only have {len(current_pieces_3d)}/{len(current_pieces)} pieces")
+            # Still remove from pending to avoid infinite loop
+            remove_from_pending()
             return
 
         # Get the piece that becomes the new target
@@ -7483,33 +7511,8 @@ class ContourMeshMixin:
         # Create new source labels from original indices
         new_source_labels = original_source_indices.copy()
 
-        # Remove this subcut from pending list (both flat and by-level)
-        new_pending = [s for s in pending_subcuts if s['piece_idx'] != piece_idx]
-        self._manual_cut_data['pending_subcuts'] = new_pending
-
-        # Also remove from pending_subcuts_by_level
-        # The sub-cut is at the level indicated by parent_level + 1
-        subcut_target_level = parent_level + 1
-        if subcut_target_level in pending_by_level:
-            # Remove by matching piece_idx and original_sources
-            # Use list comparison that handles None and list equality
-            def sources_match(a, b):
-                if a is None and b is None:
-                    return True
-                if a is None or b is None:
-                    return False
-                if len(a) != len(b):
-                    return False
-                return all(x == y for x, y in zip(a, b))
-
-            new_pending = []
-            for s in pending_by_level[subcut_target_level]:
-                if s['piece_idx'] == piece_idx and sources_match(s.get('original_sources'), precomputed_original):
-                    print(f"[SubCut] Removing subcut from level {subcut_target_level}: piece {piece_idx}")
-                else:
-                    new_pending.append(s)
-            pending_by_level[subcut_target_level] = new_pending
-        self._manual_cut_data['pending_subcuts_by_level'] = pending_by_level
+        # Remove this subcut from pending lists
+        remove_from_pending()
 
         # Set subcut_level for the new sub-window
         # IMPORTANT: Use parent_level (from subcut_info) not current_level (from subcut_level)

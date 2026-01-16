@@ -5103,7 +5103,9 @@ class GLFWApp():
                     obj._manual_cut_data['optimization_preview'] = False
 
                     # Now run the finalization code
-                    if parent_finalized_pieces and original_source_indices:
+                    # Use sub-window context if original_source_indices is set (indicating we're in a sub-cut)
+                    # Note: parent_finalized_pieces may be empty if no 1:1 matches from parent
+                    if original_source_indices:
                         # Sub-window context: need to combine with parent's 1:1 pieces
                         source_contours_full = obj._manual_cut_data.get('source_contours', [])
                         # Use original_source_count which is set at level 0 and never changes
