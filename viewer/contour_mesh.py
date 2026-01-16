@@ -10114,22 +10114,25 @@ class ContourMeshMixin:
 
         plt.tight_layout()
 
-        # Save to bp_viz/
-        os.makedirs('bp_viz', exist_ok=True)
-        if not hasattr(self, '_bp_viz_counter'):
-            self._bp_viz_counter = 0
-        self._bp_viz_counter += 1
-
+        # Save to bp_viz/{muscle_name}/
         obj_name = getattr(self, '_muscle_name', None)
         if obj_name is None:
             obj_name = getattr(self, 'name', getattr(self, 'mesh_name', 'unknown'))
+
+        # Create muscle-specific subdirectory
+        muscle_dir = f'bp_viz/{obj_name}'
+        os.makedirs(muscle_dir, exist_ok=True)
+
+        if not hasattr(self, '_bp_viz_counter'):
+            self._bp_viz_counter = 0
+        self._bp_viz_counter += 1
 
         # Include level info in filename for clarity
         level_str = ""
         if target_level is not None and source_level is not None:
             level_str = f"_cut{target_level}_using{source_level}"
 
-        filepath = f'bp_viz/bp_transform_{obj_name}_{self._bp_viz_counter:03d}{level_str}.png'
+        filepath = f'{muscle_dir}/bp_transform_{self._bp_viz_counter:03d}{level_str}.png'
         print(f"  [BP Viz] Saving to {filepath}")
         plt.savefig(filepath, dpi=100)
         plt.close(fig)
