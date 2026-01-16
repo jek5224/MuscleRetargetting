@@ -1402,28 +1402,27 @@ class ContourMeshMixin:
             print(f"\nTransition {t_idx+1}: {small_count}→{large_count}")
             print(f"  Split point (exact): {split_scalar:.6f}")
 
-            # Add margin to move slightly AWAY from split (into small_count region) to get non-zero neck width
-            # The merged contour (small_count) has the neck; we move deeper into that region
-            margin_pct = 0.02
+            # Add small margin to move slightly AWAY from split (into small_count region)
+            # Want merged contour very close to diverging but with small non-zero neck
+            margin_pct = 0.002  # 0.2% - very close to split point
             # Move AWAY from large_scalar (opposite direction)
             adjusted_scalar = split_scalar - (large_scalar - split_scalar) * margin_pct
-            print(f"  Split point (adjusted away from split): {adjusted_scalar:.6f}")
+            print(f"  Split point (adjusted 0.2% away): {adjusted_scalar:.6f}")
 
             # Get contours at adjusted split point (with small neck gap) and after split
             planes_small, contours_small, contours_small_orig = self.find_contour(adjusted_scalar)
             planes_large, contours_large, _ = self.find_contour(large_scalar)
 
-            # If adjustment went too far or wrong direction, try other adjustments
+            # If adjustment went too far or wrong direction, try other small margins
             if len(contours_small) != small_count:
                 print(f"  Adjusted scalar gave {len(contours_small)} contours, trying other margins...")
-                # Try various margins in both directions
-                for try_pct in [0.01, 0.005, 0.002, 0.001, -0.01, -0.005, -0.002, -0.001]:
+                for try_pct in [0.001, 0.003, 0.005, 0.01]:
                     try_scalar = split_scalar - (large_scalar - split_scalar) * try_pct
                     _, try_contours, _ = self.find_contour(try_scalar)
                     if len(try_contours) == small_count:
                         adjusted_scalar = try_scalar
                         planes_small, contours_small, contours_small_orig = self.find_contour(adjusted_scalar)
-                        print(f"  Using margin {try_pct*100:+.1f}%: scalar={adjusted_scalar:.6f}")
+                        print(f"  Using margin {try_pct*100:.1f}%: scalar={adjusted_scalar:.6f}")
                         break
 
             if len(contours_small) != small_count:
