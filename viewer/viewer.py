@@ -4178,9 +4178,14 @@ class GLFWApp():
                     }
 
                     obj._manual_cut_data['initial_line'] = (line_start, line_end)
-                    obj._manual_cut_data['is_neck_line'] = True  # Flag for vertex-to-vertex cutting
+                    # Only set is_neck_line = True if user hasn't drawn their own line
+                    # (i.e., if _manual_cut_line is None or equals initial_line)
                     if obj._manual_cut_line is None:
+                        obj._manual_cut_data['is_neck_line'] = True  # Flag for vertex-to-vertex cutting
                         obj._manual_cut_line = (line_start, line_end)
+                    elif obj._manual_cut_line == obj._manual_cut_data.get('initial_line'):
+                        # User hasn't changed the line from initial neck recommendation
+                        obj._manual_cut_data['is_neck_line'] = True
                 else:
                     # No candidates found - set flag to prevent re-computation every frame
                     if 'neck_search_done' not in obj._manual_cut_data:
@@ -4292,6 +4297,8 @@ class GLFWApp():
                             'idx_a': i0,
                             'idx_b': i1,
                         }
+                        # User selected a neck via slider - use neck-based cutting
+                        obj._manual_cut_data['is_neck_line'] = True
                 imgui.pop_item_width()
             imgui.separator()
 
