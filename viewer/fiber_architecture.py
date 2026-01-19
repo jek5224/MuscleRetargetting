@@ -1623,24 +1623,29 @@ class FiberArchitectureMixin:
         bp_center_3d = np.mean(template_contour, axis=0)
 
         # Compute basis vectors from BP corners
-        # basis_x: along edge 0->1 (and 3->2)
-        # basis_y: along edge 0->3 (and 1->2)
+        # Use edges to define the plane, then orthogonalize
         edge_01 = template_contour[1] - template_contour[0]
-        edge_32 = template_contour[2] - template_contour[3]
         edge_03 = template_contour[3] - template_contour[0]
-        edge_12 = template_contour[2] - template_contour[1]
 
-        basis_x = (edge_01 + edge_32) / 2
-        basis_y = (edge_03 + edge_12) / 2
+        # Compute plane normal
+        normal = np.cross(edge_01, edge_03)
+        normal_norm = np.linalg.norm(normal)
+        if normal_norm > 1e-10:
+            normal = normal / normal_norm
+        else:
+            normal = np.array([0.0, 0.0, 1.0])
 
+        # basis_x along edge_01 direction
+        basis_x = edge_01.copy()
         basis_x_norm = np.linalg.norm(basis_x)
-        basis_y_norm = np.linalg.norm(basis_y)
-
         if basis_x_norm > 1e-10:
             basis_x = basis_x / basis_x_norm
         else:
             basis_x = np.array([1.0, 0.0, 0.0])
 
+        # basis_y perpendicular to both normal and basis_x (ensures orthogonality)
+        basis_y = np.cross(normal, basis_x)
+        basis_y_norm = np.linalg.norm(basis_y)
         if basis_y_norm > 1e-10:
             basis_y = basis_y / basis_y_norm
         else:
@@ -1718,29 +1723,40 @@ class FiberArchitectureMixin:
                 corner_intersections.append(best_intersection)
 
         # ===== Step 4: Insert vertices at intersections (in 3D) =====
-        # Sort by edge_idx descending to insert from end to start (avoid index shifting)
-        corner_intersections.sort(key=lambda x: (x[1], x[2]), reverse=True)
-
-        # Track which muscle_contour index corresponds to each corner
-        corner_to_muscle_idx = {}
+        # First, compute all intersection 3D points and their contour positions
+        intersection_data = []  # List of (corner_idx, edge_idx, t_seg, vertex_3d)
 
         for corner_idx, edge_idx, t_seg in corner_intersections:
+            v0_3d = muscle_contour[edge_idx]
+            v1_3d = muscle_contour[(edge_idx + 1) % len(muscle_contour)]
+            vertex_3d = v0_3d + t_seg * (v1_3d - v0_3d)
+            intersection_data.append((corner_idx, edge_idx, t_seg, vertex_3d))
+
+        # Sort by contour position (edge_idx ascending, then t_seg ascending)
+        intersection_data.sort(key=lambda x: (x[1], x[2]))
+
+        # Insert vertices in order, tracking index offset
+        corner_to_muscle_idx = {}
+        index_offset = 0
+
+        for corner_idx, edge_idx, t_seg, vertex_3d in intersection_data:
+            adjusted_edge_idx = edge_idx + index_offset
+
             if 1e-6 < t_seg < 1 - 1e-6:
-                # Intersection is on edge interior - insert new vertex in 3D
-                v0_3d = muscle_contour[edge_idx]
-                v1_3d = muscle_contour[(edge_idx + 1) % len(muscle_contour)]
-                new_vertex_3d = v0_3d + t_seg * (v1_3d - v0_3d)
-                muscle_contour = np.insert(muscle_contour, edge_idx + 1, new_vertex_3d, axis=0)
-                corner_to_muscle_idx[corner_idx] = edge_idx + 1
+                # Intersection is on edge interior - insert new vertex
+                insert_idx = adjusted_edge_idx + 1
+                muscle_contour = np.insert(muscle_contour, insert_idx, vertex_3d, axis=0)
+                corner_to_muscle_idx[corner_idx] = insert_idx
+                index_offset += 1
             elif t_seg <= 1e-6:
                 # Intersection at segment start
-                corner_to_muscle_idx[corner_idx] = edge_idx
+                corner_to_muscle_idx[corner_idx] = adjusted_edge_idx
             else:
                 # Intersection at segment end
-                corner_to_muscle_idx[corner_idx] = (edge_idx + 1) % len(muscle_contour)
+                corner_to_muscle_idx[corner_idx] = (adjusted_edge_idx + 1) % len(muscle_contour)
 
         # ===== Step 5: Build closest_muscle_index from corner intersections =====
-        # Recompute after insertions - find closest vertex to each corner
+        # Use ray-based indices where available, fallback to distance for missing corners
         closest_muscle_index = []
         for corner_idx in range(len(template_contour)):
             if corner_idx in corner_to_muscle_idx:
@@ -1752,31 +1768,22 @@ class FiberArchitectureMixin:
 
         if not preserve_order:
             # Roll contours to align starting points
-            Q0_index = 0  # Start with corner 0
             P0_index = closest_muscle_index[0]
 
-            template_contour = np.roll(template_contour, -Q0_index, axis=0)
             muscle_contour = np.roll(muscle_contour, -P0_index, axis=0)
 
-            # Recompute closest_muscle_index after rolling
-            closest_muscle_index = []
-            for corner_idx in range(len(template_contour)):
-                distances = np.linalg.norm(muscle_contour - template_contour[corner_idx], axis=1)
-                closest_muscle_index.append(np.argmin(distances))
+            # Adjust closest_muscle_index after rolling
+            n = len(muscle_contour)
+            closest_muscle_index = [(idx - P0_index) % n for idx in closest_muscle_index]
 
             # Check winding order - reverse if needed
             if len(closest_muscle_index) >= 3 and closest_muscle_index[2] < closest_muscle_index[1]:
                 muscle_contour = np.roll(muscle_contour[::-1], 1, axis=0)
-                closest_muscle_index = []
-                for corner_idx in range(len(template_contour)):
-                    distances = np.linalg.norm(muscle_contour - template_contour[corner_idx], axis=1)
-                    closest_muscle_index.append(np.argmin(distances))
-        else:
-            # preserve_order=True: Recompute closest_muscle_index without rolling/reversing
-            closest_muscle_index = []
-            for corner_idx in range(len(template_contour)):
-                distances = np.linalg.norm(muscle_contour - template_contour[corner_idx], axis=1)
-                closest_muscle_index.append(np.argmin(distances))
+                # Adjust indices: after reverse and roll by 1
+                # New index for old index i: (n - 1 - i + 1) % n = (n - i) % n
+                n = len(muscle_contour)
+                closest_muscle_index = [(n - idx) % n for idx in closest_muscle_index]
+        # If preserve_order=True, keep indices as computed
 
         result_index = []
         result = []
