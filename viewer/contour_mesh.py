@@ -9662,11 +9662,24 @@ class ContourMeshMixin:
 
         print(f"  [BP Transform] source areas: {[f'{a:.6f}' for a in source_areas]}")
 
-        # Fall back if any source is invalid or has tiny area
-        min_area_threshold = 1e-6
-        if has_invalid or any(a < min_area_threshold for a in source_areas):
-            reason = "invalid geometry" if has_invalid else "tiny source areas"
-            print(f"  [BP Transform] Falling back to area-based cutting due to {reason}")
+        # Compute target area for relative threshold
+        try:
+            target_poly_check = Polygon(target_2d)
+            if not target_poly_check.is_valid:
+                target_poly_check = target_poly_check.buffer(0)
+            target_area_for_threshold = target_poly_check.area
+            print(f"  [BP Transform] target area: {target_area_for_threshold:.6f}")
+        except:
+            target_area_for_threshold = 1.0
+
+        # Fall back if any source is invalid or has tiny area (relative to target)
+        # Use relative threshold: source should have at least 0.1% of target area
+        min_area_threshold = max(1e-8, target_area_for_threshold * 0.001)
+        has_tiny_area = any(a < min_area_threshold for a in source_areas)
+
+        if has_invalid or has_tiny_area:
+            reason = "invalid geometry" if has_invalid else f"tiny source areas (min needed: {min_area_threshold:.8f})"
+            print(f"  [BP Transform] Falling back to Voronoi cutting due to {reason}")
             projected_refs = [src_bp['mean'] for src_bp in source_bps]
             cut_contours = self._cut_contour_for_streams(target_contour, target_bp, projected_refs, stream_indices)
             return cut_contours, None
@@ -10283,48 +10296,73 @@ class ContourMeshMixin:
                         poly = Polygon(transformed)
                         if not poly.is_valid:
                             poly = poly.buffer(0)
-                        piece_polygons.append(poly)
+                        if poly.is_empty:
+                            piece_polygons.append(None)
+                        else:
+                            piece_polygons.append(poly)
                     except:
                         piece_polygons.append(None)
                 else:
                     piece_polygons.append(None)
 
+            # Check how many valid polygons we have
+            valid_polygon_count = sum(1 for p in piece_polygons if p is not None)
+            print(f"  [BP Transform] Valid polygons: {valid_polygon_count}/{n_pieces}")
+
+            # If we have no valid polygons, use pure Voronoi (nearest centroid) for ALL vertices
+            use_pure_voronoi = (valid_polygon_count == 0)
+            if use_pure_voronoi:
+                print(f"  [BP Transform] Using pure Voronoi (no valid polygons)")
+
             # Assign each vertex
             inside_count = 0
             boundary_count = 0
+            centroid_count = 0
             for v_idx, v_2d in enumerate(target_2d):
-                pt = Point(v_2d)
-
-                # First check: is vertex inside any source polygon?
                 assigned_piece = None
-                for piece_idx, poly in enumerate(piece_polygons):
-                    if poly is not None and poly.contains(pt):
-                        assigned_piece = piece_idx
-                        inside_count += 1
-                        break
 
-                # If not inside any polygon, find nearest polygon boundary
-                if assigned_piece is None:
-                    min_dist = float('inf')
-                    for piece_idx, poly in enumerate(piece_polygons):
-                        if poly is not None and not poly.is_empty:
-                            try:
-                                dist = poly.exterior.distance(pt)
-                                if dist < min_dist:
-                                    min_dist = dist
-                                    assigned_piece = piece_idx
-                            except:
-                                pass
-                    boundary_count += 1
-
-                # Final fallback: nearest centroid
-                if assigned_piece is None:
+                if use_pure_voronoi:
+                    # Pure Voronoi: just use nearest centroid
                     centroid_dists = [np.linalg.norm(v_2d - c) for c in centroids]
                     assigned_piece = centroid_dists.index(min(centroid_dists))
+                    centroid_count += 1
+                else:
+                    pt = Point(v_2d)
+
+                    # First check: is vertex inside any source polygon?
+                    for piece_idx, poly in enumerate(piece_polygons):
+                        if poly is not None and poly.contains(pt):
+                            assigned_piece = piece_idx
+                            inside_count += 1
+                            break
+
+                    # If not inside any polygon, find nearest polygon boundary
+                    if assigned_piece is None:
+                        min_dist = float('inf')
+                        for piece_idx, poly in enumerate(piece_polygons):
+                            if poly is not None and not poly.is_empty:
+                                try:
+                                    dist = poly.exterior.distance(pt)
+                                    if dist < min_dist:
+                                        min_dist = dist
+                                        assigned_piece = piece_idx
+                                except:
+                                    pass
+                        if assigned_piece is not None:
+                            boundary_count += 1
+
+                    # Final fallback: nearest centroid
+                    if assigned_piece is None:
+                        centroid_dists = [np.linalg.norm(v_2d - c) for c in centroids]
+                        assigned_piece = centroid_dists.index(min(centroid_dists))
+                        centroid_count += 1
 
                 assignments.append(assigned_piece)
 
-            print(f"  [BP Transform] assignment by polygon: {inside_count} inside, {boundary_count} by boundary")
+            if use_pure_voronoi:
+                print(f"  [BP Transform] assignment by Voronoi: all {centroid_count} vertices by centroid")
+            else:
+                print(f"  [BP Transform] assignment: {inside_count} inside, {boundary_count} by boundary, {centroid_count} by centroid")
             print(f"  [BP Transform] piece distribution: {[assignments.count(i) for i in range(n_pieces)]}")
 
         # Remove islands: for 2 pieces, find the 2 best split points
@@ -10910,7 +10948,10 @@ class ContourMeshMixin:
 
     def _cut_contour_for_streams(self, contour, bp, projected_refs, stream_indices):
         """
-        Cut a contour into pieces for multiple streams using area-based method.
+        Cut a contour into pieces for multiple streams using Voronoi-based assignment.
+
+        Uses nearest-centroid (Voronoi) assignment to guarantee complete coverage
+        of the target contour with no gaps.
 
         Args:
             contour: The contour vertices to cut
@@ -10927,59 +10968,173 @@ class ContourMeshMixin:
 
         contour = np.array(contour)
         target_mean = bp['mean']
-        target_z = bp['basis_z']
-        v0, v1, v2, v3 = bp['bounding_plane']
 
-        # Compute structure vector (direction separating the streams)
-        structure_vector = np.array([0.0, 0.0, 0.0])
-        for i in range(len(projected_refs)):
-            for j in range(i + 1, len(projected_refs)):
-                cand_vector = projected_refs[i] - projected_refs[j]
-                if np.dot(cand_vector, np.array([1, 0, 0])) < 0:
-                    cand_vector *= -1
-                structure_vector += cand_vector
-        structure_vector = structure_vector / (np.linalg.norm(structure_vector) + 1e-10)
+        print(f"  [Voronoi Cut] Cutting contour with {len(contour)} vertices into {n_pieces} pieces")
 
-        # Determine axis to cut along
-        horizontal_vector = v1 - v0
-        vertical_vector = v3 - v0
-        horizontal_vector = horizontal_vector / (np.linalg.norm(horizontal_vector) + 1e-10)
-        vertical_vector = vertical_vector / (np.linalg.norm(vertical_vector) + 1e-10)
+        # ========== Voronoi-based assignment (nearest centroid) ==========
+        # This guarantees complete coverage - every vertex goes to exactly one piece
 
-        h_proj = np.abs(np.dot(structure_vector, horizontal_vector))
-        v_proj = np.abs(np.dot(structure_vector, vertical_vector))
+        # Compute reference centroids (already projected onto this plane)
+        ref_centroids = [np.array(r) for r in projected_refs]
 
-        if h_proj > v_proj:
-            cut_axis = horizontal_vector
-        else:
-            cut_axis = vertical_vector
-
-        # Order streams along cut axis
-        ref_values = [np.dot(r - target_mean, cut_axis) for r in projected_refs]
-        order = np.argsort(ref_values)
-
-        # Equal area distribution
-        areas = [1.0] * n_pieces
-        cumul_areas = np.cumsum(areas)
-        cumul_areas = cumul_areas / cumul_areas[-1]
-
-        # Project contour points onto cut axis (normalized 0-1)
-        contour_values = [np.dot(p - target_mean, cut_axis) for p in contour]
-        min_val, max_val = min(contour_values), max(contour_values)
-        if max_val - min_val > 1e-10:
-            normalized_values = [(v - min_val) / (max_val - min_val) for v in contour_values]
-        else:
-            normalized_values = [0.5] * len(contour)
-
-        # Assign vertices to pieces
-        new_contours = [[] for _ in range(n_pieces)]
+        # Assign each vertex to the nearest reference centroid
+        assignments = []
         for v_idx, v in enumerate(contour):
-            nv = normalized_values[v_idx]
-            for piece_idx, thresh in enumerate(cumul_areas):
-                if nv <= thresh:
-                    assigned_stream = order[piece_idx]
-                    new_contours[assigned_stream].append(v)
-                    break
+            distances = [np.linalg.norm(v - c) for c in ref_centroids]
+            assigned_piece = distances.index(min(distances))
+            assignments.append(assigned_piece)
+
+        print(f"  [Voronoi Cut] Initial assignment: {[assignments.count(i) for i in range(n_pieces)]}")
+
+        # ========== Island removal for contiguous pieces ==========
+        # Remove small islands to ensure each piece forms a contiguous arc
+        def remove_islands_voronoi(arr, n_pieces):
+            """Remove small islands to ensure each piece is mostly contiguous."""
+            n = len(arr)
+            if n < 3:
+                return arr
+
+            # Find all runs (contiguous segments of same value)
+            runs = []  # [(start_idx, length, piece_value), ...]
+            i = 0
+            while i < n:
+                val = arr[i]
+                start = i
+                length = 0
+                while i < n and arr[i] == val:
+                    length += 1
+                    i += 1
+                runs.append((start, length, val))
+
+            # Handle wrap-around: if first and last run have same value, merge them
+            if len(runs) > 1 and runs[0][2] == runs[-1][2]:
+                merged_length = runs[0][1] + runs[-1][1]
+                merged_start = runs[-1][0]
+                merged_val = runs[0][2]
+                runs = runs[1:-1]  # Remove first and last
+                runs.append((merged_start, merged_length, merged_val))
+
+            # For each piece, find its longest run
+            piece_runs = {i: [] for i in range(n_pieces)}
+            for run in runs:
+                piece_runs[run[2]].append(run)
+
+            main_runs = {}
+            for piece_idx in range(n_pieces):
+                if piece_runs[piece_idx]:
+                    main_run = max(piece_runs[piece_idx], key=lambda r: r[1])
+                    main_runs[piece_idx] = main_run
+
+            # Reassign small islands (runs that aren't the main run) to nearest neighbor
+            result = list(arr)
+            min_run_length = max(3, n // (n_pieces * 4))  # Minimum run to keep
+
+            for piece_idx in range(n_pieces):
+                for run in piece_runs[piece_idx]:
+                    if run[1] < min_run_length and run != main_runs.get(piece_idx):
+                        # This is a small island - reassign to neighbor
+                        run_start, run_len, _ = run
+                        # Find what pieces are adjacent
+                        prev_idx = (run_start - 1) % n
+                        next_idx = (run_start + run_len) % n
+                        prev_piece = result[prev_idx]
+                        next_piece = result[next_idx]
+
+                        # Assign to the more common neighbor, or just prev
+                        new_piece = prev_piece if prev_piece == next_piece else prev_piece
+                        for j in range(run_len):
+                            result[(run_start + j) % n] = new_piece
+
+            return result
+
+        if n_pieces > 2:
+            assignments = remove_islands_voronoi(assignments, n_pieces)
+            print(f"  [Voronoi Cut] After island removal: {[assignments.count(i) for i in range(n_pieces)]}")
+        elif n_pieces == 2:
+            # For 2 pieces, ensure exactly 2 boundaries
+            def remove_islands_2pieces(arr):
+                n = len(arr)
+                if n < 3:
+                    return arr
+
+                # Find all boundary positions
+                boundaries = []
+                for i in range(n):
+                    if arr[i] != arr[(i + 1) % n]:
+                        boundaries.append(i)
+
+                if len(boundaries) <= 2:
+                    return arr
+
+                # Keep only 2 boundaries - pick the pair with best separation
+                best_pair = None
+                best_score = -1
+
+                for i in range(len(boundaries)):
+                    for j in range(i + 1, len(boundaries)):
+                        b1, b2 = boundaries[i], boundaries[j]
+                        seg1 = (b2 - b1) % n
+                        seg2 = n - seg1
+                        score = min(seg1, seg2)
+                        if score > best_score:
+                            best_score = score
+                            best_pair = (b1, b2)
+
+                if best_pair is None:
+                    return arr
+
+                b1, b2 = best_pair
+                if b1 > b2:
+                    b1, b2 = b2, b1
+
+                # Determine which value goes to which segment
+                seg1_indices = list(range(b1 + 1, b2 + 1))
+                seg2_indices = [i for i in range(n) if i not in seg1_indices]
+
+                seg1_votes = [arr[i] for i in seg1_indices]
+                seg2_votes = [arr[i] for i in seg2_indices]
+
+                seg1_val = 1 if seg1_votes.count(1) > seg1_votes.count(0) else 0
+                seg2_val = 1 - seg1_val
+
+                result = list(arr)
+                for i in seg1_indices:
+                    result[i] = seg1_val
+                for i in seg2_indices:
+                    result[i] = seg2_val
+
+                return result
+
+            assignments = remove_islands_2pieces(assignments)
+            print(f"  [Voronoi Cut] After 2-piece cleanup: {[assignments.count(i) for i in range(n_pieces)]}")
+
+        # ========== Build contour pieces with boundary interpolation ==========
+        new_contours = [[] for _ in range(n_pieces)]
+        n_verts = len(contour)
+
+        prev_piece = assignments[-1]
+        for v_idx in range(n_verts):
+            curr_piece = assignments[v_idx]
+
+            # Check if we crossed a boundary
+            if prev_piece != curr_piece and v_idx > 0:
+                prev_v_idx = v_idx - 1
+                # Add midpoint to BOTH pieces (shared boundary vertex)
+                boundary_pt = 0.5 * (contour[prev_v_idx] + contour[v_idx])
+                new_contours[prev_piece].append(boundary_pt)
+                new_contours[curr_piece].append(boundary_pt)
+
+            # Add current vertex to its piece
+            new_contours[curr_piece].append(contour[v_idx])
+            prev_piece = curr_piece
+
+        # Handle wrap-around boundary
+        if assignments[-1] != assignments[0]:
+            prev_piece = assignments[-1]
+            curr_piece = assignments[0]
+            boundary_pt = 0.5 * (contour[-1] + contour[0])
+            new_contours[prev_piece].append(boundary_pt)
+            new_contours[curr_piece].append(boundary_pt)
 
         # Ensure each piece has at least some vertices and convert to proper numpy arrays
         for i in range(n_pieces):
