@@ -8822,6 +8822,14 @@ class ContourMeshMixin:
 
         print("Cut streams complete")
 
+        # Automatically apply smoothening to each stream
+        # This ensures one-to-one correspondence between levels is maintained
+        print("Applying smoothening to streams...")
+        self.smoothen_contours_z()
+        self.smoothen_contours_x()
+        self.smoothen_contours_bp()
+        print("Stream smoothening complete")
+
     def select_levels(self, error_threshold=None):
         """
         Step 2: Error-based level selection for cut streams.
