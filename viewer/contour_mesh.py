@@ -4021,12 +4021,20 @@ class ContourMeshMixin:
                 basis_z = bp['basis_z']
                 mean = bp['mean']
 
-                # Farthest vertex based axis finding
+                # Debug: verify 3D vertices
+                if i == 0:
+                    print(f"    [DEBUG] Contour shape: {contour_points.shape}, first point: {contour_points[0] if len(contour_points) > 0 else 'N/A'}")
+
+                # Farthest vertex based axis finding using 3D distances
                 if len(contour_points) > 2:
-                    dists = cdist(contour_points, contour_points)
+                    dists = cdist(contour_points, contour_points)  # 3D Euclidean distances
                     fi, fj = np.unravel_index(np.argmax(dists), dists.shape)
                     farthest_dir = contour_points[fj] - contour_points[fi]
                     farthest_len = np.linalg.norm(farthest_dir)
+
+                    if i == 0:
+                        print(f"    [DEBUG] Farthest pair: i={fi}, j={fj}, 3D dist={np.max(dists):.4f}")
+                        print(f"    [DEBUG] V[{fi}]={contour_points[fi]}, V[{fj}]={contour_points[fj]}")
 
                     if farthest_len > 1e-10:
                         farthest_dir = farthest_dir / farthest_len
