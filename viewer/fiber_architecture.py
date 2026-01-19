@@ -1600,77 +1600,182 @@ class FiberArchitectureMixin:
 
     def find_contour_match(self, muscle_contour_orig, template_contour, prev_P0=None, preserve_order=False):
         """
-        Find matching points between muscle contour and template contour.
+        Find matching points between muscle contour and template contour (bounding plane corners).
 
-        For each point from template_contours, find closest point from muscle_contour.
+        Uses ray-based intersection: for each BP corner, cast a ray from BP center through
+        the corner and find where it intersects the contour. This provides consistent
+        corner-to-contour correspondence across levels.
 
         Args:
+            muscle_contour_orig: The muscle contour vertices (N x 3 array)
+            template_contour: The bounding plane corners (4 x 3 array)
+            prev_P0: Unused (kept for compatibility)
             preserve_order: If True, don't roll or reverse the muscle contour (keep normalized order)
         """
         muscle_contour = muscle_contour_orig.copy()
+        template_contour = np.array(template_contour)
 
-        for v in template_contour:
-            min_distance = float("inf")
-            min_index = 0
-            min_p = None
-            for i in range(len(muscle_contour)):
-                # make a line segment using muscle_contour[i - 1] and muscle_contour[i]
-                # find the closest point p on the line segment from v
-                # for all line segments, find the closest point to the v and add it to the new muscle_contour
-                dir = muscle_contour[i] - muscle_contour[i - 1]
-                # if t is 0, it is muscle_contour[i - 1], if t is 1, it is muscle_contour[i]
-                if np.dot(dir, dir) > 0:
-                    t = np.dot(v - muscle_contour[i - 1], dir) / np.dot(dir, dir)
-                else:
-                    t = 0
+        # ===== Step 1: Compute BP coordinate system =====
+        # BP corners are ordered: 0-1-2-3 forming a quadrilateral
+        #   3 --- 2
+        #   |     |
+        #   0 --- 1
+        bp_center_3d = np.mean(template_contour, axis=0)
 
-                if t > 0 and t < 1:
-                    p = muscle_contour[i - 1] + t * dir
-                    distance = np.linalg.norm(v - p)
-                    if distance < min_distance:
-                        min_distance = distance
-                        min_index = i
-                        min_p = p
+        # Compute basis vectors from BP corners
+        # basis_x: along edge 0->1 (and 3->2)
+        # basis_y: along edge 0->3 (and 1->2)
+        edge_01 = template_contour[1] - template_contour[0]
+        edge_32 = template_contour[2] - template_contour[3]
+        edge_03 = template_contour[3] - template_contour[0]
+        edge_12 = template_contour[2] - template_contour[1]
 
-            if min_p is not None:
-                muscle_contour = np.insert(muscle_contour, min_index, min_p, axis=0)
+        basis_x = (edge_01 + edge_32) / 2
+        basis_y = (edge_03 + edge_12) / 2
 
-        closest_points = []
+        basis_x_norm = np.linalg.norm(basis_x)
+        basis_y_norm = np.linalg.norm(basis_y)
+
+        if basis_x_norm > 1e-10:
+            basis_x = basis_x / basis_x_norm
+        else:
+            basis_x = np.array([1.0, 0.0, 0.0])
+
+        if basis_y_norm > 1e-10:
+            basis_y = basis_y / basis_y_norm
+        else:
+            basis_y = np.array([0.0, 1.0, 0.0])
+
+        # ===== Step 2: Project to 2D =====
+        def to_2d(pt_3d):
+            diff = pt_3d - bp_center_3d
+            return np.array([np.dot(diff, basis_x), np.dot(diff, basis_y)])
+
+        def to_3d(pt_2d):
+            return bp_center_3d + pt_2d[0] * basis_x + pt_2d[1] * basis_y
+
+        # Project contour and BP corners to 2D
+        contour_2d = np.array([to_2d(v) for v in muscle_contour])
+        corners_2d = np.array([to_2d(v) for v in template_contour])
+        center_2d = np.array([0.0, 0.0])  # BP center is origin in 2D
+
+        # ===== Step 3: Find ray-contour intersections for each corner =====
+        def ray_segment_intersection_2d(ray_origin, ray_dir, seg_start, seg_end):
+            """
+            Find intersection of ray with line segment in 2D.
+            Returns (t_ray, t_seg) where intersection = ray_origin + t_ray * ray_dir
+            and intersection = seg_start + t_seg * (seg_end - seg_start).
+            Returns (None, None) if no valid intersection.
+            """
+            seg_dir = seg_end - seg_start
+            # Solve: ray_origin + t_ray * ray_dir = seg_start + t_seg * seg_dir
+            # [ray_dir, -seg_dir] * [t_ray, t_seg]^T = seg_start - ray_origin
+            denom = ray_dir[0] * (-seg_dir[1]) - ray_dir[1] * (-seg_dir[0])
+            if abs(denom) < 1e-10:
+                return None, None  # Parallel
+
+            diff = seg_start - ray_origin
+            t_ray = (diff[0] * (-seg_dir[1]) - diff[1] * (-seg_dir[0])) / denom
+            t_seg = (ray_dir[0] * diff[1] - ray_dir[1] * diff[0]) / denom
+
+            # Valid if ray goes forward (t_ray > 0) and intersection is on segment (0 <= t_seg <= 1)
+            if t_ray > 1e-10 and 0 <= t_seg <= 1:
+                return t_ray, t_seg
+            return None, None
+
+        # For each corner, find intersection with contour
+        corner_intersections = []  # List of (corner_idx, edge_idx, t_seg, t_ray)
+
+        for corner_idx in range(4):
+            corner_2d = corners_2d[corner_idx]
+            ray_dir = corner_2d - center_2d
+            ray_dir_norm = np.linalg.norm(ray_dir)
+            if ray_dir_norm < 1e-10:
+                continue
+            ray_dir = ray_dir / ray_dir_norm
+
+            best_intersection = None
+            best_t_ray = float('inf')
+
+            n_contour = len(contour_2d)
+            for edge_idx in range(n_contour):
+                seg_start = contour_2d[edge_idx]
+                seg_end = contour_2d[(edge_idx + 1) % n_contour]
+
+                t_ray, t_seg = ray_segment_intersection_2d(center_2d, ray_dir, seg_start, seg_end)
+
+                if t_ray is not None:
+                    # If multiple intersections, pick closest to corner (smallest t_ray that's past the corner)
+                    # Corner is at t_ray = distance from center to corner
+                    corner_dist = np.linalg.norm(corner_2d - center_2d)
+                    # We want intersection close to the corner
+                    dist_to_corner = abs(t_ray - corner_dist)
+                    if best_intersection is None or dist_to_corner < abs(best_t_ray - corner_dist):
+                        best_intersection = (corner_idx, edge_idx, t_seg)
+                        best_t_ray = t_ray
+
+            if best_intersection is not None:
+                corner_intersections.append(best_intersection)
+
+        # ===== Step 4: Insert vertices at intersections (in 3D) =====
+        # Sort by edge_idx descending to insert from end to start (avoid index shifting)
+        corner_intersections.sort(key=lambda x: (x[1], x[2]), reverse=True)
+
+        # Track which muscle_contour index corresponds to each corner
+        corner_to_muscle_idx = {}
+
+        for corner_idx, edge_idx, t_seg in corner_intersections:
+            if 1e-6 < t_seg < 1 - 1e-6:
+                # Intersection is on edge interior - insert new vertex in 3D
+                v0_3d = muscle_contour[edge_idx]
+                v1_3d = muscle_contour[(edge_idx + 1) % len(muscle_contour)]
+                new_vertex_3d = v0_3d + t_seg * (v1_3d - v0_3d)
+                muscle_contour = np.insert(muscle_contour, edge_idx + 1, new_vertex_3d, axis=0)
+                corner_to_muscle_idx[corner_idx] = edge_idx + 1
+            elif t_seg <= 1e-6:
+                # Intersection at segment start
+                corner_to_muscle_idx[corner_idx] = edge_idx
+            else:
+                # Intersection at segment end
+                corner_to_muscle_idx[corner_idx] = (edge_idx + 1) % len(muscle_contour)
+
+        # ===== Step 5: Build closest_muscle_index from corner intersections =====
+        # Recompute after insertions - find closest vertex to each corner
         closest_muscle_index = []
-        for template_point in template_contour:
-            distances = np.linalg.norm(muscle_contour - template_point, axis=1)
-            closest_points.append(muscle_contour[np.argmin(distances)])
-            closest_muscle_index.append(np.argmin(distances))
+        for corner_idx in range(len(template_contour)):
+            if corner_idx in corner_to_muscle_idx:
+                closest_muscle_index.append(corner_to_muscle_idx[corner_idx])
+            else:
+                # Fallback: use distance-based matching
+                distances = np.linalg.norm(muscle_contour - template_contour[corner_idx], axis=1)
+                closest_muscle_index.append(np.argmin(distances))
 
         if not preserve_order:
-            # Roll contours to align starting points (this changes vertex order)
-            closest_distances = np.linalg.norm(template_contour - closest_points, axis=1)
-            Q0_index = np.argmin(closest_distances)
-            P0_index = closest_muscle_index[Q0_index]
-            Q0 = template_contour[Q0_index]
-            P0 = muscle_contour[P0_index]
+            # Roll contours to align starting points
+            Q0_index = 0  # Start with corner 0
+            P0_index = closest_muscle_index[0]
 
             template_contour = np.roll(template_contour, -Q0_index, axis=0)
             muscle_contour = np.roll(muscle_contour, -P0_index, axis=0)
 
-            closest_points = []
+            # Recompute closest_muscle_index after rolling
             closest_muscle_index = []
-            for template_point in template_contour:
-                distances = np.linalg.norm(muscle_contour - template_point, axis=1)
+            for corner_idx in range(len(template_contour)):
+                distances = np.linalg.norm(muscle_contour - template_contour[corner_idx], axis=1)
                 closest_muscle_index.append(np.argmin(distances))
 
-            # Reverse if winding doesn't match (this changes vertex order)
-            if closest_muscle_index[2] < closest_muscle_index[1]:
+            # Check winding order - reverse if needed
+            if len(closest_muscle_index) >= 3 and closest_muscle_index[2] < closest_muscle_index[1]:
                 muscle_contour = np.roll(muscle_contour[::-1], 1, axis=0)
                 closest_muscle_index = []
-                for template_point in template_contour:
-                    distances = np.linalg.norm(muscle_contour - template_point, axis=1)
+                for corner_idx in range(len(template_contour)):
+                    distances = np.linalg.norm(muscle_contour - template_contour[corner_idx], axis=1)
                     closest_muscle_index.append(np.argmin(distances))
         else:
-            # preserve_order=True: Just recompute closest_muscle_index without rolling/reversing
+            # preserve_order=True: Recompute closest_muscle_index without rolling/reversing
             closest_muscle_index = []
-            for template_point in template_contour:
-                distances = np.linalg.norm(muscle_contour - template_point, axis=1)
+            for corner_idx in range(len(template_contour)):
+                distances = np.linalg.norm(muscle_contour - template_contour[corner_idx], axis=1)
                 closest_muscle_index.append(np.argmin(distances))
 
         result_index = []
