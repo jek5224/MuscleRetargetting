@@ -484,6 +484,7 @@ class ContourMeshMixin:
         self.bounding_planes_discarded = None
         self.is_draw_contours = False
         self.is_draw_discarded = False
+        self.is_draw_farthest_pair = False
         self.draw_contour_stream = None
 
         # Inspector highlight (set by viewer when 2D inspector is open)
@@ -661,23 +662,24 @@ class ContourMeshMixin:
                         glLineWidth(1.0)
 
                         # Draw farthest vertex pair - cyan line with magenta endpoints
-                        if 'farthest_pair' in bp_info and bp_info['farthest_pair'] is not None:
-                            fp = bp_info['farthest_pair']
-                            glLineWidth(3.0)
-                            glColor3f(0.0, 1.0, 1.0)  # Cyan line
-                            glBegin(GL_LINES)
-                            glVertex3fv(fp[0])
-                            glVertex3fv(fp[1])
-                            glEnd()
-                            # Magenta endpoints
-                            glPointSize(10)
-                            glColor3f(1.0, 0.0, 1.0)
-                            glBegin(GL_POINTS)
-                            glVertex3fv(fp[0])
-                            glVertex3fv(fp[1])
-                            glEnd()
-                            glLineWidth(1.0)
-                            glPointSize(5)
+                        if getattr(self, 'is_draw_farthest_pair', False):
+                            if 'farthest_pair' in bp_info and bp_info['farthest_pair'] is not None:
+                                fp = bp_info['farthest_pair']
+                                glLineWidth(3.0)
+                                glColor3f(0.0, 1.0, 1.0)  # Cyan line
+                                glBegin(GL_LINES)
+                                glVertex3fv(fp[0])
+                                glVertex3fv(fp[1])
+                                glEnd()
+                                # Magenta endpoints
+                                glPointSize(10)
+                                glColor3f(1.0, 0.0, 1.0)
+                                glBegin(GL_POINTS)
+                                glVertex3fv(fp[0])
+                                glVertex3fv(fp[1])
+                                glEnd()
+                                glLineWidth(1.0)
+                                glPointSize(5)
 
         if self.is_draw_discarded and self.contours_discarded is not None:
             t = 0.1

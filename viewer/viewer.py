@@ -1885,26 +1885,26 @@ class GLFWApp():
                         imgui.set_column_width(0, 120)
 
                         # Left column: Process button with vertical slider
-                        num_process_buttons = 9  # Match number of buttons on right
+                        num_process_buttons = 12  # Match number of buttons on right
                         process_all_height = num_process_buttons * imgui.get_frame_height() + (num_process_buttons - 1) * imgui.get_style().item_spacing[1]
 
                         # Initialize process step slider value
                         if not hasattr(obj, '_process_step'):
-                            obj._process_step = 9
+                            obj._process_step = 12
 
-                        # Vertical slider for step selection (top=1, bottom=9)
+                        # Vertical slider for step selection (top=1, bottom=12)
                         # v_slider_int format: label, width, height, value, min, max
-                        # To get 1 at top and 9 at bottom, we invert: display (10 - value)
-                        display_step = 10 - obj._process_step  # Convert for display
+                        # To get 1 at top and 12 at bottom, we invert: display (13 - value)
+                        display_step = 13 - obj._process_step  # Convert for display
                         changed, new_display = imgui.v_slider_int(
-                            f"##step{name}", 20, process_all_height, display_step, 1, 9)
+                            f"##step{name}", 20, process_all_height, display_step, 1, 12)
                         if changed:
-                            obj._process_step = 10 - new_display  # Convert back
+                            obj._process_step = 13 - new_display  # Convert back
                         imgui.same_line()
 
-                        # Step names matching button order (1=top, 9=bottom)
-                        # 1:Scalar, 2:Contours, 3:FillGap, 4:Transitions, 5:Smooth(z/x/bp), 6:Stream(Cut/Sel/Bld), 7:Resample, 8:Mesh, 9:Tet
-                        step_names = ['', 'Scalar', 'Contours', 'Fill Gap', 'Transitions', 'Smooth', 'Stream', 'Resample', 'Mesh', 'Tet']
+                        # Step names matching button order (1=top, 12=bottom)
+                        # 1:Scalar, 2:Contours, 3:FillGap, 4:Transitions, 5:Smooth, 6:Cut, 7:StreamSmooth, 8:Select, 9:Build, 10:Resample, 11:Mesh, 12:Tet
+                        step_names = ['', 'Scalar', 'Contours', 'Fill Gap', 'Transitions', 'Smooth', 'Cut', 'StreamSmooth', 'Select', 'Build', 'Resample', 'Mesh', 'Tet']
                         if imgui.button(f"Process\n1 to {obj._process_step}\n({step_names[obj._process_step]})##{name}", width=75, height=process_all_height):
                             try:
                                 max_step = obj._process_step
@@ -1945,39 +1945,52 @@ class GLFWApp():
                                     if obj.contours is not None and len(obj.contours) > 0:
                                         obj.add_transitions_to_contours()
 
-                                # Step 5: Smooth (z, x, bp - all three)
+                                # Step 5: Smooth (z, x, bp - before cut)
                                 if max_step >= 5 and obj.contours is not None and len(obj.contours) > 0:
                                     print(f"  [5/{max_step}] Smoothening (z, x, bp)...")
                                     obj.smoothen_contours_z()
                                     obj.smoothen_contours_x()
                                     obj.smoothen_contours_bp()
 
-                                # Step 6: Stream (Cut, Select, Build - all three)
+                                # Step 6: Cut
                                 if max_step >= 6 and obj.contours is not None and len(obj.contours) > 0 and obj.bounding_planes is not None:
-                                    print(f"  [6/{max_step}] Stream (Cut, Select, Build)...")
+                                    print(f"  [6/{max_step}] Cutting streams...")
                                     obj.cut_streams(cut_method=obj.cutting_method, muscle_name=name)
-                                    # Only continue if cut_streams completed (not waiting for manual cut)
-                                    if not obj._manual_cut_pending and obj._manual_cut_data is None:
-                                        if hasattr(obj, 'stream_contours') and obj.stream_contours is not None:
-                                            obj.select_levels()
-                                            obj.build_fibers(skeleton_meshes=self.zygote_skeleton_meshes)
-                                    else:
+                                    # Check if waiting for manual cut
+                                    if obj._manual_cut_pending or obj._manual_cut_data is not None:
                                         print(f"  [6/{max_step}] Waiting for manual cut - pipeline paused")
                                         raise StopIteration("Manual cut pending")
 
-                                # Step 7: Resample Contours
-                                if max_step >= 7 and obj.contours is not None and len(obj.contours) > 0 and obj.bounding_planes is not None:
-                                    print(f"  [7/{max_step}] Resampling Contours...")
+                                # Step 7: Stream Smooth (z, x, bp - after cut)
+                                if max_step >= 7 and hasattr(obj, 'stream_contours') and obj.stream_contours is not None:
+                                    print(f"  [7/{max_step}] Stream Smoothening (z, x, bp)...")
+                                    obj.smoothen_contours_z()
+                                    obj.smoothen_contours_x()
+                                    obj.smoothen_contours_bp()
+
+                                # Step 8: Contour Select
+                                if max_step >= 8 and hasattr(obj, 'stream_contours') and obj.stream_contours is not None:
+                                    print(f"  [8/{max_step}] Selecting contours...")
+                                    obj.select_levels()
+
+                                # Step 9: Build Fiber
+                                if max_step >= 9 and hasattr(obj, 'stream_contours') and obj.stream_contours is not None:
+                                    print(f"  [9/{max_step}] Building fibers...")
+                                    obj.build_fibers(skeleton_meshes=self.zygote_skeleton_meshes)
+
+                                # Step 10: Resample Contours
+                                if max_step >= 10 and obj.contours is not None and len(obj.contours) > 0 and obj.bounding_planes is not None:
+                                    print(f"  [10/{max_step}] Resampling Contours...")
                                     obj.resample_contours(num_samples=32)
 
-                                # Step 8: Build Contour Mesh
-                                if max_step >= 8 and obj.contours is not None and len(obj.contours) > 0 and obj.draw_contour_stream is not None:
-                                    print(f"  [8/{max_step}] Building Contour Mesh...")
+                                # Step 11: Build Contour Mesh
+                                if max_step >= 11 and obj.contours is not None and len(obj.contours) > 0 and obj.draw_contour_stream is not None:
+                                    print(f"  [11/{max_step}] Building Contour Mesh...")
                                     obj.build_contour_mesh()
 
-                                # Step 9: Tetrahedralize
-                                if max_step >= 9 and obj.contour_mesh_vertices is not None:
-                                    print(f"  [9/{max_step}] Tetrahedralizing...")
+                                # Step 12: Tetrahedralize
+                                if max_step >= 12 and obj.contour_mesh_vertices is not None:
+                                    print(f"  [12/{max_step}] Tetrahedralizing...")
                                     obj.soft_body = None
                                     obj.tetrahedralize_contour_mesh()
                                     if obj.tet_vertices is not None:
@@ -2076,7 +2089,7 @@ class GLFWApp():
                             else:
                                 print(f"[{name}] Prerequisites: Run 'Scalar Field' first")
 
-                        # Smoothen buttons: z, x, bp (3 buttons in same row) - step 5
+                        # Step 5: Smoothen buttons: z, x, bp (3 buttons in same row - before cut)
                         sub_button_width = (col_button_width - 8) // 3  # 3 buttons with small margins
                         if colored_button(f"z##{name}", 5, sub_button_width):
                             if obj.contours is not None and len(obj.contours) > 0:
@@ -2104,9 +2117,9 @@ class GLFWApp():
                                     print(f"[{name}] Smoothen BP error: {e}")
                             else:
                                 print(f"[{name}] Prerequisites: Run 'Find Contours' first")
-                        # Stream buttons: Cut / Select / Build (3 buttons in same row) - step 6
-                        stream3_button_width = (col_button_width - 8) // 3  # 3 buttons with margins
-                        if colored_button(f"Cut##{name}", 6, stream3_button_width):
+
+                        # Step 6: Cut (standalone button)
+                        if colored_button(f"Cut##{name}", 6, col_button_width):
                             if obj.contours is not None and len(obj.contours) > 0 and obj.bounding_planes is not None and len(obj.bounding_planes) > 0:
                                 try:
                                     obj.cut_streams(cut_method=obj.cutting_method, muscle_name=name)
@@ -2116,8 +2129,37 @@ class GLFWApp():
                                     traceback.print_exc()
                             else:
                                 print(f"[{name}] Prerequisites: Run 'Find Contours' first")
+
+                        # Step 7: Stream Smoothen buttons: z, x, bp (3 buttons in same row - after cut)
+                        if colored_button(f"z##stream{name}", 7, sub_button_width):
+                            if hasattr(obj, 'stream_contours') and obj.stream_contours is not None:
+                                try:
+                                    obj.smoothen_contours_z()
+                                except Exception as e:
+                                    print(f"[{name}] Stream Smoothen Z error: {e}")
+                            else:
+                                print(f"[{name}] Prerequisites: Run 'Cut' first")
                         imgui.same_line(spacing=4)
-                        if colored_button(f"Sel##{name}", 6, stream3_button_width):
+                        if colored_button(f"x##stream{name}", 7, sub_button_width):
+                            if hasattr(obj, 'stream_contours') and obj.stream_contours is not None:
+                                try:
+                                    obj.smoothen_contours_x()
+                                except Exception as e:
+                                    print(f"[{name}] Stream Smoothen X error: {e}")
+                            else:
+                                print(f"[{name}] Prerequisites: Run 'Cut' first")
+                        imgui.same_line(spacing=4)
+                        if colored_button(f"bp##stream{name}", 7, sub_button_width):
+                            if hasattr(obj, 'stream_contours') and obj.stream_contours is not None:
+                                try:
+                                    obj.smoothen_contours_bp()
+                                except Exception as e:
+                                    print(f"[{name}] Stream Smoothen BP error: {e}")
+                            else:
+                                print(f"[{name}] Prerequisites: Run 'Cut' first")
+
+                        # Step 8: Contour Select (standalone button)
+                        if colored_button(f"Contour Select##{name}", 8, col_button_width):
                             if hasattr(obj, 'stream_contours') and obj.stream_contours is not None:
                                 try:
                                     obj.select_levels()
@@ -2127,8 +2169,9 @@ class GLFWApp():
                                     traceback.print_exc()
                             else:
                                 print(f"[{name}] Prerequisites: Run 'Cut' first")
-                        imgui.same_line(spacing=4)
-                        if colored_button(f"Bld##{name}", 6, stream3_button_width):
+
+                        # Step 9: Build Fiber (standalone button)
+                        if colored_button(f"Build Fiber##{name}", 9, col_button_width):
                             if hasattr(obj, 'stream_contours') and obj.stream_contours is not None:
                                 try:
                                     obj.build_fibers(skeleton_meshes=self.zygote_skeleton_meshes)
@@ -2137,8 +2180,10 @@ class GLFWApp():
                                     print(f"[{name}] Build Fibers error: {e}")
                                     traceback.print_exc()
                             else:
-                                print(f"[{name}] Prerequisites: Run 'Cut' and 'Sel' first")
-                        if colored_button(f"Resample Contours##{name}", 7, col_button_width):
+                                print(f"[{name}] Prerequisites: Run 'Cut' first")
+
+                        # Step 10: Resample Contours
+                        if colored_button(f"Resample Contours##{name}", 10, col_button_width):
                             if obj.contours is not None and len(obj.contours) > 0 and obj.bounding_planes is not None:
                                 try:
                                     obj.resample_contours(num_samples=32)
@@ -2146,17 +2191,19 @@ class GLFWApp():
                                     print(f"[{name}] Resample Contours error: {e}")
                             else:
                                 print(f"[{name}] Prerequisites: Run 'Smoothen Contours' first")
-                        if colored_button(f"Build Contour Mesh##{name}", 8, col_button_width):
+
+                        # Step 11: Build Contour Mesh
+                        if colored_button(f"Build Contour Mesh##{name}", 11, col_button_width):
                             if obj.contours is not None and len(obj.contours) > 0 and obj.draw_contour_stream is not None:
                                 try:
                                     obj.build_contour_mesh()
                                 except Exception as e:
                                     print(f"[{name}] Build Contour Mesh error: {e}")
                             else:
-                                print(f"[{name}] Prerequisites: Run 'Stream' first")
+                                print(f"[{name}] Prerequisites: Run 'Build Fiber' first")
 
-                        # Tetrahedralization for soft body simulation
-                        if colored_button(f"Tetrahedralize##{name}", 9, col_button_width):
+                        # Step 12: Tetrahedralize
+                        if colored_button(f"Tetrahedralize##{name}", 12, col_button_width):
                             if obj.contour_mesh_vertices is not None:
                                 try:
                                     obj.soft_body = None  # Reset soft body when re-tetrahedralizing
@@ -2409,6 +2456,8 @@ class GLFWApp():
                         _, obj.is_draw_contours = imgui.checkbox("Draw Contours", obj.is_draw_contours)
                         imgui.same_line()
                         _, obj.is_draw_contour_vertices = imgui.checkbox("Vertices", obj.is_draw_contour_vertices)
+                        imgui.same_line()
+                        _, obj.is_draw_farthest_pair = imgui.checkbox("Farthest Pair", obj.is_draw_farthest_pair)
                         _, obj.is_draw_edges = imgui.checkbox("Draw Edges", obj.is_draw_edges)
                         _, obj.is_draw_centroid = imgui.checkbox("Draw Centroid", obj.is_draw_centroid)
                         _, obj.is_draw_bounding_box = imgui.checkbox("Draw Bounding Box", obj.is_draw_bounding_box)
