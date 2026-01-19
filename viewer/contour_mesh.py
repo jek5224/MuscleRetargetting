@@ -3993,9 +3993,10 @@ class ContourMeshMixin:
         """
         Smooth bounding plane orientations for stream mode (after cutting).
 
-        In stream mode: bounding_planes[stream][level]
-        For each stream, recompute ALL bounding planes using farthest vertex
-        based axis finding, then update contour_match.
+        Same logic as before-cut bp smooth:
+        1. Non-square-like contours keep their farthest vertex based axes (as references)
+        2. Square-like contours get interpolated from prev/next non-square-like references
+        3. ALL contours get bounding plane corners recomputed with find_contour_match
         """
         from scipy.spatial.distance import cdist
 
@@ -4010,8 +4011,8 @@ class ContourMeshMixin:
 
             print(f"  Stream {stream_i}: {stream_len} levels")
 
-            # Process ALL contours using farthest vertex based axis finding
-            smoothed_count = 0
+            # ========== Step 1: Recompute farthest vertex axes for ALL contours first ==========
+            # This determines square_like status based on farthest vertex bounding box
             for i in range(stream_len):
                 bp = bp_stream[i]
                 contour_points = np.asarray(self.stream_contours[stream_i][i])
@@ -4038,7 +4039,6 @@ class ContourMeshMixin:
                 if x_norm > 1e-10:
                     new_basis_x = new_basis_x / x_norm
                 else:
-                    # Farthest direction is parallel to z, use arbitrary perpendicular
                     arbitrary = np.array([1.0, 0.0, 0.0])
                     if abs(np.dot(arbitrary, basis_z)) > 0.9:
                         arbitrary = np.array([0.0, 1.0, 0.0])
@@ -4051,9 +4051,139 @@ class ContourMeshMixin:
                 bp['basis_x'] = new_basis_x
                 bp['basis_y'] = new_basis_y
 
-                # Recalculate bounding plane corners with new basis
+                # Compute square_like based on farthest vertex bounding box
                 projected_2d = np.array([
                     [np.dot(v - mean, new_basis_x), np.dot(v - mean, new_basis_y)]
+                    for v in contour_points
+                ])
+                min_x, max_x = np.min(projected_2d[:, 0]), np.max(projected_2d[:, 0])
+                min_y, max_y = np.min(projected_2d[:, 1]), np.max(projected_2d[:, 1])
+                x_len = max_x - min_x
+                y_len = max_y - min_y
+
+                ratio_threshold = 2.0
+                square_like = max(x_len, y_len) / min(x_len, y_len) < ratio_threshold if min(x_len, y_len) > 1e-10 else False
+                bp['square_like'] = square_like
+
+            # ========== Step 2: Find reference (non-square-like) and smooth (square-like) indices ==========
+            reference_indices = [i for i, bp in enumerate(bp_stream) if not bp.get('square_like', False)]
+            smooth_indices = [i for i, bp in enumerate(bp_stream) if bp.get('square_like', False)]
+
+            print(f"    Reference (non-square-like): {len(reference_indices)}, Smooth (square-like): {len(smooth_indices)}")
+
+            if len(reference_indices) == 0 and len(smooth_indices) > 0:
+                # All square-like - find most non-square-like by aspect ratio
+                print(f"    All square-like, finding reference...")
+                best_idx = 0
+                best_ratio_diff = 0
+
+                for i, bp in enumerate(bp_stream):
+                    corners = bp.get('bounding_plane')
+                    if corners is None or len(corners) < 4:
+                        continue
+                    width = np.linalg.norm(corners[1] - corners[0])
+                    height = np.linalg.norm(corners[3] - corners[0])
+                    if min(width, height) > 1e-10:
+                        ratio = max(width, height) / min(width, height)
+                        ratio_diff = abs(ratio - 1.0)
+                        if ratio_diff > best_ratio_diff:
+                            best_ratio_diff = ratio_diff
+                            best_idx = i
+
+                bp_stream[best_idx]['square_like'] = False
+                reference_indices = [best_idx]
+                smooth_indices = [i for i in smooth_indices if i != best_idx]
+                print(f"    Selected level {best_idx} as reference (ratio_diff={best_ratio_diff:.3f})")
+
+            # ========== Step 3: Interpolate square-like contours from prev/next references ==========
+            for i in smooth_indices:
+                bp = bp_stream[i]
+                curr_mean = bp['mean']
+                basis_z = bp['basis_z']
+
+                # Find prev reference (non-square-like)
+                prev_idx = None
+                prev_dist = np.inf
+                for j in range(i - 1, -1, -1):
+                    if j in reference_indices:
+                        dist = np.linalg.norm(curr_mean - bp_stream[j]['mean'])
+                        if dist < prev_dist:
+                            prev_dist = dist
+                            prev_idx = j
+                        break
+
+                # Find next reference (non-square-like)
+                next_idx = None
+                next_dist = np.inf
+                for j in range(i + 1, stream_len):
+                    if j in reference_indices:
+                        dist = np.linalg.norm(curr_mean - bp_stream[j]['mean'])
+                        if dist < next_dist:
+                            next_dist = dist
+                            next_idx = j
+                        break
+
+                if prev_idx is None and next_idx is None:
+                    continue
+
+                # Determine target basis_x by interpolation
+                if prev_idx is not None and next_idx is not None:
+                    prev_x = bp_stream[prev_idx]['basis_x']
+                    prev_x_proj = prev_x - np.dot(prev_x, basis_z) * basis_z
+                    prev_x_proj = prev_x_proj / (np.linalg.norm(prev_x_proj) + 1e-10)
+
+                    next_x = bp_stream[next_idx]['basis_x']
+                    next_x_proj = next_x - np.dot(next_x, basis_z) * basis_z
+                    next_x_proj = next_x_proj / (np.linalg.norm(next_x_proj) + 1e-10)
+
+                    total_dist = prev_dist + next_dist
+                    t = prev_dist / total_dist if total_dist > 1e-10 else 0.5
+
+                    cos_angle = np.clip(np.dot(prev_x_proj, next_x_proj), -1, 1)
+                    cross = np.cross(prev_x_proj, next_x_proj)
+                    sin_angle = np.dot(cross, basis_z)
+                    angle = np.arctan2(sin_angle, cos_angle)
+                    interp_angle = angle * t
+
+                    cos_t = np.cos(interp_angle)
+                    sin_t = np.sin(interp_angle)
+                    new_basis_x = prev_x_proj * cos_t + np.cross(basis_z, prev_x_proj) * sin_t
+
+                elif prev_idx is not None:
+                    prev_x = bp_stream[prev_idx]['basis_x']
+                    new_basis_x = prev_x - np.dot(prev_x, basis_z) * basis_z
+                    new_basis_x = new_basis_x / (np.linalg.norm(new_basis_x) + 1e-10)
+                else:
+                    next_x = bp_stream[next_idx]['basis_x']
+                    new_basis_x = next_x - np.dot(next_x, basis_z) * basis_z
+                    new_basis_x = new_basis_x / (np.linalg.norm(new_basis_x) + 1e-10)
+
+                new_basis_y = np.cross(basis_z, new_basis_x)
+                new_basis_y = new_basis_y / (np.linalg.norm(new_basis_y) + 1e-10)
+
+                bp['basis_x'] = new_basis_x
+                bp['basis_y'] = new_basis_y
+
+            # ========== Step 4: Recompute bounding planes for ALL contours ==========
+            for i in range(stream_len):
+                bp = bp_stream[i]
+                contour_points = np.asarray(self.stream_contours[stream_i][i])
+                if contour_points is None or len(contour_points) == 0:
+                    continue
+
+                basis_z = bp['basis_z']
+                basis_x = bp['basis_x']
+                basis_y = bp['basis_y']
+                mean = bp['mean']
+
+                # Final re-orthogonalization
+                basis_x = basis_x / (np.linalg.norm(basis_x) + 1e-10)
+                basis_y = np.cross(basis_z, basis_x)
+                basis_y = basis_y / (np.linalg.norm(basis_y) + 1e-10)
+
+                # Reproject contour points
+                projected_2d = np.array([
+                    [np.dot(v - mean, basis_x), np.dot(v - mean, basis_y)]
                     for v in contour_points
                 ])
                 area = compute_polygon_area(projected_2d)
@@ -4076,9 +4206,12 @@ class ContourMeshMixin:
                 optimal_z_offset = np.median(z_coords)
                 optimal_mean = mean + optimal_z_offset * basis_z
 
-                bounding_plane = np.array([optimal_mean + x * new_basis_x + y * new_basis_y for x, y in bounding_plane_2d])
-                projected_2d_3d = np.array([optimal_mean + x * new_basis_x + y * new_basis_y for x, y in projected_2d])
+                bounding_plane = np.array([optimal_mean + x * basis_x + y * basis_y for x, y in bounding_plane_2d])
+                projected_2d_3d = np.array([optimal_mean + x * basis_x + y * basis_y for x, y in projected_2d])
 
+                # Update bp_info
+                bp['basis_x'] = basis_x
+                bp['basis_y'] = basis_y
                 bp['mean'] = optimal_mean
                 bp['bounding_plane'] = bounding_plane
                 bp['projected_2d'] = projected_2d_3d
@@ -4090,9 +4223,8 @@ class ContourMeshMixin:
                 new_contour, contour_match = self.find_contour_match(contour_points, bounding_plane, preserve_order=preserve)
                 bp['contour_match'] = contour_match
                 self.stream_contours[stream_i][i] = new_contour
-                smoothed_count += 1
 
-            print(f"    Recomputed {smoothed_count} contours with farthest vertex axis")
+            print(f"    Processed: {len(reference_indices)} references kept, {len(smooth_indices)} square-like interpolated")
 
         # Update self.contours and self.bounding_planes to reflect changes
         self.contours = self.stream_contours
