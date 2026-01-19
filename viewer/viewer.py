@@ -13,6 +13,7 @@ import quaternion
 from PIL import Image
 from viewer.mesh_loader import MeshLoader
 from viewer.arap_backends import get_backend, check_gpu_available, check_taichi_available
+from viewer.contour_mesh import find_corner_indices_ray_based
 from sklearn.decomposition import PCA
 
 from OpenGL.GL import *
@@ -3535,6 +3536,11 @@ class GLFWApp():
 
                     # Draw bounding plane corners and lines to closest contour vertices
                     if bp is not None and len(bp) >= 4:
+                        # Compute ray-based corner indices using 3D coordinates
+                        contour_vertices_3d = np.array([np.array(p) for p, q in contour_match])
+                        bp_corners_3d = np.array(bp[:4])
+                        ray_based_corner_indices = find_corner_indices_ray_based(contour_vertices_3d, bp_corners_3d)
+
                         # Project actual bounding plane corners to 2D
                         for ci, corner_3d in enumerate(bp[:4]):
                             corner_3d = np.array(corner_3d)
@@ -3544,18 +3550,12 @@ class GLFWApp():
                             cy = right_y0 + (1 - corner_norm[1]) * canvas_size
                             corner_screen_points_right.append((cx, cy))
 
-                            # Find closest contour vertex to this corner
-                            if len(p_screen_points) > 0:
-                                min_dist = np.inf
-                                closest_vi = 0
-                                for vi, (px, py) in enumerate(p_screen_points):
-                                    d = np.sqrt((cx - px)**2 + (cy - py)**2)
-                                    if d < min_dist:
-                                        min_dist = d
-                                        closest_vi = vi
+                            # Use ray-based corner correspondence
+                            if len(p_screen_points) > 0 and ci < len(ray_based_corner_indices):
+                                closest_vi = ray_based_corner_indices[ci]
                                 corner_to_closest_vertex.append((ci, closest_vi))
 
-                                # Draw line from corner to closest vertex (purple, thin)
+                                # Draw line from corner to corresponding vertex (purple, thin)
                                 px, py = p_screen_points[closest_vi]
                                 draw_list.add_line(cx, cy, px, py,
                                                  imgui.get_color_u32_rgba(0.7, 0.3, 0.7, 0.6), thickness=1.0)

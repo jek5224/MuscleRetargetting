@@ -33,6 +33,132 @@ CONTOUR_VALUE_MAX_DEFAULT = 9.9
 COLOR_MAP = cm.get_cmap("turbo")
 
 
+def find_corner_indices_ray_based(contour_vertices, bp_corners, bp_center=None, basis_x=None, basis_y=None):
+    """
+    Find contour vertex indices corresponding to each BP corner using ray-based intersection.
+
+    Casts ray from BP center through each corner, finds where it intersects the contour.
+    This provides more consistent corner correspondence than distance-based matching.
+
+    Args:
+        contour_vertices: Nx3 array of contour vertex positions
+        bp_corners: 4x3 array of bounding plane corner positions
+        bp_center: Optional 3D center point (computed from corners if not provided)
+        basis_x, basis_y: Optional basis vectors (computed from corners if not provided)
+
+    Returns:
+        corner_indices: List of 4 contour vertex indices, one for each BP corner
+    """
+    contour_vertices = np.array(contour_vertices)
+    bp_corners = np.array(bp_corners)
+
+    if len(bp_corners) != 4:
+        # Fallback to distance-based
+        corner_indices = []
+        for corner in bp_corners:
+            dists = np.linalg.norm(contour_vertices - corner, axis=1)
+            corner_indices.append(np.argmin(dists))
+        return corner_indices
+
+    # Compute BP center if not provided
+    if bp_center is None:
+        bp_center = np.mean(bp_corners, axis=0)
+
+    # Compute orthogonal basis if not provided
+    if basis_x is None or basis_y is None:
+        edge_01 = bp_corners[1] - bp_corners[0]
+        edge_03 = bp_corners[3] - bp_corners[0]
+
+        # Compute plane normal
+        normal = np.cross(edge_01, edge_03)
+        normal_norm = np.linalg.norm(normal)
+        if normal_norm > 1e-10:
+            normal = normal / normal_norm
+        else:
+            normal = np.array([0.0, 0.0, 1.0])
+
+        # basis_x along edge_01
+        basis_x = edge_01.copy()
+        bx_norm = np.linalg.norm(basis_x)
+        if bx_norm > 1e-10:
+            basis_x = basis_x / bx_norm
+        else:
+            basis_x = np.array([1.0, 0.0, 0.0])
+
+        # basis_y perpendicular to normal and basis_x
+        basis_y = np.cross(normal, basis_x)
+        by_norm = np.linalg.norm(basis_y)
+        if by_norm > 1e-10:
+            basis_y = basis_y / by_norm
+        else:
+            basis_y = np.array([0.0, 1.0, 0.0])
+
+    # Project to 2D
+    def to_2d(pt_3d):
+        diff = pt_3d - bp_center
+        return np.array([np.dot(diff, basis_x), np.dot(diff, basis_y)])
+
+    contour_2d = np.array([to_2d(v) for v in contour_vertices])
+    corners_2d = np.array([to_2d(c) for c in bp_corners])
+    center_2d = np.array([0.0, 0.0])
+
+    # Ray-segment intersection helper
+    def ray_segment_intersection_2d(ray_origin, ray_dir, seg_start, seg_end):
+        seg_dir = seg_end - seg_start
+        denom = ray_dir[0] * (-seg_dir[1]) - ray_dir[1] * (-seg_dir[0])
+        if abs(denom) < 1e-10:
+            return None, None
+        diff = seg_start - ray_origin
+        t_ray = (diff[0] * (-seg_dir[1]) - diff[1] * (-seg_dir[0])) / denom
+        t_seg = (ray_dir[0] * diff[1] - ray_dir[1] * diff[0]) / denom
+        if t_ray > 1e-10 and 0 <= t_seg <= 1:
+            return t_ray, t_seg
+        return None, None
+
+    # Find intersection for each corner
+    corner_indices = []
+    n_contour = len(contour_2d)
+
+    for corner_idx in range(4):
+        corner_2d = corners_2d[corner_idx]
+        ray_dir = corner_2d - center_2d
+        ray_dir_norm = np.linalg.norm(ray_dir)
+
+        best_edge_idx = None
+        best_t_seg = None
+        best_dist_to_corner = float('inf')
+
+        if ray_dir_norm > 1e-10:
+            ray_dir = ray_dir / ray_dir_norm
+            corner_dist = ray_dir_norm
+
+            for edge_idx in range(n_contour):
+                seg_start = contour_2d[edge_idx]
+                seg_end = contour_2d[(edge_idx + 1) % n_contour]
+
+                t_ray, t_seg = ray_segment_intersection_2d(center_2d, ray_dir, seg_start, seg_end)
+
+                if t_ray is not None:
+                    dist_to_corner = abs(t_ray - corner_dist)
+                    if dist_to_corner < best_dist_to_corner:
+                        best_dist_to_corner = dist_to_corner
+                        best_edge_idx = edge_idx
+                        best_t_seg = t_seg
+
+        if best_edge_idx is not None:
+            # Determine vertex index based on t_seg
+            if best_t_seg < 0.5:
+                corner_indices.append(best_edge_idx)
+            else:
+                corner_indices.append((best_edge_idx + 1) % n_contour)
+        else:
+            # Fallback to distance-based for this corner
+            dists = np.linalg.norm(contour_vertices - bp_corners[corner_idx], axis=1)
+            corner_indices.append(np.argmin(dists))
+
+    return corner_indices
+
+
 def align_basis_to_reference_continuous(basis_x, basis_y, ref_basis_x, basis_z):
     """
     Align basis vectors to match reference orientation using continuous rotation.
@@ -2929,10 +3055,7 @@ class ContourMeshMixin:
                             bp = new_bounding_plane
                             n_verts = len(contour_vertices)
 
-                            corner_indices = []
-                            for corner in bp:
-                                dists = np.linalg.norm(contour_vertices - corner, axis=1)
-                                corner_indices.append(np.argmin(dists))
+                            corner_indices = find_corner_indices_ray_based(contour_vertices, bp)
 
                             new_contour_match = [None] * n_verts
                             for edge_idx in range(4):
@@ -3010,11 +3133,8 @@ class ContourMeshMixin:
                 if n_verts < 4:
                     continue
 
-                # Find closest P vertex to each bounding plane corner
-                corner_indices = []
-                for corner in bp:
-                    dists = np.linalg.norm(Ps - corner, axis=1)
-                    corner_indices.append(np.argmin(dists))
+                # Find contour vertices corresponding to each bounding plane corner using ray-based matching
+                corner_indices = find_corner_indices_ray_based(Ps, bp)
 
                 # Build contour_match by mapping segments to edges
                 new_contour_match = [None] * n_verts
