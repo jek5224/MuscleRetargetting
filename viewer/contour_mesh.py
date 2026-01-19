@@ -10271,13 +10271,61 @@ class ContourMeshMixin:
             print(f"  [BP Transform] assignment by boundary line: {assignments.count(0)} to piece 0, {assignments.count(1)} to piece 1")
 
         else:
-            # Fallback: assign by nearest centroid
+            # For n_pieces > 2: Use polygon containment + nearest boundary (not just centroid)
+            # This ensures vertices in gaps go to the nearest piece boundary for better tiling
+            from shapely.geometry import Point
+
+            # Build valid polygons for each piece
+            piece_polygons = []
+            for piece_idx, transformed in enumerate(final_transformed):
+                if len(transformed) >= 3:
+                    try:
+                        poly = Polygon(transformed)
+                        if not poly.is_valid:
+                            poly = poly.buffer(0)
+                        piece_polygons.append(poly)
+                    except:
+                        piece_polygons.append(None)
+                else:
+                    piece_polygons.append(None)
+
+            # Assign each vertex
+            inside_count = 0
+            boundary_count = 0
             for v_idx, v_2d in enumerate(target_2d):
-                centroid_dists = [np.linalg.norm(v_2d - c) for c in centroids]
-                assigned_piece = centroid_dists.index(min(centroid_dists))
+                pt = Point(v_2d)
+
+                # First check: is vertex inside any source polygon?
+                assigned_piece = None
+                for piece_idx, poly in enumerate(piece_polygons):
+                    if poly is not None and poly.contains(pt):
+                        assigned_piece = piece_idx
+                        inside_count += 1
+                        break
+
+                # If not inside any polygon, find nearest polygon boundary
+                if assigned_piece is None:
+                    min_dist = float('inf')
+                    for piece_idx, poly in enumerate(piece_polygons):
+                        if poly is not None and not poly.is_empty:
+                            try:
+                                dist = poly.exterior.distance(pt)
+                                if dist < min_dist:
+                                    min_dist = dist
+                                    assigned_piece = piece_idx
+                            except:
+                                pass
+                    boundary_count += 1
+
+                # Final fallback: nearest centroid
+                if assigned_piece is None:
+                    centroid_dists = [np.linalg.norm(v_2d - c) for c in centroids]
+                    assigned_piece = centroid_dists.index(min(centroid_dists))
+
                 assignments.append(assigned_piece)
 
-            print(f"  [BP Transform] assignment by centroid: {[assignments.count(i) for i in range(n_pieces)]}")
+            print(f"  [BP Transform] assignment by polygon: {inside_count} inside, {boundary_count} by boundary")
+            print(f"  [BP Transform] piece distribution: {[assignments.count(i) for i in range(n_pieces)]}")
 
         # Remove islands: for 2 pieces, find the 2 best split points
         # This guarantees exactly 2 contiguous regions on a closed contour
@@ -10346,7 +10394,70 @@ class ContourMeshMixin:
         if n_pieces == 2:
             # Remove islands to ensure exactly 2 contiguous pieces
             assignments = remove_islands_2pieces(assignments)
-        # For n_pieces > 2, would need different logic
+        elif n_pieces > 2:
+            # For n_pieces > 2: Remove small islands and ensure contiguous segments
+            # Each piece should form a contiguous arc on the closed contour
+            def remove_islands_npieces(arr, n_pieces):
+                """Remove small islands to ensure each piece is mostly contiguous."""
+                n = len(arr)
+                if n < 3:
+                    return arr
+
+                # Find all runs (contiguous segments of same value)
+                runs = []  # [(start_idx, length, piece_value), ...]
+                i = 0
+                while i < n:
+                    val = arr[i]
+                    start = i
+                    length = 0
+                    while i < n and arr[i] == val:
+                        length += 1
+                        i += 1
+                    runs.append((start, length, val))
+
+                # Handle wrap-around: if first and last run have same value, merge them
+                if len(runs) > 1 and runs[0][2] == runs[-1][2]:
+                    merged_length = runs[0][1] + runs[-1][1]
+                    merged_start = runs[-1][0]
+                    runs = runs[1:-1]  # Remove first and last
+                    runs.append((merged_start, merged_length, runs[-1][2] if runs else arr[0]))
+
+                # For each piece, find its longest run and absorb smaller runs into neighbors
+                piece_runs = {i: [] for i in range(n_pieces)}
+                for run in runs:
+                    piece_runs[run[2]].append(run)
+
+                # Find main run for each piece (longest)
+                main_runs = {}
+                for piece_idx in range(n_pieces):
+                    if piece_runs[piece_idx]:
+                        main_run = max(piece_runs[piece_idx], key=lambda r: r[1])
+                        main_runs[piece_idx] = main_run
+
+                # Reassign small islands (runs that aren't the main run) to nearest neighbor
+                result = list(arr)
+                min_run_length = max(3, n // (n_pieces * 4))  # Minimum run to keep
+
+                for piece_idx in range(n_pieces):
+                    for run in piece_runs[piece_idx]:
+                        if run[1] < min_run_length and run != main_runs.get(piece_idx):
+                            # This is a small island - reassign to neighbor
+                            run_start, run_len, _ = run
+                            # Find what pieces are adjacent
+                            prev_idx = (run_start - 1) % n
+                            next_idx = (run_start + run_len) % n
+                            prev_piece = result[prev_idx]
+                            next_piece = result[next_idx]
+
+                            # Assign to the more common neighbor, or just prev
+                            new_piece = prev_piece if prev_piece == next_piece else prev_piece
+                            for j in range(run_len):
+                                result[(run_start + j) % n] = new_piece
+
+                return result
+
+            assignments = remove_islands_npieces(assignments, n_pieces)
+            print(f"  [BP Transform] after island removal: {[assignments.count(i) for i in range(n_pieces)]}")
 
         # Debug: count assignments per piece
         assignment_counts = [assignments.count(i) for i in range(n_pieces)]
