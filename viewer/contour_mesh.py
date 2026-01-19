@@ -10284,86 +10284,17 @@ class ContourMeshMixin:
             print(f"  [BP Transform] assignment by boundary line: {assignments.count(0)} to piece 0, {assignments.count(1)} to piece 1")
 
         else:
-            # For n_pieces > 2: Use polygon containment + nearest boundary (not just centroid)
-            # This ensures vertices in gaps go to the nearest piece boundary for better tiling
-            from shapely.geometry import Point
+            # For n_pieces > 2: ALWAYS use Voronoi (nearest centroid) assignment
+            # This GUARANTEES complete coverage with NO gaps - every vertex is assigned
+            # to exactly one piece based on which centroid is closest
 
-            # Build valid polygons for each piece
-            piece_polygons = []
-            for piece_idx, transformed in enumerate(final_transformed):
-                if len(transformed) >= 3:
-                    try:
-                        poly = Polygon(transformed)
-                        if not poly.is_valid:
-                            poly = poly.buffer(0)
-                        if poly.is_empty:
-                            piece_polygons.append(None)
-                        else:
-                            piece_polygons.append(poly)
-                    except:
-                        piece_polygons.append(None)
-                else:
-                    piece_polygons.append(None)
-
-            # Check how many valid polygons we have
-            valid_polygon_count = sum(1 for p in piece_polygons if p is not None)
-            print(f"  [BP Transform] Valid polygons: {valid_polygon_count}/{n_pieces}")
-
-            # If we have no valid polygons, use pure Voronoi (nearest centroid) for ALL vertices
-            use_pure_voronoi = (valid_polygon_count == 0)
-            if use_pure_voronoi:
-                print(f"  [BP Transform] Using pure Voronoi (no valid polygons)")
-
-            # Assign each vertex
-            inside_count = 0
-            boundary_count = 0
-            centroid_count = 0
+            # Assign each vertex to the nearest centroid (Voronoi partitioning)
             for v_idx, v_2d in enumerate(target_2d):
-                assigned_piece = None
-
-                if use_pure_voronoi:
-                    # Pure Voronoi: just use nearest centroid
-                    centroid_dists = [np.linalg.norm(v_2d - c) for c in centroids]
-                    assigned_piece = centroid_dists.index(min(centroid_dists))
-                    centroid_count += 1
-                else:
-                    pt = Point(v_2d)
-
-                    # First check: is vertex inside any source polygon?
-                    for piece_idx, poly in enumerate(piece_polygons):
-                        if poly is not None and poly.contains(pt):
-                            assigned_piece = piece_idx
-                            inside_count += 1
-                            break
-
-                    # If not inside any polygon, find nearest polygon boundary
-                    if assigned_piece is None:
-                        min_dist = float('inf')
-                        for piece_idx, poly in enumerate(piece_polygons):
-                            if poly is not None and not poly.is_empty:
-                                try:
-                                    dist = poly.exterior.distance(pt)
-                                    if dist < min_dist:
-                                        min_dist = dist
-                                        assigned_piece = piece_idx
-                                except:
-                                    pass
-                        if assigned_piece is not None:
-                            boundary_count += 1
-
-                    # Final fallback: nearest centroid
-                    if assigned_piece is None:
-                        centroid_dists = [np.linalg.norm(v_2d - c) for c in centroids]
-                        assigned_piece = centroid_dists.index(min(centroid_dists))
-                        centroid_count += 1
-
+                centroid_dists = [np.linalg.norm(v_2d - c) for c in centroids]
+                assigned_piece = centroid_dists.index(min(centroid_dists))
                 assignments.append(assigned_piece)
 
-            if use_pure_voronoi:
-                print(f"  [BP Transform] assignment by Voronoi: all {centroid_count} vertices by centroid")
-            else:
-                print(f"  [BP Transform] assignment: {inside_count} inside, {boundary_count} by boundary, {centroid_count} by centroid")
-            print(f"  [BP Transform] piece distribution: {[assignments.count(i) for i in range(n_pieces)]}")
+            print(f"  [BP Transform] Voronoi assignment (n={n_pieces}): {[assignments.count(i) for i in range(n_pieces)]}")
 
         # Remove islands: for 2 pieces, find the 2 best split points
         # This guarantees exactly 2 contiguous regions on a closed contour
