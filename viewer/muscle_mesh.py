@@ -3234,9 +3234,12 @@ class MuscleMeshMixin:
             basis_y = basis_y / (np.linalg.norm(basis_y) + 1e-10)
 
         elif bbox_method == 'farthest_vertex':
-            # Step 1: Find farthest vertex pair in 3D to determine basis_x
+            # Use Newell normal as z-axis (already computed as basis_z above)
+            # Find farthest vertex pair to determine x-axis direction
+
             from scipy.spatial.distance import cdist
 
+            # Step 1: Find farthest vertex pair in 3D
             if len(contour_points) > 2:
                 dists = cdist(contour_points, contour_points)
                 i, j = np.unravel_index(np.argmax(dists), dists.shape)
@@ -3244,63 +3247,42 @@ class MuscleMeshMixin:
                 farthest_len = np.linalg.norm(farthest_dir)
 
                 if farthest_len > 1e-10:
-                    new_basis_x = farthest_dir / farthest_len
+                    farthest_dir = farthest_dir / farthest_len
                 else:
-                    new_basis_x = prev_basis_x.copy()
+                    farthest_dir = prev_basis_x.copy()
             else:
-                new_basis_x = prev_basis_x.copy()
+                farthest_dir = prev_basis_x.copy()
 
-            # Step 2: Find basis_z that minimizes sum of squared distances to plane
-            # The plane must contain basis_x, so basis_z is perpendicular to basis_x
-            # Find optimal basis_z in the 2D subspace perpendicular to basis_x
-
-            # Create orthonormal basis perpendicular to new_basis_x
-            arbitrary = np.array([1.0, 0.0, 0.0])
-            if abs(np.dot(arbitrary, new_basis_x)) > 0.9:
-                arbitrary = np.array([0.0, 1.0, 0.0])
-            v1 = arbitrary - np.dot(arbitrary, new_basis_x) * new_basis_x
-            v1 = v1 / (np.linalg.norm(v1) + 1e-10)
-            v2 = np.cross(new_basis_x, v1)
-            v2 = v2 / (np.linalg.norm(v2) + 1e-10)
-
-            # Compute covariance matrix of points relative to mean
-            centered = np.array(contour_points) - mean
-            C = np.dot(centered.T, centered) / len(contour_points)
-
-            # Project covariance onto 2D subspace {v1, v2}
-            C_2d = np.array([
-                [np.dot(v1, np.dot(C, v1)), np.dot(v1, np.dot(C, v2))],
-                [np.dot(v2, np.dot(C, v1)), np.dot(v2, np.dot(C, v2))]
-            ])
-
-            # Find eigenvector with smallest eigenvalue (minimum variance direction = plane normal)
-            eigenvalues, eigenvectors = np.linalg.eigh(C_2d)
-            min_idx = np.argmin(eigenvalues)
-            min_eigenvec_2d = eigenvectors[:, min_idx]
-
-            # Convert back to 3D
-            new_basis_z = min_eigenvec_2d[0] * v1 + min_eigenvec_2d[1] * v2
-            new_basis_z = new_basis_z / (np.linalg.norm(new_basis_z) + 1e-10)
-
-            # Align with previous basis_z direction
-            if np.dot(new_basis_z, prev_basis_z) < 0:
-                new_basis_z = -new_basis_z
+            # Step 2: Project farthest direction onto plane perpendicular to basis_z (Newell normal)
+            # This gives us basis_x in the contour plane
+            new_basis_x = farthest_dir - np.dot(farthest_dir, basis_z) * basis_z
+            x_norm = np.linalg.norm(new_basis_x)
+            if x_norm > 1e-10:
+                new_basis_x = new_basis_x / x_norm
+            else:
+                # Farthest direction is parallel to z, use arbitrary perpendicular
+                arbitrary = np.array([1.0, 0.0, 0.0])
+                if abs(np.dot(arbitrary, basis_z)) > 0.9:
+                    arbitrary = np.array([0.0, 1.0, 0.0])
+                new_basis_x = arbitrary - np.dot(arbitrary, basis_z) * basis_z
+                new_basis_x = new_basis_x / (np.linalg.norm(new_basis_x) + 1e-10)
 
             # Step 3: Compute basis_y = cross(basis_z, basis_x)
-            new_basis_y = np.cross(new_basis_z, new_basis_x)
+            new_basis_y = np.cross(basis_z, new_basis_x)
             new_basis_y = new_basis_y / (np.linalg.norm(new_basis_y) + 1e-10)
 
             # Align basis_x with previous orientation (sign flip only)
-            proj_prev_x = prev_basis_x - np.dot(prev_basis_x, new_basis_z) * new_basis_z
+            proj_prev_x = prev_basis_x - np.dot(prev_basis_x, basis_z) * basis_z
             proj_norm = np.linalg.norm(proj_prev_x)
             if proj_norm > 1e-6:
                 proj_prev_x = proj_prev_x / proj_norm
                 if np.dot(new_basis_x, proj_prev_x) < 0:
                     new_basis_x = -new_basis_x
-                    new_basis_y = np.cross(new_basis_z, new_basis_x)
+                    new_basis_y = np.cross(basis_z, new_basis_x)
                     new_basis_y = new_basis_y / (np.linalg.norm(new_basis_y) + 1e-10)
 
-            basis_x, basis_y, basis_z = new_basis_x, new_basis_y, new_basis_z
+            basis_x, basis_y = new_basis_x, new_basis_y
+            # basis_z remains as Newell normal (already set above)
 
         # Reproject with final basis
         projected_2d = np.array([[np.dot(v - mean, basis_x), np.dot(v - mean, basis_y)] for v in contour_points])
