@@ -3994,8 +3994,8 @@ class ContourMeshMixin:
         Smooth bounding plane orientations for stream mode (after cutting).
 
         In stream mode: bounding_planes[stream][level]
-        For each stream, interpolate basis_x for square-like contours from
-        non-square-like neighbors.
+        For each stream, use first and last contours as anchors and interpolate
+        ALL intermediate contours by distance-based weighting.
         """
         num_streams = len(self.stream_bounding_planes)
 
@@ -4008,94 +4008,58 @@ class ContourMeshMixin:
 
             print(f"  Stream {stream_i}: {stream_len} levels")
 
-            # Find reference indices (non-square-like) and smooth indices (square-like)
-            reference_indices = [i for i, bp in enumerate(bp_stream)
-                                 if not bp.get('square_like', False)]
-            smooth_indices = [i for i, bp in enumerate(bp_stream)
-                              if bp.get('square_like', False)]
+            # Use first (index 0) and last (index stream_len-1) as anchor references
+            first_idx = 0
+            last_idx = stream_len - 1
 
-            print(f"    Reference: {len(reference_indices)}, Smooth: {len(smooth_indices)}")
+            first_bp = bp_stream[first_idx]
+            last_bp = bp_stream[last_idx]
 
-            if len(reference_indices) == 0 and len(smooth_indices) > 0:
-                # All square-like - find most non-square-like as reference
-                best_idx = 0
-                best_ratio_diff = 0
-                for i, bp in enumerate(bp_stream):
-                    corners = bp.get('bounding_plane')
-                    if corners is None or len(corners) < 4:
-                        continue
-                    width = np.linalg.norm(corners[1] - corners[0])
-                    height = np.linalg.norm(corners[3] - corners[0])
-                    if min(width, height) > 1e-10:
-                        ratio = max(width, height) / min(width, height)
-                        ratio_diff = abs(ratio - 1.0)
-                        if ratio_diff > best_ratio_diff:
-                            best_ratio_diff = ratio_diff
-                            best_idx = i
-                bp_stream[best_idx]['square_like'] = False
-                reference_indices = [best_idx]
-                smooth_indices = [i for i in smooth_indices if i != best_idx]
-                print(f"    All square-like, using level {best_idx} as reference")
+            first_mean = first_bp['mean']
+            last_mean = last_bp['mean']
+            first_x = first_bp['basis_x']
+            last_x = last_bp['basis_x']
 
-            # Interpolate square-like contours
-            for i in smooth_indices:
+            print(f"    Anchors: first={first_idx}, last={last_idx}")
+
+            # Interpolate ALL intermediate contours (indices 1 to stream_len-2)
+            smoothed_count = 0
+            for i in range(1, stream_len - 1):
                 bp = bp_stream[i]
                 curr_mean = bp['mean']
                 basis_z = bp['basis_z']
 
-                # Find prev reference (non-square-like)
-                prev_idx = None
-                prev_dist = np.inf
-                for j in range(i - 1, -1, -1):
-                    if j in reference_indices:
-                        prev_dist = np.linalg.norm(curr_mean - bp_stream[j]['mean'])
-                        prev_idx = j
-                        break
+                # Compute distances to first and last anchors
+                dist_to_first = np.linalg.norm(curr_mean - first_mean)
+                dist_to_last = np.linalg.norm(curr_mean - last_mean)
+                total_dist = dist_to_first + dist_to_last
 
-                # Find next reference (non-square-like)
-                next_idx = None
-                next_dist = np.inf
-                for j in range(i + 1, stream_len):
-                    if j in reference_indices:
-                        next_dist = np.linalg.norm(curr_mean - bp_stream[j]['mean'])
-                        next_idx = j
-                        break
-
-                if prev_idx is None and next_idx is None:
-                    continue
-
-                # Determine target basis_x by interpolation
-                if prev_idx is not None and next_idx is not None:
-                    # Interpolate between prev and next
-                    prev_x = bp_stream[prev_idx]['basis_x']
-                    prev_x_proj = prev_x - np.dot(prev_x, basis_z) * basis_z
-                    prev_x_proj = prev_x_proj / (np.linalg.norm(prev_x_proj) + 1e-10)
-
-                    next_x = bp_stream[next_idx]['basis_x']
-                    next_x_proj = next_x - np.dot(next_x, basis_z) * basis_z
-                    next_x_proj = next_x_proj / (np.linalg.norm(next_x_proj) + 1e-10)
-
-                    total_dist = prev_dist + next_dist
-                    t = prev_dist / total_dist if total_dist > 1e-10 else 0.5
-
-                    # Compute angle and interpolate
-                    cos_angle = np.clip(np.dot(prev_x_proj, next_x_proj), -1, 1)
-                    cross = np.cross(prev_x_proj, next_x_proj)
-                    sin_angle = np.dot(cross, basis_z)
-                    angle = np.arctan2(sin_angle, cos_angle)
-                    interp_angle = angle * t
-
-                    cos_t = np.cos(interp_angle)
-                    sin_t = np.sin(interp_angle)
-                    new_basis_x = prev_x_proj * cos_t + np.cross(basis_z, prev_x_proj) * sin_t
-                elif prev_idx is not None:
-                    prev_x = bp_stream[prev_idx]['basis_x']
-                    new_basis_x = prev_x - np.dot(prev_x, basis_z) * basis_z
-                    new_basis_x = new_basis_x / (np.linalg.norm(new_basis_x) + 1e-10)
+                if total_dist < 1e-10:
+                    t = 0.5
                 else:
-                    next_x = bp_stream[next_idx]['basis_x']
-                    new_basis_x = next_x - np.dot(next_x, basis_z) * basis_z
-                    new_basis_x = new_basis_x / (np.linalg.norm(new_basis_x) + 1e-10)
+                    t = dist_to_first / total_dist  # 0 at first, 1 at last
+
+                # Project anchor basis_x onto current plane
+                first_x_proj = first_x - np.dot(first_x, basis_z) * basis_z
+                first_x_proj = first_x_proj / (np.linalg.norm(first_x_proj) + 1e-10)
+
+                last_x_proj = last_x - np.dot(last_x, basis_z) * basis_z
+                last_x_proj = last_x_proj / (np.linalg.norm(last_x_proj) + 1e-10)
+
+                # Compute angle between first and last (on current plane)
+                cos_angle = np.clip(np.dot(first_x_proj, last_x_proj), -1, 1)
+                cross = np.cross(first_x_proj, last_x_proj)
+                sin_angle = np.dot(cross, basis_z)
+                angle = np.arctan2(sin_angle, cos_angle)
+
+                # Interpolate angle
+                interp_angle = angle * t
+
+                # Rotate first_x_proj by interp_angle around basis_z
+                cos_t = np.cos(interp_angle)
+                sin_t = np.sin(interp_angle)
+                new_basis_x = first_x_proj * cos_t + np.cross(basis_z, first_x_proj) * sin_t
+                new_basis_x = new_basis_x / (np.linalg.norm(new_basis_x) + 1e-10)
 
                 new_basis_y = np.cross(basis_z, new_basis_x)
                 new_basis_y = new_basis_y / (np.linalg.norm(new_basis_y) + 1e-10)
@@ -4132,9 +4096,9 @@ class ContourMeshMixin:
                 new_contour, contour_match = self.find_contour_match(contour_points, bounding_plane, preserve_order=preserve)
                 bp['contour_match'] = contour_match
                 self.stream_contours[stream_i][i] = new_contour
+                smoothed_count += 1
 
-            if len(smooth_indices) > 0:
-                print(f"    Smoothed {len(smooth_indices)} square-like contours")
+            print(f"    Smoothed {smoothed_count} intermediate contours (interpolated from anchors)")
 
         # Update self.contours and self.bounding_planes to reflect changes
         self.contours = self.stream_contours
