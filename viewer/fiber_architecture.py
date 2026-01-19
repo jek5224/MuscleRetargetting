@@ -1700,7 +1700,7 @@ class FiberArchitectureMixin:
             ray_dir = ray_dir / ray_dir_norm
 
             best_intersection = None
-            best_t_ray = float('inf')
+            best_dist_to_corner = float('inf')
 
             n_contour = len(contour_2d)
             for edge_idx in range(n_contour):
@@ -1710,14 +1710,14 @@ class FiberArchitectureMixin:
                 t_ray, t_seg = ray_segment_intersection_2d(center_2d, ray_dir, seg_start, seg_end)
 
                 if t_ray is not None:
-                    # If multiple intersections, pick closest to corner (smallest t_ray that's past the corner)
-                    # Corner is at t_ray = distance from center to corner
-                    corner_dist = np.linalg.norm(corner_2d - center_2d)
-                    # We want intersection close to the corner
-                    dist_to_corner = abs(t_ray - corner_dist)
-                    if best_intersection is None or dist_to_corner < abs(best_t_ray - corner_dist):
+                    # Compute actual intersection point in 2D
+                    intersection_pt = center_2d + t_ray * ray_dir
+                    # Compute actual distance from intersection to bounding plane corner
+                    dist_to_corner = np.linalg.norm(intersection_pt - corner_2d)
+                    # Select the intersection closest to the bounding plane corner
+                    if dist_to_corner < best_dist_to_corner:
                         best_intersection = (corner_idx, edge_idx, t_seg)
-                        best_t_ray = t_ray
+                        best_dist_to_corner = dist_to_corner
 
             if best_intersection is not None:
                 corner_intersections.append(best_intersection)
