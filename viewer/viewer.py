@@ -3993,13 +3993,9 @@ class GLFWApp():
             subcut_level = obj._manual_cut_data.get('subcut_level', 0)
             need_new_recommendation = 'initial_line' not in obj._manual_cut_data
 
-            # Check if target is a merge point (where separate sources converge into one)
-            target_bp = obj._manual_cut_data.get('target_bp', {})
-            is_merge_point = target_bp.get('is_merge_point', False)
-
-            # Neck finding ONLY for SEPARATE mode with merged target contour
-            # Skip for: COMMON mode, sub-windows, sub-cuts, or non-merged targets
-            skip_neck = is_common_mode or is_subwindow or subcut_level > 0 or not is_merge_point
+            # Neck finding for SEPARATE mode only (multiple separate sources → one target)
+            # Skip for: COMMON mode (sources share boundary), sub-windows, or sub-cuts
+            skip_neck = is_common_mode or is_subwindow or subcut_level > 0
             if need_new_recommendation and not skip_neck:
                 current_pieces = obj._manual_cut_data.get('current_pieces', [target_2d])
                 contour_range = np.max(target_2d.max(axis=0) - target_2d.min(axis=0))
@@ -4144,11 +4140,9 @@ class GLFWApp():
 
             current_pieces = obj._manual_cut_data.get('current_pieces', [target_2d])
             required_pieces = obj._manual_cut_data.get('required_pieces', 2)
-            target_bp = obj._manual_cut_data['target_bp']
-            is_merge_point = target_bp.get('is_merge_point', False)
             imgui.text(f"Target level: {target_level} | Source level: {source_level}")
             imgui.text(f"Pieces: {len(current_pieces)} / {required_pieces} required")
-            imgui.text(f"Target verts: {len(target_2d)} | is_merge_point: {is_merge_point}")
+            imgui.text(f"Target verts: {len(target_2d)}")
             imgui.text_colored("WHITE = Target contour (cut this)", 1.0, 1.0, 1.0, 1.0)
             imgui.same_line()
             imgui.text_colored(" | FADED = Source ref (guide)", 0.6, 0.6, 0.6, 1.0)
