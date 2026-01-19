@@ -8863,7 +8863,7 @@ class ContourMeshMixin:
                             _, new_bp = self.save_bounding_planes(
                                 cut_contour,
                                 target_bp['scalar_value'],
-                                prev_bounding_plane=ref_bp
+                                use_independent_axes=True  # Cut pieces use their own farthest vertex pair
                             )
                             new_bp['is_cut'] = True
 
@@ -9662,8 +9662,8 @@ class ContourMeshMixin:
                 sub_source_bps = [source_bps[s] for s in assigned_sources]
                 sub_stream_indices = [stream_indices[s] for s in assigned_sources]
 
-                # Create a temporary bounding plane for this piece
-                piece_bp = self.save_bounding_planes(piece_3d, target_bp.get('scalar_value', 0), prev_bounding_plane=target_bp)[1]
+                # Create a temporary bounding plane for this piece (use independent axes)
+                piece_bp = self.save_bounding_planes(piece_3d, target_bp.get('scalar_value', 0), use_independent_axes=True)[1]
 
                 # Run optimization on this piece
                 sub_pieces, _ = self._cut_contour_bp_transform(
