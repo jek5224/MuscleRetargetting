@@ -5001,9 +5001,10 @@ class GLFWApp():
 
             # Optimize button - run automatic optimization on current pieces
             # Can be used after manual cuts to optimize remaining subdivisions
-            # Hide in preview mode (Accept/Reset are shown instead)
+            # Hide in preview mode (Accept/Reset are shown instead) and in assignment mode
             in_preview_for_button = obj._manual_cut_data.get('optimization_preview', False) if obj._manual_cut_data else False
-            if num_selected >= 2 and not in_preview_for_button:
+            in_assignment_mode_for_button = obj._manual_cut_data.get('assignment_mode', False) if obj._manual_cut_data else False
+            if num_selected >= 2 and not in_preview_for_button and not in_assignment_mode_for_button:
                 # Determine if we should run optimization (button click or auto-optimize mode)
                 run_optimization = False
                 skip_preview = False  # For Optimize All: skip preview and auto-accept
