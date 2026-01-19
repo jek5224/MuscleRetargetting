@@ -3268,13 +3268,12 @@ class MuscleMeshMixin:
             basis_y = basis_y / (np.linalg.norm(basis_y) + 1e-10)
 
         elif bbox_method == 'farthest_vertex':
-            # Use Newell normal as z-axis (already computed as basis_z above)
-            # Use continuous alignment with previous level's basis_x for smooth transitions
-            from .contour_mesh import align_basis_to_reference_continuous
-
+            # x: parallel to farthest vertex direction (projected onto plane)
+            # z: Newell normal
+            # y: cross(z, x)
             print(f"  [DEBUG] save_bounding_planes: Using farthest_vertex method (use_independent_axes={use_independent_axes}, has_prev_reference={has_prev_reference})")
 
-            # Step 1: Use pre-computed farthest vertex pair for initial x-axis guess
+            # Step 1: Use pre-computed farthest vertex pair for x-axis direction
             if farthest_pair is not None:
                 farthest_dir = farthest_pair[1] - farthest_pair[0]
                 farthest_len = np.linalg.norm(farthest_dir)
@@ -3288,31 +3287,34 @@ class MuscleMeshMixin:
                 farthest_dir = prev_basis_x.copy()
 
             # Step 2: Project farthest direction onto plane perpendicular to basis_z (Newell normal)
-            new_basis_x = farthest_dir - np.dot(farthest_dir, basis_z) * basis_z
-            x_norm = np.linalg.norm(new_basis_x)
+            basis_x = farthest_dir - np.dot(farthest_dir, basis_z) * basis_z
+            x_norm = np.linalg.norm(basis_x)
             if x_norm > 1e-10:
-                new_basis_x = new_basis_x / x_norm
+                basis_x = basis_x / x_norm
             else:
                 # Farthest direction is parallel to z, use arbitrary perpendicular
                 arbitrary = np.array([1.0, 0.0, 0.0])
                 if abs(np.dot(arbitrary, basis_z)) > 0.9:
                     arbitrary = np.array([0.0, 1.0, 0.0])
-                new_basis_x = arbitrary - np.dot(arbitrary, basis_z) * basis_z
-                new_basis_x = new_basis_x / (np.linalg.norm(new_basis_x) + 1e-10)
+                basis_x = arbitrary - np.dot(arbitrary, basis_z) * basis_z
+                basis_x = basis_x / (np.linalg.norm(basis_x) + 1e-10)
 
-            # Step 3: Compute initial basis_y
-            new_basis_y = np.cross(basis_z, new_basis_x)
-            new_basis_y = new_basis_y / (np.linalg.norm(new_basis_y) + 1e-10)
+            # Step 3: y = cross(z, x)
+            basis_y = np.cross(basis_z, basis_x)
+            basis_y = basis_y / (np.linalg.norm(basis_y) + 1e-10)
 
-            # Step 4: Only use continuous alignment if we have a real previous reference
-            # For the first contour, use farthest vertex pair direction directly
+            # Step 4: Only sign flip for continuity (no rotation)
             if has_prev_reference:
-                new_basis_x, new_basis_y = align_basis_to_reference_continuous(
-                    new_basis_x, new_basis_y, prev_basis_x, basis_z
-                )
-
-            basis_x, basis_y = new_basis_x, new_basis_y
-            # basis_z remains as Newell normal (already set above)
+                # Project prev_basis_x onto current plane
+                prev_x_proj = prev_basis_x - np.dot(prev_basis_x, basis_z) * basis_z
+                prev_x_norm = np.linalg.norm(prev_x_proj)
+                if prev_x_norm > 1e-10:
+                    prev_x_proj = prev_x_proj / prev_x_norm
+                    # Only flip sign if facing opposite direction
+                    if np.dot(basis_x, prev_x_proj) < 0:
+                        basis_x = -basis_x
+                        basis_y = np.cross(basis_z, basis_x)
+                        basis_y = basis_y / (np.linalg.norm(basis_y) + 1e-10)
 
         # Reproject with final basis
         projected_2d = np.array([[np.dot(v - mean, basis_x), np.dot(v - mean, basis_y)] for v in contour_points])
