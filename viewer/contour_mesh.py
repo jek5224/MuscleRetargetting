@@ -8822,10 +8822,15 @@ class ContourMeshMixin:
 
         print("Cut streams complete")
 
-        # Run stream finding (find_contour_stream)
-        print("Finding contour streams...")
-        self.find_contour_stream()
-        print("Stream finding complete")
+        # Align vertices within each stream for proper fiber building
+        # This ensures vertex 0 at level N connects to vertex 0 at level N+1
+        print("Aligning stream contours...")
+        for stream_i in range(max_stream_count):
+            if len(self.stream_contours[stream_i]) > 1:
+                aligned = self._align_stream_contours_for_mesh(self.stream_contours[stream_i])
+                self.stream_contours[stream_i] = aligned
+                self.contours[stream_i] = aligned
+        print("Stream alignment complete")
 
         # Apply smoothening to each stream
         print("Applying smoothening to streams...")
