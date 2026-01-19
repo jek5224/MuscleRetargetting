@@ -8822,21 +8822,17 @@ class ContourMeshMixin:
 
         print("Cut streams complete")
 
-        # Step 1: Select levels (error-based level selection)
-        print("Selecting levels...")
-        self.select_levels()
+        # Run stream finding (find_contour_stream)
+        print("Finding contour streams...")
+        self.find_contour_stream()
+        print("Stream finding complete")
 
-        # Step 2: Apply smoothening to each stream
+        # Apply smoothening to each stream
         print("Applying smoothening to streams...")
         self.smoothen_contours_z()
         self.smoothen_contours_x()
         self.smoothen_contours_bp()
         print("Stream smoothening complete")
-
-        # Step 3: Build fibers (after smoothening and level selection)
-        print("Building fibers...")
-        self.build_fibers()
-        print("Build fibers complete")
 
     def select_levels(self, error_threshold=None):
         """
