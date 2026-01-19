@@ -3192,20 +3192,17 @@ class ContourMeshMixin:
 
     def _recompute_bounding_plane_after_axis_change(self, bp_info, contour_points):
         """
-        Recompute bounding plane corners after axis changes.
+        Recompute bounding plane corners and contour_match after axis changes.
 
         This must be called whenever basis_x, basis_y, or basis_z are modified
-        to maintain correct bounding plane geometry.
-
-        NOTE: Does NOT call find_contour_match - contour_match is NOT updated here.
-        The bp smoothening step will update contour_match.
+        to maintain correct bounding plane geometry and unit square correspondence.
 
         Args:
             bp_info: Bounding plane info dict with basis_x, basis_y, basis_z, mean
             contour_points: The contour vertices (N x 3 array)
 
         Returns:
-            contour_points unchanged (for API compatibility)
+            new_contour: The contour with vertices reordered to match bounding plane corners
         """
         contour_points = np.asarray(contour_points)
 
@@ -3263,9 +3260,14 @@ class ContourMeshMixin:
         bp_info['area'] = area
         bp_info['square_like'] = square_like
 
-        # NOTE: contour_match is NOT updated here - bp smooth will handle it
+        # Update contour_match with new bounding plane corners (same as bp smooth)
+        preserve = getattr(self, '_contours_normalized', False)
+        new_contour, contour_match = self.find_contour_match(
+            contour_points, bounding_plane, preserve_order=preserve
+        )
+        bp_info['contour_match'] = contour_match
 
-        return contour_points
+        return new_contour
 
     def smoothen_contours_z(self):
         """

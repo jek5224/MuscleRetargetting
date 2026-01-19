@@ -3158,6 +3158,7 @@ class MuscleMeshMixin:
 
         if bounding_plane_info_orig is not None:
             # For cut planes, use bbox method to find optimal orientation
+            print(f"  [DEBUG] save_bounding_planes: Using bounding_plane_info_orig path (minimum area bbox)")
             basis_z = bounding_plane_info_orig['basis_z']
             newell_normal = bounding_plane_info_orig['newell_normal']
 
@@ -3197,6 +3198,7 @@ class MuscleMeshMixin:
 
         elif bbox_method == 'bbox':
             # Minimum area bounding box using rotating calipers
+            print(f"  [DEBUG] save_bounding_planes: Using bbox method (minimum area)")
             # Create initial orthonormal basis on the plane
             arbitrary = np.array([1, 0, 0])
             if abs(np.dot(arbitrary, basis_z)) > 0.9:
@@ -3231,6 +3233,7 @@ class MuscleMeshMixin:
 
         elif bbox_method == 'pca':
             # Project contour points onto the plane and do 2D PCA to find principal direction
+            print(f"  [DEBUG] save_bounding_planes: Using pca method")
             # This ensures basis_x aligns with the long axis of the contour
 
             # Create initial orthonormal basis on the plane
@@ -3261,12 +3264,15 @@ class MuscleMeshMixin:
             from .contour_mesh import align_basis_to_reference_continuous
             from scipy.spatial.distance import cdist
 
+            print(f"  [DEBUG] save_bounding_planes: Using farthest_vertex method (use_independent_axes={use_independent_axes}, has_prev_reference={has_prev_reference})")
+
             # Step 1: Find farthest vertex pair in 3D for initial x-axis guess
             if len(contour_points) > 2:
                 dists = cdist(contour_points, contour_points)
                 i, j = np.unravel_index(np.argmax(dists), dists.shape)
                 farthest_dir = contour_points[j] - contour_points[i]
                 farthest_len = np.linalg.norm(farthest_dir)
+                print(f"  [DEBUG] Farthest vertex pair: i={i}, j={j}, dist={np.max(dists):.4f}, dir={farthest_dir[:3]}")
 
                 if farthest_len > 1e-10:
                     farthest_dir = farthest_dir / farthest_len
