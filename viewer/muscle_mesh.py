@@ -3063,8 +3063,14 @@ class MuscleMeshMixin:
 
     # ========== Bounding Plane Methods ==========
 
-    def save_bounding_planes(self, contour_points, scalar_value, prev_bounding_plane=None, bounding_plane_info_orig=None):
-        """Save bounding plane information for a contour."""
+    def save_bounding_planes(self, contour_points, scalar_value, prev_bounding_plane=None, bounding_plane_info_orig=None, use_independent_axes=False):
+        """Save bounding plane information for a contour.
+
+        Args:
+            use_independent_axes: If True, use farthest vertex pair for axes without
+                                  aligning to any previous reference. Used for origin/insertion
+                                  contours that should have independent orientations.
+        """
         # Import geometric utilities from contour_mesh
         from .contour_mesh import compute_newell_normal, compute_best_fitting_plane, compute_polygon_area, compute_minimum_area_bbox
 
@@ -3099,7 +3105,20 @@ class MuscleMeshMixin:
             contour_points = np.vstack([contour_points, contour_points[-1] + [0.001, 0, 0]])
 
         has_prev_reference = False  # Track if we have a real previous reference
-        if prev_bounding_plane is not None:
+        if use_independent_axes:
+            # Force independent axes - don't use any previous reference
+            temp_newell = compute_newell_normal(contour_points)
+            prev_basis_z = temp_newell / (np.linalg.norm(temp_newell) + 1e-10)
+            # Create arbitrary orthonormal x/y (will be overridden by farthest_vertex)
+            arbitrary = np.array([1, 0, 0])
+            if abs(np.dot(arbitrary, prev_basis_z)) > 0.9:
+                arbitrary = np.array([0, 1, 0])
+            prev_basis_x = arbitrary - np.dot(arbitrary, prev_basis_z) * prev_basis_z
+            prev_basis_x = prev_basis_x / (np.linalg.norm(prev_basis_x) + 1e-10)
+            prev_basis_y = np.cross(prev_basis_z, prev_basis_x)
+            prev_newell = prev_basis_z.copy()
+            has_prev_reference = False
+        elif prev_bounding_plane is not None:
             prev_basis_x = prev_bounding_plane['basis_x']
             prev_basis_y = prev_bounding_plane['basis_y']
             prev_basis_z = prev_bounding_plane['basis_z']

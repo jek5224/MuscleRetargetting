@@ -1076,16 +1076,15 @@ class ContourMeshMixin:
         origin_bounding_planes = []
         origin_contours = []
         origin_contours_orig = []
-        prev_origin_plane = None
         for i, edge_group in enumerate(self.edge_groups):
             if self.edge_classes[i] == 'origin':
-                # Pass previous origin's bounding plane for axis consistency
+                # Each origin uses its own farthest vertex pair independently
+                # This is important for multi-stream muscles where origins are separate
                 new_origin_contour, bounding_plane = self.save_bounding_planes(
-                    self.vertices[edge_group], 1, prev_bounding_plane=prev_origin_plane)
+                    self.vertices[edge_group], 1, use_independent_axes=True)
                 origin_bounding_planes.append(bounding_plane)
                 origin_contours.append(new_origin_contour)
                 origin_contours_orig.append(self.vertices[edge_group])
-                prev_origin_plane = bounding_plane  # Use this as reference for next origin
         self.bounding_planes.append(origin_bounding_planes)
         contours.append(origin_contours)
         contours_orig.append(origin_contours_orig)
@@ -1240,16 +1239,15 @@ class ContourMeshMixin:
         insertion_bounding_planes = []
         insertion_contours = []
         insertion_contours_orig = []
-        # Use last contour level as reference for insertion axes
-        prev_insertion_plane = self.bounding_planes[-1][0] if len(self.bounding_planes) > 0 and len(self.bounding_planes[-1]) > 0 else None
         for i, edge_group in enumerate(self.edge_groups):
             if self.edge_classes[i] == 'insertion':
+                # Each insertion uses its own farthest vertex pair independently
+                # This is important for multi-stream muscles where insertions are separate
                 new_insertion_contour, bounding_plane = self.save_bounding_planes(
-                    self.vertices[edge_group], 10, prev_bounding_plane=prev_insertion_plane)
+                    self.vertices[edge_group], 10, use_independent_axes=True)
                 insertion_bounding_planes.append(bounding_plane)
                 insertion_contours.append(new_insertion_contour)
                 insertion_contours_orig.append(self.vertices[edge_group])
-                prev_insertion_plane = bounding_plane  # Use for next insertion
         
         self.bounding_planes.append(insertion_bounding_planes)
         contours.append(insertion_contours)
