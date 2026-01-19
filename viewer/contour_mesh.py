@@ -8798,6 +8798,11 @@ class ContourMeshMixin:
 
         print(f"Created {max_stream_count} streams, each with {len(stream_contours[0])} levels")
 
+        # Re-order streams at each level to ensure consistent correspondence
+        # This fixes the issue where stream 0 at level N might correspond to stream 1 at level N+1
+        print("Reordering streams for consistent correspondence...")
+        self._reorder_streams_for_correspondence(stream_contours, stream_bounding_planes, max_stream_count)
+
         # Bounding planes are computed naturally from cut contour vertices
         # User can apply z, x, bp smoothening manually using the buttons
 
@@ -8851,6 +8856,92 @@ class ContourMeshMixin:
 
         # Final verification
         print(f"  Final stream data: {max_stream_count} streams, {len(self.stream_contours[0])} levels each")
+
+    def _reorder_streams_for_correspondence(self, stream_contours, stream_bounding_planes, max_stream_count):
+        """
+        Reorder streams at each level to ensure consistent spatial correspondence.
+
+        After cutting, stream 0 at level N might spatially correspond to stream 1 at level N+1.
+        This function reorders streams at each level so that stream indices are consistent
+        across all levels based on centroid proximity.
+
+        Uses Hungarian algorithm for optimal assignment.
+        """
+        from scipy.optimize import linear_sum_assignment
+
+        num_levels = len(stream_contours[0])
+        if num_levels < 2 or max_stream_count < 2:
+            print("  No reordering needed (single stream or single level)")
+            return
+
+        # Process each level starting from level 1
+        # Level 0 is the reference - all other levels are reordered to match it
+        total_swaps = 0
+
+        for level_i in range(1, num_levels):
+            # Get centroids at previous level
+            prev_centroids = []
+            for stream_i in range(max_stream_count):
+                contour = stream_contours[stream_i][level_i - 1]
+                if len(contour) > 0:
+                    centroid = np.mean(contour, axis=0)
+                else:
+                    centroid = stream_bounding_planes[stream_i][level_i - 1]['mean']
+                prev_centroids.append(centroid)
+
+            # Get centroids at current level
+            curr_centroids = []
+            for stream_i in range(max_stream_count):
+                contour = stream_contours[stream_i][level_i]
+                if len(contour) > 0:
+                    centroid = np.mean(contour, axis=0)
+                else:
+                    centroid = stream_bounding_planes[stream_i][level_i]['mean']
+                curr_centroids.append(centroid)
+
+            # Build cost matrix: distance from each prev stream to each curr stream
+            cost_matrix = np.zeros((max_stream_count, max_stream_count))
+            for prev_i in range(max_stream_count):
+                for curr_i in range(max_stream_count):
+                    cost_matrix[prev_i, curr_i] = np.linalg.norm(
+                        prev_centroids[prev_i] - curr_centroids[curr_i]
+                    )
+
+            # Find optimal assignment
+            row_ind, col_ind = linear_sum_assignment(cost_matrix)
+
+            # Check if reordering is needed
+            needs_reorder = False
+            for prev_i, curr_i in zip(row_ind, col_ind):
+                if prev_i != curr_i:
+                    needs_reorder = True
+                    break
+
+            if needs_reorder:
+                # Create new ordering: new_order[i] = which current stream to use for new stream i
+                new_order = [0] * max_stream_count
+                for prev_i, curr_i in zip(row_ind, col_ind):
+                    new_order[prev_i] = curr_i
+
+                # Reorder by creating temporary copies to avoid overwriting issues
+                temp_contours = [stream_contours[new_order[i]][level_i] for i in range(max_stream_count)]
+                temp_bps = [stream_bounding_planes[new_order[i]][level_i] for i in range(max_stream_count)]
+
+                for stream_i in range(max_stream_count):
+                    stream_contours[stream_i][level_i] = temp_contours[stream_i]
+                    stream_bounding_planes[stream_i][level_i] = temp_bps[stream_i]
+
+                total_swaps += 1
+                print(f"  Level {level_i}: reordered streams {list(zip(row_ind, col_ind))}")
+
+        if total_swaps > 0:
+            print(f"  Reordered {total_swaps} levels for consistent stream correspondence")
+        else:
+            print("  All levels already have consistent stream ordering")
+
+        # Update instance variables
+        self.stream_contours = stream_contours
+        self.stream_bounding_planes = stream_bounding_planes
 
     def select_levels(self, error_threshold=None):
         """
