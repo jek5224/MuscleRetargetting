@@ -7307,6 +7307,24 @@ class ContourMeshMixin:
                 source_2d_list = self._manual_cut_data.get('source_2d_list', [])
                 stream_indices = self._manual_cut_data.get('stream_indices', [])
 
+                # DEBUG: Verify source_contours data at time of reading
+                print(f"[Process] === VERIFYING source_contours at time of N:1 processing ===")
+                print(f"[Process] source_contours has {len(source_contours)} entries")
+                for sci, sc in enumerate(source_contours):
+                    sc_arr = np.array(sc)
+                    sc_centroid = np.mean(sc_arr, axis=0) if len(sc_arr) > 0 else np.zeros(3)
+                    print(f"[Process]   source_contours[{sci}]: {len(sc)} verts, centroid=[{sc_centroid[0]:.4f}, {sc_centroid[1]:.4f}, {sc_centroid[2]:.4f}]")
+                    if len(sc_arr) > 0:
+                        print(f"[Process]     first vertex: [{sc_arr[0][0]:.4f}, {sc_arr[0][1]:.4f}, {sc_arr[0][2]:.4f}]")
+                # Also show current_pieces_3d for comparison (to verify they're different)
+                print(f"[Process] === COMPARING with current_pieces_3d (cut pieces) ===")
+                for pi, piece in enumerate(current_pieces_3d):
+                    piece_arr = np.array(piece)
+                    piece_centroid = np.mean(piece_arr, axis=0) if len(piece_arr) > 0 else np.zeros(3)
+                    print(f"[Process]   current_pieces_3d[{pi}]: {len(piece)} verts, centroid=[{piece_centroid[0]:.4f}, {piece_centroid[1]:.4f}, {piece_centroid[2]:.4f}]")
+                    if len(piece_arr) > 0:
+                        print(f"[Process]     first vertex: [{piece_arr[0][0]:.4f}, {piece_arr[0][1]:.4f}, {piece_arr[0][2]:.4f}]")
+
                 print(f"[Process] N:1 debug: source_labels={source_labels}, assigned_sources={assigned_sources}")
                 original_sources = [source_labels[s] if s < len(source_labels) else s for s in assigned_sources]
                 print(f"[Process] N:1 debug: computed original_sources={original_sources}")
@@ -7337,14 +7355,22 @@ class ContourMeshMixin:
                 }
                 pending_by_level[next_level].append(subcut_info)
                 print(f"[Process] N:1 queued to level {next_level}: piece {piece_idx} <- local sources {assigned_sources} (original: {original_sources})")
-                # Debug: print stored source contour and BP info
+                # Debug: print stored source contour and BP info (with centroids AND first vertices)
                 stored_source_bps = subcut_info['source_bps']
                 for ssi, ssc in enumerate(stored_source_contours):
                     orig_label = original_sources[ssi] if ssi < len(original_sources) else '?'
+                    ssc_arr = np.array(ssc)
+                    ssc_centroid = np.mean(ssc_arr, axis=0) if len(ssc_arr) > 0 else np.zeros(3)
                     print(f"[Process]   stored source[{ssi}] (orig S{orig_label}): {len(ssc)} verts")
+                    print(f"[Process]     ACTUAL centroid: [{ssc_centroid[0]:.4f}, {ssc_centroid[1]:.4f}, {ssc_centroid[2]:.4f}]")
+                    # Print first 3 vertices for verification
+                    for vi in range(min(3, len(ssc_arr))):
+                        print(f"[Process]     vertex[{vi}]: [{ssc_arr[vi][0]:.4f}, {ssc_arr[vi][1]:.4f}, {ssc_arr[vi][2]:.4f}]")
                     if ssi < len(stored_source_bps):
                         bp = stored_source_bps[ssi]
                         print(f"[Process]     source_bp mean: {bp['mean']}")
+                        centroid_to_bp = np.linalg.norm(ssc_centroid - bp['mean'])
+                        print(f"[Process]     distance centroid to bp mean: {centroid_to_bp:.6f}")
 
         self._manual_cut_data['matched_pairs'] = matched_pairs
         self._manual_cut_data['pending_subcuts_by_level'] = pending_by_level
@@ -7384,34 +7410,44 @@ class ContourMeshMixin:
         parent_context = self._manual_cut_data.get('parent_context', None)
         parent_finalized = self._manual_cut_data.get('parent_finalized_pieces', {})
 
-        # Get pieces - for sibling sub-cuts, use parent level's saved pieces
+        # IMPORTANT: Save results from COMPLETED sub-window FIRST, before getting parent's pieces
+        # The completed sub-window's pieces are in self._manual_cut_data['current_pieces_3d']
+        # We must save them to parent_finalized BEFORE overwriting with parent level's pieces
+        if parent_context is not None:
+            # Get completed sub-window's pieces (NOT parent's pieces!)
+            completed_subcut_pieces = self._manual_cut_data.get('current_pieces_3d', [])
+            prev_matched_pairs = self._manual_cut_data.get('matched_pairs', [])
+            prev_original_indices = self._manual_cut_data.get('original_source_indices', [])
+
+            print(f"[SubCut] Saving results from completed sub-window: {len(prev_matched_pairs)} matched pairs")
+            print(f"[SubCut] Completed sub-window had {len(completed_subcut_pieces)} pieces")
+
+            for p_idx, local_s_idx in prev_matched_pairs:
+                if p_idx < len(completed_subcut_pieces) and local_s_idx < len(prev_original_indices):
+                    orig_s_idx = prev_original_indices[local_s_idx]
+                    parent_finalized[orig_s_idx] = completed_subcut_pieces[p_idx]
+                    piece_verts = len(completed_subcut_pieces[p_idx]) if completed_subcut_pieces[p_idx] is not None else 0
+                    print(f"[SubCut] Saved from completed sub-cut: piece {p_idx} ({piece_verts} verts) -> original source {orig_s_idx}")
+
+            self._manual_cut_data['parent_finalized_pieces'] = parent_finalized
+
+        # Get pieces for NEW sub-cut - for sibling sub-cuts, use parent level's saved pieces
         # IMPORTANT: When opening a sibling sub-cut (e.g., 2->1 after 3->1), the current
-        # _manual_cut_data contains pieces from the completed sub-cut, not the parent level.
-        # We need to use the pieces stored in level_contexts[parent_level] instead.
+        # _manual_cut_data now contains results from the completed sub-cut.
+        # We need to use the pieces stored in level_contexts[parent_level] for the NEW sub-cut's target.
         if parent_context is not None and parent_level in level_contexts:
-            # Sibling sub-cut - use parent level's pieces
+            # Sibling sub-cut - use parent level's pieces for target lookup
             parent_level_context = level_contexts[parent_level]
             current_pieces_3d = parent_level_context.get('current_pieces_3d', [])
             current_pieces = parent_level_context.get('current_pieces', [])
-            print(f"[SubCut] Using parent level {parent_level} pieces: {len(current_pieces_3d)} 3D, {len(current_pieces)} 2D")
+            print(f"[SubCut] Using parent level {parent_level} pieces for new target: {len(current_pieces_3d)} 3D, {len(current_pieces)} 2D")
         else:
             # First sub-cut or no level context - use current data
             current_pieces_3d = self._manual_cut_data.get('current_pieces_3d', [])
             current_pieces = self._manual_cut_data.get('current_pieces', [])
 
+        # Get source data - either from parent_context (sibling sub-cuts) or current data (first sub-cut)
         if parent_context is not None:
-            # Save results from previous sub-cut before switching context
-            prev_matched_pairs = self._manual_cut_data.get('matched_pairs', [])
-            prev_original_indices = self._manual_cut_data.get('original_source_indices', [])
-
-            for p_idx, local_s_idx in prev_matched_pairs:
-                if p_idx < len(current_pieces_3d) and local_s_idx < len(prev_original_indices):
-                    orig_s_idx = prev_original_indices[local_s_idx]
-                    parent_finalized[orig_s_idx] = current_pieces_3d[p_idx]
-                    print(f"[SubCut] Saved from previous sub-cut: piece {p_idx} -> original source {orig_s_idx}")
-
-            self._manual_cut_data['parent_finalized_pieces'] = parent_finalized
-
             # Use parent context for SOURCE data only (not for pieces!)
             source_contours = parent_context['source_contours']
             source_bps = parent_context['source_bps']
@@ -7588,18 +7624,35 @@ class ContourMeshMixin:
 
         print(f"[SubCut] Opened sub-window: sources {original_source_indices} -> piece {piece_idx}")
         print(f"[SubCut] New target shape: {new_target_2d.shape}, {len(new_source_contours)} sources")
+        # Debug: print new target centroid and first 3 vertices
+        target_centroid = np.mean(new_target_3d, axis=0) if len(new_target_3d) > 0 else np.zeros(3)
+        print(f"[SubCut] New target centroid: [{target_centroid[0]:.4f}, {target_centroid[1]:.4f}, {target_centroid[2]:.4f}]")
+        for vi in range(min(3, len(new_target_3d))):
+            print(f"[SubCut]   target vertex[{vi}]: [{new_target_3d[vi][0]:.4f}, {new_target_3d[vi][1]:.4f}, {new_target_3d[vi][2]:.4f}]")
         # Debug: print source contour shapes and bounding plane info
         for sci, sc in enumerate(new_source_contours):
+            sc_arr = np.array(sc)
             label = new_source_labels[sci] if sci < len(new_source_labels) else '?'
+            sc_centroid = np.mean(sc_arr, axis=0) if len(sc_arr) > 0 else np.zeros(3)
             print(f"[SubCut] source_contour[{sci}]: {len(sc)} verts, label={label}")
+            print(f"[SubCut]   ACTUAL centroid: [{sc_centroid[0]:.4f}, {sc_centroid[1]:.4f}, {sc_centroid[2]:.4f}]")
+            # Print first 3 vertices for verification
+            for vi in range(min(3, len(sc_arr))):
+                print(f"[SubCut]     vertex[{vi}]: [{sc_arr[vi][0]:.4f}, {sc_arr[vi][1]:.4f}, {sc_arr[vi][2]:.4f}]")
             if sci < len(new_source_bps):
                 bp = new_source_bps[sci]
                 print(f"[SubCut]   source_bp[{sci}] mean: {bp['mean']}")
+                # Compare source centroid to bp mean
+                centroid_to_bp_dist = np.linalg.norm(sc_centroid - bp['mean'])
+                print(f"[SubCut]   distance centroid to bp mean: {centroid_to_bp_dist:.6f}")
                 # Check if this BP looks like target BP
                 target_bp = self._manual_cut_data.get('target_bp', {})
                 if 'mean' in target_bp:
                     dist = np.linalg.norm(bp['mean'] - target_bp['mean'])
                     print(f"[SubCut]   distance from target_bp mean: {dist:.6f}")
+                # Compare source centroid to target centroid
+                centroid_to_target_dist = np.linalg.norm(sc_centroid - target_centroid)
+                print(f"[SubCut]   distance source centroid to target centroid: {centroid_to_target_dist:.6f}")
 
     def _finalize_manual_cuts(self):
         """
@@ -8398,13 +8451,16 @@ class ContourMeshMixin:
                                     if len(cut_contours) < len(streams_for_contour):
                                         print(f"  [WARNING] MISMATCH! {len(streams_for_contour)} streams need pieces but only {len(cut_contours)} available!")
                                         print(f"  [WARNING] {len(streams_for_contour) - len(cut_contours)} streams will get FALLBACK (uncut target)")
-                                    for i, s in enumerate(streams_for_contour):
-                                        if i < len(cut_contours):
-                                            piece = cut_contours[i]
+                                    for s in streams_for_contour:
+                                        # Manual cut results are indexed by stream, not position
+                                        if s < len(cut_contours):
+                                            piece = cut_contours[s]
                                             if piece is not None:
-                                                print(f"  [BP Transform] cut_contours[{i}] ({len(piece)} verts) will go to stream {s}")
+                                                print(f"  [BP Transform] cut_contours[{s}] ({len(piece)} verts) for stream {s}")
                                             else:
-                                                print(f"  [BP Transform] cut_contours[{i}] is None! Stream {s} will get fallback")
+                                                print(f"  [BP Transform] cut_contours[{s}] is None! Stream {s} will get fallback")
+                                        else:
+                                            print(f"  [BP Transform] Stream {s} out of range (cut_contours len={len(cut_contours)})")
                                 # Don't delete - keep for potential re-runs
                             # Check old format (single target result in _manual_cut_data)
                             elif self._manual_cut_data is not None and 'cut_result' in self._manual_cut_data:
@@ -8531,50 +8587,69 @@ class ContourMeshMixin:
                             print(f"  [EXPANSION] max_stream_count: {old_max_stream_count} -> {max_stream_count}")
                             print(f"  [EXPANSION] streams_for_contour: {streams_for_contour}")
 
-                        # Greedy matching: each stream gets the closest unassigned piece
-                        used_pieces = set()
+                        # Assign cut pieces to streams
                         for stream_i in streams_for_contour:
-                            # For new streams or streams without data, use prev_level_contours
-                            if len(stream_contours[stream_i]) > 0:
-                                prev_centroid = np.mean(stream_contours[stream_i][-1], axis=0)
-                            elif stream_i < len(prev_level_contours):
-                                prev_centroid = np.mean(prev_level_contours[stream_i], axis=0)
-                            else:
-                                # Fallback: use first stream's centroid (shouldn't happen)
-                                prev_centroid = np.mean(prev_level_contours[0], axis=0)
+                            cut_contour = None
 
-                            # Find closest unused piece
-                            best_idx = None
-                            best_dist = float('inf')
-                            for idx, cut_centroid in enumerate(cut_centroids):
-                                if idx in used_pieces:
-                                    continue
-                                dist = np.linalg.norm(cut_centroid - prev_centroid)
-                                if dist < best_dist:
-                                    best_dist = dist
-                                    best_idx = idx
-
-                            # Guard: if no available piece found (more streams than pieces)
-                            if best_idx is None:
-                                print(f"  [ERROR] Level {level_i}: No cut piece for stream {stream_i}!")
-                                print(f"  [ERROR]   cut_contours has {len(cut_contours)} pieces but {len(streams_for_contour)} streams need them")
-                                print(f"  [ERROR]   This is a bug - returning to request proper cutting")
-                                # Clear the invalid result so it doesn't get reused
-                                result_key = (level_i, contour_i)
-                                if hasattr(self, '_manual_cut_results') and result_key in self._manual_cut_results:
-                                    del self._manual_cut_results[result_key]
-                                # Request manual cutting for this transition
-                                self._prepare_manual_cut_data_for_level(
-                                    muscle_name, level_i, contour_i, streams_for_contour,
-                                    target_contour, target_bp, source_contours, source_bps,
-                                    prev_level,
-                                    initial_cut_line=None,
-                                    is_common_mode=False  # Force SEPARATE mode
-                                )
-                                return  # Wait for proper cutting
+                            # For manual cut results, pieces are indexed by stream, not position
+                            if has_manual_result:
+                                if stream_i < len(cut_contours) and cut_contours[stream_i] is not None:
+                                    cut_contour = cut_contours[stream_i]
+                                    print(f"  [Direct Index] Stream {stream_i} gets cut_contours[{stream_i}] ({len(cut_contour)} verts)")
+                                else:
+                                    # Stream's piece is missing - use fallback
+                                    print(f"  [WARNING] Stream {stream_i}: no piece at cut_contours[{stream_i}], using fallback")
+                                    cut_contour = target_contour  # Fallback to uncut target
                             else:
-                                used_pieces.add(best_idx)
-                                cut_contour = cut_contours[best_idx]
+                                # Automatic cutting: use greedy centroid matching
+                                # For new streams or streams without data, use prev_level_contours
+                                if len(stream_contours[stream_i]) > 0:
+                                    prev_centroid = np.mean(stream_contours[stream_i][-1], axis=0)
+                                elif stream_i < len(prev_level_contours):
+                                    prev_centroid = np.mean(prev_level_contours[stream_i], axis=0)
+                                else:
+                                    # Fallback: use first stream's centroid (shouldn't happen)
+                                    prev_centroid = np.mean(prev_level_contours[0], axis=0)
+
+                                # Find closest unused piece
+                                if not hasattr(self, '_greedy_used_pieces'):
+                                    self._greedy_used_pieces = set()
+                                best_idx = None
+                                best_dist = float('inf')
+                                for idx, cut_centroid in enumerate(cut_centroids):
+                                    if idx in self._greedy_used_pieces:
+                                        continue
+                                    dist = np.linalg.norm(cut_centroid - prev_centroid)
+                                    if dist < best_dist:
+                                        best_dist = dist
+                                        best_idx = idx
+
+                                # Guard: if no available piece found (more streams than pieces)
+                                if best_idx is None:
+                                    print(f"  [ERROR] Level {level_i}: No cut piece for stream {stream_i}!")
+                                    print(f"  [ERROR]   cut_contours has {len(cut_contours)} pieces but {len(streams_for_contour)} streams need them")
+                                    print(f"  [ERROR]   This is a bug - returning to request proper cutting")
+                                    # Clear the invalid result so it doesn't get reused
+                                    result_key = (level_i, contour_i)
+                                    if hasattr(self, '_manual_cut_results') and result_key in self._manual_cut_results:
+                                        del self._manual_cut_results[result_key]
+                                    # Request manual cutting for this transition
+                                    self._prepare_manual_cut_data_for_level(
+                                        muscle_name, level_i, contour_i, streams_for_contour,
+                                        target_contour, target_bp, source_contours, source_bps,
+                                        prev_level,
+                                        initial_cut_line=None,
+                                        is_common_mode=False  # Force SEPARATE mode
+                                    )
+                                    self._greedy_used_pieces = set()  # Reset for next time
+                                    return  # Wait for proper cutting
+                                else:
+                                    self._greedy_used_pieces.add(best_idx)
+                                    cut_contour = cut_contours[best_idx]
+
+                            # Reset greedy tracking at end of streams_for_contour loop
+                            if stream_i == streams_for_contour[-1] and hasattr(self, '_greedy_used_pieces'):
+                                self._greedy_used_pieces = set()
 
                             # Debug: warn about small cut contours
                             if len(cut_contour) <= 5:
