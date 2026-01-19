@@ -9544,12 +9544,10 @@ class ContourMeshMixin:
                     print(f"  [BP Transform] WARNING: source {i} has nearly identical vertices (degenerate)")
                     has_degenerate = True
 
-        # If any source is degenerate, fall back to simple area-based cutting
+        # Even with degenerate sources, proceed with optimization
+        # The optimization will use centroids for degenerate sources
         if has_degenerate:
-            print(f"  [BP Transform] Falling back to area-based cutting due to degenerate sources")
-            projected_refs = [src_bp['mean'] for src_bp in source_bps]
-            cut_contours = self._cut_contour_for_streams(target_contour, target_bp, projected_refs, stream_indices)
-            return cut_contours, None
+            print(f"  [BP Transform] Proceeding with optimization despite degenerate sources")
 
         # ========== Step 1: Project target contour to 2D ==========
         target_mean = target_bp['mean']
@@ -9662,28 +9660,9 @@ class ContourMeshMixin:
 
         print(f"  [BP Transform] source areas: {[f'{a:.6f}' for a in source_areas]}")
 
-        # Compute target area for relative threshold
-        try:
-            target_poly_check = Polygon(target_2d)
-            if not target_poly_check.is_valid:
-                target_poly_check = target_poly_check.buffer(0)
-            target_area_for_threshold = target_poly_check.area
-            print(f"  [BP Transform] target area: {target_area_for_threshold:.6f}")
-        except:
-            target_area_for_threshold = 1.0
-
-        # Fall back if any source is invalid or has tiny area (relative to target)
-        # Use relative threshold: source should have at least 0.1% of target area
-        min_area_threshold = max(1e-8, target_area_for_threshold * 0.001)
-        has_tiny_area = any(a < min_area_threshold for a in source_areas)
-
-        if has_invalid or has_tiny_area:
-            reason = "invalid geometry" if has_invalid else f"tiny source areas (min needed: {min_area_threshold:.8f})"
-            print(f"  [BP Transform] Falling back to Voronoi cutting due to {reason}")
-            projected_refs = [src_bp['mean'] for src_bp in source_bps]
-            cut_contours = self._cut_contour_for_streams(target_contour, target_bp, projected_refs, stream_indices)
-            return cut_contours, None
-
+        # Always proceed with optimization - no fallback for tiny areas
+        # Replace zero/tiny areas with small positive value to avoid division issues
+        source_areas = [max(a, 1e-10) for a in source_areas]
         total_source_area = sum(source_areas)
 
         # ========== Step 3: Define optimization objective ==========
@@ -9705,11 +9684,21 @@ class ContourMeshMixin:
             if not target_poly.is_valid:
                 target_poly = target_poly.buffer(0)
             target_area = target_poly.area
-        except:
-            print("  [BP Transform] WARNING: Could not create target polygon, falling back")
-            projected_refs = [src_bp['mean'] for src_bp in source_bps]
-            cut_contours = self._cut_contour_for_streams(target_contour, target_bp, projected_refs, stream_indices)
-            return cut_contours, None
+            if target_area <= 0:
+                target_area = 1.0  # Fallback area for degenerate cases
+        except Exception as e:
+            print(f"  [BP Transform] WARNING: Target polygon issue: {e}, using convex hull")
+            from scipy.spatial import ConvexHull
+            try:
+                hull = ConvexHull(target_2d)
+                target_poly = Polygon(target_2d[hull.vertices])
+                target_area = target_poly.area
+            except:
+                # Last resort: create bounding box polygon
+                min_xy = np.min(target_2d, axis=0)
+                max_xy = np.max(target_2d, axis=0)
+                target_poly = Polygon([min_xy, [max_xy[0], min_xy[1]], max_xy, [min_xy[0], max_xy[1]]])
+                target_area = target_poly.area if target_poly.area > 0 else 1.0
 
         # First division: each source has separate transform (scale, tx, ty, theta)
         # Propagated division: all sources share the same transform (move as one rigid body)
@@ -10284,17 +10273,71 @@ class ContourMeshMixin:
             print(f"  [BP Transform] assignment by boundary line: {assignments.count(0)} to piece 0, {assignments.count(1)} to piece 1")
 
         else:
-            # For n_pieces > 2: ALWAYS use Voronoi (nearest centroid) assignment
-            # This GUARANTEES complete coverage with NO gaps - every vertex is assigned
-            # to exactly one piece based on which centroid is closest
+            # For n_pieces > 2: Use optimized polygon containment + nearest boundary
+            # The optimization has transformed source polygons to tile the target
+            from shapely.geometry import Point
 
-            # Assign each vertex to the nearest centroid (Voronoi partitioning)
+            # Build valid polygons from optimized transforms
+            piece_polygons = []
+            for piece_idx, transformed in enumerate(final_transformed):
+                if len(transformed) >= 3:
+                    try:
+                        poly = Polygon(transformed)
+                        if not poly.is_valid:
+                            poly = poly.buffer(0)
+                        if not poly.is_empty and poly.area > 0:
+                            piece_polygons.append(poly)
+                        else:
+                            piece_polygons.append(None)
+                    except:
+                        piece_polygons.append(None)
+                else:
+                    piece_polygons.append(None)
+
+            valid_count = sum(1 for p in piece_polygons if p is not None)
+            print(f"  [BP Transform] Valid optimized polygons: {valid_count}/{n_pieces}")
+
+            # Assign each vertex using optimized polygons
+            inside_count = 0
+            boundary_count = 0
+            centroid_count = 0
+
             for v_idx, v_2d in enumerate(target_2d):
-                centroid_dists = [np.linalg.norm(v_2d - c) for c in centroids]
-                assigned_piece = centroid_dists.index(min(centroid_dists))
+                pt = Point(v_2d)
+                assigned_piece = None
+
+                # First: check if inside any optimized polygon
+                for piece_idx, poly in enumerate(piece_polygons):
+                    if poly is not None and poly.contains(pt):
+                        assigned_piece = piece_idx
+                        inside_count += 1
+                        break
+
+                # Second: find nearest optimized polygon boundary
+                if assigned_piece is None:
+                    min_dist = float('inf')
+                    for piece_idx, poly in enumerate(piece_polygons):
+                        if poly is not None:
+                            try:
+                                dist = poly.exterior.distance(pt)
+                                if dist < min_dist:
+                                    min_dist = dist
+                                    assigned_piece = piece_idx
+                            except:
+                                pass
+                    if assigned_piece is not None:
+                        boundary_count += 1
+
+                # Last resort: nearest centroid
+                if assigned_piece is None:
+                    centroid_dists = [np.linalg.norm(v_2d - c) for c in centroids]
+                    assigned_piece = centroid_dists.index(min(centroid_dists))
+                    centroid_count += 1
+
                 assignments.append(assigned_piece)
 
-            print(f"  [BP Transform] Voronoi assignment (n={n_pieces}): {[assignments.count(i) for i in range(n_pieces)]}")
+            print(f"  [BP Transform] Assignment (n={n_pieces}): {inside_count} inside, {boundary_count} boundary, {centroid_count} centroid")
+            print(f"  [BP Transform] Piece distribution: {[assignments.count(i) for i in range(n_pieces)]}")
 
         # Remove islands: for 2 pieces, find the 2 best split points
         # This guarantees exactly 2 contiguous regions on a closed contour
