@@ -9005,26 +9005,14 @@ class ContourMeshMixin:
                                 ref_bp = prev_level_bps[0]  # Fallback
 
                             # Create bounding plane for cut contour using farthest vertex method
+                            # NOTE: No alignment to reference - farthest vertex direction is preserved
+                            # User can run z/x/bp smooth separately to align axes if needed
                             new_contour, new_bp = self.save_bounding_planes(
                                 cut_contour,
                                 target_bp['scalar_value'],
                                 use_independent_axes=True  # Cut pieces use their own farthest vertex pair
                             )
                             new_bp['is_cut'] = True
-
-                            # Apply continuous alignment to ref_bp for consistent corner ordering
-                            # This keeps the independent z-axis but aligns x/y for corner consistency
-                            if ref_bp is not None:
-                                new_basis_x, new_basis_y = align_basis_to_reference_continuous(
-                                    new_bp['basis_x'], new_bp['basis_y'],
-                                    ref_bp['basis_x'], new_bp['basis_z']
-                                )
-                                new_bp['basis_x'] = new_basis_x
-                                new_bp['basis_y'] = new_basis_y
-                                # Recompute bounding plane corners AND contour_match with aligned axes
-                                new_contour = self._recompute_bounding_plane_after_axis_change(
-                                    new_bp, new_contour
-                                )
 
                             stream_contours[stream_i].append(new_contour)
                             stream_bounding_planes[stream_i].append(new_bp)
