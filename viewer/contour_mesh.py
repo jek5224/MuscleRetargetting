@@ -3190,6 +3190,83 @@ class ContourMeshMixin:
 
         print("Smoothening complete")
 
+    def _recompute_bounding_plane_after_axis_change(self, bp_info, contour_points):
+        """
+        Recompute bounding plane corners after axis changes.
+
+        This must be called whenever basis_x, basis_y, or basis_z are modified
+        to maintain correct bounding plane geometry.
+
+        NOTE: Does NOT call find_contour_match - contour_match is NOT updated here.
+        The bp smoothening step will update contour_match.
+
+        Args:
+            bp_info: Bounding plane info dict with basis_x, basis_y, basis_z, mean
+            contour_points: The contour vertices (N x 3 array)
+
+        Returns:
+            contour_points unchanged (for API compatibility)
+        """
+        contour_points = np.asarray(contour_points)
+
+        basis_z = bp_info['basis_z']
+        basis_x = bp_info['basis_x']
+        mean = bp_info['mean']
+
+        # Re-orthogonalize basis_x and basis_y (same as bp smooth)
+        basis_x = basis_x / (np.linalg.norm(basis_x) + 1e-10)
+        basis_y = np.cross(basis_z, basis_x)
+        basis_y = basis_y / (np.linalg.norm(basis_y) + 1e-10)
+
+        # Project contour points to 2D using orthonormal basis
+        projected_2d = np.array([
+            [np.dot(v - mean, basis_x), np.dot(v - mean, basis_y)]
+            for v in contour_points
+        ])
+        area = compute_polygon_area(projected_2d)
+
+        # Compute bounding box
+        min_x, max_x = np.min(projected_2d[:, 0]), np.max(projected_2d[:, 0])
+        min_y, max_y = np.min(projected_2d[:, 1]), np.max(projected_2d[:, 1])
+        x_len = max_x - min_x
+        y_len = max_y - min_y
+
+        # Determine if square-like
+        ratio_threshold = 2.0
+        square_like = max(x_len, y_len) / min(x_len, y_len) < ratio_threshold if min(x_len, y_len) > 1e-10 else False
+
+        # Bounding plane corners in 2D (CCW order)
+        bounding_plane_2d = np.array([
+            [min_x, min_y], [max_x, min_y],
+            [max_x, max_y], [min_x, max_y]
+        ])
+
+        # Optimize plane position along z-axis to minimize total distance from vertices
+        z_coords = np.array([np.dot(v - mean, basis_z) for v in contour_points])
+        optimal_z_offset = np.median(z_coords)
+        optimal_mean = mean + optimal_z_offset * basis_z
+
+        # Convert to 3D using optimal_mean
+        bounding_plane = np.array([
+            optimal_mean + x * basis_x + y * basis_y for x, y in bounding_plane_2d
+        ])
+        projected_2d_3d = np.array([
+            optimal_mean + x * basis_x + y * basis_y for x, y in projected_2d
+        ])
+
+        # Update bp_info (same fields as bp smooth)
+        bp_info['basis_x'] = basis_x
+        bp_info['basis_y'] = basis_y
+        bp_info['mean'] = optimal_mean
+        bp_info['bounding_plane'] = bounding_plane
+        bp_info['projected_2d'] = projected_2d_3d
+        bp_info['area'] = area
+        bp_info['square_like'] = square_like
+
+        # NOTE: contour_match is NOT updated here - bp smooth will handle it
+
+        return contour_points
+
     def smoothen_contours_z(self):
         """
         Align z-axes consistently across all contour levels.
@@ -3269,6 +3346,11 @@ class ContourMeshMixin:
                         print(f"    Level {start_level}, contour {contour_idx}: flipping z and x (toward next)")
                         curr_bp['basis_z'] = -curr_bp['basis_z']
                         curr_bp['basis_x'] = -curr_bp['basis_x']
+                        # Recompute bounding plane and contour match
+                        new_contour = self._recompute_bounding_plane_after_axis_change(
+                            curr_bp, self.contours[start_level][contour_idx]
+                        )
+                        self.contours[start_level][contour_idx] = new_contour
 
         # Continue forward from start_level+1 to insertion
         for level_idx in range(start_level + 1, num_levels):
@@ -3289,6 +3371,11 @@ class ContourMeshMixin:
                     print(f"    Level {level_idx}, contour {contour_idx}: flipping z and x")
                     curr_bp['basis_z'] = -curr_bp['basis_z']
                     curr_bp['basis_x'] = -curr_bp['basis_x']
+                    # Recompute bounding plane and contour match
+                    new_contour = self._recompute_bounding_plane_after_axis_change(
+                        curr_bp, self.contours[level_idx][contour_idx]
+                    )
+                    self.contours[level_idx][contour_idx] = new_contour
 
         # ========== BACKWARD PASS: start_level → origin ==========
         print("  Backward pass...")
@@ -3311,6 +3398,11 @@ class ContourMeshMixin:
                     print(f"    Level {level_idx}, contour {contour_idx}: flipping z and x (align with next)")
                     curr_bp['basis_z'] = -curr_bp['basis_z']
                     curr_bp['basis_x'] = -curr_bp['basis_x']
+                    # Recompute bounding plane and contour match
+                    new_contour = self._recompute_bounding_plane_after_axis_change(
+                        curr_bp, self.contours[level_idx][contour_idx]
+                    )
+                    self.contours[level_idx][contour_idx] = new_contour
 
         # ========== Final check: ensure origin contours point toward insertion ==========
         print("  Final origin check...")
@@ -3335,6 +3427,11 @@ class ContourMeshMixin:
                         print(f"    Origin contour {contour_idx}: flipping z and x (toward insertion)")
                         curr_bp['basis_z'] = -curr_bp['basis_z']
                         curr_bp['basis_x'] = -curr_bp['basis_x']
+                        # Recompute bounding plane and contour match
+                        new_contour = self._recompute_bounding_plane_after_axis_change(
+                            curr_bp, self.contours[0][contour_idx]
+                        )
+                        self.contours[0][contour_idx] = new_contour
 
         print("  Z-axis smoothening complete")
 
@@ -3344,12 +3441,16 @@ class ContourMeshMixin:
 
         In stream mode: bounding_planes[stream][level]
         For each stream, align z from origin (level 0) toward insertion (last level).
+
+        NOTE: Bounding plane corners are NOT recomputed here - that happens in bp smoothening.
         """
         num_streams = len(self.stream_bounding_planes)
+        print(f"  Processing {num_streams} streams...")
 
         for stream_i in range(num_streams):
             bp_stream = self.stream_bounding_planes[stream_i]
             stream_len = len(bp_stream)
+            print(f"  Stream {stream_i}: {stream_len} levels")
 
             if stream_len < 2:
                 continue
@@ -3362,22 +3463,26 @@ class ContourMeshMixin:
 
             if forward_norm > 1e-10:
                 forward_dir = forward_dir / forward_norm
-                if np.dot(bp_stream[0]['basis_z'], forward_dir) < 0:
+                dot_z_forward = np.dot(bp_stream[0]['basis_z'], forward_dir)
+                print(f"    Level 0: dot(z, forward)={dot_z_forward:.4f}")
+                if dot_z_forward < 0:
                     bp_stream[0]['basis_z'] = -bp_stream[0]['basis_z']
                     bp_stream[0]['basis_x'] = -bp_stream[0]['basis_x']
-                    print(f"  Stream {stream_i}, level 0: flipped z toward insertion")
+                    print(f"    Level 0: FLIPPED z toward insertion")
 
-            # Forward pass: align z with previous level
+            # Forward pass: align z with previous level (flip if needed)
             for level in range(1, stream_len):
                 prev_z = bp_stream[level - 1]['basis_z']
                 curr_z = bp_stream[level]['basis_z']
+                dot_z = np.dot(curr_z, prev_z)
+                print(f"    Level {level}: dot(z, prev_z)={dot_z:.4f}")
 
-                if np.dot(curr_z, prev_z) < 0:
+                if dot_z < 0:
                     bp_stream[level]['basis_z'] = -bp_stream[level]['basis_z']
                     bp_stream[level]['basis_x'] = -bp_stream[level]['basis_x']
-                    print(f"  Stream {stream_i}, level {level}: flipped z to align with prev")
+                    print(f"    Level {level}: FLIPPED z (dot was {dot_z:.4f})")
 
-        # Update self.bounding_planes to reflect changes
+        # Update self.bounding_planes to reflect changes (bp corners updated in bp smooth)
         self.bounding_planes = self.stream_bounding_planes
 
         print("  Z-axis smoothening (stream mode) complete")
@@ -3446,7 +3551,11 @@ class ContourMeshMixin:
             if np.dot(curr_x, ref_x) < 0:
                 print(f"    Level {start_level}, contour {contour_idx}: flipping x and y (initial)")
                 curr_bp['basis_x'] = -curr_bp['basis_x']
-                curr_bp['basis_y'] = -curr_bp['basis_y']
+                # Recompute bounding plane and contour match
+                new_contour = self._recompute_bounding_plane_after_axis_change(
+                    curr_bp, self.contours[start_level][contour_idx]
+                )
+                self.contours[start_level][contour_idx] = new_contour
 
         # ========== FORWARD PASS: start_level+1 → insertion ==========
         print("  Forward pass...")
@@ -3467,7 +3576,11 @@ class ContourMeshMixin:
                 if np.dot(curr_x, prev_x) < 0:
                     print(f"    Level {level_idx}, contour {contour_idx}: flipping x and y")
                     curr_bp['basis_x'] = -curr_bp['basis_x']
-                    curr_bp['basis_y'] = -curr_bp['basis_y']
+                    # Recompute bounding plane and contour match
+                    new_contour = self._recompute_bounding_plane_after_axis_change(
+                        curr_bp, self.contours[level_idx][contour_idx]
+                    )
+                    self.contours[level_idx][contour_idx] = new_contour
 
         # ========== BACKWARD PASS: start_level-1 → origin ==========
         print("  Backward pass...")
@@ -3488,7 +3601,11 @@ class ContourMeshMixin:
                 if np.dot(curr_x, next_x) < 0:
                     print(f"    Level {level_idx}, contour {contour_idx}: flipping x and y")
                     curr_bp['basis_x'] = -curr_bp['basis_x']
-                    curr_bp['basis_y'] = -curr_bp['basis_y']
+                    # Recompute bounding plane and contour match
+                    new_contour = self._recompute_bounding_plane_after_axis_change(
+                        curr_bp, self.contours[level_idx][contour_idx]
+                    )
+                    self.contours[level_idx][contour_idx] = new_contour
 
         print("  X-axis smoothening complete")
 
@@ -3498,22 +3615,28 @@ class ContourMeshMixin:
 
         In stream mode: bounding_planes[stream][level]
         For each stream:
-        1. First contour: align x with (1,0,0) projected onto plane
-        2. Forward pass: align x with previous level's x
+        1. First contour: use continuous alignment to align x with (1,0,0) projected onto plane
+        2. Forward pass: use continuous alignment to align x with previous level's x
+
+        Uses align_basis_to_reference_continuous to handle 90° offsets, not just 180° flips.
+        NOTE: Bounding plane corners are NOT recomputed here - that happens in bp smoothening.
         """
         num_streams = len(self.stream_bounding_planes)
+        print(f"  Processing {num_streams} streams...")
 
         for stream_i in range(num_streams):
             bp_stream = self.stream_bounding_planes[stream_i]
             stream_len = len(bp_stream)
+            print(f"  Stream {stream_i}: {stream_len} levels")
 
             if stream_len < 1:
                 continue
 
-            # First contour: align x with (1,0,0) projected onto its plane
+            # First contour: align x with (1,0,0) projected onto its plane using continuous alignment
             first_bp = bp_stream[0]
             first_z = first_bp['basis_z']
             first_x = first_bp['basis_x']
+            first_y = first_bp['basis_y']
 
             ref_x = np.array([1.0, 0.0, 0.0])
             ref_x_proj = ref_x - np.dot(ref_x, first_z) * first_z
@@ -3521,17 +3644,27 @@ class ContourMeshMixin:
 
             if ref_x_norm > 0.1:
                 ref_x_proj = ref_x_proj / ref_x_norm
-                if np.dot(first_x, ref_x_proj) < 0:
-                    first_bp['basis_x'] = -first_bp['basis_x']
-                    first_bp['basis_y'] = -first_bp['basis_y']
-                    print(f"  Stream {stream_i}, level 0: flipped x to align with (1,0,0)")
+                dot_x_ref = np.dot(first_x, ref_x_proj)
+                print(f"    Level 0: dot(x, ref)={dot_x_ref:.4f}")
 
-            # Forward pass: align x with previous level's x
+                # Use continuous alignment to rotate x toward reference
+                new_basis_x, new_basis_y = align_basis_to_reference_continuous(
+                    first_x, first_y, ref_x_proj, first_z
+                )
+                dot_after = np.dot(new_basis_x, ref_x_proj)
+
+                if abs(dot_after - dot_x_ref) > 0.01:  # Check if alignment changed anything
+                    first_bp['basis_x'] = new_basis_x
+                    first_bp['basis_y'] = new_basis_y
+                    print(f"    Level 0: ALIGNED x (dot: {dot_x_ref:.4f} -> {dot_after:.4f})")
+
+            # Forward pass: align x with previous level's x using continuous alignment
             for level in range(1, stream_len):
                 curr_bp = bp_stream[level]
                 prev_bp = bp_stream[level - 1]
 
                 curr_x = curr_bp['basis_x']
+                curr_y = curr_bp['basis_y']
                 curr_z = curr_bp['basis_z']
                 prev_x = prev_bp['basis_x']
 
@@ -3541,12 +3674,21 @@ class ContourMeshMixin:
 
                 if prev_x_norm > 1e-10:
                     prev_x_proj = prev_x_proj / prev_x_norm
-                    if np.dot(curr_x, prev_x_proj) < 0:
-                        curr_bp['basis_x'] = -curr_bp['basis_x']
-                        curr_bp['basis_y'] = -curr_bp['basis_y']
-                        print(f"  Stream {stream_i}, level {level}: flipped x to align with prev")
+                    dot_x = np.dot(curr_x, prev_x_proj)
+                    print(f"    Level {level}: dot(x, prev_x)={dot_x:.4f}")
 
-        # Update self.bounding_planes to reflect changes
+                    # Use continuous alignment to rotate x toward previous
+                    new_basis_x, new_basis_y = align_basis_to_reference_continuous(
+                        curr_x, curr_y, prev_x_proj, curr_z
+                    )
+                    dot_after = np.dot(new_basis_x, prev_x_proj)
+
+                    if abs(dot_after - dot_x) > 0.01:  # Check if alignment changed anything
+                        curr_bp['basis_x'] = new_basis_x
+                        curr_bp['basis_y'] = new_basis_y
+                        print(f"    Level {level}: ALIGNED x (dot: {dot_x:.4f} -> {dot_after:.4f})")
+
+        # Update self.bounding_planes to reflect changes (contours unchanged, bp corners updated in bp smooth)
         self.bounding_planes = self.stream_bounding_planes
 
         print("  X-axis smoothening (stream mode) complete")
@@ -8860,7 +9002,8 @@ class ContourMeshMixin:
                             else:
                                 ref_bp = prev_level_bps[0]  # Fallback
 
-                            _, new_bp = self.save_bounding_planes(
+                            # Create bounding plane for cut contour using farthest vertex method
+                            new_contour, new_bp = self.save_bounding_planes(
                                 cut_contour,
                                 target_bp['scalar_value'],
                                 use_independent_axes=True  # Cut pieces use their own farthest vertex pair
@@ -8876,20 +9019,12 @@ class ContourMeshMixin:
                                 )
                                 new_bp['basis_x'] = new_basis_x
                                 new_bp['basis_y'] = new_basis_y
-                                # Recompute bounding plane corners with aligned axes
-                                cut_arr = np.array(cut_contour)
-                                mean = new_bp['mean']
-                                projected_2d = np.array([[np.dot(v - mean, new_basis_x), np.dot(v - mean, new_basis_y)] for v in cut_arr])
-                                min_x, max_x = np.min(projected_2d[:, 0]), np.max(projected_2d[:, 0])
-                                min_y, max_y = np.min(projected_2d[:, 1]), np.max(projected_2d[:, 1])
-                                bounding_plane_2d = np.array([
-                                    [min_x, min_y], [max_x, min_y],
-                                    [max_x, max_y], [min_x, max_y]
-                                ])
-                                new_bp['bounding_plane'] = np.array([mean + x * new_basis_x + y * new_basis_y for x, y in bounding_plane_2d])
-                                new_bp['projected_2d'] = np.array([mean + x * new_basis_x + y * new_basis_y for x, y in projected_2d])
+                                # Recompute bounding plane corners AND contour_match with aligned axes
+                                new_contour = self._recompute_bounding_plane_after_axis_change(
+                                    new_bp, new_contour
+                                )
 
-                            stream_contours[stream_i].append(cut_contour)
+                            stream_contours[stream_i].append(new_contour)
                             stream_bounding_planes[stream_i].append(new_bp)
                             # Debug: show what was appended
                             cut_centroid = np.mean(cut_contour, axis=0) if len(cut_contour) > 0 else [0,0,0]
@@ -8964,12 +9099,8 @@ class ContourMeshMixin:
                 print(f"  Stream {stream_i}: aligned {len(aligned)} levels")
         print("Stream alignment complete")
 
-        # Apply smoothening to each stream
-        print("Applying smoothening to streams...")
-        self.smoothen_contours_z()
-        self.smoothen_contours_x()
-        self.smoothen_contours_bp()
-        print("Stream smoothening complete")
+        # NOTE: z/x/bp smoothening is NOT automatically applied after cutting
+        # User should run smoothening separately using the z/x/bp buttons
 
         # Final verification
         print(f"  Final stream data: {max_stream_count} streams, {len(self.stream_contours[0])} levels each")
