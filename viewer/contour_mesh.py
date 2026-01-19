@@ -8822,6 +8822,12 @@ class ContourMeshMixin:
 
         print("Cut streams complete")
 
+        # Automatically run stream finding (select_levels + build_fibers)
+        print("Running stream finding...")
+        self.select_levels()
+        self.build_fibers()
+        print("Stream finding complete")
+
         # Automatically apply smoothening to each stream
         # This ensures one-to-one correspondence between levels is maintained
         print("Applying smoothening to streams...")
