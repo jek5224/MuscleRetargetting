@@ -3271,13 +3271,11 @@ class MuscleMeshMixin:
             # x: parallel to farthest vertex direction (projected onto plane)
             # z: Newell normal
             # y: cross(z, x)
-            print(f"  [DEBUG] save_bounding_planes: Using farthest_vertex method (use_independent_axes={use_independent_axes}, has_prev_reference={has_prev_reference})")
 
             # Step 1: Use pre-computed farthest vertex pair for x-axis direction
             if farthest_pair is not None:
                 farthest_dir = farthest_pair[1] - farthest_pair[0]
                 farthest_len = np.linalg.norm(farthest_dir)
-                print(f"  [DEBUG] Farthest vertex pair dist={farthest_len:.4f}, dir={farthest_dir[:3]}")
 
                 if farthest_len > 1e-10:
                     farthest_dir = farthest_dir / farthest_len
