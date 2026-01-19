@@ -8867,6 +8867,28 @@ class ContourMeshMixin:
                             )
                             new_bp['is_cut'] = True
 
+                            # Apply continuous alignment to ref_bp for consistent corner ordering
+                            # This keeps the independent z-axis but aligns x/y for corner consistency
+                            if ref_bp is not None:
+                                new_basis_x, new_basis_y = align_basis_to_reference_continuous(
+                                    new_bp['basis_x'], new_bp['basis_y'],
+                                    ref_bp['basis_x'], new_bp['basis_z']
+                                )
+                                new_bp['basis_x'] = new_basis_x
+                                new_bp['basis_y'] = new_basis_y
+                                # Recompute bounding plane corners with aligned axes
+                                cut_arr = np.array(cut_contour)
+                                mean = new_bp['mean']
+                                projected_2d = np.array([[np.dot(v - mean, new_basis_x), np.dot(v - mean, new_basis_y)] for v in cut_arr])
+                                min_x, max_x = np.min(projected_2d[:, 0]), np.max(projected_2d[:, 0])
+                                min_y, max_y = np.min(projected_2d[:, 1]), np.max(projected_2d[:, 1])
+                                bounding_plane_2d = np.array([
+                                    [min_x, min_y], [max_x, min_y],
+                                    [max_x, max_y], [min_x, max_y]
+                                ])
+                                new_bp['bounding_plane'] = np.array([mean + x * new_basis_x + y * new_basis_y for x, y in bounding_plane_2d])
+                                new_bp['projected_2d'] = np.array([mean + x * new_basis_x + y * new_basis_y for x, y in projected_2d])
+
                             stream_contours[stream_i].append(cut_contour)
                             stream_bounding_planes[stream_i].append(new_bp)
                             # Debug: show what was appended
