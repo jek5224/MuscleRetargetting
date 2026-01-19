@@ -7776,9 +7776,23 @@ class ContourMeshMixin:
             num_sources = len(cut_contours)
             print(f"Combined: {num_sources} total pieces")
         else:
-            for i in range(min(required_pieces, len(cut_contours))):
-                if cut_contours[i] is not None:
-                    print(f"  Source {source_indices[i] if i < len(source_indices) else i}: piece with {len(cut_contours[i])} vertices")
+            # Top-level cut (not sub-window) - remap to stream indices
+            # stream_indices has the mapping: local_idx -> stream_idx
+            stream_indices_map = self._manual_cut_data.get('stream_indices', source_indices)
+            if stream_indices_map:
+                # Create array indexed by stream index
+                max_stream_idx = max(stream_indices_map) if stream_indices_map else len(cut_contours) - 1
+                final_contours = [None] * (max_stream_idx + 1)
+                for local_idx, piece in enumerate(cut_contours):
+                    if piece is not None and local_idx < len(stream_indices_map):
+                        stream_idx = stream_indices_map[local_idx]
+                        final_contours[stream_idx] = piece
+                        print(f"  Top-level: local {local_idx} -> stream {stream_idx} ({len(piece)} vertices)")
+                cut_contours = final_contours
+            else:
+                for i in range(min(required_pieces, len(cut_contours))):
+                    if cut_contours[i] is not None:
+                        print(f"  Source {source_indices[i] if i < len(source_indices) else i}: piece with {len(cut_contours[i])} vertices")
 
         # Store the result for this target
         self._manual_cut_data['cut_result'] = cut_contours
@@ -8588,18 +8602,50 @@ class ContourMeshMixin:
                             print(f"  [EXPANSION] streams_for_contour: {streams_for_contour}")
 
                         # Assign cut pieces to streams
+                        # Build greedy matching data for fallback
+                        greedy_used_pieces = set()
+                        valid_cut_pieces = [(i, c) for i, c in enumerate(cut_contours) if c is not None]
+                        valid_cut_centroids = [(i, np.mean(c, axis=0)) for i, c in valid_cut_pieces]
+
                         for stream_i in streams_for_contour:
                             cut_contour = None
 
-                            # For manual cut results, pieces are indexed by stream, not position
+                            # For manual cut results, try direct stream indexing first
                             if has_manual_result:
                                 if stream_i < len(cut_contours) and cut_contours[stream_i] is not None:
                                     cut_contour = cut_contours[stream_i]
+                                    # Mark this piece as used for greedy fallback
+                                    greedy_used_pieces.add(stream_i)
                                     print(f"  [Direct Index] Stream {stream_i} gets cut_contours[{stream_i}] ({len(cut_contour)} verts)")
                                 else:
-                                    # Stream's piece is missing - use fallback
-                                    print(f"  [WARNING] Stream {stream_i}: no piece at cut_contours[{stream_i}], using fallback")
-                                    cut_contour = target_contour  # Fallback to uncut target
+                                    # Direct indexing failed - fall back to greedy centroid matching
+                                    print(f"  [WARNING] Stream {stream_i}: no piece at cut_contours[{stream_i}], trying greedy match")
+                                    # Get previous centroid for this stream
+                                    if len(stream_contours[stream_i]) > 0:
+                                        prev_centroid = np.mean(stream_contours[stream_i][-1], axis=0)
+                                    elif stream_i < len(prev_level_contours):
+                                        prev_centroid = np.mean(prev_level_contours[stream_i], axis=0)
+                                    else:
+                                        prev_centroid = np.mean(prev_level_contours[0], axis=0)
+
+                                    # Find closest unused piece
+                                    best_idx = None
+                                    best_dist = float('inf')
+                                    for idx, centroid in valid_cut_centroids:
+                                        if idx in greedy_used_pieces:
+                                            continue
+                                        dist = np.linalg.norm(centroid - prev_centroid)
+                                        if dist < best_dist:
+                                            best_dist = dist
+                                            best_idx = idx
+
+                                    if best_idx is not None:
+                                        greedy_used_pieces.add(best_idx)
+                                        cut_contour = cut_contours[best_idx]
+                                        print(f"  [Greedy Fallback] Stream {stream_i} gets cut_contours[{best_idx}] ({len(cut_contour)} verts)")
+                                    else:
+                                        print(f"  [ERROR] Stream {stream_i}: no available piece for greedy match, using target")
+                                        cut_contour = target_contour
                             else:
                                 # Automatic cutting: use greedy centroid matching
                                 # For new streams or streams without data, use prev_level_contours
@@ -8611,13 +8657,11 @@ class ContourMeshMixin:
                                     # Fallback: use first stream's centroid (shouldn't happen)
                                     prev_centroid = np.mean(prev_level_contours[0], axis=0)
 
-                                # Find closest unused piece
-                                if not hasattr(self, '_greedy_used_pieces'):
-                                    self._greedy_used_pieces = set()
+                                # Find closest unused piece using greedy matching
                                 best_idx = None
                                 best_dist = float('inf')
                                 for idx, cut_centroid in enumerate(cut_centroids):
-                                    if idx in self._greedy_used_pieces:
+                                    if idx in greedy_used_pieces:
                                         continue
                                     dist = np.linalg.norm(cut_centroid - prev_centroid)
                                     if dist < best_dist:
@@ -8641,15 +8685,10 @@ class ContourMeshMixin:
                                         initial_cut_line=None,
                                         is_common_mode=False  # Force SEPARATE mode
                                     )
-                                    self._greedy_used_pieces = set()  # Reset for next time
                                     return  # Wait for proper cutting
                                 else:
-                                    self._greedy_used_pieces.add(best_idx)
+                                    greedy_used_pieces.add(best_idx)
                                     cut_contour = cut_contours[best_idx]
-
-                            # Reset greedy tracking at end of streams_for_contour loop
-                            if stream_i == streams_for_contour[-1] and hasattr(self, '_greedy_used_pieces'):
-                                self._greedy_used_pieces = set()
 
                             # Debug: warn about small cut contours
                             if len(cut_contour) <= 5:
