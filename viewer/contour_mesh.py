@@ -4013,6 +4013,8 @@ class ContourMeshMixin:
 
             # ========== Step 1: Recompute farthest vertex axes for ALL contours first ==========
             # This determines square_like status based on farthest vertex bounding box
+            # Also ensures one-to-one correspondence with previous level (no flipping)
+            prev_basis_x = None
             for i in range(stream_len):
                 bp = bp_stream[i]
                 contour_points = np.asarray(self.stream_contours[stream_i][i])
@@ -4045,11 +4047,24 @@ class ContourMeshMixin:
                     new_basis_x = arbitrary - np.dot(arbitrary, basis_z) * basis_z
                     new_basis_x = new_basis_x / (np.linalg.norm(new_basis_x) + 1e-10)
 
+                # Ensure consistency with previous level (no 180° flip)
+                # This maintains one-to-one correspondence between consecutive levels
+                if prev_basis_x is not None:
+                    # Project prev_basis_x onto current plane for comparison
+                    prev_x_proj = prev_basis_x - np.dot(prev_basis_x, basis_z) * basis_z
+                    prev_x_proj_norm = np.linalg.norm(prev_x_proj)
+                    if prev_x_proj_norm > 1e-10:
+                        prev_x_proj = prev_x_proj / prev_x_proj_norm
+                        # If pointing in opposite direction, flip
+                        if np.dot(new_basis_x, prev_x_proj) < 0:
+                            new_basis_x = -new_basis_x
+
                 new_basis_y = np.cross(basis_z, new_basis_x)
                 new_basis_y = new_basis_y / (np.linalg.norm(new_basis_y) + 1e-10)
 
                 bp['basis_x'] = new_basis_x
                 bp['basis_y'] = new_basis_y
+                prev_basis_x = new_basis_x  # Store for next level comparison
 
                 # Compute square_like based on farthest vertex bounding box
                 projected_2d = np.array([
