@@ -3993,8 +3993,13 @@ class GLFWApp():
             subcut_level = obj._manual_cut_data.get('subcut_level', 0)
             need_new_recommendation = 'initial_line' not in obj._manual_cut_data
 
-            # Skip neck finding for sub-windows (subcut_level > 0 or original_source_indices set)
-            skip_neck = is_common_mode or is_subwindow or subcut_level > 0
+            # Check if target is a merge point (where separate sources converge into one)
+            target_bp = obj._manual_cut_data.get('target_bp', {})
+            is_merge_point = target_bp.get('is_merge_point', False)
+
+            # Neck finding ONLY for SEPARATE mode with merged target contour
+            # Skip for: COMMON mode, sub-windows, sub-cuts, or non-merged targets
+            skip_neck = is_common_mode or is_subwindow or subcut_level > 0 or not is_merge_point
             if need_new_recommendation and not skip_neck:
                 current_pieces = obj._manual_cut_data.get('current_pieces', [target_2d])
                 contour_range = np.max(target_2d.max(axis=0) - target_2d.min(axis=0))
