@@ -3994,72 +3994,56 @@ class ContourMeshMixin:
         Smooth bounding plane orientations for stream mode (after cutting).
 
         In stream mode: bounding_planes[stream][level]
-        For each stream, use first and last contours as anchors and interpolate
-        ALL intermediate contours by distance-based weighting.
+        For each stream, recompute ALL bounding planes using farthest vertex
+        based axis finding, then update contour_match.
         """
+        from scipy.spatial.distance import cdist
+
         num_streams = len(self.stream_bounding_planes)
 
         for stream_i in range(num_streams):
             bp_stream = self.stream_bounding_planes[stream_i]
             stream_len = len(bp_stream)
 
-            if stream_len < 2:
+            if stream_len < 1:
                 continue
 
             print(f"  Stream {stream_i}: {stream_len} levels")
 
-            # Use first (index 0) and last (index stream_len-1) as anchor references
-            first_idx = 0
-            last_idx = stream_len - 1
-
-            first_bp = bp_stream[first_idx]
-            last_bp = bp_stream[last_idx]
-
-            first_mean = first_bp['mean']
-            last_mean = last_bp['mean']
-            first_x = first_bp['basis_x']
-            last_x = last_bp['basis_x']
-
-            print(f"    Anchors: first={first_idx}, last={last_idx}")
-
-            # Interpolate ALL intermediate contours (indices 1 to stream_len-2)
+            # Process ALL contours using farthest vertex based axis finding
             smoothed_count = 0
-            for i in range(1, stream_len - 1):
+            for i in range(stream_len):
                 bp = bp_stream[i]
-                curr_mean = bp['mean']
+                contour_points = np.asarray(self.stream_contours[stream_i][i])
                 basis_z = bp['basis_z']
+                mean = bp['mean']
 
-                # Compute distances to first and last anchors
-                dist_to_first = np.linalg.norm(curr_mean - first_mean)
-                dist_to_last = np.linalg.norm(curr_mean - last_mean)
-                total_dist = dist_to_first + dist_to_last
+                # Farthest vertex based axis finding
+                if len(contour_points) > 2:
+                    dists = cdist(contour_points, contour_points)
+                    fi, fj = np.unravel_index(np.argmax(dists), dists.shape)
+                    farthest_dir = contour_points[fj] - contour_points[fi]
+                    farthest_len = np.linalg.norm(farthest_dir)
 
-                if total_dist < 1e-10:
-                    t = 0.5
+                    if farthest_len > 1e-10:
+                        farthest_dir = farthest_dir / farthest_len
+                    else:
+                        farthest_dir = bp['basis_x'].copy()
                 else:
-                    t = dist_to_first / total_dist  # 0 at first, 1 at last
+                    farthest_dir = bp['basis_x'].copy()
 
-                # Project anchor basis_x onto current plane
-                first_x_proj = first_x - np.dot(first_x, basis_z) * basis_z
-                first_x_proj = first_x_proj / (np.linalg.norm(first_x_proj) + 1e-10)
-
-                last_x_proj = last_x - np.dot(last_x, basis_z) * basis_z
-                last_x_proj = last_x_proj / (np.linalg.norm(last_x_proj) + 1e-10)
-
-                # Compute angle between first and last (on current plane)
-                cos_angle = np.clip(np.dot(first_x_proj, last_x_proj), -1, 1)
-                cross = np.cross(first_x_proj, last_x_proj)
-                sin_angle = np.dot(cross, basis_z)
-                angle = np.arctan2(sin_angle, cos_angle)
-
-                # Interpolate angle
-                interp_angle = angle * t
-
-                # Rotate first_x_proj by interp_angle around basis_z
-                cos_t = np.cos(interp_angle)
-                sin_t = np.sin(interp_angle)
-                new_basis_x = first_x_proj * cos_t + np.cross(basis_z, first_x_proj) * sin_t
-                new_basis_x = new_basis_x / (np.linalg.norm(new_basis_x) + 1e-10)
+                # Project farthest direction onto plane perpendicular to basis_z
+                new_basis_x = farthest_dir - np.dot(farthest_dir, basis_z) * basis_z
+                x_norm = np.linalg.norm(new_basis_x)
+                if x_norm > 1e-10:
+                    new_basis_x = new_basis_x / x_norm
+                else:
+                    # Farthest direction is parallel to z, use arbitrary perpendicular
+                    arbitrary = np.array([1.0, 0.0, 0.0])
+                    if abs(np.dot(arbitrary, basis_z)) > 0.9:
+                        arbitrary = np.array([0.0, 1.0, 0.0])
+                    new_basis_x = arbitrary - np.dot(arbitrary, basis_z) * basis_z
+                    new_basis_x = new_basis_x / (np.linalg.norm(new_basis_x) + 1e-10)
 
                 new_basis_y = np.cross(basis_z, new_basis_x)
                 new_basis_y = new_basis_y / (np.linalg.norm(new_basis_y) + 1e-10)
@@ -4068,28 +4052,38 @@ class ContourMeshMixin:
                 bp['basis_y'] = new_basis_y
 
                 # Recalculate bounding plane corners with new basis
-                contour_points = self.stream_contours[stream_i][i]
-                mean = bp['mean']
-
-                # Project contour to 2D with new basis
                 projected_2d = np.array([
                     [np.dot(v - mean, new_basis_x), np.dot(v - mean, new_basis_y)]
                     for v in contour_points
                 ])
+                area = compute_polygon_area(projected_2d)
 
                 min_x, max_x = np.min(projected_2d[:, 0]), np.max(projected_2d[:, 0])
                 min_y, max_y = np.min(projected_2d[:, 1]), np.max(projected_2d[:, 1])
+                x_len = max_x - min_x
+                y_len = max_y - min_y
+
+                ratio_threshold = 2.0
+                square_like = max(x_len, y_len) / min(x_len, y_len) < ratio_threshold if min(x_len, y_len) > 1e-10 else False
 
                 bounding_plane_2d = np.array([
                     [min_x, min_y], [max_x, min_y],
                     [max_x, max_y], [min_x, max_y]
                 ])
 
-                bounding_plane = np.array([mean + x * new_basis_x + y * new_basis_y for x, y in bounding_plane_2d])
-                projected_2d_3d = np.array([mean + x * new_basis_x + y * new_basis_y for x, y in projected_2d])
+                # Optimize plane position along z-axis
+                z_coords = np.array([np.dot(v - mean, basis_z) for v in contour_points])
+                optimal_z_offset = np.median(z_coords)
+                optimal_mean = mean + optimal_z_offset * basis_z
 
+                bounding_plane = np.array([optimal_mean + x * new_basis_x + y * new_basis_y for x, y in bounding_plane_2d])
+                projected_2d_3d = np.array([optimal_mean + x * new_basis_x + y * new_basis_y for x, y in projected_2d])
+
+                bp['mean'] = optimal_mean
                 bp['bounding_plane'] = bounding_plane
                 bp['projected_2d'] = projected_2d_3d
+                bp['area'] = area
+                bp['square_like'] = square_like
 
                 # Update contour_match
                 preserve = getattr(self, '_contours_normalized', False)
@@ -4098,7 +4092,7 @@ class ContourMeshMixin:
                 self.stream_contours[stream_i][i] = new_contour
                 smoothed_count += 1
 
-            print(f"    Smoothed {smoothed_count} intermediate contours (interpolated from anchors)")
+            print(f"    Recomputed {smoothed_count} contours with farthest vertex axis")
 
         # Update self.contours and self.bounding_planes to reflect changes
         self.contours = self.stream_contours
