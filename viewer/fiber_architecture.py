@@ -1722,6 +1722,35 @@ class FiberArchitectureMixin:
             if best_intersection is not None:
                 corner_intersections.append(best_intersection)
 
+        # ===== Fallback: if ray-based method fails, use distance-based =====
+        if len(corner_intersections) < 4:
+            # Ray-based method didn't find all 4 intersections
+            # Fall back to distance-based matching for missing corners
+            found_corners = set(ci[0] for ci in corner_intersections)
+            for corner_idx in range(4):
+                if corner_idx not in found_corners:
+                    # Find closest point on contour edges (original method)
+                    v = template_contour[corner_idx]
+                    min_distance = float("inf")
+                    min_edge_idx = 0
+                    min_t = 0.0
+                    for edge_idx in range(len(muscle_contour)):
+                        v0 = muscle_contour[edge_idx]
+                        v1 = muscle_contour[(edge_idx + 1) % len(muscle_contour)]
+                        edge_dir = v1 - v0
+                        edge_len_sq = np.dot(edge_dir, edge_dir)
+                        if edge_len_sq > 1e-10:
+                            t = np.clip(np.dot(v - v0, edge_dir) / edge_len_sq, 0, 1)
+                        else:
+                            t = 0
+                        closest_pt = v0 + t * edge_dir
+                        dist = np.linalg.norm(v - closest_pt)
+                        if dist < min_distance:
+                            min_distance = dist
+                            min_edge_idx = edge_idx
+                            min_t = t
+                    corner_intersections.append((corner_idx, min_edge_idx, min_t))
+
         # ===== Step 4: Insert vertices at intersections (in 3D) =====
         # First, compute all intersection 3D points and their contour positions
         intersection_data = []  # List of (corner_idx, edge_idx, t_seg, vertex_3d)
