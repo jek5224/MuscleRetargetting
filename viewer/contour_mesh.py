@@ -8822,6 +8822,15 @@ class ContourMeshMixin:
 
         print("Cut streams complete")
 
+        # Verify stream data is valid
+        print(f"  Verifying stream data: {max_stream_count} streams")
+        for stream_i in range(max_stream_count):
+            num_levels = len(self.stream_contours[stream_i])
+            print(f"    Stream {stream_i}: {num_levels} levels")
+            for level_i in range(min(num_levels, 3)):  # Show first 3 levels
+                c = self.stream_contours[stream_i][level_i]
+                print(f"      Level {level_i}: {len(c)} vertices")
+
         # Align vertices within each stream for proper fiber building
         # This ensures vertex 0 at level N connects to vertex 0 at level N+1
         print("Aligning stream contours...")
@@ -8830,6 +8839,7 @@ class ContourMeshMixin:
                 aligned = self._align_stream_contours_for_mesh(self.stream_contours[stream_i])
                 self.stream_contours[stream_i] = aligned
                 self.contours[stream_i] = aligned
+                print(f"  Stream {stream_i}: aligned {len(aligned)} levels")
         print("Stream alignment complete")
 
         # Apply smoothening to each stream
@@ -8838,6 +8848,9 @@ class ContourMeshMixin:
         self.smoothen_contours_x()
         self.smoothen_contours_bp()
         print("Stream smoothening complete")
+
+        # Final verification
+        print(f"  Final stream data: {max_stream_count} streams, {len(self.stream_contours[0])} levels each")
 
     def select_levels(self, error_threshold=None):
         """
@@ -8868,7 +8881,7 @@ class ContourMeshMixin:
         print(f"Error threshold: {error_threshold:.6f} ({error_threshold/muscle_length*100:.1f}% of muscle length)")
 
         # Minimum distance between selected levels (percentage of muscle length)
-        min_spacing_ratio = getattr(self, 'level_select_min_spacing', 0.02)  # 2% default
+        min_spacing_ratio = getattr(self, 'level_select_min_spacing', 0.05)  # 5% default
         min_spacing = min_spacing_ratio * muscle_length
         print(f"Minimum spacing: {min_spacing:.6f} ({min_spacing_ratio*100:.1f}% of muscle length)")
 
@@ -8937,7 +8950,7 @@ class ContourMeshMixin:
             return np.linalg.norm(actual_mean - interpolated)
 
         # Helper: check if a level is too close to any already-selected level
-        def is_too_close(level_i, selected_levels, stream_i=0):
+        def is_too_close(level_i, selected_levels, stream_i=0, verbose=False):
             """Check if level_i is within min_spacing of any selected level."""
             if min_spacing <= 0:
                 return False
@@ -8946,6 +8959,8 @@ class ContourMeshMixin:
                 sel_mean = self.stream_bounding_planes[stream_i][sel_level]['mean']
                 dist = np.linalg.norm(level_mean - sel_mean)
                 if dist < min_spacing:
+                    if verbose:
+                        print(f"    Level {level_i} skipped: too close to level {sel_level} (dist={dist:.4f} < {min_spacing:.4f})")
                     return True
             return False
 
@@ -9007,7 +9022,7 @@ class ContourMeshMixin:
                             if level_i < start or level_i > end:
                                 continue
                             # Skip if too close to any already-selected level
-                            if is_too_close(level_i, region_selected, stream_i=0):
+                            if is_too_close(level_i, region_selected, stream_i=0, verbose=True):
                                 continue
 
                             # Max error across all streams
@@ -9058,7 +9073,7 @@ class ContourMeshMixin:
                                 if level_i in region_selected:
                                     continue
                                 # Skip if too close to any already-selected level
-                                if is_too_close(level_i, region_selected, stream_i=stream_i):
+                                if is_too_close(level_i, region_selected, stream_i=stream_i, verbose=True):
                                     continue
 
                                 error = compute_stream_error(stream_i, level_i, prev_idx, next_idx)

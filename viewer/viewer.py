@@ -4271,6 +4271,12 @@ class GLFWApp():
                 if len(src_projected) > 0:
                     all_points_2d.append(np.array(src_projected))
 
+            # Include transformed sources from optimization in bounds (if available)
+            transformed_sources = obj._manual_cut_data.get('transformed_sources_2d', [])
+            for src_2d in transformed_sources:
+                if src_2d is not None and len(src_2d) >= 3:
+                    all_points_2d.append(np.array(src_2d))
+
             # Compute combined bounds
             all_points_combined = np.vstack(all_points_2d)
             min_xy = all_points_combined.min(axis=0)
