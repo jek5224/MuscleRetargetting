@@ -3098,21 +3098,24 @@ class MuscleMeshMixin:
         while len(contour_points) < 3:
             contour_points = np.vstack([contour_points, contour_points[-1] + [0.001, 0, 0]])
 
+        has_prev_reference = False  # Track if we have a real previous reference
         if prev_bounding_plane is not None:
             prev_basis_x = prev_bounding_plane['basis_x']
             prev_basis_y = prev_bounding_plane['basis_y']
             prev_basis_z = prev_bounding_plane['basis_z']
             prev_newell = prev_bounding_plane['newell_normal']
+            has_prev_reference = True
         elif len(self.bounding_planes) > 0:
             prev_basis_x = self.bounding_planes[-1][0]['basis_x']
             prev_basis_y = self.bounding_planes[-1][0]['basis_y']
             prev_basis_z = self.bounding_planes[-1][0]['basis_z']
             prev_newell = self.bounding_planes[-1][0]['newell_normal']
+            has_prev_reference = True
         else:
-            # No reference - compute initial z from contour normal, x/y will be determined by PCA
+            # No reference - compute initial z from contour normal, x/y will be determined later
             temp_newell = compute_newell_normal(contour_points)
             prev_basis_z = temp_newell / (np.linalg.norm(temp_newell) + 1e-10)
-            # Create arbitrary orthonormal x/y
+            # Create arbitrary orthonormal x/y (will be overridden by farthest_vertex)
             arbitrary = np.array([1, 0, 0])
             if abs(np.dot(arbitrary, prev_basis_z)) > 0.9:
                 arbitrary = np.array([0, 1, 0])
@@ -3270,11 +3273,12 @@ class MuscleMeshMixin:
             new_basis_y = np.cross(basis_z, new_basis_x)
             new_basis_y = new_basis_y / (np.linalg.norm(new_basis_y) + 1e-10)
 
-            # Step 4: Use continuous rotation alignment with previous level's basis_x
-            # This ensures smooth transitions instead of just sign flips
-            new_basis_x, new_basis_y = align_basis_to_reference_continuous(
-                new_basis_x, new_basis_y, prev_basis_x, basis_z
-            )
+            # Step 4: Only use continuous alignment if we have a real previous reference
+            # For the first contour, use farthest vertex pair direction directly
+            if has_prev_reference:
+                new_basis_x, new_basis_y = align_basis_to_reference_continuous(
+                    new_basis_x, new_basis_y, prev_basis_x, basis_z
+                )
 
             basis_x, basis_y = new_basis_x, new_basis_y
             # basis_z remains as Newell normal (already set above)
