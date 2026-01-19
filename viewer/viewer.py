@@ -1889,19 +1889,25 @@ class GLFWApp():
 
                         # Initialize process step slider value
                         if not hasattr(obj, '_process_step'):
-                            obj._process_step = 8
+                            obj._process_step = 9
 
-                        # Vertical slider for step selection (top=1, bottom=8)
-                        changed, obj._process_step = imgui.v_slider_int(
-                            f"##step{name}", 20, process_all_height, obj._process_step, 8, 1)
+                        # Vertical slider for step selection (top=1, bottom=9)
+                        # v_slider_int format: label, width, height, value, min, max
+                        # To get 1 at top and 9 at bottom, we invert: display (10 - value)
+                        display_step = 10 - obj._process_step  # Convert for display
+                        changed, new_display = imgui.v_slider_int(
+                            f"##step{name}", 20, process_all_height, display_step, 1, 9)
+                        if changed:
+                            obj._process_step = 10 - new_display  # Convert back
                         imgui.same_line()
 
-                        # Process button (Find Transitions is separate - use that button manually)
-                        step_names = ['', 'Scalar', 'Contours', 'Fill Gap', 'Smooth', 'Streams', 'Resample', 'Mesh', 'Tet']
-                        if imgui.button(f"Process\nto {obj._process_step}\n({step_names[obj._process_step]})##{name}", width=75, height=process_all_height):
+                        # Step names matching button order (1=top, 9=bottom)
+                        # 1:Scalar, 2:Contours, 3:FillGap, 4:Transitions, 5:Smooth(z/x/bp), 6:Stream(Cut/Sel/Bld), 7:Resample, 8:Mesh, 9:Tet
+                        step_names = ['', 'Scalar', 'Contours', 'Fill Gap', 'Transitions', 'Smooth', 'Stream', 'Resample', 'Mesh', 'Tet']
+                        if imgui.button(f"Process\n1 to {obj._process_step}\n({step_names[obj._process_step]})##{name}", width=75, height=process_all_height):
                             try:
                                 max_step = obj._process_step
-                                print(f"[{name}] Running pipeline to step {max_step}...")
+                                print(f"[{name}] Running pipeline steps 1 to {max_step}...")
 
                                 # Step 1: Scalar Field
                                 if max_step >= 1 and len(obj.edge_groups) > 0 and len(obj.edge_classes) > 0:
@@ -1914,42 +1920,72 @@ class GLFWApp():
                                     obj.find_contours(skeleton_meshes=self.zygote_skeleton_meshes, spacing_scale=obj.contour_spacing_scale)
                                     obj.is_draw_bounding_box = True
 
-                                # Step 3: Fill Gaps (add contours where spacing is too large)
+                                # Step 3: Fill Gaps
                                 if max_step >= 3 and obj.contours is not None and len(obj.contours) > 0:
                                     print(f"  [3/{max_step}] Filling Gaps...")
                                     obj.refine_contours(max_spacing_threshold=0.01)
 
-                                # Step 4: Smoothen Contours
-                                if max_step >= 4 and obj.contours is not None and len(obj.contours) > 0:
-                                    print(f"  [4/{max_step}] Smoothening Contours...")
-                                    obj.smoothen_contours()
+                                # Step 4: Find Transitions
+                                if max_step >= 4 and obj.scalar_field is not None:
+                                    print(f"  [4/{max_step}] Finding Transitions...")
+                                    field_min = float(obj.scalar_field.min())
+                                    field_max = float(obj.scalar_field.max())
+                                    scalar_min, scalar_max = field_min, field_max
+                                    if hasattr(obj, 'origin_contour_value') and hasattr(obj, 'insertion_contour_value'):
+                                        o_val, i_val = obj.origin_contour_value, obj.insertion_contour_value
+                                        if o_val != i_val:
+                                            proposed_min, proposed_max = min(o_val, i_val), max(o_val, i_val)
+                                            if proposed_min >= field_min and proposed_max <= field_max:
+                                                scalar_min, scalar_max = proposed_min, proposed_max
+                                    exp_origin = len(obj.contours[0]) if obj.contours and len(obj.contours) > 0 else None
+                                    exp_insertion = len(obj.contours[-1]) if obj.contours and len(obj.contours) > 0 else None
+                                    obj.find_all_transitions(scalar_min=scalar_min, scalar_max=scalar_max, num_samples=200,
+                                                            expected_origin=exp_origin, expected_insertion=exp_insertion)
+                                    if obj.contours is not None and len(obj.contours) > 0:
+                                        obj.add_transitions_to_contours()
 
-                                # Step 5: Find Streams (Select Levels + Build Streams)
-                                if max_step >= 5 and obj.contours is not None and len(obj.contours) > 0 and obj.bounding_planes is not None:
-                                    print(f"  [5/{max_step}] Finding Streams...")
-                                    obj.select_stream_levels()
-                                    obj.build_streams(skeleton_meshes=self.zygote_skeleton_meshes)
+                                # Step 5: Smooth (z, x, bp - all three)
+                                if max_step >= 5 and obj.contours is not None and len(obj.contours) > 0:
+                                    print(f"  [5/{max_step}] Smoothening (z, x, bp)...")
+                                    obj.smoothen_contours_z()
+                                    obj.smoothen_contours_x()
+                                    obj.smoothen_contours_bp()
 
-                                # Step 6: Resample Contours
+                                # Step 6: Stream (Cut, Select, Build - all three)
                                 if max_step >= 6 and obj.contours is not None and len(obj.contours) > 0 and obj.bounding_planes is not None:
-                                    print(f"  [6/{max_step}] Resampling Contours...")
+                                    print(f"  [6/{max_step}] Stream (Cut, Select, Build)...")
+                                    obj.cut_streams(cut_method=obj.cutting_method, muscle_name=name)
+                                    # Only continue if cut_streams completed (not waiting for manual cut)
+                                    if not obj._manual_cut_pending and obj._manual_cut_data is None:
+                                        if hasattr(obj, 'stream_contours') and obj.stream_contours is not None:
+                                            obj.select_levels()
+                                            obj.build_fibers(skeleton_meshes=self.zygote_skeleton_meshes)
+                                    else:
+                                        print(f"  [6/{max_step}] Waiting for manual cut - pipeline paused")
+                                        raise StopIteration("Manual cut pending")
+
+                                # Step 7: Resample Contours
+                                if max_step >= 7 and obj.contours is not None and len(obj.contours) > 0 and obj.bounding_planes is not None:
+                                    print(f"  [7/{max_step}] Resampling Contours...")
                                     obj.resample_contours(num_samples=32)
 
-                                # Step 7: Build Contour Mesh
-                                if max_step >= 7 and obj.contours is not None and len(obj.contours) > 0 and obj.draw_contour_stream is not None:
-                                    print(f"  [7/{max_step}] Building Contour Mesh...")
+                                # Step 8: Build Contour Mesh
+                                if max_step >= 8 and obj.contours is not None and len(obj.contours) > 0 and obj.draw_contour_stream is not None:
+                                    print(f"  [8/{max_step}] Building Contour Mesh...")
                                     obj.build_contour_mesh()
 
-                                # Step 8: Tetrahedralize
-                                if max_step >= 8 and obj.contour_mesh_vertices is not None:
-                                    print(f"  [8/{max_step}] Tetrahedralizing...")
+                                # Step 9: Tetrahedralize
+                                if max_step >= 9 and obj.contour_mesh_vertices is not None:
+                                    print(f"  [9/{max_step}] Tetrahedralizing...")
                                     obj.soft_body = None
                                     obj.tetrahedralize_contour_mesh()
                                     if obj.tet_vertices is not None:
                                         obj.is_draw_contours = False
                                         obj.is_draw_tet_mesh = True
 
-                                print(f"[{name}] Pipeline complete (step {max_step})!")
+                                print(f"[{name}] Pipeline complete (steps 1-{max_step})!")
+                            except StopIteration:
+                                pass  # Manual cut pending - pipeline paused gracefully
                             except Exception as e:
                                 print(f"[{name}] Pipeline error: {e}")
                                 import traceback
@@ -1997,8 +2033,8 @@ class GLFWApp():
                             else:
                                 print(f"[{name}] Prerequisites: Run 'Find Contours' first")
 
-                        # Find Transitions button - fast scan for contour count changes
-                        if colored_button(f"Find Transitions##{name}", 5, col_button_width):
+                        # Find Transitions button - fast scan for contour count changes (step 4)
+                        if colored_button(f"Find Transitions##{name}", 4, col_button_width):
                             if hasattr(obj, 'scalar_field') and obj.scalar_field is not None:
                                 try:
                                     # Use actual scalar field range
@@ -2039,9 +2075,9 @@ class GLFWApp():
                             else:
                                 print(f"[{name}] Prerequisites: Run 'Scalar Field' first")
 
-                        # Smoothen buttons: z, x, bp (3 buttons in same row)
+                        # Smoothen buttons: z, x, bp (3 buttons in same row) - step 5
                         sub_button_width = (col_button_width - 8) // 3  # 3 buttons with small margins
-                        if colored_button(f"z##{name}", 4, sub_button_width):
+                        if colored_button(f"z##{name}", 5, sub_button_width):
                             if obj.contours is not None and len(obj.contours) > 0:
                                 try:
                                     obj.smoothen_contours_z()
@@ -2050,7 +2086,7 @@ class GLFWApp():
                             else:
                                 print(f"[{name}] Prerequisites: Run 'Find Contours' first")
                         imgui.same_line(spacing=4)
-                        if colored_button(f"x##{name}", 4, sub_button_width):
+                        if colored_button(f"x##{name}", 5, sub_button_width):
                             if obj.contours is not None and len(obj.contours) > 0:
                                 try:
                                     obj.smoothen_contours_x()
@@ -2059,7 +2095,7 @@ class GLFWApp():
                             else:
                                 print(f"[{name}] Prerequisites: Run 'Find Contours' first")
                         imgui.same_line(spacing=4)
-                        if colored_button(f"bp##{name}", 4, sub_button_width):
+                        if colored_button(f"bp##{name}", 5, sub_button_width):
                             if obj.contours is not None and len(obj.contours) > 0:
                                 try:
                                     obj.smoothen_contours_bp()
@@ -2067,19 +2103,12 @@ class GLFWApp():
                                     print(f"[{name}] Smoothen BP error: {e}")
                             else:
                                 print(f"[{name}] Prerequisites: Run 'Find Contours' first")
-                        # 3-step stream building: Cut / Select / Build
+                        # Stream buttons: Cut / Select / Build (3 buttons in same row) - step 6
                         stream3_button_width = (col_button_width - 8) // 3  # 3 buttons with margins
-                        if colored_button(f"Cut##{name}", 4, stream3_button_width):
+                        if colored_button(f"Cut##{name}", 6, stream3_button_width):
                             if obj.contours is not None and len(obj.contours) > 0 and obj.bounding_planes is not None and len(obj.bounding_planes) > 0:
                                 try:
                                     obj.cut_streams(cut_method=obj.cutting_method, muscle_name=name)
-                                    # Only apply smoothening if cut_streams completed (not waiting for manual cut)
-                                    if not obj._manual_cut_pending and obj._manual_cut_data is None:
-                                        if hasattr(obj, 'stream_bounding_planes') and obj.stream_bounding_planes is not None:
-                                            print(f"[{name}] Applying smoothening...")
-                                            obj.smoothen_contours_z()
-                                            obj.smoothen_contours_x()
-                                            obj.smoothen_contours_bp()
                                 except Exception as e:
                                     import traceback
                                     print(f"[{name}] Cut Streams error: {e}")
@@ -2087,7 +2116,7 @@ class GLFWApp():
                             else:
                                 print(f"[{name}] Prerequisites: Run 'Find Contours' first")
                         imgui.same_line(spacing=4)
-                        if colored_button(f"Sel##{name}", 4, stream3_button_width):
+                        if colored_button(f"Sel##{name}", 6, stream3_button_width):
                             if hasattr(obj, 'stream_contours') and obj.stream_contours is not None:
                                 try:
                                     obj.select_levels()
@@ -2098,7 +2127,7 @@ class GLFWApp():
                             else:
                                 print(f"[{name}] Prerequisites: Run 'Cut' first")
                         imgui.same_line(spacing=4)
-                        if colored_button(f"Bld##{name}", 4, stream3_button_width):
+                        if colored_button(f"Bld##{name}", 6, stream3_button_width):
                             if hasattr(obj, 'stream_contours') and obj.stream_contours is not None:
                                 try:
                                     obj.build_fibers(skeleton_meshes=self.zygote_skeleton_meshes)
@@ -2108,7 +2137,7 @@ class GLFWApp():
                                     traceback.print_exc()
                             else:
                                 print(f"[{name}] Prerequisites: Run 'Cut' and 'Sel' first")
-                        if colored_button(f"Resample Contours##{name}", 6, col_button_width):
+                        if colored_button(f"Resample Contours##{name}", 7, col_button_width):
                             if obj.contours is not None and len(obj.contours) > 0 and obj.bounding_planes is not None:
                                 try:
                                     obj.resample_contours(num_samples=32)
@@ -2116,17 +2145,17 @@ class GLFWApp():
                                     print(f"[{name}] Resample Contours error: {e}")
                             else:
                                 print(f"[{name}] Prerequisites: Run 'Smoothen Contours' first")
-                        if colored_button(f"Build Contour Mesh##{name}", 7, col_button_width):
+                        if colored_button(f"Build Contour Mesh##{name}", 8, col_button_width):
                             if obj.contours is not None and len(obj.contours) > 0 and obj.draw_contour_stream is not None:
                                 try:
                                     obj.build_contour_mesh()
                                 except Exception as e:
                                     print(f"[{name}] Build Contour Mesh error: {e}")
                             else:
-                                print(f"[{name}] Prerequisites: Run 'Find Streams' first")
+                                print(f"[{name}] Prerequisites: Run 'Stream' first")
 
                         # Tetrahedralization for soft body simulation
-                        if colored_button(f"Tetrahedralize##{name}", 8, col_button_width):
+                        if colored_button(f"Tetrahedralize##{name}", 9, col_button_width):
                             if obj.contour_mesh_vertices is not None:
                                 try:
                                     obj.soft_body = None  # Reset soft body when re-tetrahedralizing
