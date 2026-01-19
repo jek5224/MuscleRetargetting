@@ -3282,13 +3282,8 @@ class ContourMeshMixin:
                 curr_bp = self.bounding_planes[level_idx][contour_idx]
                 curr_z = curr_bp['basis_z']
 
-                # Find corresponding previous contour
-                if curr_count == prev_count:
-                    # One-to-one correspondence by index
-                    prev_idx = contour_idx
-                else:
-                    # Different counts: find closest
-                    prev_idx = find_closest_contour(curr_bp, prev_level)
+                # Find corresponding previous contour (always use distance-based matching)
+                prev_idx = find_closest_contour(curr_bp, prev_level)
 
                 prev_z = self.bounding_planes[prev_level][prev_idx]['basis_z']
 
@@ -3304,19 +3299,13 @@ class ContourMeshMixin:
         for level_idx in range(start_level - 1, -1, -1):
             next_level = level_idx + 1  # "next" in backward = toward insertion
             curr_count = contour_counts[level_idx]
-            next_count = contour_counts[next_level]
 
             for contour_idx in range(curr_count):
                 curr_bp = self.bounding_planes[level_idx][contour_idx]
                 curr_z = curr_bp['basis_z']
 
-                # Find corresponding next contour (toward insertion)
-                if curr_count == next_count:
-                    # One-to-one correspondence by index
-                    next_idx = contour_idx
-                else:
-                    # Different counts: find closest
-                    next_idx = find_closest_contour(curr_bp, next_level)
+                # Find corresponding next contour (always use distance-based matching)
+                next_idx = find_closest_contour(curr_bp, next_level)
 
                 next_z = self.bounding_planes[next_level][next_idx]['basis_z']
 
@@ -3467,19 +3456,13 @@ class ContourMeshMixin:
         for level_idx in range(start_level + 1, num_levels):
             prev_level = level_idx - 1
             curr_count = contour_counts[level_idx]
-            prev_count = contour_counts[prev_level]
 
             for contour_idx in range(curr_count):
                 curr_bp = self.bounding_planes[level_idx][contour_idx]
                 curr_x = curr_bp['basis_x']
 
-                # Find corresponding previous contour
-                if curr_count == prev_count:
-                    # One-to-one correspondence by index
-                    prev_idx = contour_idx
-                else:
-                    # Different counts: find closest
-                    prev_idx = find_closest_contour(curr_bp, prev_level)
+                # Find corresponding previous contour (always use distance-based matching)
+                prev_idx = find_closest_contour(curr_bp, prev_level)
 
                 prev_x = self.bounding_planes[prev_level][prev_idx]['basis_x']
 
@@ -3494,19 +3477,13 @@ class ContourMeshMixin:
         for level_idx in range(start_level - 1, -1, -1):
             next_level = level_idx + 1  # "next" in backward = toward insertion
             curr_count = contour_counts[level_idx]
-            next_count = contour_counts[next_level]
 
             for contour_idx in range(curr_count):
                 curr_bp = self.bounding_planes[level_idx][contour_idx]
                 curr_x = curr_bp['basis_x']
 
-                # Find corresponding next contour (toward insertion)
-                if curr_count == next_count:
-                    # One-to-one correspondence by index
-                    next_idx = contour_idx
-                else:
-                    # Different counts: find closest
-                    next_idx = find_closest_contour(curr_bp, next_level)
+                # Find corresponding next contour (always use distance-based matching)
+                next_idx = find_closest_contour(curr_bp, next_level)
 
                 next_x = self.bounding_planes[next_level][next_idx]['basis_x']
 
