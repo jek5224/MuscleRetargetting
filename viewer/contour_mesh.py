@@ -7427,7 +7427,9 @@ class ContourMeshMixin:
                     orig_s_idx = prev_original_indices[local_s_idx]
                     parent_finalized[orig_s_idx] = completed_subcut_pieces[p_idx]
                     piece_verts = len(completed_subcut_pieces[p_idx]) if completed_subcut_pieces[p_idx] is not None else 0
-                    print(f"[SubCut] Saved from completed sub-cut: piece {p_idx} ({piece_verts} verts) -> original source {orig_s_idx}")
+                    piece_id = id(completed_subcut_pieces[p_idx]) if completed_subcut_pieces[p_idx] is not None else 0
+                    piece_centroid = np.mean(completed_subcut_pieces[p_idx], axis=0) if completed_subcut_pieces[p_idx] is not None and len(completed_subcut_pieces[p_idx]) > 0 else [0,0,0]
+                    print(f"[SubCut] Saved from completed sub-cut: piece {p_idx} ({piece_verts} verts, id={piece_id}, centroid={piece_centroid}) -> original source {orig_s_idx}")
 
             self._manual_cut_data['parent_finalized_pieces'] = parent_finalized
 
@@ -7759,26 +7761,50 @@ class ContourMeshMixin:
             print(f"[Finalize] Using total_original_sources={total_original_sources} (from max stream index)")
 
             # Fill in parent's finalized pieces
+            print(f"[Finalize DEBUG] Sub-window: filling from parent_finalized_pieces ({len(parent_finalized_pieces)} entries)")
             for orig_src_idx, piece in parent_finalized_pieces.items():
                 if orig_src_idx < total_original_sources:
                     final_contours[orig_src_idx] = piece
-                    print(f"  Parent context: source {orig_src_idx}")
+                piece_id = id(piece) if piece is not None else 0
+                piece_verts = len(piece) if piece is not None else 0
+                piece_centroid = np.mean(piece, axis=0) if piece is not None and len(piece) > 0 else [0,0,0]
+                print(f"  Parent context: source {orig_src_idx}: {piece_verts} verts, id={piece_id}, centroid={piece_centroid}")
 
             # Fill in current context pieces (mapped to original indices)
+            print(f"[Finalize DEBUG] Sub-window: filling from cut_contours ({len(cut_contours)} entries), original_source_indices={original_source_indices}")
             for local_idx, piece in enumerate(cut_contours):
                 if piece is not None and local_idx < len(original_source_indices):
                     orig_src_idx = original_source_indices[local_idx]
                     if orig_src_idx < total_original_sources:
                         final_contours[orig_src_idx] = piece
-                        print(f"  Sub-window: local {local_idx} -> original source {orig_src_idx}")
+                    piece_id = id(piece)
+                    piece_verts = len(piece)
+                    piece_centroid = np.mean(piece, axis=0) if len(piece) > 0 else [0,0,0]
+                    print(f"  Sub-window: local {local_idx} -> original source {orig_src_idx}: {piece_verts} verts, id={piece_id}, centroid={piece_centroid}")
 
             cut_contours = final_contours
             num_sources = len(cut_contours)
-            print(f"Combined: {num_sources} total pieces")
+            print(f"[Finalize DEBUG] Combined final_contours: {num_sources} total entries")
+            for ci, cc in enumerate(cut_contours):
+                if cc is not None:
+                    print(f"  final_contours[{ci}]: {len(cc)} verts, id={id(cc)}")
+                else:
+                    print(f"  final_contours[{ci}]: None")
         else:
             # Top-level cut (not sub-window) - remap to stream indices
             # stream_indices has the mapping: local_idx -> stream_idx
             stream_indices_map = self._manual_cut_data.get('stream_indices', source_indices)
+            print(f"[Finalize DEBUG] Top-level cut remapping:")
+            print(f"[Finalize DEBUG]   stream_indices_map = {stream_indices_map}")
+            print(f"[Finalize DEBUG]   cut_contours BEFORE remap: {len(cut_contours)} entries")
+            for ci, cc in enumerate(cut_contours):
+                if cc is not None:
+                    cc_id = id(cc)
+                    cc_centroid = np.mean(cc, axis=0) if len(cc) > 0 else [0,0,0]
+                    print(f"[Finalize DEBUG]     cut_contours[{ci}]: {len(cc)} verts, id={cc_id}, centroid={cc_centroid}")
+                else:
+                    print(f"[Finalize DEBUG]     cut_contours[{ci}]: None")
+
             if stream_indices_map:
                 # Create array indexed by stream index
                 max_stream_idx = max(stream_indices_map) if stream_indices_map else len(cut_contours) - 1
@@ -7787,8 +7813,15 @@ class ContourMeshMixin:
                     if piece is not None and local_idx < len(stream_indices_map):
                         stream_idx = stream_indices_map[local_idx]
                         final_contours[stream_idx] = piece
-                        print(f"  Top-level: local {local_idx} -> stream {stream_idx} ({len(piece)} vertices)")
+                        print(f"  Top-level: local {local_idx} -> stream {stream_idx} ({len(piece)} vertices, id={id(piece)})")
                 cut_contours = final_contours
+
+                print(f"[Finalize DEBUG]   cut_contours AFTER remap: {len(cut_contours)} entries")
+                for ci, cc in enumerate(cut_contours):
+                    if cc is not None:
+                        print(f"[Finalize DEBUG]     cut_contours[{ci}]: {len(cc)} verts, id={id(cc)}")
+                    else:
+                        print(f"[Finalize DEBUG]     cut_contours[{ci}]: None")
             else:
                 for i in range(min(required_pieces, len(cut_contours))):
                     if cut_contours[i] is not None:
@@ -8169,6 +8202,19 @@ class ContourMeshMixin:
                 prev_level_contours = [stream_contours[s][-1].copy() if hasattr(stream_contours[s][-1], 'copy') else np.array(stream_contours[s][-1]) for s in range(max_stream_count)]
                 prev_level_bps = [stream_bounding_planes[s][-1].copy() for s in range(max_stream_count)]
 
+                # Debug: show prev_level_contours state to detect duplicates
+                print(f"[prev_level_contours DEBUG] Level {level_i}: building from {max_stream_count} streams")
+                seen_centroids = {}
+                for s in range(max_stream_count):
+                    c = prev_level_contours[s]
+                    c_verts = len(c)
+                    c_centroid = tuple(np.round(np.mean(c, axis=0), 6)) if len(c) > 0 else (0,0,0)
+                    c_id = id(stream_contours[s][-1])  # Original object ID before copy
+                    print(f"  stream[{s}]: {c_verts} verts, centroid={c_centroid}, orig_id={c_id}")
+                    if c_centroid in seen_centroids:
+                        print(f"  *** DUPLICATE DETECTED: stream[{s}] has same centroid as stream[{seen_centroids[c_centroid]}]!")
+                    seen_centroids[c_centroid] = s
+
                 # Debug: show prev level info
                 # Check actual scalar values to verify source level
                 prev_scalars = [bp.get('scalar_value', 'unknown') for bp in prev_level_bps[:3]]
@@ -8439,6 +8485,17 @@ class ContourMeshMixin:
                                 cutting_info = None
                                 has_manual_result = True
 
+                                # Debug: show what we retrieved
+                                print(f"[BP Transform DEBUG] Retrieved cut_contours from result_key {result_key}:")
+                                for ci, cc in enumerate(cut_contours):
+                                    if cc is not None:
+                                        cc_id = id(cc)
+                                        cc_verts = len(cc)
+                                        cc_centroid = np.mean(cc, axis=0) if len(cc) > 0 else [0,0,0]
+                                        print(f"  cut_contours[{ci}]: {cc_verts} verts, id={cc_id}, centroid={cc_centroid}")
+                                    else:
+                                        print(f"  cut_contours[{ci}]: None")
+
                                 # Check if this is a 1:1 mapping (user deselected sources)
                                 is_1to1 = result.get('is_1to1', False)
                                 result_source_indices = result.get('source_indices', [])
@@ -8536,20 +8593,24 @@ class ContourMeshMixin:
 
                         # Assign cut pieces to streams by distance matching
                         # For each stream, find the cut piece closest to its previous contour
-                        # Filter out None entries from cut_contours
+                        # NOTE: For manual cut results, cut_contours is indexed by STREAM INDEX
+                        # (e.g., cut_contours[3] is the piece for stream 3)
+                        # We must NOT compact it or we'll lose the stream mapping!
                         valid_cut_indices = [i for i, c in enumerate(cut_contours) if c is not None]
                         valid_cut_contours = [cut_contours[i] for i in valid_cut_indices]
-                        if len(valid_cut_contours) < len(cut_contours):
-                            print(f"  [WARNING] cut_contours has {len(cut_contours) - len(valid_cut_contours)} None entries, using {len(valid_cut_contours)} valid pieces")
-                            cut_contours = valid_cut_contours
-                        cut_centroids = [np.mean(c, axis=0) for c in cut_contours]
+                        num_valid_pieces = len(valid_cut_contours)
+                        if num_valid_pieces < len(cut_contours):
+                            print(f"  [WARNING] cut_contours has {len(cut_contours) - num_valid_pieces} None entries, using {num_valid_pieces} valid pieces")
+                            # DON'T reassign cut_contours! It's indexed by stream for manual results.
+                            # Only use valid_cut_contours for centroids/counting, NOT for direct indexing.
+                        cut_centroids = [np.mean(c, axis=0) for c in valid_cut_contours]
                         prev_centroids = [np.mean(stream_contours[s][-1], axis=0) for s in streams_for_contour]
 
                         # Handle case where cutting produced more pieces than current streams
                         # This happens in COMMON mode when user cuts aggressively
-                        if len(cut_contours) > len(streams_for_contour):
-                            extra_pieces = len(cut_contours) - len(streams_for_contour)
-                            print(f"  [EXPANSION] Cut produced {len(cut_contours)} pieces but only {len(streams_for_contour)} streams")
+                        if num_valid_pieces > len(streams_for_contour):
+                            extra_pieces = num_valid_pieces - len(streams_for_contour)
+                            print(f"  [EXPANSION] Cut produced {num_valid_pieces} pieces but only {len(streams_for_contour)} streams")
                             print(f"  [EXPANSION] Creating {extra_pieces} new streams to accommodate all pieces")
 
                             # Create new stream indices
@@ -8602,6 +8663,7 @@ class ContourMeshMixin:
                             print(f"  [EXPANSION] streams_for_contour: {streams_for_contour}")
 
                         # Assign cut pieces to streams
+                        print(f"[BP Transform DEBUG] Assigning pieces to streams_for_contour={streams_for_contour}")
                         # Build greedy matching data for fallback
                         greedy_used_pieces = set()
                         valid_cut_pieces = [(i, c) for i, c in enumerate(cut_contours) if c is not None]
@@ -8713,6 +8775,8 @@ class ContourMeshMixin:
                             stream_contours[stream_i].append(cut_contour)
                             stream_bounding_planes[stream_i].append(new_bp)
                             # Debug: show what was appended
+                            cut_centroid = np.mean(cut_contour, axis=0) if len(cut_contour) > 0 else [0,0,0]
+                            print(f"  [APPEND] stream_contours[{stream_i}] <- {len(cut_contour)} verts, id={id(cut_contour)}, centroid={cut_centroid}")
 
                 # Debug: show state after processing this level's cuts
                 for s in range(min(max_stream_count, 2)):

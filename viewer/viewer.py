@@ -4685,6 +4685,19 @@ class GLFWApp():
                     src_basis_x = src_bp['basis_x']
                     src_basis_y = src_bp['basis_y']
 
+                    # Debug: print rendering data info (once per change)
+                    render_debug_key = (src_idx, len(src_contour_3d), id(src_contour_3d))
+                    if not hasattr(obj, '_render_debug_key') or obj._render_debug_key != render_debug_key:
+                        src_contour_arr = np.array(src_contour_3d)
+                        actual_centroid = np.mean(src_contour_arr, axis=0) if len(src_contour_arr) > 0 else np.zeros(3)
+                        print(f"[RENDER DEBUG] source[{src_idx}]: {len(src_contour_3d)} verts")
+                        print(f"[RENDER DEBUG]   actual centroid: [{actual_centroid[0]:.4f}, {actual_centroid[1]:.4f}, {actual_centroid[2]:.4f}]")
+                        print(f"[RENDER DEBUG]   src_bp mean: [{src_mean[0]:.4f}, {src_mean[1]:.4f}, {src_mean[2]:.4f}]")
+                        # Print first 3 vertices for verification
+                        for vi in range(min(3, len(src_contour_arr))):
+                            print(f"[RENDER DEBUG]     vertex[{vi}]: [{src_contour_arr[vi][0]:.4f}, {src_contour_arr[vi][1]:.4f}, {src_contour_arr[vi][2]:.4f}]")
+                        obj._render_debug_key = render_debug_key
+
                     # Project to 2D
                     src_2d = []
                     for pt in src_contour_3d:
@@ -5136,9 +5149,14 @@ class GLFWApp():
                         print(f"[Accept] Using total_pieces={total_pieces} (from max stream index)")
 
                         # Fill in parent's finalized pieces (1:1 assignments from parent)
+                        print(f"[Accept DEBUG] parent_finalized_pieces has {len(parent_finalized_pieces)} entries:")
                         for orig_src_idx, piece in parent_finalized_pieces.items():
                             if orig_src_idx < total_pieces:
                                 all_pieces[orig_src_idx] = piece
+                            piece_id = id(piece) if piece is not None else 0
+                            piece_verts = len(piece) if piece is not None else 0
+                            piece_centroid = np.mean(piece, axis=0) if piece is not None and len(piece) > 0 else [0,0,0]
+                            print(f"[Accept DEBUG]   parent_finalized[{orig_src_idx}]: {piece_verts} verts, id={piece_id}, centroid={piece_centroid}")
 
                         # Fill in pre-matched pieces (mapped to original indices)
                         matched_piece_indices = set()
@@ -5203,9 +5221,12 @@ class GLFWApp():
                     # Get actual required count from parent context's stream indices
                     required_pieces = len(all_stream_indices_for_size) if original_source_indices and all_stream_indices_for_size else len(all_pieces)
                     print(f"[Accept] Filled {filled_count}/{required_pieces} pieces (array size {len(all_pieces)}): matched={len(matched_pairs)}, unmatched={len(unmatched_pieces)}")
+                    print(f"[Accept DEBUG] Final all_pieces state:")
                     for i, p in enumerate(all_pieces):
                         if p is not None:
-                            print(f"  all_pieces[{i}]: {len(p)} verts")
+                            p_id = id(p)
+                            p_centroid = np.mean(p, axis=0) if len(p) > 0 else [0,0,0]
+                            print(f"  all_pieces[{i}]: {len(p)} verts, id={p_id}, centroid={p_centroid}")
                         else:
                             print(f"  all_pieces[{i}]: None")
 
