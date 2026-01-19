@@ -3153,6 +3153,15 @@ class MuscleMeshMixin:
 
         basis_z = newell_normal
 
+        # Compute farthest vertex pair in 3D for all methods
+        # This information is useful for visualization regardless of which method is used
+        from scipy.spatial.distance import cdist
+        farthest_pair = None
+        if len(contour_points) > 2:
+            dists = cdist(contour_points, contour_points)
+            i, j = np.unravel_index(np.argmax(dists), dists.shape)
+            farthest_pair = (contour_points[i].copy(), contour_points[j].copy())
+
         # Get bounding box method
         bbox_method = getattr(self, 'bounding_box_method', 'farthest_vertex')
 
@@ -3262,17 +3271,14 @@ class MuscleMeshMixin:
             # Use Newell normal as z-axis (already computed as basis_z above)
             # Use continuous alignment with previous level's basis_x for smooth transitions
             from .contour_mesh import align_basis_to_reference_continuous
-            from scipy.spatial.distance import cdist
 
             print(f"  [DEBUG] save_bounding_planes: Using farthest_vertex method (use_independent_axes={use_independent_axes}, has_prev_reference={has_prev_reference})")
 
-            # Step 1: Find farthest vertex pair in 3D for initial x-axis guess
-            if len(contour_points) > 2:
-                dists = cdist(contour_points, contour_points)
-                i, j = np.unravel_index(np.argmax(dists), dists.shape)
-                farthest_dir = contour_points[j] - contour_points[i]
+            # Step 1: Use pre-computed farthest vertex pair for initial x-axis guess
+            if farthest_pair is not None:
+                farthest_dir = farthest_pair[1] - farthest_pair[0]
                 farthest_len = np.linalg.norm(farthest_dir)
-                print(f"  [DEBUG] Farthest vertex pair: i={i}, j={j}, dist={np.max(dists):.4f}, dir={farthest_dir[:3]}")
+                print(f"  [DEBUG] Farthest vertex pair dist={farthest_len:.4f}, dir={farthest_dir[:3]}")
 
                 if farthest_len > 1e-10:
                     farthest_dir = farthest_dir / farthest_len
@@ -3378,6 +3384,7 @@ class MuscleMeshMixin:
             'scalar_value': scalar_value,
             'square_like': square_like,
             'newell_normal': newell_normal,
+            'farthest_pair': farthest_pair,  # 3D vertex pair used for x-axis
         }
 
     def _trim_independent_section(self, contours, bounding_planes, max_spacing_threshold):

@@ -660,6 +660,25 @@ class ContourMeshMixin:
                         glEnd()
                         glLineWidth(1.0)
 
+                        # Draw farthest vertex pair - cyan line with magenta endpoints
+                        if 'farthest_pair' in bp_info and bp_info['farthest_pair'] is not None:
+                            fp = bp_info['farthest_pair']
+                            glLineWidth(3.0)
+                            glColor3f(0.0, 1.0, 1.0)  # Cyan line
+                            glBegin(GL_LINES)
+                            glVertex3fv(fp[0])
+                            glVertex3fv(fp[1])
+                            glEnd()
+                            # Magenta endpoints
+                            glPointSize(10)
+                            glColor3f(1.0, 0.0, 1.0)
+                            glBegin(GL_POINTS)
+                            glVertex3fv(fp[0])
+                            glVertex3fv(fp[1])
+                            glEnd()
+                            glLineWidth(1.0)
+                            glPointSize(5)
+
         if self.is_draw_discarded and self.contours_discarded is not None:
             t = 0.1
             color = np.array([0, 0, 0, t])
