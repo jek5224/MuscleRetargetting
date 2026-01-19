@@ -3235,11 +3235,11 @@ class MuscleMeshMixin:
 
         elif bbox_method == 'farthest_vertex':
             # Use Newell normal as z-axis (already computed as basis_z above)
-            # Find farthest vertex pair to determine x-axis direction
-
+            # Use continuous alignment with previous level's basis_x for smooth transitions
+            from .contour_mesh import align_basis_to_reference_continuous
             from scipy.spatial.distance import cdist
 
-            # Step 1: Find farthest vertex pair in 3D
+            # Step 1: Find farthest vertex pair in 3D for initial x-axis guess
             if len(contour_points) > 2:
                 dists = cdist(contour_points, contour_points)
                 i, j = np.unravel_index(np.argmax(dists), dists.shape)
@@ -3254,7 +3254,6 @@ class MuscleMeshMixin:
                 farthest_dir = prev_basis_x.copy()
 
             # Step 2: Project farthest direction onto plane perpendicular to basis_z (Newell normal)
-            # This gives us basis_x in the contour plane
             new_basis_x = farthest_dir - np.dot(farthest_dir, basis_z) * basis_z
             x_norm = np.linalg.norm(new_basis_x)
             if x_norm > 1e-10:
@@ -3267,19 +3266,15 @@ class MuscleMeshMixin:
                 new_basis_x = arbitrary - np.dot(arbitrary, basis_z) * basis_z
                 new_basis_x = new_basis_x / (np.linalg.norm(new_basis_x) + 1e-10)
 
-            # Step 3: Compute basis_y = cross(basis_z, basis_x)
+            # Step 3: Compute initial basis_y
             new_basis_y = np.cross(basis_z, new_basis_x)
             new_basis_y = new_basis_y / (np.linalg.norm(new_basis_y) + 1e-10)
 
-            # Align basis_x with previous orientation (sign flip only)
-            proj_prev_x = prev_basis_x - np.dot(prev_basis_x, basis_z) * basis_z
-            proj_norm = np.linalg.norm(proj_prev_x)
-            if proj_norm > 1e-6:
-                proj_prev_x = proj_prev_x / proj_norm
-                if np.dot(new_basis_x, proj_prev_x) < 0:
-                    new_basis_x = -new_basis_x
-                    new_basis_y = np.cross(basis_z, new_basis_x)
-                    new_basis_y = new_basis_y / (np.linalg.norm(new_basis_y) + 1e-10)
+            # Step 4: Use continuous rotation alignment with previous level's basis_x
+            # This ensures smooth transitions instead of just sign flips
+            new_basis_x, new_basis_y = align_basis_to_reference_continuous(
+                new_basis_x, new_basis_y, prev_basis_x, basis_z
+            )
 
             basis_x, basis_y = new_basis_x, new_basis_y
             # basis_z remains as Newell normal (already set above)
