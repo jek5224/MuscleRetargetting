@@ -4386,6 +4386,27 @@ class GLFWApp():
                                           imgui.get_color_u32_rgba(1.0, 1.0, 1.0, 1.0),
                                           f"Target (Lv.{target_level})")
 
+            # Draw transformed source contours after optimization (semi-transparent dashed outline)
+            transformed_sources = obj._manual_cut_data.get('transformed_sources_2d', [])
+            if len(transformed_sources) > 0:
+                for src_idx, src_2d in enumerate(transformed_sources):
+                    if src_2d is not None and len(src_2d) >= 3:
+                        src_color = piece_colors[src_idx % len(piece_colors)]
+                        # Draw as dashed lines (semi-transparent)
+                        for i in range(len(src_2d)):
+                            p1 = to_screen(src_2d[i], x0, y0, canvas_size)
+                            p2 = to_screen(src_2d[(i + 1) % len(src_2d)], x0, y0, canvas_size)
+                            # Draw every other segment for dashed effect
+                            if i % 2 == 0:
+                                draw_list.add_line(p1[0], p1[1], p2[0], p2[1],
+                                                  imgui.get_color_u32_rgba(*src_color, 0.5), 1.5)
+                        # Draw centroid marker with S label
+                        src_centroid = np.mean(src_2d, axis=0)
+                        scx, scy = to_screen(src_centroid, x0, y0, canvas_size)
+                        draw_list.add_circle(scx, scy, 8, imgui.get_color_u32_rgba(*src_color, 0.7), thickness=2.0)
+                        draw_list.add_text(scx - 5, scy - 6,
+                                          imgui.get_color_u32_rgba(*src_color, 0.9), f"S{src_idx}")
+
             # Draw all neck candidates (faded) and highlight selected one
             candidates = obj._manual_cut_data.get('neck_candidates', [])
             selected_neck_idx = obj._manual_cut_data.get('selected_neck_idx', 0)
@@ -4699,14 +4720,33 @@ class GLFWApp():
                             print(f"[RENDER DEBUG]     vertex[{vi}]: [{src_contour_arr[vi][0]:.4f}, {src_contour_arr[vi][1]:.4f}, {src_contour_arr[vi][2]:.4f}]")
                         obj._render_debug_key = render_debug_key
 
-                    # Project to 2D
-                    src_2d = []
-                    for pt in src_contour_3d:
-                        diff = pt - src_mean
-                        x = np.dot(diff, src_basis_x)
-                        y = np.dot(diff, src_basis_y)
-                        src_2d.append([x, y])
-                    src_2d = np.array(src_2d)
+                    # Project to 2D using TARGET's basis for consistent rotation with cutting panel
+                    target_bp_for_src = obj._manual_cut_data.get('target_bp')
+                    if target_bp_for_src is not None:
+                        tgt_mean = target_bp_for_src['mean']
+                        tgt_basis_x = target_bp_for_src['basis_x']
+                        tgt_basis_y = target_bp_for_src['basis_y']
+                        tgt_basis_z = target_bp_for_src['basis_z']
+                        # Project source onto target plane, then to 2D
+                        src_2d = []
+                        for pt in src_contour_3d:
+                            diff = pt - tgt_mean
+                            dist_along_normal = np.dot(diff, tgt_basis_z)
+                            pt_on_plane = pt - dist_along_normal * tgt_basis_z
+                            diff_on_plane = pt_on_plane - tgt_mean
+                            x = np.dot(diff_on_plane, tgt_basis_x)
+                            y = np.dot(diff_on_plane, tgt_basis_y)
+                            src_2d.append([x, y])
+                        src_2d = np.array(src_2d)
+                    else:
+                        # Fallback to source's own basis
+                        src_2d = []
+                        for pt in src_contour_3d:
+                            diff = pt - src_mean
+                            x = np.dot(diff, src_basis_x)
+                            y = np.dot(diff, src_basis_y)
+                            src_2d.append([x, y])
+                        src_2d = np.array(src_2d)
 
                     # Compute bounds for source contour
                     src_min = src_2d.min(axis=0)
@@ -5080,6 +5120,11 @@ class GLFWApp():
                             obj._manual_cut_data['edit_history'] = []
                             obj._manual_cut_line = None
 
+                            # Store transformed source contours for display on cutting panel
+                            if hasattr(obj, '_bp_viz_data') and len(obj._bp_viz_data) > 0:
+                                latest_viz = obj._bp_viz_data[-1]
+                                obj._manual_cut_data['transformed_sources_2d'] = latest_viz.get('final_transformed', [])
+
                             if skip_preview:
                                 # Optimize All: trigger auto-accept flag
                                 obj._manual_cut_data['optimization_preview'] = True
@@ -5290,13 +5335,8 @@ class GLFWApp():
                             obj._manual_cut_original_state = None
                             obj._manual_cut_pending = False
                             obj.cut_streams(cut_method='bp', muscle_name=muscle_name)
-                            # Only apply smoothening if cut_streams completed
+                            # Smoothening and alignment are now handled inside cut_streams
                             if not obj._manual_cut_pending and obj._manual_cut_data is None:
-                                if hasattr(obj, 'stream_bounding_planes') and obj.stream_bounding_planes is not None:
-                                    print(f"[{muscle_name}] Applying smoothening...")
-                                    obj.smoothen_contours_z()
-                                    obj.smoothen_contours_x()
-                                    obj.smoothen_contours_bp()
                                 # Clear auto-optimize-all flag when all cutting is done
                                 if hasattr(obj, '_auto_optimize_all'):
                                     obj._auto_optimize_all = False
@@ -5401,13 +5441,8 @@ class GLFWApp():
                     obj._manual_cut_pending = False
                     obj.cut_streams(cut_method='bp', muscle_name=muscle_name)
 
-                    # Only apply smoothening if cut_streams completed (not waiting for another manual cut)
+                    # Smoothening and alignment are now handled inside cut_streams
                     if not obj._manual_cut_pending and obj._manual_cut_data is None:
-                        if hasattr(obj, 'stream_bounding_planes') and obj.stream_bounding_planes is not None:
-                            print(f"[{muscle_name}] Applying smoothening...")
-                            obj.smoothen_contours_z()
-                            obj.smoothen_contours_x()
-                            obj.smoothen_contours_bp()
                         # Clear auto-optimize-all flag when all cutting is done
                         if hasattr(obj, '_auto_optimize_all'):
                             obj._auto_optimize_all = False
@@ -5545,13 +5580,8 @@ class GLFWApp():
                                 obj._manual_cut_original_state = None
                                 obj._manual_cut_pending = False
                                 obj.cut_streams(cut_method='bp', muscle_name=muscle_name)
-                                # Only apply smoothening if cut_streams completed (not waiting for another manual cut)
+                                # Smoothening and alignment are now handled inside cut_streams
                                 if not obj._manual_cut_pending and obj._manual_cut_data is None:
-                                    if hasattr(obj, 'stream_bounding_planes') and obj.stream_bounding_planes is not None:
-                                        print(f"[{muscle_name}] Applying smoothening...")
-                                        obj.smoothen_contours_z()
-                                        obj.smoothen_contours_x()
-                                        obj.smoothen_contours_bp()
                                     # Clear auto-optimize-all flag when all cutting is done
                                     if hasattr(obj, '_auto_optimize_all'):
                                         obj._auto_optimize_all = False

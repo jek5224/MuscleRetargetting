@@ -8867,6 +8867,11 @@ class ContourMeshMixin:
             error_threshold = getattr(self, 'level_select_error_threshold', 0.005) * muscle_length
         print(f"Error threshold: {error_threshold:.6f} ({error_threshold/muscle_length*100:.1f}% of muscle length)")
 
+        # Minimum distance between selected levels (percentage of muscle length)
+        min_spacing_ratio = getattr(self, 'level_select_min_spacing', 0.02)  # 2% default
+        min_spacing = min_spacing_ratio * muscle_length
+        print(f"Minimum spacing: {min_spacing:.6f} ({min_spacing_ratio*100:.1f}% of muscle length)")
+
         # Identify original contour counts per level
         original_counts = []
         for level_i in range(num_levels):
@@ -8931,6 +8936,19 @@ class ContourMeshMixin:
             interpolated = (1 - t) * prev_mean + t * next_mean
             return np.linalg.norm(actual_mean - interpolated)
 
+        # Helper: check if a level is too close to any already-selected level
+        def is_too_close(level_i, selected_levels, stream_i=0):
+            """Check if level_i is within min_spacing of any selected level."""
+            if min_spacing <= 0:
+                return False
+            level_mean = self.stream_bounding_planes[stream_i][level_i]['mean']
+            for sel_level in selected_levels:
+                sel_mean = self.stream_bounding_planes[stream_i][sel_level]['mean']
+                dist = np.linalg.norm(level_mean - sel_mean)
+                if dist < min_spacing:
+                    return True
+            return False
+
         # Group levels by original count
         # Levels with same original count in consecutive range form a region
         regions = []
@@ -8988,6 +9006,9 @@ class ContourMeshMixin:
                                 continue
                             if level_i < start or level_i > end:
                                 continue
+                            # Skip if too close to any already-selected level
+                            if is_too_close(level_i, region_selected, stream_i=0):
+                                continue
 
                             # Max error across all streams
                             error = max(compute_stream_error(s, level_i, prev_idx, next_idx)
@@ -9035,6 +9056,9 @@ class ContourMeshMixin:
 
                             for level_i in range(prev_idx + 1, next_idx):
                                 if level_i in region_selected:
+                                    continue
+                                # Skip if too close to any already-selected level
+                                if is_too_close(level_i, region_selected, stream_i=stream_i):
                                     continue
 
                                 error = compute_stream_error(stream_i, level_i, prev_idx, next_idx)
