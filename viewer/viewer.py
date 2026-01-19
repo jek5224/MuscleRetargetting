@@ -2032,17 +2032,6 @@ class GLFWApp():
                                     # Auto-add transitions to contours if contours exist
                                     if obj.contours is not None and len(obj.contours) > 0:
                                         obj.add_transitions_to_contours()
-                                    # Auto-open Neck Viz if transitions found
-                                    if hasattr(obj, '_neck_viz_data') and obj._neck_viz_data and len(obj._neck_viz_data) > 0:
-                                        if not hasattr(self, 'neck_viz_open'):
-                                            self.neck_viz_open = {}
-                                        self.neck_viz_open[name] = True
-                                        if not hasattr(self, 'neck_viz_idx'):
-                                            self.neck_viz_idx = {}
-                                        self.neck_viz_idx[name] = 0
-                                        print(f"[{name}] Neck Viz opened with {len(obj._neck_viz_data)} transitions")
-                                    else:
-                                        print(f"[{name}] No transitions found to visualize")
                                 except Exception as e:
                                     print(f"[{name}] Find Transitions error: {e}")
                                     import traceback
@@ -2214,23 +2203,6 @@ class GLFWApp():
                             else:
                                 print(f"[{name}] No contour data. Run 'Find Contours' first.")
                         if not has_contour_data:
-                            imgui.pop_style_var()
-
-                        # Neck Viz button - opens narrowest neck visualization window
-                        has_neck_viz_data = (hasattr(obj, '_neck_viz_data') and obj._neck_viz_data is not None and len(obj._neck_viz_data) > 0)
-                        if not has_neck_viz_data:
-                            imgui.push_style_var(imgui.STYLE_ALPHA, 0.5)
-                        if imgui.button(f"Neck Viz##{name}", width=inspect_width):
-                            if has_neck_viz_data:
-                                if not hasattr(self, 'neck_viz_open'):
-                                    self.neck_viz_open = {}
-                                self.neck_viz_open[name] = True
-                                if not hasattr(self, 'neck_viz_idx'):
-                                    self.neck_viz_idx = {}
-                                self.neck_viz_idx[name] = 0
-                            else:
-                                print(f"[{name}] No neck viz data. Run 'Find Transitions' first.")
-                        if not has_neck_viz_data:
                             imgui.pop_style_var()
 
                         # Focus camera on muscle button
