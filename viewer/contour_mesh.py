@@ -11299,6 +11299,70 @@ class ContourMeshMixin:
             while len(new_contours[i]) < 3:
                 new_contours[i] = np.vstack([new_contours[i], new_contours[i][-1]])
 
+        # ========== Step 7b: Add intermediate vertices on shared edges ==========
+        # For 2-piece cuts, add intermediate vertices on the shared edge
+        if n_pieces == 2 and len(shared_boundary_points) == 2:
+            cut1_3d = np.array(shared_boundary_points[0])
+            cut2_3d = np.array(shared_boundary_points[1])
+
+            # Compute perimeter and edge length
+            original_perimeter = self._compute_contour_perimeter(target_contour)
+            edge_length = np.linalg.norm(cut2_3d - cut1_3d)
+            n_verts = len(target_contour)
+
+            # Calculate number of intermediate vertices
+            n_edge_verts = round(n_verts * edge_length / original_perimeter)
+            n_intermediate = max(0, n_edge_verts - 2)
+
+            print(f"  [BP Transform] Shared edge: length={edge_length:.4f}, perimeter={original_perimeter:.4f}")
+            print(f"  [BP Transform] Edge vertices: {n_edge_verts} total, {n_intermediate} intermediate")
+
+            if n_intermediate > 0:
+                # Generate intermediate vertices
+                intermediate_verts = []
+                for i in range(1, n_intermediate + 1):
+                    t = i / (n_intermediate + 1)
+                    v = cut1_3d + t * (cut2_3d - cut1_3d)
+                    intermediate_verts.append(v)
+
+                # Find where boundary points are in each piece and add intermediates
+                for piece_idx in range(2):
+                    piece = new_contours[piece_idx]
+                    piece_list = list(piece)
+
+                    # Find indices of both boundary points in this piece
+                    bp_indices = []
+                    for bp in shared_boundary_points:
+                        bp_arr = np.array(bp)
+                        for v_idx, v in enumerate(piece_list):
+                            if np.linalg.norm(v - bp_arr) < 1e-8:
+                                bp_indices.append(v_idx)
+                                break
+
+                    if len(bp_indices) == 2:
+                        # Add intermediate vertices between boundary points
+                        # Determine order (which bp comes first in piece traversal)
+                        idx1, idx2 = bp_indices[0], bp_indices[1]
+
+                        # Insert intermediates after the first boundary point
+                        # (going toward second boundary point)
+                        if idx1 < idx2:
+                            # bp1 comes before bp2, insert forward intermediates after bp1
+                            for i, v in enumerate(intermediate_verts):
+                                piece_list.insert(idx1 + 1 + i, v)
+                        else:
+                            # bp2 comes before bp1, insert reversed intermediates after bp2
+                            for i, v in enumerate(reversed(intermediate_verts)):
+                                piece_list.insert(idx2 + 1 + i, v)
+
+                        new_contours[piece_idx] = np.array(piece_list)
+
+                # Register intermediate vertices
+                for v in intermediate_verts:
+                    self.shared_cut_vertices.append(v)
+
+                print(f"  [BP Transform] Added {n_intermediate} intermediate vertices to shared edge")
+
         # ========== Step 8: Save visualization with assignments ==========
         self._save_bp_transform_visualization(
             target_2d, target_poly, source_2d_shapes, final_transformed,
