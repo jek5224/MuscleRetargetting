@@ -4183,11 +4183,9 @@ class GLFWApp():
                     if obj._manual_cut_line is None:
                         obj._manual_cut_data['is_neck_line'] = True  # Flag for vertex-to-vertex cutting
                         obj._manual_cut_line = (line_start, line_end)
-                        print(f"[NECK DEBUG] is_neck_line=True (initial setup)")
                     elif obj._manual_cut_line == obj._manual_cut_data.get('initial_line'):
                         # User hasn't changed the line from initial neck recommendation
                         obj._manual_cut_data['is_neck_line'] = True
-                        print(f"[NECK DEBUG] is_neck_line=True (line matches initial_line)")
                 else:
                     # No candidates found - set flag to prevent re-computation every frame
                     if 'neck_search_done' not in obj._manual_cut_data:
@@ -4670,7 +4668,6 @@ class GLFWApp():
                                         x0, y0, canvas_size)
                     obj._manual_cut_line = (tuple(start_2d), tuple(end_2d))
                     obj._manual_cut_data['is_neck_line'] = False  # User drew this line manually
-                    print(f"[NECK DEBUG] is_neck_line=False (user drew manual line)")
 
             # Clip cutting line drawing to canvas area
             draw_list.push_clip_rect(x0 - padding, y0 - padding,
