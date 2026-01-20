@@ -4998,17 +4998,30 @@ class ContourMeshMixin:
                 return results
 
             # ========== Step 3: Resample merged contour ==========
-            # Total vertices = num_samples * num_pieces, but boundary counted once
-            n_boundary = len(boundary_verts)
-            total_target = num_samples * 2 - n_boundary  # Two pieces share boundary
+            # The merged contour is the ORIGINAL shape (without cut edge intermediates)
+            # Resample it to get the smooth original shape
+            # Target = total vertices for both pieces minus boundary intermediates
+            # Each piece will have num_samples vertices
+            # Boundary intermediates will be added back when splitting
 
-            resampled_merged = self._resample_merged_with_fixed_boundary(
-                merged, total_target, split_info['boundary_start'], split_info['boundary_end'], boundary_verts
-            )
+            n_boundary_intermediates = len(boundary_verts)
+            # Each piece has: original_portion + boundary_intermediates
+            # After resample: original_portion vertices come from resampled merged
+            # Total original vertices (merged) = num_samples * 2 - n_boundary_intermediates * 2 + 2
+            # (each piece has num_samples, shared boundary counted once, but we removed intermediates)
+
+            # Simpler: resample merged to same count, then split proportionally
+            total_merged_target = len(merged)  # Keep same count as merged for now
+            if total_merged_target < 4:
+                total_merged_target = num_samples  # Minimum
+
+            resampled_merged = self._resample_single_contour(merged, total_merged_target, None)
 
             # ========== Step 4: Split back into pieces ==========
-            piece_a, piece_b = self._split_merged_contour(
-                resampled_merged, split_info, num_samples, boundary_verts
+            # Find boundary endpoints in resampled merged
+            boundary_endpoints = [boundary_verts[0], boundary_verts[-1]]
+            piece_a, piece_b = self._split_resampled_merged(
+                resampled_merged, boundary_endpoints, boundary_verts, num_samples
             )
 
             # Return in order of group_indices
@@ -5032,17 +5045,30 @@ class ContourMeshMixin:
 
     def _merge_two_contours(self, contour_a, contour_b, boundary_verts):
         """
-        Merge two contours that share a boundary into one closed contour.
+        Merge two cut contours back into the original contour shape.
+
+        Each cut piece has:
+        - Original portion: vertices from the original pre-cut contour
+        - Cut edge: the shared boundary with intermediate vertices
+
+        We reconstruct the original by:
+        - Taking the original portion from piece A (between boundary points, NOT the cut edge)
+        - Taking the original portion from piece B (between boundary points, NOT the cut edge)
+        - Joining them at the boundary points
 
         Returns:
-            merged: numpy array of merged contour vertices
+            merged: numpy array of merged contour vertices (original shape)
             split_info: dict with info needed to split back later
         """
         # Find boundary vertex positions in each contour
+        # boundary_verts contains ALL vertices on the cut edge (including intermediates)
+        # We need the two ENDPOINT boundary vertices
+        boundary_endpoints = [boundary_verts[0], boundary_verts[-1]]
+
         boundary_indices_a = []
         boundary_indices_b = []
 
-        for bv in boundary_verts:
+        for bv in boundary_endpoints:
             for i, v in enumerate(contour_a):
                 if np.linalg.norm(v - bv) < 1e-6:
                     boundary_indices_a.append(i)
@@ -5053,185 +5079,238 @@ class ContourMeshMixin:
                     break
 
         if len(boundary_indices_a) < 2 or len(boundary_indices_b) < 2:
+            print(f"      Warning: Could not find boundary endpoints in contours")
             return None, None
 
-        # Sort boundary indices
-        boundary_indices_a.sort()
-        boundary_indices_b.sort()
+        # For each piece, determine which path is the ORIGINAL portion vs the CUT EDGE
+        # The original portion is the SHORTER path (fewer intermediates)
+        # The cut edge is the LONGER path (has intermediate vertices)
 
-        # Extract non-boundary portions from each contour
-        # Contour A: from after last boundary vertex to before first (wrapping around)
-        # Contour B: from after last boundary vertex to before first (wrapping around)
-
-        start_a, end_a = boundary_indices_a[0], boundary_indices_a[-1]
-        start_b, end_b = boundary_indices_b[0], boundary_indices_b[-1]
-
-        # Extract segment from contour A (non-boundary part)
-        # This goes from end_a+1 to start_a (wrapping around)
         n_a = len(contour_a)
-        segment_a = []
-        i = (end_a + 1) % n_a
-        while i != start_a:
-            segment_a.append(contour_a[i].copy())
-            i = (i + 1) % n_a
-
-        # Extract segment from contour B (non-boundary part)
         n_b = len(contour_b)
-        segment_b = []
-        i = (end_b + 1) % n_b
-        while i != start_b:
-            segment_b.append(contour_b[i].copy())
-            i = (i + 1) % n_b
 
-        # Check direction: do contours traverse boundary in same or opposite direction?
-        # Compare first two boundary indices
-        dir_a = (boundary_indices_a[1] - boundary_indices_a[0]) % n_a
-        dir_b = (boundary_indices_b[1] - boundary_indices_b[0]) % n_b
-        same_direction = (dir_a < n_a // 2) == (dir_b < n_b // 2)
+        idx_a_0, idx_a_1 = boundary_indices_a[0], boundary_indices_a[1]
+        idx_b_0, idx_b_1 = boundary_indices_b[0], boundary_indices_b[1]
 
-        # Build merged contour
-        # Start with boundary vertices, then segment_a, then boundary again (reversed), then segment_b
-        merged = []
+        # Path 1: from idx_0 to idx_1 going forward (not wrapping)
+        # Path 2: from idx_1 to idx_0 going forward (wrapping)
 
-        # Add boundary vertices (in order from contour A)
-        for idx in boundary_indices_a:
-            merged.append(contour_a[idx].copy())
+        # For contour A
+        path_a_forward_len = (idx_a_1 - idx_a_0) % n_a
+        path_a_backward_len = (idx_a_0 - idx_a_1) % n_a
 
-        boundary_end_in_merged = len(merged) - 1
-
-        # Add segment A (non-boundary portion of contour A)
-        merged.extend(segment_a)
-
-        # Add boundary vertices again (in reverse order to close the loop properly)
-        # Actually, for a proper merge, we need to connect segment_a back to segment_b
-        # through the other end of the boundary
-
-        # Simpler approach: just concatenate
-        # boundary -> segment_a -> boundary_reversed -> segment_b
-
-        # Add segment B (non-boundary portion of contour B)
-        if same_direction:
-            merged.extend(segment_b)
+        # The original portion has FEWER vertices (just the original contour part)
+        # The cut edge has MORE vertices (the boundary intermediates)
+        if path_a_forward_len <= path_a_backward_len:
+            # Forward path is original portion
+            original_a = [contour_a[i].copy() for i in range(idx_a_0, idx_a_1 + 1)]
+            original_a_reversed = False
         else:
-            merged.extend(reversed(segment_b))
+            # Backward (wrapping) path is original portion
+            original_a = []
+            i = idx_a_1
+            while True:
+                original_a.append(contour_a[i].copy())
+                if i == idx_a_0:
+                    break
+                i = (i + 1) % n_a
+            original_a_reversed = True
+
+        # For contour B
+        path_b_forward_len = (idx_b_1 - idx_b_0) % n_b
+        path_b_backward_len = (idx_b_0 - idx_b_1) % n_b
+
+        if path_b_forward_len <= path_b_backward_len:
+            original_b = [contour_b[i].copy() for i in range(idx_b_0, idx_b_1 + 1)]
+            original_b_reversed = False
+        else:
+            original_b = []
+            i = idx_b_1
+            while True:
+                original_b.append(contour_b[i].copy())
+                if i == idx_b_0:
+                    break
+                i = (i + 1) % n_b
+            original_b_reversed = True
+
+        # Now merge: original_a + original_b (connected at boundary endpoints)
+        # original_a goes from one boundary endpoint to the other
+        # original_b goes from one boundary endpoint to the other (in the opposite direction around the original contour)
+
+        # We need to connect them properly
+        # original_a: starts at bp0, ends at bp1 (or reversed)
+        # original_b: starts at bp0, ends at bp1 (or reversed)
+
+        # For a proper merge, one should end where the other starts
+        # original_a ends at bp1, original_b should start at bp1
+
+        # Determine the connection
+        # If original_a ends at endpoint that equals original_b's start endpoint -> connect directly
+        # Otherwise, reverse one of them
+
+        endpoint_a_start = original_a[0]
+        endpoint_a_end = original_a[-1]
+        endpoint_b_start = original_b[0]
+        endpoint_b_end = original_b[-1]
+
+        # Check which endpoints match
+        if np.linalg.norm(endpoint_a_end - endpoint_b_start) < 1e-6:
+            # A ends where B starts - connect A + B (skip duplicate)
+            merged = original_a + original_b[1:]
+        elif np.linalg.norm(endpoint_a_end - endpoint_b_end) < 1e-6:
+            # A ends where B ends - connect A + reversed(B) (skip duplicate)
+            merged = original_a + list(reversed(original_b))[1:]
+        elif np.linalg.norm(endpoint_a_start - endpoint_b_end) < 1e-6:
+            # B ends where A starts - connect B + A (skip duplicate)
+            merged = original_b + original_a[1:]
+        elif np.linalg.norm(endpoint_a_start - endpoint_b_start) < 1e-6:
+            # A starts where B starts - connect reversed(A) + B (skip duplicate)
+            merged = list(reversed(original_a)) + original_b[1:]
+        else:
+            print(f"      Warning: Could not find matching endpoints for merge")
+            return None, None
 
         merged = np.array(merged)
 
+        # Record where the boundary is in the merged contour
+        # The boundary endpoints are at the connection point
         split_info = {
-            'boundary_start': 0,
-            'boundary_end': len(boundary_verts) - 1,
-            'segment_a_start': len(boundary_verts),
-            'segment_a_end': len(boundary_verts) + len(segment_a) - 1,
-            'segment_b_start': len(boundary_verts) + len(segment_a),
-            'segment_b_end': len(merged) - 1,
-            'n_boundary': len(boundary_verts),
-            'n_segment_a': len(segment_a),
-            'n_segment_b': len(segment_b),
-            'same_direction': same_direction
+            'n_original_a': len(original_a),
+            'n_original_b': len(original_b),
+            'boundary_verts': boundary_verts,  # Full boundary with intermediates
         }
+
+        print(f"      Merged: {len(original_a)} + {len(original_b)} - 1 = {len(merged)} vertices")
 
         return merged, split_info
 
-    def _resample_merged_with_fixed_boundary(self, merged, total_target, boundary_start, boundary_end, boundary_verts):
-        """
-        Resample merged contour while keeping boundary vertices fixed.
-        """
-        merged = np.array(merged)
-        n_boundary = len(boundary_verts)
-
-        # The boundary vertices should stay fixed
-        # Resample the rest proportionally
-
-        # For simplicity, use arc-length based resampling but snap boundary vertices
-        resampled = self._resample_single_contour(merged, total_target, None)
-
-        # Snap vertices near boundary positions to exact boundary positions
-        for i in range(len(resampled)):
-            for bv in boundary_verts:
-                if np.linalg.norm(resampled[i] - bv) < 0.1:  # Generous threshold
-                    resampled[i] = bv.copy()
-                    break
-
-        return resampled
-
-    def _split_merged_contour(self, resampled_merged, split_info, num_samples, boundary_verts):
+    def _split_resampled_merged(self, resampled_merged, boundary_endpoints, boundary_verts, num_samples):
         """
         Split a resampled merged contour back into two pieces.
-        Each piece gets num_samples vertices and includes the boundary.
-        """
-        # Find boundary vertices in resampled merged
-        boundary_indices = []
-        for bv in boundary_verts:
-            best_idx = -1
-            best_dist = float('inf')
-            for i, v in enumerate(resampled_merged):
-                dist = np.linalg.norm(v - bv)
-                if dist < best_dist:
-                    best_dist = dist
-                    best_idx = i
-            if best_dist < 0.1:
-                boundary_indices.append(best_idx)
 
-        if len(boundary_indices) < 2:
-            # Can't find boundary - return equal split
+        The merged contour was the ORIGINAL shape. Now we split it at the boundary
+        endpoints and add the boundary intermediates back to create closed pieces.
+
+        Args:
+            resampled_merged: resampled original contour shape
+            boundary_endpoints: [start_point, end_point] of the cut edge
+            boundary_verts: all vertices on the cut edge (including intermediates)
+            num_samples: target vertex count per piece
+
+        Returns:
+            piece_a, piece_b: two closed contours
+        """
+        # Find boundary endpoints in resampled merged
+        bp0, bp1 = boundary_endpoints[0], boundary_endpoints[-1]
+
+        idx_bp0 = -1
+        idx_bp1 = -1
+        best_dist0 = float('inf')
+        best_dist1 = float('inf')
+
+        for i, v in enumerate(resampled_merged):
+            d0 = np.linalg.norm(v - bp0)
+            d1 = np.linalg.norm(v - bp1)
+            if d0 < best_dist0:
+                best_dist0 = d0
+                idx_bp0 = i
+            if d1 < best_dist1:
+                best_dist1 = d1
+                idx_bp1 = i
+
+        if idx_bp0 == -1 or idx_bp1 == -1:
+            print(f"      Warning: Could not find boundary endpoints in resampled merged")
             mid = len(resampled_merged) // 2
             return resampled_merged[:mid].copy(), resampled_merged[mid:].copy()
 
-        boundary_indices.sort()
-        b_start, b_end = boundary_indices[0], boundary_indices[-1]
+        # Ensure idx_bp0 < idx_bp1
+        if idx_bp0 > idx_bp1:
+            idx_bp0, idx_bp1 = idx_bp1, idx_bp0
+            bp0, bp1 = bp1, bp0
 
-        # Piece A: from b_start to b_end (through the middle)
-        piece_a_verts = []
-        for i in range(b_start, b_end + 1):
-            piece_a_verts.append(resampled_merged[i].copy())
-
-        # Piece B: from b_end to b_start (wrapping around)
         n = len(resampled_merged)
-        piece_b_verts = []
-        i = b_end
+
+        # Segment A: from bp0 to bp1 (forward path in resampled merged)
+        segment_a = [resampled_merged[i].copy() for i in range(idx_bp0, idx_bp1 + 1)]
+
+        # Segment B: from bp1 to bp0 (wrapping path in resampled merged)
+        segment_b = []
+        i = idx_bp1
         while True:
-            piece_b_verts.append(resampled_merged[i].copy())
-            if i == b_start:
+            segment_b.append(resampled_merged[i].copy())
+            if i == idx_bp0:
                 break
             i = (i + 1) % n
 
-        # Resample each piece to target count
-        piece_a = self._resample_closed_piece(piece_a_verts, num_samples, boundary_verts)
-        piece_b = self._resample_closed_piece(piece_b_verts, num_samples, boundary_verts)
+        # Now create closed pieces by adding boundary intermediates
+        # Piece A = segment_a + boundary_intermediates (going from bp1 back to bp0)
+        # Piece B = segment_b + boundary_intermediates (going from bp0 back to bp1)
+
+        # boundary_verts goes from bp0 to bp1 (or bp1 to bp0)
+        # Determine direction
+        if np.linalg.norm(boundary_verts[0] - bp0) < 1e-6:
+            # boundary_verts goes bp0 -> ... -> bp1
+            boundary_forward = list(boundary_verts)
+            boundary_backward = list(reversed(boundary_verts))
+        else:
+            # boundary_verts goes bp1 -> ... -> bp0
+            boundary_backward = list(boundary_verts)
+            boundary_forward = list(reversed(boundary_verts))
+
+        # Piece A: segment_a (bp0 to bp1) + boundary going back (bp1 to bp0, excluding endpoints)
+        piece_a_verts = list(segment_a)  # Ends at bp1
+        # Add boundary intermediates (bp1 -> ... -> bp0, excluding bp1 and bp0)
+        if len(boundary_backward) > 2:
+            piece_a_verts.extend(boundary_backward[1:-1])
+        # Now piece_a goes bp0 -> ... -> bp1 -> intermediates -> (back to bp0, closed)
+
+        # Piece B: segment_b (bp1 to bp0) + boundary going back (bp0 to bp1, excluding endpoints)
+        piece_b_verts = list(segment_b)  # Ends at bp0
+        # Add boundary intermediates (bp0 -> ... -> bp1, excluding bp0 and bp1)
+        if len(boundary_forward) > 2:
+            piece_b_verts.extend(boundary_forward[1:-1])
+        # Now piece_b goes bp1 -> ... -> bp0 -> intermediates -> (back to bp1, closed)
+
+        piece_a = np.array(piece_a_verts)
+        piece_b = np.array(piece_b_verts)
+
+        # Resample each piece to target count, preserving boundary vertices
+        piece_a = self._resample_piece_preserving_boundary(piece_a, num_samples, boundary_verts)
+        piece_b = self._resample_piece_preserving_boundary(piece_b, num_samples, boundary_verts)
+
+        print(f"      Split: piece_a={len(piece_a)}, piece_b={len(piece_b)} vertices")
 
         return piece_a, piece_b
 
-    def _resample_closed_piece(self, piece_verts, num_samples, boundary_verts):
+    def _resample_piece_preserving_boundary(self, piece, num_samples, boundary_verts):
         """
-        Resample a piece (which includes boundary vertices) to target count.
-        Boundary vertices are preserved.
+        Resample a piece to target count while preserving boundary vertices exactly.
         """
-        piece = np.array(piece_verts)
-
         if len(piece) == num_samples:
             return piece
 
-        # Find which vertices are boundary vertices
-        boundary_mask = []
-        for v in piece:
-            is_boundary = False
+        if len(piece) < 3:
+            return piece
+
+        # Identify boundary vertices in this piece
+        boundary_indices = []
+        for i, v in enumerate(piece):
             for bv in boundary_verts:
                 if np.linalg.norm(v - bv) < 1e-6:
-                    is_boundary = True
+                    boundary_indices.append(i)
                     break
-            boundary_mask.append(is_boundary)
 
-        n_boundary_in_piece = sum(boundary_mask)
-        n_non_boundary_target = num_samples - n_boundary_in_piece
+        n_boundary = len(boundary_indices)
+        n_non_boundary_needed = num_samples - n_boundary
 
-        if n_non_boundary_target <= 0:
-            # All vertices are boundary - just return boundary
-            return np.array([v for v, is_b in zip(piece, boundary_mask) if is_b])
+        if n_non_boundary_needed <= 0:
+            # Just return boundary vertices
+            return np.array([piece[i] for i in sorted(boundary_indices)])
 
-        # Resample using arc-length, keeping boundary fixed
+        # Resample using arc-length
         resampled = self._resample_single_contour(piece, num_samples, None)
 
-        # Snap boundary vertices
+        # Snap vertices near boundary positions to exact positions
         for i in range(len(resampled)):
             for bv in boundary_verts:
                 if np.linalg.norm(resampled[i] - bv) < 0.05:
