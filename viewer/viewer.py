@@ -5766,16 +5766,24 @@ class GLFWApp():
 
             # Render rows (one per level)
             for level_i in range(max_levels):
-                # Level label
-                imgui.text(f"{level_i:3d}")
-
                 # Find which group this level belongs to (for linking)
                 group_streams = None
+                is_linked = False
                 if level_i < len(stream_groups):
                     for group in stream_groups[level_i]:
-                        if len(group) > 0:
+                        if len(group) > 1:  # More than 1 stream = linked
                             group_streams = group
+                            is_linked = True
                             break
+                        elif len(group) > 0:
+                            group_streams = group
+
+                # Level label with link indicator
+                if is_linked:
+                    # Cyan color for linked levels
+                    imgui.text_colored(f"{level_i:3d} *", 0.0, 1.0, 1.0, 1.0)
+                else:
+                    imgui.text(f"{level_i:3d}  ")
 
                 # Checkbox for each stream at this level
                 for stream_i in range(max_stream_count):
@@ -5785,7 +5793,18 @@ class GLFWApp():
                         checkbox_id = f"##lvl_{stream_i}_{level_i}"
                         is_checked = checkboxes[stream_i][level_i]
 
+                        # For linked checkboxes, check if this stream is in the linked group
+                        is_this_linked = is_linked and group_streams and stream_i in group_streams
+
+                        if is_this_linked:
+                            # Tint checkbox frame for linked ones
+                            imgui.push_style_color(imgui.COLOR_FRAME_BACKGROUND, 0.0, 0.3, 0.3, 1.0)
+                            imgui.push_style_color(imgui.COLOR_FRAME_BACKGROUND_HOVERED, 0.0, 0.5, 0.5, 1.0)
+
                         changed, new_value = imgui.checkbox(checkbox_id, is_checked)
+
+                        if is_this_linked:
+                            imgui.pop_style_color(2)
 
                         if changed:
                             vis_changed = True
