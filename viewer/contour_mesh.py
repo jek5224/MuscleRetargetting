@@ -4744,6 +4744,14 @@ class ContourMeshMixin:
             print("No bounding planes found. Please run find_contours first.")
             return
 
+        # Debug: Check registry status
+        has_registry = hasattr(self, 'shared_boundary_registry')
+        registry_len = len(self.shared_boundary_registry) if has_registry else 0
+        print(f"DEBUG resample_contours: shared_boundary_registry exists={has_registry}, len={registry_len}")
+        if has_registry and registry_len > 0:
+            for bid, binfo in self.shared_boundary_registry.items():
+                print(f"  Boundary {bid}: {len(binfo['vertices'])} verts, streams={binfo['stream_indices']}")
+
         # Store original contours before resampling (deep copy)
         self.contours_orig = [[c.copy() for c in contour_group] for contour_group in self.contours]
         self.bounding_planes_orig = [[bp.copy() for bp in bp_group] for bp_group in self.bounding_planes]
@@ -12223,6 +12231,7 @@ class ContourMeshMixin:
         # ========== Step 9: Build shared boundary info for each piece ==========
         # For resampling, we need to know which vertices in each piece are shared with adjacent pieces
         shared_boundary_info = []
+        print(f"DEBUG cut: n_pieces={n_pieces}, shared_boundary_points={len(shared_boundary_points)}")
         if n_pieces == 2 and len(shared_boundary_points) >= 2:
             # Generate unique boundary ID for this cut
             import uuid
@@ -12244,6 +12253,7 @@ class ContourMeshMixin:
                 'resampled': None,  # Will be computed during resampling
                 'resampled_count': None
             }
+            print(f"DEBUG cut: Registered boundary {boundary_id} with {len(shared_boundary_vertices)} verts, streams={stream_indices}")
 
             for piece_idx in range(2):
                 piece = new_contours[piece_idx]
