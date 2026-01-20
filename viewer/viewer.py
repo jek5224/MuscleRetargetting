@@ -5742,8 +5742,7 @@ class GLFWApp():
                 continue
 
             imgui.text(f"Streams: {max_stream_count}")
-            imgui.text("Check/uncheck levels to include/exclude.")
-            imgui.text("Linked levels (from same original contour) are toggled together.")
+            imgui.text("Check/uncheck levels. Linked levels toggle together.")
             imgui.separator()
 
             # Create scrollable region for checkboxes
@@ -5752,44 +5751,55 @@ class GLFWApp():
             # Track if visualization needs update
             vis_changed = False
 
-            # Render checkboxes for each stream
+            # Find max levels across all streams
+            max_levels = max(len(checkboxes[s]) for s in range(max_stream_count))
+
+            # Column width for each stream
+            col_width = 80
+
+            # Header row with stream labels
+            imgui.text("Level")
             for stream_i in range(max_stream_count):
-                num_levels = len(checkboxes[stream_i])
-                imgui.text(f"Stream {stream_i} ({num_levels} levels):")
-                imgui.indent(20)
+                imgui.same_line(60 + stream_i * col_width)
+                imgui.text(f"S{stream_i}")
+            imgui.separator()
 
-                for level_i in range(num_levels):
-                    # Find which group this level belongs to (for linking)
-                    group_streams = None
-                    if level_i < len(stream_groups):
-                        for group in stream_groups[level_i]:
-                            if stream_i in group:
-                                group_streams = group
-                                break
+            # Render rows (one per level)
+            for level_i in range(max_levels):
+                # Level label
+                imgui.text(f"{level_i:3d}")
 
-                    # Create unique ID for checkbox
-                    checkbox_id = f"##level_{stream_i}_{level_i}"
+                # Find which group this level belongs to (for linking)
+                group_streams = None
+                if level_i < len(stream_groups):
+                    for group in stream_groups[level_i]:
+                        if len(group) > 0:
+                            group_streams = group
+                            break
 
-                    # Get current state
-                    is_checked = checkboxes[stream_i][level_i]
+                # Checkbox for each stream at this level
+                for stream_i in range(max_stream_count):
+                    imgui.same_line(60 + stream_i * col_width)
 
-                    # Show checkbox with level index
-                    changed, new_value = imgui.checkbox(f"Level {level_i}{checkbox_id}", is_checked)
+                    if level_i < len(checkboxes[stream_i]):
+                        checkbox_id = f"##lvl_{stream_i}_{level_i}"
+                        is_checked = checkboxes[stream_i][level_i]
 
-                    if changed:
-                        vis_changed = True
-                        # Update this checkbox
-                        checkboxes[stream_i][level_i] = new_value
+                        changed, new_value = imgui.checkbox(checkbox_id, is_checked)
 
-                        # If this level is part of a group, update all streams in the group
-                        if group_streams is not None and len(group_streams) > 1:
-                            for other_stream in group_streams:
-                                if other_stream != stream_i and other_stream < max_stream_count:
-                                    if level_i < len(checkboxes[other_stream]):
-                                        checkboxes[other_stream][level_i] = new_value
+                        if changed:
+                            vis_changed = True
+                            checkboxes[stream_i][level_i] = new_value
 
-                imgui.unindent(20)
-                imgui.separator()
+                            # If linked, update all streams in the group
+                            if group_streams is not None and len(group_streams) > 1:
+                                for other_stream in group_streams:
+                                    if other_stream != stream_i and other_stream < max_stream_count:
+                                        if level_i < len(checkboxes[other_stream]):
+                                            checkboxes[other_stream][level_i] = new_value
+                    else:
+                        # This stream doesn't have this level - show placeholder
+                        imgui.text("-")
 
             imgui.end_child()
 
