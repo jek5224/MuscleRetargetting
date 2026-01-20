@@ -4870,47 +4870,37 @@ class ContourMeshMixin:
         Detect shared boundaries between streams by finding vertices at same positions.
         This is used when loading contours from a saved file where the registry wasn't preserved.
 
-        At resample time, self.contours is organized as:
-        - self.contours[level_idx][contour_idx] = contour vertices
+        After find_contour_stream, self.contours is organized as:
+        - self.contours[stream_idx][level_idx] = contour vertices
 
-        We look for vertices that are shared between different contours at each level.
+        We look for vertices that are shared between different streams at each level.
         """
-        if self.contours is None or len(self.contours) == 0:
-            return
+        if self.contours is None or len(self.contours) < 2:
+            return  # Need at least 2 streams
 
         self.shared_boundary_registry = {}
         self.shared_cut_vertices = []
 
-        eps = 1e-4  # Tolerance for detecting same position (slightly permissive for float precision after loading)
-        num_levels = len(self.contours)
+        num_streams = len(self.contours)
+        eps = 1e-4  # Tolerance for detecting same position
 
-        print(f"    Detecting shared boundaries: {num_levels} levels")
+        print(f"    Detecting shared boundaries: {num_streams} streams")
 
-        # For each level, compare all pairs of contours to find shared vertices
-        for level_idx in range(num_levels):
-            contour_group = self.contours[level_idx]
-            if contour_group is None:
-                continue
+        # For each pair of streams, find shared vertices at each level
+        for stream_i in range(num_streams):
+            for stream_j in range(stream_i + 1, num_streams):
+                # Get the number of levels (might differ between streams)
+                levels_i = len(self.contours[stream_i])
+                levels_j = len(self.contours[stream_j])
+                min_levels = min(levels_i, levels_j)
 
-            num_contours = len(contour_group)
-            if num_contours < 2:
-                continue  # Need at least 2 contours to have shared boundaries
+                print(f"      Comparing stream {stream_i} ({levels_i} levels) vs stream {stream_j} ({levels_j} levels)")
 
-            print(f"      Level {level_idx}: {num_contours} contours")
+                for level_idx in range(min_levels):
+                    contour_i = np.array(self.contours[stream_i][level_idx])
+                    contour_j = np.array(self.contours[stream_j][level_idx])
 
-            # Compare each pair of contours at this level
-            for contour_i in range(num_contours):
-                for contour_j in range(contour_i + 1, num_contours):
-                    c_i = contour_group[contour_i]
-                    c_j = contour_group[contour_j]
-
-                    if c_i is None or c_j is None:
-                        continue
-
-                    contour_arr_i = np.array(c_i)
-                    contour_arr_j = np.array(c_j)
-
-                    if len(contour_arr_i) == 0 or len(contour_arr_j) == 0:
+                    if len(contour_i) == 0 or len(contour_j) == 0:
                         continue
 
                     # Find vertices that are at the same position
@@ -4918,13 +4908,23 @@ class ContourMeshMixin:
                     shared_indices_i = []
                     shared_indices_j = []
 
-                    for idx_i, v_i in enumerate(contour_arr_i):
-                        for idx_j, v_j in enumerate(contour_arr_j):
-                            if np.linalg.norm(v_i - v_j) < eps:
+                    # Track minimum distance for debug
+                    min_dist = float('inf')
+
+                    for idx_i, v_i in enumerate(contour_i):
+                        for idx_j, v_j in enumerate(contour_j):
+                            dist = np.linalg.norm(v_i - v_j)
+                            if dist < min_dist:
+                                min_dist = dist
+                            if dist < eps:
                                 shared_vertices.append(v_i.copy())
                                 shared_indices_i.append(idx_i)
                                 shared_indices_j.append(idx_j)
                                 break  # Found match, move to next vertex in contour_i
+
+                    # Debug: show closest distance at each level
+                    if level_idx < 3 or level_idx >= min_levels - 2:  # First/last few levels
+                        print(f"        Level {level_idx}: {len(contour_i)} vs {len(contour_j)} verts, min_dist={min_dist:.6f}, shared={len(shared_vertices)}")
 
                     if len(shared_vertices) >= 2:
                         # Found a shared boundary at this level
@@ -4932,12 +4932,12 @@ class ContourMeshMixin:
                         sorted_pairs = sorted(zip(shared_indices_i, shared_vertices), key=lambda x: x[0])
                         vertices = [p[1] for p in sorted_pairs]
 
-                        # Create boundary ID using contour indices (which are stream indices at this level)
-                        boundary_id = f"detected_c{contour_i}_c{contour_j}_l{level_idx}"
+                        # Create boundary ID
+                        boundary_id = f"detected_s{stream_i}_s{stream_j}_l{level_idx}"
 
                         self.shared_boundary_registry[boundary_id] = {
                             'vertices': vertices,
-                            'stream_indices': [contour_i, contour_j],  # contour indices at this level
+                            'stream_indices': [stream_i, stream_j],
                             'level_idx': level_idx,
                             'resampled': None,
                             'resampled_count': None
@@ -4947,7 +4947,7 @@ class ContourMeshMixin:
                         for v in vertices:
                             self.shared_cut_vertices.append(v.copy())
 
-                        print(f"        Found boundary between contour {contour_i} and {contour_j}: {len(vertices)} shared vertices")
+                        print(f"        Found boundary at level {level_idx}: {len(vertices)} shared vertices")
 
         print(f"    Detected {len(self.shared_boundary_registry)} shared boundaries total")
 
@@ -14347,6 +14347,12 @@ class ContourMeshMixin:
         if hasattr(self, 'max_stream_count') and self.max_stream_count is not None:
             save_data['max_stream_count'] = self.max_stream_count
 
+        # Save shared boundary registry (for cut contours)
+        if hasattr(self, 'shared_boundary_registry') and self.shared_boundary_registry:
+            save_data['shared_boundary_registry'] = convert_to_serializable(self.shared_boundary_registry)
+        if hasattr(self, 'shared_cut_vertices') and self.shared_cut_vertices:
+            save_data['shared_cut_vertices'] = convert_to_serializable(self.shared_cut_vertices)
+
         with open(filepath, 'w') as f:
             json.dump(save_data, f)
 
@@ -14458,6 +14464,23 @@ class ContourMeshMixin:
 
         if 'max_stream_count' in save_data:
             self.max_stream_count = save_data['max_stream_count']
+
+        # Load shared boundary registry (for cut contours)
+        if 'shared_boundary_registry' in save_data:
+            self.shared_boundary_registry = {}
+            for boundary_id, boundary_info in save_data['shared_boundary_registry'].items():
+                self.shared_boundary_registry[boundary_id] = {
+                    'vertices': [np.array(v) for v in boundary_info['vertices']],
+                    'stream_indices': boundary_info['stream_indices'],
+                    'level_idx': boundary_info['level_idx'],
+                    'resampled': np.array(boundary_info['resampled']) if boundary_info.get('resampled') else None,
+                    'resampled_count': boundary_info.get('resampled_count')
+                }
+            print(f"  Loaded {len(self.shared_boundary_registry)} shared boundaries")
+
+        if 'shared_cut_vertices' in save_data:
+            self.shared_cut_vertices = [np.array(v) for v in save_data['shared_cut_vertices']]
+            print(f"  Loaded {len(self.shared_cut_vertices)} shared cut vertices")
 
         # Enable drawing
         self.is_draw_contours = True
