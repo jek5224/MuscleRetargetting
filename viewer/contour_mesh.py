@@ -11340,20 +11340,34 @@ class ContourMeshMixin:
                                 break
 
                     if len(bp_indices) == 2:
-                        # Add intermediate vertices between boundary points
-                        # Determine order (which bp comes first in piece traversal)
-                        idx1, idx2 = bp_indices[0], bp_indices[1]
+                        # Add intermediate vertices on the shared edge
+                        # The shared edge is the edge connecting the two boundary points
+                        # that has NO original vertices between them
+                        idx1, idx2 = min(bp_indices), max(bp_indices)
+                        bp1_pos = np.array(piece_list[idx1])
+                        bp2_pos = np.array(piece_list[idx2])
 
-                        # Insert intermediates after the first boundary point
-                        # (going toward second boundary point)
-                        if idx1 < idx2:
-                            # bp1 comes before bp2, insert forward intermediates after bp1
-                            for i, v in enumerate(intermediate_verts):
+                        # Check if boundary points are adjacent in the array
+                        if idx2 - idx1 == 1:
+                            # Adjacent: shared edge is between idx1 and idx2
+                            # Compute intermediates from bp1 toward bp2 and insert after idx1
+                            piece_intermediates = []
+                            for i in range(1, n_intermediate + 1):
+                                t = i / (n_intermediate + 1)
+                                v = bp1_pos + t * (bp2_pos - bp1_pos)
+                                piece_intermediates.append(v)
+                            for i, v in enumerate(piece_intermediates):
                                 piece_list.insert(idx1 + 1 + i, v)
                         else:
-                            # bp2 comes before bp1, insert reversed intermediates after bp2
-                            for i, v in enumerate(reversed(intermediate_verts)):
-                                piece_list.insert(idx2 + 1 + i, v)
+                            # Not adjacent: shared edge is the closing edge (from idx2 wrapping to idx1)
+                            # Compute intermediates from bp2 toward bp1 and append at end
+                            piece_intermediates = []
+                            for i in range(1, n_intermediate + 1):
+                                t = i / (n_intermediate + 1)
+                                v = bp2_pos + t * (bp1_pos - bp2_pos)
+                                piece_intermediates.append(v)
+                            for v in piece_intermediates:
+                                piece_list.append(v)
 
                         new_contours[piece_idx] = np.array(piece_list)
 
