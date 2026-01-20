@@ -7386,8 +7386,14 @@ class ContourMeshMixin:
         line_end_arr = np.array(line_end)
         is_neck_line = self._manual_cut_data.get('is_neck_line', False)
         neck_info = self._manual_cut_data.get('current_neck_info', None)
+        initial_line = self._manual_cut_data.get('initial_line', None)
 
-        print(f"[CUT] Line: {line_start_arr} to {line_end_arr}, is_neck_line={is_neck_line}")
+        print(f"[CUT] is_neck_line={is_neck_line}, neck_info={'set' if neck_info else 'None'}")
+        print(f"[CUT] _manual_cut_line: {(line_start_arr, line_end_arr)}")
+        print(f"[CUT] initial_line: {initial_line}")
+        if initial_line:
+            lines_match = (tuple(line_start), tuple(line_end)) == initial_line
+            print(f"[CUT] lines match initial_line: {lines_match}")
 
         # For neck lines, use vertex-to-vertex cutting at the exact neck vertices
         if is_neck_line and neck_info is not None:
