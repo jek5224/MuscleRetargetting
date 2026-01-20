@@ -4727,12 +4727,6 @@ class ContourMeshMixin:
         Uses arc-length parameterization and uniform sampling.
         Also updates bounding planes via find_contour_match to maintain linkage.
 
-        For cut contours with shared boundaries:
-        - Reconstructs the merged contour from cut pieces
-        - Resamples as ONE shape (avoiding "two balloons" effect)
-        - Splits back into pieces, preserving boundary vertices
-        - Ensures boundary vertices align across levels for mesh connectivity
-
         Args:
             num_samples: int - desired number of vertices per contour
         """
@@ -4744,33 +4738,9 @@ class ContourMeshMixin:
             print("No bounding planes found. Please run find_contours first.")
             return
 
-        # Debug: Check registry status
-        has_registry = hasattr(self, 'shared_boundary_registry')
-        registry_len = len(self.shared_boundary_registry) if has_registry else 0
-        print(f"DEBUG resample_contours: shared_boundary_registry exists={has_registry}, len={registry_len}")
-
-        # If no registry exists, try to detect shared boundaries from contour data
-        # This handles the case where contours were loaded from a saved file
-        if not has_registry or registry_len == 0:
-            print("  Detecting shared boundaries from contour data...")
-            self._detect_shared_boundaries_from_contours()
-            has_registry = hasattr(self, 'shared_boundary_registry')
-            registry_len = len(self.shared_boundary_registry) if has_registry else 0
-            print(f"  After detection: registry exists={has_registry}, len={registry_len}")
-
-        if has_registry and registry_len > 0:
-            for bid, binfo in self.shared_boundary_registry.items():
-                print(f"  Boundary {bid}: {len(binfo['vertices'])} verts, streams={binfo['stream_indices']}")
-
         # Store original contours before resampling (deep copy)
         self.contours_orig = [[c.copy() for c in contour_group] for contour_group in self.contours]
         self.bounding_planes_orig = [[bp.copy() for bp in bp_group] for bp_group in self.bounding_planes]
-
-        # ========== Phase 1: Compute shared boundary parameterization ==========
-        # Determine consistent vertex count for shared boundaries across all levels
-        if hasattr(self, 'shared_boundary_registry') and len(self.shared_boundary_registry) > 0:
-            print(f"Phase 1: Computing shared boundary parameterization...")
-            self._compute_shared_boundary_parameterization(num_samples)
 
         resampled_contours = []
         new_bounding_planes = []
@@ -4778,92 +4748,42 @@ class ContourMeshMixin:
         # Track previous level's first vertices for chained alignment
         prev_first_vertices = {}  # contour_idx -> first vertex position
 
-        print(f"Phase 2: Resampling {len(self.contours)} levels")
-        for level_idx, (contour_group, bounding_plane_group) in enumerate(zip(self.contours, self.bounding_planes)):
-            level_type = "origin" if level_idx == 0 else ("insertion" if level_idx == len(self.contours) - 1 else "mid")
-            print(f"  Level {level_idx} ({level_type}): {len(contour_group)} contours")
+        print(f"Resampling {len(self.contours)} streams")
+        for stream_idx, (contour_group, bounding_plane_group) in enumerate(zip(self.contours, self.bounding_planes)):
+            print(f"  Stream {stream_idx}: {len(contour_group)} levels")
 
-            # Check if this level has cut contours that should be merged for resampling
-            if hasattr(self, 'shared_boundary_registry') and len(self.shared_boundary_registry) > 0:
-                # Find which contours at this level share boundaries
-                connected_groups = self._find_connected_contour_groups(contour_group, level_idx)
-            else:
-                # No shared boundaries - each contour is its own group
-                connected_groups = [[i] for i in range(len(contour_group))]
+            resampled_group = []
+            new_bp_group = []
 
-            resampled_group = [None] * len(contour_group)
-            new_bp_group = [None] * len(bounding_plane_group)
-
-            for group in connected_groups:
-                if len(group) == 1:
-                    # Single contour - normal resampling
-                    contour_idx = group[0]
-                    contour = contour_group[contour_idx]
-                    bounding_plane_info = bounding_plane_group[contour_idx]
-
-                    bounding_plane_corners = bounding_plane_info.get('bounding_plane')
-                    if bounding_plane_corners is not None and len(bounding_plane_corners) >= 1:
-                        corner_ref = np.array(bounding_plane_corners[0])
-                    else:
-                        corner_ref = prev_first_vertices.get(contour_idx, None)
-
-                    resampled = self._resample_single_contour(np.array(contour), num_samples, corner_ref)
-                    prev_first_vertices[contour_idx] = resampled[0].copy()
-
-                    # Align with bounding plane
-                    bounding_plane = bounding_plane_info['bounding_plane']
-                    aligned_contour, contour_match = self.find_contour_match(resampled, bounding_plane, preserve_order=True)
-
-                    new_bp_info = bounding_plane_info.copy()
-                    if 'contour_match' in bounding_plane_info and 'contour_match_orig' not in bounding_plane_info:
-                        new_bp_info['contour_match_orig'] = bounding_plane_info['contour_match']
-                    new_bp_info['contour_match'] = contour_match
-
-                    resampled_group[contour_idx] = aligned_contour
-                    new_bp_group[contour_idx] = new_bp_info
-                    print(f"    Contour {contour_idx}: {len(contour)} -> {len(aligned_contour)} points (single)")
+            for level_idx, (contour, bounding_plane_info) in enumerate(zip(contour_group, bounding_plane_group)):
+                bounding_plane_corners = bounding_plane_info.get('bounding_plane')
+                if bounding_plane_corners is not None and len(bounding_plane_corners) >= 1:
+                    corner_ref = np.array(bounding_plane_corners[0])
                 else:
-                    # Multiple connected contours - resample as merged, then split
-                    print(f"    Connected group {group}: resampling as merged contour")
-                    resampled_pieces = self._resample_merged_contour_group(
-                        contour_group, bounding_plane_group, group, num_samples, level_idx
-                    )
+                    corner_ref = prev_first_vertices.get(level_idx, None)
 
-                    for i, contour_idx in enumerate(group):
-                        bounding_plane_info = bounding_plane_group[contour_idx]
-                        piece = resampled_pieces[i]
+                resampled = self._resample_single_contour(np.array(contour), num_samples, corner_ref)
+                prev_first_vertices[level_idx] = resampled[0].copy()
 
-                        prev_first_vertices[contour_idx] = piece[0].copy()
+                # Align with bounding plane
+                bounding_plane = bounding_plane_info['bounding_plane']
+                aligned_contour, contour_match = self.find_contour_match(resampled, bounding_plane, preserve_order=True)
 
-                        # Align with bounding plane
-                        bounding_plane = bounding_plane_info['bounding_plane']
-                        aligned_contour, contour_match = self.find_contour_match(piece, bounding_plane, preserve_order=True)
+                new_bp_info = bounding_plane_info.copy()
+                if 'contour_match' in bounding_plane_info and 'contour_match_orig' not in bounding_plane_info:
+                    new_bp_info['contour_match_orig'] = bounding_plane_info['contour_match']
+                new_bp_info['contour_match'] = contour_match
 
-                        new_bp_info = bounding_plane_info.copy()
-                        if 'contour_match' in bounding_plane_info and 'contour_match_orig' not in bounding_plane_info:
-                            new_bp_info['contour_match_orig'] = bounding_plane_info['contour_match']
-                        new_bp_info['contour_match'] = contour_match
-
-                        # Snap boundary vertices to registered positions
-                        if hasattr(self, 'shared_cut_vertices') and len(self.shared_cut_vertices) > 0:
-                            snap_threshold = 1e-4
-                            for v_idx in range(len(aligned_contour)):
-                                for shared_pos in self.shared_cut_vertices:
-                                    dist = np.linalg.norm(aligned_contour[v_idx] - shared_pos)
-                                    if dist < snap_threshold:
-                                        aligned_contour[v_idx] = shared_pos.copy()
-                                        break
-
-                        resampled_group[contour_idx] = aligned_contour
-                        new_bp_group[contour_idx] = new_bp_info
-                        print(f"      Piece {contour_idx}: {len(contour_group[contour_idx])} -> {len(aligned_contour)} points")
+                resampled_group.append(aligned_contour)
+                new_bp_group.append(new_bp_info)
 
             resampled_contours.append(resampled_group)
             new_bounding_planes.append(new_bp_group)
+            print(f"    Resampled {len(resampled_group)} levels to {num_samples} vertices each")
 
         self.contours = resampled_contours
         self.bounding_planes = new_bounding_planes
-        print(f"Resampled {len(self.contours)} contour levels to {num_samples} vertices each")
+        print(f"Resampling complete: {len(self.contours)} streams")
 
     def _detect_shared_boundaries_from_contours(self):
         """
@@ -5994,36 +5914,9 @@ class ContourMeshMixin:
         all_faces = []
 
         # Track processed quads to avoid duplicates at shared boundaries
-        # A quad is identified by the frozenset of its 4 vertex indices
         processed_quads = set()
 
-        # First pass: identify boundary vertices (close to other streams) at each level
-        # boundary_positions[stream_idx][level_idx] = set of positions in that stream's contour
-        # that are on the cut boundary (close to another stream)
-        boundary_positions = [[set() for _ in range(num_levels)] for _ in range(num_streams)]
-        boundary_threshold = 0.1  # Max distance to consider as boundary
-
-        for level_idx in range(num_levels):
-            for stream_i in range(num_streams):
-                for stream_j in range(stream_i + 1, num_streams):
-                    indices_i = stream_level_indices[stream_i][level_idx]
-                    indices_j = stream_level_indices[stream_j][level_idx]
-
-                    if len(indices_i) == 0 or len(indices_j) == 0:
-                        continue
-
-                    # Find close vertex pairs
-                    for pi, vi in enumerate(indices_i):
-                        for pj, vj in enumerate(indices_j):
-                            dist = np.linalg.norm(all_vertices[vi] - all_vertices[vj])
-                            if dist < boundary_threshold:
-                                boundary_positions[stream_i][level_idx].add(pi)
-                                boundary_positions[stream_j][level_idx].add(pj)
-
         # Create faces between consecutive levels for each stream
-        # BUT skip faces along the cut boundary (internal faces)
-        skipped_boundary_faces = 0
-
         for stream_idx in range(num_streams):
             for level_idx in range(num_levels - 1):
                 curr_indices = stream_level_indices[stream_idx][level_idx]
@@ -6035,33 +5928,21 @@ class ContourMeshMixin:
                 n_curr = len(curr_indices)
                 n_next = len(next_indices)
 
-                # Get boundary positions for this stream at both levels
-                curr_boundary = boundary_positions[stream_idx][level_idx]
-                next_boundary = boundary_positions[stream_idx][level_idx + 1]
-
                 if n_curr == n_next:
                     # Same size - create band with direct indices
                     if level_idx == 0:
                         print(f"  Level 0->1 (origin->next): {n_curr} == {n_next} vertices (equal path)")
                     for i in range(n_curr):
                         i_next = (i + 1) % n_curr
-
-                        # Skip if BOTH vertices on curr level are boundary vertices
-                        # This is a cut-edge face that should be internal, not surface
-                        if i in curr_boundary and i_next in curr_boundary:
-                            skipped_boundary_faces += 1
-                            continue
-
                         v0 = curr_indices[i]
                         v1 = curr_indices[i_next]
                         v2 = next_indices[i_next]
                         v3 = next_indices[i]
 
                         # Check if this quad was already created by another stream
-                        # (happens at shared boundary edges between cut contours)
                         quad_key = frozenset([v0, v1, v2, v3])
                         if quad_key in processed_quads:
-                            continue  # Skip duplicate quad
+                            continue
                         processed_quads.add(quad_key)
 
                         # Choose shorter diagonal to minimize dents
@@ -6071,99 +5952,17 @@ class ContourMeshMixin:
                         diag_13 = np.linalg.norm(p1 - p3)
 
                         if diag_02 <= diag_13:
-                            # Split along v0-v2
                             all_faces.append([v0, v1, v2])
                             all_faces.append([v0, v2, v3])
                         else:
-                            # Split along v1-v3
                             all_faces.append([v0, v1, v3])
                             all_faces.append([v1, v2, v3])
                 else:
-                    # Different sizes - variable band (pass boundary info)
+                    # Different sizes - variable band
                     faces = self._create_contour_band_variable_indices(
-                        curr_indices, next_indices, all_vertices, processed_quads,
-                        curr_boundary, next_boundary
+                        curr_indices, next_indices, all_vertices, processed_quads
                     )
                     all_faces.extend(faces)
-
-        if skipped_boundary_faces > 0:
-            print(f"  Skipped {skipped_boundary_faces} internal cut-boundary faces")
-
-        # Create stitching faces between adjacent streams at each level
-        # This connects cut pieces so they form one unified shape, not "two balloons"
-        stitch_threshold = 0.1  # Max distance to consider vertices as stitchable
-        stitched_levels = 0
-
-        for level_idx in range(num_levels):
-            for stream_i in range(num_streams):
-                for stream_j in range(stream_i + 1, num_streams):
-                    indices_i = stream_level_indices[stream_i][level_idx]
-                    indices_j = stream_level_indices[stream_j][level_idx]
-
-                    if len(indices_i) == 0 or len(indices_j) == 0:
-                        continue
-
-                    # Find closest vertex pairs between the two streams
-                    # These are the "boundary" vertices where the cut happened
-                    close_pairs = []  # List of (pos_i, pos_j, distance)
-
-                    for pi, vi in enumerate(indices_i):
-                        v_pos_i = all_vertices[vi]
-                        min_dist = float('inf')
-                        min_pj = -1
-                        for pj, vj in enumerate(indices_j):
-                            v_pos_j = all_vertices[vj]
-                            dist = np.linalg.norm(v_pos_i - v_pos_j)
-                            if dist < min_dist:
-                                min_dist = dist
-                                min_pj = pj
-                        if min_dist < stitch_threshold:
-                            close_pairs.append((pi, min_pj, min_dist))
-
-                    if len(close_pairs) < 2:
-                        continue  # Need at least 2 close points to stitch
-
-                    # Sort by position in stream i to get ordered boundary
-                    close_pairs.sort(key=lambda x: x[0])
-
-                    # Find contiguous runs of close vertices (the cut boundary)
-                    # Create stitching faces along the boundary
-                    for k in range(len(close_pairs) - 1):
-                        pi1, pj1, _ = close_pairs[k]
-                        pi2, pj2, _ = close_pairs[k + 1]
-
-                        # Check if these are adjacent in stream i
-                        if pi2 - pi1 > 3:  # Gap too large, not contiguous
-                            continue
-
-                        v0 = indices_i[pi1]
-                        v1 = indices_i[pi2]
-                        v2 = indices_j[pj2]
-                        v3 = indices_j[pj1]
-
-                        # Create quad (two triangles) connecting the streams
-                        quad_key = frozenset([v0, v1, v2, v3])
-                        if quad_key in processed_quads:
-                            continue
-                        processed_quads.add(quad_key)
-
-                        # Split quad into triangles
-                        p0, p1 = all_vertices[v0], all_vertices[v1]
-                        p2, p3 = all_vertices[v2], all_vertices[v3]
-                        diag_02 = np.linalg.norm(p0 - p2)
-                        diag_13 = np.linalg.norm(p1 - p3)
-
-                        if diag_02 <= diag_13:
-                            all_faces.append([v0, v1, v2])
-                            all_faces.append([v0, v2, v3])
-                        else:
-                            all_faces.append([v0, v1, v3])
-                            all_faces.append([v1, v2, v3])
-
-                    stitched_levels += 1
-
-        if stitched_levels > 0:
-            print(f"  Stitched {stitched_levels} stream pairs across levels")
 
         if len(all_faces) == 0:
             print("No faces generated.")
@@ -6196,8 +5995,7 @@ class ContourMeshMixin:
     # _ensure_waypoints_inside_mesh method moved to FiberArchitectureMixin in fiber_architecture.py
     # _update_contours_from_smoothed_mesh method moved to FiberArchitectureMixin in fiber_architecture.py
 
-    def _create_contour_band_variable_indices(self, curr_indices, next_indices, all_vertices,
-                                               processed_quads=None, curr_boundary=None, next_boundary=None):
+    def _create_contour_band_variable_indices(self, curr_indices, next_indices, all_vertices, processed_quads=None):
         """
         Create triangular faces between two contours with different vertex counts.
         Uses direct vertex indices instead of offsets.
@@ -6205,17 +6003,10 @@ class ContourMeshMixin:
         Args:
             processed_quads: Optional set to track processed quads/triangles to avoid
                            duplicates at shared boundaries between cut contours.
-            curr_boundary: Optional set of positions in curr_indices that are boundary vertices
-            next_boundary: Optional set of positions in next_indices that are boundary vertices
         """
         n_curr = len(curr_indices)
         n_next = len(next_indices)
         faces = []
-
-        if curr_boundary is None:
-            curr_boundary = set()
-        if next_boundary is None:
-            next_boundary = set()
 
         print(f"  Variable band: {n_curr} -> {n_next} vertices")
 
@@ -6228,22 +6019,13 @@ class ContourMeshMixin:
             ratio_curr = i_curr / n_curr if n_curr > 0 else 1
             ratio_next = i_next / n_next if n_next > 0 else 1
 
-            curr_pos = i_curr % n_curr
-            curr_pos_next = (i_curr + 1) % n_curr
-            next_pos = i_next % n_next
-            next_pos_next = (i_next + 1) % n_next
-
-            v0 = curr_indices[curr_pos]
-            v1 = curr_indices[curr_pos_next]
-            v2 = next_indices[next_pos_next]
-            v3 = next_indices[next_pos]
+            v0 = curr_indices[i_curr % n_curr]
+            v1 = curr_indices[(i_curr + 1) % n_curr]
+            v2 = next_indices[(i_next + 1) % n_next]
+            v3 = next_indices[i_next % n_next]
 
             if ratio_curr <= ratio_next and i_curr < n_curr:
                 # Advance on curr contour - create triangle [v0, v1, v3]
-                # Skip if both curr vertices are on boundary
-                if curr_pos in curr_boundary and curr_pos_next in curr_boundary:
-                    i_curr += 1
-                    continue
                 tri_key = frozenset([v0, v1, v3])
                 if processed_quads is None or tri_key not in processed_quads:
                     faces.append([v0, v1, v3])
@@ -6252,10 +6034,6 @@ class ContourMeshMixin:
                 i_curr += 1
             elif i_next < n_next:
                 # Advance on next contour - create triangle [v0, v2, v3]
-                # Skip if both next vertices are on boundary
-                if next_pos in next_boundary and next_pos_next in next_boundary:
-                    i_next += 1
-                    continue
                 tri_key = frozenset([v0, v2, v3])
                 if processed_quads is None or tri_key not in processed_quads:
                     faces.append([v0, v2, v3])
