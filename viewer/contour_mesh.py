@@ -9586,6 +9586,9 @@ class ContourMeshMixin:
                     stream_checkboxes[level_i] = True
             self._level_select_checkboxes.append(stream_checkboxes)
 
+        # Update visualization to show initial selection
+        self._update_level_select_visualization()
+
         # Open GUI window for manual selection adjustment
         self._level_select_window_open = True
         print(f"\nLevel selection GUI window opened. Adjust selection and click 'Finish Select'.")
