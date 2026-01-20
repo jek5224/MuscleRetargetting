@@ -4897,6 +4897,10 @@ class ContourMeshMixin:
         """
         Find which shared boundaries this contour has.
         Returns list of boundary info dicts for use in resampling.
+
+        Important: The resampled vertices are adjusted to match the direction
+        in which this contour traverses the boundary, ensuring both adjacent
+        contours have vertices at the same positions.
         """
         if not hasattr(self, 'shared_boundary_registry') or not hasattr(self, 'shared_cut_vertices'):
             return []
@@ -4918,6 +4922,7 @@ class ContourMeshMixin:
             resampled_vertices = boundary_info['resampled']
 
             # Find indices of original boundary vertices in this contour
+            # Keep track of order to determine direction
             boundary_indices = []
             for bv in original_vertices:
                 for v_idx, cv in enumerate(contour):
@@ -4926,10 +4931,23 @@ class ContourMeshMixin:
                         break
 
             if len(boundary_indices) >= 2:
-                # Found this boundary in the contour
-                boundary_indices.sort()
-                start_idx = boundary_indices[0]
-                end_idx = boundary_indices[-1]
+                # Determine if contour traverses boundary in same direction as registry
+                # by checking if the second registry vertex appears after the first in contour order
+                first_idx = boundary_indices[0]   # Contour index of first registry vertex
+                second_idx = boundary_indices[1]  # Contour index of second registry vertex
+
+                # Calculate forward distance (accounting for wrap-around)
+                n_contour = len(contour)
+                forward_dist = (second_idx - first_idx) % n_contour
+                backward_dist = (first_idx - second_idx) % n_contour
+
+                # If forward distance is shorter, same direction. Otherwise, reverse.
+                same_direction = forward_dist <= backward_dist
+
+                # Get sorted indices for start/end
+                sorted_indices = sorted(boundary_indices)
+                start_idx = sorted_indices[0]
+                end_idx = sorted_indices[-1]
 
                 # Check if boundary wraps around
                 if end_idx - start_idx > len(boundary_indices):
@@ -4937,11 +4955,18 @@ class ContourMeshMixin:
                     # Check if indices at start and end of contour
                     if 0 in boundary_indices and len(contour) - 1 in boundary_indices:
                         # Wrap-around case
-                        end_idx = len(contour) - 1 + boundary_indices[0]
+                        end_idx = len(contour) - 1 + sorted_indices[0]
+
+                # Use resampled vertices in correct direction for this contour
+                if same_direction:
+                    verts_for_contour = resampled_vertices.copy()
+                else:
+                    # Reverse the resampled vertices to match contour direction
+                    verts_for_contour = resampled_vertices[::-1].copy()
 
                 shared_boundaries_info.append({
                     'indices': (start_idx, end_idx),
-                    'resampled_vertices': resampled_vertices.copy(),
+                    'resampled_vertices': verts_for_contour,
                     'boundary_id': boundary_id
                 })
 
