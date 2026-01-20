@@ -3158,6 +3158,9 @@ class GLFWApp():
         # Render Manual Cut windows for each muscle
         self._render_manual_cut_windows()
 
+        # Render Level Select windows for manual level selection
+        self._render_level_select_windows()
+
         imgui.render()
 
     def _render_inspect_2d_windows(self):
@@ -5705,6 +5708,103 @@ class GLFWApp():
                         obj._auto_optimize_all = False
                     if name in self._manual_cut_mouse:
                         del self._manual_cut_mouse[name]
+
+            imgui.end()
+
+    def _render_level_select_windows(self):
+        """Render level selection windows for manual level selection after Contour Select."""
+        for name, obj in self.zygote_muscle_meshes.items():
+            if not hasattr(obj, '_level_select_window_open') or not obj._level_select_window_open:
+                continue
+
+            if not hasattr(obj, '_level_select_checkboxes') or obj._level_select_checkboxes is None:
+                continue
+
+            if not hasattr(obj, '_level_select_original') or obj._level_select_original is None:
+                continue
+
+            # Get data
+            orig = obj._level_select_original
+            checkboxes = obj._level_select_checkboxes
+            stream_groups = orig['stream_groups']
+            max_stream_count = len(checkboxes)
+
+            # Window setup
+            imgui.set_next_window_size(500, 600, imgui.FIRST_USE_EVER)
+            expanded, opened = imgui.begin(f"Level Select: {name}", True)
+
+            if not opened:
+                # User closed window - cancel selection
+                obj._level_select_window_open = False
+                obj._level_select_checkboxes = None
+                obj._level_select_original = None
+                imgui.end()
+                continue
+
+            imgui.text(f"Streams: {max_stream_count}")
+            imgui.text("Check/uncheck levels to include/exclude.")
+            imgui.text("Linked levels (from same original contour) are toggled together.")
+            imgui.separator()
+
+            # Create scrollable region for checkboxes
+            imgui.begin_child("LevelCheckboxes", 0, -50, border=True)
+
+            # Track if visualization needs update
+            vis_changed = False
+
+            # Render checkboxes for each stream
+            for stream_i in range(max_stream_count):
+                num_levels = len(checkboxes[stream_i])
+                imgui.text(f"Stream {stream_i} ({num_levels} levels):")
+                imgui.indent(20)
+
+                for level_i in range(num_levels):
+                    # Find which group this level belongs to (for linking)
+                    group_streams = None
+                    if level_i < len(stream_groups):
+                        for group in stream_groups[level_i]:
+                            if stream_i in group:
+                                group_streams = group
+                                break
+
+                    # Create unique ID for checkbox
+                    checkbox_id = f"##level_{stream_i}_{level_i}"
+
+                    # Get current state
+                    is_checked = checkboxes[stream_i][level_i]
+
+                    # Show checkbox with level index
+                    changed, new_value = imgui.checkbox(f"Level {level_i}{checkbox_id}", is_checked)
+
+                    if changed:
+                        vis_changed = True
+                        # Update this checkbox
+                        checkboxes[stream_i][level_i] = new_value
+
+                        # If this level is part of a group, update all streams in the group
+                        if group_streams is not None and len(group_streams) > 1:
+                            for other_stream in group_streams:
+                                if other_stream != stream_i and other_stream < max_stream_count:
+                                    if level_i < len(checkboxes[other_stream]):
+                                        checkboxes[other_stream][level_i] = new_value
+
+                imgui.unindent(20)
+                imgui.separator()
+
+            imgui.end_child()
+
+            # Update visualization if checkboxes changed
+            if vis_changed:
+                obj._update_level_select_visualization()
+
+            # Buttons
+            button_width = 120
+            if imgui.button("Undo Selection", button_width, 30):
+                obj._undo_level_selection()
+
+            imgui.same_line()
+            if imgui.button("Finish Select", button_width, 30):
+                obj._apply_level_selection()
 
             imgui.end()
 

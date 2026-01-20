@@ -9562,11 +9562,57 @@ class ContourMeshMixin:
         counts = [len(s) for s in stream_selected]
         print(f"Level counts per stream: {counts} (no equalization)")
 
-        # Store results
+        # Store results (initial automatic selection)
         self.stream_selected_levels = [sorted(s) for s in stream_selected]
-        print(f"\nFinal selected levels per stream:")
+        print(f"\nInitial selected levels per stream:")
         for s in range(max_stream_count):
             print(f"  Stream {s}: {self.stream_selected_levels[s]}")
+
+        # Save original state for "Undo Selection" functionality
+        self._level_select_original = {
+            'stream_contours': [list(sc) for sc in self.stream_contours],
+            'stream_bounding_planes': [list(bp) for bp in self.stream_bounding_planes],
+            'stream_groups': list(self.stream_groups),
+        }
+
+        # Create checkbox state for GUI: level_checkbox[stream_i][level_i] = True/False
+        # Initialize with automatic selection result
+        self._level_select_checkboxes = []
+        for stream_i in range(max_stream_count):
+            num_levels_stream = len(self.stream_contours[stream_i])
+            stream_checkboxes = [False] * num_levels_stream
+            for level_i in self.stream_selected_levels[stream_i]:
+                if level_i < num_levels_stream:
+                    stream_checkboxes[level_i] = True
+            self._level_select_checkboxes.append(stream_checkboxes)
+
+        # Open GUI window for manual selection adjustment
+        self._level_select_window_open = True
+        print(f"\nLevel selection GUI window opened. Adjust selection and click 'Finish Select'.")
+
+    def _apply_level_selection(self):
+        """Apply the current checkbox selection to stream data (called by Finish Select)."""
+        if not hasattr(self, '_level_select_checkboxes') or self._level_select_checkboxes is None:
+            return
+
+        max_stream_count = self.max_stream_count
+
+        # Build selected levels from checkboxes
+        stream_selected = []
+        for stream_i in range(max_stream_count):
+            selected = [i for i, checked in enumerate(self._level_select_checkboxes[stream_i]) if checked]
+            stream_selected.append(selected)
+
+        self.stream_selected_levels = stream_selected
+        print(f"\nApplying level selection:")
+        for s in range(max_stream_count):
+            print(f"  Stream {s}: {self.stream_selected_levels[s]}")
+
+        # Get original data
+        orig = self._level_select_original
+        orig_stream_contours = orig['stream_contours']
+        orig_stream_bounding_planes = orig['stream_bounding_planes']
+        orig_stream_groups = orig['stream_groups']
 
         # Apply selection to stream_contours and stream_bounding_planes
         new_stream_contours = [[] for _ in range(max_stream_count)]
@@ -9580,12 +9626,14 @@ class ContourMeshMixin:
         all_selected_sorted = sorted(all_selected)
 
         for level_i in all_selected_sorted:
-            new_stream_groups.append(self.stream_groups[level_i])
+            if level_i < len(orig_stream_groups):
+                new_stream_groups.append(orig_stream_groups[level_i])
 
         for stream_i in range(max_stream_count):
             for level_i in self.stream_selected_levels[stream_i]:
-                new_stream_contours[stream_i].append(self.stream_contours[stream_i][level_i])
-                new_stream_bounding_planes[stream_i].append(self.stream_bounding_planes[stream_i][level_i])
+                if level_i < len(orig_stream_contours[stream_i]):
+                    new_stream_contours[stream_i].append(orig_stream_contours[stream_i][level_i])
+                    new_stream_bounding_planes[stream_i].append(orig_stream_bounding_planes[stream_i][level_i])
 
         self.stream_contours = new_stream_contours
         self.stream_bounding_planes = new_stream_bounding_planes
@@ -9599,6 +9647,53 @@ class ContourMeshMixin:
 
         level_counts = [len(self.stream_contours[s]) for s in range(max_stream_count)]
         print(f"Levels updated: {level_counts} per stream")
+
+        # Close window and clean up
+        self._level_select_window_open = False
+        self._level_select_checkboxes = None
+        self._level_select_original = None
+
+    def _undo_level_selection(self):
+        """Restore original state (all levels selected)."""
+        if not hasattr(self, '_level_select_original') or self._level_select_original is None:
+            return
+
+        max_stream_count = self.max_stream_count
+
+        # Reset checkboxes to all True (select all levels)
+        self._level_select_checkboxes = []
+        for stream_i in range(max_stream_count):
+            num_levels_stream = len(self._level_select_original['stream_contours'][stream_i])
+            self._level_select_checkboxes.append([True] * num_levels_stream)
+
+        # Update visualization to show all levels
+        self._update_level_select_visualization()
+        print("Level selection reset to all levels selected")
+
+    def _update_level_select_visualization(self):
+        """Update visualization based on current checkbox state."""
+        if not hasattr(self, '_level_select_checkboxes') or self._level_select_checkboxes is None:
+            return
+        if not hasattr(self, '_level_select_original') or self._level_select_original is None:
+            return
+
+        max_stream_count = self.max_stream_count
+        orig = self._level_select_original
+
+        # Temporarily update contours/bounding_planes for visualization
+        # (without actually deleting unselected levels)
+        temp_contours = [[] for _ in range(max_stream_count)]
+        temp_bps = [[] for _ in range(max_stream_count)]
+
+        for stream_i in range(max_stream_count):
+            for level_i, checked in enumerate(self._level_select_checkboxes[stream_i]):
+                if checked and level_i < len(orig['stream_contours'][stream_i]):
+                    temp_contours[stream_i].append(orig['stream_contours'][stream_i][level_i])
+                    temp_bps[stream_i].append(orig['stream_bounding_planes'][stream_i][level_i])
+
+        self.contours = temp_contours
+        self.bounding_planes = temp_bps
+        self.draw_contour_stream = [[True] * len(temp_contours[s]) for s in range(max_stream_count)]
 
     def build_fibers(self, skeleton_meshes=None):
         """
