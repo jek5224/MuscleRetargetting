@@ -4728,9 +4728,10 @@ class ContourMeshMixin:
         Also updates bounding planes via find_contour_match to maintain linkage.
 
         For cut contours with shared boundaries:
-        - First resamples shared boundaries (agreeing on vertex count between adjacent streams)
-        - Then resamples non-shared portions to fill remaining vertex budget
-        - Ensures identical vertex positions on shared edges for tet mesh connectivity
+        - Reconstructs the merged contour from cut pieces
+        - Resamples as ONE shape (avoiding "two balloons" effect)
+        - Splits back into pieces, preserving boundary vertices
+        - Ensures boundary vertices align across levels for mesh connectivity
 
         Args:
             num_samples: int - desired number of vertices per contour
@@ -4747,80 +4748,97 @@ class ContourMeshMixin:
         self.contours_orig = [[c.copy() for c in contour_group] for contour_group in self.contours]
         self.bounding_planes_orig = [[bp.copy() for bp in bp_group] for bp_group in self.bounding_planes]
 
-        # ========== Phase 1: Pre-compute shared boundary resampling ==========
-        # For cut contours, resample shared boundaries FIRST so both adjacent contours
-        # use identical vertex positions
+        # ========== Phase 1: Compute shared boundary parameterization ==========
+        # Determine consistent vertex count for shared boundaries across all levels
         if hasattr(self, 'shared_boundary_registry') and len(self.shared_boundary_registry) > 0:
-            print(f"Phase 1: Resampling {len(self.shared_boundary_registry)} shared boundaries...")
-            self._resample_shared_boundaries(num_samples)
+            print(f"Phase 1: Computing shared boundary parameterization...")
+            self._compute_shared_boundary_parameterization(num_samples)
 
         resampled_contours = []
         new_bounding_planes = []
 
         # Track previous level's first vertices for chained alignment
-        # This ensures consistency between resampled levels
         prev_first_vertices = {}  # contour_idx -> first vertex position
 
-        print(f"Phase 2: Resampling {len(self.contours)} levels, {len(self.bounding_planes)} bounding plane groups")
+        print(f"Phase 2: Resampling {len(self.contours)} levels")
         for level_idx, (contour_group, bounding_plane_group) in enumerate(zip(self.contours, self.bounding_planes)):
-            resampled_group = []
-            new_bp_group = []
-
             level_type = "origin" if level_idx == 0 else ("insertion" if level_idx == len(self.contours) - 1 else "mid")
-            print(f"  Level {level_idx} ({level_type}): {len(contour_group)} contours, {len(bounding_plane_group)} planes")
+            print(f"  Level {level_idx} ({level_type}): {len(contour_group)} contours")
 
-            for contour_idx, (contour, bounding_plane_info) in enumerate(zip(contour_group, bounding_plane_group)):
-                original_size = len(contour)
+            # Check if this level has cut contours that should be merged for resampling
+            if hasattr(self, 'shared_boundary_registry') and len(self.shared_boundary_registry) > 0:
+                # Find which contours at this level share boundaries
+                connected_groups = self._find_connected_contour_groups(contour_group, level_idx)
+            else:
+                # No shared boundaries - each contour is its own group
+                connected_groups = [[i] for i in range(len(contour_group))]
 
-                # Check if this contour has shared boundaries (from cutting)
-                shared_boundaries_info = self._find_contour_shared_boundaries(contour, contour_idx, level_idx)
+            resampled_group = [None] * len(contour_group)
+            new_bp_group = [None] * len(bounding_plane_group)
 
-                # Use bounding plane corner 0 as reference for consistent winding
-                bounding_plane_corners = bounding_plane_info.get('bounding_plane')
-                if bounding_plane_corners is not None and len(bounding_plane_corners) >= 1:
-                    corner_ref = np.array(bounding_plane_corners[0])
-                else:
-                    corner_ref = prev_first_vertices.get(contour_idx, None)
+            for group in connected_groups:
+                if len(group) == 1:
+                    # Single contour - normal resampling
+                    contour_idx = group[0]
+                    contour = contour_group[contour_idx]
+                    bounding_plane_info = bounding_plane_group[contour_idx]
 
-                if len(shared_boundaries_info) > 0:
-                    # Use shared-boundary-aware resampling
-                    print(f"    Contour {contour_idx}: {original_size} pts, {len(shared_boundaries_info)} shared boundaries")
-                    resampled = self._resample_contour_with_shared_boundaries(
-                        np.array(contour), num_samples, shared_boundaries_info
-                    )
-                else:
-                    # Normal resampling
+                    bounding_plane_corners = bounding_plane_info.get('bounding_plane')
+                    if bounding_plane_corners is not None and len(bounding_plane_corners) >= 1:
+                        corner_ref = np.array(bounding_plane_corners[0])
+                    else:
+                        corner_ref = prev_first_vertices.get(contour_idx, None)
+
                     resampled = self._resample_single_contour(np.array(contour), num_samples, corner_ref)
+                    prev_first_vertices[contour_idx] = resampled[0].copy()
 
-                # Store first vertex for next level
-                prev_first_vertices[contour_idx] = resampled[0].copy()
+                    # Align with bounding plane
+                    bounding_plane = bounding_plane_info['bounding_plane']
+                    aligned_contour, contour_match = self.find_contour_match(resampled, bounding_plane, preserve_order=True)
 
-                print(f"    Contour {contour_idx}: {original_size} -> {len(resampled)} points")
+                    new_bp_info = bounding_plane_info.copy()
+                    if 'contour_match' in bounding_plane_info and 'contour_match_orig' not in bounding_plane_info:
+                        new_bp_info['contour_match_orig'] = bounding_plane_info['contour_match']
+                    new_bp_info['contour_match'] = contour_match
 
-                # Get the bounding plane rectangle
-                bounding_plane = bounding_plane_info['bounding_plane']
+                    resampled_group[contour_idx] = aligned_contour
+                    new_bp_group[contour_idx] = new_bp_info
+                    print(f"    Contour {contour_idx}: {len(contour)} -> {len(aligned_contour)} points (single)")
+                else:
+                    # Multiple connected contours - resample as merged, then split
+                    print(f"    Connected group {group}: resampling as merged contour")
+                    resampled_pieces = self._resample_merged_contour_group(
+                        contour_group, bounding_plane_group, group, num_samples, level_idx
+                    )
 
-                # Re-run find_contour_match to align resampled contour
-                aligned_contour, contour_match = self.find_contour_match(resampled, bounding_plane, preserve_order=True)
+                    for i, contour_idx in enumerate(group):
+                        bounding_plane_info = bounding_plane_group[contour_idx]
+                        piece = resampled_pieces[i]
 
-                # Update bounding plane info
-                new_bp_info = bounding_plane_info.copy()
-                if 'contour_match' in bounding_plane_info and 'contour_match_orig' not in bounding_plane_info:
-                    new_bp_info['contour_match_orig'] = bounding_plane_info['contour_match']
-                new_bp_info['contour_match'] = contour_match
+                        prev_first_vertices[contour_idx] = piece[0].copy()
 
-                # Final snap: ensure shared vertices are exactly at registered positions
-                if hasattr(self, 'shared_cut_vertices') and len(self.shared_cut_vertices) > 0:
-                    snap_threshold = 1e-4
-                    for v_idx in range(len(aligned_contour)):
-                        for shared_pos in self.shared_cut_vertices:
-                            dist = np.linalg.norm(aligned_contour[v_idx] - shared_pos)
-                            if dist < snap_threshold:
-                                aligned_contour[v_idx] = shared_pos.copy()
-                                break
+                        # Align with bounding plane
+                        bounding_plane = bounding_plane_info['bounding_plane']
+                        aligned_contour, contour_match = self.find_contour_match(piece, bounding_plane, preserve_order=True)
 
-                resampled_group.append(aligned_contour)
-                new_bp_group.append(new_bp_info)
+                        new_bp_info = bounding_plane_info.copy()
+                        if 'contour_match' in bounding_plane_info and 'contour_match_orig' not in bounding_plane_info:
+                            new_bp_info['contour_match_orig'] = bounding_plane_info['contour_match']
+                        new_bp_info['contour_match'] = contour_match
+
+                        # Snap boundary vertices to registered positions
+                        if hasattr(self, 'shared_cut_vertices') and len(self.shared_cut_vertices) > 0:
+                            snap_threshold = 1e-4
+                            for v_idx in range(len(aligned_contour)):
+                                for shared_pos in self.shared_cut_vertices:
+                                    dist = np.linalg.norm(aligned_contour[v_idx] - shared_pos)
+                                    if dist < snap_threshold:
+                                        aligned_contour[v_idx] = shared_pos.copy()
+                                        break
+
+                        resampled_group[contour_idx] = aligned_contour
+                        new_bp_group[contour_idx] = new_bp_info
+                        print(f"      Piece {contour_idx}: {len(contour_group[contour_idx])} -> {len(aligned_contour)} points")
 
             resampled_contours.append(resampled_group)
             new_bounding_planes.append(new_bp_group)
@@ -4829,69 +4847,398 @@ class ContourMeshMixin:
         self.bounding_planes = new_bounding_planes
         print(f"Resampled {len(self.contours)} contour levels to {num_samples} vertices each")
 
-    def _resample_shared_boundaries(self, num_samples):
+    def _compute_shared_boundary_parameterization(self, num_samples):
         """
-        Pre-compute resampled vertices for all shared boundaries.
-        Uses average perimeter of adjacent contours to determine vertex count.
+        Compute consistent parameterization for shared boundaries across all levels.
+        This ensures boundary vertices align when connecting across stream levels.
         """
         if not hasattr(self, 'shared_boundary_registry'):
             return
 
         for boundary_id, boundary_info in self.shared_boundary_registry.items():
             vertices = boundary_info['vertices']
-            stream_indices = boundary_info['stream_indices']
 
             if len(vertices) < 2:
                 boundary_info['resampled'] = np.array(vertices)
                 boundary_info['resampled_count'] = len(vertices)
                 continue
 
-            # Compute arc length of this boundary
-            boundary_arc_length = self._compute_segment_arc_length(vertices)
+            # Keep the original boundary vertices (cutting-based vertices)
+            # Don't resample them - preserve exactly as they are
+            boundary_info['resampled'] = np.array(vertices)
+            boundary_info['resampled_count'] = len(vertices)
 
-            # Compute average perimeter of contours that share this boundary
-            # (We'd need to know which contours these are - for now use a heuristic)
-            # Heuristic: assume shared boundary is roughly 10-30% of contour perimeter
-            # Allocate proportionally: if boundary is ~20% of perimeter, give it ~20% of vertices
-            # For simplicity, use boundary_arc_length relative to total shared_cut_vertices arc
+            print(f"    Boundary {boundary_id}: preserving {len(vertices)} cutting vertices")
 
-            # Better approach: compute actual contour perimeters if available
-            # For now, use a simple ratio based on vertex count
-            original_boundary_verts = len(vertices)
-            # Assume original contours had roughly num_samples * 2 vertices before cutting
-            # and shared boundary was original_boundary_verts out of that
-            estimated_perimeter_ratio = original_boundary_verts / (num_samples * 2)
-            estimated_perimeter_ratio = max(0.05, min(0.4, estimated_perimeter_ratio))  # Clamp to 5-40%
-
-            # Calculate target vertex count for this boundary
-            target_count = max(2, round(num_samples * estimated_perimeter_ratio))
-
-            # Resample the boundary
-            resampled = self._resample_open_segment(vertices, target_count)
-
-            boundary_info['resampled'] = resampled
-            boundary_info['resampled_count'] = target_count
-
-            print(f"    Boundary {boundary_id}: {len(vertices)} -> {target_count} vertices")
-
-            # Update shared_cut_vertices with resampled positions
-            # This ensures snapping uses the resampled positions
-            # (Clear old and add new)
+            # Update shared_cut_vertices with these positions
             if hasattr(self, 'shared_cut_vertices'):
-                # Remove old boundary vertices from shared_cut_vertices
-                new_shared = []
-                for v in self.shared_cut_vertices:
-                    is_in_boundary = False
-                    for bv in vertices:
-                        if np.linalg.norm(v - bv) < 1e-8:
-                            is_in_boundary = True
+                for v in vertices:
+                    # Check if already in shared_cut_vertices
+                    already_exists = False
+                    for sv in self.shared_cut_vertices:
+                        if np.linalg.norm(v - sv) < 1e-8:
+                            already_exists = True
                             break
-                    if not is_in_boundary:
-                        new_shared.append(v)
-                # Add resampled boundary vertices
-                for v in resampled:
-                    new_shared.append(v.copy())
-                self.shared_cut_vertices = new_shared
+                    if not already_exists:
+                        self.shared_cut_vertices.append(v.copy())
+
+    def _find_connected_contour_groups(self, contour_group, level_idx):
+        """
+        Find groups of contours that are connected via shared boundaries.
+        Returns list of lists, where each inner list contains indices of connected contours.
+        """
+        if not hasattr(self, 'shared_boundary_registry'):
+            return [[i] for i in range(len(contour_group))]
+
+        n_contours = len(contour_group)
+        if n_contours == 0:
+            return []
+
+        # Build adjacency based on shared boundaries
+        adjacency = {i: set() for i in range(n_contours)}
+
+        for boundary_id, boundary_info in self.shared_boundary_registry.items():
+            stream_indices = boundary_info['stream_indices']
+            # Stream indices that share this boundary are connected
+            for i in stream_indices:
+                for j in stream_indices:
+                    if i != j and i < n_contours and j < n_contours:
+                        adjacency[i].add(j)
+                        adjacency[j].add(i)
+
+        # Find connected components using BFS
+        visited = set()
+        groups = []
+
+        for start in range(n_contours):
+            if start in visited:
+                continue
+
+            # BFS to find all connected contours
+            group = []
+            queue = [start]
+            while queue:
+                node = queue.pop(0)
+                if node in visited:
+                    continue
+                visited.add(node)
+                group.append(node)
+                for neighbor in adjacency[node]:
+                    if neighbor not in visited:
+                        queue.append(neighbor)
+
+            if group:
+                groups.append(sorted(group))
+
+        return groups
+
+    def _resample_merged_contour_group(self, contour_group, bounding_plane_group, group_indices, num_samples, level_idx):
+        """
+        Resample a group of connected contours as one merged contour, then split back.
+
+        This ensures the pieces together form the original smooth shape (not "two balloons").
+        Boundary vertices are preserved at their cutting positions.
+
+        Args:
+            contour_group: list of all contours at this level
+            bounding_plane_group: list of bounding plane info at this level
+            group_indices: list of contour indices that form this connected group
+            num_samples: target vertex count per piece
+            level_idx: current level index
+
+        Returns:
+            list of resampled contour arrays, one per group_indices entry
+        """
+        if len(group_indices) == 1:
+            # Single contour - use normal resampling
+            idx = group_indices[0]
+            contour = np.array(contour_group[idx])
+            return [self._resample_single_contour(contour, num_samples, None)]
+
+        # ========== Step 1: Find shared boundaries between contours in this group ==========
+        shared_boundaries = []  # List of (contour_i, contour_j, boundary_vertices)
+
+        for boundary_id, boundary_info in self.shared_boundary_registry.items():
+            stream_indices = boundary_info['stream_indices']
+            # Check if both streams are in our group
+            in_group = [idx for idx in stream_indices if idx in group_indices]
+            if len(in_group) >= 2:
+                shared_boundaries.append({
+                    'boundary_id': boundary_id,
+                    'vertices': boundary_info['vertices'],
+                    'contour_indices': in_group
+                })
+
+        if len(shared_boundaries) == 0:
+            # No shared boundaries found - resample each independently
+            print(f"      Warning: No shared boundaries found for group {group_indices}")
+            results = []
+            for idx in group_indices:
+                contour = np.array(contour_group[idx])
+                results.append(self._resample_single_contour(contour, num_samples, None))
+            return results
+
+        # ========== Step 2: Reconstruct merged contour ==========
+        # For 2 contours sharing 1 boundary: join them at the boundary
+        if len(group_indices) == 2 and len(shared_boundaries) == 1:
+            idx_a, idx_b = group_indices[0], group_indices[1]
+            contour_a = np.array(contour_group[idx_a])
+            contour_b = np.array(contour_group[idx_b])
+            boundary_verts = shared_boundaries[0]['vertices']
+
+            merged, split_info = self._merge_two_contours(contour_a, contour_b, boundary_verts)
+
+            if merged is None:
+                # Merge failed - fall back to independent resampling
+                print(f"      Warning: Merge failed for group {group_indices}")
+                results = []
+                for idx in group_indices:
+                    contour = np.array(contour_group[idx])
+                    results.append(self._resample_single_contour(contour, num_samples, None))
+                return results
+
+            # ========== Step 3: Resample merged contour ==========
+            # Total vertices = num_samples * num_pieces, but boundary counted once
+            n_boundary = len(boundary_verts)
+            total_target = num_samples * 2 - n_boundary  # Two pieces share boundary
+
+            resampled_merged = self._resample_merged_with_fixed_boundary(
+                merged, total_target, split_info['boundary_start'], split_info['boundary_end'], boundary_verts
+            )
+
+            # ========== Step 4: Split back into pieces ==========
+            piece_a, piece_b = self._split_merged_contour(
+                resampled_merged, split_info, num_samples, boundary_verts
+            )
+
+            # Return in order of group_indices
+            if idx_a < idx_b:
+                return [piece_a, piece_b]
+            else:
+                return [piece_b, piece_a]
+        else:
+            # More complex case (3+ contours or multiple boundaries)
+            # For now, fall back to boundary-aware resampling
+            print(f"      Complex merge case: {len(group_indices)} contours, {len(shared_boundaries)} boundaries")
+            results = []
+            for idx in group_indices:
+                contour = np.array(contour_group[idx])
+                shared_info = self._find_contour_shared_boundaries(contour, idx, level_idx)
+                if shared_info:
+                    results.append(self._resample_contour_with_shared_boundaries(contour, num_samples, shared_info))
+                else:
+                    results.append(self._resample_single_contour(contour, num_samples, None))
+            return results
+
+    def _merge_two_contours(self, contour_a, contour_b, boundary_verts):
+        """
+        Merge two contours that share a boundary into one closed contour.
+
+        Returns:
+            merged: numpy array of merged contour vertices
+            split_info: dict with info needed to split back later
+        """
+        # Find boundary vertex positions in each contour
+        boundary_indices_a = []
+        boundary_indices_b = []
+
+        for bv in boundary_verts:
+            for i, v in enumerate(contour_a):
+                if np.linalg.norm(v - bv) < 1e-6:
+                    boundary_indices_a.append(i)
+                    break
+            for i, v in enumerate(contour_b):
+                if np.linalg.norm(v - bv) < 1e-6:
+                    boundary_indices_b.append(i)
+                    break
+
+        if len(boundary_indices_a) < 2 or len(boundary_indices_b) < 2:
+            return None, None
+
+        # Sort boundary indices
+        boundary_indices_a.sort()
+        boundary_indices_b.sort()
+
+        # Extract non-boundary portions from each contour
+        # Contour A: from after last boundary vertex to before first (wrapping around)
+        # Contour B: from after last boundary vertex to before first (wrapping around)
+
+        start_a, end_a = boundary_indices_a[0], boundary_indices_a[-1]
+        start_b, end_b = boundary_indices_b[0], boundary_indices_b[-1]
+
+        # Extract segment from contour A (non-boundary part)
+        # This goes from end_a+1 to start_a (wrapping around)
+        n_a = len(contour_a)
+        segment_a = []
+        i = (end_a + 1) % n_a
+        while i != start_a:
+            segment_a.append(contour_a[i].copy())
+            i = (i + 1) % n_a
+
+        # Extract segment from contour B (non-boundary part)
+        n_b = len(contour_b)
+        segment_b = []
+        i = (end_b + 1) % n_b
+        while i != start_b:
+            segment_b.append(contour_b[i].copy())
+            i = (i + 1) % n_b
+
+        # Check direction: do contours traverse boundary in same or opposite direction?
+        # Compare first two boundary indices
+        dir_a = (boundary_indices_a[1] - boundary_indices_a[0]) % n_a
+        dir_b = (boundary_indices_b[1] - boundary_indices_b[0]) % n_b
+        same_direction = (dir_a < n_a // 2) == (dir_b < n_b // 2)
+
+        # Build merged contour
+        # Start with boundary vertices, then segment_a, then boundary again (reversed), then segment_b
+        merged = []
+
+        # Add boundary vertices (in order from contour A)
+        for idx in boundary_indices_a:
+            merged.append(contour_a[idx].copy())
+
+        boundary_end_in_merged = len(merged) - 1
+
+        # Add segment A (non-boundary portion of contour A)
+        merged.extend(segment_a)
+
+        # Add boundary vertices again (in reverse order to close the loop properly)
+        # Actually, for a proper merge, we need to connect segment_a back to segment_b
+        # through the other end of the boundary
+
+        # Simpler approach: just concatenate
+        # boundary -> segment_a -> boundary_reversed -> segment_b
+
+        # Add segment B (non-boundary portion of contour B)
+        if same_direction:
+            merged.extend(segment_b)
+        else:
+            merged.extend(reversed(segment_b))
+
+        merged = np.array(merged)
+
+        split_info = {
+            'boundary_start': 0,
+            'boundary_end': len(boundary_verts) - 1,
+            'segment_a_start': len(boundary_verts),
+            'segment_a_end': len(boundary_verts) + len(segment_a) - 1,
+            'segment_b_start': len(boundary_verts) + len(segment_a),
+            'segment_b_end': len(merged) - 1,
+            'n_boundary': len(boundary_verts),
+            'n_segment_a': len(segment_a),
+            'n_segment_b': len(segment_b),
+            'same_direction': same_direction
+        }
+
+        return merged, split_info
+
+    def _resample_merged_with_fixed_boundary(self, merged, total_target, boundary_start, boundary_end, boundary_verts):
+        """
+        Resample merged contour while keeping boundary vertices fixed.
+        """
+        merged = np.array(merged)
+        n_boundary = len(boundary_verts)
+
+        # The boundary vertices should stay fixed
+        # Resample the rest proportionally
+
+        # For simplicity, use arc-length based resampling but snap boundary vertices
+        resampled = self._resample_single_contour(merged, total_target, None)
+
+        # Snap vertices near boundary positions to exact boundary positions
+        for i in range(len(resampled)):
+            for bv in boundary_verts:
+                if np.linalg.norm(resampled[i] - bv) < 0.1:  # Generous threshold
+                    resampled[i] = bv.copy()
+                    break
+
+        return resampled
+
+    def _split_merged_contour(self, resampled_merged, split_info, num_samples, boundary_verts):
+        """
+        Split a resampled merged contour back into two pieces.
+        Each piece gets num_samples vertices and includes the boundary.
+        """
+        # Find boundary vertices in resampled merged
+        boundary_indices = []
+        for bv in boundary_verts:
+            best_idx = -1
+            best_dist = float('inf')
+            for i, v in enumerate(resampled_merged):
+                dist = np.linalg.norm(v - bv)
+                if dist < best_dist:
+                    best_dist = dist
+                    best_idx = i
+            if best_dist < 0.1:
+                boundary_indices.append(best_idx)
+
+        if len(boundary_indices) < 2:
+            # Can't find boundary - return equal split
+            mid = len(resampled_merged) // 2
+            return resampled_merged[:mid].copy(), resampled_merged[mid:].copy()
+
+        boundary_indices.sort()
+        b_start, b_end = boundary_indices[0], boundary_indices[-1]
+
+        # Piece A: from b_start to b_end (through the middle)
+        piece_a_verts = []
+        for i in range(b_start, b_end + 1):
+            piece_a_verts.append(resampled_merged[i].copy())
+
+        # Piece B: from b_end to b_start (wrapping around)
+        n = len(resampled_merged)
+        piece_b_verts = []
+        i = b_end
+        while True:
+            piece_b_verts.append(resampled_merged[i].copy())
+            if i == b_start:
+                break
+            i = (i + 1) % n
+
+        # Resample each piece to target count
+        piece_a = self._resample_closed_piece(piece_a_verts, num_samples, boundary_verts)
+        piece_b = self._resample_closed_piece(piece_b_verts, num_samples, boundary_verts)
+
+        return piece_a, piece_b
+
+    def _resample_closed_piece(self, piece_verts, num_samples, boundary_verts):
+        """
+        Resample a piece (which includes boundary vertices) to target count.
+        Boundary vertices are preserved.
+        """
+        piece = np.array(piece_verts)
+
+        if len(piece) == num_samples:
+            return piece
+
+        # Find which vertices are boundary vertices
+        boundary_mask = []
+        for v in piece:
+            is_boundary = False
+            for bv in boundary_verts:
+                if np.linalg.norm(v - bv) < 1e-6:
+                    is_boundary = True
+                    break
+            boundary_mask.append(is_boundary)
+
+        n_boundary_in_piece = sum(boundary_mask)
+        n_non_boundary_target = num_samples - n_boundary_in_piece
+
+        if n_non_boundary_target <= 0:
+            # All vertices are boundary - just return boundary
+            return np.array([v for v, is_b in zip(piece, boundary_mask) if is_b])
+
+        # Resample using arc-length, keeping boundary fixed
+        resampled = self._resample_single_contour(piece, num_samples, None)
+
+        # Snap boundary vertices
+        for i in range(len(resampled)):
+            for bv in boundary_verts:
+                if np.linalg.norm(resampled[i] - bv) < 0.05:
+                    resampled[i] = bv.copy()
+                    break
+
+        return resampled
 
     def _find_contour_shared_boundaries(self, contour, contour_idx, level_idx):
         """
