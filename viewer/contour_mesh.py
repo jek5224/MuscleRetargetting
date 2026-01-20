@@ -5083,8 +5083,11 @@ class ContourMeshMixin:
             return None, None
 
         # For each piece, determine which path is the ORIGINAL portion vs the CUT EDGE
-        # The original portion is the SHORTER path (fewer intermediates)
-        # The cut edge is the LONGER path (has intermediate vertices)
+        # The CUT EDGE contains the intermediate boundary vertices
+        # The ORIGINAL portion does NOT contain any intermediate boundary vertices
+
+        # Get intermediate boundary vertices (all except endpoints)
+        intermediate_verts = boundary_verts[1:-1] if len(boundary_verts) > 2 else []
 
         n_a = len(contour_a)
         n_b = len(contour_b)
@@ -5092,46 +5095,63 @@ class ContourMeshMixin:
         idx_a_0, idx_a_1 = boundary_indices_a[0], boundary_indices_a[1]
         idx_b_0, idx_b_1 = boundary_indices_b[0], boundary_indices_b[1]
 
-        # Path 1: from idx_0 to idx_1 going forward (not wrapping)
-        # Path 2: from idx_1 to idx_0 going forward (wrapping)
+        # For contour A: check which path contains intermediates
+        # Path forward: idx_a_0 -> idx_a_1 (not wrapping if idx_a_0 < idx_a_1)
+        # Path backward: idx_a_1 -> idx_a_0 (wrapping)
 
-        # For contour A
-        path_a_forward_len = (idx_a_1 - idx_a_0) % n_a
-        path_a_backward_len = (idx_a_0 - idx_a_1) % n_a
+        def path_contains_intermediates(contour, start_idx, end_idx, n, intermediates):
+            """Check if path from start_idx to end_idx contains any intermediate vertices."""
+            if len(intermediates) == 0:
+                return False
+            i = (start_idx + 1) % n  # Start after start_idx
+            while i != end_idx:
+                v = contour[i]
+                for iv in intermediates:
+                    if np.linalg.norm(v - iv) < 1e-6:
+                        return True
+                i = (i + 1) % n
+            return False
 
-        # The original portion has FEWER vertices (just the original contour part)
-        # The cut edge has MORE vertices (the boundary intermediates)
-        if path_a_forward_len <= path_a_backward_len:
+        # Check forward path (idx_a_0 to idx_a_1)
+        forward_has_intermediates_a = path_contains_intermediates(
+            contour_a, idx_a_0, idx_a_1, n_a, intermediate_verts
+        )
+
+        if not forward_has_intermediates_a:
             # Forward path is original portion
-            original_a = [contour_a[i].copy() for i in range(idx_a_0, idx_a_1 + 1)]
-            original_a_reversed = False
+            original_a = [contour_a[i % n_a].copy() for i in range(idx_a_0, idx_a_1 + 1)]
         else:
             # Backward (wrapping) path is original portion
             original_a = []
             i = idx_a_1
-            while True:
+            count = 0
+            while count < n_a:
                 original_a.append(contour_a[i].copy())
-                if i == idx_a_0:
+                if i == idx_a_0 and count > 0:
                     break
                 i = (i + 1) % n_a
-            original_a_reversed = True
+                count += 1
 
         # For contour B
-        path_b_forward_len = (idx_b_1 - idx_b_0) % n_b
-        path_b_backward_len = (idx_b_0 - idx_b_1) % n_b
+        forward_has_intermediates_b = path_contains_intermediates(
+            contour_b, idx_b_0, idx_b_1, n_b, intermediate_verts
+        )
 
-        if path_b_forward_len <= path_b_backward_len:
-            original_b = [contour_b[i].copy() for i in range(idx_b_0, idx_b_1 + 1)]
-            original_b_reversed = False
+        if not forward_has_intermediates_b:
+            original_b = [contour_b[i % n_b].copy() for i in range(idx_b_0, idx_b_1 + 1)]
         else:
             original_b = []
             i = idx_b_1
-            while True:
+            count = 0
+            while count < n_b:
                 original_b.append(contour_b[i].copy())
-                if i == idx_b_0:
+                if i == idx_b_0 and count > 0:
                     break
                 i = (i + 1) % n_b
-            original_b_reversed = True
+                count += 1
+
+        print(f"      Contour A: forward_has_intermediates={forward_has_intermediates_a}, original_a has {len(original_a)} verts")
+        print(f"      Contour B: forward_has_intermediates={forward_has_intermediates_b}, original_b has {len(original_b)} verts")
 
         # Now merge: original_a + original_b (connected at boundary endpoints)
         # original_a goes from one boundary endpoint to the other
