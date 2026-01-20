@@ -6048,7 +6048,11 @@ class ContourMeshMixin:
                     )
                     all_faces.extend(faces)
 
-        # Create stitching faces between adjacent streams at merged levels
+        # Create stitching faces between adjacent streams at each level
+        # This connects cut pieces so they form one unified shape, not "two balloons"
+        stitch_threshold = 0.1  # Max distance to consider vertices as stitchable
+        stitched_levels = 0
+
         for level_idx in range(num_levels):
             for stream_i in range(num_streams):
                 for stream_j in range(stream_i + 1, num_streams):
@@ -6058,22 +6062,67 @@ class ContourMeshMixin:
                     if len(indices_i) == 0 or len(indices_j) == 0:
                         continue
 
-                    # Find shared vertex indices (boundary points)
-                    shared_i = []  # positions in indices_i that are shared
-                    shared_j = []  # corresponding positions in indices_j
+                    # Find closest vertex pairs between the two streams
+                    # These are the "boundary" vertices where the cut happened
+                    close_pairs = []  # List of (pos_i, pos_j, distance)
 
                     for pi, vi in enumerate(indices_i):
+                        v_pos_i = all_vertices[vi]
+                        min_dist = float('inf')
+                        min_pj = -1
                         for pj, vj in enumerate(indices_j):
-                            if vi == vj:  # Same vertex index = shared
-                                shared_i.append(pi)
-                                shared_j.append(pj)
+                            v_pos_j = all_vertices[vj]
+                            dist = np.linalg.norm(v_pos_i - v_pos_j)
+                            if dist < min_dist:
+                                min_dist = dist
+                                min_pj = pj
+                        if min_dist < stitch_threshold:
+                            close_pairs.append((pi, min_pj, min_dist))
 
-                    # If there are exactly 2 shared points, we can create stitching
-                    if len(shared_i) >= 2:
-                        # Streams share boundary - this is a merged level
-                        # The shared vertices are the boundaries where streams meet
-                        # No additional stitching needed since vertices are already shared
-                        pass
+                    if len(close_pairs) < 2:
+                        continue  # Need at least 2 close points to stitch
+
+                    # Sort by position in stream i to get ordered boundary
+                    close_pairs.sort(key=lambda x: x[0])
+
+                    # Find contiguous runs of close vertices (the cut boundary)
+                    # Create stitching faces along the boundary
+                    for k in range(len(close_pairs) - 1):
+                        pi1, pj1, _ = close_pairs[k]
+                        pi2, pj2, _ = close_pairs[k + 1]
+
+                        # Check if these are adjacent in stream i
+                        if pi2 - pi1 > 3:  # Gap too large, not contiguous
+                            continue
+
+                        v0 = indices_i[pi1]
+                        v1 = indices_i[pi2]
+                        v2 = indices_j[pj2]
+                        v3 = indices_j[pj1]
+
+                        # Create quad (two triangles) connecting the streams
+                        quad_key = frozenset([v0, v1, v2, v3])
+                        if quad_key in processed_quads:
+                            continue
+                        processed_quads.add(quad_key)
+
+                        # Split quad into triangles
+                        p0, p1 = all_vertices[v0], all_vertices[v1]
+                        p2, p3 = all_vertices[v2], all_vertices[v3]
+                        diag_02 = np.linalg.norm(p0 - p2)
+                        diag_13 = np.linalg.norm(p1 - p3)
+
+                        if diag_02 <= diag_13:
+                            all_faces.append([v0, v1, v2])
+                            all_faces.append([v0, v2, v3])
+                        else:
+                            all_faces.append([v0, v1, v3])
+                            all_faces.append([v1, v2, v3])
+
+                    stitched_levels += 1
+
+        if stitched_levels > 0:
+            print(f"  Stitched {stitched_levels} stream pairs across levels")
 
         if len(all_faces) == 0:
             print("No faces generated.")
