@@ -5997,7 +5997,33 @@ class ContourMeshMixin:
         # A quad is identified by the frozenset of its 4 vertex indices
         processed_quads = set()
 
+        # First pass: identify boundary vertices (close to other streams) at each level
+        # boundary_positions[stream_idx][level_idx] = set of positions in that stream's contour
+        # that are on the cut boundary (close to another stream)
+        boundary_positions = [[set() for _ in range(num_levels)] for _ in range(num_streams)]
+        boundary_threshold = 0.1  # Max distance to consider as boundary
+
+        for level_idx in range(num_levels):
+            for stream_i in range(num_streams):
+                for stream_j in range(stream_i + 1, num_streams):
+                    indices_i = stream_level_indices[stream_i][level_idx]
+                    indices_j = stream_level_indices[stream_j][level_idx]
+
+                    if len(indices_i) == 0 or len(indices_j) == 0:
+                        continue
+
+                    # Find close vertex pairs
+                    for pi, vi in enumerate(indices_i):
+                        for pj, vj in enumerate(indices_j):
+                            dist = np.linalg.norm(all_vertices[vi] - all_vertices[vj])
+                            if dist < boundary_threshold:
+                                boundary_positions[stream_i][level_idx].add(pi)
+                                boundary_positions[stream_j][level_idx].add(pj)
+
         # Create faces between consecutive levels for each stream
+        # BUT skip faces along the cut boundary (internal faces)
+        skipped_boundary_faces = 0
+
         for stream_idx in range(num_streams):
             for level_idx in range(num_levels - 1):
                 curr_indices = stream_level_indices[stream_idx][level_idx]
@@ -6009,12 +6035,23 @@ class ContourMeshMixin:
                 n_curr = len(curr_indices)
                 n_next = len(next_indices)
 
+                # Get boundary positions for this stream at both levels
+                curr_boundary = boundary_positions[stream_idx][level_idx]
+                next_boundary = boundary_positions[stream_idx][level_idx + 1]
+
                 if n_curr == n_next:
                     # Same size - create band with direct indices
                     if level_idx == 0:
                         print(f"  Level 0->1 (origin->next): {n_curr} == {n_next} vertices (equal path)")
                     for i in range(n_curr):
                         i_next = (i + 1) % n_curr
+
+                        # Skip if BOTH vertices on curr level are boundary vertices
+                        # This is a cut-edge face that should be internal, not surface
+                        if i in curr_boundary and i_next in curr_boundary:
+                            skipped_boundary_faces += 1
+                            continue
+
                         v0 = curr_indices[i]
                         v1 = curr_indices[i_next]
                         v2 = next_indices[i_next]
@@ -6042,11 +6079,15 @@ class ContourMeshMixin:
                             all_faces.append([v0, v1, v3])
                             all_faces.append([v1, v2, v3])
                 else:
-                    # Different sizes - variable band
+                    # Different sizes - variable band (pass boundary info)
                     faces = self._create_contour_band_variable_indices(
-                        curr_indices, next_indices, all_vertices, processed_quads
+                        curr_indices, next_indices, all_vertices, processed_quads,
+                        curr_boundary, next_boundary
                     )
                     all_faces.extend(faces)
+
+        if skipped_boundary_faces > 0:
+            print(f"  Skipped {skipped_boundary_faces} internal cut-boundary faces")
 
         # Create stitching faces between adjacent streams at each level
         # This connects cut pieces so they form one unified shape, not "two balloons"
@@ -6155,7 +6196,8 @@ class ContourMeshMixin:
     # _ensure_waypoints_inside_mesh method moved to FiberArchitectureMixin in fiber_architecture.py
     # _update_contours_from_smoothed_mesh method moved to FiberArchitectureMixin in fiber_architecture.py
 
-    def _create_contour_band_variable_indices(self, curr_indices, next_indices, all_vertices, processed_quads=None):
+    def _create_contour_band_variable_indices(self, curr_indices, next_indices, all_vertices,
+                                               processed_quads=None, curr_boundary=None, next_boundary=None):
         """
         Create triangular faces between two contours with different vertex counts.
         Uses direct vertex indices instead of offsets.
@@ -6163,10 +6205,17 @@ class ContourMeshMixin:
         Args:
             processed_quads: Optional set to track processed quads/triangles to avoid
                            duplicates at shared boundaries between cut contours.
+            curr_boundary: Optional set of positions in curr_indices that are boundary vertices
+            next_boundary: Optional set of positions in next_indices that are boundary vertices
         """
         n_curr = len(curr_indices)
         n_next = len(next_indices)
         faces = []
+
+        if curr_boundary is None:
+            curr_boundary = set()
+        if next_boundary is None:
+            next_boundary = set()
 
         print(f"  Variable band: {n_curr} -> {n_next} vertices")
 
@@ -6179,13 +6228,22 @@ class ContourMeshMixin:
             ratio_curr = i_curr / n_curr if n_curr > 0 else 1
             ratio_next = i_next / n_next if n_next > 0 else 1
 
-            v0 = curr_indices[i_curr % n_curr]
-            v1 = curr_indices[(i_curr + 1) % n_curr]
-            v2 = next_indices[(i_next + 1) % n_next]
-            v3 = next_indices[i_next % n_next]
+            curr_pos = i_curr % n_curr
+            curr_pos_next = (i_curr + 1) % n_curr
+            next_pos = i_next % n_next
+            next_pos_next = (i_next + 1) % n_next
+
+            v0 = curr_indices[curr_pos]
+            v1 = curr_indices[curr_pos_next]
+            v2 = next_indices[next_pos_next]
+            v3 = next_indices[next_pos]
 
             if ratio_curr <= ratio_next and i_curr < n_curr:
                 # Advance on curr contour - create triangle [v0, v1, v3]
+                # Skip if both curr vertices are on boundary
+                if curr_pos in curr_boundary and curr_pos_next in curr_boundary:
+                    i_curr += 1
+                    continue
                 tri_key = frozenset([v0, v1, v3])
                 if processed_quads is None or tri_key not in processed_quads:
                     faces.append([v0, v1, v3])
@@ -6194,6 +6252,10 @@ class ContourMeshMixin:
                 i_curr += 1
             elif i_next < n_next:
                 # Advance on next contour - create triangle [v0, v2, v3]
+                # Skip if both next vertices are on boundary
+                if next_pos in next_boundary and next_pos_next in next_boundary:
+                    i_next += 1
+                    continue
                 tri_key = frozenset([v0, v2, v3])
                 if processed_quads is None or tri_key not in processed_quads:
                     faces.append([v0, v2, v3])
