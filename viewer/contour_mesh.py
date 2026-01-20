@@ -3638,10 +3638,10 @@ class ContourMeshMixin:
 
         In stream mode: bounding_planes[stream][level]
         For each stream:
-        1. First contour: use continuous alignment to align x with (1,0,0) projected onto plane
-        2. Forward pass: use continuous alignment to align x with previous level's x
+        1. First contour: sign flip x to align with (1,0,0) projected onto plane
+        2. Forward pass: find closest non-square-like reference, rotate by 0/90/180/270 around z
+           - If no non-square-like reference, fallback to previous level with sign flip
 
-        Uses align_basis_to_reference_continuous to handle 90° offsets, not just 180° flips.
         NOTE: Bounding plane corners are NOT recomputed here - that happens in bp smoothening.
         """
         num_streams = len(self.stream_bounding_planes)
@@ -3655,61 +3655,91 @@ class ContourMeshMixin:
             if stream_len < 1:
                 continue
 
-            # First contour: align x with (1,0,0) projected onto its plane using continuous alignment
+            # First contour: rotate by 0/90/180/270 to align with (1,0,0)
             first_bp = bp_stream[0]
-            first_z = first_bp['basis_z']
             first_x = first_bp['basis_x']
             first_y = first_bp['basis_y']
 
             ref_x = np.array([1.0, 0.0, 0.0])
-            ref_x_proj = ref_x - np.dot(ref_x, first_z) * first_z
-            ref_x_norm = np.linalg.norm(ref_x_proj)
 
-            if ref_x_norm > 0.1:
-                ref_x_proj = ref_x_proj / ref_x_norm
-                dot_x_ref = np.dot(first_x, ref_x_proj)
-                print(f"    Level 0: dot(x, ref)={dot_x_ref:.4f}")
+            # Try 4 rotations: 0, 90, 180, 270 degrees around z
+            candidates = [
+                (first_x, first_y, 0),
+                (first_y, -first_x, 90),
+                (-first_x, -first_y, 180),
+                (-first_y, first_x, 270),
+            ]
 
-                # Use continuous alignment to rotate x toward reference
-                new_basis_x, new_basis_y = align_basis_to_reference_continuous(
-                    first_x, first_y, ref_x_proj, first_z
-                )
-                dot_after = np.dot(new_basis_x, ref_x_proj)
+            best_dot = -2.0
+            best_x, best_y, best_angle = first_x, first_y, 0
+            for cand_x, cand_y, angle in candidates:
+                dot_val = np.dot(cand_x, ref_x)
+                if dot_val > best_dot:
+                    best_dot = dot_val
+                    best_x, best_y, best_angle = cand_x, cand_y, angle
 
-                if abs(dot_after - dot_x_ref) > 0.01:  # Check if alignment changed anything
-                    first_bp['basis_x'] = new_basis_x
-                    first_bp['basis_y'] = new_basis_y
-                    print(f"    Level 0: ALIGNED x (dot: {dot_x_ref:.4f} -> {dot_after:.4f})")
+            print(f"    Level 0: ref=(1,0,0), best_rot={best_angle}°, dot={best_dot:.4f}")
 
-            # Forward pass: align x with previous level's x using continuous alignment
+            if best_angle != 0:
+                first_bp['basis_x'] = best_x
+                first_bp['basis_y'] = best_y
+
+            # Forward pass: find closest previous non-square-like reference, rotate by 0/90/180/270
             for level in range(1, stream_len):
                 curr_bp = bp_stream[level]
-                prev_bp = bp_stream[level - 1]
-
                 curr_x = curr_bp['basis_x']
                 curr_y = curr_bp['basis_y']
                 curr_z = curr_bp['basis_z']
-                prev_x = prev_bp['basis_x']
 
-                # Project previous x onto current plane
-                prev_x_proj = prev_x - np.dot(prev_x, curr_z) * curr_z
-                prev_x_norm = np.linalg.norm(prev_x_proj)
+                # Find closest previous (lower level) non-square-like contour
+                ref_bp = None
+                ref_level = None
+                for check_level in range(level - 1, -1, -1):
+                    check_bp = bp_stream[check_level]
+                    if not check_bp.get('square_like', False):
+                        ref_bp = check_bp
+                        ref_level = check_level
+                        break
 
-                if prev_x_norm > 1e-10:
-                    prev_x_proj = prev_x_proj / prev_x_norm
-                    dot_x = np.dot(curr_x, prev_x_proj)
-                    print(f"    Level {level}: dot(x, prev_x)={dot_x:.4f}")
+                if ref_bp is not None:
+                    # Found non-square-like reference - rotate by 0/90/180/270
+                    ref_x_axis = ref_bp['basis_x']
 
-                    # Use continuous alignment to rotate x toward previous
-                    new_basis_x, new_basis_y = align_basis_to_reference_continuous(
-                        curr_x, curr_y, prev_x_proj, curr_z
-                    )
-                    dot_after = np.dot(new_basis_x, prev_x_proj)
+                    # Try 4 rotations: 0, 90, 180, 270 degrees around z
+                    # 0°: curr_x, 90°: curr_y, 180°: -curr_x, 270°: -curr_y
+                    candidates = [
+                        (curr_x, curr_y, 0),
+                        (curr_y, -curr_x, 90),
+                        (-curr_x, -curr_y, 180),
+                        (-curr_y, curr_x, 270),
+                    ]
 
-                    if abs(dot_after - dot_x) > 0.01:  # Check if alignment changed anything
-                        curr_bp['basis_x'] = new_basis_x
-                        curr_bp['basis_y'] = new_basis_y
-                        print(f"    Level {level}: ALIGNED x (dot: {dot_x:.4f} -> {dot_after:.4f})")
+                    best_dot = -2.0
+                    best_x, best_y, best_angle = curr_x, curr_y, 0
+                    for cand_x, cand_y, angle in candidates:
+                        dot_val = np.dot(cand_x, ref_x_axis)
+                        if dot_val > best_dot:
+                            best_dot = dot_val
+                            best_x, best_y, best_angle = cand_x, cand_y, angle
+
+                    print(f"    Level {level}: ref=L{ref_level}, best_rot={best_angle}°, dot={best_dot:.4f}")
+
+                    if best_angle != 0:
+                        curr_bp['basis_x'] = best_x
+                        curr_bp['basis_y'] = best_y
+                else:
+                    # No non-square-like reference - fallback to previous level with sign flip
+                    prev_bp = bp_stream[level - 1]
+                    prev_x = prev_bp['basis_x']
+
+                    dot_x = np.dot(curr_x, prev_x)
+                    print(f"    Level {level}: no ref, prev dot={dot_x:.4f}")
+
+                    # Sign flip only if dot product is negative
+                    if dot_x < 0:
+                        curr_bp['basis_x'] = -curr_x
+                        curr_bp['basis_y'] = np.cross(curr_z, -curr_x)
+                        print(f"    Level {level}: FLIPPED x")
 
         # Update self.bounding_planes to reflect changes (contours unchanged, bp corners updated in bp smooth)
         self.bounding_planes = self.stream_bounding_planes
@@ -4014,13 +4044,11 @@ class ContourMeshMixin:
         """
         Smooth bounding plane orientations for stream mode (after cutting).
 
-        Same logic as before-cut bp smooth:
-        1. Non-square-like contours keep their farthest vertex based axes (as references)
+        Only applies to square-like contours:
+        1. Non-square-like contours keep their axes from x-smoothening (as references)
         2. Square-like contours get interpolated from prev/next non-square-like references
-        3. ALL contours get bounding plane corners recomputed with find_contour_match
+        3. Bounding plane corners recomputed for square-like contours only
         """
-        from scipy.spatial.distance import cdist
-
         num_streams = len(self.stream_bounding_planes)
 
         for stream_i in range(num_streams):
@@ -4032,84 +4060,7 @@ class ContourMeshMixin:
 
             print(f"  Stream {stream_i}: {stream_len} levels")
 
-            # ========== Step 1: Recompute farthest vertex axes for ALL contours first ==========
-            # This determines square_like status based on farthest vertex bounding box
-            # Also ensures one-to-one correspondence with previous level (no flipping)
-            prev_basis_x = None
-            for i in range(stream_len):
-                bp = bp_stream[i]
-                contour_points = np.asarray(self.stream_contours[stream_i][i])
-                basis_z = bp['basis_z']
-                mean = bp['mean']
-
-                # Debug: verify 3D vertices
-                if i == 0:
-                    print(f"    [DEBUG] Contour shape: {contour_points.shape}, first point: {contour_points[0] if len(contour_points) > 0 else 'N/A'}")
-
-                # Farthest vertex based axis finding using 3D distances
-                if len(contour_points) > 2:
-                    dists = cdist(contour_points, contour_points)  # 3D Euclidean distances
-                    fi, fj = np.unravel_index(np.argmax(dists), dists.shape)
-                    farthest_dir = contour_points[fj] - contour_points[fi]
-                    farthest_len = np.linalg.norm(farthest_dir)
-
-                    if i == 0:
-                        print(f"    [DEBUG] Farthest pair: i={fi}, j={fj}, 3D dist={np.max(dists):.4f}")
-                        print(f"    [DEBUG] V[{fi}]={contour_points[fi]}, V[{fj}]={contour_points[fj]}")
-
-                    if farthest_len > 1e-10:
-                        farthest_dir = farthest_dir / farthest_len
-                    else:
-                        farthest_dir = bp['basis_x'].copy()
-                else:
-                    farthest_dir = bp['basis_x'].copy()
-
-                # Project farthest direction onto plane perpendicular to basis_z
-                new_basis_x = farthest_dir - np.dot(farthest_dir, basis_z) * basis_z
-                x_norm = np.linalg.norm(new_basis_x)
-                if x_norm > 1e-10:
-                    new_basis_x = new_basis_x / x_norm
-                else:
-                    arbitrary = np.array([1.0, 0.0, 0.0])
-                    if abs(np.dot(arbitrary, basis_z)) > 0.9:
-                        arbitrary = np.array([0.0, 1.0, 0.0])
-                    new_basis_x = arbitrary - np.dot(arbitrary, basis_z) * basis_z
-                    new_basis_x = new_basis_x / (np.linalg.norm(new_basis_x) + 1e-10)
-
-                # Ensure consistency with previous level (no 180° flip)
-                # This maintains one-to-one correspondence between consecutive levels
-                if prev_basis_x is not None:
-                    # Project prev_basis_x onto current plane for comparison
-                    prev_x_proj = prev_basis_x - np.dot(prev_basis_x, basis_z) * basis_z
-                    prev_x_proj_norm = np.linalg.norm(prev_x_proj)
-                    if prev_x_proj_norm > 1e-10:
-                        prev_x_proj = prev_x_proj / prev_x_proj_norm
-                        # If pointing in opposite direction, flip
-                        if np.dot(new_basis_x, prev_x_proj) < 0:
-                            new_basis_x = -new_basis_x
-
-                new_basis_y = np.cross(basis_z, new_basis_x)
-                new_basis_y = new_basis_y / (np.linalg.norm(new_basis_y) + 1e-10)
-
-                bp['basis_x'] = new_basis_x
-                bp['basis_y'] = new_basis_y
-                prev_basis_x = new_basis_x  # Store for next level comparison
-
-                # Compute square_like based on farthest vertex bounding box
-                projected_2d = np.array([
-                    [np.dot(v - mean, new_basis_x), np.dot(v - mean, new_basis_y)]
-                    for v in contour_points
-                ])
-                min_x, max_x = np.min(projected_2d[:, 0]), np.max(projected_2d[:, 0])
-                min_y, max_y = np.min(projected_2d[:, 1]), np.max(projected_2d[:, 1])
-                x_len = max_x - min_x
-                y_len = max_y - min_y
-
-                ratio_threshold = 2.0
-                square_like = max(x_len, y_len) / min(x_len, y_len) < ratio_threshold if min(x_len, y_len) > 1e-10 else False
-                bp['square_like'] = square_like
-
-            # ========== Step 2: Find reference (non-square-like) and smooth (square-like) indices ==========
+            # ========== Step 1: Find reference (non-square-like) and smooth (square-like) indices ==========
             reference_indices = [i for i, bp in enumerate(bp_stream) if not bp.get('square_like', False)]
             smooth_indices = [i for i, bp in enumerate(bp_stream) if bp.get('square_like', False)]
 
@@ -4139,7 +4090,7 @@ class ContourMeshMixin:
                 smooth_indices = [i for i in smooth_indices if i != best_idx]
                 print(f"    Selected level {best_idx} as reference (ratio_diff={best_ratio_diff:.3f})")
 
-            # ========== Step 3: Interpolate square-like contours from prev/next references ==========
+            # ========== Step 2: Interpolate square-like contours from prev/next references ==========
             for i in smooth_indices:
                 bp = bp_stream[i]
                 curr_mean = bp['mean']
@@ -4208,7 +4159,7 @@ class ContourMeshMixin:
                 bp['basis_x'] = new_basis_x
                 bp['basis_y'] = new_basis_y
 
-            # ========== Step 4: Recompute bounding planes for ALL contours ==========
+            # ========== Step 3: Recompute bounding planes for ALL contours ==========
             for i in range(stream_len):
                 bp = bp_stream[i]
                 contour_points = np.asarray(self.stream_contours[stream_i][i])
@@ -4234,11 +4185,6 @@ class ContourMeshMixin:
 
                 min_x, max_x = np.min(projected_2d[:, 0]), np.max(projected_2d[:, 0])
                 min_y, max_y = np.min(projected_2d[:, 1]), np.max(projected_2d[:, 1])
-                x_len = max_x - min_x
-                y_len = max_y - min_y
-
-                ratio_threshold = 2.0
-                square_like = max(x_len, y_len) / min(x_len, y_len) < ratio_threshold if min(x_len, y_len) > 1e-10 else False
 
                 bounding_plane_2d = np.array([
                     [min_x, min_y], [max_x, min_y],
@@ -4260,7 +4206,6 @@ class ContourMeshMixin:
                 bp['bounding_plane'] = bounding_plane
                 bp['projected_2d'] = projected_2d_3d
                 bp['area'] = area
-                bp['square_like'] = square_like
 
                 # Update contour_match
                 preserve = getattr(self, '_contours_normalized', False)
@@ -7014,6 +6959,140 @@ class ContourMeshMixin:
 
         print(f"Manual cutting window ready for level {level_i} ({mode_str}) - draw a cutting line")
 
+    def _compute_contour_perimeter(self, contour):
+        """Compute the total perimeter (arc length) of a closed contour."""
+        perimeter = 0.0
+        n = len(contour)
+        for i in range(n):
+            perimeter += np.linalg.norm(contour[(i + 1) % n] - contour[i])
+        return perimeter
+
+    def _add_shared_edge_vertices(self, piece0, piece1, cut1_3d, cut2_3d, original_n_verts, original_perimeter):
+        """
+        Add intermediate vertices on the shared cut edge between two pieces.
+
+        The shared edge goes from cut1_3d to cut2_3d. Both pieces share this edge:
+        - piece0 ends at cut2_3d and starts at cut1_3d (closing edge: cut2→cut1)
+        - piece1 ends at cut1_3d and starts at cut2_3d (closing edge: cut1→cut2)
+
+        Args:
+            piece0: First piece (list of vertices, starts with cut1, ends with cut2)
+            piece1: Second piece (list of vertices, starts with cut2, ends with cut1)
+            cut1_3d: First cut point (3D)
+            cut2_3d: Second cut point (3D)
+            original_n_verts: Number of vertices in original contour
+            original_perimeter: Total perimeter of original contour
+
+        Returns:
+            (new_piece0, new_piece1, shared_vertices): Updated pieces and list of shared intermediate vertices
+        """
+        # Calculate shared edge length
+        edge_length = np.linalg.norm(cut2_3d - cut1_3d)
+
+        # Calculate number of vertices on shared edge (including endpoints)
+        # Formula: round(original_vertex_count * edge_length / total_perimeter)
+        n_edge_verts = round(original_n_verts * edge_length / original_perimeter)
+
+        # Number of intermediate vertices (excluding the two endpoints)
+        n_intermediate = max(0, n_edge_verts - 2)
+
+        print(f"  Shared edge: length={edge_length:.4f}, perimeter={original_perimeter:.4f}")
+        print(f"  Edge vertices: {n_edge_verts} total, {n_intermediate} intermediate")
+
+        if n_intermediate == 0:
+            # No intermediate vertices needed
+            return piece0, piece1, []
+
+        # Generate intermediate vertices evenly spaced from cut1 to cut2
+        intermediate_verts = []
+        for i in range(1, n_intermediate + 1):
+            t = i / (n_intermediate + 1)  # t goes from 1/(n+1) to n/(n+1)
+            v = cut1_3d + t * (cut2_3d - cut1_3d)
+            intermediate_verts.append(v)
+
+        # Add intermediate vertices to pieces
+        # piece0: [cut1, ..., cut2] -> [cut1, ..., cut2, intermediate_reversed]
+        #   The closing edge goes cut2 -> (reversed intermediates) -> cut1
+        # piece1: [cut2, ..., cut1] -> [cut2, ..., cut1, intermediate_forward]
+        #   The closing edge goes cut1 -> (forward intermediates) -> cut2
+
+        piece0_list = list(piece0)
+        piece1_list = list(piece1)
+
+        # For piece0: add intermediates in reverse order after cut2 (last vertex)
+        # So closing edge becomes: cut2 -> mN -> mN-1 -> ... -> m1 -> cut1
+        for v in reversed(intermediate_verts):
+            piece0_list.append(v)
+
+        # For piece1: add intermediates in forward order after cut1 (last vertex)
+        # So closing edge becomes: cut1 -> m1 -> m2 -> ... -> mN -> cut2
+        for v in intermediate_verts:
+            piece1_list.append(v)
+
+        new_piece0 = np.array(piece0_list)
+        new_piece1 = np.array(piece1_list)
+
+        print(f"  Added {n_intermediate} intermediate vertices to shared edge")
+        print(f"  piece0: {len(piece0)} -> {len(new_piece0)}, piece1: {len(piece1)} -> {len(new_piece1)}")
+
+        return new_piece0, new_piece1, intermediate_verts
+
+    def _add_shared_edge_vertices_2d_3d(self, piece0_2d, piece0_3d, piece1_2d, piece1_3d,
+                                         cut1_2d, cut1_3d, cut2_2d, cut2_3d,
+                                         original_n_verts, original_perimeter):
+        """
+        Add intermediate vertices on the shared cut edge for both 2D and 3D pieces.
+
+        Similar to _add_shared_edge_vertices but handles 2D/3D pairs for iterative cutting.
+
+        Returns:
+            (new_piece0_2d, new_piece0_3d, new_piece1_2d, new_piece1_3d, intermediate_verts_3d)
+        """
+        # Calculate shared edge length (from 3D)
+        edge_length = np.linalg.norm(cut2_3d - cut1_3d)
+
+        # Calculate number of vertices on shared edge
+        n_edge_verts = round(original_n_verts * edge_length / original_perimeter)
+        n_intermediate = max(0, n_edge_verts - 2)
+
+        print(f"  Shared edge: length={edge_length:.4f}, perimeter={original_perimeter:.4f}")
+        print(f"  Edge vertices: {n_edge_verts} total, {n_intermediate} intermediate")
+
+        if n_intermediate == 0:
+            return (np.array(piece0_2d), np.array(piece0_3d),
+                    np.array(piece1_2d), np.array(piece1_3d), [])
+
+        # Generate intermediate vertices
+        intermediate_verts_2d = []
+        intermediate_verts_3d = []
+        for i in range(1, n_intermediate + 1):
+            t = i / (n_intermediate + 1)
+            v_2d = cut1_2d + t * (cut2_2d - cut1_2d)
+            v_3d = cut1_3d + t * (cut2_3d - cut1_3d)
+            intermediate_verts_2d.append(v_2d)
+            intermediate_verts_3d.append(v_3d)
+
+        # Add to pieces (same logic as _add_shared_edge_vertices)
+        piece0_2d_list = list(piece0_2d)
+        piece0_3d_list = list(piece0_3d)
+        piece1_2d_list = list(piece1_2d)
+        piece1_3d_list = list(piece1_3d)
+
+        # piece0: add reversed intermediates after last vertex
+        for v_2d, v_3d in zip(reversed(intermediate_verts_2d), reversed(intermediate_verts_3d)):
+            piece0_2d_list.append(v_2d)
+            piece0_3d_list.append(v_3d)
+
+        # piece1: add forward intermediates after last vertex
+        for v_2d, v_3d in zip(intermediate_verts_2d, intermediate_verts_3d):
+            piece1_2d_list.append(v_2d)
+            piece1_3d_list.append(v_3d)
+
+        print(f"  Added {n_intermediate} intermediate vertices to shared edge")
+
+        return (np.array(piece0_2d_list), np.array(piece0_3d_list),
+                np.array(piece1_2d_list), np.array(piece1_3d_list), intermediate_verts_3d)
+
     def _apply_manual_cut(self):
         """
         Apply the manually drawn cutting line to split the target contour.
@@ -7029,6 +7108,9 @@ class ContourMeshMixin:
         target_contour = self._manual_cut_data['target_contour']
         target_bp = self._manual_cut_data['target_bp']
         n_verts = len(target_2d)
+
+        # Compute original contour perimeter for shared edge vertex calculation
+        original_perimeter = self._compute_contour_perimeter(target_contour)
 
         # Ensure shared_cut_vertices exists
         if not hasattr(self, 'shared_cut_vertices'):
@@ -7061,9 +7143,16 @@ class ContourMeshMixin:
 
             print(f"Manual cut (at neck): piece0 has {len(piece0)} vertices, piece1 has {len(piece1)} vertices")
 
-            # Register shared cut edge vertices
+            # Add intermediate vertices on the shared cut edge
+            piece0, piece1, intermediate_verts = self._add_shared_edge_vertices(
+                piece0, piece1, cut1_3d, cut2_3d, n_verts, original_perimeter
+            )
+
+            # Register shared cut edge vertices (endpoints + intermediates)
             self.shared_cut_vertices.append(cut1_3d)
             self.shared_cut_vertices.append(cut2_3d)
+            for v in intermediate_verts:
+                self.shared_cut_vertices.append(v)
         else:
             # Use line intersection method for manually drawn lines
             line_start, line_end = self._manual_cut_line
@@ -7130,9 +7219,16 @@ class ContourMeshMixin:
 
             print(f"Manual cut: piece0 has {len(piece0)} vertices, piece1 has {len(piece1)} vertices")
 
-            # Register shared cut edge vertices
+            # Add intermediate vertices on the shared cut edge
+            piece0, piece1, intermediate_verts = self._add_shared_edge_vertices(
+                piece0, piece1, int1_3d, int2_3d, n_verts, original_perimeter
+            )
+
+            # Register shared cut edge vertices (endpoints + intermediates)
             self.shared_cut_vertices.append(int1_3d)
             self.shared_cut_vertices.append(int2_3d)
+            for v in intermediate_verts:
+                self.shared_cut_vertices.append(v)
 
         # Determine which piece corresponds to which source contour
         # Simple 3D centroid distance matching
@@ -7420,9 +7516,23 @@ class ContourMeshMixin:
 
                 print(f"[CUT] Neck cut: idx_a={idx_a}, idx_b={idx_b}, piece0={len(new_piece0_2d)} verts, piece1={len(new_piece1_2d)} verts")
 
+                # Add shared edge vertices
+                piece_perimeter = self._compute_contour_perimeter(piece_3d)
+                cut1_2d = piece_2d[idx_a].copy()
+                cut1_3d = piece_3d[idx_a].copy()
+                cut2_2d = piece_2d[idx_b].copy()
+                cut2_3d = piece_3d[idx_b].copy()
+
+                (new_piece0_2d, new_piece0_3d, new_piece1_2d, new_piece1_3d,
+                 intermediate_verts) = self._add_shared_edge_vertices_2d_3d(
+                    new_piece0_2d, new_piece0_3d, new_piece1_2d, new_piece1_3d,
+                    cut1_2d, cut1_3d, cut2_2d, cut2_3d,
+                    n_verts, piece_perimeter
+                )
+
                 # Replace the cut piece with the two new pieces
-                new_pieces = current_pieces[:piece_idx] + [np.array(new_piece0_2d), np.array(new_piece1_2d)] + current_pieces[piece_idx + 1:]
-                new_pieces_3d = current_pieces_3d[:piece_idx] + [np.array(new_piece0_3d), np.array(new_piece1_3d)] + current_pieces_3d[piece_idx + 1:]
+                new_pieces = current_pieces[:piece_idx] + [new_piece0_2d, new_piece1_2d] + current_pieces[piece_idx + 1:]
+                new_pieces_3d = current_pieces_3d[:piece_idx] + [new_piece0_3d, new_piece1_3d] + current_pieces_3d[piece_idx + 1:]
 
                 self._manual_cut_data['current_pieces'] = new_pieces
                 self._manual_cut_data['current_pieces_3d'] = new_pieces_3d
@@ -7545,18 +7655,29 @@ class ContourMeshMixin:
             new_piece1_3d.append(piece_3d[i])
         new_piece1_3d.append(int1_3d)
 
+        # Add shared edge vertices proportionally based on perimeter
+        piece_perimeter = self._compute_contour_perimeter(piece_3d)
+        (new_piece0_2d, new_piece0_3d, new_piece1_2d, new_piece1_3d,
+         intermediate_verts) = self._add_shared_edge_vertices_2d_3d(
+            new_piece0_2d, new_piece0_3d, new_piece1_2d, new_piece1_3d,
+            int1_2d, int1_3d, int2_2d, int2_3d,
+            n_verts, piece_perimeter
+        )
+
         # Replace the cut piece with the two new pieces
-        new_pieces = current_pieces[:cut_piece_idx] + [np.array(new_piece0_2d), np.array(new_piece1_2d)] + current_pieces[cut_piece_idx + 1:]
-        new_pieces_3d = current_pieces_3d[:cut_piece_idx] + [np.array(new_piece0_3d), np.array(new_piece1_3d)] + current_pieces_3d[cut_piece_idx + 1:]
+        new_pieces = current_pieces[:cut_piece_idx] + [new_piece0_2d, new_piece1_2d] + current_pieces[cut_piece_idx + 1:]
+        new_pieces_3d = current_pieces_3d[:cut_piece_idx] + [new_piece0_3d, new_piece1_3d] + current_pieces_3d[cut_piece_idx + 1:]
 
         self._manual_cut_data['current_pieces'] = new_pieces
         self._manual_cut_data['current_pieces_3d'] = new_pieces_3d
         self._manual_cut_data['cut_lines'].append((line_start, line_end))
 
-        # Register shared cut vertices
+        # Register shared cut vertices (including intermediates)
         if not hasattr(self, 'shared_cut_vertices'):
             self.shared_cut_vertices = []
         self.shared_cut_vertices.append(int1_3d)
+        for v in intermediate_verts:
+            self.shared_cut_vertices.append(v)
         self.shared_cut_vertices.append(int2_3d)
 
         print(f"Iterative cut: piece {cut_piece_idx} -> 2 pieces, total now {len(new_pieces)}")
@@ -10184,39 +10305,26 @@ class ContourMeshMixin:
             src_mean = src_bp['mean']
 
             if is_first_division:
-                # SEPARATE mode: project each source to its own 2D plane
-                # Then compute rotation to align with target basis
-                src_x = src_bp['basis_x']
-                src_y = src_bp['basis_y']
-
-                # Project source contour to its own 2D plane (centered at origin)
+                # SEPARATE mode: project source directly to TARGET's 2D plane
+                # This ensures proper coordinate system alignment for display
+                # Project source contour to TARGET's 2D plane (not source's own plane)
                 src_2d = np.array([
-                    [np.dot(v - src_mean, src_x), np.dot(v - src_mean, src_y)]
+                    [np.dot(v - target_mean, target_x), np.dot(v - target_mean, target_y)]
                     for v in src_contour
                 ])
-                source_2d_shapes.append(src_2d)
-                print(f"  [BP Transform] source {i} has {len(src_2d)} vertices (own basis)")
+                # Center at source mean position (for proper transform_shape usage)
+                src_2d_mean = src_2d.mean(axis=0)
+                src_2d_centered = src_2d - src_2d_mean
+                source_2d_shapes.append(src_2d_centered)
+                print(f"  [BP Transform] source {i} has {len(src_2d)} vertices (target basis, SEPARATE)")
 
-                # Initial translation: project source mean onto target plane
-                src_to_target = src_mean - target_mean
-                dist_along_z = np.dot(src_to_target, target_bp['basis_z'])
-                src_mean_projected = src_mean - dist_along_z * target_bp['basis_z']
-                src_mean_on_target_x = np.dot(src_mean_projected - target_mean, target_x)
-                src_mean_on_target_y = np.dot(src_mean_projected - target_mean, target_y)
-                initial_translations.append([src_mean_on_target_x, src_mean_on_target_y])
-                print(f"  [BP Transform] source {i} initial pos: ({src_mean_on_target_x:.4f}, {src_mean_on_target_y:.4f})")
+                # Initial translation is the source's mean position on target plane
+                initial_translations.append([src_2d_mean[0], src_2d_mean[1]])
+                print(f"  [BP Transform] source {i} initial pos: ({src_2d_mean[0]:.4f}, {src_2d_mean[1]:.4f})")
 
-                # Initial rotation: align source basis_x with target basis_x
-                src_x_on_target = src_x - np.dot(src_x, target_bp['basis_z']) * target_bp['basis_z']
-                src_x_norm = np.linalg.norm(src_x_on_target)
-                if src_x_norm > 1e-10:
-                    src_x_on_target = src_x_on_target / src_x_norm
-                    src_x_2d = np.array([np.dot(src_x_on_target, target_x), np.dot(src_x_on_target, target_y)])
-                    init_theta = np.arctan2(src_x_2d[1], src_x_2d[0])
-                else:
-                    init_theta = 0.0
-                initial_rotations.append(init_theta)
-                print(f"  [BP Transform] source {i} initial rotation: {np.degrees(init_theta):.1f}°")
+                # Since source is already projected to target basis, start with no rotation
+                initial_rotations.append(0.0)
+                print(f"  [BP Transform] source {i} initial rotation: 0.0° (projected to target basis)")
             else:
                 # COMMON mode: project source directly to TARGET's 2D plane
                 # This maintains relative positions between sources
