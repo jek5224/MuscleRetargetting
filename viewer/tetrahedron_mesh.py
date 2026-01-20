@@ -120,6 +120,12 @@ class TetrahedronMeshMixin:
         - Caps open edges at origins/insertions with triangular faces using mean point as anchor
         - Tetrahedralizes the closed volume
         - Marks cap faces as fixed (for attachment to skeleton)
+
+        Shared boundary handling (cut contours):
+        - The contour mesh may have duplicate vertices at shared cut boundaries
+        - Step 0.5 merges vertices within merge_epsilon=1e-6
+        - This ensures tetrahedra on either side of a cut boundary share vertices
+        - Result: one connected tet mesh even for cut/split contour streams
         """
         if self.contour_mesh_vertices is None or self.contour_mesh_faces is None:
             print("No contour mesh to tetrahedralize. Build contour mesh first.")
@@ -144,7 +150,10 @@ class TetrahedronMeshMixin:
             vertices = vertices_original.copy()
 
         # Step 0.5: Merge duplicate vertices (shared cut edge vertices)
-        # This ensures the tet mesh forms one connected body after cutting
+        # After contour cutting, adjacent pieces have vertices at identical positions
+        # on shared boundaries. build_contour_mesh deduplicates per-level, but this
+        # step catches any remaining duplicates to ensure the tet mesh forms one
+        # connected body with shared vertices at cut boundaries.
         merge_epsilon = 1e-6
         n_verts_before = len(vertices)
 

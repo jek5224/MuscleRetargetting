@@ -5304,6 +5304,13 @@ class ContourMeshMixin:
         For muscles like biceps (2 origins -> 1 insertion):
         - At merged levels, adjacent streams share boundary vertices
         - Stitching faces connect the streams at shared boundaries
+
+        Shared boundary handling (cut contours):
+        - When contours are cut, adjacent pieces share boundary vertices
+        - The shared-boundary-aware resampling ensures these vertices have
+          IDENTICAL positions (not just close) across different streams
+        - Deduplication with eps=1e-6 merges these into single vertices
+        - This ensures the resulting tet mesh has proper connectivity
         """
         if self.contours is None or len(self.contours) == 0:
             print("No contours found. Run find_contours, resample_contours, and find_contour_stream first.")
