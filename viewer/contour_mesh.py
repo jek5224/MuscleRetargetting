@@ -5408,6 +5408,10 @@ class ContourMeshMixin:
         # Build faces
         all_faces = []
 
+        # Track processed quads to avoid duplicates at shared boundaries
+        # A quad is identified by the frozenset of its 4 vertex indices
+        processed_quads = set()
+
         # Create faces between consecutive levels for each stream
         for stream_idx in range(num_streams):
             for level_idx in range(num_levels - 1):
@@ -5431,6 +5435,13 @@ class ContourMeshMixin:
                         v2 = next_indices[i_next]
                         v3 = next_indices[i]
 
+                        # Check if this quad was already created by another stream
+                        # (happens at shared boundary edges between cut contours)
+                        quad_key = frozenset([v0, v1, v2, v3])
+                        if quad_key in processed_quads:
+                            continue  # Skip duplicate quad
+                        processed_quads.add(quad_key)
+
                         # Choose shorter diagonal to minimize dents
                         p0, p1 = all_vertices[v0], all_vertices[v1]
                         p2, p3 = all_vertices[v2], all_vertices[v3]
@@ -5448,7 +5459,7 @@ class ContourMeshMixin:
                 else:
                     # Different sizes - variable band
                     faces = self._create_contour_band_variable_indices(
-                        curr_indices, next_indices, all_vertices
+                        curr_indices, next_indices, all_vertices, processed_quads
                     )
                     all_faces.extend(faces)
 
@@ -5510,10 +5521,14 @@ class ContourMeshMixin:
     # _ensure_waypoints_inside_mesh method moved to FiberArchitectureMixin in fiber_architecture.py
     # _update_contours_from_smoothed_mesh method moved to FiberArchitectureMixin in fiber_architecture.py
 
-    def _create_contour_band_variable_indices(self, curr_indices, next_indices, all_vertices):
+    def _create_contour_band_variable_indices(self, curr_indices, next_indices, all_vertices, processed_quads=None):
         """
         Create triangular faces between two contours with different vertex counts.
         Uses direct vertex indices instead of offsets.
+
+        Args:
+            processed_quads: Optional set to track processed quads/triangles to avoid
+                           duplicates at shared boundaries between cut contours.
         """
         n_curr = len(curr_indices)
         n_next = len(next_indices)
@@ -5536,12 +5551,20 @@ class ContourMeshMixin:
             v3 = next_indices[i_next % n_next]
 
             if ratio_curr <= ratio_next and i_curr < n_curr:
-                # Advance on curr contour
-                faces.append([v0, v1, v3])
+                # Advance on curr contour - create triangle [v0, v1, v3]
+                tri_key = frozenset([v0, v1, v3])
+                if processed_quads is None or tri_key not in processed_quads:
+                    faces.append([v0, v1, v3])
+                    if processed_quads is not None:
+                        processed_quads.add(tri_key)
                 i_curr += 1
             elif i_next < n_next:
-                # Advance on next contour
-                faces.append([v0, v2, v3])
+                # Advance on next contour - create triangle [v0, v2, v3]
+                tri_key = frozenset([v0, v2, v3])
+                if processed_quads is None or tri_key not in processed_quads:
+                    faces.append([v0, v2, v3])
+                    if processed_quads is not None:
+                        processed_quads.add(tri_key)
                 i_next += 1
             else:
                 break
