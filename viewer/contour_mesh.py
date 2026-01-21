@@ -13249,6 +13249,33 @@ class ContourMeshMixin:
                 shared_boundary_points.append(boundary_pt.copy())
                 boundary_crossings.append((n_verts - 1, 0, prev_piece, curr_piece, t, 'wrap-around'))
 
+            # Fix wrap-around piece ordering when there's NO wrap-around boundary
+            # This happens when assignments[-1] == assignments[0] - that piece spans both ends
+            # but its vertices are in wrong order (boundary points in the middle instead of at ends)
+            if assignments[-1] == assignments[0] and len(shared_boundary_points) >= 2:
+                wrap_idx = assignments[0]
+                piece = list(new_contours[wrap_idx])
+
+                # Find indices of boundary points in this piece
+                bp_indices = []
+                for v_idx, v in enumerate(piece):
+                    for bp in shared_boundary_points:
+                        if np.linalg.norm(np.array(v) - np.array(bp)) < 1e-8:
+                            bp_indices.append(v_idx)
+                            break
+
+                # If boundary points are not at the ends, rotate the piece
+                if len(bp_indices) >= 2:
+                    bp_indices.sort()
+                    # Check if boundaries are in the middle (not at positions 0 and len-1)
+                    if bp_indices[0] != 0 or bp_indices[-1] != len(piece) - 1:
+                        # Rotate so the last boundary point becomes first
+                        # (this is the "entry" boundary for the wrap-around piece)
+                        last_bp_idx = bp_indices[-1]
+                        piece = piece[last_bp_idx:] + piece[:last_bp_idx]
+                        new_contours[wrap_idx] = piece
+                        print(f"  [BP Transform] Fixed wrap-around piece {wrap_idx} vertex ordering")
+
             # Debug: print boundary crossings
             print(f"  [BP Transform] {len(boundary_crossings)} boundary crossings:")
             for bc in boundary_crossings:
