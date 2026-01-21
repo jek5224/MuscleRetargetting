@@ -5858,10 +5858,30 @@ class GLFWApp():
                             obj._manual_cut_line = None
 
                             # Store transformed source contours for display on cutting panel
+                            # Also update target_2d and source_2d_list to match the coordinate system
                             if hasattr(obj, '_bp_viz_data') and len(obj._bp_viz_data) > 0:
                                 latest_viz = obj._bp_viz_data[-1]
                                 transformed_srcs = latest_viz.get('final_transformed', [])
                                 obj._manual_cut_data['transformed_sources_2d'] = transformed_srcs
+
+                                # Update target_2d to match optimization's coordinate system
+                                opt_target_2d = latest_viz.get('target_2d', None)
+                                if opt_target_2d is not None:
+                                    obj._manual_cut_data['target_2d'] = opt_target_2d
+                                    print(f"[Optimize DEBUG] Updated target_2d to optimization coords")
+
+                                # Update source_2d_list to match (use source_2d_shapes + translations)
+                                source_shapes = latest_viz.get('source_2d_shapes', [])
+                                init_trans = latest_viz.get('initial_translations', [])
+                                if len(source_shapes) > 0 and len(init_trans) == len(source_shapes):
+                                    new_source_2d_list = []
+                                    for i, (shape, trans) in enumerate(zip(source_shapes, init_trans)):
+                                        # Reconstruct original source position (before any transform)
+                                        src_2d = np.array(shape) + np.array(trans)
+                                        new_source_2d_list.append(src_2d)
+                                    obj._manual_cut_data['source_2d_list'] = new_source_2d_list
+                                    print(f"[Optimize DEBUG] Updated source_2d_list to optimization coords")
+
                                 print(f"[Optimize DEBUG] Transformed sources: {len(transformed_srcs)}")
                                 for si, src in enumerate(transformed_srcs):
                                     if src is not None and len(src) > 0:
