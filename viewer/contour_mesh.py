@@ -8628,13 +8628,29 @@ class ContourMeshMixin:
                 src_2d.append([x, y])
             source_2d_list.append(np.array(src_2d))
 
-        # Debug: show projected source bounds
+        # Debug: show projected source bounds and validate for self-intersection
+        from shapely.geometry import Polygon as ShapelyPolygon
+        from shapely.validation import explain_validity
         for i, src_2d in enumerate(source_2d_list):
             if len(src_2d) > 0:
                 src_min = src_2d.min(axis=0)
                 src_max = src_2d.max(axis=0)
                 src_range = src_max - src_min
                 print(f"  Source {i}: 2D bounds [{src_min[0]:.6f}, {src_min[1]:.6f}] to [{src_max[0]:.6f}, {src_max[1]:.6f}], range [{src_range[0]:.6f}, {src_range[1]:.6f}]")
+                # Validate source polygon
+                is_cut = source_bps[i].get('is_cut', False) if i < len(source_bps) else False
+                if len(src_2d) >= 3:
+                    try:
+                        src_poly = ShapelyPolygon(src_2d)
+                        if not src_poly.is_valid:
+                            print(f"  Source {i} WARNING: INVALID polygon (is_cut={is_cut})! Reason: {explain_validity(src_poly)}")
+                            # Print vertices around the self-intersection
+                            print(f"    First 5 verts: {src_2d[:5].tolist()}")
+                            print(f"    Last 5 verts: {src_2d[-5:].tolist()}")
+                        else:
+                            print(f"  Source {i}: valid polygon (area={src_poly.area:.8f}, is_cut={is_cut})")
+                    except Exception as e:
+                        print(f"  Source {i} WARNING: Could not validate: {e}")
         print(f"  Target: 2D bounds [{t2d_min[0]:.6f}, {t2d_min[1]:.6f}] to [{t2d_max[0]:.6f}, {t2d_max[1]:.6f}]")
 
         # Store all data for the manual cutting window
