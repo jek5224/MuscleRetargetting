@@ -5141,8 +5141,8 @@ class ContourMeshMixin:
             print(f"      Lengths: surface={surface_length:.4f}, boundary={boundary_length:.4f}")
             print(f"      Distribution: surface={surface_verts}, boundary={boundary_verts}, fixed=2")
 
-            # Extract surface segment using CONTOUR vertices (for consistency)
-            # Use original intersection points only for the BOUNDARY (straight line)
+            # Extract surface segment using CONTOUR vertices
+            # Use CONTOUR VERTICES for boundary too (ensures exact alignment with original)
             if surface_is_path_b:
                 # Surface is path B: idx2 -> idx1 (wrapping around)
                 # Include vertices at idx2 and idx1 as endpoints
@@ -5153,8 +5153,9 @@ class ContourMeshMixin:
                     if idx == idx1:
                         break
                     idx = (idx + 1) % n
-                # For boundary: use original intersection points (straight line)
-                boundary_start, boundary_end = int1_3d.copy(), int2_3d.copy()
+                # For boundary: use CONTOUR VERTICES (matches exactly with original)
+                boundary_start = contour[idx1].copy()
+                boundary_end = contour[idx2].copy()
             else:
                 # Surface is path A: idx1 -> idx2 (direct)
                 # Include vertices at idx1 and idx2 as endpoints
@@ -5165,8 +5166,9 @@ class ContourMeshMixin:
                     if idx == idx2:
                         break
                     idx = (idx + 1) % n
-                # For boundary: use original intersection points (straight line)
-                boundary_start, boundary_end = int2_3d.copy(), int1_3d.copy()
+                # For boundary: use CONTOUR VERTICES (matches exactly with original)
+                boundary_start = contour[idx2].copy()
+                boundary_end = contour[idx1].copy()
 
             print(f"      Surface segment: {len(surface_segment)} original vertices")
 
