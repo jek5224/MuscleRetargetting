@@ -254,6 +254,17 @@ class GLFWApp():
         self.inspect_2d_stream_idx = {}  # Dict: muscle_name -> selected stream index
         self.inspect_2d_contour_idx = {}  # Dict: muscle_name -> selected contour index
 
+        # Correspondence mode state for Inspect 2D
+        self.inspect_2d_corr_mode = {}  # Dict: muscle_name -> bool (correspondence mode active)
+        self.inspect_2d_corr_corner = {}  # Dict: muscle_name -> selected corner index (0-3) or -1
+        self.inspect_2d_corr_vertex = {}  # Dict: muscle_name -> selected vertex index or -1
+
+        # Edit fiber mode state for Inspect 2D
+        self.inspect_2d_edit_fiber_mode = {}  # Dict: muscle_name -> bool (edit fiber mode active)
+        self.inspect_2d_edit_fiber_selected = {}  # Dict: muscle_name -> selected fiber index or -1
+        self.inspect_2d_edit_fiber_preview = {}  # Dict: muscle_name -> preview position (u, v) or None
+        self.inspect_2d_edit_fiber_test = {}  # Dict: muscle_name -> test waypoints list or None
+
         # GPU acceleration settings
         self.use_gpu_arap = False  # Use GPU (PyTorch) for ARAP solver
         self.use_taichi_arap = True  # Use Taichi for ARAP solver (default)
@@ -1981,7 +1992,7 @@ class GLFWApp():
                                 # Step 10: Resample Contours
                                 if max_step >= 10 and obj.contours is not None and len(obj.contours) > 0 and obj.bounding_planes is not None:
                                     print(f"  [10/{max_step}] Resampling Contours...")
-                                    obj.resample_contours(num_samples=32)
+                                    obj.resample_contours(base_samples=32)
 
                                 # Step 11: Build Contour Mesh
                                 if max_step >= 11 and obj.contours is not None and len(obj.contours) > 0 and obj.draw_contour_stream is not None:
@@ -2186,7 +2197,7 @@ class GLFWApp():
                         if colored_button(f"Resample Contours##{name}", 10, col_button_width):
                             if obj.contours is not None and len(obj.contours) > 0 and obj.bounding_planes is not None:
                                 try:
-                                    obj.resample_contours(num_samples=32)
+                                    obj.resample_contours(base_samples=32)
                                 except Exception as e:
                                     print(f"[{name}] Resample Contours error: {e}")
                             else:
@@ -3343,6 +3354,15 @@ class GLFWApp():
                 changed_show_all, show_all = imgui.checkbox(f"Show All##{name}", show_all)
                 if changed_show_all:
                     self.inspect_2d_show_all[name] = show_all
+                    # Exit Edit Fiber mode when switching to "Show All"
+                    if show_all and name in self.inspect_2d_edit_fiber_mode and self.inspect_2d_edit_fiber_mode[name]:
+                        self.inspect_2d_edit_fiber_mode[name] = False
+                        self.inspect_2d_edit_fiber_selected[name] = -1
+                        self.inspect_2d_edit_fiber_preview[name] = None
+                        self.inspect_2d_edit_fiber_test[name] = None
+                        # Clear test fiber from object
+                        obj.test_fiber_waypoints = None
+                        obj.test_fiber_stream_idx = None
 
                 if not show_all:
                     changed, new_contour_idx = imgui.slider_int(f"Contour##{name}_inspect", contour_idx, 0, max(0, num_levels - 1))
@@ -3360,6 +3380,39 @@ class GLFWApp():
 
             # Always use child region for consistent layout (scrollbar space reserved)
             imgui.begin_child(f"contours_scroll##{name}", 0, 0, border=False)
+
+            # Initialize correspondence mode state for this muscle
+            if name not in self.inspect_2d_corr_mode:
+                self.inspect_2d_corr_mode[name] = False
+                self.inspect_2d_corr_corner[name] = -1
+                self.inspect_2d_corr_vertex[name] = -1
+
+            corr_mode = self.inspect_2d_corr_mode[name]
+            corr_corner = self.inspect_2d_corr_corner[name]
+            corr_vertex = self.inspect_2d_corr_vertex[name]
+
+            # Initialize edit fiber mode state for this muscle
+            if name not in self.inspect_2d_edit_fiber_mode:
+                self.inspect_2d_edit_fiber_mode[name] = False
+                self.inspect_2d_edit_fiber_selected[name] = -1
+                self.inspect_2d_edit_fiber_preview[name] = None
+                self.inspect_2d_edit_fiber_test[name] = None
+
+            edit_fiber_mode = self.inspect_2d_edit_fiber_mode[name]
+            edit_fiber_selected = self.inspect_2d_edit_fiber_selected[name]
+            edit_fiber_preview = self.inspect_2d_edit_fiber_preview[name]
+            edit_fiber_test = self.inspect_2d_edit_fiber_test[name]
+
+            # Set inspector highlight on the object for 3D visualization
+            # This will highlight the contour being inspected in the 3D view
+            if is_post_stream:
+                highlight_stream = self.inspect_2d_stream_idx.get(name, 0)
+                highlight_level = self.inspect_2d_contour_idx.get(name, 0)
+            else:
+                highlight_stream = self.inspect_2d_stream_idx.get(name, 0)
+                highlight_level = self.inspect_2d_contour_idx.get(name, 0)
+            obj.inspector_highlight_stream = highlight_stream
+            obj.inspector_highlight_level = highlight_level
 
             # Initialize hover state (may not be set if contour_indices is empty)
             hovered_idx = -1
@@ -3548,7 +3601,7 @@ class GLFWApp():
                     scale = (1 - 2 * margin) / max_range
                     center_xy = (min_xy + max_xy) / 2
 
-                    # Draw contour lines (yellow)
+                    # Compute screen points for contour
                     p_screen_points = []
                     for p_2d in p_2d_list:
                         p_norm = (p_2d - center_xy) * scale + 0.5
@@ -3556,6 +3609,7 @@ class GLFWApp():
                         py = right_y0 + (1 - p_norm[1]) * canvas_size
                         p_screen_points.append((px, py))
 
+                    # Draw contour lines (yellow)
                     for i in range(len(p_screen_points)):
                         p1 = p_screen_points[i]
                         p2 = p_screen_points[(i + 1) % len(p_screen_points)]
@@ -3588,10 +3642,21 @@ class GLFWApp():
 
                     # Draw bounding plane corners and lines to closest contour vertices
                     if bp is not None and len(bp) >= 4:
-                        # Compute ray-based corner indices using 3D coordinates
-                        contour_vertices_3d = np.array([np.array(p) for p, q in contour_match])
-                        bp_corners_3d = np.array(bp[:4])
-                        ray_based_corner_indices = find_corner_indices_ray_based(contour_vertices_3d, bp_corners_3d)
+                        # Find corner-vertex correspondence based on Q positions (not ray-based)
+                        # This reflects the actual correspondence used in fiber computation
+                        bp_corners_3d = [np.array(c) for c in bp[:4]]
+                        q_based_corner_indices = []
+                        for ci, corner_3d in enumerate(bp_corners_3d):
+                            # Find vertex whose Q is closest to this corner
+                            min_dist = float('inf')
+                            closest_vi = 0
+                            for vi, (p, q) in enumerate(contour_match):
+                                q_arr = np.array(q)
+                                dist = np.linalg.norm(q_arr - corner_3d)
+                                if dist < min_dist:
+                                    min_dist = dist
+                                    closest_vi = vi
+                            q_based_corner_indices.append(closest_vi)
 
                         # Project actual bounding plane corners to 2D
                         for ci, corner_3d in enumerate(bp[:4]):
@@ -3602,15 +3667,16 @@ class GLFWApp():
                             cy = right_y0 + (1 - corner_norm[1]) * canvas_size
                             corner_screen_points_right.append((cx, cy))
 
-                            # Use ray-based corner correspondence
-                            if len(p_screen_points) > 0 and ci < len(ray_based_corner_indices):
-                                closest_vi = ray_based_corner_indices[ci]
+                            # Use Q-based corner correspondence (reflects actual fiber computation)
+                            if len(p_screen_points) > 0 and ci < len(q_based_corner_indices):
+                                closest_vi = q_based_corner_indices[ci]
                                 corner_to_closest_vertex.append((ci, closest_vi))
 
                                 # Draw line from corner to corresponding vertex (purple, thin)
-                                px, py = p_screen_points[closest_vi]
-                                draw_list.add_line(cx, cy, px, py,
-                                                 imgui.get_color_u32_rgba(0.7, 0.3, 0.7, 0.6), thickness=1.0)
+                                if closest_vi < len(p_screen_points):
+                                    px, py = p_screen_points[closest_vi]
+                                    draw_list.add_line(cx, cy, px, py,
+                                                     imgui.get_color_u32_rgba(0.7, 0.3, 0.7, 0.6), thickness=1.0)
 
                             # Draw corner (purple/magenta diamond)
                             draw_list.add_quad_filled(cx, cy - 5, cx + 5, cy, cx, cy + 5, cx - 5, cy,
@@ -3823,6 +3889,207 @@ class GLFWApp():
                 if show_all:
                     imgui.separator()
 
+            # Handle click for correspondence mode
+            mouse_clicked = imgui.is_mouse_clicked(0)  # Left click
+            if mouse_clicked and hovered_idx >= 0:
+                if hovered_type == 'corner':
+                    # Clicking corner enters/updates correspondence mode
+                    self.inspect_2d_corr_mode[name] = True
+                    self.inspect_2d_corr_corner[name] = hovered_idx
+                    self.inspect_2d_corr_vertex[name] = -1  # Reset vertex selection
+                    corr_mode = True
+                    corr_corner = hovered_idx
+                    corr_vertex = -1
+                elif hovered_type == 'vertex' and corr_mode and corr_corner >= 0:
+                    # Clicking vertex when in correspondence mode with corner selected
+                    self.inspect_2d_corr_vertex[name] = hovered_idx
+                    corr_vertex = hovered_idx
+                elif hovered_type == 'fiber' and edit_fiber_mode:
+                    # Clicking on existing fiber in edit mode - select it
+                    self.inspect_2d_edit_fiber_selected[name] = hovered_idx
+                    self.inspect_2d_edit_fiber_preview[name] = None
+                    edit_fiber_selected = hovered_idx
+                    edit_fiber_preview = None
+
+            # Handle click on empty space in unit square for edit fiber mode
+            if mouse_clicked and edit_fiber_mode and hovered_idx < 0:
+                # Check if click is within the left canvas (unit square)
+                if (left_x0 <= mouse_pos[0] <= left_x0 + canvas_size and
+                    left_y0 <= mouse_pos[1] <= left_y0 + canvas_size):
+                    # Convert screen position to unit square coordinates
+                    u = (mouse_pos[0] - left_x0) / canvas_size
+                    v = 1 - (mouse_pos[1] - left_y0) / canvas_size  # Flip Y
+                    # Clamp to [0, 1]
+                    u = max(0.0, min(1.0, u))
+                    v = max(0.0, min(1.0, v))
+                    # Set preview position and clear test data
+                    self.inspect_2d_edit_fiber_preview[name] = (u, v)
+                    self.inspect_2d_edit_fiber_selected[name] = -1
+                    self.inspect_2d_edit_fiber_test[name] = None  # Clear previous test
+                    # Clear test fiber from object
+                    obj.test_fiber_waypoints = None
+                    obj.test_fiber_stream_idx = None
+                    edit_fiber_preview = (u, v)
+                    edit_fiber_selected = -1
+                    edit_fiber_test = None
+
+            # Draw correspondence mode visual feedback
+            if corr_mode and corr_corner >= 0:
+                draw_list = imgui.get_window_draw_list()
+                # Highlight selected corner with green
+                if corr_corner < len(corner_screen_points_right):
+                    cx, cy = corner_screen_points_right[corr_corner]
+                    draw_list.add_quad_filled(cx, cy - 10, cx + 10, cy, cx, cy + 10, cx - 10, cy,
+                                             imgui.get_color_u32_rgba(0.0, 1.0, 0.0, 1.0))
+                    draw_list.add_quad(cx, cy - 12, cx + 12, cy, cx, cy + 12, cx - 12, cy,
+                                      imgui.get_color_u32_rgba(1.0, 1.0, 1.0, 1.0), thickness=2.5)
+                if corr_corner < len(corner_screen_points_left):
+                    cx, cy = corner_screen_points_left[corr_corner]
+                    draw_list.add_quad_filled(cx, cy - 10, cx + 10, cy, cx, cy + 10, cx - 10, cy,
+                                             imgui.get_color_u32_rgba(0.0, 1.0, 0.0, 1.0))
+                    draw_list.add_quad(cx, cy - 12, cx + 12, cy, cx, cy + 12, cx - 12, cy,
+                                      imgui.get_color_u32_rgba(1.0, 1.0, 1.0, 1.0), thickness=2.5)
+
+                # Highlight selected vertex with green if selected
+                if corr_vertex >= 0 and corr_vertex < len(p_screen_points):
+                    px, py = p_screen_points[corr_vertex]
+                    draw_list.add_circle_filled(px, py, 9, imgui.get_color_u32_rgba(0.0, 1.0, 0.0, 1.0))
+                    draw_list.add_circle(px, py, 11, imgui.get_color_u32_rgba(1.0, 1.0, 1.0, 1.0), thickness=2.5)
+                    # Also highlight on Q side
+                    if corr_vertex < len(q_screen_points):
+                        qx, qy = q_screen_points[corr_vertex]
+                        draw_list.add_circle_filled(qx, qy, 9, imgui.get_color_u32_rgba(0.0, 1.0, 0.0, 1.0))
+                        draw_list.add_circle(qx, qy, 11, imgui.get_color_u32_rgba(1.0, 1.0, 1.0, 1.0), thickness=2.5)
+                    # Draw line from corner to selected vertex
+                    if corr_corner < len(corner_screen_points_right):
+                        cx, cy = corner_screen_points_right[corr_corner]
+                        draw_list.add_line(cx, cy, px, py,
+                                          imgui.get_color_u32_rgba(0.0, 1.0, 0.0, 1.0), thickness=3.0)
+
+            # Draw edit fiber mode visual feedback
+            if edit_fiber_mode:
+                draw_list = imgui.get_window_draw_list()
+                # Highlight selected fiber with yellow ring
+                if edit_fiber_selected >= 0 and edit_fiber_selected < len(fiber_screen_points):
+                    fx, fy = fiber_screen_points[edit_fiber_selected]
+                    draw_list.add_circle_filled(fx, fy, 8, imgui.get_color_u32_rgba(1.0, 1.0, 0.0, 1.0))
+                    draw_list.add_circle(fx, fy, 10, imgui.get_color_u32_rgba(1.0, 1.0, 1.0, 1.0), thickness=2.5)
+                # Draw preview marker (cyan) for new fiber position
+                if edit_fiber_preview is not None:
+                    px = left_x0 + edit_fiber_preview[0] * canvas_size
+                    py = left_y0 + (1 - edit_fiber_preview[1]) * canvas_size
+                    draw_list.add_circle_filled(px, py, 6, imgui.get_color_u32_rgba(0.0, 1.0, 1.0, 0.7))
+                    draw_list.add_circle(px, py, 8, imgui.get_color_u32_rgba(1.0, 1.0, 1.0, 1.0), thickness=2.0)
+                    # Draw crosshair
+                    draw_list.add_line(px - 12, py, px + 12, py, imgui.get_color_u32_rgba(0.0, 1.0, 1.0, 0.5), 1.5)
+                    draw_list.add_line(px, py - 12, px, py + 12, imgui.get_color_u32_rgba(0.0, 1.0, 1.0, 0.5), 1.5)
+
+            # Correspondence mode UI (Cancel/Confirm buttons)
+            if corr_mode:
+                imgui.separator()
+                corner_names = ['Bottom-Left', 'Bottom-Right', 'Top-Right', 'Top-Left']
+                corner_name = corner_names[corr_corner] if 0 <= corr_corner < 4 else f"Corner {corr_corner}"
+                if corr_vertex >= 0:
+                    imgui.text(f"Set {corner_name} -> Vertex {corr_vertex}")
+                else:
+                    imgui.text(f"Selected {corner_name}, click a contour vertex")
+
+                # Cancel button - always enabled
+                if imgui.button(f"Cancel##{name}_corr"):
+                    self.inspect_2d_corr_mode[name] = False
+                    self.inspect_2d_corr_corner[name] = -1
+                    self.inspect_2d_corr_vertex[name] = -1
+
+                imgui.same_line()
+
+                # Confirm button - only enabled when vertex is selected
+                if corr_vertex < 0:
+                    imgui.push_style_var(imgui.STYLE_ALPHA, 0.5)
+                    imgui.button(f"Confirm##{name}_corr")
+                    imgui.pop_style_var()
+                else:
+                    if imgui.button(f"Confirm##{name}_corr"):
+                        # Apply the correspondence change
+                        self._apply_corner_correspondence(name, obj, stream_idx, level_idx,
+                                                          corr_corner, corr_vertex, is_post_stream)
+                        # Reset correspondence mode
+                        self.inspect_2d_corr_mode[name] = False
+                        self.inspect_2d_corr_corner[name] = -1
+                        self.inspect_2d_corr_vertex[name] = -1
+
+            # Edit Fiber mode UI (only available when not in "Show All" mode)
+            if has_fiber and not corr_mode and not show_all:
+                imgui.separator()
+                if not edit_fiber_mode:
+                    # Show Edit Fiber button only when fiber architecture exists
+                    if imgui.button(f"Edit Fiber##{name}"):
+                        self.inspect_2d_edit_fiber_mode[name] = True
+                        self.inspect_2d_edit_fiber_selected[name] = -1
+                        self.inspect_2d_edit_fiber_preview[name] = None
+                else:
+                    # In edit fiber mode
+                    imgui.text("Edit Fiber Mode (click unit square)")
+
+                    # Exit button
+                    if imgui.button(f"Exit Edit Mode##{name}"):
+                        self.inspect_2d_edit_fiber_mode[name] = False
+                        self.inspect_2d_edit_fiber_selected[name] = -1
+                        self.inspect_2d_edit_fiber_preview[name] = None
+                        self.inspect_2d_edit_fiber_test[name] = None
+                        # Clear test fiber from object
+                        obj.test_fiber_waypoints = None
+                        obj.test_fiber_stream_idx = None
+
+                    imgui.same_line()
+
+                    # Delete button - enabled when existing fiber is selected
+                    if edit_fiber_selected >= 0:
+                        if imgui.button(f"Delete Fiber {edit_fiber_selected}##{name}"):
+                            self._delete_fiber(name, obj, stream_idx, edit_fiber_selected, is_post_stream)
+                            self.inspect_2d_edit_fiber_selected[name] = -1
+                            self.inspect_2d_edit_fiber_preview[name] = None
+                    else:
+                        imgui.push_style_var(imgui.STYLE_ALPHA, 0.5)
+                        imgui.button(f"Delete##{name}")
+                        imgui.pop_style_var()
+
+                    imgui.same_line()
+
+                    # Add button - enabled when preview position is set
+                    if edit_fiber_preview is not None:
+                        if imgui.button(f"Add Fiber##{name}"):
+                            self._add_fiber(name, obj, stream_idx, edit_fiber_preview, is_post_stream)
+                            self.inspect_2d_edit_fiber_selected[name] = -1
+                            self.inspect_2d_edit_fiber_preview[name] = None
+                            self.inspect_2d_edit_fiber_test[name] = None  # Clear test data
+                            # Clear test fiber from object
+                            obj.test_fiber_waypoints = None
+                            obj.test_fiber_stream_idx = None
+                    else:
+                        imgui.push_style_var(imgui.STYLE_ALPHA, 0.5)
+                        imgui.button(f"Add##{name}")
+                        imgui.pop_style_var()
+
+                    imgui.same_line()
+
+                    # Test button - enabled when preview position is set
+                    if edit_fiber_preview is not None:
+                        if imgui.button(f"Test##{name}"):
+                            self._test_fiber(name, obj, stream_idx, edit_fiber_preview, is_post_stream)
+                    else:
+                        imgui.push_style_var(imgui.STYLE_ALPHA, 0.5)
+                        imgui.button(f"Test##{name}")
+                        imgui.pop_style_var()
+
+                    # Show info text
+                    if edit_fiber_selected >= 0:
+                        imgui.text(f"Selected: Fiber {edit_fiber_selected}")
+                    elif edit_fiber_preview is not None:
+                        test_status = " (testing)" if edit_fiber_test is not None else ""
+                        imgui.text(f"Preview: ({edit_fiber_preview[0]:.3f}, {edit_fiber_preview[1]:.3f}){test_status}")
+                    else:
+                        imgui.text("Click on fiber to select, or empty space to add")
+
             # End scrollable region (always used now)
             imgui.end_child()
 
@@ -3831,6 +4098,373 @@ class GLFWApp():
         # Close windows that were marked for closing
         for name in muscles_to_close:
             self.inspect_2d_open[name] = False
+            # Clear inspector highlight when window closes
+            if name in self.zygote_muscle_meshes:
+                self.zygote_muscle_meshes[name].inspector_highlight_stream = None
+                self.zygote_muscle_meshes[name].inspector_highlight_level = None
+
+    def _apply_corner_correspondence(self, name, obj, stream_idx, level_idx, corner_idx, vertex_idx, is_post_stream):
+        """
+        Apply manual corner-to-vertex correspondence.
+
+        When a corner assignment changes, recompute Q positions based on arc-length
+        interpolation between the new corner vertices.
+
+        Args:
+            name: Muscle name
+            obj: ContourMesh object
+            stream_idx: Stream index
+            level_idx: Level index
+            corner_idx: Selected corner (0-3)
+            vertex_idx: Selected vertex index
+            is_post_stream: Whether data is in post-stream format
+        """
+        print(f"Applying correspondence: Corner {corner_idx} -> Vertex {vertex_idx}")
+        print(f"  Stream: {stream_idx}, Level: {level_idx}, Post-stream: {is_post_stream}")
+
+        # Get current bounding plane info
+        if is_post_stream:
+            bp_info = obj.bounding_planes[stream_idx][level_idx]
+        else:
+            bp_info = obj.bounding_planes[level_idx][stream_idx]
+
+        bp_corners = bp_info.get('bounding_plane', None)
+        contour_match = bp_info.get('contour_match', None)
+
+        if bp_corners is None or contour_match is None:
+            print("  Error: No bounding plane or contour_match found")
+            return
+
+        # Extract P vertices from contour_match
+        P_vertices = [np.array(p) for p, q in contour_match]
+        n = len(P_vertices)
+
+        # Get current corner-to-vertex mapping using Q-based method (reads from saved contour_match)
+        # This preserves any previous manual corner changes
+        bp_corners_3d = np.array(bp_corners[:4])
+        current_corner_indices = []
+        for ci, corner_3d in enumerate(bp_corners_3d):
+            min_dist = float('inf')
+            closest_vi = 0
+            for vi, (p, q) in enumerate(contour_match):
+                q_arr = np.array(q)
+                dist = np.linalg.norm(q_arr - corner_3d)
+                if dist < min_dist:
+                    min_dist = dist
+                    closest_vi = vi
+            current_corner_indices.append(closest_vi)
+
+        print(f"  Current corner indices (Q-based): {current_corner_indices}")
+
+        # Update corner assignment
+        new_corner_indices = current_corner_indices.copy()
+        new_corner_indices[corner_idx] = vertex_idx
+
+        print(f"  New corner indices: {new_corner_indices}")
+
+        # Recompute Q positions based on arc-length interpolation between new corner vertices
+        # BP corners: 0 (bottom-left), 1 (bottom-right), 2 (top-right), 3 (top-left)
+        bp_corners_3d = [np.array(c) for c in bp_corners[:4]]
+
+        new_contour_match = []
+
+        # For each edge between consecutive corners, interpolate Q positions
+        for edge_idx in range(4):
+            corner_start = edge_idx
+            corner_end = (edge_idx + 1) % 4
+
+            vertex_start = new_corner_indices[corner_start]
+            vertex_end = new_corner_indices[corner_end]
+
+            q_start = bp_corners_3d[corner_start]
+            q_end = bp_corners_3d[corner_end]
+
+            # Get vertices between corner_start and corner_end (inclusive of start, exclusive of end)
+            if vertex_end > vertex_start:
+                vertex_list = list(range(vertex_start, vertex_end))
+            elif vertex_end < vertex_start:
+                # Wrap around
+                vertex_list = list(range(vertex_start, n)) + list(range(0, vertex_end))
+            else:
+                # Same vertex (shouldn't happen normally)
+                vertex_list = [vertex_start]
+
+            if len(vertex_list) == 0:
+                continue
+
+            # Compute arc-length along this segment
+            arc_lengths = [0.0]
+            for i in range(1, len(vertex_list)):
+                prev_v = P_vertices[vertex_list[i - 1]]
+                curr_v = P_vertices[vertex_list[i]]
+                arc_lengths.append(arc_lengths[-1] + np.linalg.norm(curr_v - prev_v))
+
+            total_arc = arc_lengths[-1]
+            if total_arc < 1e-10:
+                total_arc = 1.0
+
+            # Assign Q positions based on arc-length interpolation
+            for i, vi in enumerate(vertex_list):
+                t = arc_lengths[i] / total_arc
+                q_interp = (1 - t) * q_start + t * q_end
+                new_contour_match.append((P_vertices[vi], q_interp))
+
+        # Update bounding plane info with new contour_match
+        bp_info['contour_match'] = new_contour_match
+
+        print(f"  Updated contour_match with {len(new_contour_match)} pairs (was {n})")
+
+        # Debug: verify the change
+        if len(new_contour_match) > 0:
+            # Check Q at the new corner vertex
+            for ci in range(4):
+                vi = new_corner_indices[ci]
+                # Find which entry in new_contour_match has this vertex
+                for idx, (p, q) in enumerate(new_contour_match):
+                    if np.allclose(p, P_vertices[vi]):
+                        q_arr = np.array(q)
+                        corner_arr = np.array(bp_corners[ci])
+                        dist = np.linalg.norm(q_arr - corner_arr)
+                        print(f"    Corner {ci} -> vertex {vi}: Q dist to corner = {dist:.6f}")
+                        break
+
+        # Verify bp_info is modified
+        print(f"  bp_info id: {id(bp_info)}, contour_match id: {id(bp_info.get('contour_match'))}")
+
+        # Recompute fiber structure if available
+        if hasattr(obj, 'fiber_architecture') and obj.fiber_architecture is not None:
+            if is_post_stream and stream_idx < len(obj.fiber_architecture):
+                fiber_samples = obj.fiber_architecture[stream_idx]
+                if fiber_samples is not None and len(fiber_samples) > 0:
+                    print(f"  Recomputing waypoints for {len(fiber_samples)} fiber samples")
+
+                    # Recompute waypoints and MVC weights for this level
+                    # find_waypoints returns (Qs_normalized_2d, waypoints_3d, mvc_weights)
+                    _, waypoints_3d, mvc_weights = obj.find_waypoints(bp_info, fiber_samples)
+
+                    # Update waypoints
+                    if hasattr(obj, 'waypoints') and obj.waypoints is not None:
+                        if stream_idx < len(obj.waypoints) and level_idx < len(obj.waypoints[stream_idx]):
+                            obj.waypoints[stream_idx][level_idx] = waypoints_3d
+                            print(f"  Updated waypoints: {len(waypoints_3d)} points")
+
+                    # Update MVC weights
+                    if hasattr(obj, 'mvc_weights') and obj.mvc_weights is not None:
+                        if stream_idx < len(obj.mvc_weights) and level_idx < len(obj.mvc_weights[stream_idx]):
+                            obj.mvc_weights[stream_idx][level_idx] = mvc_weights
+                            print(f"  Updated MVC weights")
+
+        print("  Correspondence applied successfully")
+
+    def _delete_fiber(self, name, obj, stream_idx, fiber_idx, is_post_stream):
+        """
+        Delete a fiber from the fiber architecture for a given stream.
+        Removes the fiber from all levels and recomputes waypoints/MVC weights.
+
+        Args:
+            name: Muscle name
+            obj: ContourMesh object
+            stream_idx: Stream index
+            fiber_idx: Index of fiber to delete
+            is_post_stream: Whether data is in post-stream format
+        """
+        print(f"Deleting fiber {fiber_idx} from stream {stream_idx}")
+
+        # Check if fiber_architecture exists
+        if not hasattr(obj, 'fiber_architecture') or obj.fiber_architecture is None:
+            print("  Error: No fiber architecture found")
+            return
+
+        if stream_idx >= len(obj.fiber_architecture):
+            print(f"  Error: stream_idx {stream_idx} out of range")
+            return
+
+        fiber_samples = obj.fiber_architecture[stream_idx]
+        if fiber_samples is None or fiber_idx >= len(fiber_samples):
+            print(f"  Error: fiber_idx {fiber_idx} out of range")
+            return
+
+        # Remove the fiber sample (handle both list and numpy array)
+        if isinstance(fiber_samples, np.ndarray):
+            fiber_samples = np.delete(fiber_samples, fiber_idx, axis=0)
+            obj.fiber_architecture[stream_idx] = fiber_samples
+        else:
+            fiber_samples.pop(fiber_idx)
+        print(f"  Removed fiber sample, {len(fiber_samples)} remaining")
+
+        # Recompute waypoints and MVC weights for all levels in this stream
+        self._recompute_fiber_data_for_stream(obj, stream_idx, is_post_stream)
+
+        print("  Fiber deleted successfully")
+
+    def _add_fiber(self, name, obj, stream_idx, position, is_post_stream):
+        """
+        Add a new fiber to the fiber architecture for a given stream.
+        Adds the fiber to all levels and recomputes waypoints/MVC weights.
+
+        Args:
+            name: Muscle name
+            obj: ContourMesh object
+            stream_idx: Stream index
+            position: (u, v) position on unit square
+            is_post_stream: Whether data is in post-stream format
+        """
+        print(f"Adding fiber at ({position[0]:.3f}, {position[1]:.3f}) to stream {stream_idx}")
+
+        # Check if fiber_architecture exists
+        if not hasattr(obj, 'fiber_architecture') or obj.fiber_architecture is None:
+            print("  Error: No fiber architecture found")
+            return
+
+        if stream_idx >= len(obj.fiber_architecture):
+            print(f"  Error: stream_idx {stream_idx} out of range")
+            return
+
+        fiber_samples = obj.fiber_architecture[stream_idx]
+        if fiber_samples is None:
+            fiber_samples = np.array([[position[0], position[1]]])
+            obj.fiber_architecture[stream_idx] = fiber_samples
+        elif isinstance(fiber_samples, np.ndarray):
+            # Append to numpy array
+            new_sample = np.array([[position[0], position[1]]])
+            fiber_samples = np.vstack([fiber_samples, new_sample])
+            obj.fiber_architecture[stream_idx] = fiber_samples
+        else:
+            # Append to list
+            fiber_samples.append([position[0], position[1]])
+        print(f"  Added fiber sample, {len(fiber_samples)} total")
+
+        # Recompute waypoints and MVC weights for all levels in this stream
+        self._recompute_fiber_data_for_stream(obj, stream_idx, is_post_stream)
+
+        print("  Fiber added successfully")
+
+    def _recompute_fiber_data_for_stream(self, obj, stream_idx, is_post_stream):
+        """
+        Recompute waypoints and MVC weights for all levels in a stream after fiber changes.
+
+        Args:
+            obj: ContourMesh object
+            stream_idx: Stream index
+            is_post_stream: Whether data is in post-stream format
+        """
+        fiber_samples = obj.fiber_architecture[stream_idx]
+        if fiber_samples is None or len(fiber_samples) == 0:
+            print("  No fiber samples to recompute")
+            return
+
+        # Get number of levels for this stream
+        if is_post_stream:
+            num_levels = len(obj.bounding_planes[stream_idx]) if stream_idx < len(obj.bounding_planes) else 0
+        else:
+            num_levels = len(obj.bounding_planes) if obj.bounding_planes else 0
+
+        # Ensure waypoints and mvc_weights lists are properly sized
+        if not hasattr(obj, 'waypoints') or obj.waypoints is None:
+            obj.waypoints = []
+        if not hasattr(obj, 'mvc_weights') or obj.mvc_weights is None:
+            obj.mvc_weights = []
+
+        # Extend lists if needed
+        while len(obj.waypoints) <= stream_idx:
+            obj.waypoints.append([])
+        while len(obj.mvc_weights) <= stream_idx:
+            obj.mvc_weights.append([])
+
+        # Recompute for each level
+        for level_idx in range(num_levels):
+            # Get bounding plane info
+            if is_post_stream:
+                bp_info = obj.bounding_planes[stream_idx][level_idx]
+            else:
+                bp_info = obj.bounding_planes[level_idx][stream_idx]
+
+            if bp_info is None:
+                continue
+
+            contour_match = bp_info.get('contour_match', None)
+            if contour_match is None:
+                continue
+
+            # Recompute waypoints and MVC weights
+            try:
+                _, waypoints_3d, mvc_weights = obj.find_waypoints(bp_info, fiber_samples)
+
+                # Ensure level lists are properly sized
+                while len(obj.waypoints[stream_idx]) <= level_idx:
+                    obj.waypoints[stream_idx].append([])
+                while len(obj.mvc_weights[stream_idx]) <= level_idx:
+                    obj.mvc_weights[stream_idx].append([])
+
+                # Update data
+                obj.waypoints[stream_idx][level_idx] = waypoints_3d
+                obj.mvc_weights[stream_idx][level_idx] = mvc_weights
+                print(f"  Recomputed level {level_idx}: {len(waypoints_3d)} waypoints")
+            except Exception as e:
+                print(f"  Error recomputing level {level_idx}: {e}")
+
+    def _test_fiber(self, name, obj, stream_idx, position, is_post_stream):
+        """
+        Compute test waypoints for a fiber at the given position.
+        Stores the waypoints for visualization in 3D (shown in blue).
+
+        Args:
+            name: Muscle name
+            obj: ContourMesh object
+            stream_idx: Stream index
+            position: (u, v) position on unit square
+            is_post_stream: Whether data is in post-stream format
+        """
+        print(f"Testing fiber at ({position[0]:.3f}, {position[1]:.3f}) for stream {stream_idx}")
+
+        # Create a single fiber sample for testing
+        test_fiber_sample = np.array([[position[0], position[1]]])
+
+        # Get number of levels for this stream
+        if is_post_stream:
+            num_levels = len(obj.bounding_planes[stream_idx]) if stream_idx < len(obj.bounding_planes) else 0
+        else:
+            num_levels = len(obj.bounding_planes) if obj.bounding_planes else 0
+
+        # Compute waypoints for each level
+        test_waypoints = []
+        for level_idx in range(num_levels):
+            # Get bounding plane info
+            if is_post_stream:
+                bp_info = obj.bounding_planes[stream_idx][level_idx]
+            else:
+                bp_info = obj.bounding_planes[level_idx][stream_idx]
+
+            if bp_info is None:
+                test_waypoints.append(None)
+                continue
+
+            contour_match = bp_info.get('contour_match', None)
+            if contour_match is None:
+                test_waypoints.append(None)
+                continue
+
+            # Compute waypoint for this level
+            try:
+                _, waypoints_3d, _ = obj.find_waypoints(bp_info, test_fiber_sample)
+                if len(waypoints_3d) > 0:
+                    test_waypoints.append(waypoints_3d[0])  # Single waypoint
+                    print(f"  Level {level_idx}: waypoint at [{waypoints_3d[0][0]:.4f}, {waypoints_3d[0][1]:.4f}, {waypoints_3d[0][2]:.4f}]")
+                else:
+                    test_waypoints.append(None)
+            except Exception as e:
+                print(f"  Error computing waypoint for level {level_idx}: {e}")
+                test_waypoints.append(None)
+
+        # Store test waypoints for visualization (both locally and on object for 3D drawing)
+        self.inspect_2d_edit_fiber_test[name] = {
+            'stream_idx': stream_idx,
+            'waypoints': test_waypoints
+        }
+        # Also store on object for draw_fiber_architecture to access
+        obj.test_fiber_waypoints = test_waypoints
+        obj.test_fiber_stream_idx = stream_idx
+        print(f"  Test fiber computed with {sum(1 for w in test_waypoints if w is not None)} valid waypoints")
 
     def _render_neck_viz_windows(self):
         """Render transition visualization windows showing source and target contours."""
