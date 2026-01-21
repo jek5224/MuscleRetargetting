@@ -4879,11 +4879,11 @@ class ContourMeshMixin:
                 int1_3d, int2_3d = int2_3d, int1_3d
 
             # Calculate lengths
-            # Surface: from idx2 to idx1 (wrapping around)
-            # Boundary: from idx1 to idx2 (direct)
+            # Surface: from idx1 to idx2 (direct path, contains original surface vertices)
+            # Boundary: from idx2 to idx1 (wrapping, contains cut edge vertices)
             surface_length = 0
-            idx = idx2
-            while idx != idx1:
+            idx = idx1
+            while idx != idx2:
                 next_idx = (idx + 1) % n
                 surface_length += np.linalg.norm(contour[next_idx] - contour[idx])
                 idx = next_idx
@@ -4907,14 +4907,14 @@ class ContourMeshMixin:
             print(f"      Lengths: surface={surface_length:.4f}, boundary={boundary_length:.4f}")
             print(f"      Distribution: surface={surface_verts}, boundary={boundary_verts}, fixed=2")
 
-            # Extract surface segment (from int2 to int1, wrapping)
-            surface_segment = [int2_3d.copy()]
-            idx = idx2
-            while idx != idx1:
+            # Extract surface segment (from int1 to int2, direct path)
+            surface_segment = [int1_3d.copy()]
+            idx = idx1
+            while idx != idx2:
                 idx = (idx + 1) % n
-                if idx != idx1:
+                if idx != idx2:
                     surface_segment.append(contour[idx].copy())
-            surface_segment.append(int1_3d.copy())
+            surface_segment.append(int2_3d.copy())
 
             # Resample surface segment as open curve
             if len(surface_segment) >= 2:
@@ -4922,27 +4922,27 @@ class ContourMeshMixin:
                     np.array(surface_segment), surface_verts + 2  # +2 for endpoints
                 )
                 # Ensure exact endpoint positions
-                resampled_surface[0] = int2_3d.copy()
-                resampled_surface[-1] = int1_3d.copy()
+                resampled_surface[0] = int1_3d.copy()
+                resampled_surface[-1] = int2_3d.copy()
             else:
-                resampled_surface = np.array([int2_3d.copy(), int1_3d.copy()])
+                resampled_surface = np.array([int1_3d.copy(), int2_3d.copy()])
 
-            # Create boundary segment (from int1 to int2)
+            # Create boundary segment (from int2 to int1, straight line)
             if boundary_verts > 0:
                 boundary_segment = []
                 for i in range(boundary_verts + 2):
                     t = i / (boundary_verts + 1)
-                    pt = int1_3d + t * (int2_3d - int1_3d)
+                    pt = int2_3d + t * (int1_3d - int2_3d)  # int2 -> int1
                     boundary_segment.append(pt)
                 resampled_boundary = np.array(boundary_segment)
             else:
-                resampled_boundary = np.array([int1_3d.copy(), int2_3d.copy()])
+                resampled_boundary = np.array([int2_3d.copy(), int1_3d.copy()])
 
-            # Combine: surface (int2->int1) + boundary (int1->int2, skip first which is int1)
+            # Combine: surface (int1->int2) + boundary (int2->int1, skip first which is int2)
             result = list(resampled_surface)
-            for v in resampled_boundary[1:]:  # Skip int1 (already at end of surface)
+            for v in resampled_boundary[1:]:  # Skip int2 (already at end of surface)
                 result.append(v)
-            # Remove last vertex (int2) since it's the same as first (int2)
+            # Remove last vertex (int1) since it's the same as first (int1)
             result = result[:-1]
 
             return np.array(result)
