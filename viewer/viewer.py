@@ -5886,12 +5886,14 @@ class GLFWApp():
                                 old_target_2d = obj._manual_cut_data.get('target_2d', None)
                                 if opt_target_2d is not None:
                                     # Compare old vs new target_2d
-                                    if old_target_2d is not None and len(old_target_2d) > 0:
+                                    if old_target_2d is not None and hasattr(old_target_2d, '__len__') and len(old_target_2d) > 0:
                                         old_centroid = np.mean(old_target_2d, axis=0)
                                         new_centroid = np.mean(opt_target_2d, axis=0)
                                         print(f"[Optimize DEBUG] target_2d comparison:")
                                         print(f"  old: {len(old_target_2d)} verts, centroid=({old_centroid[0]:.4f}, {old_centroid[1]:.4f}), first=({old_target_2d[0][0]:.4f}, {old_target_2d[0][1]:.4f})")
                                         print(f"  new: {len(opt_target_2d)} verts, centroid=({new_centroid[0]:.4f}, {new_centroid[1]:.4f}), first=({opt_target_2d[0][0]:.4f}, {opt_target_2d[0][1]:.4f})")
+                                    else:
+                                        print(f"[Optimize DEBUG] old_target_2d is None or empty: {type(old_target_2d)}, hasattr len: {hasattr(old_target_2d, '__len__')}")
                                     obj._manual_cut_data['target_2d'] = opt_target_2d
                                     print(f"[Optimize DEBUG] Updated target_2d: {len(opt_target_2d)} verts")
                                 else:
