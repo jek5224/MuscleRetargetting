@@ -5025,24 +5025,56 @@ class ContourMeshMixin:
         if len(boundaries) == 1:
             idx1, idx2, int1_3d, int2_3d = boundaries[0]
 
-            # Ensure idx1 < idx2
+            # Compute arc-length for BOTH paths to determine which is boundary vs surface
+            # Path A: idx1 -> idx2 (direct, assuming idx1 < idx2 after potential swap)
+            # Path B: idx2 -> idx1 (wrapping around)
+            # The BOUNDARY path should have arc-length close to straight-line distance
+            # The SURFACE path should have arc-length longer than straight-line distance
+
+            # Ensure idx1 < idx2 for consistent path definitions
             if idx1 > idx2:
                 idx1, idx2 = idx2, idx1
                 int1_3d, int2_3d = int2_3d, int1_3d
 
-            # Calculate lengths
-            # Surface: from idx1 to idx2 (direct path, contains original surface vertices)
-            # Boundary: from idx2 to idx1 (wrapping, contains cut edge vertices)
-            surface_length = 0
+            # Calculate arc-length for path A (idx1 -> idx2, direct)
+            path_a_length = 0
             idx = idx1
             while idx != idx2:
                 next_idx = (idx + 1) % n
-                surface_length += np.linalg.norm(contour[next_idx] - contour[idx])
+                path_a_length += np.linalg.norm(contour[next_idx] - contour[idx])
                 idx = next_idx
 
-            # Boundary length is just the straight-line distance between intersection points
-            # (not arc length along original vertices)
-            boundary_length = np.linalg.norm(int2_3d - int1_3d)
+            # Calculate arc-length for path B (idx2 -> idx1, wrapping)
+            path_b_length = 0
+            idx = idx2
+            while idx != idx1:
+                next_idx = (idx + 1) % n
+                path_b_length += np.linalg.norm(contour[next_idx] - contour[idx])
+                idx = next_idx
+
+            # Straight-line distance between intersection points
+            straight_dist = np.linalg.norm(int2_3d - int1_3d)
+
+            # The boundary is the path whose arc-length is closer to straight-line distance
+            # (boundary should be nearly straight, so arc-length ≈ straight distance)
+            diff_a = abs(path_a_length - straight_dist)
+            diff_b = abs(path_b_length - straight_dist)
+
+            if diff_a < diff_b:
+                # Path A is boundary, Path B is surface
+                boundary_arc_length = path_a_length
+                surface_length = path_b_length
+                surface_is_path_b = True
+                print(f"      Path A is boundary (arc={path_a_length:.4f}), Path B is surface (arc={path_b_length:.4f})")
+            else:
+                # Path B is boundary, Path A is surface
+                boundary_arc_length = path_b_length
+                surface_length = path_a_length
+                surface_is_path_b = False
+                print(f"      Path B is boundary (arc={path_b_length:.4f}), Path A is surface (arc={path_a_length:.4f})")
+
+            # Boundary length for vertex distribution is straight-line distance
+            boundary_length = straight_dist
 
             total_length = surface_length + boundary_length
             if total_length < 1e-10:
@@ -5059,14 +5091,29 @@ class ContourMeshMixin:
             print(f"      Lengths: surface={surface_length:.4f}, boundary={boundary_length:.4f}")
             print(f"      Distribution: surface={surface_verts}, boundary={boundary_verts}, fixed=2")
 
-            # Extract surface segment (from int1 to int2, direct path)
-            surface_segment = [int1_3d.copy()]
-            idx = idx1
-            while idx != idx2:
-                idx = (idx + 1) % n
-                if idx != idx2:
-                    surface_segment.append(contour[idx].copy())
-            surface_segment.append(int2_3d.copy())
+            # Extract surface segment based on which path is the surface
+            if surface_is_path_b:
+                # Surface is path B: idx2 -> idx1 (wrapping)
+                surface_segment = [int2_3d.copy()]
+                idx = idx2
+                while idx != idx1:
+                    idx = (idx + 1) % n
+                    if idx != idx1:
+                        surface_segment.append(contour[idx].copy())
+                surface_segment.append(int1_3d.copy())
+                # For boundary: int1 -> int2 (straight line)
+                boundary_start, boundary_end = int1_3d, int2_3d
+            else:
+                # Surface is path A: idx1 -> idx2 (direct)
+                surface_segment = [int1_3d.copy()]
+                idx = idx1
+                while idx != idx2:
+                    idx = (idx + 1) % n
+                    if idx != idx2:
+                        surface_segment.append(contour[idx].copy())
+                surface_segment.append(int2_3d.copy())
+                # For boundary: int2 -> int1 (straight line)
+                boundary_start, boundary_end = int2_3d, int1_3d
 
             # Resample surface segment as open curve
             if len(surface_segment) >= 2:
@@ -5074,29 +5121,30 @@ class ContourMeshMixin:
                     np.array(surface_segment), surface_verts + 2  # +2 for endpoints
                 )
                 # Ensure exact endpoint positions
-                resampled_surface[0] = int1_3d.copy()
-                resampled_surface[-1] = int2_3d.copy()
+                resampled_surface[0] = surface_segment[0].copy()
+                resampled_surface[-1] = surface_segment[-1].copy()
             else:
-                resampled_surface = np.array([int1_3d.copy(), int2_3d.copy()])
+                resampled_surface = np.array([surface_segment[0].copy(), surface_segment[-1].copy()])
 
-            # Create boundary segment (from int2 to int1, straight line)
+            # Create boundary segment as straight line
             if boundary_verts > 0:
                 boundary_segment = []
                 for i in range(boundary_verts + 2):
                     t = i / (boundary_verts + 1)
-                    pt = int2_3d + t * (int1_3d - int2_3d)  # int2 -> int1
+                    pt = boundary_start + t * (boundary_end - boundary_start)
                     boundary_segment.append(pt)
                 resampled_boundary = np.array(boundary_segment)
-                print(f"      Boundary: {len(resampled_boundary)} verts from int2={int2_3d} to int1={int1_3d}")
+                print(f"      Boundary: {len(resampled_boundary)} verts, straight line")
             else:
-                resampled_boundary = np.array([int2_3d.copy(), int1_3d.copy()])
+                resampled_boundary = np.array([boundary_start.copy(), boundary_end.copy()])
                 print(f"      Boundary: 2 verts (no intermediates)")
 
-            # Combine: surface (int1->int2) + boundary (int2->int1, skip first which is int2)
+            # Combine: surface + boundary (skip endpoints to avoid duplicates)
+            # Surface ends at same point where boundary starts
             result = list(resampled_surface)
-            for v in resampled_boundary[1:]:  # Skip int2 (already at end of surface)
+            for v in resampled_boundary[1:]:  # Skip first (already at end of surface)
                 result.append(v)
-            # Remove last vertex (int1) since it's the same as first (int1)
+            # Remove last vertex (same as first, closing the loop)
             result = result[:-1]
 
             return np.array(result)
