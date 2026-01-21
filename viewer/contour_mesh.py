@@ -5099,8 +5099,14 @@ class ContourMeshMixin:
                 idx1, idx2, int1_3d, int2_3d = boundary_data
                 all_boundary_indices = [idx1, idx2]  # Fallback
 
-            # Ensure idx1 < idx2 for consistent path definitions
-            if idx1 > idx2:
+            # Ensure CONSISTENT ordering of intersection points across all levels
+            # Use coordinate-based ordering (not index-based) so the same physical point
+            # is always "first" regardless of how the contour is indexed
+            # This prevents the surface/boundary from flipping between levels
+            ip1_key = (int1_3d[0], int1_3d[1], int1_3d[2])
+            ip2_key = (int2_3d[0], int2_3d[1], int2_3d[2])
+            if ip1_key > ip2_key:
+                # Swap so int1_3d is always the "smaller" point
                 idx1, idx2 = idx2, idx1
                 int1_3d, int2_3d = int2_3d, int1_3d
 
@@ -5164,10 +5170,11 @@ class ContourMeshMixin:
             print(f"      Distribution: surface={surface_verts}, boundary={boundary_verts}, fixed=2")
 
             # Extract surface segment using CONTOUR vertices
-            # Use CONTOUR VERTICES for boundary too (ensures exact alignment with original)
+            # IMPORTANT: Always orient surface to start at idx1 (int1_3d) for consistency
+            # This ensures the first vertex (t=0) is always at the same physical intersection point
             if surface_is_path_b:
                 # Surface is path B: idx2 -> idx1 (wrapping around)
-                # Include vertices at idx2 and idx1 as endpoints
+                # But we want to START at idx1, so collect in reverse: idx1 <- idx2
                 surface_segment = []
                 idx = idx2
                 while True:
@@ -5175,12 +5182,13 @@ class ContourMeshMixin:
                     if idx == idx1:
                         break
                     idx = (idx + 1) % n
-                # For boundary: use CONTOUR VERTICES (matches exactly with original)
-                boundary_start = contour[idx1].copy()
-                boundary_end = contour[idx2].copy()
+                # Reverse so it goes idx1 -> idx2 instead
+                surface_segment = surface_segment[::-1]
+                # Boundary goes from idx2 back to idx1
+                boundary_start = contour[idx2].copy()
+                boundary_end = contour[idx1].copy()
             else:
-                # Surface is path A: idx1 -> idx2 (direct)
-                # Include vertices at idx1 and idx2 as endpoints
+                # Surface is path A: idx1 -> idx2 (direct) - already correct orientation
                 surface_segment = []
                 idx = idx1
                 while True:
@@ -5188,7 +5196,7 @@ class ContourMeshMixin:
                     if idx == idx2:
                         break
                     idx = (idx + 1) % n
-                # For boundary: use CONTOUR VERTICES (matches exactly with original)
+                # Boundary goes from idx2 back to idx1
                 boundary_start = contour[idx2].copy()
                 boundary_end = contour[idx1].copy()
 
