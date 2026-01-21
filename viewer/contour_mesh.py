@@ -4890,18 +4890,16 @@ class ContourMeshMixin:
                 new_shared_cut_vertices.append(ep.copy())
 
         # Extract the "original contour" portion (non-cut-edge vertices)
-        # plus the two endpoints
         cut_edge_set = set(cut_edge_indices)
-        original_indices = [i for i in range(n) if i not in cut_edge_set]
 
-        # Build the contour: endpoint1 -> original portion -> endpoint2 -> (close back)
-        # We need to order the original portion correctly
-
-        # Find where original portion starts (after end2) and ends (before end1)
-        # Original goes from end2+1 to end1-1 (wrapping)
+        # The original portion is BETWEEN the two endpoints (not wrapping through cut edge)
+        # For piece: [cut1, orig1, orig2, orig3, cut2, m3, m2, m1]
+        #   end1_idx=0 (cut1), end2_idx=4 (cut2)
+        #   Original portion: indices 1, 2, 3 (between cut1 and cut2)
+        # Go from end1_idx+1 to end2_idx-1 (not wrapping)
         original_portion = []
-        idx = (end2_idx + 1) % n
-        while idx != end1_idx:
+        idx = (end1_idx + 1) % n
+        while idx != end2_idx:
             if idx not in cut_edge_set:
                 original_portion.append(contour[idx].copy())
             idx = (idx + 1) % n
