@@ -4990,7 +4990,7 @@ class GLFWApp():
                     all_points_2d.append(np.array(src_projected))
 
             # Include transformed sources from optimization in bounds (if available)
-            transformed_sources = obj._manual_cut_data.get('transformed_sources_2d', [])
+            transformed_sources = obj._manual_cut_data.get('transformed_sources_2d', None) or []
             for src_2d in transformed_sources:
                 if src_2d is not None and len(src_2d) >= 3:
                     all_points_2d.append(np.array(src_2d))
@@ -5112,7 +5112,7 @@ class GLFWApp():
                                           f"Target (Lv.{target_level})")
 
             # Draw transformed source contours after optimization (semi-transparent dashed outline)
-            transformed_sources = obj._manual_cut_data.get('transformed_sources_2d', [])
+            transformed_sources = obj._manual_cut_data.get('transformed_sources_2d', None) or []
             if len(transformed_sources) > 0:
                 # Debug: print once when drawing
                 if not hasattr(obj, '_debug_transformed_printed') or obj._debug_transformed_printed != len(transformed_sources):
