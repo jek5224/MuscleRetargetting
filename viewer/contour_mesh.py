@@ -4884,12 +4884,9 @@ class ContourMeshMixin:
                 surface_length += np.linalg.norm(contour[next_idx] - contour[idx])
                 idx = next_idx
 
-            boundary_length = 0
-            idx = idx1
-            while idx != idx2:
-                next_idx = (idx + 1) % n
-                boundary_length += np.linalg.norm(contour[next_idx] - contour[idx])
-                idx = next_idx
+            # Boundary length is just the straight-line distance between intersection points
+            # (not arc length along original vertices)
+            boundary_length = np.linalg.norm(int2_3d - int1_3d)
 
             total_length = surface_length + boundary_length
             if total_length < 1e-10:
