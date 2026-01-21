@@ -4751,10 +4751,21 @@ class ContourMeshMixin:
         self.bounding_planes_orig = [[bp.copy() for bp in bp_group] for bp_group in self.bounding_planes]
 
         # Get intersection points if available
-        intersection_points = getattr(self, 'cut_intersection_points', [])
-        has_cuts = len(intersection_points) > 0
+        # Support both old format (list) and new format (dict keyed by level)
+        cut_ip_raw = getattr(self, 'cut_intersection_points', {})
+        if isinstance(cut_ip_raw, list):
+            # Old format: convert to new format by trying to match each level
+            print(f"  Note: Converting old intersection point format ({len(cut_ip_raw)} pairs)")
+            intersection_points_by_level = {}  # Will be populated per-level during matching
+            intersection_points_all = cut_ip_raw
+        else:
+            # New format: dict keyed by level_idx
+            intersection_points_by_level = cut_ip_raw
+            intersection_points_all = []  # Not used in new format
+        has_cuts = len(intersection_points_by_level) > 0 or len(intersection_points_all) > 0
 
-        print(f"Resampling {len(self.contours)} streams (base={base_samples}, cuts={len(intersection_points)})")
+        total_ip_count = sum(len(v) for v in intersection_points_by_level.values()) if intersection_points_by_level else len(intersection_points_all)
+        print(f"Resampling {len(self.contours)} streams (base={base_samples}, cuts={total_ip_count})")
 
         # Step 1: For each stream, find which contours have boundaries and count them
         stream_boundary_info = []  # stream_idx -> {level_idx -> [(int1, int2), ...]}
@@ -4769,15 +4780,24 @@ class ContourMeshMixin:
                 boundaries = []
 
                 if has_cuts:
+                    # Get intersection points for this specific level
+                    if intersection_points_by_level:
+                        # New format: use level-specific intersection points
+                        level_ips = intersection_points_by_level.get(level_idx, [])
+                    else:
+                        # Old format: use tight tolerance to only match exact vertices
+                        level_ips = intersection_points_all
+
                     # Find which intersection points are in this contour
-                    for ip_idx, (int1, int2) in enumerate(intersection_points):
+                    for ip_idx, (int1, int2) in enumerate(level_ips):
                         # Check if both intersection points are in this contour
-                        int1_idx = self._find_vertex_in_contour(contour, int1)
-                        int2_idx = self._find_vertex_in_contour(contour, int2)
+                        # Use tight tolerance for exact matching
+                        int1_idx = self._find_vertex_in_contour(contour, int1, tolerance=1e-6)
+                        int2_idx = self._find_vertex_in_contour(contour, int2, tolerance=1e-6)
 
                         if int1_idx is not None and int2_idx is not None:
                             boundaries.append((int1_idx, int2_idx, int1.copy(), int2.copy()))
-                            print(f"    Stream {stream_idx} level {level_idx}: found boundary {ip_idx} at indices {int1_idx}, {int2_idx}")
+                            print(f"    Stream {stream_idx} level {level_idx}: found boundary at indices {int1_idx}, {int2_idx}")
 
                 boundary_info[level_idx] = boundaries
                 max_boundaries = max(max_boundaries, len(boundaries))
@@ -8413,10 +8433,13 @@ class ContourMeshMixin:
             for v in intermediate_verts:
                 self.shared_cut_vertices.append(v)
 
-            # Store ONLY intersection points (for resampling)
-            if not hasattr(self, 'cut_intersection_points'):
-                self.cut_intersection_points = []
-            self.cut_intersection_points.append((cut1_3d.copy(), cut2_3d.copy()))
+            # Store ONLY intersection points (for resampling) - keyed by level
+            if not hasattr(self, 'cut_intersection_points') or isinstance(self.cut_intersection_points, list):
+                self.cut_intersection_points = {}
+            target_level = self._manual_cut_data.get('target_level', 0)
+            if target_level not in self.cut_intersection_points:
+                self.cut_intersection_points[target_level] = []
+            self.cut_intersection_points[target_level].append((cut1_3d.copy(), cut2_3d.copy()))
         else:
             # Use line intersection method for manually drawn lines
             line_start, line_end = self._manual_cut_line
@@ -8494,10 +8517,13 @@ class ContourMeshMixin:
             for v in intermediate_verts:
                 self.shared_cut_vertices.append(v)
 
-            # Store ONLY intersection points (for resampling)
-            if not hasattr(self, 'cut_intersection_points'):
-                self.cut_intersection_points = []
-            self.cut_intersection_points.append((int1_3d.copy(), int2_3d.copy()))
+            # Store ONLY intersection points (for resampling) - keyed by level
+            if not hasattr(self, 'cut_intersection_points') or isinstance(self.cut_intersection_points, list):
+                self.cut_intersection_points = {}
+            target_level = self._manual_cut_data.get('target_level', 0)
+            if target_level not in self.cut_intersection_points:
+                self.cut_intersection_points[target_level] = []
+            self.cut_intersection_points[target_level].append((int1_3d.copy(), int2_3d.copy()))
 
         # Determine which piece corresponds to which source contour
         # Simple 3D centroid distance matching
@@ -8949,10 +8975,13 @@ class ContourMeshMixin:
             self.shared_cut_vertices.append(v)
         self.shared_cut_vertices.append(int2_3d)
 
-        # Store ONLY intersection points (for resampling)
-        if not hasattr(self, 'cut_intersection_points'):
-            self.cut_intersection_points = []
-        self.cut_intersection_points.append((int1_3d.copy(), int2_3d.copy()))
+        # Store ONLY intersection points (for resampling) - keyed by level
+        if not hasattr(self, 'cut_intersection_points') or isinstance(self.cut_intersection_points, list):
+            self.cut_intersection_points = {}
+        target_level = self._manual_cut_data.get('target_level', 0)
+        if target_level not in self.cut_intersection_points:
+            self.cut_intersection_points[target_level] = []
+        self.cut_intersection_points[target_level].append((int1_3d.copy(), int2_3d.copy()))
 
         print(f"Iterative cut: piece {cut_piece_idx} -> 2 pieces, total now {len(new_pieces)}")
         return True
@@ -12545,16 +12574,19 @@ class ContourMeshMixin:
                 self.shared_cut_vertices.append(pt)
             print(f"  [BP Transform] Registered {len(shared_boundary_points)} shared cut edge vertices (total: {len(self.shared_cut_vertices)})")
 
-            # Store intersection point pairs (for resampling)
+            # Store intersection point pairs (for resampling) - keyed by level
             # For n_pieces, there are n_pieces-1 cuts, each with 2 boundary points
-            if not hasattr(self, 'cut_intersection_points'):
-                self.cut_intersection_points = []
+            if not hasattr(self, 'cut_intersection_points') or isinstance(self.cut_intersection_points, list):
+                self.cut_intersection_points = {}
+            level_key = target_level if target_level is not None else 0
+            if level_key not in self.cut_intersection_points:
+                self.cut_intersection_points[level_key] = []
             # Pair up boundary points: (0,1), (2,3), (4,5), etc.
             for i in range(0, len(shared_boundary_points) - 1, 2):
                 int1 = shared_boundary_points[i]
                 int2 = shared_boundary_points[i + 1]
-                self.cut_intersection_points.append((int1.copy(), int2.copy()))
-                print(f"  [BP Transform] Registered intersection pair: {int1} -> {int2}")
+                self.cut_intersection_points[level_key].append((int1.copy(), int2.copy()))
+                print(f"  [BP Transform] Level {level_key}: Registered intersection pair")
 
         # Ensure each piece has at least some vertices and convert to proper numpy arrays
         for i in range(n_pieces):
@@ -14823,11 +14855,25 @@ class ContourMeshMixin:
             print(f"  Loaded {len(self.shared_cut_vertices)} shared cut vertices")
 
         if 'cut_intersection_points' in save_data:
-            self.cut_intersection_points = [
-                (np.array(pair[0]), np.array(pair[1]))
-                for pair in save_data['cut_intersection_points']
-            ]
-            print(f"  Loaded {len(self.cut_intersection_points)} cut intersection point pairs")
+            raw_ips = save_data['cut_intersection_points']
+            if isinstance(raw_ips, dict):
+                # New format: dict keyed by level
+                self.cut_intersection_points = {}
+                for level_key, pairs in raw_ips.items():
+                    level_idx = int(level_key)  # JSON keys are strings
+                    self.cut_intersection_points[level_idx] = [
+                        (np.array(pair[0]), np.array(pair[1]))
+                        for pair in pairs
+                    ]
+                total_pairs = sum(len(v) for v in self.cut_intersection_points.values())
+                print(f"  Loaded {total_pairs} cut intersection point pairs across {len(self.cut_intersection_points)} levels")
+            else:
+                # Old format: list (keep as list for backwards compatibility)
+                self.cut_intersection_points = [
+                    (np.array(pair[0]), np.array(pair[1]))
+                    for pair in raw_ips
+                ]
+                print(f"  Loaded {len(self.cut_intersection_points)} cut intersection point pairs (old format)")
 
         # Enable drawing
         self.is_draw_contours = True
