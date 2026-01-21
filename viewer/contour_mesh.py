@@ -4721,20 +4721,22 @@ class ContourMeshMixin:
 
         return resampled
 
-    def resample_contours(self, num_samples=32):
+    def resample_contours(self, base_samples=32):
         """
-        Resample all contours to have the same number of vertices with consistent topology.
-        Uses arc-length parameterization and uniform sampling.
-        Also updates bounding planes via find_contour_match to maintain linkage.
+        Resample all contours with proper handling of cut boundaries.
 
-        For cut contours with shared boundary vertices:
-        - Identifies cut edge vertices (from shared_cut_vertices)
-        - Keeps cut edge ENDPOINTS at exact positions (shared between streams)
-        - Removes intermediate cut edge vertices
-        - Resamples only the "original contour" portion
+        Vertex count formula: base_samples + 2 × num_boundaries
+        - No cut: 32 vertices
+        - 1 boundary (2-on-1 outer piece): 34 vertices
+        - 2 boundaries (3-on-1 middle piece): 36 vertices
+
+        For cut contours:
+        - Intersection points (cut endpoints) are FIXED at exact positions
+        - Remaining vertices distributed between surface and boundary by length ratio
+        - Boundary vertices are identical between sharing pieces
 
         Args:
-            num_samples: int - desired number of vertices per contour
+            base_samples: int - base number of vertices (default 32)
         """
         if self.contours is None or len(self.contours) == 0:
             print("No contours found. Please run find_contours first.")
@@ -4748,31 +4750,77 @@ class ContourMeshMixin:
         self.contours_orig = [[c.copy() for c in contour_group] for contour_group in self.contours]
         self.bounding_planes_orig = [[bp.copy() for bp in bp_group] for bp_group in self.bounding_planes]
 
+        # Get intersection points if available
+        intersection_points = getattr(self, 'cut_intersection_points', [])
+        has_cuts = len(intersection_points) > 0
+
+        print(f"Resampling {len(self.contours)} streams (base={base_samples}, cuts={len(intersection_points)})")
+
+        # Step 1: For each stream, find which contours have boundaries and count them
+        stream_boundary_info = []  # stream_idx -> {level_idx -> [(int1, int2), ...]}
+        max_boundaries_per_stream = []  # stream_idx -> max number of boundaries in any contour
+
+        for stream_idx, contour_group in enumerate(self.contours):
+            boundary_info = {}
+            max_boundaries = 0
+
+            for level_idx, contour in enumerate(contour_group):
+                contour = np.array(contour)
+                boundaries = []
+
+                if has_cuts:
+                    # Find which intersection points are in this contour
+                    for int1, int2 in intersection_points:
+                        # Check if both intersection points are in this contour
+                        int1_idx = self._find_vertex_in_contour(contour, int1)
+                        int2_idx = self._find_vertex_in_contour(contour, int2)
+
+                        if int1_idx is not None and int2_idx is not None:
+                            boundaries.append((int1_idx, int2_idx, int1.copy(), int2.copy()))
+
+                boundary_info[level_idx] = boundaries
+                max_boundaries = max(max_boundaries, len(boundaries))
+
+            stream_boundary_info.append(boundary_info)
+            max_boundaries_per_stream.append(max_boundaries)
+
+        # Step 2: Calculate vertex count for each stream
+        stream_vertex_counts = []
+        for stream_idx, max_boundaries in enumerate(max_boundaries_per_stream):
+            vertex_count = base_samples + 2 * max_boundaries
+            stream_vertex_counts.append(vertex_count)
+            print(f"  Stream {stream_idx}: {max_boundaries} boundaries -> {vertex_count} vertices")
+
+        # Step 3: Resample each contour
         resampled_contours = []
         new_bounding_planes = []
 
-        # Track previous level's first vertices for chained alignment
-        prev_first_vertices = {}  # contour_idx -> first vertex position
-
-        print(f"Resampling {len(self.contours)} streams")
         for stream_idx, (contour_group, bounding_plane_group) in enumerate(zip(self.contours, self.bounding_planes)):
-            print(f"  Stream {stream_idx}: {len(contour_group)} levels")
+            num_samples = stream_vertex_counts[stream_idx]
+            boundary_info = stream_boundary_info[stream_idx]
+
+            print(f"  Stream {stream_idx}: {len(contour_group)} levels, {num_samples} vertices each")
 
             resampled_group = []
             new_bp_group = []
 
             for level_idx, (contour, bounding_plane_info) in enumerate(zip(contour_group, bounding_plane_group)):
                 contour = np.array(contour)
+                boundaries = boundary_info.get(level_idx, [])
 
-                # Normal resampling for all contours
-                bounding_plane_corners = bounding_plane_info.get('bounding_plane')
-                if bounding_plane_corners is not None and len(bounding_plane_corners) >= 1:
-                    corner_ref = np.array(bounding_plane_corners[0])
+                if len(boundaries) > 0:
+                    # Cut contour: resample with fixed intersection points
+                    resampled = self._resample_cut_contour(
+                        contour, boundaries, num_samples, base_samples
+                    )
                 else:
-                    corner_ref = prev_first_vertices.get(level_idx, None)
-                resampled = self._resample_single_contour(contour, num_samples, corner_ref)
-
-                prev_first_vertices[level_idx] = resampled[0].copy()
+                    # Normal contour: standard resampling
+                    bounding_plane_corners = bounding_plane_info.get('bounding_plane')
+                    if bounding_plane_corners is not None and len(bounding_plane_corners) >= 1:
+                        corner_ref = np.array(bounding_plane_corners[0])
+                    else:
+                        corner_ref = None
+                    resampled = self._resample_single_contour(contour, num_samples, corner_ref)
 
                 # Align with bounding plane
                 bounding_plane = bounding_plane_info['bounding_plane']
@@ -4788,16 +4836,121 @@ class ContourMeshMixin:
 
             resampled_contours.append(resampled_group)
             new_bounding_planes.append(new_bp_group)
-            print(f"    Resampled {len(resampled_group)} levels to {num_samples} vertices each")
 
         self.contours = resampled_contours
         self.bounding_planes = new_bounding_planes
 
-        # Post-process: weld close vertices between streams at same level
-        if len(self.contours) > 1:
-            self._weld_stream_vertices()
-
         print(f"Resampling complete: {len(self.contours)} streams")
+
+    def _find_vertex_in_contour(self, contour, target_vertex, tolerance=1e-4):
+        """Find the index of a vertex in a contour, or None if not found."""
+        for i, v in enumerate(contour):
+            if np.linalg.norm(v - target_vertex) < tolerance:
+                return i
+        return None
+
+    def _resample_cut_contour(self, contour, boundaries, num_samples, base_samples):
+        """
+        Resample a contour with cut boundaries.
+
+        Args:
+            contour: Original contour vertices
+            boundaries: List of (idx1, idx2, int1_3d, int2_3d) for each boundary
+            num_samples: Total target vertex count
+            base_samples: Base vertex count (for distributing non-fixed vertices)
+
+        Returns:
+            Resampled contour with fixed intersection points
+        """
+        n = len(contour)
+
+        # For now, handle single boundary case (2-on-1)
+        # TODO: Handle multiple boundaries (3-on-1, etc.)
+        if len(boundaries) == 1:
+            idx1, idx2, int1_3d, int2_3d = boundaries[0]
+
+            # Ensure idx1 < idx2
+            if idx1 > idx2:
+                idx1, idx2 = idx2, idx1
+                int1_3d, int2_3d = int2_3d, int1_3d
+
+            # Calculate lengths
+            # Surface: from idx2 to idx1 (wrapping around)
+            # Boundary: from idx1 to idx2 (direct)
+            surface_length = 0
+            idx = idx2
+            while idx != idx1:
+                next_idx = (idx + 1) % n
+                surface_length += np.linalg.norm(contour[next_idx] - contour[idx])
+                idx = next_idx
+
+            boundary_length = 0
+            idx = idx1
+            while idx != idx2:
+                next_idx = (idx + 1) % n
+                boundary_length += np.linalg.norm(contour[next_idx] - contour[idx])
+                idx = next_idx
+
+            total_length = surface_length + boundary_length
+            if total_length < 1e-10:
+                return self._resample_single_contour(contour, num_samples, None)
+
+            # Distribute vertices (excluding 2 fixed intersection points)
+            distributable = num_samples - 2
+            surface_ratio = surface_length / total_length
+            boundary_ratio = boundary_length / total_length
+
+            surface_verts = max(1, int(round(distributable * surface_ratio)))
+            boundary_verts = distributable - surface_verts
+
+            print(f"      Lengths: surface={surface_length:.4f}, boundary={boundary_length:.4f}")
+            print(f"      Distribution: surface={surface_verts}, boundary={boundary_verts}, fixed=2")
+
+            # Extract surface segment (from int2 to int1, wrapping)
+            surface_segment = [int2_3d.copy()]
+            idx = idx2
+            while idx != idx1:
+                idx = (idx + 1) % n
+                if idx != idx1:
+                    surface_segment.append(contour[idx].copy())
+            surface_segment.append(int1_3d.copy())
+
+            # Resample surface segment as open curve
+            if len(surface_segment) >= 2:
+                resampled_surface = self._resample_open_segment(
+                    np.array(surface_segment), surface_verts + 2  # +2 for endpoints
+                )
+                # Ensure exact endpoint positions
+                resampled_surface[0] = int2_3d.copy()
+                resampled_surface[-1] = int1_3d.copy()
+            else:
+                resampled_surface = np.array([int2_3d.copy(), int1_3d.copy()])
+
+            # Create boundary segment (from int1 to int2)
+            if boundary_verts > 0:
+                boundary_segment = []
+                for i in range(boundary_verts + 2):
+                    t = i / (boundary_verts + 1)
+                    pt = int1_3d + t * (int2_3d - int1_3d)
+                    boundary_segment.append(pt)
+                resampled_boundary = np.array(boundary_segment)
+            else:
+                resampled_boundary = np.array([int1_3d.copy(), int2_3d.copy()])
+
+            # Combine: surface (int2->int1) + boundary (int1->int2, skip first which is int1)
+            result = list(resampled_surface)
+            for v in resampled_boundary[1:]:  # Skip int1 (already at end of surface)
+                result.append(v)
+            # Remove last vertex (int2) since it's the same as first (int2)
+            result = result[:-1]
+
+            return np.array(result)
+
+        else:
+            # Multiple boundaries - need more complex handling
+            # For now, fall back to normal resampling
+            print(f"      WARNING: {len(boundaries)} boundaries not yet fully supported")
+            return self._resample_single_contour(contour, num_samples, None)
 
     def _weld_stream_vertices(self, tolerance=0.05):
         """
@@ -8124,6 +8277,11 @@ class ContourMeshMixin:
             self.shared_cut_vertices.append(cut2_3d)
             for v in intermediate_verts:
                 self.shared_cut_vertices.append(v)
+
+            # Store ONLY intersection points (for resampling)
+            if not hasattr(self, 'cut_intersection_points'):
+                self.cut_intersection_points = []
+            self.cut_intersection_points.append((cut1_3d.copy(), cut2_3d.copy()))
         else:
             # Use line intersection method for manually drawn lines
             line_start, line_end = self._manual_cut_line
@@ -8200,6 +8358,11 @@ class ContourMeshMixin:
             self.shared_cut_vertices.append(int2_3d)
             for v in intermediate_verts:
                 self.shared_cut_vertices.append(v)
+
+            # Store ONLY intersection points (for resampling)
+            if not hasattr(self, 'cut_intersection_points'):
+                self.cut_intersection_points = []
+            self.cut_intersection_points.append((int1_3d.copy(), int2_3d.copy()))
 
         # Determine which piece corresponds to which source contour
         # Simple 3D centroid distance matching
@@ -14376,6 +14539,8 @@ class ContourMeshMixin:
             save_data['shared_boundary_registry'] = convert_to_serializable(self.shared_boundary_registry)
         if hasattr(self, 'shared_cut_vertices') and self.shared_cut_vertices:
             save_data['shared_cut_vertices'] = convert_to_serializable(self.shared_cut_vertices)
+        if hasattr(self, 'cut_intersection_points') and self.cut_intersection_points:
+            save_data['cut_intersection_points'] = convert_to_serializable(self.cut_intersection_points)
 
         with open(filepath, 'w') as f:
             json.dump(save_data, f)
@@ -14505,6 +14670,13 @@ class ContourMeshMixin:
         if 'shared_cut_vertices' in save_data:
             self.shared_cut_vertices = [np.array(v) for v in save_data['shared_cut_vertices']]
             print(f"  Loaded {len(self.shared_cut_vertices)} shared cut vertices")
+
+        if 'cut_intersection_points' in save_data:
+            self.cut_intersection_points = [
+                (np.array(pair[0]), np.array(pair[1]))
+                for pair in save_data['cut_intersection_points']
+            ]
+            print(f"  Loaded {len(self.cut_intersection_points)} cut intersection point pairs")
 
         # Enable drawing
         self.is_draw_contours = True
