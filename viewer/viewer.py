@@ -5211,32 +5211,15 @@ class GLFWApp():
             selected_sources = obj._manual_cut_data.get('selected_sources', list(range(len(source_contours_3d))))
             source_labels = obj._manual_cut_data.get('source_labels', list(range(len(source_contours_3d))))
 
-            if 'source_view_idx' in mouse_state and len(source_contours_3d) > 0:
+            # Use pre-computed source_2d_list for drawing (same as PNG visualization)
+            source_2d_list = obj._manual_cut_data.get('source_2d_list', [])
+
+            if 'source_view_idx' in mouse_state and len(source_2d_list) > 0:
                 src_idx = mouse_state.get('source_view_idx', 0)
-                if src_idx < len(source_contours_3d) and src_idx < len(source_bps):
+                if src_idx < len(source_2d_list) and src_idx < len(source_bps):
                     src_bp = source_bps[src_idx]
-                    src_contour_3d = source_contours_3d[src_idx]
-
-                    # Project source contour onto TARGET's bounding plane for overlay
-                    target_bp = obj._manual_cut_data['target_bp']
-                    target_mean = target_bp['mean']
-                    # Negate basis vectors to rotate 180° - match cutting window orientation
-                    target_x = -target_bp['basis_x']
-                    target_y = -target_bp['basis_y']
-                    target_z = target_bp['basis_z']
-
-                    # Project each point of source contour onto target plane
-                    src_on_target_2d = []
-                    for pt in src_contour_3d:
-                        # Project onto target plane
-                        diff = pt - target_mean
-                        proj_pt = pt - np.dot(diff, target_z) * target_z
-                        # Convert to 2D in target's coordinate system
-                        diff_proj = proj_pt - target_mean
-                        x_coord = np.dot(diff_proj, target_x)
-                        y_coord = np.dot(diff_proj, target_y)
-                        src_on_target_2d.append([x_coord, y_coord])
-                    src_on_target_2d = np.array(src_on_target_2d)
+                    # Use pre-computed 2D source contour (matches PNG visualization)
+                    src_on_target_2d = np.array(source_2d_list[src_idx])
 
                     # Draw source contour transparently on main canvas
                     src_color = piece_colors[src_idx % len(piece_colors)]
