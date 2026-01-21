@@ -13166,26 +13166,116 @@ class ContourMeshMixin:
                     t = np.clip(t, 0.0, 1.0)
 
             elif piece_a is not None and piece_b is not None and piece_a < len(piece_polygons) and piece_b < len(piece_polygons):
-                # For n_pieces > 2: compute local cutting line between the two adjacent sources
+                # For n_pieces > 2: find shared boundary between the two adjacent sources
                 poly_a = piece_polygons[piece_a]
                 poly_b = piece_polygons[piece_b]
                 if poly_a is not None and poly_b is not None:
                     try:
-                        # Find perpendicular bisector between centroids of the two sources
-                        c_a = centroids[piece_a]
-                        c_b = centroids[piece_b]
-                        mid = (c_a + c_b) / 2
-                        dir_ab = c_b - c_a
-                        dir_len = np.linalg.norm(dir_ab)
-                        if dir_len > 1e-10:
-                            # Cutting line is perpendicular to the line between centroids
-                            line_dir = np.array([-dir_ab[1], dir_ab[0]]) / dir_len
-                            line_normal = dir_ab / dir_len
+                        from shapely.geometry import LineString as LS
 
+                        # Find where the two polygon boundaries meet
+                        boundary_a = poly_a.exterior
+                        boundary_b = poly_b.exterior
+
+                        # Find parts of each boundary inside the other polygon
+                        edge_a_in_b = boundary_a.intersection(poly_b)
+                        edge_b_in_a = boundary_b.intersection(poly_a)
+
+                        # Extract coordinates from shared edge
+                        def extract_shared_coords(geom):
+                            coords = []
+                            if geom.is_empty:
+                                return coords
+                            if geom.geom_type == 'LineString':
+                                coords.extend(list(np.array(geom.coords)))
+                            elif geom.geom_type == 'MultiLineString':
+                                for line in geom.geoms:
+                                    coords.extend(list(np.array(line.coords)))
+                            elif geom.geom_type == 'Point':
+                                coords.append(np.array(geom.coords[0]))
+                            elif geom.geom_type == 'MultiPoint':
+                                for pt in geom.geoms:
+                                    coords.append(np.array(pt.coords[0]))
+                            elif geom.geom_type == 'GeometryCollection':
+                                for g in geom.geoms:
+                                    coords.extend(extract_shared_coords(g))
+                            return coords
+
+                        coords_ab = extract_shared_coords(edge_a_in_b)
+                        coords_ba = extract_shared_coords(edge_b_in_a)
+                        shared_coords = coords_ab if len(coords_ab) >= len(coords_ba) else coords_ba
+
+                        cutting_line_found = False
+                        if len(shared_coords) >= 2:
+                            # Shared edge exists - compute cutting line from SVD
+                            shared_arr = np.array(shared_coords)
+                            shared_mean = shared_arr.mean(axis=0)
+                            centered = shared_arr - shared_mean
+                            _, _, Vt = np.linalg.svd(centered, full_matrices=False)
+                            shared_dir = Vt[0]
+                            shared_dir = shared_dir / (np.linalg.norm(shared_dir) + 1e-10)
+
+                            # Cutting line along the shared boundary
+                            line_normal = np.array([-shared_dir[1], shared_dir[0]])
                             denom = np.dot(edge_vec, line_normal)
                             if abs(denom) > 1e-10:
-                                t = np.dot(mid - p_a, line_normal) / denom
+                                t = np.dot(shared_mean - p_a, line_normal) / denom
                                 t = np.clip(t, 0.0, 1.0)
+                                cutting_line_found = True
+                        elif len(shared_coords) == 1:
+                            # Single touch point - use with perpendicular bisector direction
+                            touch_pt = shared_coords[0]
+                            c_a = centroids[piece_a]
+                            c_b = centroids[piece_b]
+                            dir_ab = c_b - c_a
+                            dir_len = np.linalg.norm(dir_ab)
+                            if dir_len > 1e-10:
+                                line_normal = dir_ab / dir_len
+                                denom = np.dot(edge_vec, line_normal)
+                                if abs(denom) > 1e-10:
+                                    t = np.dot(touch_pt - p_a, line_normal) / denom
+                                    t = np.clip(t, 0.0, 1.0)
+                                    cutting_line_found = True
+
+                        if not cutting_line_found:
+                            # No shared boundary - find closest points between boundaries
+                            min_dist = float('inf')
+                            closest_pair = None
+                            coords_a = np.array(boundary_a.coords)
+                            coords_b = np.array(boundary_b.coords)
+                            for pa in coords_a:
+                                for pb in coords_b:
+                                    d = np.linalg.norm(pa - pb)
+                                    if d < min_dist:
+                                        min_dist = d
+                                        closest_pair = (pa, pb)
+                            if closest_pair is not None:
+                                if min_dist < 1e-8:
+                                    # Touch at single point
+                                    touch_pt = closest_pair[0]
+                                    c_a = centroids[piece_a]
+                                    c_b = centroids[piece_b]
+                                    dir_ab = c_b - c_a
+                                    dir_len = np.linalg.norm(dir_ab)
+                                    if dir_len > 1e-10:
+                                        line_normal = dir_ab / dir_len
+                                        denom = np.dot(edge_vec, line_normal)
+                                        if abs(denom) > 1e-10:
+                                            t = np.dot(touch_pt - p_a, line_normal) / denom
+                                            t = np.clip(t, 0.0, 1.0)
+                                else:
+                                    # Gap between pieces - use midpoint of closest pair
+                                    mid = (closest_pair[0] + closest_pair[1]) / 2
+                                    c_a = centroids[piece_a]
+                                    c_b = centroids[piece_b]
+                                    dir_ab = c_b - c_a
+                                    dir_len = np.linalg.norm(dir_ab)
+                                    if dir_len > 1e-10:
+                                        line_normal = dir_ab / dir_len
+                                        denom = np.dot(edge_vec, line_normal)
+                                        if abs(denom) > 1e-10:
+                                            t = np.dot(mid - p_a, line_normal) / denom
+                                            t = np.clip(t, 0.0, 1.0)
                     except Exception as e:
                         pass  # Fall back to midpoint
 
