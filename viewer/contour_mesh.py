@@ -5140,29 +5140,34 @@ class ContourMeshMixin:
             print(f"      Lengths: surface={surface_length:.4f}, boundary={boundary_length:.4f}")
             print(f"      Distribution: surface={surface_verts}, boundary={boundary_verts}, fixed=2")
 
-            # Extract surface segment based on which path is the surface
+            # Extract surface segment using CONTOUR vertices (for consistency)
+            # Use original intersection points only for the BOUNDARY (straight line)
             if surface_is_path_b:
-                # Surface is path B: idx2 -> idx1 (wrapping)
-                surface_segment = [int2_3d.copy()]
+                # Surface is path B: idx2 -> idx1 (wrapping around)
+                # Include vertices at idx2 and idx1 as endpoints
+                surface_segment = []
                 idx = idx2
-                while idx != idx1:
+                while True:
+                    surface_segment.append(contour[idx].copy())
+                    if idx == idx1:
+                        break
                     idx = (idx + 1) % n
-                    if idx != idx1:
-                        surface_segment.append(contour[idx].copy())
-                surface_segment.append(int1_3d.copy())
-                # For boundary: int1 -> int2 (straight line)
-                boundary_start, boundary_end = int1_3d, int2_3d
+                # For boundary: use original intersection points (straight line)
+                boundary_start, boundary_end = int1_3d.copy(), int2_3d.copy()
             else:
                 # Surface is path A: idx1 -> idx2 (direct)
-                surface_segment = [int1_3d.copy()]
+                # Include vertices at idx1 and idx2 as endpoints
+                surface_segment = []
                 idx = idx1
-                while idx != idx2:
+                while True:
+                    surface_segment.append(contour[idx].copy())
+                    if idx == idx2:
+                        break
                     idx = (idx + 1) % n
-                    if idx != idx2:
-                        surface_segment.append(contour[idx].copy())
-                surface_segment.append(int2_3d.copy())
-                # For boundary: int2 -> int1 (straight line)
-                boundary_start, boundary_end = int2_3d, int1_3d
+                # For boundary: use original intersection points (straight line)
+                boundary_start, boundary_end = int2_3d.copy(), int1_3d.copy()
+
+            print(f"      Surface segment: {len(surface_segment)} original vertices")
 
             # Resample surface segment as open curve
             if len(surface_segment) >= 2:
