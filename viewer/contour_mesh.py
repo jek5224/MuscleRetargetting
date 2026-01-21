@@ -4776,24 +4776,34 @@ class ContourMeshMixin:
                 contour = np.array(contour)
 
                 # Find the 2 cut edge ENDPOINTS in this contour
-                # Instead of matching all cut edge vertices (which causes issues with accumulated shared_cut_vertices),
-                # we find the 2 vertices closest to any shared_cut_vertex
+                # The endpoints should be: (1) close to shared_cut_vertices, (2) far apart in contour
                 endpoint_indices = []
                 if has_shared_cuts:
-                    # For each vertex, find its minimum distance to any shared_cut_vertex
-                    min_distances = []
+                    # Find all vertices close to any shared_cut_vertex
+                    close_indices = []
                     for i, v in enumerate(contour):
                         min_d = min(np.linalg.norm(v - sv) for sv in self.shared_cut_vertices)
-                        min_distances.append((i, min_d))
+                        if min_d < 0.01:
+                            close_indices.append(i)
 
-                    # Sort by distance and take the 2 closest
-                    min_distances.sort(key=lambda x: x[1])
-
-                    # Only use if the closest 2 are actually close (< 0.01)
-                    if min_distances[0][1] < 0.01 and min_distances[1][1] < 0.01:
-                        endpoint_indices = [min_distances[0][0], min_distances[1][0]]
-                        # Sort by index for consistent ordering
-                        endpoint_indices.sort()
+                    # From the close vertices, find the 2 that are farthest apart in contour indices
+                    # This finds the actual endpoints of the cut edge
+                    if len(close_indices) >= 2:
+                        n = len(contour)
+                        best_pair = None
+                        best_gap = 0
+                        for i in range(len(close_indices)):
+                            for j in range(i + 1, len(close_indices)):
+                                idx_i, idx_j = close_indices[i], close_indices[j]
+                                # Gap considering circular contour (take the smaller of two arcs)
+                                gap1 = abs(idx_j - idx_i)
+                                gap2 = n - gap1
+                                gap = min(gap1, gap2)
+                                if gap > best_gap:
+                                    best_gap = gap
+                                    best_pair = (idx_i, idx_j)
+                        if best_pair and best_gap > 5:  # Require meaningful separation
+                            endpoint_indices = sorted(best_pair)
 
                 if len(endpoint_indices) == 2:
                     # This contour has cut edge endpoints - resample preserving them
