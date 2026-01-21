@@ -4940,55 +4940,67 @@ class ContourMeshMixin:
             resampled_fixed.append(fixed_group)
             resampled_types.append(types_group)
 
-        # Post-process: Align normal contours with adjacent cut contours
-        # When a normal contour is next to a cut contour, rotate the normal contour
-        # so its first vertex aligns with the cut contour's first fixed point
-        print("  Aligning normal contours with adjacent cut contours...")
+        # Post-process: Propagate alignment from cut contours outward
+        # Like forward/backward smoothing - start from cut contours and propagate both directions
+        print("  Propagating alignment from cut contours...")
         for stream_idx in range(len(resampled_contours)):
             stream = resampled_contours[stream_idx]
             fixed_list = resampled_fixed[stream_idx]
             params_list = resampled_params[stream_idx]
+            n_levels = len(stream)
 
-            for level_idx in range(len(stream)):
-                curr_fixed = fixed_list[level_idx]
+            if n_levels == 0:
+                continue
 
-                # Skip if this is a cut contour (already aligned)
-                if len(curr_fixed) > 0:
-                    continue
+            # Find first and last cut contour indices
+            first_cut_idx = None
+            last_cut_idx = None
+            for i in range(n_levels):
+                if len(fixed_list[i]) > 0:
+                    if first_cut_idx is None:
+                        first_cut_idx = i
+                    last_cut_idx = i
 
-                # Check adjacent levels for cut contours
-                target_v0 = None
+            if first_cut_idx is None:
+                # No cut contours in this stream - skip
+                continue
 
-                # Check next level
-                if level_idx + 1 < len(stream) and len(fixed_list[level_idx + 1]) > 0:
-                    next_contour = stream[level_idx + 1]
-                    target_v0 = next_contour[0].copy()  # First fixed point of next (cut) contour
-                # Check previous level
-                elif level_idx > 0 and len(fixed_list[level_idx - 1]) > 0:
-                    prev_contour = stream[level_idx - 1]
-                    target_v0 = prev_contour[0].copy()  # First fixed point of prev (cut) contour
+            # Helper function to align a contour to a target v0
+            def align_contour_to_target(level_idx, target_v0):
+                curr_contour = stream[level_idx]
+                min_dist = float('inf')
+                best_idx = 0
+                for i, v in enumerate(curr_contour):
+                    dist = np.linalg.norm(v - target_v0)
+                    if dist < min_dist:
+                        min_dist = dist
+                        best_idx = i
 
-                if target_v0 is not None:
-                    # Find closest vertex in this normal contour to target_v0
-                    curr_contour = stream[level_idx]
-                    min_dist = float('inf')
-                    best_idx = 0
-                    for i, v in enumerate(curr_contour):
-                        dist = np.linalg.norm(v - target_v0)
-                        if dist < min_dist:
-                            min_dist = dist
-                            best_idx = i
+                if best_idx != 0:
+                    rotated = np.roll(curr_contour, -best_idx, axis=0)
+                    stream[level_idx] = rotated
+                    old_params = params_list[level_idx]
+                    rotated_params = np.roll(old_params, -best_idx)
+                    params_list[level_idx] = rotated_params
+                    print(f"    Stream {stream_idx} Level {level_idx}: rotated by {best_idx} (dist={min_dist:.4f})")
 
-                    # Rotate contour so best_idx becomes index 0
-                    if best_idx != 0:
-                        n = len(curr_contour)
-                        rotated = np.roll(curr_contour, -best_idx, axis=0)
-                        stream[level_idx] = rotated
-                        # Also rotate params
-                        old_params = params_list[level_idx]
-                        rotated_params = np.roll(old_params, -best_idx)
-                        params_list[level_idx] = rotated_params
-                        print(f"    Stream {stream_idx} Level {level_idx}: rotated by {best_idx} to align with cut contour (dist={min_dist:.4f})")
+            # BACKWARD pass: from first_cut_idx-1 down to 0
+            # Each contour aligns to the one AFTER it (which is already aligned)
+            for level_idx in range(first_cut_idx - 1, -1, -1):
+                if len(fixed_list[level_idx]) > 0:
+                    continue  # Skip cut contours
+                # Align to the contour after this one (already aligned)
+                target_v0 = stream[level_idx + 1][0].copy()
+                align_contour_to_target(level_idx, target_v0)
+
+            # FORWARD pass: from last_cut_idx+1 up to n_levels-1
+            # Each contour aligns to the one BEFORE it (which is already aligned)
+            for level_idx in range(last_cut_idx + 1, n_levels):
+                if len(fixed_list[level_idx]) > 0:
+                    continue  # Skip cut contours
+                # Align to the contour before this one (already aligned)
+                target_v0 = stream[level_idx - 1][0].copy()
+                align_contour_to_target(level_idx, target_v0)
 
         # Store resampled contours and metadata SEPARATELY
         self.contours_resampled = resampled_contours
