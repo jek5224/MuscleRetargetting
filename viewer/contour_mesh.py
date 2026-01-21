@@ -4725,6 +4725,10 @@ class ContourMeshMixin:
         """
         Resample all contours with proper handling of cut boundaries.
 
+        IMPORTANT: Resampled vertices are stored SEPARATELY in self.contours_resampled.
+        Original self.contours and self.bounding_planes (with contour_match) are NOT modified.
+        This preserves the original data for fiber architecture / MVC computation.
+
         Vertex count formula: base_samples + 2 × num_boundaries
         - No cut: 32 vertices
         - 1 boundary (2-on-1 outer piece): 34 vertices
@@ -4745,10 +4749,6 @@ class ContourMeshMixin:
         if self.bounding_planes is None or len(self.bounding_planes) == 0:
             print("No bounding planes found. Please run find_contours first.")
             return
-
-        # Store original contours before resampling (deep copy)
-        self.contours_orig = [[c.copy() for c in contour_group] for contour_group in self.contours]
-        self.bounding_planes_orig = [[bp.copy() for bp in bp_group] for bp_group in self.bounding_planes]
 
         # Get intersection points if available
         # Support both old format (list) and new format (dict keyed by level)
@@ -4812,9 +4812,8 @@ class ContourMeshMixin:
             stream_vertex_counts.append(vertex_count)
             print(f"  Stream {stream_idx}: {max_boundaries} boundaries -> {vertex_count} vertices")
 
-        # Step 3: Resample each contour
+        # Step 3: Resample each contour (store separately, don't modify originals)
         resampled_contours = []
-        new_bounding_planes = []
 
         for stream_idx, (contour_group, bounding_plane_group) in enumerate(zip(self.contours, self.bounding_planes)):
             num_samples = stream_vertex_counts[stream_idx]
@@ -4823,7 +4822,6 @@ class ContourMeshMixin:
             print(f"  Stream {stream_idx}: {len(contour_group)} levels, {num_samples} vertices each")
 
             resampled_group = []
-            new_bp_group = []
 
             for level_idx, (contour, bounding_plane_info) in enumerate(zip(contour_group, bounding_plane_group)):
                 contour = np.array(contour)
@@ -4834,12 +4832,6 @@ class ContourMeshMixin:
                     resampled = self._resample_cut_contour(
                         contour, boundaries, num_samples, base_samples
                     )
-                    # Don't align cut contours - preserve boundary vertex positions
-                    aligned_contour = resampled
-                    bounding_plane = bounding_plane_info['bounding_plane']
-                    # Build proper contour_match (P,Q pairs) without modifying contour
-                    contour_match = self._build_contour_match_no_insert(resampled, bounding_plane)
-                    print(f"      Cut contour: built {len(contour_match)} (P,Q) pairs")
                 else:
                     # Normal contour: standard resampling
                     bounding_plane_corners = bounding_plane_info.get('bounding_plane')
@@ -4849,25 +4841,15 @@ class ContourMeshMixin:
                         corner_ref = None
                     resampled = self._resample_single_contour(contour, num_samples, corner_ref)
 
-                    # Align with bounding plane (only for non-cut contours)
-                    bounding_plane = bounding_plane_info['bounding_plane']
-                    aligned_contour, contour_match = self.find_contour_match(resampled, bounding_plane, preserve_order=True)
-
-                new_bp_info = bounding_plane_info.copy()
-                if 'contour_match' in bounding_plane_info and 'contour_match_orig' not in bounding_plane_info:
-                    new_bp_info['contour_match_orig'] = bounding_plane_info['contour_match']
-                new_bp_info['contour_match'] = contour_match
-
-                resampled_group.append(aligned_contour)
-                new_bp_group.append(new_bp_info)
+                resampled_group.append(resampled)
 
             resampled_contours.append(resampled_group)
-            new_bounding_planes.append(new_bp_group)
 
-        self.contours = resampled_contours
-        self.bounding_planes = new_bounding_planes
+        # Store resampled contours SEPARATELY - don't modify original contours or bounding_planes
+        self.contours_resampled = resampled_contours
 
-        print(f"Resampling complete: {len(self.contours)} streams")
+        print(f"Resampling complete: {len(self.contours_resampled)} streams stored in contours_resampled")
+        print(f"  Original contours and bounding_planes preserved for fiber/MVC")
 
     def _find_vertex_in_contour(self, contour, target_vertex, tolerance=0.01):
         """Find the index of a vertex in a contour, or None if not found.
