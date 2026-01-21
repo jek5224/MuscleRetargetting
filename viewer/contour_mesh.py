@@ -12720,8 +12720,8 @@ class ContourMeshMixin:
                         print(f"  [BP Transform] SEPARATE: WARNING - no neck found on target (n={n_target}, min_sep={min_sep})")
 
                 elif len(src_0) >= 3 and len(src_1) >= 3:
-                    # COMMON mode: Find the shared edge where the two source contours MEET
-                    # This is the intersection/overlap boundary between the two sources
+                    # COMMON mode: Find where the two source BOUNDARIES meet
+                    # This is the actual shared edge - NOT the intersection polygon boundary
                     poly_0 = Polygon(src_0)
                     poly_1 = Polygon(src_1)
                     if not poly_0.is_valid:
@@ -12729,44 +12729,78 @@ class ContourMeshMixin:
                     if not poly_1.is_valid:
                         poly_1 = poly_1.buffer(0)
 
-                    # Find the intersection of the two source polygons
-                    # The boundary of this intersection is where they meet
                     try:
-                        shared_region = poly_0.intersection(poly_1)
-                        print(f"  [BP Transform] COMMON: intersection geom_type={shared_region.geom_type}, area={shared_region.area if hasattr(shared_region, 'area') else 0:.6f}")
+                        # Method: Find the portion of each source's boundary that's inside the other
+                        # This gives the ACTUAL shared edge where they meet
+                        from shapely.geometry import LineString
 
-                        # Extract the shared boundary as a polyline
+                        # Get boundaries as LineStrings
+                        boundary_0 = poly_0.exterior
+                        boundary_1 = poly_1.exterior
+
+                        # Find parts of boundary_0 inside poly_1 (where source 0's edge is inside source 1)
+                        edge_0_in_1 = boundary_0.intersection(poly_1)
+                        # Find parts of boundary_1 inside poly_0 (where source 1's edge is inside source 0)
+                        edge_1_in_0 = boundary_1.intersection(poly_0)
+
+                        print(f"  [BP Transform] COMMON: edge_0_in_1 type={edge_0_in_1.geom_type}, edge_1_in_0 type={edge_1_in_0.geom_type}")
+
+                        # Extract coordinates from the shared edges
+                        def extract_line_coords(geom):
+                            coords = []
+                            if geom.is_empty:
+                                return coords
+                            if geom.geom_type == 'LineString':
+                                coords.extend(list(np.array(geom.coords)))
+                            elif geom.geom_type == 'MultiLineString':
+                                for line in geom.geoms:
+                                    coords.extend(list(np.array(line.coords)))
+                            elif geom.geom_type == 'GeometryCollection':
+                                for g in geom.geoms:
+                                    coords.extend(extract_line_coords(g))
+                            elif geom.geom_type == 'Point':
+                                coords.append(np.array(geom.coords[0]))
+                            elif geom.geom_type == 'MultiPoint':
+                                for pt in geom.geoms:
+                                    coords.append(np.array(pt.coords[0]))
+                            return coords
+
                         shared_edge_points = []
-                        if shared_region.geom_type == 'Polygon' and shared_region.area > 1e-10:
-                            # The intersection is a polygon - its boundary is the shared edge
-                            shared_edge_coords = np.array(shared_region.exterior.coords)[:-1]
-                            shared_edge_points = list(shared_edge_coords)
-                            print(f"  [BP Transform] COMMON: shared edge from polygon intersection: {len(shared_edge_points)} points")
-                        elif shared_region.geom_type == 'LineString':
-                            # The intersection is a line (sources touch but don't overlap)
-                            shared_edge_coords = np.array(shared_region.coords)
-                            shared_edge_points = list(shared_edge_coords)
-                            print(f"  [BP Transform] COMMON: shared edge from LineString: {len(shared_edge_points)} points")
-                        elif shared_region.geom_type == 'MultiLineString':
-                            # Multiple line segments
-                            for line in shared_region.geoms:
-                                shared_edge_points.extend(list(np.array(line.coords)))
-                            print(f"  [BP Transform] COMMON: shared edge from MultiLineString: {len(shared_edge_points)} points")
-                        elif shared_region.geom_type == 'GeometryCollection':
-                            # Mixed geometries - extract lines and polygon boundaries
-                            for geom in shared_region.geoms:
-                                if geom.geom_type == 'LineString':
-                                    shared_edge_points.extend(list(np.array(geom.coords)))
-                                elif geom.geom_type == 'Polygon':
-                                    shared_edge_points.extend(list(np.array(geom.exterior.coords)[:-1]))
-                            print(f"  [BP Transform] COMMON: shared edge from GeometryCollection: {len(shared_edge_points)} points")
+                        # Use the longer of the two (they should be similar)
+                        coords_0 = extract_line_coords(edge_0_in_1)
+                        coords_1 = extract_line_coords(edge_1_in_0)
+
+                        if len(coords_0) >= len(coords_1) and len(coords_0) >= 2:
+                            shared_edge_points = coords_0
+                            print(f"  [BP Transform] COMMON: using edge_0_in_1 with {len(coords_0)} points")
+                        elif len(coords_1) >= 2:
+                            shared_edge_points = coords_1
+                            print(f"  [BP Transform] COMMON: using edge_1_in_0 with {len(coords_1)} points")
+                        else:
+                            # Fallback: find closest points between the two boundaries
+                            print(f"  [BP Transform] COMMON: no shared edge found, using closest points")
+                            min_dist = float('inf')
+                            closest_pair = None
+                            coords_0_full = np.array(boundary_0.coords)
+                            coords_1_full = np.array(boundary_1.coords)
+                            for p0 in coords_0_full:
+                                for p1 in coords_1_full:
+                                    d = np.linalg.norm(p0 - p1)
+                                    if d < min_dist:
+                                        min_dist = d
+                                        closest_pair = (p0, p1)
+                            if closest_pair is not None:
+                                # Use midpoint and perpendicular as cutting line
+                                midpt = (closest_pair[0] + closest_pair[1]) / 2
+                                shared_edge_points = [closest_pair[0], midpt, closest_pair[1]]
+                                print(f"  [BP Transform] COMMON: closest points dist={min_dist:.6f}")
 
                         # Store the shared edge for use in cutting
                         if len(shared_edge_points) >= 2:
                             self._shared_cut_edge_2d = np.array(shared_edge_points)
                             print(f"  [BP Transform] COMMON: stored shared edge with {len(shared_edge_points)} points")
 
-                            # Also compute a cutting line direction from the shared edge
+                            # Compute cutting line direction from the shared edge
                             edge_arr = np.array(shared_edge_points)
                             edge_mean = edge_arr.mean(axis=0)
                             centered = edge_arr - edge_mean
@@ -12776,9 +12810,13 @@ class ContourMeshMixin:
                                 boundary_dir = boundary_dir / (np.linalg.norm(boundary_dir) + 1e-10)
                                 cutting_line_2d = (edge_mean, boundary_dir)
                                 print(f"  [BP Transform] COMMON: cutting line from shared edge")
+                        else:
+                            self._shared_cut_edge_2d = None
 
                     except Exception as e:
-                        print(f"  [BP Transform] COMMON: intersection failed: {e}")
+                        print(f"  [BP Transform] COMMON: shared edge detection failed: {e}")
+                        import traceback
+                        traceback.print_exc()
                         self._shared_cut_edge_2d = None
 
                 if cutting_line_2d is None:
@@ -13201,74 +13239,115 @@ class ContourMeshMixin:
             if len(boundary_crossings) != expected_crossings:
                 print(f"  [BP Transform] WARNING: Expected {expected_crossings} boundary crossings for {n_pieces} pieces, got {len(boundary_crossings)}")
 
-            # ========== Insert shared edge vertices (the actual curved boundary where sources meet) ==========
-            # For COMMON mode with 2 pieces, replace simple boundary interpolation with actual shared edge
+            # ========== Build pieces using shared edge (the actual curved boundary where sources meet) ==========
+            # For COMMON mode with 2 pieces, rebuild contours using shared edge instead of simple boundary
             if n_pieces == 2 and hasattr(self, '_shared_cut_edge_2d') and self._shared_cut_edge_2d is not None and len(self._shared_cut_edge_2d) >= 2:
                 shared_edge_2d = self._shared_cut_edge_2d
-                print(f"  [BP Transform] Inserting shared edge with {len(shared_edge_2d)} vertices")
+                print(f"  [BP Transform] Building pieces with shared edge ({len(shared_edge_2d)} vertices)")
 
-                # Convert shared edge from 2D to 3D
-                shared_edge_3d = []
-                for pt_2d in shared_edge_2d:
-                    pt_3d = target_mean + pt_2d[0] * target_x + pt_2d[1] * target_y
-                    shared_edge_3d.append(pt_3d)
-                shared_edge_3d = np.array(shared_edge_3d)
+                # Find where shared edge intersects target contour (in 2D)
+                from shapely.geometry import LineString
+                target_ring = LineString(list(target_2d) + [target_2d[0]])  # Close the ring
+                shared_line = LineString(shared_edge_2d)
 
-                # Find where shared edge intersects the target contour
-                # Look for the two boundary crossing points in shared_boundary_points
-                if len(shared_boundary_points) >= 2:
-                    bp0_3d = np.array(shared_boundary_points[0])
-                    bp1_3d = np.array(shared_boundary_points[1])
+                try:
+                    intersection_pts = target_ring.intersection(shared_line)
+                    print(f"  [BP Transform] Shared edge/target intersection type: {intersection_pts.geom_type}")
 
-                    # Find indices on shared edge closest to the boundary points
-                    dists_to_bp0 = np.linalg.norm(shared_edge_3d - bp0_3d, axis=1)
-                    dists_to_bp1 = np.linalg.norm(shared_edge_3d - bp1_3d, axis=1)
-                    idx0 = np.argmin(dists_to_bp0)
-                    idx1 = np.argmin(dists_to_bp1)
+                    # Extract intersection points
+                    int_points_2d = []
+                    if intersection_pts.geom_type == 'Point':
+                        int_points_2d.append(np.array(intersection_pts.coords[0]))
+                    elif intersection_pts.geom_type == 'MultiPoint':
+                        for pt in intersection_pts.geoms:
+                            int_points_2d.append(np.array(pt.coords[0]))
+                    elif intersection_pts.geom_type == 'LineString':
+                        # Shared edge overlaps target - use endpoints
+                        coords = np.array(intersection_pts.coords)
+                        int_points_2d.append(coords[0])
+                        int_points_2d.append(coords[-1])
+                    elif intersection_pts.geom_type == 'GeometryCollection':
+                        for geom in intersection_pts.geoms:
+                            if geom.geom_type == 'Point':
+                                int_points_2d.append(np.array(geom.coords[0]))
 
-                    # Extract the portion of shared edge between the two boundary points
-                    if idx0 != idx1:
-                        if idx0 < idx1:
-                            edge_segment = shared_edge_3d[idx0:idx1+1]
+                    print(f"  [BP Transform] Found {len(int_points_2d)} intersection points")
+
+                    if len(int_points_2d) >= 2:
+                        # Convert intersection points to 3D
+                        int_points_3d = []
+                        for pt_2d in int_points_2d[:2]:  # Take first 2
+                            pt_3d = target_mean + pt_2d[0] * target_x + pt_2d[1] * target_y
+                            int_points_3d.append(pt_3d)
+
+                        # Find which target vertices go between the intersection points
+                        # for each piece
+                        int0_2d, int1_2d = int_points_2d[0], int_points_2d[1]
+
+                        # Find closest target vertex indices to intersection points
+                        dists_to_int0 = np.linalg.norm(target_2d - int0_2d, axis=1)
+                        dists_to_int1 = np.linalg.norm(target_2d - int1_2d, axis=1)
+                        target_idx0 = np.argmin(dists_to_int0)
+                        target_idx1 = np.argmin(dists_to_int1)
+
+                        # Get shared edge vertices that are INSIDE target (between intersection points)
+                        # Find which shared edge vertices are between the two intersection points
+                        dists_edge_to_int0 = np.linalg.norm(shared_edge_2d - int0_2d, axis=1)
+                        dists_edge_to_int1 = np.linalg.norm(shared_edge_2d - int1_2d, axis=1)
+                        edge_idx0 = np.argmin(dists_edge_to_int0)
+                        edge_idx1 = np.argmin(dists_edge_to_int1)
+
+                        if edge_idx0 < edge_idx1:
+                            inner_edge_2d = shared_edge_2d[edge_idx0:edge_idx1+1]
                         else:
-                            edge_segment = shared_edge_3d[idx1:idx0+1][::-1]
+                            inner_edge_2d = shared_edge_2d[edge_idx1:edge_idx0+1][::-1]
 
-                        # Insert edge segment into both pieces (shared vertices)
-                        # Find where to insert in each piece (after the first boundary point)
-                        for piece_idx in range(2):
-                            piece_list = list(new_contours[piece_idx])
+                        # Convert inner edge to 3D
+                        inner_edge_3d = []
+                        for pt_2d in inner_edge_2d:
+                            pt_3d = target_mean + pt_2d[0] * target_x + pt_2d[1] * target_y
+                            inner_edge_3d.append(pt_3d)
+                        inner_edge_3d = np.array(inner_edge_3d)
 
-                            # Find the boundary point in this piece
-                            bp_indices = []
-                            for bp in shared_boundary_points:
-                                bp_arr = np.array(bp)
-                                for v_idx, v in enumerate(piece_list):
-                                    v_arr = np.array(v)
-                                    if np.linalg.norm(v_arr - bp_arr) < 1e-6:
-                                        bp_indices.append(v_idx)
-                                        break
+                        print(f"  [BP Transform] Inner shared edge: {len(inner_edge_3d)} vertices")
+                        print(f"  [BP Transform] Target split at indices: {target_idx0}, {target_idx1}")
 
-                            if len(bp_indices) >= 2:
-                                # Insert edge segment between the two boundary points
-                                idx_a, idx_b = min(bp_indices), max(bp_indices)
+                        # Build new contours:
+                        # Piece 0: target[idx0 to idx1] + inner_edge (reversed)
+                        # Piece 1: target[idx1 to idx0 (wrap)] + inner_edge
+                        n_target = len(target_contour)
 
-                                # Check which direction the edge goes
-                                if idx_b - idx_a == 1:
-                                    # Adjacent - insert between them
-                                    # Don't include endpoints since they're already the boundary points
-                                    if len(edge_segment) > 2:
-                                        insert_verts = edge_segment[1:-1]
-                                        for i, v in enumerate(insert_verts):
-                                            piece_list.insert(idx_a + 1 + i, v)
-                                        print(f"  [BP Transform] Piece {piece_idx}: inserted {len(insert_verts)} shared edge vertices")
+                        if target_idx0 < target_idx1:
+                            # Piece 0: idx0 -> idx1 on target, then back via shared edge
+                            piece0_target = [target_contour[i] for i in range(target_idx0, target_idx1 + 1)]
+                            piece0 = piece0_target + list(inner_edge_3d[::-1])[1:-1]  # Skip endpoints (already have them)
 
-                                new_contours[piece_idx] = piece_list
+                            # Piece 1: idx1 -> idx0 (wrapping), then back via shared edge
+                            piece1_target = [target_contour[i] for i in range(target_idx1, n_target)] + \
+                                           [target_contour[i] for i in range(0, target_idx0 + 1)]
+                            piece1 = piece1_target + list(inner_edge_3d)[1:-1]
+                        else:
+                            # Swap
+                            piece1_target = [target_contour[i] for i in range(target_idx1, target_idx0 + 1)]
+                            piece1 = piece1_target + list(inner_edge_3d[::-1])[1:-1]
 
-                        # Update shared_boundary_points to include all edge vertices
+                            piece0_target = [target_contour[i] for i in range(target_idx0, n_target)] + \
+                                           [target_contour[i] for i in range(0, target_idx1 + 1)]
+                            piece0 = piece0_target + list(inner_edge_3d)[1:-1]
+
+                        new_contours[0] = piece0
+                        new_contours[1] = piece1
+                        print(f"  [BP Transform] Rebuilt pieces with shared edge: {len(piece0)}, {len(piece1)} vertices")
+
+                        # Update shared_boundary_points
                         shared_boundary_points.clear()
-                        for v in edge_segment:
+                        for v in inner_edge_3d:
                             shared_boundary_points.append(v.copy())
-                        print(f"  [BP Transform] Updated shared_boundary_points with {len(shared_boundary_points)} vertices")
+
+                except Exception as e:
+                    print(f"  [BP Transform] WARNING: Shared edge processing failed: {e}")
+                    import traceback
+                    traceback.print_exc()
 
         # Register shared cut edge vertices globally
         if len(shared_boundary_points) > 0:
