@@ -5759,6 +5759,19 @@ class GLFWApp():
                             color = piece_colors[piece_idx % len(piece_colors)]
                             imgui.text_colored(f"  P{piece_idx} ({len(current_pieces_3d_preview[piece_idx])} verts) -> S{src_label}", *color)
 
+                # Show optimization scales
+                if hasattr(obj, '_bp_viz_data') and len(obj._bp_viz_data) > 0:
+                    latest_viz = obj._bp_viz_data[-1]
+                    opt_scales = latest_viz.get('scales', [])
+                    if len(opt_scales) > 0:
+                        imgui.separator()
+                        imgui.text("Optimization scales:")
+                        for si, scale in enumerate(opt_scales):
+                            if isinstance(scale, (list, tuple)) and len(scale) == 2:
+                                imgui.text(f"  Source {si}: ({scale[0]:.3f}, {scale[1]:.3f})")
+                            else:
+                                imgui.text(f"  Source {si}: {scale:.3f}")
+
                 imgui.separator()
 
             # Show hint for 1-to-1 case
