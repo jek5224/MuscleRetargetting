@@ -4806,9 +4806,9 @@ class ContourMeshMixin:
                     found_boundary = False
 
                     for ip1, ip2 in all_intersection_pairs:
-                        # Step 1: Find vertices that EXACTLY match ip1 and ip2 (tight tolerance)
+                        # Find vertices that EXACTLY match ip1 and ip2 (tight tolerance)
                         # Only proceed if BOTH endpoints are found in this contour
-                        endpoint_tolerance = 0.005  # Very tight - must be actual intersection points
+                        endpoint_tolerance = 0.005
 
                         idx_at_ip1 = None
                         idx_at_ip2 = None
@@ -4831,33 +4831,10 @@ class ContourMeshMixin:
                         if idx_at_ip1 == idx_at_ip2:
                             continue  # Same vertex can't be both endpoints
 
-                        # Step 2: Now find intermediate vertices on the line segment
-                        line_vec = ip2 - ip1
-                        line_len = np.linalg.norm(line_vec)
-                        if line_len < 1e-10:
-                            continue
-                        line_dir = line_vec / line_len
-
-                        boundary_vertex_indices = []
-                        intermediate_tolerance = 0.005  # Tight tolerance for intermediates too
-
-                        for vi, v in enumerate(contour):
-                            v_to_ip1 = v - ip1
-                            t = np.dot(v_to_ip1, line_dir)
-                            closest = ip1 + t * line_dir
-                            dist_to_line = np.linalg.norm(v - closest)
-
-                            # Must be very close to line AND within segment
-                            if dist_to_line < intermediate_tolerance and -0.001 < t < line_len + 0.001:
-                                boundary_vertex_indices.append((vi, t))
-
-                        # Sort by position along line
-                        boundary_vertex_indices.sort(key=lambda x: x[1])
-                        boundary_indices = [x[0] for x in boundary_vertex_indices]
-
-                        # Verify endpoints are in the list
-                        if idx_at_ip1 not in boundary_indices or idx_at_ip2 not in boundary_indices:
-                            continue
+                        # Only store the TWO intersection point indices
+                        # Don't try to find intermediate vertices - just use these two as fixed points
+                        # The resampling will create a straight line between them
+                        boundary_indices = [idx_at_ip1, idx_at_ip2]
 
                         if s_idx >= len(stream_boundary_info):
                             for _ in range(s_idx - len(stream_boundary_info) + 1):
@@ -4872,7 +4849,7 @@ class ContourMeshMixin:
                             ip1.copy(), ip2.copy(),  # Original intersection points
                             boundary_indices
                         ))
-                        print(f"    Stream {s_idx} level {level_idx}: boundary {idx_at_ip1}->{idx_at_ip2} with {len(boundary_indices)} vertices")
+                        print(f"    Stream {s_idx} level {level_idx}: boundary endpoints {idx_at_ip1}->{idx_at_ip2} (dist={dist_to_ip1:.4f}, {dist_to_ip2:.4f})")
                         found_boundary = True
                         break  # Found the matching cut for this contour
 
