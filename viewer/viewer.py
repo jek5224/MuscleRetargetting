@@ -5832,8 +5832,9 @@ class GLFWApp():
                         if final_pieces is not None and len(final_pieces) > 0:
                             # Convert 3D pieces to 2D for display
                             target_mean = target_bp['mean']
-                            target_x = target_bp['basis_x']
-                            target_y = target_bp['basis_y']
+                            # Negate basis vectors to rotate 180° - match initial cutting window
+                            target_x = -target_bp['basis_x']
+                            target_y = -target_bp['basis_y']
 
                             print(f"[Optimize DEBUG] Converting {len(final_pieces)} pieces to 2D")
                             optimized_2d = []

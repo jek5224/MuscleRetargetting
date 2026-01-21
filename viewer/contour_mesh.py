@@ -8369,8 +8369,9 @@ class ContourMeshMixin:
 
         # Project target contour to 2D (using its own bounding plane)
         target_mean = target_bp['mean']
-        target_x = target_bp['basis_x']
-        target_y = target_bp['basis_y']
+        # Negate basis vectors to rotate 180° - match optimization orientation
+        target_x = -target_bp['basis_x']
+        target_y = -target_bp['basis_y']
 
         target_2d = np.array([
             [np.dot(v - target_mean, target_x), np.dot(v - target_mean, target_y)]
@@ -8586,8 +8587,9 @@ class ContourMeshMixin:
 
         # Project target contour to 2D
         target_mean = target_bp['mean']
-        target_x = target_bp['basis_x']
-        target_y = target_bp['basis_y']
+        # Negate basis vectors to rotate 180° - match optimization orientation
+        target_x = -target_bp['basis_x']
+        target_y = -target_bp['basis_y']
 
         target_2d = np.array([
             [np.dot(v - target_mean, target_x), np.dot(v - target_mean, target_y)]
