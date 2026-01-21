@@ -5314,13 +5314,14 @@ class GLFWApp():
                 if imgui.is_mouse_released(pan_button):
                     mouse_state['panning'] = False
 
-            # Left click for drawing cut line
-            if canvas_hovered and imgui.is_mouse_clicked(0):
+            # Left click for drawing cut line (disabled in optimization preview mode)
+            is_preview_mode = obj._manual_cut_data.get('optimization_preview', False)
+            if canvas_hovered and imgui.is_mouse_clicked(0) and not is_preview_mode:
                 mouse_state['dragging'] = True
                 mouse_state['start_pos'] = (mouse_pos[0], mouse_pos[1])
                 mouse_state['end_pos'] = (mouse_pos[0], mouse_pos[1])
 
-            if mouse_state['dragging']:
+            if mouse_state['dragging'] and not is_preview_mode:
                 end_x, end_y = mouse_pos[0], mouse_pos[1]
                 # Check if shift is pressed for axis-aligned line
                 shift_pressed = (glfw.get_key(self.window, glfw.KEY_LEFT_SHIFT) == glfw.PRESS or
