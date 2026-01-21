@@ -4771,60 +4771,79 @@ class ContourMeshMixin:
         stream_boundary_info = []  # stream_idx -> {level_idx -> [(int1, int2), ...]}
         max_boundaries_per_stream = []  # stream_idx -> max number of boundaries in any contour
 
-        # Find boundary vertices by checking shared vertices between streams at same level
-        # This is more robust than trying to match stored intersection point coordinates
+        # Find boundary vertices by checking which vertices lie on the line segment
+        # between intersection points. This is more robust than shared vertex matching.
         num_streams = len(self.contours)
+        print(f"  DEBUG: num_streams={num_streams}, has_cuts={has_cuts}")
 
-        if num_streams > 1 and has_cuts:
+        if num_streams > 0 and has_cuts:
             # Find max levels across all streams
             max_levels = max(len(cg) for cg in self.contours)
+            print(f"  DEBUG: max_levels={max_levels}")
 
-            # For each level, find shared vertices between streams
+            # For each level, find vertices that lie on the boundary (line segment between intersection points)
             for level_idx in range(max_levels):
-                # Collect all contours at this level
-                level_contours = []
-                for s_idx in range(num_streams):
-                    if level_idx < len(self.contours[s_idx]):
-                        level_contours.append((s_idx, np.array(self.contours[s_idx][level_idx])))
-
-                if len(level_contours) < 2:
+                # Get intersection points for this level
+                level_ips = intersection_points_by_level.get(level_idx, [])
+                if len(level_ips) == 0:
                     continue
 
-                # Find shared vertices between each pair of streams
-                for i in range(len(level_contours)):
-                    s_idx_i, contour_i = level_contours[i]
-                    shared_vertices_i = []  # List of (vertex_idx, shared_position)
+                print(f"  Level {level_idx}: {len(level_ips)} cut(s)")
 
-                    for j in range(len(level_contours)):
-                        if i == j:
+                # For each stream, find boundary vertices
+                for s_idx in range(num_streams):
+                    if level_idx >= len(self.contours[s_idx]):
+                        continue
+
+                    contour = np.array(self.contours[s_idx][level_idx])
+                    if len(contour) == 0:
+                        continue
+
+                    # For each cut (intersection point pair), find vertices on that boundary
+                    for cut_idx, (ip1, ip2) in enumerate(level_ips):
+                        ip1 = np.array(ip1)
+                        ip2 = np.array(ip2)
+                        boundary_dir = ip2 - ip1
+                        boundary_len = np.linalg.norm(boundary_dir)
+
+                        if boundary_len < 1e-10:
                             continue
-                        s_idx_j, contour_j = level_contours[j]
 
-                        # Find vertices in contour_i that are close to any vertex in contour_j
-                        for vi, v in enumerate(contour_i):
-                            for vj, u in enumerate(contour_j):
-                                if np.linalg.norm(v - u) < 0.001:  # Shared vertex
-                                    shared_vertices_i.append((vi, v.copy()))
-                                    break
+                        boundary_dir_norm = boundary_dir / boundary_len
 
-                    # If we found shared vertices, they form the boundary
-                    if len(shared_vertices_i) >= 2:
-                        # Sort by index to get the two endpoints
-                        shared_vertices_i.sort(key=lambda x: x[0])
-                        # Take first and last as boundary endpoints
-                        idx1, pos1 = shared_vertices_i[0]
-                        idx2, pos2 = shared_vertices_i[-1]
+                        # Find vertices that lie on the line segment between ip1 and ip2
+                        boundary_vertices = []  # List of (vertex_idx, position, t_param)
+                        for vi, v in enumerate(contour):
+                            v = np.array(v)
+                            # Vector from ip1 to vertex
+                            to_v = v - ip1
+                            # Project onto boundary direction
+                            t = np.dot(to_v, boundary_dir_norm) / boundary_len
+                            # Perpendicular distance to line
+                            proj = ip1 + t * boundary_dir
+                            perp_dist = np.linalg.norm(v - proj)
 
-                        # Initialize boundary_info for this stream if needed
-                        if s_idx_i >= len(stream_boundary_info):
-                            for _ in range(s_idx_i - len(stream_boundary_info) + 1):
-                                stream_boundary_info.append({})
+                            # Check if vertex lies on the line segment (within tolerance)
+                            if perp_dist < 0.01 and -0.01 <= t <= 1.01:  # Small tolerance
+                                boundary_vertices.append((vi, v.copy(), t))
 
-                        if level_idx not in stream_boundary_info[s_idx_i]:
-                            stream_boundary_info[s_idx_i][level_idx] = []
+                        if len(boundary_vertices) >= 2:
+                            # Sort by t parameter to get proper ordering along boundary
+                            boundary_vertices.sort(key=lambda x: x[2])
+                            # First and last vertices (by t) are the boundary endpoints
+                            idx1, pos1, _ = boundary_vertices[0]
+                            idx2, pos2, _ = boundary_vertices[-1]
 
-                        stream_boundary_info[s_idx_i][level_idx].append((idx1, idx2, pos1, pos2))
-                        print(f"    Stream {s_idx_i} level {level_idx}: found boundary at indices {idx1}, {idx2} ({len(shared_vertices_i)} shared verts)")
+                            # Initialize boundary_info for this stream if needed
+                            if s_idx >= len(stream_boundary_info):
+                                for _ in range(s_idx - len(stream_boundary_info) + 1):
+                                    stream_boundary_info.append({})
+
+                            if level_idx not in stream_boundary_info[s_idx]:
+                                stream_boundary_info[s_idx][level_idx] = []
+
+                            stream_boundary_info[s_idx][level_idx].append((idx1, idx2, pos1, pos2))
+                            print(f"    Stream {s_idx} level {level_idx} cut {cut_idx}: boundary indices {idx1}->{idx2} ({len(boundary_vertices)} verts on line)")
 
         # Ensure stream_boundary_info has entries for all streams
         while len(stream_boundary_info) < num_streams:
@@ -8326,7 +8345,10 @@ class ContourMeshMixin:
             original_perimeter: Total perimeter of original contour
 
         Returns:
-            (new_piece0, new_piece1, shared_vertices): Updated pieces and list of shared intermediate vertices
+            (new_piece0, new_piece1, shared_vertices, boundary_indices):
+            - new_piece0, new_piece1: Updated pieces with intermediate vertices
+            - shared_vertices: List of shared intermediate vertices
+            - boundary_indices: Dict with 'piece0' and 'piece1' lists of boundary vertex indices
         """
         # Calculate shared edge length
         edge_length = np.linalg.norm(cut2_3d - cut1_3d)
@@ -8341,9 +8363,33 @@ class ContourMeshMixin:
         print(f"  Shared edge: length={edge_length:.4f}, perimeter={original_perimeter:.4f}")
         print(f"  Edge vertices: {n_edge_verts} total, {n_intermediate} intermediate")
 
+        # Compute boundary indices for each piece
+        # Before adding intermediates:
+        #   piece0: [cut1, ...surface..., cut2] with indices 0, ..., orig_len-1
+        #   piece1: [cut2, ...surface..., cut1] with indices 0, ..., orig_len-1
+        # After adding intermediates:
+        #   piece0: [cut1, ...surface..., cut2, m_N, m_{N-1}, ..., m_1]
+        #   piece1: [cut2, ...surface..., cut1, m_1, m_2, ..., m_N]
+        # Boundary indices: first vertex (0), last vertex before intermediates (orig_len-1),
+        #                   and all intermediate vertices (orig_len, ..., new_len-1)
+
+        orig_len0 = len(piece0)
+        orig_len1 = len(piece1)
+
+        # Boundary indices: index 0 (first cut point) + last vertex + intermediates
+        # For piece0: 0 (cut1), orig_len0-1 (cut2), orig_len0, ..., orig_len0+n_intermediate-1
+        # For piece1: 0 (cut2), orig_len1-1 (cut1), orig_len1, ..., orig_len1+n_intermediate-1
+        boundary_indices_piece0 = [0, orig_len0 - 1] + list(range(orig_len0, orig_len0 + n_intermediate))
+        boundary_indices_piece1 = [0, orig_len1 - 1] + list(range(orig_len1, orig_len1 + n_intermediate))
+
         if n_intermediate == 0:
-            # No intermediate vertices needed
-            return piece0, piece1, []
+            # No intermediate vertices needed, but still mark the two endpoints as boundaries
+            boundary_indices = {
+                'piece0': boundary_indices_piece0,  # [0, orig_len0-1]
+                'piece1': boundary_indices_piece1,  # [0, orig_len1-1]
+            }
+            print(f"  Boundary indices (no intermediates): piece0={boundary_indices_piece0}, piece1={boundary_indices_piece1}")
+            return piece0, piece1, [], boundary_indices
 
         # Generate intermediate vertices evenly spaced from cut1 to cut2
         intermediate_verts = []
@@ -8374,10 +8420,16 @@ class ContourMeshMixin:
         new_piece0 = np.array(piece0_list)
         new_piece1 = np.array(piece1_list)
 
+        boundary_indices = {
+            'piece0': boundary_indices_piece0,
+            'piece1': boundary_indices_piece1,
+        }
+
         print(f"  Added {n_intermediate} intermediate vertices to shared edge")
         print(f"  piece0: {len(piece0)} -> {len(new_piece0)}, piece1: {len(piece1)} -> {len(new_piece1)}")
+        print(f"  Boundary indices: piece0={boundary_indices_piece0}, piece1={boundary_indices_piece1}")
 
-        return new_piece0, new_piece1, intermediate_verts
+        return new_piece0, new_piece1, intermediate_verts, boundary_indices
 
     def _add_shared_edge_vertices_2d_3d(self, piece0_2d, piece0_3d, piece1_2d, piece1_3d,
                                          cut1_2d, cut1_3d, cut2_2d, cut2_3d,
@@ -8388,7 +8440,7 @@ class ContourMeshMixin:
         Similar to _add_shared_edge_vertices but handles 2D/3D pairs for iterative cutting.
 
         Returns:
-            (new_piece0_2d, new_piece0_3d, new_piece1_2d, new_piece1_3d, intermediate_verts_3d)
+            (new_piece0_2d, new_piece0_3d, new_piece1_2d, new_piece1_3d, intermediate_verts_3d, boundary_indices)
         """
         # Calculate shared edge length (from 3D)
         edge_length = np.linalg.norm(cut2_3d - cut1_3d)
@@ -8400,9 +8452,20 @@ class ContourMeshMixin:
         print(f"  Shared edge: length={edge_length:.4f}, perimeter={original_perimeter:.4f}")
         print(f"  Edge vertices: {n_edge_verts} total, {n_intermediate} intermediate")
 
+        # Compute boundary indices (same logic as _add_shared_edge_vertices)
+        orig_len0 = len(piece0_3d)
+        orig_len1 = len(piece1_3d)
+        boundary_indices_piece0 = [0, orig_len0 - 1] + list(range(orig_len0, orig_len0 + n_intermediate))
+        boundary_indices_piece1 = [0, orig_len1 - 1] + list(range(orig_len1, orig_len1 + n_intermediate))
+        boundary_indices = {
+            'piece0': boundary_indices_piece0,
+            'piece1': boundary_indices_piece1,
+        }
+
         if n_intermediate == 0:
+            print(f"  Boundary indices (no intermediates): piece0={boundary_indices_piece0}, piece1={boundary_indices_piece1}")
             return (np.array(piece0_2d), np.array(piece0_3d),
-                    np.array(piece1_2d), np.array(piece1_3d), [])
+                    np.array(piece1_2d), np.array(piece1_3d), [], boundary_indices)
 
         # Generate intermediate vertices
         intermediate_verts_2d = []
@@ -8431,9 +8494,10 @@ class ContourMeshMixin:
             piece1_3d_list.append(v_3d)
 
         print(f"  Added {n_intermediate} intermediate vertices to shared edge")
+        print(f"  Boundary indices: piece0={boundary_indices_piece0}, piece1={boundary_indices_piece1}")
 
         return (np.array(piece0_2d_list), np.array(piece0_3d_list),
-                np.array(piece1_2d_list), np.array(piece1_3d_list), intermediate_verts_3d)
+                np.array(piece1_2d_list), np.array(piece1_3d_list), intermediate_verts_3d, boundary_indices)
 
     def _apply_manual_cut(self):
         """
@@ -8486,7 +8550,7 @@ class ContourMeshMixin:
             print(f"Manual cut (at neck): piece0 has {len(piece0)} vertices, piece1 has {len(piece1)} vertices")
 
             # Add intermediate vertices on the shared cut edge
-            piece0, piece1, intermediate_verts = self._add_shared_edge_vertices(
+            piece0, piece1, intermediate_verts, boundary_indices = self._add_shared_edge_vertices(
                 piece0, piece1, cut1_3d, cut2_3d, n_verts, original_perimeter
             )
 
@@ -8503,6 +8567,9 @@ class ContourMeshMixin:
             if target_level not in self.cut_intersection_points:
                 self.cut_intersection_points[target_level] = []
             self.cut_intersection_points[target_level].append((cut1_3d.copy(), cut2_3d.copy()))
+
+            # Store boundary indices for resampling
+            cut_boundary_indices = boundary_indices
         else:
             # Use line intersection method for manually drawn lines
             line_start, line_end = self._manual_cut_line
@@ -8570,7 +8637,7 @@ class ContourMeshMixin:
             print(f"Manual cut: piece0 has {len(piece0)} vertices, piece1 has {len(piece1)} vertices")
 
             # Add intermediate vertices on the shared cut edge
-            piece0, piece1, intermediate_verts = self._add_shared_edge_vertices(
+            piece0, piece1, intermediate_verts, boundary_indices = self._add_shared_edge_vertices(
                 piece0, piece1, int1_3d, int2_3d, n_verts, original_perimeter
             )
 
@@ -8587,6 +8654,9 @@ class ContourMeshMixin:
             if target_level not in self.cut_intersection_points:
                 self.cut_intersection_points[target_level] = []
             self.cut_intersection_points[target_level].append((int1_3d.copy(), int2_3d.copy()))
+
+            # Store boundary indices for resampling
+            cut_boundary_indices = boundary_indices
 
         # Determine which piece corresponds to which source contour
         # Simple 3D centroid distance matching
@@ -8610,22 +8680,29 @@ class ContourMeshMixin:
 
         if dist_00 + dist_11 < dist_01 + dist_10:
             cut_contours = [piece0, piece1]
+            # cut_contours[0] = piece0, cut_contours[1] = piece1
+            cut_boundary_indices_ordered = {
+                0: cut_boundary_indices['piece0'],
+                1: cut_boundary_indices['piece1'],
+            }
             print(f"  Matching: piece0 → src0, piece1 → src1")
         else:
             cut_contours = [piece1, piece0]
+            # cut_contours[0] = piece1, cut_contours[1] = piece0
+            cut_boundary_indices_ordered = {
+                0: cut_boundary_indices['piece1'],
+                1: cut_boundary_indices['piece0'],
+            }
             print(f"  Matching: piece0 → src1, piece1 → src0 (swapped)")
 
         # Store the result
         self._manual_cut_data['cut_result'] = cut_contours
         print(f"  Registered {len(self.shared_cut_vertices)} shared cut edge vertices")
 
-        # Store cut edge indices for each piece
-        # piece0: cut edges at indices 0 (int1) and last-1 (int2, before closing)
-        # piece1: cut edges at indices 0 (int2) and last-1 (int1, before closing)
-        self._manual_cut_data['cut_edge_indices'] = {
-            0: [0, len(piece0) - 1],  # indices of shared vertices in piece0
-            1: [0, len(piece1) - 1],  # indices of shared vertices in piece1
-        }
+        # Store boundary indices for each piece (includes cut points + all intermediates)
+        # These indices mark all vertices on the shared boundary that should stay fixed during resampling
+        self._manual_cut_data['cut_boundary_indices'] = cut_boundary_indices_ordered
+        print(f"  Boundary indices: {cut_boundary_indices_ordered}")
 
         return cut_contours
 
@@ -8882,7 +8959,7 @@ class ContourMeshMixin:
                 cut2_3d = piece_3d[idx_b].copy()
 
                 (new_piece0_2d, new_piece0_3d, new_piece1_2d, new_piece1_3d,
-                 intermediate_verts) = self._add_shared_edge_vertices_2d_3d(
+                 intermediate_verts, boundary_indices) = self._add_shared_edge_vertices_2d_3d(
                     new_piece0_2d, new_piece0_3d, new_piece1_2d, new_piece1_3d,
                     cut1_2d, cut1_3d, cut2_2d, cut2_3d,
                     n_verts, piece_perimeter
@@ -8895,6 +8972,22 @@ class ContourMeshMixin:
                 self._manual_cut_data['current_pieces'] = new_pieces
                 self._manual_cut_data['current_pieces_3d'] = new_pieces_3d
                 self._manual_cut_data['cut_lines'].append((line_start, line_end))
+
+                # Store boundary indices for the two new pieces
+                # piece_idx becomes two pieces: piece_idx (piece0) and piece_idx+1 (piece1)
+                piece_boundary_indices = self._manual_cut_data.get('piece_boundary_indices', {})
+                # Shift indices for pieces after the cut
+                new_piece_boundary_indices = {}
+                for pi, bi in piece_boundary_indices.items():
+                    if pi < piece_idx:
+                        new_piece_boundary_indices[pi] = bi
+                    elif pi >= piece_idx:
+                        new_piece_boundary_indices[pi + 1] = bi  # Shift by 1 since we're inserting a piece
+                # Add boundary indices for the two new pieces
+                new_piece_boundary_indices[piece_idx] = boundary_indices['piece0']
+                new_piece_boundary_indices[piece_idx + 1] = boundary_indices['piece1']
+                self._manual_cut_data['piece_boundary_indices'] = new_piece_boundary_indices
+                print(f"  Updated piece_boundary_indices: {new_piece_boundary_indices}")
                 return True
 
         # For manually drawn lines, use edge intersection
@@ -9016,7 +9109,7 @@ class ContourMeshMixin:
         # Add shared edge vertices proportionally based on perimeter
         piece_perimeter = self._compute_contour_perimeter(piece_3d)
         (new_piece0_2d, new_piece0_3d, new_piece1_2d, new_piece1_3d,
-         intermediate_verts) = self._add_shared_edge_vertices_2d_3d(
+         intermediate_verts, boundary_indices) = self._add_shared_edge_vertices_2d_3d(
             new_piece0_2d, new_piece0_3d, new_piece1_2d, new_piece1_3d,
             int1_2d, int1_3d, int2_2d, int2_3d,
             n_verts, piece_perimeter
@@ -9029,6 +9122,19 @@ class ContourMeshMixin:
         self._manual_cut_data['current_pieces'] = new_pieces
         self._manual_cut_data['current_pieces_3d'] = new_pieces_3d
         self._manual_cut_data['cut_lines'].append((line_start, line_end))
+
+        # Store boundary indices for the two new pieces
+        piece_boundary_indices = self._manual_cut_data.get('piece_boundary_indices', {})
+        new_piece_boundary_indices = {}
+        for pi, bi in piece_boundary_indices.items():
+            if pi < cut_piece_idx:
+                new_piece_boundary_indices[pi] = bi
+            elif pi >= cut_piece_idx:
+                new_piece_boundary_indices[pi + 1] = bi
+        new_piece_boundary_indices[cut_piece_idx] = boundary_indices['piece0']
+        new_piece_boundary_indices[cut_piece_idx + 1] = boundary_indices['piece1']
+        self._manual_cut_data['piece_boundary_indices'] = new_piece_boundary_indices
+        print(f"  Updated piece_boundary_indices: {new_piece_boundary_indices}")
 
         # Register shared cut vertices (including intermediates)
         if not hasattr(self, 'shared_cut_vertices'):
