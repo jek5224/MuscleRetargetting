@@ -13652,6 +13652,33 @@ class ContourMeshMixin:
                 if len(shared_boundary_info) == 2:
                     shared_boundary_info = [shared_boundary_info[1], shared_boundary_info[0]]
 
+        elif n_pieces > 2 and len(new_contours) == n_pieces:
+            # For n_pieces > 2, use Hungarian algorithm for optimal assignment
+            from scipy.optimize import linear_sum_assignment
+
+            piece_centroids = [np.mean(c, axis=0) for c in new_contours]
+            source_centroids_3d = [np.mean(source_contours[i], axis=0) for i in range(n_pieces)]
+
+            # Build cost matrix based on centroid distances
+            cost_matrix = np.zeros((n_pieces, n_pieces))
+            for p_i in range(n_pieces):
+                for s_i in range(n_pieces):
+                    cost_matrix[p_i, s_i] = np.linalg.norm(piece_centroids[p_i] - source_centroids_3d[s_i])
+
+            # Solve assignment problem
+            row_ind, col_ind = linear_sum_assignment(cost_matrix)
+
+            # Check if reordering is needed
+            needs_reorder = not all(p_i == s_i for p_i, s_i in zip(row_ind, col_ind))
+            if needs_reorder:
+                print(f"  [BP Transform] Reordering {n_pieces} pieces to match source order")
+                print(f"    Assignment: piece -> source = {list(zip(row_ind, col_ind))}")
+                # Reorder new_contours to match sources
+                reordered = [None] * n_pieces
+                for p_i, s_i in zip(row_ind, col_ind):
+                    reordered[s_i] = new_contours[p_i]
+                new_contours = reordered
+
         # ========== Step 10b: Save visualization (AFTER reordering) ==========
         # Compute pieces in 2D (same coordinate system as final_transformed)
         pieces_2d = []
