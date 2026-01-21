@@ -4806,58 +4806,77 @@ class ContourMeshMixin:
                     found_boundary = False
 
                     for ip1, ip2 in all_intersection_pairs:
-                        # Find ALL vertices that lie on the line segment between ip1 and ip2
-                        # This includes the two intersection points AND any intermediate vertices
-                        boundary_vertex_indices = []
+                        # Step 1: Find vertices that EXACTLY match ip1 and ip2 (tight tolerance)
+                        # Only proceed if BOTH endpoints are found in this contour
+                        endpoint_tolerance = 0.005  # Very tight - must be actual intersection points
+
+                        idx_at_ip1 = None
+                        idx_at_ip2 = None
+                        dist_to_ip1 = float('inf')
+                        dist_to_ip2 = float('inf')
+
+                        for vi, v in enumerate(contour):
+                            d1 = np.linalg.norm(v - ip1)
+                            d2 = np.linalg.norm(v - ip2)
+                            if d1 < dist_to_ip1:
+                                dist_to_ip1 = d1
+                                idx_at_ip1 = vi
+                            if d2 < dist_to_ip2:
+                                dist_to_ip2 = d2
+                                idx_at_ip2 = vi
+
+                        # Both endpoints must be present in this contour
+                        if dist_to_ip1 > endpoint_tolerance or dist_to_ip2 > endpoint_tolerance:
+                            continue
+                        if idx_at_ip1 == idx_at_ip2:
+                            continue  # Same vertex can't be both endpoints
+
+                        # Step 2: Now find intermediate vertices on the line segment
                         line_vec = ip2 - ip1
                         line_len = np.linalg.norm(line_vec)
                         if line_len < 1e-10:
                             continue
                         line_dir = line_vec / line_len
 
+                        boundary_vertex_indices = []
+                        intermediate_tolerance = 0.005  # Tight tolerance for intermediates too
+
                         for vi, v in enumerate(contour):
-                            # Check if vertex is on the line segment
                             v_to_ip1 = v - ip1
-                            # Project onto line
                             t = np.dot(v_to_ip1, line_dir)
-                            # Point on line closest to v
                             closest = ip1 + t * line_dir
                             dist_to_line = np.linalg.norm(v - closest)
 
-                            # Check if: 1) close to line, 2) within segment bounds
-                            if dist_to_line < 0.01 and -0.01 < t < line_len + 0.01:
-                                boundary_vertex_indices.append((vi, t))  # Store index and t for sorting
+                            # Must be very close to line AND within segment
+                            if dist_to_line < intermediate_tolerance and -0.001 < t < line_len + 0.001:
+                                boundary_vertex_indices.append((vi, t))
 
-                        # Need at least 2 vertices (the two endpoints)
-                        if len(boundary_vertex_indices) >= 2:
-                            # Sort by t (position along line) to get ordered boundary
-                            boundary_vertex_indices.sort(key=lambda x: x[1])
-                            boundary_indices = [x[0] for x in boundary_vertex_indices]
+                        # Sort by position along line
+                        boundary_vertex_indices.sort(key=lambda x: x[1])
+                        boundary_indices = [x[0] for x in boundary_vertex_indices]
 
-                            # Get the two endpoints (first and last after sorting by t)
-                            idx1 = boundary_indices[0]
-                            idx2 = boundary_indices[-1]
-                            # IMPORTANT: Use ORIGINAL intersection points for exact boundary line
-                            # NOT contour[idx1] which might have drifted
-                            pos1 = ip1.copy()  # Original intersection point
-                            pos2 = ip2.copy()  # Original intersection point
+                        # Verify endpoints are in the list
+                        if idx_at_ip1 not in boundary_indices or idx_at_ip2 not in boundary_indices:
+                            continue
 
-                            if s_idx >= len(stream_boundary_info):
-                                for _ in range(s_idx - len(stream_boundary_info) + 1):
-                                    stream_boundary_info.append({})
+                        if s_idx >= len(stream_boundary_info):
+                            for _ in range(s_idx - len(stream_boundary_info) + 1):
+                                stream_boundary_info.append({})
 
-                            if level_idx not in stream_boundary_info[s_idx]:
-                                stream_boundary_info[s_idx][level_idx] = []
+                        if level_idx not in stream_boundary_info[s_idx]:
+                            stream_boundary_info[s_idx][level_idx] = []
 
-                            # Store ALL boundary vertex indices (not just endpoints)
-                            # pos1, pos2 are the ORIGINAL intersection points (exact boundary endpoints)
-                            stream_boundary_info[s_idx][level_idx].append((idx1, idx2, pos1, pos2, boundary_indices))
-                            print(f"    Stream {s_idx} level {level_idx}: boundary {idx1}->{idx2} with {len(boundary_indices)} vertices on line")
-                            found_boundary = True
-                            break  # Found the matching cut for this contour
+                        # Store boundary info with ORIGINAL intersection points
+                        stream_boundary_info[s_idx][level_idx].append((
+                            idx_at_ip1, idx_at_ip2,
+                            ip1.copy(), ip2.copy(),  # Original intersection points
+                            boundary_indices
+                        ))
+                        print(f"    Stream {s_idx} level {level_idx}: boundary {idx_at_ip1}->{idx_at_ip2} with {len(boundary_indices)} vertices")
+                        found_boundary = True
+                        break  # Found the matching cut for this contour
 
                     if not found_boundary and level_idx == 0:
-                        # Debug: print first contour info
                         print(f"    Stream {s_idx} level {level_idx}: NO boundary found (contour has {n} vertices)")
 
         # Ensure stream_boundary_info has entries for all streams
