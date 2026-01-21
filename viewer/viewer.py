@@ -5877,6 +5877,7 @@ class GLFWApp():
                             # Also update target_2d, source_2d_list, and current_pieces to match the coordinate system
                             if hasattr(obj, '_bp_viz_data') and len(obj._bp_viz_data) > 0:
                                 latest_viz = obj._bp_viz_data[-1]
+                                print(f"[Optimize DEBUG] _bp_viz_data has {len(obj._bp_viz_data)} entries, latest keys: {list(latest_viz.keys())}")
                                 transformed_srcs = latest_viz.get('final_transformed', [])
                                 obj._manual_cut_data['transformed_sources_2d'] = transformed_srcs
 
@@ -5884,11 +5885,14 @@ class GLFWApp():
                                 opt_target_2d = latest_viz.get('target_2d', None)
                                 if opt_target_2d is not None:
                                     obj._manual_cut_data['target_2d'] = opt_target_2d
-                                    print(f"[Optimize DEBUG] Updated target_2d to optimization coords")
+                                    print(f"[Optimize DEBUG] Updated target_2d: {len(opt_target_2d)} verts")
+                                else:
+                                    print(f"[Optimize DEBUG] WARNING: opt_target_2d is None!")
 
                                 # Update source_2d_list to match (use source_2d_shapes + translations)
                                 source_shapes = latest_viz.get('source_2d_shapes', [])
                                 init_trans = latest_viz.get('initial_translations', [])
+                                print(f"[Optimize DEBUG] source_shapes: {len(source_shapes)}, init_trans: {len(init_trans)}")
                                 if len(source_shapes) > 0 and len(init_trans) == len(source_shapes):
                                     new_source_2d_list = []
                                     for i, (shape, trans) in enumerate(zip(source_shapes, init_trans)):
@@ -5896,7 +5900,7 @@ class GLFWApp():
                                         src_2d = np.array(shape) + np.array(trans)
                                         new_source_2d_list.append(src_2d)
                                     obj._manual_cut_data['source_2d_list'] = new_source_2d_list
-                                    print(f"[Optimize DEBUG] Updated source_2d_list to optimization coords")
+                                    print(f"[Optimize DEBUG] Updated source_2d_list: {len(new_source_2d_list)} sources")
 
                                 # Use pieces_2d directly from optimization (same coordinate system)
                                 opt_pieces_2d = latest_viz.get('pieces_2d', [])
