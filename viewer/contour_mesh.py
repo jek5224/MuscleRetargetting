@@ -4813,6 +4813,10 @@ class ContourMeshMixin:
                     resampled = self._resample_cut_contour(
                         contour, boundaries, num_samples, base_samples
                     )
+                    # Don't align cut contours - preserve boundary vertex positions
+                    aligned_contour = resampled
+                    bounding_plane = bounding_plane_info['bounding_plane']
+                    contour_match = bounding_plane_info.get('contour_match', list(range(len(bounding_plane))))
                 else:
                     # Normal contour: standard resampling
                     bounding_plane_corners = bounding_plane_info.get('bounding_plane')
@@ -4822,9 +4826,9 @@ class ContourMeshMixin:
                         corner_ref = None
                     resampled = self._resample_single_contour(contour, num_samples, corner_ref)
 
-                # Align with bounding plane
-                bounding_plane = bounding_plane_info['bounding_plane']
-                aligned_contour, contour_match = self.find_contour_match(resampled, bounding_plane, preserve_order=True)
+                    # Align with bounding plane (only for non-cut contours)
+                    bounding_plane = bounding_plane_info['bounding_plane']
+                    aligned_contour, contour_match = self.find_contour_match(resampled, bounding_plane, preserve_order=True)
 
                 new_bp_info = bounding_plane_info.copy()
                 if 'contour_match' in bounding_plane_info and 'contour_match_orig' not in bounding_plane_info:
