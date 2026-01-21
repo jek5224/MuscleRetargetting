@@ -4770,13 +4770,14 @@ class ContourMeshMixin:
 
                 if has_cuts:
                     # Find which intersection points are in this contour
-                    for int1, int2 in intersection_points:
+                    for ip_idx, (int1, int2) in enumerate(intersection_points):
                         # Check if both intersection points are in this contour
                         int1_idx = self._find_vertex_in_contour(contour, int1)
                         int2_idx = self._find_vertex_in_contour(contour, int2)
 
                         if int1_idx is not None and int2_idx is not None:
                             boundaries.append((int1_idx, int2_idx, int1.copy(), int2.copy()))
+                            print(f"    Stream {stream_idx} level {level_idx}: found boundary {ip_idx} at indices {int1_idx}, {int2_idx}")
 
                 boundary_info[level_idx] = boundaries
                 max_boundaries = max(max_boundaries, len(boundaries))
@@ -4816,7 +4817,9 @@ class ContourMeshMixin:
                     # Don't align cut contours - preserve boundary vertex positions
                     aligned_contour = resampled
                     bounding_plane = bounding_plane_info['bounding_plane']
-                    contour_match = bounding_plane_info.get('contour_match', list(range(len(bounding_plane))))
+                    # Build proper contour_match (P,Q pairs) without modifying contour
+                    contour_match = self._build_contour_match_no_insert(resampled, bounding_plane)
+                    print(f"      Cut contour: built {len(contour_match)} (P,Q) pairs")
                 else:
                     # Normal contour: standard resampling
                     bounding_plane_corners = bounding_plane_info.get('bounding_plane')
@@ -4846,12 +4849,141 @@ class ContourMeshMixin:
 
         print(f"Resampling complete: {len(self.contours)} streams")
 
-    def _find_vertex_in_contour(self, contour, target_vertex, tolerance=1e-4):
-        """Find the index of a vertex in a contour, or None if not found."""
+    def _find_vertex_in_contour(self, contour, target_vertex, tolerance=0.01):
+        """Find the index of a vertex in a contour, or None if not found.
+
+        Uses a larger tolerance (0.01) by default since vertex positions may have
+        small floating point differences after cutting operations.
+        """
+        min_dist = float('inf')
+        min_idx = None
         for i, v in enumerate(contour):
-            if np.linalg.norm(v - target_vertex) < tolerance:
-                return i
+            dist = np.linalg.norm(v - target_vertex)
+            if dist < min_dist:
+                min_dist = dist
+                min_idx = i
+        # Return the closest vertex if within tolerance
+        if min_dist < tolerance:
+            return min_idx
         return None
+
+    def _build_contour_match_no_insert(self, contour, bounding_plane):
+        """
+        Build contour_match (P, Q pairs) without inserting new vertices.
+
+        This is used for cut contours where we want to preserve exact vertex positions
+        but still need proper (P, Q) pairs for visualization and MVC computation.
+
+        For each contour vertex P, we compute its Q position by projecting P onto
+        the bounding plane's coordinate system and mapping to the BP boundary.
+
+        Args:
+            contour: Nx3 array of contour vertices (already resampled)
+            bounding_plane: 4x3 array of bounding plane corners [0-1-2-3]
+
+        Returns:
+            List of (P, Q) tuples where P is contour vertex and Q is corresponding BP position
+        """
+        bp = np.array(bounding_plane)
+        n = len(contour)
+
+        # BP coordinate system:
+        #   3 --- 2
+        #   |     |
+        #   0 --- 1
+        # edge_x = bp[1] - bp[0], edge_y = bp[3] - bp[0]
+        # Any point Q = bp[0] + u * edge_x + v * edge_y
+        v0 = bp[0]
+        edge_x = bp[1] - bp[0]
+        edge_y = bp[3] - bp[0]
+
+        # Compute plane normal
+        normal = np.cross(edge_x, edge_y)
+        normal_norm = np.linalg.norm(normal)
+        if normal_norm > 1e-10:
+            normal = normal / normal_norm
+        else:
+            normal = np.array([0.0, 0.0, 1.0])
+
+        # BP center for ray casting
+        bp_center = np.mean(bp, axis=0)
+
+        # For each contour vertex, compute its Q on the BP boundary
+        result = []
+        for i, p in enumerate(contour):
+            # Project P onto BP plane along normal
+            # plane: n · (x - v0) = 0
+            # line: P + t * n
+            # intersection: t = n · (v0 - P) / (n · n) = n · (v0 - P)
+            t = np.dot(normal, v0 - p)
+            p_projected = p + t * normal
+
+            # Now find Q on BP boundary by casting ray from center through p_projected
+            # and finding intersection with BP edges
+            ray_dir = p_projected - bp_center
+            ray_dir_norm = np.linalg.norm(ray_dir)
+
+            if ray_dir_norm < 1e-10:
+                # P is at center, use arbitrary Q
+                q = v0.copy()
+            else:
+                ray_dir = ray_dir / ray_dir_norm
+
+                # Find intersection with BP edges (in 3D along the plane)
+                # BP edges: 0-1, 1-2, 2-3, 3-0
+                edges = [(0, 1), (1, 2), (2, 3), (3, 0)]
+                best_q = None
+                best_t = float('inf')
+
+                for e_start, e_end in edges:
+                    seg_start = bp[e_start]
+                    seg_end = bp[e_end]
+                    seg_dir = seg_end - seg_start
+
+                    # Solve: bp_center + t_ray * ray_dir = seg_start + t_seg * seg_dir
+                    # Using least squares for 3D case
+                    # [ray_dir, -seg_dir] * [t_ray, t_seg]^T = seg_start - bp_center
+                    A = np.column_stack([ray_dir, -seg_dir])
+                    b = seg_start - bp_center
+
+                    # Solve using least squares
+                    try:
+                        result_ls, _, _, _ = np.linalg.lstsq(A, b, rcond=None)
+                        t_ray, t_seg = result_ls[0], result_ls[1]
+
+                        # Valid if ray goes forward and intersection is on segment
+                        if t_ray > 1e-6 and -0.001 <= t_seg <= 1.001:
+                            if t_ray < best_t:
+                                best_t = t_ray
+                                t_seg_clamped = np.clip(t_seg, 0, 1)
+                                best_q = seg_start + t_seg_clamped * seg_dir
+                    except:
+                        continue
+
+                if best_q is not None:
+                    q = best_q
+                else:
+                    # Fallback: find closest point on BP boundary
+                    min_dist = float('inf')
+                    q = v0.copy()
+                    for e_start, e_end in edges:
+                        seg_start = bp[e_start]
+                        seg_end = bp[e_end]
+                        seg_dir = seg_end - seg_start
+                        seg_len_sq = np.dot(seg_dir, seg_dir)
+                        if seg_len_sq > 1e-10:
+                            t_seg = np.clip(np.dot(p_projected - seg_start, seg_dir) / seg_len_sq, 0, 1)
+                        else:
+                            t_seg = 0
+                        closest = seg_start + t_seg * seg_dir
+                        dist = np.linalg.norm(p_projected - closest)
+                        if dist < min_dist:
+                            min_dist = dist
+                            q = closest
+
+            result.append((p.copy(), q.copy()))
+
+        return result
 
     def _resample_cut_contour(self, contour, boundaries, num_samples, base_samples):
         """
