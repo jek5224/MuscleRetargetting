@@ -4935,8 +4935,10 @@ class ContourMeshMixin:
                     pt = int2_3d + t * (int1_3d - int2_3d)  # int2 -> int1
                     boundary_segment.append(pt)
                 resampled_boundary = np.array(boundary_segment)
+                print(f"      Boundary: {len(resampled_boundary)} verts from int2={int2_3d} to int1={int1_3d}")
             else:
                 resampled_boundary = np.array([int2_3d.copy(), int1_3d.copy()])
+                print(f"      Boundary: 2 verts (no intermediates)")
 
             # Combine: surface (int1->int2) + boundary (int2->int1, skip first which is int2)
             result = list(resampled_surface)
@@ -8815,6 +8817,11 @@ class ContourMeshMixin:
             self.shared_cut_vertices.append(v)
         self.shared_cut_vertices.append(int2_3d)
 
+        # Store ONLY intersection points (for resampling)
+        if not hasattr(self, 'cut_intersection_points'):
+            self.cut_intersection_points = []
+        self.cut_intersection_points.append((int1_3d.copy(), int2_3d.copy()))
+
         print(f"Iterative cut: piece {cut_piece_idx} -> 2 pieces, total now {len(new_pieces)}")
         return True
 
@@ -12405,6 +12412,17 @@ class ContourMeshMixin:
             for pt in shared_boundary_points:
                 self.shared_cut_vertices.append(pt)
             print(f"  [BP Transform] Registered {len(shared_boundary_points)} shared cut edge vertices (total: {len(self.shared_cut_vertices)})")
+
+            # Store intersection point pairs (for resampling)
+            # For n_pieces, there are n_pieces-1 cuts, each with 2 boundary points
+            if not hasattr(self, 'cut_intersection_points'):
+                self.cut_intersection_points = []
+            # Pair up boundary points: (0,1), (2,3), (4,5), etc.
+            for i in range(0, len(shared_boundary_points) - 1, 2):
+                int1 = shared_boundary_points[i]
+                int2 = shared_boundary_points[i + 1]
+                self.cut_intersection_points.append((int1.copy(), int2.copy()))
+                print(f"  [BP Transform] Registered intersection pair: {int1} -> {int2}")
 
         # Ensure each piece has at least some vertices and convert to proper numpy arrays
         for i in range(n_pieces):
