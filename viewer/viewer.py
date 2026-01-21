@@ -3713,6 +3713,22 @@ class GLFWApp():
                     if not (hovered_type == 'vertex' and i == hovered_idx):
                         draw_list.add_circle_filled(px, py, 3, imgui.get_color_u32_rgba(1.0, 0.5, 0.0, 1.0))
 
+                # Draw resampled contour vertices (cyan) if available
+                if (hasattr(obj, 'contours_resampled') and obj.contours_resampled is not None and
+                    stream_idx < len(obj.contours_resampled) and
+                    level_idx < len(obj.contours_resampled[stream_idx])):
+                    resampled = obj.contours_resampled[stream_idx][level_idx]
+                    if resampled is not None and len(resampled) > 0:
+                        # Project resampled vertices to 2D using same transformation
+                        for rv in resampled:
+                            rv = np.array(rv)
+                            rv_2d = np.array([np.dot(rv - mean, basis_x), np.dot(rv - mean, basis_y)])
+                            rv_norm = (rv_2d - center_xy) * scale + 0.5
+                            rvx = right_x0 + rv_norm[0] * canvas_size
+                            rvy = right_y0 + (1 - rv_norm[1]) * canvas_size
+                            # Draw in cyan with same size as original vertices
+                            draw_list.add_circle_filled(rvx, rvy, 3, imgui.get_color_u32_rgba(0.0, 1.0, 1.0, 1.0))
+
                 # Reserve space
                 imgui.dummy(canvas_size + 2 * padding, canvas_size + 2 * padding)
 

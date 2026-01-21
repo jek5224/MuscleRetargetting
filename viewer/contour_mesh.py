@@ -4767,6 +4767,12 @@ class ContourMeshMixin:
         total_ip_count = sum(len(v) for v in intersection_points_by_level.values()) if intersection_points_by_level else len(intersection_points_all)
         print(f"Resampling {len(self.contours)} streams (base={base_samples}, cuts={total_ip_count})")
 
+        # Debug: show which levels have intersection points
+        if intersection_points_by_level:
+            print(f"  DEBUG: intersection_points_by_level keys: {sorted(intersection_points_by_level.keys())}")
+            for lvl, ips in intersection_points_by_level.items():
+                print(f"    Level {lvl}: {len(ips)} pairs")
+
         # Step 1: For each stream, find which contours have boundaries and count them
         stream_boundary_info = []  # stream_idx -> {level_idx -> [(int1, int2), ...]}
         max_boundaries_per_stream = []  # stream_idx -> max number of boundaries in any contour
@@ -4776,74 +4782,92 @@ class ContourMeshMixin:
         num_streams = len(self.contours)
         print(f"  DEBUG: num_streams={num_streams}, has_cuts={has_cuts}")
 
-        if num_streams > 0 and has_cuts:
+        # Collect ALL intersection points (regardless of stored level index)
+        # The stored level indices are from BEFORE cut_streams reorganized contours
+        all_intersection_pairs = []
+        for lvl, ips in intersection_points_by_level.items():
+            for ip1, ip2 in ips:
+                all_intersection_pairs.append((np.array(ip1), np.array(ip2)))
+        print(f"  DEBUG: {len(all_intersection_pairs)} total intersection point pairs to match")
+
+        if num_streams > 0 and len(all_intersection_pairs) > 0:
             # Find max levels across all streams
             max_levels = max(len(cg) for cg in self.contours)
             print(f"  DEBUG: max_levels={max_levels}")
 
-            # For each level, find vertices that lie on the boundary (line segment between intersection points)
-            for level_idx in range(max_levels):
-                # Get intersection points for this level
-                level_ips = intersection_points_by_level.get(level_idx, [])
-                if len(level_ips) == 0:
-                    continue
-
-                print(f"  Level {level_idx}: {len(level_ips)} cut(s)")
-
-                # For each stream, find boundary vertices
-                for s_idx in range(num_streams):
-                    if level_idx >= len(self.contours[s_idx]):
-                        continue
-
+            # For each contour, check ALL intersection points to find matching boundaries
+            for s_idx in range(num_streams):
+                for level_idx in range(len(self.contours[s_idx])):
                     contour = np.array(self.contours[s_idx][level_idx])
                     if len(contour) == 0:
                         continue
 
-                    # For each cut (intersection point pair), find vertices on that boundary
-                    for cut_idx, (ip1, ip2) in enumerate(level_ips):
-                        ip1 = np.array(ip1)
-                        ip2 = np.array(ip2)
-                        boundary_dir = ip2 - ip1
-                        boundary_len = np.linalg.norm(boundary_dir)
+                    # For each intersection point pair, check if this contour has vertices on that boundary
+                    # IMPORTANT: Each contour was cut at most ONCE, so find the BEST matching cut line
+                    best_match = None  # (cut_idx, total_dist, boundary_vertices)
+                    best_dist = float('inf')
 
-                        if boundary_len < 1e-10:
+                    for cut_idx, (ip1, ip2) in enumerate(all_intersection_pairs):
+                        # Find closest vertices to each intersection point
+                        min_dist_to_ip1 = float('inf')
+                        min_dist_to_ip2 = float('inf')
+                        for v in contour:
+                            d1 = np.linalg.norm(v - ip1)
+                            d2 = np.linalg.norm(v - ip2)
+                            if d1 < min_dist_to_ip1:
+                                min_dist_to_ip1 = d1
+                            if d2 < min_dist_to_ip2:
+                                min_dist_to_ip2 = d2
+
+                        total_dist = min_dist_to_ip1 + min_dist_to_ip2
+
+                        # Skip if either intersection point is too far from any contour vertex
+                        ip_tolerance = 0.05  # Maximum distance to consider
+                        if min_dist_to_ip1 > ip_tolerance or min_dist_to_ip2 > ip_tolerance:
                             continue
 
-                        boundary_dir_norm = boundary_dir / boundary_len
+                        # Check if this is the best match so far
+                        if total_dist < best_dist:
+                            boundary_dir = ip2 - ip1
+                            boundary_len = np.linalg.norm(boundary_dir)
 
-                        # Find vertices that lie on the line segment between ip1 and ip2
-                        boundary_vertices = []  # List of (vertex_idx, position, t_param)
-                        for vi, v in enumerate(contour):
-                            v = np.array(v)
-                            # Vector from ip1 to vertex
-                            to_v = v - ip1
-                            # Project onto boundary direction
-                            t = np.dot(to_v, boundary_dir_norm) / boundary_len
-                            # Perpendicular distance to line
-                            proj = ip1 + t * boundary_dir
-                            perp_dist = np.linalg.norm(v - proj)
+                            if boundary_len < 1e-10:
+                                continue
 
-                            # Check if vertex lies on the line segment (within tolerance)
-                            if perp_dist < 0.01 and -0.01 <= t <= 1.01:  # Small tolerance
-                                boundary_vertices.append((vi, v.copy(), t))
+                            boundary_dir_norm = boundary_dir / boundary_len
 
-                        if len(boundary_vertices) >= 2:
-                            # Sort by t parameter to get proper ordering along boundary
-                            boundary_vertices.sort(key=lambda x: x[2])
-                            # First and last vertices (by t) are the boundary endpoints
-                            idx1, pos1, _ = boundary_vertices[0]
-                            idx2, pos2, _ = boundary_vertices[-1]
+                            # Find vertices that lie on the line segment between ip1 and ip2
+                            boundary_vertices = []
+                            for vi, v in enumerate(contour):
+                                v = np.array(v)
+                                to_v = v - ip1
+                                t = np.dot(to_v, boundary_dir_norm) / boundary_len
+                                proj = ip1 + t * boundary_dir
+                                perp_dist = np.linalg.norm(v - proj)
 
-                            # Initialize boundary_info for this stream if needed
-                            if s_idx >= len(stream_boundary_info):
-                                for _ in range(s_idx - len(stream_boundary_info) + 1):
-                                    stream_boundary_info.append({})
+                                if perp_dist < 0.01 and -0.01 <= t <= 1.01:
+                                    boundary_vertices.append((vi, v.copy(), t))
 
-                            if level_idx not in stream_boundary_info[s_idx]:
-                                stream_boundary_info[s_idx][level_idx] = []
+                            if len(boundary_vertices) >= 2:
+                                best_dist = total_dist
+                                best_match = (cut_idx, total_dist, boundary_vertices)
 
-                            stream_boundary_info[s_idx][level_idx].append((idx1, idx2, pos1, pos2))
-                            print(f"    Stream {s_idx} level {level_idx} cut {cut_idx}: boundary indices {idx1}->{idx2} ({len(boundary_vertices)} verts on line)")
+                    # Use the best matching cut line (if any)
+                    if best_match is not None:
+                        cut_idx, total_dist, boundary_vertices = best_match
+                        boundary_vertices.sort(key=lambda x: x[2])
+                        idx1, pos1, _ = boundary_vertices[0]
+                        idx2, pos2, _ = boundary_vertices[-1]
+
+                        if s_idx >= len(stream_boundary_info):
+                            for _ in range(s_idx - len(stream_boundary_info) + 1):
+                                stream_boundary_info.append({})
+
+                        if level_idx not in stream_boundary_info[s_idx]:
+                            stream_boundary_info[s_idx][level_idx] = []
+
+                        stream_boundary_info[s_idx][level_idx].append((idx1, idx2, pos1, pos2))
+                        print(f"    Stream {s_idx} level {level_idx}: boundary {idx1}->{idx2} ({len(boundary_vertices)} verts, dist={total_dist:.6f})")
 
         # Ensure stream_boundary_info has entries for all streams
         while len(stream_boundary_info) < num_streams:
