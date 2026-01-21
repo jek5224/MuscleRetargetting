@@ -8608,25 +8608,16 @@ class ContourMeshMixin:
             print(f"  max: [{t2d_max[0]:.6f}, {t2d_max[1]:.6f}]")
             print(f"  range: [{t2d_range[0]:.6f}, {t2d_range[1]:.6f}]")
 
-        # Project source contours to 2D (project onto target plane first, then to 2D)
-        target_z = target_bp['basis_z']  # Normal to target plane
+        # Project source contours to 2D using direct dot product (same as optimization/PNG)
         source_2d_list = []
         for i, (src_contour, src_bp) in enumerate(zip(source_contours, source_bps)):
             src_contour = np.array(src_contour)
-
-            # Project source vertices ONTO target plane, then to 2D
-            src_2d = []
-            for v in src_contour:
-                # Project onto target plane (along normal direction)
-                diff = v - target_mean
-                dist_along_normal = np.dot(diff, target_z)
-                v_on_plane = v - dist_along_normal * target_z
-                # Convert to 2D
-                diff_on_plane = v_on_plane - target_mean
-                x = np.dot(diff_on_plane, target_x)
-                y = np.dot(diff_on_plane, target_y)
-                src_2d.append([x, y])
-            source_2d_list.append(np.array(src_2d))
+            # Direct projection to 2D (matches _cut_contour_bp_transform and PNG viz)
+            src_2d = np.array([
+                [np.dot(v - target_mean, target_x), np.dot(v - target_mean, target_y)]
+                for v in src_contour
+            ])
+            source_2d_list.append(src_2d)
 
         # Debug: show projected source bounds and validate for self-intersection
         from shapely.geometry import Polygon as ShapelyPolygon
