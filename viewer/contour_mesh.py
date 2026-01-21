@@ -8591,6 +8591,8 @@ class ContourMeshMixin:
         # Negate basis vectors to rotate 180° - match optimization orientation
         target_x = -target_bp['basis_x']
         target_y = -target_bp['basis_y']
+        print(f"  [InitSetup] target_bp basis_x (negated): [{target_x[0]:.6f}, {target_x[1]:.6f}, {target_x[2]:.6f}]")
+        print(f"  [InitSetup] target_bp basis_y (negated): [{target_y[0]:.6f}, {target_y[1]:.6f}, {target_y[2]:.6f}]")
 
         target_2d = np.array([
             [np.dot(v - target_mean, target_x), np.dot(v - target_mean, target_y)]
@@ -12140,6 +12142,8 @@ class ContourMeshMixin:
         target_mean = target_bp['mean']
         # Negate basis vectors to rotate 180° - match basic cutting window orientation
         target_x = -target_bp['basis_x']
+        print(f"  [BP Transform] target_bp basis_x (negated): [{target_x[0]:.6f}, {target_x[1]:.6f}, {target_x[2]:.6f}]")
+        print(f"  [BP Transform] target_bp basis_y (negated): [{-target_bp['basis_y'][0]:.6f}, {-target_bp['basis_y'][1]:.6f}, {-target_bp['basis_y'][2]:.6f}]")
         target_y = -target_bp['basis_y']
 
         target_2d = np.array([
