@@ -4837,8 +4837,10 @@ class ContourMeshMixin:
                             # Get the two endpoints (first and last after sorting by t)
                             idx1 = boundary_indices[0]
                             idx2 = boundary_indices[-1]
-                            pos1 = contour[idx1].copy()
-                            pos2 = contour[idx2].copy()
+                            # IMPORTANT: Use ORIGINAL intersection points for exact boundary line
+                            # NOT contour[idx1] which might have drifted
+                            pos1 = ip1.copy()  # Original intersection point
+                            pos2 = ip2.copy()  # Original intersection point
 
                             if s_idx >= len(stream_boundary_info):
                                 for _ in range(s_idx - len(stream_boundary_info) + 1):
@@ -4848,6 +4850,7 @@ class ContourMeshMixin:
                                 stream_boundary_info[s_idx][level_idx] = []
 
                             # Store ALL boundary vertex indices (not just endpoints)
+                            # pos1, pos2 are the ORIGINAL intersection points (exact boundary endpoints)
                             stream_boundary_info[s_idx][level_idx].append((idx1, idx2, pos1, pos2, boundary_indices))
                             print(f"    Stream {s_idx} level {level_idx}: boundary {idx1}->{idx2} with {len(boundary_indices)} vertices on line")
                             found_boundary = True
