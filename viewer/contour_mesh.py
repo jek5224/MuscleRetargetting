@@ -13419,10 +13419,10 @@ class ContourMeshMixin:
                 except Exception as e:
                     print(f"  [BP Transform] WARNING: Could not validate piece {i}: {e}")
 
-        # ========== Step 7b: Add intermediate vertices on shared edges ==========
-        # For 2-piece cuts, add intermediate vertices on the shared edge
-        n_intermediate = 0  # Default value (set properly below if needed)
-        if n_pieces == 2 and len(shared_boundary_points) == 2:
+        # ========== Step 7b: Add intermediate vertices on shared edges (DISABLED) ==========
+        # This was causing triangle artifacts - the intermediate vertex insertion logic is buggy
+        n_intermediate = 0  # Default value
+        if False and n_pieces == 2 and len(shared_boundary_points) == 2:
             cut1_3d = np.array(shared_boundary_points[0])
             cut2_3d = np.array(shared_boundary_points[1])
 
