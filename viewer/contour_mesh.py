@@ -4900,11 +4900,17 @@ class ContourMeshMixin:
 
                 if len(boundaries) > 0:
                     # Cut contour: resample with fixed intersection points
+                    print(f"    Level {level_idx}: CUT contour, {len(boundaries)} boundary(s)")
+                    for bi, bdata in enumerate(boundaries):
+                        if len(bdata) >= 4:
+                            print(f"      Boundary {bi}: IP1={bdata[2][:2]}, IP2={bdata[3][:2]}")
                     resampled, params, fixed_indices, vertex_types = self._resample_cut_contour(
                         contour, boundaries, num_samples, base_samples
                     )
+                    print(f"      Result: v0={resampled[0][:2]}, params[0]={params[0]:.3f}, fixed={fixed_indices}")
                 else:
                     # Normal contour: standard resampling
+                    print(f"    Level {level_idx}: NORMAL contour (no boundaries)")
                     bounding_plane_corners = bounding_plane_info.get('bounding_plane')
                     if bounding_plane_corners is not None and len(bounding_plane_corners) >= 1:
                         corner_ref = np.array(bounding_plane_corners[0])
@@ -4916,6 +4922,7 @@ class ContourMeshMixin:
                     params = np.linspace(0, 1, n, endpoint=False)
                     fixed_indices = []  # No fixed vertices
                     vertex_types = ['surface'] * n
+                    print(f"      Result: v0={resampled[0][:2]}, params[0]={params[0]:.3f}")
 
                 resampled_group.append(resampled)
                 params_group.append(params)
@@ -6601,6 +6608,17 @@ class ContourMeshMixin:
 
                 # Use parametric method if params available, else fall back to index-based
                 if curr_params is not None and next_params is not None:
+                    # Debug: show fixed point alignment for first few levels
+                    if level_idx < 3:
+                        print(f"  Stream {stream_idx} Level {level_idx}->{level_idx+1}:")
+                        print(f"    curr: n={n_curr}, fixed={curr_fixed}, params at fixed={[curr_params[i] for i in (curr_fixed or [])]}")
+                        print(f"    next: n={n_next}, fixed={next_fixed}, params at fixed={[next_params[i] for i in (next_fixed or [])]}")
+                        if len(curr_fixed or []) > 0 and len(next_fixed or []) > 0:
+                            # Show vertex positions at fixed points
+                            curr_v0 = all_vertices[curr_indices[curr_fixed[0]]] if curr_fixed else None
+                            next_v0 = all_vertices[next_indices[next_fixed[0]]] if next_fixed else None
+                            if curr_v0 is not None and next_v0 is not None:
+                                print(f"    curr v[fixed0]={curr_v0[:2]}, next v[fixed0]={next_v0[:2]}")
                     # Use zipper algorithm with parameter matching
                     faces = self._create_contour_band_parametric(
                         curr_indices, next_indices, curr_params, next_params,
