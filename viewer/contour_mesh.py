@@ -4784,9 +4784,11 @@ class ContourMeshMixin:
 
                 if len(cut_edge_indices) >= 2:
                     # This contour has a cut edge - resample preserving endpoints
+                    print(f"    Level {level_idx}: found {len(cut_edge_indices)} cut edge vertices, original contour has {len(contour)} vertices")
                     resampled = self._resample_contour_with_cut_edge(
                         contour, cut_edge_indices, num_samples, new_shared_cut_vertices
                     )
+                    print(f"    Level {level_idx}: resampled to {len(resampled)} vertices")
                     has_cut_edge = True
                 else:
                     # Normal resampling
@@ -4906,16 +4908,20 @@ class ContourMeshMixin:
 
         if len(original_portion) == 0:
             # Edge case: no original portion (shouldn't happen)
+            print(f"      WARNING: no original portion found!")
             return self._resample_single_contour(contour, num_samples, None)
+
+        print(f"      Cut edge endpoints: idx {end1_idx} and {end2_idx}, original portion has {len(original_portion)} vertices")
 
         # Resample the original portion to (num_samples - 2) vertices
         # (reserving 2 for the endpoints)
         n_original_resampled = num_samples - 2
-        if n_original_resampled < 1:
-            n_original_resampled = 1
+        if n_original_resampled < 2:
+            n_original_resampled = 2
 
         original_array = np.array(original_portion)
-        resampled_original = self._resample_single_contour(original_array, n_original_resampled, None)
+        # Use open segment resampling since original portion is not a closed loop
+        resampled_original = self._resample_open_segment(original_array, n_original_resampled)
 
         # Build final contour: endpoint1 -> resampled_original -> endpoint2
         # The contour closes: endpoint2 -> endpoint1
