@@ -12842,118 +12842,147 @@ class ContourMeshMixin:
                     except Exception as e:
                         pass  # Silently skip invalid polygon checks
 
-        # ========== Step 7: Assign target vertices by cutting line ==========
-        # Strategy: Use cutting line to assign vertices based on which side they're on
-        # This is cleaner than the hybrid contour proximity + centroid approach
+        # ========== Step 7: Cut target using polygon intersection with source boundaries ==========
+        # Strategy: Intersect target polygon with each optimized source polygon
+        # This ensures the cut pieces follow the actual source contour boundaries
+        from shapely.geometry import Point
+        from shapely.ops import unary_union
 
-        # First compute distances for boundary interpolation
-        all_distances = []  # distances to each source for interpolation
-        for v_idx, v_2d in enumerate(target_2d):
-            contour_dists = []
-            for piece_idx, transformed in enumerate(final_transformed):
-                if len(transformed) > 0:
-                    distances = np.linalg.norm(transformed - v_2d, axis=1)
-                    min_dist = np.min(distances)
-                    contour_dists.append(min_dist)
-                else:
-                    contour_dists.append(np.inf)
-            all_distances.append(contour_dists)
-
-        # Assign vertices based on cutting line (moves with optimized sources)
-        assignments = []
-
-        if cutting_line_2d is not None and n_pieces == 2:
-            # Use the cutting line from optimized sources
-            line_point, line_dir = cutting_line_2d
-            # Normal to the cutting line (perpendicular)
-            line_normal = np.array([-line_dir[1], line_dir[0]])
-
-            # Determine which side each optimized centroid is on
-            centroid_sides = []
-            for c in centroids:
-                side = np.dot(c - line_point, line_normal)
-                centroid_sides.append(side)
-
-            # Ensure centroid 0 is on the negative side (for consistent assignment)
-            if centroid_sides[0] > 0:
-                line_normal = -line_normal
-
-            # Assign each vertex based on which side of the boundary line it's on
-            for v_idx, v_2d in enumerate(target_2d):
-                side = np.dot(v_2d - line_point, line_normal)
-                if side < 0:
-                    assignments.append(0)
-                else:
-                    assignments.append(1)
-
-            print(f"  [BP Transform] assignment by boundary line: {assignments.count(0)} to piece 0, {assignments.count(1)} to piece 1")
-
-        else:
-            # For n_pieces > 2: Use optimized polygon containment + nearest boundary
-            # The optimization has transformed source polygons to tile the target
-            from shapely.geometry import Point
-
-            # Build valid polygons from optimized transforms
-            piece_polygons = []
-            for piece_idx, transformed in enumerate(final_transformed):
-                if len(transformed) >= 3:
-                    try:
-                        poly = Polygon(transformed)
-                        if not poly.is_valid:
-                            poly = poly.buffer(0)
-                        if not poly.is_empty and poly.area > 0:
-                            piece_polygons.append(poly)
-                        else:
-                            piece_polygons.append(None)
-                    except:
+        # Build valid polygons from optimized transforms
+        piece_polygons = []
+        for piece_idx, transformed in enumerate(final_transformed):
+            if len(transformed) >= 3:
+                try:
+                    poly = Polygon(transformed)
+                    if not poly.is_valid:
+                        poly = poly.buffer(0)
+                    if not poly.is_empty and poly.area > 0:
+                        piece_polygons.append(poly)
+                    else:
                         piece_polygons.append(None)
-                else:
+                except:
                     piece_polygons.append(None)
+            else:
+                piece_polygons.append(None)
 
-            valid_count = sum(1 for p in piece_polygons if p is not None)
-            print(f"  [BP Transform] Valid optimized polygons: {valid_count}/{n_pieces}")
+        valid_poly_count = sum(1 for p in piece_polygons if p is not None)
+        print(f"  [BP Transform] Valid source polygons for intersection: {valid_poly_count}/{n_pieces}")
 
-            # Assign each vertex using optimized polygons
-            inside_count = 0
-            boundary_count = 0
-            centroid_count = 0
+        # Try polygon intersection approach
+        use_intersection_method = valid_poly_count == n_pieces
+        intersection_pieces_2d = []
 
-            for v_idx, v_2d in enumerate(target_2d):
-                pt = Point(v_2d)
-                assigned_piece = None
+        if use_intersection_method:
+            print(f"  [BP Transform] Using polygon intersection method")
+            for piece_idx, source_poly in enumerate(piece_polygons):
+                try:
+                    # Compute intersection of target with this source
+                    intersection = target_poly.intersection(source_poly)
 
-                # First: check if inside any optimized polygon
-                for piece_idx, poly in enumerate(piece_polygons):
-                    if poly is not None and poly.contains(pt):
-                        assigned_piece = piece_idx
-                        inside_count += 1
-                        break
+                    if intersection.is_empty:
+                        print(f"  [BP Transform] WARNING: Empty intersection for piece {piece_idx}")
+                        intersection_pieces_2d.append(None)
+                    elif intersection.geom_type == 'Polygon':
+                        # Get exterior coordinates
+                        coords = np.array(intersection.exterior.coords)[:-1]  # Remove closing duplicate
+                        intersection_pieces_2d.append(coords)
+                        print(f"  [BP Transform] Piece {piece_idx} intersection: {len(coords)} vertices, area={intersection.area:.4f}")
+                    elif intersection.geom_type == 'MultiPolygon':
+                        # Take the largest polygon
+                        largest = max(intersection.geoms, key=lambda g: g.area)
+                        coords = np.array(largest.exterior.coords)[:-1]
+                        intersection_pieces_2d.append(coords)
+                        print(f"  [BP Transform] Piece {piece_idx} MultiPolygon -> largest: {len(coords)} vertices")
+                    else:
+                        print(f"  [BP Transform] WARNING: Unexpected geometry type {intersection.geom_type} for piece {piece_idx}")
+                        intersection_pieces_2d.append(None)
+                except Exception as e:
+                    print(f"  [BP Transform] WARNING: Intersection failed for piece {piece_idx}: {e}")
+                    intersection_pieces_2d.append(None)
 
-                # Second: find nearest optimized polygon boundary
-                if assigned_piece is None:
-                    min_dist = float('inf')
+            # Check if all intersections succeeded
+            if all(p is not None for p in intersection_pieces_2d):
+                print(f"  [BP Transform] All intersections successful, using intersection-based pieces")
+            else:
+                print(f"  [BP Transform] Some intersections failed, falling back to vertex assignment")
+                use_intersection_method = False
+
+        # Fallback: vertex assignment (for backward compatibility or when intersection fails)
+        assignments = []
+        if not use_intersection_method:
+            print(f"  [BP Transform] Using vertex assignment method (fallback)")
+
+            if cutting_line_2d is not None and n_pieces == 2:
+                # Use the cutting line from optimized sources
+                line_point, line_dir = cutting_line_2d
+                # Normal to the cutting line (perpendicular)
+                line_normal = np.array([-line_dir[1], line_dir[0]])
+
+                # Determine which side each optimized centroid is on
+                centroid_sides = []
+                for c in centroids:
+                    side = np.dot(c - line_point, line_normal)
+                    centroid_sides.append(side)
+
+                # Ensure centroid 0 is on the negative side (for consistent assignment)
+                if centroid_sides[0] > 0:
+                    line_normal = -line_normal
+
+                # Assign each vertex based on which side of the boundary line it's on
+                for v_idx, v_2d in enumerate(target_2d):
+                    side = np.dot(v_2d - line_point, line_normal)
+                    if side < 0:
+                        assignments.append(0)
+                    else:
+                        assignments.append(1)
+
+                print(f"  [BP Transform] assignment by boundary line: {assignments.count(0)} to piece 0, {assignments.count(1)} to piece 1")
+
+            else:
+                # For n_pieces > 2: Use optimized polygon containment + nearest boundary
+                # The optimization has transformed source polygons to tile the target
+
+                # Assign each vertex using optimized polygons (piece_polygons already built above)
+                inside_count = 0
+                boundary_count = 0
+                centroid_count = 0
+
+                for v_idx, v_2d in enumerate(target_2d):
+                    pt = Point(v_2d)
+                    assigned_piece = None
+
+                    # First: check if inside any optimized polygon
                     for piece_idx, poly in enumerate(piece_polygons):
-                        if poly is not None:
-                            try:
-                                dist = poly.exterior.distance(pt)
-                                if dist < min_dist:
-                                    min_dist = dist
-                                    assigned_piece = piece_idx
-                            except:
-                                pass
-                    if assigned_piece is not None:
-                        boundary_count += 1
+                        if poly is not None and poly.contains(pt):
+                            assigned_piece = piece_idx
+                            inside_count += 1
+                            break
 
-                # Last resort: nearest centroid
-                if assigned_piece is None:
-                    centroid_dists = [np.linalg.norm(v_2d - c) for c in centroids]
-                    assigned_piece = centroid_dists.index(min(centroid_dists))
-                    centroid_count += 1
+                    # Second: find nearest optimized polygon boundary
+                    if assigned_piece is None:
+                        min_dist = float('inf')
+                        for piece_idx, poly in enumerate(piece_polygons):
+                            if poly is not None:
+                                try:
+                                    dist = poly.exterior.distance(pt)
+                                    if dist < min_dist:
+                                        min_dist = dist
+                                        assigned_piece = piece_idx
+                                except:
+                                    pass
+                        if assigned_piece is not None:
+                            boundary_count += 1
 
-                assignments.append(assigned_piece)
+                    # Last resort: nearest centroid
+                    if assigned_piece is None:
+                        centroid_dists = [np.linalg.norm(v_2d - c) for c in centroids]
+                        assigned_piece = centroid_dists.index(min(centroid_dists))
+                        centroid_count += 1
 
-            print(f"  [BP Transform] Assignment (n={n_pieces}): {inside_count} inside, {boundary_count} boundary, {centroid_count} centroid")
-            print(f"  [BP Transform] Piece distribution: {[assignments.count(i) for i in range(n_pieces)]}")
+                    assignments.append(assigned_piece)
+
+                print(f"  [BP Transform] Assignment (n={n_pieces}): {inside_count} inside, {boundary_count} boundary, {centroid_count} centroid")
+                print(f"  [BP Transform] Piece distribution: {[assignments.count(i) for i in range(n_pieces)]}")
 
         # Remove islands: for 2 pieces, find the 2 best split points
         # This guarantees exactly 2 contiguous regions on a closed contour
@@ -13121,59 +13150,94 @@ class ContourMeshMixin:
             boundary_pt = target_contour[v_idx_a] + t * (target_contour[v_idx_b] - target_contour[v_idx_a])
             return t, boundary_pt
 
-        # Second pass: assign vertices and interpolate at boundaries
+        # ========== Build final pieces ==========
         new_contours = [[] for _ in range(n_pieces)]
         shared_boundary_points = []  # Collect shared cut edge vertices
-        n_verts = len(target_2d)
         boundary_crossings = []  # Track all boundary crossings for debug
 
-        prev_piece = assignments[-1]  # Start with last vertex's assignment
-        for v_idx in range(n_verts):
-            curr_piece = assignments[v_idx]
+        if use_intersection_method and all(p is not None for p in intersection_pieces_2d):
+            # Convert intersection pieces from 2D back to 3D
+            print(f"  [BP Transform] Converting {len(intersection_pieces_2d)} intersection pieces to 3D")
+            for piece_idx, piece_2d in enumerate(intersection_pieces_2d):
+                piece_3d = []
+                for pt_2d in piece_2d:
+                    # Convert from 2D (target plane) to 3D
+                    pt_3d = target_mean + pt_2d[0] * target_x + pt_2d[1] * target_y
+                    piece_3d.append(pt_3d)
+                new_contours[piece_idx] = piece_3d
+                print(f"  [BP Transform] Piece {piece_idx}: {len(piece_3d)} vertices (from intersection)")
 
-            # Check if we crossed a boundary from prev vertex to this one
-            if prev_piece != curr_piece and v_idx > 0:
-                prev_v_idx = v_idx - 1
-                # Find where cutting line intersects this edge
-                t, boundary_pt = find_edge_cut_point(prev_v_idx, v_idx)
+            # Find shared boundary points between adjacent pieces
+            # These are points that appear in multiple pieces (intersection boundaries)
+            for i in range(n_pieces):
+                for j in range(i + 1, n_pieces):
+                    if len(new_contours[i]) >= 3 and len(new_contours[j]) >= 3:
+                        piece_i = np.array(new_contours[i])
+                        piece_j = np.array(new_contours[j])
+                        # Find closest point pairs between pieces
+                        for pi in piece_i:
+                            for pj in piece_j:
+                                if np.linalg.norm(pi - pj) < 1e-6:
+                                    shared_boundary_points.append(pi.copy())
+                                    break
 
-                # Add boundary point to BOTH pieces (shared vertex)
+        else:
+            # Fallback: vertex assignment method
+            n_verts = len(target_2d)
+            if len(assignments) == 0:
+                # No assignments made (shouldn't happen, but handle gracefully)
+                print(f"  [BP Transform] WARNING: No assignments, using centroid-based assignment")
+                for v_idx, v_2d in enumerate(target_2d):
+                    centroid_dists = [np.linalg.norm(v_2d - c) for c in centroids]
+                    assignments.append(centroid_dists.index(min(centroid_dists)))
+
+            prev_piece = assignments[-1]  # Start with last vertex's assignment
+            for v_idx in range(n_verts):
+                curr_piece = assignments[v_idx]
+
+                # Check if we crossed a boundary from prev vertex to this one
+                if prev_piece != curr_piece and v_idx > 0:
+                    prev_v_idx = v_idx - 1
+                    # Find where cutting line intersects this edge
+                    t, boundary_pt = find_edge_cut_point(prev_v_idx, v_idx)
+
+                    # Add boundary point to BOTH pieces (shared vertex)
+                    new_contours[prev_piece].append(boundary_pt)
+                    new_contours[curr_piece].append(boundary_pt)
+                    shared_boundary_points.append(boundary_pt.copy())
+                    boundary_crossings.append((prev_v_idx, v_idx, prev_piece, curr_piece, t))
+
+                # Add current vertex to its piece
+                new_contours[curr_piece].append(target_contour[v_idx])
+                prev_piece = curr_piece
+
+            # Handle wrap-around: check boundary between last and first vertex
+            if assignments[-1] != assignments[0]:
+                prev_piece = assignments[-1]
+                curr_piece = assignments[0]
+
+                # Find where cutting line intersects wrap-around edge
+                t, boundary_pt = find_edge_cut_point(n_verts - 1, 0)
+
                 new_contours[prev_piece].append(boundary_pt)
                 new_contours[curr_piece].append(boundary_pt)
                 shared_boundary_points.append(boundary_pt.copy())
-                boundary_crossings.append((prev_v_idx, v_idx, prev_piece, curr_piece, t))
+                boundary_crossings.append((n_verts - 1, 0, prev_piece, curr_piece, t, 'wrap-around'))
 
-            # Add current vertex to its piece
-            new_contours[curr_piece].append(target_contour[v_idx])
-            prev_piece = curr_piece
-
-        # Handle wrap-around: check boundary between last and first vertex
-        if assignments[-1] != assignments[0]:
-            prev_piece = assignments[-1]
-            curr_piece = assignments[0]
-
-            # Find where cutting line intersects wrap-around edge
-            t, boundary_pt = find_edge_cut_point(n_verts - 1, 0)
-
-            new_contours[prev_piece].append(boundary_pt)
-            new_contours[curr_piece].append(boundary_pt)
-            shared_boundary_points.append(boundary_pt.copy())
-            boundary_crossings.append((n_verts - 1, 0, prev_piece, curr_piece, t, 'wrap-around'))
-
-        # Debug: print boundary crossings
-        print(f"  [BP Transform] {len(boundary_crossings)} boundary crossings:")
-        for bc in boundary_crossings:
-            if len(bc) == 6:  # wrap-around case
-                print(f"    edge ({bc[0]}->{bc[1]}): piece {bc[2]} -> piece {bc[3]}, t={bc[4]:.3f} [{bc[5]}]")
-            else:
-                print(f"    edge ({bc[0]}->{bc[1]}): piece {bc[2]} -> piece {bc[3]}, t={bc[4]:.3f}")
-        if len(boundary_crossings) != n_pieces - 1 + (1 if assignments[-1] != assignments[0] else 0):
-            # Expected: for N pieces, we need N boundary crossings to form N closed pieces
-            # Actually for a single cut through closed contour, we get exactly 2 crossings (or 1 main + 1 wrap-around)
-            pass
-        expected_crossings = n_pieces  # For N pieces from a closed contour, exactly N boundary crossings
-        if len(boundary_crossings) != expected_crossings:
-            print(f"  [BP Transform] WARNING: Expected {expected_crossings} boundary crossings for {n_pieces} pieces, got {len(boundary_crossings)}")
+            # Debug: print boundary crossings
+            print(f"  [BP Transform] {len(boundary_crossings)} boundary crossings:")
+            for bc in boundary_crossings:
+                if len(bc) == 6:  # wrap-around case
+                    print(f"    edge ({bc[0]}->{bc[1]}): piece {bc[2]} -> piece {bc[3]}, t={bc[4]:.3f} [{bc[5]}]")
+                else:
+                    print(f"    edge ({bc[0]}->{bc[1]}): piece {bc[2]} -> piece {bc[3]}, t={bc[4]:.3f}")
+            if len(boundary_crossings) != n_pieces - 1 + (1 if assignments[-1] != assignments[0] else 0):
+                # Expected: for N pieces, we need N boundary crossings to form N closed pieces
+                # Actually for a single cut through closed contour, we get exactly 2 crossings (or 1 main + 1 wrap-around)
+                pass
+            expected_crossings = n_pieces  # For N pieces from a closed contour, exactly N boundary crossings
+            if len(boundary_crossings) != expected_crossings:
+                print(f"  [BP Transform] WARNING: Expected {expected_crossings} boundary crossings for {n_pieces} pieces, got {len(boundary_crossings)}")
 
         # Register shared cut edge vertices globally
         if len(shared_boundary_points) > 0:
