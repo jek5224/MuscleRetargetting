@@ -4877,7 +4877,11 @@ class ContourMeshMixin:
             print(f"  Stream {stream_idx}: {max_boundaries} boundaries -> {vertex_count} vertices")
 
         # Step 3: Resample each contour (store separately, don't modify originals)
+        # Also store parameters and metadata for mesh building
         resampled_contours = []
+        resampled_params = []      # Parameter t for each vertex
+        resampled_fixed = []       # Fixed vertex indices (intersection points)
+        resampled_types = []       # Vertex types ('surface', 'boundary', 'fixed')
 
         for stream_idx, (contour_group, bounding_plane_group) in enumerate(zip(self.contours, self.bounding_planes)):
             num_samples = stream_vertex_counts[stream_idx]
@@ -4886,6 +4890,9 @@ class ContourMeshMixin:
             print(f"  Stream {stream_idx}: {len(contour_group)} levels, {num_samples} vertices each")
 
             resampled_group = []
+            params_group = []
+            fixed_group = []
+            types_group = []
 
             for level_idx, (contour, bounding_plane_info) in enumerate(zip(contour_group, bounding_plane_group)):
                 contour = np.array(contour)
@@ -4893,7 +4900,7 @@ class ContourMeshMixin:
 
                 if len(boundaries) > 0:
                     # Cut contour: resample with fixed intersection points
-                    resampled = self._resample_cut_contour(
+                    resampled, params, fixed_indices, vertex_types = self._resample_cut_contour(
                         contour, boundaries, num_samples, base_samples
                     )
                 else:
@@ -4904,15 +4911,30 @@ class ContourMeshMixin:
                     else:
                         corner_ref = None
                     resampled = self._resample_single_contour(contour, num_samples, corner_ref)
+                    # Generate uniform parameters for normal contours
+                    n = len(resampled)
+                    params = np.linspace(0, 1, n, endpoint=False)
+                    fixed_indices = []  # No fixed vertices
+                    vertex_types = ['surface'] * n
 
                 resampled_group.append(resampled)
+                params_group.append(params)
+                fixed_group.append(fixed_indices)
+                types_group.append(vertex_types)
 
             resampled_contours.append(resampled_group)
+            resampled_params.append(params_group)
+            resampled_fixed.append(fixed_group)
+            resampled_types.append(types_group)
 
-        # Store resampled contours SEPARATELY - don't modify original contours or bounding_planes
+        # Store resampled contours and metadata SEPARATELY
         self.contours_resampled = resampled_contours
+        self.contours_resampled_params = resampled_params
+        self.contours_resampled_fixed = resampled_fixed
+        self.contours_resampled_types = resampled_types
 
         print(f"Resampling complete: {len(self.contours_resampled)} streams stored in contours_resampled")
+        print(f"  Parameters and fixed indices stored for mesh building")
         print(f"  Original contours and bounding_planes preserved for fiber/MVC")
 
     def _find_vertex_in_contour(self, contour, target_vertex, tolerance=0.01):
@@ -5204,13 +5226,59 @@ class ContourMeshMixin:
             # Remove last vertex (same as first, closing the loop)
             result = result[:-1]
 
-            return np.array(result)
+            # Compute parameters for each vertex (for mesh building)
+            # Parameter t ∈ [0, 1] represents position around the contour
+            n_result = len(result)
+            n_surface = len(resampled_surface)
+            n_boundary_used = len(resampled_boundary) - 2  # Exclude endpoints (already in surface)
+
+            params = np.zeros(n_result)
+            vertex_types = []  # 'surface', 'boundary', or 'fixed'
+
+            # Surface vertices: t from 0 to surface_fraction
+            surface_length = np.sum([np.linalg.norm(resampled_surface[i+1] - resampled_surface[i])
+                                     for i in range(len(resampled_surface)-1)])
+            boundary_length_actual = np.linalg.norm(boundary_end - boundary_start)
+            total_length = surface_length + boundary_length_actual
+            surface_fraction = surface_length / total_length if total_length > 0 else 0.5
+
+            # Assign parameters to surface vertices
+            for i in range(n_surface):
+                if i == 0:
+                    params[i] = 0.0
+                    vertex_types.append('fixed')  # First intersection point
+                elif i == n_surface - 1:
+                    params[i] = surface_fraction
+                    vertex_types.append('fixed')  # Second intersection point
+                else:
+                    # Interpolate based on position in surface
+                    params[i] = (i / (n_surface - 1)) * surface_fraction
+                    vertex_types.append('surface')
+
+            # Assign parameters to boundary vertices (excluding endpoints already counted)
+            for i in range(n_boundary_used):
+                param_idx = n_surface + i
+                # Interpolate from surface_fraction to 1.0
+                t_in_boundary = (i + 1) / (n_boundary_used + 1)
+                params[param_idx] = surface_fraction + t_in_boundary * (1.0 - surface_fraction)
+                vertex_types.append('boundary')
+
+            # Fixed vertex indices (the two intersection points)
+            fixed_indices = [0, n_surface - 1]
+
+            return np.array(result), params, fixed_indices, vertex_types
 
         else:
             # Multiple boundaries - need more complex handling
             # For now, fall back to normal resampling
             print(f"      WARNING: {len(boundaries)} boundaries not yet fully supported")
-            return self._resample_single_contour(contour, num_samples, None)
+            resampled = self._resample_single_contour(contour, num_samples, None)
+            # Generate uniform parameters for fallback
+            n = len(resampled)
+            params = np.linspace(0, 1, n, endpoint=False)
+            fixed_indices = []  # No fixed vertices
+            vertex_types = ['surface'] * n
+            return resampled, params, fixed_indices, vertex_types
 
     def _weld_stream_vertices(self, tolerance=0.05):
         """
@@ -6374,15 +6442,24 @@ class ContourMeshMixin:
         self.contour_mesh_vertices = None
         self.contour_mesh_faces = None
 
-        print(f"Building contour mesh from {len(self.contours)} streams...")
-        num_streams = len(self.contours)
+        # Use contours_resampled if available (has params for parametric mesh building)
+        # Otherwise fall back to self.contours
+        use_resampled = (hasattr(self, 'contours_resampled') and
+                        self.contours_resampled is not None and
+                        len(self.contours_resampled) > 0)
+
+        source_contours = self.contours_resampled if use_resampled else self.contours
+        source_name = "contours_resampled" if use_resampled else "contours"
+
+        print(f"Building contour mesh from {len(source_contours)} streams (source: {source_name})...")
+        num_streams = len(source_contours)
         if num_streams == 0:
             print("No streams found.")
             return
 
         # Contours are already normalized - use directly without re-alignment
         aligned_streams = []
-        for stream_idx, stream_contours in enumerate(self.contours):
+        for stream_idx, stream_contours in enumerate(source_contours):
             if len(stream_contours) < 2:
                 print(f"Stream {stream_idx} has less than 2 contours, skipping.")
                 aligned_streams.append([])
@@ -6464,6 +6541,15 @@ class ContourMeshMixin:
         # Track processed quads to avoid duplicates at shared boundaries
         processed_quads = set()
 
+        # Check if parametric data is available
+        has_params = (hasattr(self, 'contours_resampled_params') and
+                      self.contours_resampled_params is not None and
+                      len(self.contours_resampled_params) > 0)
+        if has_params:
+            print("  Using parametric mesh building (zipper algorithm)")
+        else:
+            print("  Using index-based mesh building (no params available)")
+
         # Create faces between consecutive levels for each stream
         for stream_idx in range(num_streams):
             for level_idx in range(num_levels - 1):
@@ -6476,7 +6562,42 @@ class ContourMeshMixin:
                 n_curr = len(curr_indices)
                 n_next = len(next_indices)
 
-                if n_curr == n_next:
+                # Check if we have params for both contours
+                curr_params = None
+                next_params = None
+                curr_fixed = None
+                next_fixed = None
+                if has_params:
+                    try:
+                        if (stream_idx < len(self.contours_resampled_params) and
+                            level_idx < len(self.contours_resampled_params[stream_idx]) and
+                            level_idx + 1 < len(self.contours_resampled_params[stream_idx])):
+                            curr_params = self.contours_resampled_params[stream_idx][level_idx]
+                            next_params = self.contours_resampled_params[stream_idx][level_idx + 1]
+                            # Check length matches
+                            if (curr_params is not None and next_params is not None and
+                                len(curr_params) == n_curr and len(next_params) == n_next):
+                                # Get fixed indices if available
+                                if hasattr(self, 'contours_resampled_fixed'):
+                                    curr_fixed = self.contours_resampled_fixed[stream_idx][level_idx]
+                                    next_fixed = self.contours_resampled_fixed[stream_idx][level_idx + 1]
+                            else:
+                                curr_params = None
+                                next_params = None
+                    except (IndexError, TypeError):
+                        curr_params = None
+                        next_params = None
+
+                # Use parametric method if params available, else fall back to index-based
+                if curr_params is not None and next_params is not None:
+                    # Use zipper algorithm with parameter matching
+                    faces = self._create_contour_band_parametric(
+                        curr_indices, next_indices, curr_params, next_params,
+                        curr_fixed or [], next_fixed or [],
+                        all_vertices, processed_quads
+                    )
+                    all_faces.extend(faces)
+                elif n_curr == n_next:
                     # Same size - create band with direct indices
                     if level_idx == 0:
                         print(f"  Level 0->1 (origin->next): {n_curr} == {n_next} vertices (equal path)")
@@ -6506,7 +6627,7 @@ class ContourMeshMixin:
                             all_faces.append([v0, v1, v3])
                             all_faces.append([v1, v2, v3])
                 else:
-                    # Different sizes - variable band
+                    # Different sizes - variable band (fallback)
                     faces = self._create_contour_band_variable_indices(
                         curr_indices, next_indices, all_vertices, processed_quads
                     )
@@ -6590,6 +6711,117 @@ class ContourMeshMixin:
                 i_next += 1
             else:
                 break
+
+        return faces
+
+    def _create_contour_band_parametric(self, curr_indices, next_indices, curr_params, next_params,
+                                        curr_fixed, next_fixed, all_vertices, processed_quads=None):
+        """
+        Create triangular faces between two contours using parametric matching (zipper algorithm).
+
+        This avoids twisted faces by matching vertices based on their parameter values
+        (position around the contour) rather than simple index positions.
+
+        Args:
+            curr_indices: Vertex indices for current contour (global mesh indices)
+            next_indices: Vertex indices for next contour (global mesh indices)
+            curr_params: Parameter values [0,1] for each vertex in current contour
+            next_params: Parameter values [0,1] for each vertex in next contour
+            curr_fixed: List of fixed vertex indices (local to contour) - intersection points
+            next_fixed: List of fixed vertex indices (local to contour) - intersection points
+            all_vertices: Global vertex array
+            processed_quads: Set to track processed triangles (for deduplication)
+
+        Returns:
+            List of triangle faces [v0, v1, v2]
+        """
+        n_curr = len(curr_indices)
+        n_next = len(next_indices)
+        faces = []
+
+        if n_curr < 2 or n_next < 2:
+            return faces
+
+        # Convert params to numpy arrays for easier manipulation
+        curr_params = np.array(curr_params)
+        next_params = np.array(next_params)
+
+        # Create lookup from global index to local index
+        curr_idx_to_local = {curr_indices[i]: i for i in range(n_curr)}
+        next_idx_to_local = {next_indices[i]: i for i in range(n_next)}
+
+        # Zipper algorithm: advance through both contours matching by parameter
+        # Start at parameter t=0 (first vertex)
+        i_curr = 0  # pointer for current contour
+        i_next = 0  # pointer for next contour
+
+        # Track number of triangles created
+        tri_count = 0
+
+        # Continue until we've traversed both contours completely
+        while i_curr < n_curr or i_next < n_next:
+            # Get current parameter values (wrap around for closed contour)
+            t_curr = curr_params[i_curr % n_curr]
+            t_next = next_params[i_next % n_next]
+
+            # Get next parameter values (for deciding which to advance)
+            t_curr_next = curr_params[(i_curr + 1) % n_curr] if i_curr < n_curr else float('inf')
+            t_next_next = next_params[(i_next + 1) % n_next] if i_next < n_next else float('inf')
+
+            # Handle wrap-around for parameters near 1.0
+            if t_curr_next < t_curr:  # wrapped around
+                t_curr_next += 1.0
+            if t_next_next < t_next:  # wrapped around
+                t_next_next += 1.0
+
+            # Get vertex indices
+            v_curr = curr_indices[i_curr % n_curr]
+            v_curr_next = curr_indices[(i_curr + 1) % n_curr]
+            v_next = next_indices[i_next % n_next]
+            v_next_next = next_indices[(i_next + 1) % n_next]
+
+            # Decide which contour to advance based on which has smaller next parameter
+            # This creates triangles that follow parameter order
+            if i_curr >= n_curr:
+                # Current contour done, must advance next
+                advance_next = True
+            elif i_next >= n_next:
+                # Next contour done, must advance current
+                advance_next = False
+            else:
+                # Both have vertices remaining - choose based on parameter
+                advance_next = t_next_next <= t_curr_next
+
+            if advance_next and i_next < n_next:
+                # Create triangle: (v_curr, v_next_next, v_next)
+                # This advances next contour
+                tri = [v_curr, v_next_next, v_next]
+                tri_key = frozenset(tri)
+                if processed_quads is None or tri_key not in processed_quads:
+                    # Verify triangle is valid (no degenerate)
+                    if len(set(tri)) == 3:
+                        faces.append(tri)
+                        tri_count += 1
+                        if processed_quads is not None:
+                            processed_quads.add(tri_key)
+                i_next += 1
+            elif i_curr < n_curr:
+                # Create triangle: (v_curr, v_curr_next, v_next)
+                # This advances current contour
+                tri = [v_curr, v_curr_next, v_next]
+                tri_key = frozenset(tri)
+                if processed_quads is None or tri_key not in processed_quads:
+                    # Verify triangle is valid (no degenerate)
+                    if len(set(tri)) == 3:
+                        faces.append(tri)
+                        tri_count += 1
+                        if processed_quads is not None:
+                            processed_quads.add(tri_key)
+                i_curr += 1
+            else:
+                break
+
+        print(f"    Parametric band: {n_curr} -> {n_next} vertices, {tri_count} triangles")
 
         return faces
 
