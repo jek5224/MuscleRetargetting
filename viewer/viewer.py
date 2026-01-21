@@ -5228,9 +5228,29 @@ class GLFWApp():
                     thickness = 2.5 if is_selected else 1.5
 
                     if len(src_on_target_2d) >= 3:
-                        for i in range(len(src_on_target_2d)):
-                            p1 = to_screen(src_on_target_2d[i], x0, y0, canvas_size)
-                            p2 = to_screen(src_on_target_2d[(i + 1) % len(src_on_target_2d)], x0, y0, canvas_size)
+                        # Convert all points to screen coordinates
+                        screen_pts = [to_screen(src_on_target_2d[i], x0, y0, canvas_size) for i in range(len(src_on_target_2d))]
+
+                        # Fill polygon first (like PNG visualization does)
+                        # Use triangulation for non-convex polygons
+                        fill_alpha = 0.15 if is_selected else 0.05
+                        try:
+                            # Simple triangle fan from centroid for fill
+                            src_centroid_screen = to_screen(src_on_target_2d.mean(axis=0), x0, y0, canvas_size)
+                            for i in range(len(screen_pts)):
+                                p1 = screen_pts[i]
+                                p2 = screen_pts[(i + 1) % len(screen_pts)]
+                                draw_list.add_triangle_filled(
+                                    src_centroid_screen[0], src_centroid_screen[1],
+                                    p1[0], p1[1], p2[0], p2[1],
+                                    imgui.get_color_u32_rgba(*src_color, fill_alpha))
+                        except:
+                            pass  # Skip fill if it fails
+
+                        # Draw outline
+                        for i in range(len(screen_pts)):
+                            p1 = screen_pts[i]
+                            p2 = screen_pts[(i + 1) % len(screen_pts)]
                             draw_list.add_line(p1[0], p1[1], p2[0], p2[1],
                                               imgui.get_color_u32_rgba(*src_color, alpha), thickness)
 
