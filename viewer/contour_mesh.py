@@ -4875,6 +4875,11 @@ class ContourMeshMixin:
             vertex_count = base_samples + 2 * max_boundaries
             stream_vertex_counts.append(vertex_count)
             print(f"  Stream {stream_idx}: {max_boundaries} boundaries -> {vertex_count} vertices")
+            # Debug: show which levels have boundaries
+            if stream_idx < len(stream_boundary_info):
+                bi = stream_boundary_info[stream_idx]
+                if bi:
+                    print(f"    Boundary levels: {sorted(bi.keys())}")
 
         # Step 3: Resample each contour (store separately, don't modify originals)
         # Also store parameters and metadata for mesh building
@@ -4888,6 +4893,7 @@ class ContourMeshMixin:
             boundary_info = stream_boundary_info[stream_idx]
 
             print(f"  Stream {stream_idx}: {len(contour_group)} levels, {num_samples} vertices each")
+            print(f"    boundary_info keys: {sorted(boundary_info.keys()) if boundary_info else 'empty'}")
 
             resampled_group = []
             params_group = []
