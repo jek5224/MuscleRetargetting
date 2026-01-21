@@ -12044,6 +12044,7 @@ class ContourMeshMixin:
                 is_common_mode = self._manual_cut_data.get('is_common_mode', False) if self._manual_cut_data else False
                 # COMMON mode: is_first_division=False, SEPARATE mode: is_first_division=True (only for first piece)
                 is_first_div = (not is_common_mode) and (num_unmatched_pieces == 1 and local_idx == 0)
+                print(f"[Optimize Remaining] is_common_mode={is_common_mode}, is_first_div={is_first_div}, num_unmatched={num_unmatched_pieces}, local_idx={local_idx}")
                 sub_pieces, _ = self._cut_contour_bp_transform(
                     piece_3d, piece_bp,
                     sub_source_contours, sub_source_bps, sub_stream_indices,
