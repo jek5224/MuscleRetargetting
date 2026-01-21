@@ -6679,15 +6679,39 @@ class ContourMeshMixin:
                     )
                     all_faces.extend(faces)
                 elif n_curr == n_next:
-                    # Same size - create band with direct indices
-                    if level_idx == 0:
-                        print(f"  Level 0->1 (origin->next): {n_curr} == {n_next} vertices (equal path)")
+                    # Same size - find best rotation offset to minimize twist
+                    # This is important for normal↔cut transitions where v0 positions differ
+
+                    # Get actual vertex positions
+                    curr_verts = np.array([all_vertices[idx] for idx in curr_indices])
+                    next_verts = np.array([all_vertices[idx] for idx in next_indices])
+
+                    # Find best rotation offset for next contour
+                    best_offset = 0
+                    best_cost = float('inf')
+                    for offset in range(n_next):
+                        # Compute cost as sum of distances between paired vertices
+                        cost = 0
+                        for i in range(n_curr):
+                            j = (i + offset) % n_next
+                            cost += np.linalg.norm(curr_verts[i] - next_verts[j])
+                        if cost < best_cost:
+                            best_cost = cost
+                            best_offset = offset
+
+                    if best_offset != 0:
+                        print(f"  Level {level_idx}->{level_idx+1}: rotation offset {best_offset}")
+
+                    # Build faces using the offset
                     for i in range(n_curr):
                         i_next = (i + 1) % n_curr
+                        j = (i + best_offset) % n_next
+                        j_next = (i + 1 + best_offset) % n_next
+
                         v0 = curr_indices[i]
                         v1 = curr_indices[i_next]
-                        v2 = next_indices[i_next]
-                        v3 = next_indices[i]
+                        v2 = next_indices[j_next]
+                        v3 = next_indices[j]
 
                         # Check if this quad was already created by another stream
                         quad_key = frozenset([v0, v1, v2, v3])
