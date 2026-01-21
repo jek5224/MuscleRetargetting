@@ -5099,70 +5099,50 @@ class ContourMeshMixin:
                 idx1, idx2, int1_3d, int2_3d = boundary_data
                 all_boundary_indices = [idx1, idx2]  # Fallback
 
-            # all_boundary_indices contains ALL vertex indices on the boundary line
-            # (sorted by position along the line from ip1 to ip2)
-            boundary_indices_set = set(all_boundary_indices)
-            print(f"      Boundary line has {len(boundary_indices_set)} vertices: {sorted(boundary_indices_set)}")
-
             # Ensure idx1 < idx2 for consistent path definitions
             if idx1 > idx2:
                 idx1, idx2 = idx2, idx1
                 int1_3d, int2_3d = int2_3d, int1_3d
 
-            # Determine which path is boundary vs surface by checking if path vertices
-            # are in the boundary_indices_set
+            # Determine which path is boundary vs surface using arc-length comparison
             # Path A: idx1 -> idx2 (direct)
             # Path B: idx2 -> idx1 (wrapping)
+            # The BOUNDARY path has arc-length close to straight-line distance
+            # The SURFACE path has arc-length much longer than straight-line distance
 
-            # Count boundary vertices in each path
-            path_a_boundary_count = 0
+            # Calculate arc-length for path A (idx1 -> idx2, direct)
             path_a_length = 0
             idx = idx1
             while idx != idx2:
                 next_idx = (idx + 1) % n
                 path_a_length += np.linalg.norm(contour[next_idx] - contour[idx])
-                if idx in boundary_indices_set:
-                    path_a_boundary_count += 1
                 idx = next_idx
-            if idx2 in boundary_indices_set:
-                path_a_boundary_count += 1
 
-            path_b_boundary_count = 0
+            # Calculate arc-length for path B (idx2 -> idx1, wrapping)
             path_b_length = 0
             idx = idx2
             while idx != idx1:
                 next_idx = (idx + 1) % n
                 path_b_length += np.linalg.norm(contour[next_idx] - contour[idx])
-                if idx in boundary_indices_set:
-                    path_b_boundary_count += 1
                 idx = next_idx
-            if idx1 in boundary_indices_set:
-                path_b_boundary_count += 1
 
-            # The path with more boundary vertices is the boundary path
-            # (the boundary line contains the intersection points + intermediates)
-            if path_a_boundary_count > path_b_boundary_count:
-                # Path A is boundary, Path B is surface
+            # Straight-line distance between intersection points
+            straight_dist = np.linalg.norm(int2_3d - int1_3d)
+
+            # The boundary is the path whose arc-length is closer to straight-line distance
+            diff_a = abs(path_a_length - straight_dist)
+            diff_b = abs(path_b_length - straight_dist)
+
+            if diff_a < diff_b:
+                # Path A is boundary (shorter/straighter), Path B is surface
                 surface_length = path_b_length
                 surface_is_path_b = True
-                print(f"      Path A is boundary ({path_a_boundary_count} boundary verts), Path B is surface ({path_b_boundary_count} boundary verts)")
-            elif path_b_boundary_count > path_a_boundary_count:
-                # Path B is boundary, Path A is surface
+                print(f"      Path A=boundary (arc={path_a_length:.2f}, straight={straight_dist:.2f}), Path B=surface (arc={path_b_length:.2f})")
+            else:
+                # Path B is boundary (shorter/straighter), Path A is surface
                 surface_length = path_a_length
                 surface_is_path_b = False
-                print(f"      Path B is boundary ({path_b_boundary_count} boundary verts), Path A is surface ({path_a_boundary_count} boundary verts)")
-            else:
-                # Fallback: use arc-length comparison
-                straight_dist = np.linalg.norm(int2_3d - int1_3d)
-                diff_a = abs(path_a_length - straight_dist)
-                diff_b = abs(path_b_length - straight_dist)
-                if diff_a < diff_b:
-                    surface_length = path_b_length
-                    surface_is_path_b = True
-                else:
-                    surface_length = path_a_length
-                    surface_is_path_b = False
-                print(f"      Fallback: used arc-length comparison")
+                print(f"      Path B=boundary (arc={path_b_length:.2f}, straight={straight_dist:.2f}), Path A=surface (arc={path_a_length:.2f})")
 
             # Boundary length for vertex distribution is straight-line distance
             straight_dist = np.linalg.norm(int2_3d - int1_3d)
