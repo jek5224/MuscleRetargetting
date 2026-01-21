@@ -13010,8 +13010,9 @@ class ContourMeshMixin:
                 if len(runs) > 1 and runs[0][2] == runs[-1][2]:
                     merged_length = runs[0][1] + runs[-1][1]
                     merged_start = runs[-1][0]
+                    merged_value = runs[0][2]  # Save piece value BEFORE modifying runs
                     runs = runs[1:-1]  # Remove first and last
-                    runs.append((merged_start, merged_length, runs[-1][2] if runs else arr[0]))
+                    runs.append((merged_start, merged_length, merged_value))
 
                 # For each piece, find its longest run and absorb smaller runs into neighbors
                 piece_runs = {i: [] for i in range(n_pieces)}
@@ -13087,6 +13088,7 @@ class ContourMeshMixin:
         new_contours = [[] for _ in range(n_pieces)]
         shared_boundary_points = []  # Collect shared cut edge vertices
         n_verts = len(target_2d)
+        boundary_crossings = []  # Track all boundary crossings for debug
 
         prev_piece = assignments[-1]  # Start with last vertex's assignment
         for v_idx in range(n_verts):
@@ -13102,6 +13104,7 @@ class ContourMeshMixin:
                 new_contours[prev_piece].append(boundary_pt)
                 new_contours[curr_piece].append(boundary_pt)
                 shared_boundary_points.append(boundary_pt.copy())
+                boundary_crossings.append((prev_v_idx, v_idx, prev_piece, curr_piece, t))
 
             # Add current vertex to its piece
             new_contours[curr_piece].append(target_contour[v_idx])
@@ -13118,6 +13121,22 @@ class ContourMeshMixin:
             new_contours[prev_piece].append(boundary_pt)
             new_contours[curr_piece].append(boundary_pt)
             shared_boundary_points.append(boundary_pt.copy())
+            boundary_crossings.append((n_verts - 1, 0, prev_piece, curr_piece, t, 'wrap-around'))
+
+        # Debug: print boundary crossings
+        print(f"  [BP Transform] {len(boundary_crossings)} boundary crossings:")
+        for bc in boundary_crossings:
+            if len(bc) == 6:  # wrap-around case
+                print(f"    edge ({bc[0]}->{bc[1]}): piece {bc[2]} -> piece {bc[3]}, t={bc[4]:.3f} [{bc[5]}]")
+            else:
+                print(f"    edge ({bc[0]}->{bc[1]}): piece {bc[2]} -> piece {bc[3]}, t={bc[4]:.3f}")
+        if len(boundary_crossings) != n_pieces - 1 + (1 if assignments[-1] != assignments[0] else 0):
+            # Expected: for N pieces, we need N boundary crossings to form N closed pieces
+            # Actually for a single cut through closed contour, we get exactly 2 crossings (or 1 main + 1 wrap-around)
+            pass
+        expected_crossings = n_pieces  # For N pieces from a closed contour, exactly N boundary crossings
+        if len(boundary_crossings) != expected_crossings:
+            print(f"  [BP Transform] WARNING: Expected {expected_crossings} boundary crossings for {n_pieces} pieces, got {len(boundary_crossings)}")
 
         # Register shared cut edge vertices globally
         if len(shared_boundary_points) > 0:
@@ -13168,6 +13187,25 @@ class ContourMeshMixin:
             # Ensure at least 3 vertices for valid contour (duplicate if needed)
             while len(new_contours[i]) < 3:
                 new_contours[i] = np.vstack([new_contours[i], new_contours[i][-1]])
+
+        # DEBUG: Check for self-intersection in pieces
+        from shapely.geometry import Polygon as ShapelyPolygon
+        from shapely.validation import explain_validity
+        for i in range(n_pieces):
+            piece_3d = new_contours[i]
+            if len(piece_3d) >= 3:
+                # Project to 2D for self-intersection check
+                piece_2d = np.array([[np.dot(v - target_mean, target_x), np.dot(v - target_mean, target_y)] for v in piece_3d])
+                try:
+                    poly = ShapelyPolygon(piece_2d)
+                    if not poly.is_valid:
+                        print(f"  [BP Transform] WARNING: Piece {i} is NOT a valid polygon! Reason: {explain_validity(poly)}")
+                        print(f"    First 5 verts: {piece_2d[:5].tolist()}")
+                        print(f"    Last 5 verts: {piece_2d[-5:].tolist()}")
+                    else:
+                        print(f"  [BP Transform] Piece {i} is valid (area={poly.area:.4f})")
+                except Exception as e:
+                    print(f"  [BP Transform] WARNING: Could not validate piece {i}: {e}")
 
         # ========== Step 7b: Add intermediate vertices on shared edges ==========
         # For 2-piece cuts, add intermediate vertices on the shared edge
