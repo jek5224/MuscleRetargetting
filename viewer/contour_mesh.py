@@ -13384,18 +13384,29 @@ class ContourMeshMixin:
             print(f"  [BP Transform] Registered {len(shared_boundary_points)} shared cut edge vertices (total: {len(self.shared_cut_vertices)})")
 
             # Store intersection point pairs (for resampling) - keyed by level
-            # For n_pieces, there are n_pieces-1 cuts, each with 2 boundary points
+            # For n_pieces == 2: a single cut creates 2 boundary points (entry/exit)
+            # For n_pieces > 2: each boundary crossing is a single point between adjacent pieces
             if not hasattr(self, 'cut_intersection_points') or isinstance(self.cut_intersection_points, list):
                 self.cut_intersection_points = {}
             level_key = target_level if target_level is not None else 0
             if level_key not in self.cut_intersection_points:
                 self.cut_intersection_points[level_key] = []
-            # Pair up boundary points: (0,1), (2,3), (4,5), etc.
-            for i in range(0, len(shared_boundary_points) - 1, 2):
-                int1 = shared_boundary_points[i]
-                int2 = shared_boundary_points[i + 1]
+
+            if n_pieces == 2 and len(shared_boundary_points) == 2:
+                # For 2 pieces: pair the entry/exit points
+                int1 = shared_boundary_points[0]
+                int2 = shared_boundary_points[1]
                 self.cut_intersection_points[level_key].append((int1.copy(), int2.copy()))
-                print(f"  [BP Transform] Level {level_key}: Registered intersection pair")
+                print(f"  [BP Transform] Level {level_key}: Registered intersection pair (2-piece cut)")
+            elif n_pieces > 2:
+                # For n_pieces > 2: register pairs of consecutive boundary points
+                # Each adjacent piece pair shares one boundary point
+                # Pair consecutive points to form boundary segments
+                for i in range(len(shared_boundary_points)):
+                    int1 = shared_boundary_points[i]
+                    int2 = shared_boundary_points[(i + 1) % len(shared_boundary_points)]
+                    self.cut_intersection_points[level_key].append((int1.copy(), int2.copy()))
+                print(f"  [BP Transform] Level {level_key}: Registered {len(shared_boundary_points)} intersection pairs ({n_pieces}-piece cut)")
 
         # Ensure each piece has at least some vertices and convert to proper numpy arrays
         for i in range(n_pieces):
