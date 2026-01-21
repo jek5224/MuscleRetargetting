@@ -5854,8 +5854,6 @@ class ContourMeshMixin:
 
         # Epsilon for detecting exact duplicates
         eps = 1e-6
-        # Threshold for welding close vertices between streams (fixes /\ ridge at cut boundaries)
-        weld_threshold = 0.08
 
         for level_idx in range(num_levels):
             level_vertices = []  # All vertices at this level (before dedup)
@@ -5878,30 +5876,10 @@ class ContourMeshMixin:
             level_vertices = np.array(level_vertices)
             n = len(level_vertices)
 
-            # Weld close vertices between streams: move both to midpoint
-            # This fixes the /\ ridge at cut boundaries by collapsing it to |
-            welded_count = 0
-            for stream_i in range(num_streams):
-                start_i, end_i = level_stream_ranges[stream_i]
-                for stream_j in range(stream_i + 1, num_streams):
-                    start_j, end_j = level_stream_ranges[stream_j]
-                    for i in range(start_i, end_i):
-                        for j in range(start_j, end_j):
-                            dist = np.linalg.norm(level_vertices[i] - level_vertices[j])
-                            if dist < weld_threshold and dist > eps:
-                                # Move both to midpoint
-                                midpoint = (level_vertices[i] + level_vertices[j]) / 2
-                                level_vertices[i] = midpoint
-                                level_vertices[j] = midpoint
-                                welded_count += 1
-
-            if welded_count > 0 and level_idx < 3:
-                print(f"    Level {level_idx}: welded {welded_count} vertex pairs")
-
             # Map from original index to deduplicated index
             dedup_map = list(range(n))
 
-            # Find duplicates (including newly welded vertices that are now identical)
+            # Find duplicates across different streams
             for stream_i in range(num_streams):
                 start_i, end_i = level_stream_ranges[stream_i]
                 for stream_j in range(stream_i + 1, num_streams):
