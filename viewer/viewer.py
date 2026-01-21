@@ -4580,7 +4580,7 @@ class GLFWApp():
             def to_screen(pt_2d, x0, y0, canvas_size):
                 norm = (pt_2d - center_xy) * scale_factor + 0.5
                 sx = x0 + norm[0] * canvas_size
-                sy = y0 + norm[1] * canvas_size  # No Y flip - match PNG
+                sy = y0 + (1 - norm[1]) * canvas_size  # Flip Y to match matplotlib
                 return (sx, sy)
 
             # Canvas setup
@@ -5013,18 +5013,18 @@ class GLFWApp():
             pan = mouse_state['pan']
 
             # Coordinate transform functions (with zoom and pan)
-            # NO Y flip - match matplotlib PNG orientation (Y increases upward in data space)
+            # Y flip required: matplotlib Y goes up, screen Y goes down
             def to_screen(p, x0, y0, canvas_size):
                 center = (min_xy + max_xy) / 2
                 normalized = (np.array(p) - center) / max_range + 0.5
                 # Apply zoom and pan
                 normalized = (normalized - 0.5) * zoom + 0.5 + np.array(pan)
                 return (x0 + normalized[0] * canvas_size,
-                        y0 + normalized[1] * canvas_size)  # No Y flip - match PNG
+                        y0 + (1.0 - normalized[1]) * canvas_size)  # Flip Y to match matplotlib
 
             def from_screen(sx, sy, x0, y0, canvas_size):
                 normalized_x = (sx - x0) / canvas_size
-                normalized_y = (sy - y0) / canvas_size  # No Y flip - match PNG
+                normalized_y = 1.0 - (sy - y0) / canvas_size  # Flip Y back
                 # Reverse zoom and pan
                 normalized = np.array([normalized_x, normalized_y])
                 normalized = (normalized - 0.5 - np.array(pan)) / zoom + 0.5

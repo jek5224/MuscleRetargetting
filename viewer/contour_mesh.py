@@ -13331,6 +13331,42 @@ class ContourMeshMixin:
 
             print(f"  [BP Transform] Shared boundary info: {[(info['stream_idx'], len(info['shared_indices']), info['segments']) for info in shared_boundary_info]}")
 
+        # ========== Step 10: Reorder pieces to match source order ==========
+        # Match pieces to sources by centroid distance
+        if n_pieces == 2 and len(new_contours) == 2:
+            piece_centroids = [np.mean(c, axis=0) for c in new_contours]
+            source_centroids_3d = [np.mean(source_contours[i], axis=0) for i in range(n_pieces)]
+
+            # Project source centroids to target plane for comparison
+            source_centroids_2d = []
+            for sc in source_centroids_3d:
+                sc_2d = np.array([
+                    np.dot(sc - target_mean, target_x),
+                    np.dot(sc - target_mean, target_y)
+                ])
+                source_centroids_2d.append(sc_2d)
+
+            # Project piece centroids to 2D (they're 3D)
+            piece_centroids_2d = []
+            for pc in piece_centroids:
+                pc_2d = np.array([
+                    np.dot(pc - target_mean, target_x),
+                    np.dot(pc - target_mean, target_y)
+                ])
+                piece_centroids_2d.append(pc_2d)
+
+            # Check if piece 0 is closer to source 1 than source 0
+            dist_00 = np.linalg.norm(piece_centroids_2d[0] - source_centroids_2d[0])
+            dist_01 = np.linalg.norm(piece_centroids_2d[0] - source_centroids_2d[1])
+
+            if dist_01 < dist_00:
+                # Pieces are in wrong order - swap them
+                print(f"  [BP Transform] Reordering pieces to match source order (dist_00={dist_00:.6f}, dist_01={dist_01:.6f})")
+                new_contours = [new_contours[1], new_contours[0]]
+                # Also swap shared_boundary_info if it exists
+                if len(shared_boundary_info) == 2:
+                    shared_boundary_info = [shared_boundary_info[1], shared_boundary_info[0]]
+
         # Return cut contours along with cutting info for bounding plane creation
         # cutting_info contains:
         #   - cutting_line_3d: the cutting line direction in 3D (for x-axis perpendicular)
