@@ -4900,6 +4900,10 @@ class ContourMeshMixin:
             fixed_group = []
             types_group = []
 
+            # Track the last normal contour's v0 position
+            # Use this as reference for the first cut contour to ensure smooth transition
+            last_normal_v0 = None
+
             # Track the first intersection point from the first cut contour
             # Use this as reference for subsequent cut contours to ensure consistent ordering
             first_cut_ip1 = None
@@ -4922,9 +4926,16 @@ class ContourMeshMixin:
                         if len(bdata) >= 4:
                             print(f"      Boundary {bi}: IP1={bdata[2][:2]}, IP2={bdata[3][:2]}")
 
-                    # Use first_cut_ip1 as reference for subsequent cut contours
-                    # This ensures the same physical intersection point is always "first"
-                    ref_point = first_cut_ip1 if first_cut_ip1 is not None else corner_ref
+                    # For reference point:
+                    # - First cut contour: use last normal contour's v0 (for smooth normal->cut transition)
+                    # - Subsequent cut contours: use first cut's IP1 (for consistent cut->cut alignment)
+                    if first_cut_ip1 is not None:
+                        ref_point = first_cut_ip1
+                    elif last_normal_v0 is not None:
+                        ref_point = last_normal_v0
+                        print(f"      Using last normal v0 as reference: {last_normal_v0[:2]}")
+                    else:
+                        ref_point = corner_ref
 
                     resampled, params, fixed_indices, vertex_types = self._resample_cut_contour(
                         contour, boundaries, num_samples, base_samples, ref_point
@@ -4946,6 +4957,9 @@ class ContourMeshMixin:
                     fixed_indices = []  # No fixed vertices
                     vertex_types = ['surface'] * n
                     print(f"      Result: v0={resampled[0][:2]}, params[0]={params[0]:.3f}")
+
+                    # Track the last normal contour's v0 for reference
+                    last_normal_v0 = resampled[0].copy()
 
                 resampled_group.append(resampled)
                 params_group.append(params)
