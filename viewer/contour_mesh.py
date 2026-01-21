@@ -6614,17 +6614,22 @@ class ContourMeshMixin:
 
                 # Use parametric method if params available, else fall back to index-based
                 if curr_params is not None and next_params is not None:
-                    # Debug: show fixed point alignment for first few levels
-                    if level_idx < 3:
+                    # Debug: show fixed point alignment when transitioning to/from cut contours
+                    has_curr_fixed = len(curr_fixed or []) > 0
+                    has_next_fixed = len(next_fixed or []) > 0
+                    # Show when entering/exiting cut region or both are cut
+                    if has_curr_fixed or has_next_fixed:
                         print(f"  Stream {stream_idx} Level {level_idx}->{level_idx+1}:")
                         print(f"    curr: n={n_curr}, fixed={curr_fixed}, params at fixed={[curr_params[i] for i in (curr_fixed or [])]}")
                         print(f"    next: n={n_next}, fixed={next_fixed}, params at fixed={[next_params[i] for i in (next_fixed or [])]}")
-                        if len(curr_fixed or []) > 0 and len(next_fixed or []) > 0:
+                        if has_curr_fixed and has_next_fixed:
                             # Show vertex positions at fixed points
-                            curr_v0 = all_vertices[curr_indices[curr_fixed[0]]] if curr_fixed else None
-                            next_v0 = all_vertices[next_indices[next_fixed[0]]] if next_fixed else None
-                            if curr_v0 is not None and next_v0 is not None:
-                                print(f"    curr v[fixed0]={curr_v0[:2]}, next v[fixed0]={next_v0[:2]}")
+                            curr_v0 = all_vertices[curr_indices[curr_fixed[0]]]
+                            curr_v1 = all_vertices[curr_indices[curr_fixed[1]]]
+                            next_v0 = all_vertices[next_indices[next_fixed[0]]]
+                            next_v1 = all_vertices[next_indices[next_fixed[1]]]
+                            print(f"    curr v[fixed0]={curr_v0[:2]}, v[fixed1]={curr_v1[:2]}")
+                            print(f"    next v[fixed0]={next_v0[:2]}, v[fixed1]={next_v1[:2]}")
                     # Use zipper algorithm with parameter matching
                     faces = self._create_contour_band_parametric(
                         curr_indices, next_indices, curr_params, next_params,
