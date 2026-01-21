@@ -12855,8 +12855,9 @@ class ContourMeshMixin:
         valid_poly_count = sum(1 for p in piece_polygons if p is not None)
         print(f"  [BP Transform] Valid source polygons for intersection: {valid_poly_count}/{n_pieces}")
 
-        # Try polygon intersection approach
-        use_intersection_method = valid_poly_count == n_pieces
+        # Don't use polygon intersection approach - it cuts by source outer boundaries
+        # We want to cut along the shared edge where sources MEET each other
+        use_intersection_method = False  # Always use vertex assignment with shared edge
         intersection_pieces_2d = []
 
         if use_intersection_method:
