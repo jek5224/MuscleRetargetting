@@ -11999,14 +11999,22 @@ class ContourMeshMixin:
                 sub_source_bps = [source_bps[s] for s in assigned_sources]
                 sub_stream_indices = [stream_indices[s] for s in assigned_sources]
 
-                # Create a temporary bounding plane for this piece (use independent axes)
-                piece_bp = self.save_bounding_planes(piece_3d, target_bp.get('scalar_value', 0), use_independent_axes=True)[1]
+                # Use original target_bp if this is the first/only piece (keeps coordinate system consistent)
+                # Otherwise create a temporary bounding plane for sub-pieces
+                if num_unmatched_pieces == 1 and local_idx == 0:
+                    # First piece is the entire target - use original target_bp for consistent orientation
+                    piece_bp = target_bp
+                    print(f"[Optimize Remaining] Using original target_bp for piece {orig_piece_idx}")
+                else:
+                    # Sub-piece needs its own bounding plane
+                    piece_bp = self.save_bounding_planes(piece_3d, target_bp.get('scalar_value', 0), use_independent_axes=True)[1]
+                    print(f"[Optimize Remaining] Created new piece_bp for piece {orig_piece_idx}")
 
                 # Run optimization on this piece
                 sub_pieces, _ = self._cut_contour_bp_transform(
                     piece_3d, piece_bp,
                     sub_source_contours, sub_source_bps, sub_stream_indices,
-                    is_first_division=False,
+                    is_first_division=(num_unmatched_pieces == 1 and local_idx == 0),
                     target_level=target_level, source_level=source_level
                 )
 

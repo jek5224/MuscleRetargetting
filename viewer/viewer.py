@@ -6153,7 +6153,13 @@ class GLFWApp():
                             obj._manual_cut_data['current_pieces_3d'] = pre_pieces_3d
                         obj._manual_cut_data['optimization_preview'] = False
                         obj._manual_cut_data['cut_lines'] = []
+                        obj._manual_cut_data['edit_history'] = []
                         obj._manual_cut_line = None
+                        # Clear optimization display data
+                        obj._manual_cut_data['transformed_sources_2d'] = None
+                        # Clear _bp_viz_data to remove optimization results
+                        if hasattr(obj, '_bp_viz_data'):
+                            obj._bp_viz_data = []
                         print(f"[Preview] Reset complete - you can draw new cuts or optimize again")
 
                     imgui.same_line()
