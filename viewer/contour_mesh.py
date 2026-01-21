@@ -9962,6 +9962,11 @@ class ContourMeshMixin:
 
         # Clear cutting line and initial_line so neck finding runs for new target
         self._manual_cut_line = None
+        # Clear BP visualization data so sub-window doesn't show previous window's optimization
+        if hasattr(self, '_bp_viz_data'):
+            self._bp_viz_data = []
+        # Clear transformed sources from previous optimization
+        self._manual_cut_data['transformed_sources_2d'] = None
         if 'initial_line' in self._manual_cut_data:
             del self._manual_cut_data['initial_line']
         if 'neck_candidates' in self._manual_cut_data:
