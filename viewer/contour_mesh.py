@@ -4900,6 +4900,10 @@ class ContourMeshMixin:
             fixed_group = []
             types_group = []
 
+            # Track the first intersection point from the first cut contour
+            # Use this as reference for subsequent cut contours to ensure consistent ordering
+            first_cut_ip1 = None
+
             for level_idx, (contour, bounding_plane_info) in enumerate(zip(contour_group, bounding_plane_group)):
                 contour = np.array(contour)
                 boundaries = boundary_info.get(level_idx, [])
@@ -4917,9 +4921,20 @@ class ContourMeshMixin:
                     for bi, bdata in enumerate(boundaries):
                         if len(bdata) >= 4:
                             print(f"      Boundary {bi}: IP1={bdata[2][:2]}, IP2={bdata[3][:2]}")
+
+                    # Use first_cut_ip1 as reference for subsequent cut contours
+                    # This ensures the same physical intersection point is always "first"
+                    ref_point = first_cut_ip1 if first_cut_ip1 is not None else corner_ref
+
                     resampled, params, fixed_indices, vertex_types = self._resample_cut_contour(
-                        contour, boundaries, num_samples, base_samples, corner_ref
+                        contour, boundaries, num_samples, base_samples, ref_point
                     )
+
+                    # Store the first intersection point from this cut contour
+                    if first_cut_ip1 is None:
+                        first_cut_ip1 = resampled[0].copy()
+                        print(f"      First cut IP1 set to: {first_cut_ip1[:2]}")
+
                     print(f"      Result: v0={resampled[0][:2]}, params[0]={params[0]:.3f}, fixed={fixed_indices}")
                 else:
                     # Normal contour: standard resampling
