@@ -9963,6 +9963,22 @@ class ContourMeshMixin:
 
         print(f"[SubCut] Opened sub-window: sources {original_source_indices} -> piece {piece_idx}")
         print(f"[SubCut] New target shape: {new_target_2d.shape}, {len(new_source_contours)} sources")
+
+        # DEBUG: Validate new target for self-intersection
+        from shapely.geometry import Polygon as ShapelyPolygon
+        from shapely.validation import explain_validity
+        if len(new_target_2d) >= 3:
+            try:
+                target_poly = ShapelyPolygon(new_target_2d)
+                if not target_poly.is_valid:
+                    print(f"[SubCut] WARNING: New target is NOT a valid polygon! Reason: {explain_validity(target_poly)}")
+                    print(f"[SubCut]   First 5 verts: {new_target_2d[:5].tolist()}")
+                    print(f"[SubCut]   Last 5 verts: {new_target_2d[-5:].tolist()}")
+                else:
+                    print(f"[SubCut] New target is valid (area={target_poly.area:.4f})")
+            except Exception as e:
+                print(f"[SubCut] WARNING: Could not validate new target: {e}")
+
         # Debug: print new target centroid and first 3 vertices
         target_centroid = np.mean(new_target_3d, axis=0) if len(new_target_3d) > 0 else np.zeros(3)
         print(f"[SubCut] New target centroid: [{target_centroid[0]:.4f}, {target_centroid[1]:.4f}, {target_centroid[2]:.4f}]")
