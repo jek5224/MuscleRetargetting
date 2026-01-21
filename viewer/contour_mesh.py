@@ -13122,29 +13122,52 @@ class ContourMeshMixin:
         print(f"  [BP Transform] vertex assignments (after smoothing): {assignment_counts}")
 
         # Helper function to find intersection of cutting line with edge
-        def find_edge_cut_point(v_idx_a, v_idx_b):
+        def find_edge_cut_point(v_idx_a, v_idx_b, piece_a=None, piece_b=None):
             """Find where the cutting line intersects the edge from vertex a to vertex b.
-            Returns interpolation parameter t in [0,1] and the 3D intersection point."""
+            Returns interpolation parameter t in [0,1] and the 3D intersection point.
+            For n_pieces > 2, uses the boundary between the two adjacent source polygons."""
             # Default to midpoint
             t = 0.5
 
+            # Edge endpoints in 2D
+            p_a = target_2d[v_idx_a]
+            p_b = target_2d[v_idx_b]
+            edge_vec = p_b - p_a
+
             if cutting_line_2d is not None:
+                # Use global cutting line (for 2-piece cuts)
                 line_point, line_dir = cutting_line_2d
                 line_normal = np.array([-line_dir[1], line_dir[0]])  # Perpendicular to line
 
-                # Edge endpoints in 2D
-                p_a = target_2d[v_idx_a]
-                p_b = target_2d[v_idx_b]
-                edge_vec = p_b - p_a
-
                 # Find t where the edge crosses the line
-                # Line equation: dot(p - line_point, line_normal) = 0
-                # Edge point: p_a + t * edge_vec
-                # Solve: dot(p_a + t*edge_vec - line_point, line_normal) = 0
                 denom = np.dot(edge_vec, line_normal)
                 if abs(denom) > 1e-10:
                     t = np.dot(line_point - p_a, line_normal) / denom
                     t = np.clip(t, 0.0, 1.0)
+
+            elif piece_a is not None and piece_b is not None and piece_a < len(piece_polygons) and piece_b < len(piece_polygons):
+                # For n_pieces > 2: compute local cutting line between the two adjacent sources
+                poly_a = piece_polygons[piece_a]
+                poly_b = piece_polygons[piece_b]
+                if poly_a is not None and poly_b is not None:
+                    try:
+                        # Find perpendicular bisector between centroids of the two sources
+                        c_a = centroids[piece_a]
+                        c_b = centroids[piece_b]
+                        mid = (c_a + c_b) / 2
+                        dir_ab = c_b - c_a
+                        dir_len = np.linalg.norm(dir_ab)
+                        if dir_len > 1e-10:
+                            # Cutting line is perpendicular to the line between centroids
+                            line_dir = np.array([-dir_ab[1], dir_ab[0]]) / dir_len
+                            line_normal = dir_ab / dir_len
+
+                            denom = np.dot(edge_vec, line_normal)
+                            if abs(denom) > 1e-10:
+                                t = np.dot(mid - p_a, line_normal) / denom
+                                t = np.clip(t, 0.0, 1.0)
+                    except Exception as e:
+                        pass  # Fall back to midpoint
 
             # Compute 3D intersection point (always returns valid point)
             boundary_pt = target_contour[v_idx_a] + t * (target_contour[v_idx_b] - target_contour[v_idx_a])
@@ -13199,7 +13222,7 @@ class ContourMeshMixin:
                 if prev_piece != curr_piece and v_idx > 0:
                     prev_v_idx = v_idx - 1
                     # Find where cutting line intersects this edge
-                    t, boundary_pt = find_edge_cut_point(prev_v_idx, v_idx)
+                    t, boundary_pt = find_edge_cut_point(prev_v_idx, v_idx, prev_piece, curr_piece)
 
                     # Add boundary point to BOTH pieces (shared vertex)
                     new_contours[prev_piece].append(boundary_pt)
@@ -13217,7 +13240,7 @@ class ContourMeshMixin:
                 curr_piece = assignments[0]
 
                 # Find where cutting line intersects wrap-around edge
-                t, boundary_pt = find_edge_cut_point(n_verts - 1, 0)
+                t, boundary_pt = find_edge_cut_point(n_verts - 1, 0, prev_piece, curr_piece)
 
                 new_contours[prev_piece].append(boundary_pt)
                 new_contours[curr_piece].append(boundary_pt)
