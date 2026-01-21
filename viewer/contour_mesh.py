@@ -4806,9 +4806,10 @@ class ContourMeshMixin:
                     found_boundary = False
 
                     for ip1, ip2 in all_intersection_pairs:
-                        # Find vertices that EXACTLY match ip1 and ip2 (tight tolerance)
-                        # Only proceed if BOTH endpoints are found in this contour
-                        endpoint_tolerance = 0.005
+                        # Find vertices that EXACTLY match ip1 and ip2
+                        # Use very tight tolerance to avoid false positives from wrong intersection pairs
+                        # Working contours have dist=0.0000, wrong matches have dist=0.002-0.003
+                        endpoint_tolerance = 0.001  # Must be essentially exact match
 
                         idx_at_ip1 = None
                         idx_at_ip2 = None
