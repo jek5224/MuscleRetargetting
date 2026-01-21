@@ -5228,6 +5228,8 @@ class ContourMeshMixin:
 
             # Compute parameters for each vertex (for mesh building)
             # Parameter t ∈ [0, 1] represents position around the contour
+            # IMPORTANT: Use FIXED parameter values for intersection points (0 and 0.5)
+            # This ensures fixed points align across levels regardless of geometry
             n_result = len(result)
             n_surface = len(resampled_surface)
             n_boundary_used = len(resampled_boundary) - 2  # Exclude endpoints (already in surface)
@@ -5235,12 +5237,13 @@ class ContourMeshMixin:
             params = np.zeros(n_result)
             vertex_types = []  # 'surface', 'boundary', or 'fixed'
 
-            # Surface vertices: t from 0 to surface_fraction
-            surface_length = np.sum([np.linalg.norm(resampled_surface[i+1] - resampled_surface[i])
-                                     for i in range(len(resampled_surface)-1)])
-            boundary_length_actual = np.linalg.norm(boundary_end - boundary_start)
-            total_length = surface_length + boundary_length_actual
-            surface_fraction = surface_length / total_length if total_length > 0 else 0.5
+            # Use consistent parameter split:
+            # - First fixed point: t = 0
+            # - Surface vertices: t in (0, 0.5)
+            # - Second fixed point: t = 0.5
+            # - Boundary vertices: t in (0.5, 1)
+            # This ensures fixed points have same params across all cut contours
+            surface_fraction = 0.5  # FIXED value for consistency
 
             # Assign parameters to surface vertices
             for i in range(n_surface):
