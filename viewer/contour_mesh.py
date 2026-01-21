@@ -12792,9 +12792,18 @@ class ContourMeshMixin:
                             if closest_pair is not None:
                                 closest_dist = np.linalg.norm(closest_pair[0] - closest_pair[1])
                                 if closest_dist < 1e-8:
-                                    # Points are nearly identical - can't compute meaningful direction
-                                    # Leave shared_edge_points empty to trigger perpendicular bisector fallback
-                                    print(f"  [BP Transform] COMMON: closest points too close ({closest_dist:.9f}), will use perpendicular bisector")
+                                    # Points are nearly identical - sources touch at a single point
+                                    # Use this touching point with perpendicular bisector direction
+                                    touch_point = closest_pair[0]
+                                    centroid_vec = centroids[1] - centroids[0]
+                                    centroid_dist = np.linalg.norm(centroid_vec)
+                                    if centroid_dist > 1e-10:
+                                        centroid_dir = centroid_vec / centroid_dist
+                                        cutting_dir = np.array([-centroid_dir[1], centroid_dir[0]])
+                                        cutting_line_2d = (touch_point, cutting_dir)
+                                        print(f"  [BP Transform] COMMON: cutting line through touch point ({touch_point[0]:.6f}, {touch_point[1]:.6f})")
+                                    else:
+                                        print(f"  [BP Transform] COMMON: touch point found but centroids too close")
                                 else:
                                     # Use midpoint and perpendicular as cutting line
                                     midpt = (closest_pair[0] + closest_pair[1]) / 2
