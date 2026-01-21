@@ -4904,6 +4904,13 @@ class ContourMeshMixin:
                 contour = np.array(contour)
                 boundaries = boundary_info.get(level_idx, [])
 
+                # Get corner_ref for both cut and normal contours (for consistent alignment)
+                bounding_plane_corners = bounding_plane_info.get('bounding_plane')
+                if bounding_plane_corners is not None and len(bounding_plane_corners) >= 1:
+                    corner_ref = np.array(bounding_plane_corners[0])
+                else:
+                    corner_ref = None
+
                 if len(boundaries) > 0:
                     # Cut contour: resample with fixed intersection points
                     print(f"    Level {level_idx}: CUT contour, {len(boundaries)} boundary(s)")
@@ -4911,17 +4918,12 @@ class ContourMeshMixin:
                         if len(bdata) >= 4:
                             print(f"      Boundary {bi}: IP1={bdata[2][:2]}, IP2={bdata[3][:2]}")
                     resampled, params, fixed_indices, vertex_types = self._resample_cut_contour(
-                        contour, boundaries, num_samples, base_samples
+                        contour, boundaries, num_samples, base_samples, corner_ref
                     )
                     print(f"      Result: v0={resampled[0][:2]}, params[0]={params[0]:.3f}, fixed={fixed_indices}")
                 else:
                     # Normal contour: standard resampling
                     print(f"    Level {level_idx}: NORMAL contour (no boundaries)")
-                    bounding_plane_corners = bounding_plane_info.get('bounding_plane')
-                    if bounding_plane_corners is not None and len(bounding_plane_corners) >= 1:
-                        corner_ref = np.array(bounding_plane_corners[0])
-                    else:
-                        corner_ref = None
                     resampled = self._resample_single_contour(contour, num_samples, corner_ref)
                     # Generate uniform parameters for normal contours
                     n = len(resampled)
@@ -4939,68 +4941,6 @@ class ContourMeshMixin:
             resampled_params.append(params_group)
             resampled_fixed.append(fixed_group)
             resampled_types.append(types_group)
-
-        # Post-process: Propagate alignment from cut contours outward
-        # Like forward/backward smoothing - start from cut contours and propagate both directions
-        print("  Propagating alignment from cut contours...")
-        for stream_idx in range(len(resampled_contours)):
-            stream = resampled_contours[stream_idx]
-            fixed_list = resampled_fixed[stream_idx]
-            params_list = resampled_params[stream_idx]
-            n_levels = len(stream)
-
-            if n_levels == 0:
-                continue
-
-            # Find first and last cut contour indices
-            first_cut_idx = None
-            last_cut_idx = None
-            for i in range(n_levels):
-                if len(fixed_list[i]) > 0:
-                    if first_cut_idx is None:
-                        first_cut_idx = i
-                    last_cut_idx = i
-
-            if first_cut_idx is None:
-                # No cut contours in this stream - skip
-                continue
-
-            # Helper function to align a contour to a target v0
-            def align_contour_to_target(level_idx, target_v0):
-                curr_contour = stream[level_idx]
-                min_dist = float('inf')
-                best_idx = 0
-                for i, v in enumerate(curr_contour):
-                    dist = np.linalg.norm(v - target_v0)
-                    if dist < min_dist:
-                        min_dist = dist
-                        best_idx = i
-
-                if best_idx != 0:
-                    rotated = np.roll(curr_contour, -best_idx, axis=0)
-                    stream[level_idx] = rotated
-                    old_params = params_list[level_idx]
-                    rotated_params = np.roll(old_params, -best_idx)
-                    params_list[level_idx] = rotated_params
-                    print(f"    Stream {stream_idx} Level {level_idx}: rotated by {best_idx} (dist={min_dist:.4f})")
-
-            # BACKWARD pass: from first_cut_idx-1 down to 0
-            # Each contour aligns to the one AFTER it (which is already aligned)
-            for level_idx in range(first_cut_idx - 1, -1, -1):
-                if len(fixed_list[level_idx]) > 0:
-                    continue  # Skip cut contours
-                # Align to the contour after this one (already aligned)
-                target_v0 = stream[level_idx + 1][0].copy()
-                align_contour_to_target(level_idx, target_v0)
-
-            # FORWARD pass: from last_cut_idx+1 up to n_levels-1
-            # Each contour aligns to the one BEFORE it (which is already aligned)
-            for level_idx in range(last_cut_idx + 1, n_levels):
-                if len(fixed_list[level_idx]) > 0:
-                    continue  # Skip cut contours
-                # Align to the contour before this one (already aligned)
-                target_v0 = stream[level_idx - 1][0].copy()
-                align_contour_to_target(level_idx, target_v0)
 
         # Store resampled contours and metadata SEPARATELY
         self.contours_resampled = resampled_contours
@@ -5148,7 +5088,7 @@ class ContourMeshMixin:
 
         return result
 
-    def _resample_cut_contour(self, contour, boundaries, num_samples, base_samples):
+    def _resample_cut_contour(self, contour, boundaries, num_samples, base_samples, corner_ref=None):
         """
         Resample a contour with cut boundaries.
 
@@ -5157,6 +5097,7 @@ class ContourMeshMixin:
             boundaries: List of (idx1, idx2, int1_3d, int2_3d, all_boundary_indices) for each boundary
             num_samples: Total target vertex count
             base_samples: Base vertex count (for distributing non-fixed vertices)
+            corner_ref: Reference point (bounding plane corner 0) for consistent alignment
 
         Returns:
             Resampled contour with fixed intersection points
@@ -5174,16 +5115,24 @@ class ContourMeshMixin:
                 idx1, idx2, int1_3d, int2_3d = boundary_data
                 all_boundary_indices = [idx1, idx2]  # Fallback
 
-            # Ensure CONSISTENT ordering of intersection points across all levels
-            # Use coordinate-based ordering (not index-based) so the same physical point
-            # is always "first" regardless of how the contour is indexed
-            # This prevents the surface/boundary from flipping between levels
-            ip1_key = (int1_3d[0], int1_3d[1], int1_3d[2])
-            ip2_key = (int2_3d[0], int2_3d[1], int2_3d[2])
-            if ip1_key > ip2_key:
-                # Swap so int1_3d is always the "smaller" point
-                idx1, idx2 = idx2, idx1
-                int1_3d, int2_3d = int2_3d, int1_3d
+            # Ensure CONSISTENT ordering of intersection points
+            # Use corner_ref (bounding plane corner 0) to determine which intersection point
+            # should be "first" - this matches how normal contours are aligned
+            if corner_ref is not None:
+                # Pick the intersection point closer to corner_ref as "first"
+                dist1 = np.linalg.norm(int1_3d - corner_ref)
+                dist2 = np.linalg.norm(int2_3d - corner_ref)
+                if dist2 < dist1:
+                    # Swap so int1_3d is the one closer to corner_ref
+                    idx1, idx2 = idx2, idx1
+                    int1_3d, int2_3d = int2_3d, int1_3d
+            else:
+                # Fallback to coordinate-based ordering if no corner_ref
+                ip1_key = (int1_3d[0], int1_3d[1], int1_3d[2])
+                ip2_key = (int2_3d[0], int2_3d[1], int2_3d[2])
+                if ip1_key > ip2_key:
+                    idx1, idx2 = idx2, idx1
+                    int1_3d, int2_3d = int2_3d, int1_3d
 
             # Determine which path is boundary vs surface using arc-length comparison
             # Path A: idx1 -> idx2 (direct)
