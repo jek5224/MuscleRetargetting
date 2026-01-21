@@ -3713,20 +3713,29 @@ class GLFWApp():
                     if not (hovered_type == 'vertex' and i == hovered_idx):
                         draw_list.add_circle_filled(px, py, 3, imgui.get_color_u32_rgba(1.0, 0.5, 0.0, 1.0))
 
-                # Draw resampled contour vertices (cyan) if available
+                # Draw resampled contour vertices and edges (cyan) if available
                 if (hasattr(obj, 'contours_resampled') and obj.contours_resampled is not None and
                     stream_idx < len(obj.contours_resampled) and
                     level_idx < len(obj.contours_resampled[stream_idx])):
                     resampled = obj.contours_resampled[stream_idx][level_idx]
                     if resampled is not None and len(resampled) > 0:
                         # Project resampled vertices to 2D using same transformation
+                        resampled_screen = []
                         for rv in resampled:
                             rv = np.array(rv)
                             rv_2d = np.array([np.dot(rv - mean, basis_x), np.dot(rv - mean, basis_y)])
                             rv_norm = (rv_2d - center_xy) * scale + 0.5
                             rvx = right_x0 + rv_norm[0] * canvas_size
                             rvy = right_y0 + (1 - rv_norm[1]) * canvas_size
-                            # Draw in cyan with same size as original vertices
+                            resampled_screen.append((rvx, rvy))
+                        # Draw resampled contour edges (cyan)
+                        for i in range(len(resampled_screen)):
+                            p1 = resampled_screen[i]
+                            p2 = resampled_screen[(i + 1) % len(resampled_screen)]
+                            draw_list.add_line(p1[0], p1[1], p2[0], p2[1],
+                                              imgui.get_color_u32_rgba(0.0, 1.0, 1.0, 0.9), thickness=1.5)
+                        # Draw resampled vertices
+                        for rvx, rvy in resampled_screen:
                             draw_list.add_circle_filled(rvx, rvy, 3, imgui.get_color_u32_rgba(0.0, 1.0, 1.0, 1.0))
 
                 # Reserve space
@@ -4571,7 +4580,7 @@ class GLFWApp():
             def to_screen(pt_2d, x0, y0, canvas_size):
                 norm = (pt_2d - center_xy) * scale_factor + 0.5
                 sx = x0 + norm[0] * canvas_size
-                sy = y0 + (1 - norm[1]) * canvas_size
+                sy = y0 + norm[1] * canvas_size  # No Y flip - match PNG
                 return (sx, sy)
 
             # Canvas setup
@@ -5004,17 +5013,18 @@ class GLFWApp():
             pan = mouse_state['pan']
 
             # Coordinate transform functions (with zoom and pan)
+            # NO Y flip - match matplotlib PNG orientation (Y increases upward in data space)
             def to_screen(p, x0, y0, canvas_size):
                 center = (min_xy + max_xy) / 2
                 normalized = (np.array(p) - center) / max_range + 0.5
                 # Apply zoom and pan
                 normalized = (normalized - 0.5) * zoom + 0.5 + np.array(pan)
                 return (x0 + normalized[0] * canvas_size,
-                        y0 + (1.0 - normalized[1]) * canvas_size)  # Flip Y
+                        y0 + normalized[1] * canvas_size)  # No Y flip - match PNG
 
             def from_screen(sx, sy, x0, y0, canvas_size):
                 normalized_x = (sx - x0) / canvas_size
-                normalized_y = 1.0 - (sy - y0) / canvas_size  # Flip Y back
+                normalized_y = (sy - y0) / canvas_size  # No Y flip - match PNG
                 # Reverse zoom and pan
                 normalized = np.array([normalized_x, normalized_y])
                 normalized = (normalized - 0.5 - np.array(pan)) / zoom + 0.5
@@ -5103,6 +5113,14 @@ class GLFWApp():
             # Draw transformed source contours after optimization (semi-transparent dashed outline)
             transformed_sources = obj._manual_cut_data.get('transformed_sources_2d', [])
             if len(transformed_sources) > 0:
+                # Debug: print once when drawing
+                if not hasattr(obj, '_debug_transformed_printed') or obj._debug_transformed_printed != len(transformed_sources):
+                    obj._debug_transformed_printed = len(transformed_sources)
+                    print(f"[Draw DEBUG] transformed_sources: {len(transformed_sources)}")
+                    for si, src in enumerate(transformed_sources):
+                        if src is not None and len(src) > 0:
+                            src_arr = np.array(src)
+                            print(f"  S{si}: {len(src)} verts, first=[{src_arr[0,0]:.4f},{src_arr[0,1]:.4f}], centroid=[{src_arr.mean(axis=0)[0]:.4f},{src_arr.mean(axis=0)[1]:.4f}]")
                 for src_idx, src_2d in enumerate(transformed_sources):
                     if src_2d is not None and len(src_2d) >= 3:
                         src_color = piece_colors[src_idx % len(piece_colors)]
@@ -5817,13 +5835,18 @@ class GLFWApp():
                             target_x = target_bp['basis_x']
                             target_y = target_bp['basis_y']
 
+                            print(f"[Optimize DEBUG] Converting {len(final_pieces)} pieces to 2D")
                             optimized_2d = []
-                            for piece_3d in final_pieces:
+                            for pi, piece_3d in enumerate(final_pieces):
                                 piece_2d = np.array([
                                     [np.dot(v - target_mean, target_x), np.dot(v - target_mean, target_y)]
                                     for v in piece_3d
                                 ])
                                 optimized_2d.append(piece_2d)
+                                print(f"  Piece {pi}: {len(piece_3d)} verts 3D -> {len(piece_2d)} verts 2D")
+                                if len(piece_2d) > 0:
+                                    centroid_2d = np.mean(piece_2d, axis=0)
+                                    print(f"    2D centroid: ({centroid_2d[0]:.4f}, {centroid_2d[1]:.4f})")
 
                             # Update current pieces with optimized result
                             obj._manual_cut_data['current_pieces'] = optimized_2d
@@ -5837,7 +5860,13 @@ class GLFWApp():
                             # Store transformed source contours for display on cutting panel
                             if hasattr(obj, '_bp_viz_data') and len(obj._bp_viz_data) > 0:
                                 latest_viz = obj._bp_viz_data[-1]
-                                obj._manual_cut_data['transformed_sources_2d'] = latest_viz.get('final_transformed', [])
+                                transformed_srcs = latest_viz.get('final_transformed', [])
+                                obj._manual_cut_data['transformed_sources_2d'] = transformed_srcs
+                                print(f"[Optimize DEBUG] Transformed sources: {len(transformed_srcs)}")
+                                for si, src in enumerate(transformed_srcs):
+                                    if src is not None and len(src) > 0:
+                                        src_centroid = np.mean(src, axis=0)
+                                        print(f"  Source {si}: {len(src)} verts, centroid ({src_centroid[0]:.4f}, {src_centroid[1]:.4f})")
 
                             if skip_preview:
                                 # Optimize All: trigger auto-accept flag

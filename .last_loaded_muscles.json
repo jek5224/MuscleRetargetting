@@ -1,7 +1,15 @@
 [
   {
+    "name": "L_Adductor_Magnus",
+    "path": "Zygote_Meshes_251229/Muscle/UpLeg/L_Adductor_Magnus.obj"
+  },
+  {
     "name": "L_Biceps_Brachii",
     "path": "Zygote_Meshes_251229/Muscle/UpArm/L_Biceps_Brachii.obj"
+  },
+  {
+    "name": "L_Biceps_Femoris",
+    "path": "Zygote_Meshes_251229/Muscle/UpLeg/L_Biceps_Femoris.obj"
   },
   {
     "name": "L_Extensor_Digitorum_Longus",

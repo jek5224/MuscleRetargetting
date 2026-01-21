@@ -13232,6 +13232,13 @@ class ContourMeshMixin:
                 print(f"  [BP Transform] Added {n_intermediate} intermediate vertices to shared edge")
 
         # ========== Step 8: Save visualization with assignments ==========
+        # DEBUG: Print final_transformed before saving
+        print(f"[BP DEBUG] Saving final_transformed with {len(final_transformed)} sources:")
+        for fi, ft in enumerate(final_transformed):
+            ft_arr = np.array(ft)
+            print(f"  Source {fi}: {len(ft)} verts, first=[{ft_arr[0,0]:.4f},{ft_arr[0,1]:.4f}], centroid=[{ft_arr.mean(axis=0)[0]:.4f},{ft_arr.mean(axis=0)[1]:.4f}]")
+        print(f"[BP DEBUG] target_2d: first=[{target_2d[0,0]:.4f},{target_2d[0,1]:.4f}], centroid=[{target_2d.mean(axis=0)[0]:.4f},{target_2d.mean(axis=0)[1]:.4f}]")
+
         self._save_bp_transform_visualization(
             target_2d, target_poly, source_2d_shapes, final_transformed,
             stream_indices, optimal_scales, initial_translations, initial_rotations,
