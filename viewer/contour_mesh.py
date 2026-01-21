@@ -4802,72 +4802,60 @@ class ContourMeshMixin:
                     if len(contour) == 0:
                         continue
 
-                    # For each intersection point pair, check if this contour has vertices on that boundary
-                    # IMPORTANT: Each contour was cut at most ONCE, so find the BEST matching cut line
-                    best_match = None  # (cut_idx, total_dist, boundary_vertices)
-                    best_dist = float('inf')
+                    n = len(contour)
+                    found_boundary = False
 
-                    for cut_idx, (ip1, ip2) in enumerate(all_intersection_pairs):
-                        # Find closest vertices to each intersection point
-                        min_dist_to_ip1 = float('inf')
-                        min_dist_to_ip2 = float('inf')
-                        for v in contour:
-                            d1 = np.linalg.norm(v - ip1)
-                            d2 = np.linalg.norm(v - ip2)
-                            if d1 < min_dist_to_ip1:
-                                min_dist_to_ip1 = d1
-                            if d2 < min_dist_to_ip2:
-                                min_dist_to_ip2 = d2
-
-                        total_dist = min_dist_to_ip1 + min_dist_to_ip2
-
-                        # Skip if either intersection point is too far from any contour vertex
-                        ip_tolerance = 0.05  # Maximum distance to consider
-                        if min_dist_to_ip1 > ip_tolerance or min_dist_to_ip2 > ip_tolerance:
+                    for ip1, ip2 in all_intersection_pairs:
+                        # Find ALL vertices that lie on the line segment between ip1 and ip2
+                        # This includes the two intersection points AND any intermediate vertices
+                        boundary_vertex_indices = []
+                        line_vec = ip2 - ip1
+                        line_len = np.linalg.norm(line_vec)
+                        if line_len < 1e-10:
                             continue
+                        line_dir = line_vec / line_len
 
-                        # Check if this is the best match so far
-                        if total_dist < best_dist:
-                            boundary_dir = ip2 - ip1
-                            boundary_len = np.linalg.norm(boundary_dir)
+                        for vi, v in enumerate(contour):
+                            # Check if vertex is on the line segment
+                            v_to_ip1 = v - ip1
+                            # Project onto line
+                            t = np.dot(v_to_ip1, line_dir)
+                            # Point on line closest to v
+                            closest = ip1 + t * line_dir
+                            dist_to_line = np.linalg.norm(v - closest)
 
-                            if boundary_len < 1e-10:
-                                continue
+                            # Check if: 1) close to line, 2) within segment bounds
+                            if dist_to_line < 0.01 and -0.01 < t < line_len + 0.01:
+                                boundary_vertex_indices.append((vi, t))  # Store index and t for sorting
 
-                            boundary_dir_norm = boundary_dir / boundary_len
+                        # Need at least 2 vertices (the two endpoints)
+                        if len(boundary_vertex_indices) >= 2:
+                            # Sort by t (position along line) to get ordered boundary
+                            boundary_vertex_indices.sort(key=lambda x: x[1])
+                            boundary_indices = [x[0] for x in boundary_vertex_indices]
 
-                            # Find vertices that lie on the line segment between ip1 and ip2
-                            boundary_vertices = []
-                            for vi, v in enumerate(contour):
-                                v = np.array(v)
-                                to_v = v - ip1
-                                t = np.dot(to_v, boundary_dir_norm) / boundary_len
-                                proj = ip1 + t * boundary_dir
-                                perp_dist = np.linalg.norm(v - proj)
+                            # Get the two endpoints (first and last after sorting by t)
+                            idx1 = boundary_indices[0]
+                            idx2 = boundary_indices[-1]
+                            pos1 = contour[idx1].copy()
+                            pos2 = contour[idx2].copy()
 
-                                if perp_dist < 0.01 and -0.01 <= t <= 1.01:
-                                    boundary_vertices.append((vi, v.copy(), t))
+                            if s_idx >= len(stream_boundary_info):
+                                for _ in range(s_idx - len(stream_boundary_info) + 1):
+                                    stream_boundary_info.append({})
 
-                            if len(boundary_vertices) >= 2:
-                                best_dist = total_dist
-                                best_match = (cut_idx, total_dist, boundary_vertices)
+                            if level_idx not in stream_boundary_info[s_idx]:
+                                stream_boundary_info[s_idx][level_idx] = []
 
-                    # Use the best matching cut line (if any)
-                    if best_match is not None:
-                        cut_idx, total_dist, boundary_vertices = best_match
-                        boundary_vertices.sort(key=lambda x: x[2])
-                        idx1, pos1, _ = boundary_vertices[0]
-                        idx2, pos2, _ = boundary_vertices[-1]
+                            # Store ALL boundary vertex indices (not just endpoints)
+                            stream_boundary_info[s_idx][level_idx].append((idx1, idx2, pos1, pos2, boundary_indices))
+                            print(f"    Stream {s_idx} level {level_idx}: boundary {idx1}->{idx2} with {len(boundary_indices)} vertices on line")
+                            found_boundary = True
+                            break  # Found the matching cut for this contour
 
-                        if s_idx >= len(stream_boundary_info):
-                            for _ in range(s_idx - len(stream_boundary_info) + 1):
-                                stream_boundary_info.append({})
-
-                        if level_idx not in stream_boundary_info[s_idx]:
-                            stream_boundary_info[s_idx][level_idx] = []
-
-                        stream_boundary_info[s_idx][level_idx].append((idx1, idx2, pos1, pos2))
-                        print(f"    Stream {s_idx} level {level_idx}: boundary {idx1}->{idx2} ({len(boundary_vertices)} verts, dist={total_dist:.6f})")
+                    if not found_boundary and level_idx == 0:
+                        # Debug: print first contour info
+                        print(f"    Stream {s_idx} level {level_idx}: NO boundary found (contour has {n} vertices)")
 
         # Ensure stream_boundary_info has entries for all streams
         while len(stream_boundary_info) < num_streams:
@@ -5069,7 +5057,7 @@ class ContourMeshMixin:
 
         Args:
             contour: Original contour vertices
-            boundaries: List of (idx1, idx2, int1_3d, int2_3d) for each boundary
+            boundaries: List of (idx1, idx2, int1_3d, int2_3d, all_boundary_indices) for each boundary
             num_samples: Total target vertex count
             base_samples: Base vertex count (for distributing non-fixed vertices)
 
@@ -5081,57 +5069,81 @@ class ContourMeshMixin:
         # For now, handle single boundary case (2-on-1)
         # TODO: Handle multiple boundaries (3-on-1, etc.)
         if len(boundaries) == 1:
-            idx1, idx2, int1_3d, int2_3d = boundaries[0]
+            # Handle both old 4-tuple and new 5-tuple format
+            boundary_data = boundaries[0]
+            if len(boundary_data) >= 5:
+                idx1, idx2, int1_3d, int2_3d, all_boundary_indices = boundary_data
+            else:
+                idx1, idx2, int1_3d, int2_3d = boundary_data
+                all_boundary_indices = [idx1, idx2]  # Fallback
 
-            # Compute arc-length for BOTH paths to determine which is boundary vs surface
-            # Path A: idx1 -> idx2 (direct, assuming idx1 < idx2 after potential swap)
-            # Path B: idx2 -> idx1 (wrapping around)
-            # The BOUNDARY path should have arc-length close to straight-line distance
-            # The SURFACE path should have arc-length longer than straight-line distance
+            # all_boundary_indices contains ALL vertex indices on the boundary line
+            # (sorted by position along the line from ip1 to ip2)
+            boundary_indices_set = set(all_boundary_indices)
+            print(f"      Boundary line has {len(boundary_indices_set)} vertices: {sorted(boundary_indices_set)}")
 
             # Ensure idx1 < idx2 for consistent path definitions
             if idx1 > idx2:
                 idx1, idx2 = idx2, idx1
                 int1_3d, int2_3d = int2_3d, int1_3d
 
-            # Calculate arc-length for path A (idx1 -> idx2, direct)
+            # Determine which path is boundary vs surface by checking if path vertices
+            # are in the boundary_indices_set
+            # Path A: idx1 -> idx2 (direct)
+            # Path B: idx2 -> idx1 (wrapping)
+
+            # Count boundary vertices in each path
+            path_a_boundary_count = 0
             path_a_length = 0
             idx = idx1
             while idx != idx2:
                 next_idx = (idx + 1) % n
                 path_a_length += np.linalg.norm(contour[next_idx] - contour[idx])
+                if idx in boundary_indices_set:
+                    path_a_boundary_count += 1
                 idx = next_idx
+            if idx2 in boundary_indices_set:
+                path_a_boundary_count += 1
 
-            # Calculate arc-length for path B (idx2 -> idx1, wrapping)
+            path_b_boundary_count = 0
             path_b_length = 0
             idx = idx2
             while idx != idx1:
                 next_idx = (idx + 1) % n
                 path_b_length += np.linalg.norm(contour[next_idx] - contour[idx])
+                if idx in boundary_indices_set:
+                    path_b_boundary_count += 1
                 idx = next_idx
+            if idx1 in boundary_indices_set:
+                path_b_boundary_count += 1
 
-            # Straight-line distance between intersection points
-            straight_dist = np.linalg.norm(int2_3d - int1_3d)
-
-            # The boundary is the path whose arc-length is closer to straight-line distance
-            # (boundary should be nearly straight, so arc-length ≈ straight distance)
-            diff_a = abs(path_a_length - straight_dist)
-            diff_b = abs(path_b_length - straight_dist)
-
-            if diff_a < diff_b:
+            # The path with more boundary vertices is the boundary path
+            # (the boundary line contains the intersection points + intermediates)
+            if path_a_boundary_count > path_b_boundary_count:
                 # Path A is boundary, Path B is surface
-                boundary_arc_length = path_a_length
                 surface_length = path_b_length
                 surface_is_path_b = True
-                print(f"      Path A is boundary (arc={path_a_length:.4f}), Path B is surface (arc={path_b_length:.4f})")
-            else:
+                print(f"      Path A is boundary ({path_a_boundary_count} boundary verts), Path B is surface ({path_b_boundary_count} boundary verts)")
+            elif path_b_boundary_count > path_a_boundary_count:
                 # Path B is boundary, Path A is surface
-                boundary_arc_length = path_b_length
                 surface_length = path_a_length
                 surface_is_path_b = False
-                print(f"      Path B is boundary (arc={path_b_length:.4f}), Path A is surface (arc={path_a_length:.4f})")
+                print(f"      Path B is boundary ({path_b_boundary_count} boundary verts), Path A is surface ({path_a_boundary_count} boundary verts)")
+            else:
+                # Fallback: use arc-length comparison
+                straight_dist = np.linalg.norm(int2_3d - int1_3d)
+                diff_a = abs(path_a_length - straight_dist)
+                diff_b = abs(path_b_length - straight_dist)
+                if diff_a < diff_b:
+                    surface_length = path_b_length
+                    surface_is_path_b = True
+                else:
+                    surface_length = path_a_length
+                    surface_is_path_b = False
+                print(f"      Fallback: used arc-length comparison")
 
             # Boundary length for vertex distribution is straight-line distance
+            straight_dist = np.linalg.norm(int2_3d - int1_3d)
             boundary_length = straight_dist
 
             total_length = surface_length + boundary_length
@@ -8727,6 +8739,16 @@ class ContourMeshMixin:
         # These indices mark all vertices on the shared boundary that should stay fixed during resampling
         self._manual_cut_data['cut_boundary_indices'] = cut_boundary_indices_ordered
         print(f"  Boundary indices: {cut_boundary_indices_ordered}")
+
+        # Also store boundary vertex COORDINATES (robust to find_contour_match index changes)
+        # Extract coordinates from the cut contours using the boundary indices
+        cut_boundary_coords_ordered = {}
+        for piece_key, indices in cut_boundary_indices_ordered.items():
+            contour = cut_contours[piece_key]
+            coords = [contour[i].copy() for i in indices]
+            cut_boundary_coords_ordered[piece_key] = coords
+        self._manual_cut_data['cut_boundary_coords'] = cut_boundary_coords_ordered
+        print(f"  Boundary coords: piece0 has {len(cut_boundary_coords_ordered.get(0, []))} vertices, piece1 has {len(cut_boundary_coords_ordered.get(1, []))} vertices")
 
         return cut_contours
 
