@@ -14380,9 +14380,9 @@ class ContourMeshMixin:
             self.shared_boundary_registry = {}
             for boundary_id, boundary_info in save_data['shared_boundary_registry'].items():
                 self.shared_boundary_registry[boundary_id] = {
-                    'vertices': [np.array(v) for v in boundary_info['vertices']],
-                    'stream_indices': boundary_info['stream_indices'],
-                    'level_idx': boundary_info['level_idx'],
+                    'vertices': [np.array(v) for v in boundary_info.get('vertices', [])],
+                    'stream_indices': boundary_info.get('stream_indices', []),
+                    'level_idx': boundary_info.get('level_idx', -1),
                     'resampled': np.array(boundary_info['resampled']) if boundary_info.get('resampled') else None,
                     'resampled_count': boundary_info.get('resampled_count')
                 }
