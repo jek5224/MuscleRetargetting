@@ -6663,26 +6663,48 @@ class ContourMeshMixin:
                     next_verts = np.array([all_vertices[idx] for idx in next_indices])
 
                     # Find best rotation offset for next contour
+                    # Try both forward and reverse directions (for opposite winding)
                     best_offset = 0
                     best_cost = float('inf')
+                    best_reverse = False
+
                     for offset in range(n_next):
-                        # Compute cost as sum of distances between paired vertices
-                        cost = 0
+                        # Forward direction: j = (i + offset) % n
+                        cost_fwd = 0
                         for i in range(n_curr):
                             j = (i + offset) % n_next
-                            cost += np.linalg.norm(curr_verts[i] - next_verts[j])
-                        if cost < best_cost:
-                            best_cost = cost
+                            cost_fwd += np.linalg.norm(curr_verts[i] - next_verts[j])
+
+                        # Reverse direction: j = (n - i + offset) % n
+                        cost_rev = 0
+                        for i in range(n_curr):
+                            j = (n_next - i + offset) % n_next
+                            cost_rev += np.linalg.norm(curr_verts[i] - next_verts[j])
+
+                        if cost_fwd < best_cost:
+                            best_cost = cost_fwd
                             best_offset = offset
+                            best_reverse = False
+                        if cost_rev < best_cost:
+                            best_cost = cost_rev
+                            best_offset = offset
+                            best_reverse = True
 
-                    if best_offset != 0:
-                        print(f"  Level {level_idx}->{level_idx+1}: rotation offset {best_offset}")
+                    if best_offset != 0 or best_reverse:
+                        print(f"  Level {level_idx}->{level_idx+1}: rotation offset {best_offset}, reverse={best_reverse}")
 
-                    # Build faces using the offset
+                    # Build faces using the offset (and reverse if needed)
                     for i in range(n_curr):
                         i_next = (i + 1) % n_curr
-                        j = (i + best_offset) % n_next
-                        j_next = (i + 1 + best_offset) % n_next
+
+                        if best_reverse:
+                            # Reverse direction: next contour winds opposite
+                            j = (n_next - i + best_offset) % n_next
+                            j_next = (n_next - i - 1 + best_offset) % n_next
+                        else:
+                            # Forward direction: same winding
+                            j = (i + best_offset) % n_next
+                            j_next = (i + 1 + best_offset) % n_next
 
                         v0 = curr_indices[i]
                         v1 = curr_indices[i_next]
