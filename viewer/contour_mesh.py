@@ -9946,6 +9946,11 @@ class ContourMeshMixin:
         self._manual_cut_data['stream_indices'] = new_stream_indices
         self._manual_cut_data['source_labels'] = new_source_labels  # Original indices for display
 
+        # CRITICAL: Sub-cuts always use COMMON mode because ALL sources are cut pieces
+        # (they came from cutting the parent's target)
+        self._manual_cut_data['is_common_mode'] = True
+        print(f"[SubCut] Setting is_common_mode=True (all sources are cut pieces)")
+
         # Update requirements
         self._manual_cut_data['required_pieces'] = len(assigned_sources)
         self._manual_cut_data['selected_sources'] = list(range(len(assigned_sources)))
