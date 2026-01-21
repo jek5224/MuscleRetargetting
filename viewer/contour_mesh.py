@@ -13310,6 +13310,7 @@ class ContourMeshMixin:
 
         # ========== Step 7b: Add intermediate vertices on shared edges ==========
         # For 2-piece cuts, add intermediate vertices on the shared edge
+        n_intermediate = 0  # Default value (set properly below if needed)
         if n_pieces == 2 and len(shared_boundary_points) == 2:
             cut1_3d = np.array(shared_boundary_points[0])
             cut2_3d = np.array(shared_boundary_points[1])
