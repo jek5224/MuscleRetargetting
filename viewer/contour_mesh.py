@@ -13242,8 +13242,10 @@ class ContourMeshMixin:
                 # Find where cutting line intersects wrap-around edge
                 t, boundary_pt = find_edge_cut_point(n_verts - 1, 0, prev_piece, curr_piece)
 
+                # For prev_piece: boundary is at the END, so append
                 new_contours[prev_piece].append(boundary_pt)
-                new_contours[curr_piece].append(boundary_pt)
+                # For curr_piece: boundary is at the BEGINNING, so INSERT at position 0
+                new_contours[curr_piece].insert(0, boundary_pt)
                 shared_boundary_points.append(boundary_pt.copy())
                 boundary_crossings.append((n_verts - 1, 0, prev_piece, curr_piece, t, 'wrap-around'))
 
