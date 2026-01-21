@@ -8459,8 +8459,9 @@ class ContourMeshMixin:
             return None
 
         target_mean = target_bp['mean']
-        target_x = target_bp['basis_x']
-        target_y = target_bp['basis_y']
+        # Negate basis vectors to rotate 180° - match cutting window orientation
+        target_x = -target_bp['basis_x']
+        target_y = -target_bp['basis_y']
 
         # Find shared/closest vertices between adjacent source contours
         # These should be along the cutting boundary
@@ -13632,8 +13633,9 @@ class ContourMeshMixin:
 
         # Project everything to 2D
         target_mean = target_bp['mean']
-        target_x = target_bp['basis_x']
-        target_y = target_bp['basis_y']
+        # Negate basis vectors to rotate 180° - match cutting window orientation
+        target_x = -target_bp['basis_x']
+        target_y = -target_bp['basis_y']
         target_z = target_bp['basis_z']
 
         # Project target contour

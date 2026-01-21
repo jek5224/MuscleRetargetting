@@ -4972,8 +4972,9 @@ class GLFWApp():
             source_bps_for_bounds = obj._manual_cut_data.get('source_bps', [])
             target_bp = obj._manual_cut_data['target_bp']
             target_mean_bounds = target_bp['mean']
-            target_x_bounds = target_bp['basis_x']
-            target_y_bounds = target_bp['basis_y']
+            # Negate basis vectors to rotate 180° - match cutting window orientation
+            target_x_bounds = -target_bp['basis_x']
+            target_y_bounds = -target_bp['basis_y']
             target_z_bounds = target_bp['basis_z']
 
             for src_contour_3d in source_contours_3d_for_bounds:
@@ -5219,8 +5220,9 @@ class GLFWApp():
                     # Project source contour onto TARGET's bounding plane for overlay
                     target_bp = obj._manual_cut_data['target_bp']
                     target_mean = target_bp['mean']
-                    target_x = target_bp['basis_x']
-                    target_y = target_bp['basis_y']
+                    # Negate basis vectors to rotate 180° - match cutting window orientation
+                    target_x = -target_bp['basis_x']
+                    target_y = -target_bp['basis_y']
                     target_z = target_bp['basis_z']
 
                     # Project each point of source contour onto target plane
