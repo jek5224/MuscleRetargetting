@@ -5858,7 +5858,7 @@ class GLFWApp():
                             obj._manual_cut_line = None
 
                             # Store transformed source contours for display on cutting panel
-                            # Also update target_2d and source_2d_list to match the coordinate system
+                            # Also update target_2d, source_2d_list, and current_pieces to match the coordinate system
                             if hasattr(obj, '_bp_viz_data') and len(obj._bp_viz_data) > 0:
                                 latest_viz = obj._bp_viz_data[-1]
                                 transformed_srcs = latest_viz.get('final_transformed', [])
@@ -5881,6 +5881,18 @@ class GLFWApp():
                                         new_source_2d_list.append(src_2d)
                                     obj._manual_cut_data['source_2d_list'] = new_source_2d_list
                                     print(f"[Optimize DEBUG] Updated source_2d_list to optimization coords")
+
+                                # Use pieces_2d directly from optimization (same coordinate system)
+                                opt_pieces_2d = latest_viz.get('pieces_2d', [])
+                                if len(opt_pieces_2d) > 0:
+                                    obj._manual_cut_data['current_pieces'] = opt_pieces_2d
+                                    print(f"[Optimize DEBUG] Using pieces_2d from optimization ({len(opt_pieces_2d)} pieces)")
+                                    for pi, pc in enumerate(opt_pieces_2d):
+                                        pc_centroid = np.mean(pc, axis=0)
+                                        print(f"  Piece {pi}: {len(pc)} verts, centroid ({pc_centroid[0]:.4f}, {pc_centroid[1]:.4f})")
+                                else:
+                                    # Fallback to projecting from 3D (old behavior)
+                                    obj._manual_cut_data['current_pieces'] = optimized_2d
 
                                 print(f"[Optimize DEBUG] Transformed sources: {len(transformed_srcs)}")
                                 for si, src in enumerate(transformed_srcs):

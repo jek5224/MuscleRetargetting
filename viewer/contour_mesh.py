@@ -13239,12 +13239,7 @@ class ContourMeshMixin:
             print(f"  Source {fi}: {len(ft)} verts, first=[{ft_arr[0,0]:.4f},{ft_arr[0,1]:.4f}], centroid=[{ft_arr.mean(axis=0)[0]:.4f},{ft_arr.mean(axis=0)[1]:.4f}]")
         print(f"[BP DEBUG] target_2d: first=[{target_2d[0,0]:.4f},{target_2d[0,1]:.4f}], centroid=[{target_2d.mean(axis=0)[0]:.4f},{target_2d.mean(axis=0)[1]:.4f}]")
 
-        self._save_bp_transform_visualization(
-            target_2d, target_poly, source_2d_shapes, final_transformed,
-            stream_indices, optimal_scales, initial_translations, initial_rotations,
-            use_separate_transforms, assignments, centroids, cutting_line_2d,
-            target_level=target_level, source_level=source_level
-        )
+        # NOTE: pieces_2d and visualization saving moved to AFTER reordering (Step 10b)
 
         print(f"  [BP Transform] result: {[len(c) for c in new_contours]} vertices per piece")
 
@@ -13367,6 +13362,25 @@ class ContourMeshMixin:
                 if len(shared_boundary_info) == 2:
                     shared_boundary_info = [shared_boundary_info[1], shared_boundary_info[0]]
 
+        # ========== Step 10b: Save visualization (AFTER reordering) ==========
+        # Compute pieces in 2D (same coordinate system as final_transformed)
+        pieces_2d = []
+        for piece_3d in new_contours:
+            piece_2d = np.array([
+                [np.dot(v - target_mean, target_x), np.dot(v - target_mean, target_y)]
+                for v in piece_3d
+            ])
+            pieces_2d.append(piece_2d)
+            print(f"[BP DEBUG] piece_2d (after reorder): {len(piece_2d)} verts, centroid=[{piece_2d.mean(axis=0)[0]:.4f},{piece_2d.mean(axis=0)[1]:.4f}]")
+
+        self._save_bp_transform_visualization(
+            target_2d, target_poly, source_2d_shapes, final_transformed,
+            stream_indices, optimal_scales, initial_translations, initial_rotations,
+            use_separate_transforms, assignments, centroids, cutting_line_2d,
+            target_level=target_level, source_level=source_level,
+            pieces_2d=pieces_2d
+        )
+
         # Return cut contours along with cutting info for bounding plane creation
         # cutting_info contains:
         #   - cutting_line_3d: the cutting line direction in 3D (for x-axis perpendicular)
@@ -13386,7 +13400,8 @@ class ContourMeshMixin:
                                          final_transformed, stream_indices, scales,
                                          initial_translations, initial_rotations,
                                          use_separate_transforms=True, assignments=None, centroids=None,
-                                         cutting_line_2d=None, target_level=None, source_level=None):
+                                         cutting_line_2d=None, target_level=None, source_level=None,
+                                         pieces_2d=None):
         """
         Store visualization data for BP Viz imgui window and save to file.
         """
@@ -13405,6 +13420,7 @@ class ContourMeshMixin:
             'use_separate_transforms': use_separate_transforms,
             'centroids': [np.array(c) for c in centroids] if centroids else [],
             'assignments': list(assignments) if assignments else [],
+            'pieces_2d': [np.array(p) for p in pieces_2d] if pieces_2d else [],
         })
 
         # Save to file using matplotlib
