@@ -4746,8 +4746,11 @@ class ContourMeshMixin:
 
         # Check for shared cut vertices
         has_shared_cuts = hasattr(self, 'shared_cut_vertices') and len(self.shared_cut_vertices) > 0
+        print(f"  DEBUG: has_shared_cuts={has_shared_cuts}")
         if has_shared_cuts:
             print(f"  Found {len(self.shared_cut_vertices)} shared cut vertices")
+        else:
+            print(f"  No shared cut vertices found")
 
         # Store original contours before resampling (deep copy)
         self.contours_orig = [[c.copy() for c in contour_group] for contour_group in self.contours]
@@ -4772,21 +4775,31 @@ class ContourMeshMixin:
             for level_idx, (contour, bounding_plane_info) in enumerate(zip(contour_group, bounding_plane_group)):
                 contour = np.array(contour)
 
-                # Find cut edge vertices in this contour
-                cut_edge_indices = []
+                # Find the 2 cut edge ENDPOINTS in this contour
+                # Instead of matching all cut edge vertices (which causes issues with accumulated shared_cut_vertices),
+                # we find the 2 vertices closest to any shared_cut_vertex
+                endpoint_indices = []
                 if has_shared_cuts:
-                    eps = 1e-6
+                    # For each vertex, find its minimum distance to any shared_cut_vertex
+                    min_distances = []
                     for i, v in enumerate(contour):
-                        for sv in self.shared_cut_vertices:
-                            if np.linalg.norm(v - sv) < eps:
-                                cut_edge_indices.append(i)
-                                break
+                        min_d = min(np.linalg.norm(v - sv) for sv in self.shared_cut_vertices)
+                        min_distances.append((i, min_d))
 
-                if len(cut_edge_indices) >= 2:
-                    # This contour has a cut edge - resample preserving endpoints
-                    print(f"    Level {level_idx}: found {len(cut_edge_indices)} cut edge vertices, original contour has {len(contour)} vertices")
-                    resampled = self._resample_contour_with_cut_edge(
-                        contour, cut_edge_indices, num_samples, new_shared_cut_vertices
+                    # Sort by distance and take the 2 closest
+                    min_distances.sort(key=lambda x: x[1])
+
+                    # Only use if the closest 2 are actually close (< 0.01)
+                    if min_distances[0][1] < 0.01 and min_distances[1][1] < 0.01:
+                        endpoint_indices = [min_distances[0][0], min_distances[1][0]]
+                        # Sort by index for consistent ordering
+                        endpoint_indices.sort()
+
+                if len(endpoint_indices) == 2:
+                    # This contour has cut edge endpoints - resample preserving them
+                    print(f"    Level {level_idx}: found endpoints at indices {endpoint_indices}, contour has {len(contour)} vertices")
+                    resampled = self._resample_contour_with_endpoints(
+                        contour, endpoint_indices, num_samples, new_shared_cut_vertices
                     )
                     print(f"    Level {level_idx}: resampled to {len(resampled)} vertices")
                     has_cut_edge = True
@@ -4833,52 +4846,32 @@ class ContourMeshMixin:
 
         print(f"Resampling complete: {len(self.contours)} streams")
 
-    def _resample_contour_with_cut_edge(self, contour, cut_edge_indices, num_samples, new_shared_cut_vertices):
+    def _resample_contour_with_endpoints(self, contour, endpoint_indices, num_samples, new_shared_cut_vertices):
         """
-        Resample a contour that has a cut edge, preserving cut edge endpoints.
+        Resample a contour preserving 2 specific endpoint positions.
 
-        The cut edge vertices are removed (except endpoints), and the "original"
-        portion of the contour is resampled to fill the remaining vertex count.
+        The contour is split into two segments at the endpoints:
+        - Segment A: from endpoint1 to endpoint2 (shorter path)
+        - Segment B: from endpoint2 to endpoint1 (longer path, wrapping around)
+
+        We resample the longer segment and keep the shorter one as the "cut edge".
 
         Args:
-            contour: Original contour vertices
-            cut_edge_indices: Indices of vertices on the cut edge
+            contour: Original contour vertices (N, 3)
+            endpoint_indices: List of exactly 2 indices [idx1, idx2] (sorted)
             num_samples: Target vertex count
             new_shared_cut_vertices: List to append the preserved endpoints to
 
         Returns:
-            Resampled contour with cut edge endpoints preserved
+            Resampled contour with endpoints at positions 0 and (num_samples-1)
         """
         n = len(contour)
-        cut_edge_indices = sorted(cut_edge_indices)
+        idx1, idx2 = endpoint_indices[0], endpoint_indices[1]
 
-        # Find the two endpoints of the cut edge
-        # The cut edge is a contiguous run of vertices
-        # Find the first and last in the run
+        endpoint1 = contour[idx1].copy()
+        endpoint2 = contour[idx2].copy()
 
-        # Check if cut edge wraps around (indices at both ends of array)
-        if cut_edge_indices[-1] - cut_edge_indices[0] > len(cut_edge_indices):
-            # Wraps around - find the actual start and end
-            # The gap is where the original contour is
-            for i in range(len(cut_edge_indices) - 1):
-                if cut_edge_indices[i+1] - cut_edge_indices[i] > 1:
-                    # Found the gap - original contour is here
-                    end1_idx = cut_edge_indices[i]
-                    end2_idx = cut_edge_indices[i+1]
-                    break
-            else:
-                # No gap found, use first and last
-                end1_idx = cut_edge_indices[0]
-                end2_idx = cut_edge_indices[-1]
-        else:
-            # Contiguous run
-            end1_idx = cut_edge_indices[0]
-            end2_idx = cut_edge_indices[-1]
-
-        endpoint1 = contour[end1_idx].copy()
-        endpoint2 = contour[end2_idx].copy()
-
-        # Add endpoints to shared list (will be deduplicated later)
+        # Add endpoints to shared list (deduplicated)
         eps = 1e-6
         for ep in [endpoint1, endpoint2]:
             already_added = False
@@ -4889,46 +4882,48 @@ class ContourMeshMixin:
             if not already_added:
                 new_shared_cut_vertices.append(ep.copy())
 
-        # Extract the "original contour" portion (non-cut-edge vertices)
-        cut_edge_set = set(cut_edge_indices)
-
-        # The original portion is BETWEEN the two endpoints (not wrapping through cut edge)
-        # For piece: [cut1, orig1, orig2, orig3, cut2, m3, m2, m1]
-        #   end1_idx=0 (cut1), end2_idx=4 (cut2)
-        #   Original portion: indices 1, 2, 3 (between cut1 and cut2)
-        # Go from end1_idx+1 to end2_idx-1 (not wrapping)
-        original_portion = []
-        idx = (end1_idx + 1) % n
-        while idx != end2_idx:
-            if idx not in cut_edge_set:
-                original_portion.append(contour[idx].copy())
+        # Extract the two segments
+        # Segment A: idx1 -> idx2 (direct path)
+        segment_a = []
+        idx = idx1
+        while idx != idx2:
+            segment_a.append(contour[idx].copy())
             idx = (idx + 1) % n
+        segment_a.append(contour[idx2].copy())  # Include endpoint2
 
-        if len(original_portion) == 0:
-            # Edge case: no original portion (shouldn't happen)
-            print(f"      WARNING: no original portion found!")
-            return self._resample_single_contour(contour, num_samples, None)
+        # Segment B: idx2 -> idx1 (wrapping path)
+        segment_b = []
+        idx = idx2
+        while idx != idx1:
+            segment_b.append(contour[idx].copy())
+            idx = (idx + 1) % n
+        segment_b.append(contour[idx1].copy())  # Include endpoint1
 
-        print(f"      Cut edge endpoints: idx {end1_idx} and {end2_idx}, original portion has {len(original_portion)} vertices")
+        # The "original contour" is the LONGER segment (more vertices from original muscle surface)
+        # The "cut edge" is the SHORTER segment (the artificial cut line)
+        if len(segment_a) > len(segment_b):
+            original_segment = segment_a  # A is longer, use it as original
+            print(f"      Segment A (original): {len(segment_a)} verts, Segment B (cut): {len(segment_b)} verts")
+        else:
+            original_segment = segment_b  # B is longer, use it as original
+            # Reverse so it goes from endpoint1 to endpoint2
+            original_segment = original_segment[::-1]
+            print(f"      Segment A (cut): {len(segment_a)} verts, Segment B (original): {len(segment_b)} verts")
 
-        # Resample the original portion to (num_samples - 2) vertices
-        # (reserving 2 for the endpoints)
-        n_original_resampled = num_samples - 2
-        if n_original_resampled < 2:
-            n_original_resampled = 2
+        # Resample the original segment to (num_samples - 1) vertices
+        # (start at endpoint1, end at endpoint2, with num_samples-2 vertices in between)
+        # Actually, we want: endpoint1 + (num_samples-2) resampled + endpoint2 = num_samples total
+        original_array = np.array(original_segment)
 
-        original_array = np.array(original_portion)
-        # Use open segment resampling since original portion is not a closed loop
-        resampled_original = self._resample_open_segment(original_array, n_original_resampled)
+        # Resample as open segment
+        resampled = self._resample_open_segment(original_array, num_samples)
 
-        # Build final contour: endpoint1 -> resampled_original -> endpoint2
-        # The contour closes: endpoint2 -> endpoint1
-        result = [endpoint1]
-        for v in resampled_original:
-            result.append(v)
-        result.append(endpoint2)
+        # The resampled segment already starts at endpoint1 and ends at endpoint2
+        # But ensure exact endpoint positions
+        resampled[0] = endpoint1
+        resampled[-1] = endpoint2
 
-        return np.array(result)
+        return resampled
 
     def _detect_shared_boundaries_from_contours(self):
         """
