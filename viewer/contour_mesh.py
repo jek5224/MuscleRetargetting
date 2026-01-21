@@ -13239,9 +13239,10 @@ class ContourMeshMixin:
             if len(boundary_crossings) != expected_crossings:
                 print(f"  [BP Transform] WARNING: Expected {expected_crossings} boundary crossings for {n_pieces} pieces, got {len(boundary_crossings)}")
 
-            # ========== Build pieces using shared edge (the actual curved boundary where sources meet) ==========
-            # For COMMON mode with 2 pieces, rebuild contours using shared edge instead of simple boundary
-            if n_pieces == 2 and hasattr(self, '_shared_cut_edge_2d') and self._shared_cut_edge_2d is not None and len(self._shared_cut_edge_2d) >= 2:
+            # ========== Build pieces using shared edge (DISABLED - causes triangle artifacts) ==========
+            # The "shared edge" from source boundaries causes problems because it's still outer boundary
+            # Just use simple vertex assignment with straight boundary interpolation
+            if False and n_pieces == 2 and hasattr(self, '_shared_cut_edge_2d') and self._shared_cut_edge_2d is not None and len(self._shared_cut_edge_2d) >= 2:
                 shared_edge_2d = self._shared_cut_edge_2d
                 print(f"  [BP Transform] Building pieces with shared edge ({len(shared_edge_2d)} vertices)")
 
