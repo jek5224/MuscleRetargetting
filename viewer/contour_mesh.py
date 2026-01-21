@@ -4744,14 +4744,6 @@ class ContourMeshMixin:
             print("No bounding planes found. Please run find_contours first.")
             return
 
-        # Check for shared cut vertices
-        has_shared_cuts = hasattr(self, 'shared_cut_vertices') and len(self.shared_cut_vertices) > 0
-        print(f"  DEBUG: has_shared_cuts={has_shared_cuts}")
-        if has_shared_cuts:
-            print(f"  Found {len(self.shared_cut_vertices)} shared cut vertices")
-        else:
-            print(f"  No shared cut vertices found")
-
         # Store original contours before resampling (deep copy)
         self.contours_orig = [[c.copy() for c in contour_group] for contour_group in self.contours]
         self.bounding_planes_orig = [[bp.copy() for bp in bp_group] for bp_group in self.bounding_planes]
@@ -4761,9 +4753,6 @@ class ContourMeshMixin:
 
         # Track previous level's first vertices for chained alignment
         prev_first_vertices = {}  # contour_idx -> first vertex position
-
-        # After resampling, these will be the new shared cut vertices (just endpoints)
-        new_shared_cut_vertices = []
 
         print(f"Resampling {len(self.contours)} streams")
         for stream_idx, (contour_group, bounding_plane_group) in enumerate(zip(self.contours, self.bounding_planes)):
@@ -4775,64 +4764,19 @@ class ContourMeshMixin:
             for level_idx, (contour, bounding_plane_info) in enumerate(zip(contour_group, bounding_plane_group)):
                 contour = np.array(contour)
 
-                # Find the 2 cut edge ENDPOINTS in this contour
-                # The endpoints should be: (1) close to shared_cut_vertices, (2) far apart in contour
-                endpoint_indices = []
-                if has_shared_cuts:
-                    # Find all vertices close to any shared_cut_vertex
-                    close_indices = []
-                    for i, v in enumerate(contour):
-                        min_d = min(np.linalg.norm(v - sv) for sv in self.shared_cut_vertices)
-                        if min_d < 0.01:
-                            close_indices.append(i)
-
-                    # From the close vertices, find the 2 that are farthest apart in contour indices
-                    # This finds the actual endpoints of the cut edge
-                    if len(close_indices) >= 2:
-                        n = len(contour)
-                        best_pair = None
-                        best_gap = 0
-                        for i in range(len(close_indices)):
-                            for j in range(i + 1, len(close_indices)):
-                                idx_i, idx_j = close_indices[i], close_indices[j]
-                                # Gap considering circular contour (take the smaller of two arcs)
-                                gap1 = abs(idx_j - idx_i)
-                                gap2 = n - gap1
-                                gap = min(gap1, gap2)
-                                if gap > best_gap:
-                                    best_gap = gap
-                                    best_pair = (idx_i, idx_j)
-                        if best_pair and best_gap > 5:  # Require meaningful separation
-                            endpoint_indices = sorted(best_pair)
-
-                if len(endpoint_indices) == 2:
-                    # This contour has cut edge endpoints - resample preserving them
-                    print(f"    Level {level_idx}: found endpoints at indices {endpoint_indices}, contour has {len(contour)} vertices")
-                    resampled = self._resample_contour_with_endpoints(
-                        contour, endpoint_indices, num_samples, new_shared_cut_vertices
-                    )
-                    print(f"    Level {level_idx}: resampled to {len(resampled)} vertices")
-                    has_cut_edge = True
+                # Normal resampling for all contours
+                bounding_plane_corners = bounding_plane_info.get('bounding_plane')
+                if bounding_plane_corners is not None and len(bounding_plane_corners) >= 1:
+                    corner_ref = np.array(bounding_plane_corners[0])
                 else:
-                    # Normal resampling
-                    bounding_plane_corners = bounding_plane_info.get('bounding_plane')
-                    if bounding_plane_corners is not None and len(bounding_plane_corners) >= 1:
-                        corner_ref = np.array(bounding_plane_corners[0])
-                    else:
-                        corner_ref = prev_first_vertices.get(level_idx, None)
-                    resampled = self._resample_single_contour(contour, num_samples, corner_ref)
-                    has_cut_edge = False
+                    corner_ref = prev_first_vertices.get(level_idx, None)
+                resampled = self._resample_single_contour(contour, num_samples, corner_ref)
 
                 prev_first_vertices[level_idx] = resampled[0].copy()
 
-                # Align with bounding plane (skip for cut edge contours to preserve endpoint positions)
+                # Align with bounding plane
                 bounding_plane = bounding_plane_info['bounding_plane']
-                if has_cut_edge:
-                    # Don't rotate - keep endpoints at 0 and n-1
-                    aligned_contour = resampled
-                    contour_match = bounding_plane_info.get('contour_match', list(range(len(bounding_plane))))
-                else:
-                    aligned_contour, contour_match = self.find_contour_match(resampled, bounding_plane, preserve_order=True)
+                aligned_contour, contour_match = self.find_contour_match(resampled, bounding_plane, preserve_order=True)
 
                 new_bp_info = bounding_plane_info.copy()
                 if 'contour_match' in bounding_plane_info and 'contour_match_orig' not in bounding_plane_info:
@@ -4849,12 +4793,54 @@ class ContourMeshMixin:
         self.contours = resampled_contours
         self.bounding_planes = new_bounding_planes
 
-        # Update shared_cut_vertices to only contain the endpoints
-        if len(new_shared_cut_vertices) > 0:
-            self.shared_cut_vertices = new_shared_cut_vertices
-            print(f"  Reduced shared cut vertices: {len(new_shared_cut_vertices)} endpoints")
+        # Post-process: weld close vertices between streams at same level
+        if len(self.contours) > 1:
+            self._weld_stream_vertices()
 
         print(f"Resampling complete: {len(self.contours)} streams")
+
+    def _weld_stream_vertices(self, tolerance=0.05):
+        """
+        After resampling, find and weld close vertices between different streams at each level.
+        This ensures cut edges share identical vertex positions.
+        """
+        num_streams = len(self.contours)
+        if num_streams < 2:
+            return
+
+        print(f"  Welding vertices between {num_streams} streams...")
+        total_welded = 0
+
+        # For each level that exists in multiple streams
+        max_levels = max(len(s) for s in self.contours)
+        for level_idx in range(max_levels):
+            # Collect contours from all streams at this level
+            level_contours = []
+            for stream_idx in range(num_streams):
+                if level_idx < len(self.contours[stream_idx]):
+                    level_contours.append((stream_idx, self.contours[stream_idx][level_idx]))
+
+            if len(level_contours) < 2:
+                continue
+
+            # Find close vertex pairs between different streams
+            for i in range(len(level_contours)):
+                stream_i, contour_i = level_contours[i]
+                for j in range(i + 1, len(level_contours)):
+                    stream_j, contour_j = level_contours[j]
+
+                    # Find all close pairs
+                    for vi, v_i in enumerate(contour_i):
+                        for vj, v_j in enumerate(contour_j):
+                            dist = np.linalg.norm(v_i - v_j)
+                            if dist < tolerance and dist > 1e-10:
+                                # Weld to midpoint
+                                midpoint = (v_i + v_j) / 2
+                                self.contours[stream_i][level_idx][vi] = midpoint
+                                self.contours[stream_j][level_idx][vj] = midpoint
+                                total_welded += 1
+
+        print(f"  Welded {total_welded} vertex pairs")
 
     def _resample_contour_with_endpoints(self, contour, endpoint_indices, num_samples, new_shared_cut_vertices):
         """
