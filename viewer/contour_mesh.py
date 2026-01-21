@@ -4771,38 +4771,71 @@ class ContourMeshMixin:
         stream_boundary_info = []  # stream_idx -> {level_idx -> [(int1, int2), ...]}
         max_boundaries_per_stream = []  # stream_idx -> max number of boundaries in any contour
 
-        for stream_idx, contour_group in enumerate(self.contours):
-            boundary_info = {}
+        # Find boundary vertices by checking shared vertices between streams at same level
+        # This is more robust than trying to match stored intersection point coordinates
+        num_streams = len(self.contours)
+
+        if num_streams > 1 and has_cuts:
+            # Find max levels across all streams
+            max_levels = max(len(cg) for cg in self.contours)
+
+            # For each level, find shared vertices between streams
+            for level_idx in range(max_levels):
+                # Collect all contours at this level
+                level_contours = []
+                for s_idx in range(num_streams):
+                    if level_idx < len(self.contours[s_idx]):
+                        level_contours.append((s_idx, np.array(self.contours[s_idx][level_idx])))
+
+                if len(level_contours) < 2:
+                    continue
+
+                # Find shared vertices between each pair of streams
+                for i in range(len(level_contours)):
+                    s_idx_i, contour_i = level_contours[i]
+                    shared_vertices_i = []  # List of (vertex_idx, shared_position)
+
+                    for j in range(len(level_contours)):
+                        if i == j:
+                            continue
+                        s_idx_j, contour_j = level_contours[j]
+
+                        # Find vertices in contour_i that are close to any vertex in contour_j
+                        for vi, v in enumerate(contour_i):
+                            for vj, u in enumerate(contour_j):
+                                if np.linalg.norm(v - u) < 0.001:  # Shared vertex
+                                    shared_vertices_i.append((vi, v.copy()))
+                                    break
+
+                    # If we found shared vertices, they form the boundary
+                    if len(shared_vertices_i) >= 2:
+                        # Sort by index to get the two endpoints
+                        shared_vertices_i.sort(key=lambda x: x[0])
+                        # Take first and last as boundary endpoints
+                        idx1, pos1 = shared_vertices_i[0]
+                        idx2, pos2 = shared_vertices_i[-1]
+
+                        # Initialize boundary_info for this stream if needed
+                        if s_idx_i >= len(stream_boundary_info):
+                            for _ in range(s_idx_i - len(stream_boundary_info) + 1):
+                                stream_boundary_info.append({})
+
+                        if level_idx not in stream_boundary_info[s_idx_i]:
+                            stream_boundary_info[s_idx_i][level_idx] = []
+
+                        stream_boundary_info[s_idx_i][level_idx].append((idx1, idx2, pos1, pos2))
+                        print(f"    Stream {s_idx_i} level {level_idx}: found boundary at indices {idx1}, {idx2} ({len(shared_vertices_i)} shared verts)")
+
+        # Ensure stream_boundary_info has entries for all streams
+        while len(stream_boundary_info) < num_streams:
+            stream_boundary_info.append({})
+
+        # Calculate max boundaries per stream
+        for stream_idx in range(num_streams):
+            boundary_info = stream_boundary_info[stream_idx]
             max_boundaries = 0
-
-            for level_idx, contour in enumerate(contour_group):
-                contour = np.array(contour)
-                boundaries = []
-
-                if has_cuts:
-                    # Get intersection points for this specific level
-                    if intersection_points_by_level:
-                        # New format: use level-specific intersection points
-                        level_ips = intersection_points_by_level.get(level_idx, [])
-                    else:
-                        # Old format: use tight tolerance to only match exact vertices
-                        level_ips = intersection_points_all
-
-                    # Find which intersection points are in this contour
-                    for ip_idx, (int1, int2) in enumerate(level_ips):
-                        # Check if both intersection points are in this contour
-                        # Use tight tolerance for exact matching
-                        int1_idx = self._find_vertex_in_contour(contour, int1, tolerance=1e-6)
-                        int2_idx = self._find_vertex_in_contour(contour, int2, tolerance=1e-6)
-
-                        if int1_idx is not None and int2_idx is not None:
-                            boundaries.append((int1_idx, int2_idx, int1.copy(), int2.copy()))
-                            print(f"    Stream {stream_idx} level {level_idx}: found boundary at indices {int1_idx}, {int2_idx}")
-
-                boundary_info[level_idx] = boundaries
+            for level_idx, boundaries in boundary_info.items():
                 max_boundaries = max(max_boundaries, len(boundaries))
-
-            stream_boundary_info.append(boundary_info)
             max_boundaries_per_stream.append(max_boundaries)
 
         # Step 2: Calculate vertex count for each stream
