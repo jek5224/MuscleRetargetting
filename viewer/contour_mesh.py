@@ -6652,33 +6652,9 @@ class ContourMeshMixin:
                         curr_params = None
                         next_params = None
 
-                # Check if both contours have fixed points (cut↔cut transition)
-                has_curr_fixed = len(curr_fixed or []) > 0
-                has_next_fixed = len(next_fixed or []) > 0
-                both_cut = has_curr_fixed and has_next_fixed
-
-                # Only use parametric method for cut↔cut transitions
-                # For normal↔normal or normal↔cut, use standard index-based method
-                if both_cut and curr_params is not None and next_params is not None:
-                    # Debug output for cut↔cut transitions
-                    print(f"  Stream {stream_idx} Level {level_idx}->{level_idx+1} (cut->cut):")
-                    print(f"    curr: n={n_curr}, fixed={curr_fixed}")
-                    print(f"    next: n={n_next}, fixed={next_fixed}")
-                    curr_v0 = all_vertices[curr_indices[curr_fixed[0]]]
-                    curr_v1 = all_vertices[curr_indices[curr_fixed[1]]]
-                    next_v0 = all_vertices[next_indices[next_fixed[0]]]
-                    next_v1 = all_vertices[next_indices[next_fixed[1]]]
-                    print(f"    curr v[fixed0]={curr_v0[:2]}, v[fixed1]={curr_v1[:2]}")
-                    print(f"    next v[fixed0]={next_v0[:2]}, v[fixed1]={next_v1[:2]}")
-
-                    # Use zipper algorithm with parameter matching for cut↔cut
-                    faces = self._create_contour_band_parametric(
-                        curr_indices, next_indices, curr_params, next_params,
-                        curr_fixed or [], next_fixed or [],
-                        all_vertices, processed_quads
-                    )
-                    all_faces.extend(faces)
-                elif n_curr == n_next:
+                # Use rotation offset finding for ALL transitions (including cut↔cut)
+                # This ensures the alignment chain isn't broken at cut→cut boundaries
+                if n_curr == n_next:
                     # Same size - find best rotation offset to minimize twist
                     # This is important for normal↔cut transitions where v0 positions differ
 
