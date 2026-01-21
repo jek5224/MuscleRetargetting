@@ -12790,10 +12790,16 @@ class ContourMeshMixin:
                                         min_dist = d
                                         closest_pair = (p0, p1)
                             if closest_pair is not None:
-                                # Use midpoint and perpendicular as cutting line
-                                midpt = (closest_pair[0] + closest_pair[1]) / 2
-                                shared_edge_points = [closest_pair[0], midpt, closest_pair[1]]
-                                print(f"  [BP Transform] COMMON: closest points dist={min_dist:.6f}")
+                                closest_dist = np.linalg.norm(closest_pair[0] - closest_pair[1])
+                                if closest_dist < 1e-8:
+                                    # Points are nearly identical - can't compute meaningful direction
+                                    # Leave shared_edge_points empty to trigger perpendicular bisector fallback
+                                    print(f"  [BP Transform] COMMON: closest points too close ({closest_dist:.9f}), will use perpendicular bisector")
+                                else:
+                                    # Use midpoint and perpendicular as cutting line
+                                    midpt = (closest_pair[0] + closest_pair[1]) / 2
+                                    shared_edge_points = [closest_pair[0], midpt, closest_pair[1]]
+                                    print(f"  [BP Transform] COMMON: closest points dist={closest_dist:.6f}")
 
                         # Store the shared edge for use in cutting
                         if len(shared_edge_points) >= 2:
