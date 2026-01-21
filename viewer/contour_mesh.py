@@ -12127,8 +12127,9 @@ class ContourMeshMixin:
 
         # ========== Step 1: Project target contour to 2D ==========
         target_mean = target_bp['mean']
-        target_x = target_bp['basis_x']
-        target_y = target_bp['basis_y']
+        # Negate basis vectors to rotate 180° - match basic cutting window orientation
+        target_x = -target_bp['basis_x']
+        target_y = -target_bp['basis_y']
 
         target_2d = np.array([
             [np.dot(v - target_mean, target_x), np.dot(v - target_mean, target_y)]
