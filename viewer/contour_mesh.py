@@ -13362,57 +13362,69 @@ class ContourMeshMixin:
                     print(f"    Piece {pi}: {len(p)} verts, first=({p_2d[0,0]:.6f}, {p_2d[0,1]:.6f}), last=({p_2d[-1,0]:.6f}, {p_2d[-1,1]:.6f})")
 
             else:
-                # N-piece case: Use vertex assignments directly
-                # Walk around contour, adding vertices to pieces based on assignments
-                # Add boundary points ONLY where assignments change
+                # N-piece case: Cut at crossings, assign segments by majority assignment
+                # This ensures piece boundaries match the cut lines
 
-                print(f"  [BP Transform] N-piece cut using vertex assignments")
+                print(f"  [BP Transform] N-piece cut using crossings")
                 print(f"  [BP Transform] Assignment counts: {[assignments.count(i) for i in range(n_pieces)]}")
 
-                # Build map: edge_idx -> crossing info
-                edge_to_crossing = {}
-                for c in all_crossings:
-                    edge_idx = c[0]
-                    if edge_idx not in edge_to_crossing:
-                        edge_to_crossing[edge_idx] = []
-                    edge_to_crossing[edge_idx].append(c)
+                # Sort crossings by edge position
+                sorted_crossings = sorted(all_crossings, key=lambda c: c[0] + c[1])
+                n_crossings = len(sorted_crossings)
 
-                # Walk around contour using vertex assignments
-                for v_idx in range(n_verts):
-                    current_piece = assignments[v_idx]
-                    next_v_idx = (v_idx + 1) % n_verts
-                    next_piece = assignments[next_v_idx]
+                print(f"  [BP Transform] Cutting at {n_crossings} crossings")
 
-                    # Add vertex to its assigned piece
-                    new_contours[current_piece].append(target_contour[v_idx])
+                # Collect shared boundary points
+                for c in sorted_crossings:
+                    shared_boundary_points.append(c[3])
 
-                    # Only add boundary points where assignment CHANGES
-                    if current_piece != next_piece:
-                        # Find crossing point on this edge if it exists
-                        boundary_pt = None
-                        if v_idx in edge_to_crossing:
-                            # Use the crossing point that involves both pieces
-                            for crossing in edge_to_crossing[v_idx]:
-                                pair = crossing[4]
-                                if current_piece in pair and next_piece in pair:
-                                    boundary_pt = crossing[3]  # pt_3d
-                                    shared_boundary_points.append(boundary_pt)
-                                    print(f"  [BP Transform] Edge {v_idx}: boundary {current_piece}->{next_piece} using crossing {pair}")
-                                    break
+                # Build segments between consecutive crossings
+                segments = []  # [(start_crossing_idx, vertices_3d, vertex_indices), ...]
 
-                        if boundary_pt is None:
-                            # No exact crossing - interpolate boundary at edge midpoint
-                            pt_a = target_contour[v_idx]
-                            pt_b = target_contour[next_v_idx]
-                            boundary_pt = (pt_a + pt_b) / 2
-                            shared_boundary_points.append(boundary_pt)
-                            print(f"  [BP Transform] Edge {v_idx}: boundary {current_piece}->{next_piece} (interpolated)")
+                for i in range(n_crossings):
+                    c1 = sorted_crossings[i]
+                    c2 = sorted_crossings[(i + 1) % n_crossings]
 
-                        # Add boundary point to both pieces
-                        new_contours[current_piece].append(boundary_pt)
-                        new_contours[next_piece].append(boundary_pt)
+                    edge1, t1, pt2d_1, pt3d_1, pair1 = c1
+                    edge2, t2, pt2d_2, pt3d_2, pair2 = c2
 
-                # Vertices are already in correct order from the walk - no sorting needed
+                    # Collect vertices in this segment (from after c1 to before c2)
+                    segment_verts = [pt3d_1]  # Start with crossing point
+                    segment_indices = []
+
+                    v = (edge1 + 1) % n_verts
+                    end_v = (edge2 + 1) % n_verts
+                    if i == n_crossings - 1:
+                        # Last segment wraps around
+                        while v != end_v:
+                            segment_verts.append(target_contour[v])
+                            segment_indices.append(v)
+                            v = (v + 1) % n_verts
+                    else:
+                        while v != end_v:
+                            segment_verts.append(target_contour[v])
+                            segment_indices.append(v)
+                            v = (v + 1) % n_verts
+
+                    segment_verts.append(pt3d_2)  # End with crossing point
+
+                    segments.append((i, segment_verts, segment_indices, pair1, pair2))
+
+                # Assign each segment to a piece based on majority vertex assignment
+                for seg_idx, seg_verts, seg_indices, pair_start, pair_end in segments:
+                    if len(seg_indices) > 0:
+                        # Count assignments in this segment
+                        counts = [0] * n_pieces
+                        for v_idx in seg_indices:
+                            counts[assignments[v_idx]] += 1
+                        piece_idx = counts.index(max(counts))
+                    else:
+                        # No vertices - use the common piece between start and end crossings
+                        common = set(pair_start) & set(pair_end)
+                        piece_idx = list(common)[0] if common else pair_start[0]
+
+                    new_contours[piece_idx].extend(seg_verts)
+                    print(f"  [BP Transform] Segment {seg_idx}: {len(seg_verts)} verts -> piece {piece_idx}")
 
             for piece_idx in range(n_pieces):
                 print(f"  [BP Transform] Piece {piece_idx}: {len(new_contours[piece_idx])} verts")
