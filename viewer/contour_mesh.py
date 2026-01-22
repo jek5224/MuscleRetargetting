@@ -13289,59 +13289,57 @@ class ContourMeshMixin:
                 shared_boundary_points = [pt3d_1, pt3d_2]
 
             else:
-                # N-piece case: use crossings to split contour
-                # Walk around contour, switch pieces at crossings
-                # Use assignments to know which piece each vertex belongs to
+                # N-piece case: like 2-piece, split at crossings
+                # Pre-compute boundary points, add SAME point to both adjacent pieces
 
-                # Build map: edge_idx -> crossing on that edge
-                edge_to_crossing = {}
+                # Build map: edge_idx -> crossing point (3D)
+                edge_to_pt3d = {}
                 for c in all_crossings:
                     edge_idx = c[0]
-                    if edge_idx not in edge_to_crossing:
-                        edge_to_crossing[edge_idx] = c
+                    pt3d = c[3]
+                    edge_to_pt3d[edge_idx] = pt3d
+                    shared_boundary_points.append(pt3d)
 
                 # Walk around contour
                 for v_idx in range(n_verts):
                     curr_piece = assignments[v_idx]
-                    new_contours[curr_piece].append(target_contour[v_idx])
-
-                    # If there's a crossing on this edge, add it to both pieces
-                    if v_idx in edge_to_crossing:
-                        c = edge_to_crossing[v_idx]
-                        pt3d = c[3]
-                        pair_i, pair_j = c[4]
-                        new_contours[pair_i].append(pt3d)
-                        if pair_j != pair_i:
-                            new_contours[pair_j].append(pt3d)
-                        shared_boundary_points.append(pt3d)
-
-                    # If assignment changes but no crossing, compute crossing point
                     next_v_idx = (v_idx + 1) % n_verts
                     next_piece = assignments[next_v_idx]
-                    if curr_piece != next_piece and v_idx not in edge_to_crossing:
-                        # Find shared edge for this pair
-                        t = 0.5
-                        for pair_indices, shared_pts in shared_edges:
-                            if set(pair_indices) == {curr_piece, next_piece} and len(shared_pts) >= 2:
-                                line_p1 = shared_pts[0]
-                                line_p2 = shared_pts[-1]
-                                line_dir = line_p2 - line_p1
-                                line_len = np.linalg.norm(line_dir)
-                                if line_len > 1e-10:
-                                    line_dir = line_dir / line_len
-                                    line_normal = np.array([-line_dir[1], line_dir[0]])
-                                    p_a = target_2d[v_idx]
-                                    p_b = target_2d[next_v_idx]
-                                    edge_vec = p_b - p_a
-                                    denom = np.dot(edge_vec, line_normal)
-                                    if abs(denom) > 1e-10:
-                                        t = np.dot(line_p1 - p_a, line_normal) / denom
-                                        t = np.clip(t, 0.0, 1.0)
-                                break
-                        pt3d = target_contour[v_idx] + t * (target_contour[next_v_idx] - target_contour[v_idx])
+
+                    # Add vertex to its piece
+                    new_contours[curr_piece].append(target_contour[v_idx])
+
+                    # If assignment changes, add boundary point to BOTH pieces
+                    if curr_piece != next_piece:
+                        if v_idx in edge_to_pt3d:
+                            # Use pre-computed crossing point
+                            pt3d = edge_to_pt3d[v_idx]
+                        else:
+                            # Compute crossing from shared edge
+                            t = 0.5
+                            for pair_indices, shared_pts in shared_edges:
+                                if set(pair_indices) == {curr_piece, next_piece} and len(shared_pts) >= 2:
+                                    line_p1 = shared_pts[0]
+                                    line_p2 = shared_pts[-1]
+                                    line_dir = line_p2 - line_p1
+                                    line_len = np.linalg.norm(line_dir)
+                                    if line_len > 1e-10:
+                                        line_dir = line_dir / line_len
+                                        line_normal = np.array([-line_dir[1], line_dir[0]])
+                                        p_a = target_2d[v_idx]
+                                        p_b = target_2d[next_v_idx]
+                                        edge_vec = p_b - p_a
+                                        denom = np.dot(edge_vec, line_normal)
+                                        if abs(denom) > 1e-10:
+                                            t = np.dot(line_p1 - p_a, line_normal) / denom
+                                            t = np.clip(t, 0.0, 1.0)
+                                    break
+                            pt3d = target_contour[v_idx] + t * (target_contour[next_v_idx] - target_contour[v_idx])
+                            shared_boundary_points.append(pt3d)
+
+                        # Add SAME point to BOTH pieces
                         new_contours[curr_piece].append(pt3d)
                         new_contours[next_piece].append(pt3d)
-                        shared_boundary_points.append(pt3d)
 
             for piece_idx in range(n_pieces):
                 print(f"  [BP Transform] Piece {piece_idx}: {len(new_contours[piece_idx])} verts")
