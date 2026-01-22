@@ -13388,8 +13388,8 @@ class ContourMeshMixin:
                     print(f"    Piece {pi}: {len(p)} verts, first=({p_2d[0,0]:.6f}, {p_2d[0,1]:.6f}), last=({p_2d[-1,0]:.6f}, {p_2d[-1,1]:.6f})")
 
             else:
-                # N-piece case: Build pieces by walking around each piece's complete boundary
-                # For pieces with multiple segments on target, connect via shared source boundaries
+                # N-piece case: Build pieces by walking around target using ALL crossings
+                # Each segment between consecutive crossings belongs to exactly ONE piece
 
                 print(f"  [BP Transform] N-piece cut using crossings")
                 print(f"  [BP Transform] Assignment counts: {[assignments.count(i) for i in range(n_pieces)]}")
@@ -13404,9 +13404,6 @@ class ContourMeshMixin:
                 for c in sorted_crossings:
                     shared_boundary_points.append(c[3])
 
-                # Build map: crossing index -> crossing info
-                crossing_map = {i: sorted_crossings[i] for i in range(n_crossings)}
-
                 # For each piece, find which crossings bound it
                 piece_crossings = {i: [] for i in range(n_pieces)}
                 for c_idx, c in enumerate(sorted_crossings):
@@ -13416,92 +13413,90 @@ class ContourMeshMixin:
 
                 print(f"  [BP Transform] Crossings per piece: {[(p, len(piece_crossings[p])) for p in range(n_pieces)]}")
 
-                # Build shared edge lookup: (piece_i, piece_j) -> shared boundary points in 2D
-                shared_edge_lookup = {}
-                for pair, pts in shared_edges:
-                    shared_edge_lookup[(pair[0], pair[1])] = pts
-                    shared_edge_lookup[(pair[1], pair[0])] = pts[::-1]  # Reverse for other direction
+                # ========== NEW ALGORITHM: Walk around target using ALL crossings ==========
+                # Step 1: For each segment between consecutive crossings, determine owner piece
+                segment_owners = []  # [(start_c_idx, end_c_idx, owner_piece, start_pt3d, end_pt3d), ...]
 
-                # For each piece, build its complete boundary
+                for seg_idx in range(n_crossings):
+                    c1_idx = seg_idx
+                    c2_idx = (seg_idx + 1) % n_crossings
+
+                    c1 = sorted_crossings[c1_idx]
+                    c2 = sorted_crossings[c2_idx]
+
+                    edge1, t1, pt2d_1, pt3d_1, pair1 = c1
+                    edge2, t2, pt2d_2, pt3d_2, pair2 = c2
+
+                    # Count vertices assigned to each piece in this segment
+                    piece_counts = {i: 0 for i in range(n_pieces)}
+                    v_temp = (edge1 + 1) % n_verts
+                    target_end = (edge2 + 1) % n_verts
+                    while v_temp != target_end:
+                        piece_counts[assignments[v_temp]] += 1
+                        v_temp = (v_temp + 1) % n_verts
+
+                    # Find piece with most vertices (should be clear winner)
+                    owner_piece = max(piece_counts.keys(), key=lambda p: piece_counts[p])
+                    owner_count = piece_counts[owner_piece]
+
+                    # Verify owner is in at least one of the bounding crossing pairs
+                    valid_owners = set(pair1) | set(pair2)
+                    if owner_piece not in valid_owners and owner_count > 0:
+                        # Owner not adjacent to either crossing - find best valid owner
+                        valid_counts = {p: piece_counts[p] for p in valid_owners}
+                        if sum(valid_counts.values()) > 0:
+                            owner_piece = max(valid_counts.keys(), key=lambda p: valid_counts[p])
+
+                    segment_owners.append((c1_idx, c2_idx, owner_piece, pt3d_1, pt3d_2))
+                    print(f"  [BP Transform] Segment c{c1_idx}->c{c2_idx}: {piece_counts[owner_piece]} verts -> piece {owner_piece}")
+
+                # Step 2: Build each piece's boundary by collecting its segments
+                piece_segments = {i: [] for i in range(n_pieces)}  # piece -> [(start_c_idx, end_c_idx, start_pt, end_pt), ...]
+
+                for c1_idx, c2_idx, owner, pt3d_1, pt3d_2 in segment_owners:
+                    piece_segments[owner].append((c1_idx, c2_idx, pt3d_1, pt3d_2))
+
+                # Step 3: For each piece, assemble segments in order (may need shared boundaries between)
                 for piece_idx in range(n_pieces):
-                    crossings_for_piece = piece_crossings[piece_idx]
-                    if len(crossings_for_piece) < 2:
-                        # Piece bounded by fewer than 2 crossings - use vertex assignment
-                        for v_idx in range(n_verts):
-                            if assignments[v_idx] == piece_idx:
-                                new_contours[piece_idx].append(target_contour[v_idx])
-                        print(f"  [BP Transform] Piece {piece_idx}: {len(new_contours[piece_idx])} verts (from assignments)")
+                    segments = piece_segments[piece_idx]
+                    if len(segments) == 0:
+                        # No segments - piece has no target boundary (shouldn't happen)
+                        print(f"  [BP Transform] WARNING: Piece {piece_idx} has no segments!")
                         continue
 
-                    # Sort crossings for this piece by edge position
-                    crossings_for_piece.sort(key=lambda c_idx: sorted_crossings[c_idx][0] + sorted_crossings[c_idx][1])
+                    # Sort segments by start crossing index
+                    segments.sort(key=lambda s: s[0])
 
-                    # Walk around the piece boundary
                     piece_boundary = []
-                    n_piece_crossings = len(crossings_for_piece)
 
-                    for i in range(n_piece_crossings):
-                        c1_idx = crossings_for_piece[i]
-                        c2_idx = crossings_for_piece[(i + 1) % n_piece_crossings]
-
+                    for seg_i, (c1_idx, c2_idx, pt3d_1, pt3d_2) in enumerate(segments):
                         c1 = sorted_crossings[c1_idx]
                         c2 = sorted_crossings[c2_idx]
+                        edge1, t1, _, _, pair1 = c1
+                        edge2, t2, _, _, pair2 = c2
 
-                        edge1, t1, pt2d_1, pt3d_1, pair1 = c1
-                        edge2, t2, pt2d_2, pt3d_2, pair2 = c2
+                        # Add crossing point at start
+                        piece_boundary.append(pt3d_1)
 
-                        # Check if we walk along target contour or shared boundary
-                        # We walk along target if the segment between c1 and c2 is inside this piece
-                        # Determine by checking if any target vertex between c1 and c2 is assigned to this piece
+                        # Add target vertices between crossings
                         v = (edge1 + 1) % n_verts
-                        end_v = (edge2 + 1) % n_verts if c2_idx != crossings_for_piece[0] else (edge2 + 1) % n_verts
+                        target_end = (edge2 + 1) % n_verts
+                        seg_verts = 0
+                        while v != target_end:
+                            piece_boundary.append(target_contour[v])
+                            seg_verts += 1
+                            v = (v + 1) % n_verts
 
-                        # Count vertices assigned to this piece between c1 and c2
-                        target_segment_verts = []
-                        v_temp = (edge1 + 1) % n_verts
-                        while v_temp != (edge2 + 1) % n_verts:
-                            if assignments[v_temp] == piece_idx:
-                                target_segment_verts.append(v_temp)
-                            v_temp = (v_temp + 1) % n_verts
+                        print(f"  [BP Transform] Piece {piece_idx}: target segment c{c1_idx}->c{c2_idx}, {seg_verts+1} verts")
 
-                        # Check if both crossings are between the same two pieces
-                        same_pair = (pair1 == pair2)
+                        # Check if we need shared boundary to next segment
+                        if len(segments) > 1:
+                            next_seg_i = (seg_i + 1) % len(segments)
+                            next_c1_idx = segments[next_seg_i][0]
 
-                        if same_pair:
-                            # Same pair: segment belongs to ONE of the two pieces exclusively
-                            # Check which piece has more vertices in this segment
-                            other_piece = pair1[1] if pair1[0] == piece_idx else pair1[0]
-                            other_segment_verts = []
-                            v_temp = (edge1 + 1) % n_verts
-                            while v_temp != (edge2 + 1) % n_verts:
-                                if assignments[v_temp] == other_piece:
-                                    other_segment_verts.append(v_temp)
-                                v_temp = (v_temp + 1) % n_verts
-
-                            # This segment belongs to this piece only if we have more vertices
-                            segment_belongs_to_this_piece = len(target_segment_verts) > len(other_segment_verts)
-                        else:
-                            # Different pairs: segment might have vertices from this piece
-                            segment_belongs_to_this_piece = len(target_segment_verts) > 0
-
-                        if segment_belongs_to_this_piece:
-                            # Walk along target contour
-                            piece_boundary.append(pt3d_1)
-                            v = (edge1 + 1) % n_verts
-                            while v != (edge2 + 1) % n_verts:
-                                piece_boundary.append(target_contour[v])
-                                v = (v + 1) % n_verts
-                            print(f"  [BP Transform] Piece {piece_idx}: target segment c{c1_idx}->c{c2_idx}, {len(target_segment_verts)+1} verts")
-                        else:
-                            # Walk along shared boundary between sources
-                            # Find which other piece shares this boundary with current piece
-                            other_piece = pair1[1] if pair1[0] == piece_idx else pair1[0]
-                            shared_key = (piece_idx, other_piece)
-
-                            # Shared boundary: just add crossing point (cutting line is straight)
-                            # The next segment will add its crossing point, creating a straight edge
-                            piece_boundary.append(pt3d_1)
-                            print(f"  [BP Transform] Piece {piece_idx}: shared boundary c{c1_idx}->c{c2_idx} (straight edge)")
+                            # If next segment doesn't start where this one ends, we need shared boundary
+                            if next_c1_idx != c2_idx:
+                                print(f"  [BP Transform] Piece {piece_idx}: shared boundary c{c2_idx}->c{next_c1_idx} (straight edge)")
 
                     new_contours[piece_idx] = piece_boundary
                     print(f"  [BP Transform] Piece {piece_idx}: {len(piece_boundary)} verts (complete boundary)")
