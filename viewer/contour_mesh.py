@@ -12739,22 +12739,31 @@ class ContourMeshMixin:
                         # This is where the two optimized sources meet
                         from shapely.geometry import LineString
 
+                        # DEBUG: Print source polygon info
+                        print(f"  [BP DEBUG] poly_0: {poly_0.geom_type}, area={poly_0.area:.10f}, bounds={poly_0.bounds}")
+                        print(f"  [BP DEBUG] poly_1: {poly_1.geom_type}, area={poly_1.area:.10f}, bounds={poly_1.bounds}")
+
                         # The overlapping region between two polygons
                         overlap_region = poly_0.intersection(poly_1)
+                        print(f"  [BP DEBUG] overlap_region: type={overlap_region.geom_type if overlap_region else 'None'}, empty={overlap_region.is_empty if overlap_region else 'N/A'}")
 
                         # The shared boundary is the boundary of this overlap region
-                        if not overlap_region.is_empty:
-                            shared_boundary = overlap_region.boundary
-                            print(f"  [BP Transform] COMMON: overlap_region type={overlap_region.geom_type}, shared_boundary type={shared_boundary.geom_type}")
-                        else:
-                            # No overlap - fall back to exterior intersection (crossing points)
+                        shared_boundary = None
+                        if overlap_region is not None and not overlap_region.is_empty:
+                            if hasattr(overlap_region, 'boundary'):
+                                shared_boundary = overlap_region.boundary
+                                if shared_boundary is not None:
+                                    print(f"  [BP DEBUG] shared_boundary from overlap: type={shared_boundary.geom_type}")
+
+                        if shared_boundary is None or shared_boundary.is_empty:
+                            # No overlap or no boundary - fall back to exterior intersection
                             shared_boundary = poly_0.exterior.intersection(poly_1.exterior)
-                            print(f"  [BP Transform] COMMON: no overlap, using exterior intersection type={shared_boundary.geom_type}")
+                            print(f"  [BP DEBUG] shared_boundary from exterior intersection: type={shared_boundary.geom_type if shared_boundary else 'None'}")
 
                         # Extract coordinates from the shared edges
                         def extract_line_coords(geom):
                             coords = []
-                            if geom.is_empty:
+                            if geom is None or geom.is_empty:
                                 return coords
                             if geom.geom_type == 'LineString':
                                 coords.extend(list(np.array(geom.coords)))
@@ -12769,16 +12778,20 @@ class ContourMeshMixin:
                             elif geom.geom_type == 'MultiPoint':
                                 for pt in geom.geoms:
                                     coords.append(np.array(pt.coords[0]))
+                            elif geom.geom_type == 'LinearRing':
+                                coords.extend(list(np.array(geom.coords)))
                             return coords
 
                         # Extract coordinates from shared boundary
                         shared_edge_points = extract_line_coords(shared_boundary)
-                        print(f"  [BP Transform] COMMON: shared boundary has {len(shared_edge_points)} points")
+                        print(f"  [BP DEBUG] shared_edge_points: {len(shared_edge_points)} points")
+                        if len(shared_edge_points) > 0:
+                            pts = np.array(shared_edge_points)
+                            print(f"  [BP DEBUG] shared edge bounds: ({pts[:,0].min():.6f},{pts[:,1].min():.6f}) to ({pts[:,0].max():.6f},{pts[:,1].max():.6f})")
 
                         # Store the shared edge for use in cutting
                         if len(shared_edge_points) >= 2:
                             self._shared_cut_edge_2d = np.array(shared_edge_points)
-                            print(f"  [BP Transform] COMMON: stored shared edge with {len(shared_edge_points)} points")
 
                             # Compute cutting line direction from the shared edge
                             edge_arr = np.array(shared_edge_points)
@@ -12789,9 +12802,15 @@ class ContourMeshMixin:
                                 boundary_dir = Vt[0]
                                 boundary_dir = boundary_dir / (np.linalg.norm(boundary_dir) + 1e-10)
                                 cutting_line_2d = (edge_mean, boundary_dir)
-                                print(f"  [BP Transform] COMMON: cutting line from shared edge")
+                                # DEBUG: compute line endpoints for display
+                                line_len = np.linalg.norm(pts.max(axis=0) - pts.min(axis=0))
+                                line_start = edge_mean - boundary_dir * line_len / 2
+                                line_end = edge_mean + boundary_dir * line_len / 2
+                                print(f"  [BP DEBUG] cutting_line_2d: center=({edge_mean[0]:.6f},{edge_mean[1]:.6f}), dir=({boundary_dir[0]:.4f},{boundary_dir[1]:.4f})")
+                                print(f"  [BP DEBUG] cutting line endpoints: ({line_start[0]:.6f},{line_start[1]:.6f}) to ({line_end[0]:.6f},{line_end[1]:.6f})")
                         else:
                             self._shared_cut_edge_2d = None
+                            print(f"  [BP DEBUG] No shared edge found!")
 
                     except Exception as e:
                         print(f"  [BP Transform] COMMON: shared edge detection failed: {e}")
