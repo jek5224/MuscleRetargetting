@@ -89,7 +89,9 @@ class TetrahedronMeshMixin:
         # Tetrahedron mesh data
         self.tet_vertices = None  # (N, 3) array of tet vertex positions
         self.tet_tetrahedra = None  # (M, 4) array of tet indices
-        self.tet_faces = None  # (F, 3) array of surface face indices
+        self.tet_faces = None  # (F, 3) array of surface face indices (for backwards compat)
+        self.tet_render_faces = None  # Original contour faces for rendering/collision
+        self.tet_sim_faces = None  # Tet boundary faces for simulation
         self.tet_face_normals = None  # (F, 3) array of face normals
         self.tet_cap_face_indices = []  # Indices of cap faces (for skeleton attachment)
         self.tet_anchor_vertices = []  # Vertices at origin/insertion caps
@@ -113,6 +115,35 @@ class TetrahedronMeshMixin:
         self.contour_to_tet_vertex_map = None  # Maps contour vertex indices to tet vertex indices
         self.cross_contour_edge_mask = None  # Boolean mask for cross-contour edges
         self.intra_contour_edge_mask = None  # Boolean mask for intra-contour edges
+
+    def _extract_tet_boundary_faces(self, tetrahedra):
+        """
+        Extract boundary faces from tetrahedra (faces shared by exactly 1 tet).
+        Used for simulation boundary conditions.
+        """
+        from collections import Counter
+        face_counts = Counter()
+        face_to_original = {}
+
+        for tet_idx, tet in enumerate(tetrahedra):
+            # 4 faces per tet with outward-facing winding
+            tet_faces_local = [
+                (tet[1], tet[2], tet[3]),
+                (tet[0], tet[3], tet[2]),
+                (tet[0], tet[1], tet[3]),
+                (tet[0], tet[2], tet[1]),
+            ]
+            for face in tet_faces_local:
+                sorted_face = tuple(sorted(face))
+                face_counts[sorted_face] += 1
+                face_to_original[sorted_face] = face
+
+        boundary_faces = []
+        for sorted_face, count in face_counts.items():
+            if count == 1:
+                boundary_faces.append(face_to_original[sorted_face])
+
+        return np.array(boundary_faces, dtype=np.int32) if boundary_faces else np.array([], dtype=np.int32).reshape(0, 3)
 
     def tetrahedralize_contour_mesh(self):
         """
@@ -350,42 +381,25 @@ class TetrahedronMeshMixin:
                         end_name = "origin" if end_type == 0 else "insertion"
                         print(f"  Anchor {anchor_idx} -> stream {stream_idx} {end_name}, skeleton {skel_idx}")
 
-        # Step 4: Tetrahedralize using TetGen (preserves surface mesh)
-        print("Performing TetGen tetrahedralization...")
+        # Step 4: Tetrahedralize using Delaunay (robust, preserves all input vertices)
+        # Delaunay is more robust than TetGen for open/non-manifold meshes
+        # Original surface vertices are preserved; we keep original faces for rendering
+        print("Performing Delaunay tetrahedralization...")
         try:
-            import tetgen
-
-            # TetGen requires vertices and faces
-            tgen = tetgen.TetGen(closed_vertices, closed_faces)
-
-            # Tetrahedralize with quality constraints
-            # order=1: linear elements
-            # mindihedral: minimum dihedral angle (quality)
-            # minratio: minimum radius-edge ratio (quality)
-            tet_verts, interior_tetrahedra = tgen.tetrahedralize(
-                order=1,
-                mindihedral=10,  # Allow some flat tetrahedra
-                minratio=1.5
-            )
-
-            # TetGen may add Steiner points - update vertices
-            if len(tet_verts) != len(closed_vertices):
-                print(f"  TetGen added {len(tet_verts) - len(closed_vertices)} Steiner points")
-                closed_vertices = tet_verts
-
-            print(f"Tetrahedralization: {len(interior_tetrahedra)} tetrahedra")
-
-        except ImportError:
-            print("TetGen not available, falling back to Delaunay...")
-            # Fallback to Delaunay
             delaunay = Delaunay(closed_vertices)
             tetrahedra = delaunay.simplices
+
+            # Filter to keep only tetrahedra whose centroids are inside the surface
             tet_centroids = np.mean(closed_vertices[tetrahedra], axis=1)
             mesh = trimesh.Trimesh(vertices=closed_vertices, faces=closed_faces)
             inside_mask = mesh.contains(tet_centroids)
             interior_tetrahedra = tetrahedra[inside_mask]
+
             if len(interior_tetrahedra) == 0:
+                print("  Warning: No interior tetrahedra found, using all tetrahedra")
                 interior_tetrahedra = tetrahedra
+
+            print(f"  Delaunay: {len(tetrahedra)} total tets, {len(interior_tetrahedra)} interior")
 
         except Exception as e:
             print(f"Tetrahedralization failed: {e}")
@@ -393,16 +407,54 @@ class TetrahedronMeshMixin:
             traceback.print_exc()
             return False
 
-        # Step 5: Store results
+        # Step 5: Extract tet boundary faces (faces shared by exactly 1 tetrahedron)
+        # These are used for simulation boundary conditions
+        from collections import Counter
+        face_counts = Counter()
+        face_to_tet = {}  # Track which tet each face belongs to
+
+        for tet_idx, tet in enumerate(interior_tetrahedra):
+            # 4 faces per tet: opposite to each vertex
+            tet_faces_local = [
+                (tet[1], tet[2], tet[3]),  # opposite to vertex 0
+                (tet[0], tet[3], tet[2]),  # opposite to vertex 1 (flipped for outward normal)
+                (tet[0], tet[1], tet[3]),  # opposite to vertex 2
+                (tet[0], tet[2], tet[1]),  # opposite to vertex 3 (flipped for outward normal)
+            ]
+            for face in tet_faces_local:
+                sorted_face = tuple(sorted(face))
+                face_counts[sorted_face] += 1
+                face_to_tet[sorted_face] = (tet_idx, face)  # Store original winding
+
+        # Boundary faces appear exactly once
+        sim_faces = []
+        for sorted_face, count in face_counts.items():
+            if count == 1:
+                # Use the original winding from the tet
+                _, original_face = face_to_tet[sorted_face]
+                sim_faces.append(original_face)
+
+        sim_faces = np.array(sim_faces, dtype=np.int32)
+        print(f"  Extracted {len(sim_faces)} tet boundary faces for simulation")
+
+        # Step 6: Store results with dual face system
         self.tet_vertices = closed_vertices
-        self.tet_faces = closed_faces  # Original surface faces + cap faces
         self.tet_tetrahedra = interior_tetrahedra
+
+        # Dual face system:
+        # - tet_render_faces: Original contour faces + caps (for rendering/collision)
+        # - tet_sim_faces: Tet boundary faces (for simulation boundary conditions)
+        self.tet_render_faces = closed_faces  # Original surface faces + cap faces
+        self.tet_sim_faces = sim_faces  # Tet boundary faces
+        self.tet_faces = closed_faces  # Backwards compatibility (alias to render faces)
+
         self.tet_cap_face_indices = cap_face_indices  # Indices of cap faces (fixed during simulation)
         self.tet_surface_face_count = len(faces)  # Number of original surface faces
 
         print(f"Tetrahedralization complete:")
         print(f"  Vertices: {len(self.tet_vertices)}")
-        print(f"  Surface faces: {len(self.tet_faces)} ({self.tet_surface_face_count} original + {len(cap_face_indices)} caps)")
+        print(f"  Render faces: {len(self.tet_render_faces)} ({self.tet_surface_face_count} original + {len(cap_face_indices)} caps)")
+        print(f"  Sim faces: {len(self.tet_sim_faces)} (tet boundary)")
         print(f"  Tetrahedra: {len(self.tet_tetrahedra)}")
         print(f"  Fixed cap faces: {len(self.tet_cap_face_indices)}")
 
@@ -478,9 +530,15 @@ class TetrahedronMeshMixin:
 
         # Save with pickle for complex nested structures
         try:
+            # Get render and sim faces (dual face system)
+            render_faces = self.tet_render_faces if hasattr(self, 'tet_render_faces') and self.tet_render_faces is not None else self.tet_faces
+            sim_faces = self.tet_sim_faces if hasattr(self, 'tet_sim_faces') and self.tet_sim_faces is not None else None
+
             save_dict = {
                 'vertices': self.tet_vertices,
-                'faces': self.tet_faces,
+                'faces': render_faces,  # Backwards compatible: 'faces' = render faces
+                'render_faces': render_faces,  # Explicit render faces
+                'sim_faces': sim_faces,  # Tet boundary faces for simulation
                 'tetrahedra': self.tet_tetrahedra,
                 'cap_face_indices': np.array(self.tet_cap_face_indices) if hasattr(self, 'tet_cap_face_indices') else np.array([]),
                 'anchor_vertices': np.array(self.tet_anchor_vertices) if hasattr(self, 'tet_anchor_vertices') else np.array([]),
@@ -526,11 +584,24 @@ class TetrahedronMeshMixin:
                 data = pickle.load(f)
 
             self.tet_vertices = data['vertices']
-            self.tet_faces = data['faces']
             self.tet_tetrahedra = data['tetrahedra']
             self.tet_cap_face_indices = list(data['cap_face_indices'])
             self.tet_anchor_vertices = list(data['anchor_vertices']) if 'anchor_vertices' in data and len(data['anchor_vertices']) > 0 else []
             self.tet_surface_face_count = int(data['surface_face_count'])
+
+            # Load dual face system (with backwards compatibility)
+            if 'render_faces' in data and data['render_faces'] is not None:
+                self.tet_render_faces = data['render_faces']
+            else:
+                self.tet_render_faces = data['faces']  # Old format: faces = render faces
+
+            if 'sim_faces' in data and data['sim_faces'] is not None:
+                self.tet_sim_faces = data['sim_faces']
+            else:
+                # Old format: regenerate sim faces from tetrahedra
+                self.tet_sim_faces = self._extract_tet_boundary_faces(self.tet_tetrahedra)
+
+            self.tet_faces = self.tet_render_faces  # Backwards compatibility alias
 
             if 'cap_attachments' in data and data['cap_attachments'] is not None and len(data['cap_attachments']) > 0:
                 self.tet_cap_attachments = [tuple(row) for row in data['cap_attachments']]
@@ -590,7 +661,7 @@ class TetrahedronMeshMixin:
                 self.fiber_sampling_seed = data['fiber_sampling_seed']
 
             print(f"[{name}] Loaded tetrahedron mesh from {filepath}")
-            print(f"  Vertices: {len(self.tet_vertices)}, Faces: {len(self.tet_faces)}, Tets: {len(self.tet_tetrahedra)}")
+            print(f"  Vertices: {len(self.tet_vertices)}, Render faces: {len(self.tet_render_faces)}, Sim faces: {len(self.tet_sim_faces)}, Tets: {len(self.tet_tetrahedra)}")
             return True
 
         except Exception as e:
@@ -598,7 +669,6 @@ class TetrahedronMeshMixin:
             try:
                 data = np.load(filepath)
                 self.tet_vertices = data['vertices']
-                self.tet_faces = data['faces']
                 self.tet_tetrahedra = data['tetrahedra']
                 self.tet_cap_face_indices = list(data['cap_face_indices'])
                 self.tet_anchor_vertices = list(data['anchor_vertices']) if 'anchor_vertices' in data else []
@@ -607,6 +677,12 @@ class TetrahedronMeshMixin:
                     self.tet_cap_attachments = [tuple(row) for row in data['cap_attachments']]
                 else:
                     self.tet_cap_attachments = []
+
+                # Old format: faces = render faces, regenerate sim faces
+                self.tet_render_faces = data['faces']
+                self.tet_sim_faces = self._extract_tet_boundary_faces(self.tet_tetrahedra)
+                self.tet_faces = self.tet_render_faces  # Backwards compatibility alias
+
                 print(f"[{name}] Loaded tetrahedron mesh (old format) from {filepath}")
                 return True
             except Exception as e2:
@@ -617,6 +693,9 @@ class TetrahedronMeshMixin:
         """Prepare vertex arrays for efficient tetrahedron mesh drawing."""
         if not hasattr(self, 'tet_vertices') or self.tet_vertices is None:
             return
+
+        # Use render faces for drawing (original contour mesh surface)
+        render_faces = self.tet_render_faces if hasattr(self, 'tet_render_faces') and self.tet_render_faces is not None else self.tet_faces
 
         # Prepare surface face arrays
         cap_set = set(self.tet_cap_face_indices)
@@ -630,7 +709,7 @@ class TetrahedronMeshMixin:
         color = self.contour_mesh_color
         cap_color = np.array([0.2, 0.6, 0.2])
 
-        for face_idx, face in enumerate(self.tet_faces):
+        for face_idx, face in enumerate(render_faces):
             v0, v1, v2 = self.tet_vertices[face]
             normal = np.cross(v1 - v0, v2 - v0)
             norm_len = np.linalg.norm(normal)
@@ -651,9 +730,9 @@ class TetrahedronMeshMixin:
         self._tet_cap_verts = np.array(cap_verts, dtype=np.float32) if cap_verts else None
         self._tet_cap_normals = np.array(cap_normals, dtype=np.float32) if cap_normals else None
 
-        # Prepare surface edge arrays (from tet_faces, not tetrahedra)
+        # Prepare surface edge arrays (from render faces for display)
         edge_set = set()
-        for face in self.tet_faces:
+        for face in render_faces:
             for i in range(3):
                 v0, v1 = face[i], face[(i + 1) % 3]
                 edge = (min(v0, v1), max(v0, v1))

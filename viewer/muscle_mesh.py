@@ -1455,7 +1455,9 @@ class MuscleMeshMixin:
 
         # Tetrahedron mesh for soft body simulation
         self.tet_vertices = None
-        self.tet_faces = None
+        self.tet_faces = None  # Backwards compat alias to tet_render_faces
+        self.tet_render_faces = None  # Original contour faces for rendering/collision
+        self.tet_sim_faces = None  # Tet boundary faces for simulation
         self.tet_tetrahedra = None
         self.tet_cap_face_indices = []
         self.tet_anchor_vertices = []
@@ -2995,7 +2997,9 @@ class MuscleMeshMixin:
 
         # Tetrahedron mesh
         self.tet_vertices = None
-        self.tet_faces = None
+        self.tet_faces = None  # Backwards compat alias to tet_render_faces
+        self.tet_render_faces = None  # Original contour faces for rendering/collision
+        self.tet_sim_faces = None  # Tet boundary faces for simulation
         self.tet_tetrahedra = None
         self.tet_cap_face_indices = []
         self.tet_anchor_vertices = []
