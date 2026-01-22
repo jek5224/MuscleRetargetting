@@ -12011,24 +12011,12 @@ class ContourMeshMixin:
                         if overlap is not None and not overlap.is_empty and hasattr(overlap, 'boundary'):
                             shared_boundary = overlap.boundary
 
-                    if shared_boundary is None or shared_boundary.is_empty:
-                        # Use perpendicular bisector between centroids
-                        ci = centroids_2d[i]
-                        cj = centroids_2d[j]
-                        mid = (ci + cj) / 2
-                        direction = cj - ci
-                        direction = direction / (np.linalg.norm(direction) + 1e-10)
-                        perp = np.array([-direction[1], direction[0]])
-                        line_len = 0.1
-                        p1 = mid - perp * line_len
-                        p2 = mid + perp * line_len
-                        self._shared_cut_edges_2d.append(((i, j), np.array([p1, p2])))
-                        print(f"  [Shared Edges] Pair {i}-{j}: using perpendicular bisector")
+                    shared_points = extract_line_coords(shared_boundary) if shared_boundary and not shared_boundary.is_empty else []
+                    if len(shared_points) >= 2:
+                        self._shared_cut_edges_2d.append(((i, j), np.array(shared_points)))
+                        print(f"  [Shared Edges] Found shared edge {i}-{j}: {len(shared_points)} points")
                     else:
-                        shared_points = extract_line_coords(shared_boundary)
-                        if len(shared_points) >= 2:
-                            self._shared_cut_edges_2d.append(((i, j), np.array(shared_points)))
-                            print(f"  [Shared Edges] Found shared edge {i}-{j}: {len(shared_points)} points")
+                        print(f"  [Shared Edges] WARNING: Pair {i}-{j} has no shared edge")
                 except Exception as e:
                     print(f"  [Shared Edges] Error for pair {i}-{j}: {e}")
 
@@ -12784,7 +12772,8 @@ class ContourMeshMixin:
                 print(f"  [BP Transform] WARNING: piece {piece_idx} has no vertices, using initial position")
 
         # ========== Step 6.5: Find cutting lines between ALL adjacent source pairs ==========
-        # Store shared edges for ALL pairs of sources that touch/overlap
+        # IMPORTANT: Compute shared edges from UNTRANSFORMED sources, then transform them
+        # This ensures shared edges are preserved even when transformed sources only touch at a point
         cutting_line_2d = None  # (point, direction) in 2D target plane (for 2-piece case)
         cutting_line_3d = None  # direction vector in 3D for bounding plane creation
         self._shared_cut_edges_2d = []  # List of (pair_indices, points) for all adjacent pairs
@@ -12811,70 +12800,105 @@ class ContourMeshMixin:
                 coords.extend(list(np.array(geom.coords)))
             return coords
 
-        # Find shared boundaries between ALL pairs of sources
+        # Helper function to transform a point using common transform
+        def transform_point(pt, scale_x, scale_y, center_tx, center_ty, theta, combined_center):
+            cos_t = np.cos(theta)
+            sin_t = np.sin(theta)
+            rot = np.array([[cos_t, -sin_t], [sin_t, cos_t]])
+            rel = pt - combined_center
+            scaled = rel * np.array([scale_x, scale_y])
+            rotated = scaled @ rot.T
+            return rotated + np.array([center_tx, center_ty])
+
+        # Find shared boundaries from UNTRANSFORMED sources first
         if n_pieces >= 2:
             try:
-                # Create polygons for all sources
-                source_polygons = []
-                for i, src in enumerate(final_transformed):
-                    if len(src) >= 3:
-                        poly = Polygon(np.array(src))
+                # Create polygons from UNTRANSFORMED sources (absolute positions)
+                untransformed_polygons = []
+                for i in range(n_pieces):
+                    abs_vertices = source_2d_shapes[i] + initial_translations[i]
+                    if len(abs_vertices) >= 3:
+                        poly = Polygon(abs_vertices)
                         if not poly.is_valid:
                             poly = poly.buffer(0)
-                        source_polygons.append(poly)
-                        print(f"  [BP Transform] Source {i}: {len(src)} verts, valid={poly.is_valid}")
+                        untransformed_polygons.append(poly)
+                        print(f"  [BP Transform] Source {i}: {len(abs_vertices)} verts, valid={poly.is_valid}")
                     else:
-                        source_polygons.append(None)
-                        print(f"  [BP Transform] Source {i}: too few verts ({len(src)})")
+                        untransformed_polygons.append(None)
+                        print(f"  [BP Transform] Source {i}: too few verts ({len(abs_vertices)})")
 
-                # Find shared boundaries between all pairs
+                # Find shared edges from untransformed sources
+                untransformed_shared_edges = []  # [(pair_indices, points), ...]
                 for i in range(n_pieces):
                     for j in range(i + 1, n_pieces):
-                        poly_i = source_polygons[i]
-                        poly_j = source_polygons[j]
+                        poly_i = untransformed_polygons[i]
+                        poly_j = untransformed_polygons[j]
                         if poly_i is None or poly_j is None:
                             continue
 
                         try:
                             # Find shared boundary between this pair
                             shared_boundary = poly_i.exterior.intersection(poly_j.exterior)
-                            print(f"  [BP Transform] Pair {i}-{j} exterior intersection: {shared_boundary.geom_type if shared_boundary and not shared_boundary.is_empty else 'empty'}")
+                            print(f"  [BP Transform] Untransformed pair {i}-{j} intersection: {shared_boundary.geom_type if shared_boundary and not shared_boundary.is_empty else 'empty'}")
 
                             if shared_boundary is None or shared_boundary.is_empty:
                                 # Try overlap boundary
                                 overlap = poly_i.intersection(poly_j)
                                 if overlap is not None and not overlap.is_empty and hasattr(overlap, 'boundary'):
                                     shared_boundary = overlap.boundary
-                                    print(f"  [BP Transform] Pair {i}-{j} overlap boundary: {shared_boundary.geom_type if shared_boundary else 'None'}")
 
-                            # Try to extract shared boundary points
                             shared_points = []
                             if shared_boundary is not None and not shared_boundary.is_empty:
                                 shared_points = extract_line_coords(shared_boundary)
 
-                            # If we got 2+ points, use them as the cutting line
                             if len(shared_points) >= 2:
-                                self._shared_cut_edges_2d.append(((i, j), np.array(shared_points)))
-                                print(f"  [BP Transform] Found shared edge between pieces {i}-{j}: {len(shared_points)} points")
+                                untransformed_shared_edges.append(((i, j), np.array(shared_points)))
+                                print(f"  [BP Transform] Untransformed shared edge {i}-{j}: {len(shared_points)} points")
                             else:
-                                # Fallback to perpendicular bisector when no shared edge or only a point
-                                ci = centroids[i]
-                                cj = centroids[j]
-                                mid = (ci + cj) / 2
-                                direction = cj - ci
-                                direction = direction / (np.linalg.norm(direction) + 1e-10)
-                                perp = np.array([-direction[1], direction[0]])
-                                # Create line segment through midpoint
-                                line_len = 0.1  # Long enough to cross target
-                                p1 = mid - perp * line_len
-                                p2 = mid + perp * line_len
-                                shared_points = [p1, p2]
-                                self._shared_cut_edges_2d.append(((i, j), np.array(shared_points)))
-                                print(f"  [BP Transform] Pair {i}-{j}: using perpendicular bisector (shared boundary had {len(extract_line_coords(shared_boundary)) if shared_boundary and not shared_boundary.is_empty else 0} points)")
+                                print(f"  [BP Transform] Untransformed pair {i}-{j}: no shared edge ({len(shared_points)} points)")
                         except Exception as e:
-                            print(f"  [BP Transform] Error finding shared edge {i}-{j}: {e}")
-                            import traceback
-                            traceback.print_exc()
+                            print(f"  [BP Transform] Error finding untransformed shared edge {i}-{j}: {e}")
+
+                # Now transform the shared edges using the optimization parameters
+                if not use_separate_transforms:
+                    # Common transform - apply same transform to shared edges
+                    common_scale_x = max(optimal_params[0], 0.5)
+                    common_scale_y = max(optimal_params[1], 0.5)
+                    center_tx = optimal_params[2]
+                    center_ty = optimal_params[3]
+                    theta = optimal_params[4]
+
+                    for pair_indices, shared_pts in untransformed_shared_edges:
+                        transformed_pts = []
+                        for pt in shared_pts:
+                            t_pt = transform_point(pt, common_scale_x, common_scale_y,
+                                                   center_tx, center_ty, theta, combined_center)
+                            transformed_pts.append(t_pt)
+                        self._shared_cut_edges_2d.append((pair_indices, np.array(transformed_pts)))
+                        print(f"  [BP Transform] Transformed shared edge {pair_indices}: {len(transformed_pts)} points")
+                else:
+                    # Separate transforms - can't easily transform shared edges
+                    # Fall back to finding edges from transformed sources
+                    for i, src in enumerate(final_transformed):
+                        if len(src) >= 3:
+                            poly = Polygon(np.array(src))
+                            if not poly.is_valid:
+                                poly = poly.buffer(0)
+                            untransformed_polygons[i] = poly  # Reuse list for transformed
+
+                    for i in range(n_pieces):
+                        for j in range(i + 1, n_pieces):
+                            poly_i = untransformed_polygons[i]
+                            poly_j = untransformed_polygons[j]
+                            if poly_i is None or poly_j is None:
+                                continue
+                            try:
+                                shared_boundary = poly_i.exterior.intersection(poly_j.exterior)
+                                shared_points = extract_line_coords(shared_boundary) if shared_boundary and not shared_boundary.is_empty else []
+                                if len(shared_points) >= 2:
+                                    self._shared_cut_edges_2d.append(((i, j), np.array(shared_points)))
+                            except:
+                                pass
 
                 print(f"  [BP Transform] Total shared edges found: {len(self._shared_cut_edges_2d)}")
 
@@ -12934,88 +12958,24 @@ class ContourMeshMixin:
                         print(f"  [BP Transform] SEPARATE: WARNING - no neck found on target (n={n_target}, min_sep={min_sep})")
 
                 elif len(src_0) >= 3 and len(src_1) >= 3:
-                    # COMMON mode: Find where the two source BOUNDARIES meet
-                    # This is the actual shared edge - NOT the intersection polygon boundary
-                    poly_0 = Polygon(src_0)
-                    poly_1 = Polygon(src_1)
-                    if not poly_0.is_valid:
-                        poly_0 = poly_0.buffer(0)
-                    if not poly_1.is_valid:
-                        poly_1 = poly_1.buffer(0)
-
-                    try:
-                        # Method: Find the boundary of the OVERLAPPING REGION between two sources
-                        # This is where the two optimized sources meet
-                        from shapely.geometry import LineString
-
-                        # DEBUG: Print source polygon info
-                        print(f"  [BP DEBUG] poly_0: {poly_0.geom_type}, area={poly_0.area:.10f}, bounds={poly_0.bounds}")
-                        print(f"  [BP DEBUG] poly_1: {poly_1.geom_type}, area={poly_1.area:.10f}, bounds={poly_1.bounds}")
-
-                        # The overlapping region between two polygons
-                        overlap_region = poly_0.intersection(poly_1)
-                        print(f"  [BP DEBUG] overlap_region: type={overlap_region.geom_type if overlap_region else 'None'}, empty={overlap_region.is_empty if overlap_region else 'N/A'}")
-
-                        # The shared boundary is the boundary of this overlap region
-                        shared_boundary = None
-                        if overlap_region is not None and not overlap_region.is_empty:
-                            if hasattr(overlap_region, 'boundary'):
-                                shared_boundary = overlap_region.boundary
-                                if shared_boundary is not None:
-                                    print(f"  [BP DEBUG] shared_boundary from overlap: type={shared_boundary.geom_type}")
-
-                        if shared_boundary is None or shared_boundary.is_empty:
-                            # No overlap or no boundary - fall back to exterior intersection
-                            shared_boundary = poly_0.exterior.intersection(poly_1.exterior)
-                            print(f"  [BP DEBUG] shared_boundary from exterior intersection: type={shared_boundary.geom_type if shared_boundary else 'None'}")
-
-                        # Extract coordinates from shared boundary (using helper defined above)
-                        shared_edge_points = extract_line_coords(shared_boundary)
-                        print(f"  [BP DEBUG] shared_edge_points: {len(shared_edge_points)} points")
-                        if len(shared_edge_points) > 0:
-                            pts = np.array(shared_edge_points)
-                            print(f"  [BP DEBUG] shared edge bounds: ({pts[:,0].min():.6f},{pts[:,1].min():.6f}) to ({pts[:,0].max():.6f},{pts[:,1].max():.6f})")
-
-                        # Store the shared edge for use in cutting
-                        if len(shared_edge_points) >= 2:
-                            self._shared_cut_edge_2d = np.array(shared_edge_points)
-
-                            # Compute cutting line direction from the shared edge
-                            edge_arr = np.array(shared_edge_points)
-                            edge_mean = edge_arr.mean(axis=0)
-                            centered = edge_arr - edge_mean
-                            if len(centered) >= 2:
-                                _, _, Vt = np.linalg.svd(centered, full_matrices=False)
-                                boundary_dir = Vt[0]
-                                boundary_dir = boundary_dir / (np.linalg.norm(boundary_dir) + 1e-10)
-                                cutting_line_2d = (edge_mean, boundary_dir)
-                                # DEBUG: compute line endpoints for display
-                                line_len = np.linalg.norm(pts.max(axis=0) - pts.min(axis=0))
-                                line_start = edge_mean - boundary_dir * line_len / 2
-                                line_end = edge_mean + boundary_dir * line_len / 2
-                                print(f"  [BP DEBUG] cutting_line_2d: center=({edge_mean[0]:.6f},{edge_mean[1]:.6f}), dir=({boundary_dir[0]:.4f},{boundary_dir[1]:.4f})")
-                                print(f"  [BP DEBUG] cutting line endpoints: ({line_start[0]:.6f},{line_start[1]:.6f}) to ({line_end[0]:.6f},{line_end[1]:.6f})")
-                        else:
-                            self._shared_cut_edge_2d = None
-                            print(f"  [BP DEBUG] No shared edge found!")
-
-                    except Exception as e:
-                        print(f"  [BP Transform] COMMON: shared edge detection failed: {e}")
-                        import traceback
-                        traceback.print_exc()
-                        self._shared_cut_edge_2d = None
+                    # COMMON mode: shared edges are already computed in Step 6.5
+                    # from UNTRANSFORMED sources and then transformed
+                    # Use the already-computed _shared_cut_edge_2d to set cutting_line_2d
+                    if self._shared_cut_edge_2d is not None and len(self._shared_cut_edge_2d) >= 2:
+                        edge_arr = np.array(self._shared_cut_edge_2d)
+                        edge_mean = edge_arr.mean(axis=0)
+                        centered = edge_arr - edge_mean
+                        if len(centered) >= 2:
+                            _, _, Vt = np.linalg.svd(centered, full_matrices=False)
+                            boundary_dir = Vt[0]
+                            boundary_dir = boundary_dir / (np.linalg.norm(boundary_dir) + 1e-10)
+                            cutting_line_2d = (edge_mean, boundary_dir)
+                            print(f"  [BP Transform] COMMON: using pre-computed shared edge for cutting line")
+                    else:
+                        print(f"  [BP Transform] COMMON: no shared edge available")
 
                 if cutting_line_2d is None:
-                    # Fallback: Use perpendicular bisector between optimized centroids
-                    centroid_vec = centroids[1] - centroids[0]
-                    centroid_dist = np.linalg.norm(centroid_vec)
-                    if centroid_dist > 1e-10:
-                        centroid_dir = centroid_vec / centroid_dist
-                        # Cutting line is perpendicular to centroid direction
-                        cutting_dir = np.array([-centroid_dir[1], centroid_dir[0]])
-                        centroid_mid = (centroids[0] + centroids[1]) / 2
-                        cutting_line_2d = (centroid_mid, cutting_dir)
-                        print(f"  [BP Transform] cutting line: perpendicular bisector at ({centroid_mid[0]:.4f}, {centroid_mid[1]:.4f})")
+                    print(f"  [BP Transform] WARNING: No cutting line available - sources may not share an edge")
 
                 # Convert cutting line direction to 3D
                 if cutting_line_2d is not None:
