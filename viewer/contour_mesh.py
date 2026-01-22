@@ -13170,6 +13170,7 @@ class ContourMeshMixin:
 
             # Try to find actual intersection of target edge with shared boundary
             t = 0.5  # Default
+            method_used = "default"
 
             if shared_boundary is not None and not shared_boundary.is_empty:
                 int_pt = target_edge.intersection(shared_boundary)
@@ -13179,23 +13180,30 @@ class ContourMeshMixin:
                         if edge_len > 1e-10:
                             t = np.linalg.norm(int_coords - p_a) / edge_len
                             t = np.clip(t, 0.0, 1.0)
+                        method_used = f"Point intersection at ({int_coords[0]:.6f},{int_coords[1]:.6f})"
                         boundary_pt = target_contour[v_idx_a] + t * (target_contour[v_idx_b] - target_contour[v_idx_a])
+                        print(f"    [CUT DEBUG] edge {v_idx_a}->{v_idx_b}: {method_used}, t={t:.3f}")
                         return t, boundary_pt
                     elif int_pt.geom_type == 'MultiPoint':
                         int_coords = np.array(int_pt.geoms[0].coords[0])
                         if edge_len > 1e-10:
                             t = np.linalg.norm(int_coords - p_a) / edge_len
                             t = np.clip(t, 0.0, 1.0)
+                        method_used = f"MultiPoint[0] at ({int_coords[0]:.6f},{int_coords[1]:.6f})"
                         boundary_pt = target_contour[v_idx_a] + t * (target_contour[v_idx_b] - target_contour[v_idx_a])
+                        print(f"    [CUT DEBUG] edge {v_idx_a}->{v_idx_b}: {method_used}, t={t:.3f}")
                         return t, boundary_pt
                     elif int_pt.geom_type == 'LineString':
-                        # Edge lies along shared boundary - use midpoint of intersection
                         int_coords = np.array(int_pt.centroid.coords[0])
                         if edge_len > 1e-10:
                             t = np.linalg.norm(int_coords - p_a) / edge_len
                             t = np.clip(t, 0.0, 1.0)
+                        method_used = f"LineString centroid at ({int_coords[0]:.6f},{int_coords[1]:.6f})"
                         boundary_pt = target_contour[v_idx_a] + t * (target_contour[v_idx_b] - target_contour[v_idx_a])
+                        print(f"    [CUT DEBUG] edge {v_idx_a}->{v_idx_b}: {method_used}, t={t:.3f}")
                         return t, boundary_pt
+                    else:
+                        method_used = f"unknown int_pt type: {int_pt.geom_type}"
 
                 # No direct intersection - find nearest point on shared boundary
                 edge_mid = (p_a + p_b) / 2
@@ -13205,10 +13213,13 @@ class ContourMeshMixin:
                     closest_pt = np.array(nearest.coords[0])
                     # Project closest_pt onto the edge to get t
                     if edge_len > 1e-10:
-                        t = np.dot(closest_pt - p_a, edge_vec) / (edge_len * edge_len)
-                        t = np.clip(t, 0.0, 1.0)
-                except:
-                    pass
+                        t_raw = np.dot(closest_pt - p_a, edge_vec) / (edge_len * edge_len)
+                        t = np.clip(t_raw, 0.0, 1.0)
+                    method_used = f"nearest_points at ({closest_pt[0]:.6f},{closest_pt[1]:.6f}), t_raw={t_raw:.3f}"
+                except Exception as e:
+                    method_used = f"nearest_points failed: {e}"
+
+            print(f"    [CUT DEBUG] edge {v_idx_a}->{v_idx_b}: {method_used}, t={t:.3f}")
 
             # Compute 3D intersection point
             boundary_pt = target_contour[v_idx_a] + t * (target_contour[v_idx_b] - target_contour[v_idx_a])
