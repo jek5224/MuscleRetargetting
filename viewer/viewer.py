@@ -5140,22 +5140,31 @@ class GLFWApp():
                         draw_list.add_text(scx - 5, scy - 6,
                                           imgui.get_color_u32_rgba(*src_color, 0.9), f"S{src_idx}")
 
-                # Draw shared boundary line (cutting line between sources)
-                shared_edge = obj._shared_cut_edge_2d if hasattr(obj, '_shared_cut_edge_2d') else None
-                if shared_edge is not None and len(shared_edge) >= 2:
-                    # Draw the shared boundary line in magenta
-                    line_color = imgui.get_color_u32_rgba(1.0, 0.0, 1.0, 1.0)
-                    # Draw line from first to last shared edge point
-                    p1 = to_screen(shared_edge[0], x0, y0, canvas_size)
-                    p2 = to_screen(shared_edge[-1], x0, y0, canvas_size)
-                    draw_list.add_line(p1[0], p1[1], p2[0], p2[1], line_color, 2.0)
-                    # Draw endpoint markers
-                    draw_list.add_circle_filled(p1[0], p1[1], 4, line_color)
-                    draw_list.add_circle_filled(p2[0], p2[1], 4, line_color)
-                    # Label
-                    mid_x, mid_y = (p1[0] + p2[0]) / 2, (p1[1] + p2[1]) / 2
-                    draw_list.add_text(mid_x + 5, mid_y - 15,
-                                      line_color, "Cut Line")
+                # Draw shared boundary lines (cutting lines between sources)
+                # For 2 pieces: use _shared_cut_edge_2d
+                # For N pieces: use _shared_cut_edges_2d (list of all pairs)
+                shared_edges_list = []
+                if hasattr(obj, '_shared_cut_edges_2d') and obj._shared_cut_edges_2d:
+                    shared_edges_list = obj._shared_cut_edges_2d
+                elif hasattr(obj, '_shared_cut_edge_2d') and obj._shared_cut_edge_2d is not None:
+                    shared_edges_list = [((0, 1), obj._shared_cut_edge_2d)]
+
+                line_colors = [
+                    imgui.get_color_u32_rgba(1.0, 0.0, 1.0, 1.0),  # Magenta
+                    imgui.get_color_u32_rgba(0.0, 1.0, 1.0, 1.0),  # Cyan
+                    imgui.get_color_u32_rgba(1.0, 1.0, 0.0, 1.0),  # Yellow
+                    imgui.get_color_u32_rgba(1.0, 0.5, 0.0, 1.0),  # Orange
+                ]
+                for idx, (pair_indices, shared_edge) in enumerate(shared_edges_list):
+                    if shared_edge is not None and len(shared_edge) >= 2:
+                        line_color = line_colors[idx % len(line_colors)]
+                        p1 = to_screen(shared_edge[0], x0, y0, canvas_size)
+                        p2 = to_screen(shared_edge[-1], x0, y0, canvas_size)
+                        draw_list.add_line(p1[0], p1[1], p2[0], p2[1], line_color, 2.0)
+                        draw_list.add_circle_filled(p1[0], p1[1], 4, line_color)
+                        draw_list.add_circle_filled(p2[0], p2[1], 4, line_color)
+                        mid_x, mid_y = (p1[0] + p2[0]) / 2, (p1[1] + p2[1]) / 2
+                        draw_list.add_text(mid_x + 5, mid_y - 15, line_color, f"Cut {pair_indices[0]}-{pair_indices[1]}")
 
             # Draw all neck candidates (faded) and highlight selected one
             candidates = obj._manual_cut_data.get('neck_candidates', [])
