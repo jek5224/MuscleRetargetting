@@ -12836,20 +12836,22 @@ class ContourMeshMixin:
                             continue
 
                         try:
-                            # Find shared boundary between this pair
-                            shared_boundary = poly_i.exterior.intersection(poly_j.exterior)
-                            geom_type = shared_boundary.geom_type if shared_boundary and not shared_boundary.is_empty else 'empty'
-                            print(f"  [BP Transform] Optimized pair {i}-{j} intersection: {geom_type}")
+                            # Find shared boundary by looking for close vertices
+                            # Shapely intersection can fail due to numerical precision after transformation
+                            src_i = np.array(final_transformed[i])
+                            src_j = np.array(final_transformed[j])
 
-                            if shared_boundary is None or shared_boundary.is_empty:
-                                # Try overlap boundary
-                                overlap = poly_i.intersection(poly_j)
-                                if overlap is not None and not overlap.is_empty and hasattr(overlap, 'boundary'):
-                                    shared_boundary = overlap.boundary
-
+                            # Find vertices in src_i that are close to any vertex in src_j
+                            tol = 1e-6  # Tolerance for considering vertices as shared
                             shared_points = []
-                            if shared_boundary is not None and not shared_boundary.is_empty:
-                                shared_points = extract_line_coords(shared_boundary)
+                            for vi, pt_i in enumerate(src_i):
+                                for vj, pt_j in enumerate(src_j):
+                                    dist = np.linalg.norm(pt_i - pt_j)
+                                    if dist < tol:
+                                        shared_points.append(pt_i.copy())
+                                        break
+
+                            print(f"  [BP Transform] Optimized pair {i}-{j}: found {len(shared_points)} close vertices")
 
                             if len(shared_points) >= 2:
                                 self._shared_cut_edges_2d.append(((i, j), np.array(shared_points)))

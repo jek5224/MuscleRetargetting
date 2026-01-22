@@ -17,3 +17,8 @@
 - Look for similar patterns elsewhere in the codebase that may need the same fix
 - Don't assume a fix works in isolation - verify data flows correctly through all code paths
 - Before declaring a fix complete, search for other usages of the same variable/function
+
+## No Unsolicited Fallbacks
+- Do NOT add fallback logic or edge case handling unless explicitly asked
+- If you think a fallback is necessary, ASK the user first before implementing
+- Stick to what was requested - don't proactively "protect" against cases the user didn't mention
