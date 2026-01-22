@@ -11046,6 +11046,7 @@ class ContourMeshMixin:
                         # We must NOT compact it or we'll lose the stream mapping!
                         valid_cut_indices = [i for i, c in enumerate(cut_contours) if c is not None]
                         valid_cut_contours = [cut_contours[i] for i in valid_cut_indices]
+                        num_valid_pieces = len(valid_cut_contours)
                         cut_centroids = [np.mean(c, axis=0) for c in valid_cut_contours]
                         prev_centroids = [np.mean(stream_contours[s][-1], axis=0) for s in streams_for_contour]
 
