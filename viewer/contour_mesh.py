@@ -12958,30 +12958,7 @@ class ContourMeshMixin:
         if not use_intersection_method:
             print(f"  [BP Transform] Using vertex assignment method (fallback)")
 
-            if n_pieces == 2 and cutting_line_2d is not None:
-                # For n_pieces == 2 with cutting line: use cutting line to partition vertices
-                # This ensures assignment is CONSISTENT with boundary point placement
-                line_point, line_dir = cutting_line_2d
-                line_normal = np.array([-line_dir[1], line_dir[0]])  # Perpendicular to line
-
-                # Determine which side each centroid is on to map sides to pieces
-                centroid_sides = [np.dot(c - line_point, line_normal) for c in centroids]
-                # piece 0 should be on the positive side (or match centroid 0's side)
-                flip_sides = centroid_sides[0] < 0
-
-                line_count = 0
-                for v_idx, v_2d in enumerate(target_2d):
-                    side = np.dot(v_2d - line_point, line_normal)
-                    if flip_sides:
-                        side = -side
-                    assigned_piece = 0 if side >= 0 else 1
-                    assignments.append(assigned_piece)
-                    line_count += 1
-
-                print(f"  [BP Transform] Assignment (n=2): {line_count} vertices assigned by cutting line")
-                print(f"  [BP Transform] Piece distribution: {[assignments.count(i) for i in range(n_pieces)]}")
-
-            elif n_pieces >= 2:
+            if n_pieces >= 2:
                 # For n_pieces > 2: Use optimized polygon containment + nearest boundary
                 # The optimization has transformed source polygons to tile the target
 
