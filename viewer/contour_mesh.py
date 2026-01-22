@@ -13410,21 +13410,46 @@ class ContourMeshMixin:
 
                     segments.append((i, segment_verts, segment_indices, pair1, pair2))
 
-                # Assign each segment to a piece based on majority vertex assignment
-                for seg_idx, seg_verts, seg_indices, pair_start, pair_end in segments:
-                    if len(seg_indices) > 0:
-                        # Count assignments in this segment
-                        counts = [0] * n_pieces
-                        for v_idx in seg_indices:
-                            counts[assignments[v_idx]] += 1
-                        piece_idx = counts.index(max(counts))
-                    else:
-                        # No vertices - use the common piece between start and end crossings
-                        common = set(pair_start) & set(pair_end)
-                        piece_idx = list(common)[0] if common else pair_start[0]
+                # Assign segments by tracking piece transitions at crossings
+                # First, determine initial piece using first segment's centroid
+                if len(segments) > 0 and len(segments[0][1]) > 0:
+                    first_seg_verts = segments[0][1]
+                    first_seg_2d = np.array([[np.dot(v - target_mean, target_x), np.dot(v - target_mean, target_y)] for v in first_seg_verts])
+                    first_seg_centroid = np.mean(first_seg_2d, axis=0)
 
-                    new_contours[piece_idx].extend(seg_verts)
-                    print(f"  [BP Transform] Segment {seg_idx}: {len(seg_verts)} verts -> piece {piece_idx}")
+                    # Find which piece in first crossing pair is closer
+                    pair0 = sorted_crossings[0][4]
+                    d0 = np.linalg.norm(first_seg_centroid - centroids[pair0[0]])
+                    d1 = np.linalg.norm(first_seg_centroid - centroids[pair0[1]])
+                    current_piece = pair0[0] if d0 < d1 else pair0[1]
+                else:
+                    current_piece = 0
+
+                print(f"  [BP Transform] Initial piece (after crossing 0): {current_piece}")
+
+                # Walk through segments, tracking piece at each crossing
+                for seg_idx, seg_verts, seg_indices, pair_start, pair_end in segments:
+                    # This segment is in current_piece (we enter it after pair_start crossing)
+                    new_contours[current_piece].extend(seg_verts)
+                    print(f"  [BP Transform] Segment {seg_idx}: {len(seg_verts)} verts -> piece {current_piece}")
+
+                    # At the end of this segment, we hit pair_end crossing
+                    # Switch to the other piece in pair_end
+                    if current_piece == pair_end[0]:
+                        current_piece = pair_end[1]
+                    elif current_piece == pair_end[1]:
+                        current_piece = pair_end[0]
+                    else:
+                        # Current piece not in crossing pair - use centroid to pick
+                        if seg_idx + 1 < len(segments):
+                            next_seg_verts = segments[seg_idx + 1][1]
+                            if len(next_seg_verts) > 0:
+                                next_seg_2d = np.array([[np.dot(v - target_mean, target_x), np.dot(v - target_mean, target_y)] for v in next_seg_verts])
+                                next_centroid = np.mean(next_seg_2d, axis=0)
+                                d0 = np.linalg.norm(next_centroid - centroids[pair_end[0]])
+                                d1 = np.linalg.norm(next_centroid - centroids[pair_end[1]])
+                                current_piece = pair_end[0] if d0 < d1 else pair_end[1]
+                        print(f"  [BP Transform] WARNING: piece {current_piece} not in crossing pair {pair_end}")
 
             for piece_idx in range(n_pieces):
                 print(f"  [BP Transform] Piece {piece_idx}: {len(new_contours[piece_idx])} verts")
