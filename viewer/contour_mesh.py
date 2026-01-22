@@ -13542,39 +13542,36 @@ class ContourMeshMixin:
                     adjacency[j].add(i)
                     shared_edge_map[(min(i, j), max(i, j))] = shared_pts
 
-                print(f"  [BP Transform] Adjacency: {[(i, list(adjacency[i])) for i in range(n_pieces)]}")
+                print(f"  [BP Transform] Adjacency from shared edges: {[(i, list(adjacency[i])) for i in range(n_pieces)]}")
 
-                # Find cutting order: prefer "leaf" sources (adjacent to only one other)
-                remaining_sources = set(range(n_pieces))
-                cut_order = []  # [(source_to_cut, adjacent_source), ...]
+                # For COMMON mode, sources should form a chain: 0-1-2-3-...-(n-1)
+                # Ensure sequential adjacency even if shared edge detection missed some
+                for i in range(n_pieces - 1):
+                    adjacency[i].add(i + 1)
+                    adjacency[i + 1].add(i)
+                    # If no shared edge exists, create a synthetic one using centroids
+                    pair_key = (i, i + 1)
+                    if pair_key not in shared_edge_map:
+                        # Use line between centroids as cutting line
+                        c1 = centroids[i]
+                        c2 = centroids[i + 1]
+                        midpoint = (c1 + c2) / 2
+                        shared_edge_map[pair_key] = np.array([c1, midpoint, c2])
+                        print(f"  [BP Transform] Created synthetic shared edge for {i}-{i+1}")
 
-                while len(remaining_sources) > 1:
-                    # Find a leaf source (adjacent to only one remaining source)
-                    leaf_found = False
-                    for src in remaining_sources:
-                        remaining_neighbors = adjacency[src] & remaining_sources
-                        if len(remaining_neighbors) == 1:
-                            neighbor = list(remaining_neighbors)[0]
-                            cut_order.append((src, neighbor))
-                            remaining_sources.remove(src)
-                            leaf_found = True
-                            break
+                print(f"  [BP Transform] Adjacency (chain): {[(i, list(adjacency[i])) for i in range(n_pieces)]}")
 
-                    if not leaf_found:
-                        # No leaf found - pick any source with at least one neighbor
-                        for src in remaining_sources:
-                            remaining_neighbors = adjacency[src] & remaining_sources
-                            if len(remaining_neighbors) > 0:
-                                neighbor = list(remaining_neighbors)[0]
-                                cut_order.append((src, neighbor))
-                                remaining_sources.remove(src)
-                                break
-                        else:
-                            # No connected sources - this shouldn't happen
-                            print(f"  [BP Transform] WARNING: No connected sources found!")
-                            break
+                # Cutting order: cut from one end to the other (0, 1, 2, ...)
+                # This ensures sequential cutting along the chain
+                cut_order = []
+                for src in range(n_pieces - 1):
+                    # Each source is cut using its boundary with the next source
+                    cut_order.append((src, src + 1))
 
-                print(f"  [BP Transform] Cut order: {cut_order}")
+                print(f"  [BP Transform] Cut order (sequential): {cut_order}")
+
+                # Only the last source remains after sequential cuts
+                remaining_sources = {n_pieces - 1}
 
                 # Initialize: current target is full target, all sources are unassigned
                 current_target = list(target_contour)
@@ -13689,12 +13686,21 @@ class ContourMeshMixin:
                 print(f"  [BP Transform] Source {last_source} (last): {len(current_target)} verts")
 
                 # Assign pieces to new_contours in source order
+                # For sources without pieces from divide-and-conquer, use vertex assignment
                 for src_idx in range(n_pieces):
                     if src_idx in source_to_piece:
                         new_contours[src_idx] = source_to_piece[src_idx]
                     else:
-                        print(f"  [BP Transform] WARNING: Source {src_idx} has no piece!")
-                        new_contours[src_idx] = []
+                        # Source not in adjacency graph - use vertex assignment fallback
+                        print(f"  [BP Transform] Source {src_idx} not in adjacency - using vertex assignment")
+                        # Get vertices assigned to this source
+                        src_verts_3d = [target_contour[v] for v in range(len(assignments)) if assignments[v] == src_idx]
+                        if len(src_verts_3d) >= 3:
+                            new_contours[src_idx] = src_verts_3d
+                            print(f"  [BP Transform] Source {src_idx}: assigned {len(src_verts_3d)} verts from vertex assignment")
+                        else:
+                            print(f"  [BP Transform] WARNING: Source {src_idx} has only {len(src_verts_3d)} assigned verts!")
+                            new_contours[src_idx] = src_verts_3d if src_verts_3d else []
 
             for piece_idx in range(n_pieces):
                 print(f"  [BP Transform] Piece {piece_idx}: {len(new_contours[piece_idx])} verts")
