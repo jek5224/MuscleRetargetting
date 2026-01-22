@@ -12064,6 +12064,19 @@ class ContourMeshMixin:
                     continue
 
                 try:
+                    # First check if contours are duplicates (all vertices same)
+                    # This happens when streams inherit the same parent contour before being cut
+                    if len(src_i) == len(src_j):
+                        all_match = True
+                        match_tol = 1e-6
+                        for k in range(len(src_i)):
+                            if np.linalg.norm(src_i[k] - src_j[k]) > match_tol:
+                                all_match = False
+                                break
+                        if all_match:
+                            print(f"  [Shared Edges] SKIP: Sources {i} and {j} are DUPLICATES (all vertices match)")
+                            continue
+
                     # Find shared boundary by looking for close vertices
                     # Shapely intersection can fail due to numerical precision
                     tol = 1e-4  # Tolerance for considering vertices as shared (accounts for scaling drift)
@@ -12074,6 +12087,12 @@ class ContourMeshMixin:
                             if dist < tol:
                                 shared_points.append(pt_i.copy())
                                 break
+
+                    # Also check if too many points are shared (indicating near-duplicate contours)
+                    min_verts = min(len(src_i), len(src_j))
+                    if len(shared_points) > min_verts * 0.5:
+                        print(f"  [Shared Edges] SKIP: Sources {i}-{j} share {len(shared_points)}/{min_verts} vertices (likely duplicates)")
+                        continue
 
                     if len(shared_points) >= 2:
                         self._shared_cut_edges_2d.append(((i, j), np.array(shared_points)))
@@ -12340,6 +12359,30 @@ class ContourMeshMixin:
         if has_degenerate:
             print(f"  [BP Transform] Proceeding with optimization despite degenerate sources")
 
+        # Check for DUPLICATE source contours (same vertices)
+        # This happens when streams inherit the same parent contour before being properly cut
+        duplicate_groups = {}  # centroid_key -> list of source indices
+        source_centroids_3d = []
+        for i, src_contour in enumerate(source_contours):
+            src_arr = np.array(src_contour) if src_contour is not None else np.array([])
+            if len(src_arr) > 0:
+                centroid = np.mean(src_arr, axis=0)
+            else:
+                centroid = np.array([0, 0, 0])
+            source_centroids_3d.append(centroid)
+            # Round centroid for grouping
+            centroid_key = tuple(np.round(centroid, 5))
+            if centroid_key not in duplicate_groups:
+                duplicate_groups[centroid_key] = []
+            duplicate_groups[centroid_key].append(i)
+
+        has_duplicates = any(len(group) > 1 for group in duplicate_groups.values())
+        if has_duplicates:
+            print(f"  [BP Transform] WARNING: Duplicate source contours detected!")
+            for key, group in duplicate_groups.items():
+                if len(group) > 1:
+                    print(f"    Sources {group} have same centroid: {key}")
+
         # ========== Step 1: Project target contour to 2D ==========
         target_mean = target_bp['mean']
         # Negate basis vectors to rotate 180° - match basic cutting window orientation
@@ -12403,6 +12446,28 @@ class ContourMeshMixin:
                 # No rotation needed - already in target basis
                 initial_rotations.append(0.0)
                 print(f"  [BP Transform] source {i} initial rotation: 0.0° (common basis)")
+
+        # Spread out duplicate sources so they have different initial positions
+        # This ensures optimization can differentiate them
+        if has_duplicates:
+            target_center = target_2d.mean(axis=0)
+            target_radius = np.max(np.linalg.norm(target_2d - target_center, axis=1))
+
+            for centroid_key, group in duplicate_groups.items():
+                if len(group) <= 1:
+                    continue
+                # Spread these duplicates evenly around the target center
+                n_dupes = len(group)
+                for i, src_idx in enumerate(group):
+                    angle = 2 * np.pi * i / n_dupes
+                    spread_radius = target_radius * 0.3  # Spread by 30% of target radius
+                    offset_x = spread_radius * np.cos(angle)
+                    offset_y = spread_radius * np.sin(angle)
+                    old_pos = initial_translations[src_idx]
+                    # Add offset to center position (use target center as base)
+                    new_pos = [target_center[0] + offset_x, target_center[1] + offset_y]
+                    initial_translations[src_idx] = new_pos
+                    print(f"  [BP Transform] Spread duplicate source {src_idx}: ({old_pos[0]:.4f}, {old_pos[1]:.4f}) -> ({new_pos[0]:.4f}, {new_pos[1]:.4f})")
 
         # Validate source polygons - check for self-intersection, holes, tiny area
         source_areas = []
@@ -13167,50 +13232,73 @@ class ContourMeshMixin:
             print(f"  [BP Transform] Using vertex assignment method (fallback)")
 
             if n_pieces >= 2:
-                # For n_pieces > 2: Use optimized polygon containment + nearest boundary
-                # The optimization has transformed source polygons to tile the target
+                # Special case: when source contours are duplicates, use spread centroids for Voronoi-like assignment
+                if has_duplicates:
+                    print(f"  [BP Transform] DUPLICATE sources detected - using spread centroid assignment")
+                    # Create spread centroids evenly around target center
+                    target_center = target_2d.mean(axis=0)
+                    target_radius = np.max(np.linalg.norm(target_2d - target_center, axis=1))
+                    spread_centroids = []
+                    for i in range(n_pieces):
+                        angle = 2 * np.pi * i / n_pieces
+                        spread_radius = target_radius * 0.5  # Position centroids at 50% of target radius
+                        cx = target_center[0] + spread_radius * np.cos(angle)
+                        cy = target_center[1] + spread_radius * np.sin(angle)
+                        spread_centroids.append(np.array([cx, cy]))
+                        print(f"  [BP Transform] Spread centroid {i}: ({cx:.4f}, {cy:.4f})")
 
-                # Assign each vertex using optimized polygons (piece_polygons already built above)
-                inside_count = 0
-                boundary_count = 0
-                centroid_count = 0
+                    # Assign each vertex to nearest spread centroid (Voronoi-like)
+                    for v_idx, v_2d in enumerate(target_2d):
+                        dists = [np.linalg.norm(v_2d - c) for c in spread_centroids]
+                        assigned_piece = dists.index(min(dists))
+                        assignments.append(assigned_piece)
 
-                for v_idx, v_2d in enumerate(target_2d):
-                    pt = Point(v_2d)
-                    assigned_piece = None
+                    print(f"  [BP Transform] Spread assignment distribution: {[assignments.count(i) for i in range(n_pieces)]}")
+                else:
+                    # For n_pieces > 2: Use optimized polygon containment + nearest boundary
+                    # The optimization has transformed source polygons to tile the target
 
-                    # First: check if inside any optimized polygon
-                    for piece_idx, poly in enumerate(piece_polygons):
-                        if poly is not None and poly.contains(pt):
-                            assigned_piece = piece_idx
-                            inside_count += 1
-                            break
+                    # Assign each vertex using optimized polygons (piece_polygons already built above)
+                    inside_count = 0
+                    boundary_count = 0
+                    centroid_count = 0
 
-                    # Second: find nearest optimized polygon boundary
-                    if assigned_piece is None:
-                        min_dist = float('inf')
+                    for v_idx, v_2d in enumerate(target_2d):
+                        pt = Point(v_2d)
+                        assigned_piece = None
+
+                        # First: check if inside any optimized polygon
                         for piece_idx, poly in enumerate(piece_polygons):
-                            if poly is not None:
-                                try:
-                                    dist = poly.exterior.distance(pt)
-                                    if dist < min_dist:
-                                        min_dist = dist
-                                        assigned_piece = piece_idx
-                                except:
-                                    pass
-                        if assigned_piece is not None:
-                            boundary_count += 1
+                            if poly is not None and poly.contains(pt):
+                                assigned_piece = piece_idx
+                                inside_count += 1
+                                break
 
-                    # Last resort: nearest centroid
-                    if assigned_piece is None:
-                        centroid_dists = [np.linalg.norm(v_2d - c) for c in centroids]
-                        assigned_piece = centroid_dists.index(min(centroid_dists))
-                        centroid_count += 1
+                        # Second: find nearest optimized polygon boundary
+                        if assigned_piece is None:
+                            min_dist = float('inf')
+                            for piece_idx, poly in enumerate(piece_polygons):
+                                if poly is not None:
+                                    try:
+                                        dist = poly.exterior.distance(pt)
+                                        if dist < min_dist:
+                                            min_dist = dist
+                                            assigned_piece = piece_idx
+                                    except:
+                                        pass
+                            if assigned_piece is not None:
+                                boundary_count += 1
 
-                    assignments.append(assigned_piece)
+                        # Last resort: nearest centroid
+                        if assigned_piece is None:
+                            centroid_dists = [np.linalg.norm(v_2d - c) for c in centroids]
+                            assigned_piece = centroid_dists.index(min(centroid_dists))
+                            centroid_count += 1
 
-                print(f"  [BP Transform] Assignment (n={n_pieces}): {inside_count} inside, {boundary_count} boundary, {centroid_count} centroid")
-                print(f"  [BP Transform] Piece distribution: {[assignments.count(i) for i in range(n_pieces)]}")
+                        assignments.append(assigned_piece)
+
+                    print(f"  [BP Transform] Assignment (n={n_pieces}): {inside_count} inside, {boundary_count} boundary, {centroid_count} centroid")
+                    print(f"  [BP Transform] Piece distribution: {[assignments.count(i) for i in range(n_pieces)]}")
 
         # Remove islands: for 2 pieces, find the 2 best split points
         # This guarantees exactly 2 contiguous regions on a closed contour
@@ -13766,12 +13854,23 @@ class ContourMeshMixin:
                     print(f"    Piece {pi}: {len(p)} verts, first=({p_2d[0,0]:.6f}, {p_2d[0,1]:.6f}), last=({p_2d[-1,0]:.6f}, {p_2d[-1,1]:.6f})")
 
         else:
-            # No crossings found - this is an error, all sources must share edges
-            print(f"  [BP Transform] ERROR: No crossings found! Sources may not share edges or may not cross target contour.")
-            print(f"  [BP Transform] Cannot cut target contour without shared edge crossings.")
-            # Create dummy pieces to avoid crash
-            for piece_idx in range(n_pieces):
-                new_contours[piece_idx] = [target_contour[v] for v in range(piece_idx * n_verts // n_pieces, (piece_idx + 1) * n_verts // n_pieces)]
+            # No crossings found - use vertex assignment (spread centroids for duplicates)
+            if has_duplicates:
+                print(f"  [BP Transform] No crossings (duplicate sources) - using spread centroid vertex assignment")
+            else:
+                print(f"  [BP Transform] WARNING: No crossings found! Using vertex assignment fallback.")
+
+            # Use the assignments computed earlier (which uses spread centroids for duplicates)
+            if len(assignments) == len(target_contour):
+                for piece_idx in range(n_pieces):
+                    src_verts_3d = [target_contour[v] for v in range(len(assignments)) if assignments[v] == piece_idx]
+                    new_contours[piece_idx] = src_verts_3d
+                    print(f"  [BP Transform] Piece {piece_idx}: {len(src_verts_3d)} verts from vertex assignment")
+            else:
+                # Fallback: equal division if assignments don't match
+                print(f"  [BP Transform] WARNING: Assignment length mismatch, using equal division")
+                for piece_idx in range(n_pieces):
+                    new_contours[piece_idx] = [target_contour[v] for v in range(piece_idx * n_verts // n_pieces, (piece_idx + 1) * n_verts // n_pieces)]
 
         # Register shared cut edge vertices globally
         if len(shared_boundary_points) > 0:
