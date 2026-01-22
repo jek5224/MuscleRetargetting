@@ -1733,6 +1733,77 @@ class GLFWApp():
                                         self.env.muscle_activation_levels[start_fiber:end_fiber] = self.env.zygote_activation_levels[i]
                                 # self.env.muscle_activation_levels[start_fiber:end_fiber] = self.env.zygote_activation_levels[i] / (end_fiber - start_fiber)
                     imgui.tree_pop()
+
+                # Skeleton joint angle sliders
+                if self.env.skel is not None and imgui.tree_node("Skeleton Joint Angles"):
+                    # Initialize DOF array if not present
+                    if not hasattr(self, '_skel_dofs'):
+                        self._skel_dofs = self.env.skel.getPositions().copy()
+                        self._skel_dof_names = []
+                        # Build DOF names from joints
+                        for jn_idx in range(self.env.skel.getNumJoints()):
+                            joint = self.env.skel.getJoint(jn_idx)
+                            jn_name = joint.getName()
+                            num_dofs = joint.getNumDofs()
+                            if num_dofs == 1:
+                                self._skel_dof_names.append(jn_name)
+                            elif num_dofs == 3:
+                                self._skel_dof_names.extend([f"{jn_name}_x", f"{jn_name}_y", f"{jn_name}_z"])
+                            elif num_dofs == 6:
+                                self._skel_dof_names.extend([f"{jn_name}_tx", f"{jn_name}_ty", f"{jn_name}_tz",
+                                                            f"{jn_name}_rx", f"{jn_name}_ry", f"{jn_name}_rz"])
+                            else:
+                                for d in range(num_dofs):
+                                    self._skel_dof_names.append(f"{jn_name}_{d}")
+
+                    # Sync DOF array size with skeleton
+                    num_dofs = self.env.skel.getNumDofs()
+                    if len(self._skel_dofs) != num_dofs:
+                        self._skel_dofs = self.env.skel.getPositions().copy()
+
+                    # Reset all button
+                    if imgui.button("Reset All##skel_dofs", width=100):
+                        self._skel_dofs = np.zeros(num_dofs)
+                        self.env.skel.setPositions(self._skel_dofs)
+                        # Update soft bodies and waypoints
+                        for mname, mobj in self.zygote_muscle_meshes.items():
+                            if mobj.soft_body is not None:
+                                mobj._update_tet_positions_from_skeleton(self.env.skel)
+                                mobj._update_fixed_targets_from_skeleton(self.zygote_skeleton_meshes, self.env.skel)
+                    imgui.same_line()
+                    if imgui.button("Sync from Skel##skel_dofs", width=120):
+                        self._skel_dofs = self.env.skel.getPositions().copy()
+
+                    # Sliders for each DOF
+                    slider_width = 150
+                    any_changed = False
+                    for i in range(num_dofs):
+                        # Get DOF name (truncate if too long)
+                        dof_name = self._skel_dof_names[i] if i < len(self._skel_dof_names) else f"DOF {i}"
+                        display_name = dof_name[:20] + ".." if len(dof_name) > 20 else dof_name
+                        imgui.text(f"{i:2d} {display_name}")
+                        imgui.same_line(position=180)
+                        imgui.push_item_width(slider_width)
+                        changed, self._skel_dofs[i] = imgui.slider_float(f"##skel_dof{i}", self._skel_dofs[i], -3.14, 3.14)
+                        imgui.pop_item_width()
+                        if changed:
+                            any_changed = True
+                        imgui.same_line()
+                        if imgui.button(f"0##reset_dof{i}", width=20):
+                            self._skel_dofs[i] = 0.0
+                            any_changed = True
+
+                    # Apply changes to skeleton
+                    if any_changed:
+                        self.env.skel.setPositions(self._skel_dofs)
+                        # Update soft bodies and waypoints
+                        for mname, mobj in self.zygote_muscle_meshes.items():
+                            if mobj.soft_body is not None:
+                                mobj._update_tet_positions_from_skeleton(self.env.skel)
+                                mobj._update_fixed_targets_from_skeleton(self.zygote_skeleton_meshes, self.env.skel)
+
+                    imgui.tree_pop()
+
                 if imgui.button("Export Muscle Waypoints", width=wide_button_width):
                     from core.dartHelper import exportMuscleWaypoints
                     exportMuscleWaypoints(self.zygote_muscle_meshes, list(self.zygote_skeleton_meshes.keys()))
