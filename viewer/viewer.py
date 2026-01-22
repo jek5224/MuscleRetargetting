@@ -6538,11 +6538,6 @@ class GLFWApp():
                 continue
 
             imgui.text(f"Streams: {max_stream_count}")
-            imgui.same_line()
-            if imgui.button("Rebuild Groups"):
-                obj.rebuild_stream_groups()
-                # Update the original reference
-                orig['stream_groups'] = obj.stream_groups
             imgui.text("Check/uncheck levels. Linked levels toggle together.")
             imgui.separator()
 
@@ -6571,16 +6566,22 @@ class GLFWApp():
                         print(f"  Level {lvl_i}: linked groups = {linked}")
                 obj._level_select_debug_printed = True
 
-            # Find the most merged level (fewest unique contours = most linking)
+            # Find a level with multiple groups (most informative for ordering)
+            # Prefer levels where streams are split into distinct groups
             best_level = 0
-            max_linked = 0
+            best_score = 0
             for lvl_i, groups in enumerate(stream_groups):
-                linked_streams = sum(len(g) for g in groups if len(g) > 1)
-                if linked_streams > max_linked:
-                    max_linked = linked_streams
+                multi_groups = [g for g in groups if len(g) > 1]
+                num_multi_groups = len(multi_groups)
+                total_linked = sum(len(g) for g in multi_groups)
+                # Score: prefer multiple groups over single big group
+                # A level with [[0,4], [1,2,3]] scores higher than [[0,1,2,3,4]]
+                score = num_multi_groups * 100 + total_linked
+                if score > best_score:
+                    best_score = score
                     best_level = lvl_i
 
-            if max_linked > 0 and best_level < len(stream_groups):
+            if best_score > 0 and best_level < len(stream_groups):
                 # Use the linked structure at this level to order streams
                 # Streams in same group should be adjacent
                 groups_at_best = stream_groups[best_level]
