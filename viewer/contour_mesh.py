@@ -12920,7 +12920,7 @@ class ContourMeshMixin:
             # Multi-start optimization with different rotation angles
             best_result = None
             best_cost = float('inf')
-            rotation_trials = [0, np.pi/4, np.pi/2, 3*np.pi/4, np.pi, -np.pi/4, -np.pi/2, -3*np.pi/4]
+            rotation_trials = [0, np.pi/4, -np.pi/4]  # 0°, +45°, -45°
 
             for trial_theta in rotation_trials:
                 trial_x0 = x0.copy() if isinstance(x0, list) else list(x0)
