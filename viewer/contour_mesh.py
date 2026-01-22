@@ -12713,8 +12713,10 @@ class ContourMeshMixin:
                         if not poly.is_valid:
                             poly = poly.buffer(0)
                         source_polygons.append(poly)
+                        print(f"  [BP Transform] Source {i}: {len(src)} verts, valid={poly.is_valid}")
                     else:
                         source_polygons.append(None)
+                        print(f"  [BP Transform] Source {i}: too few verts ({len(src)})")
 
                 # Find shared boundaries between all pairs
                 for i in range(n_pieces):
@@ -12727,19 +12729,39 @@ class ContourMeshMixin:
                         try:
                             # Find shared boundary between this pair
                             shared_boundary = poly_i.exterior.intersection(poly_j.exterior)
+                            print(f"  [BP Transform] Pair {i}-{j} exterior intersection: {shared_boundary.geom_type if shared_boundary and not shared_boundary.is_empty else 'empty'}")
+
                             if shared_boundary is None or shared_boundary.is_empty:
                                 # Try overlap boundary
                                 overlap = poly_i.intersection(poly_j)
                                 if overlap is not None and not overlap.is_empty and hasattr(overlap, 'boundary'):
                                     shared_boundary = overlap.boundary
+                                    print(f"  [BP Transform] Pair {i}-{j} overlap boundary: {shared_boundary.geom_type if shared_boundary else 'None'}")
 
-                            if shared_boundary is not None and not shared_boundary.is_empty:
+                            # If still no shared boundary, use perpendicular bisector between centroids
+                            if shared_boundary is None or shared_boundary.is_empty:
+                                ci = centroids[i]
+                                cj = centroids[j]
+                                mid = (ci + cj) / 2
+                                direction = cj - ci
+                                direction = direction / (np.linalg.norm(direction) + 1e-10)
+                                perp = np.array([-direction[1], direction[0]])
+                                # Create line segment through midpoint
+                                line_len = 0.1  # Long enough to cross target
+                                p1 = mid - perp * line_len
+                                p2 = mid + perp * line_len
+                                shared_points = [p1, p2]
+                                self._shared_cut_edges_2d.append(((i, j), np.array(shared_points)))
+                                print(f"  [BP Transform] Pair {i}-{j}: using perpendicular bisector (no shared boundary)")
+                            elif shared_boundary is not None and not shared_boundary.is_empty:
                                 shared_points = extract_line_coords(shared_boundary)
                                 if len(shared_points) >= 2:
                                     self._shared_cut_edges_2d.append(((i, j), np.array(shared_points)))
                                     print(f"  [BP Transform] Found shared edge between pieces {i}-{j}: {len(shared_points)} points")
                         except Exception as e:
                             print(f"  [BP Transform] Error finding shared edge {i}-{j}: {e}")
+                            import traceback
+                            traceback.print_exc()
 
                 print(f"  [BP Transform] Total shared edges found: {len(self._shared_cut_edges_2d)}")
 
