@@ -8219,12 +8219,20 @@ class ContourMeshMixin:
                             continue
                         # Distance component: average normalized distance
                         avg_dist = np.mean([dist_matrix[s_i, t_i] / max_dist for s_i in t2s[t_i]])
+                        # Penalty for sources far from their closest target
+                        # This prevents moving sources too far from where they belong
+                        dist_penalty = 0.0
+                        for s_i in t2s[t_i]:
+                            closest_dist = np.min(dist_matrix[s_i])
+                            actual_dist = dist_matrix[s_i, t_i]
+                            if actual_dist > closest_dist * 2.0:  # More than 2x the closest distance
+                                dist_penalty += (actual_dist - closest_dist) / max_dist * 2.0
                         # Area component: ratio of sum(source_areas) to target_area
                         source_area_sum = sum(source_areas[s_i] for s_i in t2s[t_i])
                         area_ratio = source_area_sum / target_areas[t_i] if target_areas[t_i] > 0 else 1.0
                         area_error = abs(area_ratio - 1.0)  # Want ratio close to 1.0
-                        # Combined score (lower is better)
-                        total_score += avg_dist + 0.5 * area_error
+                        # Combined score (lower is better) - distance matters more than area
+                        total_score += avg_dist + dist_penalty + 0.3 * area_error
                     return total_score
 
                 current_score = compute_assignment_score(target_to_sources)
