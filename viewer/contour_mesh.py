@@ -13242,15 +13242,30 @@ class ContourMeshMixin:
             if len(shared_pts) < 2:
                 continue
 
-            # For 2-piece case with short shared edge, use cutting_line_2d direction (computed via SVD, more robust)
-            # but use the current shared_pts position (which is post-transformation)
-            if n_pieces == 2 and cutting_line_2d is not None and len(shared_pts) <= 5:
-                _, line_dir = cutting_line_2d  # Only use direction from SVD
+            # For short shared edge, compute direction from TRANSFORMED points using SVD
+            # (original cutting_line_2d direction is pre-transformation and may not match after anisotropic scaling)
+            if len(shared_pts) <= 5:
+                # Use SVD on transformed shared points to get robust line direction
+                shared_pts_arr = np.array(shared_pts)
+                line_point = np.mean(shared_pts_arr, axis=0)
+                centered = shared_pts_arr - line_point
+
+                if len(shared_pts) >= 2:
+                    # SVD to find principal direction
+                    _, _, vh = np.linalg.svd(centered)
+                    line_dir = vh[0]  # First principal component
+                    line_dir = line_dir / np.linalg.norm(line_dir)
+                else:
+                    # Fallback: use endpoints
+                    line_dir = shared_pts[-1] - shared_pts[0]
+                    line_len = np.linalg.norm(line_dir)
+                    if line_len < 1e-10:
+                        continue
+                    line_dir = line_dir / line_len
+
                 line_normal = np.array([-line_dir[1], line_dir[0]])
-                # Use center of transformed shared points as line_point
-                line_point = np.mean(shared_pts, axis=0)
-                print(f"  [BP Transform] Using cutting_line_2d direction for crossing detection (short shared edge: {len(shared_pts)} pts)")
-                print(f"  [BP Transform] Line point (from transformed shared edge): ({line_point[0]:.6f}, {line_point[1]:.6f})")
+                print(f"  [BP Transform] Using SVD on transformed shared edge for crossing detection ({len(shared_pts)} pts)")
+                print(f"  [BP Transform] Line point: ({line_point[0]:.6f}, {line_point[1]:.6f}), dir: ({line_dir[0]:.4f}, {line_dir[1]:.4f})")
             else:
                 line_p1 = shared_pts[0]
                 line_p2 = shared_pts[-1]
