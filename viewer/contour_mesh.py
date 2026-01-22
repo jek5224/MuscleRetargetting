@@ -12120,6 +12120,12 @@ class ContourMeshMixin:
 
         print(f"[Optimize Remaining] Source assignments: {piece_to_sources}")
 
+        # Always compute shared edges for visualization (even if 1:1 matching)
+        if num_sources >= 2:
+            self._compute_shared_edges_for_visualization(
+                source_contours, source_bps, target_bp
+            )
+
         # Build final pieces list
         final_pieces = []
 
