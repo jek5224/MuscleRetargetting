@@ -13449,7 +13449,27 @@ class ContourMeshMixin:
                                 target_segment_verts.append(v_temp)
                             v_temp = (v_temp + 1) % n_verts
 
-                        if len(target_segment_verts) > 0:
+                        # Check if both crossings are between the same two pieces
+                        same_pair = (pair1 == pair2)
+
+                        if same_pair:
+                            # Same pair: segment belongs to ONE of the two pieces exclusively
+                            # Check which piece has more vertices in this segment
+                            other_piece = pair1[1] if pair1[0] == piece_idx else pair1[0]
+                            other_segment_verts = []
+                            v_temp = (edge1 + 1) % n_verts
+                            while v_temp != (edge2 + 1) % n_verts:
+                                if assignments[v_temp] == other_piece:
+                                    other_segment_verts.append(v_temp)
+                                v_temp = (v_temp + 1) % n_verts
+
+                            # This segment belongs to this piece only if we have more vertices
+                            segment_belongs_to_this_piece = len(target_segment_verts) > len(other_segment_verts)
+                        else:
+                            # Different pairs: segment might have vertices from this piece
+                            segment_belongs_to_this_piece = len(target_segment_verts) > 0
+
+                        if segment_belongs_to_this_piece:
                             # Walk along target contour
                             piece_boundary.append(pt3d_1)
                             v = (edge1 + 1) % n_verts
