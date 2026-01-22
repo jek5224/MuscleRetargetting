@@ -6784,6 +6784,43 @@ class GLFWApp():
             imgui.same_line()
             if imgui.button("Finish Select", button_width, 30):
                 obj._apply_level_selection()
+                # Auto-resume pipeline if it was paused waiting for level selection
+                if hasattr(obj, '_pipeline_paused_at') and obj._pipeline_paused_at is not None:
+                    max_step = obj._process_step if hasattr(obj, '_process_step') else 12
+                    start_step = obj._pipeline_paused_at
+                    if start_step <= max_step:
+                        print(f"[{name}] Auto-resuming pipeline from step {start_step} to {max_step}...")
+                        try:
+                            # Step 9: Build Fiber
+                            if start_step <= 9 <= max_step and hasattr(obj, 'stream_contours') and obj.stream_contours is not None:
+                                print(f"  [9/{max_step}] Building fibers...")
+                                obj.build_fibers(skeleton_meshes=self.zygote_skeleton_meshes)
+
+                            # Step 10: Resample Contours
+                            if start_step <= 10 <= max_step and obj.contours is not None and len(obj.contours) > 0 and obj.bounding_planes is not None:
+                                print(f"  [10/{max_step}] Resampling Contours...")
+                                obj.resample_contours(base_samples=32)
+
+                            # Step 11: Build Contour Mesh
+                            if start_step <= 11 <= max_step and obj.contours is not None and len(obj.contours) > 0 and obj.draw_contour_stream is not None:
+                                print(f"  [11/{max_step}] Building Contour Mesh...")
+                                obj.build_contour_mesh()
+
+                            # Step 12: Tetrahedralize
+                            if start_step <= 12 <= max_step and obj.contour_mesh_vertices is not None:
+                                print(f"  [12/{max_step}] Tetrahedralizing...")
+                                obj.soft_body = None
+                                obj.tetrahedralize_contour_mesh()
+                                if obj.tet_vertices is not None:
+                                    obj.is_draw_contours = False
+                                    obj.is_draw_tet_mesh = True
+
+                            print(f"[{name}] Pipeline complete (steps {start_step}-{max_step})!")
+                        except Exception as e:
+                            print(f"[{name}] Pipeline error: {e}")
+                            import traceback
+                            traceback.print_exc()
+                    obj._pipeline_paused_at = None
 
             imgui.end()
 
