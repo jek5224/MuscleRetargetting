@@ -12735,17 +12735,21 @@ class ContourMeshMixin:
                         poly_1 = poly_1.buffer(0)
 
                     try:
-                        # Method: Find where the two source BOUNDARIES actually meet
-                        # This is the intersection of the two exterior rings
+                        # Method: Find the boundary of the OVERLAPPING REGION between two sources
+                        # This is where the two optimized sources meet
                         from shapely.geometry import LineString
 
-                        # Get boundaries as LineStrings
-                        boundary_0 = poly_0.exterior
-                        boundary_1 = poly_1.exterior
+                        # The overlapping region between two polygons
+                        overlap_region = poly_0.intersection(poly_1)
 
-                        # Shared boundary = where both exteriors intersect
-                        shared_boundary = boundary_0.intersection(boundary_1)
-                        print(f"  [BP Transform] COMMON: shared_boundary type={shared_boundary.geom_type}")
+                        # The shared boundary is the boundary of this overlap region
+                        if not overlap_region.is_empty:
+                            shared_boundary = overlap_region.boundary
+                            print(f"  [BP Transform] COMMON: overlap_region type={overlap_region.geom_type}, shared_boundary type={shared_boundary.geom_type}")
+                        else:
+                            # No overlap - fall back to exterior intersection (crossing points)
+                            shared_boundary = poly_0.exterior.intersection(poly_1.exterior)
+                            print(f"  [BP Transform] COMMON: no overlap, using exterior intersection type={shared_boundary.geom_type}")
 
                         # Extract coordinates from the shared edges
                         def extract_line_coords(geom):
@@ -13129,9 +13133,14 @@ class ContourMeshMixin:
                 boundary_pt = target_contour[v_idx_a] + t * (target_contour[v_idx_b] - target_contour[v_idx_a])
                 return t, boundary_pt
 
-            # Find shared boundary: where the two polygon exteriors intersect
-            # This is the line/points where the two optimized source contours meet
-            shared_boundary = poly_a.exterior.intersection(poly_b.exterior)
+            # Find shared boundary: the boundary of the overlapping region between sources
+            # This is the line where the two optimized source contours meet
+            overlap_region = poly_a.intersection(poly_b)
+            if not overlap_region.is_empty:
+                shared_boundary = overlap_region.boundary
+            else:
+                # No overlap - fall back to exterior intersection
+                shared_boundary = poly_a.exterior.intersection(poly_b.exterior)
 
             # Try to find actual intersection of target edge with shared boundary
             t = 0.5  # Default
