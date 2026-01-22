@@ -2976,7 +2976,7 @@ class MuscleMeshMixin:
         self.bounding_planes_discarded = None
         self.draw_contour_stream = None
         self.is_draw_contours = False
-        self.is_draw_bounding_box = False
+        # Keep is_draw_bounding_box enabled so bounding planes are drawn when process runs again
 
         # Level selection backup
         self._contours_backup = None
