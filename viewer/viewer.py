@@ -6635,9 +6635,8 @@ class GLFWApp():
                                 projections = [(s, np.dot(c - mean_pos, principal_axis)) for s, c in centroids]
                                 projections.sort(key=lambda x: x[1])
                                 stream_display_order = [p[0] for p in projections]
-                    print(f"[DEBUG] Using spatial ordering at first level, display_order = {stream_display_order}")
-                except Exception as e:
-                    print(f"[DEBUG] Exception in ordering: {e}")
+                except Exception:
+                    pass  # Keep default order on error
 
             # Header row with stream labels (in spatial order)
             imgui.text("Level")
