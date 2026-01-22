@@ -9098,6 +9098,110 @@ class ContourMeshMixin:
             self._manual_cut_results = None
         print("Manual cutting cancelled")
 
+    def _save_and_close_manual_cut(self, muscle_name=None):
+        """
+        Save the current finalized pieces and close the manual cut window.
+
+        For any targets that haven't been cut yet, use the target contour directly
+        (no cutting applied). This allows early exit from the cutting process
+        while keeping whatever progress has been made.
+        """
+        if self._manual_cut_data is None:
+            print("[Save&Close] No manual cut data - nothing to save")
+            self._manual_cut_pending = False
+            return
+
+        print("[Save&Close] Saving current progress and closing...")
+
+        # Get current context
+        target_level = self._manual_cut_data.get('target_level')
+        target_i = self._manual_cut_data.get('target_i', 0)
+        target_contour = self._manual_cut_data.get('target_contour')
+        stream_indices = self._manual_cut_data.get('stream_indices', [])
+        parent_finalized_pieces = self._manual_cut_data.get('parent_finalized_pieces', {})
+        current_pieces_3d = self._manual_cut_data.get('current_pieces_3d', [])
+        original_source_indices = self._manual_cut_data.get('original_source_indices', None)
+
+        # Get parent context for full stream indices
+        parent_context = self._manual_cut_data.get('parent_context', None)
+        if parent_context and 'stream_indices' in parent_context:
+            all_stream_indices = parent_context['stream_indices']
+        else:
+            all_stream_indices = stream_indices
+
+        # Initialize results storage
+        if not hasattr(self, '_manual_cut_results') or self._manual_cut_results is None:
+            self._manual_cut_results = {}
+
+        # Build final pieces array
+        # Use max of known indices to determine array size
+        max_idx = -1
+        if all_stream_indices:
+            max_idx = max(max_idx, max(all_stream_indices))
+        if parent_finalized_pieces:
+            max_idx = max(max_idx, max(parent_finalized_pieces.keys()))
+        if original_source_indices:
+            max_idx = max(max_idx, max(original_source_indices))
+
+        total_pieces = max_idx + 1 if max_idx >= 0 else len(stream_indices)
+        all_pieces = [None] * total_pieces
+
+        print(f"[Save&Close] Building result array of size {total_pieces}")
+
+        # 1. Fill in parent's finalized pieces (already completed cuts)
+        for orig_src_idx, piece in parent_finalized_pieces.items():
+            if orig_src_idx < total_pieces:
+                all_pieces[orig_src_idx] = piece
+                print(f"[Save&Close]   Slot {orig_src_idx}: from parent finalized ({len(piece)} verts)")
+
+        # 2. Fill in current optimized pieces if available
+        if current_pieces_3d and len(current_pieces_3d) > 0:
+            # Map current pieces to their original source indices
+            if original_source_indices:
+                for i, piece in enumerate(current_pieces_3d):
+                    if i < len(original_source_indices):
+                        orig_idx = original_source_indices[i]
+                        if orig_idx < total_pieces and all_pieces[orig_idx] is None:
+                            all_pieces[orig_idx] = piece
+                            print(f"[Save&Close]   Slot {orig_idx}: from current pieces ({len(piece)} verts)")
+            else:
+                for i, piece in enumerate(current_pieces_3d):
+                    if i < total_pieces and all_pieces[i] is None:
+                        all_pieces[i] = piece
+                        print(f"[Save&Close]   Slot {i}: from current pieces ({len(piece)} verts)")
+
+        # 3. For any remaining empty slots, use target contour directly
+        #    (This handles cases where cutting wasn't performed/completed)
+        if target_contour is not None:
+            for i in range(total_pieces):
+                if all_pieces[i] is None:
+                    all_pieces[i] = list(target_contour)
+                    print(f"[Save&Close]   Slot {i}: using target contour directly ({len(target_contour)} verts)")
+
+        # Store result
+        result_key = (target_level, target_i)
+        self._manual_cut_results[result_key] = {
+            'cut_contours': all_pieces,
+            'source_indices': all_stream_indices,
+            'is_1to1': False,
+            'early_close': True,  # Flag to indicate early close
+        }
+
+        print(f"[Save&Close] Stored result with key {result_key}")
+        filled_count = sum(1 for p in all_pieces if p is not None)
+        print(f"[Save&Close] {filled_count}/{total_pieces} pieces filled")
+
+        # Clear state
+        self._manual_cut_data = None
+        self._manual_cut_original_state = None
+        self._manual_cut_pending = False
+        self._manual_cut_line = None
+
+        # Continue with cut_streams to finalize
+        self.cut_streams(cut_method='bp', muscle_name=muscle_name)
+
+        print("[Save&Close] Complete")
+
     def _match_and_exclude_sources(self):
         """
         After a cut, match pieces to sources and exclude matched (1:1) pairs.

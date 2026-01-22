@@ -6328,7 +6328,16 @@ class GLFWApp():
 
             # Skip normal cutting/assignment UI if in preview mode (Accept/Reset/Cut shown above)
             if in_preview_mode_check:
-                # In preview mode, just show Cancel button
+                # In preview mode, show Save&Close and Cancel buttons
+                if imgui.button("Save && Close", button_width, 30):
+                    obj._save_and_close_manual_cut(muscle_name=muscle_name)
+                    if hasattr(obj, '_auto_optimize_all'):
+                        obj._auto_optimize_all = False
+                    if name in self._manual_cut_mouse:
+                        del self._manual_cut_mouse[name]
+                    imgui.end()
+                    continue
+                imgui.same_line()
                 if imgui.button("Cancel", button_width, 30):
                     obj._cancel_manual_cut()
                     if name in self._manual_cut_mouse:
@@ -6502,6 +6511,16 @@ class GLFWApp():
                         self._manual_cut_mouse[name]['dragging'] = False
                         self._manual_cut_mouse[name]['zoom'] = 1.0
                         self._manual_cut_mouse[name]['pan'] = [0.0, 0.0]
+
+                imgui.same_line()
+                if imgui.button("Save && Close", button_width, 30):
+                    obj._save_and_close_manual_cut(muscle_name=muscle_name)
+                    if hasattr(obj, '_auto_optimize_all'):
+                        obj._auto_optimize_all = False
+                    if name in self._manual_cut_mouse:
+                        del self._manual_cut_mouse[name]
+                    imgui.end()
+                    continue
 
                 imgui.same_line()
                 if imgui.button("Cancel", button_width, 30):
