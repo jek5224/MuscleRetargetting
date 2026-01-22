@@ -8451,6 +8451,9 @@ class ContourMeshMixin:
         This function finds the boundary line between adjacent source contours
         (the line where they were cut) and projects it to target's 2D frame.
 
+        For 2 sources: finds boundary between them
+        For >2 sources: finds all shared edges and uses the best one
+
         Returns:
             List of 2D points [[x1, y1], [x2, y2]] representing the cutting line,
             or None if boundary cannot be determined.
@@ -8463,8 +8466,60 @@ class ContourMeshMixin:
         target_x = -target_bp['basis_x']
         target_y = -target_bp['basis_y']
 
-        # Find shared/closest vertices between adjacent source contours
-        # These should be along the cutting boundary
+        n_sources = len(source_contours)
+
+        # For >2 sources, find all shared edges between ALL pairs (not just adjacent)
+        # and pick the best one (longest shared edge)
+        if n_sources > 2:
+            best_shared_edge = None
+            best_edge_length = 0
+
+            for i in range(n_sources):
+                for j in range(i + 1, n_sources):
+                    contour_a = np.array(source_contours[i])
+                    contour_b = np.array(source_contours[j])
+
+                    # Find shared vertices between this pair
+                    shared_points_3d = []
+                    tol = 1e-4
+                    for pt_a in contour_a:
+                        for pt_b in contour_b:
+                            if np.linalg.norm(pt_a - pt_b) < tol:
+                                shared_points_3d.append(pt_a.copy())
+                                break
+
+                    if len(shared_points_3d) >= 2:
+                        # Project to 2D and compute edge length
+                        shared_2d = []
+                        for pt in shared_points_3d:
+                            x = np.dot(pt - target_mean, target_x)
+                            y = np.dot(pt - target_mean, target_y)
+                            shared_2d.append([x, y])
+
+                        # Find endpoints (furthest apart points)
+                        shared_2d = np.array(shared_2d)
+                        max_dist = 0
+                        endpoints = None
+                        for pi in range(len(shared_2d)):
+                            for pj in range(pi + 1, len(shared_2d)):
+                                dist = np.linalg.norm(shared_2d[pi] - shared_2d[pj])
+                                if dist > max_dist:
+                                    max_dist = dist
+                                    endpoints = [shared_2d[pi].tolist(), shared_2d[pj].tolist()]
+
+                        if endpoints and max_dist > best_edge_length:
+                            best_edge_length = max_dist
+                            best_shared_edge = endpoints
+                            print(f"  [CutLine] Found shared edge {i}-{j}: {len(shared_points_3d)} pts, length={max_dist:.6f}")
+
+            if best_shared_edge:
+                print(f"  [CutLine] Using best shared edge with length {best_edge_length:.6f}")
+                return best_shared_edge
+            else:
+                print(f"  [CutLine] No shared edges found for {n_sources} sources, no line recommendation")
+                return None
+
+        # For 2 sources: original logic
         boundary_points_3d = []
 
         for i in range(len(source_contours) - 1):
@@ -12681,9 +12736,6 @@ class ContourMeshMixin:
                     union_boundary = union_poly.exterior
                     target_boundary = target_poly.exterior
 
-                    # Use target size as scale reference (not area which is too small)
-                    target_size = np.sqrt(target_area)
-
                     # Sample at regular intervals along the boundary
                     n_samples = min(50, int(union_boundary.length / 0.01) + 1)
                     n_samples = max(n_samples, 20)  # Minimum 20 samples
@@ -12696,11 +12748,10 @@ class ContourMeshMixin:
                             dist = pt.distance(target_boundary)
                             sample_distances.append(dist)
 
-                        # Normalize distances by target size for scale-invariant cost
-                        mean_dist = np.mean(sample_distances) / (target_size + 1e-10)
-                        max_dist = np.max(sample_distances) / (target_size + 1e-10)
-                        # Strong weight for boundary alignment
-                        boundary_cost = mean_dist * 100.0 + max_dist * 50.0
+                        # Use mean + max distance, scaled by target_area to match other costs
+                        mean_dist = np.mean(sample_distances)
+                        max_dist = np.max(sample_distances)
+                        boundary_cost = (mean_dist * 50.0 + max_dist * 20.0) * target_area
                 except:
                     boundary_cost = 0.0
 
