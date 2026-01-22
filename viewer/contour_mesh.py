@@ -10599,6 +10599,9 @@ class ContourMeshMixin:
         if muscle_name is not None:
             self._muscle_name = muscle_name
 
+        # Reset debug flag for level select window
+        self._level_select_debug_printed = False
+
         if self.contours is None or len(self.contours) < 2:
             print("Need at least 2 contour levels")
             return
@@ -10968,20 +10971,13 @@ class ContourMeshMixin:
                         stream_to_contour[stream_i] = contour_i
 
                 # Build stream_groups for this level
-                # IMPORTANT: Only group streams that will SHARE the same data (no cutting)
-                # If a contour is cut into pieces, each stream gets different data -> separate groups
+                # Group streams that came from the SAME original contour (even if cut into pieces)
+                # This allows them to toggle together in Level Select
                 groups = []
-                for contour_i in range(curr_count):
-                    streams_for_this = contour_to_streams[contour_i]
-                    if len(streams_for_this) == 0:
-                        continue
-                    elif len(streams_for_this) == 1:
-                        # Single stream gets whole contour - in its own group
+                for contour_i_grp in range(curr_count):
+                    streams_for_this = contour_to_streams[contour_i_grp]
+                    if len(streams_for_this) > 0:
                         groups.append(list(streams_for_this))
-                    else:
-                        # Multiple streams will get CUT pieces -> each in separate group
-                        for s in streams_for_this:
-                            groups.append([s])
                 stream_groups.append(groups)
 
                 # Debug: show final mapping
@@ -11180,16 +11176,19 @@ class ContourMeshMixin:
                             streams_for_contour = list(streams_for_contour) + new_stream_indices
                             contour_to_streams[contour_i] = streams_for_contour
 
-                            # Update stream_groups for this level to include new streams
-                            # New streams belong to the same group as their parent (same contour)
+                            # Update stream_groups for PREVIOUS level to include new streams
+                            # At previous level, new streams share the same contour data as their parent
+                            # So they SHOULD be grouped together at the previous level
                             if len(stream_groups) > 0:
-                                # Rebuild groups for this level
+                                # Rebuild groups for previous level (stream_groups[-1])
+                                # Note: expansion adds streams that share data at prev level
                                 groups = []
                                 for ci in range(curr_count):
                                     if contour_to_streams[ci]:
+                                        # At prev level, all these streams share same contour
                                         groups.append(list(contour_to_streams[ci]))
                                 stream_groups[-1] = groups
-                                print(f"  [EXPANSION] Updated stream_groups[-1]: {groups}")
+                                print(f"  [EXPANSION] Updated stream_groups[-1] (prev level): {groups}")
 
                             # Update prev_centroids to include new streams
                             prev_centroids = [np.mean(prev_level_contours[s], axis=0) for s in streams_for_contour]
@@ -11510,6 +11509,96 @@ class ContourMeshMixin:
         self.stream_contours = stream_contours
         self.stream_bounding_planes = stream_bounding_planes
         self.stream_groups = stream_groups
+
+    def rebuild_stream_groups(self):
+        """
+        Rebuild stream_groups by analyzing contour centroids.
+
+        Streams that were cut from the SAME original contour will have centroids
+        that are close together (they're pieces of the same shape). This groups
+        them together for Level Select toggling.
+        """
+        if not hasattr(self, 'stream_contours') or self.stream_contours is None:
+            print("No stream_contours to analyze")
+            return
+
+        max_stream_count = len(self.stream_contours)
+        if max_stream_count == 0:
+            return
+
+        num_levels = len(self.stream_contours[0])
+        print(f"Rebuilding stream_groups: {max_stream_count} streams, {num_levels} levels")
+
+        # Compute typical contour size to set grouping threshold
+        sample_sizes = []
+        for s in range(min(max_stream_count, 3)):
+            for lvl in range(min(num_levels, 10)):
+                c = self.stream_contours[s][lvl]
+                if c is not None and len(c) > 0:
+                    c = np.array(c)
+                    size = np.max(c, axis=0) - np.min(c, axis=0)
+                    sample_sizes.append(np.linalg.norm(size))
+
+        if sample_sizes:
+            avg_size = np.mean(sample_sizes)
+            # Streams from same original contour should have centroids within ~50% of contour size
+            centroid_threshold = avg_size * 0.5
+        else:
+            centroid_threshold = 0.1  # fallback
+
+        print(f"  Using centroid threshold: {centroid_threshold:.4f}")
+
+        self.stream_groups = []
+
+        for level_i in range(num_levels):
+            # Get centroids for all streams at this level
+            centroids = []
+            for stream_i in range(max_stream_count):
+                contour = self.stream_contours[stream_i][level_i]
+                if contour is not None and len(contour) > 0:
+                    centroids.append(np.mean(np.array(contour), axis=0))
+                else:
+                    centroids.append(None)
+
+            # Group streams with nearby centroids (came from same original contour)
+            used = [False] * max_stream_count
+            groups = []
+
+            for stream_i in range(max_stream_count):
+                if used[stream_i]:
+                    continue
+
+                group = [stream_i]
+                used[stream_i] = True
+
+                if centroids[stream_i] is None:
+                    groups.append(group)
+                    continue
+
+                centroid_i = centroids[stream_i]
+
+                for other_j in range(stream_i + 1, max_stream_count):
+                    if used[other_j]:
+                        continue
+                    if centroids[other_j] is None:
+                        continue
+
+                    # Check if centroids are close (same original contour)
+                    dist = np.linalg.norm(centroid_i - centroids[other_j])
+                    if dist < centroid_threshold:
+                        group.append(other_j)
+                        used[other_j] = True
+
+                groups.append(group)
+
+            self.stream_groups.append(groups)
+
+        # Count linked groups
+        linked_count = sum(1 for level_groups in self.stream_groups for g in level_groups if len(g) > 1)
+        print(f"  Rebuilt: {linked_count} linked groups across {num_levels} levels")
+
+        # Reset debug flag
+        self._level_select_debug_printed = False
 
     def select_levels(self, error_threshold=None):
         """

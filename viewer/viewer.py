@@ -5440,20 +5440,7 @@ class GLFWApp():
 
             # ===== Source Contour Viewer Panel (right side) =====
             source_contours_3d = obj._manual_cut_data.get('source_contours', [])
-            # Debug: print source contours info when window first opens or changes
             source_labels = obj._manual_cut_data.get('source_labels', list(range(len(source_contours_3d))))
-            debug_key = (len(source_contours_3d), tuple(source_labels))
-            if not hasattr(obj, '_debug_source_key') or obj._debug_source_key != debug_key:
-                print(f"[DEBUG Viewer] source_contours_3d: {len(source_contours_3d)} contours, labels={source_labels}")
-                target_2d_debug = obj._manual_cut_data.get('target_2d', np.array([]))
-                print(f"[DEBUG Viewer] target_2d shape: {target_2d_debug.shape if hasattr(target_2d_debug, 'shape') else 'N/A'}")
-                for sci, sc in enumerate(source_contours_3d):
-                    sc_arr = np.array(sc)
-                    label = source_labels[sci] if sci < len(source_labels) else '?'
-                    print(f"  source[{sci}] (label S{label}): {len(sc)} verts, shape={sc_arr.shape}, bounds=({sc_arr.min(axis=0) if len(sc) > 0 else 'N/A'}) to ({sc_arr.max(axis=0) if len(sc) > 0 else 'N/A'})")
-                source_bps_check = obj._manual_cut_data.get('source_bps', [])
-                print(f"[DEBUG Viewer] source_bps: {len(source_bps_check)} entries")
-                obj._debug_source_key = debug_key
             if len(source_contours_3d) > 0:
                 # Initialize source viewer state
                 if 'source_view_idx' not in mouse_state:
@@ -6551,6 +6538,11 @@ class GLFWApp():
                 continue
 
             imgui.text(f"Streams: {max_stream_count}")
+            imgui.same_line()
+            if imgui.button("Rebuild Groups"):
+                obj.rebuild_stream_groups()
+                # Update the original reference
+                orig['stream_groups'] = obj.stream_groups
             imgui.text("Check/uncheck levels. Linked levels toggle together.")
             imgui.separator()
 
@@ -6566,62 +6558,197 @@ class GLFWApp():
             # Column width for each stream
             col_width = 80
 
-            # Header row with stream labels
+            # Compute display order so that streams from same merged contour are adjacent
+            # Find levels with linked groups and use that structure for ordering
+            stream_display_order = list(range(max_stream_count))
+
+            # Debug: print stream_groups to see linking (only once per window open)
+            if not hasattr(obj, '_level_select_debug_printed') or not obj._level_select_debug_printed:
+                print(f"[DEBUG] Level Select - stream_groups has {len(stream_groups)} levels")
+                for lvl_i, groups in enumerate(stream_groups):
+                    linked = [g for g in groups if len(g) > 1]
+                    if linked:
+                        print(f"  Level {lvl_i}: linked groups = {linked}")
+                obj._level_select_debug_printed = True
+
+            # Find the most merged level (fewest unique contours = most linking)
+            best_level = 0
+            max_linked = 0
+            for lvl_i, groups in enumerate(stream_groups):
+                linked_streams = sum(len(g) for g in groups if len(g) > 1)
+                if linked_streams > max_linked:
+                    max_linked = linked_streams
+                    best_level = lvl_i
+
+            if max_linked > 0 and best_level < len(stream_groups):
+                # Use the linked structure at this level to order streams
+                # Streams in same group should be adjacent
+                groups_at_best = stream_groups[best_level]
+                stream_display_order = []
+                for group in groups_at_best:
+                    stream_display_order.extend(sorted(group))
+                # Add any missing streams
+                for s in range(max_stream_count):
+                    if s not in stream_display_order:
+                        stream_display_order.append(s)
+                print(f"[DEBUG] Using level {best_level} for ordering, display_order = {stream_display_order}")
+            elif hasattr(obj, 'stream_contours') and obj.stream_contours is not None and len(obj.stream_contours) > 0:
+                # Fall back to spatial ordering at first level
+                try:
+                    centroids = []
+                    for stream_i in range(max_stream_count):
+                        if stream_i < len(obj.stream_contours) and len(obj.stream_contours[stream_i]) > 0:
+                            first_contour = obj.stream_contours[stream_i][0]
+                            if len(first_contour) > 0:
+                                centroid = np.mean(first_contour, axis=0)
+                                centroids.append((stream_i, centroid))
+                            else:
+                                centroids.append((stream_i, np.zeros(3)))
+                        else:
+                            centroids.append((stream_i, np.zeros(3)))
+
+                    if len(centroids) > 1:
+                        positions = np.array([c[1] for c in centroids])
+                        mean_pos = np.mean(positions, axis=0)
+                        centered = positions - mean_pos
+
+                        if centered.shape[0] >= 2:
+                            cov = np.cov(centered.T)
+                            if cov.shape == (3, 3):
+                                eigenvalues, eigenvectors = np.linalg.eigh(cov)
+                                principal_axis = eigenvectors[:, np.argmax(eigenvalues)]
+                                projections = [(s, np.dot(c - mean_pos, principal_axis)) for s, c in centroids]
+                                projections.sort(key=lambda x: x[1])
+                                stream_display_order = [p[0] for p in projections]
+                    print(f"[DEBUG] Using spatial ordering at first level, display_order = {stream_display_order}")
+                except Exception as e:
+                    print(f"[DEBUG] Exception in ordering: {e}")
+
+            # Header row with stream labels (in spatial order)
             imgui.text("Level")
-            for stream_i in range(max_stream_count):
-                imgui.same_line(60 + stream_i * col_width)
+            for col_i, stream_i in enumerate(stream_display_order):
+                imgui.same_line(60 + col_i * col_width)
                 imgui.text(f"S{stream_i}")
             imgui.separator()
 
-            # Render rows (one per level)
+            # Base colors - many distinct, bright colors
+            base_colors = [
+                (1.0, 0.2, 0.2),   # red
+                (0.2, 0.8, 0.2),   # green
+                (0.2, 0.4, 1.0),   # blue
+                (1.0, 0.6, 0.1),   # orange
+                (0.8, 0.2, 0.9),   # purple
+                (0.1, 0.9, 0.9),   # cyan
+                (0.9, 0.9, 0.2),   # yellow
+                (1.0, 0.4, 0.7),   # pink
+                (0.6, 0.4, 0.2),   # brown
+                (0.4, 1.0, 0.6),   # mint
+                (0.6, 0.6, 1.0),   # lavender
+                (1.0, 0.8, 0.4),   # peach
+            ]
+
+            # Pre-compute colors for each stream at each level
+            # - Same group: keep color
+            # - Merge: blend colors
+            # - Split: assign NEW distinct colors
+            stream_colors_rgb = [[(0.5, 0.5, 0.5)] * max_stream_count for _ in range(max_levels)]
+            group_to_color = {}  # group_key -> color
+            next_base_color = 0
+
             for level_i in range(max_levels):
-                # Find which group this level belongs to (for linking)
-                group_streams = None
-                is_linked = False
                 if level_i < len(stream_groups):
                     for group in stream_groups[level_i]:
-                        if len(group) > 1:  # More than 1 stream = linked
-                            group_streams = group
-                            is_linked = True
-                            break
-                        elif len(group) > 0:
-                            group_streams = group
+                        group_key = tuple(sorted(group))
+
+                        if group_key in group_to_color:
+                            # Already assigned (same group seen before)
+                            color = group_to_color[group_key]
+                        elif level_i == 0:
+                            # First level: assign base color
+                            color = base_colors[next_base_color % len(base_colors)]
+                            next_base_color += 1
+                            group_to_color[group_key] = color
+                        else:
+                            # Check previous level colors of streams in this group
+                            prev_colors = []
+                            for s in group:
+                                if s < max_stream_count:
+                                    prev_colors.append(stream_colors_rgb[level_i - 1][s])
+
+                            unique_colors = list(set(prev_colors))
+
+                            if len(unique_colors) > 1:
+                                # Merge: blend all previous colors
+                                r = sum(c[0] for c in unique_colors) / len(unique_colors)
+                                g = sum(c[1] for c in unique_colors) / len(unique_colors)
+                                b = sum(c[2] for c in unique_colors) / len(unique_colors)
+                                color = (r, g, b)
+                            else:
+                                # New group (split or first appearance): new distinct color
+                                color = base_colors[next_base_color % len(base_colors)]
+                                next_base_color += 1
+
+                            group_to_color[group_key] = color
+
+                        # Assign color to all streams in group
+                        for s in group:
+                            if s < max_stream_count:
+                                stream_colors_rgb[level_i][s] = color
+
+            # Render rows (one per level)
+            for level_i in range(max_levels):
+                # Build stream-to-group mapping for this level
+                stream_to_group = {}  # stream_i -> group list
+                has_any_linked = False
+                if level_i < len(stream_groups):
+                    for group in stream_groups[level_i]:
+                        is_multi = len(group) > 1
+                        if is_multi:
+                            has_any_linked = True
+                        for s in group:
+                            stream_to_group[s] = group if is_multi else None
 
                 # Level label with link indicator
-                if is_linked:
-                    # Cyan color for linked levels
+                if has_any_linked:
                     imgui.text_colored(f"{level_i:3d} *", 0.0, 1.0, 1.0, 1.0)
                 else:
                     imgui.text(f"{level_i:3d}  ")
 
-                # Checkbox for each stream at this level
-                for stream_i in range(max_stream_count):
-                    imgui.same_line(60 + stream_i * col_width)
+                # Checkbox for each stream at this level (in spatial display order)
+                for col_i, stream_i in enumerate(stream_display_order):
+                    imgui.same_line(60 + col_i * col_width)
 
                     if level_i < len(checkboxes[stream_i]):
                         checkbox_id = f"##lvl_{stream_i}_{level_i}"
                         is_checked = checkboxes[stream_i][level_i]
 
-                        # For linked checkboxes, check if this stream is in the linked group
-                        is_this_linked = is_linked and group_streams and stream_i in group_streams
+                        # Find THIS stream's group
+                        this_group = stream_to_group.get(stream_i, None)
+                        is_this_linked = this_group is not None and len(this_group) > 1
 
-                        if is_this_linked:
-                            # Tint checkbox frame for linked ones
-                            imgui.push_style_color(imgui.COLOR_FRAME_BACKGROUND, 0.0, 0.3, 0.3, 1.0)
-                            imgui.push_style_color(imgui.COLOR_FRAME_BACKGROUND_HOVERED, 0.0, 0.5, 0.5, 1.0)
+                        # Always show color based on group identity
+                        color = stream_colors_rgb[level_i][stream_i]
+                        # Tint checkbox frame - use bright colors
+                        imgui.push_style_color(imgui.COLOR_FRAME_BACKGROUND, color[0] * 0.8, color[1] * 0.8, color[2] * 0.8, 1.0)
+                        imgui.push_style_color(imgui.COLOR_FRAME_BACKGROUND_HOVERED, color[0], color[1], color[2], 1.0)
+                        # Checkmark color - use black or white based on background brightness
+                        brightness = color[0] * 0.299 + color[1] * 0.587 + color[2] * 0.114
+                        if brightness > 0.5:
+                            imgui.push_style_color(imgui.COLOR_CHECK_MARK, 0.0, 0.0, 0.0, 1.0)  # black
+                        else:
+                            imgui.push_style_color(imgui.COLOR_CHECK_MARK, 1.0, 1.0, 1.0, 1.0)  # white
 
                         changed, new_value = imgui.checkbox(checkbox_id, is_checked)
 
-                        if is_this_linked:
-                            imgui.pop_style_color(2)
+                        imgui.pop_style_color(3)
 
                         if changed:
                             vis_changed = True
                             checkboxes[stream_i][level_i] = new_value
 
-                            # If linked, update all streams in the group
-                            if group_streams is not None and len(group_streams) > 1:
-                                for other_stream in group_streams:
+                            # If linked, update all streams in THIS stream's group
+                            if is_this_linked:
+                                for other_stream in this_group:
                                     if other_stream != stream_i and other_stream < max_stream_count:
                                         if level_i < len(checkboxes[other_stream]):
                                             checkboxes[other_stream][level_i] = new_value
