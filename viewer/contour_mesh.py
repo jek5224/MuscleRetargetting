@@ -13400,12 +13400,10 @@ class ContourMeshMixin:
                             pt_3d = crossing[3]
                             pair_indices = crossing[4]
 
-                            # Add crossing point to pieces involved in this boundary
-                            # The crossing is between pair_indices[0] and pair_indices[1]
-                            if current_piece in pair_indices:
-                                new_contours[current_piece].append(pt_3d)
-                            if next_piece in pair_indices and next_piece != current_piece:
-                                new_contours[next_piece].append(pt_3d)
+                            # Add crossing point to BOTH pieces in the pair
+                            # The crossing is the actual cut boundary between these two pieces
+                            new_contours[pair_indices[0]].append(pt_3d)
+                            new_contours[pair_indices[1]].append(pt_3d)
 
                             print(f"  [BP Transform] Edge {v_idx}: crossing {pair_indices}, assignment {current_piece} -> {next_piece}")
 
