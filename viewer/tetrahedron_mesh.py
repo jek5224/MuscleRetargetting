@@ -350,31 +350,47 @@ class TetrahedronMeshMixin:
                         end_name = "origin" if end_type == 0 else "insertion"
                         print(f"  Anchor {anchor_idx} -> stream {stream_idx} {end_name}, skeleton {skel_idx}")
 
-        # Step 4: Tetrahedralize using Delaunay
-        print("Performing Delaunay tetrahedralization...")
+        # Step 4: Tetrahedralize using TetGen (preserves surface mesh)
+        print("Performing TetGen tetrahedralization...")
         try:
+            import tetgen
+
+            # TetGen requires vertices and faces
+            tgen = tetgen.TetGen(closed_vertices, closed_faces)
+
+            # Tetrahedralize with quality constraints
+            # order=1: linear elements
+            # mindihedral: minimum dihedral angle (quality)
+            # minratio: minimum radius-edge ratio (quality)
+            tet_verts, interior_tetrahedra = tgen.tetrahedralize(
+                order=1,
+                mindihedral=10,  # Allow some flat tetrahedra
+                minratio=1.5
+            )
+
+            # TetGen may add Steiner points - update vertices
+            if len(tet_verts) != len(closed_vertices):
+                print(f"  TetGen added {len(tet_verts) - len(closed_vertices)} Steiner points")
+                closed_vertices = tet_verts
+
+            print(f"Tetrahedralization: {len(interior_tetrahedra)} tetrahedra")
+
+        except ImportError:
+            print("TetGen not available, falling back to Delaunay...")
+            # Fallback to Delaunay
             delaunay = Delaunay(closed_vertices)
             tetrahedra = delaunay.simplices
-
-            # Filter tetrahedra to keep only those inside the mesh
-            # Use centroid-based inside/outside test
             tet_centroids = np.mean(closed_vertices[tetrahedra], axis=1)
-
-            # Create trimesh for inside/outside testing
             mesh = trimesh.Trimesh(vertices=closed_vertices, faces=closed_faces)
-
-            # Check which tetrahedra are inside
             inside_mask = mesh.contains(tet_centroids)
             interior_tetrahedra = tetrahedra[inside_mask]
-
-            print(f"Tetrahedralization: {len(tetrahedra)} total, {len(interior_tetrahedra)} interior")
-
             if len(interior_tetrahedra) == 0:
-                print("Warning: No interior tetrahedra found. Using all tetrahedra.")
                 interior_tetrahedra = tetrahedra
 
         except Exception as e:
             print(f"Tetrahedralization failed: {e}")
+            import traceback
+            traceback.print_exc()
             return False
 
         # Step 5: Store results
