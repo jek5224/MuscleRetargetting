@@ -12657,9 +12657,11 @@ class ContourMeshMixin:
                 # Low coverage - strongly penalize to prevent shrinkage
                 coverage_cost += 100.0 * target_area * (0.5 - coverage_ratio)
 
-            # Area matching cost - penalize when source area differs from target area
-            # This encourages the optimizer to adjust scales to match areas
-            area_ratio = union_area / (target_area + 1e-10)
+            # Area matching cost - use SUM of individual areas, not union
+            # For N sources with overlaps: union < sum, so using union gives wrong scale
+            # Using sum ensures proper scaling regardless of overlap
+            sum_individual_areas = sum(p.area for p in transformed_polygons)
+            area_ratio = sum_individual_areas / (target_area + 1e-10)
             area_cost = abs(area_ratio - 1.0) * target_area * 10.0  # Weight = 10
 
             # Gap cost - penalize distance between polygons when they don't overlap
@@ -12784,8 +12786,9 @@ class ContourMeshMixin:
 
             coverage_cost = union_area + target_area - 2 * intersection_area
 
-            # Area matching cost
-            area_ratio = union_area / (target_area + 1e-10)
+            # Area matching cost - use SUM of individual areas, not union
+            sum_individual_areas = sum(p.area for p in transformed_polygons)
+            area_ratio = sum_individual_areas / (target_area + 1e-10)
             area_cost = abs(area_ratio - 1.0) * target_area * 10.0
 
             # Gap cost when no overlap
