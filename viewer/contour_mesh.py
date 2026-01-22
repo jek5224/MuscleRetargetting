@@ -13573,6 +13573,9 @@ class ContourMeshMixin:
                 # Only the last source remains after sequential cuts
                 remaining_sources = {n_pieces - 1}
 
+                # Collect actual crossings for visualization (not the initial all_crossings)
+                actual_cut_crossings = []  # [(pt_2d, pair_indices), ...]
+
                 # Initialize: current target is full target, all sources are unassigned
                 current_target = list(target_contour)
                 current_target_2d = list(target_2d)
@@ -13678,6 +13681,10 @@ class ContourMeshMixin:
                         current_target_2d = piece_a_2d
 
                     shared_boundary_points.extend([pt3d_1, pt3d_2])
+                    # Store actual crossings for visualization
+                    pair = (src_to_cut, adjacent_src)
+                    actual_cut_crossings.append((pt2d_1, pair))
+                    actual_cut_crossings.append((pt2d_2, pair))
                     print(f"  [BP Transform] Source {src_to_cut}: {len(source_to_piece[src_to_cut])} verts, remaining: {len(current_target)} verts")
 
                 # Last remaining source gets the remaining target
@@ -13702,14 +13709,18 @@ class ContourMeshMixin:
                             print(f"  [BP Transform] WARNING: Source {src_idx} has only {len(src_verts_3d)} assigned verts!")
                             new_contours[src_idx] = src_verts_3d if src_verts_3d else []
 
+                # Update _target_cut_crossings_2d with actual crossings from divide-and-conquer
+                if actual_cut_crossings:
+                    self._target_cut_crossings_2d = actual_cut_crossings
+                    print(f"  [BP Transform] Updated visualization with {len(actual_cut_crossings)} actual cut crossings")
+
             for piece_idx in range(n_pieces):
                 print(f"  [BP Transform] Piece {piece_idx}: {len(new_contours[piece_idx])} verts")
 
             # Debug: show piece boundaries vs cutting lines
-            print(f"  [CUT DEBUG] Cutting line crossings (2D):")
-            for i, c in enumerate(all_crossings):
-                edge_idx, t, pt2d, pt3d, pair = c
-                print(f"    Crossing {i}: edge {edge_idx}, t={t:.4f}, pt2d=({pt2d[0]:.6f}, {pt2d[1]:.6f}), pair={pair}")
+            print(f"  [CUT DEBUG] Cutting line crossings (2D) - visualization data:")
+            for i, (pt2d, pair) in enumerate(self._target_cut_crossings_2d):
+                print(f"    Crossing {i}: pt2d=({pt2d[0]:.6f}, {pt2d[1]:.6f}), pair={pair}")
             print(f"  [CUT DEBUG] Piece boundaries (2D):")
             for pi in range(n_pieces):
                 p = new_contours[pi]
