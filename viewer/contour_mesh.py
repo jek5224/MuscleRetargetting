@@ -13152,14 +13152,21 @@ class ContourMeshMixin:
                 boundary_pt = target_contour[v_idx_a] + t * (target_contour[v_idx_b] - target_contour[v_idx_a])
                 return t, boundary_pt
 
-            # Find shared boundary: the boundary of the overlapping region between sources
-            # This is the line where the two optimized source contours meet
-            overlap_region = poly_a.intersection(poly_b)
-            if not overlap_region.is_empty:
-                shared_boundary = overlap_region.boundary
-            else:
-                # No overlap - fall back to exterior intersection
-                shared_boundary = poly_a.exterior.intersection(poly_b.exterior)
+            # Use pre-computed shared boundary from self._shared_cut_edge_2d if available
+            # This was computed during optimization and is more reliable
+            shared_boundary = None
+            if hasattr(self, '_shared_cut_edge_2d') and self._shared_cut_edge_2d is not None and len(self._shared_cut_edge_2d) >= 2:
+                from shapely.geometry import LineString as SharedLS
+                shared_boundary = SharedLS(self._shared_cut_edge_2d)
+
+            # Fallback: compute shared boundary from polygon intersection
+            if shared_boundary is None:
+                overlap_region = poly_a.intersection(poly_b)
+                if not overlap_region.is_empty:
+                    if hasattr(overlap_region, 'boundary') and overlap_region.boundary is not None:
+                        shared_boundary = overlap_region.boundary
+                if shared_boundary is None or shared_boundary.is_empty:
+                    shared_boundary = poly_a.exterior.intersection(poly_b.exterior)
 
             # Try to find actual intersection of target edge with shared boundary
             t = 0.5  # Default
