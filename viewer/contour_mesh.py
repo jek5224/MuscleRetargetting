@@ -10909,10 +10909,17 @@ class ContourMeshMixin:
                             total_score += 1000.0
                             continue
                         avg_dist = np.mean([dist_matrix[s_i, c_i] / max_dist for s_i in c2s[c_i]])
+                        # Penalty for sources far from their closest target
+                        dist_penalty = 0.0
+                        for s_i in c2s[c_i]:
+                            closest_dist = np.min(dist_matrix[s_i])
+                            actual_dist = dist_matrix[s_i, c_i]
+                            if actual_dist > closest_dist * 2.0:
+                                dist_penalty += (actual_dist - closest_dist) / max_dist * 2.0
                         source_area_sum = sum(prev_areas[s_i] for s_i in c2s[c_i])
                         area_ratio = source_area_sum / curr_areas[c_i] if curr_areas[c_i] > 0 else 1.0
                         area_error = abs(area_ratio - 1.0)
-                        total_score += avg_dist + 0.5 * area_error
+                        total_score += avg_dist + dist_penalty + 0.3 * area_error
                     return total_score
 
                 # Iterative refinement
@@ -10961,10 +10968,20 @@ class ContourMeshMixin:
                         stream_to_contour[stream_i] = contour_i
 
                 # Build stream_groups for this level
+                # IMPORTANT: Only group streams that will SHARE the same data (no cutting)
+                # If a contour is cut into pieces, each stream gets different data -> separate groups
                 groups = []
                 for contour_i in range(curr_count):
-                    if contour_to_streams[contour_i]:
-                        groups.append(contour_to_streams[contour_i])
+                    streams_for_this = contour_to_streams[contour_i]
+                    if len(streams_for_this) == 0:
+                        continue
+                    elif len(streams_for_this) == 1:
+                        # Single stream gets whole contour - in its own group
+                        groups.append(list(streams_for_this))
+                    else:
+                        # Multiple streams will get CUT pieces -> each in separate group
+                        for s in streams_for_this:
+                            groups.append([s])
                 stream_groups.append(groups)
 
                 # Debug: show final mapping
@@ -11312,7 +11329,7 @@ class ContourMeshMixin:
         # Re-order streams at each level to ensure consistent correspondence
         # This fixes the issue where stream 0 at level N might correspond to stream 1 at level N+1
         print("Reordering streams for consistent correspondence...")
-        self._reorder_streams_for_correspondence(stream_contours, stream_bounding_planes, max_stream_count)
+        self._reorder_streams_for_correspondence(stream_contours, stream_bounding_planes, stream_groups, max_stream_count)
 
         # Bounding planes are computed naturally from cut contour vertices
         # User can apply z, x, bp smoothening manually using the buttons
@@ -11321,6 +11338,16 @@ class ContourMeshMixin:
         self.contours = self.stream_contours
         self.bounding_planes = self.stream_bounding_planes
         self.draw_contour_stream = [[True] * len(self.stream_contours[0]) for _ in range(max_stream_count)]
+
+        # Ensure attach_skeletons arrays are properly sized for new stream count
+        if not hasattr(self, 'attach_skeletons') or self.attach_skeletons is None:
+            self.attach_skeletons = []
+        if not hasattr(self, 'attach_skeletons_sub') or self.attach_skeletons_sub is None:
+            self.attach_skeletons_sub = []
+        while len(self.attach_skeletons) < max_stream_count:
+            self.attach_skeletons.append([0, 0])
+        while len(self.attach_skeletons_sub) < max_stream_count:
+            self.attach_skeletons_sub.append([0, 0])
 
         # Clean up manual cut tracking data
         if hasattr(self, '_pending_manual_cuts'):
@@ -11336,7 +11363,23 @@ class ContourMeshMixin:
         if hasattr(self, '_original_bounding_planes'):
             self._original_bounding_planes = None
 
+        # Clear contours_resampled so build_contour_mesh uses new stream_contours
+        # User should resample after cut_streams if needed
+        if hasattr(self, 'contours_resampled'):
+            self.contours_resampled = None
+        if hasattr(self, 'contours_resampled_params'):
+            self.contours_resampled_params = None
+        if hasattr(self, 'contours_resampled_fixed'):
+            self.contours_resampled_fixed = None
+        if hasattr(self, 'contours_resampled_types'):
+            self.contours_resampled_types = None
+
         print("Cut streams complete")
+
+        # Debug: print stream_groups built during cut_streams (NOT rebuilt - preserves correct grouping)
+        num_levels = len(self.stream_contours[0]) if len(self.stream_contours) > 0 else 0
+        linked_count = sum(1 for level_groups in self.stream_groups for g in level_groups if len(g) > 1)
+        print(f"  stream_groups: {num_levels} levels, {linked_count} linked groups")
 
         # Verify stream data is valid
         print(f"  Verifying stream data: {max_stream_count} streams")
@@ -11364,13 +11407,15 @@ class ContourMeshMixin:
         # Final verification
         print(f"  Final stream data: {max_stream_count} streams, {len(self.stream_contours[0])} levels each")
 
-    def _reorder_streams_for_correspondence(self, stream_contours, stream_bounding_planes, max_stream_count):
+    def _reorder_streams_for_correspondence(self, stream_contours, stream_bounding_planes, stream_groups, max_stream_count):
         """
         Reorder streams at each level to ensure consistent spatial correspondence.
 
         After cutting, stream 0 at level N might spatially correspond to stream 1 at level N+1.
         This function reorders streams at each level so that stream indices are consistent
         across all levels based on centroid proximity.
+
+        Also updates stream_groups to match the new stream indices.
 
         Uses Hungarian algorithm for optimal assignment.
         """
@@ -11438,6 +11483,21 @@ class ContourMeshMixin:
                     stream_contours[stream_i][level_i] = temp_contours[stream_i]
                     stream_bounding_planes[stream_i][level_i] = temp_bps[stream_i]
 
+                # Also update stream_groups for this level
+                # new_order[i] = old_stream_index that becomes new stream i
+                # We need inverse: old_to_new[old_idx] = new_idx
+                old_to_new = [0] * max_stream_count
+                for new_idx, old_idx in enumerate(new_order):
+                    old_to_new[old_idx] = new_idx
+
+                if level_i < len(stream_groups):
+                    # Remap stream indices in each group
+                    new_groups = []
+                    for group in stream_groups[level_i]:
+                        new_group = [old_to_new[s] for s in group]
+                        new_groups.append(sorted(new_group))  # Keep sorted for consistency
+                    stream_groups[level_i] = new_groups
+
                 total_swaps += 1
                 print(f"  Level {level_i}: reordered streams {list(zip(row_ind, col_ind))}")
 
@@ -11449,6 +11509,7 @@ class ContourMeshMixin:
         # Update instance variables
         self.stream_contours = stream_contours
         self.stream_bounding_planes = stream_bounding_planes
+        self.stream_groups = stream_groups
 
     def select_levels(self, error_threshold=None):
         """
@@ -11729,6 +11790,33 @@ class ContourMeshMixin:
         # Open GUI window for manual selection adjustment
         self._level_select_window_open = True
         print(f"\nLevel selection GUI window opened. Adjust selection and click 'Finish Select'.")
+
+        # Debug: print stream_groups structure
+        print(f"\n[DEBUG] stream_groups structure ({len(self.stream_groups)} levels):")
+        for level_i, groups in enumerate(self.stream_groups):
+            linked_groups = [g for g in groups if len(g) > 1]
+            if linked_groups:
+                print(f"  Level {level_i}: {groups} (linked: {linked_groups})")
+        print(f"[DEBUG] Levels per stream: {[len(sc) for sc in self.stream_contours]}")
+
+        # Debug: verify stream_groups by checking if linked streams actually share contour data
+        print(f"\n[DEBUG] Verifying stream_groups linkage:")
+        for level_i, groups in enumerate(self.stream_groups):
+            for group in groups:
+                if len(group) > 1:
+                    # Check if these streams actually share the same contour at this level
+                    contours_same = True
+                    ref_contour = None
+                    for stream_i in group:
+                        if stream_i < len(self.stream_contours) and level_i < len(self.stream_contours[stream_i]):
+                            contour = self.stream_contours[stream_i][level_i]
+                            if ref_contour is None:
+                                ref_contour = contour
+                            elif len(contour) != len(ref_contour) or not np.allclose(contour, ref_contour, atol=1e-6):
+                                contours_same = False
+                                break
+                    if not contours_same:
+                        print(f"  WARNING: Level {level_i} group {group} - contours are DIFFERENT!")
 
     def _apply_level_selection(self):
         """Apply the current checkbox selection to stream data (called by Finish Select)."""
@@ -12785,7 +12873,15 @@ class ContourMeshMixin:
                 except:
                     boundary_cost = 0.0
 
-            return coverage_cost + area_cost + gap_cost + boundary_cost
+            # Rotation penalty - prefer smaller rotations when costs are similar
+            # This prevents unnecessary 180° flips
+            rotation_penalty = 0.0
+            if not use_separate_transforms:
+                theta = params[4]
+                # Penalize rotations away from 0 (quadratic, small weight)
+                rotation_penalty = (theta ** 2) * target_area * 0.5
+
+            return coverage_cost + area_cost + gap_cost + boundary_cost + rotation_penalty
 
         # ========== Step 4: Build initial configuration ==========
         # Compute initial scale based on area ratio (sources should roughly cover target)
@@ -12827,6 +12923,32 @@ class ContourMeshMixin:
             initial_scale_y = initial_scale
 
         print(f"  [BP Transform] initial scale=({initial_scale_x:.4f},{initial_scale_y:.4f}) (target_area={target_area:.6f}, total_source_area={total_source_area:.6f})")
+
+        # ========== PCA-based rotation alignment ==========
+        # Compute principal axis of target and source to find optimal initial rotation
+        def compute_principal_angle(points):
+            """Compute angle of principal axis using PCA."""
+            pts = np.array(points)
+            if len(pts) < 3:
+                return 0.0
+            centered = pts - np.mean(pts, axis=0)
+            cov = np.cov(centered.T)
+            if cov.shape != (2, 2):
+                return 0.0
+            eigenvalues, eigenvectors = np.linalg.eigh(cov)
+            # Principal axis is eigenvector with largest eigenvalue
+            principal_axis = eigenvectors[:, np.argmax(eigenvalues)]
+            return np.arctan2(principal_axis[1], principal_axis[0])
+
+        target_principal_angle = compute_principal_angle(target_2d)
+        source_principal_angle = compute_principal_angle(all_source_pts)
+        pca_rotation = target_principal_angle - source_principal_angle
+        # Normalize to [-pi, pi]
+        while pca_rotation > np.pi:
+            pca_rotation -= 2 * np.pi
+        while pca_rotation < -np.pi:
+            pca_rotation += 2 * np.pi
+        print(f"  [BP Transform] PCA rotation: target={np.degrees(target_principal_angle):.1f}°, source={np.degrees(source_principal_angle):.1f}°, diff={np.degrees(pca_rotation):.1f}°")
 
         # Use computed translations and rotations that align source basis with target basis
         if use_separate_transforms:
@@ -12998,10 +13120,18 @@ class ContourMeshMixin:
             print(f"  [BP Transform] Optimization bounds: scale=[0.5,2], tx=[{bounds[2][0]:.2f},{bounds[2][1]:.2f}], ty=[{bounds[3][0]:.2f},{bounds[3][1]:.2f}]")
             print(f"  [BP Transform] Initial x0: scale=({x0[0]:.4f},{x0[1]:.4f}), tx={x0[2]:.4f}, ty={x0[3]:.4f}, theta={x0[4]:.4f}")
 
-            # Multi-start optimization with different rotation angles
+            # Multi-start optimization with PCA-based rotation angles
+            # PCA gives axis direction, so try both orientations (180° apart)
+            # Pick the smaller angle as primary
             best_result = None
             best_cost = float('inf')
-            rotation_trials = [0, np.pi/4, -np.pi/4]  # 0°, +45°, -45°
+            pca_flip = pca_rotation + np.pi if pca_rotation < 0 else pca_rotation - np.pi
+            # Primary rotation is the one with smaller absolute angle
+            if abs(pca_flip) < abs(pca_rotation):
+                rotation_trials = [pca_flip, pca_rotation, 0]
+            else:
+                rotation_trials = [pca_rotation, pca_flip, 0]
+            print(f"  [BP Transform] Rotation trials: {[f'{np.degrees(t):.1f}°' for t in rotation_trials]}")
 
             for trial_theta in rotation_trials:
                 trial_x0 = x0.copy() if isinstance(x0, list) else list(x0)
