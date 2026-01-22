@@ -12677,7 +12677,35 @@ class ContourMeshMixin:
             else:
                 gap_cost = 0
 
-            return coverage_cost + area_cost + gap_cost
+            # Boundary alignment cost - for COMMON mode, align outer boundary to target
+            # This is critical for multi-on-1 where area overlap alone doesn't ensure boundary alignment
+            boundary_cost = 0.0
+            if not use_separate_transforms and intersection_area > 1e-10:
+                try:
+                    # Sample points from the union boundary
+                    union_boundary = union_poly.exterior
+                    target_boundary = target_poly.exterior
+
+                    # Sample at regular intervals along the boundary
+                    n_samples = min(50, int(union_boundary.length / 0.01) + 1)
+                    if n_samples >= 5:
+                        sample_distances = []
+                        for i in range(n_samples):
+                            t = i / n_samples
+                            pt = union_boundary.interpolate(t, normalized=True)
+                            # Distance to target boundary
+                            dist = pt.distance(target_boundary)
+                            sample_distances.append(dist)
+
+                        # Use mean + max distance to penalize both average and worst-case misalignment
+                        mean_dist = np.mean(sample_distances)
+                        max_dist = np.max(sample_distances)
+                        # Weight boundary alignment strongly for multi-source case
+                        boundary_cost = (mean_dist * 50.0 + max_dist * 20.0) * target_area
+                except:
+                    boundary_cost = 0.0
+
+            return coverage_cost + area_cost + gap_cost + boundary_cost
 
         # ========== Step 4: Build initial configuration ==========
         # Compute initial scale based on area ratio (sources should roughly cover target)
@@ -12730,8 +12758,28 @@ class ContourMeshMixin:
         else:
             # params: [scale_x, scale_y, tx, ty, theta]
             # (tx, ty) = position of combined center, theta = rotation around it
-            # Start at combined_center with no rotation
-            x0 = [initial_scale_x, initial_scale_y, combined_center[0], combined_center[1], 0.0]
+            # Try multiple starting points and pick the best one
+            target_center = np.mean(target_2d, axis=0)
+
+            # Candidate starting positions:
+            # 1. combined_center (where sources currently are)
+            # 2. target_center (where we want them to be)
+            # 3. midpoint between the two
+            candidate_starts = [
+                [initial_scale_x, initial_scale_y, combined_center[0], combined_center[1], 0.0],
+                [initial_scale_x, initial_scale_y, target_center[0], target_center[1], 0.0],
+                [initial_scale_x, initial_scale_y, (combined_center[0] + target_center[0])/2, (combined_center[1] + target_center[1])/2, 0.0],
+            ]
+
+            # Evaluate each candidate and pick the best starting point
+            best_cost = float('inf')
+            x0 = candidate_starts[0]
+            for i, candidate in enumerate(candidate_starts):
+                cost = objective(candidate)
+                if cost < best_cost:
+                    best_cost = cost
+                    x0 = candidate
+            print(f"  [BP Transform] Best initial position: ({x0[2]:.4f}, {x0[3]:.4f}) with cost {best_cost:.4f}")
 
         # Debug: show initial cost breakdown
         def objective_debug(params, verbose=False):
@@ -12822,14 +12870,22 @@ class ContourMeshMixin:
             target_size = np.sqrt(target_area)  # Approximate size
             max_translation = target_size * 3  # Don't go more than 3x size away
 
+            # Compute target center for translation bounds
+            target_center = np.mean(target_2d, axis=0)
+
             # Bounds for [scale_x, scale_y, tx, ty, theta]
+            # Translation bounds are RELATIVE to target center, not origin
+            # This ensures the optimizer can move sources to cover the target
             bounds = [
                 (0.5, 2.0),  # scale_x: 0.5 to 2x (prevent excessive shrink/grow)
                 (0.5, 2.0),  # scale_y: 0.5 to 2x (prevent excessive shrink/grow)
-                (-max_translation, max_translation),  # tx
-                (-max_translation, max_translation),  # ty
+                (target_center[0] - max_translation, target_center[0] + max_translation),  # tx
+                (target_center[1] - max_translation, target_center[1] + max_translation),  # ty
                 (-np.pi, np.pi)  # theta
             ]
+
+            print(f"  [BP Transform] Optimization bounds: scale=[0.5,2], tx=[{bounds[2][0]:.2f},{bounds[2][1]:.2f}], ty=[{bounds[3][0]:.2f},{bounds[3][1]:.2f}]")
+            print(f"  [BP Transform] Initial x0: scale=({x0[0]:.4f},{x0[1]:.4f}), tx={x0[2]:.4f}, ty={x0[3]:.4f}, theta={x0[4]:.4f}")
 
             result = minimize(
                 objective,
