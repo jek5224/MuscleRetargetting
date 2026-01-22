@@ -13452,18 +13452,10 @@ class ContourMeshMixin:
                             other_piece = pair1[1] if pair1[0] == piece_idx else pair1[0]
                             shared_key = (piece_idx, other_piece)
 
-                            if shared_key in shared_edge_lookup:
-                                shared_pts_2d = shared_edge_lookup[shared_key]
-                                # Convert 2D shared boundary to 3D
-                                piece_boundary.append(pt3d_1)
-                                for pt_2d in shared_pts_2d[1:-1]:  # Skip first/last (crossing points)
-                                    pt_3d = target_mean + pt_2d[0] * target_x + pt_2d[1] * target_y
-                                    piece_boundary.append(pt_3d)
-                                print(f"  [BP Transform] Piece {piece_idx}: shared boundary c{c1_idx}->c{c2_idx} via piece {other_piece}")
-                            else:
-                                # No shared boundary - just add crossing points
-                                piece_boundary.append(pt3d_1)
-                                print(f"  [BP Transform] Piece {piece_idx}: no shared boundary c{c1_idx}->c{c2_idx}")
+                            # Shared boundary: just add crossing point (cutting line is straight)
+                            # The next segment will add its crossing point, creating a straight edge
+                            piece_boundary.append(pt3d_1)
+                            print(f"  [BP Transform] Piece {piece_idx}: shared boundary c{c1_idx}->c{c2_idx} (straight edge)")
 
                     new_contours[piece_idx] = piece_boundary
                     print(f"  [BP Transform] Piece {piece_idx}: {len(piece_boundary)} verts (complete boundary)")
