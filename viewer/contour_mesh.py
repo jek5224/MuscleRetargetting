@@ -13655,7 +13655,8 @@ class ContourMeshMixin:
 
                 # Do iterative 2-piece cuts
                 for cut_idx, (src_to_cut, adjacent_src) in enumerate(cut_order):
-                    print(f"  [BP Transform] Cut {cut_idx+1}: separating source {src_to_cut} using boundary with {adjacent_src}")
+                    print(f"  [BP Transform] Cut {cut_idx+1}/{len(cut_order)}: separating source {src_to_cut} using boundary with {adjacent_src}")
+                    print(f"    Current target: {len(current_target)} verts")
 
                     # Get shared boundary between these two sources
                     pair_key = (min(src_to_cut, adjacent_src), max(src_to_cut, adjacent_src))
@@ -13664,6 +13665,7 @@ class ContourMeshMixin:
                         continue
 
                     shared_pts = shared_edge_map[pair_key]
+                    print(f"    Shared edge has {len(shared_pts)} points")
 
                     # Compute cutting line from shared boundary
                     if len(shared_pts) >= 2:
@@ -13676,6 +13678,7 @@ class ContourMeshMixin:
                             line_dir = shared_pts[-1] - shared_pts[0]
                             line_dir = line_dir / np.linalg.norm(line_dir)
                         line_normal = np.array([-line_dir[1], line_dir[0]])
+                        print(f"    Line point: ({line_point[0]:.4f}, {line_point[1]:.4f}), normal: ({line_normal[0]:.4f}, {line_normal[1]:.4f})")
                     else:
                         print(f"  [BP Transform] WARNING: Shared edge too short ({len(shared_pts)} pts)")
                         continue
@@ -13684,6 +13687,12 @@ class ContourMeshMixin:
                     # Use progressively relaxed thresholds if needed
                     n_current = len(current_target)
                     current_crossings = []
+
+                    # Debug: show current target bounds
+                    current_2d_arr = np.array(current_target_2d)
+                    ct_min = current_2d_arr.min(axis=0)
+                    ct_max = current_2d_arr.max(axis=0)
+                    print(f"    Current target bounds: x=[{ct_min[0]:.4f}, {ct_max[0]:.4f}], y=[{ct_min[1]:.4f}, {ct_max[1]:.4f}]")
 
                     for threshold in [0.01, 0.001, 1e-6]:
                         current_crossings = []
