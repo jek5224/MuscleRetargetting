@@ -9096,6 +9096,9 @@ class ContourMeshMixin:
             self._pending_manual_cuts = None
         if hasattr(self, '_manual_cut_results'):
             self._manual_cut_results = None
+        # Clear visualization data so Inspect 2D is updated
+        if hasattr(self, '_bp_viz_data'):
+            self._bp_viz_data = []
         print("Manual cutting cancelled")
 
     def _save_and_close_manual_cut(self, muscle_name=None):
@@ -9206,6 +9209,10 @@ class ContourMeshMixin:
         # Clear results - don't apply partial results
         if hasattr(self, '_manual_cut_results'):
             self._manual_cut_results = None
+
+        # Clear visualization data so Inspect 2D is updated
+        if hasattr(self, '_bp_viz_data'):
+            self._bp_viz_data = []
 
         # DON'T call cut_streams - user wants to fully stop
         print("[Save&Close] Complete - closed without further processing")
