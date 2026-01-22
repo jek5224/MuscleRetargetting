@@ -12776,11 +12776,7 @@ class ContourMeshMixin:
         # This ensures shared edges are preserved even when transformed sources only touch at a point
         cutting_line_2d = None  # (point, direction) in 2D target plane (for 2-piece case)
         cutting_line_3d = None  # direction vector in 3D for bounding plane creation
-        # Save any pre-computed shared edges from _compute_shared_edges_for_visualization
-        pre_computed_shared_edges = getattr(self, '_shared_cut_edges_2d', [])
-        if pre_computed_shared_edges:
-            pre_computed_shared_edges = list(pre_computed_shared_edges)  # Make a copy
-        self._shared_cut_edges_2d = []  # Will be repopulated with transformed edges
+        self._shared_cut_edges_2d = []  # Will be populated from optimized sources
 
         # Helper function to extract line coordinates from geometry
         def extract_line_coords(geom):
@@ -12814,102 +12810,54 @@ class ContourMeshMixin:
             rotated = scaled @ rot.T
             return rotated + np.array([center_tx, center_ty])
 
-        # Use shared edges from _compute_shared_edges_for_visualization if available
-        # That function uses direct 3D->2D projection which is more reliable
+        # Compute shared edges from FINAL TRANSFORMED sources (after optimization)
+        # This ensures the cutting line matches the actual optimized source positions
         if n_pieces >= 2:
             try:
-                # Check if we already have shared edges computed (saved above before reset)
-                if pre_computed_shared_edges and len(pre_computed_shared_edges) > 0:
-                    print(f"  [BP Transform] Using {len(pre_computed_shared_edges)} pre-computed shared edges from visualization")
-                    untransformed_shared_edges = list(pre_computed_shared_edges)
-                else:
-                    # Compute from untransformed sources
-                    print(f"  [BP Transform] No pre-computed shared edges, computing from sources")
-                    untransformed_polygons = []
-                    for i in range(n_pieces):
-                        abs_vertices = source_2d_shapes[i] + initial_translations[i]
-                        if len(abs_vertices) >= 3:
-                            poly = Polygon(abs_vertices)
-                            if not poly.is_valid:
-                                poly = poly.buffer(0)
-                            untransformed_polygons.append(poly)
-                            print(f"  [BP Transform] Source {i}: {len(abs_vertices)} verts, valid={poly.is_valid}")
-                        else:
-                            untransformed_polygons.append(None)
-                            print(f"  [BP Transform] Source {i}: too few verts ({len(abs_vertices)})")
+                # Build polygons from final_transformed (optimized positions in target 2D space)
+                transformed_polygons = []
+                for i, src in enumerate(final_transformed):
+                    if len(src) >= 3:
+                        poly = Polygon(np.array(src))
+                        if not poly.is_valid:
+                            poly = poly.buffer(0)
+                        transformed_polygons.append(poly)
+                        print(f"  [BP Transform] Optimized source {i}: {len(src)} verts, valid={poly.is_valid}")
+                    else:
+                        transformed_polygons.append(None)
+                        print(f"  [BP Transform] Optimized source {i}: too few verts ({len(src)})")
 
-                    # Find shared edges from untransformed sources
-                    untransformed_shared_edges = []  # [(pair_indices, points), ...]
-                    for i in range(n_pieces):
-                        for j in range(i + 1, n_pieces):
-                            poly_i = untransformed_polygons[i]
-                            poly_j = untransformed_polygons[j]
-                            if poly_i is None or poly_j is None:
-                                continue
+                # Find shared edges from optimized sources
+                for i in range(n_pieces):
+                    for j in range(i + 1, n_pieces):
+                        poly_i = transformed_polygons[i]
+                        poly_j = transformed_polygons[j]
+                        if poly_i is None or poly_j is None:
+                            continue
 
-                            try:
-                                # Find shared boundary between this pair
-                                shared_boundary = poly_i.exterior.intersection(poly_j.exterior)
-                                print(f"  [BP Transform] Untransformed pair {i}-{j} intersection: {shared_boundary.geom_type if shared_boundary and not shared_boundary.is_empty else 'empty'}")
+                        try:
+                            # Find shared boundary between this pair
+                            shared_boundary = poly_i.exterior.intersection(poly_j.exterior)
+                            geom_type = shared_boundary.geom_type if shared_boundary and not shared_boundary.is_empty else 'empty'
+                            print(f"  [BP Transform] Optimized pair {i}-{j} intersection: {geom_type}")
 
-                                if shared_boundary is None or shared_boundary.is_empty:
-                                    # Try overlap boundary
-                                    overlap = poly_i.intersection(poly_j)
-                                    if overlap is not None and not overlap.is_empty and hasattr(overlap, 'boundary'):
-                                        shared_boundary = overlap.boundary
+                            if shared_boundary is None or shared_boundary.is_empty:
+                                # Try overlap boundary
+                                overlap = poly_i.intersection(poly_j)
+                                if overlap is not None and not overlap.is_empty and hasattr(overlap, 'boundary'):
+                                    shared_boundary = overlap.boundary
 
-                                shared_points = []
-                                if shared_boundary is not None and not shared_boundary.is_empty:
-                                    shared_points = extract_line_coords(shared_boundary)
+                            shared_points = []
+                            if shared_boundary is not None and not shared_boundary.is_empty:
+                                shared_points = extract_line_coords(shared_boundary)
 
-                                if len(shared_points) >= 2:
-                                    untransformed_shared_edges.append(((i, j), np.array(shared_points)))
-                                    print(f"  [BP Transform] Untransformed shared edge {i}-{j}: {len(shared_points)} points")
-                                else:
-                                    print(f"  [BP Transform] Untransformed pair {i}-{j}: no shared edge ({len(shared_points)} points)")
-                            except Exception as e:
-                                print(f"  [BP Transform] Error finding untransformed shared edge {i}-{j}: {e}")
-
-                # Now transform the shared edges using the optimization parameters
-                if not use_separate_transforms:
-                    # Common transform - apply same transform to shared edges
-                    common_scale_x = max(optimal_params[0], 0.5)
-                    common_scale_y = max(optimal_params[1], 0.5)
-                    center_tx = optimal_params[2]
-                    center_ty = optimal_params[3]
-                    theta = optimal_params[4]
-
-                    for pair_indices, shared_pts in untransformed_shared_edges:
-                        transformed_pts = []
-                        for pt in shared_pts:
-                            t_pt = transform_point(pt, common_scale_x, common_scale_y,
-                                                   center_tx, center_ty, theta, combined_center)
-                            transformed_pts.append(t_pt)
-                        self._shared_cut_edges_2d.append((pair_indices, np.array(transformed_pts)))
-                        print(f"  [BP Transform] Transformed shared edge {pair_indices}: {len(transformed_pts)} points")
-                else:
-                    # Separate transforms - can't easily transform shared edges
-                    # Fall back to finding edges from transformed sources
-                    for i, src in enumerate(final_transformed):
-                        if len(src) >= 3:
-                            poly = Polygon(np.array(src))
-                            if not poly.is_valid:
-                                poly = poly.buffer(0)
-                            untransformed_polygons[i] = poly  # Reuse list for transformed
-
-                    for i in range(n_pieces):
-                        for j in range(i + 1, n_pieces):
-                            poly_i = untransformed_polygons[i]
-                            poly_j = untransformed_polygons[j]
-                            if poly_i is None or poly_j is None:
-                                continue
-                            try:
-                                shared_boundary = poly_i.exterior.intersection(poly_j.exterior)
-                                shared_points = extract_line_coords(shared_boundary) if shared_boundary and not shared_boundary.is_empty else []
-                                if len(shared_points) >= 2:
-                                    self._shared_cut_edges_2d.append(((i, j), np.array(shared_points)))
-                            except:
-                                pass
+                            if len(shared_points) >= 2:
+                                self._shared_cut_edges_2d.append(((i, j), np.array(shared_points)))
+                                print(f"  [BP Transform] Shared edge {i}-{j}: {len(shared_points)} points")
+                            else:
+                                print(f"  [BP Transform] Pair {i}-{j}: no shared edge ({len(shared_points)} points)")
+                        except Exception as e:
+                            print(f"  [BP Transform] Error finding shared edge {i}-{j}: {e}")
 
                 print(f"  [BP Transform] Total shared edges found: {len(self._shared_cut_edges_2d)}")
 
@@ -12969,8 +12917,7 @@ class ContourMeshMixin:
                         print(f"  [BP Transform] SEPARATE: WARNING - no neck found on target (n={n_target}, min_sep={min_sep})")
 
                 elif len(src_0) >= 3 and len(src_1) >= 3:
-                    # COMMON mode: shared edges are already computed in Step 6.5
-                    # from UNTRANSFORMED sources and then transformed
+                    # COMMON mode: shared edges computed from OPTIMIZED sources in Step 6.5
                     # Use the already-computed _shared_cut_edge_2d to set cutting_line_2d
                     if self._shared_cut_edge_2d is not None and len(self._shared_cut_edge_2d) >= 2:
                         edge_arr = np.array(self._shared_cut_edge_2d)
