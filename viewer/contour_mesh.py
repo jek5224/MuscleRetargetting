@@ -13196,16 +13196,20 @@ class ContourMeshMixin:
                 boundary_pt = target_contour[v_idx_a] + t * (target_contour[v_idx_b] - target_contour[v_idx_a])
                 return t, boundary_pt
 
-            # Find shared boundary: where both polygon boundaries intersect
-            # This is the actual line/curve where the two polygons meet
-            boundary_a = poly_a.exterior
-            boundary_b = poly_b.exterior
-            shared_boundary = boundary_a.intersection(boundary_b)
+            # Find shared boundary: the boundary of the overlapping region between two sources
+            # This is where the two optimized source contours meet
+            intersection_region = poly_a.intersection(poly_b)
+
+            # The shared boundary is the boundary of the intersection region
+            if not intersection_region.is_empty:
+                shared_boundary = intersection_region.boundary
+            else:
+                shared_boundary = None
 
             # Try to find actual intersection of target edge with shared boundary
             t = 0.5  # Default
 
-            if not shared_boundary.is_empty:
+            if shared_boundary is not None and not shared_boundary.is_empty:
                 int_pt = target_edge.intersection(shared_boundary)
                 if not int_pt.is_empty:
                     if int_pt.geom_type == 'Point':
