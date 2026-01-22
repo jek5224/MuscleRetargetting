@@ -10599,9 +10599,6 @@ class ContourMeshMixin:
         if muscle_name is not None:
             self._muscle_name = muscle_name
 
-        # Reset debug flag for level select window
-        self._level_select_debug_printed = False
-
         if self.contours is None or len(self.contours) < 2:
             print("Need at least 2 contour levels")
             return

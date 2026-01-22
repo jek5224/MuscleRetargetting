@@ -6557,15 +6557,6 @@ class GLFWApp():
             # Find levels with linked groups and use that structure for ordering
             stream_display_order = list(range(max_stream_count))
 
-            # Debug: print stream_groups to see linking (only once per window open)
-            if not hasattr(obj, '_level_select_debug_printed') or not obj._level_select_debug_printed:
-                print(f"[DEBUG] Level Select - stream_groups has {len(stream_groups)} levels")
-                for lvl_i, groups in enumerate(stream_groups):
-                    linked = [g for g in groups if len(g) > 1]
-                    if linked:
-                        print(f"  Level {lvl_i}: linked groups = {linked}")
-                obj._level_select_debug_printed = True
-
             # Find a level with multiple groups (most informative for ordering)
             # Prefer levels where streams are split into distinct groups
             best_level = 0
@@ -6592,7 +6583,6 @@ class GLFWApp():
                 for s in range(max_stream_count):
                     if s not in stream_display_order:
                         stream_display_order.append(s)
-                print(f"[DEBUG] Using level {best_level} for ordering, display_order = {stream_display_order}")
             elif hasattr(obj, 'stream_contours') and obj.stream_contours is not None and len(obj.stream_contours) > 0:
                 # Fall back to spatial ordering at first level
                 try:
