@@ -13544,34 +13544,50 @@ class ContourMeshMixin:
 
                 print(f"  [BP Transform] Adjacency from shared edges: {[(i, list(adjacency[i])) for i in range(n_pieces)]}")
 
-                # For COMMON mode, sources should form a chain: 0-1-2-3-...-(n-1)
-                # Ensure sequential adjacency even if shared edge detection missed some
-                for i in range(n_pieces - 1):
-                    adjacency[i].add(i + 1)
-                    adjacency[i + 1].add(i)
-                    # If no shared edge exists, create a synthetic one using centroids
-                    pair_key = (i, i + 1)
-                    if pair_key not in shared_edge_map:
-                        # Use line between centroids as cutting line
-                        c1 = centroids[i]
-                        c2 = centroids[i + 1]
-                        midpoint = (c1 + c2) / 2
-                        shared_edge_map[pair_key] = np.array([c1, midpoint, c2])
-                        print(f"  [BP Transform] Created synthetic shared edge for {i}-{i+1}")
-
-                print(f"  [BP Transform] Adjacency (chain): {[(i, list(adjacency[i])) for i in range(n_pieces)]}")
-
-                # Cutting order: cut from one end to the other (0, 1, 2, ...)
-                # This ensures sequential cutting along the chain
+                # Find cutting order using leaf-first algorithm (respects actual adjacency)
+                # A "leaf" is a source adjacent to only one other remaining source
+                remaining_sources = set(range(n_pieces))
                 cut_order = []
-                for src in range(n_pieces - 1):
-                    # Each source is cut using its boundary with the next source
-                    cut_order.append((src, src + 1))
 
-                print(f"  [BP Transform] Cut order (sequential): {cut_order}")
+                while len(remaining_sources) > 1:
+                    # Find a leaf source (adjacent to only one remaining source)
+                    leaf_found = False
+                    for src in sorted(remaining_sources):  # Sort for determinism
+                        remaining_neighbors = adjacency[src] & remaining_sources
+                        if len(remaining_neighbors) == 1:
+                            neighbor = list(remaining_neighbors)[0]
+                            # Only add to cut_order if we have a real shared edge
+                            pair_key = (min(src, neighbor), max(src, neighbor))
+                            if pair_key in shared_edge_map:
+                                cut_order.append((src, neighbor))
+                                remaining_sources.remove(src)
+                                leaf_found = True
+                                print(f"  [BP Transform] Cut order: leaf {src} using edge with {neighbor}")
+                                break
+                            else:
+                                print(f"  [BP Transform] WARNING: Leaf {src} has no shared edge with {neighbor}")
 
-                # Only the last source remains after sequential cuts
-                remaining_sources = {n_pieces - 1}
+                    if not leaf_found:
+                        # No leaf found - pick any source with at least one neighbor that has shared edge
+                        for src in sorted(remaining_sources):
+                            remaining_neighbors = adjacency[src] & remaining_sources
+                            for neighbor in remaining_neighbors:
+                                pair_key = (min(src, neighbor), max(src, neighbor))
+                                if pair_key in shared_edge_map:
+                                    cut_order.append((src, neighbor))
+                                    remaining_sources.remove(src)
+                                    leaf_found = True
+                                    print(f"  [BP Transform] Cut order: non-leaf {src} using edge with {neighbor}")
+                                    break
+                            if leaf_found:
+                                break
+
+                        if not leaf_found:
+                            # No connected sources with shared edges - use vertex assignment for remaining
+                            print(f"  [BP Transform] WARNING: No more shared edges, remaining sources will use vertex assignment")
+                            break
+
+                print(f"  [BP Transform] Cut order: {cut_order}")
 
                 # Collect actual crossings for visualization (not the initial all_crossings)
                 actual_cut_crossings = []  # [(pt_2d, pair_indices), ...]
@@ -13666,19 +13682,35 @@ class ContourMeshMixin:
                     piece_b.append(pt3d_1)
                     piece_b_2d.append(pt2d_1)
 
-                    # Determine which piece belongs to src_to_cut
+                    # Determine which piece belongs to src_to_cut using SIGNED DISTANCE to cutting line
+                    # The source centroid should be on the SAME side of the cutting line as its piece
+                    src_centroid = centroids[src_to_cut]
                     centroid_a = np.mean(piece_a_2d, axis=0)
                     centroid_b = np.mean(piece_b_2d, axis=0)
-                    src_centroid = centroids[src_to_cut]
 
-                    if np.linalg.norm(centroid_a - src_centroid) < np.linalg.norm(centroid_b - src_centroid):
+                    # Signed distance: positive on one side, negative on other
+                    src_side = np.dot(src_centroid - line_point, line_normal)
+                    side_a = np.dot(centroid_a - line_point, line_normal)
+                    side_b = np.dot(centroid_b - line_point, line_normal)
+
+                    print(f"  [BP Transform] Cut {cut_idx+1} piece assignment:")
+                    print(f"    Source {src_to_cut} centroid: ({src_centroid[0]:.4f}, {src_centroid[1]:.4f}), signed dist: {src_side:.4f}")
+                    print(f"    Piece A centroid: ({centroid_a[0]:.4f}, {centroid_a[1]:.4f}), signed dist: {side_a:.4f}")
+                    print(f"    Piece B centroid: ({centroid_b[0]:.4f}, {centroid_b[1]:.4f}), signed dist: {side_b:.4f}")
+                    print(f"    Product src*A: {src_side * side_a:.4f}, Product src*B: {src_side * side_b:.4f}")
+
+                    # Assign piece on same side as source centroid
+                    # If signs match, they're on the same side
+                    if (src_side * side_a) > (src_side * side_b):
                         source_to_piece[src_to_cut] = piece_a
                         current_target = piece_b
                         current_target_2d = piece_b_2d
+                        print(f"  [BP Transform] Source {src_to_cut} assigned piece_a (same side of cut line)")
                     else:
                         source_to_piece[src_to_cut] = piece_b
                         current_target = piece_a
                         current_target_2d = piece_a_2d
+                        print(f"  [BP Transform] Source {src_to_cut} assigned piece_b (same side of cut line)")
 
                     shared_boundary_points.extend([pt3d_1, pt3d_2])
                     # Store actual crossings for visualization
