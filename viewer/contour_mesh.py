@@ -11999,24 +11999,28 @@ class ContourMeshMixin:
 
         for i in range(n_sources):
             for j in range(i + 1, n_sources):
-                poly_i = source_polygons[i]
-                poly_j = source_polygons[j]
-                if poly_i is None or poly_j is None:
+                src_i = transformed_sources_2d[i]
+                src_j = transformed_sources_2d[j]
+                if len(src_i) < 3 or len(src_j) < 3:
                     continue
 
                 try:
-                    shared_boundary = poly_i.exterior.intersection(poly_j.exterior)
-                    if shared_boundary is None or shared_boundary.is_empty:
-                        overlap = poly_i.intersection(poly_j)
-                        if overlap is not None and not overlap.is_empty and hasattr(overlap, 'boundary'):
-                            shared_boundary = overlap.boundary
+                    # Find shared boundary by looking for close vertices
+                    # Shapely intersection can fail due to numerical precision
+                    tol = 1e-4  # Tolerance for considering vertices as shared (accounts for scaling drift)
+                    shared_points = []
+                    for pt_i in src_i:
+                        for pt_j in src_j:
+                            dist = np.linalg.norm(pt_i - pt_j)
+                            if dist < tol:
+                                shared_points.append(pt_i.copy())
+                                break
 
-                    shared_points = extract_line_coords(shared_boundary) if shared_boundary and not shared_boundary.is_empty else []
                     if len(shared_points) >= 2:
                         self._shared_cut_edges_2d.append(((i, j), np.array(shared_points)))
                         print(f"  [Shared Edges] Found shared edge {i}-{j}: {len(shared_points)} points")
                     else:
-                        print(f"  [Shared Edges] WARNING: Pair {i}-{j} has no shared edge")
+                        print(f"  [Shared Edges] WARNING: Pair {i}-{j} has no shared edge ({len(shared_points)} points)")
                 except Exception as e:
                     print(f"  [Shared Edges] Error for pair {i}-{j}: {e}")
 
@@ -12842,7 +12846,7 @@ class ContourMeshMixin:
                             src_j = np.array(final_transformed[j])
 
                             # Find vertices in src_i that are close to any vertex in src_j
-                            tol = 1e-6  # Tolerance for considering vertices as shared
+                            tol = 1e-4  # Tolerance for considering vertices as shared (accounts for scaling drift)
                             shared_points = []
                             for vi, pt_i in enumerate(src_i):
                                 for vj, pt_j in enumerate(src_j):
