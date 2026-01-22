@@ -13279,6 +13279,8 @@ class ContourMeshMixin:
                 line_normal = np.array([-line_dir[1], line_dir[0]])
                 line_point = (line_p1 + line_p2) / 2
 
+            # Collect potential crossings for this shared edge (store t values too)
+            potential_crossings = []
             for edge_idx in range(n_verts):
                 v_idx_a = edge_idx
                 v_idx_b = (edge_idx + 1) % n_verts
@@ -13290,12 +13292,27 @@ class ContourMeshMixin:
                 denom = np.dot(edge_vec, line_normal)
                 if abs(denom) > 1e-10:
                     t = np.dot(line_point - p_a, line_normal) / denom
-                    # Only count if t is strictly inside (0, 1) - actual crossing
-                    if 0.01 < t < 0.99:
+                    # Store crossing if t is in (0, 1) at all
+                    if 0 < t < 1:
                         pt_2d = p_a + t * edge_vec
                         pt_3d = target_contour[v_idx_a] + t * (target_contour[v_idx_b] - target_contour[v_idx_a])
-                        all_crossings.append((edge_idx, t, pt_2d, pt_3d, pair_indices))
-                        print(f"  [BP Transform] Shared edge {pair_indices} crosses target edge {edge_idx} at t={t:.4f}")
+                        potential_crossings.append((edge_idx, t, pt_2d, pt_3d, pair_indices))
+
+            # Apply progressively relaxed thresholds if needed
+            for threshold in [0.01, 0.001, 1e-6]:
+                filtered = [c for c in potential_crossings if threshold < c[1] < (1 - threshold)]
+                if len(filtered) >= 2:
+                    for c in filtered:
+                        all_crossings.append(c)
+                        print(f"  [BP Transform] Shared edge {pair_indices} crosses target edge {c[0]} at t={c[1]:.4f}")
+                    if threshold != 0.01:
+                        print(f"  [BP Transform] Used relaxed threshold {threshold} for pair {pair_indices}")
+                    break
+            else:
+                # Accept whatever we found, even with only 1 crossing
+                for c in potential_crossings:
+                    all_crossings.append(c)
+                    print(f"  [BP Transform] Shared edge {pair_indices} crosses target edge {c[0]} at t={c[1]:.4f} (no threshold)")
 
         print(f"  [BP Transform] Found {len(all_crossings)} total crossings from {len(shared_edges)} shared edges")
 
@@ -13470,21 +13487,29 @@ class ContourMeshMixin:
                         continue
 
                     # Find crossings with current target
+                    # Use progressively relaxed thresholds if needed
                     n_current = len(current_target)
                     current_crossings = []
 
-                    for edge_idx in range(n_current):
-                        p_a = current_target_2d[edge_idx]
-                        p_b = current_target_2d[(edge_idx + 1) % n_current]
-                        edge_vec = np.array(p_b) - np.array(p_a)
+                    for threshold in [0.01, 0.001, 1e-6]:
+                        current_crossings = []
+                        for edge_idx in range(n_current):
+                            p_a = current_target_2d[edge_idx]
+                            p_b = current_target_2d[(edge_idx + 1) % n_current]
+                            edge_vec = np.array(p_b) - np.array(p_a)
 
-                        denom = np.dot(edge_vec, line_normal)
-                        if abs(denom) > 1e-10:
-                            t = np.dot(line_point - np.array(p_a), line_normal) / denom
-                            if 0.01 < t < 0.99:
-                                pt_2d = np.array(p_a) + t * edge_vec
-                                pt_3d = current_target[edge_idx] + t * (current_target[(edge_idx + 1) % n_current] - current_target[edge_idx])
-                                current_crossings.append((edge_idx, t, pt_2d, pt_3d))
+                            denom = np.dot(edge_vec, line_normal)
+                            if abs(denom) > 1e-10:
+                                t = np.dot(line_point - np.array(p_a), line_normal) / denom
+                                if threshold < t < (1 - threshold):
+                                    pt_2d = np.array(p_a) + t * edge_vec
+                                    pt_3d = current_target[edge_idx] + t * (current_target[(edge_idx + 1) % n_current] - current_target[edge_idx])
+                                    current_crossings.append((edge_idx, t, pt_2d, pt_3d))
+
+                        if len(current_crossings) >= 2:
+                            if threshold != 0.01:
+                                print(f"  [BP Transform] Found {len(current_crossings)} crossings with relaxed threshold {threshold}")
+                            break
 
                     if len(current_crossings) < 2:
                         print(f"  [BP Transform] WARNING: Only {len(current_crossings)} crossings found for cut {cut_idx+1}")
