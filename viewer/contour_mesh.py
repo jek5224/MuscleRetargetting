@@ -13322,6 +13322,10 @@ class ContourMeshMixin:
                 edge1, t1, pt2d_1, pt3d_1, _ = cut1
                 edge2, t2, pt2d_2, pt3d_2, _ = cut2
 
+                print(f"  [CUT DEBUG] Cutting line info:")
+                print(f"    Cut1: edge {edge1}, t={t1:.4f}, pt2d=({pt2d_1[0]:.6f}, {pt2d_1[1]:.6f})")
+                print(f"    Cut2: edge {edge2}, t={t2:.4f}, pt2d=({pt2d_2[0]:.6f}, {pt2d_2[1]:.6f})")
+
                 piece0 = [pt3d_1]
                 piece0_2d = [pt2d_1]
                 v = (edge1 + 1) % n_verts
@@ -13349,6 +13353,13 @@ class ContourMeshMixin:
                     new_contours[1] = piece0
 
                 shared_boundary_points = [pt3d_1, pt3d_2]
+
+                # Debug: show piece boundaries vs cutting line
+                print(f"  [CUT DEBUG] Piece boundaries (2D):")
+                for pi in range(2):
+                    p = new_contours[pi]
+                    p_2d = np.array([[np.dot(v - target_mean, target_x), np.dot(v - target_mean, target_y)] for v in p])
+                    print(f"    Piece {pi}: {len(p)} verts, first=({p_2d[0,0]:.6f}, {p_2d[0,1]:.6f}), last=({p_2d[-1,0]:.6f}, {p_2d[-1,1]:.6f})")
 
             else:
                 # N-piece case: Build pieces by walking around contour, tracking piece at crossings
@@ -13440,6 +13451,18 @@ class ContourMeshMixin:
 
             for piece_idx in range(n_pieces):
                 print(f"  [BP Transform] Piece {piece_idx}: {len(new_contours[piece_idx])} verts")
+
+            # Debug: show piece boundaries vs cutting lines
+            print(f"  [CUT DEBUG] Cutting line crossings (2D):")
+            for i, c in enumerate(all_crossings):
+                edge_idx, t, pt2d, pt3d, pair = c
+                print(f"    Crossing {i}: edge {edge_idx}, t={t:.4f}, pt2d=({pt2d[0]:.6f}, {pt2d[1]:.6f}), pair={pair}")
+            print(f"  [CUT DEBUG] Piece boundaries (2D):")
+            for pi in range(n_pieces):
+                p = new_contours[pi]
+                if len(p) > 0:
+                    p_2d = np.array([[np.dot(v - target_mean, target_x), np.dot(v - target_mean, target_y)] for v in p])
+                    print(f"    Piece {pi}: {len(p)} verts, first=({p_2d[0,0]:.6f}, {p_2d[0,1]:.6f}), last=({p_2d[-1,0]:.6f}, {p_2d[-1,1]:.6f})")
 
         else:
             # No crossings found - this is an error, all sources must share edges
