@@ -10935,25 +10935,14 @@ class ContourMeshMixin:
                             any_source_not_cut = any(not cut for cut in source_cut_status)
                             all_sources_cut = all(source_cut_status)
 
-                            # Also check contour sizes - if sizes vary significantly, treat as SEPARATE
-                            # This catches cases where is_cut=True from earlier transitions but contours weren't
-                            # cut at the most recent transition (e.g., 1:1 mappings that inherited is_cut)
-                            source_sizes = [len(source_contours[i]) for i in range(len(source_contours))]
-                            if len(source_sizes) > 1:
-                                min_size, max_size = min(source_sizes), max(source_sizes)
-                                size_ratio = max_size / min_size if min_size > 0 else float('inf')
-                                # If largest is more than 3x the smallest, sizes are inconsistent
-                                sizes_inconsistent = size_ratio > 3.0
-                            else:
-                                sizes_inconsistent = False
-
-                            # SEPARATE mode if ANY source has not been cut yet OR sizes are inconsistent
-                            # This handles mixed cases: 1 SEPARATE + 2 COMMON → still needs manual cutting
-                            is_first_division = any_source_not_cut or sizes_inconsistent
+                            # SEPARATE mode only if ANY source has not been cut yet
+                            # If all sources are cut (all_sources_cut=True), use COMMON mode
+                            # Size differences are normal for cut contours and shouldn't trigger SEPARATE
+                            is_first_division = any_source_not_cut
                             cut_stream_combos.add(stream_combo)
 
                             mode_str = "SEPARATE" if is_first_division else "COMMON"
-                            reason = "uncut sources" if any_source_not_cut else ("size inconsistency" if sizes_inconsistent else "all cut")
+                            reason = "uncut sources" if any_source_not_cut else "all cut"
                             cut_status_str = ', '.join([f's{streams_for_contour[i]}:{"cut" if c else "uncut"}' for i, c in enumerate(source_cut_status)])
                             print(f"  [BP Transform] Mode: {mode_str} ({cut_status_str}, reason: {reason})")
 
