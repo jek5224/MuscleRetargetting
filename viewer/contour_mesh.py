@@ -12776,7 +12776,11 @@ class ContourMeshMixin:
         # This ensures shared edges are preserved even when transformed sources only touch at a point
         cutting_line_2d = None  # (point, direction) in 2D target plane (for 2-piece case)
         cutting_line_3d = None  # direction vector in 3D for bounding plane creation
-        self._shared_cut_edges_2d = []  # List of (pair_indices, points) for all adjacent pairs
+        # Save any pre-computed shared edges from _compute_shared_edges_for_visualization
+        pre_computed_shared_edges = getattr(self, '_shared_cut_edges_2d', [])
+        if pre_computed_shared_edges:
+            pre_computed_shared_edges = list(pre_computed_shared_edges)  # Make a copy
+        self._shared_cut_edges_2d = []  # Will be repopulated with transformed edges
 
         # Helper function to extract line coordinates from geometry
         def extract_line_coords(geom):
@@ -12814,13 +12818,10 @@ class ContourMeshMixin:
         # That function uses direct 3D->2D projection which is more reliable
         if n_pieces >= 2:
             try:
-                # Check if we already have shared edges computed
-                pre_computed_edges = getattr(self, '_shared_cut_edges_2d', [])
-                if pre_computed_edges and len(pre_computed_edges) > 0:
-                    print(f"  [BP Transform] Using {len(pre_computed_edges)} pre-computed shared edges from visualization")
-                    untransformed_shared_edges = list(pre_computed_edges)
-                    # Clear _shared_cut_edges_2d - we'll repopulate with transformed edges
-                    self._shared_cut_edges_2d = []
+                # Check if we already have shared edges computed (saved above before reset)
+                if pre_computed_shared_edges and len(pre_computed_shared_edges) > 0:
+                    print(f"  [BP Transform] Using {len(pre_computed_shared_edges)} pre-computed shared edges from visualization")
+                    untransformed_shared_edges = list(pre_computed_shared_edges)
                 else:
                     # Compute from untransformed sources
                     print(f"  [BP Transform] No pre-computed shared edges, computing from sources")
