@@ -13276,10 +13276,17 @@ class ContourMeshMixin:
                 v = (v + 1) % n_verts
             piece1.append(pt3d_1)
 
-            # Match pieces to sources by centroid distance
-            c0 = np.mean(piece0, axis=0)
-            c1 = np.mean(piece1, axis=0)
-            if np.linalg.norm(c0 - centroids[0]) < np.linalg.norm(c0 - centroids[1]):
+            # Match pieces to sources by centroid distance (use 2D for comparison)
+            # Build 2D centroids for pieces
+            piece0_2d = [cut1[2]]  # pt_2d from cut1
+            v = (edge1 + 1) % n_verts
+            while v != (edge2 + 1) % n_verts:
+                piece0_2d.append(target_2d[v])
+                v = (v + 1) % n_verts
+            piece0_2d.append(cut2[2])  # pt_2d from cut2
+
+            c0_2d = np.mean(piece0_2d, axis=0)
+            if np.linalg.norm(c0_2d - centroids[0]) < np.linalg.norm(c0_2d - centroids[1]):
                 new_contours[0] = piece0
                 new_contours[1] = piece1
             else:
