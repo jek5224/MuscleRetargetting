@@ -13245,66 +13245,49 @@ class ContourMeshMixin:
                                     shared_boundary_points.append(pi.copy())
                                     break
 
-        elif len(all_crossings) >= 2 and n_pieces >= 2:
-            # Sort crossings by position around contour
+        elif len(all_crossings) >= 2:
+            # Simple: cut line crosses target at 2 points, split into 2 pieces
             all_crossings.sort(key=lambda x: x[0] + x[1])
 
-            print(f"  [BP Transform] Building {n_pieces} pieces using {len(all_crossings)} crossings")
-            for i, c in enumerate(all_crossings):
-                print(f"  [BP Transform]   Crossing {i}: edge {c[0]}, t={c[1]:.4f}, pair={c[4]}")
+            # Get the two cut points
+            cut1 = all_crossings[0]  # (edge_idx, t, pt_2d, pt_3d, pair)
+            cut2 = all_crossings[1]
+            edge1, t1, _, pt3d_1, _ = cut1
+            edge2, t2, _, pt3d_2, _ = cut2
 
-            # Pre-compute boundary points - store as list with edge_idx as key
-            edge_to_boundary_pt = {}
-            for crossing in all_crossings:
-                edge_idx, t, pt_2d, pt_3d, pair_indices = crossing
-                # Store the 3D point - this exact point will be shared by both pieces
-                edge_to_boundary_pt[edge_idx] = pt_3d.copy()
-                shared_boundary_points.append(pt_3d.copy())
+            print(f"  [BP Transform] Cutting at edge {edge1} (t={t1:.3f}) and edge {edge2} (t={t2:.3f})")
 
-            # Walk around contour, building pieces
-            for v_idx in range(n_verts):
-                curr_piece = assignments[v_idx]
-                next_v_idx = (v_idx + 1) % n_verts
-                next_piece = assignments[next_v_idx]
+            # Piece 0: from cut1 to cut2 (walking forward)
+            # Piece 1: from cut2 to cut1 (the rest)
+            piece0 = [pt3d_1]
+            piece1 = [pt3d_2]
 
-                # Add vertex to its piece
-                new_contours[curr_piece].append(target_contour[v_idx])
+            # Add vertices from edge1+1 to edge2 to piece0
+            v = (edge1 + 1) % n_verts
+            while v != (edge2 + 1) % n_verts:
+                piece0.append(target_contour[v])
+                v = (v + 1) % n_verts
+            piece0.append(pt3d_2)
 
-                # If assignment changes, add the shared boundary point
-                if curr_piece != next_piece:
-                    if v_idx in edge_to_boundary_pt:
-                        # Use pre-computed crossing point
-                        boundary_pt = edge_to_boundary_pt[v_idx]
-                    else:
-                        # Compute crossing point from cutting line
-                        t = 0.5
-                        for pair_indices, shared_pts in shared_edges:
-                            if set(pair_indices) == {curr_piece, next_piece} and len(shared_pts) >= 2:
-                                line_p1 = shared_pts[0]
-                                line_p2 = shared_pts[-1]
-                                line_dir = line_p2 - line_p1
-                                line_len = np.linalg.norm(line_dir)
-                                if line_len > 1e-10:
-                                    line_dir = line_dir / line_len
-                                    line_normal = np.array([-line_dir[1], line_dir[0]])
-                                    p_a = target_2d[v_idx]
-                                    p_b = target_2d[next_v_idx]
-                                    edge_vec = p_b - p_a
-                                    denom = np.dot(edge_vec, line_normal)
-                                    if abs(denom) > 1e-10:
-                                        t = np.dot(line_p1 - p_a, line_normal) / denom
-                                        t = np.clip(t, 0.0, 1.0)
-                                break
-                        boundary_pt = target_contour[v_idx] + t * (target_contour[next_v_idx] - target_contour[v_idx])
-                        shared_boundary_points.append(boundary_pt.copy())
+            # Add vertices from edge2+1 to edge1 to piece1
+            v = (edge2 + 1) % n_verts
+            while v != (edge1 + 1) % n_verts:
+                piece1.append(target_contour[v])
+                v = (v + 1) % n_verts
+            piece1.append(pt3d_1)
 
-                    # Add SAME point to BOTH pieces
-                    new_contours[curr_piece].append(boundary_pt)
-                    new_contours[next_piece].append(boundary_pt)
-                    boundary_crossings.append((v_idx, next_v_idx, curr_piece, next_piece, 0))
+            # Match pieces to sources by centroid distance
+            c0 = np.mean(piece0, axis=0)
+            c1 = np.mean(piece1, axis=0)
+            if np.linalg.norm(c0 - centroids[0]) < np.linalg.norm(c0 - centroids[1]):
+                new_contours[0] = piece0
+                new_contours[1] = piece1
+            else:
+                new_contours[0] = piece1
+                new_contours[1] = piece0
 
-            for piece_idx in range(n_pieces):
-                print(f"  [BP Transform] Piece {piece_idx}: {len(new_contours[piece_idx])} vertices")
+            shared_boundary_points = [pt3d_1, pt3d_2]
+            print(f"  [BP Transform] Piece 0: {len(new_contours[0])} verts, Piece 1: {len(new_contours[1])} verts")
 
         else:
             # Fallback: vertex assignment method
