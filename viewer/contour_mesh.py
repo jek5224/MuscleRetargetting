@@ -13247,25 +13247,22 @@ class ContourMeshMixin:
 
         elif len(all_crossings) >= 2 and n_pieces >= 2:
             # Use cutting line crossings to build pieces
-            # Sort crossings by edge index (position around the contour)
-            all_crossings.sort(key=lambda x: (x[0], x[1]))  # Sort by edge_idx, then by t
+            # Sort crossings by position around contour (edge_idx + t fraction)
+            all_crossings.sort(key=lambda x: x[0] + x[1])
 
             print(f"  [BP Transform] Building {n_pieces} pieces using {len(all_crossings)} crossings")
+            for i, c in enumerate(all_crossings):
+                print(f"  [BP Transform]   Crossing {i}: edge {c[0]}, t={c[1]:.4f}, pair={c[4]}")
 
-            # Create a map of edge_idx -> list of crossings on that edge
-            edge_crossings = {}
-            for crossing in all_crossings:
-                edge_idx = crossing[0]
-                if edge_idx not in edge_crossings:
-                    edge_crossings[edge_idx] = []
-                edge_crossings[edge_idx].append(crossing)
+            # Map edge_idx to crossings on that edge
+            edge_to_crossings = {}
+            for c in all_crossings:
+                edge_idx = c[0]
+                if edge_idx not in edge_to_crossings:
+                    edge_to_crossings[edge_idx] = []
+                edge_to_crossings[edge_idx].append(c)
 
-            # Sort crossings on each edge by t value
-            for edge_idx in edge_crossings:
-                edge_crossings[edge_idx].sort(key=lambda x: x[1])
-
-            # Walk around the contour, building pieces based on vertex assignments
-            # Insert crossing points when we encounter them on an edge
+            # Walk around contour vertex by vertex
             for v_idx in range(n_verts):
                 curr_piece = assignments[v_idx]
                 next_v_idx = (v_idx + 1) % n_verts
@@ -13274,24 +13271,20 @@ class ContourMeshMixin:
                 # Add current vertex to its piece
                 new_contours[curr_piece].append(target_contour[v_idx])
 
-                # Check if this edge has any crossings
-                if v_idx in edge_crossings:
-                    for crossing in edge_crossings[v_idx]:
+                # Check for crossings on this edge
+                if v_idx in edge_to_crossings:
+                    for crossing in edge_to_crossings[v_idx]:
                         edge_idx, t, pt_2d, pt_3d, pair_indices = crossing
-                        # Add crossing point to BOTH pieces that this edge separates
                         piece_i, piece_j = pair_indices
-                        if curr_piece == piece_i or curr_piece == piece_j:
-                            new_contours[curr_piece].append(pt_3d)
-                        if next_piece == piece_i or next_piece == piece_j:
-                            if next_piece != curr_piece:
-                                new_contours[next_piece].append(pt_3d)
+                        # Add crossing point to BOTH pieces from pair_indices
+                        new_contours[piece_i].append(pt_3d)
+                        new_contours[piece_j].append(pt_3d)
                         shared_boundary_points.append(pt_3d.copy())
-                        boundary_crossings.append((v_idx, next_v_idx, curr_piece, next_piece, t))
+                        boundary_crossings.append((v_idx, next_v_idx, piece_i, piece_j, t))
 
-                # If piece changes but no explicit crossing found, use assignment boundary
-                if curr_piece != next_piece and v_idx not in edge_crossings:
-                    # Find crossing point using the shared edge between these pieces
-                    t = 0.5  # Default to midpoint
+                # If assignment changes but no crossing found, compute crossing point
+                elif curr_piece != next_piece:
+                    t = 0.5  # Default
                     for pair_indices, shared_pts in shared_edges:
                         if set(pair_indices) == {curr_piece, next_piece} and len(shared_pts) >= 2:
                             line_p1 = shared_pts[0]
