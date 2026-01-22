@@ -9191,16 +9191,24 @@ class ContourMeshMixin:
         filled_count = sum(1 for p in all_pieces if p is not None)
         print(f"[Save&Close] {filled_count}/{total_pieces} pieces filled")
 
-        # Clear state
+        # Clear ALL manual cut state - complete stop, no more processing
         self._manual_cut_data = None
         self._manual_cut_original_state = None
         self._manual_cut_pending = False
         self._manual_cut_line = None
 
-        # Continue with cut_streams to finalize
-        self.cut_streams(cut_method='bp', muscle_name=muscle_name)
+        # Clear pending cuts queue
+        if hasattr(self, '_pending_manual_cuts'):
+            remaining = len(self._pending_manual_cuts) if self._pending_manual_cuts else 0
+            self._pending_manual_cuts = None
+            print(f"[Save&Close] Cleared {remaining} pending cuts from queue")
 
-        print("[Save&Close] Complete")
+        # Clear results - don't apply partial results
+        if hasattr(self, '_manual_cut_results'):
+            self._manual_cut_results = None
+
+        # DON'T call cut_streams - user wants to fully stop
+        print("[Save&Close] Complete - closed without further processing")
 
     def _match_and_exclude_sources(self):
         """
