@@ -13152,31 +13152,57 @@ class ContourMeshMixin:
                 boundary_pt = target_contour[v_idx_a] + t * (target_contour[v_idx_b] - target_contour[v_idx_a])
                 return t, boundary_pt
 
-            # Use cutting_line_2d (point + direction) to find where it crosses this target edge
-            # The cutting line is derived from the shared boundary between sources
-            # It's an infinite line, so we find where it intersects the target edge
+            # Find where target edge crosses the source polygon boundaries
+            # piece_a is assigned to poly_a, piece_b is assigned to poly_b
+            # The edge goes from inside poly_a to inside poly_b
+            # So find where it crosses poly_a's exterior OR poly_b's exterior
             t = 0.5  # Default
             method_used = "default"
 
-            if cutting_line_2d is not None:
-                line_point, line_dir = cutting_line_2d
-                # Line normal (perpendicular to line direction)
-                line_normal = np.array([-line_dir[1], line_dir[0]])
-
-                # Find where target edge crosses the cutting line
-                # Edge: P = p_a + t * edge_vec
-                # Line: (P - line_point) · line_normal = 0
-                # Solve: t = (line_point - p_a) · line_normal / (edge_vec · line_normal)
-                denom = np.dot(edge_vec, line_normal)
-                if abs(denom) > 1e-10:
-                    t_raw = np.dot(line_point - p_a, line_normal) / denom
-                    t = np.clip(t_raw, 0.0, 1.0)
-                    int_coords = p_a + t * edge_vec
-                    method_used = f"cutting_line at ({int_coords[0]:.6f},{int_coords[1]:.6f}), t_raw={t_raw:.3f}"
-                else:
-                    method_used = "edge parallel to cutting line"
+            # Try intersecting target edge with poly_a's exterior (leaving poly_a)
+            int_pt = target_edge.intersection(poly_a.exterior)
+            if not int_pt.is_empty:
+                if int_pt.geom_type == 'Point':
+                    int_coords = np.array(int_pt.coords[0])
+                    if edge_len > 1e-10:
+                        t = np.linalg.norm(int_coords - p_a) / edge_len
+                        t = np.clip(t, 0.0, 1.0)
+                    method_used = f"poly_a.exterior at ({int_coords[0]:.6f},{int_coords[1]:.6f})"
+                elif int_pt.geom_type == 'MultiPoint':
+                    # Multiple crossings - use the one closest to midpoint
+                    best_t = 0.5
+                    best_coords = None
+                    for pt in int_pt.geoms:
+                        coords = np.array(pt.coords[0])
+                        pt_t = np.linalg.norm(coords - p_a) / edge_len if edge_len > 1e-10 else 0.5
+                        if abs(pt_t - 0.5) < abs(best_t - 0.5):
+                            best_t = pt_t
+                            best_coords = coords
+                    if best_coords is not None:
+                        t = np.clip(best_t, 0.0, 1.0)
+                        method_used = f"poly_a.exterior MultiPoint at ({best_coords[0]:.6f},{best_coords[1]:.6f})"
             else:
-                method_used = "no cutting_line_2d"
+                # Try poly_b's exterior
+                int_pt = target_edge.intersection(poly_b.exterior)
+                if not int_pt.is_empty:
+                    if int_pt.geom_type == 'Point':
+                        int_coords = np.array(int_pt.coords[0])
+                        if edge_len > 1e-10:
+                            t = np.linalg.norm(int_coords - p_a) / edge_len
+                            t = np.clip(t, 0.0, 1.0)
+                        method_used = f"poly_b.exterior at ({int_coords[0]:.6f},{int_coords[1]:.6f})"
+                    elif int_pt.geom_type == 'MultiPoint':
+                        best_t = 0.5
+                        best_coords = None
+                        for pt in int_pt.geoms:
+                            coords = np.array(pt.coords[0])
+                            pt_t = np.linalg.norm(coords - p_a) / edge_len if edge_len > 1e-10 else 0.5
+                            if abs(pt_t - 0.5) < abs(best_t - 0.5):
+                                best_t = pt_t
+                                best_coords = coords
+                        if best_coords is not None:
+                            t = np.clip(best_t, 0.0, 1.0)
+                            method_used = f"poly_b.exterior MultiPoint at ({best_coords[0]:.6f},{best_coords[1]:.6f})"
 
             print(f"    [CUT DEBUG] edge {v_idx_a}->{v_idx_b}: {method_used}, t={t:.3f}")
 
