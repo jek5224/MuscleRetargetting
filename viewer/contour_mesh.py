@@ -13242,16 +13242,23 @@ class ContourMeshMixin:
             if len(shared_pts) < 2:
                 continue
 
-            line_p1 = shared_pts[0]
-            line_p2 = shared_pts[-1]
-            line_dir = line_p2 - line_p1
-            line_len = np.linalg.norm(line_dir)
+            # For 2-piece case with short shared edge, use cutting_line_2d (computed via SVD, more robust)
+            if n_pieces == 2 and cutting_line_2d is not None and len(shared_pts) <= 5:
+                line_point, line_dir = cutting_line_2d
+                line_normal = np.array([-line_dir[1], line_dir[0]])
+                print(f"  [BP Transform] Using cutting_line_2d for crossing detection (short shared edge: {len(shared_pts)} pts)")
+            else:
+                line_p1 = shared_pts[0]
+                line_p2 = shared_pts[-1]
+                line_dir = line_p2 - line_p1
+                line_len = np.linalg.norm(line_dir)
 
-            if line_len < 1e-10:
-                continue
+                if line_len < 1e-10:
+                    continue
 
-            line_dir = line_dir / line_len
-            line_normal = np.array([-line_dir[1], line_dir[0]])
+                line_dir = line_dir / line_len
+                line_normal = np.array([-line_dir[1], line_dir[0]])
+                line_point = (line_p1 + line_p2) / 2
 
             for edge_idx in range(n_verts):
                 v_idx_a = edge_idx
@@ -13263,7 +13270,7 @@ class ContourMeshMixin:
                 # Find where edge crosses the cutting line
                 denom = np.dot(edge_vec, line_normal)
                 if abs(denom) > 1e-10:
-                    t = np.dot(line_p1 - p_a, line_normal) / denom
+                    t = np.dot(line_point - p_a, line_normal) / denom
                     # Only count if t is strictly inside (0, 1) - actual crossing
                     if 0.01 < t < 0.99:
                         pt_2d = p_a + t * edge_vec
