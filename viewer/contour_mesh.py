@@ -13362,92 +13362,71 @@ class ContourMeshMixin:
                     print(f"    Piece {pi}: {len(p)} verts, first=({p_2d[0,0]:.6f}, {p_2d[0,1]:.6f}), last=({p_2d[-1,0]:.6f}, {p_2d[-1,1]:.6f})")
 
             else:
-                # N-piece case: Build pieces by walking around contour, tracking piece at crossings
-                # At each crossing (pair i,j), we switch between pieces i and j
+                # N-piece case: Use vertex assignments directly instead of crossing-based walk
+                # This handles cases where not all sources share edges with each other
 
-                # Collect and sort crossings
-                crossing_info = []  # [(edge_idx, t, pt_2d, pt_3d, pair_indices), ...]
+                # Collect crossing points for shared boundary
                 for c in all_crossings:
-                    crossing_info.append(c)
                     shared_boundary_points.append(c[3])  # pt_3d
 
-                crossing_info.sort(key=lambda x: x[0] + x[1])
-                n_crossings = len(crossing_info)
-                print(f"  [BP Transform] Sorted {n_crossings} crossings for N-piece cut")
+                print(f"  [BP Transform] N-piece cut using vertex assignments")
+                print(f"  [BP Transform] Assignment counts: {[assignments.count(i) for i in range(n_pieces)]}")
 
-                # Build map: edge_idx -> crossing info
+                # Build map: edge_idx -> crossing info (for inserting cut points)
                 edge_to_crossing = {}
-                for c in crossing_info:
+                for c in all_crossings:
                     edge_idx = c[0]
-                    edge_to_crossing[edge_idx] = c
+                    if edge_idx not in edge_to_crossing:
+                        edge_to_crossing[edge_idx] = []
+                    edge_to_crossing[edge_idx].append(c)
 
-                # Determine initial piece using centroid of first segment
-                first_crossing = crossing_info[0]
-                second_crossing = crossing_info[1] if n_crossings > 1 else crossing_info[0]
-                start_edge = first_crossing[0]
-                end_edge = second_crossing[0]
-
-                # Sample vertices in first segment to determine initial piece
-                segment_verts_2d = []
-                v = (start_edge + 1) % n_verts
-                end_v = (end_edge + 1) % n_verts
-                while v != end_v:
-                    segment_verts_2d.append(target_2d[v])
-                    v = (v + 1) % n_verts
-
-                if segment_verts_2d:
-                    segment_centroid = np.mean(segment_verts_2d, axis=0)
-                    # Find nearest source centroid
-                    min_dist = float('inf')
-                    current_piece = 0
-                    for piece_idx, src_centroid in enumerate(centroids):
-                        dist = np.linalg.norm(segment_centroid - src_centroid)
-                        if dist < min_dist:
-                            min_dist = dist
-                            current_piece = piece_idx
-                else:
-                    current_piece = 0
-
-                print(f"  [BP Transform] Initial piece (before first crossing): {current_piece}")
-
-                # Walk around contour, adding vertices to pieces and switching at crossings
-                crossing_edges = set(c[0] for c in crossing_info)
-
+                # Walk around contour using vertex assignments
+                # Insert crossing points at piece boundaries
                 for v_idx in range(n_verts):
-                    # Add vertex to current piece
+                    current_piece = assignments[v_idx]
+                    next_v_idx = (v_idx + 1) % n_verts
+                    next_piece = assignments[next_v_idx]
+
+                    # Add vertex to its assigned piece
                     new_contours[current_piece].append(target_contour[v_idx])
 
-                    # Check if this edge has a crossing
-                    if v_idx in crossing_edges:
-                        crossing = edge_to_crossing[v_idx]
-                        pt_3d = crossing[3]
-                        pair_indices = crossing[4]
+                    # Check if there's a crossing on this edge
+                    if v_idx in edge_to_crossing:
+                        crossings_on_edge = edge_to_crossing[v_idx]
+                        # Sort by t value if multiple crossings
+                        crossings_on_edge.sort(key=lambda c: c[1])
 
-                        # Add crossing point to current piece
-                        new_contours[current_piece].append(pt_3d)
+                        for crossing in crossings_on_edge:
+                            pt_3d = crossing[3]
+                            pair_indices = crossing[4]
 
-                        # Switch to the other piece in the pair
-                        if current_piece == pair_indices[0]:
-                            next_piece = pair_indices[1]
-                        elif current_piece == pair_indices[1]:
-                            next_piece = pair_indices[0]
-                        else:
-                            # Current piece not in pair - this shouldn't happen
-                            # Use centroid distance to determine which piece
-                            next_v_2d = target_2d[(v_idx + 1) % n_verts]
-                            d0 = np.linalg.norm(next_v_2d - centroids[pair_indices[0]])
-                            d1 = np.linalg.norm(next_v_2d - centroids[pair_indices[1]])
-                            next_piece = pair_indices[0] if d0 < d1 else pair_indices[1]
-                            print(f"  [BP Transform] WARNING: Current piece {current_piece} not in crossing pair {pair_indices}, guessing {next_piece}")
+                            # Add crossing point to pieces involved in this boundary
+                            # The crossing is between pair_indices[0] and pair_indices[1]
+                            if current_piece in pair_indices:
+                                new_contours[current_piece].append(pt_3d)
+                            if next_piece in pair_indices and next_piece != current_piece:
+                                new_contours[next_piece].append(pt_3d)
 
-                        # Add crossing point to next piece (shared vertex)
-                        new_contours[next_piece].append(pt_3d)
+                            print(f"  [BP Transform] Edge {v_idx}: crossing {pair_indices}, assignment {current_piece} -> {next_piece}")
 
-                        print(f"  [BP Transform] Edge {v_idx}: crossing {pair_indices}, piece {current_piece} -> {next_piece}")
-                        current_piece = next_piece
+                    # If piece changes without a crossing, still need to handle boundary
+                    elif current_piece != next_piece:
+                        # No explicit crossing found - pieces change at edge boundary
+                        # This can happen when sources don't share an edge at this location
+                        print(f"  [BP Transform] Edge {v_idx}: piece change {current_piece} -> {next_piece} (no crossing)")
 
-                # Handle wrap-around: if we end on a different piece than we started, close the loop
-                # (The first vertex was added to the initial piece, which may be different from current_piece)
+                # Reorder vertices within each piece to form a proper contour
+                # The vertices may not be contiguous, so we need to sort by angle from centroid
+                for piece_idx in range(n_pieces):
+                    if len(new_contours[piece_idx]) >= 3:
+                        piece_verts = np.array(new_contours[piece_idx])
+                        piece_2d = np.array([[np.dot(v - target_mean, target_x), np.dot(v - target_mean, target_y)] for v in piece_verts])
+                        piece_centroid = np.mean(piece_2d, axis=0)
+
+                        # Sort by angle from centroid
+                        angles = np.arctan2(piece_2d[:, 1] - piece_centroid[1], piece_2d[:, 0] - piece_centroid[0])
+                        sorted_indices = np.argsort(angles)
+                        new_contours[piece_idx] = [new_contours[piece_idx][i] for i in sorted_indices]
 
             for piece_idx in range(n_pieces):
                 print(f"  [BP Transform] Piece {piece_idx}: {len(new_contours[piece_idx])} verts")
