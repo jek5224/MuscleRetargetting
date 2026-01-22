@@ -8167,6 +8167,13 @@ class ContourMeshMixin:
             for t_i in range(target_count):
                 dist_matrix[s_i, t_i] = np.linalg.norm(source_means[s_i] - target_means[t_i])
 
+        # Debug: show distance matrix
+        print(f"Distance matrix (sources -> targets):")
+        for s_i in range(source_count):
+            closest_t = np.argmin(dist_matrix[s_i])
+            dists_str = ', '.join([f't{t_i}:{dist_matrix[s_i, t_i]:.4f}' for t_i in range(min(target_count, 8))])
+            print(f"  Source {s_i}: closest=t{closest_t} [{dists_str}]")
+
         # Normalize distances for scoring
         max_dist = np.max(dist_matrix) if np.max(dist_matrix) > 0 else 1.0
 
