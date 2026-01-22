@@ -11935,6 +11935,105 @@ class ContourMeshMixin:
 
         return new_contours
 
+    def _compute_shared_edges_for_visualization(self, source_contours, source_bps, target_bp):
+        """
+        Compute shared edges between source contours for visualization.
+        Used when we already have enough pieces and don't need to cut,
+        but still want to show the cutting lines.
+        """
+        from shapely.geometry import Polygon
+        import numpy as np
+
+        n_sources = len(source_contours)
+        if n_sources < 2:
+            self._shared_cut_edges_2d = []
+            return
+
+        # Transform sources to 2D using target_bp
+        target_mean = target_bp['mean']
+        target_x = target_bp['basis_x']
+        target_y = target_bp['basis_y']
+
+        transformed_sources_2d = []
+        centroids_2d = []
+        for src in source_contours:
+            src_arr = np.array(src)
+            src_2d = np.array([
+                [np.dot(v - target_mean, target_x), np.dot(v - target_mean, target_y)]
+                for v in src_arr
+            ])
+            transformed_sources_2d.append(src_2d)
+            centroids_2d.append(np.mean(src_2d, axis=0))
+
+        # Helper to extract line coords from geometry
+        def extract_line_coords(geom):
+            coords = []
+            if geom is None or geom.is_empty:
+                return coords
+            if geom.geom_type == 'LineString':
+                coords.extend(list(np.array(geom.coords)))
+            elif geom.geom_type == 'MultiLineString':
+                for line in geom.geoms:
+                    coords.extend(list(np.array(line.coords)))
+            elif geom.geom_type == 'GeometryCollection':
+                for g in geom.geoms:
+                    coords.extend(extract_line_coords(g))
+            elif geom.geom_type == 'Point':
+                coords.append(np.array(geom.coords[0]))
+            elif geom.geom_type == 'MultiPoint':
+                for pt in geom.geoms:
+                    coords.append(np.array(pt.coords[0]))
+            return coords
+
+        # Create polygons and find shared edges
+        self._shared_cut_edges_2d = []
+        source_polygons = []
+        for i, src_2d in enumerate(transformed_sources_2d):
+            if len(src_2d) >= 3:
+                poly = Polygon(src_2d)
+                if not poly.is_valid:
+                    poly = poly.buffer(0)
+                source_polygons.append(poly)
+            else:
+                source_polygons.append(None)
+
+        for i in range(n_sources):
+            for j in range(i + 1, n_sources):
+                poly_i = source_polygons[i]
+                poly_j = source_polygons[j]
+                if poly_i is None or poly_j is None:
+                    continue
+
+                try:
+                    shared_boundary = poly_i.exterior.intersection(poly_j.exterior)
+                    if shared_boundary is None or shared_boundary.is_empty:
+                        overlap = poly_i.intersection(poly_j)
+                        if overlap is not None and not overlap.is_empty and hasattr(overlap, 'boundary'):
+                            shared_boundary = overlap.boundary
+
+                    if shared_boundary is None or shared_boundary.is_empty:
+                        # Use perpendicular bisector between centroids
+                        ci = centroids_2d[i]
+                        cj = centroids_2d[j]
+                        mid = (ci + cj) / 2
+                        direction = cj - ci
+                        direction = direction / (np.linalg.norm(direction) + 1e-10)
+                        perp = np.array([-direction[1], direction[0]])
+                        line_len = 0.1
+                        p1 = mid - perp * line_len
+                        p2 = mid + perp * line_len
+                        self._shared_cut_edges_2d.append(((i, j), np.array([p1, p2])))
+                        print(f"  [Shared Edges] Pair {i}-{j}: using perpendicular bisector")
+                    else:
+                        shared_points = extract_line_coords(shared_boundary)
+                        if len(shared_points) >= 2:
+                            self._shared_cut_edges_2d.append(((i, j), np.array(shared_points)))
+                            print(f"  [Shared Edges] Found shared edge {i}-{j}: {len(shared_points)} points")
+                except Exception as e:
+                    print(f"  [Shared Edges] Error for pair {i}-{j}: {e}")
+
+        print(f"  [Shared Edges] Total: {len(self._shared_cut_edges_2d)} edges for visualization")
+
     def _optimize_remaining_pieces(self, current_pieces_3d, source_contours, source_bps,
                                     stream_indices, target_bp, target_level, source_level,
                                     matched_pairs=None):
@@ -11986,6 +12085,10 @@ class ContourMeshMixin:
 
         if num_unmatched_pieces >= num_sources:
             # Already have enough unmatched pieces, just return them matched by distance
+            # But still compute shared edges for visualization
+            self._compute_shared_edges_for_visualization(
+                source_contours, source_bps, target_bp
+            )
             unmatched_pieces_3d = [p[1] for p in unmatched_pieces]
             return self._match_pieces_to_sources(unmatched_pieces_3d, source_contours, source_bps)
 
