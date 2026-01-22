@@ -5140,6 +5140,23 @@ class GLFWApp():
                         draw_list.add_text(scx - 5, scy - 6,
                                           imgui.get_color_u32_rgba(*src_color, 0.9), f"S{src_idx}")
 
+                # Draw shared boundary line (cutting line between sources)
+                shared_edge = obj._shared_cut_edge_2d if hasattr(obj, '_shared_cut_edge_2d') else None
+                if shared_edge is not None and len(shared_edge) >= 2:
+                    # Draw the shared boundary line in magenta
+                    line_color = imgui.get_color_u32_rgba(1.0, 0.0, 1.0, 1.0)
+                    # Draw line from first to last shared edge point
+                    p1 = to_screen(shared_edge[0], x0, y0, canvas_size)
+                    p2 = to_screen(shared_edge[-1], x0, y0, canvas_size)
+                    draw_list.add_line(p1[0], p1[1], p2[0], p2[1], line_color, 2.0)
+                    # Draw endpoint markers
+                    draw_list.add_circle_filled(p1[0], p1[1], 4, line_color)
+                    draw_list.add_circle_filled(p2[0], p2[1], 4, line_color)
+                    # Label
+                    mid_x, mid_y = (p1[0] + p2[0]) / 2, (p1[1] + p2[1]) / 2
+                    draw_list.add_text(mid_x + 5, mid_y - 15,
+                                      line_color, "Cut Line")
+
             # Draw all neck candidates (faded) and highlight selected one
             candidates = obj._manual_cut_data.get('neck_candidates', [])
             selected_neck_idx = obj._manual_cut_data.get('selected_neck_idx', 0)
