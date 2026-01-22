@@ -13246,68 +13246,62 @@ class ContourMeshMixin:
                                     break
 
         elif len(all_crossings) >= 2 and n_pieces >= 2:
-            # Use cutting line crossings to build pieces
-            # Sort crossings by position around contour (edge_idx + t fraction)
+            # Sort crossings by position around contour
             all_crossings.sort(key=lambda x: x[0] + x[1])
 
             print(f"  [BP Transform] Building {n_pieces} pieces using {len(all_crossings)} crossings")
             for i, c in enumerate(all_crossings):
                 print(f"  [BP Transform]   Crossing {i}: edge {c[0]}, t={c[1]:.4f}, pair={c[4]}")
 
-            # Map edge_idx to crossings on that edge
-            edge_to_crossings = {}
-            for c in all_crossings:
-                edge_idx = c[0]
-                if edge_idx not in edge_to_crossings:
-                    edge_to_crossings[edge_idx] = []
-                edge_to_crossings[edge_idx].append(c)
+            # Pre-compute boundary points - store as list with edge_idx as key
+            edge_to_boundary_pt = {}
+            for crossing in all_crossings:
+                edge_idx, t, pt_2d, pt_3d, pair_indices = crossing
+                # Store the 3D point - this exact point will be shared by both pieces
+                edge_to_boundary_pt[edge_idx] = pt_3d.copy()
+                shared_boundary_points.append(pt_3d.copy())
 
-            # Walk around contour vertex by vertex
+            # Walk around contour, building pieces
             for v_idx in range(n_verts):
                 curr_piece = assignments[v_idx]
                 next_v_idx = (v_idx + 1) % n_verts
                 next_piece = assignments[next_v_idx]
 
-                # Add current vertex to its piece
+                # Add vertex to its piece
                 new_contours[curr_piece].append(target_contour[v_idx])
 
-                # Check for crossings on this edge
-                if v_idx in edge_to_crossings:
-                    for crossing in edge_to_crossings[v_idx]:
-                        edge_idx, t, pt_2d, pt_3d, pair_indices = crossing
-                        piece_i, piece_j = pair_indices
-                        # Add crossing point to BOTH pieces from pair_indices
-                        new_contours[piece_i].append(pt_3d)
-                        new_contours[piece_j].append(pt_3d)
-                        shared_boundary_points.append(pt_3d.copy())
-                        boundary_crossings.append((v_idx, next_v_idx, piece_i, piece_j, t))
+                # If assignment changes, add the shared boundary point
+                if curr_piece != next_piece:
+                    if v_idx in edge_to_boundary_pt:
+                        # Use pre-computed crossing point
+                        boundary_pt = edge_to_boundary_pt[v_idx]
+                    else:
+                        # Compute crossing point from cutting line
+                        t = 0.5
+                        for pair_indices, shared_pts in shared_edges:
+                            if set(pair_indices) == {curr_piece, next_piece} and len(shared_pts) >= 2:
+                                line_p1 = shared_pts[0]
+                                line_p2 = shared_pts[-1]
+                                line_dir = line_p2 - line_p1
+                                line_len = np.linalg.norm(line_dir)
+                                if line_len > 1e-10:
+                                    line_dir = line_dir / line_len
+                                    line_normal = np.array([-line_dir[1], line_dir[0]])
+                                    p_a = target_2d[v_idx]
+                                    p_b = target_2d[next_v_idx]
+                                    edge_vec = p_b - p_a
+                                    denom = np.dot(edge_vec, line_normal)
+                                    if abs(denom) > 1e-10:
+                                        t = np.dot(line_p1 - p_a, line_normal) / denom
+                                        t = np.clip(t, 0.0, 1.0)
+                                break
+                        boundary_pt = target_contour[v_idx] + t * (target_contour[next_v_idx] - target_contour[v_idx])
+                        shared_boundary_points.append(boundary_pt.copy())
 
-                # If assignment changes but no crossing found, compute crossing point
-                elif curr_piece != next_piece:
-                    t = 0.5  # Default
-                    for pair_indices, shared_pts in shared_edges:
-                        if set(pair_indices) == {curr_piece, next_piece} and len(shared_pts) >= 2:
-                            line_p1 = shared_pts[0]
-                            line_p2 = shared_pts[-1]
-                            line_dir = line_p2 - line_p1
-                            line_len = np.linalg.norm(line_dir)
-                            if line_len > 1e-10:
-                                line_dir = line_dir / line_len
-                                line_normal = np.array([-line_dir[1], line_dir[0]])
-                                p_a = target_2d[v_idx]
-                                p_b = target_2d[next_v_idx]
-                                edge_vec = p_b - p_a
-                                denom = np.dot(edge_vec, line_normal)
-                                if abs(denom) > 1e-10:
-                                    t = np.dot(line_p1 - p_a, line_normal) / denom
-                                    t = np.clip(t, 0.0, 1.0)
-                            break
-
-                    pt_3d = target_contour[v_idx] + t * (target_contour[next_v_idx] - target_contour[v_idx])
-                    new_contours[curr_piece].append(pt_3d)
-                    new_contours[next_piece].append(pt_3d)
-                    shared_boundary_points.append(pt_3d.copy())
-                    boundary_crossings.append((v_idx, next_v_idx, curr_piece, next_piece, t))
+                    # Add SAME point to BOTH pieces
+                    new_contours[curr_piece].append(boundary_pt)
+                    new_contours[next_piece].append(boundary_pt)
+                    boundary_crossings.append((v_idx, next_v_idx, curr_piece, next_piece, 0))
 
             for piece_idx in range(n_pieces):
                 print(f"  [BP Transform] Piece {piece_idx}: {len(new_contours[piece_idx])} vertices")
