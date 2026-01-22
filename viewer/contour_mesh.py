@@ -13387,284 +13387,100 @@ class ContourMeshMixin:
                 shared_boundary_points = [pt3d_1, pt3d_2]
 
             else:
-                # N-piece case: like 2-piece, split at crossings
-                # Pre-compute boundary points, add SAME point to both adjacent pieces
+                # N-piece case: Build pieces directly from crossings (like 2-piece case)
+                # Don't rely on vertex assignments - use crossings to define boundaries
 
-                # Build map: edge_idx -> crossing point (3D)
-                edge_to_pt3d = {}
+                # Collect all crossings with their info
+                crossing_info = []  # [(edge_idx, t, pt_2d, pt_3d, pair_indices), ...]
                 for c in all_crossings:
-                    edge_idx = c[0]
-                    pt3d = c[3]
-                    edge_to_pt3d[edge_idx] = pt3d
-                    shared_boundary_points.append(pt3d)
+                    crossing_info.append(c)
+                    shared_boundary_points.append(c[3])  # pt_3d
 
-                # Walk around contour
-                for v_idx in range(n_verts):
-                    curr_piece = assignments[v_idx]
-                    next_v_idx = (v_idx + 1) % n_verts
-                    next_piece = assignments[next_v_idx]
+                # Sort crossings by edge position
+                crossing_info.sort(key=lambda x: x[0] + x[1])
 
-                    # Add vertex to its piece
-                    new_contours[curr_piece].append(target_contour[v_idx])
+                # Build segments between consecutive crossings
+                segments = []  # [(start_crossing_idx, end_crossing_idx, vertices_3d, centroid_2d), ...]
+                n_crossings = len(crossing_info)
 
-                    # If assignment changes, add boundary point to BOTH pieces
-                    if curr_piece != next_piece:
-                        if v_idx in edge_to_pt3d:
-                            # Use pre-computed crossing point
-                            pt3d = edge_to_pt3d[v_idx]
+                for i in range(n_crossings):
+                    start_crossing = crossing_info[i]
+                    end_crossing = crossing_info[(i + 1) % n_crossings]
+
+                    start_edge = start_crossing[0]
+                    end_edge = end_crossing[0]
+                    start_pt_3d = start_crossing[3]
+                    end_pt_3d = end_crossing[3]
+                    start_pt_2d = start_crossing[2]
+                    end_pt_2d = end_crossing[2]
+
+                    # Collect vertices from start_edge+1 to end_edge (inclusive)
+                    segment_verts_3d = [start_pt_3d]
+                    segment_verts_2d = [start_pt_2d]
+
+                    v = (start_edge + 1) % n_verts
+                    end_v = (end_edge + 1) % n_verts
+                    while v != end_v:
+                        segment_verts_3d.append(target_contour[v])
+                        segment_verts_2d.append(target_2d[v])
+                        v = (v + 1) % n_verts
+                    segment_verts_3d.append(end_pt_3d)
+                    segment_verts_2d.append(end_pt_2d)
+
+                    # Compute segment centroid in 2D
+                    segment_centroid_2d = np.mean(segment_verts_2d, axis=0)
+                    segments.append((i, (i + 1) % n_crossings, segment_verts_3d, segment_centroid_2d))
+
+                print(f"  [BP Transform] Built {len(segments)} segments from {n_crossings} crossings")
+
+                # Assign each segment to the nearest source centroid
+                segment_to_piece = []
+                for seg_idx, (start_c, end_c, verts_3d, centroid_2d) in enumerate(segments):
+                    # Find nearest source centroid
+                    min_dist = float('inf')
+                    best_piece = 0
+                    for piece_idx, src_centroid in enumerate(centroids):
+                        dist = np.linalg.norm(centroid_2d - src_centroid)
+                        if dist < min_dist:
+                            min_dist = dist
+                            best_piece = piece_idx
+                    segment_to_piece.append(best_piece)
+                    print(f"  [BP Transform] Segment {seg_idx}: {len(verts_3d)} verts, centroid=({centroid_2d[0]:.4f}, {centroid_2d[1]:.4f}) -> piece {best_piece}")
+
+                # Build pieces by collecting segments assigned to each piece
+                piece_segments = [[] for _ in range(n_pieces)]
+                for seg_idx, piece_idx in enumerate(segment_to_piece):
+                    piece_segments[piece_idx].append(seg_idx)
+
+                # For each piece, concatenate its segments in order
+                for piece_idx in range(n_pieces):
+                    if not piece_segments[piece_idx]:
+                        print(f"  [BP Transform] WARNING: Piece {piece_idx} has no segments!")
+                        continue
+
+                    # Sort segments by their start crossing index to maintain contour order
+                    sorted_segs = sorted(piece_segments[piece_idx])
+
+                    # Concatenate vertices, avoiding duplicates at boundaries
+                    for i, seg_idx in enumerate(sorted_segs):
+                        _, _, verts_3d, _ = segments[seg_idx]
+                        if i == 0:
+                            # First segment: add all vertices
+                            new_contours[piece_idx].extend(verts_3d)
                         else:
-                            # Compute crossing from shared edge
-                            t = 0.5
-                            for pair_indices, shared_pts in shared_edges:
-                                if set(pair_indices) == {curr_piece, next_piece} and len(shared_pts) >= 2:
-                                    line_p1 = shared_pts[0]
-                                    line_p2 = shared_pts[-1]
-                                    line_dir = line_p2 - line_p1
-                                    line_len = np.linalg.norm(line_dir)
-                                    if line_len > 1e-10:
-                                        line_dir = line_dir / line_len
-                                        line_normal = np.array([-line_dir[1], line_dir[0]])
-                                        p_a = target_2d[v_idx]
-                                        p_b = target_2d[next_v_idx]
-                                        edge_vec = p_b - p_a
-                                        denom = np.dot(edge_vec, line_normal)
-                                        if abs(denom) > 1e-10:
-                                            t = np.dot(line_p1 - p_a, line_normal) / denom
-                                            t = np.clip(t, 0.0, 1.0)
-                                    break
-                            pt3d = target_contour[v_idx] + t * (target_contour[next_v_idx] - target_contour[v_idx])
-                            shared_boundary_points.append(pt3d)
-
-                        # Add SAME point to BOTH pieces
-                        new_contours[curr_piece].append(pt3d)
-                        new_contours[next_piece].append(pt3d)
+                            # Skip first vertex (duplicate of previous segment's last vertex)
+                            new_contours[piece_idx].extend(verts_3d[1:])
 
             for piece_idx in range(n_pieces):
                 print(f"  [BP Transform] Piece {piece_idx}: {len(new_contours[piece_idx])} verts")
 
         else:
-            # Fallback: vertex assignment method
-            n_verts = len(target_2d)
-            if len(assignments) == 0:
-                # No assignments made (shouldn't happen, but handle gracefully)
-                print(f"  [BP Transform] WARNING: No assignments, using centroid-based assignment")
-                for v_idx, v_2d in enumerate(target_2d):
-                    centroid_dists = [np.linalg.norm(v_2d - c) for c in centroids]
-                    assignments.append(centroid_dists.index(min(centroid_dists)))
-
-            # Helper function to find intersection of target edge with cutting line
-            def find_edge_cut_point(v_idx_a, v_idx_b):
-                """Find where the cutting line intersects the target edge."""
-                p_a = target_2d[v_idx_a]
-                p_b = target_2d[v_idx_b]
-                edge_vec = p_b - p_a
-                t = 0.5  # Default
-
-                if hasattr(self, '_shared_cut_edge_2d') and self._shared_cut_edge_2d is not None and len(self._shared_cut_edge_2d) >= 2:
-                    pts = self._shared_cut_edge_2d
-                    line_p1 = pts[0]
-                    line_p2 = pts[-1]
-                    line_dir = line_p2 - line_p1
-                    line_len = np.linalg.norm(line_dir)
-
-                    if line_len > 1e-10:
-                        line_dir = line_dir / line_len
-                        line_normal = np.array([-line_dir[1], line_dir[0]])
-                        denom = np.dot(edge_vec, line_normal)
-                        if abs(denom) > 1e-10:
-                            t = np.dot(line_p1 - p_a, line_normal) / denom
-                            t = np.clip(t, 0.0, 1.0)
-
-                boundary_pt = target_contour[v_idx_a] + t * (target_contour[v_idx_b] - target_contour[v_idx_a])
-                return t, boundary_pt
-
-            prev_piece = assignments[-1]  # Start with last vertex's assignment
-            for v_idx in range(n_verts):
-                curr_piece = assignments[v_idx]
-
-                # Check if we crossed a boundary from prev vertex to this one
-                if prev_piece != curr_piece and v_idx > 0:
-                    prev_v_idx = v_idx - 1
-                    # Find where cutting line intersects this edge
-                    t, boundary_pt = find_edge_cut_point(prev_v_idx, v_idx)
-
-                    # Add boundary point to BOTH pieces (shared vertex)
-                    new_contours[prev_piece].append(boundary_pt)
-                    new_contours[curr_piece].append(boundary_pt)
-                    shared_boundary_points.append(boundary_pt.copy())
-                    boundary_crossings.append((prev_v_idx, v_idx, prev_piece, curr_piece, t))
-
-                # Add current vertex to its piece
-                new_contours[curr_piece].append(target_contour[v_idx])
-                prev_piece = curr_piece
-
-            # Handle wrap-around: check boundary between last and first vertex
-            if assignments[-1] != assignments[0]:
-                prev_piece = assignments[-1]
-                curr_piece = assignments[0]
-
-                # Find where cutting line intersects wrap-around edge
-                t, boundary_pt = find_edge_cut_point(n_verts - 1, 0)
-
-                # For prev_piece: boundary is at the END, so append
-                new_contours[prev_piece].append(boundary_pt)
-                # For curr_piece: boundary is at the BEGINNING, so INSERT at position 0
-                new_contours[curr_piece].insert(0, boundary_pt)
-                shared_boundary_points.append(boundary_pt.copy())
-                boundary_crossings.append((n_verts - 1, 0, prev_piece, curr_piece, t, 'wrap-around'))
-
-            # Fix wrap-around piece ordering when there's NO wrap-around boundary
-            # This happens when assignments[-1] == assignments[0] - that piece spans both ends
-            # but its vertices are in wrong order (boundary points in the middle instead of at ends)
-            if assignments[-1] == assignments[0] and len(shared_boundary_points) >= 2:
-                wrap_idx = assignments[0]
-                piece = list(new_contours[wrap_idx])
-
-                # Find indices of boundary points in this piece
-                bp_indices = []
-                for v_idx, v in enumerate(piece):
-                    for bp in shared_boundary_points:
-                        if np.linalg.norm(np.array(v) - np.array(bp)) < 1e-8:
-                            bp_indices.append(v_idx)
-                            break
-
-                # If boundary points are not at the ends, rotate the piece
-                if len(bp_indices) >= 2:
-                    bp_indices.sort()
-                    # Check if boundaries are in the middle (not at positions 0 and len-1)
-                    if bp_indices[0] != 0 or bp_indices[-1] != len(piece) - 1:
-                        # Rotate so the last boundary point becomes first
-                        # (this is the "entry" boundary for the wrap-around piece)
-                        last_bp_idx = bp_indices[-1]
-                        piece = piece[last_bp_idx:] + piece[:last_bp_idx]
-                        new_contours[wrap_idx] = piece
-                        print(f"  [BP Transform] Fixed wrap-around piece {wrap_idx} vertex ordering")
-
-            # Debug: print boundary crossings
-            print(f"  [BP Transform] {len(boundary_crossings)} boundary crossings:")
-            for bc in boundary_crossings:
-                if len(bc) == 6:  # wrap-around case
-                    print(f"    edge ({bc[0]}->{bc[1]}): piece {bc[2]} -> piece {bc[3]}, t={bc[4]:.3f} [{bc[5]}]")
-                else:
-                    print(f"    edge ({bc[0]}->{bc[1]}): piece {bc[2]} -> piece {bc[3]}, t={bc[4]:.3f}")
-            if len(boundary_crossings) != n_pieces - 1 + (1 if assignments[-1] != assignments[0] else 0):
-                # Expected: for N pieces, we need N boundary crossings to form N closed pieces
-                # Actually for a single cut through closed contour, we get exactly 2 crossings (or 1 main + 1 wrap-around)
-                pass
-            expected_crossings = n_pieces  # For N pieces from a closed contour, exactly N boundary crossings
-            if len(boundary_crossings) != expected_crossings:
-                print(f"  [BP Transform] WARNING: Expected {expected_crossings} boundary crossings for {n_pieces} pieces, got {len(boundary_crossings)}")
-
-            # ========== Build pieces using shared edge (DISABLED - causes triangle artifacts) ==========
-            # The "shared edge" from source boundaries causes problems because it's still outer boundary
-            # Just use simple vertex assignment with straight boundary interpolation
-            if False and n_pieces == 2 and hasattr(self, '_shared_cut_edge_2d') and self._shared_cut_edge_2d is not None and len(self._shared_cut_edge_2d) >= 2:
-                shared_edge_2d = self._shared_cut_edge_2d
-                print(f"  [BP Transform] Building pieces with shared edge ({len(shared_edge_2d)} vertices)")
-
-                # Find where shared edge intersects target contour (in 2D)
-                from shapely.geometry import LineString
-                target_ring = LineString(list(target_2d) + [target_2d[0]])  # Close the ring
-                shared_line = LineString(shared_edge_2d)
-
-                try:
-                    intersection_pts = target_ring.intersection(shared_line)
-                    print(f"  [BP Transform] Shared edge/target intersection type: {intersection_pts.geom_type}")
-
-                    # Extract intersection points
-                    int_points_2d = []
-                    if intersection_pts.geom_type == 'Point':
-                        int_points_2d.append(np.array(intersection_pts.coords[0]))
-                    elif intersection_pts.geom_type == 'MultiPoint':
-                        for pt in intersection_pts.geoms:
-                            int_points_2d.append(np.array(pt.coords[0]))
-                    elif intersection_pts.geom_type == 'LineString':
-                        # Shared edge overlaps target - use endpoints
-                        coords = np.array(intersection_pts.coords)
-                        int_points_2d.append(coords[0])
-                        int_points_2d.append(coords[-1])
-                    elif intersection_pts.geom_type == 'GeometryCollection':
-                        for geom in intersection_pts.geoms:
-                            if geom.geom_type == 'Point':
-                                int_points_2d.append(np.array(geom.coords[0]))
-
-                    print(f"  [BP Transform] Found {len(int_points_2d)} intersection points")
-
-                    if len(int_points_2d) >= 2:
-                        # Convert intersection points to 3D
-                        int_points_3d = []
-                        for pt_2d in int_points_2d[:2]:  # Take first 2
-                            pt_3d = target_mean + pt_2d[0] * target_x + pt_2d[1] * target_y
-                            int_points_3d.append(pt_3d)
-
-                        # Find which target vertices go between the intersection points
-                        # for each piece
-                        int0_2d, int1_2d = int_points_2d[0], int_points_2d[1]
-
-                        # Find closest target vertex indices to intersection points
-                        dists_to_int0 = np.linalg.norm(target_2d - int0_2d, axis=1)
-                        dists_to_int1 = np.linalg.norm(target_2d - int1_2d, axis=1)
-                        target_idx0 = np.argmin(dists_to_int0)
-                        target_idx1 = np.argmin(dists_to_int1)
-
-                        # Get shared edge vertices that are INSIDE target (between intersection points)
-                        # Find which shared edge vertices are between the two intersection points
-                        dists_edge_to_int0 = np.linalg.norm(shared_edge_2d - int0_2d, axis=1)
-                        dists_edge_to_int1 = np.linalg.norm(shared_edge_2d - int1_2d, axis=1)
-                        edge_idx0 = np.argmin(dists_edge_to_int0)
-                        edge_idx1 = np.argmin(dists_edge_to_int1)
-
-                        if edge_idx0 < edge_idx1:
-                            inner_edge_2d = shared_edge_2d[edge_idx0:edge_idx1+1]
-                        else:
-                            inner_edge_2d = shared_edge_2d[edge_idx1:edge_idx0+1][::-1]
-
-                        # Convert inner edge to 3D
-                        inner_edge_3d = []
-                        for pt_2d in inner_edge_2d:
-                            pt_3d = target_mean + pt_2d[0] * target_x + pt_2d[1] * target_y
-                            inner_edge_3d.append(pt_3d)
-                        inner_edge_3d = np.array(inner_edge_3d)
-
-                        print(f"  [BP Transform] Inner shared edge: {len(inner_edge_3d)} vertices")
-                        print(f"  [BP Transform] Target split at indices: {target_idx0}, {target_idx1}")
-
-                        # Build new contours:
-                        # Piece 0: target[idx0 to idx1] + inner_edge (reversed)
-                        # Piece 1: target[idx1 to idx0 (wrap)] + inner_edge
-                        n_target = len(target_contour)
-
-                        if target_idx0 < target_idx1:
-                            # Piece 0: idx0 -> idx1 on target, then back via shared edge
-                            piece0_target = [target_contour[i] for i in range(target_idx0, target_idx1 + 1)]
-                            piece0 = piece0_target + list(inner_edge_3d[::-1])[1:-1]  # Skip endpoints (already have them)
-
-                            # Piece 1: idx1 -> idx0 (wrapping), then back via shared edge
-                            piece1_target = [target_contour[i] for i in range(target_idx1, n_target)] + \
-                                           [target_contour[i] for i in range(0, target_idx0 + 1)]
-                            piece1 = piece1_target + list(inner_edge_3d)[1:-1]
-                        else:
-                            # Swap
-                            piece1_target = [target_contour[i] for i in range(target_idx1, target_idx0 + 1)]
-                            piece1 = piece1_target + list(inner_edge_3d[::-1])[1:-1]
-
-                            piece0_target = [target_contour[i] for i in range(target_idx0, n_target)] + \
-                                           [target_contour[i] for i in range(0, target_idx1 + 1)]
-                            piece0 = piece0_target + list(inner_edge_3d)[1:-1]
-
-                        new_contours[0] = piece0
-                        new_contours[1] = piece1
-                        print(f"  [BP Transform] Rebuilt pieces with shared edge: {len(piece0)}, {len(piece1)} vertices")
-
-                        # Update shared_boundary_points
-                        shared_boundary_points.clear()
-                        for v in inner_edge_3d:
-                            shared_boundary_points.append(v.copy())
-
-                except Exception as e:
-                    print(f"  [BP Transform] WARNING: Shared edge processing failed: {e}")
-                    import traceback
-                    traceback.print_exc()
+            # No crossings found - this is an error, all sources must share edges
+            print(f"  [BP Transform] ERROR: No crossings found! Sources may not share edges or may not cross target contour.")
+            print(f"  [BP Transform] Cannot cut target contour without shared edge crossings.")
+            # Create dummy pieces to avoid crash
+            for piece_idx in range(n_pieces):
+                new_contours[piece_idx] = [target_contour[v] for v in range(piece_idx * n_verts // n_pieces, (piece_idx + 1) * n_verts // n_pieces)]
 
         # Register shared cut edge vertices globally
         if len(shared_boundary_points) > 0:
