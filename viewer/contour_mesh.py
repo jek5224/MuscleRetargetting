@@ -12735,20 +12735,17 @@ class ContourMeshMixin:
                         poly_1 = poly_1.buffer(0)
 
                     try:
-                        # Method: Find the portion of each source's boundary that's inside the other
-                        # This gives the ACTUAL shared edge where they meet
+                        # Method: Find where the two source BOUNDARIES actually meet
+                        # This is the intersection of the two exterior rings
                         from shapely.geometry import LineString
 
                         # Get boundaries as LineStrings
                         boundary_0 = poly_0.exterior
                         boundary_1 = poly_1.exterior
 
-                        # Find parts of boundary_0 inside poly_1 (where source 0's edge is inside source 1)
-                        edge_0_in_1 = boundary_0.intersection(poly_1)
-                        # Find parts of boundary_1 inside poly_0 (where source 1's edge is inside source 0)
-                        edge_1_in_0 = boundary_1.intersection(poly_0)
-
-                        print(f"  [BP Transform] COMMON: edge_0_in_1 type={edge_0_in_1.geom_type}, edge_1_in_0 type={edge_1_in_0.geom_type}")
+                        # Shared boundary = where both exteriors intersect
+                        shared_boundary = boundary_0.intersection(boundary_1)
+                        print(f"  [BP Transform] COMMON: shared_boundary type={shared_boundary.geom_type}")
 
                         # Extract coordinates from the shared edges
                         def extract_line_coords(geom):
@@ -12770,50 +12767,9 @@ class ContourMeshMixin:
                                     coords.append(np.array(pt.coords[0]))
                             return coords
 
-                        shared_edge_points = []
-                        # Use the longer of the two (they should be similar)
-                        coords_0 = extract_line_coords(edge_0_in_1)
-                        coords_1 = extract_line_coords(edge_1_in_0)
-
-                        if len(coords_0) >= len(coords_1) and len(coords_0) >= 2:
-                            shared_edge_points = coords_0
-                            print(f"  [BP Transform] COMMON: using edge_0_in_1 with {len(coords_0)} points")
-                        elif len(coords_1) >= 2:
-                            shared_edge_points = coords_1
-                            print(f"  [BP Transform] COMMON: using edge_1_in_0 with {len(coords_1)} points")
-                        else:
-                            # Fallback: find closest points between the two boundaries
-                            print(f"  [BP Transform] COMMON: no shared edge found, using closest points")
-                            min_dist = float('inf')
-                            closest_pair = None
-                            coords_0_full = np.array(boundary_0.coords)
-                            coords_1_full = np.array(boundary_1.coords)
-                            for p0 in coords_0_full:
-                                for p1 in coords_1_full:
-                                    d = np.linalg.norm(p0 - p1)
-                                    if d < min_dist:
-                                        min_dist = d
-                                        closest_pair = (p0, p1)
-                            if closest_pair is not None:
-                                closest_dist = np.linalg.norm(closest_pair[0] - closest_pair[1])
-                                if closest_dist < 1e-8:
-                                    # Points are nearly identical - sources touch at a single point
-                                    # Use this touching point with perpendicular bisector direction
-                                    touch_point = closest_pair[0]
-                                    centroid_vec = centroids[1] - centroids[0]
-                                    centroid_dist = np.linalg.norm(centroid_vec)
-                                    if centroid_dist > 1e-10:
-                                        centroid_dir = centroid_vec / centroid_dist
-                                        cutting_dir = np.array([-centroid_dir[1], centroid_dir[0]])
-                                        cutting_line_2d = (touch_point, cutting_dir)
-                                        print(f"  [BP Transform] COMMON: cutting line through touch point ({touch_point[0]:.6f}, {touch_point[1]:.6f})")
-                                    else:
-                                        print(f"  [BP Transform] COMMON: touch point found but centroids too close")
-                                else:
-                                    # Use midpoint and perpendicular as cutting line
-                                    midpt = (closest_pair[0] + closest_pair[1]) / 2
-                                    shared_edge_points = [closest_pair[0], midpt, closest_pair[1]]
-                                    print(f"  [BP Transform] COMMON: closest points dist={closest_dist:.6f}")
+                        # Extract coordinates from shared boundary
+                        shared_edge_points = extract_line_coords(shared_boundary)
+                        print(f"  [BP Transform] COMMON: shared boundary has {len(shared_edge_points)} points")
 
                         # Store the shared edge for use in cutting
                         if len(shared_edge_points) >= 2:
@@ -13173,20 +13129,9 @@ class ContourMeshMixin:
                 boundary_pt = target_contour[v_idx_a] + t * (target_contour[v_idx_b] - target_contour[v_idx_a])
                 return t, boundary_pt
 
-            # Find shared boundary: internal edges where two sources meet (not on outer union boundary)
-            from shapely.ops import unary_union as shapely_union
-
-            union = shapely_union([poly_a, poly_b])
-            shared_boundary = None
-
-            if not union.is_empty and hasattr(union, 'exterior'):
-                # Internal edges = parts of source exteriors NOT on the union exterior
-                union_ext_buffered = union.exterior.buffer(1e-6)
-                internal_a = poly_a.exterior.difference(union_ext_buffered)
-                internal_b = poly_b.exterior.difference(union_ext_buffered)
-                combined = shapely_union([internal_a, internal_b])
-                if not combined.is_empty:
-                    shared_boundary = combined
+            # Find shared boundary: where the two polygon exteriors intersect
+            # This is the line/points where the two optimized source contours meet
+            shared_boundary = poly_a.exterior.intersection(poly_b.exterior)
 
             # Try to find actual intersection of target edge with shared boundary
             t = 0.5  # Default
