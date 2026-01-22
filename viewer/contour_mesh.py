@@ -13349,6 +13349,9 @@ class ContourMeshMixin:
 
         print(f"  [BP Transform] Found {len(all_crossings)} total crossings from {len(shared_edges)} shared edges")
 
+        # Store crossings for visualization - these are the actual cut points on target
+        self._target_cut_crossings_2d = [(c[2], c[4]) for c in all_crossings]  # [(pt_2d, pair_indices), ...]
+
         # ========== Build final pieces using all crossings ==========
         new_contours = [[] for _ in range(n_pieces)]
         shared_boundary_points = []  # Collect shared cut edge vertices

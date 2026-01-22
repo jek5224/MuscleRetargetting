@@ -5140,14 +5140,9 @@ class GLFWApp():
                         draw_list.add_text(scx - 5, scy - 6,
                                           imgui.get_color_u32_rgba(*src_color, 0.9), f"S{src_idx}")
 
-                # Draw shared boundary lines (cutting lines between sources)
-                # For 2 pieces: use _shared_cut_edge_2d
-                # For N pieces: use _shared_cut_edges_2d (list of all pairs)
-                shared_edges_list = []
-                if hasattr(obj, '_shared_cut_edges_2d') and obj._shared_cut_edges_2d:
-                    shared_edges_list = obj._shared_cut_edges_2d
-                elif hasattr(obj, '_shared_cut_edge_2d') and obj._shared_cut_edge_2d is not None:
-                    shared_edges_list = [((0, 1), obj._shared_cut_edge_2d)]
+                # Draw actual cut points on target contour (where cutting lines cross target)
+                # These are the real cut locations, not the source shared boundaries
+                target_crossings = getattr(obj, '_target_cut_crossings_2d', [])
 
                 line_colors = [
                     imgui.get_color_u32_rgba(1.0, 0.0, 1.0, 1.0),  # Magenta
@@ -5155,16 +5150,47 @@ class GLFWApp():
                     imgui.get_color_u32_rgba(1.0, 1.0, 0.0, 1.0),  # Yellow
                     imgui.get_color_u32_rgba(1.0, 0.5, 0.0, 1.0),  # Orange
                 ]
-                for idx, (pair_indices, shared_edge) in enumerate(shared_edges_list):
-                    if shared_edge is not None and len(shared_edge) >= 2:
+
+                if target_crossings:
+                    # Group crossings by pair indices
+                    crossings_by_pair = {}
+                    for pt_2d, pair_indices in target_crossings:
+                        if pair_indices not in crossings_by_pair:
+                            crossings_by_pair[pair_indices] = []
+                        crossings_by_pair[pair_indices].append(pt_2d)
+
+                    # Draw crossings for each pair
+                    for idx, (pair_indices, pts) in enumerate(crossings_by_pair.items()):
                         line_color = line_colors[idx % len(line_colors)]
-                        p1 = to_screen(shared_edge[0], x0, y0, canvas_size)
-                        p2 = to_screen(shared_edge[-1], x0, y0, canvas_size)
-                        draw_list.add_line(p1[0], p1[1], p2[0], p2[1], line_color, 2.0)
-                        draw_list.add_circle_filled(p1[0], p1[1], 4, line_color)
-                        draw_list.add_circle_filled(p2[0], p2[1], 4, line_color)
-                        mid_x, mid_y = (p1[0] + p2[0]) / 2, (p1[1] + p2[1]) / 2
-                        draw_list.add_text(mid_x + 5, mid_y - 15, line_color, f"Cut {pair_indices[0]}-{pair_indices[1]}")
+                        # Draw each crossing point
+                        for pt_2d in pts:
+                            sp = to_screen(pt_2d, x0, y0, canvas_size)
+                            draw_list.add_circle_filled(sp[0], sp[1], 6, line_color)
+                        # If we have 2 crossings, draw line between them
+                        if len(pts) >= 2:
+                            p1 = to_screen(pts[0], x0, y0, canvas_size)
+                            p2 = to_screen(pts[-1], x0, y0, canvas_size)
+                            draw_list.add_line(p1[0], p1[1], p2[0], p2[1], line_color, 2.0)
+                            mid_x, mid_y = (p1[0] + p2[0]) / 2, (p1[1] + p2[1]) / 2
+                            draw_list.add_text(mid_x + 5, mid_y - 15, line_color, f"Cut {pair_indices[0]}-{pair_indices[1]}")
+                else:
+                    # Fallback to old method using shared edges
+                    shared_edges_list = []
+                    if hasattr(obj, '_shared_cut_edges_2d') and obj._shared_cut_edges_2d:
+                        shared_edges_list = obj._shared_cut_edges_2d
+                    elif hasattr(obj, '_shared_cut_edge_2d') and obj._shared_cut_edge_2d is not None:
+                        shared_edges_list = [((0, 1), obj._shared_cut_edge_2d)]
+
+                    for idx, (pair_indices, shared_edge) in enumerate(shared_edges_list):
+                        if shared_edge is not None and len(shared_edge) >= 2:
+                            line_color = line_colors[idx % len(line_colors)]
+                            p1 = to_screen(shared_edge[0], x0, y0, canvas_size)
+                            p2 = to_screen(shared_edge[-1], x0, y0, canvas_size)
+                            draw_list.add_line(p1[0], p1[1], p2[0], p2[1], line_color, 2.0)
+                            draw_list.add_circle_filled(p1[0], p1[1], 4, line_color)
+                            draw_list.add_circle_filled(p2[0], p2[1], 4, line_color)
+                            mid_x, mid_y = (p1[0] + p2[0]) / 2, (p1[1] + p2[1]) / 2
+                            draw_list.add_text(mid_x + 5, mid_y - 15, line_color, f"Cut {pair_indices[0]}-{pair_indices[1]}")
 
             # Draw all neck candidates (faded) and highlight selected one
             candidates = obj._manual_cut_data.get('neck_candidates', [])
