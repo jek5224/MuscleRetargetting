@@ -12847,8 +12847,17 @@ class ContourMeshMixin:
                                     shared_boundary = overlap.boundary
                                     print(f"  [BP Transform] Pair {i}-{j} overlap boundary: {shared_boundary.geom_type if shared_boundary else 'None'}")
 
-                            # If still no shared boundary, use perpendicular bisector between centroids
-                            if shared_boundary is None or shared_boundary.is_empty:
+                            # Try to extract shared boundary points
+                            shared_points = []
+                            if shared_boundary is not None and not shared_boundary.is_empty:
+                                shared_points = extract_line_coords(shared_boundary)
+
+                            # If we got 2+ points, use them as the cutting line
+                            if len(shared_points) >= 2:
+                                self._shared_cut_edges_2d.append(((i, j), np.array(shared_points)))
+                                print(f"  [BP Transform] Found shared edge between pieces {i}-{j}: {len(shared_points)} points")
+                            else:
+                                # Fallback to perpendicular bisector when no shared edge or only a point
                                 ci = centroids[i]
                                 cj = centroids[j]
                                 mid = (ci + cj) / 2
@@ -12861,12 +12870,7 @@ class ContourMeshMixin:
                                 p2 = mid + perp * line_len
                                 shared_points = [p1, p2]
                                 self._shared_cut_edges_2d.append(((i, j), np.array(shared_points)))
-                                print(f"  [BP Transform] Pair {i}-{j}: using perpendicular bisector (no shared boundary)")
-                            elif shared_boundary is not None and not shared_boundary.is_empty:
-                                shared_points = extract_line_coords(shared_boundary)
-                                if len(shared_points) >= 2:
-                                    self._shared_cut_edges_2d.append(((i, j), np.array(shared_points)))
-                                    print(f"  [BP Transform] Found shared edge between pieces {i}-{j}: {len(shared_points)} points")
+                                print(f"  [BP Transform] Pair {i}-{j}: using perpendicular bisector (shared boundary had {len(extract_line_coords(shared_boundary)) if shared_boundary and not shared_boundary.is_empty else 0} points)")
                         except Exception as e:
                             print(f"  [BP Transform] Error finding shared edge {i}-{j}: {e}")
                             import traceback
