@@ -13196,18 +13196,17 @@ class ContourMeshMixin:
                 boundary_pt = target_contour[v_idx_a] + t * (target_contour[v_idx_b] - target_contour[v_idx_a])
                 return t, boundary_pt
 
-            # Find shared boundary: parts of each polygon's boundary inside the other
+            # Find shared boundary: where both polygon boundaries intersect
+            # This is the actual line/curve where the two polygons meet
             boundary_a = poly_a.exterior
             boundary_b = poly_b.exterior
-            edge_a_in_b = boundary_a.intersection(poly_b)
-            edge_b_in_a = boundary_b.intersection(poly_a)
+            shared_boundary = boundary_a.intersection(boundary_b)
 
             # Try to find actual intersection of target edge with shared boundary
             t = 0.5  # Default
 
-            # Try edge_a_in_b
-            if not edge_a_in_b.is_empty:
-                int_pt = target_edge.intersection(edge_a_in_b)
+            if not shared_boundary.is_empty:
+                int_pt = target_edge.intersection(shared_boundary)
                 if not int_pt.is_empty:
                     if int_pt.geom_type == 'Point':
                         int_coords = np.array(int_pt.coords[0])
@@ -13223,57 +13222,27 @@ class ContourMeshMixin:
                             t = np.clip(t, 0.0, 1.0)
                         boundary_pt = target_contour[v_idx_a] + t * (target_contour[v_idx_b] - target_contour[v_idx_a])
                         return t, boundary_pt
-
-            # Try edge_b_in_a
-            if not edge_b_in_a.is_empty:
-                int_pt = target_edge.intersection(edge_b_in_a)
-                if not int_pt.is_empty:
-                    if int_pt.geom_type == 'Point':
-                        int_coords = np.array(int_pt.coords[0])
-                        if edge_len > 1e-10:
-                            t = np.linalg.norm(int_coords - p_a) / edge_len
-                            t = np.clip(t, 0.0, 1.0)
-                        boundary_pt = target_contour[v_idx_a] + t * (target_contour[v_idx_b] - target_contour[v_idx_a])
-                        return t, boundary_pt
-                    elif int_pt.geom_type == 'MultiPoint':
-                        int_coords = np.array(int_pt.geoms[0].coords[0])
+                    elif int_pt.geom_type == 'LineString':
+                        # Edge lies along shared boundary - use midpoint of intersection
+                        int_coords = np.array(int_pt.centroid.coords[0])
                         if edge_len > 1e-10:
                             t = np.linalg.norm(int_coords - p_a) / edge_len
                             t = np.clip(t, 0.0, 1.0)
                         boundary_pt = target_contour[v_idx_a] + t * (target_contour[v_idx_b] - target_contour[v_idx_a])
                         return t, boundary_pt
 
-            # No direct intersection - find nearest point on shared boundary to edge midpoint
-            edge_mid = (p_a + p_b) / 2
-            edge_mid_pt = ShapelyPoint(edge_mid)
-            closest_pt = None
-            min_dist = float('inf')
-
-            if not edge_a_in_b.is_empty:
+                # No direct intersection - find nearest point on shared boundary
+                edge_mid = (p_a + p_b) / 2
+                edge_mid_pt = ShapelyPoint(edge_mid)
                 try:
-                    d = edge_a_in_b.distance(edge_mid_pt)
-                    if d < min_dist:
-                        min_dist = d
-                        _, nearest = nearest_points(edge_mid_pt, edge_a_in_b)
-                        closest_pt = np.array(nearest.coords[0])
+                    _, nearest = nearest_points(edge_mid_pt, shared_boundary)
+                    closest_pt = np.array(nearest.coords[0])
+                    # Project closest_pt onto the edge to get t
+                    if edge_len > 1e-10:
+                        t = np.dot(closest_pt - p_a, edge_vec) / (edge_len * edge_len)
+                        t = np.clip(t, 0.0, 1.0)
                 except:
                     pass
-
-            if not edge_b_in_a.is_empty:
-                try:
-                    d = edge_b_in_a.distance(edge_mid_pt)
-                    if d < min_dist:
-                        min_dist = d
-                        _, nearest = nearest_points(edge_mid_pt, edge_b_in_a)
-                        closest_pt = np.array(nearest.coords[0])
-                except:
-                    pass
-
-            if closest_pt is not None:
-                # Project closest_pt onto the edge to get t
-                if edge_len > 1e-10:
-                    t = np.dot(closest_pt - p_a, edge_vec) / (edge_len * edge_len)
-                    t = np.clip(t, 0.0, 1.0)
 
             # Compute 3D intersection point
             boundary_pt = target_contour[v_idx_a] + t * (target_contour[v_idx_b] - target_contour[v_idx_a])
