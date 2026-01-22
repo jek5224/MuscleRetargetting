@@ -5497,19 +5497,6 @@ class GLFWApp():
                     src_basis_x = src_bp['basis_x']
                     src_basis_y = src_bp['basis_y']
 
-                    # Debug: print rendering data info (once per change)
-                    render_debug_key = (src_idx, len(src_contour_3d), id(src_contour_3d))
-                    if not hasattr(obj, '_render_debug_key') or obj._render_debug_key != render_debug_key:
-                        src_contour_arr = np.array(src_contour_3d)
-                        actual_centroid = np.mean(src_contour_arr, axis=0) if len(src_contour_arr) > 0 else np.zeros(3)
-                        print(f"[RENDER DEBUG] source[{src_idx}]: {len(src_contour_3d)} verts")
-                        print(f"[RENDER DEBUG]   actual centroid: [{actual_centroid[0]:.4f}, {actual_centroid[1]:.4f}, {actual_centroid[2]:.4f}]")
-                        print(f"[RENDER DEBUG]   src_bp mean: [{src_mean[0]:.4f}, {src_mean[1]:.4f}, {src_mean[2]:.4f}]")
-                        # Print first 3 vertices for verification
-                        for vi in range(min(3, len(src_contour_arr))):
-                            print(f"[RENDER DEBUG]     vertex[{vi}]: [{src_contour_arr[vi][0]:.4f}, {src_contour_arr[vi][1]:.4f}, {src_contour_arr[vi][2]:.4f}]")
-                        obj._render_debug_key = render_debug_key
-
                     # Project to 2D using TARGET's basis for consistent rotation with cutting panel
                     target_bp_for_src = obj._manual_cut_data.get('target_bp')
                     if target_bp_for_src is not None:
