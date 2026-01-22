@@ -13196,15 +13196,20 @@ class ContourMeshMixin:
                 boundary_pt = target_contour[v_idx_a] + t * (target_contour[v_idx_b] - target_contour[v_idx_a])
                 return t, boundary_pt
 
-            # Find shared boundary: the boundary of the overlapping region between two sources
-            # This is where the two optimized source contours meet
-            intersection_region = poly_a.intersection(poly_b)
+            # Find shared boundary: internal edges where two sources meet (not on outer union boundary)
+            from shapely.ops import unary_union as shapely_union
 
-            # The shared boundary is the boundary of the intersection region
-            if not intersection_region.is_empty:
-                shared_boundary = intersection_region.boundary
-            else:
-                shared_boundary = None
+            union = shapely_union([poly_a, poly_b])
+            shared_boundary = None
+
+            if not union.is_empty and hasattr(union, 'exterior'):
+                # Internal edges = parts of source exteriors NOT on the union exterior
+                union_ext_buffered = union.exterior.buffer(1e-6)
+                internal_a = poly_a.exterior.difference(union_ext_buffered)
+                internal_b = poly_b.exterior.difference(union_ext_buffered)
+                combined = shapely_union([internal_a, internal_b])
+                if not combined.is_empty:
+                    shared_boundary = combined
 
             # Try to find actual intersection of target edge with shared boundary
             t = 0.5  # Default
