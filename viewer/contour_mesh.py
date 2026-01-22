@@ -13242,11 +13242,15 @@ class ContourMeshMixin:
             if len(shared_pts) < 2:
                 continue
 
-            # For 2-piece case with short shared edge, use cutting_line_2d (computed via SVD, more robust)
+            # For 2-piece case with short shared edge, use cutting_line_2d direction (computed via SVD, more robust)
+            # but use the current shared_pts position (which is post-transformation)
             if n_pieces == 2 and cutting_line_2d is not None and len(shared_pts) <= 5:
-                line_point, line_dir = cutting_line_2d
+                _, line_dir = cutting_line_2d  # Only use direction from SVD
                 line_normal = np.array([-line_dir[1], line_dir[0]])
-                print(f"  [BP Transform] Using cutting_line_2d for crossing detection (short shared edge: {len(shared_pts)} pts)")
+                # Use center of transformed shared points as line_point
+                line_point = np.mean(shared_pts, axis=0)
+                print(f"  [BP Transform] Using cutting_line_2d direction for crossing detection (short shared edge: {len(shared_pts)} pts)")
+                print(f"  [BP Transform] Line point (from transformed shared edge): ({line_point[0]:.6f}, {line_point[1]:.6f})")
             else:
                 line_p1 = shared_pts[0]
                 line_p2 = shared_pts[-1]
