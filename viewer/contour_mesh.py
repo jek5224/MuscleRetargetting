@@ -10770,6 +10770,13 @@ class ContourMeshMixin:
                     for contour_i in range(curr_count):
                         dist_matrix[stream_i, contour_i] = np.linalg.norm(prev_means[stream_i] - curr_means[contour_i])
 
+                # Debug: show distance matrix summary
+                print(f"  [Mapping] Distance matrix ({max_stream_count} streams -> {curr_count} targets):")
+                for stream_i in range(min(max_stream_count, 10)):  # Limit to first 10
+                    closest_target = np.argmin(dist_matrix[stream_i])
+                    closest_dist = dist_matrix[stream_i, closest_target]
+                    print(f"    Stream {stream_i}: closest to target {closest_target} (dist={closest_dist:.6f})")
+
                 # Get previous level's groupings (which streams came from same contour)
                 prev_groups = stream_groups[-1] if stream_groups else [[i] for i in range(max_stream_count)]
 
@@ -10944,6 +10951,14 @@ class ContourMeshMixin:
                     if contour_to_streams[contour_i]:
                         groups.append(contour_to_streams[contour_i])
                 stream_groups.append(groups)
+
+                # Debug: show final mapping
+                print(f"  [Mapping] Final assignment:")
+                for contour_i in range(curr_count):
+                    streams = contour_to_streams[contour_i]
+                    if len(streams) > 1:
+                        dists = [dist_matrix[s, contour_i] for s in streams]
+                        print(f"    Target {contour_i} <- streams {streams} (dists: {[f'{d:.6f}' for d in dists]})")
 
                 # Cut each contour that has multiple streams
                 for contour_i in range(curr_count):
