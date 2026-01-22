@@ -12674,11 +12674,85 @@ class ContourMeshMixin:
                 centroids.append(np.array(initial_translations[piece_idx]))
                 print(f"  [BP Transform] WARNING: piece {piece_idx} has no vertices, using initial position")
 
-        # ========== Step 6.5: Find cutting line ==========
-        # SEPARATE mode: Use nearest non-adjacent vertices on target (waist/concave points)
-        # COMMON mode: Transform the original cutting line from first division
-        cutting_line_2d = None  # (point, direction) in 2D target plane
+        # ========== Step 6.5: Find cutting lines between ALL adjacent source pairs ==========
+        # Store shared edges for ALL pairs of sources that touch/overlap
+        cutting_line_2d = None  # (point, direction) in 2D target plane (for 2-piece case)
         cutting_line_3d = None  # direction vector in 3D for bounding plane creation
+        self._shared_cut_edges_2d = []  # List of (pair_indices, points) for all adjacent pairs
+
+        # Helper function to extract line coordinates from geometry
+        def extract_line_coords(geom):
+            coords = []
+            if geom is None or geom.is_empty:
+                return coords
+            if geom.geom_type == 'LineString':
+                coords.extend(list(np.array(geom.coords)))
+            elif geom.geom_type == 'MultiLineString':
+                for line in geom.geoms:
+                    coords.extend(list(np.array(line.coords)))
+            elif geom.geom_type == 'GeometryCollection':
+                for g in geom.geoms:
+                    coords.extend(extract_line_coords(g))
+            elif geom.geom_type == 'Point':
+                coords.append(np.array(geom.coords[0]))
+            elif geom.geom_type == 'MultiPoint':
+                for pt in geom.geoms:
+                    coords.append(np.array(pt.coords[0]))
+            elif geom.geom_type == 'LinearRing':
+                coords.extend(list(np.array(geom.coords)))
+            return coords
+
+        # Find shared boundaries between ALL pairs of sources
+        if n_pieces >= 2:
+            try:
+                # Create polygons for all sources
+                source_polygons = []
+                for i, src in enumerate(final_transformed):
+                    if len(src) >= 3:
+                        poly = Polygon(np.array(src))
+                        if not poly.is_valid:
+                            poly = poly.buffer(0)
+                        source_polygons.append(poly)
+                    else:
+                        source_polygons.append(None)
+
+                # Find shared boundaries between all pairs
+                for i in range(n_pieces):
+                    for j in range(i + 1, n_pieces):
+                        poly_i = source_polygons[i]
+                        poly_j = source_polygons[j]
+                        if poly_i is None or poly_j is None:
+                            continue
+
+                        try:
+                            # Find shared boundary between this pair
+                            shared_boundary = poly_i.exterior.intersection(poly_j.exterior)
+                            if shared_boundary is None or shared_boundary.is_empty:
+                                # Try overlap boundary
+                                overlap = poly_i.intersection(poly_j)
+                                if overlap is not None and not overlap.is_empty and hasattr(overlap, 'boundary'):
+                                    shared_boundary = overlap.boundary
+
+                            if shared_boundary is not None and not shared_boundary.is_empty:
+                                shared_points = extract_line_coords(shared_boundary)
+                                if len(shared_points) >= 2:
+                                    self._shared_cut_edges_2d.append(((i, j), np.array(shared_points)))
+                                    print(f"  [BP Transform] Found shared edge between pieces {i}-{j}: {len(shared_points)} points")
+                        except Exception as e:
+                            print(f"  [BP Transform] Error finding shared edge {i}-{j}: {e}")
+
+                print(f"  [BP Transform] Total shared edges found: {len(self._shared_cut_edges_2d)}")
+
+                # For backward compatibility, also set _shared_cut_edge_2d for 2-piece case
+                if n_pieces == 2 and len(self._shared_cut_edges_2d) > 0:
+                    self._shared_cut_edge_2d = self._shared_cut_edges_2d[0][1]
+                else:
+                    self._shared_cut_edge_2d = None
+
+            except Exception as e:
+                print(f"  [BP Transform] Error in shared edge detection: {e}")
+                import traceback
+                traceback.print_exc()
 
         if n_pieces == 2:
             try:
@@ -12760,29 +12834,7 @@ class ContourMeshMixin:
                             shared_boundary = poly_0.exterior.intersection(poly_1.exterior)
                             print(f"  [BP DEBUG] shared_boundary from exterior intersection: type={shared_boundary.geom_type if shared_boundary else 'None'}")
 
-                        # Extract coordinates from the shared edges
-                        def extract_line_coords(geom):
-                            coords = []
-                            if geom is None or geom.is_empty:
-                                return coords
-                            if geom.geom_type == 'LineString':
-                                coords.extend(list(np.array(geom.coords)))
-                            elif geom.geom_type == 'MultiLineString':
-                                for line in geom.geoms:
-                                    coords.extend(list(np.array(line.coords)))
-                            elif geom.geom_type == 'GeometryCollection':
-                                for g in geom.geoms:
-                                    coords.extend(extract_line_coords(g))
-                            elif geom.geom_type == 'Point':
-                                coords.append(np.array(geom.coords[0]))
-                            elif geom.geom_type == 'MultiPoint':
-                                for pt in geom.geoms:
-                                    coords.append(np.array(pt.coords[0]))
-                            elif geom.geom_type == 'LinearRing':
-                                coords.extend(list(np.array(geom.coords)))
-                            return coords
-
-                        # Extract coordinates from shared boundary
+                        # Extract coordinates from shared boundary (using helper defined above)
                         shared_edge_points = extract_line_coords(shared_boundary)
                         print(f"  [BP DEBUG] shared_edge_points: {len(shared_edge_points)} points")
                         if len(shared_edge_points) > 0:
@@ -13120,43 +13172,49 @@ class ContourMeshMixin:
         assignment_counts = [assignments.count(i) for i in range(n_pieces)]
         print(f"  [BP Transform] vertex assignments (after smoothing): {assignment_counts}")
 
-        # ========== Find where cutting line crosses target contour ==========
-        # First: find ALL edges where the cutting line actually crosses
-        cutting_line_crossings = []  # [(edge_idx, t, pt_2d, pt_3d), ...]
+        # ========== Find where ALL cutting lines cross target contour ==========
+        # For each shared edge between source pairs, find where it crosses target edges
+        all_crossings = []  # [(edge_idx, t, pt_2d, pt_3d, pair_indices), ...]
 
-        if hasattr(self, '_shared_cut_edge_2d') and self._shared_cut_edge_2d is not None and len(self._shared_cut_edge_2d) >= 2:
-            pts = self._shared_cut_edge_2d
-            line_p1 = pts[0]
-            line_p2 = pts[-1]
+        n_verts = len(target_2d)
+        shared_edges = getattr(self, '_shared_cut_edges_2d', [])
+
+        for pair_indices, shared_pts in shared_edges:
+            if len(shared_pts) < 2:
+                continue
+
+            line_p1 = shared_pts[0]
+            line_p2 = shared_pts[-1]
             line_dir = line_p2 - line_p1
             line_len = np.linalg.norm(line_dir)
 
-            if line_len > 1e-10:
-                line_dir = line_dir / line_len
-                line_normal = np.array([-line_dir[1], line_dir[0]])
+            if line_len < 1e-10:
+                continue
 
-                n_verts = len(target_2d)
-                for edge_idx in range(n_verts):
-                    v_idx_a = edge_idx
-                    v_idx_b = (edge_idx + 1) % n_verts
-                    p_a = target_2d[v_idx_a]
-                    p_b = target_2d[v_idx_b]
-                    edge_vec = p_b - p_a
+            line_dir = line_dir / line_len
+            line_normal = np.array([-line_dir[1], line_dir[0]])
 
-                    # Find where edge crosses the cutting line
-                    denom = np.dot(edge_vec, line_normal)
-                    if abs(denom) > 1e-10:
-                        t = np.dot(line_p1 - p_a, line_normal) / denom
-                        # Only count if t is strictly inside (0, 1) - actual crossing
-                        if 0.01 < t < 0.99:
-                            pt_2d = p_a + t * edge_vec
-                            pt_3d = target_contour[v_idx_a] + t * (target_contour[v_idx_b] - target_contour[v_idx_a])
-                            cutting_line_crossings.append((edge_idx, t, pt_2d, pt_3d))
-                            print(f"  [BP Transform] Cutting line crosses edge {edge_idx} at t={t:.4f}")
+            for edge_idx in range(n_verts):
+                v_idx_a = edge_idx
+                v_idx_b = (edge_idx + 1) % n_verts
+                p_a = target_2d[v_idx_a]
+                p_b = target_2d[v_idx_b]
+                edge_vec = p_b - p_a
 
-        print(f"  [BP Transform] Found {len(cutting_line_crossings)} cutting line crossings")
+                # Find where edge crosses the cutting line
+                denom = np.dot(edge_vec, line_normal)
+                if abs(denom) > 1e-10:
+                    t = np.dot(line_p1 - p_a, line_normal) / denom
+                    # Only count if t is strictly inside (0, 1) - actual crossing
+                    if 0.01 < t < 0.99:
+                        pt_2d = p_a + t * edge_vec
+                        pt_3d = target_contour[v_idx_a] + t * (target_contour[v_idx_b] - target_contour[v_idx_a])
+                        all_crossings.append((edge_idx, t, pt_2d, pt_3d, pair_indices))
+                        print(f"  [BP Transform] Shared edge {pair_indices} crosses target edge {edge_idx} at t={t:.4f}")
 
-        # ========== Build final pieces using cutting line crossings ==========
+        print(f"  [BP Transform] Found {len(all_crossings)} total crossings from {len(shared_edges)} shared edges")
+
+        # ========== Build final pieces using all crossings ==========
         new_contours = [[] for _ in range(n_pieces)]
         shared_boundary_points = []  # Collect shared cut edge vertices
         boundary_crossings = []  # Track all boundary crossings for debug
@@ -13187,74 +13245,79 @@ class ContourMeshMixin:
                                     shared_boundary_points.append(pi.copy())
                                     break
 
-        elif len(cutting_line_crossings) >= 2 and n_pieces == 2:
-            # Use cutting line crossings directly for 2-piece case
-            # Sort crossings by edge index
-            cutting_line_crossings.sort(key=lambda x: x[0])
+        elif len(all_crossings) >= 2 and n_pieces >= 2:
+            # Use cutting line crossings to build pieces
+            # Sort crossings by edge index (position around the contour)
+            all_crossings.sort(key=lambda x: (x[0], x[1]))  # Sort by edge_idx, then by t
 
-            # Take first two crossings as the cut points
-            cross1 = cutting_line_crossings[0]
-            cross2 = cutting_line_crossings[1]
-            edge1, t1, pt2d_1, pt3d_1 = cross1
-            edge2, t2, pt2d_2, pt3d_2 = cross2
+            print(f"  [BP Transform] Building {n_pieces} pieces using {len(all_crossings)} crossings")
 
-            print(f"  [BP Transform] Using crossings at edges {edge1} and {edge2}")
+            # Create a map of edge_idx -> list of crossings on that edge
+            edge_crossings = {}
+            for crossing in all_crossings:
+                edge_idx = crossing[0]
+                if edge_idx not in edge_crossings:
+                    edge_crossings[edge_idx] = []
+                edge_crossings[edge_idx].append(crossing)
 
-            # Build two pieces by walking around the contour
-            # Piece 0: from cross1 to cross2 (shorter path based on assignments)
-            # Piece 1: from cross2 to cross1 (the other path)
+            # Sort crossings on each edge by t value
+            for edge_idx in edge_crossings:
+                edge_crossings[edge_idx].sort(key=lambda x: x[1])
 
-            n_verts = len(target_2d)
+            # Walk around the contour, building pieces based on vertex assignments
+            # Insert crossing points when we encounter them on an edge
+            for v_idx in range(n_verts):
+                curr_piece = assignments[v_idx]
+                next_v_idx = (v_idx + 1) % n_verts
+                next_piece = assignments[next_v_idx]
 
-            # Determine which vertices go to which piece using assignments
-            # Vertices between edge1+1 and edge2 (inclusive) vs the rest
-            piece0_verts = []
-            piece1_verts = []
+                # Add current vertex to its piece
+                new_contours[curr_piece].append(target_contour[v_idx])
 
-            # Walk from edge1+1 to edge2 (inclusive)
-            idx = (edge1 + 1) % n_verts
-            while idx != (edge2 + 1) % n_verts:
-                piece0_verts.append(idx)
-                idx = (idx + 1) % n_verts
+                # Check if this edge has any crossings
+                if v_idx in edge_crossings:
+                    for crossing in edge_crossings[v_idx]:
+                        edge_idx, t, pt_2d, pt_3d, pair_indices = crossing
+                        # Add crossing point to BOTH pieces that this edge separates
+                        piece_i, piece_j = pair_indices
+                        if curr_piece == piece_i or curr_piece == piece_j:
+                            new_contours[curr_piece].append(pt_3d)
+                        if next_piece == piece_i or next_piece == piece_j:
+                            if next_piece != curr_piece:
+                                new_contours[next_piece].append(pt_3d)
+                        shared_boundary_points.append(pt_3d.copy())
+                        boundary_crossings.append((v_idx, next_v_idx, curr_piece, next_piece, t))
 
-            # The rest go to piece1
-            idx = (edge2 + 1) % n_verts
-            while idx != (edge1 + 1) % n_verts:
-                piece1_verts.append(idx)
-                idx = (idx + 1) % n_verts
+                # If piece changes but no explicit crossing found, use assignment boundary
+                if curr_piece != next_piece and v_idx not in edge_crossings:
+                    # Find crossing point using the shared edge between these pieces
+                    t = 0.5  # Default to midpoint
+                    for pair_indices, shared_pts in shared_edges:
+                        if set(pair_indices) == {curr_piece, next_piece} and len(shared_pts) >= 2:
+                            line_p1 = shared_pts[0]
+                            line_p2 = shared_pts[-1]
+                            line_dir = line_p2 - line_p1
+                            line_len = np.linalg.norm(line_dir)
+                            if line_len > 1e-10:
+                                line_dir = line_dir / line_len
+                                line_normal = np.array([-line_dir[1], line_dir[0]])
+                                p_a = target_2d[v_idx]
+                                p_b = target_2d[next_v_idx]
+                                edge_vec = p_b - p_a
+                                denom = np.dot(edge_vec, line_normal)
+                                if abs(denom) > 1e-10:
+                                    t = np.dot(line_p1 - p_a, line_normal) / denom
+                                    t = np.clip(t, 0.0, 1.0)
+                            break
 
-            # Check which piece matches which assignment using centroids
-            if len(piece0_verts) > 0 and len(piece1_verts) > 0:
-                piece0_centroid = np.mean([target_2d[i] for i in piece0_verts], axis=0)
-                piece1_centroid = np.mean([target_2d[i] for i in piece1_verts], axis=0)
+                    pt_3d = target_contour[v_idx] + t * (target_contour[next_v_idx] - target_contour[v_idx])
+                    new_contours[curr_piece].append(pt_3d)
+                    new_contours[next_piece].append(pt_3d)
+                    shared_boundary_points.append(pt_3d.copy())
+                    boundary_crossings.append((v_idx, next_v_idx, curr_piece, next_piece, t))
 
-                # Match to source centroids
-                d00 = np.linalg.norm(piece0_centroid - centroids[0])
-                d01 = np.linalg.norm(piece0_centroid - centroids[1])
-
-                if d00 > d01:
-                    # Swap: piece0_verts should go to piece 1
-                    piece0_verts, piece1_verts = piece1_verts, piece0_verts
-
-            # Build piece 0: start with cut point 1, add vertices, end with cut point 2
-            new_contours[0].append(pt3d_1)
-            for v_idx in piece0_verts:
-                new_contours[0].append(target_contour[v_idx])
-            new_contours[0].append(pt3d_2)
-
-            # Build piece 1: start with cut point 2, add vertices, end with cut point 1
-            new_contours[1].append(pt3d_2)
-            for v_idx in piece1_verts:
-                new_contours[1].append(target_contour[v_idx])
-            new_contours[1].append(pt3d_1)
-
-            shared_boundary_points.append(pt3d_1.copy())
-            shared_boundary_points.append(pt3d_2.copy())
-            boundary_crossings.append((edge1, (edge1+1)%n_verts, 0, 1, t1))
-            boundary_crossings.append((edge2, (edge2+1)%n_verts, 1, 0, t2))
-
-            print(f"  [BP Transform] Piece 0: {len(new_contours[0])} vertices")
-            print(f"  [BP Transform] Piece 1: {len(new_contours[1])} vertices")
+            for piece_idx in range(n_pieces):
+                print(f"  [BP Transform] Piece {piece_idx}: {len(new_contours[piece_idx])} vertices")
 
         else:
             # Fallback: vertex assignment method
