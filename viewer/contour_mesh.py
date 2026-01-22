@@ -12681,8 +12681,12 @@ class ContourMeshMixin:
                     union_boundary = union_poly.exterior
                     target_boundary = target_poly.exterior
 
+                    # Use target size as scale reference (not area which is too small)
+                    target_size = np.sqrt(target_area)
+
                     # Sample at regular intervals along the boundary
                     n_samples = min(50, int(union_boundary.length / 0.01) + 1)
+                    n_samples = max(n_samples, 20)  # Minimum 20 samples
                     if n_samples >= 5:
                         sample_distances = []
                         for i in range(n_samples):
@@ -12692,11 +12696,11 @@ class ContourMeshMixin:
                             dist = pt.distance(target_boundary)
                             sample_distances.append(dist)
 
-                        # Use mean + max distance to penalize both average and worst-case misalignment
-                        mean_dist = np.mean(sample_distances)
-                        max_dist = np.max(sample_distances)
-                        # Weight boundary alignment strongly for multi-source case
-                        boundary_cost = (mean_dist * 50.0 + max_dist * 20.0) * target_area
+                        # Normalize distances by target size for scale-invariant cost
+                        mean_dist = np.mean(sample_distances) / (target_size + 1e-10)
+                        max_dist = np.max(sample_distances) / (target_size + 1e-10)
+                        # Strong weight for boundary alignment
+                        boundary_cost = mean_dist * 100.0 + max_dist * 50.0
                 except:
                     boundary_cost = 0.0
 
@@ -12913,17 +12917,31 @@ class ContourMeshMixin:
             print(f"  [BP Transform] Optimization bounds: scale=[0.5,2], tx=[{bounds[2][0]:.2f},{bounds[2][1]:.2f}], ty=[{bounds[3][0]:.2f},{bounds[3][1]:.2f}]")
             print(f"  [BP Transform] Initial x0: scale=({x0[0]:.4f},{x0[1]:.4f}), tx={x0[2]:.4f}, ty={x0[3]:.4f}, theta={x0[4]:.4f}")
 
-            result = minimize(
-                objective,
-                x0,
-                method='L-BFGS-B',
-                bounds=bounds,
-                options={'maxiter': 3000, 'ftol': 1e-9, 'gtol': 1e-7}
-            )
-            print(f"  [BP Transform] optimizer iterations: {result.nit}")
+            # Multi-start optimization with different rotation angles
+            best_result = None
+            best_cost = float('inf')
+            rotation_trials = [0, np.pi/4, np.pi/2, 3*np.pi/4, np.pi, -np.pi/4, -np.pi/2, -3*np.pi/4]
 
-            optimal_params = result.x
-            print(f"  [BP Transform] optimization: success={result.success}, final_cost={result.fun:.4f}")
+            for trial_theta in rotation_trials:
+                trial_x0 = x0.copy() if isinstance(x0, list) else list(x0)
+                trial_x0[4] = trial_theta  # Set rotation
+
+                result = minimize(
+                    objective,
+                    trial_x0,
+                    method='L-BFGS-B',
+                    bounds=bounds,
+                    options={'maxiter': 3000, 'ftol': 1e-9, 'gtol': 1e-7}
+                )
+
+                if result.fun < best_cost:
+                    best_cost = result.fun
+                    best_result = result
+
+            print(f"  [BP Transform] Multi-start: tried {len(rotation_trials)} rotations, best cost={best_cost:.4f}")
+
+            optimal_params = best_result.x
+            print(f"  [BP Transform] optimization: success={best_result.success}, final_cost={best_result.fun:.4f}, iterations={best_result.nit}")
             objective_debug(optimal_params, verbose=True)
 
         # ========== Step 6: Get final transformed source shapes ==========
