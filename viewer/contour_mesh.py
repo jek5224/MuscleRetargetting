@@ -12865,11 +12865,42 @@ class ContourMeshMixin:
         print(f"  [BP Transform] initial cost={init_cost:.4f}")
 
         # ========== Step 5: Optimize from initial configuration ==========
-        if use_separate_transforms:
-            # SEPARATE mode: skip optimization, just use initial config
-            # The goal is only to find the cutting line at the target waist
+        if use_separate_transforms and n_pieces == 2:
+            # SEPARATE mode with 2 pieces: skip optimization, use initial config
+            # For 2 sources, we find the cutting line at the target waist
             optimal_params = x0
-            print(f"  [BP Transform] SEPARATE mode: skipping optimization, using initial config")
+            print(f"  [BP Transform] SEPARATE mode (2 pieces): skipping optimization, using initial config")
+        elif use_separate_transforms and n_pieces > 2:
+            # SEPARATE mode with >2 pieces: need to run optimization so sources tile target
+            # Otherwise sources have gaps and vertex assignment fails
+            print(f"  [BP Transform] SEPARATE mode ({n_pieces} pieces): running optimization to tile target")
+
+            target_size = np.sqrt(target_area)
+            max_translation = target_size * 3
+            target_center = np.mean(target_2d, axis=0)
+
+            # Build bounds for each source's parameters
+            bounds = []
+            for i in range(n_pieces):
+                bounds.extend([
+                    (0.3, 3.0),  # scale_x
+                    (0.3, 3.0),  # scale_y
+                    (target_center[0] - max_translation, target_center[0] + max_translation),  # tx
+                    (target_center[1] - max_translation, target_center[1] + max_translation),  # ty
+                    (-np.pi, np.pi)  # theta
+                ])
+
+            result = minimize(
+                objective,
+                x0,
+                method='L-BFGS-B',
+                bounds=bounds,
+                options={'maxiter': 3000, 'ftol': 1e-9, 'gtol': 1e-7}
+            )
+            print(f"  [BP Transform] optimizer iterations: {result.nit}")
+            optimal_params = result.x
+            print(f"  [BP Transform] optimization: success={result.success}, final_cost={result.fun:.4f}")
+            objective_debug(optimal_params, verbose=True)
         else:
             # COMMON mode: run optimization to fit sources to target
             # Compute bounds to prevent optimizer from going crazy
