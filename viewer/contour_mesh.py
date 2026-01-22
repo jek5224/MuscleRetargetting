@@ -13120,65 +13120,43 @@ class ContourMeshMixin:
         assignment_counts = [assignments.count(i) for i in range(n_pieces)]
         print(f"  [BP Transform] vertex assignments (after smoothing): {assignment_counts}")
 
-        # Helper function to find intersection of target edge with shared boundary between sources
-        def find_edge_cut_point(v_idx_a, v_idx_b, piece_a=None, piece_b=None):
-            """Find where the shared boundary between source polygons intersects the target edge.
-            Returns interpolation parameter t in [0,1] and the 3D intersection point.
-            Always uses actual shared boundary geometry from source polygon intersections."""
-            from shapely.geometry import LineString as LS, Point as ShapelyPoint
-            from shapely.ops import nearest_points
+        # ========== Find where cutting line crosses target contour ==========
+        # First: find ALL edges where the cutting line actually crosses
+        cutting_line_crossings = []  # [(edge_idx, t, pt_2d, pt_3d), ...]
 
-            # Edge endpoints in 2D
-            p_a = target_2d[v_idx_a]
-            p_b = target_2d[v_idx_b]
-            edge_vec = p_b - p_a
-            edge_len = np.linalg.norm(edge_vec)
+        if hasattr(self, '_shared_cut_edge_2d') and self._shared_cut_edge_2d is not None and len(self._shared_cut_edge_2d) >= 2:
+            pts = self._shared_cut_edge_2d
+            line_p1 = pts[0]
+            line_p2 = pts[-1]
+            line_dir = line_p2 - line_p1
+            line_len = np.linalg.norm(line_dir)
 
-            # Create target edge as LineString
-            target_edge = LS([p_a, p_b])
+            if line_len > 1e-10:
+                line_dir = line_dir / line_len
+                line_normal = np.array([-line_dir[1], line_dir[0]])
 
-            # Determine which two source polygons we're finding the boundary between
-            if piece_a is None:
-                piece_a = 0
-            if piece_b is None:
-                piece_b = 1
+                n_verts = len(target_2d)
+                for edge_idx in range(n_verts):
+                    v_idx_a = edge_idx
+                    v_idx_b = (edge_idx + 1) % n_verts
+                    p_a = target_2d[v_idx_a]
+                    p_b = target_2d[v_idx_b]
+                    edge_vec = p_b - p_a
 
-            poly_a = piece_polygons[piece_a] if piece_a < len(piece_polygons) else None
-            poly_b = piece_polygons[piece_b] if piece_b < len(piece_polygons) else None
-
-            if poly_a is None or poly_b is None:
-                # No polygons - use edge midpoint
-                t = 0.5
-                boundary_pt = target_contour[v_idx_a] + t * (target_contour[v_idx_b] - target_contour[v_idx_a])
-                return t, boundary_pt
-
-            # Use shared edge points to define the cutting line
-            # Take first and last point to get the line
-            t = 0.5  # Default
-
-            if hasattr(self, '_shared_cut_edge_2d') and self._shared_cut_edge_2d is not None and len(self._shared_cut_edge_2d) >= 2:
-                pts = self._shared_cut_edge_2d
-                # Line from first to last shared edge point
-                line_p1 = pts[0]
-                line_p2 = pts[-1]
-                line_dir = line_p2 - line_p1
-                line_len = np.linalg.norm(line_dir)
-
-                if line_len > 1e-10:
-                    line_dir = line_dir / line_len
-                    line_normal = np.array([-line_dir[1], line_dir[0]])
-
-                    # Find where edge crosses this line
+                    # Find where edge crosses the cutting line
                     denom = np.dot(edge_vec, line_normal)
                     if abs(denom) > 1e-10:
                         t = np.dot(line_p1 - p_a, line_normal) / denom
-                        t = np.clip(t, 0.0, 1.0)
+                        # Only count if t is strictly inside (0, 1) - actual crossing
+                        if 0.01 < t < 0.99:
+                            pt_2d = p_a + t * edge_vec
+                            pt_3d = target_contour[v_idx_a] + t * (target_contour[v_idx_b] - target_contour[v_idx_a])
+                            cutting_line_crossings.append((edge_idx, t, pt_2d, pt_3d))
+                            print(f"  [BP Transform] Cutting line crosses edge {edge_idx} at t={t:.4f}")
 
-            # Compute 3D intersection point
-            boundary_pt = target_contour[v_idx_a] + t * (target_contour[v_idx_b] - target_contour[v_idx_a])
-            return t, boundary_pt
+        print(f"  [BP Transform] Found {len(cutting_line_crossings)} cutting line crossings")
 
-        # ========== Build final pieces ==========
+        # ========== Build final pieces using cutting line crossings ==========
         new_contours = [[] for _ in range(n_pieces)]
         shared_boundary_points = []  # Collect shared cut edge vertices
         boundary_crossings = []  # Track all boundary crossings for debug
@@ -13209,6 +13187,75 @@ class ContourMeshMixin:
                                     shared_boundary_points.append(pi.copy())
                                     break
 
+        elif len(cutting_line_crossings) >= 2 and n_pieces == 2:
+            # Use cutting line crossings directly for 2-piece case
+            # Sort crossings by edge index
+            cutting_line_crossings.sort(key=lambda x: x[0])
+
+            # Take first two crossings as the cut points
+            cross1 = cutting_line_crossings[0]
+            cross2 = cutting_line_crossings[1]
+            edge1, t1, pt2d_1, pt3d_1 = cross1
+            edge2, t2, pt2d_2, pt3d_2 = cross2
+
+            print(f"  [BP Transform] Using crossings at edges {edge1} and {edge2}")
+
+            # Build two pieces by walking around the contour
+            # Piece 0: from cross1 to cross2 (shorter path based on assignments)
+            # Piece 1: from cross2 to cross1 (the other path)
+
+            n_verts = len(target_2d)
+
+            # Determine which vertices go to which piece using assignments
+            # Vertices between edge1+1 and edge2 (inclusive) vs the rest
+            piece0_verts = []
+            piece1_verts = []
+
+            # Walk from edge1+1 to edge2 (inclusive)
+            idx = (edge1 + 1) % n_verts
+            while idx != (edge2 + 1) % n_verts:
+                piece0_verts.append(idx)
+                idx = (idx + 1) % n_verts
+
+            # The rest go to piece1
+            idx = (edge2 + 1) % n_verts
+            while idx != (edge1 + 1) % n_verts:
+                piece1_verts.append(idx)
+                idx = (idx + 1) % n_verts
+
+            # Check which piece matches which assignment using centroids
+            if len(piece0_verts) > 0 and len(piece1_verts) > 0:
+                piece0_centroid = np.mean([target_2d[i] for i in piece0_verts], axis=0)
+                piece1_centroid = np.mean([target_2d[i] for i in piece1_verts], axis=0)
+
+                # Match to source centroids
+                d00 = np.linalg.norm(piece0_centroid - centroids[0])
+                d01 = np.linalg.norm(piece0_centroid - centroids[1])
+
+                if d00 > d01:
+                    # Swap: piece0_verts should go to piece 1
+                    piece0_verts, piece1_verts = piece1_verts, piece0_verts
+
+            # Build piece 0: start with cut point 1, add vertices, end with cut point 2
+            new_contours[0].append(pt3d_1)
+            for v_idx in piece0_verts:
+                new_contours[0].append(target_contour[v_idx])
+            new_contours[0].append(pt3d_2)
+
+            # Build piece 1: start with cut point 2, add vertices, end with cut point 1
+            new_contours[1].append(pt3d_2)
+            for v_idx in piece1_verts:
+                new_contours[1].append(target_contour[v_idx])
+            new_contours[1].append(pt3d_1)
+
+            shared_boundary_points.append(pt3d_1.copy())
+            shared_boundary_points.append(pt3d_2.copy())
+            boundary_crossings.append((edge1, (edge1+1)%n_verts, 0, 1, t1))
+            boundary_crossings.append((edge2, (edge2+1)%n_verts, 1, 0, t2))
+
+            print(f"  [BP Transform] Piece 0: {len(new_contours[0])} vertices")
+            print(f"  [BP Transform] Piece 1: {len(new_contours[1])} vertices")
+
         else:
             # Fallback: vertex assignment method
             n_verts = len(target_2d)
@@ -13219,6 +13266,32 @@ class ContourMeshMixin:
                     centroid_dists = [np.linalg.norm(v_2d - c) for c in centroids]
                     assignments.append(centroid_dists.index(min(centroid_dists)))
 
+            # Helper function to find intersection of target edge with cutting line
+            def find_edge_cut_point(v_idx_a, v_idx_b):
+                """Find where the cutting line intersects the target edge."""
+                p_a = target_2d[v_idx_a]
+                p_b = target_2d[v_idx_b]
+                edge_vec = p_b - p_a
+                t = 0.5  # Default
+
+                if hasattr(self, '_shared_cut_edge_2d') and self._shared_cut_edge_2d is not None and len(self._shared_cut_edge_2d) >= 2:
+                    pts = self._shared_cut_edge_2d
+                    line_p1 = pts[0]
+                    line_p2 = pts[-1]
+                    line_dir = line_p2 - line_p1
+                    line_len = np.linalg.norm(line_dir)
+
+                    if line_len > 1e-10:
+                        line_dir = line_dir / line_len
+                        line_normal = np.array([-line_dir[1], line_dir[0]])
+                        denom = np.dot(edge_vec, line_normal)
+                        if abs(denom) > 1e-10:
+                            t = np.dot(line_p1 - p_a, line_normal) / denom
+                            t = np.clip(t, 0.0, 1.0)
+
+                boundary_pt = target_contour[v_idx_a] + t * (target_contour[v_idx_b] - target_contour[v_idx_a])
+                return t, boundary_pt
+
             prev_piece = assignments[-1]  # Start with last vertex's assignment
             for v_idx in range(n_verts):
                 curr_piece = assignments[v_idx]
@@ -13227,7 +13300,7 @@ class ContourMeshMixin:
                 if prev_piece != curr_piece and v_idx > 0:
                     prev_v_idx = v_idx - 1
                     # Find where cutting line intersects this edge
-                    t, boundary_pt = find_edge_cut_point(prev_v_idx, v_idx, prev_piece, curr_piece)
+                    t, boundary_pt = find_edge_cut_point(prev_v_idx, v_idx)
 
                     # Add boundary point to BOTH pieces (shared vertex)
                     new_contours[prev_piece].append(boundary_pt)
@@ -13245,7 +13318,7 @@ class ContourMeshMixin:
                 curr_piece = assignments[0]
 
                 # Find where cutting line intersects wrap-around edge
-                t, boundary_pt = find_edge_cut_point(n_verts - 1, 0, prev_piece, curr_piece)
+                t, boundary_pt = find_edge_cut_point(n_verts - 1, 0)
 
                 # For prev_piece: boundary is at the END, so append
                 new_contours[prev_piece].append(boundary_pt)
