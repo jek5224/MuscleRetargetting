@@ -10691,17 +10691,12 @@ class ContourMeshMixin:
                 prev_level_contours = [stream_contours[s][-1].copy() if hasattr(stream_contours[s][-1], 'copy') else np.array(stream_contours[s][-1]) for s in range(max_stream_count)]
                 prev_level_bps = [stream_bounding_planes[s][-1].copy() for s in range(max_stream_count)]
 
-                # Debug: show prev_level_contours state to detect duplicates
-                print(f"[prev_level_contours DEBUG] Level {level_i}: building from {max_stream_count} streams")
+                # Silent duplicate detection (only prints if duplicates found)
                 seen_centroids = {}
                 for s in range(max_stream_count):
-                    c = prev_level_contours[s]
-                    c_verts = len(c)
-                    c_centroid = tuple(np.round(np.mean(c, axis=0), 6)) if len(c) > 0 else (0,0,0)
-                    c_id = id(stream_contours[s][-1])  # Original object ID before copy
-                    print(f"  stream[{s}]: {c_verts} verts, centroid={c_centroid}, orig_id={c_id}")
+                    c_centroid = tuple(np.round(np.mean(prev_level_contours[s], axis=0), 6)) if len(prev_level_contours[s]) > 0 else (0,0,0)
                     if c_centroid in seen_centroids:
-                        print(f"  *** DUPLICATE DETECTED: stream[{s}] has same centroid as stream[{seen_centroids[c_centroid]}]!")
+                        print(f"  *** DUPLICATE: stream[{s}] same centroid as stream[{seen_centroids[c_centroid]}]!")
                     seen_centroids[c_centroid] = s
 
                 # Debug: show prev level info
@@ -10974,16 +10969,8 @@ class ContourMeshMixin:
                                 cutting_info = None
                                 has_manual_result = True
 
-                                # Debug: show what we retrieved
-                                print(f"[BP Transform DEBUG] Retrieved cut_contours from result_key {result_key}:")
-                                for ci, cc in enumerate(cut_contours):
-                                    if cc is not None:
-                                        cc_id = id(cc)
-                                        cc_verts = len(cc)
-                                        cc_centroid = np.mean(cc, axis=0) if len(cc) > 0 else [0,0,0]
-                                        print(f"  cut_contours[{ci}]: {cc_verts} verts, id={cc_id}, centroid={cc_centroid}")
-                                    else:
-                                        print(f"  cut_contours[{ci}]: None")
+                                # Count valid pieces (silent unless mismatch)
+                                valid_count = sum(1 for cc in cut_contours if cc is not None)
 
                                 # Check if this is a 1:1 mapping (user deselected sources)
                                 is_1to1 = result.get('is_1to1', False)
@@ -10992,46 +10979,18 @@ class ContourMeshMixin:
                                 if is_1to1 and len(result_source_indices) == 1:
                                     # 1:1 case: only assign to the single selected source/stream
                                     selected_stream = result_source_indices[0]
-                                    print(f"  [BP Transform] 1:1 mapping for level {level_i}, contour {contour_i}")
-                                    print(f"  [BP Transform] Only stream {selected_stream} gets this contour")
-
-                                    # Override streams_for_contour to only include the selected stream
                                     original_streams = list(streams_for_contour)
                                     streams_for_contour = [selected_stream] if selected_stream in original_streams else original_streams[:1]
-
-                                    # Warn about orphaned streams
-                                    orphaned = [s for s in original_streams if s not in streams_for_contour]
-                                    if orphaned:
-                                        print(f"  [WARNING] Streams {orphaned} were originally assigned here but user deselected them")
-                                        print(f"  [WARNING] These streams may not have proper contours at this level!")
                                 else:
-                                    print(f"  [BP Transform] Using manual cut result for level {level_i}, contour {contour_i}")
-                                    print(f"  [BP Transform] streams_for_contour = {streams_for_contour} ({len(streams_for_contour)} streams)")
-                                    print(f"  [BP Transform] cut_contours has {len(cut_contours)} pieces")
-                                    if len(cut_contours) < len(streams_for_contour):
-                                        print(f"  [WARNING] MISMATCH! {len(streams_for_contour)} streams need pieces but only {len(cut_contours)} available!")
-                                        print(f"  [WARNING] {len(streams_for_contour) - len(cut_contours)} streams will get FALLBACK (uncut target)")
-                                    for s in streams_for_contour:
-                                        # Manual cut results are indexed by stream, not position
-                                        if s < len(cut_contours):
-                                            piece = cut_contours[s]
-                                            if piece is not None:
-                                                print(f"  [BP Transform] cut_contours[{s}] ({len(piece)} verts) for stream {s}")
-                                            else:
-                                                print(f"  [BP Transform] cut_contours[{s}] is None! Stream {s} will get fallback")
-                                        else:
-                                            print(f"  [BP Transform] Stream {s} out of range (cut_contours len={len(cut_contours)})")
+                                    # Only warn on mismatches
+                                    if valid_count < len(streams_for_contour):
+                                        print(f"  [WARNING] Level {level_i}: {len(streams_for_contour)} streams need pieces but only {valid_count} valid")
                                 # Don't delete - keep for potential re-runs
                             # Check old format (single target result in _manual_cut_data)
                             elif self._manual_cut_data is not None and 'cut_result' in self._manual_cut_data:
                                 cut_contours = self._manual_cut_data['cut_result']
                                 cutting_info = None
                                 has_manual_result = True
-                                print(f"  [BP Transform] Using manual cut result (legacy format)")
-                                print(f"  [BP Transform] streams_for_contour = {streams_for_contour}")
-                                print(f"  [BP Transform] cut_contours[0] will go to stream {streams_for_contour[0]}")
-                                print(f"  [BP Transform] cut_contours[1] will go to stream {streams_for_contour[1]}")
-                                # Clear manual cut data after using it
                                 self._manual_cut_data = None
 
                             if not has_manual_result:
@@ -11087,11 +11046,6 @@ class ContourMeshMixin:
                         # We must NOT compact it or we'll lose the stream mapping!
                         valid_cut_indices = [i for i, c in enumerate(cut_contours) if c is not None]
                         valid_cut_contours = [cut_contours[i] for i in valid_cut_indices]
-                        num_valid_pieces = len(valid_cut_contours)
-                        if num_valid_pieces < len(cut_contours):
-                            print(f"  [WARNING] cut_contours has {len(cut_contours) - num_valid_pieces} None entries, using {num_valid_pieces} valid pieces")
-                            # DON'T reassign cut_contours! It's indexed by stream for manual results.
-                            # Only use valid_cut_contours for centroids/counting, NOT for direct indexing.
                         cut_centroids = [np.mean(c, axis=0) for c in valid_cut_contours]
                         prev_centroids = [np.mean(stream_contours[s][-1], axis=0) for s in streams_for_contour]
 
@@ -11151,9 +11105,7 @@ class ContourMeshMixin:
                             print(f"  [EXPANSION] max_stream_count: {old_max_stream_count} -> {max_stream_count}")
                             print(f"  [EXPANSION] streams_for_contour: {streams_for_contour}")
 
-                        # Assign cut pieces to streams
-                        print(f"[BP Transform DEBUG] Assigning pieces to streams_for_contour={streams_for_contour}")
-                        # Build greedy matching data for fallback
+                        # Assign cut pieces to streams (silent unless errors)
                         greedy_used_pieces = set()
                         valid_cut_pieces = [(i, c) for i, c in enumerate(cut_contours) if c is not None]
                         valid_cut_centroids = [(i, np.mean(c, axis=0)) for i, c in valid_cut_pieces]
@@ -11165,12 +11117,9 @@ class ContourMeshMixin:
                             if has_manual_result:
                                 if stream_i < len(cut_contours) and cut_contours[stream_i] is not None:
                                     cut_contour = cut_contours[stream_i]
-                                    # Mark this piece as used for greedy fallback
                                     greedy_used_pieces.add(stream_i)
-                                    print(f"  [Direct Index] Stream {stream_i} gets cut_contours[{stream_i}] ({len(cut_contour)} verts)")
                                 else:
                                     # Direct indexing failed - fall back to greedy centroid matching
-                                    print(f"  [WARNING] Stream {stream_i}: no piece at cut_contours[{stream_i}], trying greedy match")
                                     # Get previous centroid for this stream
                                     if len(stream_contours[stream_i]) > 0:
                                         prev_centroid = np.mean(stream_contours[stream_i][-1], axis=0)
@@ -11193,9 +11142,8 @@ class ContourMeshMixin:
                                     if best_idx is not None:
                                         greedy_used_pieces.add(best_idx)
                                         cut_contour = cut_contours[best_idx]
-                                        print(f"  [Greedy Fallback] Stream {stream_i} gets cut_contours[{best_idx}] ({len(cut_contour)} verts)")
                                     else:
-                                        print(f"  [ERROR] Stream {stream_i}: no available piece for greedy match, using target")
+                                        print(f"  [ERROR] Stream {stream_i}: no piece available, using target")
                                         cut_contour = target_contour
                             else:
                                 # Automatic cutting: use greedy centroid matching
@@ -11270,14 +11218,6 @@ class ContourMeshMixin:
                             # Store original cut_contour (not modified by find_contour_match)
                             stream_contours[stream_i].append(np.array(cut_contour))
                             stream_bounding_planes[stream_i].append(new_bp)
-                            # Debug: show what was appended
-                            cut_centroid = np.mean(cut_contour, axis=0) if len(cut_contour) > 0 else [0,0,0]
-                            print(f"  [APPEND] stream_contours[{stream_i}] <- {len(cut_contour)} verts (original), id={id(cut_contour)}, centroid={cut_centroid}")
-
-                # Debug: show state after processing this level's cuts
-                for s in range(min(max_stream_count, 2)):
-                    if len(stream_bounding_planes[s]) > 0:
-                        last_scalar = stream_bounding_planes[s][-1].get('scalar_value', 'unknown')
 
         # If we processed in reverse order, reverse the results
         if origin_count < insertion_count:
