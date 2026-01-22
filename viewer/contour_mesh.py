@@ -13152,72 +13152,31 @@ class ContourMeshMixin:
                 boundary_pt = target_contour[v_idx_a] + t * (target_contour[v_idx_b] - target_contour[v_idx_a])
                 return t, boundary_pt
 
-            # Use pre-computed shared boundary from self._shared_cut_edge_2d if available
-            # This was computed during optimization and is more reliable
-            shared_boundary = None
-            if hasattr(self, '_shared_cut_edge_2d') and self._shared_cut_edge_2d is not None and len(self._shared_cut_edge_2d) >= 2:
-                from shapely.geometry import LineString as SharedLS
-                shared_boundary = SharedLS(self._shared_cut_edge_2d)
-
-            # Fallback: compute shared boundary from polygon intersection
-            if shared_boundary is None:
-                overlap_region = poly_a.intersection(poly_b)
-                if not overlap_region.is_empty:
-                    if hasattr(overlap_region, 'boundary') and overlap_region.boundary is not None:
-                        shared_boundary = overlap_region.boundary
-                if shared_boundary is None or shared_boundary.is_empty:
-                    shared_boundary = poly_a.exterior.intersection(poly_b.exterior)
-
-            # Try to find actual intersection of target edge with shared boundary
+            # Use cutting_line_2d (point + direction) to find where it crosses this target edge
+            # The cutting line is derived from the shared boundary between sources
+            # It's an infinite line, so we find where it intersects the target edge
             t = 0.5  # Default
             method_used = "default"
 
-            if shared_boundary is not None and not shared_boundary.is_empty:
-                int_pt = target_edge.intersection(shared_boundary)
-                if not int_pt.is_empty:
-                    if int_pt.geom_type == 'Point':
-                        int_coords = np.array(int_pt.coords[0])
-                        if edge_len > 1e-10:
-                            t = np.linalg.norm(int_coords - p_a) / edge_len
-                            t = np.clip(t, 0.0, 1.0)
-                        method_used = f"Point intersection at ({int_coords[0]:.6f},{int_coords[1]:.6f})"
-                        boundary_pt = target_contour[v_idx_a] + t * (target_contour[v_idx_b] - target_contour[v_idx_a])
-                        print(f"    [CUT DEBUG] edge {v_idx_a}->{v_idx_b}: {method_used}, t={t:.3f}")
-                        return t, boundary_pt
-                    elif int_pt.geom_type == 'MultiPoint':
-                        int_coords = np.array(int_pt.geoms[0].coords[0])
-                        if edge_len > 1e-10:
-                            t = np.linalg.norm(int_coords - p_a) / edge_len
-                            t = np.clip(t, 0.0, 1.0)
-                        method_used = f"MultiPoint[0] at ({int_coords[0]:.6f},{int_coords[1]:.6f})"
-                        boundary_pt = target_contour[v_idx_a] + t * (target_contour[v_idx_b] - target_contour[v_idx_a])
-                        print(f"    [CUT DEBUG] edge {v_idx_a}->{v_idx_b}: {method_used}, t={t:.3f}")
-                        return t, boundary_pt
-                    elif int_pt.geom_type == 'LineString':
-                        int_coords = np.array(int_pt.centroid.coords[0])
-                        if edge_len > 1e-10:
-                            t = np.linalg.norm(int_coords - p_a) / edge_len
-                            t = np.clip(t, 0.0, 1.0)
-                        method_used = f"LineString centroid at ({int_coords[0]:.6f},{int_coords[1]:.6f})"
-                        boundary_pt = target_contour[v_idx_a] + t * (target_contour[v_idx_b] - target_contour[v_idx_a])
-                        print(f"    [CUT DEBUG] edge {v_idx_a}->{v_idx_b}: {method_used}, t={t:.3f}")
-                        return t, boundary_pt
-                    else:
-                        method_used = f"unknown int_pt type: {int_pt.geom_type}"
+            if cutting_line_2d is not None:
+                line_point, line_dir = cutting_line_2d
+                # Line normal (perpendicular to line direction)
+                line_normal = np.array([-line_dir[1], line_dir[0]])
 
-                # No direct intersection - find nearest point on shared boundary
-                edge_mid = (p_a + p_b) / 2
-                edge_mid_pt = ShapelyPoint(edge_mid)
-                try:
-                    _, nearest = nearest_points(edge_mid_pt, shared_boundary)
-                    closest_pt = np.array(nearest.coords[0])
-                    # Project closest_pt onto the edge to get t
-                    if edge_len > 1e-10:
-                        t_raw = np.dot(closest_pt - p_a, edge_vec) / (edge_len * edge_len)
-                        t = np.clip(t_raw, 0.0, 1.0)
-                    method_used = f"nearest_points at ({closest_pt[0]:.6f},{closest_pt[1]:.6f}), t_raw={t_raw:.3f}"
-                except Exception as e:
-                    method_used = f"nearest_points failed: {e}"
+                # Find where target edge crosses the cutting line
+                # Edge: P = p_a + t * edge_vec
+                # Line: (P - line_point) · line_normal = 0
+                # Solve: t = (line_point - p_a) · line_normal / (edge_vec · line_normal)
+                denom = np.dot(edge_vec, line_normal)
+                if abs(denom) > 1e-10:
+                    t_raw = np.dot(line_point - p_a, line_normal) / denom
+                    t = np.clip(t_raw, 0.0, 1.0)
+                    int_coords = p_a + t * edge_vec
+                    method_used = f"cutting_line at ({int_coords[0]:.6f},{int_coords[1]:.6f}), t_raw={t_raw:.3f}"
+                else:
+                    method_used = "edge parallel to cutting line"
+            else:
+                method_used = "no cutting_line_2d"
 
             print(f"    [CUT DEBUG] edge {v_idx_a}->{v_idx_b}: {method_used}, t={t:.3f}")
 
