@@ -12810,54 +12810,64 @@ class ContourMeshMixin:
             rotated = scaled @ rot.T
             return rotated + np.array([center_tx, center_ty])
 
-        # Find shared boundaries from UNTRANSFORMED sources first
+        # Use shared edges from _compute_shared_edges_for_visualization if available
+        # That function uses direct 3D->2D projection which is more reliable
         if n_pieces >= 2:
             try:
-                # Create polygons from UNTRANSFORMED sources (absolute positions)
-                untransformed_polygons = []
-                for i in range(n_pieces):
-                    abs_vertices = source_2d_shapes[i] + initial_translations[i]
-                    if len(abs_vertices) >= 3:
-                        poly = Polygon(abs_vertices)
-                        if not poly.is_valid:
-                            poly = poly.buffer(0)
-                        untransformed_polygons.append(poly)
-                        print(f"  [BP Transform] Source {i}: {len(abs_vertices)} verts, valid={poly.is_valid}")
-                    else:
-                        untransformed_polygons.append(None)
-                        print(f"  [BP Transform] Source {i}: too few verts ({len(abs_vertices)})")
+                # Check if we already have shared edges computed
+                pre_computed_edges = getattr(self, '_shared_cut_edges_2d', [])
+                if pre_computed_edges and len(pre_computed_edges) > 0:
+                    print(f"  [BP Transform] Using {len(pre_computed_edges)} pre-computed shared edges from visualization")
+                    untransformed_shared_edges = list(pre_computed_edges)
+                    # Clear _shared_cut_edges_2d - we'll repopulate with transformed edges
+                    self._shared_cut_edges_2d = []
+                else:
+                    # Compute from untransformed sources
+                    print(f"  [BP Transform] No pre-computed shared edges, computing from sources")
+                    untransformed_polygons = []
+                    for i in range(n_pieces):
+                        abs_vertices = source_2d_shapes[i] + initial_translations[i]
+                        if len(abs_vertices) >= 3:
+                            poly = Polygon(abs_vertices)
+                            if not poly.is_valid:
+                                poly = poly.buffer(0)
+                            untransformed_polygons.append(poly)
+                            print(f"  [BP Transform] Source {i}: {len(abs_vertices)} verts, valid={poly.is_valid}")
+                        else:
+                            untransformed_polygons.append(None)
+                            print(f"  [BP Transform] Source {i}: too few verts ({len(abs_vertices)})")
 
-                # Find shared edges from untransformed sources
-                untransformed_shared_edges = []  # [(pair_indices, points), ...]
-                for i in range(n_pieces):
-                    for j in range(i + 1, n_pieces):
-                        poly_i = untransformed_polygons[i]
-                        poly_j = untransformed_polygons[j]
-                        if poly_i is None or poly_j is None:
-                            continue
+                    # Find shared edges from untransformed sources
+                    untransformed_shared_edges = []  # [(pair_indices, points), ...]
+                    for i in range(n_pieces):
+                        for j in range(i + 1, n_pieces):
+                            poly_i = untransformed_polygons[i]
+                            poly_j = untransformed_polygons[j]
+                            if poly_i is None or poly_j is None:
+                                continue
 
-                        try:
-                            # Find shared boundary between this pair
-                            shared_boundary = poly_i.exterior.intersection(poly_j.exterior)
-                            print(f"  [BP Transform] Untransformed pair {i}-{j} intersection: {shared_boundary.geom_type if shared_boundary and not shared_boundary.is_empty else 'empty'}")
+                            try:
+                                # Find shared boundary between this pair
+                                shared_boundary = poly_i.exterior.intersection(poly_j.exterior)
+                                print(f"  [BP Transform] Untransformed pair {i}-{j} intersection: {shared_boundary.geom_type if shared_boundary and not shared_boundary.is_empty else 'empty'}")
 
-                            if shared_boundary is None or shared_boundary.is_empty:
-                                # Try overlap boundary
-                                overlap = poly_i.intersection(poly_j)
-                                if overlap is not None and not overlap.is_empty and hasattr(overlap, 'boundary'):
-                                    shared_boundary = overlap.boundary
+                                if shared_boundary is None or shared_boundary.is_empty:
+                                    # Try overlap boundary
+                                    overlap = poly_i.intersection(poly_j)
+                                    if overlap is not None and not overlap.is_empty and hasattr(overlap, 'boundary'):
+                                        shared_boundary = overlap.boundary
 
-                            shared_points = []
-                            if shared_boundary is not None and not shared_boundary.is_empty:
-                                shared_points = extract_line_coords(shared_boundary)
+                                shared_points = []
+                                if shared_boundary is not None and not shared_boundary.is_empty:
+                                    shared_points = extract_line_coords(shared_boundary)
 
-                            if len(shared_points) >= 2:
-                                untransformed_shared_edges.append(((i, j), np.array(shared_points)))
-                                print(f"  [BP Transform] Untransformed shared edge {i}-{j}: {len(shared_points)} points")
-                            else:
-                                print(f"  [BP Transform] Untransformed pair {i}-{j}: no shared edge ({len(shared_points)} points)")
-                        except Exception as e:
-                            print(f"  [BP Transform] Error finding untransformed shared edge {i}-{j}: {e}")
+                                if len(shared_points) >= 2:
+                                    untransformed_shared_edges.append(((i, j), np.array(shared_points)))
+                                    print(f"  [BP Transform] Untransformed shared edge {i}-{j}: {len(shared_points)} points")
+                                else:
+                                    print(f"  [BP Transform] Untransformed pair {i}-{j}: no shared edge ({len(shared_points)} points)")
+                            except Exception as e:
+                                print(f"  [BP Transform] Error finding untransformed shared edge {i}-{j}: {e}")
 
                 # Now transform the shared edges using the optimization parameters
                 if not use_separate_transforms:
