@@ -13456,7 +13456,7 @@ class ContourMeshMixin:
                 for c1_idx, c2_idx, owner, pt3d_1, pt3d_2 in segment_owners:
                     piece_segments[owner].append((c1_idx, c2_idx, pt3d_1, pt3d_2))
 
-                # Step 3: For each piece, assemble segments in order (may need shared boundaries between)
+                # Step 3: For each piece, assemble segments in order with proper closing
                 for piece_idx in range(n_pieces):
                     segments = piece_segments[piece_idx]
                     if len(segments) == 0:
@@ -13475,7 +13475,7 @@ class ContourMeshMixin:
                         edge1, t1, _, _, pair1 = c1
                         edge2, t2, _, _, pair2 = c2
 
-                        # Add crossing point at start
+                        # Add crossing point at start of segment
                         piece_boundary.append(pt3d_1)
 
                         # Add target vertices between crossings
@@ -13489,13 +13489,21 @@ class ContourMeshMixin:
 
                         print(f"  [BP Transform] Piece {piece_idx}: target segment c{c1_idx}->c{c2_idx}, {seg_verts+1} verts")
 
-                        # Check if we need shared boundary to next segment
-                        if len(segments) > 1:
-                            next_seg_i = (seg_i + 1) % len(segments)
-                            next_c1_idx = segments[next_seg_i][0]
+                        # Add end crossing point
+                        piece_boundary.append(pt3d_2)
 
-                            # If next segment doesn't start where this one ends, we need shared boundary
+                        # Check if we need shared boundary to next segment (or to close)
+                        next_seg_i = (seg_i + 1) % len(segments)
+                        if next_seg_i == 0:
+                            # Last segment - check if we need to close back to first segment
+                            first_c1_idx = segments[0][0]
+                            if first_c1_idx != c2_idx:
+                                # Need shared boundary from this segment's end to first segment's start
+                                print(f"  [BP Transform] Piece {piece_idx}: shared boundary c{c2_idx}->c{first_c1_idx} (closing)")
+                        else:
+                            next_c1_idx = segments[next_seg_i][0]
                             if next_c1_idx != c2_idx:
+                                # Gap between segments - shared boundary
                                 print(f"  [BP Transform] Piece {piece_idx}: shared boundary c{c2_idx}->c{next_c1_idx} (straight edge)")
 
                     new_contours[piece_idx] = piece_boundary
