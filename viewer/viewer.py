@@ -1916,29 +1916,46 @@ class GLFWApp():
                         # Step names matching button order (1=top, 12=bottom)
                         # 1:Scalar, 2:Contours, 3:FillGap, 4:Transitions, 5:Smooth, 6:Cut, 7:StreamSmooth, 8:Select, 9:Build, 10:Resample, 11:Mesh, 12:Tet
                         step_names = ['', 'Scalar', 'Contours', 'Fill Gap', 'Transitions', 'Smooth', 'Cut', 'StreamSmooth', 'Select', 'Build', 'Resample', 'Mesh', 'Tet']
-                        if imgui.button(f"Process\n1 to {obj._process_step}\n({step_names[obj._process_step]})##{name}", width=75, height=process_all_height):
+
+                        # Check if pipeline is paused waiting for manual step
+                        pipeline_paused = hasattr(obj, '_pipeline_paused_at') and obj._pipeline_paused_at is not None
+
+                        # Button label changes if paused
+                        if pipeline_paused:
+                            btn_label = f"Resume\nfrom {obj._pipeline_paused_at}\n({step_names[obj._pipeline_paused_at]})"
+                        else:
+                            btn_label = f"Process\n1 to {obj._process_step}\n({step_names[obj._process_step]})"
+
+                        if imgui.button(f"{btn_label}##{name}", width=75, height=process_all_height):
                             try:
                                 max_step = obj._process_step
-                                print(f"[{name}] Running pipeline steps 1 to {max_step}...")
+                                # If resuming, start from paused step
+                                if pipeline_paused:
+                                    start_step = obj._pipeline_paused_at
+                                    obj._pipeline_paused_at = None
+                                    print(f"[{name}] Resuming pipeline from step {start_step} to {max_step}...")
+                                else:
+                                    start_step = 1
+                                    print(f"[{name}] Running pipeline steps 1 to {max_step}...")
 
                                 # Step 1: Scalar Field
-                                if max_step >= 1 and len(obj.edge_groups) > 0 and len(obj.edge_classes) > 0:
+                                if start_step <= 1 <= max_step and len(obj.edge_groups) > 0 and len(obj.edge_classes) > 0:
                                     print(f"  [1/{max_step}] Computing Scalar Field...")
                                     obj.compute_scalar_field()
 
                                 # Step 2: Find Contours
-                                if max_step >= 2 and obj.scalar_field is not None:
+                                if start_step <= 2 <= max_step and obj.scalar_field is not None:
                                     print(f"  [2/{max_step}] Finding Contours...")
                                     obj.find_contours(skeleton_meshes=self.zygote_skeleton_meshes, spacing_scale=obj.contour_spacing_scale)
                                     obj.is_draw_bounding_box = True
 
                                 # Step 3: Fill Gaps
-                                if max_step >= 3 and obj.contours is not None and len(obj.contours) > 0:
+                                if start_step <= 3 <= max_step and obj.contours is not None and len(obj.contours) > 0:
                                     print(f"  [3/{max_step}] Filling Gaps...")
                                     obj.refine_contours(max_spacing_threshold=0.01)
 
                                 # Step 4: Find Transitions
-                                if max_step >= 4 and obj.scalar_field is not None:
+                                if start_step <= 4 <= max_step and obj.scalar_field is not None:
                                     print(f"  [4/{max_step}] Finding Transitions...")
                                     field_min = float(obj.scalar_field.min())
                                     field_max = float(obj.scalar_field.max())
@@ -1957,50 +1974,56 @@ class GLFWApp():
                                         obj.add_transitions_to_contours()
 
                                 # Step 5: Smooth (z, x, bp - before cut)
-                                if max_step >= 5 and obj.contours is not None and len(obj.contours) > 0:
+                                if start_step <= 5 <= max_step and obj.contours is not None and len(obj.contours) > 0:
                                     print(f"  [5/{max_step}] Smoothening (z, x, bp)...")
                                     obj.smoothen_contours_z()
                                     obj.smoothen_contours_x()
                                     obj.smoothen_contours_bp()
 
                                 # Step 6: Cut
-                                if max_step >= 6 and obj.contours is not None and len(obj.contours) > 0 and obj.bounding_planes is not None:
+                                if start_step <= 6 <= max_step and obj.contours is not None and len(obj.contours) > 0 and obj.bounding_planes is not None:
                                     print(f"  [6/{max_step}] Cutting streams...")
                                     obj.cut_streams(cut_method=obj.cutting_method, muscle_name=name)
                                     # Check if waiting for manual cut
-                                    if obj._manual_cut_pending or obj._manual_cut_data is not None:
+                                    if hasattr(obj, '_manual_cut_pending') and obj._manual_cut_pending or hasattr(obj, '_manual_cut_data') and obj._manual_cut_data is not None:
+                                        obj._pipeline_paused_at = 7  # Resume from step 7 after cut is complete
                                         print(f"  [6/{max_step}] Waiting for manual cut - pipeline paused")
                                         raise StopIteration("Manual cut pending")
 
                                 # Step 7: Stream Smooth (z, x, bp - after cut)
-                                if max_step >= 7 and hasattr(obj, 'stream_contours') and obj.stream_contours is not None:
+                                if start_step <= 7 <= max_step and hasattr(obj, 'stream_contours') and obj.stream_contours is not None:
                                     print(f"  [7/{max_step}] Stream Smoothening (z, x, bp)...")
                                     obj.smoothen_contours_z()
                                     obj.smoothen_contours_x()
                                     obj.smoothen_contours_bp()
 
                                 # Step 8: Contour Select
-                                if max_step >= 8 and hasattr(obj, 'stream_contours') and obj.stream_contours is not None:
+                                if start_step <= 8 <= max_step and hasattr(obj, 'stream_contours') and obj.stream_contours is not None:
                                     print(f"  [8/{max_step}] Selecting contours...")
                                     obj.select_levels()
+                                    # Check if waiting for manual level selection
+                                    if hasattr(obj, '_level_select_window_open') and obj._level_select_window_open:
+                                        obj._pipeline_paused_at = 9  # Resume from step 9 after selection
+                                        print(f"  [8/{max_step}] Waiting for level selection - pipeline paused")
+                                        raise StopIteration("Level selection pending")
 
                                 # Step 9: Build Fiber
-                                if max_step >= 9 and hasattr(obj, 'stream_contours') and obj.stream_contours is not None:
+                                if start_step <= 9 <= max_step and hasattr(obj, 'stream_contours') and obj.stream_contours is not None:
                                     print(f"  [9/{max_step}] Building fibers...")
                                     obj.build_fibers(skeleton_meshes=self.zygote_skeleton_meshes)
 
                                 # Step 10: Resample Contours
-                                if max_step >= 10 and obj.contours is not None and len(obj.contours) > 0 and obj.bounding_planes is not None:
+                                if start_step <= 10 <= max_step and obj.contours is not None and len(obj.contours) > 0 and obj.bounding_planes is not None:
                                     print(f"  [10/{max_step}] Resampling Contours...")
                                     obj.resample_contours(base_samples=32)
 
                                 # Step 11: Build Contour Mesh
-                                if max_step >= 11 and obj.contours is not None and len(obj.contours) > 0 and obj.draw_contour_stream is not None:
+                                if start_step <= 11 <= max_step and obj.contours is not None and len(obj.contours) > 0 and obj.draw_contour_stream is not None:
                                     print(f"  [11/{max_step}] Building Contour Mesh...")
                                     obj.build_contour_mesh()
 
                                 # Step 12: Tetrahedralize
-                                if max_step >= 12 and obj.contour_mesh_vertices is not None:
+                                if start_step <= 12 <= max_step and obj.contour_mesh_vertices is not None:
                                     print(f"  [12/{max_step}] Tetrahedralizing...")
                                     obj.soft_body = None
                                     obj.tetrahedralize_contour_mesh()
@@ -2008,7 +2031,8 @@ class GLFWApp():
                                         obj.is_draw_contours = False
                                         obj.is_draw_tet_mesh = True
 
-                                print(f"[{name}] Pipeline complete (steps 1-{max_step})!")
+                                obj._pipeline_paused_at = None  # Clear pause state on completion
+                                print(f"[{name}] Pipeline complete (steps {start_step}-{max_step})!")
                             except StopIteration:
                                 pass  # Manual cut pending - pipeline paused gracefully
                             except Exception as e:
