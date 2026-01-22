@@ -13362,17 +13362,14 @@ class ContourMeshMixin:
                     print(f"    Piece {pi}: {len(p)} verts, first=({p_2d[0,0]:.6f}, {p_2d[0,1]:.6f}), last=({p_2d[-1,0]:.6f}, {p_2d[-1,1]:.6f})")
 
             else:
-                # N-piece case: Use vertex assignments directly instead of crossing-based walk
-                # This handles cases where not all sources share edges with each other
-
-                # Collect crossing points for shared boundary
-                for c in all_crossings:
-                    shared_boundary_points.append(c[3])  # pt_3d
+                # N-piece case: Use vertex assignments directly
+                # Walk around contour, adding vertices to pieces based on assignments
+                # Add boundary points ONLY where assignments change
 
                 print(f"  [BP Transform] N-piece cut using vertex assignments")
                 print(f"  [BP Transform] Assignment counts: {[assignments.count(i) for i in range(n_pieces)]}")
 
-                # Build map: edge_idx -> crossing info (for inserting cut points)
+                # Build map: edge_idx -> crossing info
                 edge_to_crossing = {}
                 for c in all_crossings:
                     edge_idx = c[0]
@@ -13381,7 +13378,6 @@ class ContourMeshMixin:
                     edge_to_crossing[edge_idx].append(c)
 
                 # Walk around contour using vertex assignments
-                # Insert crossing points at piece boundaries
                 for v_idx in range(n_verts):
                     current_piece = assignments[v_idx]
                     next_v_idx = (v_idx + 1) % n_verts
@@ -13390,41 +13386,33 @@ class ContourMeshMixin:
                     # Add vertex to its assigned piece
                     new_contours[current_piece].append(target_contour[v_idx])
 
-                    # Check if there's a crossing on this edge
-                    if v_idx in edge_to_crossing:
-                        crossings_on_edge = edge_to_crossing[v_idx]
-                        # Sort by t value if multiple crossings
-                        crossings_on_edge.sort(key=lambda c: c[1])
+                    # Only add boundary points where assignment CHANGES
+                    if current_piece != next_piece:
+                        # Find crossing point on this edge if it exists
+                        boundary_pt = None
+                        if v_idx in edge_to_crossing:
+                            # Use the crossing point that involves both pieces
+                            for crossing in edge_to_crossing[v_idx]:
+                                pair = crossing[4]
+                                if current_piece in pair and next_piece in pair:
+                                    boundary_pt = crossing[3]  # pt_3d
+                                    shared_boundary_points.append(boundary_pt)
+                                    print(f"  [BP Transform] Edge {v_idx}: boundary {current_piece}->{next_piece} using crossing {pair}")
+                                    break
 
-                        for crossing in crossings_on_edge:
-                            pt_3d = crossing[3]
-                            pair_indices = crossing[4]
+                        if boundary_pt is None:
+                            # No exact crossing - interpolate boundary at edge midpoint
+                            pt_a = target_contour[v_idx]
+                            pt_b = target_contour[next_v_idx]
+                            boundary_pt = (pt_a + pt_b) / 2
+                            shared_boundary_points.append(boundary_pt)
+                            print(f"  [BP Transform] Edge {v_idx}: boundary {current_piece}->{next_piece} (interpolated)")
 
-                            # Add crossing point to BOTH pieces in the pair
-                            # The crossing is the actual cut boundary between these two pieces
-                            new_contours[pair_indices[0]].append(pt_3d)
-                            new_contours[pair_indices[1]].append(pt_3d)
+                        # Add boundary point to both pieces
+                        new_contours[current_piece].append(boundary_pt)
+                        new_contours[next_piece].append(boundary_pt)
 
-                            print(f"  [BP Transform] Edge {v_idx}: crossing {pair_indices}, assignment {current_piece} -> {next_piece}")
-
-                    # If piece changes without a crossing, still need to handle boundary
-                    elif current_piece != next_piece:
-                        # No explicit crossing found - pieces change at edge boundary
-                        # This can happen when sources don't share an edge at this location
-                        print(f"  [BP Transform] Edge {v_idx}: piece change {current_piece} -> {next_piece} (no crossing)")
-
-                # Reorder vertices within each piece to form a proper contour
-                # The vertices may not be contiguous, so we need to sort by angle from centroid
-                for piece_idx in range(n_pieces):
-                    if len(new_contours[piece_idx]) >= 3:
-                        piece_verts = np.array(new_contours[piece_idx])
-                        piece_2d = np.array([[np.dot(v - target_mean, target_x), np.dot(v - target_mean, target_y)] for v in piece_verts])
-                        piece_centroid = np.mean(piece_2d, axis=0)
-
-                        # Sort by angle from centroid
-                        angles = np.arctan2(piece_2d[:, 1] - piece_centroid[1], piece_2d[:, 0] - piece_centroid[0])
-                        sorted_indices = np.argsort(angles)
-                        new_contours[piece_idx] = [new_contours[piece_idx][i] for i in sorted_indices]
+                # Vertices are already in correct order from the walk - no sorting needed
 
             for piece_idx in range(n_pieces):
                 print(f"  [BP Transform] Piece {piece_idx}: {len(new_contours[piece_idx])} verts")
