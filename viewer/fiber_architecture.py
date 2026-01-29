@@ -1860,64 +1860,74 @@ class FiberArchitectureMixin:
         highlight_level = getattr(self, 'inspector_highlight_level', None)
 
         glDisable(GL_LIGHTING)
+        glEnableClientState(GL_VERTEX_ARRAY)
 
-        # Draw waypoints
+        # Collect waypoints by highlight status
+        normal_pts = []
+        highlight_pts = []
+
         for stream_idx, waypoint_group in enumerate(self.waypoints):
-            # Check if stream should be drawn (with bounds check)
             if self.draw_contour_stream is not None and stream_idx < len(self.draw_contour_stream) and self.draw_contour_stream[stream_idx]:
                 for level_idx, waypoints in enumerate(waypoint_group):
                     is_highlighted = (highlight_stream == stream_idx and highlight_level == level_idx)
-
                     if is_highlighted:
-                        glPointSize(5)
-                        glColor4f(0.3, 0.6, 0.9, 1)  # Subtle blue
+                        highlight_pts.extend(waypoints)
                     else:
-                        glPointSize(3)
-                        glColor4f(1, 0, 0, 1)  # Red
+                        normal_pts.extend(waypoints)
 
-                    glBegin(GL_POINTS)
-                    for p in waypoints:
-                        glVertex3fv(p)
-                    glEnd()
+        # Draw normal waypoints (red)
+        if len(normal_pts) > 0:
+            glPointSize(3)
+            glColor4f(1, 0, 0, 1)
+            pts = np.array(normal_pts, dtype=np.float32)
+            glVertexPointer(3, GL_FLOAT, 0, pts)
+            glDrawArrays(GL_POINTS, 0, len(pts))
 
-        # Draw fiber lines
+        # Draw highlighted waypoints (blue)
+        if len(highlight_pts) > 0:
+            glPointSize(5)
+            glColor4f(0.3, 0.6, 0.9, 1)
+            pts = np.array(highlight_pts, dtype=np.float32)
+            glVertexPointer(3, GL_FLOAT, 0, pts)
+            glDrawArrays(GL_POINTS, 0, len(pts))
+
+        # Collect fiber lines
+        fiber_lines = []
         glLineWidth(2)
         glColor4f(0.75, 0, 0, 1)  # Dark red
         for stream_idx, waypoint_group in enumerate(self.waypoints):
-            # Check if stream should be drawn (with bounds check)
             if self.draw_contour_stream is not None and stream_idx < len(self.draw_contour_stream) and self.draw_contour_stream[stream_idx]:
                 for contour_idx in range(len(waypoint_group) - 1):
-                    glBegin(GL_LINES)
                     for p1, p2 in zip(waypoint_group[contour_idx], waypoint_group[contour_idx + 1]):
-                        glVertex3fv(p1)
-                        glVertex3fv(p2)
-                    glEnd()
+                        fiber_lines.append(p1)
+                        fiber_lines.append(p2)
+
+        if len(fiber_lines) > 0:
+            lines = np.array(fiber_lines, dtype=np.float32)
+            glVertexPointer(3, GL_FLOAT, 0, lines)
+            glDrawArrays(GL_LINES, 0, len(lines))
 
         # Draw test fiber (blue) if available
         test_waypoints = getattr(self, 'test_fiber_waypoints', None)
         test_stream_idx = getattr(self, 'test_fiber_stream_idx', None)
         if test_waypoints is not None and test_stream_idx is not None:
-            # Check if stream should be drawn
             if self.draw_contour_stream is not None and test_stream_idx < len(self.draw_contour_stream) and self.draw_contour_stream[test_stream_idx]:
-                # Draw test waypoints (blue, larger)
-                glPointSize(5)
-                glColor4f(0.2, 0.4, 1.0, 1.0)  # Blue
-                glBegin(GL_POINTS)
-                for waypoint in test_waypoints:
-                    if waypoint is not None:
-                        glVertex3fv(waypoint)
-                glEnd()
-
-                # Draw test fiber lines (blue)
-                glLineWidth(3)
-                glColor4f(0.2, 0.4, 1.0, 1.0)  # Blue
                 valid_waypoints = [w for w in test_waypoints if w is not None]
-                if len(valid_waypoints) >= 2:
-                    glBegin(GL_LINE_STRIP)
-                    for waypoint in valid_waypoints:
-                        glVertex3fv(waypoint)
-                    glEnd()
+                if len(valid_waypoints) > 0:
+                    # Draw test waypoints (blue, larger)
+                    glPointSize(5)
+                    glColor4f(0.2, 0.4, 1.0, 1.0)
+                    pts = np.array(valid_waypoints, dtype=np.float32)
+                    glVertexPointer(3, GL_FLOAT, 0, pts)
+                    glDrawArrays(GL_POINTS, 0, len(pts))
 
+                    # Draw test fiber lines (blue)
+                    if len(valid_waypoints) >= 2:
+                        glLineWidth(3)
+                        glVertexPointer(3, GL_FLOAT, 0, pts)
+                        glDrawArrays(GL_LINE_STRIP, 0, len(pts))
+
+        glDisableClientState(GL_VERTEX_ARRAY)
         glEnable(GL_LIGHTING)
 
     def find_waypoints(self, bounding_plane_info, fiber_architecture, is_origin=False):

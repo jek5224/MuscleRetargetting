@@ -916,19 +916,15 @@ class GLFWApp():
         if not hasattr(self, 'inter_muscle_constraints') or len(self.inter_muscle_constraints) == 0:
             return
 
-        from OpenGL.GL import (glPushMatrix, glPopMatrix, glDisable, glEnable,
-                               glBegin, glEnd, glVertex3fv, glColor4f, glLineWidth,
-                               GL_LIGHTING, GL_LINES, GL_BLEND, glBlendFunc,
-                               GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
-        import numpy as np
-
         glPushMatrix()
         glDisable(GL_LIGHTING)
         glEnable(GL_BLEND)
         glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
         glLineWidth(2.0)
 
-        glBegin(GL_LINES)
+        # Build vertex and color arrays
+        verts = []
+        colors = []
         for constraint in self.inter_muscle_constraints:
             name1, v1_idx, v1_fixed, name2, v2_idx, v2_fixed, rest_dist = constraint
 
@@ -953,17 +949,29 @@ class GLFWApp():
             # Color based on strain with transparency
             if strain > 0.01:  # Stretched
                 t = min(strain * 5, 1.0)
-                glColor4f(1.0, 1.0 - t * 0.7, 0.3, 0.5)  # Yellow -> Red
+                c = [1.0, 1.0 - t * 0.7, 0.3, 0.5]  # Yellow -> Red
             elif strain < -0.01:  # Compressed
                 t = min(-strain * 5, 1.0)
-                glColor4f(0.3, 1.0, 0.3 + t * 0.7, 0.5)  # Green -> Cyan
+                c = [0.3, 1.0, 0.3 + t * 0.7, 0.5]  # Green -> Cyan
             else:  # Near rest length
-                glColor4f(0.9, 0.9, 0.9, 0.4)  # White/gray
+                c = [0.9, 0.9, 0.9, 0.4]  # White/gray
 
-            glVertex3fv(v1)
-            glVertex3fv(v2)
+            verts.append(v1)
+            verts.append(v2)
+            colors.append(c)
+            colors.append(c)
 
-        glEnd()
+        if len(verts) > 0:
+            verts = np.array(verts, dtype=np.float32)
+            colors = np.array(colors, dtype=np.float32)
+            glEnableClientState(GL_VERTEX_ARRAY)
+            glEnableClientState(GL_COLOR_ARRAY)
+            glVertexPointer(3, GL_FLOAT, 0, verts)
+            glColorPointer(4, GL_FLOAT, 0, colors)
+            glDrawArrays(GL_LINES, 0, len(verts))
+            glDisableClientState(GL_COLOR_ARRAY)
+            glDisableClientState(GL_VERTEX_ARRAY)
+
         glDisable(GL_BLEND)
         glEnable(GL_LIGHTING)
         glPopMatrix()
@@ -1206,13 +1214,12 @@ class GLFWApp():
         if color is not None:
             glColor4d(color[0], color[1], color[2], color[3])
         glLineWidth(self.line_width)
-        idx = 0
-        for m_wps in self.env.test_muscle_pos:  # m_wps = muscle waypoints
-            glBegin(GL_LINE_STRIP)
-            for wp in m_wps:
-                glVertex3f(wp[0], wp[1], wp[2])
-            glEnd() 
-            idx += 1
+        glEnableClientState(GL_VERTEX_ARRAY)
+        for m_wps in self.env.test_muscle_pos:
+            verts = np.array(m_wps, dtype=np.float32)
+            glVertexPointer(3, GL_FLOAT, 0, verts)
+            glDrawArrays(GL_LINE_STRIP, 0, len(verts))
+        glDisableClientState(GL_VERTEX_ARRAY)
 
     def drawMuscles(self, color=None):
         if color is not None:
@@ -1221,6 +1228,7 @@ class GLFWApp():
         if self.draw_line_muscle:
             glDisable(GL_LIGHTING)
             glLineWidth(self.line_width)
+            glEnableClientState(GL_VERTEX_ARRAY)
             for idx, m_wps in enumerate(self.env.muscle_pos):
                 # Bounds check for activation levels
                 if idx < len(self.env.muscle_activation_levels):
@@ -1229,18 +1237,10 @@ class GLFWApp():
                     a = 0.0  # Default activation if index out of bounds
                 if color is None:
                     glColor4d(1.0 * a,  0.2 * a, 0.2 * a, 0.2 + 0.6 * a)
-                glBegin(GL_LINE_STRIP)
-                for wp in m_wps:
-                    glVertex3f(wp[0], wp[1], wp[2])
-                glEnd()
-
-                # # Draw Origin an dInsertion Points
-                # glColor4d(1, 0, 0, 1)
-                # for i in [0, -1]:
-                #     glPushMatrix()
-                #     glTranslatef(m_wps[i][0], m_wps[i][1], m_wps[i][2])
-                #     mygl.draw_sphere(0.003, 10, 10)
-                #     glPopMatrix()
+                verts = np.array(m_wps, dtype=np.float32)
+                glVertexPointer(3, GL_FLOAT, 0, verts)
+                glDrawArrays(GL_LINE_STRIP, 0, len(verts))
+            glDisableClientState(GL_VERTEX_ARRAY)
             glEnable(GL_LIGHTING)
         else:
             for idx, m_wps in enumerate(self.env.muscle_pos):
