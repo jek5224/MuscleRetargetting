@@ -436,10 +436,12 @@ class MeshLoader(ContourMeshMixin, TetrahedronMeshMixin, FiberArchitectureMixin,
         if is_transparent:
             # Two-pass rendering for correct transparency
             glEnable(GL_CULL_FACE)
-            # Pass 1: Draw back faces first
+            # Pass 1: Draw back faces first (with depth write for intra-mesh ordering)
+            glDepthMask(GL_TRUE)
             glCullFace(GL_FRONT)
             self._draw_mesh_arrays(use_color_array)
-            # Pass 2: Draw front faces on top
+            # Pass 2: Draw front faces on top (no depth write to not block other objects)
+            glDepthMask(GL_FALSE)
             glCullFace(GL_BACK)
             self._draw_mesh_arrays(use_color_array)
             glDisable(GL_CULL_FACE)
