@@ -1393,26 +1393,41 @@ class GLFWApp():
                     if obj.is_draw:
                         obj.draw([obj.color[0], obj.color[1], obj.color[2], obj.transparency])
 
+        # ============================================================
+        # PASS 3: Draw DART skeleton/muscle objects (opaque)
+        # ============================================================
+        # Note: draw_bone, draw_joint use alpha=0.5 so always transparent
+        # draw_obj uses self.obj_trans, draw_body uses self.body_trans
+
+        if self.draw_obj and self.obj_trans >= 1.0:
+            self.drawObj(self.env.skel.getPositions())
+        if self.draw_body and self.body_trans >= 1.0:
+            self.drawSkeleton(self.env.skel.getPositions(), np.array([0.5, 0.5, 0.5, self.body_trans]))
+
+        # ============================================================
+        # PASS 4: Draw DART skeleton/muscle objects (transparent)
+        # ============================================================
+        glDepthMask(GL_FALSE)
+
+        if self.draw_target_motion:
+            self.drawSkeleton(self.env.target_pos, np.array([1.0, 0.3, 0.3, 0.5]))
+        if self.draw_bone:
+            self.drawBone(self.env.skel.getPositions())
+        if self.draw_joint:
+            self.drawJoint(self.env.skel.getPositions())
+        if self.draw_obj and self.obj_trans < 1.0:
+            self.drawObj(self.env.skel.getPositions())
+        if self.draw_muscle:
+            self.drawMuscles()
+        if self.draw_body and self.body_trans < 1.0:
+            self.drawSkeleton(self.env.skel.getPositions(), np.array([0.5, 0.5, 0.5, self.body_trans]))
+
         # Restore depth mask
         glDepthMask(GL_TRUE)
 
         # Draw inter-muscle constraints if enabled
         if getattr(self, 'draw_inter_muscle_constraints', False):
             self.draw_inter_muscle_constraint_lines()
-
-        if self.draw_target_motion:
-            self.drawSkeleton(self.env.target_pos, np.array([1.0, 0.3, 0.3, 0.5]))
-        
-        if self.draw_bone:
-            self.drawBone(self.env.skel.getPositions())
-        if self.draw_joint:
-            self.drawJoint(self.env.skel.getPositions())
-        if self.draw_obj:
-            self.drawObj(self.env.skel.getPositions())
-        if self.draw_muscle:
-            self.drawMuscles()
-        if self.draw_body:
-            self.drawSkeleton(self.env.skel.getPositions(), np.array([0.5, 0.5, 0.5, self.body_trans]))
 
         # if self.draw_pd_target:
         #     self.drawSkeleton(self.env.pd_target, np.array([0.3, 0.3, 1.0, 0.5]))
