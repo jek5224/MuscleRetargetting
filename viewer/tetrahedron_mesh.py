@@ -807,7 +807,7 @@ class TetrahedronMeshMixin:
         glDisableClientState(GL_VERTEX_ARRAY)
         glPopMatrix()
 
-    def draw_constraints(self, always_visible=False):
+    def draw_constraints(self):
         """
         Draw soft body constraints visualization:
         - Fixed vertices (red spheres)
@@ -821,9 +821,6 @@ class TetrahedronMeshMixin:
 
         glPushMatrix()
         glDisable(GL_LIGHTING)
-
-        if always_visible:
-            glDepthFunc(GL_ALWAYS)
 
         glEnableClientState(GL_VERTEX_ARRAY)
         verts = self.tet_vertices
@@ -888,9 +885,6 @@ class TetrahedronMeshMixin:
                     glDrawArrays(GL_LINES, 0, len(edge_verts))
 
         glDisableClientState(GL_VERTEX_ARRAY)
-
-        if always_visible:
-            glDepthFunc(GL_LEQUAL)
 
         glEnable(GL_LIGHTING)
         glPopMatrix()

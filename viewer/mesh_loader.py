@@ -478,7 +478,7 @@ class MeshLoader(ContourMeshMixin, TetrahedronMeshMixin, FiberArchitectureMixin,
         glDisableClientState(GL_VERTEX_ARRAY)
         glPopMatrix()
 
-    def draw_edges(self, always_visible=False):
+    def draw_edges(self):
         if len(self.edges) == 0:
             return
 
@@ -496,26 +496,17 @@ class MeshLoader(ContourMeshMixin, TetrahedronMeshMixin, FiberArchitectureMixin,
         glColor4f(0, 0, 0, 1.0)
         glLineWidth(0.5)
 
-        if always_visible:
-            glDepthFunc(GL_ALWAYS)
-
         glEnableClientState(GL_VERTEX_ARRAY)
         glVertexPointer(3, GL_FLOAT, 0, self._edge_verts_cache)
         glDrawArrays(GL_LINES, 0, len(self._edge_verts_cache))
         glDisableClientState(GL_VERTEX_ARRAY)
 
-        if always_visible:
-            glDepthFunc(GL_LEQUAL)
-
         glEnable(GL_LIGHTING)
         glPopMatrix()
 
-    def draw_open_edges(self, color=np.array([0.0, 0.0, 1.0, 1.0]), always_visible=False):
+    def draw_open_edges(self, color=np.array([0.0, 0.0, 1.0, 1.0])):
         glDisable(GL_LIGHTING)
         glPushMatrix()
-
-        if always_visible:
-            glDepthFunc(GL_ALWAYS)
 
         glEnableClientState(GL_VERTEX_ARRAY)
 
@@ -556,21 +547,15 @@ class MeshLoader(ContourMeshMixin, TetrahedronMeshMixin, FiberArchitectureMixin,
 
         glDisableClientState(GL_VERTEX_ARRAY)
 
-        if always_visible:
-            glDepthFunc(GL_LEQUAL)
-
         glPopMatrix()
         glEnable(GL_LIGHTING)
 
-    def draw_centroid(self, always_visible=False):
+    def draw_centroid(self):
         if len(self.centroids) == 0:
             return
 
         glDisable(GL_LIGHTING)
         glPushMatrix()
-
-        if always_visible:
-            glDepthFunc(GL_ALWAYS)
 
         glEnableClientState(GL_VERTEX_ARRAY)
 
@@ -600,9 +585,6 @@ class MeshLoader(ContourMeshMixin, TetrahedronMeshMixin, FiberArchitectureMixin,
                 glDrawArrays(GL_LINES, 0, len(axis_verts))
 
         glDisableClientState(GL_VERTEX_ARRAY)
-
-        if always_visible:
-            glDepthFunc(GL_LEQUAL)
 
         glPopMatrix()
         glEnable(GL_LIGHTING)

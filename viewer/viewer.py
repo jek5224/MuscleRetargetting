@@ -241,7 +241,6 @@ class GLFWApp():
         self.zygote_skeleton_transparency = DEFAULT_OBJ_TRANSPARENCY
         self.is_draw_zygote_skeleton = True
         self.is_draw_one_zygote_skeleton = False
-        self.lines_points_always_visible = True  # Draw lines/points visible through transparent meshes
         self.zygote_muscle_meshes_intersection_bones = {}
 
         # Inter-muscle distance constraints
@@ -1215,12 +1214,9 @@ class GLFWApp():
             glEnd() 
             idx += 1
 
-    def drawMuscles(self, color=None, always_visible=False):
+    def drawMuscles(self, color=None):
         if color is not None:
             glColor4d(color[0], color[1], color[2], color[3])
-
-        if always_visible:
-            glDepthFunc(GL_ALWAYS)
 
         if self.draw_line_muscle:
             glDisable(GL_LIGHTING)
@@ -1277,9 +1273,6 @@ class GLFWApp():
                     mygl.draw_cube([0.01, 0.01, length])
                     glPopMatrix()
 
-        if always_visible:
-            glDepthFunc(GL_LEQUAL)
-
     def drawSimFrame(self):
         initGL()
         
@@ -1317,13 +1310,13 @@ class GLFWApp():
                 if obj.is_draw_contours:
                     obj.draw_contours()
                 if obj.is_draw_open_edges:
-                    obj.draw_open_edges([0.0, 0.0, 1.0, obj.transparency], always_visible=self.lines_points_always_visible)
+                    obj.draw_open_edges([0.0, 0.0, 1.0, obj.transparency])
                 if obj.is_draw_centroid:
-                    obj.draw_centroid(always_visible=self.lines_points_always_visible)
+                    obj.draw_centroid()
                 if obj.is_draw_bounding_box:
                     obj.draw_bounding_box()
                 if obj.is_draw_edges:
-                    obj.draw_edges(always_visible=self.lines_points_always_visible)
+                    obj.draw_edges()
                 if obj.is_draw_fiber_architecture:
                     obj.draw_fiber_architecture()
                 if obj.is_draw_contour_mesh:
@@ -1331,7 +1324,7 @@ class GLFWApp():
                 if obj.is_draw_tet_mesh:
                     obj.draw_tetrahedron_mesh(draw_tets=obj.is_draw_tet_edges)
                 if obj.is_draw_constraints:
-                    obj.draw_constraints(always_visible=self.lines_points_always_visible)
+                    obj.draw_constraints()
                 if obj.is_draw:
                     obj.draw([obj.color[0], obj.color[1], obj.color[2], obj.transparency])
 
@@ -1345,7 +1338,7 @@ class GLFWApp():
             if obj.is_draw_corners:
                 obj.draw_corners()
             if obj.is_draw_edges:
-                obj.draw_edges(always_visible=self.lines_points_always_visible)
+                obj.draw_edges()
 
         if self.draw_target_motion:
             self.drawSkeleton(self.env.target_pos, np.array([1.0, 0.3, 0.3, 0.5]))
@@ -1356,7 +1349,7 @@ class GLFWApp():
         if self.draw_obj:
             self.drawObj(self.env.skel.getPositions())
         if self.draw_muscle:
-            self.drawMuscles(always_visible=self.lines_points_always_visible)
+            self.drawMuscles()
         if self.draw_body:
             self.drawSkeleton(self.env.skel.getPositions(), np.array([0.5, 0.5, 0.5, self.body_trans]))
 
@@ -1617,8 +1610,6 @@ class GLFWApp():
                         obj.transparency = self.zygote_muscle_transparency
                         if obj.vertex_colors is not None:
                             obj.vertex_colors[:, 3] = obj.transparency
-
-                _, self.lines_points_always_visible = imgui.checkbox("Lines/Points Always Visible", self.lines_points_always_visible)
 
                 # Muscle Add/Remove UI
                 if imgui.tree_node("Add/Remove Muscles"):
