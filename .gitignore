@@ -3,3 +3,17 @@ dart/
 Result_Images/
 studying/
 ray_results/
+
+# Large binary files
+*.npz
+*.obj
+*.png
+*.pkl
+*.zip
+
+# Python virtualenv
+pyMAC/
+
+# Model files
+models/smpl/
+models/skel_models_v1.1/
