@@ -463,6 +463,33 @@ class GLFWApp():
         # Auto-save muscle list
         self.save_loaded_muscles()
 
+    def add_muscles_by_prefix(self, prefix):
+        """Add all available muscles that start with the given prefix (e.g., 'L_' or 'R_')."""
+        to_add = []
+        for category, muscles in self.available_muscle_by_category.items():
+            for name, path in muscles:
+                if name.startswith(prefix):
+                    to_add.append((name, path))
+        for name, path in to_add:
+            self.add_muscle_mesh(name, path)
+
+    def add_muscles_by_category(self, category):
+        """Add all available muscles in the given category."""
+        if category not in self.available_muscle_by_category:
+            return
+        to_add = list(self.available_muscle_by_category[category])
+        for name, path in to_add:
+            self.add_muscle_mesh(name, path)
+
+    def remove_all_muscles(self):
+        """Remove all currently loaded muscles."""
+        names = list(self.zygote_muscle_meshes.keys())
+        for name in names:
+            del self.zygote_muscle_meshes[name]
+        self.loaded_muscle_selected = 0
+        self.update_available_muscles()
+        self.save_loaded_muscles()
+
     def save_loaded_muscles(self):
         """Save current loaded muscle names to file for later reload."""
         import json
@@ -1685,12 +1712,32 @@ class GLFWApp():
                     else:
                         imgui.text("(none)")
 
-                    # Save/Load previous muscles buttons
-                    if imgui.button("Save List", width=button_width):
-                        self.save_loaded_muscles()
+                    # Bulk add/remove buttons
+                    imgui.separator()
+                    imgui.text("Bulk Actions:")
+
+                    # Add All L / Add All R buttons
+                    if imgui.button("Add All L", width=70):
+                        self.add_muscles_by_prefix("L_")
                     imgui.same_line()
-                    if imgui.button("Load Previous", width=button_width):
-                        self.load_previous_muscles()
+                    if imgui.button("Add All R", width=70):
+                        self.add_muscles_by_prefix("R_")
+                    imgui.same_line()
+                    if imgui.button("Remove All", width=70):
+                        self.remove_all_muscles()
+
+                    # Add by category buttons
+                    categories = sorted(set(self.available_muscle_by_category.keys()))
+                    if len(categories) > 0:
+                        imgui.text("Add by group:")
+                        btn_count = 0
+                        for cat in categories:
+                            if btn_count > 0 and btn_count % 3 != 0:
+                                imgui.same_line()
+                            short_name = cat[:12] if len(cat) > 12 else cat
+                            if imgui.button(f"{short_name}##cat", width=70):
+                                self.add_muscles_by_category(cat)
+                            btn_count += 1
 
                     imgui.tree_pop()
 
