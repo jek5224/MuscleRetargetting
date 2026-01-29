@@ -7031,6 +7031,8 @@ class ContourMeshMixin:
 
         is_transparent = alpha < 1.0
         if is_transparent:
+            # Save current depth mask state
+            prev_depth_mask = glGetBoolean(GL_DEPTH_WRITEMASK)
             # Two-pass rendering for correct transparency
             glEnable(GL_CULL_FACE)
             # Pass 1: Draw back faces first (with depth write for intra-mesh ordering)
@@ -7042,6 +7044,8 @@ class ContourMeshMixin:
             glCullFace(GL_BACK)
             draw_triangles()
             glDisable(GL_CULL_FACE)
+            # Restore depth mask state
+            glDepthMask(prev_depth_mask)
         else:
             draw_triangles()
 

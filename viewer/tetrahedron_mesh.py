@@ -782,6 +782,8 @@ class TetrahedronMeshMixin:
                 glDrawArrays(GL_TRIANGLES, 0, len(self._tet_cap_verts))
 
         if is_transparent:
+            # Save current depth mask state
+            prev_depth_mask = glGetBoolean(GL_DEPTH_WRITEMASK)
             # Two-pass rendering for correct transparency
             glEnable(GL_CULL_FACE)
             # Pass 1: Draw back faces first (with depth write for intra-mesh ordering)
@@ -793,6 +795,8 @@ class TetrahedronMeshMixin:
             glCullFace(GL_BACK)
             draw_surface_and_caps()
             glDisable(GL_CULL_FACE)
+            # Restore depth mask state
+            glDepthMask(prev_depth_mask)
         else:
             draw_surface_and_caps()
 
