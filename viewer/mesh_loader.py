@@ -432,8 +432,10 @@ class MeshLoader(ContourMeshMixin, TetrahedronMeshMixin, FiberArchitectureMixin,
 
         # Check if transparent (use vertex color alpha or color parameter)
         is_transparent = self.transparency < 1.0 if hasattr(self, 'transparency') else color[3] < 1.0
+        # Check if two-pass culling should be used (some meshes have bad winding)
+        use_two_pass = getattr(self, 'use_two_pass_culling', True)
 
-        if is_transparent:
+        if is_transparent and use_two_pass:
             # Two-pass rendering for correct transparency
             # Draw back faces first, then front faces on top
             glEnable(GL_CULL_FACE)
@@ -443,7 +445,7 @@ class MeshLoader(ContourMeshMixin, TetrahedronMeshMixin, FiberArchitectureMixin,
             self._draw_mesh_arrays(use_color_array)
             glDisable(GL_CULL_FACE)
         else:
-            # Single pass for opaque meshes
+            # Single pass for opaque meshes or meshes with bad winding
             self._draw_mesh_arrays(use_color_array)
 
         # Disable color array if it was enabled

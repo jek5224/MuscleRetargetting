@@ -977,6 +977,7 @@ class GLFWApp():
         for k, info in self.env.mesh_info.items():
             self.meshes[k] = MeshLoader()
             self.meshes[k].load(info)
+            self.meshes[k].use_two_pass_culling = False  # OBJ meshes may have inconsistent winding
 
         self.env.meshes = self.meshes
 
