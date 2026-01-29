@@ -1400,6 +1400,9 @@ class GLFWApp():
         # ============================================================
         # PASS 3: Draw DART skeleton/muscle objects (simple, no two-pass)
         # ============================================================
+        # Restore depth mask for DART objects
+        glDepthMask(GL_TRUE)
+
         if self.draw_target_motion:
             self.drawSkeleton(self.env.target_pos, np.array([1.0, 0.3, 0.3, 0.5]))
         if self.draw_bone:
