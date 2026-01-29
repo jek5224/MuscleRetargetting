@@ -384,20 +384,8 @@ class MeshLoader(ContourMeshMixin, TetrahedronMeshMixin, FiberArchitectureMixin,
         
         return grouped_open_edges, ordered_edge_groups, classes
     
-    def draw(self, color=np.array([0.5, 0.5, 0.5, 1.0])):
-        glPushMatrix()
-
-        # Determine if color array should be enabled for scalar field rendering
-        use_color_array = self.vertex_colors is not None and self.is_draw_scalar_field
-
-        if use_color_array:
-            glEnableClientState(GL_COLOR_ARRAY)
-        else:
-            glColor4f(color[0], color[1], color[2], color[3])  # Default solid color
-
-        glEnableClientState(GL_VERTEX_ARRAY)
-        glBindBuffer(GL_ARRAY_BUFFER, 0)
-
+    def _draw_mesh_arrays(self, use_color_array):
+        """Internal method to draw mesh geometry arrays."""
         # Draw filled faces (triangles)
         if len(self.new_vertices_3) > 0:
             glVertexPointer(3, GL_FLOAT, 0, self.new_vertices_3)
@@ -428,10 +416,41 @@ class MeshLoader(ContourMeshMixin, TetrahedronMeshMixin, FiberArchitectureMixin,
                 glNormalPointer(GL_FLOAT, 0, face_normals)
             glDrawArrays(GL_POLYGON, 0, len(face_vertices))
 
+    def draw(self, color=np.array([0.5, 0.5, 0.5, 1.0])):
+        glPushMatrix()
+
+        # Determine if color array should be enabled for scalar field rendering
+        use_color_array = self.vertex_colors is not None and self.is_draw_scalar_field
+
+        if use_color_array:
+            glEnableClientState(GL_COLOR_ARRAY)
+        else:
+            glColor4f(color[0], color[1], color[2], color[3])  # Default solid color
+
+        glEnableClientState(GL_VERTEX_ARRAY)
+        glBindBuffer(GL_ARRAY_BUFFER, 0)
+
+        # Check if transparent (use vertex color alpha or color parameter)
+        is_transparent = self.transparency < 1.0 if hasattr(self, 'transparency') else color[3] < 1.0
+
+        if is_transparent:
+            # Two-pass rendering for correct transparency
+            glEnable(GL_CULL_FACE)
+            # Pass 1: Draw back faces first
+            glCullFace(GL_FRONT)
+            self._draw_mesh_arrays(use_color_array)
+            # Pass 2: Draw front faces on top
+            glCullFace(GL_BACK)
+            self._draw_mesh_arrays(use_color_array)
+            glDisable(GL_CULL_FACE)
+        else:
+            # Single pass for opaque meshes
+            self._draw_mesh_arrays(use_color_array)
+
         # Disable color array if it was enabled
         if use_color_array:
             glDisableClientState(GL_COLOR_ARRAY)
-        
+
         glDisableClientState(GL_VERTEX_ARRAY)
         glPopMatrix()
 

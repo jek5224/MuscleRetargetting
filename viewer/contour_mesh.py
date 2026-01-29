@@ -7020,13 +7020,28 @@ class ContourMeshMixin:
         alpha = self.contour_mesh_transparency
         glColor4f(color[0], color[1], color[2], alpha)
 
-        glBegin(GL_TRIANGLES)
-        for face in self.contour_mesh_faces:
-            for vi in face:
-                if self.contour_mesh_normals is not None:
-                    glNormal3fv(self.contour_mesh_normals[vi])
-                glVertex3fv(self.contour_mesh_vertices[vi])
-        glEnd()
+        def draw_triangles():
+            glBegin(GL_TRIANGLES)
+            for face in self.contour_mesh_faces:
+                for vi in face:
+                    if self.contour_mesh_normals is not None:
+                        glNormal3fv(self.contour_mesh_normals[vi])
+                    glVertex3fv(self.contour_mesh_vertices[vi])
+            glEnd()
+
+        is_transparent = alpha < 1.0
+        if is_transparent:
+            # Two-pass rendering for correct transparency
+            glEnable(GL_CULL_FACE)
+            # Pass 1: Draw back faces first
+            glCullFace(GL_FRONT)
+            draw_triangles()
+            # Pass 2: Draw front faces on top
+            glCullFace(GL_BACK)
+            draw_triangles()
+            glDisable(GL_CULL_FACE)
+        else:
+            draw_triangles()
 
         glPopMatrix()
 
