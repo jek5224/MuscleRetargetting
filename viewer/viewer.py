@@ -1215,9 +1215,13 @@ class GLFWApp():
             glEnd() 
             idx += 1
 
-    def drawMuscles(self, color=None):
+    def drawMuscles(self, color=None, always_visible=False):
         if color is not None:
             glColor4d(color[0], color[1], color[2], color[3])
+
+        if always_visible:
+            glDepthFunc(GL_ALWAYS)
+
         if self.draw_line_muscle:
             glDisable(GL_LIGHTING)
             glLineWidth(self.line_width)
@@ -1228,10 +1232,6 @@ class GLFWApp():
                 else:
                     a = 0.0  # Default activation if index out of bounds
                 if color is None:
-                    # if idx == self.muscle_index:
-                    #     glColor4d(10, 0, 0, 1)
-                    # else:
-                    #     glColor4d(1.0 * a,  0.2 * a, 0.2 * a, 0.2 + 0.6 * a)
                     glColor4d(1.0 * a,  0.2 * a, 0.2 * a, 0.2 + 0.6 * a)
                 glBegin(GL_LINE_STRIP)
                 for wp in m_wps:
@@ -1276,6 +1276,9 @@ class GLFWApp():
                     glRotatef(angle, axis[0], axis[1], axis[2])
                     mygl.draw_cube([0.01, 0.01, length])
                     glPopMatrix()
+
+        if always_visible:
+            glDepthFunc(GL_LEQUAL)
 
     def drawSimFrame(self):
         initGL()
@@ -1395,36 +1398,20 @@ class GLFWApp():
                         obj.draw([obj.color[0], obj.color[1], obj.color[2], obj.transparency])
 
         # ============================================================
-        # PASS 3: Draw DART skeleton/muscle objects (opaque)
+        # PASS 3: Draw DART skeleton/muscle objects (simple, no two-pass)
         # ============================================================
-        # Note: draw_bone, draw_joint use alpha=0.5 so always transparent
-        # draw_obj uses self.obj_trans, draw_body uses self.body_trans
-
-        if self.draw_obj and self.obj_trans >= 1.0:
-            self.drawObj(self.env.skel.getPositions())
-        if self.draw_body and self.body_trans >= 1.0:
-            self.drawSkeleton(self.env.skel.getPositions(), np.array([0.5, 0.5, 0.5, self.body_trans]))
-
-        # ============================================================
-        # PASS 4: Draw DART skeleton/muscle objects (transparent)
-        # ============================================================
-        glDepthMask(GL_FALSE)
-
         if self.draw_target_motion:
             self.drawSkeleton(self.env.target_pos, np.array([1.0, 0.3, 0.3, 0.5]))
         if self.draw_bone:
             self.drawBone(self.env.skel.getPositions())
         if self.draw_joint:
             self.drawJoint(self.env.skel.getPositions())
-        if self.draw_obj and self.obj_trans < 1.0:
+        if self.draw_obj:
             self.drawObj(self.env.skel.getPositions())
         if self.draw_muscle:
-            self.drawMuscles()
-        if self.draw_body and self.body_trans < 1.0:
+            self.drawMuscles(always_visible=self.lines_points_always_visible)
+        if self.draw_body:
             self.drawSkeleton(self.env.skel.getPositions(), np.array([0.5, 0.5, 0.5, self.body_trans]))
-
-        # Restore depth mask
-        glDepthMask(GL_TRUE)
 
         # Draw inter-muscle constraints if enabled
         if getattr(self, 'draw_inter_muscle_constraints', False):
@@ -1685,7 +1672,6 @@ class GLFWApp():
                 if changed:
                     for name, obj in self.zygote_muscle_meshes.items():
                         obj.transparency = self.zygote_muscle_transparency
-                        obj.contour_mesh_transparency = self.zygote_muscle_transparency
                         if obj.vertex_colors is not None:
                             obj.vertex_colors[:, 3] = obj.transparency
 
@@ -2557,10 +2543,8 @@ class GLFWApp():
                         #     self.zygote_muscle_meshes_intersection_bones[name] = intersecting_meshes
 
                         changed, obj.transparency = imgui.slider_float(f"Transparency##{name}", obj.transparency, 0.0, 1.0)
-                        if changed:
-                            obj.contour_mesh_transparency = obj.transparency
-                            if obj.vertex_colors is not None:
-                                obj.vertex_colors[:, 3] = obj.transparency
+                        if changed and obj.vertex_colors is not None:
+                            obj.vertex_colors[:, 3] = obj.transparency
 
                         if imgui.tree_node("Edge Classes"):
                             for i in range(len(obj.edge_classes)):
@@ -2877,15 +2861,12 @@ class GLFWApp():
                 if changed:
                     for name, obj in self.zygote_skeleton_meshes.items():
                         obj.transparency = self.zygote_skeleton_transparency
-                        obj.contour_mesh_transparency = self.zygote_skeleton_transparency
 
                 for i, (name, obj) in enumerate(self.zygote_skeleton_meshes.items()):
                     if imgui.tree_node(f"{i}: {name}"):
                         changed, obj.transparency = imgui.slider_float(f"Transparency##{name}", obj.transparency, 0.0, 1.0)
-                        if changed:
-                            obj.contour_mesh_transparency = obj.transparency
-                            if obj.vertex_colors is not None:
-                                obj.vertex_colors[:, 3] = obj.transparency
+                        if changed and obj.vertex_colors is not None:
+                            obj.vertex_colors[:, 3] = obj.transparency
                         _, obj.is_draw = imgui.checkbox("Draw", obj.is_draw)
                         _, obj.is_draw_corners = imgui.checkbox("Draw Corners", obj.is_draw_corners)
                         _, obj.is_draw_edges = imgui.checkbox("Draw Edges", obj.is_draw_edges)
