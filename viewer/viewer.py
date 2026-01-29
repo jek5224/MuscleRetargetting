@@ -1668,6 +1668,7 @@ class GLFWApp():
                 if changed:
                     for name, obj in self.zygote_muscle_meshes.items():
                         obj.transparency = self.zygote_muscle_transparency
+                        obj.contour_mesh_transparency = self.zygote_muscle_transparency
                         if obj.vertex_colors is not None:
                             obj.vertex_colors[:, 3] = obj.transparency
 
@@ -2537,8 +2538,10 @@ class GLFWApp():
                         #     self.zygote_muscle_meshes_intersection_bones[name] = intersecting_meshes
 
                         changed, obj.transparency = imgui.slider_float(f"Transparency##{name}", obj.transparency, 0.0, 1.0)
-                        if changed and obj.vertex_colors is not None:
-                            obj.vertex_colors[:, 3] = obj.transparency
+                        if changed:
+                            obj.contour_mesh_transparency = obj.transparency
+                            if obj.vertex_colors is not None:
+                                obj.vertex_colors[:, 3] = obj.transparency
 
                         if imgui.tree_node("Edge Classes"):
                             for i in range(len(obj.edge_classes)):
@@ -2855,12 +2858,15 @@ class GLFWApp():
                 if changed:
                     for name, obj in self.zygote_skeleton_meshes.items():
                         obj.transparency = self.zygote_skeleton_transparency
-                    
+                        obj.contour_mesh_transparency = self.zygote_skeleton_transparency
+
                 for i, (name, obj) in enumerate(self.zygote_skeleton_meshes.items()):
                     if imgui.tree_node(f"{i}: {name}"):
                         changed, obj.transparency = imgui.slider_float(f"Transparency##{name}", obj.transparency, 0.0, 1.0)
-                        if changed and obj.vertex_colors is not None:
-                            obj.vertex_colors[:, 3] = obj.transparency
+                        if changed:
+                            obj.contour_mesh_transparency = obj.transparency
+                            if obj.vertex_colors is not None:
+                                obj.vertex_colors[:, 3] = obj.transparency
                         _, obj.is_draw = imgui.checkbox("Draw", obj.is_draw)
                         _, obj.is_draw_corners = imgui.checkbox("Draw Corners", obj.is_draw_corners)
                         _, obj.is_draw_edges = imgui.checkbox("Draw Edges", obj.is_draw_edges)
