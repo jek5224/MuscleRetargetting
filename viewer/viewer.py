@@ -463,24 +463,22 @@ class GLFWApp():
         # Auto-save muscle list
         self.save_loaded_muscles()
 
-    def get_available_body_parts(self):
-        """Get list of body part names (without L_/R_ prefix) from available muscles."""
-        parts = set()
-        for category, muscles in self.available_muscle_by_category.items():
-            for name, path in muscles:
-                # Remove L_ or R_ prefix to get body part name
-                if name.startswith("L_") or name.startswith("R_"):
-                    part = name[2:]
-                    parts.add(part)
-        return sorted(parts)
+    def get_available_muscle_groups(self):
+        """Get list of muscle groups (categories) that have available muscles."""
+        groups = set()
+        for category in self.available_muscle_by_category.keys():
+            if len(self.available_muscle_by_category[category]) > 0:
+                groups.add(category)
+        return sorted(groups)
 
-    def add_muscles_by_body_part(self, body_part):
-        """Add both L_ and R_ versions of a body part muscle."""
+    def add_muscles_by_group(self, group, prefix):
+        """Add all muscles in a group that start with the given prefix (L_ or R_)."""
+        if group not in self.available_muscle_by_category:
+            return
         to_add = []
-        for category, muscles in self.available_muscle_by_category.items():
-            for name, path in muscles:
-                if name == f"L_{body_part}" or name == f"R_{body_part}":
-                    to_add.append((name, path))
+        for name, path in self.available_muscle_by_category[group]:
+            if name.startswith(prefix):
+                to_add.append((name, path))
         for name, path in to_add:
             self.add_muscle_mesh(name, path)
 
@@ -1721,18 +1719,17 @@ class GLFWApp():
                     if imgui.button("Remove All", width=button_width):
                         self.remove_all_muscles()
 
-                    # Add L/R pairs by body part group
-                    body_parts = self.get_available_body_parts()
-                    if len(body_parts) > 0:
-                        imgui.text("Add L/R pair:")
-                        btn_count = 0
-                        for part in body_parts:
-                            if btn_count > 0 and btn_count % 3 != 0:
-                                imgui.same_line()
-                            short_name = part[:10] if len(part) > 10 else part
-                            if imgui.button(f"{short_name}##part", width=100):
-                                self.add_muscles_by_body_part(part)
-                            btn_count += 1
+                    # Add L/R muscles by group
+                    groups = self.get_available_muscle_groups()
+                    if len(groups) > 0:
+                        imgui.text("Add by group:")
+                        for group in groups:
+                            short_name = group[:8] if len(group) > 8 else group
+                            if imgui.button(f"L {short_name}##L{group}", width=73):
+                                self.add_muscles_by_group(group, "L_")
+                            imgui.same_line()
+                            if imgui.button(f"R {short_name}##R{group}", width=73):
+                                self.add_muscles_by_group(group, "R_")
 
                     imgui.tree_pop()
 
