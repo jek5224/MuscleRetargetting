@@ -1775,21 +1775,23 @@ class GLFWApp():
                         self._skel_dofs = self.env.skel.getPositions().copy()
 
                     # Sliders for each DOF
-                    slider_width = 150
+                    label_width = 140
+                    slider_width = 120
+                    reset_btn_width = 22
                     any_changed = False
                     for i in range(num_dofs):
                         # Get DOF name (truncate if too long)
                         dof_name = self._skel_dof_names[i] if i < len(self._skel_dof_names) else f"DOF {i}"
-                        display_name = dof_name[:20] + ".." if len(dof_name) > 20 else dof_name
-                        imgui.text(f"{i:2d} {display_name}")
-                        imgui.same_line(position=180)
+                        display_name = dof_name[:15] if len(dof_name) > 15 else dof_name
+                        imgui.text(f"{i:2d} {display_name:<15}")
+                        imgui.same_line(position=label_width)
                         imgui.push_item_width(slider_width)
                         changed, self._skel_dofs[i] = imgui.slider_float(f"##skel_dof{i}", self._skel_dofs[i], -3.14, 3.14)
                         imgui.pop_item_width()
                         if changed:
                             any_changed = True
                         imgui.same_line()
-                        if imgui.button(f"0##reset_dof{i}", width=20):
+                        if imgui.button(f"0##reset_dof{i}", width=reset_btn_width):
                             self._skel_dofs[i] = 0.0
                             any_changed = True
 
