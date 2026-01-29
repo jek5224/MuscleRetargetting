@@ -1116,7 +1116,7 @@ class GLFWApp():
 
             # check if bn.getName() in self.meshes.keys()
             if bn.getName() in self.meshes.keys():
-                self.meshes[bn.getName()].draw(np.array([color[0], color[1], color[2], self.obj_trans]))
+                self.meshes[bn.getName()].draw_simple(np.array([color[0], color[1], color[2], self.obj_trans]))
 
             glPopMatrix()
 

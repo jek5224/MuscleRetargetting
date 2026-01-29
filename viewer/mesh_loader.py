@@ -455,6 +455,29 @@ class MeshLoader(ContourMeshMixin, TetrahedronMeshMixin, FiberArchitectureMixin,
         glDisableClientState(GL_VERTEX_ARRAY)
         glPopMatrix()
 
+    def draw_simple(self, color=np.array([0.5, 0.5, 0.5, 1.0])):
+        """Original draw method without transparency logic - for OBJ meshes."""
+        glPushMatrix()
+
+        # Determine if color array should be enabled for scalar field rendering
+        use_color_array = self.vertex_colors is not None and self.is_draw_scalar_field
+
+        if use_color_array:
+            glEnableClientState(GL_COLOR_ARRAY)
+        else:
+            glColor4f(color[0], color[1], color[2], color[3])
+
+        glEnableClientState(GL_VERTEX_ARRAY)
+        glBindBuffer(GL_ARRAY_BUFFER, 0)
+
+        self._draw_mesh_arrays(use_color_array)
+
+        if use_color_array:
+            glDisableClientState(GL_COLOR_ARRAY)
+
+        glDisableClientState(GL_VERTEX_ARRAY)
+        glPopMatrix()
+
     def draw_edges(self, always_visible=False):
         if len(self.edges) == 0:
             return
