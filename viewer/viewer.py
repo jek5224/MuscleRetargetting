@@ -1307,103 +1307,45 @@ class GLFWApp():
             glLineWidth(1.5)
             mygl.draw_axis()
 
-        # ============================================================
-        # PASS 1: Draw OPAQUE objects first (depth write ON)
-        # ============================================================
-        glDepthMask(GL_TRUE)
-
-        # Draw opaque skeleton meshes
-        for name, obj in self.zygote_skeleton_meshes.items():
-            if obj.transparency >= 1.0:  # Opaque
-                if obj.is_draw:
-                    obj.draw([obj.color[0], obj.color[1], obj.color[2], obj.transparency])
-                if obj.is_draw_corners:
-                    obj.draw_corners()
+        for name, obj in self.zygote_muscle_meshes.items():
+            viper_only = obj.viper_sim is not None and obj.viper_only_mode
+            if obj.viper_sim is not None and obj.is_draw_viper:
+                obj.draw_viper()
+            if obj.viper_sim is not None and getattr(obj, 'is_draw_viper_rod_mesh', False):
+                obj.draw_viper_mesh()
+            if not viper_only:
+                if obj.is_draw_contours:
+                    obj.draw_contours()
+                if obj.is_draw_open_edges:
+                    obj.draw_open_edges([0.0, 0.0, 1.0, obj.transparency], always_visible=self.lines_points_always_visible)
+                if obj.is_draw_centroid:
+                    obj.draw_centroid(always_visible=self.lines_points_always_visible)
+                if obj.is_draw_bounding_box:
+                    obj.draw_bounding_box()
                 if obj.is_draw_edges:
                     obj.draw_edges(always_visible=self.lines_points_always_visible)
-
-        # Draw opaque muscle meshes
-        for name, obj in self.zygote_muscle_meshes.items():
-            if obj.transparency >= 1.0:  # Opaque
-                viper_only = obj.viper_sim is not None and obj.viper_only_mode
-                if obj.viper_sim is not None and obj.is_draw_viper:
-                    obj.draw_viper()
-                if obj.viper_sim is not None and getattr(obj, 'is_draw_viper_rod_mesh', False):
-                    obj.draw_viper_mesh()
-                if not viper_only:
-                    if obj.is_draw_contours:
-                        obj.draw_contours()
-                    if obj.is_draw_open_edges:
-                        obj.draw_open_edges([0.0, 0.0, 1.0, obj.transparency], always_visible=self.lines_points_always_visible)
-                    if obj.is_draw_centroid:
-                        obj.draw_centroid(always_visible=self.lines_points_always_visible)
-                    if obj.is_draw_bounding_box:
-                        obj.draw_bounding_box()
-                    if obj.is_draw_edges:
-                        obj.draw_edges(always_visible=self.lines_points_always_visible)
-                    if obj.is_draw_fiber_architecture:
-                        obj.draw_fiber_architecture()
-                    if obj.is_draw_contour_mesh:
-                        obj.draw_contour_mesh()
-                    if obj.is_draw_tet_mesh:
-                        obj.draw_tetrahedron_mesh(draw_tets=obj.is_draw_tet_edges)
-                    if obj.is_draw_constraints:
-                        obj.draw_constraints(always_visible=self.lines_points_always_visible)
-                    if obj.is_draw:
-                        obj.draw([obj.color[0], obj.color[1], obj.color[2], obj.transparency])
-
-        # ============================================================
-        # PASS 2: Draw TRANSPARENT objects (depth write OFF, depth test ON)
-        # ============================================================
-        glDepthMask(GL_FALSE)
-
-        # Draw transparent skeleton meshes
-        for name, obj in self.zygote_skeleton_meshes.items():
-            if obj.transparency < 1.0:  # Transparent
+                if obj.is_draw_fiber_architecture:
+                    obj.draw_fiber_architecture()
+                if obj.is_draw_contour_mesh:
+                    obj.draw_contour_mesh()
+                if obj.is_draw_tet_mesh:
+                    obj.draw_tetrahedron_mesh(draw_tets=obj.is_draw_tet_edges)
+                if obj.is_draw_constraints:
+                    obj.draw_constraints(always_visible=self.lines_points_always_visible)
                 if obj.is_draw:
                     obj.draw([obj.color[0], obj.color[1], obj.color[2], obj.transparency])
-                if obj.is_draw_corners:
-                    obj.draw_corners()
-                if obj.is_draw_edges:
-                    obj.draw_edges(always_visible=self.lines_points_always_visible)
 
-        # Draw transparent muscle meshes
-        for name, obj in self.zygote_muscle_meshes.items():
-            if obj.transparency < 1.0:  # Transparent
-                viper_only = obj.viper_sim is not None and obj.viper_only_mode
-                if obj.viper_sim is not None and obj.is_draw_viper:
-                    obj.draw_viper()
-                if obj.viper_sim is not None and getattr(obj, 'is_draw_viper_rod_mesh', False):
-                    obj.draw_viper_mesh()
-                if not viper_only:
-                    if obj.is_draw_contours:
-                        obj.draw_contours()
-                    if obj.is_draw_open_edges:
-                        obj.draw_open_edges([0.0, 0.0, 1.0, obj.transparency], always_visible=self.lines_points_always_visible)
-                    if obj.is_draw_centroid:
-                        obj.draw_centroid(always_visible=self.lines_points_always_visible)
-                    if obj.is_draw_bounding_box:
-                        obj.draw_bounding_box()
-                    if obj.is_draw_edges:
-                        obj.draw_edges(always_visible=self.lines_points_always_visible)
-                    if obj.is_draw_fiber_architecture:
-                        obj.draw_fiber_architecture()
-                    if obj.is_draw_contour_mesh:
-                        obj.draw_contour_mesh()
-                    if obj.is_draw_tet_mesh:
-                        obj.draw_tetrahedron_mesh(draw_tets=obj.is_draw_tet_edges)
-                    if obj.is_draw_constraints:
-                        obj.draw_constraints(always_visible=self.lines_points_always_visible)
-                    if obj.is_draw:
-                        obj.draw([obj.color[0], obj.color[1], obj.color[2], obj.transparency])
+        # Draw inter-muscle constraints if enabled
+        if getattr(self, 'draw_inter_muscle_constraints', False):
+            self.draw_inter_muscle_constraint_lines()
 
-        # ============================================================
-        # PASS 3: Draw DART skeleton/muscle objects (simple, no two-pass)
-        # ============================================================
-        # Reset OpenGL state for DART objects
-        glDepthMask(GL_TRUE)
-        glDepthFunc(GL_LEQUAL)
-        glDisable(GL_CULL_FACE)
+        for name, obj in self.zygote_skeleton_meshes.items():
+            if obj.is_draw:
+                obj.draw([obj.color[0], obj.color[1], obj.color[2], obj.transparency])
+            if obj.is_draw_corners:
+                obj.draw_corners()
+            if obj.is_draw_edges:
+                obj.draw_edges(always_visible=self.lines_points_always_visible)
 
         if self.draw_target_motion:
             self.drawSkeleton(self.env.target_pos, np.array([1.0, 0.3, 0.3, 0.5]))
@@ -1417,10 +1359,6 @@ class GLFWApp():
             self.drawMuscles(always_visible=self.lines_points_always_visible)
         if self.draw_body:
             self.drawSkeleton(self.env.skel.getPositions(), np.array([0.5, 0.5, 0.5, self.body_trans]))
-
-        # Draw inter-muscle constraints if enabled
-        if getattr(self, 'draw_inter_muscle_constraints', False):
-            self.draw_inter_muscle_constraint_lines()
 
         # if self.draw_pd_target:
         #     self.drawSkeleton(self.env.pd_target, np.array([0.3, 0.3, 1.0, 0.5]))
