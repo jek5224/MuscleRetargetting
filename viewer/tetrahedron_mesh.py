@@ -807,7 +807,7 @@ class TetrahedronMeshMixin:
         glDisableClientState(GL_VERTEX_ARRAY)
         glPopMatrix()
 
-    def draw_constraints(self):
+    def draw_constraints(self, always_visible=False):
         """
         Draw soft body constraints visualization:
         - Fixed vertices (red spheres)
@@ -822,63 +822,75 @@ class TetrahedronMeshMixin:
         glPushMatrix()
         glDisable(GL_LIGHTING)
 
+        if always_visible:
+            glDepthFunc(GL_ALWAYS)
+
+        glEnableClientState(GL_VERTEX_ARRAY)
         verts = self.tet_vertices
 
-        # Draw fixed vertices as red spheres
+        # Draw fixed vertices as red points
         if hasattr(self, 'soft_body_fixed_vertices') and len(self.soft_body_fixed_vertices) > 0:
-            glColor4f(1.0, 0.2, 0.2, 1.0)
-            glPointSize(8.0)
-            glBegin(GL_POINTS)
-            for vi in self.soft_body_fixed_vertices:
-                if vi < len(verts):
-                    glVertex3fv(verts[vi])
-            glEnd()
+            fixed_pts = np.array([verts[vi] for vi in self.soft_body_fixed_vertices if vi < len(verts)], dtype=np.float32)
+            if len(fixed_pts) > 0:
+                glColor4f(1.0, 0.2, 0.2, 1.0)
+                glPointSize(8.0)
+                glVertexPointer(3, GL_FLOAT, 0, fixed_pts)
+                glDrawArrays(GL_POINTS, 0, len(fixed_pts))
 
-        # Draw skeleton attachment lines (fixed vertex to body)
+        # Draw skeleton attachment lines
         if hasattr(self, 'soft_body_local_anchors') and len(self.soft_body_local_anchors) > 0:
-            glColor4f(1.0, 1.0, 0.0, 1.0)
-            glLineWidth(2.0)
-            glBegin(GL_LINES)
+            anchor_lines = []
             for vi, (body_name, local_pos) in self.soft_body_local_anchors.items():
                 if vi < len(verts):
-                    # Draw line from vertex to a small offset (indicating attachment)
                     v = verts[vi]
-                    glVertex3fv(v)
-                    # Draw short line in direction of attachment
-                    glVertex3f(v[0], v[1] + 0.01, v[2])
-            glEnd()
+                    anchor_lines.append(v)
+                    anchor_lines.append([v[0], v[1] + 0.01, v[2]])
+            if len(anchor_lines) > 0:
+                anchor_lines = np.array(anchor_lines, dtype=np.float32)
+                glColor4f(1.0, 1.0, 0.0, 1.0)
+                glLineWidth(2.0)
+                glVertexPointer(3, GL_FLOAT, 0, anchor_lines)
+                glDrawArrays(GL_LINES, 0, len(anchor_lines))
 
-        # Draw contour level vertices with different colors
+        # Draw contour level vertices
         if hasattr(self, 'contour_level_vertices') and len(self.contour_level_vertices) > 0:
-            # Origin side (blue)
-            glColor4f(0.2, 0.4, 1.0, 1.0)
             glPointSize(6.0)
-            glBegin(GL_POINTS)
-            for vi, (stream_idx, end_type) in self.contour_level_vertices.items():
-                if end_type == 0 and vi < len(verts):  # Origin
-                    glVertex3fv(verts[vi])
-            glEnd()
+            # Origin side (blue)
+            origin_pts = np.array([verts[vi] for vi, (stream_idx, end_type) in self.contour_level_vertices.items()
+                                   if end_type == 0 and vi < len(verts)], dtype=np.float32)
+            if len(origin_pts) > 0:
+                glColor4f(0.2, 0.4, 1.0, 1.0)
+                glVertexPointer(3, GL_FLOAT, 0, origin_pts)
+                glDrawArrays(GL_POINTS, 0, len(origin_pts))
 
             # Insertion side (green)
-            glColor4f(0.2, 1.0, 0.4, 1.0)
-            glBegin(GL_POINTS)
-            for vi, (stream_idx, end_type) in self.contour_level_vertices.items():
-                if end_type == 1 and vi < len(verts):  # Insertion
-                    glVertex3fv(verts[vi])
-            glEnd()
+            insert_pts = np.array([verts[vi] for vi, (stream_idx, end_type) in self.contour_level_vertices.items()
+                                   if end_type == 1 and vi < len(verts)], dtype=np.float32)
+            if len(insert_pts) > 0:
+                glColor4f(0.2, 1.0, 0.4, 1.0)
+                glVertexPointer(3, GL_FLOAT, 0, insert_pts)
+                glDrawArrays(GL_POINTS, 0, len(insert_pts))
 
-        # Draw edge constraints (springs) - optional, can be slow
+        # Draw edge constraints (springs)
         if hasattr(self, 'soft_body') and hasattr(self.soft_body, 'edges'):
             edges = self.soft_body.edges
-            if len(edges) > 0 and len(edges) < 5000:  # Only draw if not too many
-                glColor4f(0.5, 0.5, 0.5, 0.2)
-                glLineWidth(1.0)
-                glBegin(GL_LINES)
+            if len(edges) > 0 and len(edges) < 5000:
+                edge_verts = []
                 for i, j in edges:
                     if i < len(verts) and j < len(verts):
-                        glVertex3fv(verts[i])
-                        glVertex3fv(verts[j])
-                glEnd()
+                        edge_verts.append(verts[i])
+                        edge_verts.append(verts[j])
+                if len(edge_verts) > 0:
+                    edge_verts = np.array(edge_verts, dtype=np.float32)
+                    glColor4f(0.5, 0.5, 0.5, 0.2)
+                    glLineWidth(1.0)
+                    glVertexPointer(3, GL_FLOAT, 0, edge_verts)
+                    glDrawArrays(GL_LINES, 0, len(edge_verts))
+
+        glDisableClientState(GL_VERTEX_ARRAY)
+
+        if always_visible:
+            glDepthFunc(GL_LEQUAL)
 
         glEnable(GL_LIGHTING)
         glPopMatrix()

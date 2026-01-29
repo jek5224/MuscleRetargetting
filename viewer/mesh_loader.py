@@ -453,97 +453,131 @@ class MeshLoader(ContourMeshMixin, TetrahedronMeshMixin, FiberArchitectureMixin,
         glDisableClientState(GL_VERTEX_ARRAY)
         glPopMatrix()
 
-    def draw_edges(self):
+    def draw_edges(self, always_visible=False):
+        if len(self.edges) == 0:
+            return
+
+        # Build edge vertex array if not cached or vertices changed
+        if not hasattr(self, '_edge_verts_cache') or self._edge_verts_cache is None:
+            edge_verts = []
+            for edge in self.edges:
+                v1, v2 = edge
+                edge_verts.append(self.vertices[v1])
+                edge_verts.append(self.vertices[v2])
+            self._edge_verts_cache = np.array(edge_verts, dtype=np.float32)
+
         glPushMatrix()
+        glDisable(GL_LIGHTING)
         glColor4f(0, 0, 0, 1.0)
         glLineWidth(0.5)
-        glBegin(GL_LINES)
-        for edge in self.edges:
-            v1, v2 = edge
-            glVertex3fv(self.vertices[v1])
-            glVertex3fv(self.vertices[v2])
-        glEnd()
+
+        if always_visible:
+            glDepthFunc(GL_ALWAYS)
+
+        glEnableClientState(GL_VERTEX_ARRAY)
+        glVertexPointer(3, GL_FLOAT, 0, self._edge_verts_cache)
+        glDrawArrays(GL_LINES, 0, len(self._edge_verts_cache))
+        glDisableClientState(GL_VERTEX_ARRAY)
+
+        if always_visible:
+            glDepthFunc(GL_LEQUAL)
+
+        glEnable(GL_LIGHTING)
         glPopMatrix()
 
-    def draw_open_edges(self, color=np.array([0.0, 0.0, 1.0, 1.0])):
+    def draw_open_edges(self, color=np.array([0.0, 0.0, 1.0, 1.0]), always_visible=False):
         glDisable(GL_LIGHTING)
         glPushMatrix()
-        for i, group in enumerate(self.edge_groups):
-            # color = cmap(1 - i / max((len(self.edge_groups)- 1), 1))[:3]
-            if self.edge_classes[i] == 'origin':
-                color = np.array([1, 0, 0])
-            else:
-                color = np.array([0, 0, 1])
-            glColor3fv(color)
 
-            glPointSize(2)
-            glBegin(GL_POINTS)
-            for element in group:    
-                glVertex3f(self.vertices[element][0], self.vertices[element][1], self.vertices[element][2])
-            glEnd()
-        
-        for i, edges in enumerate(self.open_edges):
-            # color = cmap(1 - i / max((len(self.edge_groups)- 1), 1))[:3]
+        if always_visible:
+            glDepthFunc(GL_ALWAYS)
+
+        glEnableClientState(GL_VERTEX_ARRAY)
+
+        # Draw points for each edge group
+        glPointSize(2)
+        for i, group in enumerate(self.edge_groups):
+            if len(group) == 0:
+                continue
             if self.edge_classes[i] == 'origin':
-                color = np.array([1, 0, 0])
+                glColor3f(1, 0, 0)
             else:
-                color = np.array([0, 0, 1])
-            glColor3fv(color)
-            glLineWidth(1)
-            glBegin(GL_LINES)
+                glColor3f(0, 0, 1)
+
+            # Build point array
+            points = np.array([self.vertices[idx] for idx in group], dtype=np.float32)
+            glVertexPointer(3, GL_FLOAT, 0, points)
+            glDrawArrays(GL_POINTS, 0, len(points))
+
+        # Draw lines for each open edge group
+        glLineWidth(1)
+        for i, edges in enumerate(self.open_edges):
+            if len(edges) == 0:
+                continue
+            if self.edge_classes[i] == 'origin':
+                glColor3f(1, 0, 0)
+            else:
+                glColor3f(0, 0, 1)
+
+            # Build line vertex array
+            line_verts = []
             for edge in edges:
                 v1, v2 = edge
-                glVertex3fv(self.vertices[v1])
-                glVertex3fv(self.vertices[v2])
-            glEnd()
+                line_verts.append(self.vertices[v1])
+                line_verts.append(self.vertices[v2])
+            line_verts = np.array(line_verts, dtype=np.float32)
+            glVertexPointer(3, GL_FLOAT, 0, line_verts)
+            glDrawArrays(GL_LINES, 0, len(line_verts))
+
+        glDisableClientState(GL_VERTEX_ARRAY)
+
+        if always_visible:
+            glDepthFunc(GL_LEQUAL)
+
         glPopMatrix()
         glEnable(GL_LIGHTING)
 
-    def draw_centroid(self):
+    def draw_centroid(self, always_visible=False):
+        if len(self.centroids) == 0:
+            return
+
         glDisable(GL_LIGHTING)
         glPushMatrix()
-        
+
+        if always_visible:
+            glDepthFunc(GL_ALWAYS)
+
+        glEnableClientState(GL_VERTEX_ARRAY)
+
+        # Draw centroid points
         glPointSize(5)
         glColor3f(1, 0, 0)
-        glBegin(GL_POINTS)
-        for centroid in self.centroids:
-            glVertex3fv(centroid)
-        glEnd()
+        centroids_arr = np.array(self.centroids, dtype=np.float32)
+        glVertexPointer(3, GL_FLOAT, 0, centroids_arr)
+        glDrawArrays(GL_POINTS, 0, len(centroids_arr))
 
+        # Draw frame axes
         if len(self.frames) == 2:
             glLineWidth(2)
-
-            # glColor3f(0, 1, 0)
-            # glBegin(GL_LINES)
-            # glVertex3fv(self.centroids[2])
-            # glVertex3fv(self.centroids[2] + self.frames[0][0])
-            # glEnd()
-
-            # glColor3f(0, 0, 1)
-            # offset = -self.frames[1][0] / 2
-            # glPushMatrix()
-            # glTranslatef(offset[0], offset[1], offset[2])
-            # glBegin(GL_LINES)
-            # # Draw self.frames[1] with its center at self.centroids[0]
-            # glVertex3fv(self.centroids[0])
-            # glVertex3fv(self.centroids[0] + self.frames[1][0])
-            # glEnd()
-            # glPopMatrix()
-
             for i, axes in enumerate(self.frames):
                 if i == 0:
                     glColor3f(0, 1, 0)
                 else:
                     glColor3f(0, 0, 1)
 
-                glBegin(GL_LINES)
-                glVertex3fv(self.centroids[0])
-                glVertex3fv(self.centroids[0] + axes[1])
-                glVertex3fv(self.centroids[0])
-                glVertex3fv(self.centroids[0] + axes[2])
-                glVertex3fv(self.centroids[0])
-                glVertex3fv(self.centroids[0] + axes[3])
-                glEnd()
+                # Build axis lines
+                axis_verts = np.array([
+                    self.centroids[0], self.centroids[0] + axes[1],
+                    self.centroids[0], self.centroids[0] + axes[2],
+                    self.centroids[0], self.centroids[0] + axes[3],
+                ], dtype=np.float32)
+                glVertexPointer(3, GL_FLOAT, 0, axis_verts)
+                glDrawArrays(GL_LINES, 0, len(axis_verts))
+
+        glDisableClientState(GL_VERTEX_ARRAY)
+
+        if always_visible:
+            glDepthFunc(GL_LEQUAL)
 
         glPopMatrix()
         glEnable(GL_LIGHTING)
