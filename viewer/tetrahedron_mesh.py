@@ -782,21 +782,14 @@ class TetrahedronMeshMixin:
                 glDrawArrays(GL_TRIANGLES, 0, len(self._tet_cap_verts))
 
         if is_transparent:
-            # Save current depth mask state
-            prev_depth_mask = glGetBoolean(GL_DEPTH_WRITEMASK)
             # Two-pass rendering for correct transparency
+            # Draw back faces first, then front faces on top
             glEnable(GL_CULL_FACE)
-            # Pass 1: Draw back faces first (with depth write for intra-mesh ordering)
-            glDepthMask(GL_TRUE)
-            glCullFace(GL_FRONT)
+            glCullFace(GL_FRONT)  # Cull front, draw back
             draw_surface_and_caps()
-            # Pass 2: Draw front faces on top (no depth write to not block other objects)
-            glDepthMask(GL_FALSE)
-            glCullFace(GL_BACK)
+            glCullFace(GL_BACK)   # Cull back, draw front
             draw_surface_and_caps()
             glDisable(GL_CULL_FACE)
-            # Restore depth mask state
-            glDepthMask(prev_depth_mask)
         else:
             draw_surface_and_caps()
 

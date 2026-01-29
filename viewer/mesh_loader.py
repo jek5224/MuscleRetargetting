@@ -434,21 +434,14 @@ class MeshLoader(ContourMeshMixin, TetrahedronMeshMixin, FiberArchitectureMixin,
         is_transparent = self.transparency < 1.0 if hasattr(self, 'transparency') else color[3] < 1.0
 
         if is_transparent:
-            # Save current depth mask state
-            prev_depth_mask = glGetBoolean(GL_DEPTH_WRITEMASK)
             # Two-pass rendering for correct transparency
+            # Draw back faces first, then front faces on top
             glEnable(GL_CULL_FACE)
-            # Pass 1: Draw back faces first (with depth write for intra-mesh ordering)
-            glDepthMask(GL_TRUE)
-            glCullFace(GL_FRONT)
+            glCullFace(GL_FRONT)  # Cull front, draw back
             self._draw_mesh_arrays(use_color_array)
-            # Pass 2: Draw front faces on top (no depth write to not block other objects)
-            glDepthMask(GL_FALSE)
-            glCullFace(GL_BACK)
+            glCullFace(GL_BACK)   # Cull back, draw front
             self._draw_mesh_arrays(use_color_array)
             glDisable(GL_CULL_FACE)
-            # Restore depth mask state
-            glDepthMask(prev_depth_mask)
         else:
             # Single pass for opaque meshes
             self._draw_mesh_arrays(use_color_array)
