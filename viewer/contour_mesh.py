@@ -10654,6 +10654,7 @@ class ContourMeshMixin:
         # Skip if both origin and insertion have 1 contour (1:1 case - just stream align)
         contour_count_varies = len(set(all_counts)) > 1
         is_one_to_one = origin_count == 1 and insertion_count == 1
+        self._is_one_to_one = is_one_to_one  # Store for mid-processing checks
         if is_one_to_one and contour_count_varies:
             print(f"1:1 case with intermediate variations - skipping manual cutting, just stream align")
         if cut_method == 'bp' and max_stream_count >= 2 and contour_count_varies and not is_one_to_one:
@@ -11096,40 +11097,48 @@ class ContourMeshMixin:
                                 self._manual_cut_data = None
 
                             if not has_manual_result:
-                                # Always show manual cutting window (for both SEPARATE and COMMON modes)
-                                print(f"  [BP Transform] {mode_str} mode needs manual cutting - preparing window")
+                                # Skip manual cutting for 1:1 case (just use largest contour)
+                                if getattr(self, '_is_one_to_one', False):
+                                    print(f"  [BP Transform] 1:1 case - skipping manual cutting, using automatic merge")
+                                    # For 1:1 case, just use the target contour as-is for all streams
+                                    # The intermediate 2-contour is likely noise
+                                    cut_contours = [target_contour]
+                                    cutting_info = None
+                                else:
+                                    # Always show manual cutting window (for both SEPARATE and COMMON modes)
+                                    print(f"  [BP Transform] {mode_str} mode needs manual cutting - preparing window")
 
-                                # Store current progress so we can resume
-                                self._cut_streams_progress = {
-                                    'level_i': level_i,
-                                    'contour_i': contour_i,
-                                    'streams_for_contour': streams_for_contour,
-                                    'stream_contours': stream_contours,
-                                    'stream_bounding_planes': stream_bounding_planes,
-                                    'stream_groups': stream_groups,
-                                    'cut_stream_combos': cut_stream_combos,
-                                    'level_order': level_order,
-                                    'level_i_idx': level_i_idx,
-                                }
+                                    # Store current progress so we can resume
+                                    self._cut_streams_progress = {
+                                        'level_i': level_i,
+                                        'contour_i': contour_i,
+                                        'streams_for_contour': streams_for_contour,
+                                        'stream_contours': stream_contours,
+                                        'stream_bounding_planes': stream_bounding_planes,
+                                        'stream_groups': stream_groups,
+                                        'cut_stream_combos': cut_stream_combos,
+                                        'level_order': level_order,
+                                        'level_i_idx': level_i_idx,
+                                    }
 
-                                # For COMMON mode, get the initial cutting line from source boundaries
-                                initial_cut_line = None
-                                if not is_first_division:
-                                    # COMMON mode: extract cutting boundary from source contours
-                                    # The boundary is where the source contours were previously cut
-                                    initial_cut_line = self._get_source_cutting_boundary(
-                                        source_contours, source_bps, target_bp
+                                    # For COMMON mode, get the initial cutting line from source boundaries
+                                    initial_cut_line = None
+                                    if not is_first_division:
+                                        # COMMON mode: extract cutting boundary from source contours
+                                        # The boundary is where the source contours were previously cut
+                                        initial_cut_line = self._get_source_cutting_boundary(
+                                            source_contours, source_bps, target_bp
+                                        )
+
+                                    # Prepare manual cut data for this specific transition
+                                    self._prepare_manual_cut_data_for_level(
+                                        muscle_name, level_i, contour_i, streams_for_contour,
+                                        target_contour, target_bp, source_contours, source_bps,
+                                        prev_level,  # Pass actual source level
+                                        initial_cut_line=initial_cut_line,
+                                        is_common_mode=(not is_first_division)
                                     )
-
-                                # Prepare manual cut data for this specific transition
-                                self._prepare_manual_cut_data_for_level(
-                                    muscle_name, level_i, contour_i, streams_for_contour,
-                                    target_contour, target_bp, source_contours, source_bps,
-                                    prev_level,  # Pass actual source level
-                                    initial_cut_line=initial_cut_line,
-                                    is_common_mode=(not is_first_division)
-                                )
-                                return  # Wait for user to draw cutting line
+                                    return  # Wait for user to draw cutting line
                         elif cut_method == 'mesh':
                             cut_contours = self._cut_contour_mesh_aware(
                                 target_contour, target_bp, projected_refs, streams_for_contour
