@@ -10656,7 +10656,8 @@ class ContourMeshMixin:
         is_one_to_one = origin_count == 1 and insertion_count == 1
         self._is_one_to_one = is_one_to_one  # Store for mid-processing checks
         if is_one_to_one and contour_count_varies:
-            print(f"1:1 case with intermediate variations - skipping manual cutting, just stream align")
+            print(f"1:1 case with intermediate variations - forcing max_stream_count=1, ignoring noise")
+            max_stream_count = 1  # Force single stream for 1:1 case
         if cut_method == 'bp' and max_stream_count >= 2 and contour_count_varies and not is_one_to_one:
             # Check if we need to open manual cutting window
             # Skip _prepare_manual_cut_data if we have results in _manual_cut_results
