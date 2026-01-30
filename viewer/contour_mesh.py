@@ -10651,8 +10651,12 @@ class ContourMeshMixin:
 
         # Check if manual cutting is needed (contour count changes along levels)
         # Only for 'bp' method with max_stream_count >= 2 and varying counts
+        # Skip if both origin and insertion have 1 contour (1:1 case - just stream align)
         contour_count_varies = len(set(all_counts)) > 1
-        if cut_method == 'bp' and max_stream_count >= 2 and contour_count_varies:
+        is_one_to_one = origin_count == 1 and insertion_count == 1
+        if is_one_to_one and contour_count_varies:
+            print(f"1:1 case with intermediate variations - skipping manual cutting, just stream align")
+        if cut_method == 'bp' and max_stream_count >= 2 and contour_count_varies and not is_one_to_one:
             # Check if we need to open manual cutting window
             # Skip _prepare_manual_cut_data if we have results in _manual_cut_results
             # (means we're resuming after a mid-processing cut was completed)
