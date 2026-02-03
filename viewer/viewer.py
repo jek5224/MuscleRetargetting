@@ -1730,8 +1730,8 @@ class GLFWApp():
                 frames=np.array(frames, dtype=np.int32),
                 positions=np.array(all_pos, dtype=np.float32),
             )
-            if wp_flat is not None:
-                save_dict['waypoints_flat'] = np.array(all_wp, dtype=np.float32)
+            if wp_flat is not None and all(w is not None for w in all_wp):
+                save_dict['waypoints_flat'] = np.stack(all_wp).astype(np.float32)
                 save_dict['waypoints_shape'] = np.array([wp_shape.encode('utf-8')])
             np.savez_compressed(filepath, **save_dict)
             saved_count += 1
