@@ -30,7 +30,6 @@ import glob
 from skeleton_section import SKEL_dart_info
 
 import time
-import threading
 
 # ============================================================================
 # CONSTANTS
@@ -190,7 +189,7 @@ class GLFWApp():
         self.motion_baking = False        # True during batch bake
         self.motion_bake_end_frame = 0    # Target end frame for batch bake
         self.motion_bake_current = 0      # Current progress during bake
-        self._bake_thread = None          # Background bake thread
+        self._bake_data = {}              # Accumulated bake results
         self._scan_motion_files()
 
         ## Flag
@@ -1831,109 +1830,100 @@ class GLFWApp():
         return any_applied
 
     def _motion_start_bake(self):
-        """Start background bake in a separate thread."""
-        if self._bake_thread is not None and self._bake_thread.is_alive():
-            print("Bake already running")
+        """Start baking: reset to frame 0, init accumulator, set baking flag."""
+        if self.motion_baking:
             return
         self._motion_reset()
         self.motion_baking = True
         self.motion_bake_current = 0
         self.motion_is_playing = False
-        self._bake_thread = threading.Thread(target=self._motion_bake_worker, daemon=True)
-        self._bake_thread.start()
-        print(f"Started background bake: frames 0-{self.motion_bake_end_frame}")
+        # Init per-muscle accumulator for baked results
+        self._bake_data = {}
+        for mname, mobj in self.zygote_muscle_meshes.items():
+            if mobj.soft_body is not None:
+                self._bake_data[mname] = {}
+        print(f"Started bake: frames 0-{self.motion_bake_end_frame}")
 
-    def _motion_bake_worker(self):
-        """Background thread: iterates frames, runs tet sim, saves results to disk.
-        Always re-simulates every frame, overwriting any existing cache.
-        """
-        try:
-            end_frame = self.motion_bake_end_frame
-            cache_dir = self._motion_cache_dir()
-            settle_iters = self.motion_settle_iters
+    def _motion_bake_step(self):
+        """Called once per render loop while baking. Simulates ONE frame, captures results.
+        When done, writes all accumulated results to disk."""
+        if not self.motion_baking:
+            return
 
-            active_muscles = [n for n, m in self.zygote_muscle_meshes.items() if m.soft_body is not None]
+        end_frame = self.motion_bake_end_frame
+        frame = self.motion_current_frame + 1
 
-            # Accumulate results in memory, write per-muscle at the end
-            baked = {}  # muscle_name -> {frame: {positions, wp_flat, wp_shape}}
-            for mname in active_muscles:
-                baked[mname] = {}
+        if frame > end_frame:
+            self._motion_bake_finish()
+            return
 
-            for frame in range(1, end_frame + 1):
-                if not self.motion_baking:
-                    print("Bake cancelled by user")
-                    break
+        # Apply pose
+        pose = self.motion_bvh.mocap_refs[frame].copy()
+        if hasattr(self, 'motion_root_translation') and self.motion_root_translation is not None:
+            pose[3:6] = self.motion_root_translation
+        self.env.skel.setPositions(pose)
+        self.motion_current_frame = frame
 
-                # Apply pose
-                pose = self.motion_bvh.mocap_refs[frame].copy()
-                if hasattr(self, 'motion_root_translation') and self.motion_root_translation is not None:
-                    pose[3:6] = self.motion_root_translation
-                self.env.skel.setPositions(pose)
-                self.motion_current_frame = frame
+        # Update constraints from skeleton, then run tet sim
+        for mname, mobj in self.zygote_muscle_meshes.items():
+            if mobj.soft_body is not None:
+                mobj._update_tet_positions_from_skeleton(self.env.skel)
+                mobj._update_fixed_targets_from_skeleton(self.zygote_skeleton_meshes, self.env.skel)
 
-                # Update constraints from skeleton, then run tet sim
-                for mname, mobj in self.zygote_muscle_meshes.items():
-                    if mobj.soft_body is not None:
-                        mobj._update_tet_positions_from_skeleton(self.env.skel)
-                        mobj._update_fixed_targets_from_skeleton(self.zygote_skeleton_meshes, self.env.skel)
+        self.run_all_tet_sim_with_constraints(
+            max_iterations=self.motion_settle_iters,
+            tolerance=1e-4
+        )
 
-                self.run_all_tet_sim_with_constraints(
-                    max_iterations=settle_iters,
-                    tolerance=1e-4
-                )
+        # Capture positions + waypoints
+        for mname in self._bake_data:
+            mobj = self.zygote_muscle_meshes[mname]
+            entry = {'positions': mobj.soft_body.get_positions().astype(np.float32)}
+            if hasattr(mobj, 'waypoints') and len(mobj.waypoints) > 0:
+                entry['wp_flat'], entry['wp_shape'] = self._flatten_waypoints(mobj.waypoints)
+            self._bake_data[mname][frame] = entry
 
-                # Capture positions + waypoints
-                for mname in baked:
-                    mobj = self.zygote_muscle_meshes[mname]
-                    entry = {'positions': mobj.soft_body.get_positions().astype(np.float32)}
-                    if hasattr(mobj, 'waypoints') and len(mobj.waypoints) > 0:
-                        entry['wp_flat'], entry['wp_shape'] = self._flatten_waypoints(mobj.waypoints)
-                    baked[mname][frame] = entry
+        self.motion_bake_current = frame
 
-                self.motion_bake_current = frame
+    def _motion_bake_finish(self):
+        """Write accumulated bake results to disk and reload cache."""
+        cache_dir = self._motion_cache_dir()
+        for mname, frame_data in self._bake_data.items():
+            if len(frame_data) == 0:
+                continue
+            filepath = os.path.join(cache_dir, f'{mname}.npz')
+            # Merge with existing cache file if present
+            if os.path.exists(filepath):
+                existing = np.load(filepath, allow_pickle=True)
+                has_wp = 'waypoints_flat' in existing and 'waypoints_shape' in existing
+                ex_wp_shape = existing['waypoints_shape'][0] if has_wp else None
+                for i, f in enumerate(existing['frames']):
+                    fi = int(f)
+                    if fi not in frame_data:
+                        entry = {'positions': existing['positions'][i]}
+                        if has_wp:
+                            entry['wp_flat'] = existing['waypoints_flat'][i]
+                            entry['wp_shape'] = ex_wp_shape
+                        frame_data[fi] = entry
+            sorted_frames = sorted(frame_data.keys())
+            save_dict = dict(
+                frames=np.array(sorted_frames, dtype=np.int32),
+                positions=np.array([frame_data[f]['positions'] for f in sorted_frames], dtype=np.float32),
+            )
+            # Save waypoints if available
+            if 'wp_flat' in frame_data[sorted_frames[0]]:
+                save_dict['waypoints_flat'] = np.array(
+                    [frame_data[f]['wp_flat'] for f in sorted_frames], dtype=np.float32)
+                wp_s = frame_data[sorted_frames[0]]['wp_shape']
+                if isinstance(wp_s, str):
+                    wp_s = wp_s.encode('utf-8')
+                save_dict['waypoints_shape'] = np.array([wp_s])
+            np.savez_compressed(filepath, **save_dict)
 
-            # Write accumulated results to disk
-            for mname, frame_data in baked.items():
-                if len(frame_data) == 0:
-                    continue
-                filepath = os.path.join(cache_dir, f'{mname}.npz')
-                # Merge with existing cache file if present
-                if os.path.exists(filepath):
-                    existing = np.load(filepath, allow_pickle=True)
-                    has_wp = 'waypoints_flat' in existing and 'waypoints_shape' in existing
-                    ex_wp_shape = existing['waypoints_shape'][0] if has_wp else None
-                    for i, f in enumerate(existing['frames']):
-                        fi = int(f)
-                        if fi not in frame_data:
-                            entry = {'positions': existing['positions'][i]}
-                            if has_wp:
-                                entry['wp_flat'] = existing['waypoints_flat'][i]
-                                entry['wp_shape'] = ex_wp_shape
-                            frame_data[fi] = entry
-                sorted_frames = sorted(frame_data.keys())
-                save_dict = dict(
-                    frames=np.array(sorted_frames, dtype=np.int32),
-                    positions=np.array([frame_data[f]['positions'] for f in sorted_frames], dtype=np.float32),
-                )
-                # Save waypoints if available
-                if 'wp_flat' in frame_data[sorted_frames[0]]:
-                    save_dict['waypoints_flat'] = np.array(
-                        [frame_data[f]['wp_flat'] for f in sorted_frames], dtype=np.float32)
-                    wp_s = frame_data[sorted_frames[0]]['wp_shape']
-                    if isinstance(wp_s, str):
-                        wp_s = wp_s.encode('utf-8')
-                    save_dict['waypoints_shape'] = np.array([wp_s])
-                np.savez_compressed(filepath, **save_dict)
-
-            print(f"Bake complete: frames 0-{end_frame}")
-        except Exception as e:
-            print(f"Bake error: {e}")
-            import traceback
-            traceback.print_exc()
-        finally:
-            self.motion_baking = False
-            self._bake_needs_reload = True
-            self._bake_thread = None
+        self.motion_baking = False
+        self._bake_data = {}
+        self._motion_load_cache()
+        print(f"Bake complete: frames 0-{self.motion_bake_end_frame}")
 
     def _motion_reset(self):
         """Reset to frame 0, reset skeleton to rest pose, reset tet meshes."""
@@ -2055,8 +2045,8 @@ class GLFWApp():
                 imgui.progress_bar(bake_frac, (imgui.get_content_region_available_width(), 0),
                                   f"Baking: frame {self.motion_bake_current}/{self.motion_bake_end_frame}")
                 if imgui.button("Cancel Bake##motion_cache"):
-                    self.motion_baking = False  # Worker thread checks this flag
-                    print("Bake cancel requested")
+                    self._motion_bake_finish()
+                    print("Bake cancelled, partial results saved")
             else:
                 if not has_soft_bodies:
                     imgui.push_style_var(imgui.STYLE_ALPHA, 0.5)
@@ -7539,10 +7529,9 @@ class GLFWApp():
                     self.motion_play_accumulator -= frame_time
             self._motion_last_time = start_time
 
-            # Motion Browser: reload cache when background bake finishes
-            if self._bake_thread is None and not self.motion_baking and getattr(self, '_bake_needs_reload', False):
-                self._motion_load_cache()
-                self._bake_needs_reload = False
+            # Motion Browser: bake one frame per render loop
+            if self.motion_baking:
+                self._motion_bake_step()
 
             if self.is_simulation:
                 self.update()
