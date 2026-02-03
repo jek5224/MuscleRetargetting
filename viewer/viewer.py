@@ -1641,9 +1641,10 @@ class GLFWApp():
             return
         self.motion_current_frame = frame
         pose = self.motion_bvh.mocap_refs[frame].copy()
-        # Fix root translation to initial position so skeleton doesn't walk away
+        # Fix root x/z to initial position so skeleton doesn't walk away; keep y (height) from motion
         if hasattr(self, 'motion_root_translation') and self.motion_root_translation is not None:
-            pose[3:6] = self.motion_root_translation
+            pose[3] = self.motion_root_translation[0]  # x
+            pose[5] = self.motion_root_translation[2]  # z
         self.env.skel.setPositions(pose)
         # Sync the joint angle slider state
         if hasattr(self, '_skel_dofs'):
