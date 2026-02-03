@@ -2041,10 +2041,16 @@ class GLFWApp():
             # Section 2: Sequential Playback Transport
             imgui.separator()
 
-            # Progress bar
-            fraction = self.motion_current_frame / max(1, self.motion_total_frames - 1)
-            imgui.progress_bar(fraction, (imgui.get_content_region_available_width(), 0),
-                              f"Frame {self.motion_current_frame} / {self.motion_total_frames - 1}")
+            # Frame slider
+            imgui.push_item_width(imgui.get_content_region_available_width())
+            changed, new_frame = imgui.slider_int(
+                "##frame_slider", self.motion_current_frame,
+                0, self.motion_total_frames - 1,
+                f"Frame {self.motion_current_frame} / {self.motion_total_frames - 1}")
+            imgui.pop_item_width()
+            if changed and new_frame != self.motion_current_frame:
+                self._motion_apply_pose(new_frame)
+                self._motion_apply_cached_deformation(new_frame)
 
             # Transport buttons
             if imgui.button("Reset##motion"):
