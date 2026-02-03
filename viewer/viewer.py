@@ -1746,6 +1746,50 @@ class GLFWApp():
         self._motion_load_cache()
         print(f"Saved deformation at frame {frame} for {saved_count} muscles")
 
+    def _motion_patch_waypoints(self):
+        """Patch existing cache files by computing waypoints from cached tet positions.
+        Much faster than re-baking since it skips tet sim — only does barycentric interpolation."""
+        cache_dir = self._motion_cache_dir()
+        if cache_dir is None:
+            return
+        patched = 0
+        for mname, mobj in self.zygote_muscle_meshes.items():
+            if mobj.soft_body is None:
+                continue
+            if not (hasattr(mobj, 'waypoints') and len(mobj.waypoints) > 0):
+                continue
+            if not (hasattr(mobj, 'waypoint_bary_coords') and len(mobj.waypoint_bary_coords) > 0):
+                continue
+            filepath = os.path.join(cache_dir, f'{mname}.npz')
+            if not os.path.exists(filepath):
+                continue
+            data = np.load(filepath, allow_pickle=True)
+            if 'waypoints_flat' in data:
+                continue  # Already has waypoints
+            frames = data['frames']
+            positions = data['positions']
+            # Compute waypoints for each frame
+            wp_flats = []
+            wp_shape_str = None
+            for i in range(len(frames)):
+                # Temporarily set tet vertices to cached positions
+                mobj.tet_vertices = positions[i].astype(np.float32).copy()
+                mobj._update_waypoints_from_tet(self.env.skel, verbose=False)
+                wp_flat, wp_shape_str = self._flatten_waypoints(mobj.waypoints)
+                wp_flats.append(wp_flat)
+            # Re-save with waypoints
+            save_dict = dict(
+                frames=frames,
+                positions=positions,
+                waypoints_flat=np.stack(wp_flats).astype(np.float32),
+                waypoints_shape=np.array([wp_shape_str.encode('utf-8')]),
+            )
+            np.savez_compressed(filepath, **save_dict)
+            patched += 1
+            print(f"  Patched {mname}: {len(frames)} frames")
+        self._motion_load_cache()
+        print(f"Waypoint patch complete: {patched} muscles updated")
+
     def _motion_load_cache(self):
         """Load all cached deformation data for the current BVH into memory."""
         self.motion_deform_cache = {}
@@ -2066,6 +2110,18 @@ class GLFWApp():
                 else:
                     if imgui.button("Bake to End Frame##motion_cache"):
                         self._motion_start_bake()
+
+            # Show whether cache has waypoints; offer patch button if not
+            has_wp_in_cache = any(
+                'waypoints_flat' in entry
+                for mcache in self.motion_deform_cache.values()
+                for entry in mcache.values()
+            )
+            if num_cached > 0 and not has_wp_in_cache:
+                imgui.text("Cache missing waypoints (old format)")
+                if has_soft_bodies and not self.motion_baking:
+                    if imgui.button("Patch Waypoints into Cache##motion_cache"):
+                        self._motion_patch_waypoints()
 
     def drawUIFrame(self):
         imgui.new_frame()
