@@ -1607,7 +1607,10 @@ class GLFWApp():
                 self.motion_root_translation = init_pos[3:6].copy()
             else:
                 self.motion_root_translation = None
+            print(f"[Motion] bvh_info: {self.env.bvh_info}")
+            print(f"[Motion] skel DOFs: {self.env.skel.getNumDofs()}, joints: {self.env.skel.getNumJoints()}")
             self.motion_bvh = MyBVH(bvh_path, self.env.bvh_info, self.env.skel)
+            print(f"[Motion] mocap_refs shape: {self.motion_bvh.mocap_refs.shape}, max abs: {np.abs(self.motion_bvh.mocap_refs).max():.6f}")
             self.motion_total_frames = self.motion_bvh.num_frames
             self.motion_current_frame = 0
             self.motion_is_playing = False
