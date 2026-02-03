@@ -3,7 +3,7 @@
 		<Body type="Box" mass="0.350280" size="0.133674 0.077752 0.059765" contact="Off" color="0.9 0.9 0.9 1.0" obj="Zygote_Meshes_251229/Skeleton/Saccrum_Coccyx.obj">
 			<Transformation linear="1.0 0.0 0.0 0.0 -0.793813 0.608161 0.0 -0.608161 -0.793813" translation="0.0 1.006084 -0.074451"/>
 		</Body>
-		<Joint type="FixedFree">
+		<Joint type="FixedFree" bvh="Character1_Hips">
 			<Transformation linear="1.0 0.0 0.0 0.0 1.0 0.0 0.0 0.0 1.0" translation="-1.2e-05 0.985771 -0.081843"/>
 		</Joint>
 	</Node>
@@ -35,7 +35,7 @@
 		<Body type="Box" mass="1.664858" size="0.443702 0.097229 0.068436" contact="Off" color="0.9 0.9 0.9 1.0" obj="Zygote_Meshes_251229/Skeleton/L_Femur.obj">
 			<Transformation linear="0.050255 0.967423 0.248129 0.998725 -0.04748 -0.017161 -0.004821 0.248675 -0.968575" translation="0.108077 0.734214 -0.008953"/>
 		</Body>
-		<Joint type="Ball" lower="-1.57 -1.57 -1.57" upper="1.57 1.57 1.57">
+		<Joint type="Ball" lower="-1.57 -1.57 -1.57" upper="1.57 1.57 1.57" bvh="Character1_LeftUpLeg">
 			<Transformation linear="1.0 0.0 0.0 0.0 1.0 0.0 0.0 0.0 1.0" translation="0.092104 0.955046 -0.040046"/>
 		</Joint>
 	</Node>
@@ -43,7 +43,7 @@
 		<Body type="Box" mass="1.743281" size="0.456938 0.090211 0.074997" contact="Off" color="0.9 0.9 0.9 1.0" obj="Zygote_Meshes_251229/Skeleton/L_Tibia_Fibula.obj">
 			<Transformation linear="-0.04762 -0.877804 -0.476648 -0.996598 0.009618 0.081855 -0.067268 0.478924 -0.875275" translation="0.09418 0.290275 -0.031168"/>
 		</Body>
-		<Joint type="Revolute" axis="1.0 0.0 0.0" lower="0.0" upper="2.5">
+		<Joint type="Revolute" axis="1.0 0.0 0.0" lower="0.0" upper="2.5" bvh="Character1_LeftLeg">
 			<Transformation linear="1.0 0.0 0.0 0.0 1.0 0.0 0.0 0.0 1.0" translation="0.100558 0.515247 -0.014824"/>
 		</Joint>
 	</Node>
@@ -59,7 +59,7 @@
 		<Body type="Box" mass="0.151573" size="0.100888 0.062188 0.042842" contact="Off" color="0.9 0.9 0.9 1.0" obj="Zygote_Meshes_251229/Skeleton/L_Talus.obj">
 			<Transformation linear="-0.005952 0.825119 -0.564927 0.316257 -0.534387 -0.783845 -0.948655 -0.183327 -0.257769" translation="0.090064 0.05924 -0.022702"/>
 		</Body>
-		<Joint type="Ball" lower="-1.57 -1.57 -1.57" upper="1.57 1.57 1.57">
+		<Joint type="Ball" lower="-1.57 -1.57 -1.57" upper="1.57 1.57 1.57" bvh="Character1_LeftFoot">
 			<Transformation linear="1.0 0.0 0.0 0.0 1.0 0.0 0.0 0.0 1.0" translation="0.08597 0.0752 -0.040573"/>
 		</Joint>
 	</Node>
@@ -139,7 +139,7 @@
 		<Body type="Box" mass="1.664858" size="0.443702 0.097229 0.068436" contact="Off" color="0.9 0.9 0.9 1.0" obj="Zygote_Meshes_251229/Skeleton/R_Femur.obj">
 			<Transformation linear="-0.050255 -0.967423 0.248128 0.998725 -0.04748 0.017161 -0.004821 0.248674 0.968575" translation="-0.108077 0.734214 -0.008953"/>
 		</Body>
-		<Joint type="Ball" lower="-1.57 -1.57 -1.57" upper="1.57 1.57 1.57">
+		<Joint type="Ball" lower="-1.57 -1.57 -1.57" upper="1.57 1.57 1.57" bvh="Character1_RightUpLeg">
 			<Transformation linear="1.0 0.0 0.0 0.0 1.0 0.0 0.0 0.0 1.0" translation="-0.092104 0.955046 -0.040046"/>
 		</Joint>
 	</Node>
@@ -147,7 +147,7 @@
 		<Body type="Box" mass="1.694464" size="0.459042 0.08609 0.076036" contact="Off" color="0.9 0.9 0.9 1.0" obj="Zygote_Meshes_251229/Skeleton/R_Tibia_Fibula.obj">
 			<Transformation linear="-0.03309 0.860297 0.508719 0.996442 -0.011078 0.08355 0.077513 0.509673 -0.856869" translation="-0.095942 0.291616 -0.032775"/>
 		</Body>
-		<Joint type="Revolute" axis="1.0 0.0 0.0" lower="0.0" upper="2.5">
+		<Joint type="Revolute" axis="1.0 0.0 0.0" lower="0.0" upper="2.5" bvh="Character1_RightLeg">
 			<Transformation linear="1.0 0.0 0.0 0.0 1.0 0.0 0.0 0.0 1.0" translation="-0.101082 0.516358 -0.013996"/>
 		</Joint>
 	</Node>
@@ -163,7 +163,7 @@
 		<Body type="Box" mass="0.154950" size="0.101427 0.062282 0.043498" contact="Off" color="0.9 0.9 0.9 1.0" obj="Zygote_Meshes_251229/Skeleton/R_Talus.obj">
 			<Transformation linear="0.032004 -0.837876 -0.544922 0.295652 -0.512866 0.805952 -0.95476 -0.186901 0.231306" translation="-0.089758 0.059388 -0.022868"/>
 		</Body>
-		<Joint type="Ball" lower="-1.57 -1.57 -1.57" upper="1.57 1.57 1.57">
+		<Joint type="Ball" lower="-1.57 -1.57 -1.57" upper="1.57 1.57 1.57" bvh="Character1_RightFoot">
 			<Transformation linear="1.0 0.0 0.0 0.0 1.0 0.0 0.0 0.0 1.0" translation="-0.085538 0.075393 -0.041198"/>
 		</Joint>
 	</Node>
