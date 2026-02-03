@@ -709,6 +709,10 @@ class TetrahedronMeshMixin:
         color = self.contour_mesh_color
         cap_color = np.array([0.2, 0.6, 0.2])
 
+        # Build index arrays for fast position updates
+        surface_face_indices = []
+        cap_face_indices = []
+
         for face_idx, face in enumerate(render_faces):
             v0, v1, v2 = self.tet_vertices[face]
             normal = np.cross(v1 - v0, v2 - v0)
@@ -720,15 +724,21 @@ class TetrahedronMeshMixin:
                 for vi in face:
                     cap_verts.append(self.tet_vertices[vi])
                     cap_normals.append(normal)
+                cap_face_indices.append(face)
             else:
                 for vi in face:
                     surface_verts.append(self.tet_vertices[vi])
                     surface_normals.append(normal)
+                surface_face_indices.append(face)
 
         self._tet_surface_verts = np.array(surface_verts, dtype=np.float32) if surface_verts else None
         self._tet_surface_normals = np.array(surface_normals, dtype=np.float32) if surface_normals else None
         self._tet_cap_verts = np.array(cap_verts, dtype=np.float32) if cap_verts else None
         self._tet_cap_normals = np.array(cap_normals, dtype=np.float32) if cap_normals else None
+
+        # Store flattened vertex index arrays for fast update path
+        self._tet_surface_vidx = np.array(surface_face_indices, dtype=np.int32).reshape(-1) if surface_face_indices else None
+        self._tet_cap_vidx = np.array(cap_face_indices, dtype=np.int32).reshape(-1) if cap_face_indices else None
 
         # Prepare surface edge arrays (from render faces for display)
         edge_set = set()
@@ -739,10 +749,44 @@ class TetrahedronMeshMixin:
                 edge_set.add(edge)
 
         edge_verts = []
+        edge_vidx = []
         for v0, v1 in edge_set:
             edge_verts.append(self.tet_vertices[v0])
             edge_verts.append(self.tet_vertices[v1])
+            edge_vidx.extend([v0, v1])
         self._tet_edge_verts = np.array(edge_verts, dtype=np.float32) if edge_verts else None
+        self._tet_edge_vidx = np.array(edge_vidx, dtype=np.int32) if edge_vidx else None
+
+    def _update_tet_draw_positions(self):
+        """Fast path: update draw arrays from tet_vertices using precomputed index arrays.
+        Call this instead of _prepare_tet_draw_arrays when only positions changed (not topology)."""
+        if not hasattr(self, '_tet_surface_vidx') or self._tet_surface_vidx is None:
+            self._prepare_tet_draw_arrays()
+            return
+        verts = self.tet_vertices
+        # Update surface verts + normals
+        if self._tet_surface_vidx is not None and self._tet_surface_verts is not None:
+            self._tet_surface_verts[:] = verts[self._tet_surface_vidx]
+            # Recompute normals vectorized: every 3 verts is a triangle
+            v = self._tet_surface_verts.reshape(-1, 3, 3)
+            normals = np.cross(v[:, 1] - v[:, 0], v[:, 2] - v[:, 0])
+            norms = np.linalg.norm(normals, axis=1, keepdims=True)
+            norms[norms < 1e-10] = 1.0
+            normals /= norms
+            # Broadcast per-face normal to 3 vertices
+            self._tet_surface_normals[:] = np.repeat(normals, 3, axis=0)
+        # Update cap verts + normals
+        if self._tet_cap_vidx is not None and self._tet_cap_verts is not None:
+            self._tet_cap_verts[:] = verts[self._tet_cap_vidx]
+            v = self._tet_cap_verts.reshape(-1, 3, 3)
+            normals = np.cross(v[:, 1] - v[:, 0], v[:, 2] - v[:, 0])
+            norms = np.linalg.norm(normals, axis=1, keepdims=True)
+            norms[norms < 1e-10] = 1.0
+            normals /= norms
+            self._tet_cap_normals[:] = np.repeat(normals, 3, axis=0)
+        # Update edge verts
+        if self._tet_edge_vidx is not None and self._tet_edge_verts is not None:
+            self._tet_edge_verts[:] = verts[self._tet_edge_vidx]
 
     def draw_tetrahedron_mesh(self, draw_tets=False, draw_caps=True):
         """

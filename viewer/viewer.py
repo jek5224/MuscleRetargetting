@@ -1643,14 +1643,17 @@ class GLFWApp():
         # Fix root translation to initial position so skeleton doesn't walk away
         if hasattr(self, 'motion_root_translation') and self.motion_root_translation is not None:
             pose[3:6] = self.motion_root_translation
-        print(f"[Motion] Frame {frame}: pose range [{pose.min():.3f}, {pose.max():.3f}], non-zero DOFs: {np.count_nonzero(np.abs(pose) > 0.01)}/{len(pose)}")
         self.env.skel.setPositions(pose)
         # Sync the joint angle slider state
         if hasattr(self, '_skel_dofs'):
             self._skel_dofs = pose.copy()
 
-    def _motion_step_forward(self, count=1):
-        """Advance count frames sequentially, applying pose and optionally running tet sim each step."""
+    def _motion_step_forward(self, count=1, run_tet=False):
+        """Advance count frames sequentially, applying pose and optionally running tet sim each step.
+
+        run_tet: if True, run tet sim for frames not in cache (used by Step+1 button and baking).
+                 Play mode always passes False — it only uses cached deformation.
+        """
         if self.motion_bvh is None:
             return
         for _ in range(count):
@@ -1662,12 +1665,9 @@ class GLFWApp():
                     self.motion_is_playing = False
                     return
             self._motion_apply_pose(next_frame)
-            if self.motion_run_tet_sim:
-                if not self._motion_apply_cached_deformation(next_frame):
+            if not self._motion_apply_cached_deformation(next_frame):
+                if run_tet:
                     self._motion_run_tet_settle()
-            else:
-                # Even without tet sim, apply cached deformation if available
-                self._motion_apply_cached_deformation(next_frame)
 
     def _motion_run_tet_settle(self):
         """Run coupled tet sim for all active soft bodies at current pose."""
@@ -1748,7 +1748,7 @@ class GLFWApp():
                 cached_pos = self.motion_deform_cache[mname][frame]
                 mobj.soft_body.positions = cached_pos.astype(np.float64)
                 mobj.tet_vertices = cached_pos.astype(np.float32).copy()
-                mobj._prepare_tet_draw_arrays()
+                mobj._update_tet_draw_positions()
                 any_applied = True
         return any_applied
 
@@ -1761,7 +1761,7 @@ class GLFWApp():
             self._motion_load_cache()
             print(f"Bake complete: frames 0-{self.motion_bake_end_frame}")
             return
-        self._motion_step_forward(1)
+        self._motion_step_forward(1, run_tet=True)
         self._motion_save_current_frame()
         self.motion_bake_current = self.motion_current_frame
 
@@ -1818,7 +1818,7 @@ class GLFWApp():
                 self._motion_reset()
             imgui.same_line()
             if imgui.button("Step +1##motion"):
-                self._motion_step_forward(1)
+                self._motion_step_forward(1, run_tet=self.motion_run_tet_sim)
 
             # Play/Pause + speed
             if self.motion_is_playing:
