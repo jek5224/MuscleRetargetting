@@ -1766,8 +1766,6 @@ class GLFWApp():
             if not os.path.exists(filepath):
                 continue
             data = np.load(filepath, allow_pickle=True)
-            if 'waypoints_flat' in data:
-                continue
             to_patch[mname] = (filepath, data['frames'], data['positions'])
 
         if not to_patch:
@@ -2140,17 +2138,10 @@ class GLFWApp():
                     if imgui.button("Bake to End Frame##motion_cache"):
                         self._motion_start_bake()
 
-            # Show whether cache has waypoints; offer patch button if not
-            has_wp_in_cache = any(
-                'waypoints_flat' in entry
-                for mcache in self.motion_deform_cache.values()
-                for entry in mcache.values()
-            )
-            if num_cached > 0 and not has_wp_in_cache:
-                imgui.text("Cache missing waypoints (old format)")
-                if has_soft_bodies and not self.motion_baking:
-                    if imgui.button("Patch Waypoints into Cache##motion_cache"):
-                        self._motion_patch_waypoints()
+            # Recompute/patch waypoints in cache
+            if num_cached > 0 and has_soft_bodies and not self.motion_baking:
+                if imgui.button("Recompute Waypoints in Cache##motion_cache"):
+                    self._motion_patch_waypoints()
 
     def drawUIFrame(self):
         imgui.new_frame()
