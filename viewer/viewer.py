@@ -1748,11 +1748,13 @@ class GLFWApp():
 
     def _motion_patch_waypoints(self):
         """Patch existing cache files by computing waypoints from cached tet positions.
-        Much faster than re-baking since it skips tet sim — only does barycentric interpolation."""
+        Much faster than re-baking since it skips tet sim — only does barycentric interpolation.
+        Sets skeleton pose per frame so origin/insertion endpoints update correctly."""
         cache_dir = self._motion_cache_dir()
         if cache_dir is None:
             return
-        patched = 0
+        # Collect muscles that need patching
+        to_patch = {}  # mname -> (filepath, frames, positions)
         for mname, mobj in self.zygote_muscle_meshes.items():
             if mobj.soft_body is None:
                 continue
@@ -1765,28 +1767,55 @@ class GLFWApp():
                 continue
             data = np.load(filepath, allow_pickle=True)
             if 'waypoints_flat' in data:
-                continue  # Already has waypoints
-            frames = data['frames']
-            positions = data['positions']
-            # Compute waypoints for each frame
-            wp_flats = []
-            wp_shape_str = None
-            for i in range(len(frames)):
-                # Temporarily set tet vertices to cached positions
+                continue
+            to_patch[mname] = (filepath, data['frames'], data['positions'])
+
+        if not to_patch:
+            print("All cache files already have waypoints")
+            return
+
+        # Build sorted list of all unique frame indices across muscles
+        all_frames = sorted(set(
+            int(f) for _, frames, _ in to_patch.values() for f in frames
+        ))
+
+        # Per-muscle: build frame->index mapping and accumulate results
+        muscle_wp = {}  # mname -> {frame_idx: wp_flat}
+        muscle_wp_shape = {}  # mname -> wp_shape_str
+        for mname in to_patch:
+            muscle_wp[mname] = {}
+
+        # Iterate frames once, update all muscles per frame
+        for frame_idx in all_frames:
+            if frame_idx < self.motion_total_frames:
+                self._motion_apply_pose(frame_idx)
+            for mname, (filepath, frames, positions) in to_patch.items():
+                frame_list = list(frames)
+                if frame_idx not in frame_list:
+                    continue
+                i = frame_list.index(frame_idx)
+                mobj = self.zygote_muscle_meshes[mname]
                 mobj.tet_vertices = positions[i].astype(np.float32).copy()
                 mobj._update_waypoints_from_tet(self.env.skel, verbose=False)
                 wp_flat, wp_shape_str = self._flatten_waypoints(mobj.waypoints)
-                wp_flats.append(wp_flat)
-            # Re-save with waypoints
+                muscle_wp[mname][frame_idx] = wp_flat
+                muscle_wp_shape[mname] = wp_shape_str
+
+        # Write patched files
+        patched = 0
+        for mname, (filepath, frames, positions) in to_patch.items():
+            frame_list = [int(f) for f in frames]
+            wp_flats = [muscle_wp[mname][f] for f in frame_list]
             save_dict = dict(
                 frames=frames,
                 positions=positions,
                 waypoints_flat=np.stack(wp_flats).astype(np.float32),
-                waypoints_shape=np.array([wp_shape_str.encode('utf-8')]),
+                waypoints_shape=np.array([muscle_wp_shape[mname].encode('utf-8')]),
             )
             np.savez_compressed(filepath, **save_dict)
             patched += 1
             print(f"  Patched {mname}: {len(frames)} frames")
+
         self._motion_load_cache()
         print(f"Waypoint patch complete: {patched} muscles updated")
 
