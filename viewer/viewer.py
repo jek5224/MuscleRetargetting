@@ -1688,7 +1688,7 @@ class GLFWApp():
         return cache_dir
 
     def _motion_save_current_frame(self):
-        """Save deformed tet positions for all muscles with soft_body at the current frame."""
+        """Save deformed tet positions + waypoints for all muscles with soft_body at the current frame."""
         cache_dir = self._motion_cache_dir()
         if cache_dir is None:
             return
@@ -1698,26 +1698,43 @@ class GLFWApp():
             if mobj.soft_body is None:
                 continue
             positions = mobj.soft_body.get_positions().astype(np.float32)
+            # Flatten waypoints
+            wp_flat = wp_shape = None
+            if hasattr(mobj, 'waypoints') and len(mobj.waypoints) > 0:
+                wp_flat, wp_shape = self._flatten_waypoints(mobj.waypoints)
+
             filepath = os.path.join(cache_dir, f'{mname}.npz')
             if os.path.exists(filepath):
-                data = np.load(filepath)
+                data = np.load(filepath, allow_pickle=True)
                 frames = list(data['frames'])
                 all_pos = list(data['positions'])
+                all_wp = list(data['waypoints_flat']) if 'waypoints_flat' in data else [None] * len(frames)
                 if frame in frames:
                     idx = frames.index(frame)
                     all_pos[idx] = positions
+                    if wp_flat is not None:
+                        all_wp[idx] = wp_flat
                 else:
                     frames.append(frame)
                     all_pos.append(positions)
+                    all_wp.append(wp_flat)
                     order = np.argsort(frames)
                     frames = [frames[i] for i in order]
                     all_pos = [all_pos[i] for i in order]
+                    all_wp = [all_wp[i] for i in order]
             else:
                 frames = [frame]
                 all_pos = [positions]
-            np.savez_compressed(filepath,
-                               frames=np.array(frames, dtype=np.int32),
-                               positions=np.array(all_pos, dtype=np.float32))
+                all_wp = [wp_flat]
+
+            save_dict = dict(
+                frames=np.array(frames, dtype=np.int32),
+                positions=np.array(all_pos, dtype=np.float32),
+            )
+            if wp_flat is not None:
+                save_dict['waypoints_flat'] = np.array(all_wp, dtype=np.float32)
+                save_dict['waypoints_shape'] = np.array([wp_shape.encode('utf-8')])
+            np.savez_compressed(filepath, **save_dict)
             saved_count += 1
         self._motion_load_cache()
         print(f"Saved deformation at frame {frame} for {saved_count} muscles")
@@ -1731,12 +1748,65 @@ class GLFWApp():
         for mname in self.zygote_muscle_meshes:
             filepath = os.path.join(cache_dir, f'{mname}.npz')
             if os.path.exists(filepath):
-                data = np.load(filepath)
+                data = np.load(filepath, allow_pickle=True)
                 frames = data['frames']
                 positions = data['positions']
-                self.motion_deform_cache[mname] = {
-                    int(f): positions[i] for i, f in enumerate(frames)
-                }
+                has_wp = 'waypoints_flat' in data and 'waypoints_shape' in data
+                wp_flats = data['waypoints_flat'] if has_wp else None
+                # waypoints_shape is a 1-element array containing a JSON byte string
+                wp_shape_str = None
+                if has_wp:
+                    raw = data['waypoints_shape'][0]
+                    wp_shape_str = raw.decode('utf-8') if isinstance(raw, (bytes, np.bytes_)) else str(raw)
+                cache = {}
+                for i, f in enumerate(frames):
+                    entry = {'positions': positions[i]}
+                    if has_wp:
+                        entry['waypoints_flat'] = wp_flats[i]
+                        entry['waypoints_shape'] = wp_shape_str
+                    cache[int(f)] = entry
+                self.motion_deform_cache[mname] = cache
+
+    @staticmethod
+    def _flatten_waypoints(waypoints):
+        """Flatten nested waypoints list into a single float32 array + shape JSON string.
+        waypoints[stream][contour] = array(num_fibers, 3)
+        Returns (flat_array, shape_json_str).
+        """
+        import json
+        parts = []
+        shape_desc = []
+        for stream in waypoints:
+            contour_shapes = []
+            for contour_arr in stream:
+                arr = np.asarray(contour_arr, dtype=np.float32)
+                if arr.ndim == 1:
+                    arr = arr.reshape(1, 3)
+                parts.append(arr.ravel())
+                contour_shapes.append(int(arr.shape[0]))
+            shape_desc.append(contour_shapes)
+        flat = np.concatenate(parts) if parts else np.array([], dtype=np.float32)
+        return flat, json.dumps(shape_desc)
+
+    @staticmethod
+    def _unflatten_waypoints(flat, shape_json):
+        """Reconstruct nested waypoints list from flat array + shape JSON string."""
+        import json
+        if isinstance(shape_json, (bytes, np.bytes_)):
+            shape_json = shape_json.decode('utf-8')
+        elif isinstance(shape_json, np.ndarray):
+            shape_json = str(shape_json)
+        shape_desc = json.loads(shape_json)
+        waypoints = []
+        offset = 0
+        for contour_shapes in shape_desc:
+            stream = []
+            for nf in contour_shapes:
+                n = nf * 3
+                stream.append(flat[offset:offset + n].reshape(nf, 3).copy())
+                offset += n
+            waypoints.append(stream)
+        return waypoints
 
     def _motion_apply_cached_deformation(self, frame):
         """Try to apply cached deformation for the given frame. Returns True if cache was used."""
@@ -1747,14 +1817,16 @@ class GLFWApp():
             if mobj.soft_body is None:
                 continue
             if mname in self.motion_deform_cache and frame in self.motion_deform_cache[mname]:
-                cached_pos = self.motion_deform_cache[mname][frame]
+                cached = self.motion_deform_cache[mname][frame]
+                cached_pos = cached['positions']
                 mobj.soft_body.positions = cached_pos.astype(np.float64)
                 mobj.tet_vertices = cached_pos.astype(np.float32).copy()
                 mobj._update_tet_draw_positions()
-                # Update waypoints from deformed tet positions
-                if hasattr(mobj, 'waypoints') and len(mobj.waypoints) > 0:
-                    if hasattr(mobj, 'waypoint_bary_coords') and len(mobj.waypoint_bary_coords) > 0:
-                        mobj._update_waypoints_from_tet(self.env.skel, verbose=False)
+                # Restore cached waypoints directly (no recomputation)
+                if 'waypoints_flat' in cached and 'waypoints_shape' in cached:
+                    if hasattr(mobj, 'waypoints') and len(mobj.waypoints) > 0:
+                        mobj.waypoints = self._unflatten_waypoints(
+                            cached['waypoints_flat'], cached['waypoints_shape'])
                 any_applied = True
         return any_applied
 
@@ -1779,7 +1851,7 @@ class GLFWApp():
             settle_iters = self.motion_settle_iters
 
             # Accumulate results in memory, write per-muscle at the end
-            baked = {}  # muscle_name -> {frame: positions}
+            baked = {}  # muscle_name -> {frame: {positions, wp_flat, wp_shape}}
             for mname, mobj in self.zygote_muscle_meshes.items():
                 if mobj.soft_body is not None:
                     baked[mname] = {}
@@ -1807,10 +1879,13 @@ class GLFWApp():
                     tolerance=1e-4
                 )
 
-                # Capture positions
+                # Capture positions + waypoints
                 for mname in baked:
                     mobj = self.zygote_muscle_meshes[mname]
-                    baked[mname][frame] = mobj.soft_body.get_positions().astype(np.float32)
+                    entry = {'positions': mobj.soft_body.get_positions().astype(np.float32)}
+                    if hasattr(mobj, 'waypoints') and len(mobj.waypoints) > 0:
+                        entry['wp_flat'], entry['wp_shape'] = self._flatten_waypoints(mobj.waypoints)
+                    baked[mname][frame] = entry
 
                 self.motion_bake_current = frame
 
@@ -1821,14 +1896,31 @@ class GLFWApp():
                 filepath = os.path.join(cache_dir, f'{mname}.npz')
                 # Merge with existing cache file if present
                 if os.path.exists(filepath):
-                    existing = np.load(filepath)
-                    existing_frames = {int(f): existing['positions'][i] for i, f in enumerate(existing['frames'])}
-                    existing_frames.update(frame_data)
-                    frame_data = existing_frames
+                    existing = np.load(filepath, allow_pickle=True)
+                    has_wp = 'waypoints_flat' in existing and 'waypoints_shape' in existing
+                    ex_wp_shape = existing['waypoints_shape'][0] if has_wp else None
+                    for i, f in enumerate(existing['frames']):
+                        fi = int(f)
+                        if fi not in frame_data:
+                            entry = {'positions': existing['positions'][i]}
+                            if has_wp:
+                                entry['wp_flat'] = existing['waypoints_flat'][i]
+                                entry['wp_shape'] = ex_wp_shape
+                            frame_data[fi] = entry
                 sorted_frames = sorted(frame_data.keys())
-                np.savez_compressed(filepath,
-                                   frames=np.array(sorted_frames, dtype=np.int32),
-                                   positions=np.array([frame_data[f] for f in sorted_frames], dtype=np.float32))
+                save_dict = dict(
+                    frames=np.array(sorted_frames, dtype=np.int32),
+                    positions=np.array([frame_data[f]['positions'] for f in sorted_frames], dtype=np.float32),
+                )
+                # Save waypoints if available
+                if 'wp_flat' in frame_data[sorted_frames[0]]:
+                    save_dict['waypoints_flat'] = np.array(
+                        [frame_data[f]['wp_flat'] for f in sorted_frames], dtype=np.float32)
+                    wp_s = frame_data[sorted_frames[0]]['wp_shape']
+                    if isinstance(wp_s, str):
+                        wp_s = wp_s.encode('utf-8')
+                    save_dict['waypoints_shape'] = np.array([wp_s])
+                np.savez_compressed(filepath, **save_dict)
 
             print(f"Bake complete: frames 0-{end_frame} ({sum(len(fd) for fd in baked.values())} frame-muscles saved)")
         except Exception as e:
