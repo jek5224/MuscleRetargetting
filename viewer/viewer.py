@@ -1604,6 +1604,15 @@ class GLFWApp():
             self.motion_current_frame = 0
             self.motion_is_playing = False
             self.motion_play_accumulator = 0.0
+            # Store initial root position to keep skeleton in place
+            root_jn = self.env.skel.getJoint(0)
+            root_dofs = root_jn.getNumDofs()
+            if root_dofs == 6:
+                # Root joint: DOFs 0-2 = rotation, DOFs 3-5 = translation
+                init_pos = self.env.skel.getPositions()
+                self.motion_root_translation = init_pos[3:6].copy()
+            else:
+                self.motion_root_translation = None
             # Apply frame 0 pose
             self._motion_apply_pose(0)
             # Enable OBJ skeleton rendering so posed skeleton is visible
@@ -1621,6 +1630,9 @@ class GLFWApp():
             return
         self.motion_current_frame = frame
         pose = self.motion_bvh.mocap_refs[frame].copy()
+        # Fix root translation to initial position so skeleton doesn't walk away
+        if hasattr(self, 'motion_root_translation') and self.motion_root_translation is not None:
+            pose[3:6] = self.motion_root_translation
         self.env.skel.setPositions(pose)
         # Sync the joint angle slider state
         if hasattr(self, '_skel_dofs'):
