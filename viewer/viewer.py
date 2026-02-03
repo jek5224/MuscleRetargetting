@@ -185,6 +185,10 @@ class GLFWApp():
         self.motion_settle_iters = 50
         self.motion_play_accumulator = 0.0
         self.motion_repeat = False
+        self.motion_deform_cache = {}     # Dict: muscle_name -> {frame_idx: positions_array}
+        self.motion_baking = False        # True during batch bake
+        self.motion_bake_end_frame = 0    # Target end frame for batch bake
+        self.motion_bake_current = 0      # Current progress during bake
         self._scan_motion_files()
 
         ## Flag
@@ -1620,6 +1624,9 @@ class GLFWApp():
             self._motion_apply_pose(0)
             # Enable OBJ skeleton rendering so posed skeleton is visible
             self.draw_obj = True
+            # Load cached deformation data if available
+            self._motion_load_cache()
+            self.motion_bake_end_frame = min(self.motion_bake_end_frame, self.motion_total_frames - 1)
             print(f"Loaded motion: {os.path.basename(bvh_path)} ({self.motion_total_frames} frames, {1.0/self.motion_bvh.frame_time:.0f} FPS)")
         except Exception as e:
             print(f"Error loading BVH: {e}")
@@ -1656,7 +1663,11 @@ class GLFWApp():
                     return
             self._motion_apply_pose(next_frame)
             if self.motion_run_tet_sim:
-                self._motion_run_tet_settle()
+                if not self._motion_apply_cached_deformation(next_frame):
+                    self._motion_run_tet_settle()
+            else:
+                # Even without tet sim, apply cached deformation if available
+                self._motion_apply_cached_deformation(next_frame)
 
     def _motion_run_tet_settle(self):
         """Run coupled tet sim for all active soft bodies at current pose."""
@@ -1664,6 +1675,95 @@ class GLFWApp():
             max_iterations=self.motion_settle_iters,
             tolerance=1e-4
         )
+
+    def _motion_cache_dir(self):
+        """Returns cache directory path for current BVH. Creates it if needed."""
+        if self.motion_bvh is None:
+            return None
+        bvh_name = os.path.splitext(os.path.basename(self.motion_bvh_files[self.motion_selected_idx]))[0]
+        cache_dir = f'data/motion_cache/{bvh_name}'
+        os.makedirs(cache_dir, exist_ok=True)
+        return cache_dir
+
+    def _motion_save_current_frame(self):
+        """Save deformed tet positions for all muscles with soft_body at the current frame."""
+        cache_dir = self._motion_cache_dir()
+        if cache_dir is None:
+            return
+        frame = self.motion_current_frame
+        saved_count = 0
+        for mname, mobj in self.zygote_muscle_meshes.items():
+            if mobj.soft_body is None:
+                continue
+            positions = mobj.soft_body.get_positions().astype(np.float32)
+            filepath = os.path.join(cache_dir, f'{mname}.npz')
+            if os.path.exists(filepath):
+                data = np.load(filepath)
+                frames = list(data['frames'])
+                all_pos = list(data['positions'])
+                if frame in frames:
+                    idx = frames.index(frame)
+                    all_pos[idx] = positions
+                else:
+                    frames.append(frame)
+                    all_pos.append(positions)
+                    order = np.argsort(frames)
+                    frames = [frames[i] for i in order]
+                    all_pos = [all_pos[i] for i in order]
+            else:
+                frames = [frame]
+                all_pos = [positions]
+            np.savez_compressed(filepath,
+                               frames=np.array(frames, dtype=np.int32),
+                               positions=np.array(all_pos, dtype=np.float32))
+            saved_count += 1
+        self._motion_load_cache()
+        print(f"Saved deformation at frame {frame} for {saved_count} muscles")
+
+    def _motion_load_cache(self):
+        """Load all cached deformation data for the current BVH into memory."""
+        self.motion_deform_cache = {}
+        cache_dir = self._motion_cache_dir()
+        if cache_dir is None:
+            return
+        for mname in self.zygote_muscle_meshes:
+            filepath = os.path.join(cache_dir, f'{mname}.npz')
+            if os.path.exists(filepath):
+                data = np.load(filepath)
+                frames = data['frames']
+                positions = data['positions']
+                self.motion_deform_cache[mname] = {
+                    int(f): positions[i] for i, f in enumerate(frames)
+                }
+
+    def _motion_apply_cached_deformation(self, frame):
+        """Try to apply cached deformation for the given frame. Returns True if cache was used."""
+        if not self.motion_deform_cache:
+            return False
+        any_applied = False
+        for mname, mobj in self.zygote_muscle_meshes.items():
+            if mobj.soft_body is None:
+                continue
+            if mname in self.motion_deform_cache and frame in self.motion_deform_cache[mname]:
+                cached_pos = self.motion_deform_cache[mname][frame]
+                mobj.soft_body.positions = cached_pos.astype(np.float64)
+                mobj.tet_vertices = cached_pos.astype(np.float32).copy()
+                mobj._prepare_tet_draw_arrays()
+                any_applied = True
+        return any_applied
+
+    def _motion_bake_step(self):
+        """Called each render loop iteration during baking. Processes ONE frame per call."""
+        if not self.motion_baking:
+            return
+        if self.motion_current_frame >= self.motion_bake_end_frame:
+            self.motion_baking = False
+            self._motion_load_cache()
+            print(f"Bake complete: frames 0-{self.motion_bake_end_frame}")
+            return
+        self._motion_step_forward(1)
+        self._motion_save_current_frame()
+        self.motion_bake_current = self.motion_current_frame
 
     def _motion_reset(self):
         """Reset to frame 0, reset skeleton to rest pose, reset tet meshes."""
@@ -1748,6 +1848,59 @@ class GLFWApp():
                 imgui.push_item_width(150)
                 _, self.motion_settle_iters = imgui.slider_int("Settle Iters##motion", self.motion_settle_iters, 10, 200)
                 imgui.pop_item_width()
+
+            # --- Deformation Cache ---
+            imgui.separator()
+            imgui.text("--- Deformation Cache ---")
+
+            # Cache info: count how many frames are cached
+            cached_frames = set()
+            for mname_cache in self.motion_deform_cache.values():
+                cached_frames.update(mname_cache.keys())
+            num_cached = len(cached_frames)
+            imgui.text(f"Cache: {num_cached}/{self.motion_total_frames} frames baked")
+
+            # Save Current Frame button
+            has_soft_bodies = any(m.soft_body is not None for m in self.zygote_muscle_meshes.values()) if hasattr(self, 'zygote_muscle_meshes') else False
+            if not has_soft_bodies or self.motion_baking:
+                imgui.push_style_var(imgui.STYLE_ALPHA, 0.5)
+                imgui.button("Save Current Frame##motion_cache")
+                imgui.pop_style_var()
+            else:
+                if imgui.button("Save Current Frame##motion_cache"):
+                    self._motion_save_current_frame()
+
+            # Bake End Frame slider
+            imgui.push_item_width(150)
+            _, self.motion_bake_end_frame = imgui.slider_int(
+                "Bake End Frame##motion_cache",
+                self.motion_bake_end_frame, 0, max(1, self.motion_total_frames - 1))
+            imgui.pop_item_width()
+
+            # Bake / Cancel buttons
+            if self.motion_baking:
+                # Show progress during bake
+                bake_frac = self.motion_bake_current / max(1, self.motion_bake_end_frame)
+                imgui.progress_bar(bake_frac, (imgui.get_content_region_available_width(), 0),
+                                  f"Baking: frame {self.motion_bake_current}/{self.motion_bake_end_frame}")
+                if imgui.button("Cancel Bake##motion_cache"):
+                    self.motion_baking = False
+                    self._motion_load_cache()
+                    print("Bake cancelled")
+            else:
+                if not has_soft_bodies:
+                    imgui.push_style_var(imgui.STYLE_ALPHA, 0.5)
+                    imgui.button("Bake to End Frame##motion_cache")
+                    imgui.pop_style_var()
+                else:
+                    if imgui.button("Bake to End Frame##motion_cache"):
+                        # Reset to frame 0 and start baking
+                        self._motion_reset()
+                        self.motion_run_tet_sim = True
+                        self.motion_baking = True
+                        self.motion_bake_current = 0
+                        self.motion_is_playing = False
+                        print(f"Starting bake: frames 0-{self.motion_bake_end_frame}")
 
     def drawUIFrame(self):
         imgui.new_frame()
@@ -7221,6 +7374,10 @@ class GLFWApp():
                     self._motion_step_forward(1)
                     self.motion_play_accumulator -= frame_time
             self._motion_last_time = start_time
+
+            # Motion Browser: bake step (one frame per render loop)
+            if self.motion_baking:
+                self._motion_bake_step()
 
             if self.is_simulation:
                 self.update()
