@@ -1599,20 +1599,19 @@ class GLFWApp():
         bvh_path = self.motion_bvh_files[idx]
         self.motion_selected_idx = idx
         try:
+            # Store initial root position BEFORE MyBVH constructor modifies skeleton
+            root_jn = self.env.skel.getJoint(0)
+            root_dofs = root_jn.getNumDofs()
+            if root_dofs == 6:
+                init_pos = self.env.skel.getPositions()
+                self.motion_root_translation = init_pos[3:6].copy()
+            else:
+                self.motion_root_translation = None
             self.motion_bvh = MyBVH(bvh_path, self.env.bvh_info, self.env.skel)
             self.motion_total_frames = self.motion_bvh.num_frames
             self.motion_current_frame = 0
             self.motion_is_playing = False
             self.motion_play_accumulator = 0.0
-            # Store initial root position to keep skeleton in place
-            root_jn = self.env.skel.getJoint(0)
-            root_dofs = root_jn.getNumDofs()
-            if root_dofs == 6:
-                # Root joint: DOFs 0-2 = rotation, DOFs 3-5 = translation
-                init_pos = self.env.skel.getPositions()
-                self.motion_root_translation = init_pos[3:6].copy()
-            else:
-                self.motion_root_translation = None
             # Apply frame 0 pose
             self._motion_apply_pose(0)
             # Enable OBJ skeleton rendering so posed skeleton is visible
@@ -1633,6 +1632,7 @@ class GLFWApp():
         # Fix root translation to initial position so skeleton doesn't walk away
         if hasattr(self, 'motion_root_translation') and self.motion_root_translation is not None:
             pose[3:6] = self.motion_root_translation
+        print(f"[Motion] Frame {frame}: pose range [{pose.min():.3f}, {pose.max():.3f}], non-zero DOFs: {np.count_nonzero(np.abs(pose) > 0.01)}/{len(pose)}")
         self.env.skel.setPositions(pose)
         # Sync the joint angle slider state
         if hasattr(self, '_skel_dofs'):
