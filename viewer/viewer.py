@@ -184,6 +184,7 @@ class GLFWApp():
         self.motion_run_tet_sim = False
         self.motion_settle_iters = 50
         self.motion_play_accumulator = 0.0
+        self.motion_repeat = False
         self._scan_motion_files()
 
         ## Flag
@@ -1648,8 +1649,11 @@ class GLFWApp():
         for _ in range(count):
             next_frame = self.motion_current_frame + 1
             if next_frame >= self.motion_total_frames:
-                self.motion_is_playing = False
-                return
+                if self.motion_repeat:
+                    next_frame = 0
+                else:
+                    self.motion_is_playing = False
+                    return
             self._motion_apply_pose(next_frame)
             if self.motion_run_tet_sim:
                 self._motion_run_tet_settle()
@@ -1735,7 +1739,7 @@ class GLFWApp():
                     self.motion_is_playing = False
             else:
                 if imgui.button("Play##motion", width=80):
-                    if self.motion_current_frame < self.motion_total_frames - 1:
+                    if self.motion_current_frame < self.motion_total_frames - 1 or self.motion_repeat:
                         self.motion_is_playing = True
                         self.motion_play_accumulator = 0.0
             imgui.same_line()
@@ -1747,6 +1751,9 @@ class GLFWApp():
             imgui.pop_item_width()
             if changed:
                 self.motion_play_speed = speed_options[new_speed_idx]
+
+            # Repeat option
+            _, self.motion_repeat = imgui.checkbox("Repeat##motion", self.motion_repeat)
 
             # Tet sim options
             _, self.motion_run_tet_sim = imgui.checkbox("Run Tet Sim Each Step##motion", self.motion_run_tet_sim)
