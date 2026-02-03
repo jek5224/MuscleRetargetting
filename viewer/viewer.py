@@ -1947,11 +1947,12 @@ class GLFWApp():
             self.env.skel.setPositions(np.zeros(self.env.skel.getNumDofs()))
             if hasattr(self, '_skel_dofs'):
                 self._skel_dofs = np.zeros(self.env.skel.getNumDofs())
-        # Reset soft bodies
-        for mname, mobj in self.zygote_muscle_meshes.items():
-            if mobj.soft_body is not None:
-                mobj._update_tet_positions_from_skeleton(self.env.skel)
-                mobj._update_fixed_targets_from_skeleton(self.zygote_skeleton_meshes, self.env.skel)
+        # Reset soft bodies — use cached frame 0 if available, otherwise reset from skeleton
+        if not self._motion_apply_cached_deformation(0):
+            for mname, mobj in self.zygote_muscle_meshes.items():
+                if mobj.soft_body is not None:
+                    mobj._update_tet_positions_from_skeleton(self.env.skel)
+                    mobj._update_fixed_targets_from_skeleton(self.zygote_skeleton_meshes, self.env.skel)
 
     def _draw_motion_browser_ui(self):
         """Draw the Motion Browser imgui panel."""
