@@ -1946,7 +1946,8 @@ class MuscleMeshMixin:
 
         # Update tetrahedron mesh vertices for rendering
         self.tet_vertices = self.soft_body.get_positions().astype(np.float32)
-        self._prepare_tet_draw_arrays()
+        if not getattr(self, '_baking_mode', False):
+            self._prepare_tet_draw_arrays()
 
         # === STEP 6: Update waypoints from tets ===
         if getattr(self, 'waypoints_from_tet_sim', True):

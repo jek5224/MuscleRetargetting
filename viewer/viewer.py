@@ -879,10 +879,11 @@ class GLFWApp():
             old_pos = mobj.tet_vertices.copy() if mobj.tet_vertices is not None else mobj.soft_body.rest_positions
             mobj.soft_body.positions = global_positions[offset:offset+n].copy()
             mobj.tet_vertices = mobj.soft_body.get_positions().astype(np.float32)
-            mobj._prepare_tet_draw_arrays()
+            if not getattr(mobj, '_baking_mode', False):
+                mobj._prepare_tet_draw_arrays()
 
             # Update waypoints/fibers from deformed tetrahedra
-            if getattr(mobj, 'waypoints_from_tet_sim', True):
+            if not getattr(mobj, '_baking_mode', False) and getattr(mobj, 'waypoints_from_tet_sim', True):
                 if hasattr(mobj, 'waypoints') and len(mobj.waypoints) > 0:
                     if hasattr(mobj, '_update_waypoints_from_tet'):
                         mobj._update_waypoints_from_tet(self.env.skel)
@@ -1929,35 +1930,50 @@ class GLFWApp():
             self._motion_bake_finish()
             return
 
-        # Apply pose (use _motion_apply_pose for consistent root translation handling)
-        self._motion_apply_pose(frame)
+        try:
+            # Apply pose
+            self._motion_apply_pose(frame)
 
-        # Update constraints from skeleton, then run tet sim
-        # Disable per-iteration waypoint updates during baking (expensive, only needed once after sim)
-        saved_wp_flags = {}
-        for mname, mobj in self.zygote_muscle_meshes.items():
-            if mobj.soft_body is not None:
-                saved_wp_flags[mname] = getattr(mobj, 'waypoints_from_tet_sim', True)
-                mobj.waypoints_from_tet_sim = False
-                mobj._update_tet_positions_from_skeleton(self.env.skel)
-                mobj._update_fixed_targets_from_skeleton(self.zygote_skeleton_meshes, self.env.skel)
+            # Disable waypoint updates and draw array rebuilds during baking
+            saved_flags = {}
+            for mname, mobj in self.zygote_muscle_meshes.items():
+                if mobj.soft_body is not None:
+                    saved_flags[mname] = {
+                        'wp': getattr(mobj, 'waypoints_from_tet_sim', True),
+                        'baking': getattr(mobj, '_baking_mode', False),
+                    }
+                    mobj.waypoints_from_tet_sim = False
+                    mobj._baking_mode = True
 
-        self.run_all_tet_sim_with_constraints(
-            max_iterations=self.motion_settle_iters,
-            tolerance=1e-4
-        )
+            self.run_all_tet_sim_with_constraints(
+                max_iterations=self.motion_settle_iters,
+                tolerance=1e-4
+            )
 
-        # Capture positions (always) — waypoints are NOT computed during bake.
-        # Use "Recompute Waypoints" button after bake to patch them in.
-        for mname in self._bake_data:
-            mobj = self.zygote_muscle_meshes[mname]
-            self._bake_data[mname][frame] = {
-                'positions': mobj.soft_body.get_positions().astype(np.float32)
-            }
+            # Capture positions only
+            for mname in self._bake_data:
+                mobj = self.zygote_muscle_meshes[mname]
+                self._bake_data[mname][frame] = {
+                    'positions': mobj.soft_body.get_positions().astype(np.float32)
+                }
 
-        # Restore waypoints_from_tet_sim flags
-        for mname, flag in saved_wp_flags.items():
-            self.zygote_muscle_meshes[mname].waypoints_from_tet_sim = flag
+            # Restore flags
+            for mname, flags in saved_flags.items():
+                mobj = self.zygote_muscle_meshes[mname]
+                mobj.waypoints_from_tet_sim = flags['wp']
+                mobj._baking_mode = False
+
+        except Exception as e:
+            print(f"ERROR in bake step frame {frame}: {e}")
+            import traceback
+            traceback.print_exc()
+            # Still try to capture whatever positions we have
+            for mname in self._bake_data:
+                mobj = self.zygote_muscle_meshes[mname]
+                if mobj.soft_body is not None:
+                    self._bake_data[mname][frame] = {
+                        'positions': mobj.soft_body.get_positions().astype(np.float32)
+                    }
 
         self.motion_bake_current = frame
 

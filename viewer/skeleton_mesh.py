@@ -1583,7 +1583,8 @@ class SkeletonMeshMixin:
                 print(f"  _update: exception for anchor {anchor_idx}: {e}")
                 continue
 
-        print(f"  _update: updated {updated_count} anchor targets")
+        if not getattr(self, '_baking_mode', False):
+            print(f"  _update: updated {updated_count} anchor targets")
         self.soft_body.set_fixed_targets(new_targets)
 
     def _update_proximity_targets_from_skeleton(self, skeleton):
