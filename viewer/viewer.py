@@ -1845,38 +1845,20 @@ class GLFWApp():
 
     def _motion_bake_worker(self):
         """Background thread: iterates frames, runs tet sim, saves results to disk.
-        Skips frames that already exist in cache (apply cached positions instead to
-        keep soft body state continuous, but don't re-run tet sim).
+        Always re-simulates every frame, overwriting any existing cache.
         """
         try:
             end_frame = self.motion_bake_end_frame
             cache_dir = self._motion_cache_dir()
             settle_iters = self.motion_settle_iters
 
-            # Load existing cache to know which frames to skip
             active_muscles = [n for n, m in self.zygote_muscle_meshes.items() if m.soft_body is not None]
-            existing_positions = {}  # mname -> {frame: positions_array}
-            for mname in active_muscles:
-                filepath = os.path.join(cache_dir, f'{mname}.npz')
-                if os.path.exists(filepath):
-                    data = np.load(filepath, allow_pickle=True)
-                    existing_positions[mname] = {
-                        int(f): data['positions'][i] for i, f in enumerate(data['frames'])
-                    }
-                else:
-                    existing_positions[mname] = {}
-            # A frame is fully cached if ALL active muscles have it
-            cached_frames = set()
-            if active_muscles:
-                per_muscle = [set(existing_positions[n].keys()) for n in active_muscles]
-                cached_frames = set.intersection(*per_muscle) if per_muscle else set()
 
             # Accumulate results in memory, write per-muscle at the end
             baked = {}  # muscle_name -> {frame: {positions, wp_flat, wp_shape}}
             for mname in active_muscles:
                 baked[mname] = {}
 
-            skipped = 0
             for frame in range(1, end_frame + 1):
                 if not self.motion_baking:
                     print("Bake cancelled by user")
@@ -1889,34 +1871,24 @@ class GLFWApp():
                 self.env.skel.setPositions(pose)
                 self.motion_current_frame = frame
 
-                if frame in cached_frames:
-                    # Frame already cached — restore cached positions to keep soft body
-                    # state continuous for the next uncached frame, but don't re-sim
-                    for mname in active_muscles:
-                        mobj = self.zygote_muscle_meshes[mname]
-                        cached_pos = existing_positions[mname][frame]
-                        mobj.soft_body.positions = cached_pos.astype(np.float64)
-                        mobj.tet_vertices = cached_pos.astype(np.float32).copy()
-                    skipped += 1
-                else:
-                    # Update constraints from skeleton, then run tet sim
-                    for mname, mobj in self.zygote_muscle_meshes.items():
-                        if mobj.soft_body is not None:
-                            mobj._update_tet_positions_from_skeleton(self.env.skel)
-                            mobj._update_fixed_targets_from_skeleton(self.zygote_skeleton_meshes, self.env.skel)
+                # Update constraints from skeleton, then run tet sim
+                for mname, mobj in self.zygote_muscle_meshes.items():
+                    if mobj.soft_body is not None:
+                        mobj._update_tet_positions_from_skeleton(self.env.skel)
+                        mobj._update_fixed_targets_from_skeleton(self.zygote_skeleton_meshes, self.env.skel)
 
-                    self.run_all_tet_sim_with_constraints(
-                        max_iterations=settle_iters,
-                        tolerance=1e-4
-                    )
+                self.run_all_tet_sim_with_constraints(
+                    max_iterations=settle_iters,
+                    tolerance=1e-4
+                )
 
-                    # Capture positions + waypoints
-                    for mname in baked:
-                        mobj = self.zygote_muscle_meshes[mname]
-                        entry = {'positions': mobj.soft_body.get_positions().astype(np.float32)}
-                        if hasattr(mobj, 'waypoints') and len(mobj.waypoints) > 0:
-                            entry['wp_flat'], entry['wp_shape'] = self._flatten_waypoints(mobj.waypoints)
-                        baked[mname][frame] = entry
+                # Capture positions + waypoints
+                for mname in baked:
+                    mobj = self.zygote_muscle_meshes[mname]
+                    entry = {'positions': mobj.soft_body.get_positions().astype(np.float32)}
+                    if hasattr(mobj, 'waypoints') and len(mobj.waypoints) > 0:
+                        entry['wp_flat'], entry['wp_shape'] = self._flatten_waypoints(mobj.waypoints)
+                    baked[mname][frame] = entry
 
                 self.motion_bake_current = frame
 
@@ -1953,8 +1925,7 @@ class GLFWApp():
                     save_dict['waypoints_shape'] = np.array([wp_s])
                 np.savez_compressed(filepath, **save_dict)
 
-            simulated = end_frame - skipped
-            print(f"Bake complete: frames 0-{end_frame} ({simulated} simulated, {skipped} skipped from cache)")
+            print(f"Bake complete: frames 0-{end_frame}")
         except Exception as e:
             print(f"Bake error: {e}")
             import traceback
