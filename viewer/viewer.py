@@ -1659,21 +1659,11 @@ class GLFWApp():
                 self._motion_run_tet_settle()
 
     def _motion_run_tet_settle(self):
-        """Run tet sim settle for all active soft bodies at current pose."""
-        for mname, mobj in self.zygote_muscle_meshes.items():
-            if mobj.soft_body is not None:
-                mobj._update_tet_positions_from_skeleton(self.env.skel)
-                mobj._update_fixed_targets_from_skeleton(self.zygote_skeleton_meshes, self.env.skel)
-                mobj.run_soft_body_to_convergence(
-                    self.zygote_skeleton_meshes,
-                    self.env.skel,
-                    max_iterations=self.motion_settle_iters,
-                    tolerance=1e-4,
-                    enable_collision=mobj.soft_body_collision,
-                    collision_margin=mobj.soft_body_collision_margin,
-                    verbose=False,
-                    use_arap=mobj.use_arap
-                )
+        """Run coupled tet sim for all active soft bodies at current pose."""
+        self.run_all_tet_sim_with_constraints(
+            max_iterations=self.motion_settle_iters,
+            tolerance=1e-4
+        )
 
     def _motion_reset(self):
         """Reset to frame 0, reset skeleton to rest pose, reset tet meshes."""
@@ -1729,9 +1719,6 @@ class GLFWApp():
             imgui.same_line()
             if imgui.button("Step +1##motion"):
                 self._motion_step_forward(1)
-            imgui.same_line()
-            if imgui.button("Step +10##motion"):
-                self._motion_step_forward(10)
 
             # Play/Pause + speed
             if self.motion_is_playing:
@@ -1755,8 +1742,8 @@ class GLFWApp():
             # Repeat option
             _, self.motion_repeat = imgui.checkbox("Repeat##motion", self.motion_repeat)
 
-            # Tet sim options
-            _, self.motion_run_tet_sim = imgui.checkbox("Run Tet Sim Each Step##motion", self.motion_run_tet_sim)
+            # Coupled tet sim option
+            _, self.motion_run_tet_sim = imgui.checkbox("Run Coupled Tet Sim##motion", self.motion_run_tet_sim)
             if self.motion_run_tet_sim:
                 imgui.push_item_width(150)
                 _, self.motion_settle_iters = imgui.slider_int("Settle Iters##motion", self.motion_settle_iters, 10, 200)
