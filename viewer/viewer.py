@@ -1366,13 +1366,13 @@ class GLFWApp():
                     obj.draw_bounding_box()
                 if obj.is_draw_edges:
                     obj.draw_edges()
-                if obj.is_draw_fiber_architecture and not self.motion_baking:
+                if obj.is_draw_fiber_architecture:
                     obj.draw_fiber_architecture()
-                if obj.is_draw_contour_mesh and not self.motion_baking:
+                if obj.is_draw_contour_mesh:
                     obj.draw_contour_mesh()
-                if obj.is_draw_tet_mesh and not self.motion_baking:
+                if obj.is_draw_tet_mesh:
                     obj.draw_tetrahedron_mesh(draw_tets=obj.is_draw_tet_edges)
-                if obj.is_draw_constraints and not self.motion_baking:
+                if obj.is_draw_constraints:
                     obj.draw_constraints()
                 if obj.is_draw:
                     obj.draw([obj.color[0], obj.color[1], obj.color[2], obj.transparency])
