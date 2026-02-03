@@ -1606,6 +1606,8 @@ class GLFWApp():
             self.motion_play_accumulator = 0.0
             # Apply frame 0 pose
             self._motion_apply_pose(0)
+            # Enable OBJ skeleton rendering so posed skeleton is visible
+            self.draw_obj = True
             print(f"Loaded motion: {os.path.basename(bvh_path)} ({self.motion_total_frames} frames, {1.0/self.motion_bvh.frame_time:.0f} FPS)")
         except Exception as e:
             print(f"Error loading BVH: {e}")
