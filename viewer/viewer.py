@@ -30,6 +30,7 @@ import glob
 from skeleton_section import SKEL_dart_info
 
 import time
+import threading
 
 # ============================================================================
 # CONSTANTS
@@ -189,6 +190,7 @@ class GLFWApp():
         self.motion_baking = False        # True during batch bake
         self.motion_bake_end_frame = 0    # Target end frame for batch bake
         self.motion_bake_current = 0      # Current progress during bake
+        self._bake_thread = None          # Background bake thread
         self._scan_motion_files()
 
         ## Flag
@@ -1365,13 +1367,13 @@ class GLFWApp():
                     obj.draw_bounding_box()
                 if obj.is_draw_edges:
                     obj.draw_edges()
-                if obj.is_draw_fiber_architecture:
+                if obj.is_draw_fiber_architecture and not self.motion_baking:
                     obj.draw_fiber_architecture()
-                if obj.is_draw_contour_mesh:
+                if obj.is_draw_contour_mesh and not self.motion_baking:
                     obj.draw_contour_mesh()
-                if obj.is_draw_tet_mesh:
+                if obj.is_draw_tet_mesh and not self.motion_baking:
                     obj.draw_tetrahedron_mesh(draw_tets=obj.is_draw_tet_edges)
-                if obj.is_draw_constraints:
+                if obj.is_draw_constraints and not self.motion_baking:
                     obj.draw_constraints()
                 if obj.is_draw:
                     obj.draw([obj.color[0], obj.color[1], obj.color[2], obj.transparency])
@@ -1756,18 +1758,87 @@ class GLFWApp():
                 any_applied = True
         return any_applied
 
-    def _motion_bake_step(self):
-        """Called each render loop iteration during baking. Processes ONE frame per call."""
-        if not self.motion_baking:
+    def _motion_start_bake(self):
+        """Start background bake in a separate thread."""
+        if self._bake_thread is not None and self._bake_thread.is_alive():
+            print("Bake already running")
             return
-        if self.motion_current_frame >= self.motion_bake_end_frame:
+        self._motion_reset()
+        self.motion_baking = True
+        self.motion_bake_current = 0
+        self.motion_is_playing = False
+        self._bake_thread = threading.Thread(target=self._motion_bake_worker, daemon=True)
+        self._bake_thread.start()
+        print(f"Started background bake: frames 0-{self.motion_bake_end_frame}")
+
+    def _motion_bake_worker(self):
+        """Background thread: iterates frames, runs tet sim, saves results to disk."""
+        try:
+            end_frame = self.motion_bake_end_frame
+            cache_dir = self._motion_cache_dir()
+            settle_iters = self.motion_settle_iters
+
+            # Accumulate results in memory, write per-muscle at the end
+            baked = {}  # muscle_name -> {frame: positions}
+            for mname, mobj in self.zygote_muscle_meshes.items():
+                if mobj.soft_body is not None:
+                    baked[mname] = {}
+
+            for frame in range(1, end_frame + 1):
+                if not self.motion_baking:
+                    print("Bake cancelled by user")
+                    break
+
+                # Apply pose
+                pose = self.motion_bvh.mocap_refs[frame].copy()
+                if hasattr(self, 'motion_root_translation') and self.motion_root_translation is not None:
+                    pose[3:6] = self.motion_root_translation
+                self.env.skel.setPositions(pose)
+                self.motion_current_frame = frame
+
+                # Update constraints from skeleton, then run tet sim
+                for mname, mobj in self.zygote_muscle_meshes.items():
+                    if mobj.soft_body is not None:
+                        mobj._update_tet_positions_from_skeleton(self.env.skel)
+                        mobj._update_fixed_targets_from_skeleton(self.zygote_skeleton_meshes, self.env.skel)
+
+                self.run_all_tet_sim_with_constraints(
+                    max_iterations=settle_iters,
+                    tolerance=1e-4
+                )
+
+                # Capture positions
+                for mname in baked:
+                    mobj = self.zygote_muscle_meshes[mname]
+                    baked[mname][frame] = mobj.soft_body.get_positions().astype(np.float32)
+
+                self.motion_bake_current = frame
+
+            # Write accumulated results to disk
+            for mname, frame_data in baked.items():
+                if len(frame_data) == 0:
+                    continue
+                filepath = os.path.join(cache_dir, f'{mname}.npz')
+                # Merge with existing cache file if present
+                if os.path.exists(filepath):
+                    existing = np.load(filepath)
+                    existing_frames = {int(f): existing['positions'][i] for i, f in enumerate(existing['frames'])}
+                    existing_frames.update(frame_data)
+                    frame_data = existing_frames
+                sorted_frames = sorted(frame_data.keys())
+                np.savez_compressed(filepath,
+                                   frames=np.array(sorted_frames, dtype=np.int32),
+                                   positions=np.array([frame_data[f] for f in sorted_frames], dtype=np.float32))
+
+            print(f"Bake complete: frames 0-{end_frame} ({sum(len(fd) for fd in baked.values())} frame-muscles saved)")
+        except Exception as e:
+            print(f"Bake error: {e}")
+            import traceback
+            traceback.print_exc()
+        finally:
             self.motion_baking = False
-            self._motion_load_cache()
-            print(f"Bake complete: frames 0-{self.motion_bake_end_frame}")
-            return
-        self._motion_step_forward(1, run_tet=True)
-        self._motion_save_current_frame()
-        self.motion_bake_current = self.motion_current_frame
+            self._bake_needs_reload = True
+            self._bake_thread = None
 
     def _motion_reset(self):
         """Reset to frame 0, reset skeleton to rest pose, reset tet meshes."""
@@ -1888,9 +1959,8 @@ class GLFWApp():
                 imgui.progress_bar(bake_frac, (imgui.get_content_region_available_width(), 0),
                                   f"Baking: frame {self.motion_bake_current}/{self.motion_bake_end_frame}")
                 if imgui.button("Cancel Bake##motion_cache"):
-                    self.motion_baking = False
-                    self._motion_load_cache()
-                    print("Bake cancelled")
+                    self.motion_baking = False  # Worker thread checks this flag
+                    print("Bake cancel requested")
             else:
                 if not has_soft_bodies:
                     imgui.push_style_var(imgui.STYLE_ALPHA, 0.5)
@@ -1898,13 +1968,7 @@ class GLFWApp():
                     imgui.pop_style_var()
                 else:
                     if imgui.button("Bake to End Frame##motion_cache"):
-                        # Reset to frame 0 and start baking
-                        self._motion_reset()
-                        self.motion_run_tet_sim = True
-                        self.motion_baking = True
-                        self.motion_bake_current = 0
-                        self.motion_is_playing = False
-                        print(f"Starting bake: frames 0-{self.motion_bake_end_frame}")
+                        self._motion_start_bake()
 
     def drawUIFrame(self):
         imgui.new_frame()
@@ -7379,9 +7443,10 @@ class GLFWApp():
                     self.motion_play_accumulator -= frame_time
             self._motion_last_time = start_time
 
-            # Motion Browser: bake step (one frame per render loop)
-            if self.motion_baking:
-                self._motion_bake_step()
+            # Motion Browser: reload cache when background bake finishes
+            if self._bake_thread is None and not self.motion_baking and getattr(self, '_bake_needs_reload', False):
+                self._motion_load_cache()
+                self._bake_needs_reload = False
 
             if self.is_simulation:
                 self.update()
