@@ -1749,6 +1749,10 @@ class GLFWApp():
                 mobj.soft_body.positions = cached_pos.astype(np.float64)
                 mobj.tet_vertices = cached_pos.astype(np.float32).copy()
                 mobj._update_tet_draw_positions()
+                # Update waypoints from deformed tet positions
+                if hasattr(mobj, 'waypoints') and len(mobj.waypoints) > 0:
+                    if hasattr(mobj, 'waypoint_bary_coords') and len(mobj.waypoint_bary_coords) > 0:
+                        mobj._update_waypoints_from_tet(self.env.skel, verbose=False)
                 any_applied = True
         return any_applied
 

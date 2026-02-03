@@ -2504,7 +2504,7 @@ class FiberArchitectureMixin:
         except Exception:
             return None
 
-    def _update_waypoints_from_tet(self, skeleton=None):
+    def _update_waypoints_from_tet(self, skeleton=None, verbose=True):
         """
         Update waypoint positions using deformed tetrahedra and skeleton transforms.
 
@@ -2595,7 +2595,7 @@ class FiberArchitectureMixin:
                 # Update the waypoints array
                 self.waypoints[stream_idx][contour_idx] = contour_wps
 
-        if tet_count + skel_count > 0:
+        if verbose and tet_count + skel_count > 0:
             msg = f"  Updated waypoints: {tet_count} from tetrahedra, {skel_count} from skeleton"
             if skipped_count > 0:
                 msg += f", {skipped_count} SKIPPED (not embedded!)"
