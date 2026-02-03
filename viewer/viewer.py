@@ -1929,12 +1929,8 @@ class GLFWApp():
             self._motion_bake_finish()
             return
 
-        # Apply pose
-        pose = self.motion_bvh.mocap_refs[frame].copy()
-        if hasattr(self, 'motion_root_translation') and self.motion_root_translation is not None:
-            pose[3:6] = self.motion_root_translation
-        self.env.skel.setPositions(pose)
-        self.motion_current_frame = frame
+        # Apply pose (use _motion_apply_pose for consistent root translation handling)
+        self._motion_apply_pose(frame)
 
         # Update constraints from skeleton, then run tet sim
         # Disable per-iteration waypoint updates during baking (expensive, only needed once after sim)
@@ -1956,7 +1952,10 @@ class GLFWApp():
             mobj = self.zygote_muscle_meshes[mname]
             # Update waypoints once from final deformed positions
             if hasattr(mobj, 'waypoints') and len(mobj.waypoints) > 0:
-                if hasattr(mobj, '_update_waypoints_from_tet'):
+                # Ensure bary coords are computed (Step 6 was skipped during sim)
+                if not hasattr(mobj, 'waypoint_bary_coords') or len(mobj.waypoint_bary_coords) == 0:
+                    mobj._compute_waypoint_barycentric_coords(self.zygote_skeleton_meshes, self.env.skel)
+                if hasattr(mobj, 'waypoint_bary_coords') and len(mobj.waypoint_bary_coords) > 0:
                     mobj._update_waypoints_from_tet(self.env.skel, verbose=False)
             entry = {'positions': mobj.soft_body.get_positions().astype(np.float32)}
             if hasattr(mobj, 'waypoints') and len(mobj.waypoints) > 0:
