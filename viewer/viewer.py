@@ -180,7 +180,7 @@ class GLFWApp():
         self.motion_current_frame = 0
         self.motion_total_frames = 0
         self.motion_is_playing = False
-        self.motion_play_speed = 1.0
+        self.motion_play_speed = 0.25
         self.motion_run_tet_sim = False
         self.motion_settle_iters = 50
         self.motion_play_accumulator = 0.0
@@ -1669,6 +1669,14 @@ class GLFWApp():
             if not self._motion_apply_cached_deformation(next_frame):
                 if run_tet:
                     self._motion_run_tet_settle()
+                else:
+                    # No cache, no tet sim — still update waypoints from skeleton
+                    for mname, mobj in self.zygote_muscle_meshes.items():
+                        if mobj.soft_body is None:
+                            continue
+                        if hasattr(mobj, 'waypoints') and len(mobj.waypoints) > 0:
+                            if hasattr(mobj, 'waypoint_bary_coords') and len(mobj.waypoint_bary_coords) > 0:
+                                mobj._update_waypoints_from_tet(self.env.skel, verbose=False)
 
     def _motion_run_tet_settle(self):
         """Run coupled tet sim for all active soft bodies at current pose."""
@@ -1821,11 +1829,14 @@ class GLFWApp():
                 mobj.soft_body.positions = cached_pos.astype(np.float64)
                 mobj.tet_vertices = cached_pos.astype(np.float32).copy()
                 mobj._update_tet_draw_positions()
-                # Restore cached waypoints directly (no recomputation)
+                # Restore cached waypoints directly, or recompute from tets
                 if 'waypoints_flat' in cached and 'waypoints_shape' in cached:
                     if hasattr(mobj, 'waypoints') and len(mobj.waypoints) > 0:
                         mobj.waypoints = self._unflatten_waypoints(
                             cached['waypoints_flat'], cached['waypoints_shape'])
+                elif hasattr(mobj, 'waypoints') and len(mobj.waypoints) > 0:
+                    if hasattr(mobj, 'waypoint_bary_coords') and len(mobj.waypoint_bary_coords) > 0:
+                        mobj._update_waypoints_from_tet(self.env.skel, verbose=False)
                 any_applied = True
         return any_applied
 
