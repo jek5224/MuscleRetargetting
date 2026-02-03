@@ -1947,20 +1947,13 @@ class GLFWApp():
             tolerance=1e-4
         )
 
-        # Compute waypoints once after sim finishes, then capture
+        # Capture positions (always) — waypoints are NOT computed during bake.
+        # Use "Recompute Waypoints" button after bake to patch them in.
         for mname in self._bake_data:
             mobj = self.zygote_muscle_meshes[mname]
-            # Update waypoints once from final deformed positions
-            if hasattr(mobj, 'waypoints') and len(mobj.waypoints) > 0:
-                # Ensure bary coords are computed (Step 6 was skipped during sim)
-                if not hasattr(mobj, 'waypoint_bary_coords') or len(mobj.waypoint_bary_coords) == 0:
-                    mobj._compute_waypoint_barycentric_coords(self.zygote_skeleton_meshes, self.env.skel)
-                if hasattr(mobj, 'waypoint_bary_coords') and len(mobj.waypoint_bary_coords) > 0:
-                    mobj._update_waypoints_from_tet(self.env.skel, verbose=False)
-            entry = {'positions': mobj.soft_body.get_positions().astype(np.float32)}
-            if hasattr(mobj, 'waypoints') and len(mobj.waypoints) > 0:
-                entry['wp_flat'], entry['wp_shape'] = self._flatten_waypoints(mobj.waypoints)
-            self._bake_data[mname][frame] = entry
+            self._bake_data[mname][frame] = {
+                'positions': mobj.soft_body.get_positions().astype(np.float32)
+            }
 
         # Restore waypoints_from_tet_sim flags
         for mname, flag in saved_wp_flags.items():
@@ -1969,44 +1962,31 @@ class GLFWApp():
         self.motion_bake_current = frame
 
     def _motion_bake_finish(self):
-        """Write accumulated bake results to disk and reload cache."""
+        """Write accumulated bake results to disk and reload cache.
+        Bake only saves positions. Use 'Recompute Waypoints' to patch waypoints after."""
         cache_dir = self._motion_cache_dir()
         for mname, frame_data in self._bake_data.items():
             if len(frame_data) == 0:
                 continue
             filepath = os.path.join(cache_dir, f'{mname}.npz')
-            # Merge with existing cache file if present
+            # Merge with existing cache: keep old frames not in this bake, positions only
             if os.path.exists(filepath):
                 existing = np.load(filepath, allow_pickle=True)
-                has_wp = 'waypoints_flat' in existing and 'waypoints_shape' in existing
-                ex_wp_shape = existing['waypoints_shape'][0] if has_wp else None
                 for i, f in enumerate(existing['frames']):
                     fi = int(f)
                     if fi not in frame_data:
-                        entry = {'positions': existing['positions'][i]}
-                        if has_wp:
-                            entry['wp_flat'] = existing['waypoints_flat'][i]
-                            entry['wp_shape'] = ex_wp_shape
-                        frame_data[fi] = entry
+                        frame_data[fi] = {'positions': existing['positions'][i]}
             sorted_frames = sorted(frame_data.keys())
             save_dict = dict(
                 frames=np.array(sorted_frames, dtype=np.int32),
                 positions=np.array([frame_data[f]['positions'] for f in sorted_frames], dtype=np.float32),
             )
-            # Save waypoints if available
-            if 'wp_flat' in frame_data[sorted_frames[0]]:
-                save_dict['waypoints_flat'] = np.array(
-                    [frame_data[f]['wp_flat'] for f in sorted_frames], dtype=np.float32)
-                wp_s = frame_data[sorted_frames[0]]['wp_shape']
-                if isinstance(wp_s, str):
-                    wp_s = wp_s.encode('utf-8')
-                save_dict['waypoints_shape'] = np.array([wp_s])
             np.savez_compressed(filepath, **save_dict)
 
         self.motion_baking = False
         self._bake_data = {}
         self._motion_load_cache()
-        print(f"Bake complete: frames 0-{self.motion_bake_end_frame}")
+        print(f"Bake complete: frames 0-{self.motion_bake_end_frame}. Use 'Recompute Waypoints' to add waypoint data.")
 
     def _motion_reset(self):
         """Reset to frame 0, reset skeleton to rest pose, reset tet meshes."""
