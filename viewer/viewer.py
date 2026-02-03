@@ -25,6 +25,8 @@ from learning.ray_model import loading_network
 from numba import jit
 from core.env import Env
 from core.dartHelper import buildFromInfo, exportSkeleton
+from core.bvhparser import MyBVH
+import glob
 from skeleton_section import SKEL_dart_info
 
 import time
@@ -170,8 +172,21 @@ class GLFWApp():
         self.mouse_x = 0
         self.mouse_y = 0
         self.motion_skel = None
-        
-        ## Flag         
+
+        # Motion Browser state
+        self.motion_bvh_files = []  # list of .bvh paths found in data/motion/
+        self.motion_selected_idx = -1  # index into motion_bvh_files (-1 = none)
+        self.motion_bvh = None  # loaded MyBVH instance
+        self.motion_current_frame = 0
+        self.motion_total_frames = 0
+        self.motion_is_playing = False
+        self.motion_play_speed = 1.0
+        self.motion_run_tet_sim = False
+        self.motion_settle_iters = 50
+        self.motion_play_accumulator = 0.0
+        self._scan_motion_files()
+
+        ## Flag
         self.is_simulation = False
 
         self.draw_obj = False
@@ -1569,6 +1584,160 @@ class GLFWApp():
         # self.reset(self.env.world.getTime())
         self.zero_reset()
 
+    # ========================================================================
+    # Motion Browser Methods
+    # ========================================================================
+
+    def _scan_motion_files(self):
+        """Scan data/motion/ for .bvh files."""
+        self.motion_bvh_files = sorted(glob.glob('data/motion/*.bvh'))
+
+    def _load_motion_bvh(self, idx):
+        """Load the BVH file at the given index."""
+        if idx < 0 or idx >= len(self.motion_bvh_files):
+            return
+        bvh_path = self.motion_bvh_files[idx]
+        self.motion_selected_idx = idx
+        try:
+            self.motion_bvh = MyBVH(bvh_path, self.env.bvh_info, self.env.skel)
+            self.motion_total_frames = self.motion_bvh.num_frames
+            self.motion_current_frame = 0
+            self.motion_is_playing = False
+            self.motion_play_accumulator = 0.0
+            # Apply frame 0 pose
+            self._motion_apply_pose(0)
+            print(f"Loaded motion: {os.path.basename(bvh_path)} ({self.motion_total_frames} frames, {1.0/self.motion_bvh.frame_time:.0f} FPS)")
+        except Exception as e:
+            print(f"Error loading BVH: {e}")
+            self.motion_bvh = None
+            self.motion_total_frames = 0
+            self.motion_current_frame = 0
+
+    def _motion_apply_pose(self, frame):
+        """Set skeleton to the BVH pose at the given frame."""
+        if self.motion_bvh is None or frame >= self.motion_total_frames:
+            return
+        self.motion_current_frame = frame
+        pose = self.motion_bvh.mocap_refs[frame].copy()
+        self.env.skel.setPositions(pose)
+        # Sync the joint angle slider state
+        if hasattr(self, '_skel_dofs'):
+            self._skel_dofs = pose.copy()
+
+    def _motion_step_forward(self, count=1):
+        """Advance count frames sequentially, applying pose and optionally running tet sim each step."""
+        if self.motion_bvh is None:
+            return
+        for _ in range(count):
+            next_frame = self.motion_current_frame + 1
+            if next_frame >= self.motion_total_frames:
+                self.motion_is_playing = False
+                return
+            self._motion_apply_pose(next_frame)
+            if self.motion_run_tet_sim:
+                self._motion_run_tet_settle()
+
+    def _motion_run_tet_settle(self):
+        """Run tet sim settle for all active soft bodies at current pose."""
+        for mname, mobj in self.zygote_muscle_meshes.items():
+            if mobj.soft_body is not None:
+                mobj._update_tet_positions_from_skeleton(self.env.skel)
+                mobj._update_fixed_targets_from_skeleton(self.zygote_skeleton_meshes, self.env.skel)
+                mobj.run_soft_body_to_convergence(
+                    self.zygote_skeleton_meshes,
+                    self.env.skel,
+                    max_iterations=self.motion_settle_iters,
+                    tolerance=1e-4,
+                    enable_collision=mobj.soft_body_collision,
+                    collision_margin=mobj.soft_body_collision_margin,
+                    verbose=False,
+                    use_arap=mobj.use_arap
+                )
+
+    def _motion_reset(self):
+        """Reset to frame 0, reset skeleton to rest pose, reset tet meshes."""
+        self.motion_current_frame = 0
+        self.motion_is_playing = False
+        self.motion_play_accumulator = 0.0
+        if self.motion_bvh is not None:
+            self._motion_apply_pose(0)
+        else:
+            # Reset skeleton to zero pose
+            self.env.skel.setPositions(np.zeros(self.env.skel.getNumDofs()))
+            if hasattr(self, '_skel_dofs'):
+                self._skel_dofs = np.zeros(self.env.skel.getNumDofs())
+        # Reset soft bodies
+        for mname, mobj in self.zygote_muscle_meshes.items():
+            if mobj.soft_body is not None:
+                mobj._update_tet_positions_from_skeleton(self.env.skel)
+                mobj._update_fixed_targets_from_skeleton(self.zygote_skeleton_meshes, self.env.skel)
+
+    def _draw_motion_browser_ui(self):
+        """Draw the Motion Browser imgui panel."""
+        # Section 1: Motion file selection
+        bvh_names = [os.path.basename(f) for f in self.motion_bvh_files]
+        if len(bvh_names) == 0:
+            imgui.text("No .bvh files in data/motion/")
+            if imgui.button("Rescan##motion"):
+                self._scan_motion_files()
+            return
+
+        imgui.push_item_width(200)
+        changed, new_idx = imgui.combo("Motion##bvh_select", self.motion_selected_idx, bvh_names)
+        imgui.pop_item_width()
+        if changed and new_idx != self.motion_selected_idx:
+            self._load_motion_bvh(new_idx)
+
+        # Show info if loaded
+        if self.motion_bvh is not None:
+            fps = 1.0 / self.motion_bvh.frame_time
+            duration = self.motion_total_frames * self.motion_bvh.frame_time
+            imgui.text(f"Frames: {self.motion_total_frames}   FPS: {fps:.0f}   Duration: {duration:.2f}s")
+
+            # Section 2: Sequential Playback Transport
+            imgui.separator()
+
+            # Progress bar
+            fraction = self.motion_current_frame / max(1, self.motion_total_frames - 1)
+            imgui.progress_bar(fraction, (imgui.get_content_region_available_width(), 0),
+                              f"Frame {self.motion_current_frame} / {self.motion_total_frames - 1}")
+
+            # Transport buttons
+            if imgui.button("Reset##motion"):
+                self._motion_reset()
+            imgui.same_line()
+            if imgui.button("Step +1##motion"):
+                self._motion_step_forward(1)
+            imgui.same_line()
+            if imgui.button("Step +10##motion"):
+                self._motion_step_forward(10)
+
+            # Play/Pause + speed
+            if self.motion_is_playing:
+                if imgui.button("Pause##motion", width=80):
+                    self.motion_is_playing = False
+            else:
+                if imgui.button("Play##motion", width=80):
+                    if self.motion_current_frame < self.motion_total_frames - 1:
+                        self.motion_is_playing = True
+                        self.motion_play_accumulator = 0.0
+            imgui.same_line()
+            speed_options = [0.25, 0.5, 1.0, 2.0]
+            speed_labels = ["0.25x", "0.5x", "1.0x", "2.0x"]
+            current_speed_idx = speed_options.index(self.motion_play_speed) if self.motion_play_speed in speed_options else 2
+            imgui.push_item_width(80)
+            changed, new_speed_idx = imgui.combo("Speed##motion", current_speed_idx, speed_labels)
+            imgui.pop_item_width()
+            if changed:
+                self.motion_play_speed = speed_options[new_speed_idx]
+
+            # Tet sim options
+            _, self.motion_run_tet_sim = imgui.checkbox("Run Tet Sim Each Step##motion", self.motion_run_tet_sim)
+            if self.motion_run_tet_sim:
+                imgui.push_item_width(150)
+                _, self.motion_settle_iters = imgui.slider_int("Settle Iters##motion", self.motion_settle_iters, 10, 200)
+                imgui.pop_item_width()
+
     def drawUIFrame(self):
         imgui.new_frame()
         
@@ -1761,6 +1930,11 @@ class GLFWApp():
                                     if end_fiber <= len(self.env.muscle_activation_levels):
                                         self.env.muscle_activation_levels[start_fiber:end_fiber] = self.env.zygote_activation_levels[i]
                                 # self.env.muscle_activation_levels[start_fiber:end_fiber] = self.env.zygote_activation_levels[i] / (end_fiber - start_fiber)
+                    imgui.tree_pop()
+
+                # Motion Browser
+                if self.env.skel is not None and imgui.tree_node("Motion Browser", imgui.TREE_NODE_DEFAULT_OPEN):
+                    self._draw_motion_browser_ui()
                     imgui.tree_pop()
 
                 # Skeleton joint angle sliders
@@ -7024,6 +7198,19 @@ class GLFWApp():
             glfw.poll_events()
             
             self.impl.process_inputs()
+
+            # Motion Browser: auto-advance in play mode
+            if self.motion_is_playing and self.motion_bvh is not None:
+                dt = start_time - getattr(self, '_motion_last_time', start_time)
+                if dt <= 0:
+                    dt = 1.0 / 30.0
+                self.motion_play_accumulator += dt * self.motion_play_speed
+                frame_time = self.motion_bvh.frame_time
+                while self.motion_play_accumulator >= frame_time and self.motion_is_playing:
+                    self._motion_step_forward(1)
+                    self.motion_play_accumulator -= frame_time
+            self._motion_last_time = start_time
+
             if self.is_simulation:
                 self.update()
                 if self.is_screenshot:
