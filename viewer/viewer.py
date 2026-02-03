@@ -1937,8 +1937,12 @@ class GLFWApp():
         self.motion_current_frame = frame
 
         # Update constraints from skeleton, then run tet sim
+        # Disable per-iteration waypoint updates during baking (expensive, only needed once after sim)
+        saved_wp_flags = {}
         for mname, mobj in self.zygote_muscle_meshes.items():
             if mobj.soft_body is not None:
+                saved_wp_flags[mname] = getattr(mobj, 'waypoints_from_tet_sim', True)
+                mobj.waypoints_from_tet_sim = False
                 mobj._update_tet_positions_from_skeleton(self.env.skel)
                 mobj._update_fixed_targets_from_skeleton(self.zygote_skeleton_meshes, self.env.skel)
 
@@ -1947,13 +1951,21 @@ class GLFWApp():
             tolerance=1e-4
         )
 
-        # Capture positions + waypoints
+        # Compute waypoints once after sim finishes, then capture
         for mname in self._bake_data:
             mobj = self.zygote_muscle_meshes[mname]
+            # Update waypoints once from final deformed positions
+            if hasattr(mobj, 'waypoints') and len(mobj.waypoints) > 0:
+                if hasattr(mobj, '_update_waypoints_from_tet'):
+                    mobj._update_waypoints_from_tet(self.env.skel, verbose=False)
             entry = {'positions': mobj.soft_body.get_positions().astype(np.float32)}
             if hasattr(mobj, 'waypoints') and len(mobj.waypoints) > 0:
                 entry['wp_flat'], entry['wp_shape'] = self._flatten_waypoints(mobj.waypoints)
             self._bake_data[mname][frame] = entry
+
+        # Restore waypoints_from_tet_sim flags
+        for mname, flag in saved_wp_flags.items():
+            self.zygote_muscle_meshes[mname].waypoints_from_tet_sim = flag
 
         self.motion_bake_current = frame
 
