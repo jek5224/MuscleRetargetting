@@ -33,7 +33,8 @@ from viewer.zygote_mesh_ui import (draw_zygote_ui,
     _render_manual_cut_windows, _render_level_select_windows,
     update_available_muscles, load_previous_muscles, save_loaded_muscles,
     draw_inter_muscle_constraint_lines, drawMuscles, drawTestMuscles,
-    reset, zero_reset, _motion_step_forward, _motion_bake_step)
+    reset, zero_reset, _scan_motion_files,
+    _motion_step_forward, _motion_bake_step)
 
 import time
 
