@@ -6511,8 +6511,6 @@ def _motion_load_cache(v):
                 cache[int(f)] = entry
             v.motion_deform_cache[mname] = cache
 
-@staticmethod
-
 def _flatten_waypoints(waypoints):
     """Flatten nested waypoints list into a single float32 array + shape JSON string.
     waypoints[stream][contour] = array(num_fibers, 3)
@@ -6532,8 +6530,6 @@ def _flatten_waypoints(waypoints):
         shape_desc.append(contour_shapes)
     flat = np.concatenate(parts) if parts else np.array([], dtype=np.float32)
     return flat, json.dumps(shape_desc)
-
-@staticmethod
 
 def _unflatten_waypoints(flat, shape_json):
     """Reconstruct nested waypoints list from flat array + shape JSON string."""
