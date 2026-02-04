@@ -6308,9 +6308,8 @@ def _motion_apply_pose(v, frame):
         return
     v.motion_current_frame = frame
     pose = v.motion_bvh.mocap_refs[frame].copy()
-    # Fix root x/z to initial position so skeleton doesn't walk away; keep y (height) from motion
+    # Fix root z to initial position so skeleton doesn't walk away; keep x and y from motion
     if hasattr(v, 'motion_root_translation') and v.motion_root_translation is not None:
-        pose[3] = v.motion_root_translation[0]  # x
         pose[5] = v.motion_root_translation[2]  # z
     v.env.skel.setPositions(pose)
     # Sync the joint angle slider state
