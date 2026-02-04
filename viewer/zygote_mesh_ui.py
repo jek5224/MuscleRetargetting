@@ -1,11 +1,14 @@
-"""Zygote mesh UI — extracted from viewer.py.
+"""Zygote mesh UI and mesh-related functions — extracted from viewer.py.
 
-Three free functions that take the viewer instance (v) as first argument.
+Free functions that take the viewer instance (v) as first argument.
 """
 import imgui
 import numpy as np
 import os
 import traceback
+import glob
+
+from OpenGL.GL import *
 
 # UI dimension constants (mirrored from viewer.py to avoid circular imports)
 wide_button_width = 308
@@ -84,7 +87,7 @@ def draw_zygote_muscle_ui(v):
                                 v.available_selected_muscle = name
                             # Double-click to add
                             if imgui.is_item_hovered() and imgui.is_mouse_double_clicked(0):
-                                v.add_muscle_mesh(name, path)
+                                add_muscle_mesh(v, name, path)
                             imgui.unindent(15)
 
                 imgui.end_child()
@@ -97,14 +100,14 @@ def draw_zygote_muscle_ui(v):
                     # Find the path for selected muscle
                     for name, path in v.available_muscle_by_category.get(v.available_selected_category, []):
                         if name == v.available_selected_muscle:
-                            v.add_muscle_mesh(name, path)
+                            add_muscle_mesh(v, name, path)
                             break
             imgui.same_line()
             if imgui.button("Remove", width=button_width):
                 if len(v.zygote_muscle_meshes) > 0:
                     loaded_names = list(v.zygote_muscle_meshes.keys())
                     name = loaded_names[v.loaded_muscle_selected]
-                    v.remove_muscle_mesh(name)
+                    remove_muscle_mesh(v, name)
 
             imgui.text("Loaded:")
             loaded_names = list(v.zygote_muscle_meshes.keys())
@@ -118,7 +121,7 @@ def draw_zygote_muscle_ui(v):
                         v.loaded_muscle_selected = i
                     # Double-click to remove
                     if imgui.is_item_hovered() and imgui.is_mouse_double_clicked(0):
-                        v.remove_muscle_mesh(name)
+                        remove_muscle_mesh(v, name)
                 imgui.end_child()
             else:
                 imgui.text("(none)")
@@ -127,19 +130,19 @@ def draw_zygote_muscle_ui(v):
             imgui.separator()
 
             if imgui.button("Remove All", width=button_width):
-                v.remove_all_muscles()
+                remove_all_muscles(v)
 
             # Add L/R muscles by group
-            groups = v.get_available_muscle_groups()
+            groups = get_available_muscle_groups(v)
             if len(groups) > 0:
                 imgui.text("Add by group:")
                 for group in groups:
                     short_name = group[:8] if len(group) > 8 else group
                     if imgui.button(f"L {short_name}##L{group}", width=73):
-                        v.add_muscles_by_group(group, "L_")
+                        add_muscles_by_group(v, group, "L_")
                     imgui.same_line()
                     if imgui.button(f"R {short_name}##R{group}", width=73):
-                        v.add_muscles_by_group(group, "R_")
+                        add_muscles_by_group(v, group, "R_")
 
             imgui.tree_pop()
 
@@ -348,7 +351,7 @@ def draw_zygote_muscle_ui(v):
 
         # Find constraints button
         if imgui.button("Find Constraints", width=wide_button_width):
-            count = v.find_inter_muscle_constraints()
+            count = find_inter_muscle_constraints(v)
 
         imgui.text(f"{len(v.inter_muscle_constraints)} constraints")
         _, v.draw_inter_muscle_constraints = imgui.checkbox(
@@ -395,7 +398,7 @@ def draw_zygote_muscle_ui(v):
 
         # Run coupled simulation button
         if imgui.button("Run Coupled Tet Sim", width=wide_button_width):
-            v.run_all_tet_sim_with_constraints()
+            run_all_tet_sim_with_constraints(v)
 
         imgui.separator()
 
@@ -1544,14 +1547,14 @@ def _draw_motion_browser_ui(v):
     if len(bvh_names) == 0:
         imgui.text("No .bvh files in data/motion/")
         if imgui.button("Rescan##motion"):
-            v._scan_motion_files()
+            _scan_motion_files(v)
         return
 
     imgui.push_item_width(200)
     changed, new_idx = imgui.combo("Motion##bvh_select", v.motion_selected_idx, bvh_names)
     imgui.pop_item_width()
     if changed and new_idx != v.motion_selected_idx:
-        v._load_motion_bvh(new_idx)
+        _load_motion_bvh(v, new_idx)
 
     # Show info if loaded
     if v.motion_bvh is not None:
@@ -1570,15 +1573,15 @@ def _draw_motion_browser_ui(v):
             f"Frame {v.motion_current_frame} / {v.motion_total_frames - 1}")
         imgui.pop_item_width()
         if changed and new_frame != v.motion_current_frame:
-            v._motion_apply_pose(new_frame)
-            v._motion_apply_cached_deformation(new_frame)
+            _motion_apply_pose(v, new_frame)
+            _motion_apply_cached_deformation(v, new_frame)
 
         # Transport buttons
         if imgui.button("Reset##motion"):
-            v._motion_reset()
+            _motion_reset(v)
         imgui.same_line()
         if imgui.button("Step +1##motion"):
-            v._motion_step_forward(1, run_tet=v.motion_run_tet_sim)
+            _motion_step_forward(v, 1, run_tet=v.motion_run_tet_sim)
 
         # Play/Pause + speed
         if v.motion_is_playing:
@@ -1628,7 +1631,7 @@ def _draw_motion_browser_ui(v):
             imgui.pop_style_var()
         else:
             if imgui.button("Save Current Frame##motion_cache"):
-                v._motion_save_current_frame()
+                _motion_save_current_frame(v)
 
         # Bake End Frame slider
         imgui.push_item_width(150)
@@ -1644,7 +1647,7 @@ def _draw_motion_browser_ui(v):
             imgui.progress_bar(bake_frac, (imgui.get_content_region_available_width(), 0),
                               f"Baking: frame {v.motion_bake_current}/{v.motion_bake_end_frame}")
             if imgui.button("Cancel Bake##motion_cache"):
-                v._motion_bake_finish()
+                _motion_bake_finish(v)
                 print("Bake cancelled, partial results saved")
         else:
             if not has_soft_bodies:
@@ -1653,12 +1656,12 @@ def _draw_motion_browser_ui(v):
                 imgui.pop_style_var()
             else:
                 if imgui.button("Bake to End Frame##motion_cache"):
-                    v._motion_start_bake()
+                    _motion_start_bake(v)
 
         # Recompute/patch waypoints in cache
         if num_cached > 0 and has_soft_bodies and not v.motion_baking:
             if imgui.button("Recompute Waypoints in Cache##motion_cache"):
-                v._motion_patch_waypoints()
+                _motion_patch_waypoints(v)
 
 
 def _render_inspect_2d_windows(v):
@@ -5353,5 +5356,1364 @@ def _render_level_select_windows(v):
                 obj._pipeline_paused_at = None
 
         imgui.end()
+
+
+def update_available_muscles(v):
+    """Scan muscle directory and subdirectories for available .obj files not yet loaded."""
+    v.available_muscle_files = []
+    v.available_muscle_by_category = {}
+    loaded_names = set(v.zygote_muscle_meshes.keys())
+
+    # Scan root directory and subdirectories
+    for root, dirs, files in os.walk(v.zygote_muscle_dir):
+        for file in files:
+            if file.endswith('.obj'):
+                muscle_name = file.split('.')[0]
+                if muscle_name not in loaded_names:
+                    full_path = os.path.join(root, file)
+                    v.available_muscle_files.append((muscle_name, full_path))
+
+                    # Determine category from relative path
+                    rel_path = os.path.relpath(root, v.zygote_muscle_dir)
+                    if rel_path == '.':
+                        category = 'Root'
+                    else:
+                        category = rel_path.replace(os.sep, '/')
+
+                    if category not in v.available_muscle_by_category:
+                        v.available_muscle_by_category[category] = []
+                        # Initialize expanded state (collapsed by default)
+                        if category not in v.available_category_expanded:
+                            v.available_category_expanded[category] = False
+
+                    v.available_muscle_by_category[category].append((muscle_name, full_path))
+
+    # Sort categories and muscles within each category
+    v.available_muscle_by_category = dict(sorted(v.available_muscle_by_category.items()))
+    for category in v.available_muscle_by_category:
+        v.available_muscle_by_category[category].sort(key=lambda x: x[0])
+
+    # Sort flat list by name (for backwards compatibility)
+    v.available_muscle_files.sort(key=lambda x: x[0])
+
+    # Reset selection if current selection is no longer valid
+    if v.available_selected_muscle:
+        # Check if selected muscle still exists in available list
+        found = False
+        for cat, muscles in v.available_muscle_by_category.items():
+            for name, path in muscles:
+                if name == v.available_selected_muscle:
+                    found = True
+                    break
+            if found:
+                break
+        if not found:
+            v.available_selected_category = None
+            v.available_selected_muscle = None
+
+    # Reset old index-based selection if out of bounds
+    if v.available_muscle_selected >= len(v.available_muscle_files):
+        v.available_muscle_selected = max(0, len(v.available_muscle_files) - 1)
+
+
+def add_muscle_mesh(v, name, path):
+    """Dynamically add a muscle mesh to the simulation."""
+    if name in v.zygote_muscle_meshes:
+        return  # Already loaded
+
+    # Remember current position in category for cursor maintenance
+    prev_category = v.available_selected_category
+    prev_index = -1
+    if prev_category and prev_category in v.available_muscle_by_category:
+        muscles_in_cat = v.available_muscle_by_category[prev_category]
+        for i, (mname, mpath) in enumerate(muscles_in_cat):
+            if mname == name:
+                prev_index = i
+                break
+
+    v.zygote_muscle_meshes[name] = MeshLoader()
+    v.zygote_muscle_meshes[name].load(path)
+    v.zygote_muscle_meshes[name].color = np.array(v.zygote_muscle_color)
+    v.zygote_muscle_meshes[name].transparency = v.zygote_muscle_transparency
+    v.zygote_muscle_meshes[name].is_draw = v.is_draw_zygote_muscle
+    # Load trimesh and apply same scale as MeshLoader.load() uses
+    muscle_trimesh = trimesh.load_mesh(path)
+    muscle_trimesh.vertices *= 0.01  # MESH_SCALE
+    v.zygote_muscle_meshes[name].trimesh = muscle_trimesh
+
+    # Re-sort meshes by name
+    v.zygote_muscle_meshes = dict(sorted(v.zygote_muscle_meshes.items()))
+
+    # Update available list
+    update_available_muscles(v)
+
+    # Auto-save muscle list
+    save_loaded_muscles(v)
+
+    # Maintain cursor position in the same category
+    if prev_category and prev_category in v.available_muscle_by_category:
+        muscles_in_cat = v.available_muscle_by_category[prev_category]
+        if len(muscles_in_cat) > 0:
+            # Select same index or previous if at end
+            new_index = min(prev_index, len(muscles_in_cat) - 1)
+            v.available_selected_category = prev_category
+            v.available_selected_muscle = muscles_in_cat[new_index][0]
+        else:
+            # Category is now empty, clear selection
+            v.available_selected_category = None
+            v.available_selected_muscle = None
+    else:
+        v.available_selected_category = None
+        v.available_selected_muscle = None
+
+
+def remove_muscle_mesh(v, name):
+    """Dynamically remove a muscle mesh from the simulation."""
+    if name not in v.zygote_muscle_meshes:
+        return  # Not loaded
+
+    del v.zygote_muscle_meshes[name]
+
+    # Reset loaded selection if out of bounds
+    if v.loaded_muscle_selected >= len(v.zygote_muscle_meshes):
+        v.loaded_muscle_selected = max(0, len(v.zygote_muscle_meshes) - 1)
+
+    # Update available list
+    update_available_muscles(v)
+
+    # Auto-save muscle list
+    save_loaded_muscles(v)
+
+
+def get_available_muscle_groups(v):
+    """Get list of muscle groups (categories) that have available muscles."""
+    groups = set()
+    for category in v.available_muscle_by_category.keys():
+        if len(v.available_muscle_by_category[category]) > 0:
+            groups.add(category)
+    return sorted(groups)
+
+
+def add_muscles_by_group(v, group, prefix):
+    """Add all muscles in a group that start with the given prefix (L_ or R_)."""
+    if group not in v.available_muscle_by_category:
+        return
+    to_add = []
+    for name, path in v.available_muscle_by_category[group]:
+        if name.startswith(prefix):
+            to_add.append((name, path))
+    for name, path in to_add:
+        add_muscle_mesh(v, name, path)
+
+
+def remove_all_muscles(v):
+    """Remove all currently loaded muscles."""
+    names = list(v.zygote_muscle_meshes.keys())
+    for name in names:
+        del v.zygote_muscle_meshes[name]
+    v.loaded_muscle_selected = 0
+    update_available_muscles(v)
+    save_loaded_muscles(v)
+
+
+def save_loaded_muscles(v):
+    """Save current loaded muscle names to file for later reload."""
+    import json
+    try:
+        # Build list of (name, path) for all loaded muscles
+        muscle_list = []
+        for name, mobj in v.zygote_muscle_meshes.items():
+            # Get path from mesh object's stored filename
+            path = getattr(mobj, 'obj', None)
+            if path is None:
+                # Fallback: try to reconstruct path
+                path = v.zygote_muscle_dir + name + '.obj'
+            muscle_list.append({'name': name, 'path': path})
+
+        with open(v.last_muscles_file, 'w') as f:
+            json.dump(muscle_list, f, indent=2)
+        print(f"Saved {len(muscle_list)} muscle names to {v.last_muscles_file}")
+    except Exception as e:
+        print(f"Failed to save muscle list: {e}")
+
+
+def load_previous_muscles(v):
+    """Load muscles that were previously saved."""
+    import json
+    import os
+    if not os.path.exists(v.last_muscles_file):
+        print(f"No previous muscle list found at {v.last_muscles_file}")
+        return 0
+
+    try:
+        with open(v.last_muscles_file, 'r') as f:
+            muscle_list = json.load(f)
+
+        loaded_count = 0
+        for entry in muscle_list:
+            name = entry['name']
+            path = entry['path']
+            if name not in v.zygote_muscle_meshes:
+                if os.path.exists(path):
+                    add_muscle_mesh(v, name, path)
+                    loaded_count += 1
+                else:
+                    print(f"  Muscle file not found: {path}")
+        print(f"Loaded {loaded_count} muscles from previous session")
+        return loaded_count
+    except Exception as e:
+        print(f"Failed to load previous muscles: {e}")
+        return 0
+
+
+def find_inter_muscle_constraints(v, threshold=None):
+    """
+    Find distance constraints between vertices of different muscles.
+    Uses REST positions (from soft_body.rest_positions) to find constraints.
+    Only considers muscles with initialized soft bodies.
+
+    Args:
+        threshold: Maximum distance to create constraint (default: v.inter_muscle_constraint_threshold)
+
+    Returns:
+        Number of constraints found
+    """
+    if threshold is None:
+        threshold = v.inter_muscle_constraint_threshold
+
+    v.inter_muscle_constraints = []
+
+    # Get all muscles with soft body (need rest_positions)
+    tet_muscles = {}
+    for name, mobj in v.zygote_muscle_meshes.items():
+        if hasattr(mobj, 'soft_body') and mobj.soft_body is not None:
+            # Use REST positions for finding constraints
+            tet_muscles[name] = {
+                'rest_positions': mobj.soft_body.rest_positions.copy(),
+                'fixed_mask': mobj.soft_body.fixed_mask.copy()
+            }
+
+    if len(tet_muscles) < 2:
+        print(f"Inter-muscle constraints: need at least 2 muscles with soft body, found {len(tet_muscles)}")
+        return 0
+
+    muscle_names = list(tet_muscles.keys())
+    print(f"Finding inter-muscle constraints for {len(muscle_names)} muscles (threshold={threshold*100:.1f}cm)...")
+
+    # For each pair of muscles
+    from scipy.spatial import cKDTree
+
+    for i in range(len(muscle_names)):
+        name1 = muscle_names[i]
+        data1 = tet_muscles[name1]
+        verts1 = data1['rest_positions']
+        fixed1 = data1['fixed_mask']
+
+        for j in range(i + 1, len(muscle_names)):
+            name2 = muscle_names[j]
+            data2 = tet_muscles[name2]
+            verts2 = data2['rest_positions']
+            fixed2 = data2['fixed_mask']
+
+            # Build KD-tree for muscle2 vertices
+            tree2 = cKDTree(verts2)
+
+            # Find all pairs within threshold
+            for v1_idx, v1 in enumerate(verts1):
+                # Query nearby vertices in muscle2
+                nearby_indices = tree2.query_ball_point(v1, threshold)
+
+                for v2_idx in nearby_indices:
+                    v2 = verts2[v2_idx]
+                    dist = np.linalg.norm(v1 - v2)
+
+                    # Store constraint with fixed status
+                    v.inter_muscle_constraints.append((
+                        name1, v1_idx, bool(fixed1[v1_idx]),
+                        name2, v2_idx, bool(fixed2[v2_idx]),
+                        dist  # rest distance
+                    ))
+
+    print(f"Found {len(v.inter_muscle_constraints)} inter-muscle constraints")
+    return len(v.inter_muscle_constraints)
+
+
+def run_all_tet_sim_with_constraints(v, max_iterations=100, tolerance=1e-4, outer_iterations=10):
+    """
+    Run tet simulation for all muscles together, respecting inter-muscle constraints.
+    Uses ARAP with collision detection integrated.
+
+    If v.coupled_as_unified_volume is True, treats all muscles as one unified system.
+    """
+    # Get all muscles with soft body
+    active_muscles = {}
+    for name, mobj in v.zygote_muscle_meshes.items():
+        if mobj.soft_body is not None:
+            active_muscles[name] = mobj
+
+    if len(active_muscles) == 0:
+        print("No muscles with soft body initialized")
+        return
+
+    n_constraints = len(v.inter_muscle_constraints)
+
+    if v.coupled_as_unified_volume and n_constraints > 0:
+        # Unified volume mode: treat all muscles as one system
+        _run_unified_volume_sim(v, active_muscles, max_iterations, tolerance)
+    else:
+        # Standard mode: alternating individual solve + constraint enforcement
+        print(f"Running coupled tet sim for {len(active_muscles)} muscles with {n_constraints} inter-muscle constraints...")
+
+        for outer_iter in range(outer_iterations):
+            # Step 1: Run individual soft body solves
+            total_residual = 0
+            for name, mobj in active_muscles.items():
+                iters, residual = mobj.run_soft_body_to_convergence(
+                    v.zygote_skeleton_meshes,
+                    v.env.skel,
+                    max_iterations=max_iterations // outer_iterations,
+                    tolerance=tolerance,
+                    enable_collision=mobj.soft_body_collision,
+                    collision_margin=mobj.soft_body_collision_margin,
+                    verbose=False,
+                    use_arap=mobj.use_arap
+                )
+                total_residual += residual
+
+            # Step 2: Enforce inter-muscle constraints
+            if n_constraints > 0:
+                constraint_error = _enforce_inter_muscle_constraints(v, active_muscles)
+                print(f"  Iter {outer_iter+1}/{outer_iterations}: residual={total_residual:.2e}, constraint_err={constraint_error:.6f}m")
+
+                if constraint_error < tolerance:
+                    print(f"  Constraints satisfied (error < {tolerance}), stopping")
+                    break
+            else:
+                print(f"  Iter {outer_iter+1}: residual={total_residual:.2e} (no constraints)")
+                if total_residual < tolerance * len(active_muscles):
+                    break
+
+        print(f"Coupled tet sim complete ({len(active_muscles)} muscles)")
+
+
+def _run_unified_volume_sim(v, active_muscles, max_iterations=100, tolerance=1e-4):
+    """
+    Run simulation treating all muscles as one unified volume.
+    Inter-muscle constraints become edges in a combined system.
+    Supports GPU acceleration via PyTorch when v.use_gpu_arap is True.
+    """
+    import scipy.sparse
+    import scipy.sparse.linalg
+    import time
+
+    if v.use_taichi_arap:
+        backend_name = 'taichi'
+    elif v.use_gpu_arap:
+        backend_name = 'gpu'
+    else:
+        backend_name = 'cpu'
+    print(f"Running UNIFIED volume sim for {len(active_muscles)} muscles... [{backend_name.upper()}]")
+
+    # Step 1: Update each muscle's positions and fixed targets from skeleton
+    print(f"  Updating positions from skeleton...")
+    for name, mobj in active_muscles.items():
+        # Update vertex positions based on skeleton bindings
+        if hasattr(mobj, '_update_tet_positions_from_skeleton'):
+            mobj._update_tet_positions_from_skeleton(v.env.skel)
+        # Update fixed vertex targets (origins/insertions)
+        if hasattr(mobj, '_update_fixed_targets_from_skeleton'):
+            mobj._update_fixed_targets_from_skeleton(v.zygote_skeleton_meshes, v.env.skel)
+
+    # Build global vertex indexing
+    muscle_names = list(active_muscles.keys())
+    global_offset = {}  # muscle_name -> starting index in global array
+    total_verts = 0
+    for name in muscle_names:
+        global_offset[name] = total_verts
+        total_verts += active_muscles[name].soft_body.num_vertices
+
+    print(f"  Total vertices: {total_verts}")
+
+    # Collect all positions into one array
+    global_positions = np.zeros((total_verts, 3))
+    global_rest_positions = np.zeros((total_verts, 3))
+    global_fixed_mask = np.zeros(total_verts, dtype=bool)
+    global_fixed_targets = {}  # global_idx -> target position
+
+    for name, mobj in active_muscles.items():
+        offset = global_offset[name]
+        n = mobj.soft_body.num_vertices
+        global_positions[offset:offset+n] = mobj.soft_body.positions
+        global_rest_positions[offset:offset+n] = mobj.soft_body.rest_positions
+        global_fixed_mask[offset:offset+n] = mobj.soft_body.fixed_mask
+
+        # Store fixed targets
+        if mobj.soft_body.fixed_targets is not None and len(mobj.soft_body.fixed_indices) > 0:
+            for local_idx, target in zip(mobj.soft_body.fixed_indices, mobj.soft_body.fixed_targets):
+                global_fixed_targets[offset + local_idx] = target
+
+    # Debug: check if fixed targets differ from rest
+    max_fixed_diff = 0.0
+    for gi, target in global_fixed_targets.items():
+        diff = np.linalg.norm(target - global_rest_positions[gi])
+        max_fixed_diff = max(max_fixed_diff, diff)
+
+    n_fixed_mask = np.sum(global_fixed_mask)
+    n_fixed_targets = len(global_fixed_targets)
+    print(f"  Fixed: {n_fixed_mask} in mask, {n_fixed_targets} with targets, max displacement from rest: {max_fixed_diff:.4f}m")
+    if n_fixed_mask != n_fixed_targets:
+        print(f"  WARNING: Mismatch between fixed_mask ({n_fixed_mask}) and fixed_targets ({n_fixed_targets})")
+
+    # Build combined edge list (internal edges + inter-muscle constraints)
+    all_edges = []  # (global_i, global_j, rest_length, weight)
+
+    # Add internal edges from each muscle
+    for name, mobj in active_muscles.items():
+        offset = global_offset[name]
+        sb = mobj.soft_body
+        for edge_idx, (i, j) in enumerate(zip(sb.edge_i, sb.edge_j)):
+            # Use stored rest_lengths if available, otherwise compute from rest positions
+            if hasattr(sb, 'rest_lengths') and sb.rest_lengths is not None and edge_idx < len(sb.rest_lengths):
+                rest_len = sb.rest_lengths[edge_idx]
+            else:
+                rest_len = np.linalg.norm(sb.rest_positions[j] - sb.rest_positions[i])
+            all_edges.append((offset + i, offset + j, rest_len, 1.0))
+
+    n_internal = len(all_edges)
+
+    # Add inter-muscle constraints as edges
+    for constraint in v.inter_muscle_constraints:
+        name1, v1_idx, v1_fixed, name2, v2_idx, v2_fixed, rest_dist = constraint
+        if name1 in active_muscles and name2 in active_muscles:
+            global_i = global_offset[name1] + v1_idx
+            global_j = global_offset[name2] + v2_idx
+            all_edges.append((global_i, global_j, rest_dist, 1.0))  # Same weight as internal
+
+    n_inter = len(all_edges) - n_internal
+    print(f"  Edges: {n_internal} internal + {n_inter} inter-muscle = {len(all_edges)} total")
+
+    # Build neighbor list
+    neighbors = [[] for _ in range(total_verts)]
+    edge_weights = {}
+    rest_edge_vectors = [{} for _ in range(total_verts)]
+
+    for gi, gj, rest_len, weight in all_edges:
+        neighbors[gi].append(gj)
+        neighbors[gj].append(gi)
+        edge_weights[(gi, gj)] = weight
+        edge_weights[(gj, gi)] = weight
+        # Store rest edge vectors
+        rest_edge_vectors[gi][gj] = global_rest_positions[gj] - global_rest_positions[gi]
+        rest_edge_vectors[gj][gi] = global_rest_positions[gi] - global_rest_positions[gj]
+
+    # Debug: check neighbor distribution
+    neighbor_counts = [len(neighbors[i]) for i in range(total_verts)]
+    n0 = sum(1 for c in neighbor_counts if c == 0)
+    n1 = sum(1 for c in neighbor_counts if c == 1)
+    n2 = sum(1 for c in neighbor_counts if c == 2)
+    if n0 > 0 or n1 > 0:
+        print(f"  WARNING: {n0} isolated, {n1} single-neighbor, {n2} two-neighbor vertices")
+
+    # Create or get ARAP backend
+    backend = get_backend(backend_name)
+
+    # Prepare fixed targets array (ordered by fixed indices)
+    fixed_indices = np.where(global_fixed_mask)[0]
+    fixed_targets_array = np.array([global_fixed_targets.get(i, global_rest_positions[i]) for i in fixed_indices])
+
+    # Build system and run ARAP
+    start_time = time.time()
+    backend.build_system(total_verts, neighbors, edge_weights, global_fixed_mask, regularization=1e-6)
+    print(f"  System built in {time.time() - start_time:.3f}s")
+
+    start_time = time.time()
+    global_positions, iterations, max_disp = backend.solve(
+        global_positions, global_rest_positions, neighbors, edge_weights, rest_edge_vectors,
+        global_fixed_mask, fixed_targets_array, max_iterations=max_iterations, tolerance=tolerance,
+        target_edges=None, verbose=True
+    )
+    print(f"  ARAP solved in {time.time() - start_time:.3f}s ({iterations} iterations)")
+
+    # Fix isolated vertices (0 neighbors) by finding closest non-isolated vertex
+    # and applying same displacement
+    isolated_fixed = 0
+    for i in range(total_verts):
+        if len(neighbors[i]) == 0 and not global_fixed_mask[i]:
+            # Find closest vertex that has neighbors
+            rest_pos = global_rest_positions[i]
+            best_dist = float('inf')
+            best_j = -1
+            for j in range(total_verts):
+                if j != i and len(neighbors[j]) > 0:
+                    d = np.linalg.norm(global_rest_positions[j] - rest_pos)
+                    if d < best_dist:
+                        best_dist = d
+                        best_j = j
+            if best_j >= 0:
+                # Apply same displacement as closest connected vertex
+                disp = global_positions[best_j] - global_rest_positions[best_j]
+                global_positions[i] = rest_pos + disp
+                isolated_fixed += 1
+    if isolated_fixed > 0:
+        print(f"  Fixed {isolated_fixed} isolated vertices by copying nearby displacement")
+
+    # Check for other stuck vertices and fix them
+    # Only apply if there's actual deformation (fixed vertices moved from rest)
+    fixed_indices = np.where(global_fixed_mask)[0]
+    fixed_disp = np.linalg.norm(global_positions[fixed_indices] - global_rest_positions[fixed_indices], axis=1)
+    max_fixed_disp = np.max(fixed_disp) if len(fixed_disp) > 0 else 0.0
+
+    if max_fixed_disp > 1e-6:  # Only fix stuck vertices if there's actual deformation
+        total_disp_from_rest = np.linalg.norm(global_positions - global_rest_positions, axis=1)
+        stuck_threshold = 1e-6
+        stuck_count = 0
+        for i in range(total_verts):
+            if not global_fixed_mask[i] and total_disp_from_rest[i] < stuck_threshold:
+                n_neighbors = len(neighbors[i])
+                if n_neighbors > 0:
+                    neighbor_positions = [global_positions[j] for j in neighbors[i]]
+                    neighbor_avg = np.mean(neighbor_positions, axis=0)
+                    # Move toward neighbor average
+                    global_positions[i] = 0.3 * global_positions[i] + 0.7 * neighbor_avg
+                    stuck_count += 1
+        if stuck_count > 0:
+            print(f"  Fixed {stuck_count} stuck vertices by moving toward neighbors")
+
+    # Distribute results back to individual muscles
+    total_change = 0.0
+    for name, mobj in active_muscles.items():
+        offset = global_offset[name]
+        n = mobj.soft_body.num_vertices
+        old_pos = mobj.tet_vertices.copy() if mobj.tet_vertices is not None else mobj.soft_body.rest_positions
+        mobj.soft_body.positions = global_positions[offset:offset+n].copy()
+        mobj.tet_vertices = mobj.soft_body.get_positions().astype(np.float32)
+        if not getattr(mobj, '_baking_mode', False):
+            mobj._prepare_tet_draw_arrays()
+
+        # Update waypoints/fibers from deformed tetrahedra
+        if not getattr(mobj, '_baking_mode', False) and getattr(mobj, 'waypoints_from_tet_sim', True):
+            if hasattr(mobj, 'waypoints') and len(mobj.waypoints) > 0:
+                if hasattr(mobj, '_update_waypoints_from_tet'):
+                    mobj._update_waypoints_from_tet(v.env.skel)
+
+        # Calculate change
+        change = np.linalg.norm(mobj.tet_vertices - old_pos, axis=1).max()
+        total_change = max(total_change, change)
+        print(f"    {name}: max vertex change = {change:.4f}m")
+
+    print(f"Unified volume sim complete (max change: {total_change:.4f}m)")
+
+
+def _enforce_inter_muscle_constraints(v, active_muscles, stiffness=0.5):
+    """
+    Enforce inter-muscle distance constraints by adjusting vertex positions.
+    Respects fixed vertices - only moves free vertices.
+
+    Returns: total constraint error
+    """
+    total_error = 0
+    constraint_count = 0
+
+    for constraint in v.inter_muscle_constraints:
+        # Unpack constraint (new format with fixed status)
+        name1, v1_idx, v1_fixed, name2, v2_idx, v2_fixed, rest_dist = constraint
+
+        if name1 not in active_muscles or name2 not in active_muscles:
+            continue
+
+        # Skip if both vertices are fixed
+        if v1_fixed and v2_fixed:
+            continue
+
+        mobj1 = active_muscles[name1]
+        mobj2 = active_muscles[name2]
+
+        # Get current positions
+        pos1 = mobj1.soft_body.positions[v1_idx].copy()
+        pos2 = mobj2.soft_body.positions[v2_idx].copy()
+
+        # Current distance
+        diff = pos2 - pos1
+        curr_dist = np.linalg.norm(diff)
+
+        if curr_dist < 1e-8:
+            continue
+
+        # Error
+        error = curr_dist - rest_dist
+        total_error += abs(error)
+        constraint_count += 1
+
+        # Correction direction
+        direction = diff / curr_dist
+
+        # Determine correction weights based on fixed status
+        if v1_fixed:
+            # Only v2 moves
+            w1, w2 = 0.0, 1.0
+        elif v2_fixed:
+            # Only v1 moves
+            w1, w2 = 1.0, 0.0
+        else:
+            # Both move equally
+            w1, w2 = 0.5, 0.5
+
+        # Apply correction
+        correction = error * stiffness
+        mobj1.soft_body.positions[v1_idx] += direction * correction * w1
+        mobj2.soft_body.positions[v2_idx] -= direction * correction * w2
+
+    # Update tet_vertices for rendering
+    for name, mobj in active_muscles.items():
+        mobj.tet_vertices = mobj.soft_body.get_positions().astype(np.float32)
+        mobj._prepare_tet_draw_arrays()
+
+    return total_error / max(1, constraint_count)
+
+
+def draw_inter_muscle_constraint_lines(v):
+    """Draw lines between inter-muscle constraint vertex pairs with strain visualization."""
+    if not hasattr(v, 'inter_muscle_constraints') or len(v.inter_muscle_constraints) == 0:
+        return
+
+    glPushMatrix()
+    glDisable(GL_LIGHTING)
+    glEnable(GL_BLEND)
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
+    glLineWidth(2.0)
+
+    # Build vertex and color arrays
+    verts = []
+    colors = []
+    for constraint in v.inter_muscle_constraints:
+        name1, v1_idx, v1_fixed, name2, v2_idx, v2_fixed, rest_dist = constraint
+
+        if name1 not in v.zygote_muscle_meshes or name2 not in v.zygote_muscle_meshes:
+            continue
+
+        mobj1 = v.zygote_muscle_meshes[name1]
+        mobj2 = v.zygote_muscle_meshes[name2]
+
+        if mobj1.tet_vertices is None or mobj2.tet_vertices is None:
+            continue
+        if v1_idx >= len(mobj1.tet_vertices) or v2_idx >= len(mobj2.tet_vertices):
+            continue
+
+        v1 = mobj1.tet_vertices[v1_idx]
+        v2 = mobj2.tet_vertices[v2_idx]
+        current_dist = np.linalg.norm(v2 - v1)
+
+        # Calculate strain: positive = stretched, negative = compressed
+        strain = (current_dist - rest_dist) / rest_dist if rest_dist > 0 else 0
+
+        # Color based on strain with transparency
+        if strain > 0.01:  # Stretched
+            t = min(strain * 5, 1.0)
+            c = [1.0, 1.0 - t * 0.7, 0.3, 0.5]  # Yellow -> Red
+        elif strain < -0.01:  # Compressed
+            t = min(-strain * 5, 1.0)
+            c = [0.3, 1.0, 0.3 + t * 0.7, 0.5]  # Green -> Cyan
+        else:  # Near rest length
+            c = [0.9, 0.9, 0.9, 0.4]  # White/gray
+
+        verts.append(v1)
+        verts.append(v2)
+        colors.append(c)
+        colors.append(c)
+
+    if len(verts) > 0:
+        verts = np.array(verts, dtype=np.float32)
+        colors = np.array(colors, dtype=np.float32)
+        glEnableClientState(GL_VERTEX_ARRAY)
+        glEnableClientState(GL_COLOR_ARRAY)
+        glVertexPointer(3, GL_FLOAT, 0, verts)
+        glColorPointer(4, GL_FLOAT, 0, colors)
+        glDrawArrays(GL_LINES, 0, len(verts))
+        glDisableClientState(GL_COLOR_ARRAY)
+        glDisableClientState(GL_VERTEX_ARRAY)
+
+    glDisable(GL_BLEND)
+    glEnable(GL_LIGHTING)
+    glPopMatrix()
+
+
+def drawTestMuscles(v, color=None):
+    if color is not None:
+        glColor4d(color[0], color[1], color[2], color[3])
+    glLineWidth(v.line_width)
+    glEnableClientState(GL_VERTEX_ARRAY)
+    for m_wps in v.env.test_muscle_pos:
+        verts = np.array(m_wps, dtype=np.float32)
+        glVertexPointer(3, GL_FLOAT, 0, verts)
+        glDrawArrays(GL_LINE_STRIP, 0, len(verts))
+    glDisableClientState(GL_VERTEX_ARRAY)
+
+
+def drawMuscles(v, color=None):
+    if color is not None:
+        glColor4d(color[0], color[1], color[2], color[3])
+
+    if v.draw_line_muscle:
+        glDisable(GL_LIGHTING)
+        glLineWidth(v.line_width)
+        glEnableClientState(GL_VERTEX_ARRAY)
+        for idx, m_wps in enumerate(v.env.muscle_pos):
+            # Bounds check for activation levels
+            if idx < len(v.env.muscle_activation_levels):
+                a = v.env.muscle_activation_levels[idx]
+            else:
+                a = 0.0  # Default activation if index out of bounds
+            if color is None:
+                glColor4d(1.0 * a,  0.2 * a, 0.2 * a, 0.2 + 0.6 * a)
+            verts = np.array(m_wps, dtype=np.float32)
+            glVertexPointer(3, GL_FLOAT, 0, verts)
+            glDrawArrays(GL_LINE_STRIP, 0, len(verts))
+        glDisableClientState(GL_VERTEX_ARRAY)
+        glEnable(GL_LIGHTING)
+    else:
+        for idx, m_wps in enumerate(v.env.muscle_pos):
+            # Bounds check for activation levels
+            if idx < len(v.env.muscle_activation_levels):
+                a = v.env.muscle_activation_levels[idx]
+            else:
+                a = 0.0  # Default activation if index out of bounds
+            if color is None:
+                glColor4d(1.0 * a,  0.2 * a, 0.2 * a, 0.2 + 0.6 * a)
+            for i_wp in range(len(m_wps) - 1):
+                t_parent = m_wps[i_wp]
+                t_child = m_wps[i_wp + 1]
+
+                glPushMatrix()
+                m = (t_parent + t_child) / 2
+                p2c = t_child - t_parent
+                length = np.linalg.norm(p2c)
+                p2c = p2c / length
+                z = np.array([0, 0, 1])
+
+                axis = np.cross(z, p2c)
+                s = np.linalg.norm(axis)
+                axis /= s
+                c = np.dot(z, p2c)
+                angle = np.rad2deg(np.arctan2(s, c))
+                
+                glTranslatef(m[0], m[1], m[2])
+                glRotatef(angle, axis[0], axis[1], axis[2])
+                mygl.draw_cube([0.01, 0.01, length])
+                glPopMatrix()
+
+
+def _build_combined_collision_mesh(v):
+    """Build a combined collision mesh from all skeleton bones for batch operations."""
+    import trimesh
+
+    if not hasattr(v, 'zygote_skeleton_meshes') or v.zygote_skeleton_meshes is None:
+        return None
+    if v.env.skel is None:
+        return None
+
+    all_vertices = []
+    all_faces = []
+    vertex_offset = 0
+    skeleton = v.env.skel
+
+    for mesh_name, mesh_loader in v.zygote_skeleton_meshes.items():
+        # Find the body node for this mesh
+        body_node = skeleton.getBodyNode(mesh_name)
+        if body_node is None:
+            for i in range(skeleton.getNumBodyNodes()):
+                bn = skeleton.getBodyNode(i)
+                bn_name = bn.getName()
+                if mesh_name.lower() in bn_name.lower() or bn_name.lower() in mesh_name.lower():
+                    body_node = bn
+                    break
+
+        if body_node is None:
+            continue
+
+        # Get or create trimesh
+        if not hasattr(mesh_loader, 'trimesh') or mesh_loader.trimesh is None:
+            if hasattr(mesh_loader, 'vertices') and hasattr(mesh_loader, 'faces'):
+                if mesh_loader.vertices is not None and mesh_loader.faces is not None and len(mesh_loader.vertices) > 0:
+                    try:
+                        mesh_loader.trimesh = trimesh.Trimesh(
+                            vertices=np.array(mesh_loader.vertices),
+                            faces=np.array(mesh_loader.faces),
+                            process=False
+                        )
+                    except:
+                        continue
+
+        if mesh_loader.trimesh is None:
+            continue
+
+        try:
+            original_verts = np.array(mesh_loader.trimesh.vertices)
+            faces = np.array(mesh_loader.trimesh.faces)
+
+            # Get current world transform
+            world_transform = body_node.getWorldTransform()
+            R_curr = world_transform.rotation()
+            T_curr = world_transform.translation()
+
+            # Get rest transforms if available (stored during soft body init)
+            body_name = body_node.getName()
+            # Check any muscle for skeleton_rest_transforms
+            rest_transform = None
+            for mobj in v.zygote_muscle_meshes.values():
+                if hasattr(mobj, 'skeleton_rest_transforms') and body_name in mobj.skeleton_rest_transforms:
+                    rest_transform = mobj.skeleton_rest_transforms[body_name]
+                    break
+
+            if rest_transform is not None:
+                R_rest, T_rest = rest_transform
+                delta_rotation = R_curr @ R_rest.T
+                transformed_verts = (delta_rotation @ (original_verts - T_rest).T).T + T_curr
+            else:
+                # No rest transform, assume OBJ is already at rest
+                transformed_verts = original_verts
+
+            all_vertices.append(transformed_verts)
+            all_faces.append(faces + vertex_offset)
+            vertex_offset += len(transformed_verts)
+
+        except Exception as e:
+            continue
+
+    if len(all_vertices) == 0:
+        return None
+
+    combined_vertices = np.vstack(all_vertices)
+    combined_faces = np.vstack(all_faces)
+
+    return trimesh.Trimesh(
+        vertices=combined_vertices,
+        faces=combined_faces,
+        process=False
+    )
+
+
+def _apply_batched_collision(v, collision_mesh, margin=2.0, num_passes=2):
+    """Apply collision to all muscles at once with a single batched query."""
+    if collision_mesh is None:
+        return
+
+    # Collect all proximal vertices from all muscles
+    position_arrays = []
+    muscle_info = []  # (muscle_obj, proximal_indices, start_idx, end_idx)
+    total_count = 0
+
+    for mname, mobj in v.zygote_muscle_meshes.items():
+        if mobj.soft_body is None:
+            continue
+        if not hasattr(mobj, 'bone_proximal_vertices') or len(mobj.bone_proximal_vertices) == 0:
+            continue
+
+        proximal_indices = np.array(list(mobj.bone_proximal_vertices.keys()))
+        positions = mobj.soft_body.positions[proximal_indices].copy()
+
+        start_idx = total_count
+        total_count += len(positions)
+        end_idx = total_count
+
+        position_arrays.append(positions)
+        muscle_info.append((mobj, proximal_indices, start_idx, end_idx))
+
+    if len(position_arrays) == 0:
+        print("No proximal vertices to check for collision")
+        return
+
+    all_positions = np.vstack(position_arrays)
+    print(f"Batched collision: {len(all_positions)} vertices from {len(muscle_info)} muscles")
+
+    # Do collision passes
+    for pass_idx in range(num_passes):
+        # Single batched query for all vertices
+        closest_points, distances, face_ids = collision_mesh.nearest.on_surface(all_positions)
+
+        need_push = distances < margin
+        if not np.any(need_push):
+            break
+
+        push_indices = np.where(need_push)[0]
+        face_normals = collision_mesh.face_normals[face_ids[push_indices]]
+        all_positions[push_indices] = closest_points[push_indices] + face_normals * (margin + 1.0)
+
+    # Distribute results back to muscles
+    for mobj, proximal_indices, start_idx, end_idx in muscle_info:
+        new_positions = all_positions[start_idx:end_idx]
+        mobj.soft_body.positions[proximal_indices] = new_positions
+        # Quick relax
+        mobj.soft_body.step(5)
+        # Update rendering
+        mobj.tet_vertices = mobj.soft_body.get_positions().astype(np.float32)
+        mobj._prepare_tet_draw_arrays()
+
+    print(f"Batched collision done: {num_passes} passes")
+
+
+def _scan_motion_files(v):
+    """Scan data/motion/ for .bvh files."""
+    v.motion_bvh_files = sorted(glob.glob('data/motion/*.bvh'))
+
+
+def _load_motion_bvh(v, idx):
+    """Load the BVH file at the given index."""
+    if idx < 0 or idx >= len(v.motion_bvh_files):
+        return
+    bvh_path = v.motion_bvh_files[idx]
+    v.motion_selected_idx = idx
+    try:
+        # Store initial root position BEFORE MyBVH constructor modifies skeleton
+        root_jn = v.env.skel.getJoint(0)
+        root_dofs = root_jn.getNumDofs()
+        if root_dofs == 6:
+            init_pos = v.env.skel.getPositions()
+            v.motion_root_translation = init_pos[3:6].copy()
+        else:
+            v.motion_root_translation = None
+        print(f"[Motion] bvh_info: {v.env.bvh_info}")
+        print(f"[Motion] skel DOFs: {v.env.skel.getNumDofs()}, joints: {v.env.skel.getNumJoints()}")
+        v.motion_bvh = MyBVH(bvh_path, v.env.bvh_info, v.env.skel)
+        print(f"[Motion] mocap_refs shape: {v.motion_bvh.mocap_refs.shape}, max abs: {np.abs(v.motion_bvh.mocap_refs).max():.6f}")
+        v.motion_total_frames = v.motion_bvh.num_frames
+        v.motion_current_frame = 0
+        v.motion_is_playing = False
+        v.motion_play_accumulator = 0.0
+        # Apply frame 0 pose
+        _motion_apply_pose(v, 0)
+        # Enable OBJ skeleton rendering so posed skeleton is visible
+        v.draw_obj = True
+        # Load cached deformation data if available
+        _motion_load_cache(v)
+        v.motion_bake_end_frame = min(v.motion_bake_end_frame, v.motion_total_frames - 1)
+        print(f"Loaded motion: {os.path.basename(bvh_path)} ({v.motion_total_frames} frames, {1.0/v.motion_bvh.frame_time:.0f} FPS)")
+    except Exception as e:
+        print(f"Error loading BVH: {e}")
+        v.motion_bvh = None
+        v.motion_total_frames = 0
+        v.motion_current_frame = 0
+
+
+def _motion_apply_pose(v, frame):
+    """Set skeleton to the BVH pose at the given frame."""
+    if v.motion_bvh is None or frame >= v.motion_total_frames:
+        return
+    v.motion_current_frame = frame
+    pose = v.motion_bvh.mocap_refs[frame].copy()
+    # Fix root x/z to initial position so skeleton doesn't walk away; keep y (height) from motion
+    if hasattr(v, 'motion_root_translation') and v.motion_root_translation is not None:
+        pose[3] = v.motion_root_translation[0]  # x
+        pose[5] = v.motion_root_translation[2]  # z
+    v.env.skel.setPositions(pose)
+    # Sync the joint angle slider state
+    if hasattr(v, '_skel_dofs'):
+        v._skel_dofs = pose.copy()
+
+
+def _motion_step_forward(v, count=1, run_tet=False):
+    """Advance count frames sequentially, applying pose and optionally running tet sim each step.
+
+    run_tet: if True, run tet sim for frames not in cache (used by Step+1 button and baking).
+             Play mode always passes False — it only uses cached deformation.
+    """
+    if v.motion_bvh is None:
+        return
+    for _ in range(count):
+        next_frame = v.motion_current_frame + 1
+        if next_frame >= v.motion_total_frames:
+            if v.motion_repeat:
+                next_frame = 0
+            else:
+                v.motion_is_playing = False
+                return
+        _motion_apply_pose(v, next_frame)
+        if not _motion_apply_cached_deformation(v, next_frame):
+            if run_tet:
+                _motion_run_tet_settle(v)
+
+
+def _motion_run_tet_settle(v):
+    """Run coupled tet sim for all active soft bodies at current pose."""
+    run_all_tet_sim_with_constraints(v, 
+        max_iterations=v.motion_settle_iters,
+        tolerance=1e-4
+    )
+
+
+def _motion_cache_dir(v):
+    """Returns cache directory path for current BVH. Creates it if needed."""
+    if v.motion_bvh is None:
+        return None
+    bvh_name = os.path.splitext(os.path.basename(v.motion_bvh_files[v.motion_selected_idx]))[0]
+    cache_dir = f'data/motion_cache/{bvh_name}'
+    os.makedirs(cache_dir, exist_ok=True)
+    return cache_dir
+
+
+def _motion_save_current_frame(v):
+    """Save deformed tet positions + waypoints for all muscles with soft_body at the current frame."""
+    cache_dir = _motion_cache_dir(v)
+    if cache_dir is None:
+        return
+    frame = v.motion_current_frame
+    saved_count = 0
+    for mname, mobj in v.zygote_muscle_meshes.items():
+        if mobj.soft_body is None:
+            continue
+        positions = mobj.soft_body.get_positions().astype(np.float32)
+        # Flatten waypoints
+        wp_flat = wp_shape = None
+        if hasattr(mobj, 'waypoints') and len(mobj.waypoints) > 0:
+            wp_flat, wp_shape = _flatten_waypoints(mobj.waypoints)
+
+        filepath = os.path.join(cache_dir, f'{mname}.npz')
+        if os.path.exists(filepath):
+            data = np.load(filepath, allow_pickle=True)
+            frames = list(data['frames'])
+            all_pos = list(data['positions'])
+            all_wp = list(data['waypoints_flat']) if 'waypoints_flat' in data else [None] * len(frames)
+            if frame in frames:
+                idx = frames.index(frame)
+                all_pos[idx] = positions
+                if wp_flat is not None:
+                    all_wp[idx] = wp_flat
+            else:
+                frames.append(frame)
+                all_pos.append(positions)
+                all_wp.append(wp_flat)
+                order = np.argsort(frames)
+                frames = [frames[i] for i in order]
+                all_pos = [all_pos[i] for i in order]
+                all_wp = [all_wp[i] for i in order]
+        else:
+            frames = [frame]
+            all_pos = [positions]
+            all_wp = [wp_flat]
+
+        save_dict = dict(
+            frames=np.array(frames, dtype=np.int32),
+            positions=np.array(all_pos, dtype=np.float32),
+        )
+        if wp_flat is not None and all(w is not None for w in all_wp):
+            save_dict['waypoints_flat'] = np.stack(all_wp).astype(np.float32)
+            save_dict['waypoints_shape'] = np.array([wp_shape.encode('utf-8')])
+        np.savez_compressed(filepath, **save_dict)
+        saved_count += 1
+    _motion_load_cache(v)
+    print(f"Saved deformation at frame {frame} for {saved_count} muscles")
+
+
+def _motion_patch_waypoints(v):
+    """Patch existing cache files by computing waypoints from cached tet positions.
+    Much faster than re-baking since it skips tet sim — only does barycentric interpolation.
+    Sets skeleton pose per frame so origin/insertion endpoints update correctly."""
+    cache_dir = _motion_cache_dir(v)
+    if cache_dir is None:
+        return
+    # Collect muscles that need patching
+    to_patch = {}  # mname -> (filepath, frames, positions)
+    for mname, mobj in v.zygote_muscle_meshes.items():
+        if mobj.soft_body is None:
+            continue
+        if not (hasattr(mobj, 'waypoints') and len(mobj.waypoints) > 0):
+            continue
+        if not (hasattr(mobj, 'waypoint_bary_coords') and len(mobj.waypoint_bary_coords) > 0):
+            continue
+        filepath = os.path.join(cache_dir, f'{mname}.npz')
+        if not os.path.exists(filepath):
+            continue
+        data = np.load(filepath, allow_pickle=True)
+        to_patch[mname] = (filepath, data['frames'], data['positions'])
+
+    if not to_patch:
+        print("All cache files already have waypoints")
+        return
+
+    # Build sorted list of all unique frame indices across muscles
+    all_frames = sorted(set(
+        int(f) for _, frames, _ in to_patch.values() for f in frames
+    ))
+
+    # Per-muscle: build frame->index mapping and accumulate results
+    muscle_wp = {}  # mname -> {frame_idx: wp_flat}
+    muscle_wp_shape = {}  # mname -> wp_shape_str
+    for mname in to_patch:
+        muscle_wp[mname] = {}
+
+    # Iterate frames once, update all muscles per frame
+    for frame_idx in all_frames:
+        if frame_idx < v.motion_total_frames:
+            _motion_apply_pose(v, frame_idx)
+        for mname, (filepath, frames, positions) in to_patch.items():
+            frame_list = list(frames)
+            if frame_idx not in frame_list:
+                continue
+            i = frame_list.index(frame_idx)
+            mobj = v.zygote_muscle_meshes[mname]
+            mobj.tet_vertices = positions[i].astype(np.float32).copy()
+            mobj._update_waypoints_from_tet(v.env.skel, verbose=False)
+            wp_flat, wp_shape_str = _flatten_waypoints(mobj.waypoints)
+            muscle_wp[mname][frame_idx] = wp_flat
+            muscle_wp_shape[mname] = wp_shape_str
+
+    # Write patched files
+    patched = 0
+    for mname, (filepath, frames, positions) in to_patch.items():
+        frame_list = [int(f) for f in frames]
+        wp_flats = [muscle_wp[mname][f] for f in frame_list]
+        save_dict = dict(
+            frames=frames,
+            positions=positions,
+            waypoints_flat=np.stack(wp_flats).astype(np.float32),
+            waypoints_shape=np.array([muscle_wp_shape[mname].encode('utf-8')]),
+        )
+        np.savez_compressed(filepath, **save_dict)
+        patched += 1
+        print(f"  Patched {mname}: {len(frames)} frames")
+
+    _motion_load_cache(v)
+    print(f"Waypoint patch complete: {patched} muscles updated")
+
+
+def _motion_load_cache(v):
+    """Load all cached deformation data for the current BVH into memory."""
+    v.motion_deform_cache = {}
+    cache_dir = _motion_cache_dir(v)
+    if cache_dir is None:
+        return
+    for mname in v.zygote_muscle_meshes:
+        filepath = os.path.join(cache_dir, f'{mname}.npz')
+        if os.path.exists(filepath):
+            data = np.load(filepath, allow_pickle=True)
+            frames = data['frames']
+            positions = data['positions']
+            has_wp = 'waypoints_flat' in data and 'waypoints_shape' in data
+            wp_flats = data['waypoints_flat'] if has_wp else None
+            # waypoints_shape is a 1-element array containing a JSON byte string
+            wp_shape_str = None
+            if has_wp:
+                raw = data['waypoints_shape'][0]
+                wp_shape_str = raw.decode('utf-8') if isinstance(raw, (bytes, np.bytes_)) else str(raw)
+            cache = {}
+            for i, f in enumerate(frames):
+                entry = {'positions': positions[i]}
+                if has_wp:
+                    entry['waypoints_flat'] = wp_flats[i]
+                    entry['waypoints_shape'] = wp_shape_str
+                cache[int(f)] = entry
+            v.motion_deform_cache[mname] = cache
+
+@staticmethod
+
+def _flatten_waypoints(waypoints):
+    """Flatten nested waypoints list into a single float32 array + shape JSON string.
+    waypoints[stream][contour] = array(num_fibers, 3)
+    Returns (flat_array, shape_json_str).
+    """
+    import json
+    parts = []
+    shape_desc = []
+    for stream in waypoints:
+        contour_shapes = []
+        for contour_arr in stream:
+            arr = np.asarray(contour_arr, dtype=np.float32)
+            if arr.ndim == 1:
+                arr = arr.reshape(1, 3)
+            parts.append(arr.ravel())
+            contour_shapes.append(int(arr.shape[0]))
+        shape_desc.append(contour_shapes)
+    flat = np.concatenate(parts) if parts else np.array([], dtype=np.float32)
+    return flat, json.dumps(shape_desc)
+
+@staticmethod
+
+def _unflatten_waypoints(flat, shape_json):
+    """Reconstruct nested waypoints list from flat array + shape JSON string."""
+    import json
+    if isinstance(shape_json, (bytes, np.bytes_)):
+        shape_json = shape_json.decode('utf-8')
+    elif isinstance(shape_json, np.ndarray):
+        shape_json = str(shape_json)
+    shape_desc = json.loads(shape_json)
+    waypoints = []
+    offset = 0
+    for contour_shapes in shape_desc:
+        stream = []
+        for nf in contour_shapes:
+            n = nf * 3
+            stream.append(flat[offset:offset + n].reshape(nf, 3).copy())
+            offset += n
+        waypoints.append(stream)
+    return waypoints
+
+
+def _motion_apply_cached_deformation(v, frame):
+    """Try to apply cached deformation for the given frame. Returns True if cache was used."""
+    if not v.motion_deform_cache:
+        return False
+    any_applied = False
+    for mname, mobj in v.zygote_muscle_meshes.items():
+        if mobj.soft_body is None:
+            continue
+        if mname in v.motion_deform_cache and frame in v.motion_deform_cache[mname]:
+            cached = v.motion_deform_cache[mname][frame]
+            cached_pos = cached['positions']
+            mobj.soft_body.positions = cached_pos.astype(np.float64)
+            mobj.tet_vertices = cached_pos.astype(np.float32).copy()
+            mobj._update_tet_draw_positions()
+            # Restore cached waypoints if available
+            if 'waypoints_flat' in cached and 'waypoints_shape' in cached:
+                if hasattr(mobj, 'waypoints') and len(mobj.waypoints) > 0:
+                    mobj.waypoints = _unflatten_waypoints(
+                        cached['waypoints_flat'], cached['waypoints_shape'])
+            any_applied = True
+    return any_applied
+
+
+def _motion_start_bake(v):
+    """Start baking: reset to frame 0, init accumulator, set baking flag."""
+    if v.motion_baking:
+        return
+    _motion_reset(v)
+    v.motion_baking = True
+    v.motion_bake_current = 0
+    v.motion_is_playing = False
+    # Init per-muscle accumulator for baked results
+    v._bake_data = {}
+    for mname, mobj in v.zygote_muscle_meshes.items():
+        if mobj.soft_body is not None:
+            v._bake_data[mname] = {}
+    print(f"Started bake: frames 0-{v.motion_bake_end_frame}")
+
+
+def _motion_bake_step(v):
+    """Called once per render loop while baking. Simulates ONE frame, captures results.
+    When done, writes all accumulated results to disk."""
+    if not v.motion_baking:
+        return
+
+    end_frame = v.motion_bake_end_frame
+    frame = v.motion_current_frame + 1
+
+    if frame > end_frame:
+        _motion_bake_finish(v)
+        return
+
+    try:
+        # Apply pose
+        _motion_apply_pose(v, frame)
+
+        # Disable waypoint updates and draw array rebuilds during baking
+        saved_flags = {}
+        for mname, mobj in v.zygote_muscle_meshes.items():
+            if mobj.soft_body is not None:
+                saved_flags[mname] = {
+                    'wp': getattr(mobj, 'waypoints_from_tet_sim', True),
+                    'baking': getattr(mobj, '_baking_mode', False),
+                }
+                mobj.waypoints_from_tet_sim = False
+                mobj._baking_mode = True
+
+        run_all_tet_sim_with_constraints(v, 
+            max_iterations=v.motion_settle_iters,
+            tolerance=1e-4
+        )
+
+        # Capture positions only
+        for mname in v._bake_data:
+            mobj = v.zygote_muscle_meshes[mname]
+            v._bake_data[mname][frame] = {
+                'positions': mobj.soft_body.get_positions().astype(np.float32)
+            }
+
+        # Restore flags
+        for mname, flags in saved_flags.items():
+            mobj = v.zygote_muscle_meshes[mname]
+            mobj.waypoints_from_tet_sim = flags['wp']
+            mobj._baking_mode = False
+
+    except Exception as e:
+        print(f"ERROR in bake step frame {frame}: {e}")
+        import traceback
+        traceback.print_exc()
+        # Still try to capture whatever positions we have
+        for mname in v._bake_data:
+            mobj = v.zygote_muscle_meshes[mname]
+            if mobj.soft_body is not None:
+                v._bake_data[mname][frame] = {
+                    'positions': mobj.soft_body.get_positions().astype(np.float32)
+                }
+
+    v.motion_bake_current = frame
+
+
+def _motion_bake_finish(v):
+    """Write accumulated bake results to disk and reload cache.
+    Bake only saves positions. Use 'Recompute Waypoints' to patch waypoints after."""
+    cache_dir = _motion_cache_dir(v)
+    for mname, frame_data in v._bake_data.items():
+        if len(frame_data) == 0:
+            continue
+        filepath = os.path.join(cache_dir, f'{mname}.npz')
+        # Merge with existing cache: keep old frames not in this bake, positions only
+        if os.path.exists(filepath):
+            existing = np.load(filepath, allow_pickle=True)
+            for i, f in enumerate(existing['frames']):
+                fi = int(f)
+                if fi not in frame_data:
+                    frame_data[fi] = {'positions': existing['positions'][i]}
+        sorted_frames = sorted(frame_data.keys())
+        save_dict = dict(
+            frames=np.array(sorted_frames, dtype=np.int32),
+            positions=np.array([frame_data[f]['positions'] for f in sorted_frames], dtype=np.float32),
+        )
+        np.savez_compressed(filepath, **save_dict)
+
+    v.motion_baking = False
+    v._bake_data = {}
+    _motion_load_cache(v)
+    print(f"Bake complete: frames 0-{v.motion_bake_end_frame}. Use 'Recompute Waypoints' to add waypoint data.")
+
+
+def _motion_reset(v):
+    """Reset to frame 0, reset skeleton to rest pose, reset tet meshes."""
+    v.motion_current_frame = 0
+    v.motion_is_playing = False
+    v.motion_play_accumulator = 0.0
+    if v.motion_bvh is not None:
+        _motion_apply_pose(v, 0)
+    else:
+        # Reset skeleton to zero pose
+        v.env.skel.setPositions(np.zeros(v.env.skel.getNumDofs()))
+        if hasattr(v, '_skel_dofs'):
+            v._skel_dofs = np.zeros(v.env.skel.getNumDofs())
+    # Reset soft bodies — use cached frame 0 if available, otherwise reset from skeleton
+    if not _motion_apply_cached_deformation(v, 0):
+        for mname, mobj in v.zygote_muscle_meshes.items():
+            if mobj.soft_body is not None:
+                mobj._update_tet_positions_from_skeleton(v.env.skel)
+                mobj._update_fixed_targets_from_skeleton(v.zygote_skeleton_meshes, v.env.skel)
+
+
+def reset(v, reset_time=None):
+    v.env.reset(reset_time)
+    v.reward_buffer = [v.env.get_reward()]
+    # Reset soft body and VIPER simulations
+    for name, obj in v.zygote_muscle_meshes.items():
+        if obj.soft_body is not None:
+            obj.reset_soft_body()
+        if hasattr(obj, 'viper_sim') and obj.viper_sim is not None:
+            obj.reset_viper()
+
+
+def zero_reset(v):
+    v.env.zero_reset()
+    v.reward_buffer = [v.env.get_reward()]
+    # Reset soft body and VIPER simulations
+    for name, obj in v.zygote_muscle_meshes.items():
+        if obj.soft_body is not None:
+            obj.reset_soft_body()
+        if hasattr(obj, 'viper_sim') and obj.viper_sim is not None:
+            obj.reset_viper()
 
 
