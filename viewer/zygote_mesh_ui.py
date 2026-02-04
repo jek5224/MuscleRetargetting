@@ -9,6 +9,10 @@ import traceback
 import glob
 
 from OpenGL.GL import *
+import viewer.gl_function as mygl
+from viewer.mesh_loader import MeshLoader
+from viewer.arap_backends import get_backend
+from core.bvhparser import MyBVH
 
 # UI dimension constants (mirrored from viewer.py to avoid circular imports)
 wide_button_width = 308
