@@ -169,7 +169,7 @@ def draw_zygote_muscle_ui(v):
 
         # Motion Browser
         if v.env.skel is not None and imgui.tree_node("Motion Browser", imgui.TREE_NODE_DEFAULT_OPEN):
-            v._draw_motion_browser_ui()
+            _draw_motion_browser_ui(v)
             imgui.tree_pop()
 
         # Skeleton joint angle sliders
@@ -1535,3 +1535,3823 @@ def draw_zygote_skeleton_ui(v):
                     v.motion_skel = v.env.skel.clone()
 
         imgui.tree_pop()
+
+
+def _draw_motion_browser_ui(v):
+    """Draw the Motion Browser imgui panel."""
+    # Section 1: Motion file selection
+    bvh_names = [os.path.basename(f) for f in v.motion_bvh_files]
+    if len(bvh_names) == 0:
+        imgui.text("No .bvh files in data/motion/")
+        if imgui.button("Rescan##motion"):
+            v._scan_motion_files()
+        return
+
+    imgui.push_item_width(200)
+    changed, new_idx = imgui.combo("Motion##bvh_select", v.motion_selected_idx, bvh_names)
+    imgui.pop_item_width()
+    if changed and new_idx != v.motion_selected_idx:
+        v._load_motion_bvh(new_idx)
+
+    # Show info if loaded
+    if v.motion_bvh is not None:
+        fps = 1.0 / v.motion_bvh.frame_time
+        duration = v.motion_total_frames * v.motion_bvh.frame_time
+        imgui.text(f"Frames: {v.motion_total_frames}   FPS: {fps:.0f}   Duration: {duration:.2f}s")
+
+        # Section 2: Sequential Playback Transport
+        imgui.separator()
+
+        # Frame slider
+        imgui.push_item_width(imgui.get_content_region_available_width())
+        changed, new_frame = imgui.slider_int(
+            "##frame_slider", v.motion_current_frame,
+            0, v.motion_total_frames - 1,
+            f"Frame {v.motion_current_frame} / {v.motion_total_frames - 1}")
+        imgui.pop_item_width()
+        if changed and new_frame != v.motion_current_frame:
+            v._motion_apply_pose(new_frame)
+            v._motion_apply_cached_deformation(new_frame)
+
+        # Transport buttons
+        if imgui.button("Reset##motion"):
+            v._motion_reset()
+        imgui.same_line()
+        if imgui.button("Step +1##motion"):
+            v._motion_step_forward(1, run_tet=v.motion_run_tet_sim)
+
+        # Play/Pause + speed
+        if v.motion_is_playing:
+            if imgui.button("Pause##motion", width=80):
+                v.motion_is_playing = False
+        else:
+            if imgui.button("Play##motion", width=80):
+                if v.motion_current_frame < v.motion_total_frames - 1 or v.motion_repeat:
+                    v.motion_is_playing = True
+                    v.motion_play_accumulator = 0.0
+        imgui.same_line()
+        speed_options = [0.25, 0.5, 1.0, 2.0]
+        speed_labels = ["0.25x", "0.5x", "1.0x", "2.0x"]
+        current_speed_idx = speed_options.index(v.motion_play_speed) if v.motion_play_speed in speed_options else 2
+        imgui.push_item_width(80)
+        changed, new_speed_idx = imgui.combo("Speed##motion", current_speed_idx, speed_labels)
+        imgui.pop_item_width()
+        if changed:
+            v.motion_play_speed = speed_options[new_speed_idx]
+
+        # Repeat option
+        _, v.motion_repeat = imgui.checkbox("Repeat##motion", v.motion_repeat)
+
+        # Coupled tet sim option
+        _, v.motion_run_tet_sim = imgui.checkbox("Run Coupled Tet Sim##motion", v.motion_run_tet_sim)
+        if v.motion_run_tet_sim:
+            imgui.push_item_width(150)
+            _, v.motion_settle_iters = imgui.slider_int("Settle Iters##motion", v.motion_settle_iters, 10, 200)
+            imgui.pop_item_width()
+
+        # --- Deformation Cache ---
+        imgui.separator()
+        imgui.text("--- Deformation Cache ---")
+
+        # Cache info: count how many frames are cached
+        cached_frames = set()
+        for mname_cache in v.motion_deform_cache.values():
+            cached_frames.update(mname_cache.keys())
+        num_cached = len(cached_frames)
+        imgui.text(f"Cache: {num_cached}/{v.motion_total_frames} frames baked")
+
+        # Save Current Frame button
+        has_soft_bodies = any(m.soft_body is not None for m in v.zygote_muscle_meshes.values()) if hasattr(v, 'zygote_muscle_meshes') else False
+        if not has_soft_bodies or v.motion_baking:
+            imgui.push_style_var(imgui.STYLE_ALPHA, 0.5)
+            imgui.button("Save Current Frame##motion_cache")
+            imgui.pop_style_var()
+        else:
+            if imgui.button("Save Current Frame##motion_cache"):
+                v._motion_save_current_frame()
+
+        # Bake End Frame slider
+        imgui.push_item_width(150)
+        _, v.motion_bake_end_frame = imgui.slider_int(
+            "Bake End Frame##motion_cache",
+            v.motion_bake_end_frame, 0, max(1, v.motion_total_frames - 1))
+        imgui.pop_item_width()
+
+        # Bake / Cancel buttons
+        if v.motion_baking:
+            # Show progress during bake
+            bake_frac = v.motion_bake_current / max(1, v.motion_bake_end_frame)
+            imgui.progress_bar(bake_frac, (imgui.get_content_region_available_width(), 0),
+                              f"Baking: frame {v.motion_bake_current}/{v.motion_bake_end_frame}")
+            if imgui.button("Cancel Bake##motion_cache"):
+                v._motion_bake_finish()
+                print("Bake cancelled, partial results saved")
+        else:
+            if not has_soft_bodies:
+                imgui.push_style_var(imgui.STYLE_ALPHA, 0.5)
+                imgui.button("Bake to End Frame##motion_cache")
+                imgui.pop_style_var()
+            else:
+                if imgui.button("Bake to End Frame##motion_cache"):
+                    v._motion_start_bake()
+
+        # Recompute/patch waypoints in cache
+        if num_cached > 0 and has_soft_bodies and not v.motion_baking:
+            if imgui.button("Recompute Waypoints in Cache##motion_cache"):
+                v._motion_patch_waypoints()
+
+
+def _render_inspect_2d_windows(v):
+    """Render 2D inspection windows for fiber samples and contour waypoints."""
+    muscles_to_close = []
+
+    for name, is_open in list(v.inspect_2d_open.items()):
+        if not is_open:
+            continue
+
+        if name not in v.zygote_muscle_meshes:
+            muscles_to_close.append(name)
+            continue
+
+        obj = v.zygote_muscle_meshes[name]
+
+        # Check if data is available (only contours required, fiber_architecture optional)
+        if (not hasattr(obj, 'contours') or obj.contours is None or len(obj.contours) == 0):
+            muscles_to_close.append(name)
+            continue
+
+        # Check if fiber_architecture is available (optional - for fiber sample display)
+        has_fiber = (hasattr(obj, 'fiber_architecture') and obj.fiber_architecture is not None and
+                    len(obj.fiber_architecture) > 0)
+
+        # Window setup - size to fit two 280px canvases with padding
+        # Width: 2 * (280 + 2*20 + 20) + window padding = ~720
+        # Height: sliders(~75) + labels(~40) + canvas(280+2*20) + margins = ~450
+        imgui.set_next_window_size(720, 480, imgui.FIRST_USE_EVER)
+        expanded, opened = imgui.begin(f"Inspect 2D: {name}", True)
+
+        if not opened:
+            muscles_to_close.append(name)
+            imgui.end()
+            continue
+
+        # Detect data structure format:
+        # - Pre-stream (before cutting): contours[level_idx][stream_idx], bounding_planes[level_idx][stream_idx]
+        # - Post-stream (after build_fibers): contours[stream_idx][level_idx], bounding_planes[stream_idx][level_idx]
+        #
+        # Detection: If stream_contours exists and has data, we're in post-stream mode.
+        # Also check if contours structure matches stream_contours (indicating build_fibers was called).
+        has_stream_contours = (hasattr(obj, 'stream_contours') and
+                               obj.stream_contours is not None and
+                               len(obj.stream_contours) > 0)
+
+        # If contours == stream_contours (same object or same structure), it's post-stream
+        is_post_stream = False
+        if has_stream_contours:
+            # Check if contours is the same as stream_contours (build_fibers assigns directly)
+            if obj.contours is obj.stream_contours:
+                is_post_stream = True
+            # Also check if structure matches: outer dim is small (num streams), inner is larger (num levels)
+            elif len(obj.contours) > 0 and len(obj.contours) <= 10:  # Typically few streams
+                # In post-stream, contours[stream][level], so inner should have many elements
+                if isinstance(obj.contours[0], (list, np.ndarray)) and len(obj.contours[0]) > 0:
+                    # Check if inner elements are contour arrays (have 3D points)
+                    inner = obj.contours[0][0]
+                    if isinstance(inner, np.ndarray) and inner.ndim == 2 and inner.shape[1] == 3:
+                        is_post_stream = True
+
+        is_pre_stream = not is_post_stream
+
+        # Helper functions to access data in correct format
+        def get_num_levels():
+            """Get number of levels."""
+            if is_pre_stream:
+                return len(obj.contours)
+            else:
+                # Post-stream: levels are the inner index
+                if len(obj.contours) > 0:
+                    return len(obj.contours[0])
+                return 0
+
+        def get_max_contours_at_level():
+            """Get maximum number of contours at any level (for pre-stream)."""
+            if is_pre_stream:
+                if len(obj.contours) == 0:
+                    return 0
+                return max(len(level) for level in obj.contours)
+            else:
+                # Post-stream: streams are the outer index
+                return len(obj.contours)
+
+        def get_num_contours_at_level(level_idx):
+            """Get number of contours at a specific level (for pre-stream)."""
+            if is_pre_stream:
+                if level_idx < len(obj.contours):
+                    return len(obj.contours[level_idx])
+                return 0
+            else:
+                return len(obj.contours)
+
+        def get_contour(s_idx, level_idx):
+            if is_pre_stream:
+                # contours[level_idx][contour_idx] - s_idx is contour within level
+                if level_idx < len(obj.contours) and s_idx < len(obj.contours[level_idx]):
+                    return obj.contours[level_idx][s_idx]
+                return None
+            else:
+                # contours[stream_idx][level_idx]
+                if s_idx < len(obj.contours) and level_idx < len(obj.contours[s_idx]):
+                    return obj.contours[s_idx][level_idx]
+                return None
+
+        def get_bounding_plane(s_idx, level_idx):
+            if is_pre_stream:
+                # bounding_planes[level_idx][contour_idx] - s_idx is contour within level
+                if level_idx < len(obj.bounding_planes) and s_idx < len(obj.bounding_planes[level_idx]):
+                    return obj.bounding_planes[level_idx][s_idx]
+                return None
+            else:
+                # bounding_planes[stream_idx][level_idx]
+                if s_idx < len(obj.bounding_planes) and level_idx < len(obj.bounding_planes[s_idx]):
+                    return obj.bounding_planes[s_idx][level_idx]
+                return None
+
+        # Different UI for pre-stream vs post-stream
+        if is_pre_stream:
+            # Pre-stream: Level slider (contour) + Contour-within-level slider (stream)
+            num_levels = get_num_levels()
+            max_contours = get_max_contours_at_level()
+
+            # Level slider (labeled as "Level")
+            level_idx = v.inspect_2d_contour_idx.get(name, 0)
+            level_idx = min(level_idx, max(0, num_levels - 1))
+
+            changed, new_level_idx = imgui.slider_int(f"Level##{name}_inspect", level_idx, 0, max(0, num_levels - 1))
+            if changed:
+                v.inspect_2d_contour_idx[name] = new_level_idx
+                level_idx = new_level_idx
+
+            # Get number of contours at current level for slider boundary
+            num_at_level = get_num_contours_at_level(level_idx)
+
+            # Contour-within-level slider (labeled as "Contour")
+            # Slider max is based on contours at this level, not global max
+            contour_in_level = v.inspect_2d_stream_idx.get(name, 0)
+            contour_in_level = min(contour_in_level, max(0, num_at_level - 1))
+
+            changed, new_contour_in_level = imgui.slider_int(f"Contour##{name}_inspect", contour_in_level, 0, max(0, num_at_level - 1))
+            if changed:
+                v.inspect_2d_stream_idx[name] = new_contour_in_level
+                contour_in_level = new_contour_in_level
+
+            # Show info about contours at this level
+            imgui.text(f"Level {level_idx}: {num_at_level} contour(s)")
+
+            imgui.separator()
+
+            # Determine if we should show anything
+            # Show nothing if contour_in_level >= num_at_level
+            if contour_in_level < num_at_level:
+                contour_indices = [(contour_in_level, level_idx)]  # (stream_idx, level_idx)
+            else:
+                contour_indices = []  # Show nothing
+
+            # Pre-stream doesn't have show_all feature
+            show_all = False
+
+        else:
+            # Post-stream: Stream slider + Contour (level) slider
+            num_streams = get_max_contours_at_level()
+            stream_idx = v.inspect_2d_stream_idx.get(name, 0)
+            stream_idx = min(stream_idx, max(0, num_streams - 1))
+
+            changed, new_stream_idx = imgui.slider_int(f"Stream##{name}_inspect", stream_idx, 0, max(0, num_streams - 1))
+            if changed:
+                v.inspect_2d_stream_idx[name] = new_stream_idx
+                stream_idx = new_stream_idx
+
+            num_levels = get_num_levels()
+            contour_idx = v.inspect_2d_contour_idx.get(name, 0)
+            contour_idx = min(contour_idx, max(0, num_levels - 1))
+
+            # Show All checkbox
+            if not hasattr(v, 'inspect_2d_show_all'):
+                v.inspect_2d_show_all = {}
+            show_all = v.inspect_2d_show_all.get(name, False)
+            changed_show_all, show_all = imgui.checkbox(f"Show All##{name}", show_all)
+            if changed_show_all:
+                v.inspect_2d_show_all[name] = show_all
+                # Exit Edit Fiber mode when switching to "Show All"
+                if show_all and name in v.inspect_2d_edit_fiber_mode and v.inspect_2d_edit_fiber_mode[name]:
+                    v.inspect_2d_edit_fiber_mode[name] = False
+                    v.inspect_2d_edit_fiber_selected[name] = -1
+                    v.inspect_2d_edit_fiber_preview[name] = None
+                    v.inspect_2d_edit_fiber_test[name] = None
+                    # Clear test fiber from object
+                    obj.test_fiber_waypoints = None
+                    obj.test_fiber_stream_idx = None
+
+            if not show_all:
+                changed, new_contour_idx = imgui.slider_int(f"Contour##{name}_inspect", contour_idx, 0, max(0, num_levels - 1))
+                if changed:
+                    v.inspect_2d_contour_idx[name] = new_contour_idx
+                    contour_idx = new_contour_idx
+
+            imgui.separator()
+
+            # Determine which contours to draw
+            if show_all:
+                contour_indices = [(stream_idx, i) for i in range(num_levels)]
+            else:
+                contour_indices = [(stream_idx, contour_idx)]
+
+        # Always use child region for consistent layout (scrollbar space reserved)
+        imgui.begin_child(f"contours_scroll##{name}", 0, 0, border=False)
+
+        # Initialize correspondence mode state for this muscle
+        if name not in v.inspect_2d_corr_mode:
+            v.inspect_2d_corr_mode[name] = False
+            v.inspect_2d_corr_corner[name] = -1
+            v.inspect_2d_corr_vertex[name] = -1
+
+        corr_mode = v.inspect_2d_corr_mode[name]
+        corr_corner = v.inspect_2d_corr_corner[name]
+        corr_vertex = v.inspect_2d_corr_vertex[name]
+
+        # Initialize edit fiber mode state for this muscle
+        if name not in v.inspect_2d_edit_fiber_mode:
+            v.inspect_2d_edit_fiber_mode[name] = False
+            v.inspect_2d_edit_fiber_selected[name] = -1
+            v.inspect_2d_edit_fiber_preview[name] = None
+            v.inspect_2d_edit_fiber_test[name] = None
+
+        edit_fiber_mode = v.inspect_2d_edit_fiber_mode[name]
+        edit_fiber_selected = v.inspect_2d_edit_fiber_selected[name]
+        edit_fiber_preview = v.inspect_2d_edit_fiber_preview[name]
+        edit_fiber_test = v.inspect_2d_edit_fiber_test[name]
+
+        # Set inspector highlight on the object for 3D visualization
+        # This will highlight the contour being inspected in the 3D view
+        if is_post_stream:
+            highlight_stream = v.inspect_2d_stream_idx.get(name, 0)
+            highlight_level = v.inspect_2d_contour_idx.get(name, 0)
+        else:
+            highlight_stream = v.inspect_2d_stream_idx.get(name, 0)
+            highlight_level = v.inspect_2d_contour_idx.get(name, 0)
+        obj.inspector_highlight_stream = highlight_stream
+        obj.inspector_highlight_level = highlight_level
+
+        # Initialize hover state (may not be set if contour_indices is empty)
+        hovered_idx = -1
+        hovered_type = None
+
+        for stream_idx, level_idx in contour_indices:
+            contour_idx = level_idx  # For display purposes
+
+            imgui.text(f"=== Level {level_idx}, Contour {stream_idx} ===")
+
+            # Show bounding plane corner angles (debug info)
+            bp_info = get_bounding_plane(stream_idx, level_idx)
+            if bp_info is not None:
+                bp_corners = bp_info.get('bounding_plane', None)
+                if bp_corners is not None and len(bp_corners) >= 4:
+                    # Compute angles at each corner
+                    angles = []
+                    for i in range(4):
+                        p0 = np.array(bp_corners[(i - 1) % 4])
+                        p1 = np.array(bp_corners[i])
+                        p2 = np.array(bp_corners[(i + 1) % 4])
+                        v1 = p0 - p1
+                        v2 = p2 - p1
+                        cos_angle = np.dot(v1, v2) / (np.linalg.norm(v1) * np.linalg.norm(v2) + 1e-10)
+                        angle_deg = np.degrees(np.arccos(np.clip(cos_angle, -1, 1)))
+                        angles.append(angle_deg)
+                    imgui.text(f"BP Angles: {angles[0]:.1f}, {angles[1]:.1f}, {angles[2]:.1f}, {angles[3]:.1f}")
+
+            imgui.separator()
+
+            # Get canvas dimensions
+            canvas_size = 280
+            padding = 20
+            column_width = canvas_size + 2 * padding + 20  # Fixed column width
+
+            # Two columns: unit square (left) and contour (right)
+            imgui.columns(2, f"inspect_cols##{name}_{level_idx}_{stream_idx}", border=True)
+            imgui.set_column_width(0, column_width)
+            imgui.set_column_width(1, column_width)
+
+            draw_list = imgui.get_window_draw_list()
+            mouse_pos = imgui.get_mouse_pos()
+            hovered_idx = -1
+            hovered_type = None  # 'vertex', 'fiber', or 'waypoint'
+            hover_radius = 8.0
+
+            # Get contour data first (needed for both columns)
+            contour_match = None
+            p_screen_points = []
+            q_screen_points = []
+            fiber_screen_points = []
+            waypoint_screen_points = []
+            corner_screen_points_left = []  # Bounding plane corners on unit square
+            corner_screen_points_right = []  # Bounding plane corners on contour
+            corner_to_closest_vertex = []  # (corner_idx, closest_vertex_idx) pairs
+            contour_2d_norm = None
+
+            # Helper function to compute normalized [0,1] coordinates by solving linear system
+            def point_to_unit_square_2d(point_3d, mean, basis_x, basis_y, bp_corners):
+                """Convert 3D point to [0,1]x[0,1] by inverting the bounding plane formula.
+
+                Q was created as: Q = bp[0] + u * (bp[1]-bp[0]) + v * (bp[3]-bp[0])
+                So we solve: Q - bp[0] = u * edge_x + v * edge_y
+                This gives proper [0,1] coordinates regardless of basis orthogonality.
+                """
+                v0 = bp_corners[0]
+                edge_x = bp_corners[1] - bp_corners[0]  # horizontal edge
+                edge_y = bp_corners[3] - bp_corners[0]  # vertical edge
+
+                # Solve 2x2 system using least squares (works in 3D)
+                # [edge_x | edge_y] * [u; v] = point - v0
+                rel_p = point_3d - v0
+
+                # Build matrix A = [edge_x, edge_y] as columns (3x2)
+                A = np.column_stack([edge_x, edge_y])
+
+                # Solve using least squares
+                result, _, _, _ = np.linalg.lstsq(A, rel_p, rcond=None)
+                u, v = result[0], result[1]
+
+                return np.array([np.clip(u, 0, 1), np.clip(v, 0, 1)])
+
+            plane_info = get_bounding_plane(stream_idx, level_idx)
+            if plane_info is not None:
+                contour_match = plane_info.get('contour_match', None)
+
+                if contour_match is not None and len(contour_match) > 0 and 'basis_x' in plane_info:
+                    mean = plane_info['mean']
+                    basis_x = plane_info['basis_x']
+                    basis_y = plane_info['basis_y']
+                    bp = plane_info.get('bounding_plane', None)
+
+            # Left column: Unit square with Q points
+            imgui.text("Unit Square (Q points)")
+            cursor_pos_left = imgui.get_cursor_screen_pos()
+
+            left_x0, left_y0 = cursor_pos_left[0] + padding, cursor_pos_left[1] + padding
+            left_x1, left_y1 = left_x0 + canvas_size, left_y0 + canvas_size
+
+            # Background
+            draw_list.add_rect_filled(left_x0, left_y0, left_x1, left_y1, imgui.get_color_u32_rgba(0.15, 0.15, 0.15, 1.0))
+            draw_list.add_rect(left_x0, left_y0, left_x1, left_y1, imgui.get_color_u32_rgba(0.5, 0.5, 0.5, 1.0), thickness=2.0)
+
+            # Draw fiber samples (green) and check hover
+            fiber_samples = []
+            if has_fiber and stream_idx < len(obj.fiber_architecture):
+                fiber_samples = obj.fiber_architecture[stream_idx]
+                for i, sample in enumerate(fiber_samples):
+                    if len(sample) >= 2:
+                        sx = left_x0 + sample[0] * canvas_size
+                        sy = left_y0 + (1 - sample[1]) * canvas_size
+                        fiber_screen_points.append((sx, sy))
+                        draw_list.add_circle_filled(sx, sy, 4, imgui.get_color_u32_rgba(0.2, 0.8, 0.2, 1.0))
+                        # Check hover on fiber samples
+                        dist = np.sqrt((mouse_pos[0] - sx)**2 + (mouse_pos[1] - sy)**2)
+                        if dist < hover_radius and hovered_idx < 0:
+                            hovered_idx = i
+                            hovered_type = 'fiber'
+
+            # Compute and draw Q points from contour_match (cyan) - draw immediately so they're not covered
+            # Use bounding plane parametric coordinates to match MVC computation in find_waypoints()
+            if contour_match is not None and bp is not None and len(bp) >= 4:
+                for i, (p, q) in enumerate(contour_match):
+                    p = np.array(p)
+                    q = np.array(q)
+                    # Compute Q's position on unit square using bounding plane parametric coords
+                    q_norm = point_to_unit_square_2d(q, mean, basis_x, basis_y, bp)
+                    qx = left_x0 + q_norm[0] * canvas_size
+                    qy = left_y0 + (1 - q_norm[1]) * canvas_size
+                    q_screen_points.append((qx, qy))
+                    # Draw Q point immediately (cyan)
+                    draw_list.add_circle_filled(qx, qy, 3, imgui.get_color_u32_rgba(0.0, 0.8, 0.8, 1.0))
+
+                    # Check hover on Q points
+                    dist = np.sqrt((mouse_pos[0] - qx)**2 + (mouse_pos[1] - qy)**2)
+                    if dist < hover_radius and hovered_idx < 0:
+                        hovered_idx = i
+                        hovered_type = 'vertex'
+
+                # Draw bounding plane corners on unit square (corners are at (0,0), (1,0), (1,1), (0,1))
+                corner_uv = [(0, 0), (1, 0), (1, 1), (0, 1)]  # Unit square corners
+                for ci, (cu, cv) in enumerate(corner_uv):
+                    cx = left_x0 + cu * canvas_size
+                    cy = left_y0 + (1 - cv) * canvas_size
+                    corner_screen_points_left.append((cx, cy))
+                    # Draw corner (purple/magenta diamond)
+                    draw_list.add_quad_filled(cx, cy - 5, cx + 5, cy, cx, cy + 5, cx - 5, cy,
+                                             imgui.get_color_u32_rgba(0.8, 0.2, 0.8, 1.0))
+                    # Check hover on corners
+                    dist = np.sqrt((mouse_pos[0] - cx)**2 + (mouse_pos[1] - cy)**2)
+                    if dist < hover_radius and hovered_idx < 0:
+                        hovered_idx = ci
+                        hovered_type = 'corner'
+
+            # Reserve space
+            imgui.dummy(canvas_size + 2 * padding, canvas_size + 2 * padding)
+
+            # Right column: Contour with P points
+            imgui.next_column()
+            imgui.text(f"Level {level_idx} (P points)")
+            cursor_pos_right = imgui.get_cursor_screen_pos()
+
+            right_x0, right_y0 = cursor_pos_right[0] + padding, cursor_pos_right[1] + padding
+            right_x1, right_y1 = right_x0 + canvas_size, right_y0 + canvas_size
+
+            # Background
+            draw_list.add_rect_filled(right_x0, right_y0, right_x1, right_y1, imgui.get_color_u32_rgba(0.15, 0.15, 0.15, 1.0))
+
+            # Draw contour and P points
+            if contour_match is not None and 'basis_x' in plane_info:
+                # Project P points to 2D
+                p_2d_list = []
+                for p, q in contour_match:
+                    p = np.array(p)
+                    p_2d = np.array([np.dot(p - mean, basis_x), np.dot(p - mean, basis_y)])
+                    p_2d_list.append(p_2d)
+                p_2d_arr = np.array(p_2d_list)
+
+                # Normalization (preserve aspect ratio)
+                min_xy = p_2d_arr.min(axis=0)
+                max_xy = p_2d_arr.max(axis=0)
+                range_xy = max_xy - min_xy
+                range_xy[range_xy < 1e-10] = 1.0
+                max_range = max(range_xy[0], range_xy[1])
+                margin = 0.1
+                scale = (1 - 2 * margin) / max_range
+                center_xy = (min_xy + max_xy) / 2
+
+                # Compute screen points for contour
+                p_screen_points = []
+                for p_2d in p_2d_list:
+                    p_norm = (p_2d - center_xy) * scale + 0.5
+                    px = right_x0 + p_norm[0] * canvas_size
+                    py = right_y0 + (1 - p_norm[1]) * canvas_size
+                    p_screen_points.append((px, py))
+
+                # Draw contour lines (yellow)
+                for i in range(len(p_screen_points)):
+                    p1 = p_screen_points[i]
+                    p2 = p_screen_points[(i + 1) % len(p_screen_points)]
+                    draw_list.add_line(p1[0], p1[1], p2[0], p2[1],
+                                      imgui.get_color_u32_rgba(0.8, 0.8, 0.2, 1.0), thickness=2.0)
+
+                # Check hover on P points
+                for i, (px, py) in enumerate(p_screen_points):
+                    dist = np.sqrt((mouse_pos[0] - px)**2 + (mouse_pos[1] - py)**2)
+                    if dist < hover_radius and hovered_idx < 0:
+                        hovered_idx = i
+                        hovered_type = 'vertex'
+
+                # Draw actual bounding plane (blue) - project 3D bounding plane corners to 2D
+                if bp is not None and len(bp) >= 4:
+                    bp_screen = []
+                    for corner_3d in bp[:4]:
+                        corner_3d = np.array(corner_3d)
+                        corner_2d = np.array([np.dot(corner_3d - mean, basis_x), np.dot(corner_3d - mean, basis_y)])
+                        corner_norm = (corner_2d - center_xy) * scale + 0.5
+                        cx = right_x0 + corner_norm[0] * canvas_size
+                        cy = right_y0 + (1 - corner_norm[1]) * canvas_size
+                        bp_screen.append((cx, cy))
+                    # Draw bounding plane edges
+                    for i in range(4):
+                        p1 = bp_screen[i]
+                        p2 = bp_screen[(i + 1) % 4]
+                        draw_list.add_line(p1[0], p1[1], p2[0], p2[1],
+                                          imgui.get_color_u32_rgba(0.3, 0.5, 0.9, 1.0), thickness=1.5)
+
+                # Draw bounding plane corners and lines to closest contour vertices
+                if bp is not None and len(bp) >= 4:
+                    # Find corner-vertex correspondence based on Q positions (not ray-based)
+                    # This reflects the actual correspondence used in fiber computation
+                    bp_corners_3d = [np.array(c) for c in bp[:4]]
+                    q_based_corner_indices = []
+                    for ci, corner_3d in enumerate(bp_corners_3d):
+                        # Find vertex whose Q is closest to this corner
+                        min_dist = float('inf')
+                        closest_vi = 0
+                        for vi, (p, q) in enumerate(contour_match):
+                            q_arr = np.array(q)
+                            dist = np.linalg.norm(q_arr - corner_3d)
+                            if dist < min_dist:
+                                min_dist = dist
+                                closest_vi = vi
+                        q_based_corner_indices.append(closest_vi)
+
+                    # Project actual bounding plane corners to 2D
+                    for ci, corner_3d in enumerate(bp[:4]):
+                        corner_3d = np.array(corner_3d)
+                        corner_2d = np.array([np.dot(corner_3d - mean, basis_x), np.dot(corner_3d - mean, basis_y)])
+                        corner_norm = (corner_2d - center_xy) * scale + 0.5
+                        cx = right_x0 + corner_norm[0] * canvas_size
+                        cy = right_y0 + (1 - corner_norm[1]) * canvas_size
+                        corner_screen_points_right.append((cx, cy))
+
+                        # Use Q-based corner correspondence (reflects actual fiber computation)
+                        if len(p_screen_points) > 0 and ci < len(q_based_corner_indices):
+                            closest_vi = q_based_corner_indices[ci]
+                            corner_to_closest_vertex.append((ci, closest_vi))
+
+                            # Draw line from corner to corresponding vertex (purple, thin)
+                            if closest_vi < len(p_screen_points):
+                                px, py = p_screen_points[closest_vi]
+                                draw_list.add_line(cx, cy, px, py,
+                                                 imgui.get_color_u32_rgba(0.7, 0.3, 0.7, 0.6), thickness=1.0)
+
+                        # Draw corner (purple/magenta diamond)
+                        draw_list.add_quad_filled(cx, cy - 5, cx + 5, cy, cx, cy + 5, cx - 5, cy,
+                                                 imgui.get_color_u32_rgba(0.8, 0.2, 0.8, 1.0))
+
+                        # Check hover on corners (right side)
+                        dist = np.sqrt((mouse_pos[0] - cx)**2 + (mouse_pos[1] - cy)**2)
+                        if dist < hover_radius and hovered_idx < 0:
+                            hovered_idx = ci
+                            hovered_type = 'corner'
+
+                # Draw waypoints (red) and check hover
+                if (hasattr(obj, 'waypoints') and obj.waypoints is not None and
+                    stream_idx < len(obj.waypoints) and level_idx < len(obj.waypoints[stream_idx])):
+                    waypoints_3d = obj.waypoints[stream_idx][level_idx]
+                    if waypoints_3d is not None and len(waypoints_3d) > 0:
+                        for wi, wp in enumerate(waypoints_3d):
+                            wp = np.array(wp)
+                            wp_2d = np.array([np.dot(wp - mean, basis_x), np.dot(wp - mean, basis_y)])
+                            wp_norm = (wp_2d - center_xy) * scale + 0.5
+                            wpx = right_x0 + wp_norm[0] * canvas_size
+                            wpy = right_y0 + (1 - wp_norm[1]) * canvas_size
+                            waypoint_screen_points.append((wpx, wpy))
+                            draw_list.add_circle_filled(wpx, wpy, 5, imgui.get_color_u32_rgba(0.9, 0.3, 0.3, 1.0))
+                            # Check hover on waypoints
+                            dist = np.sqrt((mouse_pos[0] - wpx)**2 + (mouse_pos[1] - wpy)**2)
+                            if dist < hover_radius and hovered_idx < 0:
+                                hovered_idx = wi
+                                hovered_type = 'waypoint'
+
+            # Draw P vertex points (non-highlighted)
+            for i in range(len(p_screen_points)):
+                px, py = p_screen_points[i]
+                if not (hovered_type == 'vertex' and i == hovered_idx):
+                    draw_list.add_circle_filled(px, py, 3, imgui.get_color_u32_rgba(1.0, 0.5, 0.0, 1.0))
+
+            # Draw resampled contour vertices and edges (cyan) if available
+            if (hasattr(obj, 'contours_resampled') and obj.contours_resampled is not None and
+                stream_idx < len(obj.contours_resampled) and
+                level_idx < len(obj.contours_resampled[stream_idx])):
+                resampled = obj.contours_resampled[stream_idx][level_idx]
+                if resampled is not None and len(resampled) > 0:
+                    # Project resampled vertices to 2D using same transformation
+                    resampled_screen = []
+                    for rv in resampled:
+                        rv = np.array(rv)
+                        rv_2d = np.array([np.dot(rv - mean, basis_x), np.dot(rv - mean, basis_y)])
+                        rv_norm = (rv_2d - center_xy) * scale + 0.5
+                        rvx = right_x0 + rv_norm[0] * canvas_size
+                        rvy = right_y0 + (1 - rv_norm[1]) * canvas_size
+                        resampled_screen.append((rvx, rvy))
+                    # Draw resampled contour edges (cyan)
+                    for i in range(len(resampled_screen)):
+                        p1 = resampled_screen[i]
+                        p2 = resampled_screen[(i + 1) % len(resampled_screen)]
+                        draw_list.add_line(p1[0], p1[1], p2[0], p2[1],
+                                          imgui.get_color_u32_rgba(0.0, 1.0, 1.0, 0.9), thickness=1.5)
+                    # Draw resampled vertices
+                    for rvx, rvy in resampled_screen:
+                        draw_list.add_circle_filled(rvx, rvy, 3, imgui.get_color_u32_rgba(0.0, 1.0, 1.0, 1.0))
+
+            # Reserve space
+            imgui.dummy(canvas_size + 2 * padding, canvas_size + 2 * padding)
+
+            imgui.columns(1)
+
+            # Draw all highlights AFTER columns are done (ensures they're on top)
+            # Re-get draw list to ensure we're drawing on top layer
+            draw_list = imgui.get_window_draw_list()
+
+            if hovered_type == 'vertex' and hovered_idx >= 0:
+                # Highlight P on contour (orange with white border)
+                if hovered_idx < len(p_screen_points):
+                    px, py = p_screen_points[hovered_idx]
+                    draw_list.add_circle_filled(px, py, 7, imgui.get_color_u32_rgba(1.0, 0.5, 0.0, 1.0))
+                    draw_list.add_circle(px, py, 9, imgui.get_color_u32_rgba(1.0, 1.0, 1.0, 1.0), thickness=2.5)
+                # Highlight corresponding Q on unit square (magenta with white border)
+                if hovered_idx < len(q_screen_points):
+                    qx, qy = q_screen_points[hovered_idx]
+                    draw_list.add_circle_filled(qx, qy, 7, imgui.get_color_u32_rgba(1.0, 0.0, 1.0, 1.0))
+                    draw_list.add_circle(qx, qy, 9, imgui.get_color_u32_rgba(1.0, 1.0, 1.0, 1.0), thickness=2.5)
+
+            elif hovered_type == 'fiber' and hovered_idx >= 0:
+                # Highlight fiber sample on unit square (bright green with white border)
+                if hovered_idx < len(fiber_screen_points):
+                    fx, fy = fiber_screen_points[hovered_idx]
+                    draw_list.add_circle_filled(fx, fy, 7, imgui.get_color_u32_rgba(0.2, 1.0, 0.2, 1.0))
+                    draw_list.add_circle(fx, fy, 9, imgui.get_color_u32_rgba(1.0, 1.0, 1.0, 1.0), thickness=2.5)
+                # Highlight corresponding waypoint on contour (bright red with white border)
+                if hovered_idx < len(waypoint_screen_points):
+                    wpx, wpy = waypoint_screen_points[hovered_idx]
+                    draw_list.add_circle_filled(wpx, wpy, 7, imgui.get_color_u32_rgba(1.0, 0.3, 0.3, 1.0))
+                    draw_list.add_circle(wpx, wpy, 9, imgui.get_color_u32_rgba(1.0, 1.0, 1.0, 1.0), thickness=2.5)
+                # Draw MVC weight-proportional vertices
+                mvc_w = None
+                if (hasattr(obj, 'mvc_weights') and stream_idx < len(obj.mvc_weights) and
+                    level_idx < len(obj.mvc_weights[stream_idx])):
+                    mvc_w = obj.mvc_weights[stream_idx][level_idx]
+                # Fallback: compute on-the-fly if mvc_weights not available
+                if mvc_w is None and contour_match is not None and len(fiber_samples) > 0:
+                    try:
+                        # Check if contour_match has valid 3D points (not 2D)
+                        if len(contour_match) > 0 and len(contour_match[0]) >= 2:
+                            first_q = np.array(contour_match[0][1])
+                            if len(first_q) == 3:  # Valid 3D point
+                                _, _, mvc_w = obj.find_waypoints(plane_info, fiber_samples)
+                    except Exception:
+                        mvc_w = None
+                if mvc_w is not None and len(mvc_w) > hovered_idx:
+                    weights = np.array(mvc_w[hovered_idx])
+                    if len(weights) > 0 and np.isfinite(weights).all():
+                        max_w = weights.max()
+                        if max_w > 1e-8:
+                            max_radius = 7.0  # Same as hover emphasis
+                            # Sort by weight descending (draw largest first, smallest on top)
+                            sorted_indices = np.argsort(weights)[::-1]
+                            for vi in sorted_indices:
+                                w = weights[vi]
+                                if w > 1e-8:  # Only draw non-zero weights
+                                    rel_size = w / max_w
+                                    radius = max(1.0, max_radius * rel_size)  # Minimum radius of 1
+                                    # Draw on P (contour) side - yellow
+                                    if vi < len(p_screen_points):
+                                        px, py = p_screen_points[vi]
+                                        draw_list.add_circle_filled(px, py, radius, imgui.get_color_u32_rgba(1.0, 1.0, 0.0, 0.8))
+                                    # Draw on Q (unit square) side - yellow
+                                    if vi < len(q_screen_points):
+                                        qx, qy = q_screen_points[vi]
+                                        draw_list.add_circle_filled(qx, qy, radius, imgui.get_color_u32_rgba(1.0, 1.0, 0.0, 0.8))
+
+            elif hovered_type == 'waypoint' and hovered_idx >= 0:
+                # Highlight waypoint on contour (bright red with white border)
+                if hovered_idx < len(waypoint_screen_points):
+                    wpx, wpy = waypoint_screen_points[hovered_idx]
+                    draw_list.add_circle_filled(wpx, wpy, 7, imgui.get_color_u32_rgba(1.0, 0.3, 0.3, 1.0))
+                    draw_list.add_circle(wpx, wpy, 9, imgui.get_color_u32_rgba(1.0, 1.0, 1.0, 1.0), thickness=2.5)
+                # Highlight corresponding fiber sample on unit square (bright green with white border)
+                if hovered_idx < len(fiber_screen_points):
+                    fx, fy = fiber_screen_points[hovered_idx]
+                    draw_list.add_circle_filled(fx, fy, 7, imgui.get_color_u32_rgba(0.2, 1.0, 0.2, 1.0))
+                    draw_list.add_circle(fx, fy, 9, imgui.get_color_u32_rgba(1.0, 1.0, 1.0, 1.0), thickness=2.5)
+                # Draw MVC weight-proportional vertices
+                mvc_w = None
+                if (hasattr(obj, 'mvc_weights') and stream_idx < len(obj.mvc_weights) and
+                    level_idx < len(obj.mvc_weights[stream_idx])):
+                    mvc_w = obj.mvc_weights[stream_idx][level_idx]
+                # Fallback: compute on-the-fly if mvc_weights not available
+                if mvc_w is None and contour_match is not None and len(fiber_samples) > 0:
+                    try:
+                        # Check if contour_match has valid 3D points (not 2D)
+                        if len(contour_match) > 0 and len(contour_match[0]) >= 2:
+                            first_q = np.array(contour_match[0][1])
+                            if len(first_q) == 3:  # Valid 3D point
+                                _, _, mvc_w = obj.find_waypoints(plane_info, fiber_samples)
+                    except Exception:
+                        mvc_w = None
+                if mvc_w is not None and len(mvc_w) > hovered_idx:
+                    weights = np.array(mvc_w[hovered_idx])
+                    if len(weights) > 0 and np.isfinite(weights).all():
+                        max_w = weights.max()
+                        if max_w > 1e-8:
+                            max_radius = 7.0  # Same as hover emphasis
+                            # Sort by weight descending (draw largest first, smallest on top)
+                            sorted_indices = np.argsort(weights)[::-1]
+                            for vi in sorted_indices:
+                                w = weights[vi]
+                                if w > 1e-8:  # Only draw non-zero weights
+                                    rel_size = w / max_w
+                                    radius = max(1.0, max_radius * rel_size)  # Minimum radius of 1
+                                    # Draw on P (contour) side - yellow
+                                    if vi < len(p_screen_points):
+                                        px, py = p_screen_points[vi]
+                                        draw_list.add_circle_filled(px, py, radius, imgui.get_color_u32_rgba(1.0, 1.0, 0.0, 0.8))
+                                    # Draw on Q (unit square) side - yellow
+                                    if vi < len(q_screen_points):
+                                        qx, qy = q_screen_points[vi]
+                                        draw_list.add_circle_filled(qx, qy, radius, imgui.get_color_u32_rgba(1.0, 1.0, 0.0, 0.8))
+
+            elif hovered_type == 'corner' and hovered_idx >= 0:
+                # Highlight corner on unit square (left side) - bright magenta with white border
+                if hovered_idx < len(corner_screen_points_left):
+                    cx, cy = corner_screen_points_left[hovered_idx]
+                    draw_list.add_quad_filled(cx, cy - 8, cx + 8, cy, cx, cy + 8, cx - 8, cy,
+                                             imgui.get_color_u32_rgba(1.0, 0.0, 1.0, 1.0))
+                    draw_list.add_quad(cx, cy - 10, cx + 10, cy, cx, cy + 10, cx - 10, cy,
+                                      imgui.get_color_u32_rgba(1.0, 1.0, 1.0, 1.0), thickness=2.5)
+                # Highlight corner on contour (right side) - bright magenta with white border
+                if hovered_idx < len(corner_screen_points_right):
+                    cx, cy = corner_screen_points_right[hovered_idx]
+                    draw_list.add_quad_filled(cx, cy - 8, cx + 8, cy, cx, cy + 8, cx - 8, cy,
+                                             imgui.get_color_u32_rgba(1.0, 0.0, 1.0, 1.0))
+                    draw_list.add_quad(cx, cy - 10, cx + 10, cy, cx, cy + 10, cx - 10, cy,
+                                      imgui.get_color_u32_rgba(1.0, 1.0, 1.0, 1.0), thickness=2.5)
+                # Highlight the closest contour vertex and draw emphasized line
+                for corner_ci, closest_vi in corner_to_closest_vertex:
+                    if corner_ci == hovered_idx:
+                        # Draw emphasized line from corner to closest vertex
+                        if hovered_idx < len(corner_screen_points_right) and closest_vi < len(p_screen_points):
+                            cx, cy = corner_screen_points_right[hovered_idx]
+                            px, py = p_screen_points[closest_vi]
+                            draw_list.add_line(cx, cy, px, py,
+                                             imgui.get_color_u32_rgba(1.0, 0.0, 1.0, 1.0), thickness=3.0)
+                        # Highlight the closest P vertex
+                        if closest_vi < len(p_screen_points):
+                            px, py = p_screen_points[closest_vi]
+                            draw_list.add_circle_filled(px, py, 7, imgui.get_color_u32_rgba(1.0, 0.5, 0.0, 1.0))
+                            draw_list.add_circle(px, py, 9, imgui.get_color_u32_rgba(1.0, 1.0, 1.0, 1.0), thickness=2.5)
+                        # Highlight the corresponding Q vertex
+                        if closest_vi < len(q_screen_points):
+                            qx, qy = q_screen_points[closest_vi]
+                        draw_list.add_circle_filled(qx, qy, 7, imgui.get_color_u32_rgba(0.0, 0.8, 0.8, 1.0))
+                        draw_list.add_circle(qx, qy, 9, imgui.get_color_u32_rgba(1.0, 1.0, 1.0, 1.0), thickness=2.5)
+                    break
+
+        # Show tooltip
+        if hovered_idx >= 0:
+            if hovered_type == 'vertex':
+                imgui.set_tooltip(f"Vertex {hovered_idx}")
+            elif hovered_type == 'fiber':
+                imgui.set_tooltip(f"Fiber {hovered_idx}")
+            elif hovered_type == 'waypoint':
+                imgui.set_tooltip(f"Waypoint {hovered_idx}")
+            elif hovered_type == 'corner':
+                corner_names = ['Bottom-Left', 'Bottom-Right', 'Top-Right', 'Top-Left']
+                corner_name = corner_names[hovered_idx] if hovered_idx < 4 else f"Corner {hovered_idx}"
+                # Find closest vertex for this corner
+                closest_vi = -1
+                for corner_ci, vi in corner_to_closest_vertex:
+                    if corner_ci == hovered_idx:
+                        closest_vi = vi
+                        break
+                if closest_vi >= 0:
+                    imgui.set_tooltip(f"{corner_name} Corner -> Vertex {closest_vi}")
+
+            if show_all:
+                imgui.separator()
+
+        # Handle click for correspondence mode
+        mouse_clicked = imgui.is_mouse_clicked(0)  # Left click
+        if mouse_clicked and hovered_idx >= 0:
+            if hovered_type == 'corner':
+                # Clicking corner enters/updates correspondence mode
+                v.inspect_2d_corr_mode[name] = True
+                v.inspect_2d_corr_corner[name] = hovered_idx
+                v.inspect_2d_corr_vertex[name] = -1  # Reset vertex selection
+                corr_mode = True
+                corr_corner = hovered_idx
+                corr_vertex = -1
+            elif hovered_type == 'vertex' and corr_mode and corr_corner >= 0:
+                # Clicking vertex when in correspondence mode with corner selected
+                v.inspect_2d_corr_vertex[name] = hovered_idx
+                corr_vertex = hovered_idx
+            elif hovered_type == 'fiber' and edit_fiber_mode:
+                # Clicking on existing fiber in edit mode - select it
+                v.inspect_2d_edit_fiber_selected[name] = hovered_idx
+                v.inspect_2d_edit_fiber_preview[name] = None
+                edit_fiber_selected = hovered_idx
+                edit_fiber_preview = None
+
+        # Handle click on empty space in unit square for edit fiber mode
+        if mouse_clicked and edit_fiber_mode and hovered_idx < 0:
+            # Check if click is within the left canvas (unit square)
+            if (left_x0 <= mouse_pos[0] <= left_x0 + canvas_size and
+                left_y0 <= mouse_pos[1] <= left_y0 + canvas_size):
+                # Convert screen position to unit square coordinates
+                u = (mouse_pos[0] - left_x0) / canvas_size
+                v = 1 - (mouse_pos[1] - left_y0) / canvas_size  # Flip Y
+                # Clamp to [0, 1]
+                u = max(0.0, min(1.0, u))
+                v = max(0.0, min(1.0, v))
+                # Set preview position and clear test data
+                v.inspect_2d_edit_fiber_preview[name] = (u, v)
+                v.inspect_2d_edit_fiber_selected[name] = -1
+                v.inspect_2d_edit_fiber_test[name] = None  # Clear previous test
+                # Clear test fiber from object
+                obj.test_fiber_waypoints = None
+                obj.test_fiber_stream_idx = None
+                edit_fiber_preview = (u, v)
+                edit_fiber_selected = -1
+                edit_fiber_test = None
+
+        # Draw correspondence mode visual feedback
+        if corr_mode and corr_corner >= 0:
+            draw_list = imgui.get_window_draw_list()
+            # Highlight selected corner with green
+            if corr_corner < len(corner_screen_points_right):
+                cx, cy = corner_screen_points_right[corr_corner]
+                draw_list.add_quad_filled(cx, cy - 10, cx + 10, cy, cx, cy + 10, cx - 10, cy,
+                                         imgui.get_color_u32_rgba(0.0, 1.0, 0.0, 1.0))
+                draw_list.add_quad(cx, cy - 12, cx + 12, cy, cx, cy + 12, cx - 12, cy,
+                                  imgui.get_color_u32_rgba(1.0, 1.0, 1.0, 1.0), thickness=2.5)
+            if corr_corner < len(corner_screen_points_left):
+                cx, cy = corner_screen_points_left[corr_corner]
+                draw_list.add_quad_filled(cx, cy - 10, cx + 10, cy, cx, cy + 10, cx - 10, cy,
+                                         imgui.get_color_u32_rgba(0.0, 1.0, 0.0, 1.0))
+                draw_list.add_quad(cx, cy - 12, cx + 12, cy, cx, cy + 12, cx - 12, cy,
+                                  imgui.get_color_u32_rgba(1.0, 1.0, 1.0, 1.0), thickness=2.5)
+
+            # Highlight selected vertex with green if selected
+            if corr_vertex >= 0 and corr_vertex < len(p_screen_points):
+                px, py = p_screen_points[corr_vertex]
+                draw_list.add_circle_filled(px, py, 9, imgui.get_color_u32_rgba(0.0, 1.0, 0.0, 1.0))
+                draw_list.add_circle(px, py, 11, imgui.get_color_u32_rgba(1.0, 1.0, 1.0, 1.0), thickness=2.5)
+                # Also highlight on Q side
+                if corr_vertex < len(q_screen_points):
+                    qx, qy = q_screen_points[corr_vertex]
+                    draw_list.add_circle_filled(qx, qy, 9, imgui.get_color_u32_rgba(0.0, 1.0, 0.0, 1.0))
+                    draw_list.add_circle(qx, qy, 11, imgui.get_color_u32_rgba(1.0, 1.0, 1.0, 1.0), thickness=2.5)
+                # Draw line from corner to selected vertex
+                if corr_corner < len(corner_screen_points_right):
+                    cx, cy = corner_screen_points_right[corr_corner]
+                    draw_list.add_line(cx, cy, px, py,
+                                      imgui.get_color_u32_rgba(0.0, 1.0, 0.0, 1.0), thickness=3.0)
+
+        # Draw edit fiber mode visual feedback
+        if edit_fiber_mode:
+            draw_list = imgui.get_window_draw_list()
+            # Highlight selected fiber with yellow ring
+            if edit_fiber_selected >= 0 and edit_fiber_selected < len(fiber_screen_points):
+                fx, fy = fiber_screen_points[edit_fiber_selected]
+                draw_list.add_circle_filled(fx, fy, 8, imgui.get_color_u32_rgba(1.0, 1.0, 0.0, 1.0))
+                draw_list.add_circle(fx, fy, 10, imgui.get_color_u32_rgba(1.0, 1.0, 1.0, 1.0), thickness=2.5)
+            # Draw preview marker (cyan) for new fiber position
+            if edit_fiber_preview is not None:
+                px = left_x0 + edit_fiber_preview[0] * canvas_size
+                py = left_y0 + (1 - edit_fiber_preview[1]) * canvas_size
+                draw_list.add_circle_filled(px, py, 6, imgui.get_color_u32_rgba(0.0, 1.0, 1.0, 0.7))
+                draw_list.add_circle(px, py, 8, imgui.get_color_u32_rgba(1.0, 1.0, 1.0, 1.0), thickness=2.0)
+                # Draw crosshair
+                draw_list.add_line(px - 12, py, px + 12, py, imgui.get_color_u32_rgba(0.0, 1.0, 1.0, 0.5), 1.5)
+                draw_list.add_line(px, py - 12, px, py + 12, imgui.get_color_u32_rgba(0.0, 1.0, 1.0, 0.5), 1.5)
+
+        # Correspondence mode UI (Cancel/Confirm buttons)
+        if corr_mode:
+            imgui.separator()
+            corner_names = ['Bottom-Left', 'Bottom-Right', 'Top-Right', 'Top-Left']
+            corner_name = corner_names[corr_corner] if 0 <= corr_corner < 4 else f"Corner {corr_corner}"
+            if corr_vertex >= 0:
+                imgui.text(f"Set {corner_name} -> Vertex {corr_vertex}")
+            else:
+                imgui.text(f"Selected {corner_name}, click a contour vertex")
+
+            # Cancel button - always enabled
+            if imgui.button(f"Cancel##{name}_corr"):
+                v.inspect_2d_corr_mode[name] = False
+                v.inspect_2d_corr_corner[name] = -1
+                v.inspect_2d_corr_vertex[name] = -1
+
+            imgui.same_line()
+
+            # Confirm button - only enabled when vertex is selected
+            if corr_vertex < 0:
+                imgui.push_style_var(imgui.STYLE_ALPHA, 0.5)
+                imgui.button(f"Confirm##{name}_corr")
+                imgui.pop_style_var()
+            else:
+                if imgui.button(f"Confirm##{name}_corr"):
+                    # Apply the correspondence change
+                    _apply_corner_correspondence(v, name, obj, stream_idx, level_idx,
+                                                      corr_corner, corr_vertex, is_post_stream)
+                    # Reset correspondence mode
+                    v.inspect_2d_corr_mode[name] = False
+                    v.inspect_2d_corr_corner[name] = -1
+                    v.inspect_2d_corr_vertex[name] = -1
+
+        # Edit Fiber mode UI (only available when not in "Show All" mode)
+        if has_fiber and not corr_mode and not show_all:
+            imgui.separator()
+            if not edit_fiber_mode:
+                # Show Edit Fiber button only when fiber architecture exists
+                if imgui.button(f"Edit Fiber##{name}"):
+                    v.inspect_2d_edit_fiber_mode[name] = True
+                    v.inspect_2d_edit_fiber_selected[name] = -1
+                    v.inspect_2d_edit_fiber_preview[name] = None
+            else:
+                # In edit fiber mode
+                imgui.text("Edit Fiber Mode (click unit square)")
+
+                # Exit button
+                if imgui.button(f"Exit Edit Mode##{name}"):
+                    v.inspect_2d_edit_fiber_mode[name] = False
+                    v.inspect_2d_edit_fiber_selected[name] = -1
+                    v.inspect_2d_edit_fiber_preview[name] = None
+                    v.inspect_2d_edit_fiber_test[name] = None
+                    # Clear test fiber from object
+                    obj.test_fiber_waypoints = None
+                    obj.test_fiber_stream_idx = None
+
+                imgui.same_line()
+
+                # Delete button - enabled when existing fiber is selected
+                if edit_fiber_selected >= 0:
+                    if imgui.button(f"Delete Fiber {edit_fiber_selected}##{name}"):
+                        _delete_fiber(v, name, obj, stream_idx, edit_fiber_selected, is_post_stream)
+                        v.inspect_2d_edit_fiber_selected[name] = -1
+                        v.inspect_2d_edit_fiber_preview[name] = None
+                else:
+                    imgui.push_style_var(imgui.STYLE_ALPHA, 0.5)
+                    imgui.button(f"Delete##{name}")
+                    imgui.pop_style_var()
+
+                imgui.same_line()
+
+                # Add button - enabled when preview position is set
+                if edit_fiber_preview is not None:
+                    if imgui.button(f"Add Fiber##{name}"):
+                        _add_fiber(v, name, obj, stream_idx, edit_fiber_preview, is_post_stream)
+                        v.inspect_2d_edit_fiber_selected[name] = -1
+                        v.inspect_2d_edit_fiber_preview[name] = None
+                        v.inspect_2d_edit_fiber_test[name] = None  # Clear test data
+                        # Clear test fiber from object
+                        obj.test_fiber_waypoints = None
+                        obj.test_fiber_stream_idx = None
+                else:
+                    imgui.push_style_var(imgui.STYLE_ALPHA, 0.5)
+                    imgui.button(f"Add##{name}")
+                    imgui.pop_style_var()
+
+                imgui.same_line()
+
+                # Test button - enabled when preview position is set
+                if edit_fiber_preview is not None:
+                    if imgui.button(f"Test##{name}"):
+                        _test_fiber(v, name, obj, stream_idx, edit_fiber_preview, is_post_stream)
+                else:
+                    imgui.push_style_var(imgui.STYLE_ALPHA, 0.5)
+                    imgui.button(f"Test##{name}")
+                    imgui.pop_style_var()
+
+                # Show info text
+                if edit_fiber_selected >= 0:
+                    imgui.text(f"Selected: Fiber {edit_fiber_selected}")
+                elif edit_fiber_preview is not None:
+                    test_status = " (testing)" if edit_fiber_test is not None else ""
+                    imgui.text(f"Preview: ({edit_fiber_preview[0]:.3f}, {edit_fiber_preview[1]:.3f}){test_status}")
+                else:
+                    imgui.text("Click on fiber to select, or empty space to add")
+
+        # End scrollable region (always used now)
+        imgui.end_child()
+
+        imgui.end()
+
+    # Close windows that were marked for closing
+    for name in muscles_to_close:
+        v.inspect_2d_open[name] = False
+        # Clear inspector highlight when window closes
+        if name in v.zygote_muscle_meshes:
+            v.zygote_muscle_meshes[name].inspector_highlight_stream = None
+            v.zygote_muscle_meshes[name].inspector_highlight_level = None
+
+
+def _apply_corner_correspondence(v, name, obj, stream_idx, level_idx, corner_idx, vertex_idx, is_post_stream):
+    """
+    Apply manual corner-to-vertex correspondence.
+
+    When a corner assignment changes, recompute Q positions based on arc-length
+    interpolation between the new corner vertices.
+
+    Args:
+        name: Muscle name
+        obj: ContourMesh object
+        stream_idx: Stream index
+        level_idx: Level index
+        corner_idx: Selected corner (0-3)
+        vertex_idx: Selected vertex index
+        is_post_stream: Whether data is in post-stream format
+    """
+    print(f"Applying correspondence: Corner {corner_idx} -> Vertex {vertex_idx}")
+    print(f"  Stream: {stream_idx}, Level: {level_idx}, Post-stream: {is_post_stream}")
+
+    # Get current bounding plane info
+    if is_post_stream:
+        bp_info = obj.bounding_planes[stream_idx][level_idx]
+    else:
+        bp_info = obj.bounding_planes[level_idx][stream_idx]
+
+    bp_corners = bp_info.get('bounding_plane', None)
+    contour_match = bp_info.get('contour_match', None)
+
+    if bp_corners is None or contour_match is None:
+        print("  Error: No bounding plane or contour_match found")
+        return
+
+    # Extract P vertices from contour_match
+    P_vertices = [np.array(p) for p, q in contour_match]
+    n = len(P_vertices)
+
+    # Get current corner-to-vertex mapping using Q-based method (reads from saved contour_match)
+    # This preserves any previous manual corner changes
+    bp_corners_3d = np.array(bp_corners[:4])
+    current_corner_indices = []
+    for ci, corner_3d in enumerate(bp_corners_3d):
+        min_dist = float('inf')
+        closest_vi = 0
+        for vi, (p, q) in enumerate(contour_match):
+            q_arr = np.array(q)
+            dist = np.linalg.norm(q_arr - corner_3d)
+            if dist < min_dist:
+                min_dist = dist
+                closest_vi = vi
+        current_corner_indices.append(closest_vi)
+
+    print(f"  Current corner indices (Q-based): {current_corner_indices}")
+
+    # Update corner assignment
+    new_corner_indices = current_corner_indices.copy()
+    new_corner_indices[corner_idx] = vertex_idx
+
+    print(f"  New corner indices: {new_corner_indices}")
+
+    # Recompute Q positions based on arc-length interpolation between new corner vertices
+    # BP corners: 0 (bottom-left), 1 (bottom-right), 2 (top-right), 3 (top-left)
+    bp_corners_3d = [np.array(c) for c in bp_corners[:4]]
+
+    new_contour_match = []
+
+    # For each edge between consecutive corners, interpolate Q positions
+    for edge_idx in range(4):
+        corner_start = edge_idx
+        corner_end = (edge_idx + 1) % 4
+
+        vertex_start = new_corner_indices[corner_start]
+        vertex_end = new_corner_indices[corner_end]
+
+        q_start = bp_corners_3d[corner_start]
+        q_end = bp_corners_3d[corner_end]
+
+        # Get vertices between corner_start and corner_end (inclusive of start, exclusive of end)
+        if vertex_end > vertex_start:
+            vertex_list = list(range(vertex_start, vertex_end))
+        elif vertex_end < vertex_start:
+            # Wrap around
+            vertex_list = list(range(vertex_start, n)) + list(range(0, vertex_end))
+        else:
+            # Same vertex (shouldn't happen normally)
+            vertex_list = [vertex_start]
+
+        if len(vertex_list) == 0:
+            continue
+
+        # Compute arc-length along this segment
+        arc_lengths = [0.0]
+        for i in range(1, len(vertex_list)):
+            prev_v = P_vertices[vertex_list[i - 1]]
+            curr_v = P_vertices[vertex_list[i]]
+            arc_lengths.append(arc_lengths[-1] + np.linalg.norm(curr_v - prev_v))
+
+        total_arc = arc_lengths[-1]
+        if total_arc < 1e-10:
+            total_arc = 1.0
+
+        # Assign Q positions based on arc-length interpolation
+        for i, vi in enumerate(vertex_list):
+            t = arc_lengths[i] / total_arc
+            q_interp = (1 - t) * q_start + t * q_end
+            new_contour_match.append((P_vertices[vi], q_interp))
+
+    # Update bounding plane info with new contour_match
+    bp_info['contour_match'] = new_contour_match
+
+    print(f"  Updated contour_match with {len(new_contour_match)} pairs (was {n})")
+
+    # Debug: verify the change
+    if len(new_contour_match) > 0:
+        # Check Q at the new corner vertex
+        for ci in range(4):
+            vi = new_corner_indices[ci]
+            # Find which entry in new_contour_match has this vertex
+            for idx, (p, q) in enumerate(new_contour_match):
+                if np.allclose(p, P_vertices[vi]):
+                    q_arr = np.array(q)
+                    corner_arr = np.array(bp_corners[ci])
+                    dist = np.linalg.norm(q_arr - corner_arr)
+                    print(f"    Corner {ci} -> vertex {vi}: Q dist to corner = {dist:.6f}")
+                    break
+
+    # Verify bp_info is modified
+    print(f"  bp_info id: {id(bp_info)}, contour_match id: {id(bp_info.get('contour_match'))}")
+
+    # Recompute fiber structure if available
+    if hasattr(obj, 'fiber_architecture') and obj.fiber_architecture is not None:
+        if is_post_stream and stream_idx < len(obj.fiber_architecture):
+            fiber_samples = obj.fiber_architecture[stream_idx]
+            if fiber_samples is not None and len(fiber_samples) > 0:
+                print(f"  Recomputing waypoints for {len(fiber_samples)} fiber samples")
+
+                # Recompute waypoints and MVC weights for this level
+                # find_waypoints returns (Qs_normalized_2d, waypoints_3d, mvc_weights)
+                _, waypoints_3d, mvc_weights = obj.find_waypoints(bp_info, fiber_samples)
+
+                # Update waypoints
+                if hasattr(obj, 'waypoints') and obj.waypoints is not None:
+                    if stream_idx < len(obj.waypoints) and level_idx < len(obj.waypoints[stream_idx]):
+                        obj.waypoints[stream_idx][level_idx] = waypoints_3d
+                        print(f"  Updated waypoints: {len(waypoints_3d)} points")
+
+                # Update MVC weights
+                if hasattr(obj, 'mvc_weights') and obj.mvc_weights is not None:
+                    if stream_idx < len(obj.mvc_weights) and level_idx < len(obj.mvc_weights[stream_idx]):
+                        obj.mvc_weights[stream_idx][level_idx] = mvc_weights
+                        print(f"  Updated MVC weights")
+
+    print("  Correspondence applied successfully")
+
+
+def _delete_fiber(v, name, obj, stream_idx, fiber_idx, is_post_stream):
+    """
+    Delete a fiber from the fiber architecture for a given stream.
+    Removes the fiber from all levels and recomputes waypoints/MVC weights.
+
+    Args:
+        name: Muscle name
+        obj: ContourMesh object
+        stream_idx: Stream index
+        fiber_idx: Index of fiber to delete
+        is_post_stream: Whether data is in post-stream format
+    """
+    print(f"Deleting fiber {fiber_idx} from stream {stream_idx}")
+
+    # Check if fiber_architecture exists
+    if not hasattr(obj, 'fiber_architecture') or obj.fiber_architecture is None:
+        print("  Error: No fiber architecture found")
+        return
+
+    if stream_idx >= len(obj.fiber_architecture):
+        print(f"  Error: stream_idx {stream_idx} out of range")
+        return
+
+    fiber_samples = obj.fiber_architecture[stream_idx]
+    if fiber_samples is None or fiber_idx >= len(fiber_samples):
+        print(f"  Error: fiber_idx {fiber_idx} out of range")
+        return
+
+    # Remove the fiber sample (handle both list and numpy array)
+    if isinstance(fiber_samples, np.ndarray):
+        fiber_samples = np.delete(fiber_samples, fiber_idx, axis=0)
+        obj.fiber_architecture[stream_idx] = fiber_samples
+    else:
+        fiber_samples.pop(fiber_idx)
+    print(f"  Removed fiber sample, {len(fiber_samples)} remaining")
+
+    # Recompute waypoints and MVC weights for all levels in this stream
+    _recompute_fiber_data_for_stream(v, obj, stream_idx, is_post_stream)
+
+    print("  Fiber deleted successfully")
+
+
+def _add_fiber(v, name, obj, stream_idx, position, is_post_stream):
+    """
+    Add a new fiber to the fiber architecture for a given stream.
+    Adds the fiber to all levels and recomputes waypoints/MVC weights.
+
+    Args:
+        name: Muscle name
+        obj: ContourMesh object
+        stream_idx: Stream index
+        position: (u, v) position on unit square
+        is_post_stream: Whether data is in post-stream format
+    """
+    print(f"Adding fiber at ({position[0]:.3f}, {position[1]:.3f}) to stream {stream_idx}")
+
+    # Check if fiber_architecture exists
+    if not hasattr(obj, 'fiber_architecture') or obj.fiber_architecture is None:
+        print("  Error: No fiber architecture found")
+        return
+
+    if stream_idx >= len(obj.fiber_architecture):
+        print(f"  Error: stream_idx {stream_idx} out of range")
+        return
+
+    fiber_samples = obj.fiber_architecture[stream_idx]
+    if fiber_samples is None:
+        fiber_samples = np.array([[position[0], position[1]]])
+        obj.fiber_architecture[stream_idx] = fiber_samples
+    elif isinstance(fiber_samples, np.ndarray):
+        # Append to numpy array
+        new_sample = np.array([[position[0], position[1]]])
+        fiber_samples = np.vstack([fiber_samples, new_sample])
+        obj.fiber_architecture[stream_idx] = fiber_samples
+    else:
+        # Append to list
+        fiber_samples.append([position[0], position[1]])
+    print(f"  Added fiber sample, {len(fiber_samples)} total")
+
+    # Recompute waypoints and MVC weights for all levels in this stream
+    _recompute_fiber_data_for_stream(v, obj, stream_idx, is_post_stream)
+
+    print("  Fiber added successfully")
+
+
+def _recompute_fiber_data_for_stream(v, obj, stream_idx, is_post_stream):
+    """
+    Recompute waypoints and MVC weights for all levels in a stream after fiber changes.
+
+    Args:
+        obj: ContourMesh object
+        stream_idx: Stream index
+        is_post_stream: Whether data is in post-stream format
+    """
+    fiber_samples = obj.fiber_architecture[stream_idx]
+    if fiber_samples is None or len(fiber_samples) == 0:
+        print("  No fiber samples to recompute")
+        return
+
+    # Get number of levels for this stream
+    if is_post_stream:
+        num_levels = len(obj.bounding_planes[stream_idx]) if stream_idx < len(obj.bounding_planes) else 0
+    else:
+        num_levels = len(obj.bounding_planes) if obj.bounding_planes else 0
+
+    # Ensure waypoints and mvc_weights lists are properly sized
+    if not hasattr(obj, 'waypoints') or obj.waypoints is None:
+        obj.waypoints = []
+    if not hasattr(obj, 'mvc_weights') or obj.mvc_weights is None:
+        obj.mvc_weights = []
+
+    # Extend lists if needed
+    while len(obj.waypoints) <= stream_idx:
+        obj.waypoints.append([])
+    while len(obj.mvc_weights) <= stream_idx:
+        obj.mvc_weights.append([])
+
+    # Recompute for each level
+    for level_idx in range(num_levels):
+        # Get bounding plane info
+        if is_post_stream:
+            bp_info = obj.bounding_planes[stream_idx][level_idx]
+        else:
+            bp_info = obj.bounding_planes[level_idx][stream_idx]
+
+        if bp_info is None:
+            continue
+
+        contour_match = bp_info.get('contour_match', None)
+        if contour_match is None:
+            continue
+
+        # Recompute waypoints and MVC weights
+        try:
+            _, waypoints_3d, mvc_weights = obj.find_waypoints(bp_info, fiber_samples)
+
+            # Ensure level lists are properly sized
+            while len(obj.waypoints[stream_idx]) <= level_idx:
+                obj.waypoints[stream_idx].append([])
+            while len(obj.mvc_weights[stream_idx]) <= level_idx:
+                obj.mvc_weights[stream_idx].append([])
+
+            # Update data
+            obj.waypoints[stream_idx][level_idx] = waypoints_3d
+            obj.mvc_weights[stream_idx][level_idx] = mvc_weights
+            print(f"  Recomputed level {level_idx}: {len(waypoints_3d)} waypoints")
+        except Exception as e:
+            print(f"  Error recomputing level {level_idx}: {e}")
+
+
+def _test_fiber(v, name, obj, stream_idx, position, is_post_stream):
+    """
+    Compute test waypoints for a fiber at the given position.
+    Stores the waypoints for visualization in 3D (shown in blue).
+
+    Args:
+        name: Muscle name
+        obj: ContourMesh object
+        stream_idx: Stream index
+        position: (u, v) position on unit square
+        is_post_stream: Whether data is in post-stream format
+    """
+    print(f"Testing fiber at ({position[0]:.3f}, {position[1]:.3f}) for stream {stream_idx}")
+
+    # Create a single fiber sample for testing
+    test_fiber_sample = np.array([[position[0], position[1]]])
+
+    # Get number of levels for this stream
+    if is_post_stream:
+        num_levels = len(obj.bounding_planes[stream_idx]) if stream_idx < len(obj.bounding_planes) else 0
+    else:
+        num_levels = len(obj.bounding_planes) if obj.bounding_planes else 0
+
+    # Compute waypoints for each level
+    test_waypoints = []
+    for level_idx in range(num_levels):
+        # Get bounding plane info
+        if is_post_stream:
+            bp_info = obj.bounding_planes[stream_idx][level_idx]
+        else:
+            bp_info = obj.bounding_planes[level_idx][stream_idx]
+
+        if bp_info is None:
+            test_waypoints.append(None)
+            continue
+
+        contour_match = bp_info.get('contour_match', None)
+        if contour_match is None:
+            test_waypoints.append(None)
+            continue
+
+        # Compute waypoint for this level
+        try:
+            _, waypoints_3d, _ = obj.find_waypoints(bp_info, test_fiber_sample)
+            if len(waypoints_3d) > 0:
+                test_waypoints.append(waypoints_3d[0])  # Single waypoint
+                print(f"  Level {level_idx}: waypoint at [{waypoints_3d[0][0]:.4f}, {waypoints_3d[0][1]:.4f}, {waypoints_3d[0][2]:.4f}]")
+            else:
+                test_waypoints.append(None)
+        except Exception as e:
+            print(f"  Error computing waypoint for level {level_idx}: {e}")
+            test_waypoints.append(None)
+
+    # Store test waypoints for visualization (both locally and on object for 3D drawing)
+    v.inspect_2d_edit_fiber_test[name] = {
+        'stream_idx': stream_idx,
+        'waypoints': test_waypoints
+    }
+    # Also store on object for draw_fiber_architecture to access
+    obj.test_fiber_waypoints = test_waypoints
+    obj.test_fiber_stream_idx = stream_idx
+    print(f"  Test fiber computed with {sum(1 for w in test_waypoints if w is not None)} valid waypoints")
+
+
+def _render_neck_viz_windows(v):
+    """Render transition visualization windows showing source and target contours."""
+    if not hasattr(v, 'neck_viz_open'):
+        return
+
+    muscles_to_close = []
+
+    for name, is_open in list(v.neck_viz_open.items()):
+        if not is_open:
+            continue
+
+        if name not in v.zygote_muscle_meshes:
+            muscles_to_close.append(name)
+            continue
+
+        obj = v.zygote_muscle_meshes[name]
+
+        if not hasattr(obj, '_neck_viz_data') or not obj._neck_viz_data:
+            muscles_to_close.append(name)
+            continue
+
+        viz_data = obj._neck_viz_data
+        num_viz = len(viz_data)
+
+        imgui.set_next_window_size(450, 520, imgui.FIRST_USE_EVER)
+        expanded, opened = imgui.begin(f"Neck Viz: {name}", True)
+
+        if not opened:
+            muscles_to_close.append(name)
+            imgui.end()
+            continue
+
+        # Slider to select visualization
+        viz_idx = v.neck_viz_idx.get(name, 0)
+        viz_idx = min(viz_idx, max(0, num_viz - 1))
+        changed, new_idx = imgui.slider_int(f"Transition##{name}", viz_idx, 0, max(0, num_viz - 1))
+        if changed:
+            v.neck_viz_idx[name] = new_idx
+            viz_idx = new_idx
+
+        # Get current visualization data
+        data = viz_data[viz_idx]
+        large_count = data.get('large_count', 0)
+        small_count = data.get('small_count', 0)
+        transition_str = f"{large_count}→{small_count}"
+        imgui.text(f"Transition {viz_idx + 1}/{num_viz}: {transition_str}")
+
+        scalar_large = data.get('scalar_large', 0)
+        scalar_small = data.get('scalar_small', 0)
+        imgui.text(f"Source (after split): {large_count} contours @ scalar {scalar_large:.4f}")
+        imgui.text(f"Target (before split): {small_count} contours @ scalar {scalar_small:.4f}")
+        imgui.separator()
+
+        # Get contour data
+        target_contours = data.get('target_contours_2d', [])
+        source_contours = data.get('source_contours_2d', [])
+
+        if not target_contours and not source_contours:
+            imgui.text("No contour data available")
+            imgui.end()
+            continue
+
+        # Collect all points to compute bounds
+        all_points = []
+        for c in target_contours:
+            if c is not None and len(c) > 0:
+                all_points.extend(c)
+        for c in source_contours:
+            if c is not None and len(c) > 0:
+                all_points.extend(c)
+
+        if len(all_points) < 3:
+            imgui.text("Insufficient contour data")
+            imgui.end()
+            continue
+
+        all_points = np.array(all_points)
+        min_xy = all_points.min(axis=0)
+        max_xy = all_points.max(axis=0)
+        range_xy = max_xy - min_xy
+        range_xy[range_xy < 1e-10] = 1.0
+        max_range = max(range_xy[0], range_xy[1])
+        margin = 0.1
+        scale_factor = (1 - 2 * margin) / max_range
+        center_xy = (min_xy + max_xy) / 2
+
+        def to_screen(pt_2d, x0, y0, canvas_size):
+            norm = (pt_2d - center_xy) * scale_factor + 0.5
+            sx = x0 + norm[0] * canvas_size
+            sy = y0 + (1 - norm[1]) * canvas_size  # Flip Y to match matplotlib
+            return (sx, sy)
+
+        # Canvas setup
+        canvas_size = 380
+        padding = 15
+
+        draw_list = imgui.get_window_draw_list()
+        cursor_pos = imgui.get_cursor_screen_pos()
+        x0, y0 = cursor_pos[0] + padding, cursor_pos[1] + padding
+
+        # Background
+        draw_list.add_rect_filled(x0, y0, x0 + canvas_size, y0 + canvas_size,
+                                 imgui.get_color_u32_rgba(0.1, 0.1, 0.1, 1.0))
+
+        # Draw TARGET contours (merged, before division) in BLUE
+        target_color = imgui.get_color_u32_rgba(0.3, 0.5, 1.0, 1.0)
+        target_fill = imgui.get_color_u32_rgba(0.2, 0.3, 0.6, 0.3)
+        for contour_2d in target_contours:
+            if contour_2d is None or len(contour_2d) < 3:
+                continue
+            contour_2d = np.array(contour_2d)
+            contour_screen = [to_screen(p, x0, y0, canvas_size) for p in contour_2d]
+            # Fill
+            for i in range(1, len(contour_screen) - 1):
+                draw_list.add_triangle_filled(
+                    contour_screen[0][0], contour_screen[0][1],
+                    contour_screen[i][0], contour_screen[i][1],
+                    contour_screen[i+1][0], contour_screen[i+1][1],
+                    target_fill)
+            # Outline
+            for i in range(len(contour_screen)):
+                p1, p2 = contour_screen[i], contour_screen[(i+1) % len(contour_screen)]
+                draw_list.add_line(p1[0], p1[1], p2[0], p2[1], target_color, 2.5)
+
+        # Draw SOURCE contours (split, after division) in ORANGE/RED
+        source_colors = [
+            imgui.get_color_u32_rgba(1.0, 0.4, 0.1, 1.0),  # Orange
+            imgui.get_color_u32_rgba(1.0, 0.8, 0.0, 1.0),  # Yellow
+            imgui.get_color_u32_rgba(0.0, 1.0, 0.4, 1.0),  # Green
+            imgui.get_color_u32_rgba(1.0, 0.0, 0.5, 1.0),  # Pink
+            imgui.get_color_u32_rgba(0.6, 0.2, 1.0, 1.0),  # Purple
+        ]
+        for ci, contour_2d in enumerate(source_contours):
+            if contour_2d is None or len(contour_2d) < 3:
+                continue
+            contour_2d = np.array(contour_2d)
+            contour_screen = [to_screen(p, x0, y0, canvas_size) for p in contour_2d]
+            color = source_colors[ci % len(source_colors)]
+            # Outline only (no fill to see overlap with target)
+            for i in range(len(contour_screen)):
+                p1, p2 = contour_screen[i], contour_screen[(i+1) % len(contour_screen)]
+                draw_list.add_line(p1[0], p1[1], p2[0], p2[1], color, 2.0)
+
+        imgui.dummy(canvas_size + 2 * padding, canvas_size + 2 * padding)
+
+        # Legend
+        imgui.separator()
+        imgui.text_colored("Target (before split)", 0.3, 0.5, 1.0, 1.0)
+        imgui.same_line()
+        imgui.text(" | ")
+        imgui.same_line()
+        imgui.text_colored("Source (after split)", 1.0, 0.4, 0.1, 1.0)
+
+        imgui.end()
+
+    for name in muscles_to_close:
+        v.neck_viz_open[name] = False
+
+
+def _render_manual_cut_windows(v):
+    """Render manual cutting windows for muscles that need user input."""
+    for name, obj in v.zygote_muscle_meshes.items():
+        if not hasattr(obj, '_manual_cut_pending') or not obj._manual_cut_pending:
+            continue
+
+        if obj._manual_cut_data is None:
+            continue
+
+        # Initialize mouse state for this window
+        if not hasattr(v, '_manual_cut_mouse'):
+            v._manual_cut_mouse = {}
+        if name not in v._manual_cut_mouse:
+            v._manual_cut_mouse[name] = {
+                'dragging': False,
+                'start_pos': None,
+                'end_pos': None,
+                'zoom': 1.0,
+                'pan': [0.0, 0.0],
+                'panning': False,
+            }
+
+        mouse_state = v._manual_cut_mouse[name]
+
+        # Window setup
+        muscle_name = obj._manual_cut_data.get('muscle_name', name)
+        target_i = obj._manual_cut_data.get('target_i', 0)
+        source_indices = obj._manual_cut_data.get('source_indices', [])
+        required_pieces_display = obj._manual_cut_data.get('required_pieces', 2)
+        # Window size: main canvas (550+40) + gap (30) + source panel (280+30) + margins = ~960
+        imgui.set_next_window_size(960, 780, imgui.FIRST_USE_EVER)
+        # Show target index and source info in title for M->N cases
+        title_suffix = f" (Target {target_i}, {len(source_indices)}->1)" if len(source_indices) > 0 else ""
+        expanded, opened = imgui.begin(f"Manual Cut: {muscle_name}{title_suffix}", True)
+
+        if not opened:
+            obj._cancel_manual_cut()
+            imgui.end()
+            continue
+
+        # Get data
+        target_2d = obj._manual_cut_data['target_2d']
+        source_2d_list = obj._manual_cut_data['source_2d_list']
+        target_level = obj._manual_cut_data['target_level']
+        source_level = obj._manual_cut_data['source_level']
+
+        # Find initial line using obj._find_neck_in_contour (same as find_transitions)
+        # Only for SEPARATE mode - COMMON mode uses source boundary line
+        # Skip for sub-windows (original_source_indices set) - they don't need neck finding
+        is_common_mode = obj._manual_cut_data.get('is_common_mode', False)
+        original_source_indices = obj._manual_cut_data.get('original_source_indices', None)
+        is_subwindow = original_source_indices is not None
+        subcut_level = obj._manual_cut_data.get('subcut_level', 0)
+        need_new_recommendation = 'initial_line' not in obj._manual_cut_data
+
+        # Neck finding for SEPARATE mode only (multiple separate sources → one target)
+        # Skip for: COMMON mode (sources share boundary), sub-windows, or sub-cuts
+        # Also skip if no transitions found by find_all_transitions (1:1 case)
+        has_transitions = hasattr(obj, '_neck_viz_data') and obj._neck_viz_data and len(obj._neck_viz_data) > 0
+        skip_neck = is_common_mode or is_subwindow or subcut_level > 0 or not has_transitions
+        if need_new_recommendation and not skip_neck:
+            current_pieces = obj._manual_cut_data.get('current_pieces', [target_2d])
+            contour_range = np.max(target_2d.max(axis=0) - target_2d.min(axis=0))
+
+            # Find ALL neck candidates with distance < 3% of perimeter
+            # Only print debug once when actually computing candidates
+            if 'neck_candidates' not in obj._manual_cut_data:
+                print(f"[NECK] Looking for neck candidates in {len(current_pieces)} pieces, target has {len(target_2d)} vertices")
+                all_candidates = []
+                for piece_idx, piece_2d in enumerate(current_pieces):
+                    n = len(piece_2d)
+                    if n < 10:
+                        continue
+
+                    # Compute perimeter
+                    perimeter = 0
+                    for i in range(n):
+                        perimeter += np.linalg.norm(piece_2d[(i+1) % n] - piece_2d[i])
+
+                    # Threshold: 3% of perimeter (wider to catch merge point necks)
+                    neck_threshold = perimeter * 0.03
+                    # Use smaller index separation (10%) to catch pinch points
+                    min_sep_idx = int(n * 0.10)
+
+                    # Find all pairs below threshold
+                    for i in range(n):
+                        for j in range(i + min_sep_idx, i + n - min_sep_idx):
+                            j_mod = j % n
+                            # Only add if i < j_mod to avoid duplicates (i,j) and (j,i)
+                            if i >= j_mod:
+                                continue
+                            dist = np.linalg.norm(piece_2d[i] - piece_2d[j_mod])
+                            if dist < neck_threshold:
+                                all_candidates.append({
+                                    'piece_idx': piece_idx,
+                                    'idx_a': i,
+                                    'idx_b': j_mod,
+                                    'width': dist,
+                                    'point': (piece_2d[i] + piece_2d[j_mod]) / 2,
+                                    'pos_a': piece_2d[i].copy(),
+                                    'pos_b': piece_2d[j_mod].copy(),
+                                })
+
+                # Sort by width (narrowest first)
+                all_candidates.sort(key=lambda x: x['width'])
+
+                # Remove near-duplicates (candidates within 5 vertices of each other)
+                filtered = []
+                for cand in all_candidates:
+                    is_dup = False
+                    for existing in filtered:
+                        if existing['piece_idx'] == cand['piece_idx']:
+                            # Check if indices are close (in same order or swapped)
+                            n = len(current_pieces[cand['piece_idx']])
+                            # Same order check
+                            dist_a = min(abs(cand['idx_a'] - existing['idx_a']),
+                                       n - abs(cand['idx_a'] - existing['idx_a']))
+                            dist_b = min(abs(cand['idx_b'] - existing['idx_b']),
+                                       n - abs(cand['idx_b'] - existing['idx_b']))
+                            # Swapped order check
+                            dist_a_swap = min(abs(cand['idx_a'] - existing['idx_b']),
+                                            n - abs(cand['idx_a'] - existing['idx_b']))
+                            dist_b_swap = min(abs(cand['idx_b'] - existing['idx_a']),
+                                            n - abs(cand['idx_b'] - existing['idx_a']))
+                            if (dist_a < 5 and dist_b < 5) or (dist_a_swap < 5 and dist_b_swap < 5):
+                                is_dup = True
+                                break
+                    if not is_dup:
+                        filtered.append(cand)
+
+                obj._manual_cut_data['neck_candidates'] = filtered
+                obj._manual_cut_data['selected_neck_idx'] = 0 if len(filtered) > 0 else -1
+                print(f"[NECK] Found {len(filtered)} neck candidates (from {len(all_candidates)} raw)")
+
+            # Get current selection
+            candidates = obj._manual_cut_data.get('neck_candidates', [])
+            selected_idx = obj._manual_cut_data.get('selected_neck_idx', 0)
+
+            # Helper to find line-contour intersection points
+            def find_contour_intersections(line_start, line_end, contour):
+                """Find where a line intersects the contour, return the two intersection points."""
+                intersections = []
+                p1 = np.array(line_start)
+                p2 = np.array(line_end)
+                d = p2 - p1
+
+                for i in range(len(contour)):
+                    q1 = contour[i]
+                    q2 = contour[(i + 1) % len(contour)]
+                    e = q2 - q1
+
+                    denom = d[0] * e[1] - d[1] * e[0]
+                    if abs(denom) < 1e-10:
+                        continue
+
+                    t = ((q1[0] - p1[0]) * e[1] - (q1[1] - p1[1]) * e[0]) / denom
+                    s = ((q1[0] - p1[0]) * d[1] - (q1[1] - p1[1]) * d[0]) / denom
+
+                    if 0 <= s <= 1:  # Intersection on contour edge
+                        pt = p1 + t * d
+                        intersections.append((t, pt, i))
+
+                intersections.sort(key=lambda x: x[0])
+                return intersections
+
+            if len(candidates) > 0 and selected_idx >= 0 and selected_idx < len(candidates):
+                cand = candidates[selected_idx]
+                piece_idx = cand['piece_idx']
+                i0, i1 = cand['idx_a'], cand['idx_b']
+                piece_2d = current_pieces[piece_idx]
+                n = len(piece_2d)
+
+                # Get neck vertices
+                neck_a = piece_2d[i0]
+                neck_b = piece_2d[i1]
+
+                # Use neck vertices directly as cutting line endpoints
+                # They are already on the contour (vertices of piece_2d)
+                line_start = tuple(neck_a)
+                line_end = tuple(neck_b)
+
+                # Store neck info for zoomed view
+                obj._manual_cut_data['current_neck_info'] = {
+                    'neck_a': neck_a.copy(),
+                    'neck_b': neck_b.copy(),
+                    'line_start': neck_a.copy(),
+                    'line_end': neck_b.copy(),
+                    'piece_idx': piece_idx,
+                    'idx_a': i0,
+                    'idx_b': i1,
+                }
+
+                obj._manual_cut_data['initial_line'] = (line_start, line_end)
+                # Only set is_neck_line = True if user hasn't drawn their own line
+                # (i.e., if _manual_cut_line is None or equals initial_line)
+                if obj._manual_cut_line is None:
+                    obj._manual_cut_data['is_neck_line'] = True  # Flag for vertex-to-vertex cutting
+                    obj._manual_cut_line = (line_start, line_end)
+                elif obj._manual_cut_line == obj._manual_cut_data.get('initial_line'):
+                    # User hasn't changed the line from initial neck recommendation
+                    obj._manual_cut_data['is_neck_line'] = True
+            else:
+                # No candidates found - set flag to prevent re-computation every frame
+                if 'neck_search_done' not in obj._manual_cut_data:
+                    print(f"[NECK] No neck candidates found")
+                    obj._manual_cut_data['neck_search_done'] = True
+
+        current_pieces = obj._manual_cut_data.get('current_pieces', [target_2d])
+        required_pieces = obj._manual_cut_data.get('required_pieces', 2)
+        imgui.text(f"Target level: {target_level} | Source level: {source_level}")
+        imgui.text(f"Pieces: {len(current_pieces)} / {required_pieces} required")
+        imgui.text(f"Target verts: {len(target_2d)}")
+        imgui.text_colored("WHITE = Target contour (cut this)", 1.0, 1.0, 1.0, 1.0)
+        imgui.same_line()
+        imgui.text_colored(" | FADED = Source ref (guide)", 0.6, 0.6, 0.6, 1.0)
+        imgui.text("Draw a line to cut. Scroll to zoom, middle-drag to pan.")
+        imgui.text(f"Zoom: {mouse_state['zoom']:.1f}x")
+
+        # Neck candidate selector slider
+        candidates = obj._manual_cut_data.get('neck_candidates', [])
+        if len(candidates) > 0:
+            selected_idx = obj._manual_cut_data.get('selected_neck_idx', 0)
+            cand = candidates[selected_idx] if selected_idx < len(candidates) else None
+            width_str = f"{cand['width']:.6f}" if cand else "N/A"
+            imgui.text(f"Neck candidates: {len(candidates)} | Selected: {selected_idx} (width={width_str})")
+            imgui.push_item_width(200)
+            changed, new_idx = imgui.slider_int(f"##neck_slider_{name}", selected_idx, 0, len(candidates) - 1)
+            if changed:
+                obj._manual_cut_data['selected_neck_idx'] = new_idx
+                # Update the cutting line to match selected candidate
+                if new_idx < len(candidates):
+                    cand = candidates[new_idx]
+                    piece_idx = cand['piece_idx']
+                    i0, i1 = cand['idx_a'], cand['idx_b']
+                    current_pieces = obj._manual_cut_data.get('current_pieces', [target_2d])
+                    piece_2d = current_pieces[piece_idx]
+                    n = len(piece_2d)
+                    contour_range = np.max(target_2d.max(axis=0) - target_2d.min(axis=0))
+
+                    # Get neck vertices
+                    neck_a = piece_2d[i0]
+                    neck_b = piece_2d[i1]
+
+                    # Determine line direction
+                    direction = neck_b - neck_a
+                    dir_len = np.linalg.norm(direction)
+                    if dir_len > 1e-10:
+                        direction = direction / dir_len
+                    else:
+                        # Zero-length (pinch): use direction from prev to prev
+                        prev_i0 = (i0 - 1) % n
+                        prev_i1 = (i1 - 1) % n
+                        direction = piece_2d[prev_i1] - piece_2d[prev_i0]
+                        d_len = np.linalg.norm(direction)
+                        if d_len > 1e-10:
+                            direction = direction / d_len
+                        else:
+                            direction = np.array([1.0, 0.0])
+
+                    # Create extended line to find edge intersections
+                    neck_width = np.linalg.norm(neck_b - neck_a)
+                    extension = max(neck_width * 0.5, contour_range * 0.10)
+                    ext_start = neck_a - direction * extension
+                    ext_end = neck_b + direction * extension
+
+                    # Find actual contour edge intersections
+                    def find_inters_inline(ls, le, contour):
+                        inters = []
+                        p1, p2 = np.array(ls), np.array(le)
+                        d = p2 - p1
+                        for ci in range(len(contour)):
+                            q1, q2 = contour[ci], contour[(ci + 1) % len(contour)]
+                            e = q2 - q1
+                            denom = d[0] * e[1] - d[1] * e[0]
+                            if abs(denom) < 1e-10:
+                                continue
+                            t = ((q1[0] - p1[0]) * e[1] - (q1[1] - p1[1]) * e[0]) / denom
+                            s = ((q1[0] - p1[0]) * d[1] - (q1[1] - p1[1]) * d[0]) / denom
+                            if 0 <= s <= 1:
+                                inters.append((t, p1 + t * d, ci))
+                        return inters
+
+                    intersections = find_inters_inline(ext_start, ext_end, piece_2d)
+
+                    if len(intersections) >= 2:
+                        # Find two intersections closest to neck center
+                        neck_center = (neck_a + neck_b) / 2
+                        inters_with_dist = [(np.linalg.norm(pt - neck_center), t, pt, ei)
+                                           for t, pt, ei in intersections]
+                        inters_with_dist.sort(key=lambda x: x[0])
+                        if len(inters_with_dist) >= 2:
+                            _, _, p_start, _ = inters_with_dist[0]
+                            _, _, p_end, _ = inters_with_dist[1]
+                        else:
+                            p_start, p_end = ext_start, ext_end
+                    else:
+                        p_start, p_end = ext_start, ext_end
+
+                    # Update cutting line
+                    obj._manual_cut_line = (tuple(p_start), tuple(p_end))
+                    obj._manual_cut_data['initial_line'] = obj._manual_cut_line
+
+                    # Update neck info for zoomed view
+                    obj._manual_cut_data['current_neck_info'] = {
+                        'neck_a': neck_a.copy(),
+                        'neck_b': neck_b.copy(),
+                        'line_start': np.array(p_start).copy(),
+                        'line_end': np.array(p_end).copy(),
+                        'piece_idx': piece_idx,
+                        'idx_a': i0,
+                        'idx_b': i1,
+                    }
+                    # User selected a neck via slider - use neck-based cutting
+                    obj._manual_cut_data['is_neck_line'] = True
+            imgui.pop_item_width()
+        imgui.separator()
+
+        # Compute bounds for normalization (include target AND projected sources)
+        all_points_2d = [target_2d]
+
+        # Project all source contours onto target plane and include in bounds
+        source_contours_3d_for_bounds = obj._manual_cut_data.get('source_contours', [])
+        source_bps_for_bounds = obj._manual_cut_data.get('source_bps', [])
+        target_bp = obj._manual_cut_data['target_bp']
+        target_mean_bounds = target_bp['mean']
+        # Negate basis vectors to rotate 180° - match cutting window orientation
+        target_x_bounds = -target_bp['basis_x']
+        target_y_bounds = -target_bp['basis_y']
+        target_z_bounds = target_bp['basis_z']
+
+        for src_contour_3d in source_contours_3d_for_bounds:
+            src_projected = []
+            for pt in src_contour_3d:
+                diff = pt - target_mean_bounds
+                proj_pt = pt - np.dot(diff, target_z_bounds) * target_z_bounds
+                diff_proj = proj_pt - target_mean_bounds
+                x_coord = np.dot(diff_proj, target_x_bounds)
+                y_coord = np.dot(diff_proj, target_y_bounds)
+                src_projected.append([x_coord, y_coord])
+            if len(src_projected) > 0:
+                all_points_2d.append(np.array(src_projected))
+
+        # Include transformed sources from optimization in bounds (if available)
+        transformed_sources = obj._manual_cut_data.get('transformed_sources_2d', None) or []
+        for src_2d in transformed_sources:
+            if src_2d is not None and len(src_2d) >= 3:
+                all_points_2d.append(np.array(src_2d))
+
+        # Compute combined bounds
+        all_points_combined = np.vstack(all_points_2d)
+        min_xy = all_points_combined.min(axis=0)
+        max_xy = all_points_combined.max(axis=0)
+        range_xy = max_xy - min_xy
+        max_range = max(range_xy) * 1.1  # Small padding
+
+        # Canvas setup
+        canvas_size = 550
+        padding = 20
+        draw_list = imgui.get_window_draw_list()
+        cursor_pos = imgui.get_cursor_screen_pos()
+        x0, y0 = cursor_pos[0] + padding, cursor_pos[1] + padding
+
+        # Get zoom and pan from mouse state
+        zoom = mouse_state['zoom']
+        pan = mouse_state['pan']
+
+        # Coordinate transform functions (with zoom and pan)
+        # Y flip required: matplotlib Y goes up, screen Y goes down
+        def to_screen(p, x0, y0, canvas_size):
+            center = (min_xy + max_xy) / 2
+            normalized = (np.array(p) - center) / max_range + 0.5
+            # Apply zoom and pan
+            normalized = (normalized - 0.5) * zoom + 0.5 + np.array(pan)
+            return (x0 + normalized[0] * canvas_size,
+                    y0 + (1.0 - normalized[1]) * canvas_size)  # Flip Y to match matplotlib
+
+        def from_screen(sx, sy, x0, y0, canvas_size):
+            normalized_x = (sx - x0) / canvas_size
+            normalized_y = 1.0 - (sy - y0) / canvas_size  # Flip Y back
+            # Reverse zoom and pan
+            normalized = np.array([normalized_x, normalized_y])
+            normalized = (normalized - 0.5 - np.array(pan)) / zoom + 0.5
+            center = (min_xy + max_xy) / 2
+            return center + (normalized - 0.5) * max_range
+
+        def find_line_contour_intersections(line_start, line_end, contour_2d):
+            """Find intersection points of a line with a contour polygon."""
+            intersections = []
+            p1 = np.array(line_start)
+            p2 = np.array(line_end)
+            d = p2 - p1
+
+            for i in range(len(contour_2d)):
+                q1 = contour_2d[i]
+                q2 = contour_2d[(i + 1) % len(contour_2d)]
+                e = q2 - q1
+
+                # Solve p1 + t*d = q1 + s*e
+                denom = d[0] * e[1] - d[1] * e[0]
+                if abs(denom) < 1e-10:
+                    continue
+
+                t = ((q1[0] - p1[0]) * e[1] - (q1[1] - p1[1]) * e[0]) / denom
+                s = ((q1[0] - p1[0]) * d[1] - (q1[1] - p1[1]) * d[0]) / denom
+
+                if 0 <= s <= 1:  # Intersection on contour edge
+                    pt = p1 + t * d
+                    intersections.append((t, pt))
+
+            # Sort by t parameter and return points
+            intersections.sort(key=lambda x: x[0])
+            return [pt for _, pt in intersections]
+
+        # Draw canvas background
+        draw_list.add_rect_filled(x0 - padding, y0 - padding,
+                                  x0 + canvas_size + padding, y0 + canvas_size + padding,
+                                  imgui.get_color_u32_rgba(0.15, 0.15, 0.15, 1.0))
+        draw_list.add_rect(x0 - padding, y0 - padding,
+                          x0 + canvas_size + padding, y0 + canvas_size + padding,
+                          imgui.get_color_u32_rgba(0.5, 0.5, 0.5, 1.0))
+
+        # Clip drawing to canvas area
+        draw_list.push_clip_rect(x0 - padding, y0 - padding,
+                                 x0 + canvas_size + padding, y0 + canvas_size + padding)
+
+        # Draw all current pieces
+        # Colors for different pieces: cycle through these
+        piece_colors = [
+            (1.0, 1.0, 1.0),  # White (first piece / uncut)
+            (0.2, 0.6, 1.0),  # Blue
+            (1.0, 0.4, 0.2),  # Orange
+            (0.2, 1.0, 0.4),  # Green
+            (1.0, 0.8, 0.2),  # Yellow
+            (0.8, 0.2, 1.0),  # Purple
+        ]
+        current_pieces = obj._manual_cut_data.get('current_pieces', [target_2d])
+        required_pieces = obj._manual_cut_data.get('required_pieces', 2)
+
+        for piece_idx, piece_2d in enumerate(current_pieces):
+            if len(piece_2d) >= 3:
+                piece_screen = [to_screen(p, x0, y0, canvas_size) for p in piece_2d]
+                color = piece_colors[piece_idx % len(piece_colors)]
+                for i in range(len(piece_screen)):
+                    p1, p2 = piece_screen[i], piece_screen[(i+1) % len(piece_screen)]
+                    draw_list.add_line(p1[0], p1[1], p2[0], p2[1],
+                                      imgui.get_color_u32_rgba(*color, 1.0), 3.0)
+
+                # Add label at centroid
+                centroid = np.mean(piece_2d, axis=0)
+                cx, cy = to_screen(centroid, x0, y0, canvas_size)
+                if len(current_pieces) > 1:
+                    # Multiple pieces - show piece index with colored background
+                    label = f"P{piece_idx}"
+                    # Draw background rect for visibility
+                    draw_list.add_rect_filled(cx - 12, cy - 10, cx + 12, cy + 10,
+                                              imgui.get_color_u32_rgba(*color, 0.8))
+                    draw_list.add_text(cx - 8, cy - 7,
+                                      imgui.get_color_u32_rgba(0.0, 0.0, 0.0, 1.0), label)
+                else:
+                    # Single piece - show as target
+                    draw_list.add_text(cx + 10, cy - 10,
+                                      imgui.get_color_u32_rgba(1.0, 1.0, 1.0, 1.0),
+                                      f"Target (Lv.{target_level})")
+
+        # Draw transformed source contours after optimization (semi-transparent dashed outline)
+        transformed_sources = obj._manual_cut_data.get('transformed_sources_2d', None) or []
+        if len(transformed_sources) > 0:
+            # Debug: print once when drawing
+            if not hasattr(obj, '_debug_transformed_printed') or obj._debug_transformed_printed != len(transformed_sources):
+                obj._debug_transformed_printed = len(transformed_sources)
+                print(f"[Draw DEBUG] transformed_sources: {len(transformed_sources)}")
+                for si, src in enumerate(transformed_sources):
+                    if src is not None and len(src) > 0:
+                        src_arr = np.array(src)
+                        print(f"  S{si}: {len(src)} verts, first=[{src_arr[0,0]:.4f},{src_arr[0,1]:.4f}], centroid=[{src_arr.mean(axis=0)[0]:.4f},{src_arr.mean(axis=0)[1]:.4f}]")
+            for src_idx, src_2d in enumerate(transformed_sources):
+                if src_2d is not None and len(src_2d) >= 3:
+                    src_color = piece_colors[src_idx % len(piece_colors)]
+                    # Draw as dashed lines (semi-transparent)
+                    for i in range(len(src_2d)):
+                        p1 = to_screen(src_2d[i], x0, y0, canvas_size)
+                        p2 = to_screen(src_2d[(i + 1) % len(src_2d)], x0, y0, canvas_size)
+                        # Draw every other segment for dashed effect
+                        if i % 2 == 0:
+                            draw_list.add_line(p1[0], p1[1], p2[0], p2[1],
+                                              imgui.get_color_u32_rgba(*src_color, 0.5), 1.5)
+                    # Draw centroid marker with S label
+                    src_centroid = np.mean(src_2d, axis=0)
+                    scx, scy = to_screen(src_centroid, x0, y0, canvas_size)
+                    draw_list.add_circle(scx, scy, 8, imgui.get_color_u32_rgba(*src_color, 0.7), thickness=2.0)
+                    draw_list.add_text(scx - 5, scy - 6,
+                                      imgui.get_color_u32_rgba(*src_color, 0.9), f"S{src_idx}")
+
+            # Draw actual cut points on target contour (where cutting lines cross target)
+            # These are the real cut locations, not the source shared boundaries
+            target_crossings = getattr(obj, '_target_cut_crossings_2d', [])
+
+            line_colors = [
+                imgui.get_color_u32_rgba(1.0, 0.0, 1.0, 1.0),  # Magenta
+                imgui.get_color_u32_rgba(0.0, 1.0, 1.0, 1.0),  # Cyan
+                imgui.get_color_u32_rgba(1.0, 1.0, 0.0, 1.0),  # Yellow
+                imgui.get_color_u32_rgba(1.0, 0.5, 0.0, 1.0),  # Orange
+            ]
+
+            if target_crossings:
+                # Group crossings by pair indices
+                crossings_by_pair = {}
+                for pt_2d, pair_indices in target_crossings:
+                    if pair_indices not in crossings_by_pair:
+                        crossings_by_pair[pair_indices] = []
+                    crossings_by_pair[pair_indices].append(pt_2d)
+
+                # Draw crossings for each pair
+                for idx, (pair_indices, pts) in enumerate(crossings_by_pair.items()):
+                    line_color = line_colors[idx % len(line_colors)]
+                    # Draw each crossing point
+                    for pt_2d in pts:
+                        sp = to_screen(pt_2d, x0, y0, canvas_size)
+                        draw_list.add_circle_filled(sp[0], sp[1], 6, line_color)
+                    # If we have 2 crossings, draw line between them
+                    if len(pts) >= 2:
+                        p1 = to_screen(pts[0], x0, y0, canvas_size)
+                        p2 = to_screen(pts[-1], x0, y0, canvas_size)
+                        draw_list.add_line(p1[0], p1[1], p2[0], p2[1], line_color, 2.0)
+                        mid_x, mid_y = (p1[0] + p2[0]) / 2, (p1[1] + p2[1]) / 2
+                        draw_list.add_text(mid_x + 5, mid_y - 15, line_color, f"Cut {pair_indices[0]}-{pair_indices[1]}")
+            else:
+                # Fallback to old method using shared edges
+                shared_edges_list = []
+                if hasattr(obj, '_shared_cut_edges_2d') and obj._shared_cut_edges_2d:
+                    shared_edges_list = obj._shared_cut_edges_2d
+                elif hasattr(obj, '_shared_cut_edge_2d') and obj._shared_cut_edge_2d is not None:
+                    shared_edges_list = [((0, 1), obj._shared_cut_edge_2d)]
+
+                for idx, (pair_indices, shared_edge) in enumerate(shared_edges_list):
+                    if shared_edge is not None and len(shared_edge) >= 2:
+                        line_color = line_colors[idx % len(line_colors)]
+                        p1 = to_screen(shared_edge[0], x0, y0, canvas_size)
+                        p2 = to_screen(shared_edge[-1], x0, y0, canvas_size)
+                        draw_list.add_line(p1[0], p1[1], p2[0], p2[1], line_color, 2.0)
+                        draw_list.add_circle_filled(p1[0], p1[1], 4, line_color)
+                        draw_list.add_circle_filled(p2[0], p2[1], 4, line_color)
+                        mid_x, mid_y = (p1[0] + p2[0]) / 2, (p1[1] + p2[1]) / 2
+                        draw_list.add_text(mid_x + 5, mid_y - 15, line_color, f"Cut {pair_indices[0]}-{pair_indices[1]}")
+
+        # Draw all neck candidates (faded) and highlight selected one
+        candidates = obj._manual_cut_data.get('neck_candidates', [])
+        selected_neck_idx = obj._manual_cut_data.get('selected_neck_idx', 0)
+        for cand_idx, cand in enumerate(candidates):
+            pos_a = cand['pos_a']
+            pos_b = cand['pos_b']
+            screen_a = to_screen(pos_a, x0, y0, canvas_size)
+            screen_b = to_screen(pos_b, x0, y0, canvas_size)
+            mid_screen = ((screen_a[0] + screen_b[0]) / 2, (screen_a[1] + screen_b[1]) / 2)
+
+            if cand_idx == selected_neck_idx:
+                # Selected: bright cyan, thicker line
+                color = imgui.get_color_u32_rgba(0.0, 1.0, 1.0, 1.0)
+                draw_list.add_line(screen_a[0], screen_a[1], screen_b[0], screen_b[1], color, 3.0)
+                draw_list.add_circle_filled(screen_a[0], screen_a[1], 5, color)
+                draw_list.add_circle_filled(screen_b[0], screen_b[1], 5, color)
+                # Label
+                draw_list.add_text(mid_screen[0] + 5, mid_screen[1] - 10,
+                                  color, f"#{cand_idx} w={cand['width']:.4f}")
+            else:
+                # Non-selected: faded yellow
+                color = imgui.get_color_u32_rgba(1.0, 1.0, 0.0, 0.3)
+                draw_list.add_line(screen_a[0], screen_a[1], screen_b[0], screen_b[1], color, 1.5)
+                draw_list.add_circle_filled(screen_a[0], screen_a[1], 3, color)
+                draw_list.add_circle_filled(screen_b[0], screen_b[1], 3, color)
+
+        # Draw zoomed view indicator rectangle on main canvas
+        neck_info_indicator = obj._manual_cut_data.get('current_neck_info', None)
+        if neck_info_indicator is not None:
+            line_start_ind = neck_info_indicator['line_start']
+            line_end_ind = neck_info_indicator['line_end']
+            piece_idx_ind = neck_info_indicator['piece_idx']
+            current_pieces_ind = obj._manual_cut_data.get('current_pieces', [target_2d])
+
+            if piece_idx_ind < len(current_pieces_ind):
+                piece_2d_ind = current_pieces_ind[piece_idx_ind]
+
+                # Calculate the same extent as the zoomed view
+                target_line_pixels = 120.0
+                zoom_canvas_size_ind = 200
+                actual_line_length_ind = np.linalg.norm(line_end_ind - line_start_ind)
+                if actual_line_length_ind > 1e-10:
+                    world_extent_ind = actual_line_length_ind * (zoom_canvas_size_ind / target_line_pixels)
+                else:
+                    world_extent_ind = np.max(piece_2d_ind.max(axis=0) - piece_2d_ind.min(axis=0)) * 0.3
+
+                neck_center_ind = (line_start_ind + line_end_ind) / 2
+                half_extent = world_extent_ind / 2
+
+                # Get the corners of the zoomed view in world coordinates
+                corners_2d = [
+                    neck_center_ind + np.array([-half_extent, -half_extent]),
+                    neck_center_ind + np.array([half_extent, -half_extent]),
+                    neck_center_ind + np.array([half_extent, half_extent]),
+                    neck_center_ind + np.array([-half_extent, half_extent]),
+                ]
+
+                # Convert to screen coordinates and draw
+                corners_screen = [to_screen(c, x0, y0, canvas_size) for c in corners_2d]
+                indicator_color = imgui.get_color_u32_rgba(0.0, 1.0, 0.5, 0.7)
+                for i in range(4):
+                    p1 = corners_screen[i]
+                    p2 = corners_screen[(i + 1) % 4]
+                    draw_list.add_line(p1[0], p1[1], p2[0], p2[1], indicator_color, 2.0)
+
+        # Draw selected source contour transparently on the main canvas
+        source_contours_3d = obj._manual_cut_data.get('source_contours', [])
+        source_bps = obj._manual_cut_data.get('source_bps', [])
+        selected_sources = obj._manual_cut_data.get('selected_sources', list(range(len(source_contours_3d))))
+        source_labels = obj._manual_cut_data.get('source_labels', list(range(len(source_contours_3d))))
+
+        # Use pre-computed source_2d_list for drawing (same as PNG visualization)
+        source_2d_list = obj._manual_cut_data.get('source_2d_list', [])
+
+        if 'source_view_idx' in mouse_state and len(source_2d_list) > 0:
+            src_idx = mouse_state.get('source_view_idx', 0)
+            if src_idx < len(source_2d_list) and src_idx < len(source_bps):
+                src_bp = source_bps[src_idx]
+                # Use pre-computed 2D source contour (matches PNG visualization)
+                src_on_target_2d = np.array(source_2d_list[src_idx])
+
+                # Draw source contour transparently on main canvas
+                src_color = piece_colors[src_idx % len(piece_colors)]
+                is_selected = src_idx in selected_sources
+                alpha = 0.6 if is_selected else 0.25
+                thickness = 2.5 if is_selected else 1.5
+
+                if len(src_on_target_2d) >= 3:
+                    # Convert all points to screen coordinates
+                    screen_pts = [to_screen(src_on_target_2d[i], x0, y0, canvas_size) for i in range(len(src_on_target_2d))]
+
+                    # Fill polygon first (like PNG visualization does)
+                    # Use triangulation for non-convex polygons
+                    fill_alpha = 0.15 if is_selected else 0.05
+                    try:
+                        # Simple triangle fan from centroid for fill
+                        src_centroid_screen = to_screen(src_on_target_2d.mean(axis=0), x0, y0, canvas_size)
+                        for i in range(len(screen_pts)):
+                            p1 = screen_pts[i]
+                            p2 = screen_pts[(i + 1) % len(screen_pts)]
+                            draw_list.add_triangle_filled(
+                                src_centroid_screen[0], src_centroid_screen[1],
+                                p1[0], p1[1], p2[0], p2[1],
+                                imgui.get_color_u32_rgba(*src_color, fill_alpha))
+                    except:
+                        pass  # Skip fill if it fails
+
+                    # Draw outline
+                    for i in range(len(screen_pts)):
+                        p1 = screen_pts[i]
+                        p2 = screen_pts[(i + 1) % len(screen_pts)]
+                        draw_list.add_line(p1[0], p1[1], p2[0], p2[1],
+                                          imgui.get_color_u32_rgba(*src_color, alpha), thickness)
+
+                    # Draw centroid marker
+                    src_centroid = src_on_target_2d.mean(axis=0)
+                    cx, cy = to_screen(src_centroid, x0, y0, canvas_size)
+                    draw_list.add_circle_filled(cx, cy, 6, imgui.get_color_u32_rgba(*src_color, alpha))
+                    # Add X marker if not selected
+                    if not is_selected:
+                        draw_list.add_line(cx - 4, cy - 4, cx + 4, cy + 4, imgui.get_color_u32_rgba(1.0, 0.3, 0.3, 0.8), 2)
+                        draw_list.add_line(cx - 4, cy + 4, cx + 4, cy - 4, imgui.get_color_u32_rgba(1.0, 0.3, 0.3, 0.8), 2)
+                    # Add source label near centroid (use original index from source_labels)
+                    src_label = source_labels[src_idx] if src_idx < len(source_labels) else src_idx
+                    draw_list.add_text(cx + 10, cy + 5,
+                                      imgui.get_color_u32_rgba(*src_color, 1.0),
+                                      f"Source {src_label} (Lv.{source_level})")
+
+        # End canvas clipping
+        draw_list.pop_clip_rect()
+
+        # Create invisible button to capture mouse input (prevents window dragging)
+        imgui.set_cursor_screen_pos((x0 - padding, y0 - padding))
+        imgui.invisible_button(f"canvas##{name}", canvas_size + 2 * padding, canvas_size + 2 * padding)
+        canvas_hovered = imgui.is_item_hovered()
+        canvas_active = imgui.is_item_active()
+
+        # Handle mouse interaction for drawing line
+        mouse_pos = imgui.get_mouse_pos()
+
+        # Mouse wheel zoom
+        if canvas_hovered:
+            io = imgui.get_io()
+            if io.mouse_wheel != 0:
+                zoom_factor = 1.1 if io.mouse_wheel > 0 else 0.9
+                # Zoom towards mouse position
+                mouse_norm_x = (mouse_pos[0] - x0) / canvas_size
+                mouse_norm_y = 1.0 - (mouse_pos[1] - y0) / canvas_size
+                # Adjust pan to zoom towards mouse
+                old_zoom = mouse_state['zoom']
+                new_zoom = old_zoom * zoom_factor
+                new_zoom = max(0.5, min(10.0, new_zoom))  # Clamp zoom
+                if new_zoom != old_zoom:
+                    # Pan adjustment to keep mouse point fixed
+                    mouse_state['pan'][0] += (mouse_norm_x - 0.5) * (1 - zoom_factor / old_zoom * new_zoom) / new_zoom
+                    mouse_state['pan'][1] += (mouse_norm_y - 0.5) * (1 - zoom_factor / old_zoom * new_zoom) / new_zoom
+                    mouse_state['zoom'] = new_zoom
+
+        # Middle mouse or right mouse pan
+        if canvas_hovered and (imgui.is_mouse_clicked(2) or imgui.is_mouse_clicked(1)):  # Middle or right button
+            mouse_state['panning'] = True
+            mouse_state['pan_button'] = 2 if imgui.is_mouse_clicked(2) else 1  # Track which button
+            mouse_state['pan_start'] = (mouse_pos[0], mouse_pos[1])
+            mouse_state['pan_orig'] = mouse_state['pan'].copy()
+
+        if mouse_state.get('panning', False):
+            dx = (mouse_pos[0] - mouse_state['pan_start'][0]) / canvas_size
+            dy = -(mouse_pos[1] - mouse_state['pan_start'][1]) / canvas_size  # Flip Y
+            mouse_state['pan'][0] = mouse_state['pan_orig'][0] + dx
+            mouse_state['pan'][1] = mouse_state['pan_orig'][1] + dy
+            pan_button = mouse_state.get('pan_button', 2)
+            if imgui.is_mouse_released(pan_button):
+                mouse_state['panning'] = False
+
+        # Left click for drawing cut line (disabled in optimization preview mode)
+        is_preview_mode = obj._manual_cut_data.get('optimization_preview', False)
+        if canvas_hovered and imgui.is_mouse_clicked(0) and not is_preview_mode:
+            mouse_state['dragging'] = True
+            mouse_state['start_pos'] = (mouse_pos[0], mouse_pos[1])
+            mouse_state['end_pos'] = (mouse_pos[0], mouse_pos[1])
+
+        if mouse_state['dragging'] and not is_preview_mode:
+            end_x, end_y = mouse_pos[0], mouse_pos[1]
+            # Check if shift is pressed for axis-aligned line
+            shift_pressed = (glfw.get_key(v.window, glfw.KEY_LEFT_SHIFT) == glfw.PRESS or
+                             glfw.get_key(v.window, glfw.KEY_RIGHT_SHIFT) == glfw.PRESS)
+            if shift_pressed:
+                start_x, start_y = mouse_state['start_pos']
+                dx = abs(end_x - start_x)
+                dy = abs(end_y - start_y)
+                # Snap to horizontal or vertical based on which direction is dominant
+                if dx > dy:
+                    end_y = start_y  # Horizontal line
+                else:
+                    end_x = start_x  # Vertical line
+            mouse_state['end_pos'] = (end_x, end_y)
+            if imgui.is_mouse_released(0):
+                mouse_state['dragging'] = False
+                # Convert to 2D coordinates and store the line
+                start_2d = from_screen(mouse_state['start_pos'][0], mouse_state['start_pos'][1],
+                                      x0, y0, canvas_size)
+                end_2d = from_screen(mouse_state['end_pos'][0], mouse_state['end_pos'][1],
+                                    x0, y0, canvas_size)
+                obj._manual_cut_line = (tuple(start_2d), tuple(end_2d))
+                obj._manual_cut_data['is_neck_line'] = False  # User drew this line manually
+
+        # Clip cutting line drawing to canvas area
+        draw_list.push_clip_rect(x0 - padding, y0 - padding,
+                                 x0 + canvas_size + padding, y0 + canvas_size + padding)
+
+        # Draw the cutting line (from click/drag points)
+        if mouse_state['dragging'] and mouse_state['start_pos'] and mouse_state['end_pos']:
+            # Draw line from drag start to current position
+            draw_list.add_line(mouse_state['start_pos'][0], mouse_state['start_pos'][1],
+                              mouse_state['end_pos'][0], mouse_state['end_pos'][1],
+                              imgui.get_color_u32_rgba(1.0, 0.0, 1.0, 0.9), 3.0)
+        elif obj._manual_cut_line is not None:
+            # Draw stored line
+            start_2d, end_2d = obj._manual_cut_line
+            start_screen = to_screen(start_2d, x0, y0, canvas_size)
+            end_screen = to_screen(end_2d, x0, y0, canvas_size)
+            draw_list.add_line(start_screen[0], start_screen[1],
+                              end_screen[0], end_screen[1],
+                              imgui.get_color_u32_rgba(1.0, 0.0, 1.0, 0.9), 3.0)
+
+            # Draw cut preview if we have a valid line
+            piece0_2d, piece1_2d = obj._compute_cut_preview()
+            if piece0_2d is not None and piece1_2d is not None:
+                # Draw piece 0 (color 0)
+                if len(piece0_2d) >= 3:
+                    p0_screen = [to_screen(p, x0, y0, canvas_size) for p in piece0_2d]
+                    for i in range(len(p0_screen)):
+                        p1, p2 = p0_screen[i], p0_screen[(i+1) % len(p0_screen)]
+                        draw_list.add_line(p1[0], p1[1], p2[0], p2[1],
+                                          imgui.get_color_u32_rgba(piece_colors[0][0], piece_colors[0][1], piece_colors[0][2], 1.0), 2.5)
+                # Draw piece 1 (color 1)
+                if len(piece1_2d) >= 3:
+                    p1_screen = [to_screen(p, x0, y0, canvas_size) for p in piece1_2d]
+                    for i in range(len(p1_screen)):
+                        pt1, pt2 = p1_screen[i], p1_screen[(i+1) % len(p1_screen)]
+                        draw_list.add_line(pt1[0], pt1[1], pt2[0], pt2[1],
+                                          imgui.get_color_u32_rgba(piece_colors[1][0], piece_colors[1][1], piece_colors[1][2], 1.0), 2.5)
+
+        # End cutting line clipping
+        draw_list.pop_clip_rect()
+
+        # ===== Source Contour Viewer Panel (right side) =====
+        source_contours_3d = obj._manual_cut_data.get('source_contours', [])
+        source_labels = obj._manual_cut_data.get('source_labels', list(range(len(source_contours_3d))))
+        if len(source_contours_3d) > 0:
+            # Initialize source viewer state
+            if 'source_view_idx' not in mouse_state:
+                mouse_state['source_view_idx'] = 0
+
+            # Source viewer panel position (to the right of main canvas)
+            src_panel_x = x0 + canvas_size + padding + 30
+            src_panel_y = y0 - padding
+            src_canvas_size = 280
+            src_padding = 15
+
+            # Draw panel background (taller to fit checkbox and summary)
+            draw_list.add_rect_filled(
+                src_panel_x - src_padding, src_panel_y - src_padding,
+                src_panel_x + src_canvas_size + src_padding, src_panel_y + src_canvas_size + src_padding + 120,
+                imgui.get_color_u32_rgba(0.12, 0.12, 0.12, 1.0))
+            draw_list.add_rect(
+                src_panel_x - src_padding, src_panel_y - src_padding,
+                src_panel_x + src_canvas_size + src_padding, src_panel_y + src_canvas_size + src_padding + 120,
+                imgui.get_color_u32_rgba(0.4, 0.4, 0.4, 1.0))
+
+            # Title with level info
+            draw_list.add_text(src_panel_x, src_panel_y - src_padding + 5,
+                              imgui.get_color_u32_rgba(0.9, 0.9, 0.9, 1.0),
+                              f"Source Contours (Lv.{source_level}, {len(source_contours_3d)} total)")
+
+            # Adjust canvas position for title
+            src_canvas_y = src_panel_y + 20
+
+            # Get current source contour to display
+            src_idx = mouse_state['source_view_idx']
+            src_idx = max(0, min(src_idx, len(source_contours_3d) - 1))
+            mouse_state['source_view_idx'] = src_idx
+
+            # Project source contour to 2D using its bounding plane
+            source_bps = obj._manual_cut_data.get('source_bps', [])
+            if src_idx < len(source_bps):
+                src_bp = source_bps[src_idx]
+                src_contour_3d = source_contours_3d[src_idx]
+                src_mean = src_bp['mean']
+                src_basis_x = src_bp['basis_x']
+                src_basis_y = src_bp['basis_y']
+
+                # Project to 2D using TARGET's basis for consistent rotation with cutting panel
+                target_bp_for_src = obj._manual_cut_data.get('target_bp')
+                if target_bp_for_src is not None:
+                    tgt_mean = target_bp_for_src['mean']
+                    tgt_basis_x = target_bp_for_src['basis_x']
+                    tgt_basis_y = target_bp_for_src['basis_y']
+                    tgt_basis_z = target_bp_for_src['basis_z']
+                    # Project source onto target plane, then to 2D
+                    src_2d = []
+                    for pt in src_contour_3d:
+                        diff = pt - tgt_mean
+                        dist_along_normal = np.dot(diff, tgt_basis_z)
+                        pt_on_plane = pt - dist_along_normal * tgt_basis_z
+                        diff_on_plane = pt_on_plane - tgt_mean
+                        x = np.dot(diff_on_plane, tgt_basis_x)
+                        y = np.dot(diff_on_plane, tgt_basis_y)
+                        src_2d.append([x, y])
+                    src_2d = np.array(src_2d)
+                else:
+                    # Fallback to source's own basis
+                    src_2d = []
+                    for pt in src_contour_3d:
+                        diff = pt - src_mean
+                        x = np.dot(diff, src_basis_x)
+                        y = np.dot(diff, src_basis_y)
+                        src_2d.append([x, y])
+                    src_2d = np.array(src_2d)
+
+                # Compute bounds for source contour
+                src_min = src_2d.min(axis=0)
+                src_max = src_2d.max(axis=0)
+                src_range = src_max - src_min
+                src_max_range = max(src_range) * 1.2 if max(src_range) > 0 else 1.0
+
+                # Transform function for source canvas
+                def src_to_screen(p):
+                    center = (src_min + src_max) / 2
+                    normalized = (np.array(p) - center) / src_max_range + 0.5
+                    return (src_panel_x + normalized[0] * src_canvas_size,
+                            src_canvas_y + (1.0 - normalized[1]) * src_canvas_size)
+
+                # Draw source canvas background
+                draw_list.add_rect_filled(
+                    src_panel_x, src_canvas_y,
+                    src_panel_x + src_canvas_size, src_canvas_y + src_canvas_size,
+                    imgui.get_color_u32_rgba(0.08, 0.08, 0.08, 1.0))
+
+                # Draw source contour with matching color
+                src_color = piece_colors[src_idx % len(piece_colors)]
+                if len(src_2d) >= 3:
+                    for i in range(len(src_2d)):
+                        p1 = src_to_screen(src_2d[i])
+                        p2 = src_to_screen(src_2d[(i + 1) % len(src_2d)])
+                        draw_list.add_line(p1[0], p1[1], p2[0], p2[1],
+                                          imgui.get_color_u32_rgba(*src_color, 1.0), 2.5)
+
+                # Draw centroid marker
+                src_centroid = src_2d.mean(axis=0)
+                cx, cy = src_to_screen(src_centroid)
+                draw_list.add_circle_filled(cx, cy, 5, imgui.get_color_u32_rgba(*src_color, 0.8))
+
+            # Navigation controls below the source canvas
+            nav_y = src_canvas_y + src_canvas_size + 10
+            imgui.set_cursor_screen_pos((src_panel_x, nav_y))
+
+            # Left/Right buttons and slider
+            imgui.push_item_width(src_canvas_size)
+            if len(source_contours_3d) > 1:
+                # Left button
+                if imgui.button(f"<##{name}_src_prev", 30, 25):
+                    mouse_state['source_view_idx'] = max(0, src_idx - 1)
+                imgui.same_line()
+
+                # Slider
+                imgui.push_item_width(src_canvas_size - 80)
+                changed, new_idx = imgui.slider_int(f"##{name}_src_slider", src_idx, 0, len(source_contours_3d) - 1)
+                if changed:
+                    mouse_state['source_view_idx'] = new_idx
+                imgui.pop_item_width()
+                imgui.same_line()
+
+                # Right button
+                if imgui.button(f">##{name}_src_next", 30, 25):
+                    mouse_state['source_view_idx'] = min(len(source_contours_3d) - 1, src_idx + 1)
+
+            # Show source index label (use original index from source_labels)
+            imgui.set_cursor_screen_pos((src_panel_x, nav_y + 30))
+            src_label_color = piece_colors[src_idx % len(piece_colors)]
+            src_orig_label = source_labels[src_idx] if src_idx < len(source_labels) else src_idx
+            imgui.text_colored(f"Source {src_orig_label} ({src_idx + 1}/{len(source_contours_3d)})", *src_label_color, 1.0)
+
+            # Checkbox to include/exclude this source
+            imgui.set_cursor_screen_pos((src_panel_x, nav_y + 50))
+
+            # Initialize selected_sources if not present
+            if 'selected_sources' not in obj._manual_cut_data:
+                obj._manual_cut_data['selected_sources'] = list(range(len(source_contours_3d)))
+
+            selected_sources = obj._manual_cut_data['selected_sources']
+            is_selected = src_idx in selected_sources
+
+            changed, new_selected = imgui.checkbox(f"Include S{src_orig_label}##{name}", is_selected)
+            if changed:
+                if new_selected and src_idx not in selected_sources:
+                    selected_sources.append(src_idx)
+                    selected_sources.sort()
+                elif not new_selected and src_idx in selected_sources:
+                    # Don't allow deselecting if only 1 source remains
+                    if len(selected_sources) > 1:
+                        selected_sources.remove(src_idx)
+                    else:
+                        print("Cannot deselect: at least 1 source required")
+
+                # Update required_pieces and reset cuts
+                obj._manual_cut_data['selected_sources'] = selected_sources
+                new_required = len(selected_sources)
+                obj._manual_cut_data['required_pieces'] = new_required
+
+                # Reset current pieces to original target
+                obj._manual_cut_data['current_pieces'] = [target_2d.copy()]
+                obj._manual_cut_data['current_pieces_3d'] = [obj._manual_cut_data['target_contour'].copy()]
+                obj._manual_cut_data['cut_lines'] = []
+                if 'initial_line' in obj._manual_cut_data:
+                    del obj._manual_cut_data['initial_line']
+                obj._manual_cut_line = None
+
+                print(f"Source selection changed: {len(selected_sources)} sources selected, need {new_required} pieces")
+
+            # Show selection summary
+            imgui.set_cursor_screen_pos((src_panel_x, nav_y + 70))
+            num_selected = len(obj._manual_cut_data.get('selected_sources', []))
+            imgui.text(f"Selected: {num_selected} / {len(source_contours_3d)}")
+
+            imgui.pop_item_width()
+
+            # ===== Zoomed Neck View Panel (below source panel) =====
+            neck_info = obj._manual_cut_data.get('current_neck_info', None)
+            if neck_info is not None:
+                # Panel position (below source panel)
+                zoom_panel_x = src_panel_x - src_padding
+                zoom_panel_y = src_panel_y + src_canvas_size + src_padding + 130
+                zoom_canvas_size = 200
+                zoom_padding = 10
+
+                # Draw panel background
+                draw_list.add_rect_filled(
+                    zoom_panel_x, zoom_panel_y,
+                    zoom_panel_x + src_canvas_size + src_padding * 2, zoom_panel_y + zoom_canvas_size + 50,
+                    imgui.get_color_u32_rgba(0.1, 0.1, 0.1, 1.0))
+                draw_list.add_rect(
+                    zoom_panel_x, zoom_panel_y,
+                    zoom_panel_x + src_canvas_size + src_padding * 2, zoom_panel_y + zoom_canvas_size + 50,
+                    imgui.get_color_u32_rgba(0.5, 0.5, 0.5, 1.0))
+
+                # Title
+                draw_list.add_text(zoom_panel_x + zoom_padding, zoom_panel_y + 5,
+                                  imgui.get_color_u32_rgba(0.9, 0.9, 0.9, 1.0),
+                                  "Neck Detail (Zoomed)")
+
+                # Get neck line info
+                line_start = neck_info['line_start']
+                line_end = neck_info['line_end']
+                piece_idx = neck_info['piece_idx']
+                current_pieces_zoom = obj._manual_cut_data.get('current_pieces', [target_2d])
+
+                if piece_idx < len(current_pieces_zoom):
+                    piece_2d = current_pieces_zoom[piece_idx]
+
+                    # Calculate zoom level to keep line at fixed pixel length (e.g., 120 pixels)
+                    target_line_pixels = 120.0
+                    actual_line_length = np.linalg.norm(line_end - line_start)
+                    if actual_line_length > 1e-10:
+                        # Calculate the world space extent that should fit in target_line_pixels
+                        world_extent = actual_line_length * (zoom_canvas_size / target_line_pixels)
+                    else:
+                        world_extent = np.max(piece_2d.max(axis=0) - piece_2d.min(axis=0)) * 0.3
+
+                    # Center on neck midpoint
+                    neck_center = (line_start + line_end) / 2
+
+                    # Zoomed canvas position
+                    zcanvas_x = zoom_panel_x + zoom_padding
+                    zcanvas_y = zoom_panel_y + 25
+                    zcanvas_size = zoom_canvas_size
+
+                    # Draw zoom canvas background
+                    draw_list.add_rect_filled(
+                        zcanvas_x, zcanvas_y,
+                        zcanvas_x + zcanvas_size, zcanvas_y + zcanvas_size,
+                        imgui.get_color_u32_rgba(0.05, 0.05, 0.05, 1.0))
+
+                    # Clip to zoom canvas
+                    draw_list.push_clip_rect(zcanvas_x, zcanvas_y,
+                                             zcanvas_x + zcanvas_size, zcanvas_y + zcanvas_size)
+
+                    # Transform function for zoomed view
+                    def to_zoom_screen(p):
+                        offset = np.array(p) - neck_center
+                        normalized = offset / world_extent + 0.5
+                        return (zcanvas_x + normalized[0] * zcanvas_size,
+                                zcanvas_y + (1.0 - normalized[1]) * zcanvas_size)
+
+                    # Draw the piece contour (faded white)
+                    if len(piece_2d) >= 3:
+                        for i in range(len(piece_2d)):
+                            p1 = to_zoom_screen(piece_2d[i])
+                            p2 = to_zoom_screen(piece_2d[(i + 1) % len(piece_2d)])
+                            draw_list.add_line(p1[0], p1[1], p2[0], p2[1],
+                                              imgui.get_color_u32_rgba(0.6, 0.6, 0.6, 0.8), 1.5)
+
+                    # Draw cutting line (magenta)
+                    zstart = to_zoom_screen(line_start)
+                    zend = to_zoom_screen(line_end)
+                    draw_list.add_line(zstart[0], zstart[1], zend[0], zend[1],
+                                      imgui.get_color_u32_rgba(1.0, 0.0, 1.0, 1.0), 3.0)
+
+                    # Draw endpoints (on contour)
+                    draw_list.add_circle_filled(zstart[0], zstart[1], 5,
+                                               imgui.get_color_u32_rgba(0.0, 1.0, 0.0, 1.0))
+                    draw_list.add_circle_filled(zend[0], zend[1], 5,
+                                               imgui.get_color_u32_rgba(0.0, 1.0, 0.0, 1.0))
+
+                    # Draw neck vertices (cyan)
+                    neck_a = neck_info['neck_a']
+                    neck_b = neck_info['neck_b']
+                    za = to_zoom_screen(neck_a)
+                    zb = to_zoom_screen(neck_b)
+                    draw_list.add_circle_filled(za[0], za[1], 4,
+                                               imgui.get_color_u32_rgba(0.0, 1.0, 1.0, 1.0))
+                    draw_list.add_circle_filled(zb[0], zb[1], 4,
+                                               imgui.get_color_u32_rgba(0.0, 1.0, 1.0, 1.0))
+
+                    # End clip
+                    draw_list.pop_clip_rect()
+
+                    # Show info below zoomed canvas
+                    info_y = zcanvas_y + zcanvas_size + 5
+                    draw_list.add_text(zcanvas_x, info_y,
+                                      imgui.get_color_u32_rgba(0.7, 0.7, 0.7, 1.0),
+                                      f"Line len: {actual_line_length:.4f}")
+
+        # Get piece info (use selected_sources count for required_pieces)
+        current_pieces = obj._manual_cut_data.get('current_pieces', [target_2d])
+        selected_sources = obj._manual_cut_data.get('selected_sources', list(range(len(obj._manual_cut_data.get('source_contours', [])))))
+        required_pieces = len(selected_sources) if len(selected_sources) > 0 else obj._manual_cut_data.get('required_pieces', 2)
+        source_indices_display = obj._manual_cut_data.get('source_indices', [])
+
+        # Show source->target info
+        imgui.set_cursor_screen_pos((cursor_pos[0], y0 + canvas_size + padding + 10))
+        imgui.separator()
+        num_selected = len(selected_sources)
+        imgui.text(f"Selected: {num_selected} sources -> 1 target")
+        imgui.text(f"Pieces: {len(current_pieces)} / {required_pieces} needed")
+
+        # Show preview mode indicator
+        in_preview_mode = obj._manual_cut_data.get('optimization_preview', False)
+        if in_preview_mode:
+            edit_count = len(obj._manual_cut_data.get('edit_history', []))
+            if edit_count > 0:
+                imgui.text_colored(f"[PREVIEW MODE] {edit_count} edit(s) - Undo/Accept/Reset", 1.0, 0.8, 0.2, 1.0)
+            else:
+                imgui.text_colored("[PREVIEW MODE] Draw lines to edit, or Accept/Reset", 1.0, 0.8, 0.2, 1.0)
+
+            # Show piece-to-source mapping
+            current_pieces_3d_preview = obj._manual_cut_data.get('current_pieces_3d', [])
+            source_contours_preview = obj._manual_cut_data.get('source_contours', [])
+
+            if len(current_pieces_3d_preview) > 0 and len(source_contours_preview) > 0:
+                imgui.separator()
+                imgui.text("Piece -> Source mapping:")
+
+                # Compute centroids for matching
+                piece_centroids = [np.mean(p, axis=0) for p in current_pieces_3d_preview]
+                source_centroids = [np.mean(s, axis=0) for s in source_contours_preview]
+
+                # Piece colors
+                piece_colors = [
+                    (1.0, 1.0, 1.0, 1.0),  # White
+                    (0.2, 0.6, 1.0, 1.0),  # Blue
+                    (1.0, 0.4, 0.2, 1.0),  # Orange
+                    (0.2, 1.0, 0.4, 1.0),  # Green
+                    (1.0, 0.8, 0.2, 1.0),  # Yellow
+                    (0.8, 0.2, 1.0, 1.0),  # Purple
+                ]
+
+                # Match each piece to closest source
+                source_labels = obj._manual_cut_data.get('source_labels', list(range(len(source_contours_preview))))
+                used_sources = set()
+                for piece_idx, piece_centroid in enumerate(piece_centroids):
+                    best_src = None
+                    best_dist = float('inf')
+                    for src_idx, src_centroid in enumerate(source_centroids):
+                        if src_idx in used_sources:
+                            continue
+                        dist = np.linalg.norm(piece_centroid - src_centroid)
+                        if dist < best_dist:
+                            best_dist = dist
+                            best_src = src_idx
+
+                    if best_src is not None:
+                        used_sources.add(best_src)
+                        src_label = source_labels[best_src] if best_src < len(source_labels) else best_src
+                        color = piece_colors[piece_idx % len(piece_colors)]
+                        imgui.text_colored(f"  P{piece_idx} ({len(current_pieces_3d_preview[piece_idx])} verts) -> S{src_label}", *color)
+
+            # Show optimization scales
+            if hasattr(obj, '_bp_viz_data') and len(obj._bp_viz_data) > 0:
+                latest_viz = obj._bp_viz_data[-1]
+                opt_scales = latest_viz.get('scales', [])
+                if len(opt_scales) > 0:
+                    imgui.separator()
+                    imgui.text("Optimization scales:")
+                    for si, scale in enumerate(opt_scales):
+                        if isinstance(scale, (list, tuple)) and len(scale) == 2:
+                            imgui.text(f"  Source {si}: ({scale[0]:.3f}, {scale[1]:.3f})")
+                        else:
+                            imgui.text(f"  Source {si}: {scale:.3f}")
+
+            imgui.separator()
+
+        # Show hint for 1-to-1 case
+        if num_selected == 1:
+            imgui.text_colored("(1:1 mapping - no cutting needed, click Skip)", 0.5, 1.0, 0.5, 1.0)
+
+        # Buttons: Optimize, Optimize All, Skip, Next Cut, OK, Reset, Cancel
+        imgui.separator()
+        button_width = 80
+
+        # Check if auto-optimize-all mode is active
+        auto_optimize_all = getattr(obj, '_auto_optimize_all', False)
+        should_auto_optimize = auto_optimize_all and num_selected >= 2
+
+        # Optimize button - run automatic optimization on current pieces
+        # Can be used after manual cuts to optimize remaining subdivisions
+        # Hide in preview mode (Accept/Reset are shown instead) and in assignment mode
+        in_preview_for_button = obj._manual_cut_data.get('optimization_preview', False) if obj._manual_cut_data else False
+        in_assignment_mode_for_button = obj._manual_cut_data.get('assignment_mode', False) if obj._manual_cut_data else False
+        if num_selected >= 2 and not in_preview_for_button and not in_assignment_mode_for_button:
+            # Determine if we should run optimization (button click or auto-optimize mode)
+            run_optimization = False
+            skip_preview = False  # For Optimize All: skip preview and auto-accept
+
+            if imgui.button("Optimize", button_width, 30):
+                run_optimization = True
+            imgui.same_line()
+
+            # Optimize All button - optimize and accept without preview
+            if imgui.button("Opt All", button_width, 30):
+                run_optimization = True
+                skip_preview = True
+                obj._auto_optimize_all = True  # Set flag for subsequent windows
+                print(f"[OptAll] Starting Optimize All mode...")
+            imgui.same_line()
+
+            # Auto-trigger optimization if in auto-optimize-all mode
+            if should_auto_optimize and not run_optimization:
+                run_optimization = True
+                skip_preview = True
+                print(f"[OptAll] Auto-triggering optimization...")
+
+            if run_optimization:
+                # Get source data
+                source_contours = obj._manual_cut_data.get('source_contours', [])
+                source_bps = obj._manual_cut_data.get('source_bps', [])
+                target_bp = obj._manual_cut_data.get('target_bp')
+                stream_indices = obj._manual_cut_data.get('stream_indices', list(range(len(source_contours))))
+                target_level = obj._manual_cut_data.get('target_level')
+                source_level = obj._manual_cut_data.get('source_level')
+                current_pieces_3d = obj._manual_cut_data.get('current_pieces_3d', [obj._manual_cut_data.get('target_contour')])
+
+                print(f"Running optimization on {len(current_pieces_3d)} current pieces -> {required_pieces} needed...")
+
+                # Filter by selected sources
+                selected_source_contours = [source_contours[i] for i in selected_sources if i < len(source_contours)]
+                selected_source_bps = [source_bps[i] for i in selected_sources if i < len(source_bps)]
+                selected_stream_indices = [stream_indices[i] for i in selected_sources if i < len(stream_indices)]
+
+                if len(selected_source_contours) >= 2:
+                    # Get matched pairs for combining with optimized pieces
+                    matched_pairs = obj._manual_cut_data.get('matched_pairs', [])
+
+                    # Optimize remaining (unmatched) pieces
+                    final_pieces = obj._optimize_remaining_pieces(
+                        current_pieces_3d,
+                        selected_source_contours, selected_source_bps,
+                        selected_stream_indices, target_bp,
+                        target_level, source_level,
+                        matched_pairs=matched_pairs
+                    )
+
+                    if final_pieces is not None and len(final_pieces) > 0:
+                        # Convert 3D pieces to 2D for display
+                        target_mean = target_bp['mean']
+                        # Negate basis vectors to rotate 180° - match initial cutting window
+                        target_x = -target_bp['basis_x']
+                        target_y = -target_bp['basis_y']
+
+                        print(f"[Optimize DEBUG] Converting {len(final_pieces)} pieces to 2D")
+                        optimized_2d = []
+                        for pi, piece_3d in enumerate(final_pieces):
+                            piece_2d = np.array([
+                                [np.dot(v - target_mean, target_x), np.dot(v - target_mean, target_y)]
+                                for v in piece_3d
+                            ])
+                            optimized_2d.append(piece_2d)
+                            print(f"  Piece {pi}: {len(piece_3d)} verts 3D -> {len(piece_2d)} verts 2D")
+                            if len(piece_2d) > 0:
+                                centroid_2d = np.mean(piece_2d, axis=0)
+                                print(f"    2D centroid: ({centroid_2d[0]:.4f}, {centroid_2d[1]:.4f})")
+
+                        # Update current pieces with optimized result
+                        obj._manual_cut_data['current_pieces'] = optimized_2d
+                        obj._manual_cut_data['current_pieces_3d'] = list(final_pieces)
+                        obj._manual_cut_data['pre_optimization_pieces'] = current_pieces.copy()
+                        obj._manual_cut_data['pre_optimization_pieces_3d'] = [p.copy() for p in current_pieces_3d]
+                        obj._manual_cut_data['cut_lines'] = []
+                        obj._manual_cut_data['edit_history'] = []
+                        obj._manual_cut_line = None
+
+                        # Store transformed source contours for display on cutting panel
+                        # Also update target_2d, source_2d_list, and current_pieces to match the coordinate system
+                        if hasattr(obj, '_bp_viz_data') and len(obj._bp_viz_data) > 0:
+                            latest_viz = obj._bp_viz_data[-1]
+                            print(f"[Optimize DEBUG] _bp_viz_data has {len(obj._bp_viz_data)} entries, latest keys: {list(latest_viz.keys())}")
+                            transformed_srcs = latest_viz.get('final_transformed', [])
+                            obj._manual_cut_data['transformed_sources_2d'] = transformed_srcs
+
+                            # Update target_2d to match optimization's coordinate system
+                            opt_target_2d = latest_viz.get('target_2d', None)
+                            old_target_2d = obj._manual_cut_data.get('target_2d', None)
+                            if opt_target_2d is not None:
+                                # Compare old vs new target_2d
+                                if old_target_2d is not None and hasattr(old_target_2d, '__len__') and len(old_target_2d) > 0:
+                                    old_centroid = np.mean(old_target_2d, axis=0)
+                                    new_centroid = np.mean(opt_target_2d, axis=0)
+                                    print(f"[Optimize DEBUG] target_2d comparison:")
+                                    print(f"  old: {len(old_target_2d)} verts, centroid=({old_centroid[0]:.4f}, {old_centroid[1]:.4f}), first=({old_target_2d[0][0]:.4f}, {old_target_2d[0][1]:.4f})")
+                                    print(f"  new: {len(opt_target_2d)} verts, centroid=({new_centroid[0]:.4f}, {new_centroid[1]:.4f}), first=({opt_target_2d[0][0]:.4f}, {opt_target_2d[0][1]:.4f})")
+                                else:
+                                    print(f"[Optimize DEBUG] old_target_2d is None or empty: {type(old_target_2d)}, hasattr len: {hasattr(old_target_2d, '__len__')}")
+                                obj._manual_cut_data['target_2d'] = opt_target_2d
+                                print(f"[Optimize DEBUG] Updated target_2d: {len(opt_target_2d)} verts")
+                            else:
+                                print(f"[Optimize DEBUG] WARNING: opt_target_2d is None!")
+
+                            # Update source_2d_list to match (use source_2d_shapes + translations)
+                            source_shapes = latest_viz.get('source_2d_shapes', [])
+                            init_trans = latest_viz.get('initial_translations', [])
+                            print(f"[Optimize DEBUG] source_shapes: {len(source_shapes)}, init_trans: {len(init_trans)}")
+                            if len(source_shapes) > 0 and len(init_trans) == len(source_shapes):
+                                new_source_2d_list = []
+                                for i, (shape, trans) in enumerate(zip(source_shapes, init_trans)):
+                                    # Reconstruct original source position (before any transform)
+                                    src_2d = np.array(shape) + np.array(trans)
+                                    new_source_2d_list.append(src_2d)
+                                obj._manual_cut_data['source_2d_list'] = new_source_2d_list
+                                print(f"[Optimize DEBUG] Updated source_2d_list: {len(new_source_2d_list)} sources")
+
+                            # Use pieces_2d directly from optimization (same coordinate system)
+                            opt_pieces_2d = latest_viz.get('pieces_2d', [])
+                            if len(opt_pieces_2d) > 0:
+                                obj._manual_cut_data['current_pieces'] = opt_pieces_2d
+                                print(f"[Optimize DEBUG] Using pieces_2d from optimization ({len(opt_pieces_2d)} pieces)")
+                                for pi, pc in enumerate(opt_pieces_2d):
+                                    pc_centroid = np.mean(pc, axis=0)
+                                    print(f"  Piece {pi}: {len(pc)} verts, centroid ({pc_centroid[0]:.4f}, {pc_centroid[1]:.4f})")
+                            else:
+                                # Fallback to projecting from 3D (old behavior)
+                                obj._manual_cut_data['current_pieces'] = optimized_2d
+
+                            print(f"[Optimize DEBUG] Transformed sources: {len(transformed_srcs)}")
+                            for si, src in enumerate(transformed_srcs):
+                                if src is not None and len(src) > 0:
+                                    src_centroid = np.mean(src, axis=0)
+                                    print(f"  Source {si}: {len(src)} verts, centroid ({src_centroid[0]:.4f}, {src_centroid[1]:.4f})")
+
+                        if skip_preview:
+                            # Optimize All: trigger auto-accept flag
+                            obj._manual_cut_data['optimization_preview'] = True
+                            obj._manual_cut_data['auto_accept'] = True
+                            print(f"[OptAll] Optimization produced {len(final_pieces)} pieces - auto-accepting...")
+                        else:
+                            # Normal: enter preview mode
+                            obj._manual_cut_data['optimization_preview'] = True
+                            print(f"[Preview] Optimization produced {len(final_pieces)} pieces - enter preview mode")
+                            print(f"[Preview] You can now Accept, Reset, or edit with cutting lines")
+                    else:
+                        print(f"[Error] Optimization failed to produce pieces")
+                else:
+                    print(f"Need at least 2 source contours for optimization")
+
+        # ===== Preview Mode Buttons: Accept / Reset =====
+        in_preview_mode = obj._manual_cut_data.get('optimization_preview', False) if obj._manual_cut_data else False
+        if in_preview_mode:
+            # Check for auto-accept (from Optimize All)
+            auto_accept = obj._manual_cut_data.get('auto_accept', False)
+
+            # Accept button - finalize the optimization result
+            # Also triggered automatically in Optimize All mode
+            # Don't show button if auto-accepting (cleaner UI)
+            if auto_accept:
+                accept_clicked = True
+            else:
+                accept_clicked = imgui.button("Accept", button_width, 30)
+            if accept_clicked:
+                if auto_accept:
+                    obj._manual_cut_data['auto_accept'] = False  # Clear flag
+                print(f"[Preview] Accepting optimization result...")
+
+                # Get the current optimized pieces
+                current_pieces_3d = obj._manual_cut_data.get('current_pieces_3d', [])
+                # final_pieces will be set later to exclude matched pieces
+
+                # Get context data
+                source_contours = obj._manual_cut_data.get('source_contours', [])
+                source_bps = obj._manual_cut_data.get('source_bps', [])
+                target_bp = obj._manual_cut_data.get('target_bp')
+                stream_indices = obj._manual_cut_data.get('stream_indices', list(range(len(source_contours))))
+                target_level = obj._manual_cut_data.get('target_level')
+                source_level = obj._manual_cut_data.get('source_level')
+                matched_pairs = obj._manual_cut_data.get('matched_pairs', [])
+                parent_finalized_pieces = obj._manual_cut_data.get('parent_finalized_pieces', {})
+                original_source_indices = obj._manual_cut_data.get('original_source_indices', None)
+                selected_sources = obj._manual_cut_data.get('selected_sources', list(range(len(source_contours))))
+
+                # Exit preview mode
+                obj._manual_cut_data['optimization_preview'] = False
+
+                # Now run the finalization code
+                # Use sub-window context if original_source_indices is set (indicating we're in a sub-cut)
+                # Note: parent_finalized_pieces may be empty if no 1:1 matches from parent
+                if original_source_indices:
+                    # Sub-window context: need to combine with parent's 1:1 pieces
+                    source_contours_full = obj._manual_cut_data.get('source_contours', [])
+                    # Compute total_pieces from max stream index (NOT just count)
+                    # Stream indices can be larger than count-1, e.g., streams [3,1,2] with count 3
+                    # needs array size 4 to fit index 3
+                    parent_context = obj._manual_cut_data.get('parent_context', None)
+                    all_stream_indices_for_size = parent_context.get('stream_indices', []) if parent_context else []
+                    max_parent_idx = max(parent_finalized_pieces.keys()) if parent_finalized_pieces else -1
+                    max_current_idx = max(original_source_indices) if original_source_indices else -1
+                    max_all_streams = max(all_stream_indices_for_size) if all_stream_indices_for_size else -1
+                    total_pieces = max(max_parent_idx, max_current_idx, max_all_streams) + 1
+                    all_pieces = [None] * total_pieces
+                    print(f"[Accept] Using total_pieces={total_pieces} (from max stream index)")
+
+                    # Fill in parent's finalized pieces (1:1 assignments from parent)
+                    print(f"[Accept DEBUG] parent_finalized_pieces has {len(parent_finalized_pieces)} entries:")
+                    for orig_src_idx, piece in parent_finalized_pieces.items():
+                        if orig_src_idx < total_pieces:
+                            all_pieces[orig_src_idx] = piece
+                        piece_id = id(piece) if piece is not None else 0
+                        piece_verts = len(piece) if piece is not None else 0
+                        piece_centroid = np.mean(piece, axis=0) if piece is not None and len(piece) > 0 else [0,0,0]
+                        print(f"[Accept DEBUG]   parent_finalized[{orig_src_idx}]: {piece_verts} verts, id={piece_id}, centroid={piece_centroid}")
+
+                    # Fill in pre-matched pieces (mapped to original indices)
+                    matched_piece_indices = set()
+                    for piece_idx, local_src_idx in matched_pairs:
+                        if piece_idx < len(current_pieces_3d) and local_src_idx < len(original_source_indices):
+                            orig_src_idx = original_source_indices[local_src_idx]
+                            if orig_src_idx < total_pieces:
+                                all_pieces[orig_src_idx] = current_pieces_3d[piece_idx]
+                                matched_piece_indices.add(piece_idx)
+
+                    # Build list of unmatched pieces (excluding already-matched ones)
+                    unmatched_pieces = [current_pieces_3d[i] for i in range(len(current_pieces_3d))
+                                       if i not in matched_piece_indices]
+
+                    # Fill in optimized pieces for remaining sources (mapped to original indices)
+                    opt_idx = 0
+                    for local_src_idx in selected_sources:
+                        if local_src_idx < len(original_source_indices):
+                            orig_src_idx = original_source_indices[local_src_idx]
+                            if orig_src_idx < total_pieces and all_pieces[orig_src_idx] is None:
+                                if opt_idx < len(unmatched_pieces):
+                                    all_pieces[orig_src_idx] = unmatched_pieces[opt_idx]
+                                    opt_idx += 1
+
+                    # Get original stream indices from parent context
+                    # IMPORTANT: Use the actual stream indices, not just [0, 1, ..., M-1]
+                    parent_context = obj._manual_cut_data.get('parent_context', None)
+                    if parent_context and 'stream_indices' in parent_context:
+                        all_stream_indices = parent_context['stream_indices']
+                    else:
+                        # Fallback to initial stream_indices if parent_context not available
+                        all_stream_indices = obj._manual_cut_data.get('stream_indices', list(range(total_pieces)))
+                else:
+                    # Normal context (not a sub-window)
+                    source_contours_full = obj._manual_cut_data.get('source_contours', [])
+                    all_pieces = [None] * len(source_contours_full)
+
+                    # Fill in pre-matched pieces
+                    matched_piece_indices = set()
+                    for piece_idx, src_idx in matched_pairs:
+                        if piece_idx < len(current_pieces_3d) and src_idx < len(all_pieces):
+                            all_pieces[src_idx] = current_pieces_3d[piece_idx]
+                            matched_piece_indices.add(piece_idx)
+
+                    # Build list of unmatched pieces (excluding already-matched ones)
+                    unmatched_pieces = [current_pieces_3d[i] for i in range(len(current_pieces_3d))
+                                       if i not in matched_piece_indices]
+
+                    # Fill in optimized pieces for remaining sources
+                    opt_idx = 0
+                    for src_idx in selected_sources:
+                        if src_idx < len(all_pieces) and all_pieces[src_idx] is None and opt_idx < len(unmatched_pieces):
+                            all_pieces[src_idx] = unmatched_pieces[opt_idx]
+                            opt_idx += 1
+
+                    all_stream_indices = obj._manual_cut_data.get('stream_indices', stream_indices)
+
+                # Check if we have all pieces
+                # Note: all_pieces may have extra None slots for unused indices
+                # (e.g., streams [3,1,2] need array size 4 but only 3 pieces)
+                filled_count = sum(1 for p in all_pieces if p is not None)
+                # Get actual required count from parent context's stream indices
+                required_pieces = len(all_stream_indices_for_size) if original_source_indices and all_stream_indices_for_size else len(all_pieces)
+                print(f"[Accept] Filled {filled_count}/{required_pieces} pieces (array size {len(all_pieces)}): matched={len(matched_pairs)}, unmatched={len(unmatched_pieces)}")
+                print(f"[Accept DEBUG] Final all_pieces state:")
+                for i, p in enumerate(all_pieces):
+                    if p is not None:
+                        p_id = id(p)
+                        p_centroid = np.mean(p, axis=0) if len(p) > 0 else [0,0,0]
+                        print(f"  all_pieces[{i}]: {len(p)} verts, id={p_id}, centroid={p_centroid}")
+                    else:
+                        print(f"  all_pieces[{i}]: None")
+
+                # Update parent_finalized_pieces with THIS sub-cut's results
+                # Use all_pieces directly since it already has correct mappings
+                updated_finalized = dict(parent_finalized_pieces) if parent_finalized_pieces else {}
+                if original_source_indices:
+                    for local_src_idx in range(len(original_source_indices)):
+                        orig_src_idx = original_source_indices[local_src_idx]
+                        if orig_src_idx < len(all_pieces) and all_pieces[orig_src_idx] is not None:
+                            updated_finalized[orig_src_idx] = all_pieces[orig_src_idx]
+
+                # Level-by-level processing: ALWAYS check pending sub-cuts first
+                # This must happen regardless of whether all pieces are filled
+                # IMPORTANT: Use subcut_level (where we ARE), not current_subcut_level
+                subcut_level = obj._manual_cut_data.get('subcut_level', 0)
+                pending_by_level = obj._manual_cut_data.get('pending_subcuts_by_level', {})
+
+                print(f"[Accept] Subcut level: {subcut_level}")
+                print(f"[Accept] Pending by level: {[(lvl, len(lst)) for lvl, lst in pending_by_level.items()]}")
+
+                # Find lowest level with pending sub-cuts (breadth-first)
+                next_pending = None
+                for level in sorted(pending_by_level.keys()):
+                    if len(pending_by_level[level]) > 0:
+                        next_pending = (level, pending_by_level[level])
+                        break
+
+                if next_pending is not None:
+                    # Open next pending sub-cut
+                    level, pending_list = next_pending
+                    print(f"[Accept] Opening pending sub-cut at level {level} ({len(pending_list)} remaining)")
+                    next_subcut = pending_list[0]
+                    obj._manual_cut_data['parent_finalized_pieces'] = updated_finalized
+                    obj._open_subcut_for_piece(next_subcut)
+                else:
+                    # No more pending sub-cuts - check if ready to finalize
+                    # Compare against required_pieces (actual source count), not array size
+                    if filled_count >= required_pieces:
+                        print(f"[Accept] Finalizing: {required_pieces} pieces ({len(matched_pairs)} pre-matched, {len(unmatched_pieces)} optimized)")
+
+                        # All levels done - store final result and call cut_streams
+                        if not hasattr(obj, '_manual_cut_results') or obj._manual_cut_results is None:
+                            obj._manual_cut_results = {}
+
+                        target_i = obj._manual_cut_data.get('target_i', 0)
+                        result_key = (target_level, target_i)
+                        print(f"[Accept] Storing result: target_level={target_level}, target_i={target_i}")
+                        print(f"[Accept] all_pieces has {len(all_pieces)} entries, all_stream_indices={all_stream_indices}")
+                        obj._manual_cut_results[result_key] = {
+                            'cut_contours': all_pieces,
+                            'source_indices': all_stream_indices,
+                            'is_1to1': False,
+                        }
+                        print(f"[Accept] All levels complete, stored result with key {result_key}")
+
+                        # Clear stale data before continuing
+                        obj._manual_cut_data = None
+                        obj._manual_cut_original_state = None
+                        obj._manual_cut_pending = False
+                        obj.cut_streams(cut_method='bp', muscle_name=muscle_name)
+                        # Smoothening and alignment are now handled inside cut_streams
+                        if not obj._manual_cut_pending and obj._manual_cut_data is None:
+                            # Clear auto-optimize-all flag when all cutting is done
+                            if hasattr(obj, '_auto_optimize_all'):
+                                obj._auto_optimize_all = False
+                            if name in v._manual_cut_mouse:
+                                del v._manual_cut_mouse[name]
+
+                            # Auto-resume pipeline if it was paused waiting for manual cut
+                            if hasattr(obj, '_pipeline_paused_at') and obj._pipeline_paused_at is not None:
+                                max_step = obj._process_step if hasattr(obj, '_process_step') else 12
+                                start_step = obj._pipeline_paused_at
+                                if start_step <= max_step:
+                                    print(f"[{name}] Auto-resuming pipeline from step {start_step} to {max_step}...")
+                                    try:
+                                        # Step 7: Stream Smooth (z, x, bp - after cut)
+                                        if start_step <= 7 <= max_step and hasattr(obj, 'stream_contours') and obj.stream_contours is not None:
+                                            print(f"  [7/{max_step}] Stream Smoothening (z, x, bp)...")
+                                            obj.smoothen_contours_z()
+                                            obj.smoothen_contours_x()
+                                            obj.smoothen_contours_bp()
+
+                                        # Step 8: Contour Select
+                                        if start_step <= 8 <= max_step and hasattr(obj, 'stream_contours') and obj.stream_contours is not None:
+                                            print(f"  [8/{max_step}] Selecting contours...")
+                                            obj.select_levels()
+                                            # Check if waiting for manual level selection
+                                            if hasattr(obj, '_level_select_window_open') and obj._level_select_window_open:
+                                                obj._pipeline_paused_at = 9  # Resume from step 9 after selection
+                                                print(f"  [8/{max_step}] Waiting for level selection - pipeline paused")
+                                                imgui.end()
+                                                continue
+
+                                        # Step 9: Build Fiber
+                                        if start_step <= 9 <= max_step and hasattr(obj, 'stream_contours') and obj.stream_contours is not None:
+                                            print(f"  [9/{max_step}] Building fibers...")
+                                            obj.build_fibers(skeleton_meshes=v.zygote_skeleton_meshes)
+
+                                        # Step 10: Resample Contours
+                                        if start_step <= 10 <= max_step and obj.contours is not None and len(obj.contours) > 0 and obj.bounding_planes is not None:
+                                            print(f"  [10/{max_step}] Resampling Contours...")
+                                            obj.resample_contours(base_samples=32)
+
+                                        # Step 11: Build Contour Mesh
+                                        if start_step <= 11 <= max_step and obj.contours is not None and len(obj.contours) > 0 and obj.draw_contour_stream is not None:
+                                            print(f"  [11/{max_step}] Building Contour Mesh...")
+                                            obj.build_contour_mesh()
+
+                                        # Step 12: Tetrahedralize
+                                        if start_step <= 12 <= max_step and obj.contour_mesh_vertices is not None:
+                                            print(f"  [12/{max_step}] Tetrahedralizing...")
+                                            obj.soft_body = None
+                                            obj.tetrahedralize_contour_mesh()
+                                            if obj.tet_vertices is not None:
+                                                obj.is_draw_contours = False
+                                                obj.is_draw_tet_mesh = True
+
+                                        print(f"[{name}] Pipeline complete (steps {start_step}-{max_step})!")
+                                    except Exception as e:
+                                        print(f"[{name}] Pipeline error: {e}")
+                                        import traceback
+                                        traceback.print_exc()
+                                obj._pipeline_paused_at = None
+
+                            imgui.end()
+                            continue
+                    else:
+                        # No pending sub-cuts but pieces incomplete - this shouldn't happen
+                        print(f"[Accept] WARNING: No pending sub-cuts but only {filled_count}/{required_pieces} pieces filled")
+
+            # Skip remaining preview buttons if auto-accepting (cleaner UI)
+            if not auto_accept:
+                imgui.same_line()
+
+                # Reset button - go back to pre-optimization state
+                if imgui.button("Reset", button_width, 30):
+                    print(f"[Preview] Resetting to pre-optimization state...")
+                    pre_pieces = obj._manual_cut_data.get('pre_optimization_pieces', [])
+                    pre_pieces_3d = obj._manual_cut_data.get('pre_optimization_pieces_3d', [])
+                    if pre_pieces and pre_pieces_3d:
+                        obj._manual_cut_data['current_pieces'] = pre_pieces
+                        obj._manual_cut_data['current_pieces_3d'] = pre_pieces_3d
+                    obj._manual_cut_data['optimization_preview'] = False
+                    obj._manual_cut_data['cut_lines'] = []
+                    obj._manual_cut_data['edit_history'] = []
+                    obj._manual_cut_line = None
+                    # Clear optimization display data
+                    obj._manual_cut_data['transformed_sources_2d'] = None
+                    # Clear _bp_viz_data to remove optimization results
+                    if hasattr(obj, '_bp_viz_data'):
+                        obj._bp_viz_data = []
+                    print(f"[Preview] Reset complete - you can draw new cuts or optimize again")
+
+                imgui.same_line()
+
+                # Next Cut button - apply current cutting line to edit optimized pieces
+                has_cut_line = obj._manual_cut_line is not None
+                if has_cut_line:
+                    if imgui.button("Cut", button_width, 30):
+                        print(f"[Preview] Applying cut to edit optimized pieces...")
+
+                        # Save current state for undo before applying cut
+                        edit_history = obj._manual_cut_data.get('edit_history', [])
+                        edit_history.append({
+                            'pieces': [p.copy() for p in obj._manual_cut_data.get('current_pieces', [])],
+                            'pieces_3d': [p.copy() for p in obj._manual_cut_data.get('current_pieces_3d', [])],
+                        })
+                        obj._manual_cut_data['edit_history'] = edit_history
+
+                        # Apply the iterative cut to further subdivide pieces
+                        success = obj._apply_iterative_cut()
+                        if success:
+                            print(f"[Preview] Cut applied - now have {len(obj._manual_cut_data.get('current_pieces', []))} pieces (edit #{len(edit_history)})")
+                            obj._manual_cut_line = None  # Clear line after applying
+                        else:
+                            # Remove the history entry since cut failed
+                            edit_history.pop()
+                            print(f"[Preview] Cut failed - try drawing a different line")
+                    imgui.same_line()
+
+                # Undo button - revert to previous state
+                edit_history = obj._manual_cut_data.get('edit_history', [])
+                if len(edit_history) > 0:
+                    if imgui.button("Undo", button_width, 30):
+                        prev_state = edit_history.pop()
+                        obj._manual_cut_data['current_pieces'] = prev_state['pieces']
+                        obj._manual_cut_data['current_pieces_3d'] = prev_state['pieces_3d']
+                        obj._manual_cut_data['edit_history'] = edit_history
+                        obj._manual_cut_line = None
+                        print(f"[Preview] Undid last edit - now have {len(prev_state['pieces'])} pieces")
+                    imgui.same_line()
+
+        # Skip button - for 1-to-1 case (only 1 source selected, no cutting needed)
+        # Also auto-triggered in Optimize All mode
+        if num_selected == 1:
+            skip_clicked = imgui.button("Skip (1:1)", button_width, 30)
+            # Auto-skip in Optimize All mode
+            if auto_optimize_all and not skip_clicked:
+                skip_clicked = True
+                print(f"[OptAll] Auto-skipping 1:1 case...")
+            if skip_clicked:
+                print(f"Skipping cut for target (1:1 mapping with source {selected_sources[0]})")
+                # Store the 1:1 result - the single selected source maps directly to target
+                selected_src_idx = selected_sources[0]
+                target_i = obj._manual_cut_data.get('target_i', 0)
+                target_level = obj._manual_cut_data.get('target_level', 0)
+                source_indices = obj._manual_cut_data.get('source_indices', [])
+
+                # Store result in _manual_cut_results (persistent storage)
+                # Use the actual source index from source_indices, not the local index
+                actual_source_idx = source_indices[selected_src_idx] if selected_src_idx < len(source_indices) else selected_src_idx
+
+                if not hasattr(obj, '_manual_cut_results') or obj._manual_cut_results is None:
+                    obj._manual_cut_results = {}
+
+                result_key = (target_level, target_i)
+                obj._manual_cut_results[result_key] = {
+                    'cut_contours': [obj._manual_cut_data['target_contour']],  # Single piece = target
+                    'source_indices': [actual_source_idx],  # Maps to this source
+                    'is_1to1': True,  # Flag for 1:1 mapping
+                }
+                print(f"Stored 1:1 result with key {result_key}, source {actual_source_idx}")
+
+                # Continue with cut_streams - it will find the next cut point or finish
+                obj._manual_cut_data = None
+                obj._manual_cut_line = None
+                obj._manual_cut_pending = False
+                obj.cut_streams(cut_method='bp', muscle_name=muscle_name)
+
+                # Smoothening and alignment are now handled inside cut_streams
+                if not obj._manual_cut_pending and obj._manual_cut_data is None:
+                    # Clear auto-optimize-all flag when all cutting is done
+                    if hasattr(obj, '_auto_optimize_all'):
+                        obj._auto_optimize_all = False
+                    if name in v._manual_cut_mouse:
+                        del v._manual_cut_mouse[name]
+                    imgui.end()
+                    continue
+                # cut_streams returned early for another manual cut - don't close window
+            imgui.same_line()
+
+        # Check if we're in assignment mode (after cutting)
+        has_valid_line = obj._manual_cut_line is not None
+        in_assignment_mode = obj._manual_cut_data.get('assignment_mode', False)
+        piece_assignments = obj._manual_cut_data.get('piece_assignments', {})
+        in_preview_mode_check = obj._manual_cut_data.get('optimization_preview', False)
+
+        # Skip normal cutting/assignment UI if in preview mode (Accept/Reset/Cut shown above)
+        if in_preview_mode_check:
+            # In preview mode, show Save&Close and Cancel buttons
+            if imgui.button("Save && Close", button_width, 30):
+                obj._save_and_close_manual_cut(muscle_name=muscle_name)
+                if hasattr(obj, '_auto_optimize_all'):
+                    obj._auto_optimize_all = False
+                if name in v._manual_cut_mouse:
+                    del v._manual_cut_mouse[name]
+                imgui.end()
+                continue
+            imgui.same_line()
+            if imgui.button("Cancel", button_width, 30):
+                obj._cancel_manual_cut()
+                if name in v._manual_cut_mouse:
+                    del v._manual_cut_mouse[name]
+            imgui.end()
+            continue
+
+        if in_assignment_mode:
+            # === ASSIGNMENT MODE UI ===
+            imgui.text("Assign sources to pieces:")
+            imgui.separator()
+
+            # Piece colors (same as visualization)
+            piece_colors = [
+                (1.0, 1.0, 1.0),  # White
+                (0.2, 0.6, 1.0),  # Blue
+                (1.0, 0.4, 0.2),  # Orange
+                (0.2, 1.0, 0.4),  # Green
+                (1.0, 0.8, 0.2),  # Yellow
+                (0.8, 0.2, 1.0),  # Purple
+            ]
+
+            # Get source labels (original indices for display)
+            source_labels = obj._manual_cut_data.get('source_labels', list(range(len(source_contours_3d))))
+
+            # Show each piece with source checkboxes
+            for piece_idx in range(len(current_pieces)):
+                assigned = piece_assignments.get(piece_idx, [])
+                # Draw color indicator
+                color = piece_colors[piece_idx % len(piece_colors)]
+                imgui.push_style_color(imgui.COLOR_BUTTON, *color, 1.0)
+                imgui.push_style_color(imgui.COLOR_BUTTON_HOVERED, *color, 1.0)
+                imgui.push_style_color(imgui.COLOR_BUTTON_ACTIVE, *color, 1.0)
+                imgui.button(f"P{piece_idx}##color", 30, 20)
+                imgui.pop_style_color(3)
+                imgui.same_line()
+                imgui.text("->")
+                imgui.same_line()
+
+                # Checkboxes for each source (use original labels for display)
+                for src_idx in range(len(source_contours_3d)):
+                    is_assigned = src_idx in assigned
+                    # Display original source index from source_labels
+                    src_label = source_labels[src_idx] if src_idx < len(source_labels) else src_idx
+                    changed, new_val = imgui.checkbox(f"S{src_label}##p{piece_idx}", is_assigned)
+                    if changed:
+                        if new_val:
+                            # Add source to this piece, remove from others
+                            for p in piece_assignments:
+                                if src_idx in piece_assignments[p]:
+                                    piece_assignments[p].remove(src_idx)
+                            if piece_idx not in piece_assignments:
+                                piece_assignments[piece_idx] = []
+                            piece_assignments[piece_idx].append(src_idx)
+                        else:
+                            if src_idx in piece_assignments.get(piece_idx, []):
+                                piece_assignments[piece_idx].remove(src_idx)
+                        obj._manual_cut_data['piece_assignments'] = piece_assignments
+                    imgui.same_line()
+                imgui.new_line()
+
+            imgui.separator()
+
+            # Confirm button - processes assignments
+            if imgui.button("Confirm", button_width, 30):
+                # Process assignments: 1:1 finalized, 2:1 opens sub-window
+                obj._process_piece_assignments()
+
+                # Check what to do next
+                # IMPORTANT: Use subcut_level (where we ARE) not current_subcut_level (batch tracking)
+                # _process_piece_assignments queues to subcut_level + 1
+                subcut_level = obj._manual_cut_data.get('subcut_level', 0)
+                pending_by_level = obj._manual_cut_data.get('pending_subcuts_by_level', {})
+                newly_queued = pending_by_level.get(subcut_level + 1, [])
+
+                print(f"[Confirm] Subcut level: {subcut_level}")
+                print(f"[Confirm] Pending by level: {[(lvl, len(lst)) for lvl, lst in pending_by_level.items()]}")
+
+                if len(newly_queued) > 0:
+                    # Open sub-window for first pending N:1 case from THIS window
+                    print(f"[Confirm] {len(newly_queued)} sub-cuts at level {subcut_level + 1}, opening next...")
+                    obj._open_subcut_for_piece(newly_queued[0])
+                else:
+                    # Check if there are other pending sub-cuts at any level
+                    # Find lowest level with pending sub-cuts (breadth-first)
+                    next_pending = None
+                    for level in sorted(pending_by_level.keys()):
+                        if len(pending_by_level[level]) > 0:
+                            next_pending = (level, pending_by_level[level])
+                            break
+
+                    if next_pending is not None:
+                        # Open next pending sub-cut
+                        level, pending_list = next_pending
+                        print(f"[Confirm] Opening pending sub-cut at level {level} ({len(pending_list)} remaining)")
+                        obj._open_subcut_for_piece(pending_list[0])
+                    else:
+                        # All done - finalize
+                        # Extract values BEFORE finalize in case it modifies _manual_cut_data
+                        target_level = obj._manual_cut_data.get('target_level', 0)
+                        target_i = obj._manual_cut_data.get('target_i', 0)
+
+                        # _finalize_manual_cuts() stores result with correct stream_indices from parent_context
+                        cut_result, _ = obj._finalize_manual_cuts()
+                        if cut_result is not None:
+                            # NOTE: _finalize_manual_cuts() already stored the result with correct stream_indices
+                            # No need to overwrite here - just verify it exists
+                            result_key = (target_level, target_i)
+                            if hasattr(obj, '_manual_cut_results') and result_key in obj._manual_cut_results:
+                                print(f"[Confirm] Result already stored with key {result_key}")
+                            else:
+                                print(f"[Confirm] WARNING: Result not found for key {result_key}")
+
+                            # Clear _manual_cut_data to prevent stale data issues
+                            obj._manual_cut_data = None
+                            obj._manual_cut_original_state = None
+                            obj._manual_cut_pending = False
+                            obj.cut_streams(cut_method='bp', muscle_name=muscle_name)
+                            # Smoothening and alignment are now handled inside cut_streams
+                            if not obj._manual_cut_pending and obj._manual_cut_data is None:
+                                # Clear auto-optimize-all flag when all cutting is done
+                                if hasattr(obj, '_auto_optimize_all'):
+                                    obj._auto_optimize_all = False
+                                if name in v._manual_cut_mouse:
+                                    del v._manual_cut_mouse[name]
+                                imgui.end()
+                                continue
+                            # cut_streams returned early for another manual cut - don't close window
+
+            # NOTE: No "Back" button - only one cut allowed per window
+            # User must use "Reset" to start over or "Done" to proceed
+        else:
+            # === CUTTING MODE UI ===
+            # Cut button - applies cut and enters assignment mode
+            cut_enabled = has_valid_line
+            if not cut_enabled:
+                imgui.push_style_var(imgui.STYLE_ALPHA, 0.5)
+
+            if imgui.button("Cut", button_width, 30):
+                if cut_enabled:
+                    # Apply the cut
+                    success = obj._apply_iterative_cut()
+                    if success:
+                        obj._manual_cut_line = None
+
+                        # Enter assignment mode
+                        obj._manual_cut_data['assignment_mode'] = True
+
+                        # Initialize assignments by distance
+                        obj._init_piece_assignments_by_distance()
+
+                        print(f"Cut applied. Now assign sources to pieces.")
+                    else:
+                        print("Failed to apply cut - line must cross a piece twice")
+                else:
+                    print("Draw a cutting line first")
+
+            if not cut_enabled:
+                imgui.pop_style_var()
+
+        # Hide Reset/Cancel when auto-optimizing (cleaner UI)
+        if not should_auto_optimize:
+            imgui.same_line()
+            if imgui.button("Reset", button_width, 30):
+                # Reset to original state (before any cuts or sub-windows)
+                obj._reset_to_original_state()
+                # Also clear auto-optimize-all flag
+                if hasattr(obj, '_auto_optimize_all'):
+                    obj._auto_optimize_all = False
+                if name in v._manual_cut_mouse:
+                    v._manual_cut_mouse[name]['dragging'] = False
+                    v._manual_cut_mouse[name]['zoom'] = 1.0
+                    v._manual_cut_mouse[name]['pan'] = [0.0, 0.0]
+
+            imgui.same_line()
+            if imgui.button("Save && Close", button_width, 30):
+                obj._save_and_close_manual_cut(muscle_name=muscle_name)
+                if hasattr(obj, '_auto_optimize_all'):
+                    obj._auto_optimize_all = False
+                if name in v._manual_cut_mouse:
+                    del v._manual_cut_mouse[name]
+                imgui.end()
+                continue
+
+            imgui.same_line()
+            if imgui.button("Cancel", button_width, 30):
+                obj._cancel_manual_cut()
+                # Also clear auto-optimize-all flag
+                if hasattr(obj, '_auto_optimize_all'):
+                    obj._auto_optimize_all = False
+                if name in v._manual_cut_mouse:
+                    del v._manual_cut_mouse[name]
+
+        imgui.end()
+
+
+def _render_level_select_windows(v):
+    """Render level selection windows for manual level selection after Contour Select."""
+    for name, obj in v.zygote_muscle_meshes.items():
+        if not hasattr(obj, '_level_select_window_open') or not obj._level_select_window_open:
+            continue
+
+        if not hasattr(obj, '_level_select_checkboxes') or obj._level_select_checkboxes is None:
+            continue
+
+        if not hasattr(obj, '_level_select_original') or obj._level_select_original is None:
+            continue
+
+        # Get data
+        orig = obj._level_select_original
+        checkboxes = obj._level_select_checkboxes
+        stream_groups = orig['stream_groups']
+        max_stream_count = len(checkboxes)
+
+        # Window setup
+        imgui.set_next_window_size(500, 600, imgui.FIRST_USE_EVER)
+        expanded, opened = imgui.begin(f"Level Select: {name}", True)
+
+        if not opened:
+            # User closed window - cancel selection
+            obj._level_select_window_open = False
+            obj._level_select_checkboxes = None
+            obj._level_select_original = None
+            imgui.end()
+            continue
+
+        imgui.text(f"Streams: {max_stream_count}")
+        imgui.text("Check/uncheck levels. Linked levels toggle together.")
+        imgui.separator()
+
+        # Create scrollable region for checkboxes
+        imgui.begin_child("LevelCheckboxes", 0, -50, border=True)
+
+        # Track if visualization needs update
+        vis_changed = False
+
+        # Find max levels across all streams
+        max_levels = max(len(checkboxes[s]) for s in range(max_stream_count))
+
+        # Column width for each stream
+        col_width = 80
+
+        # Compute display order so that streams from same merged contour are adjacent
+        # Find levels with linked groups and use that structure for ordering
+        stream_display_order = list(range(max_stream_count))
+
+        # Find a level with multiple groups (most informative for ordering)
+        # Prefer levels where streams are split into distinct groups
+        best_level = 0
+        best_score = 0
+        for lvl_i, groups in enumerate(stream_groups):
+            multi_groups = [g for g in groups if len(g) > 1]
+            num_multi_groups = len(multi_groups)
+            total_linked = sum(len(g) for g in multi_groups)
+            # Score: prefer multiple groups over single big group
+            # A level with [[0,4], [1,2,3]] scores higher than [[0,1,2,3,4]]
+            score = num_multi_groups * 100 + total_linked
+            if score > best_score:
+                best_score = score
+                best_level = lvl_i
+
+        if best_score > 0 and best_level < len(stream_groups):
+            # Use the linked structure at this level to order streams
+            # Streams in same group should be adjacent
+            groups_at_best = stream_groups[best_level]
+            stream_display_order = []
+            for group in groups_at_best:
+                stream_display_order.extend(sorted(group))
+            # Add any missing streams
+            for s in range(max_stream_count):
+                if s not in stream_display_order:
+                    stream_display_order.append(s)
+        elif hasattr(obj, 'stream_contours') and obj.stream_contours is not None and len(obj.stream_contours) > 0:
+            # Fall back to spatial ordering at first level
+            try:
+                centroids = []
+                for stream_i in range(max_stream_count):
+                    if stream_i < len(obj.stream_contours) and len(obj.stream_contours[stream_i]) > 0:
+                        first_contour = obj.stream_contours[stream_i][0]
+                        if len(first_contour) > 0:
+                            centroid = np.mean(first_contour, axis=0)
+                            centroids.append((stream_i, centroid))
+                        else:
+                            centroids.append((stream_i, np.zeros(3)))
+                    else:
+                        centroids.append((stream_i, np.zeros(3)))
+
+                if len(centroids) > 1:
+                    positions = np.array([c[1] for c in centroids])
+                    mean_pos = np.mean(positions, axis=0)
+                    centered = positions - mean_pos
+
+                    if centered.shape[0] >= 2:
+                        cov = np.cov(centered.T)
+                        if cov.shape == (3, 3):
+                            eigenvalues, eigenvectors = np.linalg.eigh(cov)
+                            principal_axis = eigenvectors[:, np.argmax(eigenvalues)]
+                            projections = [(s, np.dot(c - mean_pos, principal_axis)) for s, c in centroids]
+                            projections.sort(key=lambda x: x[1])
+                            stream_display_order = [p[0] for p in projections]
+            except Exception:
+                pass  # Keep default order on error
+
+        # Header row with stream labels (in spatial order)
+        imgui.text("Level")
+        for col_i, stream_i in enumerate(stream_display_order):
+            imgui.same_line(60 + col_i * col_width)
+            imgui.text(f"S{stream_i}")
+        imgui.separator()
+
+        # Base colors - many distinct, bright colors
+        base_colors = [
+            (1.0, 0.2, 0.2),   # red
+            (0.2, 0.8, 0.2),   # green
+            (0.2, 0.4, 1.0),   # blue
+            (1.0, 0.6, 0.1),   # orange
+            (0.8, 0.2, 0.9),   # purple
+            (0.1, 0.9, 0.9),   # cyan
+            (0.9, 0.9, 0.2),   # yellow
+            (1.0, 0.4, 0.7),   # pink
+            (0.6, 0.4, 0.2),   # brown
+            (0.4, 1.0, 0.6),   # mint
+            (0.6, 0.6, 1.0),   # lavender
+            (1.0, 0.8, 0.4),   # peach
+        ]
+
+        # Pre-compute colors for each stream at each level
+        # - Same group: keep color
+        # - Merge: blend colors
+        # - Split: assign NEW distinct colors
+        stream_colors_rgb = [[(0.5, 0.5, 0.5)] * max_stream_count for _ in range(max_levels)]
+        group_to_color = {}  # group_key -> color
+        next_base_color = 0
+
+        for level_i in range(max_levels):
+            if level_i < len(stream_groups):
+                for group in stream_groups[level_i]:
+                    group_key = tuple(sorted(group))
+
+                    if group_key in group_to_color:
+                        # Already assigned (same group seen before)
+                        color = group_to_color[group_key]
+                    elif level_i == 0:
+                        # First level: assign base color
+                        color = base_colors[next_base_color % len(base_colors)]
+                        next_base_color += 1
+                        group_to_color[group_key] = color
+                    else:
+                        # Check previous level colors of streams in this group
+                        prev_colors = []
+                        for s in group:
+                            if s < max_stream_count:
+                                prev_colors.append(stream_colors_rgb[level_i - 1][s])
+
+                        unique_colors = list(set(prev_colors))
+
+                        if len(unique_colors) > 1:
+                            # Merge: blend all previous colors
+                            r = sum(c[0] for c in unique_colors) / len(unique_colors)
+                            g = sum(c[1] for c in unique_colors) / len(unique_colors)
+                            b = sum(c[2] for c in unique_colors) / len(unique_colors)
+                            color = (r, g, b)
+                        else:
+                            # New group (split or first appearance): new distinct color
+                            color = base_colors[next_base_color % len(base_colors)]
+                            next_base_color += 1
+
+                        group_to_color[group_key] = color
+
+                    # Assign color to all streams in group
+                    for s in group:
+                        if s < max_stream_count:
+                            stream_colors_rgb[level_i][s] = color
+
+        # Render rows (one per level)
+        for level_i in range(max_levels):
+            # Build stream-to-group mapping for this level
+            stream_to_group = {}  # stream_i -> group list
+            has_any_linked = False
+            if level_i < len(stream_groups):
+                for group in stream_groups[level_i]:
+                    is_multi = len(group) > 1
+                    if is_multi:
+                        has_any_linked = True
+                    for s in group:
+                        stream_to_group[s] = group if is_multi else None
+
+            # Level label with link indicator
+            if has_any_linked:
+                imgui.text_colored(f"{level_i:3d} *", 0.0, 1.0, 1.0, 1.0)
+            else:
+                imgui.text(f"{level_i:3d}  ")
+
+            # Checkbox for each stream at this level (in spatial display order)
+            for col_i, stream_i in enumerate(stream_display_order):
+                imgui.same_line(60 + col_i * col_width)
+
+                if level_i < len(checkboxes[stream_i]):
+                    checkbox_id = f"##lvl_{stream_i}_{level_i}"
+                    is_checked = checkboxes[stream_i][level_i]
+
+                    # Find THIS stream's group
+                    this_group = stream_to_group.get(stream_i, None)
+                    is_this_linked = this_group is not None and len(this_group) > 1
+
+                    # Always show color based on group identity
+                    color = stream_colors_rgb[level_i][stream_i]
+                    # Tint checkbox frame - use bright colors
+                    imgui.push_style_color(imgui.COLOR_FRAME_BACKGROUND, color[0] * 0.8, color[1] * 0.8, color[2] * 0.8, 1.0)
+                    imgui.push_style_color(imgui.COLOR_FRAME_BACKGROUND_HOVERED, color[0], color[1], color[2], 1.0)
+                    # Checkmark color - use black or white based on background brightness
+                    brightness = color[0] * 0.299 + color[1] * 0.587 + color[2] * 0.114
+                    if brightness > 0.5:
+                        imgui.push_style_color(imgui.COLOR_CHECK_MARK, 0.0, 0.0, 0.0, 1.0)  # black
+                    else:
+                        imgui.push_style_color(imgui.COLOR_CHECK_MARK, 1.0, 1.0, 1.0, 1.0)  # white
+
+                    changed, new_value = imgui.checkbox(checkbox_id, is_checked)
+
+                    imgui.pop_style_color(3)
+
+                    if changed:
+                        vis_changed = True
+                        checkboxes[stream_i][level_i] = new_value
+
+                        # If linked, update all streams in THIS stream's group
+                        if is_this_linked:
+                            for other_stream in this_group:
+                                if other_stream != stream_i and other_stream < max_stream_count:
+                                    if level_i < len(checkboxes[other_stream]):
+                                        checkboxes[other_stream][level_i] = new_value
+                else:
+                    # This stream doesn't have this level - show placeholder
+                    imgui.text("-")
+
+        imgui.end_child()
+
+        # Update visualization if checkboxes changed
+        if vis_changed:
+            obj._update_level_select_visualization()
+
+        # Buttons
+        button_width = 120
+        if imgui.button("Undo Selection", button_width, 30):
+            obj._undo_level_selection()
+
+        imgui.same_line()
+        if imgui.button("Finish Select", button_width, 30):
+            obj._apply_level_selection()
+            # Auto-resume pipeline if it was paused waiting for level selection
+            if hasattr(obj, '_pipeline_paused_at') and obj._pipeline_paused_at is not None:
+                max_step = obj._process_step if hasattr(obj, '_process_step') else 12
+                start_step = obj._pipeline_paused_at
+                if start_step <= max_step:
+                    print(f"[{name}] Auto-resuming pipeline from step {start_step} to {max_step}...")
+                    try:
+                        # Step 9: Build Fiber
+                        if start_step <= 9 <= max_step and hasattr(obj, 'stream_contours') and obj.stream_contours is not None:
+                            print(f"  [9/{max_step}] Building fibers...")
+                            obj.build_fibers(skeleton_meshes=v.zygote_skeleton_meshes)
+
+                        # Step 10: Resample Contours
+                        if start_step <= 10 <= max_step and obj.contours is not None and len(obj.contours) > 0 and obj.bounding_planes is not None:
+                            print(f"  [10/{max_step}] Resampling Contours...")
+                            obj.resample_contours(base_samples=32)
+
+                        # Step 11: Build Contour Mesh
+                        if start_step <= 11 <= max_step and obj.contours is not None and len(obj.contours) > 0 and obj.draw_contour_stream is not None:
+                            print(f"  [11/{max_step}] Building Contour Mesh...")
+                            obj.build_contour_mesh()
+
+                        # Step 12: Tetrahedralize
+                        if start_step <= 12 <= max_step and obj.contour_mesh_vertices is not None:
+                            print(f"  [12/{max_step}] Tetrahedralizing...")
+                            obj.soft_body = None
+                            obj.tetrahedralize_contour_mesh()
+                            if obj.tet_vertices is not None:
+                                obj.is_draw_contours = False
+                                obj.is_draw_tet_mesh = True
+
+                        print(f"[{name}] Pipeline complete (steps {start_step}-{max_step})!")
+                    except Exception as e:
+                        print(f"[{name}] Pipeline error: {e}")
+                        import traceback
+                        traceback.print_exc()
+                obj._pipeline_paused_at = None
+
+        imgui.end()
+
+
