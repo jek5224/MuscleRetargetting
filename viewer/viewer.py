@@ -630,6 +630,7 @@ class GLFWApp():
             glLineWidth(1.5)
             mygl.draw_axis()
 
+        # Draw opaque parts of muscle meshes first
         for name, obj in self.zygote_muscle_meshes.items():
             viper_only = obj.viper_sim is not None and obj.viper_only_mode
             if obj.viper_sim is not None and obj.is_draw_viper:
@@ -647,14 +648,8 @@ class GLFWApp():
                     obj.draw_bounding_box()
                 if obj.is_draw_edges:
                     obj.draw_edges()
-                if obj.is_draw_fiber_architecture:
-                    obj.fiber_transparency = self.zygote_fiber_transparency
-                    obj.draw_fiber_architecture()
                 if obj.is_draw_contour_mesh:
                     obj.draw_contour_mesh()
-                if obj.is_draw_tet_mesh:
-                    obj.contour_mesh_transparency = self.zygote_tet_transparency
-                    obj.draw_tetrahedron_mesh(draw_tets=obj.is_draw_tet_edges)
                 if obj.is_draw_constraints:
                     obj.draw_constraints()
                 if obj.is_draw:
@@ -664,6 +659,7 @@ class GLFWApp():
         if getattr(self, 'draw_inter_muscle_constraints', False):
             draw_inter_muscle_constraint_lines(self)
 
+        # Draw skeleton meshes (opaque) before transparent muscle parts
         for name, obj in self.zygote_skeleton_meshes.items():
             if obj.is_draw:
                 obj.draw([obj.color[0], obj.color[1], obj.color[2], obj.transparency])
@@ -671,6 +667,17 @@ class GLFWApp():
                 obj.draw_corners()
             if obj.is_draw_edges:
                 obj.draw_edges()
+
+        # Draw transparent tet mesh and fiber architecture last so skeleton shows through
+        for name, obj in self.zygote_muscle_meshes.items():
+            viper_only = obj.viper_sim is not None and obj.viper_only_mode
+            if not viper_only:
+                if obj.is_draw_tet_mesh:
+                    obj.contour_mesh_transparency = self.zygote_tet_transparency
+                    obj.draw_tetrahedron_mesh(draw_tets=obj.is_draw_tet_edges)
+                if obj.is_draw_fiber_architecture:
+                    obj.fiber_transparency = self.zygote_fiber_transparency
+                    obj.draw_fiber_architecture()
 
         if self.draw_target_motion:
             self.drawSkeleton(self.env.target_pos, np.array([1.0, 0.3, 0.3, 0.5]))
