@@ -659,24 +659,14 @@ class GLFWApp():
         if getattr(self, 'draw_inter_muscle_constraints', False):
             draw_inter_muscle_constraint_lines(self)
 
-        # Draw order: tet mesh (outermost) -> fiber (middle) -> skeleton (innermost)
-        # Each handles its own transparency via GL_BLEND in draw functions
+        # For proper transparency: draw back-to-front (inside to outside)
+        # Skeleton (innermost) -> Fiber (middle) -> Tet mesh (outermost)
+        # Transparent objects need depth write OFF so inner layers show through
 
-        # Draw tet mesh first (outermost layer)
-        for name, obj in self.zygote_muscle_meshes.items():
-            viper_only = obj.viper_sim is not None and obj.viper_only_mode
-            if not viper_only and obj.is_draw_tet_mesh:
-                obj.contour_mesh_transparency = self.zygote_tet_transparency
-                obj.draw_tetrahedron_mesh(draw_tets=obj.is_draw_tet_edges)
+        tet_transparent = self.zygote_tet_transparency < 1.0
+        fiber_transparent = self.zygote_fiber_transparency < 1.0
 
-        # Draw fiber (middle layer)
-        for name, obj in self.zygote_muscle_meshes.items():
-            viper_only = obj.viper_sim is not None and obj.viper_only_mode
-            if not viper_only and obj.is_draw_fiber_architecture:
-                obj.fiber_transparency = self.zygote_fiber_transparency
-                obj.draw_fiber_architecture()
-
-        # Draw skeleton meshes last (innermost)
+        # Draw skeleton meshes first (innermost, always with depth write)
         for name, obj in self.zygote_skeleton_meshes.items():
             if obj.is_draw:
                 obj.draw([obj.color[0], obj.color[1], obj.color[2], obj.transparency])
@@ -684,6 +674,28 @@ class GLFWApp():
                 obj.draw_corners()
             if obj.is_draw_edges:
                 obj.draw_edges()
+
+        # Draw fiber (middle layer)
+        if fiber_transparent:
+            glDepthMask(GL_FALSE)
+        for name, obj in self.zygote_muscle_meshes.items():
+            viper_only = obj.viper_sim is not None and obj.viper_only_mode
+            if not viper_only and obj.is_draw_fiber_architecture:
+                obj.fiber_transparency = self.zygote_fiber_transparency
+                obj.draw_fiber_architecture()
+        if fiber_transparent:
+            glDepthMask(GL_TRUE)
+
+        # Draw tet mesh last (outermost layer)
+        if tet_transparent:
+            glDepthMask(GL_FALSE)
+        for name, obj in self.zygote_muscle_meshes.items():
+            viper_only = obj.viper_sim is not None and obj.viper_only_mode
+            if not viper_only and obj.is_draw_tet_mesh:
+                obj.contour_mesh_transparency = self.zygote_tet_transparency
+                obj.draw_tetrahedron_mesh(draw_tets=obj.is_draw_tet_edges)
+        if tet_transparent:
+            glDepthMask(GL_TRUE)
 
         if self.draw_target_motion:
             self.drawSkeleton(self.env.target_pos, np.array([1.0, 0.3, 0.3, 0.5]))
