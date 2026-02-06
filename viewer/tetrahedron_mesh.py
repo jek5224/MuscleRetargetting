@@ -392,6 +392,12 @@ class TetrahedronMeshMixin:
             # Filter to keep only tetrahedra whose centroids are inside the surface
             tet_centroids = np.mean(closed_vertices[tetrahedra], axis=1)
             mesh = trimesh.Trimesh(vertices=closed_vertices, faces=closed_faces)
+
+            # Fix mesh normals and attempt to make watertight for contains check
+            mesh.fix_normals()
+            if not mesh.is_watertight:
+                print(f"  Warning: mesh is not watertight, contains() may be inaccurate")
+
             inside_mask = mesh.contains(tet_centroids)
             interior_tetrahedra = tetrahedra[inside_mask]
 
@@ -400,6 +406,22 @@ class TetrahedronMeshMixin:
                 interior_tetrahedra = tetrahedra
 
             print(f"  Delaunay: {len(tetrahedra)} total tets, {len(interior_tetrahedra)} interior")
+
+            # Diagnostic: Check for unused vertices after filtering
+            n_verts = len(closed_vertices)
+            used_vertices = set(interior_tetrahedra.flatten())
+            unused_count = n_verts - len(used_vertices)
+            if unused_count > 0:
+                unused_indices = [i for i in range(n_verts) if i not in used_vertices]
+                print(f"  WARNING: {unused_count} vertices unused after interior filtering")
+                for vi in unused_indices[:5]:  # Show first 5
+                    pos = closed_vertices[vi]
+                    print(f"    Unused vertex {vi}: pos=({pos[0]:.4f}, {pos[1]:.4f}, {pos[2]:.4f})")
+                # Check if unused vertices are cap anchor vertices
+                if hasattr(self, 'tet_anchor_vertices'):
+                    unused_anchors = [vi for vi in unused_indices if vi in self.tet_anchor_vertices]
+                    if unused_anchors:
+                        print(f"    {len(unused_anchors)} of these are cap anchor vertices!")
 
         except Exception as e:
             print(f"Tetrahedralization failed: {e}")

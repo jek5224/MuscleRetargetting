@@ -724,9 +724,26 @@ class SoftBodySimulation:
                 L[i, i] = weight_sum + regularization
                 if weight_sum == 0:
                     disconnected_count += 1
+                    # Print diagnostic info for disconnected vertex
+                    if disconnected_count <= 5:  # Limit output
+                        pos = self.rest_positions[i]
+                        print(f"    Disconnected vertex {i}: pos=({pos[0]:.4f}, {pos[1]:.4f}, {pos[2]:.4f})")
 
         if disconnected_count > 0:
             print(f"  WARNING: {disconnected_count} disconnected free vertices detected")
+            # Additional diagnostic: find which tetrahedra use these vertices
+            disconnected_indices = []
+            for i in range(n):
+                if not self.fixed_mask[i] and len(self.arap_neighbors[i]) == 0:
+                    disconnected_indices.append(i)
+            if len(disconnected_indices) > 0:
+                # Check if these vertices are in any tetrahedra
+                tet_usage = np.zeros(n, dtype=int)
+                for tet in self.tetrahedra:
+                    for vi in tet:
+                        tet_usage[vi] += 1
+                for vi in disconnected_indices[:5]:  # Limit output
+                    print(f"    Vertex {vi}: used in {tet_usage[vi]} tetrahedra")
 
         self.arap_L = L.tocsr()
 
