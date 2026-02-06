@@ -792,7 +792,7 @@ class ContourMeshMixin:
                     p_contour = (1 - t) * verts[i] + t * verts[j]
                     face_cand_vertices.append(p_contour)
 
-            if len(face_cand_vertices) == 2 and np.linalg.norm(face_cand_vertices[0] - face_cand_vertices[1]) >= 1e-7:
+            if len(face_cand_vertices) == 2 and np.linalg.norm(face_cand_vertices[0] - face_cand_vertices[1]) >= 1e-6:
                 raw_edges.append((face_cand_vertices[0], face_cand_vertices[1]))
 
         if len(raw_edges) == 0:
@@ -819,7 +819,8 @@ class ContourMeshMixin:
                 continue  # Already assigned to a cluster
 
             # Find all vertices within tolerance of this one
-            nearby = raw_tree.query_ball_point(all_raw_vertices[i], r=1e-7)
+            # Use tolerance relative to mesh scale (MESH_SCALE = 0.01)
+            nearby = raw_tree.query_ball_point(all_raw_vertices[i], r=1e-6)
 
             # Assign all nearby vertices to the same deduplicated index
             new_idx = len(contour_vertices)
