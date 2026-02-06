@@ -401,6 +401,36 @@ class TetrahedronMeshMixin:
 
             print(f"  Delaunay: {len(tetrahedra)} total tets, {len(interior_tetrahedra)} interior")
 
+            # Remove unused vertices (not part of any interior tetrahedron)
+            used_vertices = set(interior_tetrahedra.flatten())
+            n_total = len(closed_vertices)
+            n_used = len(used_vertices)
+            if n_used < n_total:
+                print(f"  Removing {n_total - n_used} unused vertices...")
+                # Create mapping from old to new indices
+                old_to_new = {}
+                new_vertices = []
+                for old_idx in range(n_total):
+                    if old_idx in used_vertices:
+                        old_to_new[old_idx] = len(new_vertices)
+                        new_vertices.append(closed_vertices[old_idx])
+                closed_vertices = np.array(new_vertices)
+                # Remap tetrahedra indices
+                interior_tetrahedra = np.array([[old_to_new[v] for v in tet] for tet in interior_tetrahedra])
+                # Remap face indices (only keep faces whose vertices are all used)
+                new_closed_faces = []
+                for face in closed_faces:
+                    if all(v in old_to_new for v in face):
+                        new_closed_faces.append([old_to_new[v] for v in face])
+                closed_faces = np.array(new_closed_faces) if new_closed_faces else np.array([]).reshape(0, 3)
+                # Update cap face indices
+                new_cap_indices = []
+                for cap_idx in cap_face_indices:
+                    if cap_idx < len(new_closed_faces):
+                        new_cap_indices.append(cap_idx)
+                cap_face_indices = new_cap_indices
+                print(f"  After cleanup: {len(closed_vertices)} vertices, {len(closed_faces)} faces")
+
         except Exception as e:
             print(f"Tetrahedralization failed: {e}")
             import traceback
