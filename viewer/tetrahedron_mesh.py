@@ -810,6 +810,11 @@ class TetrahedronMeshMixin:
         color = self.contour_mesh_color
         is_transparent = alpha < 1.0
 
+        # Enable blending for transparency
+        if is_transparent:
+            glEnable(GL_BLEND)
+            glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
+
         def draw_surface_and_caps():
             # Draw surface faces
             if self._tet_surface_verts is not None and len(self._tet_surface_verts) > 0:
@@ -834,6 +839,7 @@ class TetrahedronMeshMixin:
             glCullFace(GL_BACK)   # Cull back, draw front
             draw_surface_and_caps()
             glDisable(GL_CULL_FACE)
+            glDisable(GL_BLEND)
         else:
             draw_surface_and_caps()
 
