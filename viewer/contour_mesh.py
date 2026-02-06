@@ -6847,8 +6847,14 @@ class ContourMeshMixin:
 
         # Classify loops and find gaps to close
         # A gap is either:
-        # 1. Internal loop (not at origin/insertion levels)
+        # 1. Internal loop (not at origin/insertion levels for ANY stream)
         # 2. Multiple loops at the same position (split pieces that should be merged)
+
+        # Find the max level for each stream (different streams may have different lengths)
+        stream_max_levels = set()
+        for stream_idx, aligned_stream in enumerate(aligned_streams):
+            if len(aligned_stream) > 0:
+                stream_max_levels.add(len(aligned_stream) - 1)
 
         loop_info = []
         for loop in boundary_loops:
@@ -6858,8 +6864,14 @@ class ContourMeshMixin:
             min_level = min(loop_levels)
             max_level = max(loop_levels)
 
+            # Origin: at level 0
             is_origin = min_level == 0 and max_level <= 1
-            is_insertion = max_level == num_levels - 1 and min_level >= num_levels - 2
+
+            # Insertion: at the last level of ANY stream
+            is_insertion = any(
+                max_level == stream_max and min_level >= stream_max - 1
+                for stream_max in stream_max_levels
+            )
 
             loop_info.append({
                 'loop': loop,
