@@ -2408,11 +2408,18 @@ class ContourMeshMixin:
                 # Use current plane as reference for alignment (not last plane in list)
                 prev_plane = gap['current_planes'][0] if len(gap['current_planes']) > 0 else None
 
+                # Expected count: if both adjacent levels have same count, expect same count in between
+                # This filters out fragmented contours near boundaries
+                expected_count = None
+                if len(gap['current_planes']) == len(gap['next_planes']):
+                    expected_count = len(gap['current_planes'])
+
                 # Find a contour physically centered between the two
                 best_scalar, best_planes, best_contours = self._find_contour_between(
                     gap['current_scalar'], gap['next_scalar'],
                     centroid_low, centroid_high,
-                    prev_bounding_plane=prev_plane
+                    prev_bounding_plane=prev_plane,
+                    expected_count=expected_count
                 )
 
                 if best_planes is not None and len(best_planes) > 0:
@@ -2518,7 +2525,7 @@ class ContourMeshMixin:
             if len(gaps_exceeding) > 5:
                 print(f"    ... and {len(gaps_exceeding) - 5} more")
 
-    def _find_contour_between(self, scalar_low, scalar_high, centroid_low, centroid_high, num_samples=10, prev_bounding_plane=None):
+    def _find_contour_between(self, scalar_low, scalar_high, centroid_low, centroid_high, num_samples=10, prev_bounding_plane=None, expected_count=None):
         """
         Find a contour that is physically centered between two existing contours.
 
@@ -2532,6 +2539,7 @@ class ContourMeshMixin:
             centroid_high: Centroid of higher contour
             num_samples: Number of scalar values to sample
             prev_bounding_plane: Previous bounding plane for alignment reference
+            expected_count: Expected number of contour pieces (if set, reject contours with different count)
 
         Returns:
             (scalar, planes, contours) or (None, None, None) if failed
@@ -2555,6 +2563,10 @@ class ContourMeshMixin:
             planes, contours, _ = self.find_contour(try_scalar, prev_bounding_plane=prev_bounding_plane)
 
             if len(planes) > 0 and len(contours) > 0:
+                # Filter by expected count if specified
+                if expected_count is not None and len(planes) != expected_count:
+                    continue
+
                 # Calculate centroid of this contour
                 centroid = np.mean([p['mean'] for p in planes], axis=0)
                 dist_to_target = np.linalg.norm(centroid - target_centroid)
