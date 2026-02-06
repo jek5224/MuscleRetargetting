@@ -6881,37 +6881,10 @@ class ContourMeshMixin:
             if not info['is_origin'] and not info['is_insertion']:
                 loops_to_close.append(info['loop'])
 
-        # Check for duplicate origin/insertion loops (split pieces from same stream)
-        # These are fragments that should be merged, NOT separate valid boundaries
-        # Criteria: very close centroids AND similar sizes (both small fragments)
-        proximity_threshold = 0.005  # Very close - same position, not just nearby
-        size_ratio_threshold = 2.0   # Similar sizes - both fragments, not one valid + one fragment
-        origin_loops = [info for info in loop_info if info['is_origin']]
-        insertion_loops = [info for info in loop_info if info['is_insertion']]
-
-        def find_duplicate_loops(loops_list):
-            """Find fragment loops that are split pieces of the same boundary."""
-            duplicates = []
-            for i, info_i in enumerate(loops_list):
-                for j, info_j in enumerate(loops_list):
-                    if i >= j:
-                        continue
-                    dist = np.linalg.norm(info_i['centroid'] - info_j['centroid'])
-                    size_i, size_j = info_i['size'], info_j['size']
-                    size_ratio = max(size_i, size_j) / max(min(size_i, size_j), 1)
-
-                    # Only close if VERY close AND similar sizes (both fragments)
-                    if dist < proximity_threshold and size_ratio < size_ratio_threshold:
-                        # Close the smaller one
-                        if size_i < size_j:
-                            duplicates.append(info_i['loop'])
-                        else:
-                            duplicates.append(info_j['loop'])
-                        print(f"    Detected duplicate loops: dist={dist:.4f}, sizes={size_i}/{size_j}")
-            return duplicates
-
-        loops_to_close.extend(find_duplicate_loops(origin_loops))
-        loops_to_close.extend(find_duplicate_loops(insertion_loops))
+        # NOTE: Duplicate origin/insertion loop detection is disabled.
+        # The correct fix for overlapping boundaries at origin/insertion is to
+        # MERGE the boundary loop vertices during mesh building, not close them.
+        # Closing them removes valid openings that should be capped during tet meshing.
 
         # Remove duplicates
         loops_to_close = list({tuple(l): l for l in loops_to_close}.values())
