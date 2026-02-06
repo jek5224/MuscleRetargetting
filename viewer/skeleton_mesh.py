@@ -1800,6 +1800,37 @@ class SkeletonMeshMixin:
         positions = self.soft_body.get_positions().copy()
         updated = 0
 
+        # Safety check: ensure bindings cover all vertices
+        n_verts = len(positions)
+        n_bindings = len(self.tet_skeleton_bindings)
+        if n_bindings < n_verts:
+            # Extend bindings for new vertices by interpolating based on position
+            print(f"  WARNING: binding count ({n_bindings}) < vertex count ({n_verts}), extending bindings")
+            # Get origin/insertion info from existing bindings
+            origin_body = insertion_body = None
+            origin_mean = insertion_mean = None
+            for b in self.tet_skeleton_bindings:
+                if b is not None:
+                    origin_body, insertion_body, _, _ = b
+                    break
+            if origin_body is not None and origin_body in self.tet_initial_bone_transforms:
+                _, origin_mean = self.tet_initial_bone_transforms[origin_body]
+            if insertion_body is not None and insertion_body in self.tet_initial_bone_transforms:
+                _, insertion_mean = self.tet_initial_bone_transforms[insertion_body]
+
+            if origin_mean is not None and insertion_mean is not None:
+                muscle_axis = insertion_mean - origin_mean
+                muscle_length = np.linalg.norm(muscle_axis)
+                if muscle_length > 1e-6:
+                    muscle_axis_normalized = muscle_axis / muscle_length
+                    # Extend bindings list
+                    for v_idx in range(n_bindings, n_verts):
+                        point = positions[v_idx]
+                        t = np.dot(point - origin_mean, muscle_axis_normalized) / muscle_length
+                        t = np.clip(t, 0.0, 1.0)
+                        self.tet_skeleton_bindings.append((origin_body, insertion_body, t, point.copy()))
+                    print(f"    Extended bindings to {len(self.tet_skeleton_bindings)} vertices")
+
         for v_idx, binding in enumerate(self.tet_skeleton_bindings):
             if binding is None:
                 continue
