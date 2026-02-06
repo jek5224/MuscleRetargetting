@@ -6290,13 +6290,13 @@ def _load_motion_bvh(v, idx):
         v.motion_current_frame = 0
         v.motion_is_playing = False
         v.motion_play_accumulator = 0.0
-        # Apply frame 0 pose
-        _motion_apply_pose(v, 0)
         # Enable OBJ skeleton rendering so posed skeleton is visible
         v.draw_obj = True
         # Load cached deformation data if available
         _motion_load_cache(v)
         v.motion_bake_end_frame = min(v.motion_bake_end_frame, v.motion_total_frames - 1)
+        # Apply frame 0 pose and initialize tet meshes from cache if available
+        _motion_reset(v)
         print(f"Loaded motion: {os.path.basename(bvh_path)} ({v.motion_total_frames} frames, {1.0/v.motion_bvh.frame_time:.0f} FPS)")
     except Exception as e:
         print(f"Error loading BVH: {e}")
