@@ -2443,19 +2443,19 @@ def _render_inspect_2d_windows(v):
             if (left_x0 <= mouse_pos[0] <= left_x0 + canvas_size and
                 left_y0 <= mouse_pos[1] <= left_y0 + canvas_size):
                 # Convert screen position to unit square coordinates
-                u = (mouse_pos[0] - left_x0) / canvas_size
-                v = 1 - (mouse_pos[1] - left_y0) / canvas_size  # Flip Y
+                ucoord = (mouse_pos[0] - left_x0) / canvas_size
+                vcoord = 1 - (mouse_pos[1] - left_y0) / canvas_size  # Flip Y
                 # Clamp to [0, 1]
-                u = max(0.0, min(1.0, u))
-                v = max(0.0, min(1.0, v))
+                ucoord = max(0.0, min(1.0, ucoord))
+                vcoord = max(0.0, min(1.0, vcoord))
                 # Set preview position and clear test data
-                v.inspect_2d_edit_fiber_preview[name] = (u, v)
+                v.inspect_2d_edit_fiber_preview[name] = (ucoord, vcoord)
                 v.inspect_2d_edit_fiber_selected[name] = -1
                 v.inspect_2d_edit_fiber_test[name] = None  # Clear previous test
                 # Clear test fiber from object
                 obj.test_fiber_waypoints = None
                 obj.test_fiber_stream_idx = None
-                edit_fiber_preview = (u, v)
+                edit_fiber_preview = (ucoord, vcoord)
                 edit_fiber_selected = -1
                 edit_fiber_test = None
 
