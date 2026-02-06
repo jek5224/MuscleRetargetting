@@ -420,54 +420,57 @@ class TetrahedronMeshMixin:
                     print(f"    Unused vertex {vi}: pos=({pos[0]:.4f}, {pos[1]:.4f}, {pos[2]:.4f})")
 
                 # Fix: add tetrahedra for unused vertices from original Delaunay
-                # This ensures all surface vertices are connected in the tet mesh
+                # IMPORTANT: Only add tets that connect to the main mesh (have at least
+                # one vertex already used). Repeat until no more can be added.
                 added_count = 0
                 interior_set = set(map(tuple, interior_tetrahedra.tolist()))
 
-                for vi in unused_indices:
-                    # Find all Delaunay tetrahedra containing this vertex
-                    containing_tets = [i for i, tet in enumerate(tetrahedra) if vi in tet]
-                    if not containing_tets:
-                        continue
+                # Build index: vertex -> list of tet indices containing it
+                vertex_to_tets = {i: [] for i in range(n_verts)}
+                for tet_idx, tet in enumerate(tetrahedra):
+                    for v in tet:
+                        vertex_to_tets[v].append(tet_idx)
 
-                    # Select the tetrahedron with centroid closest to mesh interior
-                    best_tet_idx = None
-                    best_score = float('inf')
+                # Iteratively add tets that connect unused vertices to used vertices
+                max_iterations = 100
+                for iteration in range(max_iterations):
+                    added_this_round = 0
+                    still_unused = [vi for vi in range(n_verts) if vi not in used_vertices]
 
-                    for tet_idx in containing_tets:
-                        tet = tetrahedra[tet_idx]
-                        tet_tuple = tuple(tet)
-                        if tet_tuple in interior_set:
-                            # Already interior, shouldn't happen but skip
+                    for vi in still_unused:
+                        containing_tets = vertex_to_tets[vi]
+                        if not containing_tets:
                             continue
 
-                        # Score: prefer tets with more vertices already used
-                        # and with centroid closer to used tet centroids
-                        centroid = closed_vertices[tet].mean(axis=0)
-                        used_count = sum(1 for v in tet if v in used_vertices)
-                        # Higher used_count is better (lower score)
-                        score = -used_count * 10
+                        # Find tet with MOST vertices already used (must have at least 1)
+                        best_tet_idx = None
+                        best_used_count = 0
 
-                        # Add distance from centroid to nearest interior centroid
-                        if len(interior_tetrahedra) > 0:
-                            interior_centroids = closed_vertices[interior_tetrahedra].mean(axis=1)
-                            min_dist = np.min(np.linalg.norm(interior_centroids - centroid, axis=1))
-                            score += min_dist
+                        for tet_idx in containing_tets:
+                            tet = tetrahedra[tet_idx]
+                            if tuple(tet) in interior_set:
+                                continue
 
-                        if score < best_score:
-                            best_score = score
-                            best_tet_idx = tet_idx
+                            used_in_tet = sum(1 for v in tet if v in used_vertices)
+                            # Must have at least 1 used vertex to connect to main mesh
+                            if used_in_tet > best_used_count:
+                                best_used_count = used_in_tet
+                                best_tet_idx = tet_idx
 
-                    if best_tet_idx is not None:
-                        tet = tetrahedra[best_tet_idx]
-                        interior_tetrahedra = np.vstack([interior_tetrahedra, tet])
-                        interior_set.add(tuple(tet))
-                        for v in tet:
-                            used_vertices.add(v)
-                        added_count += 1
+                        if best_tet_idx is not None and best_used_count >= 1:
+                            tet = tetrahedra[best_tet_idx]
+                            interior_tetrahedra = np.vstack([interior_tetrahedra, tet])
+                            interior_set.add(tuple(tet))
+                            for v in tet:
+                                used_vertices.add(v)
+                            added_count += 1
+                            added_this_round += 1
+
+                    if added_this_round == 0:
+                        break  # No more progress possible
 
                 if added_count > 0:
-                    print(f"  Added {added_count} tetrahedra to include unused vertices")
+                    print(f"  Added {added_count} tetrahedra to connect unused vertices")
 
                 # Check if any still remain unused
                 still_unused = n_verts - len(used_vertices)
