@@ -659,20 +659,24 @@ class GLFWApp():
         if getattr(self, 'draw_inter_muscle_constraints', False):
             draw_inter_muscle_constraint_lines(self)
 
-        # For proper transparency: draw back-to-front (inside to outside)
-        # Skeleton (innermost) -> Fiber (middle) -> Tet mesh (outermost)
+        # Draw order: DART skeleton -> fiber structure -> tet mesh
         # GL_BLEND is enabled globally, just use alpha in glColor4f
 
-        # Draw skeleton meshes first (innermost)
-        for name, obj in self.zygote_skeleton_meshes.items():
-            if obj.is_draw:
-                obj.draw([obj.color[0], obj.color[1], obj.color[2], obj.transparency])
-            if obj.is_draw_corners:
-                obj.draw_corners()
-            if obj.is_draw_edges:
-                obj.draw_edges()
+        # Draw DART skeleton first
+        if self.draw_target_motion:
+            self.drawSkeleton(self.env.target_pos, np.array([1.0, 0.3, 0.3, 0.5]))
+        if self.draw_bone:
+            self.drawBone(self.env.skel.getPositions())
+        if self.draw_joint:
+            self.drawJoint(self.env.skel.getPositions())
+        if self.draw_obj:
+            self.drawObj(self.env.skel.getPositions())
+        if self.draw_muscle:
+            drawMuscles(self)
+        if self.draw_body:
+            self.drawSkeleton(self.env.skel.getPositions(), np.array([0.5, 0.5, 0.5, self.body_trans]))
 
-        # Draw fiber (middle layer)
+        # Draw fiber structure (middle layer)
         for name, obj in self.zygote_muscle_meshes.items():
             viper_only = obj.viper_sim is not None and obj.viper_only_mode
             if not viper_only and obj.is_draw_fiber_architecture:
@@ -686,18 +690,14 @@ class GLFWApp():
                 obj.contour_mesh_transparency = self.zygote_tet_transparency
                 obj.draw_tetrahedron_mesh(draw_tets=obj.is_draw_tet_edges)
 
-        if self.draw_target_motion:
-            self.drawSkeleton(self.env.target_pos, np.array([1.0, 0.3, 0.3, 0.5]))
-        if self.draw_bone:
-            self.drawBone(self.env.skel.getPositions())
-        if self.draw_joint:
-            self.drawJoint(self.env.skel.getPositions())
-        if self.draw_obj:
-            self.drawObj(self.env.skel.getPositions())
-        if self.draw_muscle:
-            drawMuscles(self)
-        if self.draw_body:
-            self.drawSkeleton(self.env.skel.getPositions(), np.array([0.5, 0.5, 0.5, self.body_trans]))
+        # Draw zygote skeleton meshes
+        for name, obj in self.zygote_skeleton_meshes.items():
+            if obj.is_draw:
+                obj.draw([obj.color[0], obj.color[1], obj.color[2], obj.transparency])
+            if obj.is_draw_corners:
+                obj.draw_corners()
+            if obj.is_draw_edges:
+                obj.draw_edges()
 
         # if self.draw_pd_target:
         #     self.drawSkeleton(self.env.pd_target, np.array([0.3, 0.3, 1.0, 0.5]))
