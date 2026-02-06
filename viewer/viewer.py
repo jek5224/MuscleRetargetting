@@ -252,6 +252,8 @@ class GLFWApp():
         self.zygote_muscle_meshes = {}
         self.zygote_muscle_color = MUSCLE_COLOR.copy()
         self.zygote_muscle_transparency = DEFAULT_OBJ_TRANSPARENCY
+        self.zygote_tet_transparency = DEFAULT_OBJ_TRANSPARENCY
+        self.zygote_fiber_transparency = 1.0
         self.is_draw_zygote_muscle = True
         self.is_draw_zygote_muscle_open_edges = False
         self.is_draw_one_zygote_muscle = False
@@ -646,10 +648,12 @@ class GLFWApp():
                 if obj.is_draw_edges:
                     obj.draw_edges()
                 if obj.is_draw_fiber_architecture:
+                    obj.fiber_transparency = self.zygote_fiber_transparency
                     obj.draw_fiber_architecture()
                 if obj.is_draw_contour_mesh:
                     obj.draw_contour_mesh()
                 if obj.is_draw_tet_mesh:
+                    obj.contour_mesh_transparency = self.zygote_tet_transparency
                     obj.draw_tetrahedron_mesh(draw_tets=obj.is_draw_tet_edges)
                 if obj.is_draw_constraints:
                     obj.draw_constraints()

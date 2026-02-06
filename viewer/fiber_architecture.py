@@ -1859,6 +1859,9 @@ class FiberArchitectureMixin:
         highlight_stream = getattr(self, 'inspector_highlight_stream', None)
         highlight_level = getattr(self, 'inspector_highlight_level', None)
 
+        # Get fiber transparency (default to 1.0 if not set)
+        alpha = getattr(self, 'fiber_transparency', 1.0)
+
         glDisable(GL_LIGHTING)
         glEnableClientState(GL_VERTEX_ARRAY)
 
@@ -1878,7 +1881,7 @@ class FiberArchitectureMixin:
         # Draw normal waypoints (red)
         if len(normal_pts) > 0:
             glPointSize(3)
-            glColor4f(1, 0, 0, 1)
+            glColor4f(1, 0, 0, alpha)
             pts = np.array(normal_pts, dtype=np.float32)
             glVertexPointer(3, GL_FLOAT, 0, pts)
             glDrawArrays(GL_POINTS, 0, len(pts))
@@ -1886,7 +1889,7 @@ class FiberArchitectureMixin:
         # Draw highlighted waypoints (blue)
         if len(highlight_pts) > 0:
             glPointSize(5)
-            glColor4f(0.3, 0.6, 0.9, 1)
+            glColor4f(0.3, 0.6, 0.9, alpha)
             pts = np.array(highlight_pts, dtype=np.float32)
             glVertexPointer(3, GL_FLOAT, 0, pts)
             glDrawArrays(GL_POINTS, 0, len(pts))
@@ -1894,7 +1897,7 @@ class FiberArchitectureMixin:
         # Collect fiber lines
         fiber_lines = []
         glLineWidth(2)
-        glColor4f(0.75, 0, 0, 1)  # Dark red
+        glColor4f(0.75, 0, 0, alpha)  # Dark red
         for stream_idx, waypoint_group in enumerate(self.waypoints):
             if self.draw_contour_stream is not None and stream_idx < len(self.draw_contour_stream) and self.draw_contour_stream[stream_idx]:
                 for contour_idx in range(len(waypoint_group) - 1):
@@ -1916,7 +1919,7 @@ class FiberArchitectureMixin:
                 if len(valid_waypoints) > 0:
                     # Draw test waypoints (blue, larger)
                     glPointSize(5)
-                    glColor4f(0.2, 0.4, 1.0, 1.0)
+                    glColor4f(0.2, 0.4, 1.0, alpha)
                     pts = np.array(valid_waypoints, dtype=np.float32)
                     glVertexPointer(3, GL_FLOAT, 0, pts)
                     glDrawArrays(GL_POINTS, 0, len(pts))
