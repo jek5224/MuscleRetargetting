@@ -6845,31 +6845,80 @@ class ContourMeshMixin:
             if len(loop) >= 3:
                 boundary_loops.append(loop)
 
-        # Identify which loops are internal (not at origin/insertion)
-        # Origin = level 0, Insertion = level num_levels-1
-        internal_loops = []
+        # Classify loops and find gaps to close
+        # A gap is either:
+        # 1. Internal loop (not at origin/insertion levels)
+        # 2. Multiple loops at the same position (split pieces that should be merged)
+
+        loop_info = []
         for loop in boundary_loops:
+            loop_verts = np.array([vertices[vi] for vi in loop])
+            centroid = np.mean(loop_verts, axis=0)
             loop_levels = [self.vertex_contour_level[vi] for vi in loop]
             min_level = min(loop_levels)
             max_level = max(loop_levels)
 
-            # If all vertices are at internal levels (not 0 or num_levels-1), it's a gap
             is_origin = min_level == 0 and max_level <= 1
             is_insertion = max_level == num_levels - 1 and min_level >= num_levels - 2
 
-            if not is_origin and not is_insertion:
-                internal_loops.append(loop)
+            loop_info.append({
+                'loop': loop,
+                'centroid': centroid,
+                'min_level': min_level,
+                'max_level': max_level,
+                'is_origin': is_origin,
+                'is_insertion': is_insertion,
+                'size': len(loop)
+            })
 
-        if len(internal_loops) == 0:
+        # Find loops to close:
+        # 1. Internal loops (not at origin/insertion)
+        # 2. Extra loops at same position (keep largest, close smaller ones)
+        loops_to_close = []
+
+        # Check for internal loops
+        for info in loop_info:
+            if not info['is_origin'] and not info['is_insertion']:
+                loops_to_close.append(info['loop'])
+
+        # Check for duplicate origin/insertion loops (split pieces)
+        # Group loops by proximity (within 0.02 distance)
+        proximity_threshold = 0.02
+        origin_loops = [info for info in loop_info if info['is_origin']]
+        insertion_loops = [info for info in loop_info if info['is_insertion']]
+
+        def find_duplicate_loops(loops_list):
+            """Find smaller loops that are near larger ones - these are split pieces."""
+            duplicates = []
+            for i, info_i in enumerate(loops_list):
+                for j, info_j in enumerate(loops_list):
+                    if i >= j:
+                        continue
+                    dist = np.linalg.norm(info_i['centroid'] - info_j['centroid'])
+                    if dist < proximity_threshold:
+                        # Close the smaller one
+                        if info_i['size'] < info_j['size']:
+                            duplicates.append(info_i['loop'])
+                        else:
+                            duplicates.append(info_j['loop'])
+            return duplicates
+
+        loops_to_close.extend(find_duplicate_loops(origin_loops))
+        loops_to_close.extend(find_duplicate_loops(insertion_loops))
+
+        # Remove duplicates
+        loops_to_close = list({tuple(l): l for l in loops_to_close}.values())
+
+        if len(loops_to_close) == 0:
             return
 
-        print(f"  Closing {len(internal_loops)} internal gaps in contour mesh")
+        print(f"  Closing {len(loops_to_close)} gaps in contour mesh")
 
-        # Close each internal loop by adding triangular fan from centroid
+        # Close each gap loop by adding triangular fan from centroid
         new_faces = list(faces)
         new_vertices = list(vertices)
 
-        for loop in internal_loops:
+        for loop in loops_to_close:
             # Calculate centroid
             loop_verts = np.array([vertices[vi] for vi in loop])
             centroid = np.mean(loop_verts, axis=0)
