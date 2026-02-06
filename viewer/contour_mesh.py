@@ -6769,7 +6769,9 @@ class ContourMeshMixin:
                     self.vertex_contour_level[vertex_idx] = level_idx
 
         # Close internal gaps in the mesh (boundary loops that aren't at origin/insertion)
-        self._close_contour_mesh_gaps(num_levels)
+        # Pass stream max levels so we know which levels are insertions for each stream
+        stream_max_levels = [len(s) - 1 for s in aligned_streams if len(s) > 0]
+        self._close_contour_mesh_gaps(num_levels, stream_max_levels)
 
         # Compute normals
         self._compute_contour_mesh_normals()
@@ -6777,12 +6779,16 @@ class ContourMeshMixin:
         print(f"Built contour mesh: {len(self.contour_mesh_vertices)} vertices, "
               f"{len(self.contour_mesh_faces)} faces from {num_streams} streams")
 
-    def _close_contour_mesh_gaps(self, num_levels):
+    def _close_contour_mesh_gaps(self, num_levels, stream_max_levels):
         """
         Close internal gaps in the contour mesh.
 
         Gaps occur when streams split/merge and face creation misses some connections.
         This finds boundary loops that are NOT at origin/insertion levels and closes them.
+
+        Args:
+            num_levels: Global max number of levels
+            stream_max_levels: List of max level index for each stream
         """
         from collections import defaultdict
 
@@ -6850,11 +6856,8 @@ class ContourMeshMixin:
         # 1. Internal loop (not at origin/insertion levels for ANY stream)
         # 2. Multiple loops at the same position (split pieces that should be merged)
 
-        # Find the max level for each stream (different streams may have different lengths)
-        stream_max_levels = set()
-        for stream_idx, aligned_stream in enumerate(aligned_streams):
-            if len(aligned_stream) > 0:
-                stream_max_levels.add(len(aligned_stream) - 1)
+        # Convert stream_max_levels to set for efficient lookup
+        stream_max_set = set(stream_max_levels)
 
         loop_info = []
         for loop in boundary_loops:
@@ -6870,7 +6873,7 @@ class ContourMeshMixin:
             # Insertion: at the last level of ANY stream
             is_insertion = any(
                 max_level == stream_max and min_level >= stream_max - 1
-                for stream_max in stream_max_levels
+                for stream_max in stream_max_set
             )
 
             loop_info.append({
