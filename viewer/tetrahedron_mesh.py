@@ -808,40 +808,20 @@ class TetrahedronMeshMixin:
 
         alpha = self.contour_mesh_transparency
         color = self.contour_mesh_color
-        is_transparent = alpha < 1.0
 
-        # Enable blending for transparency
-        if is_transparent:
-            glEnable(GL_BLEND)
-            glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
+        # Draw surface faces
+        if self._tet_surface_verts is not None and len(self._tet_surface_verts) > 0:
+            glColor4f(color[0], color[1], color[2], alpha)
+            glVertexPointer(3, GL_FLOAT, 0, self._tet_surface_verts)
+            glNormalPointer(GL_FLOAT, 0, self._tet_surface_normals)
+            glDrawArrays(GL_TRIANGLES, 0, len(self._tet_surface_verts))
 
-        def draw_surface_and_caps():
-            # Draw surface faces
-            if self._tet_surface_verts is not None and len(self._tet_surface_verts) > 0:
-                glColor4f(color[0], color[1], color[2], alpha)
-                glVertexPointer(3, GL_FLOAT, 0, self._tet_surface_verts)
-                glNormalPointer(GL_FLOAT, 0, self._tet_surface_normals)
-                glDrawArrays(GL_TRIANGLES, 0, len(self._tet_surface_verts))
-
-            # Draw cap faces in green
-            if draw_caps and self._tet_cap_verts is not None and len(self._tet_cap_verts) > 0:
-                glColor4f(0.2, 0.6, 0.2, alpha)
-                glVertexPointer(3, GL_FLOAT, 0, self._tet_cap_verts)
-                glNormalPointer(GL_FLOAT, 0, self._tet_cap_normals)
-                glDrawArrays(GL_TRIANGLES, 0, len(self._tet_cap_verts))
-
-        if is_transparent:
-            # Two-pass rendering for correct transparency
-            # Draw back faces first, then front faces on top
-            glEnable(GL_CULL_FACE)
-            glCullFace(GL_FRONT)  # Cull front, draw back
-            draw_surface_and_caps()
-            glCullFace(GL_BACK)   # Cull back, draw front
-            draw_surface_and_caps()
-            glDisable(GL_CULL_FACE)
-            glDisable(GL_BLEND)
-        else:
-            draw_surface_and_caps()
+        # Draw cap faces in green
+        if draw_caps and self._tet_cap_verts is not None and len(self._tet_cap_verts) > 0:
+            glColor4f(0.2, 0.6, 0.2, alpha)
+            glVertexPointer(3, GL_FLOAT, 0, self._tet_cap_verts)
+            glNormalPointer(GL_FLOAT, 0, self._tet_cap_normals)
+            glDrawArrays(GL_TRIANGLES, 0, len(self._tet_cap_verts))
 
         glDisableClientState(GL_NORMAL_ARRAY)
 

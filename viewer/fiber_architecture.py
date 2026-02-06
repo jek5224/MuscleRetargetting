@@ -1861,15 +1861,9 @@ class FiberArchitectureMixin:
 
         # Get fiber transparency (default to 1.0 if not set)
         alpha = getattr(self, 'fiber_transparency', 1.0)
-        is_transparent = alpha < 1.0
 
         glDisable(GL_LIGHTING)
         glEnableClientState(GL_VERTEX_ARRAY)
-
-        # Enable blending for transparency
-        if is_transparent:
-            glEnable(GL_BLEND)
-            glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
 
         # Collect waypoints by highlight status
         normal_pts = []
@@ -1937,8 +1931,6 @@ class FiberArchitectureMixin:
                         glDrawArrays(GL_LINE_STRIP, 0, len(pts))
 
         glDisableClientState(GL_VERTEX_ARRAY)
-        if is_transparent:
-            glDisable(GL_BLEND)
         glEnable(GL_LIGHTING)
 
     def find_waypoints(self, bounding_plane_info, fiber_architecture, is_origin=False):
