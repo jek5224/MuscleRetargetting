@@ -6768,11 +6768,150 @@ class ContourMeshMixin:
                 for vertex_idx in stream_level_indices[stream_idx][level_idx]:
                     self.vertex_contour_level[vertex_idx] = level_idx
 
+        # Close internal gaps in the mesh (boundary loops that aren't at origin/insertion)
+        self._close_contour_mesh_gaps(num_levels)
+
         # Compute normals
         self._compute_contour_mesh_normals()
 
         print(f"Built contour mesh: {len(self.contour_mesh_vertices)} vertices, "
               f"{len(self.contour_mesh_faces)} faces from {num_streams} streams")
+
+    def _close_contour_mesh_gaps(self, num_levels):
+        """
+        Close internal gaps in the contour mesh.
+
+        Gaps occur when streams split/merge and face creation misses some connections.
+        This finds boundary loops that are NOT at origin/insertion levels and closes them.
+        """
+        from collections import defaultdict
+
+        vertices = self.contour_mesh_vertices
+        faces = self.contour_mesh_faces
+
+        if vertices is None or faces is None or len(faces) == 0:
+            return
+
+        # Find boundary edges (edges with only one adjacent face)
+        edge_count = defaultdict(list)
+        for face_idx, face in enumerate(faces):
+            for i in range(3):
+                v0, v1 = face[i], face[(i + 1) % 3]
+                edge = tuple(sorted([v0, v1]))
+                edge_count[edge].append(face_idx)
+
+        boundary_edges = [edge for edge, face_list in edge_count.items() if len(face_list) == 1]
+
+        if len(boundary_edges) == 0:
+            return
+
+        # Build adjacency for boundary edges
+        edge_adjacency = defaultdict(list)
+        for edge in boundary_edges:
+            edge_adjacency[edge[0]].append(edge[1])
+            edge_adjacency[edge[1]].append(edge[0])
+
+        # Find boundary loops
+        visited = set()
+        boundary_loops = []
+
+        for start in edge_adjacency:
+            if start in visited:
+                continue
+
+            loop = []
+            current = start
+            prev = None
+
+            while True:
+                loop.append(current)
+                visited.add(current)
+
+                neighbors = edge_adjacency[current]
+                next_v = None
+                for n in neighbors:
+                    if n != prev and n not in visited:
+                        next_v = n
+                        break
+
+                if next_v is None:
+                    if start in neighbors and len(loop) > 2:
+                        break  # Closed loop
+                    break  # Dead end
+
+                prev = current
+                current = next_v
+
+            if len(loop) >= 3:
+                boundary_loops.append(loop)
+
+        # Identify which loops are internal (not at origin/insertion)
+        # Origin = level 0, Insertion = level num_levels-1
+        internal_loops = []
+        for loop in boundary_loops:
+            loop_levels = [self.vertex_contour_level[vi] for vi in loop]
+            min_level = min(loop_levels)
+            max_level = max(loop_levels)
+
+            # If all vertices are at internal levels (not 0 or num_levels-1), it's a gap
+            is_origin = min_level == 0 and max_level <= 1
+            is_insertion = max_level == num_levels - 1 and min_level >= num_levels - 2
+
+            if not is_origin and not is_insertion:
+                internal_loops.append(loop)
+
+        if len(internal_loops) == 0:
+            return
+
+        print(f"  Closing {len(internal_loops)} internal gaps in contour mesh")
+
+        # Close each internal loop by adding triangular fan from centroid
+        new_faces = list(faces)
+        new_vertices = list(vertices)
+
+        for loop in internal_loops:
+            # Calculate centroid
+            loop_verts = np.array([vertices[vi] for vi in loop])
+            centroid = np.mean(loop_verts, axis=0)
+
+            # Add centroid as new vertex
+            centroid_idx = len(new_vertices)
+            new_vertices.append(centroid)
+
+            # Determine winding order from adjacent face
+            # Find an edge in the loop that has an adjacent face
+            first_edge = tuple(sorted([loop[0], loop[1]]))
+            if first_edge in edge_count:
+                adj_face_idx = edge_count[first_edge][0]
+                adj_face = faces[adj_face_idx]
+
+                # Check winding: if edge goes v0->v1 in adj_face, our fan should go opposite
+                for i in range(3):
+                    if adj_face[i] == loop[0] and adj_face[(i+1)%3] == loop[1]:
+                        # Edge is v0->v1 in face, so our loop is already correct winding
+                        break
+                    elif adj_face[i] == loop[1] and adj_face[(i+1)%3] == loop[0]:
+                        # Edge is v1->v0 in face, reverse our loop
+                        loop = loop[::-1]
+                        break
+
+            # Create triangular fan
+            for i in range(len(loop)):
+                vi = loop[i]
+                vj = loop[(i + 1) % len(loop)]
+                new_faces.append([vi, vj, centroid_idx])
+
+            loop_levels = [self.vertex_contour_level[vi] for vi in loop]
+            print(f"    Closed gap: {len(loop)} vertices, levels {min(loop_levels)}-{max(loop_levels)}")
+
+        # Update mesh
+        self.contour_mesh_vertices = np.array(new_vertices, dtype=np.float32)
+        self.contour_mesh_faces = np.array(new_faces, dtype=np.int32)
+
+        # Update vertex_contour_level for new centroid vertices
+        old_levels = self.vertex_contour_level
+        self.vertex_contour_level = np.full(len(new_vertices), -1, dtype=np.int32)
+        self.vertex_contour_level[:len(old_levels)] = old_levels
 
     # build_contour_to_tet_mapping, compute_tet_edge_contour_types, compute_outward_directions,
     # update_contour_mesh_from_tet methods moved to MuscleMeshMixin in muscle_mesh.py
