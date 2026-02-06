@@ -6661,13 +6661,27 @@ def _motion_bake_finish(v):
         if len(frame_data) == 0:
             continue
         filepath = os.path.join(cache_dir, f'{mname}.npz')
+        # Get expected shape from current bake data
+        expected_shape = None
+        for f in frame_data:
+            expected_shape = frame_data[f]['positions'].shape
+            break
         # Merge with existing cache: keep old frames not in this bake, positions only
-        if os.path.exists(filepath):
-            existing = np.load(filepath, allow_pickle=True)
-            for i, f in enumerate(existing['frames']):
-                fi = int(f)
-                if fi not in frame_data:
-                    frame_data[fi] = {'positions': existing['positions'][i]}
+        # Only merge if shapes match (otherwise mesh was modified, discard old cache)
+        if os.path.exists(filepath) and expected_shape is not None:
+            try:
+                existing = np.load(filepath, allow_pickle=True)
+                for i, f in enumerate(existing['frames']):
+                    fi = int(f)
+                    if fi not in frame_data:
+                        existing_pos = existing['positions'][i]
+                        # Only merge if shape matches
+                        if existing_pos.shape == expected_shape:
+                            frame_data[fi] = {'positions': existing_pos}
+                        else:
+                            print(f"[{mname}] Discarding cached frame {fi}: shape {existing_pos.shape} != expected {expected_shape}")
+            except Exception as e:
+                print(f"[{mname}] Could not load existing cache: {e}")
         sorted_frames = sorted(frame_data.keys())
         save_dict = dict(
             frames=np.array(sorted_frames, dtype=np.int32),
