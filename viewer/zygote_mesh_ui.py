@@ -6692,7 +6692,9 @@ def _motion_bake_finish(v):
     v.motion_baking = False
     v._bake_data = {}
     _motion_load_cache(v)
-    print(f"Bake complete: frames 0-{v.motion_bake_end_frame}. Use 'Recompute Waypoints' to add waypoint data.")
+    print(f"Bake complete: frames 0-{v.motion_bake_end_frame}. Recomputing waypoints...")
+    # Automatically recompute waypoints after baking
+    _motion_patch_waypoints(v)
 
 
 def _motion_reset(v):
