@@ -664,9 +664,7 @@ class MeshLoader(ContourMeshMixin, TetrahedronMeshMixin, FiberArchitectureMixin,
                                  len(self.draw_contour_stream) > 0 and
                                  isinstance(self.draw_contour_stream[0], list)) else i
                 bp_s = bp_scale_dict.get(bp_level, 1.0) if bp_scale_dict else 1.0
-                bp_alpha = bp_s  # Fade axes/plane with scale
-                if bp_alpha < 0.99:
-                    print(f"  BP fade: level={bp_level} bp_s={bp_s:.3f} bp_alpha={bp_alpha:.3f}")
+                bp_alpha = bp_s  # Fade bounding plane with scale
                 mean = plane_info['mean']
 
                 glPushMatrix()
@@ -677,29 +675,19 @@ class MeshLoader(ContourMeshMixin, TetrahedronMeshMixin, FiberArchitectureMixin,
                 glEnd()
                 glPopMatrix()
 
-                # Use full color when not animating, black+alpha when fading
-                if bp_alpha >= 1.0:
-                    glColor3f(1, 0, 0)
-                else:
-                    glColor4f(0, 0, 0, bp_alpha)
+                glColor3f(1, 0, 0)
                 glBegin(GL_LINES)
                 glVertex3fv(mean)
                 glVertex3fv(mean + plane_info['basis_x'] * scale * 0.1 * bp_s)
                 glEnd()
 
-                if bp_alpha >= 1.0:
-                    glColor3f(0, 1, 0)
-                else:
-                    glColor4f(0, 0, 0, bp_alpha)
+                glColor3f(0, 1, 0)
                 glBegin(GL_LINES)
                 glVertex3fv(mean)
                 glVertex3fv(mean + plane_info['basis_y'] * scale * 0.1 * bp_s)
                 glEnd()
 
-                if bp_alpha >= 1.0:
-                    glColor3f(0, 0, 1)
-                else:
-                    glColor4f(0, 0, 0, bp_alpha)
+                glColor3f(0, 0, 1)
                 glBegin(GL_LINES)
                 glVertex3fv(mean)
                 glVertex3fv(mean + plane_info['basis_z'] * scale * 0.1 * bp_s)
