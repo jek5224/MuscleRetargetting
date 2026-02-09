@@ -1539,35 +1539,65 @@ class ContourMeshMixin:
         # Snapshot after
         bp_after = self._snapshot_bounding_planes()
 
-        # Precompute slerp interpolators for each bounding plane's frame rotation
-        smooth_slerps = []
+        # Precompute relative rotations (before→after) as axis-angle with consistent direction
+        smooth_rot_data = []  # List of levels, each a list of (R_before, axis, angle) or None
+        # First pass: compute all relative rotations as axis-angle
+        all_axes = []  # Flat list for consistency pass
+        all_indices = []  # (i, j) for each entry
         for i in range(len(bp_before)):
-            level_slerps = []
+            level_data = []
             for j in range(len(bp_before[i])):
                 if j < len(bp_after[i]):
                     before = bp_before[i][j]
                     after = bp_after[i][j]
-                    # Build rotation matrices from orthonormal frames (columns = axes)
                     mat_before = np.column_stack([before['basis_x'], before['basis_y'], before['basis_z']])
                     mat_after = np.column_stack([after['basis_x'], after['basis_y'], after['basis_z']])
-                    # Ensure valid rotation matrices (det = +1)
                     if np.linalg.det(mat_before) < 0:
                         mat_before[:, 1] = -mat_before[:, 1]
                     if np.linalg.det(mat_after) < 0:
                         mat_after[:, 1] = -mat_after[:, 1]
                     try:
-                        rots = R.from_matrix(np.stack([mat_before, mat_after]))
-                        slerp = Slerp([0.0, 1.0], rots)
-                        level_slerps.append(slerp)
+                        r_before = R.from_matrix(mat_before)
+                        r_after = R.from_matrix(mat_after)
+                        r_rel = r_after * r_before.inv()
+                        rotvec = r_rel.as_rotvec()
+                        angle = np.linalg.norm(rotvec)
+                        if angle > 1e-10:
+                            axis = rotvec / angle
+                        else:
+                            axis = np.array([0.0, 0.0, 1.0])
+                            angle = 0.0
+                        level_data.append((r_before, axis, angle))
+                        all_axes.append(axis)
+                        all_indices.append((i, j))
                     except Exception:
-                        level_slerps.append(None)
+                        level_data.append(None)
                 else:
-                    level_slerps.append(None)
-            smooth_slerps.append(level_slerps)
+                    level_data.append(None)
+            smooth_rot_data.append(level_data)
+
+        # Second pass: enforce consistent rotation axis direction
+        # Use the first non-trivial rotation axis as reference
+        ref_axis = None
+        for axis in all_axes:
+            if np.linalg.norm(axis) > 1e-10:
+                ref_axis = axis.copy()
+                break
+        if ref_axis is not None:
+            for k, (i, j) in enumerate(all_indices):
+                data = smooth_rot_data[i][j]
+                if data is None:
+                    continue
+                r_before, axis, angle = data
+                if angle > 1e-10 and np.dot(axis, ref_axis) < 0:
+                    # Flip: negate axis and angle to rotate the other way
+                    axis = -axis
+                    angle = -angle
+                    smooth_rot_data[i][j] = (r_before, axis, angle)
 
         self._smooth_bp_before = bp_before
         self._smooth_bp_after = bp_after
-        self._smooth_slerps = smooth_slerps
+        self._smooth_rot_data = smooth_rot_data
         self._smooth_replayed = False
 
         if defer:
@@ -1604,12 +1634,14 @@ class ContourMeshMixin:
 
     def update_smooth_animation(self, dt):
         """Advance smoothing animation. Interpolates bounding planes from before to after."""
+        from scipy.spatial.transform import Rotation as R
+
         if not self._smooth_anim_active:
             return False
 
         bp_before = self._smooth_bp_before
         bp_after = self._smooth_bp_after
-        slerps = getattr(self, '_smooth_slerps', None)
+        rot_data = getattr(self, '_smooth_rot_data', None)
         if bp_before is None or bp_after is None:
             self._smooth_anim_active = False
             self._smooth_replayed = True
@@ -1630,10 +1662,16 @@ class ContourMeshMixin:
 
                 bp['mean'] = (1 - t) * before['mean'] + t * after['mean']
 
-                # Interpolate axes using slerp for proper rotation
-                if slerps is not None and i < len(slerps) and j < len(slerps[i]) and slerps[i][j] is not None:
-                    rot = slerps[i][j](t)
-                    mat = rot.as_matrix()
+                # Interpolate axes using consistent axis-angle rotation
+                has_rot = (rot_data is not None and i < len(rot_data) and
+                           j < len(rot_data[i]) and rot_data[i][j] is not None)
+                if has_rot:
+                    r_before, axis, angle = rot_data[i][j]
+                    # Apply fraction t of the relative rotation to the before frame
+                    partial_rotvec = axis * (angle * t)
+                    r_partial = R.from_rotvec(partial_rotvec)
+                    r_interp = r_partial * r_before
+                    mat = r_interp.as_matrix()
                     bp['basis_x'] = mat[:, 0]
                     bp['basis_y'] = mat[:, 1]
                     bp['basis_z'] = mat[:, 2]
