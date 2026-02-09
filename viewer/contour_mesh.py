@@ -629,6 +629,11 @@ class ContourMeshMixin:
                 color = small_colors[i] if i < len(small_colors) else np.array(COLOR_MAP(1 - values[i])[:3], dtype=np.float32)
 
             for j, contour in enumerate(contour_set):
+                # Per-level visibility (stream mode: draw_contour_stream is 2D)
+                dcs_i = self.draw_contour_stream[i]
+                if isinstance(dcs_i, list) and j < len(dcs_i) and not dcs_i[j]:
+                    continue
+
                 # Cut animation color override
                 cut_colors = getattr(self, '_cut_anim_contour_colors', None)
                 if cut_colors is not None and i < len(cut_colors) and j < len(cut_colors[i]):
@@ -1395,19 +1400,51 @@ class ContourMeshMixin:
         # if skeleton_meshes is not None and len(skeleton_meshes) > 0:
         #     self.auto_detect_attachments(skeleton_meshes)
 
+    def _is_stream_mode(self):
+        """Check if contours are in stream mode [stream][level] (post-cut)."""
+        return (self.draw_contour_stream is not None
+                and len(self.draw_contour_stream) > 0
+                and isinstance(self.draw_contour_stream[0], list))
+
+    def _set_level_visible(self, level_idx, visible):
+        """Set visibility for a level index, works in both level and stream mode."""
+        if self._is_stream_mode():
+            for s in range(len(self.draw_contour_stream)):
+                if level_idx < len(self.draw_contour_stream[s]):
+                    self.draw_contour_stream[s][level_idx] = visible
+        else:
+            if level_idx < len(self.draw_contour_stream):
+                self.draw_contour_stream[level_idx] = visible
+
+    def _hide_all_levels(self):
+        """Hide all contour levels, works in both modes."""
+        if self._is_stream_mode():
+            for s in range(len(self.draw_contour_stream)):
+                for j in range(len(self.draw_contour_stream[s])):
+                    self.draw_contour_stream[s][j] = False
+        else:
+            for i in range(len(self.draw_contour_stream)):
+                self.draw_contour_stream[i] = False
+
+    def _num_levels(self):
+        """Get the number of contour levels (works in both modes)."""
+        if self._is_stream_mode():
+            return len(self.draw_contour_stream[0]) if len(self.draw_contour_stream) > 0 else 0
+        return len(self.draw_contour_stream) if self.draw_contour_stream else 0
+
     def replay_contour_animation(self):
         """Start replaying the contour reveal animation from origin to insertion.
         Only animates contours from find_contours, not gap-filled ones."""
         if self.contours is None or len(self.contours) == 0:
             return
-        total = len(self.contours)
+        total = self._num_levels()
         # Build set of indices inserted by later steps to skip during contour animation
         skip_indices = set(getattr(self, '_fill_gaps_inserted_indices', []))
         skip_indices.update(getattr(self, '_transitions_inserted_indices', []))
         self._contour_anim_original_indices = [i for i in range(total) if i not in skip_indices]
         self._contour_anim_total = len(self._contour_anim_original_indices)
         # Hide all contours
-        self.draw_contour_stream = [False] * total
+        self._hide_all_levels()
         self._contour_anim_progress = 0.0
         self._contour_anim_active = True
         self.is_draw_contours = True
@@ -1429,17 +1466,16 @@ class ContourMeshMixin:
         revealed = int(self._contour_anim_progress * total)
         revealed = min(revealed, total)
 
-        # Reveal only original contour indices in order
+        # Reveal only original contour level indices in order
         for k in range(total):
             idx = orig_indices[k]
-            self.draw_contour_stream[idx] = (k < revealed)
+            self._set_level_visible(idx, k < revealed)
 
         if revealed >= total:
             self._contour_anim_active = False
             self._contour_replayed = True
-            # Show only original contours, gap-filled stay hidden
             for idx in orig_indices:
-                self.draw_contour_stream[idx] = True
+                self._set_level_visible(idx, True)
             return False
 
         return True
@@ -1452,8 +1488,7 @@ class ContourMeshMixin:
             return
         # Hide only the gap-filled contours, leave everything else as-is
         for idx in self._fill_gaps_inserted_indices:
-            if idx < len(self.draw_contour_stream):
-                self.draw_contour_stream[idx] = False
+            self._set_level_visible(idx, False)
         self._fill_gaps_anim_step = 0
         self._fill_gaps_anim_progress = 0.0
         self._fill_gaps_anim_active = True
@@ -1478,9 +1513,7 @@ class ContourMeshMixin:
         revealed = min(int(self._fill_gaps_anim_progress / time_per_gap) + 1, len(indices))
 
         for i in range(revealed):
-            idx = indices[i]
-            if idx < len(self.draw_contour_stream):
-                self.draw_contour_stream[idx] = True
+            self._set_level_visible(indices[i], True)
 
         self._fill_gaps_anim_step = revealed - 1
 
@@ -1497,8 +1530,7 @@ class ContourMeshMixin:
             self._anim_highlight_contour_idx = -1
             self._anim_highlight_fade = 0.0
             for idx in indices:
-                if idx < len(self.draw_contour_stream):
-                    self.draw_contour_stream[idx] = True
+                self._set_level_visible(idx, True)
             return False
 
         return True
@@ -1510,8 +1542,7 @@ class ContourMeshMixin:
             return
         # Show all currently visible contours, but hide the transition-inserted ones
         for idx in self._transitions_inserted_indices:
-            if idx < len(self.draw_contour_stream):
-                self.draw_contour_stream[idx] = False
+            self._set_level_visible(idx, False)
         self._transitions_anim_step = 0
         self._transitions_anim_progress = 0.0
         self._transitions_anim_active = True
@@ -1536,9 +1567,7 @@ class ContourMeshMixin:
         revealed = min(int(self._transitions_anim_progress / time_per_item) + 1, len(indices))
 
         for i in range(revealed):
-            idx = indices[i]
-            if idx < len(self.draw_contour_stream):
-                self.draw_contour_stream[idx] = True
+            self._set_level_visible(indices[i], True)
 
         self._transitions_anim_step = revealed - 1
 
@@ -1555,8 +1584,7 @@ class ContourMeshMixin:
             self._anim_highlight_contour_idx = -1
             self._anim_highlight_fade = 0.0
             for idx in indices:
-                if idx < len(self.draw_contour_stream):
-                    self.draw_contour_stream[idx] = True
+                self._set_level_visible(idx, True)
             return False
 
         return True
@@ -17534,7 +17562,15 @@ class ContourMeshMixin:
         if self.contours is not None and len(self.contours) > 0:
             self.is_draw_contours = False
             self.is_draw_bounding_box = False
-            self.draw_contour_stream = [False] * len(self.contours)
+            # Preserve 2D structure if in stream mode (post-cut)
+            if (self.draw_contour_stream is not None
+                    and len(self.draw_contour_stream) > 0
+                    and isinstance(self.draw_contour_stream[0], list)):
+                num_streams = len(self.draw_contour_stream)
+                num_levels = len(self.draw_contour_stream[0])
+                self.draw_contour_stream = [[False] * num_levels for _ in range(num_streams)]
+            else:
+                self.draw_contour_stream = [False] * len(self.contours)
 
         # 3. Smooth: apply pre-smooth BPs
         if self._smooth_bp_before is not None:
