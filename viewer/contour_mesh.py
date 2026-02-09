@@ -4,7 +4,6 @@
 
 import numpy as np
 import copy
-import threading
 from OpenGL.GL import *
 import matplotlib.cm as cm
 from scipy.spatial import cKDTree
@@ -488,9 +487,10 @@ class ContourMeshMixin:
         self.is_draw_farthest_pair = False
         self.draw_contour_stream = None
 
-        # Contour threading state
-        self._contour_thread = None
+        # Contour animation replay state
         self._contour_anim_active = False
+        self._contour_anim_progress = 0.0
+        self._contour_anim_total = 0
 
         # Inspector highlight (set by viewer when 2D inspector is open)
         self.inspector_highlight_stream = None  # Stream index to highlight
@@ -516,10 +516,6 @@ class ContourMeshMixin:
             contours_to_draw = self.get_deformed_contours()
         else:
             contours_to_draw = self.contours
-
-        # Snapshot the list length to avoid race with background thread
-        if contours_to_draw is not None:
-            contours_to_draw = list(contours_to_draw)
 
         if self.specific_contour is not None:
             glDisable(GL_LIGHTING)
@@ -557,20 +553,19 @@ class ContourMeshMixin:
             glVertex3fv(structure_vector[1])
             glEnd()
 
-        draw_stream = list(self.draw_contour_stream) if self.draw_contour_stream is not None else None
         values = np.linspace(0, 1, len(contours_to_draw) + 2)[1:-1]
 
         for i, contour_set in enumerate(contours_to_draw):
-            if draw_stream is None:
+            if self.draw_contour_stream is None:
                 break
 
-            if i >= len(draw_stream):
+            if i >= len(self.draw_contour_stream):
                 continue
 
-            if not draw_stream[i]:
+            if not self.draw_contour_stream[i]:
                 continue
 
-            if len(draw_stream) > 8:
+            if len(self.draw_contour_stream) > 8:
                 color = COLOR_MAP(1 - values[i])[:3]
             else:
                 colors = [
@@ -1077,7 +1072,7 @@ class ContourMeshMixin:
 
         self.is_draw_contours = True
 
-    def find_contours(self, scalar_step=0.1, skeleton_meshes=None, use_geodesic_edges=False, spacing_scale=1.0, progressive=False):
+    def find_contours(self, scalar_step=0.1, skeleton_meshes=None, use_geodesic_edges=False, spacing_scale=1.0):
         if self.scalar_field is None:
             print("Please compute scalar field first")
             return
@@ -1101,11 +1096,7 @@ class ContourMeshMixin:
         self._bounding_planes_backup = None
         self.selected_stream_levels = None
 
-        if progressive:
-            self.is_draw_contours = True
-            self.draw_contour_stream = []
-
-        contours = self.contours if progressive else []
+        contours = []
         contours_orig = []
 
         origin_bounding_planes = []
@@ -1123,8 +1114,6 @@ class ContourMeshMixin:
         self.bounding_planes.append(origin_bounding_planes)
         contours.append(origin_contours)
         contours_orig.append(origin_contours_orig)
-        if progressive:
-            self.draw_contour_stream.append(True)
 
         # Spacing thresholds (scale is global MESH_SCALE = 0.01)
         length_min_threshold = scale * 0.5 * spacing_scale
@@ -1234,8 +1223,6 @@ class ContourMeshMixin:
                         self.bounding_planes.append(bounding_planes)
                         contours.append(ordered_contour_vertices)
                         contours_orig.append(ordered_contour_vertices_orig)
-                        if progressive:
-                            self.draw_contour_stream.append(True)
                         prev_contour_value = contour_value
                         contour_value += current_adaptive_step
                 else:
@@ -1261,8 +1248,6 @@ class ContourMeshMixin:
                         self.bounding_planes.append(bounding_planes)
                         contours.append(ordered_contour_vertices)
                         contours_orig.append(ordered_contour_vertices_orig)
-                        if progressive:
-                            self.draw_contour_stream.append(True)
                     else:
                         trial += 1
 
@@ -1293,32 +1278,48 @@ class ContourMeshMixin:
         self.bounding_planes.append(insertion_bounding_planes)
         contours.append(insertion_contours)
         contours_orig.append(insertion_contours_orig)
-        if progressive:
-            self.draw_contour_stream.append(True)
 
-        if not progressive:
-            self.draw_contour_stream = [True] * len(contours)
-            self.is_draw_contours = True
-            self.contours = contours
+        self.draw_contour_stream = [True] * len(contours)
+        self.is_draw_contours = True
+        self.contours = contours
 
         # # Auto-detect skeleton attachments if skeleton_meshes provided
         # if skeleton_meshes is not None and len(skeleton_meshes) > 0:
         #     self.auto_detect_attachments(skeleton_meshes)
 
-    def find_contours_threaded(self, **kwargs):
-        """Run find_contours in a background thread to keep UI responsive.
-        Contour levels appear progressively as they are found."""
-        # Stop any existing thread
-        self._contour_anim_active = False
-        self.is_draw_contours = False
-        self.contours = None
-        self.draw_contour_stream = None
+    def replay_contour_animation(self):
+        """Start replaying the contour reveal animation from origin to insertion."""
+        if self.contours is None or len(self.contours) == 0:
+            return
+        self._contour_anim_total = len(self.contours)
+        self.draw_contour_stream = [False] * self._contour_anim_total
+        self._contour_anim_progress = 0.0
+        self._contour_anim_active = True
+        self.is_draw_contours = True
 
-        def _worker():
-            self.find_contours(progressive=True, **kwargs)
+    def update_contour_animation(self, dt):
+        """Advance contour reveal animation. Returns True while active."""
+        if not self._contour_anim_active:
+            return False
 
-        self._contour_thread = threading.Thread(target=_worker, daemon=True)
-        self._contour_thread.start()
+        total = self._contour_anim_total
+        if total == 0:
+            self._contour_anim_active = False
+            return False
+
+        self._contour_anim_progress += dt * 0.5  # ~2 seconds for full reveal
+        revealed = int(self._contour_anim_progress * total)
+        revealed = min(revealed, total)
+
+        for i in range(total):
+            self.draw_contour_stream[i] = (i < revealed)
+
+        if revealed >= total:
+            self._contour_anim_active = False
+            self.draw_contour_stream = [True] * total
+            return False
+
+        return True
 
     def _find_neck_in_contour(self, contour_2d, min_separation=0.25):
         """

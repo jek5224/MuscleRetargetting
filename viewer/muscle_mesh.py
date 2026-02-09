@@ -3065,7 +3065,7 @@ class MuscleMeshMixin:
 
         print("Process reset complete")
 
-    def compute_scalar_field(self, animate=False):
+    def compute_scalar_field(self):
         """Compute scalar field from origin/insertion edge groups."""
         origin_indices = []
         insertion_indices = []
@@ -3089,24 +3089,25 @@ class MuscleMeshMixin:
         target_colors = np.array(target_colors, dtype=np.float32)
         target_colors[:, 3] = self.transparency
 
-        if animate:
-            # Gradual reveal animation from origin to insertion
-            self._scalar_anim_target_colors = target_colors[self.faces_3[:, :, 0].flatten()]
-            self._scalar_anim_normalized_u = normalized_u[self.faces_3[:, :, 0].flatten()]
-            self._scalar_anim_progress = 0.0
-            self._scalar_anim_active = True
-
-            n_face_verts = len(self._scalar_anim_target_colors)
-            self.vertex_colors = np.tile(
-                np.array([self.color[0], self.color[1], self.color[2], self.transparency], dtype=np.float32),
-                (n_face_verts, 1)
-            )
-        else:
-            # Instant color apply
-            self._scalar_anim_active = False
-            self.vertex_colors = target_colors[self.faces_3[:, :, 0].flatten()]
-
+        # Apply colors instantly and save animation data for replay
+        self._scalar_anim_target_colors = target_colors[self.faces_3[:, :, 0].flatten()]
+        self._scalar_anim_normalized_u = normalized_u[self.faces_3[:, :, 0].flatten()]
+        self._scalar_anim_active = False
+        self.vertex_colors = self._scalar_anim_target_colors.copy()
         self.is_draw_scalar_field = True
+
+    def replay_scalar_animation(self):
+        """Start replaying the scalar field color flood animation."""
+        if self._scalar_anim_target_colors is None:
+            return
+        self._scalar_anim_progress = 0.0
+        self._scalar_anim_active = True
+        # Reset to default muscle color
+        n = len(self._scalar_anim_target_colors)
+        self.vertex_colors = np.tile(
+            np.array([self.color[0], self.color[1], self.color[2], self.transparency], dtype=np.float32),
+            (n, 1)
+        )
 
     def update_scalar_animation(self, dt):
         """Advance the scalar field color reveal animation. Returns True while active."""

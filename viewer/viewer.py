@@ -1006,10 +1006,12 @@ class GLFWApp():
             if self.motion_baking:
                 _motion_bake_step(self)
 
-            # Process animations (scalar field color reveal)
+            # Process step animations (replay)
             for name, obj in self.zygote_muscle_meshes.items():
                 if getattr(obj, '_scalar_anim_active', False):
                     obj.update_scalar_animation(1.0 / 30.0)
+                if getattr(obj, '_contour_anim_active', False):
+                    obj.update_contour_animation(1.0 / 30.0)
 
             # Auto-rotate around focused muscle
             if self.auto_rotate:
