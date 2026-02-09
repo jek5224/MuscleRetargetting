@@ -3065,7 +3065,7 @@ class MuscleMeshMixin:
 
         print("Process reset complete")
 
-    def compute_scalar_field(self):
+    def compute_scalar_field(self, animate=False):
         """Compute scalar field from origin/insertion edge groups."""
         origin_indices = []
         insertion_indices = []
@@ -3085,21 +3085,27 @@ class MuscleMeshMixin:
         u_min, u_max = np.min(u), np.max(u)
         normalized_u = (u - u_min) / (u_max - u_min) if u_max > u_min else np.zeros_like(u)
 
-        # Compute target colors and start gradual reveal animation
         target_colors = COLOR_MAP(1 - normalized_u)[:, :4]
         target_colors = np.array(target_colors, dtype=np.float32)
         target_colors[:, 3] = self.transparency
-        self._scalar_anim_target_colors = target_colors[self.faces_3[:, :, 0].flatten()]
-        self._scalar_anim_normalized_u = normalized_u[self.faces_3[:, :, 0].flatten()]
-        self._scalar_anim_progress = 0.0
-        self._scalar_anim_active = True
 
-        # Start with default muscle color
-        n_face_verts = len(self._scalar_anim_target_colors)
-        self.vertex_colors = np.tile(
-            np.array([self.color[0], self.color[1], self.color[2], self.transparency], dtype=np.float32),
-            (n_face_verts, 1)
-        )
+        if animate:
+            # Gradual reveal animation from origin to insertion
+            self._scalar_anim_target_colors = target_colors[self.faces_3[:, :, 0].flatten()]
+            self._scalar_anim_normalized_u = normalized_u[self.faces_3[:, :, 0].flatten()]
+            self._scalar_anim_progress = 0.0
+            self._scalar_anim_active = True
+
+            n_face_verts = len(self._scalar_anim_target_colors)
+            self.vertex_colors = np.tile(
+                np.array([self.color[0], self.color[1], self.color[2], self.transparency], dtype=np.float32),
+                (n_face_verts, 1)
+            )
+        else:
+            # Instant color apply
+            self._scalar_anim_active = False
+            self.vertex_colors = target_colors[self.faces_3[:, :, 0].flatten()]
+
         self.is_draw_scalar_field = True
 
     def update_scalar_animation(self, dt):

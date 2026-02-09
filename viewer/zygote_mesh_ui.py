@@ -480,7 +480,7 @@ def draw_zygote_muscle_ui(v):
                         # Step 1: Scalar Field
                         if start_step <= 1 <= max_step and len(obj.edge_groups) > 0 and len(obj.edge_classes) > 0:
                             print(f"  [1/{max_step}] Computing Scalar Field...")
-                            obj.compute_scalar_field()
+                            obj.compute_scalar_field(animate=getattr(obj, 'animate_process', False))
 
                         # Step 2: Find Contours
                         if start_step <= 2 <= max_step and obj.scalar_field is not None:
@@ -596,7 +596,7 @@ def draw_zygote_muscle_ui(v):
                 if colored_button(f"Scalar Field##{name}", 1, col_button_width):
                     if len(obj.edge_groups) > 0 and len(obj.edge_classes) > 0:
                         try:
-                            obj.compute_scalar_field()
+                            obj.compute_scalar_field(animate=getattr(obj, 'animate_process', False))
                         except Exception as e:
                             print(f"[{name}] Scalar Field error: {e}")
                     else:
@@ -893,7 +893,9 @@ def draw_zygote_muscle_ui(v):
                 if is_rotating:
                     imgui.pop_style_color(3)
 
-                _, obj.is_one_fiber = imgui.checkbox(f"One Fiber##{name}", obj.is_one_fiber)
+                if not hasattr(obj, 'animate_process'):
+                    obj.animate_process = True
+                _, obj.animate_process = imgui.checkbox(f"Animate##{name}", obj.animate_process)
 
                 # Bounding box method selector
                 bbox_methods = ['farthest_vertex', 'pca', 'bbox']
