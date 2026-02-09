@@ -1668,11 +1668,17 @@ class ContourMeshMixin:
             # Phase 1: fade transparency
             fade_t = progress / phase1_duration
             fade_t = fade_t * fade_t * (3.0 - 2.0 * fade_t)  # ease in-out
-            self.transparency = orig_alpha + (target_alpha - orig_alpha) * fade_t
+            new_alpha = orig_alpha + (target_alpha - orig_alpha) * fade_t
+            self.transparency = new_alpha
+            # Update vertex_colors alpha when scalar field colors are active
+            if self.vertex_colors is not None and self.is_draw_scalar_field:
+                self.vertex_colors[:, 3] = new_alpha
             return True
 
         # Phase 1 done — ensure transparency is at target
         self.transparency = target_alpha
+        if self.vertex_colors is not None and self.is_draw_scalar_field:
+            self.vertex_colors[:, 3] = target_alpha
 
         # Phase 2: interpolate axes/bounding planes
         rot_t = min((progress - phase1_duration) / phase2_duration, 1.0)
