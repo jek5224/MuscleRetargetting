@@ -17585,6 +17585,9 @@ class ContourMeshMixin:
         # (smooth animation will fade it down during its replay)
         self._smooth_anim_orig_transparency = state.get('transparency', 1.0)
         self.transparency = 1.0
+        # Also reset vertex_colors alpha to 1.0 if they exist
+        if self.vertex_colors is not None:
+            self.vertex_colors[:, 3] = 1.0
 
         # Reset all animation playback states (ready for replay)
         self._scalar_anim_active = False
