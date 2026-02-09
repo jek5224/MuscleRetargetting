@@ -854,7 +854,7 @@ def draw_zygote_muscle_ui(v):
                     imgui.pop_style_var()
 
                 # Focus camera on muscle button
-                if imgui.button(f"Focus##{name}", width=inspect_width):
+                if imgui.button(f"Focus##{name}", width=button_width):
                     if obj.vertices is not None and len(obj.vertices) > 0:
                         # Compute bounding box center
                         min_pt = np.min(obj.vertices, axis=0)
@@ -869,6 +869,31 @@ def draw_zygote_muscle_ui(v):
                         v.eye = eye_dir * max(distance, MIN_EYE_DISTANCE)
                     else:
                         print(f"[{name}] No vertices to focus on")
+
+                # Rotate toggle button (auto-orbit around focused muscle)
+                imgui.same_line()
+                is_rotating = v.auto_rotate
+                if is_rotating:
+                    imgui.push_style_color(imgui.COLOR_BUTTON, 0.2, 0.4, 0.8, 1.0)
+                    imgui.push_style_color(imgui.COLOR_BUTTON_HOVERED, 0.3, 0.5, 0.9, 1.0)
+                    imgui.push_style_color(imgui.COLOR_BUTTON_ACTIVE, 0.1, 0.3, 0.7, 1.0)
+                if imgui.button(f"Rotate##{name}", width=button_width):
+                    if v.auto_rotate:
+                        v.auto_rotate = False
+                    else:
+                        # Focus on muscle first, then start rotating
+                        if obj.vertices is not None and len(obj.vertices) > 0:
+                            min_pt = np.min(obj.vertices, axis=0)
+                            max_pt = np.max(obj.vertices, axis=0)
+                            center = (min_pt + max_pt) / 2
+                            bbox_size = np.linalg.norm(max_pt - min_pt)
+                            v.trans = -center * 1000.0
+                            distance = bbox_size * 2.0
+                            eye_dir = v.eye / (np.linalg.norm(v.eye) + 1e-10)
+                            v.eye = eye_dir * max(distance, MIN_EYE_DISTANCE)
+                        v.auto_rotate = True
+                if is_rotating:
+                    imgui.pop_style_color(3)
 
                 _, obj.is_one_fiber = imgui.checkbox(f"One Fiber##{name}", obj.is_one_fiber)
 

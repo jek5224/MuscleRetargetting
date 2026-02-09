@@ -176,6 +176,10 @@ class GLFWApp():
         self.rotate = False
         self.translate = False
 
+        ## Auto-rotate around focused muscle
+        self.auto_rotate = False
+        self.auto_rotate_speed = 1.0  # radians per second
+
         self.mouse_x = 0
         self.mouse_y = 0
         self.motion_skel = None
@@ -430,6 +434,8 @@ class GLFWApp():
 
     ## mousce button callback function
     def mousePress(self, button, action, mods):
+        if self.auto_rotate:
+            return
         if action == glfw.PRESS:
             self.mouse_down = True
             if button == glfw.MOUSE_BUTTON_LEFT:
@@ -446,6 +452,8 @@ class GLFWApp():
 
     ## mouse move callback function
     def mouseMove(self, xpos, ypos):
+        if self.auto_rotate:
+            return
         dx = xpos - self.mouse_x
         dy = ypos - self.mouse_y
 
@@ -462,6 +470,8 @@ class GLFWApp():
         
     ## mouse scroll callback function
     def mouseScroll(self, xoffset, yoffset):
+        if self.auto_rotate:
+            return
         if yoffset < 0:
             self.eye *= CAMERA_ZOOM_FACTOR
         elif (yoffset > 0) and (np.linalg.norm(self.eye) > MIN_EYE_DISTANCE):
@@ -995,6 +1005,17 @@ class GLFWApp():
             # Motion Browser: bake one frame per render loop
             if self.motion_baking:
                 _motion_bake_step(self)
+
+            # Auto-rotate around focused muscle
+            if self.auto_rotate:
+                ar_dt = start_time - getattr(self, '_auto_rotate_last_time', start_time)
+                if ar_dt <= 0:
+                    ar_dt = 1.0 / 30.0
+                angle = self.auto_rotate_speed * ar_dt
+                half = angle / 2.0
+                rot_quat = np.quaternion(np.cos(half), 0.0, np.sin(half), 0.0)
+                self.trackball.curr_quat = rot_quat * self.trackball.curr_quat
+            self._auto_rotate_last_time = start_time
 
             if self.is_simulation:
                 self.update()
