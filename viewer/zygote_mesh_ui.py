@@ -71,34 +71,54 @@ def draw_zygote_muscle_ui(v):
 
             if total_available > 0:
                 # Draw category-based listbox using child region
-                imgui.begin_child("##available_muscles_child", width=0, height=150, border=True)
-
+                # Group categories by body part (first part before '/')
+                from collections import OrderedDict
+                body_parts = OrderedDict()
                 for category, muscles in v.available_muscle_by_category.items():
                     if len(muscles) == 0:
                         continue
+                    if '/' in category:
+                        body_part, side = category.rsplit('/', 1)
+                    else:
+                        body_part, side = category, ''
+                    if body_part not in body_parts:
+                        body_parts[body_part] = []
+                    body_parts[body_part].append((side, category, muscles))
 
-                    # Category header with expand/collapse
-                    is_expanded = v.available_category_expanded.get(category, False)
-                    arrow = "v" if is_expanded else ">"
-                    category_label = f"{arrow} {category} ({len(muscles)})"
+                imgui.begin_child("##available_muscles_child", width=0, height=150, border=True)
 
-                    # Make category clickable
-                    if imgui.selectable(category_label, False)[0]:
-                        v.available_category_expanded[category] = not is_expanded
+                for body_part, sides in body_parts.items():
+                    # Count total muscles in this body part
+                    bp_total = sum(len(m) for _, _, m in sides)
+                    bp_key = f"_bp_{body_part}"
+                    is_bp_expanded = v.available_category_expanded.get(bp_key, False)
+                    arrow = "v" if is_bp_expanded else ">"
+                    bp_label = f"{arrow} {body_part} ({bp_total})"
 
-                    # Show muscles if expanded
-                    if is_expanded:
-                        for name, path in muscles:
-                            # Indent muscle names
+                    if imgui.selectable(bp_label, False)[0]:
+                        v.available_category_expanded[bp_key] = not is_bp_expanded
+
+                    if is_bp_expanded:
+                        for side, category, muscles in sides:
                             imgui.indent(15)
-                            is_selected = (v.available_selected_muscle == name)
-                            clicked, _ = imgui.selectable(f"  {name}", is_selected)
-                            if clicked:
-                                v.available_selected_category = category
-                                v.available_selected_muscle = name
-                            # Double-click to add
-                            if imgui.is_item_hovered() and imgui.is_mouse_double_clicked(0):
-                                add_muscle_mesh(v, name, path)
+                            is_expanded = v.available_category_expanded.get(category, False)
+                            arrow2 = "v" if is_expanded else ">"
+                            side_label = f"{arrow2} {side} ({len(muscles)})"
+
+                            if imgui.selectable(f"{side_label}##{category}", False)[0]:
+                                v.available_category_expanded[category] = not is_expanded
+
+                            if is_expanded:
+                                for name, path in muscles:
+                                    imgui.indent(15)
+                                    is_selected = (v.available_selected_muscle == name)
+                                    clicked, _ = imgui.selectable(f"  {name}", is_selected)
+                                    if clicked:
+                                        v.available_selected_category = category
+                                        v.available_selected_muscle = name
+                                    if imgui.is_item_hovered() and imgui.is_mouse_double_clicked(0):
+                                        add_muscle_mesh(v, name, path)
+                                    imgui.unindent(15)
                             imgui.unindent(15)
 
                 imgui.end_child()
@@ -5381,12 +5401,22 @@ def update_available_muscles(v):
                     full_path = os.path.join(root, file)
                     v.available_muscle_files.append((muscle_name, full_path))
 
-                    # Determine category from relative path
+                    # Determine body part from relative path
                     rel_path = os.path.relpath(root, v.zygote_muscle_dir)
                     if rel_path == '.':
-                        category = 'Root'
+                        body_part = 'Root'
                     else:
-                        category = rel_path.replace(os.sep, '/')
+                        body_part = rel_path.replace(os.sep, '/')
+
+                    # Determine side (L/R/M) from muscle name prefix
+                    if muscle_name.startswith('L_'):
+                        side = 'L'
+                    elif muscle_name.startswith('R_'):
+                        side = 'R'
+                    else:
+                        side = 'M'
+
+                    category = f"{body_part}/{side}"
 
                     if category not in v.available_muscle_by_category:
                         v.available_muscle_by_category[category] = []
@@ -5498,22 +5528,32 @@ def remove_muscle_mesh(v, name):
 
 
 def get_available_muscle_groups(v):
-    """Get list of muscle groups (categories) that have available muscles."""
+    """Get list of body part groups that have available muscles."""
     groups = set()
     for category in v.available_muscle_by_category.keys():
         if len(v.available_muscle_by_category[category]) > 0:
-            groups.add(category)
+            if '/' in category:
+                body_part = category.rsplit('/', 1)[0]
+            else:
+                body_part = category
+            groups.add(body_part)
     return sorted(groups)
 
 
 def add_muscles_by_group(v, group, prefix):
-    """Add all muscles in a group that start with the given prefix (L_ or R_)."""
-    if group not in v.available_muscle_by_category:
-        return
+    """Add all muscles in a body part group that start with the given prefix (L_ or R_)."""
     to_add = []
-    for name, path in v.available_muscle_by_category[group]:
-        if name.startswith(prefix):
-            to_add.append((name, path))
+    for category, muscles in v.available_muscle_by_category.items():
+        # Match categories belonging to this body part
+        if '/' in category:
+            body_part = category.rsplit('/', 1)[0]
+        else:
+            body_part = category
+        if body_part != group:
+            continue
+        for name, path in muscles:
+            if name.startswith(prefix):
+                to_add.append((name, path))
     for name, path in to_add:
         add_muscle_mesh(v, name, path)
 
