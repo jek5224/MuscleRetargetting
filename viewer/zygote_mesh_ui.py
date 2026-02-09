@@ -5829,8 +5829,14 @@ def _run_unified_volume_sim(v, active_muscles, max_iterations=100, tolerance=1e-
     if n0 > 0 or n1 > 0:
         print(f"  WARNING: {n0} isolated, {n1} single-neighbor, {n2} two-neighbor vertices")
 
-    # Create or get ARAP backend
-    backend = get_backend(backend_name)
+    # Reuse cached backend to avoid Taichi field re-allocation errors
+    cached = getattr(v, '_unified_arap_backend', None)
+    if cached is not None and getattr(cached, '_backend_name', None) == backend_name:
+        backend = cached
+    else:
+        backend = get_backend(backend_name)
+        backend._backend_name = backend_name
+        v._unified_arap_backend = backend
 
     # Prepare fixed targets array (ordered by fixed indices)
     fixed_indices = np.where(global_fixed_mask)[0]
