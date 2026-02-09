@@ -1006,6 +1006,11 @@ class GLFWApp():
             if self.motion_baking:
                 _motion_bake_step(self)
 
+            # Scalar field color animation
+            for name, obj in self.zygote_muscle_meshes.items():
+                if getattr(obj, '_scalar_anim_active', False):
+                    obj.update_scalar_animation(1.0 / 30.0)
+
             # Auto-rotate around focused muscle
             if self.auto_rotate:
                 ar_dt = start_time - getattr(self, '_auto_rotate_last_time', start_time)

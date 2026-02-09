@@ -1462,6 +1462,12 @@ class MuscleMeshMixin:
         self._face_scalar_min = None  # Invalidate precomputed ranges
         self._face_scalar_max = None
         self.vertex_colors = None
+
+        # Scalar field animation state
+        self._scalar_anim_active = False
+        self._scalar_anim_progress = 0.0
+        self._scalar_anim_target_colors = None
+        self._scalar_anim_normalized_u = None
         self.contours = None
         self.contour_mesh_vertices = None
         self.contour_mesh_faces = None
@@ -3079,11 +3085,41 @@ class MuscleMeshMixin:
         u_min, u_max = np.min(u), np.max(u)
         normalized_u = (u - u_min) / (u_max - u_min) if u_max > u_min else np.zeros_like(u)
 
-        vertex_colors = COLOR_MAP(1 - normalized_u)[:, :4]
-        vertex_colors = np.array(vertex_colors, dtype=np.float32)
-        vertex_colors[:, 3] = self.transparency
-        self.vertex_colors = vertex_colors[self.faces_3[:, :, 0].flatten()]
+        # Compute target colors and start gradual reveal animation
+        target_colors = COLOR_MAP(1 - normalized_u)[:, :4]
+        target_colors = np.array(target_colors, dtype=np.float32)
+        target_colors[:, 3] = self.transparency
+        self._scalar_anim_target_colors = target_colors[self.faces_3[:, :, 0].flatten()]
+        self._scalar_anim_normalized_u = normalized_u[self.faces_3[:, :, 0].flatten()]
+        self._scalar_anim_progress = 0.0
+        self._scalar_anim_active = True
+
+        # Start with default muscle color
+        n_face_verts = len(self._scalar_anim_target_colors)
+        self.vertex_colors = np.tile(
+            np.array([self.color[0], self.color[1], self.color[2], self.transparency], dtype=np.float32),
+            (n_face_verts, 1)
+        )
         self.is_draw_scalar_field = True
+
+    def update_scalar_animation(self, dt):
+        """Advance the scalar field color reveal animation. Returns True while active."""
+        if not self._scalar_anim_active:
+            return False
+
+        self._scalar_anim_progress += dt * 0.5  # 2 seconds for full reveal
+        if self._scalar_anim_progress >= 1.0:
+            self._scalar_anim_progress = 1.0
+            self._scalar_anim_active = False
+            self.vertex_colors = self._scalar_anim_target_colors.copy()
+            return False
+
+        # Reveal vertices whose normalized scalar value (0=origin, 1=insertion) <= progress
+        mask = self._scalar_anim_normalized_u <= self._scalar_anim_progress
+        default_color = np.array([self.color[0], self.color[1], self.color[2], self.transparency], dtype=np.float32)
+        self.vertex_colors[mask] = self._scalar_anim_target_colors[mask]
+        self.vertex_colors[~mask] = default_color
+        return True
 
     # ========== End Scalar Field Methods ==========
 
