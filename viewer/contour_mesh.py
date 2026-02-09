@@ -17613,19 +17613,35 @@ class ContourMeshMixin:
         self._cut_anim_active = False
         self._cut_anim_progress = 0.0
         self._cut_replayed = False
-        # Restore deferred visual state: show pre-cut colors until replay
-        if self._cut_color_before is not None:
-            self._cut_anim_contour_colors = [[c.copy() for c in stream] for stream in self._cut_color_before]
-        else:
-            self._cut_anim_contour_colors = None
+        self._cut_anim_contour_colors = None
 
-        # Restore deferred BP state: apply pre-smooth BPs until replay
+        # ── Restore deferred visual state so everything looks pre-processed ──
+
+        # 1. Scalar: reset to default muscle color, hide scalar field
+        if self._scalar_anim_target_colors is not None:
+            self.is_draw_scalar_field = False
+            n = len(self._scalar_anim_target_colors)
+            default_color = getattr(self, 'color', [0.8, 0.8, 0.8])
+            alpha = getattr(self, 'transparency', 1.0)
+            self.vertex_colors = np.tile(
+                np.array([default_color[0], default_color[1], default_color[2], alpha], dtype=np.float32),
+                (n, 1)
+            )
+
+        # 2. Contours: hide all contours and bounding planes
+        if self.contours is not None and len(self.contours) > 0:
+            self.is_draw_contours = False
+            self.is_draw_bounding_box = False
+            self.draw_contour_stream = [False] * len(self.contours)
+
+        # 3. Smooth: apply pre-smooth BPs
         if self._smooth_bp_before is not None:
             self._apply_bp_snapshot(self._smooth_bp_before)
 
-        # Restore deferred cut BP state: apply pre-cut stream BPs until replay
+        # 4. Cut: restore pre-cut colors and BPs
+        if self._cut_color_before is not None:
+            self._cut_anim_contour_colors = [[c.copy() for c in stream] for stream in self._cut_color_before]
         if self._cut_bp_before is not None and getattr(self, '_cut_has_bp_change', False):
-            # stream_bounding_planes may not be set yet on load — alias from bounding_planes
             if not hasattr(self, 'stream_bounding_planes') or self.stream_bounding_planes is None:
                 self.stream_bounding_planes = self.bounding_planes
             self._apply_stream_bp_snapshot(self._cut_bp_before)
