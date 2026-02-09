@@ -5461,6 +5461,10 @@ def add_muscle_mesh(v, name, path):
     # Auto-save muscle list
     save_loaded_muscles(v)
 
+    # Reload motion cache so newly added muscle picks up its cached frames
+    if hasattr(v, 'motion_bvh') and v.motion_bvh is not None:
+        _motion_load_cache(v)
+
     # Maintain cursor position in the same category
     if prev_category and prev_category in v.available_muscle_by_category:
         muscles_in_cat = v.available_muscle_by_category[prev_category]
@@ -6559,12 +6563,13 @@ def _motion_apply_cached_deformation(v, frame):
         return False
     any_applied = False
     for mname, mobj in v.zygote_muscle_meshes.items():
-        if mobj.soft_body is None:
+        if mobj.tet_vertices is None:
             continue
         if mname in v.motion_deform_cache and frame in v.motion_deform_cache[mname]:
             cached = v.motion_deform_cache[mname][frame]
             cached_pos = cached['positions']
-            mobj.soft_body.positions = cached_pos.astype(np.float64)
+            if mobj.soft_body is not None:
+                mobj.soft_body.positions = cached_pos.astype(np.float64)
             mobj.tet_vertices = cached_pos.astype(np.float32).copy()
             mobj._update_tet_draw_positions()
             # Restore cached waypoints if available
