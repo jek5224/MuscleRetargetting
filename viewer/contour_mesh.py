@@ -736,21 +736,29 @@ class ContourMeshMixin:
                         basis_z = bp_info['basis_z']
                         axis_length = 0.01
 
+                        # Apply BP scale animation if active
+                        bp_scale_dict = getattr(self, '_contour_anim_bp_scale', None)
+                        is_2d = (self.draw_contour_stream is not None and
+                                 len(self.draw_contour_stream) > 0 and
+                                 isinstance(self.draw_contour_stream[0], list))
+                        bp_lev = j if is_2d else i
+                        bp_s = bp_scale_dict.get(bp_lev, 1.0) if bp_scale_dict else 1.0
+
                         glLineWidth(2.0)
                         glColor3f(1.0, 0.0, 0.0)
                         glBegin(GL_LINES)
                         glVertex3fv(origin)
-                        glVertex3fv(origin + axis_length * basis_x)
+                        glVertex3fv(origin + axis_length * basis_x * bp_s)
                         glEnd()
                         glColor3f(0.0, 1.0, 0.0)
                         glBegin(GL_LINES)
                         glVertex3fv(origin)
-                        glVertex3fv(origin + axis_length * basis_y)
+                        glVertex3fv(origin + axis_length * basis_y * bp_s)
                         glEnd()
                         glColor3f(0.0, 0.0, 1.0)
                         glBegin(GL_LINES)
                         glVertex3fv(origin)
-                        glVertex3fv(origin + axis_length * basis_z)
+                        glVertex3fv(origin + axis_length * basis_z * bp_s)
                         glEnd()
                         glLineWidth(1.0)
 
