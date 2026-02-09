@@ -1912,19 +1912,6 @@ class ContourMeshMixin:
                     'type': 'target',
                 }
 
-            # Add large (source/split) side if available
-            scalar_large = data.get('scalar_large')
-            contours_large = data.get('contours_large_3d')
-            planes_large = data.get('planes_large_3d')
-            if scalar_large is not None and contours_large is not None and planes_large is not None and len(contours_large) > 0:
-                if scalar_large not in scalars_to_add:
-                    scalars_to_add[scalar_large] = {
-                        'contours': contours_large,
-                        'planes': planes_large,
-                        'scalar': scalar_large,
-                        'type': 'source',
-                    }
-
         # Get scalar values for existing contour levels
         existing_scalars = []
         for level_idx, planes in enumerate(self.bounding_planes):
