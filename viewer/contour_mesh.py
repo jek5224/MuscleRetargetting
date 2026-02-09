@@ -516,6 +516,16 @@ class ContourMeshMixin:
         self._smooth_bp_after = None   # Snapshot after smoothing
         self._smooth_replayed = False
 
+        # Stream smooth animation replay state (post-cut)
+        self._stream_smooth_anim_active = False
+        self._stream_smooth_anim_progress = 0.0
+        self._stream_smooth_bp_before = None   # [stream][level] snapshot
+        self._stream_smooth_bp_after = None
+        self._stream_smooth_swing_data = None
+        self._stream_smooth_twist_data = None
+        self._stream_smooth_num_levels = 0
+        self._stream_smooth_replayed = False
+
         # Cut animation replay state
         self._cut_anim_active = False
         self._cut_anim_progress = 0.0
@@ -1892,6 +1902,209 @@ class ContourMeshMixin:
         if progress >= total_duration:
             self._smooth_anim_active = False
             self._smooth_replayed = True
+            self._apply_bp_snapshot(bp_after)
+            return False
+
+        return True
+
+    # ── Stream Smooth Animation (post-cut) ──────────────────────────
+
+    def stream_smoothen_all(self, defer=False):
+        """Run z, x, bp smoothing on stream-mode BPs with optional animation support.
+        If defer=True, saves before/after snapshots and restores initial state for replay."""
+
+        # Snapshot before
+        bp_before = self._snapshot_bounding_planes()
+
+        # Run all three smoothing passes
+        self.smoothen_contours_z()
+        self.smoothen_contours_x()
+        self.smoothen_contours_bp()
+
+        # Snapshot after
+        bp_after = self._snapshot_bounding_planes()
+
+        # Decompose into swing (z-axis alignment) + twist (around z)
+        smooth_swing_data = []
+        smooth_twist_data = []
+        for i in range(len(bp_before)):
+            swing_level = []
+            twist_level = []
+            for j in range(len(bp_before[i])):
+                if j < len(bp_after[i]):
+                    before = bp_before[i][j]
+                    after = bp_after[i][j]
+                    z_b = before['basis_z']
+                    z_a = after['basis_z']
+                    x_b = before['basis_x']
+
+                    # Swing: shortest arc from z_before to z_after
+                    cross_zz = np.cross(z_b, z_a)
+                    cross_norm = np.linalg.norm(cross_zz)
+                    dot_zz = np.clip(np.dot(z_b, z_a), -1.0, 1.0)
+                    swing_angle = np.arccos(dot_zz)
+
+                    if swing_angle > 1e-10 and cross_norm > 1e-10:
+                        swing_axis = cross_zz / cross_norm
+                    elif swing_angle > 0.1:
+                        swing_axis = x_b / max(np.linalg.norm(x_b), 1e-10)
+                    else:
+                        swing_axis = np.array([0.0, 1.0, 0.0])
+                        swing_angle = 0.0
+
+                    # Compute x after full swing using Rodrigues
+                    if swing_angle > 1e-10:
+                        cos_a = np.cos(swing_angle)
+                        sin_a = np.sin(swing_angle)
+                        x_swung = (x_b * cos_a +
+                                   np.cross(swing_axis, x_b) * sin_a +
+                                   swing_axis * np.dot(swing_axis, x_b) * (1 - cos_a))
+                    else:
+                        x_swung = x_b.copy()
+
+                    # Twist: angle around z_after from x_swung to x_after
+                    x_sp = x_swung - np.dot(x_swung, z_a) * z_a
+                    x_ap = after['basis_x'] - np.dot(after['basis_x'], z_a) * z_a
+                    n1 = np.linalg.norm(x_sp)
+                    n2 = np.linalg.norm(x_ap)
+
+                    if n1 > 1e-10 and n2 > 1e-10:
+                        x_sp /= n1
+                        x_ap /= n2
+                        twist_angle = np.arctan2(
+                            np.dot(np.cross(x_sp, x_ap), z_a),
+                            np.dot(x_sp, x_ap)
+                        )
+                    else:
+                        twist_angle = 0.0
+
+                    swing_level.append((swing_axis, swing_angle))
+                    twist_level.append(twist_angle)
+                else:
+                    swing_level.append(None)
+                    twist_level.append(None)
+            smooth_swing_data.append(swing_level)
+            smooth_twist_data.append(twist_level)
+
+        self._stream_smooth_bp_before = bp_before
+        self._stream_smooth_bp_after = bp_after
+        self._stream_smooth_swing_data = smooth_swing_data
+        self._stream_smooth_twist_data = smooth_twist_data
+        self._stream_smooth_num_levels = max(len(level) for level in bp_before) if bp_before else 0
+        self._stream_smooth_replayed = False
+
+        if defer:
+            self._apply_bp_snapshot(bp_before)
+        else:
+            self._stream_smooth_replayed = True
+
+    def replay_stream_smooth_animation(self):
+        """Start replaying the stream smooth animation."""
+        if self._stream_smooth_bp_before is None or self._stream_smooth_bp_after is None:
+            self._stream_smooth_replayed = True
+            return
+        self._apply_bp_snapshot(self._stream_smooth_bp_before)
+        self._stream_smooth_anim_progress = 0.0
+        self._stream_smooth_anim_active = True
+
+    def update_stream_smooth_animation(self, dt):
+        """Advance stream smooth animation in three phases (no transparency fade).
+        Phase 1 (0-1.5s): rotate axes to align z-axis (swing)
+        Phase 2 (1.5-3.0s): twist around z to align x/y
+        Phase 3 (3.0-4.0s): interpolate bounding plane corners"""
+        if not self._stream_smooth_anim_active:
+            return False
+
+        bp_before = self._stream_smooth_bp_before
+        bp_after = self._stream_smooth_bp_after
+        swing_data = self._stream_smooth_swing_data
+        twist_data = self._stream_smooth_twist_data
+        if bp_before is None or bp_after is None:
+            self._stream_smooth_anim_active = False
+            self._stream_smooth_replayed = True
+            return False
+
+        self._stream_smooth_anim_progress += dt
+        progress = self._stream_smooth_anim_progress
+
+        # Phase durations (no transparency fade)
+        p1_dur = 1.5   # z-axis swing
+        p2_dur = 1.5   # x/y twist around z
+        p3_dur = 1.0   # bounding plane corners
+        p1_end = p1_dur
+        p2_end = p1_end + p2_dur
+        p3_end = p2_end + p3_dur
+        total_duration = p3_end
+
+        num_levels = self._stream_smooth_num_levels
+
+        # Compute sub-phase overall progress (0..1 within each sub-phase)
+        swing_overall = np.clip(progress / p1_dur, 0.0, 1.0)
+        twist_overall = np.clip((progress - p1_end) / p2_dur, 0.0, 1.0) if progress > p1_end else 0.0
+        bp_overall = np.clip((progress - p2_end) / p3_dur, 0.0, 1.0) if progress > p2_end else 0.0
+
+        rod = self._rodrigues
+
+        # Outer loop i = stream (or level in level-mode), inner j = level (or contour)
+        # Wave timing uses j (level index) to propagate origin→insertion
+        for i in range(min(len(bp_before), len(self.bounding_planes))):
+            for j in range(min(len(bp_before[i]), len(self.bounding_planes[i]))):
+                if j >= len(bp_after[i]):
+                    continue
+
+                swing_t = self._smooth_wave_t(swing_overall, j, num_levels)
+                twist_t = self._smooth_wave_t(twist_overall, j, num_levels)
+                bp_t = self._smooth_wave_t(bp_overall, j, num_levels)
+
+                bpl = self.bounding_planes[i][j]
+                before = bp_before[i][j]
+                after = bp_after[i][j]
+
+                z_b = before['basis_z']
+                x_b = before['basis_x']
+                y_b = before['basis_y']
+                z_a = after['basis_z']
+
+                has_swing = (swing_data is not None and i < len(swing_data) and
+                             j < len(swing_data[i]) and swing_data[i][j] is not None)
+                has_twist = (twist_data is not None and i < len(twist_data) and
+                             j < len(twist_data[i]) and twist_data[i][j] is not None)
+
+                # Phase 1: swing all axes to align z with target
+                if has_swing:
+                    swing_axis, swing_angle = swing_data[i][j]
+                    if swing_angle > 1e-10 and swing_t > 0:
+                        a = swing_angle * swing_t
+                        z = rod(z_b, swing_axis, a)
+                        x = rod(x_b, swing_axis, a)
+                        y = rod(y_b, swing_axis, a)
+                    else:
+                        z = z_b.copy()
+                        x = x_b.copy()
+                        y = y_b.copy()
+                else:
+                    z = z_b.copy()
+                    x = x_b.copy()
+                    y = y_b.copy()
+
+                # Phase 2: twist x,y around z_after
+                if has_twist and abs(twist_data[i][j]) > 1e-10 and twist_t > 0:
+                    ta = twist_data[i][j] * twist_t
+                    x = rod(x, z_a, ta)
+                    y = rod(y, z_a, ta)
+
+                bpl['basis_x'] = x
+                bpl['basis_y'] = y
+                bpl['basis_z'] = z
+
+                # Phase 3: bounding plane corners + mean
+                bpl['mean'] = (1 - bp_t) * before['mean'] + bp_t * after['mean']
+                if before['bounding_plane'] is not None and after['bounding_plane'] is not None:
+                    bpl['bounding_plane'] = (1 - bp_t) * before['bounding_plane'] + bp_t * after['bounding_plane']
+
+        if progress >= total_duration:
+            self._stream_smooth_anim_active = False
+            self._stream_smooth_replayed = True
             self._apply_bp_snapshot(bp_after)
             return False
 
@@ -17623,6 +17836,13 @@ class ContourMeshMixin:
         state['_cut_bp_changed_levels'] = getattr(self, '_cut_bp_changed_levels', set())
         state['_cut_num_levels_before'] = getattr(self, '_cut_num_levels_before', 0)
 
+        # Stream smooth animation data (post-cut)
+        state['_stream_smooth_bp_before'] = getattr(self, '_stream_smooth_bp_before', None)
+        state['_stream_smooth_bp_after'] = getattr(self, '_stream_smooth_bp_after', None)
+        state['_stream_smooth_swing_data'] = getattr(self, '_stream_smooth_swing_data', None)
+        state['_stream_smooth_twist_data'] = getattr(self, '_stream_smooth_twist_data', None)
+        state['_stream_smooth_num_levels'] = getattr(self, '_stream_smooth_num_levels', 0)
+
         # Transparency
         state['transparency'] = getattr(self, 'transparency', 1.0)
 
@@ -17707,6 +17927,13 @@ class ContourMeshMixin:
         self._cut_has_bp_change = len(bp_changed_levels) > 0
         self._cut_num_levels_before = state.get('_cut_num_levels_before', 0)
 
+        # Stream smooth animation data (post-cut)
+        self._stream_smooth_bp_before = state.get('_stream_smooth_bp_before')
+        self._stream_smooth_bp_after = state.get('_stream_smooth_bp_after')
+        self._stream_smooth_swing_data = state.get('_stream_smooth_swing_data')
+        self._stream_smooth_twist_data = state.get('_stream_smooth_twist_data')
+        self._stream_smooth_num_levels = state.get('_stream_smooth_num_levels', 0)
+
         # Transparency — save the processed value but reset to 1.0 for deferred replay
         # (smooth animation will fade it down during its replay)
         self._smooth_anim_orig_transparency = state.get('transparency', 1.0)
@@ -17740,6 +17967,9 @@ class ContourMeshMixin:
         self._cut_anim_progress = 0.0
         self._cut_replayed = False
         self._cut_anim_contour_colors = None
+        self._stream_smooth_anim_active = False
+        self._stream_smooth_anim_progress = 0.0
+        self._stream_smooth_replayed = False
 
         # ── Restore deferred visual state so everything looks pre-processed ──
 

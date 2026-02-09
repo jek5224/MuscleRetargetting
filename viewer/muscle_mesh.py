@@ -3052,6 +3052,16 @@ class MuscleMeshMixin:
         self._smooth_twist_data = None
         self._smooth_replayed = False
 
+        # Stream smooth animation state (post-cut)
+        self._stream_smooth_anim_active = False
+        self._stream_smooth_anim_progress = 0.0
+        self._stream_smooth_bp_before = None
+        self._stream_smooth_bp_after = None
+        self._stream_smooth_swing_data = None
+        self._stream_smooth_twist_data = None
+        self._stream_smooth_num_levels = 0
+        self._stream_smooth_replayed = False
+
         # Reset transparency
         self.transparency = 1.0
         if self.vertex_colors is not None:

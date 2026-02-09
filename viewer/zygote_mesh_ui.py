@@ -532,9 +532,7 @@ def draw_zygote_muscle_ui(v):
                         # Step 7: Stream Smooth (z, x, bp - after cut)
                         if start_step <= 7 <= max_step and hasattr(obj, 'stream_contours') and obj.stream_contours is not None:
                             print(f"  [7/{max_step}] Stream Smoothening (z, x, bp)...")
-                            obj.smoothen_contours_z()
-                            obj.smoothen_contours_x()
-                            obj.smoothen_contours_bp()
+                            obj.stream_smoothen_all(defer=defer)
 
                         # Step 8: Contour Select
                         if start_step <= 8 <= max_step and hasattr(obj, 'stream_contours') and obj.stream_contours is not None:
@@ -753,7 +751,10 @@ def draw_zygote_muscle_ui(v):
                 if colored_button(f"z##stream{name}", 7, sub_button_width):
                     if hasattr(obj, 'stream_contours') and obj.stream_contours is not None:
                         try:
-                            obj.smoothen_contours_z()
+                            if animate:
+                                obj.stream_smoothen_all(defer=True)
+                            else:
+                                obj.smoothen_contours_z()
                         except Exception as e:
                             print(f"[{name}] Stream Smoothen Z error: {e}")
                     else:
@@ -762,7 +763,10 @@ def draw_zygote_muscle_ui(v):
                 if colored_button(f"x##stream{name}", 7, sub_button_width):
                     if hasattr(obj, 'stream_contours') and obj.stream_contours is not None:
                         try:
-                            obj.smoothen_contours_x()
+                            if animate:
+                                obj.stream_smoothen_all(defer=True)
+                            else:
+                                obj.smoothen_contours_x()
                         except Exception as e:
                             print(f"[{name}] Stream Smoothen X error: {e}")
                     else:
@@ -771,11 +775,18 @@ def draw_zygote_muscle_ui(v):
                 if colored_button(f"bp##stream{name}", 7, sub_button_width):
                     if hasattr(obj, 'stream_contours') and obj.stream_contours is not None:
                         try:
-                            obj.smoothen_contours_bp()
+                            if animate:
+                                obj.stream_smoothen_all(defer=True)
+                            else:
+                                obj.smoothen_contours_bp()
                         except Exception as e:
                             print(f"[{name}] Stream Smoothen BP error: {e}")
                     else:
                         print(f"[{name}] Prerequisites: Run 'Cut' first")
+                if animate and getattr(obj, '_stream_smooth_bp_after', None) is not None and getattr(obj, '_cut_replayed', False):
+                    imgui.same_line()
+                    if imgui.button(f">##{name}_stream_smooth_replay", width=replay_w):
+                        obj.replay_stream_smooth_animation()
 
                 # Step 8: Contour Select (standalone button)
                 if colored_button(f"Contour Select##{name}", 8, col_button_width):
