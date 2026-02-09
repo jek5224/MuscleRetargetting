@@ -1562,7 +1562,12 @@ class ContourMeshMixin:
 
                     if swing_angle > 1e-10 and cross_norm > 1e-10:
                         swing_axis = cross_zz / cross_norm
+                    elif swing_angle > 0.1:
+                        # Anti-parallel: z_before ≈ -z_after, cross product ~0
+                        # Rotate 180° around local x-axis (perpendicular to z)
+                        swing_axis = x_b / max(np.linalg.norm(x_b), 1e-10)
                     else:
+                        # Nearly identical, no rotation needed
                         swing_axis = np.array([0.0, 1.0, 0.0])
                         swing_angle = 0.0
 
