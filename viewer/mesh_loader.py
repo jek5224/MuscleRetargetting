@@ -668,7 +668,7 @@ class MeshLoader(ContourMeshMixin, TetrahedronMeshMixin, FiberArchitectureMixin,
                 mean = plane_info['mean']
 
                 glPushMatrix()
-                glPointSize(5)
+                glPointSize(5 * bp_s)
                 glColor4f(0, 0, 0, bp_alpha)
                 glBegin(GL_POINTS)
                 glVertex3fv(mean)
