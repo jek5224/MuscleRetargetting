@@ -6585,6 +6585,9 @@ def _motion_start_bake(v):
     """Start baking: reset to frame 0, init accumulator, set baking flag."""
     if v.motion_baking:
         return
+    # Auto-find inter-muscle constraints if none exist
+    if len(v.inter_muscle_constraints) == 0:
+        find_inter_muscle_constraints(v)
     _motion_reset(v)
     v.motion_baking = True
     v.motion_bake_current = 0
