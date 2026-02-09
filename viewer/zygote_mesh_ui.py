@@ -487,16 +487,9 @@ def draw_zygote_muscle_ui(v):
                             print(f"  [2/{max_step}] Finding Contours...")
                             animate = getattr(obj, 'animate_process', False)
                             if animate and max_step <= 2:
-                                obj.find_contours_threaded(animate=True, skeleton_meshes=v.zygote_skeleton_meshes, spacing_scale=obj.contour_spacing_scale)
+                                obj.find_contours_threaded(skeleton_meshes=v.zygote_skeleton_meshes, spacing_scale=obj.contour_spacing_scale)
                             else:
                                 obj.find_contours(skeleton_meshes=v.zygote_skeleton_meshes, spacing_scale=obj.contour_spacing_scale)
-                                if animate:
-                                    # Contours computed; start reveal animation
-                                    obj._contour_anim_total = len(obj.contours) if obj.contours else 0
-                                    if obj._contour_anim_total > 0:
-                                        obj.draw_contour_stream = [False] * obj._contour_anim_total
-                                        obj._contour_anim_progress = 0.0
-                                        obj._contour_anim_active = True
                             obj.is_draw_bounding_box = True
 
                         # Step 3: Fill Gaps
@@ -618,7 +611,7 @@ def draw_zygote_muscle_ui(v):
                         try:
                             animate = getattr(obj, 'animate_process', False)
                             if animate:
-                                obj.find_contours_threaded(animate=True, skeleton_meshes=v.zygote_skeleton_meshes, spacing_scale=obj.contour_spacing_scale)
+                                obj.find_contours_threaded(skeleton_meshes=v.zygote_skeleton_meshes, spacing_scale=obj.contour_spacing_scale)
                             else:
                                 obj.find_contours(skeleton_meshes=v.zygote_skeleton_meshes, spacing_scale=obj.contour_spacing_scale)
                             obj.is_draw_bounding_box = True
