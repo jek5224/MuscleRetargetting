@@ -1539,8 +1539,9 @@ class ContourMeshMixin:
         # Snapshot after
         bp_after = self._snapshot_bounding_planes()
 
-        # Decompose rotation into swing (z-axis) + twist (around z)
-        smooth_swing_data = []  # per level/stream: (r_before, swing_axis, swing_angle) or None
+        # Decompose into swing (z-axis alignment) + twist (around z)
+        # Uses direct vector rotation (Rodrigues) to preserve original handedness
+        smooth_swing_data = []  # per level/stream: (swing_axis, swing_angle) or None
         smooth_twist_data = []  # per level/stream: twist_angle or None
         for i in range(len(bp_before)):
             swing_level = []
@@ -1552,17 +1553,6 @@ class ContourMeshMixin:
                     z_b = before['basis_z']
                     z_a = after['basis_z']
                     x_b = before['basis_x']
-
-                    # Build R_before rotation matrix
-                    mat_before = np.column_stack([before['basis_x'], before['basis_y'], before['basis_z']])
-                    if np.linalg.det(mat_before) < 0:
-                        mat_before[:, 1] = -mat_before[:, 1]
-                    try:
-                        r_before = R.from_matrix(mat_before)
-                    except Exception:
-                        swing_level.append(None)
-                        twist_level.append(None)
-                        continue
 
                     # Swing: shortest arc from z_before to z_after
                     cross_zz = np.cross(z_b, z_a)
@@ -1576,82 +1566,39 @@ class ContourMeshMixin:
                         swing_axis = np.array([0.0, 1.0, 0.0])
                         swing_angle = 0.0
 
-                    # Compute R_swing
+                    # Compute x after full swing using Rodrigues
                     if swing_angle > 1e-10:
-                        r_swing = R.from_rotvec(swing_axis * swing_angle)
+                        cos_a = np.cos(swing_angle)
+                        sin_a = np.sin(swing_angle)
+                        x_swung = (x_b * cos_a +
+                                   np.cross(swing_axis, x_b) * sin_a +
+                                   swing_axis * np.dot(swing_axis, x_b) * (1 - cos_a))
                     else:
-                        r_swing = R.identity()
+                        x_swung = x_b.copy()
 
-                    # Twist: rotation around z_after to align x-axis
-                    x_swung = r_swing.apply(x_b)
-                    x_swung_proj = x_swung - np.dot(x_swung, z_a) * z_a
-                    x_after_proj = after['basis_x'] - np.dot(after['basis_x'], z_a) * z_a
-                    n1 = np.linalg.norm(x_swung_proj)
-                    n2 = np.linalg.norm(x_after_proj)
+                    # Twist: angle around z_after from x_swung to x_after
+                    x_sp = x_swung - np.dot(x_swung, z_a) * z_a
+                    x_ap = after['basis_x'] - np.dot(after['basis_x'], z_a) * z_a
+                    n1 = np.linalg.norm(x_sp)
+                    n2 = np.linalg.norm(x_ap)
 
                     if n1 > 1e-10 and n2 > 1e-10:
-                        x_swung_proj /= n1
-                        x_after_proj /= n2
+                        x_sp /= n1
+                        x_ap /= n2
                         twist_angle = np.arctan2(
-                            np.dot(np.cross(x_swung_proj, x_after_proj), z_a),
-                            np.dot(x_swung_proj, x_after_proj)
+                            np.dot(np.cross(x_sp, x_ap), z_a),
+                            np.dot(x_sp, x_ap)
                         )
                     else:
                         twist_angle = 0.0
 
-                    swing_level.append((r_before, swing_axis, swing_angle))
+                    swing_level.append((swing_axis, swing_angle))
                     twist_level.append(twist_angle)
                 else:
                     swing_level.append(None)
                     twist_level.append(None)
             smooth_swing_data.append(swing_level)
             smooth_twist_data.append(twist_level)
-
-        # Enforce consistent swing axis direction across levels
-        ref_swing_rotvec = None
-        for i in range(len(smooth_swing_data)):
-            for j in range(len(smooth_swing_data[i])):
-                data = smooth_swing_data[i][j]
-                if data is not None:
-                    _, axis, angle = data
-                    if angle > 1e-10:
-                        ref_swing_rotvec = axis * angle
-                        break
-            if ref_swing_rotvec is not None:
-                break
-        if ref_swing_rotvec is not None:
-            for i in range(len(smooth_swing_data)):
-                for j in range(len(smooth_swing_data[i])):
-                    data = smooth_swing_data[i][j]
-                    if data is not None:
-                        r_before, axis, angle = data
-                        if angle > 1e-10:
-                            rotvec = axis * angle
-                            if np.dot(rotvec, ref_swing_rotvec) < 0:
-                                # Go the long way around for consistent direction
-                                axis = -axis
-                                angle = 2.0 * np.pi - angle
-                                smooth_swing_data[i][j] = (r_before, axis, angle)
-
-        # Enforce consistent twist direction across levels
-        ref_twist_sign = None
-        for i in range(len(smooth_twist_data)):
-            for j in range(len(smooth_twist_data[i])):
-                ta = smooth_twist_data[i][j]
-                if ta is not None and abs(ta) > 0.01:
-                    ref_twist_sign = 1.0 if ta > 0 else -1.0
-                    break
-            if ref_twist_sign is not None:
-                break
-        if ref_twist_sign is not None:
-            for i in range(len(smooth_twist_data)):
-                for j in range(len(smooth_twist_data[i])):
-                    ta = smooth_twist_data[i][j]
-                    if ta is not None and abs(ta) > 0.01:
-                        if ref_twist_sign > 0 and ta < 0:
-                            smooth_twist_data[i][j] = ta + 2 * np.pi
-                        elif ref_twist_sign < 0 and ta > 0:
-                            smooth_twist_data[i][j] = ta - 2 * np.pi
 
         self._smooth_bp_before = bp_before
         self._smooth_bp_after = bp_after
@@ -1704,14 +1651,19 @@ class ContourMeshMixin:
             level_t = np.clip((overall_t - level_start) / overlap, 0.0, 1.0)
         return level_t * level_t * (3.0 - 2.0 * level_t)  # ease in-out
 
+    @staticmethod
+    def _rodrigues(v, axis, angle):
+        """Rotate vector v around axis by angle using Rodrigues' formula."""
+        cos_a = np.cos(angle)
+        sin_a = np.sin(angle)
+        return v * cos_a + np.cross(axis, v) * sin_a + axis * np.dot(axis, v) * (1 - cos_a)
+
     def update_smooth_animation(self, dt):
         """Advance smoothing animation in four phases.
         Phase 1 (0-0.5s):   fade transparency to 0.5
         Phase 2a (0.5-2.0s): rotate axes to align z-axis
         Phase 2b (2.0-3.5s): twist around z to align x/y
         Phase 2c (3.5-4.5s): interpolate bounding plane corners"""
-        from scipy.spatial.transform import Rotation as R
-
         if not self._smooth_anim_active:
             return False
 
@@ -1762,6 +1714,8 @@ class ContourMeshMixin:
         twist_overall = np.clip((progress - p2a_end) / p2b_dur, 0.0, 1.0) if progress > p2a_end else 0.0
         bp_overall = np.clip((progress - p2b_end) / p2c_dur, 0.0, 1.0) if progress > p2b_end else 0.0
 
+        rod = self._rodrigues
+
         for i in range(min(len(bp_before), len(self.bounding_planes))):
             swing_t = self._smooth_wave_t(swing_overall, i, num_levels)
             twist_t = self._smooth_wave_t(twist_overall, i, num_levels)
@@ -1770,51 +1724,51 @@ class ContourMeshMixin:
             for j in range(min(len(bp_before[i]), len(self.bounding_planes[i]))):
                 if j >= len(bp_after[i]):
                     continue
-                bp = self.bounding_planes[i][j]
+                bpl = self.bounding_planes[i][j]
                 before = bp_before[i][j]
                 after = bp_after[i][j]
+
+                z_b = before['basis_z']
+                x_b = before['basis_x']
+                y_b = before['basis_y']
+                z_a = after['basis_z']
 
                 has_swing = (swing_data is not None and i < len(swing_data) and
                              j < len(swing_data[i]) and swing_data[i][j] is not None)
                 has_twist = (twist_data is not None and i < len(twist_data) and
                              j < len(twist_data[i]) and twist_data[i][j] is not None)
 
+                # Phase 2a: swing all axes to align z with target
                 if has_swing:
-                    r_before, swing_axis, swing_angle = swing_data[i][j]
-
-                    # Apply partial swing
-                    if swing_angle > 1e-10:
-                        r_swing_partial = R.from_rotvec(swing_axis * (swing_angle * swing_t))
+                    swing_axis, swing_angle = swing_data[i][j]
+                    if swing_angle > 1e-10 and swing_t > 0:
+                        a = swing_angle * swing_t
+                        z = rod(z_b, swing_axis, a)
+                        x = rod(x_b, swing_axis, a)
+                        y = rod(y_b, swing_axis, a)
                     else:
-                        r_swing_partial = R.identity()
-
-                    # Apply partial twist around current z
-                    if has_twist and abs(twist_data[i][j]) > 1e-10:
-                        # z after full swing
-                        z_a = after['basis_z']
-                        r_twist_partial = R.from_rotvec(z_a * (twist_data[i][j] * twist_t))
-                    else:
-                        r_twist_partial = R.identity()
-
-                    r_interp = r_twist_partial * r_swing_partial * r_before
-                    mat = r_interp.as_matrix()
-                    bp['basis_x'] = mat[:, 0]
-                    bp['basis_y'] = mat[:, 1]
-                    bp['basis_z'] = mat[:, 2]
+                        z = z_b.copy()
+                        x = x_b.copy()
+                        y = y_b.copy()
                 else:
-                    # Fallback: lerp each axis
-                    combined_t = max(swing_t, twist_t)
-                    for key in ('basis_x', 'basis_y', 'basis_z'):
-                        interp = (1 - combined_t) * before[key] + combined_t * after[key]
-                        norm = np.linalg.norm(interp)
-                        if norm > 1e-10:
-                            interp = interp / norm
-                        bp[key] = interp
+                    z = z_b.copy()
+                    x = x_b.copy()
+                    y = y_b.copy()
 
-                # Bounding plane corners + mean interpolate in phase 2c
-                bp['mean'] = (1 - bp_t) * before['mean'] + bp_t * after['mean']
+                # Phase 2b: twist x,y around z_after (swing is complete at this point)
+                if has_twist and abs(twist_data[i][j]) > 1e-10 and twist_t > 0:
+                    ta = twist_data[i][j] * twist_t
+                    x = rod(x, z_a, ta)
+                    y = rod(y, z_a, ta)
+
+                bpl['basis_x'] = x
+                bpl['basis_y'] = y
+                bpl['basis_z'] = z
+
+                # Phase 2c: bounding plane corners + mean
+                bpl['mean'] = (1 - bp_t) * before['mean'] + bp_t * after['mean']
                 if before['bounding_plane'] is not None and after['bounding_plane'] is not None:
-                    bp['bounding_plane'] = (1 - bp_t) * before['bounding_plane'] + bp_t * after['bounding_plane']
+                    bpl['bounding_plane'] = (1 - bp_t) * before['bounding_plane'] + bp_t * after['bounding_plane']
 
         if progress >= total_duration:
             self._smooth_anim_active = False
