@@ -122,20 +122,17 @@ def draw_zygote_muscle_ui(v):
 
             imgui.text("Loaded:")
             loaded_names = list(v.zygote_muscle_meshes.keys())
-            if len(loaded_names) > 0:
-                # Use child region with selectables for double-click support
-                imgui.begin_child("##loaded_muscles_child", width=0, height=150, border=True)
-                for i, name in enumerate(loaded_names):
-                    is_selected = (v.loaded_muscle_selected == i)
-                    clicked, _ = imgui.selectable(name, is_selected)
-                    if clicked:
-                        v.loaded_muscle_selected = i
-                    # Double-click to remove
-                    if imgui.is_item_hovered() and imgui.is_mouse_double_clicked(0):
-                        remove_muscle_mesh(v, name)
-                imgui.end_child()
-            else:
-                imgui.text("(none)")
+            # Always show child region so layout stays stable
+            imgui.begin_child("##loaded_muscles_child", width=0, height=150, border=True)
+            for i, name in enumerate(loaded_names):
+                is_selected = (v.loaded_muscle_selected == i)
+                clicked, _ = imgui.selectable(name, is_selected)
+                if clicked:
+                    v.loaded_muscle_selected = i
+                # Double-click to remove
+                if imgui.is_item_hovered() and imgui.is_mouse_double_clicked(0):
+                    remove_muscle_mesh(v, name)
+            imgui.end_child()
 
             # Bulk add/remove buttons
             imgui.separator()
