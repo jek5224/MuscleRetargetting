@@ -623,29 +623,21 @@ class ContourMeshMixin:
 
                 # Highlighted contours drawn with immediate mode (rare)
                 if is_highlighted or is_anim_highlighted:
-                    if is_anim_highlighted:
-                        fade = anim_highlight_fade
-                        ha = 0.4 + 0.3 * fade  # 0.7 -> 0.4 fill alpha
-                    else:
-                        fade = 0.0
-                        ha = 0.25
-
                     if is_anim_highlighted and len(contour) >= 2:
-                        # Draw on top of mesh — bold bright line
-                        glDisable(GL_DEPTH_TEST)
-                        glEnable(GL_BLEND)
-                        glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
-                        glLineWidth(5.0 + 5.0 * fade)
-                        glColor4f(1.0, 1.0, 0.0, 0.5 + 0.5 * fade)
+                        # Pulse line width: normal → 10x → normal
+                        # fade goes 1.0→0.0; pulse peaks at fade=0.5
+                        pulse = 1.0 - abs(2.0 * anim_highlight_fade - 1.0)
+                        base_width = 0.5
+                        lw = base_width * (1.0 + 9.0 * pulse)
+                        glLineWidth(lw)
+                        glColor3fv(color)
                         glBegin(GL_LINE_LOOP)
                         for v in contour:
                             v_arr = np.asarray(v).flatten()
                             if len(v_arr) >= 3:
                                 glVertex3fv(v_arr[:3])
                         glEnd()
-                        glDisable(GL_BLEND)
-                        glEnable(GL_DEPTH_TEST)
-                        glLineWidth(1.0)
+                        glLineWidth(0.5)
                     elif is_highlighted:
                         if len(contour) >= 3:
                             glEnable(GL_BLEND)
