@@ -17588,8 +17588,10 @@ class ContourMeshMixin:
         self._cut_has_bp_change = state.get('_cut_has_bp_change', False)
         self._cut_num_levels_before = state.get('_cut_num_levels_before', 0)
 
-        # Transparency
-        self.transparency = state.get('transparency', 1.0)
+        # Transparency — save the processed value but reset to 1.0 for deferred replay
+        # (smooth animation will fade it down during its replay)
+        self._smooth_anim_orig_transparency = state.get('transparency', 1.0)
+        self.transparency = 1.0
 
         # Reset all animation playback states (ready for replay)
         self._scalar_anim_active = False
