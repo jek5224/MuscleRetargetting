@@ -3043,6 +3043,8 @@ class MuscleMeshMixin:
         self._smooth_anim_progress = 0.0
         self._smooth_bp_before = None
         self._smooth_bp_after = None
+        self._smooth_swing_data = None
+        self._smooth_twist_data = None
         self._smooth_replayed = False
 
         # Level selection backup
