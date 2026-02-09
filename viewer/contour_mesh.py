@@ -625,37 +625,74 @@ class ContourMeshMixin:
                 if is_highlighted or is_anim_highlighted:
                     if is_anim_highlighted:
                         fade = anim_highlight_fade
-                        # Bright green/yellow that fades to normal contour color
-                        hr = 0.2 + 0.8 * fade
-                        hg = 1.0
-                        hb = 0.2 * (1.0 - fade)
-                        ha = 0.15 + 0.2 * fade
+                        ha = 0.4 + 0.3 * fade  # 0.7 -> 0.4 fill alpha
                     else:
-                        hr, hg, hb, ha = 0.3, 0.6, 0.9, 0.25
+                        fade = 0.0
+                        ha = 0.25
 
-                    if len(contour) >= 3:
+                    if is_anim_highlighted and len(contour) >= 2:
+                        # Draw on top of mesh
+                        glDisable(GL_DEPTH_TEST)
                         glEnable(GL_BLEND)
                         glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
-                        glColor4f(hr, hg, hb, ha)
-                        centroid = np.mean(contour, axis=0)
-                        glBegin(GL_TRIANGLE_FAN)
-                        glVertex3fv(centroid)
-                        for v in contour:
-                            glVertex3fv(v)
-                        glVertex3fv(contour[0])
-                        glEnd()
-                        glDisable(GL_BLEND)
 
-                    lw = 1.0 + 2.0 * fade if is_anim_highlighted else 2.0
-                    glLineWidth(lw)
-                    glColor3f(hr, hg, hb)
-                    glBegin(GL_LINE_LOOP)
-                    for v in contour:
-                        v_arr = np.asarray(v).flatten()
-                        if len(v_arr) >= 3:
-                            glVertex3fv(v_arr[:3])
-                    glEnd()
-                    glLineWidth(1.0)
+                        # Bright filled polygon
+                        if len(contour) >= 3:
+                            glColor4f(1.0, 1.0, 0.3, ha)
+                            centroid = np.mean(contour, axis=0)
+                            glBegin(GL_TRIANGLE_FAN)
+                            glVertex3fv(centroid)
+                            for v in contour:
+                                glVertex3fv(v)
+                            glVertex3fv(contour[0])
+                            glEnd()
+
+                        # Outer glow: very thick semi-transparent line
+                        glLineWidth(10.0 + 6.0 * fade)
+                        glColor4f(1.0, 1.0, 0.5, 0.25 + 0.35 * fade)
+                        glBegin(GL_LINE_LOOP)
+                        for v in contour:
+                            v_arr = np.asarray(v).flatten()
+                            if len(v_arr) >= 3:
+                                glVertex3fv(v_arr[:3])
+                        glEnd()
+
+                        # Inner bright line
+                        glLineWidth(4.0 + 3.0 * fade)
+                        glColor4f(1.0, 1.0, 0.0, 1.0)
+                        glBegin(GL_LINE_LOOP)
+                        for v in contour:
+                            v_arr = np.asarray(v).flatten()
+                            if len(v_arr) >= 3:
+                                glVertex3fv(v_arr[:3])
+                        glEnd()
+
+                        glDisable(GL_BLEND)
+                        glEnable(GL_DEPTH_TEST)
+                        glLineWidth(1.0)
+                    elif is_highlighted:
+                        if len(contour) >= 3:
+                            glEnable(GL_BLEND)
+                            glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
+                            glColor4f(0.3, 0.6, 0.9, ha)
+                            centroid = np.mean(contour, axis=0)
+                            glBegin(GL_TRIANGLE_FAN)
+                            glVertex3fv(centroid)
+                            for v in contour:
+                                glVertex3fv(v)
+                            glVertex3fv(contour[0])
+                            glEnd()
+                            glDisable(GL_BLEND)
+
+                        glLineWidth(2.0)
+                        glColor3f(0.3, 0.6, 0.9)
+                        glBegin(GL_LINE_LOOP)
+                        for v in contour:
+                            v_arr = np.asarray(v).flatten()
+                            if len(v_arr) >= 3:
+                                glVertex3fv(v_arr[:3])
+                        glEnd()
+                        glLineWidth(1.0)
                 else:
                     # Batch: convert LINE_LOOP to LINE segments
                     pts = np.asarray(contour, dtype=np.float32)
