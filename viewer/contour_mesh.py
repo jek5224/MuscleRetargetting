@@ -509,6 +509,13 @@ class ContourMeshMixin:
         self._transitions_anim_step = 0
         self._transitions_replayed = False
 
+        # Smoothing animation replay state
+        self._smooth_anim_active = False
+        self._smooth_anim_progress = 0.0
+        self._smooth_bp_before = None  # Snapshot before smoothing
+        self._smooth_bp_after = None   # Snapshot after smoothing
+        self._smooth_replayed = False
+
         # Inspector highlight (set by viewer when 2D inspector is open)
         self.inspector_highlight_stream = None  # Stream index to highlight
         self.inspector_highlight_level = None   # Level index to highlight
@@ -1496,6 +1503,120 @@ class ContourMeshMixin:
             for idx in indices:
                 if idx < len(self.draw_contour_stream):
                     self.draw_contour_stream[idx] = True
+            return False
+
+        return True
+
+    def _snapshot_bounding_planes(self):
+        """Deep-copy visual fields from all bounding planes for animation."""
+        snapshot = []
+        for level in self.bounding_planes:
+            level_snap = []
+            for bp in level:
+                level_snap.append({
+                    'mean': bp['mean'].copy(),
+                    'basis_x': bp['basis_x'].copy(),
+                    'basis_y': bp['basis_y'].copy(),
+                    'basis_z': bp['basis_z'].copy(),
+                    'bounding_plane': np.array(bp['bounding_plane']).copy() if bp.get('bounding_plane') is not None else None,
+                })
+            snapshot.append(level_snap)
+        return snapshot
+
+    def smoothen_all(self, defer=False):
+        """Run z, x, bp smoothing with optional animation support.
+        If defer=True, saves before/after snapshots and restores initial state for replay."""
+        # Snapshot before
+        bp_before = self._snapshot_bounding_planes()
+
+        # Run all three smoothing passes
+        self.smoothen_contours_z()
+        self.smoothen_contours_x()
+        self.smoothen_contours_bp()
+
+        # Snapshot after
+        bp_after = self._snapshot_bounding_planes()
+
+        self._smooth_bp_before = bp_before
+        self._smooth_bp_after = bp_after
+        self._smooth_replayed = False
+
+        if defer:
+            # Restore initial state so it looks unchanged until replay
+            self._apply_bp_snapshot(bp_before)
+        else:
+            self._smooth_replayed = True
+
+    def _apply_bp_snapshot(self, snapshot):
+        """Apply a bounding plane snapshot back to live data."""
+        for i, level in enumerate(snapshot):
+            if i >= len(self.bounding_planes):
+                break
+            for j, snap in enumerate(level):
+                if j >= len(self.bounding_planes[i]):
+                    break
+                bp = self.bounding_planes[i][j]
+                bp['mean'] = snap['mean'].copy()
+                bp['basis_x'] = snap['basis_x'].copy()
+                bp['basis_y'] = snap['basis_y'].copy()
+                bp['basis_z'] = snap['basis_z'].copy()
+                if snap['bounding_plane'] is not None:
+                    bp['bounding_plane'] = snap['bounding_plane'].copy()
+
+    def replay_smooth_animation(self):
+        """Start replaying the smoothing animation (interpolate from before to after)."""
+        if self._smooth_bp_before is None or self._smooth_bp_after is None:
+            self._smooth_replayed = True
+            return
+        # Reset to initial state
+        self._apply_bp_snapshot(self._smooth_bp_before)
+        self._smooth_anim_progress = 0.0
+        self._smooth_anim_active = True
+
+    def update_smooth_animation(self, dt):
+        """Advance smoothing animation. Interpolates bounding planes from before to after."""
+        if not self._smooth_anim_active:
+            return False
+
+        bp_before = self._smooth_bp_before
+        bp_after = self._smooth_bp_after
+        if bp_before is None or bp_after is None:
+            self._smooth_anim_active = False
+            self._smooth_replayed = True
+            return False
+
+        self._smooth_anim_progress += dt * 0.5  # ~2 seconds total
+        t = min(self._smooth_anim_progress, 1.0)
+        # Ease in-out
+        t = t * t * (3.0 - 2.0 * t)
+
+        for i in range(min(len(bp_before), len(self.bounding_planes))):
+            for j in range(min(len(bp_before[i]), len(self.bounding_planes[i]))):
+                if j >= len(bp_after[i]):
+                    continue
+                bp = self.bounding_planes[i][j]
+                before = bp_before[i][j]
+                after = bp_after[i][j]
+
+                bp['mean'] = (1 - t) * before['mean'] + t * after['mean']
+
+                # Interpolate axes with renormalization (nlerp)
+                for key in ('basis_x', 'basis_y', 'basis_z'):
+                    interp = (1 - t) * before[key] + t * after[key]
+                    norm = np.linalg.norm(interp)
+                    if norm > 1e-10:
+                        interp = interp / norm
+                    bp[key] = interp
+
+                # Interpolate bounding plane corners
+                if before['bounding_plane'] is not None and after['bounding_plane'] is not None:
+                    bp['bounding_plane'] = (1 - t) * before['bounding_plane'] + t * after['bounding_plane']
+
+        if self._smooth_anim_progress >= 1.0:
+            self._smooth_anim_active = False
+            self._smooth_replayed = True
+            # Ensure final state is exact
+            self._apply_bp_snapshot(bp_after)
             return False
 
         return True

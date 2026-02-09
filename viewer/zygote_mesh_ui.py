@@ -517,9 +517,7 @@ def draw_zygote_muscle_ui(v):
                         # Step 5: Smooth (z, x, bp - before cut)
                         if start_step <= 5 <= max_step and obj.contours is not None and len(obj.contours) > 0:
                             print(f"  [5/{max_step}] Smoothening (z, x, bp)...")
-                            obj.smoothen_contours_z()
-                            obj.smoothen_contours_x()
-                            obj.smoothen_contours_bp()
+                            obj.smoothen_all(defer=defer)
 
                         # Step 6: Cut
                         if start_step <= 6 <= max_step and obj.contours is not None and len(obj.contours) > 0 and obj.bounding_planes is not None:
@@ -687,34 +685,50 @@ def draw_zygote_muscle_ui(v):
                     if imgui.button(f">##{name}_transitions_replay", width=replay_w):
                         obj.replay_transitions_animation()
 
-                # Step 5: Smoothen buttons: z, x, bp (3 buttons in same row - before cut)
-                sub_button_width = (col_button_width - 8) // 3  # 3 buttons with small margins
-                if colored_button(f"z##{name}", 5, sub_button_width):
-                    if obj.contours is not None and len(obj.contours) > 0:
-                        try:
-                            obj.smoothen_contours_z()
-                        except Exception as e:
-                            print(f"[{name}] Smoothen Z error: {e}")
-                    else:
-                        print(f"[{name}] Prerequisites: Run 'Find Contours' first")
-                imgui.same_line(spacing=4)
-                if colored_button(f"x##{name}", 5, sub_button_width):
-                    if obj.contours is not None and len(obj.contours) > 0:
-                        try:
-                            obj.smoothen_contours_x()
-                        except Exception as e:
-                            print(f"[{name}] Smoothen X error: {e}")
-                    else:
-                        print(f"[{name}] Prerequisites: Run 'Find Contours' first")
-                imgui.same_line(spacing=4)
-                if colored_button(f"bp##{name}", 5, sub_button_width):
-                    if obj.contours is not None and len(obj.contours) > 0:
-                        try:
-                            obj.smoothen_contours_bp()
-                        except Exception as e:
-                            print(f"[{name}] Smoothen BP error: {e}")
-                    else:
-                        print(f"[{name}] Prerequisites: Run 'Find Contours' first")
+                # Step 5: Smoothen buttons
+                if animate:
+                    # Single "Smooth" button with replay when animate is on
+                    if colored_button(f"Smooth##{name}", 5, proc_w):
+                        if obj.contours is not None and len(obj.contours) > 0:
+                            try:
+                                obj.smoothen_all(defer=True)
+                            except Exception as e:
+                                print(f"[{name}] Smooth error: {e}")
+                        else:
+                            print(f"[{name}] Prerequisites: Run 'Find Contours' first")
+                    if getattr(obj, '_smooth_bp_after', None) is not None and getattr(obj, '_transitions_replayed', False):
+                        imgui.same_line()
+                        if imgui.button(f">##{name}_smooth_replay", width=replay_w):
+                            obj.replay_smooth_animation()
+                else:
+                    # Individual z, x, bp buttons when animate is off
+                    sub_button_width = (col_button_width - 8) // 3
+                    if colored_button(f"z##{name}", 5, sub_button_width):
+                        if obj.contours is not None and len(obj.contours) > 0:
+                            try:
+                                obj.smoothen_contours_z()
+                            except Exception as e:
+                                print(f"[{name}] Smoothen Z error: {e}")
+                        else:
+                            print(f"[{name}] Prerequisites: Run 'Find Contours' first")
+                    imgui.same_line(spacing=4)
+                    if colored_button(f"x##{name}", 5, sub_button_width):
+                        if obj.contours is not None and len(obj.contours) > 0:
+                            try:
+                                obj.smoothen_contours_x()
+                            except Exception as e:
+                                print(f"[{name}] Smoothen X error: {e}")
+                        else:
+                            print(f"[{name}] Prerequisites: Run 'Find Contours' first")
+                    imgui.same_line(spacing=4)
+                    if colored_button(f"bp##{name}", 5, sub_button_width):
+                        if obj.contours is not None and len(obj.contours) > 0:
+                            try:
+                                obj.smoothen_contours_bp()
+                            except Exception as e:
+                                print(f"[{name}] Smoothen BP error: {e}")
+                        else:
+                            print(f"[{name}] Prerequisites: Run 'Find Contours' first")
 
                 # Step 6: Cut (standalone button)
                 if colored_button(f"Cut##{name}", 6, col_button_width):

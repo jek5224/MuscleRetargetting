@@ -3038,6 +3038,13 @@ class MuscleMeshMixin:
         self._transitions_anim_step = 0
         self._transitions_replayed = False
 
+        # Smoothing animation state
+        self._smooth_anim_active = False
+        self._smooth_anim_progress = 0.0
+        self._smooth_bp_before = None
+        self._smooth_bp_after = None
+        self._smooth_replayed = False
+
         # Level selection backup
         self._contours_backup = None
         self._bounding_planes_backup = None
