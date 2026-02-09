@@ -517,6 +517,10 @@ class ContourMeshMixin:
         else:
             contours_to_draw = self.contours
 
+        # Snapshot the list length to avoid race with background thread
+        if contours_to_draw is not None:
+            contours_to_draw = list(contours_to_draw)
+
         if self.specific_contour is not None:
             glDisable(GL_LIGHTING)
             glColor3f(1, 0, 0)
@@ -553,19 +557,20 @@ class ContourMeshMixin:
             glVertex3fv(structure_vector[1])
             glEnd()
 
+        draw_stream = list(self.draw_contour_stream) if self.draw_contour_stream is not None else None
         values = np.linspace(0, 1, len(contours_to_draw) + 2)[1:-1]
 
         for i, contour_set in enumerate(contours_to_draw):
-            if self.draw_contour_stream is None:
+            if draw_stream is None:
                 break
 
-            if i >= len(self.draw_contour_stream):
+            if i >= len(draw_stream):
                 continue
 
-            if not self.draw_contour_stream[i]:
+            if not draw_stream[i]:
                 continue
 
-            if len(self.draw_contour_stream) > 8:
+            if len(draw_stream) > 8:
                 color = COLOR_MAP(1 - values[i])[:3]
             else:
                 colors = [
