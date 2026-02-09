@@ -748,45 +748,48 @@ def draw_zygote_muscle_ui(v):
                         obj.replay_cut_animation()
 
                 # Step 7: Stream Smoothen buttons: z, x, bp (3 buttons in same row - after cut)
-                if colored_button(f"z##stream{name}", 7, sub_button_width):
-                    if hasattr(obj, 'stream_contours') and obj.stream_contours is not None:
-                        try:
-                            if animate:
+                if animate:
+                    # Single "Stream Smooth" button with replay when animate is on
+                    if colored_button(f"Stream Smooth##{name}", 7, proc_w):
+                        if hasattr(obj, 'stream_contours') and obj.stream_contours is not None:
+                            try:
                                 obj.stream_smoothen_all(defer=True)
-                            else:
+                            except Exception as e:
+                                print(f"[{name}] Stream Smooth error: {e}")
+                        else:
+                            print(f"[{name}] Prerequisites: Run 'Cut' first")
+                    if getattr(obj, '_stream_smooth_bp_after', None) is not None and getattr(obj, '_cut_replayed', False):
+                        imgui.same_line()
+                        if imgui.button(f">##{name}_stream_smooth_replay", width=replay_w):
+                            obj.replay_stream_smooth_animation()
+                else:
+                    # Individual z, x, bp buttons when animate is off
+                    if colored_button(f"z##stream{name}", 7, sub_button_width):
+                        if hasattr(obj, 'stream_contours') and obj.stream_contours is not None:
+                            try:
                                 obj.smoothen_contours_z()
-                        except Exception as e:
-                            print(f"[{name}] Stream Smoothen Z error: {e}")
-                    else:
-                        print(f"[{name}] Prerequisites: Run 'Cut' first")
-                imgui.same_line(spacing=4)
-                if colored_button(f"x##stream{name}", 7, sub_button_width):
-                    if hasattr(obj, 'stream_contours') and obj.stream_contours is not None:
-                        try:
-                            if animate:
-                                obj.stream_smoothen_all(defer=True)
-                            else:
+                            except Exception as e:
+                                print(f"[{name}] Stream Smoothen Z error: {e}")
+                        else:
+                            print(f"[{name}] Prerequisites: Run 'Cut' first")
+                    imgui.same_line(spacing=4)
+                    if colored_button(f"x##stream{name}", 7, sub_button_width):
+                        if hasattr(obj, 'stream_contours') and obj.stream_contours is not None:
+                            try:
                                 obj.smoothen_contours_x()
-                        except Exception as e:
-                            print(f"[{name}] Stream Smoothen X error: {e}")
-                    else:
-                        print(f"[{name}] Prerequisites: Run 'Cut' first")
-                imgui.same_line(spacing=4)
-                if colored_button(f"bp##stream{name}", 7, sub_button_width):
-                    if hasattr(obj, 'stream_contours') and obj.stream_contours is not None:
-                        try:
-                            if animate:
-                                obj.stream_smoothen_all(defer=True)
-                            else:
+                            except Exception as e:
+                                print(f"[{name}] Stream Smoothen X error: {e}")
+                        else:
+                            print(f"[{name}] Prerequisites: Run 'Cut' first")
+                    imgui.same_line(spacing=4)
+                    if colored_button(f"bp##stream{name}", 7, sub_button_width):
+                        if hasattr(obj, 'stream_contours') and obj.stream_contours is not None:
+                            try:
                                 obj.smoothen_contours_bp()
-                        except Exception as e:
-                            print(f"[{name}] Stream Smoothen BP error: {e}")
-                    else:
-                        print(f"[{name}] Prerequisites: Run 'Cut' first")
-                if animate and getattr(obj, '_stream_smooth_bp_after', None) is not None and getattr(obj, '_cut_replayed', False):
-                    imgui.same_line()
-                    if imgui.button(f">##{name}_stream_smooth_replay", width=replay_w):
-                        obj.replay_stream_smooth_animation()
+                            except Exception as e:
+                                print(f"[{name}] Stream Smoothen BP error: {e}")
+                        else:
+                            print(f"[{name}] Prerequisites: Run 'Cut' first")
 
                 # Step 8: Contour Select (standalone button)
                 if colored_button(f"Contour Select##{name}", 8, col_button_width):
