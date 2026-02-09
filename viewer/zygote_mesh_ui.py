@@ -6595,6 +6595,14 @@ def _motion_start_bake(v):
     if len(v.inter_muscle_constraints) == 0:
         find_inter_muscle_constraints(v)
     _motion_reset(v)
+    # Reset soft body positions to rest state so bake starts clean
+    # (reset may have loaded stale cached positions from a previous bake)
+    for mname, mobj in v.zygote_muscle_meshes.items():
+        if mobj.soft_body is not None:
+            mobj.soft_body.positions = mobj.soft_body.rest_positions.copy()
+            mobj.tet_vertices = mobj.soft_body.rest_positions.astype(np.float32).copy()
+    # Clear cached backend so system is rebuilt fresh
+    v._unified_arap_backend = None
     v.motion_baking = True
     v.motion_bake_current = 0
     v.motion_is_playing = False
