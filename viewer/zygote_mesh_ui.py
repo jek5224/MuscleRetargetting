@@ -6600,6 +6600,7 @@ def _motion_start_bake(v):
     v.motion_is_playing = False
     # Init per-muscle accumulator for baked results
     v._bake_data = {}
+    v._bake_start_time = time.time()
     for mname, mobj in v.zygote_muscle_meshes.items():
         if mobj.soft_body is not None:
             v._bake_data[mname] = {}
@@ -6706,7 +6707,10 @@ def _motion_bake_finish(v):
     v.motion_baking = False
     v._bake_data = {}
     _motion_load_cache(v)
-    print(f"Bake complete: frames 0-{v.motion_bake_end_frame}. Recomputing waypoints...")
+    n_frames = v.motion_bake_end_frame + 1
+    elapsed = time.time() - getattr(v, '_bake_start_time', time.time())
+    avg = elapsed / max(n_frames, 1)
+    print(f"Bake complete: {n_frames} frames in {elapsed:.1f}s ({avg:.2f}s/frame). Recomputing waypoints...")
     # Automatically recompute waypoints after baking
     _motion_patch_waypoints(v)
 
