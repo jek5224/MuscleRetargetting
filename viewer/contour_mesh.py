@@ -1466,7 +1466,7 @@ class ContourMeshMixin:
             self._contour_anim_active = False
             return False
 
-        total_duration = 1.0  # 1 second for entire animation
+        total_duration = 2.0  # 2 seconds for entire animation
         time_per_contour = total_duration / max(total, 1)
         self._contour_anim_progress += dt
 
