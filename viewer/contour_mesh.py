@@ -17623,6 +17623,7 @@ class ContourMeshMixin:
         # Stream data (post-cut)
         state['stream_contours'] = getattr(self, 'stream_contours', None)
         state['stream_bounding_planes'] = getattr(self, 'stream_bounding_planes', None)
+        state['stream_groups'] = getattr(self, 'stream_groups', None)
 
         # Cut animation data
         state['_cut_color_before'] = getattr(self, '_cut_color_before', None)
@@ -17697,6 +17698,8 @@ class ContourMeshMixin:
         # Stream data (post-cut)
         self.stream_contours = state.get('stream_contours')
         self.stream_bounding_planes = state.get('stream_bounding_planes')
+        if 'stream_groups' in state and state['stream_groups'] is not None:
+            self.stream_groups = state['stream_groups']
 
         # Cut animation data
         self._cut_color_before = state.get('_cut_color_before')
