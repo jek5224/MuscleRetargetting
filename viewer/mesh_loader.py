@@ -690,14 +690,15 @@ class MeshLoader(ContourMeshMixin, TetrahedronMeshMixin, FiberArchitectureMixin,
                 glVertex3fv(mean + plane_info['basis_z'] * scale * 0.1 * bp_s)
                 glEnd()
 
-                if plane_info['square_like']:
-                    glColor3f(1, 0, 0)
-                else:
-                    glColor3f(0, 0, 0)
-                glBegin(GL_LINE_LOOP)
-                for point in plane_info['bounding_plane']:
-                    glVertex3fv(mean + (point - mean) * bp_s)
-                glEnd()
+                if plane_info.get('bounding_plane') is not None:
+                    if plane_info['square_like']:
+                        glColor3f(1, 0, 0)
+                    else:
+                        glColor3f(0, 0, 0)
+                    glBegin(GL_LINE_LOOP)
+                    for point in plane_info['bounding_plane']:
+                        glVertex3fv(mean + (point - mean) * bp_s)
+                    glEnd()
 
                 # glBegin(GL_LINE_LOOP)
                 # for point_2d in plane_info['projected_2d']:
@@ -712,14 +713,30 @@ class MeshLoader(ContourMeshMixin, TetrahedronMeshMixin, FiberArchitectureMixin,
                          self._stream_endpoints is not None and
                          len(self._stream_endpoints) > 0)
         if streams_built:
+            is_2d = (self.draw_contour_stream is not None and
+                     len(self.draw_contour_stream) > 0 and
+                     isinstance(self.draw_contour_stream[0], list))
             glColor3f(0, 0, 0)
             glDisable(GL_LIGHTING)
             for i, bounding_plane_stream in enumerate(self.bounding_planes):
-                if self.draw_contour_stream is not None and not self.draw_contour_stream[i]:
-                    continue
+                if self.draw_contour_stream is not None:
+                    if is_2d:
+                        # 2D: skip stream if all levels are hidden
+                        if i < len(self.draw_contour_stream) and not any(self.draw_contour_stream[i]):
+                            continue
+                    else:
+                        if not self.draw_contour_stream[i]:
+                            continue
                 for j in range(len(bounding_plane_stream) - 1):
                     bp1 = bounding_plane_stream[j]
                     bp2 = bounding_plane_stream[j + 1]
+                    # Skip if either level is hidden in 2D mode
+                    if is_2d and i < len(self.draw_contour_stream):
+                        dcs = self.draw_contour_stream[i]
+                        if (j < len(dcs) and not dcs[j]) or (j + 1 < len(dcs) and not dcs[j + 1]):
+                            continue
+                    if bp1.get('bounding_plane') is None or bp2.get('bounding_plane') is None:
+                        continue
                     # Apply BP scale animation if active
                     s1 = bp_scale_dict.get(j, 1.0) if bp_scale_dict else 1.0
                     s2 = bp_scale_dict.get(j + 1, 1.0) if bp_scale_dict else 1.0
