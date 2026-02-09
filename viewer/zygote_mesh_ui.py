@@ -485,7 +485,18 @@ def draw_zygote_muscle_ui(v):
                         # Step 2: Find Contours
                         if start_step <= 2 <= max_step and obj.scalar_field is not None:
                             print(f"  [2/{max_step}] Finding Contours...")
-                            obj.find_contours(skeleton_meshes=v.zygote_skeleton_meshes, spacing_scale=obj.contour_spacing_scale)
+                            animate = getattr(obj, 'animate_process', False)
+                            if animate and max_step <= 2:
+                                obj.find_contours_threaded(animate=True, skeleton_meshes=v.zygote_skeleton_meshes, spacing_scale=obj.contour_spacing_scale)
+                            else:
+                                obj.find_contours(skeleton_meshes=v.zygote_skeleton_meshes, spacing_scale=obj.contour_spacing_scale)
+                                if animate:
+                                    # Contours computed; start reveal animation
+                                    obj._contour_anim_total = len(obj.contours) if obj.contours else 0
+                                    if obj._contour_anim_total > 0:
+                                        obj.draw_contour_stream = [False] * obj._contour_anim_total
+                                        obj._contour_anim_progress = 0.0
+                                        obj._contour_anim_active = True
                             obj.is_draw_bounding_box = True
 
                         # Step 3: Fill Gaps
@@ -605,7 +616,11 @@ def draw_zygote_muscle_ui(v):
                 if colored_button(f"Find Contours##{name}", 2, col_button_width):
                     if obj.scalar_field is not None:
                         try:
-                            obj.find_contours(skeleton_meshes=v.zygote_skeleton_meshes, spacing_scale=obj.contour_spacing_scale)
+                            animate = getattr(obj, 'animate_process', False)
+                            if animate:
+                                obj.find_contours_threaded(animate=True, skeleton_meshes=v.zygote_skeleton_meshes, spacing_scale=obj.contour_spacing_scale)
+                            else:
+                                obj.find_contours(skeleton_meshes=v.zygote_skeleton_meshes, spacing_scale=obj.contour_spacing_scale)
                             obj.is_draw_bounding_box = True
                         except Exception as e:
                             print(f"[{name}] Find Contours error: {e}")

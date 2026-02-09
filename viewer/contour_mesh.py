@@ -4,6 +4,7 @@
 
 import numpy as np
 import copy
+import threading
 from OpenGL.GL import *
 import matplotlib.cm as cm
 from scipy.spatial import cKDTree
@@ -486,6 +487,12 @@ class ContourMeshMixin:
         self.is_draw_discarded = False
         self.is_draw_farthest_pair = False
         self.draw_contour_stream = None
+
+        # Contour animation state
+        self._contour_thread = None
+        self._contour_anim_active = False
+        self._contour_anim_progress = 0.0
+        self._contour_anim_total = 0
 
         # Inspector highlight (set by viewer when 2D inspector is open)
         self.inspector_highlight_stream = None  # Stream index to highlight
@@ -1282,6 +1289,55 @@ class ContourMeshMixin:
         # # Auto-detect skeleton attachments if skeleton_meshes provided
         # if skeleton_meshes is not None and len(skeleton_meshes) > 0:
         #     self.auto_detect_attachments(skeleton_meshes)
+
+    def find_contours_threaded(self, animate=False, **kwargs):
+        """Run find_contours in a background thread to keep UI responsive.
+        If animate=True, contour levels are revealed gradually after completion."""
+        # Stop any existing thread/animation
+        self._contour_anim_active = False
+        self.is_draw_contours = False
+        self.contours = None
+        self.draw_contour_stream = None
+
+        def _worker():
+            self.find_contours(**kwargs)
+            if animate and self.contours is not None and len(self.contours) > 0:
+                # Hide all contour streams and start reveal animation
+                self._contour_anim_total = len(self.contours)
+                self.draw_contour_stream = [False] * self._contour_anim_total
+                self._contour_anim_progress = 0.0
+                self._contour_anim_active = True
+
+        self._contour_thread = threading.Thread(target=_worker, daemon=True)
+        self._contour_thread.start()
+
+    def update_contour_animation(self, dt):
+        """Advance contour reveal animation. Returns True while active."""
+        if not self._contour_anim_active:
+            return False
+
+        # Check if thread is still running
+        if self._contour_thread is not None and self._contour_thread.is_alive():
+            return True  # Still computing, keep waiting
+
+        total = self._contour_anim_total
+        if total == 0:
+            self._contour_anim_active = False
+            return False
+
+        self._contour_anim_progress += dt * 0.5  # ~2 seconds for full reveal
+        revealed = int(self._contour_anim_progress * total)
+        revealed = min(revealed, total)
+
+        for i in range(total):
+            self.draw_contour_stream[i] = (i < revealed)
+
+        if revealed >= total:
+            self._contour_anim_active = False
+            self.draw_contour_stream = [True] * total
+            return False
+
+        return True
 
     def _find_neck_in_contour(self, contour_2d, min_separation=0.25):
         """
