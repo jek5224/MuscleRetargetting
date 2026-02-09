@@ -563,63 +563,87 @@ class ContourMeshMixin:
 
         values = np.linspace(0, 1, len(contours_to_draw) + 2)[1:-1]
 
+        highlight_stream = getattr(self, 'inspector_highlight_stream', None)
+        highlight_level = getattr(self, 'inspector_highlight_level', None)
+        draw_vertices = getattr(self, 'is_draw_contour_vertices', False)
+        draw_farthest = getattr(self, 'is_draw_farthest_pair', False)
+
+        # Pre-compute colors per contour level
+        small_colors = [
+            np.array([1, 0, 0], dtype=np.float32), np.array([0, 1, 0], dtype=np.float32),
+            np.array([0, 0, 1], dtype=np.float32), np.array([1, 1, 0], dtype=np.float32),
+            np.array([0, 1, 1], dtype=np.float32), np.array([1, 0, 1], dtype=np.float32),
+            np.array([1, 0.5, 0], dtype=np.float32), np.array([0.5, 1, 0], dtype=np.float32),
+            np.array([0, 0, 0], dtype=np.float32),
+        ]
+        use_colormap = len(self.draw_contour_stream) > 8 if self.draw_contour_stream else True
+
+        # Batch all non-highlighted contour line segments into arrays
+        batch_verts = []
+        batch_colors = []
+
         for i, contour_set in enumerate(contours_to_draw):
             if self.draw_contour_stream is None:
                 break
-
             if i >= len(self.draw_contour_stream):
                 continue
-
             if not self.draw_contour_stream[i]:
                 continue
 
-            if len(self.draw_contour_stream) > 8:
-                color = COLOR_MAP(1 - values[i])[:3]
+            if use_colormap:
+                color = np.array(COLOR_MAP(1 - values[i])[:3], dtype=np.float32)
             else:
-                colors = [
-                    np.array([1, 0, 0]), np.array([0, 1, 0]), np.array([0, 0, 1]),
-                    np.array([1, 1, 0]), np.array([0, 1, 1]), np.array([1, 0, 1]),
-                    np.array([1, 0.5, 0]), np.array([0.5, 1, 0]), np.array([0, 0, 0])
-                ]
-                color = colors[i] if i < len(colors) else COLOR_MAP(1 - values[i])[:3]
+                color = small_colors[i] if i < len(small_colors) else np.array(COLOR_MAP(1 - values[i])[:3], dtype=np.float32)
 
             for j, contour in enumerate(contour_set):
-                # Check if this contour should be highlighted (inspector is viewing it)
-                highlight_stream = getattr(self, 'inspector_highlight_stream', None)
-                highlight_level = getattr(self, 'inspector_highlight_level', None)
                 is_highlighted = (highlight_stream == i and highlight_level == j)
 
-                # Draw transparent fill for highlighted contour
-                if is_highlighted and len(contour) >= 3:
-                    glEnable(GL_BLEND)
-                    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
-                    glColor4f(0.3, 0.6, 0.9, 0.25)  # Subtle blue with transparency
-                    # Use triangle fan from centroid for non-convex support
-                    centroid = np.mean(contour, axis=0)
-                    glBegin(GL_TRIANGLE_FAN)
-                    glVertex3fv(centroid)
-                    for v in contour:
-                        glVertex3fv(v)
-                    glVertex3fv(contour[0])  # Close the fan
-                    glEnd()
-                    glDisable(GL_BLEND)
-
+                # Highlighted contours drawn with immediate mode (rare)
                 if is_highlighted:
+                    if len(contour) >= 3:
+                        glEnable(GL_BLEND)
+                        glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
+                        glColor4f(0.3, 0.6, 0.9, 0.25)
+                        centroid = np.mean(contour, axis=0)
+                        glBegin(GL_TRIANGLE_FAN)
+                        glVertex3fv(centroid)
+                        for v in contour:
+                            glVertex3fv(v)
+                        glVertex3fv(contour[0])
+                        glEnd()
+                        glDisable(GL_BLEND)
+
                     glLineWidth(2.0)
-                    glColor3f(0.3, 0.6, 0.9)  # Subtle blue for highlighted
-                else:
+                    glColor3f(0.3, 0.6, 0.9)
+                    glBegin(GL_LINE_LOOP)
+                    for v in contour:
+                        v_arr = np.asarray(v).flatten()
+                        if len(v_arr) >= 3:
+                            glVertex3fv(v_arr[:3])
+                    glEnd()
                     glLineWidth(1.0)
-                    glColor3fv(color)
+                else:
+                    # Batch: convert LINE_LOOP to LINE segments
+                    pts = np.asarray(contour, dtype=np.float32)
+                    if pts.ndim == 1:
+                        continue
+                    if pts.ndim == 2 and pts.shape[0] >= 2 and pts.shape[1] >= 3:
+                        pts = pts[:, :3].copy()
+                        n = len(pts)
+                        # Each edge: pts[k] -> pts[k+1], plus closing edge pts[-1] -> pts[0]
+                        seg_starts = pts  # shape (n, 3)
+                        seg_ends = np.roll(pts, -1, axis=0)  # shape (n, 3)
+                        # Interleave: [start0, end0, start1, end1, ...]
+                        segs = np.empty((n * 2, 3), dtype=np.float32)
+                        segs[0::2] = seg_starts
+                        segs[1::2] = seg_ends
+                        batch_verts.append(segs)
+                        # Color for all these vertices
+                        seg_colors = np.tile(color, (n * 2, 1))
+                        batch_colors.append(seg_colors)
 
-                glBegin(GL_LINE_LOOP)
-                for v in contour:
-                    v_arr = np.asarray(v).flatten()
-                    if len(v_arr) >= 3:
-                        glVertex3fv(v_arr[:3])
-                glEnd()
-
-                # Draw vertices with color gradient: red (first) -> black (last)
-                if getattr(self, 'is_draw_contour_vertices', False):
+                # Draw vertices with color gradient (only when enabled)
+                if draw_vertices:
                     glPointSize(6 if is_highlighted else 5)
                     glBegin(GL_POINTS)
                     n_verts = len(contour)
@@ -628,16 +652,13 @@ class ContourMeshMixin:
                         if len(v_arr) < 3:
                             continue
                         if is_highlighted:
-                            # Blue tint for highlighted, green for first vertex
                             if k == 0:
-                                glColor3f(0.2, 0.8, 0.4)  # Muted green
+                                glColor3f(0.2, 0.8, 0.4)
                             else:
-                                glColor3f(0.3, 0.6, 0.9)  # Subtle blue
+                                glColor3f(0.3, 0.6, 0.9)
                         else:
-                            # Interpolate from red (1,0,0) to black (0,0,0)
                             t = k / max(n_verts - 1, 1)
-                            vert_color = (1 - t, 0, 0)  # red -> black
-                            glColor3f(*vert_color)
+                            glColor3f(1 - t, 0, 0)
                         glVertex3fv(v_arr[:3])
                     glEnd()
 
@@ -651,22 +672,19 @@ class ContourMeshMixin:
                         basis_x = bp_info['basis_x']
                         basis_y = bp_info['basis_y']
                         basis_z = bp_info['basis_z']
-                        axis_length = 0.01  # Small axes length
+                        axis_length = 0.01
 
                         glLineWidth(2.0)
-                        # X axis - red
                         glColor3f(1.0, 0.0, 0.0)
                         glBegin(GL_LINES)
                         glVertex3fv(origin)
                         glVertex3fv(origin + axis_length * basis_x)
                         glEnd()
-                        # Y axis - green
                         glColor3f(0.0, 1.0, 0.0)
                         glBegin(GL_LINES)
                         glVertex3fv(origin)
                         glVertex3fv(origin + axis_length * basis_y)
                         glEnd()
-                        # Z axis - blue
                         glColor3f(0.0, 0.0, 1.0)
                         glBegin(GL_LINES)
                         glVertex3fv(origin)
@@ -674,17 +692,15 @@ class ContourMeshMixin:
                         glEnd()
                         glLineWidth(1.0)
 
-                        # Draw farthest vertex pair - cyan line with magenta endpoints
-                        if getattr(self, 'is_draw_farthest_pair', False):
+                        if draw_farthest:
                             if 'farthest_pair' in bp_info and bp_info['farthest_pair'] is not None:
                                 fp = bp_info['farthest_pair']
                                 glLineWidth(3.0)
-                                glColor3f(0.0, 1.0, 1.0)  # Cyan line
+                                glColor3f(0.0, 1.0, 1.0)
                                 glBegin(GL_LINES)
                                 glVertex3fv(fp[0])
                                 glVertex3fv(fp[1])
                                 glEnd()
-                                # Magenta endpoints
                                 glPointSize(10)
                                 glColor3f(1.0, 0.0, 1.0)
                                 glBegin(GL_POINTS)
@@ -694,18 +710,38 @@ class ContourMeshMixin:
                                 glLineWidth(1.0)
                                 glPointSize(5)
 
+        # Draw all batched contour lines in one call
+        if batch_verts:
+            all_verts = np.concatenate(batch_verts, axis=0)
+            all_colors = np.concatenate(batch_colors, axis=0)
+            glLineWidth(1.0)
+            glEnableClientState(GL_VERTEX_ARRAY)
+            glEnableClientState(GL_COLOR_ARRAY)
+            glVertexPointer(3, GL_FLOAT, 0, all_verts)
+            glColorPointer(3, GL_FLOAT, 0, all_colors)
+            glDrawArrays(GL_LINES, 0, len(all_verts))
+            glDisableClientState(GL_COLOR_ARRAY)
+            glDisableClientState(GL_VERTEX_ARRAY)
+
         if self.is_draw_discarded and self.contours_discarded is not None:
-            t = 0.1
-            color = np.array([0, 0, 0, t])
-            glColor4fv(color)
+            disc_verts = []
             for contour_set in self.contours_discarded:
                 for contour in contour_set:
-                    glBegin(GL_LINE_LOOP)
-                    for v in contour:
-                        v_arr = np.asarray(v).flatten()
-                        if len(v_arr) >= 3:
-                            glVertex3fv(v_arr[:3])
-                    glEnd()
+                    pts = np.asarray(contour, dtype=np.float32)
+                    if pts.ndim == 2 and pts.shape[0] >= 2 and pts.shape[1] >= 3:
+                        pts = pts[:, :3].copy()
+                        n = len(pts)
+                        segs = np.empty((n * 2, 3), dtype=np.float32)
+                        segs[0::2] = pts
+                        segs[1::2] = np.roll(pts, -1, axis=0)
+                        disc_verts.append(segs)
+            if disc_verts:
+                all_disc = np.concatenate(disc_verts, axis=0)
+                glColor4f(0, 0, 0, 0.1)
+                glEnableClientState(GL_VERTEX_ARRAY)
+                glVertexPointer(3, GL_FLOAT, 0, all_disc)
+                glDrawArrays(GL_LINES, 0, len(all_disc))
+                glDisableClientState(GL_VERTEX_ARRAY)
 
         glEnable(GL_LIGHTING)
 
@@ -1312,6 +1348,7 @@ class ContourMeshMixin:
         self._contour_anim_progress = 0.0
         self._contour_anim_active = True
         self.is_draw_contours = True
+        self.is_draw_bounding_box = True
 
     def update_contour_animation(self, dt):
         """Advance contour reveal animation. Returns True while active."""

@@ -487,7 +487,8 @@ def draw_zygote_muscle_ui(v):
                         if start_step <= 2 <= max_step and obj.scalar_field is not None:
                             print(f"  [2/{max_step}] Finding Contours...")
                             obj.find_contours(skeleton_meshes=v.zygote_skeleton_meshes, spacing_scale=obj.contour_spacing_scale, defer=defer)
-                            obj.is_draw_bounding_box = True
+                            if not defer:
+                                obj.is_draw_bounding_box = True
 
                         # Step 3: Fill Gaps
                         if start_step <= 3 <= max_step and obj.contours is not None and len(obj.contours) > 0:
@@ -615,7 +616,8 @@ def draw_zygote_muscle_ui(v):
                     if obj.scalar_field is not None:
                         try:
                             obj.find_contours(skeleton_meshes=v.zygote_skeleton_meshes, spacing_scale=obj.contour_spacing_scale, defer=animate)
-                            obj.is_draw_bounding_box = True
+                            if not animate:
+                                obj.is_draw_bounding_box = True
                         except Exception as e:
                             print(f"[{name}] Find Contours error: {e}")
                     else:
