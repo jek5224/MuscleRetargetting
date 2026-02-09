@@ -1883,6 +1883,10 @@ class MuscleMeshMixin:
                 collision_trimeshes = self._build_transformed_collision_meshes(
                     skeleton_meshes, skeleton, verbose=verbose
                 )
+            # Also add DART body shape collision meshes (BoxShape primitives)
+            if skeleton is not None:
+                dart_shape_meshes = self._build_dart_shape_collision_meshes(skeleton, verbose=verbose)
+                collision_trimeshes.extend(dart_shape_meshes)
 
                 if verbose and len(collision_trimeshes) > 0:
                     all_bone_verts = np.vstack([m.vertices for m in collision_trimeshes])

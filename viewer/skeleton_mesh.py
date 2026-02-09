@@ -1496,6 +1496,45 @@ class SkeletonMeshMixin:
 
         return collision_trimeshes
 
+    def _build_dart_shape_collision_meshes(self, skeleton, verbose=False):
+        """Build collision trimeshes from DART skeleton body node shapes (BoxShape)."""
+        import trimesh
+
+        collision_trimeshes = []
+        if skeleton is None:
+            return collision_trimeshes
+
+        for i in range(skeleton.getNumBodyNodes()):
+            bn = skeleton.getBodyNode(i)
+            bn_name = bn.getName()
+            for sn in bn.getShapeNodes():
+                shape = sn.getShape()
+                shape_type = shape.getType()
+                if 'BoxShape' not in shape_type:
+                    if verbose:
+                        print(f"  DART shape: skipping {bn_name} shape type {shape_type}")
+                    continue
+                try:
+                    size = shape.getSize()
+                    box_mesh = trimesh.creation.box(extents=size)
+
+                    # World transform = body node world * shape node relative
+                    world_tf = bn.getWorldTransform().matrix() @ sn.getRelativeTransform().matrix()
+                    box_mesh.apply_transform(world_tf)
+
+                    collision_trimeshes.append(box_mesh)
+                    if verbose:
+                        print(f"  DART shape: {bn_name} box {size[0]:.4f}x{size[1]:.4f}x{size[2]:.4f}")
+                except Exception as e:
+                    if verbose:
+                        print(f"  DART shape: error on {bn_name}: {e}")
+                    continue
+
+        if verbose:
+            print(f"  DART shapes: built {len(collision_trimeshes)} box collision meshes")
+
+        return collision_trimeshes
+
     def _update_fixed_targets_from_skeleton(self, skeleton_meshes, skeleton):
         """
         Update fixed vertex positions based on skeleton body transforms.
