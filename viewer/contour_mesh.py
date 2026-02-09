@@ -1900,31 +1900,24 @@ class ContourMeshMixin:
             return np.array(COLOR_MAP(1 - values[idx])[:3], dtype=np.float32)
 
         # color_before[stream][level] = level-based color (pre-cut appearance)
-        # Before cut, contours were [level][contour], colored by level.
-        # After cut, contours are [stream][level]. We need to give each (stream, level)
-        # the color it HAD before cutting — which was the color of its original contour group.
+        # Before cut, contours were [level][contour], colored by level index.
+        # draw_contours outer loop was i=level, so color = f(level_idx, num_levels).
+        # After cut, contours are [stream][level], so color = f(stream_idx, num_streams).
+        # Pre-compute level colors (same for all streams at a given level)
+        level_colors = [_stream_color(li, num_levels_before) for li in range(num_levels_before)]
+
         color_before = []
         color_after = []
         for stream_i in range(num_streams):
             cb_stream = []
             ca_stream = []
             for level_i in range(num_levels):
-                # Before: find which group this stream was in → group_idx = original contour index
-                # Original contours were colored by their contour index within the level
-                group_idx = 0
-                if level_i < len(self.stream_groups):
-                    for gi, group in enumerate(self.stream_groups[level_i]):
-                        if stream_i in group:
-                            group_idx = gi
-                            break
-                # Original had num_levels_before levels with varying contour counts
-                # But the color was per-contour-index within level (stream-like coloring)
-                # Actually: before cut, contours[level][contour] used color = f(contour_idx, num_contours_at_level)
-                # Wait - looking at draw_contours: color is f(i) where i is the outer loop (stream/contour index)
-                # So before cut: color = f(group_idx, num_groups_at_level)
-                num_groups = len(self.stream_groups[level_i]) if level_i < len(self.stream_groups) else 1
-                cb_stream.append(_stream_color(group_idx, num_groups))
-                # After: color = f(stream_idx, num_streams)
+                # Before: level-based color (same color for all streams at this level)
+                if level_i < len(level_colors):
+                    cb_stream.append(level_colors[level_i].copy())
+                else:
+                    cb_stream.append(level_colors[-1].copy() if level_colors else np.zeros(3, dtype=np.float32))
+                # After: stream-based color (same color for all levels in this stream)
                 ca_stream.append(_stream_color(stream_i, num_streams))
             color_before.append(cb_stream)
             color_after.append(ca_stream)
