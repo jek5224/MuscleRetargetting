@@ -502,6 +502,13 @@ class ContourMeshMixin:
         self._fill_gaps_anim_step = 0  # Current gap being highlighted
         self._fill_gaps_replayed = False
 
+        # Find transitions animation replay state
+        self._transitions_inserted_indices = []
+        self._transitions_anim_active = False
+        self._transitions_anim_progress = 0.0
+        self._transitions_anim_step = 0
+        self._transitions_replayed = False
+
         # Inspector highlight (set by viewer when 2D inspector is open)
         self.inspector_highlight_stream = None  # Stream index to highlight
         self.inspector_highlight_level = None   # Level index to highlight
@@ -1348,9 +1355,10 @@ class ContourMeshMixin:
         if self.contours is None or len(self.contours) == 0:
             return
         total = len(self.contours)
-        # Build set of gap-filled indices to skip during contour animation
-        gap_indices = set(getattr(self, '_fill_gaps_inserted_indices', []))
-        self._contour_anim_original_indices = [i for i in range(total) if i not in gap_indices]
+        # Build set of indices inserted by later steps to skip during contour animation
+        skip_indices = set(getattr(self, '_fill_gaps_inserted_indices', []))
+        skip_indices.update(getattr(self, '_transitions_inserted_indices', []))
+        self._contour_anim_original_indices = [i for i in range(total) if i not in skip_indices]
         self._contour_anim_total = len(self._contour_anim_original_indices)
         # Hide all contours
         self.draw_contour_stream = [False] * total
@@ -1396,8 +1404,7 @@ class ContourMeshMixin:
             # No gaps were filled - mark as replayed immediately
             self._fill_gaps_replayed = True
             return
-        # Make sure all existing contours are visible, but hide the gap-filled ones
-        self.draw_contour_stream = [True] * len(self.contours)
+        # Hide only the gap-filled contours, leave everything else as-is
         for idx in self._fill_gaps_inserted_indices:
             if idx < len(self.draw_contour_stream):
                 self.draw_contour_stream[idx] = False
@@ -1437,8 +1444,58 @@ class ContourMeshMixin:
         if revealed >= len(indices):
             self._fill_gaps_anim_active = False
             self._fill_gaps_replayed = True
-            # Ensure all are visible
-            self.draw_contour_stream = [True] * len(self.contours)
+            # Ensure all gap-filled contours are visible
+            for idx in indices:
+                if idx < len(self.draw_contour_stream):
+                    self.draw_contour_stream[idx] = True
+            return False
+
+        return True
+
+    def replay_transitions_animation(self):
+        """Start replaying the transitions animation, revealing inserted contours one by one."""
+        if not self._transitions_inserted_indices or len(self._transitions_inserted_indices) == 0:
+            self._transitions_replayed = True
+            return
+        # Show all currently visible contours, but hide the transition-inserted ones
+        for idx in self._transitions_inserted_indices:
+            if idx < len(self.draw_contour_stream):
+                self.draw_contour_stream[idx] = False
+        self._transitions_anim_step = 0
+        self._transitions_anim_progress = 0.0
+        self._transitions_anim_active = True
+        self.is_draw_contours = True
+
+    def update_transitions_animation(self, dt):
+        """Advance transitions animation. Reveals inserted contours one by one."""
+        if not self._transitions_anim_active:
+            return False
+
+        indices = self._transitions_inserted_indices
+        if len(indices) == 0:
+            self._transitions_anim_active = False
+            self._transitions_replayed = True
+            return False
+
+        time_per_item = 0.4
+        self._transitions_anim_progress += dt
+
+        revealed = int(self._transitions_anim_progress / time_per_item)
+        revealed = min(revealed, len(indices))
+
+        for i in range(revealed):
+            idx = indices[i]
+            if idx < len(self.draw_contour_stream):
+                self.draw_contour_stream[idx] = True
+
+        self._transitions_anim_step = min(revealed, len(indices) - 1)
+
+        if revealed >= len(indices):
+            self._transitions_anim_active = False
+            self._transitions_replayed = True
+            for idx in indices:
+                if idx < len(self.draw_contour_stream):
+                    self.draw_contour_stream[idx] = True
             return False
 
         return True
@@ -1817,17 +1874,24 @@ class ContourMeshMixin:
 
         print(f"\n=== Done: {len(self._neck_viz_data)} transitions in {time.time()-start_time:.2f}s ===")
 
-    def add_transitions_to_contours(self):
+    def add_transitions_to_contours(self, defer=False):
         """
         Add found transition contours to self.contours for cutting.
         Inserts BOTH the target (merged) and source (split) contours at their scalar positions.
+
+        Args:
+            defer: If True, newly inserted contours are hidden until replay
         """
         if not hasattr(self, '_neck_viz_data') or not self._neck_viz_data:
             print("No transitions found. Run find_transitions first.")
+            self._transitions_inserted_indices = []
+            self._transitions_replayed = True
             return
 
         if not hasattr(self, 'contours') or not self.contours:
             print("No contours found. Run find_contours first.")
+            self._transitions_inserted_indices = []
+            self._transitions_replayed = True
             return
 
         print(f"\n=== Adding transition contours ===")
@@ -1873,6 +1937,7 @@ class ContourMeshMixin:
         sorted_to_add = sorted(scalars_to_add.values(), key=lambda x: x['scalar'])
 
         added_count = 0
+        all_inserted_indices = []
         for t in sorted_to_add:
             scalar = t['scalar']
 
@@ -1898,8 +1963,17 @@ class ContourMeshMixin:
             # Insert into contours and bounding_planes
             self.contours.insert(insert_idx, t['contours'])
             self.bounding_planes.insert(insert_idx, t['planes'])
-            # draw_contour_stream is list of lists, one bool per contour at each level
-            self.draw_contour_stream.insert(insert_idx, [True] * len(t['contours']))
+            self.draw_contour_stream.insert(insert_idx, True)
+
+            # Update previously tracked indices that shifted
+            all_inserted_indices = [idx + 1 if idx >= insert_idx else idx for idx in all_inserted_indices]
+            all_inserted_indices.append(insert_idx)
+
+            # Also shift fill gaps indices if they exist
+            if hasattr(self, '_fill_gaps_inserted_indices'):
+                self._fill_gaps_inserted_indices = [
+                    idx + 1 if idx >= insert_idx else idx for idx in self._fill_gaps_inserted_indices
+                ]
 
             # Update existing_scalars for next iteration
             existing_scalars.insert(insert_idx, (scalar, insert_idx))
@@ -1911,7 +1985,19 @@ class ContourMeshMixin:
                 print(f"    contour {ci}: {len(c)} vertices")
             added_count += 1
 
-        print(f"=== Added {added_count} contour levels ===\n")
+        # Save inserted indices for animation replay
+        all_inserted_indices.sort()
+        self._transitions_inserted_indices = all_inserted_indices
+        self._transitions_replayed = False
+
+        if defer and len(all_inserted_indices) > 0:
+            for idx in all_inserted_indices:
+                if idx < len(self.draw_contour_stream):
+                    self.draw_contour_stream[idx] = False
+        else:
+            self._transitions_replayed = True
+
+        print(f"=== Added {added_count} contour levels ({len(all_inserted_indices)} transitions) ===\n")
 
     def _refine_transition_points(self):
         """

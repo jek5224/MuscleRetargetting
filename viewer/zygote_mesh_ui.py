@@ -512,7 +512,7 @@ def draw_zygote_muscle_ui(v):
                             obj.find_all_transitions(scalar_min=scalar_min, scalar_max=scalar_max, num_samples=200,
                                                     expected_origin=exp_origin, expected_insertion=exp_insertion)
                             if obj.contours is not None and len(obj.contours) > 0:
-                                obj.add_transitions_to_contours()
+                                obj.add_transitions_to_contours(defer=defer)
 
                         # Step 5: Smooth (z, x, bp - before cut)
                         if start_step <= 5 <= max_step and obj.contours is not None and len(obj.contours) > 0:
@@ -642,7 +642,7 @@ def draw_zygote_muscle_ui(v):
                         obj.replay_fill_gaps_animation()
 
                 # Find Transitions button - fast scan for contour count changes (step 4)
-                if colored_button(f"Find Transitions##{name}", 4, col_button_width):
+                if colored_button(f"Find Transitions##{name}", 4, proc_w):
                     if hasattr(obj, 'scalar_field') and obj.scalar_field is not None:
                         try:
                             # Use actual scalar field range
@@ -675,12 +675,17 @@ def draw_zygote_muscle_ui(v):
                                                     expected_origin=exp_origin, expected_insertion=exp_insertion)
                             # Auto-add transitions to contours if contours exist
                             if obj.contours is not None and len(obj.contours) > 0:
-                                obj.add_transitions_to_contours()
+                                obj.add_transitions_to_contours(defer=animate)
                         except Exception as e:
                             print(f"[{name}] Find Transitions error: {e}")
                             traceback.print_exc()
                     else:
                         print(f"[{name}] Prerequisites: Run 'Scalar Field' first")
+                # Transitions replay: only available after fill gaps replay has been played
+                if animate and getattr(obj, '_transitions_inserted_indices', None) is not None and getattr(obj, '_fill_gaps_replayed', False):
+                    imgui.same_line()
+                    if imgui.button(f">##{name}_transitions_replay", width=replay_w):
+                        obj.replay_transitions_animation()
 
                 # Step 5: Smoothen buttons: z, x, bp (3 buttons in same row - before cut)
                 sub_button_width = (col_button_width - 8) // 3  # 3 buttons with small margins

@@ -3031,6 +3031,13 @@ class MuscleMeshMixin:
         self._fill_gaps_anim_step = 0
         self._fill_gaps_replayed = False
 
+        # Transitions animation state
+        self._transitions_inserted_indices = []
+        self._transitions_anim_active = False
+        self._transitions_anim_progress = 0.0
+        self._transitions_anim_step = 0
+        self._transitions_replayed = False
+
         # Level selection backup
         self._contours_backup = None
         self._bounding_planes_backup = None

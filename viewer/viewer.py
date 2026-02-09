@@ -1014,6 +1014,8 @@ class GLFWApp():
                     obj.update_contour_animation(1.0 / 30.0)
                 if getattr(obj, '_fill_gaps_anim_active', False):
                     obj.update_fill_gaps_animation(1.0 / 30.0)
+                if getattr(obj, '_transitions_anim_active', False):
+                    obj.update_transitions_animation(1.0 / 30.0)
 
             # Auto-rotate around focused muscle
             if self.auto_rotate:
