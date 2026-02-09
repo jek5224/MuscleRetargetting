@@ -675,23 +675,25 @@ class MeshLoader(ContourMeshMixin, TetrahedronMeshMixin, FiberArchitectureMixin,
                 glEnd()
                 glPopMatrix()
 
-                glColor3f(bp_s, 0, 0)
+                glDisable(GL_DEPTH_TEST)
+                glColor4f(bp_s, 0, 0, bp_alpha)
                 glBegin(GL_LINES)
                 glVertex3fv(mean)
                 glVertex3fv(mean + plane_info['basis_x'] * scale * 0.1 * bp_s)
                 glEnd()
 
-                glColor3f(0, bp_s, 0)
+                glColor4f(0, bp_s, 0, bp_alpha)
                 glBegin(GL_LINES)
                 glVertex3fv(mean)
                 glVertex3fv(mean + plane_info['basis_y'] * scale * 0.1 * bp_s)
                 glEnd()
 
-                glColor3f(0, 0, bp_s)
+                glColor4f(0, 0, bp_s, bp_alpha)
                 glBegin(GL_LINES)
                 glVertex3fv(mean)
                 glVertex3fv(mean + plane_info['basis_z'] * scale * 0.1 * bp_s)
                 glEnd()
+                glEnable(GL_DEPTH_TEST)
 
                 if plane_info.get('bounding_plane') is not None:
                     if plane_info['square_like']:
