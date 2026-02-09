@@ -1898,6 +1898,11 @@ class ContourMeshMixin:
             defer: If True, restore pre-cut visual state so animation can replay later.
             **kwargs: Passed through to cut_streams().
         """
+        # Ensure post-smooth BPs are applied (smooth defer may have restored pre-smooth)
+        smooth_bp_after = getattr(self, '_smooth_bp_after', None)
+        if smooth_bp_after is not None:
+            self._apply_bp_snapshot(smooth_bp_after)
+
         # Save bounding planes BEFORE cut_streams (it deletes _original_bounding_planes)
         orig_bps_backup = [[copy.deepcopy(bp) for bp in level] for level in self.bounding_planes]
         num_levels_before = len(self.contours)
