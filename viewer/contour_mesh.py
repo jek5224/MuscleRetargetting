@@ -1902,6 +1902,11 @@ class ContourMeshMixin:
         orig_bps_backup = [[copy.deepcopy(bp) for bp in level] for level in self.bounding_planes]
         num_levels_before = len(self.contours)
 
+        # Save pre-cut contour data for deferred replay (level-mode geometry)
+        self._precut_contours = [[np.array(c).copy() for c in level] for level in self.contours]
+        self._precut_bounding_planes = orig_bps_backup  # Already deep-copied
+        self._precut_draw_contour_stream = list(self.draw_contour_stream) if self.draw_contour_stream else None
+
         # Run the actual cut
         self.cut_streams(**kwargs)
 
@@ -2022,15 +2027,42 @@ class ContourMeshMixin:
         self._cut_num_levels_before = num_levels_before
         self._cut_replayed = False
 
+        # Save level-mode smooth data before remapping
+        self._smooth_bp_before_level = copy.deepcopy(self._smooth_bp_before) if self._smooth_bp_before else None
+        self._smooth_bp_after_level = copy.deepcopy(self._smooth_bp_after) if self._smooth_bp_after else None
+        self._smooth_swing_data_level = copy.deepcopy(getattr(self, '_smooth_swing_data', None))
+        self._smooth_twist_data_level = copy.deepcopy(getattr(self, '_smooth_twist_data', None))
+        self._smooth_num_levels_level = getattr(self, '_smooth_num_levels', len(self._smooth_bp_before) if self._smooth_bp_before else 0)
+
         # Remap smooth animation data from [level][contour] to [stream][level]
         # so smooth replay works with the post-cut stream-mode bounding_planes
         self._remap_smooth_data_to_stream_mode(num_streams, num_levels)
 
+        # Save stream-mode smooth data (after remap)
+        self._smooth_bp_before_stream = copy.deepcopy(self._smooth_bp_before) if self._smooth_bp_before else None
+        self._smooth_bp_after_stream = copy.deepcopy(self._smooth_bp_after) if self._smooth_bp_after else None
+        self._smooth_swing_data_stream = copy.deepcopy(getattr(self, '_smooth_swing_data', None))
+        self._smooth_twist_data_stream = copy.deepcopy(getattr(self, '_smooth_twist_data', None))
+        self._smooth_num_levels_stream = getattr(self, '_smooth_num_levels', 0)
+
         if defer:
-            # Show pre-cut colors and BPs until replay
-            self._cut_anim_contour_colors = [[c.copy() for c in stream] for stream in color_before]
-            # Apply pre-cut BPs to live stream_bounding_planes
-            self._apply_stream_bp_snapshot(bp_before)
+            # Restore pre-cut contour geometry and visibility (level mode)
+            if hasattr(self, '_precut_contours') and self._precut_contours is not None:
+                self.contours = self._precut_contours
+                self.bounding_planes = [[copy.deepcopy(bp) for bp in level] for level in self._precut_bounding_planes]
+            if hasattr(self, '_precut_draw_contour_stream') and self._precut_draw_contour_stream is not None:
+                self.draw_contour_stream = list(self._precut_draw_contour_stream)
+            # Restore level-mode smooth data for pre-cut animation replay
+            if self._smooth_bp_before_level is not None:
+                self._smooth_bp_before = self._smooth_bp_before_level
+                self._smooth_bp_after = self._smooth_bp_after_level
+                self._smooth_swing_data = self._smooth_swing_data_level
+                self._smooth_twist_data = self._smooth_twist_data_level
+                self._smooth_num_levels = self._smooth_num_levels_level
+                # Apply pre-smooth BPs to level-mode bounding_planes
+                self._apply_bp_snapshot(self._smooth_bp_before_level)
+            # No color override needed — level-mode coloring is correct
+            self._cut_anim_contour_colors = None
         else:
             self._cut_replayed = True
 
@@ -2103,6 +2135,20 @@ class ContourMeshMixin:
         if self._cut_color_before is None or self._cut_color_after is None:
             self._cut_replayed = True
             return
+        # Swap to stream-mode (post-cut) contour geometry if currently in level mode
+        if hasattr(self, 'stream_contours') and self.stream_contours is not None:
+            self.contours = self.stream_contours
+            self.bounding_planes = self.stream_bounding_planes
+            num_streams = len(self.stream_contours)
+            num_levels = len(self.stream_contours[0]) if num_streams > 0 else 0
+            self.draw_contour_stream = [[True] * num_levels for _ in range(num_streams)]
+        # Swap smooth data to stream-mode for future smooth replays
+        if getattr(self, '_smooth_bp_before_stream', None) is not None:
+            self._smooth_bp_before = self._smooth_bp_before_stream
+            self._smooth_bp_after = self._smooth_bp_after_stream
+            self._smooth_swing_data = self._smooth_swing_data_stream
+            self._smooth_twist_data = self._smooth_twist_data_stream
+            self._smooth_num_levels = getattr(self, '_smooth_num_levels_stream', 0)
         # Reset to pre-cut colors
         self._cut_anim_contour_colors = [[c.copy() for c in stream] for stream in self._cut_color_before]
         # Reset BPs to pre-cut state
@@ -17518,12 +17564,32 @@ class ContourMeshMixin:
         # Transitions animation data
         state['_transitions_inserted_indices'] = getattr(self, '_transitions_inserted_indices', [])
 
-        # Smooth animation data
+        # Smooth animation data (level-mode and stream-mode)
+        state['_smooth_bp_before_level'] = getattr(self, '_smooth_bp_before_level', None)
+        state['_smooth_bp_after_level'] = getattr(self, '_smooth_bp_after_level', None)
+        state['_smooth_swing_data_level'] = getattr(self, '_smooth_swing_data_level', None)
+        state['_smooth_twist_data_level'] = getattr(self, '_smooth_twist_data_level', None)
+        state['_smooth_num_levels_level'] = getattr(self, '_smooth_num_levels_level', 0)
+        state['_smooth_bp_before_stream'] = getattr(self, '_smooth_bp_before_stream', None)
+        state['_smooth_bp_after_stream'] = getattr(self, '_smooth_bp_after_stream', None)
+        state['_smooth_swing_data_stream'] = getattr(self, '_smooth_swing_data_stream', None)
+        state['_smooth_twist_data_stream'] = getattr(self, '_smooth_twist_data_stream', None)
+        state['_smooth_num_levels_stream'] = getattr(self, '_smooth_num_levels_stream', 0)
+        # Also save current smooth data (for backward compat with files without level/stream split)
         state['_smooth_bp_before'] = getattr(self, '_smooth_bp_before', None)
         state['_smooth_bp_after'] = getattr(self, '_smooth_bp_after', None)
         state['_smooth_swing_data'] = getattr(self, '_smooth_swing_data', None)
         state['_smooth_twist_data'] = getattr(self, '_smooth_twist_data', None)
         state['_smooth_num_levels'] = getattr(self, '_smooth_num_levels', 0)
+
+        # Pre-cut data (level-mode contours and BPs for deferred replay)
+        state['_precut_contours'] = getattr(self, '_precut_contours', None)
+        state['_precut_bounding_planes'] = getattr(self, '_precut_bounding_planes', None)
+        state['_precut_draw_contour_stream'] = getattr(self, '_precut_draw_contour_stream', None)
+
+        # Stream data (post-cut)
+        state['stream_contours'] = getattr(self, 'stream_contours', None)
+        state['stream_bounding_planes'] = getattr(self, 'stream_bounding_planes', None)
 
         # Cut animation data
         state['_cut_color_before'] = getattr(self, '_cut_color_before', None)
@@ -17571,12 +17637,32 @@ class ContourMeshMixin:
         # Transitions animation data
         self._transitions_inserted_indices = state.get('_transitions_inserted_indices', [])
 
-        # Smooth animation data
+        # Smooth animation data (level-mode and stream-mode)
+        self._smooth_bp_before_level = state.get('_smooth_bp_before_level')
+        self._smooth_bp_after_level = state.get('_smooth_bp_after_level')
+        self._smooth_swing_data_level = state.get('_smooth_swing_data_level')
+        self._smooth_twist_data_level = state.get('_smooth_twist_data_level')
+        self._smooth_num_levels_level = state.get('_smooth_num_levels_level', 0)
+        self._smooth_bp_before_stream = state.get('_smooth_bp_before_stream')
+        self._smooth_bp_after_stream = state.get('_smooth_bp_after_stream')
+        self._smooth_swing_data_stream = state.get('_smooth_swing_data_stream')
+        self._smooth_twist_data_stream = state.get('_smooth_twist_data_stream')
+        self._smooth_num_levels_stream = state.get('_smooth_num_levels_stream', 0)
+        # Default smooth data (backward compat or current mode)
         self._smooth_bp_before = state.get('_smooth_bp_before')
         self._smooth_bp_after = state.get('_smooth_bp_after')
         self._smooth_swing_data = state.get('_smooth_swing_data')
         self._smooth_twist_data = state.get('_smooth_twist_data')
         self._smooth_num_levels = state.get('_smooth_num_levels', 0)
+
+        # Pre-cut data (level-mode contours and BPs)
+        self._precut_contours = state.get('_precut_contours')
+        self._precut_bounding_planes = state.get('_precut_bounding_planes')
+        self._precut_draw_contour_stream = state.get('_precut_draw_contour_stream')
+
+        # Stream data (post-cut)
+        self.stream_contours = state.get('stream_contours')
+        self.stream_bounding_planes = state.get('stream_bounding_planes')
 
         # Cut animation data
         self._cut_color_before = state.get('_cut_color_before')
@@ -17633,11 +17719,25 @@ class ContourMeshMixin:
                 (n, 1)
             )
 
-        # 2. Contours: hide all contours and bounding planes
+        # 2. Contours: restore pre-cut level-mode data if available
+        if self._precut_contours is not None and self._cut_color_before is not None:
+            # Restore level-mode contours and BPs for pre-cut animations
+            self.contours = self._precut_contours
+            self.bounding_planes = [[copy.deepcopy(bp) for bp in level] for level in self._precut_bounding_planes] if self._precut_bounding_planes else self.bounding_planes
+            if self._precut_draw_contour_stream is not None:
+                self.draw_contour_stream = list(self._precut_draw_contour_stream)
+            # Use level-mode smooth data for pre-cut replay
+            if self._smooth_bp_before_level is not None:
+                self._smooth_bp_before = self._smooth_bp_before_level
+                self._smooth_bp_after = self._smooth_bp_after_level
+                self._smooth_swing_data = self._smooth_swing_data_level
+                self._smooth_twist_data = self._smooth_twist_data_level
+                self._smooth_num_levels = self._smooth_num_levels_level
+
         if self.contours is not None and len(self.contours) > 0:
             self.is_draw_contours = False
             self.is_draw_bounding_box = False
-            # Preserve 2D structure if in stream mode (post-cut)
+            # Set up visibility array matching current mode
             if (self.draw_contour_stream is not None
                     and len(self.draw_contour_stream) > 0
                     and isinstance(self.draw_contour_stream[0], list)):
@@ -17651,13 +17751,18 @@ class ContourMeshMixin:
         if self._smooth_bp_before is not None:
             self._apply_bp_snapshot(self._smooth_bp_before)
 
-        # 4. Cut: restore pre-cut colors and BPs
-        if self._cut_color_before is not None:
-            self._cut_anim_contour_colors = [[c.copy() for c in stream] for stream in self._cut_color_before]
-        if self._cut_bp_before is not None and getattr(self, '_cut_has_bp_change', False):
-            if not hasattr(self, 'stream_bounding_planes') or self.stream_bounding_planes is None:
-                self.stream_bounding_planes = self.bounding_planes
-            self._apply_stream_bp_snapshot(self._cut_bp_before)
+        # 4. Cut: handle deferred state based on mode
+        if self._precut_contours is not None:
+            # New: level mode — no color override needed (normal coloring is correct)
+            self._cut_anim_contour_colors = None
+        else:
+            # Backward compat: stream mode — use color override for pre-cut appearance
+            if self._cut_color_before is not None:
+                self._cut_anim_contour_colors = [[c.copy() for c in stream] for stream in self._cut_color_before]
+            if self._cut_bp_before is not None and getattr(self, '_cut_has_bp_change', False):
+                if not hasattr(self, 'stream_bounding_planes') or self.stream_bounding_planes is None:
+                    self.stream_bounding_planes = self.bounding_planes
+                self._apply_stream_bp_snapshot(self._cut_bp_before)
 
         print(f"Animation state loaded from {filepath}")
 

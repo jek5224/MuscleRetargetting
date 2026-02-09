@@ -4785,6 +4785,10 @@ def _render_manual_cut_windows(v):
                         obj.cut_streams(cut_method='bp', muscle_name=muscle_name)
                         # Smoothening and alignment are now handled inside cut_streams
                         if not obj._manual_cut_pending and obj._manual_cut_data is None:
+                            # Consume deferred cut animation backup
+                            if hasattr(obj, '_cut_anim_deferred_backup') and obj._cut_anim_deferred_backup is not None:
+                                obj._compute_cut_animation(*obj._cut_anim_deferred_backup)
+                                obj._cut_anim_deferred_backup = None
                             # Clear auto-optimize-all flag when all cutting is done
                             if hasattr(obj, '_auto_optimize_all'):
                                 obj._auto_optimize_all = False
@@ -4954,6 +4958,10 @@ def _render_manual_cut_windows(v):
 
                 # Smoothening and alignment are now handled inside cut_streams
                 if not obj._manual_cut_pending and obj._manual_cut_data is None:
+                    # Consume deferred cut animation backup
+                    if hasattr(obj, '_cut_anim_deferred_backup') and obj._cut_anim_deferred_backup is not None:
+                        obj._compute_cut_animation(*obj._cut_anim_deferred_backup)
+                        obj._cut_anim_deferred_backup = None
                     # Clear auto-optimize-all flag when all cutting is done
                     if hasattr(obj, '_auto_optimize_all'):
                         obj._auto_optimize_all = False
@@ -5102,6 +5110,10 @@ def _render_manual_cut_windows(v):
                             obj.cut_streams(cut_method='bp', muscle_name=muscle_name)
                             # Smoothening and alignment are now handled inside cut_streams
                             if not obj._manual_cut_pending and obj._manual_cut_data is None:
+                                # Consume deferred cut animation backup
+                                if hasattr(obj, '_cut_anim_deferred_backup') and obj._cut_anim_deferred_backup is not None:
+                                    obj._compute_cut_animation(*obj._cut_anim_deferred_backup)
+                                    obj._cut_anim_deferred_backup = None
                                 # Clear auto-optimize-all flag when all cutting is done
                                 if hasattr(obj, '_auto_optimize_all'):
                                     obj._auto_optimize_all = False
