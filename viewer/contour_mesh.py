@@ -2006,13 +2006,13 @@ class ContourMeshMixin:
         if not hasattr(self, '_neck_viz_data') or not self._neck_viz_data:
             print("No transitions found. Run find_transitions first.")
             self._transitions_inserted_indices = []
-            self._transitions_replayed = True
+            self._transitions_replayed = not defer
             return
 
         if not hasattr(self, 'contours') or not self.contours:
             print("No contours found. Run find_contours first.")
             self._transitions_inserted_indices = []
-            self._transitions_replayed = True
+            self._transitions_replayed = not defer
             return
 
         print(f"\n=== Adding transition contours ===")
@@ -2098,7 +2098,8 @@ class ContourMeshMixin:
         self._transitions_inserted_indices = all_inserted_indices
         self._transitions_replayed = False
 
-        if defer and len(all_inserted_indices) > 0:
+        if defer:
+            # Hide newly inserted contours until replay; replayed stays False
             for idx in all_inserted_indices:
                 if idx < len(self.draw_contour_stream):
                     self.draw_contour_stream[idx] = False
@@ -2642,7 +2643,7 @@ class ContourMeshMixin:
         """
         if len(self.bounding_planes) < 2:
             self._fill_gaps_inserted_indices = []
-            self._fill_gaps_replayed = False
+            self._fill_gaps_replayed = not defer
             return
 
         # NOTE: Transition point refinement is now handled separately by find_all_transitions()
@@ -2811,12 +2812,13 @@ class ContourMeshMixin:
         self._fill_gaps_inserted_indices = all_inserted_indices
         self._fill_gaps_replayed = False
 
-        if defer and len(all_inserted_indices) > 0:
-            # Hide newly inserted contours until replay
-            self.draw_contour_stream = [True] * len(self.contours)
-            for idx in all_inserted_indices:
-                if idx < len(self.draw_contour_stream):
-                    self.draw_contour_stream[idx] = False
+        if defer:
+            # Hide newly inserted contours until replay; replayed stays False
+            if len(all_inserted_indices) > 0:
+                self.draw_contour_stream = [True] * len(self.contours)
+                for idx in all_inserted_indices:
+                    if idx < len(self.draw_contour_stream):
+                        self.draw_contour_stream[idx] = False
         else:
             self._fill_gaps_replayed = True
 
