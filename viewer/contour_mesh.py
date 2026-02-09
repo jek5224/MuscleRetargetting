@@ -491,7 +491,9 @@ class ContourMeshMixin:
         self._contour_anim_active = False
         self._contour_anim_progress = 0.0
         self._contour_anim_total = 0
+        self._contour_anim_original_indices = []
         self._contour_replayed = False
+        self._find_contours_count = 0
 
         # Fill gaps animation replay state
         self._fill_gaps_inserted_indices = []  # Indices of contours inserted by refine_contours
@@ -1325,6 +1327,7 @@ class ContourMeshMixin:
 
         self.contours = contours
         self._contour_replayed = False
+        self._find_contours_count = len(contours)  # Count before fill gaps
 
         if defer:
             # Save contours but don't show them yet
@@ -1340,23 +1343,31 @@ class ContourMeshMixin:
         #     self.auto_detect_attachments(skeleton_meshes)
 
     def replay_contour_animation(self):
-        """Start replaying the contour reveal animation from origin to insertion."""
+        """Start replaying the contour reveal animation from origin to insertion.
+        Only animates contours from find_contours, not gap-filled ones."""
         if self.contours is None or len(self.contours) == 0:
             return
-        self._contour_anim_total = len(self.contours)
-        self.draw_contour_stream = [False] * self._contour_anim_total
+        total = len(self.contours)
+        # Build set of gap-filled indices to skip during contour animation
+        gap_indices = set(getattr(self, '_fill_gaps_inserted_indices', []))
+        self._contour_anim_original_indices = [i for i in range(total) if i not in gap_indices]
+        self._contour_anim_total = len(self._contour_anim_original_indices)
+        # Hide all contours
+        self.draw_contour_stream = [False] * total
         self._contour_anim_progress = 0.0
         self._contour_anim_active = True
         self.is_draw_contours = True
         self.is_draw_bounding_box = True
 
     def update_contour_animation(self, dt):
-        """Advance contour reveal animation. Returns True while active."""
+        """Advance contour reveal animation. Returns True while active.
+        Only reveals original find_contours results, gap-filled contours stay hidden."""
         if not self._contour_anim_active:
             return False
 
+        orig_indices = getattr(self, '_contour_anim_original_indices', None)
         total = self._contour_anim_total
-        if total == 0:
+        if total == 0 or orig_indices is None:
             self._contour_anim_active = False
             return False
 
@@ -1364,13 +1375,17 @@ class ContourMeshMixin:
         revealed = int(self._contour_anim_progress * total)
         revealed = min(revealed, total)
 
-        for i in range(total):
-            self.draw_contour_stream[i] = (i < revealed)
+        # Reveal only original contour indices in order
+        for k in range(total):
+            idx = orig_indices[k]
+            self.draw_contour_stream[idx] = (k < revealed)
 
         if revealed >= total:
             self._contour_anim_active = False
             self._contour_replayed = True
-            self.draw_contour_stream = [True] * total
+            # Show only original contours, gap-filled stay hidden
+            for idx in orig_indices:
+                self.draw_contour_stream[idx] = True
             return False
 
         return True

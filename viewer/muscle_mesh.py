@@ -3020,7 +3020,9 @@ class MuscleMeshMixin:
         self._contour_anim_active = False
         self._contour_anim_progress = 0.0
         self._contour_anim_total = 0
+        self._contour_anim_original_indices = []
         self._contour_replayed = False
+        self._find_contours_count = 0
 
         # Fill gaps animation state
         self._fill_gaps_inserted_indices = []
