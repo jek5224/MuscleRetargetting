@@ -17772,6 +17772,14 @@ class ContourMeshMixin:
         if hasattr(self, 'max_stream_count') and self.max_stream_count is not None:
             save_data['max_stream_count'] = self.max_stream_count
 
+        # Save pre-cut data if available (level-mode contours/BPs before cutting)
+        if hasattr(self, '_precut_contours') and self._precut_contours is not None:
+            save_data['_precut_contours'] = convert_to_serializable(self._precut_contours)
+        if hasattr(self, '_precut_bounding_planes') and self._precut_bounding_planes is not None:
+            save_data['_precut_bounding_planes'] = convert_to_serializable(self._precut_bounding_planes)
+        if hasattr(self, '_precut_draw_contour_stream') and self._precut_draw_contour_stream is not None:
+            save_data['_precut_draw_contour_stream'] = convert_to_serializable(self._precut_draw_contour_stream)
+
         # Save shared boundary registry (for cut contours)
         if hasattr(self, 'shared_boundary_registry') and self.shared_boundary_registry:
             save_data['shared_boundary_registry'] = convert_to_serializable(self.shared_boundary_registry)
@@ -18190,6 +18198,51 @@ class ContourMeshMixin:
                     for pair in raw_ips
                 ]
                 print(f"  Loaded {len(self.cut_intersection_points)} cut intersection point pairs (old format)")
+
+        # Load pre-cut data if available
+        if '_precut_contours' in save_data:
+            self._precut_contours = []
+            for level in save_data['_precut_contours']:
+                level_contours = []
+                for contour in level:
+                    level_contours.append(np.array(contour))
+                self._precut_contours.append(level_contours)
+            print(f"  Loaded {len(self._precut_contours)} pre-cut contour levels")
+
+        if '_precut_bounding_planes' in save_data:
+            self._precut_bounding_planes = []
+            for level in save_data['_precut_bounding_planes']:
+                level_bp = []
+                for bp in level:
+                    bp_dict = {}
+                    for key, value in bp.items():
+                        if key in numpy_keys and value is not None:
+                            bp_dict[key] = np.array(value)
+                        elif key == 'contour_match' and value is not None:
+                            bp_dict[key] = []
+                            for match in value:
+                                if isinstance(match, list) and len(match) == 2:
+                                    bp_dict[key].append([np.array(match[0]), np.array(match[1])])
+                                elif match is None:
+                                    bp_dict[key].append(None)
+                                else:
+                                    bp_dict[key].append(match)
+                        else:
+                            bp_dict[key] = value
+                    level_bp.append(bp_dict)
+                self._precut_bounding_planes.append(level_bp)
+
+        if '_precut_draw_contour_stream' in save_data:
+            self._precut_draw_contour_stream = save_data['_precut_draw_contour_stream']
+
+        # Set up contours/bounding_planes: use pre-cut if available, alias to stream if not
+        if hasattr(self, 'stream_contours') and self.stream_contours is not None:
+            # Alias to stream mode (post-cut is the active data)
+            self.contours = self.stream_contours
+            self.bounding_planes = self.stream_bounding_planes
+            num_streams = len(self.stream_contours)
+            num_levels = len(self.stream_contours[0]) if num_streams > 0 else 0
+            self.draw_contour_stream = [[True] * num_levels for _ in range(num_streams)]
 
         # Enable drawing
         self.is_draw_contours = True
