@@ -17612,8 +17612,23 @@ class ContourMeshMixin:
         self._smooth_replayed = False
         self._cut_anim_active = False
         self._cut_anim_progress = 0.0
-        self._cut_anim_contour_colors = None
         self._cut_replayed = False
+        # Restore deferred visual state: show pre-cut colors until replay
+        if self._cut_color_before is not None:
+            self._cut_anim_contour_colors = [[c.copy() for c in stream] for stream in self._cut_color_before]
+        else:
+            self._cut_anim_contour_colors = None
+
+        # Restore deferred BP state: apply pre-smooth BPs until replay
+        if self._smooth_bp_before is not None:
+            self._apply_bp_snapshot(self._smooth_bp_before)
+
+        # Restore deferred cut BP state: apply pre-cut stream BPs until replay
+        if self._cut_bp_before is not None and getattr(self, '_cut_has_bp_change', False):
+            # stream_bounding_planes may not be set yet on load — alias from bounding_planes
+            if not hasattr(self, 'stream_bounding_planes') or self.stream_bounding_planes is None:
+                self.stream_bounding_planes = self.bounding_planes
+            self._apply_stream_bp_snapshot(self._cut_bp_before)
 
         print(f"Animation state loaded from {filepath}")
 
