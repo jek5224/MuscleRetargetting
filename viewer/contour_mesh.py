@@ -516,6 +516,17 @@ class ContourMeshMixin:
         self._smooth_bp_after = None   # Snapshot after smoothing
         self._smooth_replayed = False
 
+        # Cut animation replay state
+        self._cut_anim_active = False
+        self._cut_anim_progress = 0.0
+        self._cut_color_before = None   # [stream_idx][level_idx] = RGB array
+        self._cut_color_after = None    # [stream_idx][level_idx] = RGB array
+        self._cut_bp_before = None      # [stream_idx][level_idx] = BP dict snapshot
+        self._cut_bp_after = None       # [stream_idx][level_idx] = BP dict snapshot
+        self._cut_anim_contour_colors = None  # Override for draw_contours (None = use normal)
+        self._cut_replayed = False
+        self._cut_num_levels_before = 0
+
         # Animation highlight for newly revealed contours
         self._anim_highlight_contour_idx = -1   # Flat contour index being highlighted
         self._anim_highlight_fade = 0.0         # 1.0 = just appeared, fades to 0.0
@@ -618,6 +629,11 @@ class ContourMeshMixin:
                 color = small_colors[i] if i < len(small_colors) else np.array(COLOR_MAP(1 - values[i])[:3], dtype=np.float32)
 
             for j, contour in enumerate(contour_set):
+                # Cut animation color override
+                cut_colors = getattr(self, '_cut_anim_contour_colors', None)
+                if cut_colors is not None and i < len(cut_colors) and j < len(cut_colors[i]):
+                    color = cut_colors[i][j]
+
                 is_highlighted = (highlight_stream == i and highlight_level == j)
                 is_anim_highlighted = (i == anim_highlight_idx and anim_highlight_fade > 0.01)
 
@@ -1817,6 +1833,277 @@ class ContourMeshMixin:
             self._smooth_anim_active = False
             self._smooth_replayed = True
             self._apply_bp_snapshot(bp_after)
+            return False
+
+        return True
+
+    # ── Cut Animation ─────────────────────────────────────────────────
+
+    def cut_streams_animated(self, defer=False, **kwargs):
+        """Wrapper around cut_streams that sets up animation data.
+
+        Args:
+            defer: If True, restore pre-cut visual state so animation can replay later.
+            **kwargs: Passed through to cut_streams().
+        """
+        # Save bounding planes BEFORE cut_streams (it deletes _original_bounding_planes)
+        orig_bps_backup = [[copy.deepcopy(bp) for bp in level] for level in self.bounding_planes]
+        num_levels_before = len(self.contours)
+
+        # Run the actual cut
+        self.cut_streams(**kwargs)
+
+        # If manual cut is pending, save state and return early
+        if getattr(self, '_manual_cut_pending', False) or getattr(self, '_manual_cut_data', None) is not None:
+            self._cut_anim_deferred_backup = (num_levels_before, orig_bps_backup, defer)
+            return
+
+        self._compute_cut_animation(num_levels_before, orig_bps_backup, defer)
+
+    def _compute_cut_animation(self, num_levels_before, orig_bps_backup, defer):
+        """Compute before/after color and BP snapshots for cut animation.
+
+        Args:
+            num_levels_before: Number of contour levels before cutting.
+            orig_bps_backup: Deep copy of bounding_planes[level][contour] before cut.
+            defer: If True, apply pre-cut state so animation replays later.
+        """
+        if not hasattr(self, 'stream_contours') or self.stream_contours is None:
+            self._cut_replayed = True
+            return
+        if not hasattr(self, 'stream_groups') or self.stream_groups is None:
+            self._cut_replayed = True
+            return
+
+        num_streams = len(self.stream_contours)
+        if num_streams == 0:
+            self._cut_replayed = True
+            return
+        num_levels = len(self.stream_contours[0]) if num_streams > 0 else 0
+
+        # ── Color before/after ──
+        # small_colors: fixed palette for <= 8, COLOR_MAP for > 8
+        small_colors = [
+            np.array([1, 0, 0], dtype=np.float32), np.array([0, 1, 0], dtype=np.float32),
+            np.array([0, 0, 1], dtype=np.float32), np.array([1, 1, 0], dtype=np.float32),
+            np.array([0, 1, 1], dtype=np.float32), np.array([1, 0, 1], dtype=np.float32),
+            np.array([1, 0.5, 0], dtype=np.float32), np.array([0.5, 1, 0], dtype=np.float32),
+            np.array([0, 0, 0], dtype=np.float32),
+        ]
+
+        def _stream_color(idx, total):
+            """Compute the color for a stream/level given index and total count."""
+            if total <= 8:
+                return small_colors[idx].copy() if idx < len(small_colors) else \
+                    np.array(COLOR_MAP(1 - idx / max(total - 1, 1))[:3], dtype=np.float32)
+            values = np.linspace(0, 1, total + 2)[1:-1]
+            return np.array(COLOR_MAP(1 - values[idx])[:3], dtype=np.float32)
+
+        # color_before[stream][level] = level-based color (pre-cut appearance)
+        # Before cut, contours were [level][contour], colored by level.
+        # After cut, contours are [stream][level]. We need to give each (stream, level)
+        # the color it HAD before cutting — which was the color of its original contour group.
+        color_before = []
+        color_after = []
+        for stream_i in range(num_streams):
+            cb_stream = []
+            ca_stream = []
+            for level_i in range(num_levels):
+                # Before: find which group this stream was in → group_idx = original contour index
+                # Original contours were colored by their contour index within the level
+                group_idx = 0
+                if level_i < len(self.stream_groups):
+                    for gi, group in enumerate(self.stream_groups[level_i]):
+                        if stream_i in group:
+                            group_idx = gi
+                            break
+                # Original had num_levels_before levels with varying contour counts
+                # But the color was per-contour-index within level (stream-like coloring)
+                # Actually: before cut, contours[level][contour] used color = f(contour_idx, num_contours_at_level)
+                # Wait - looking at draw_contours: color is f(i) where i is the outer loop (stream/contour index)
+                # So before cut: color = f(group_idx, num_groups_at_level)
+                num_groups = len(self.stream_groups[level_i]) if level_i < len(self.stream_groups) else 1
+                cb_stream.append(_stream_color(group_idx, num_groups))
+                # After: color = f(stream_idx, num_streams)
+                ca_stream.append(_stream_color(stream_i, num_streams))
+            color_before.append(cb_stream)
+            color_after.append(ca_stream)
+
+        # ── BP before/after ──
+        # bp_before: for each (stream, level), the BP of the original contour it came from
+        bp_before = []
+        bp_after = []
+        has_bp_change = False
+        for stream_i in range(num_streams):
+            bb_stream = []
+            ba_stream = []
+            for level_i in range(num_levels):
+                # Find which original contour group this stream belongs to
+                group_idx = 0
+                if level_i < len(self.stream_groups):
+                    for gi, group in enumerate(self.stream_groups[level_i]):
+                        if stream_i in group:
+                            group_idx = gi
+                            break
+                # Get the original BP for this group
+                if level_i < len(orig_bps_backup) and group_idx < len(orig_bps_backup[level_i]):
+                    bp_orig = copy.deepcopy(orig_bps_backup[level_i][group_idx])
+                else:
+                    bp_orig = None
+                bb_stream.append(bp_orig)
+
+                # After BP: from current stream_bounding_planes
+                if hasattr(self, 'stream_bounding_planes') and self.stream_bounding_planes is not None \
+                        and stream_i < len(self.stream_bounding_planes) \
+                        and level_i < len(self.stream_bounding_planes[stream_i]):
+                    bp_final = copy.deepcopy(self.stream_bounding_planes[stream_i][level_i])
+                else:
+                    bp_final = None
+                ba_stream.append(bp_final)
+
+                # Check if BP actually changed (skip BP animation for 1:1)
+                if bp_orig is not None and bp_final is not None:
+                    if not np.allclose(bp_orig.get('mean', np.zeros(3)), bp_final.get('mean', np.zeros(3)), atol=1e-6):
+                        has_bp_change = True
+
+            bp_before.append(bb_stream)
+            bp_after.append(ba_stream)
+
+        self._cut_color_before = color_before
+        self._cut_color_after = color_after
+        self._cut_bp_before = bp_before
+        self._cut_bp_after = bp_after
+        self._cut_has_bp_change = has_bp_change
+        self._cut_num_levels_before = num_levels_before
+        self._cut_replayed = False
+
+        if defer:
+            # Show pre-cut colors and BPs until replay
+            self._cut_anim_contour_colors = [[c.copy() for c in stream] for stream in color_before]
+            # Apply pre-cut BPs to live stream_bounding_planes
+            self._apply_stream_bp_snapshot(bp_before)
+        else:
+            self._cut_replayed = True
+
+    def _apply_stream_bp_snapshot(self, snapshot):
+        """Apply a BP snapshot to stream_bounding_planes[stream][level]."""
+        if not hasattr(self, 'stream_bounding_planes') or self.stream_bounding_planes is None:
+            return
+        for i, stream_bps in enumerate(snapshot):
+            if i >= len(self.stream_bounding_planes):
+                break
+            for j, snap in enumerate(stream_bps):
+                if snap is None:
+                    continue
+                if j >= len(self.stream_bounding_planes[i]):
+                    break
+                bp = self.stream_bounding_planes[i][j]
+                for key in ('mean', 'basis_x', 'basis_y', 'basis_z', 'bounding_plane'):
+                    if key in snap and snap[key] is not None:
+                        bp[key] = np.array(snap[key]).copy()
+
+    def replay_cut_animation(self):
+        """Start replaying the cut animation from the beginning."""
+        if self._cut_color_before is None or self._cut_color_after is None:
+            self._cut_replayed = True
+            return
+        # Reset to pre-cut colors
+        self._cut_anim_contour_colors = [[c.copy() for c in stream] for stream in self._cut_color_before]
+        # Reset BPs to pre-cut state
+        if self._cut_has_bp_change:
+            self._apply_stream_bp_snapshot(self._cut_bp_before)
+        self._cut_anim_progress = 0.0
+        self._cut_anim_active = True
+
+    def _cut_wave_t(self, overall_t, level_idx, num_levels, overlap=0.4):
+        """Compute per-level eased t for wave animation."""
+        if num_levels <= 1:
+            level_t = overall_t
+        else:
+            level_start = (1.0 - overlap) * (level_idx / (num_levels - 1))
+            level_t = np.clip((overall_t - level_start) / overlap, 0.0, 1.0)
+        return level_t * level_t * (3.0 - 2.0 * level_t)  # smoothstep
+
+    def update_cut_animation(self, dt):
+        """Advance cut animation.
+
+        Phase 1 (0-2s): Color wave — lerp per-contour color from before to after.
+        Phase 2 (2-4s): BP wave — lerp stream BPs from before to after (skip if 1:1).
+        """
+        if not self._cut_anim_active:
+            return False
+
+        color_before = self._cut_color_before
+        color_after = self._cut_color_after
+        bp_before = self._cut_bp_before
+        bp_after = self._cut_bp_after
+        if color_before is None or color_after is None:
+            self._cut_anim_active = False
+            self._cut_replayed = True
+            return False
+
+        self._cut_anim_progress += dt
+
+        num_streams = len(color_before)
+        num_levels = len(color_before[0]) if num_streams > 0 else 0
+
+        # Phase durations
+        color_dur = 2.0
+        bp_dur = 2.0 if getattr(self, '_cut_has_bp_change', False) else 0.0
+        total_duration = color_dur + bp_dur
+
+        progress = self._cut_anim_progress
+
+        # Phase 1: Color wave
+        if progress < color_dur:
+            overall_t = progress / color_dur
+        else:
+            overall_t = 1.0
+
+        for i in range(num_streams):
+            for j in range(num_levels):
+                t = self._cut_wave_t(overall_t, j, num_levels)
+                self._cut_anim_contour_colors[i][j] = (1 - t) * color_before[i][j] + t * color_after[i][j]
+
+        # Phase 2: BP wave (only if BPs actually changed)
+        if bp_dur > 0 and bp_before is not None and bp_after is not None:
+            if progress > color_dur:
+                bp_overall_t = min((progress - color_dur) / bp_dur, 1.0)
+            else:
+                bp_overall_t = 0.0
+
+            if bp_overall_t > 0 and hasattr(self, 'stream_bounding_planes') and self.stream_bounding_planes is not None:
+                for i in range(num_streams):
+                    if i >= len(self.stream_bounding_planes):
+                        break
+                    for j in range(num_levels):
+                        if j >= len(self.stream_bounding_planes[i]):
+                            break
+                        before = bp_before[i][j]
+                        after = bp_after[i][j]
+                        if before is None or after is None:
+                            continue
+                        t = self._cut_wave_t(bp_overall_t, j, num_levels)
+                        bp = self.stream_bounding_planes[i][j]
+                        bp['mean'] = (1 - t) * before['mean'] + t * after['mean']
+                        for key in ('basis_x', 'basis_y', 'basis_z'):
+                            if key in before and key in after and before[key] is not None and after[key] is not None:
+                                bp[key] = (1 - t) * before[key] + t * after[key]
+                                # Re-normalize
+                                n = np.linalg.norm(bp[key])
+                                if n > 1e-10:
+                                    bp[key] /= n
+                        if before.get('bounding_plane') is not None and after.get('bounding_plane') is not None:
+                            bp['bounding_plane'] = (1 - t) * before['bounding_plane'] + t * after['bounding_plane']
+
+        # Done?
+        if progress >= total_duration:
+            self._cut_anim_active = False
+            self._cut_replayed = True
+            self._cut_anim_contour_colors = None
+            # Apply final BPs
+            if bp_dur > 0:
+                self._apply_stream_bp_snapshot(bp_after)
             return False
 
         return True
@@ -17240,6 +17527,14 @@ class ContourMeshMixin:
         state['_smooth_twist_data'] = getattr(self, '_smooth_twist_data', None)
         state['_smooth_num_levels'] = getattr(self, '_smooth_num_levels', 0)
 
+        # Cut animation data
+        state['_cut_color_before'] = getattr(self, '_cut_color_before', None)
+        state['_cut_color_after'] = getattr(self, '_cut_color_after', None)
+        state['_cut_bp_before'] = getattr(self, '_cut_bp_before', None)
+        state['_cut_bp_after'] = getattr(self, '_cut_bp_after', None)
+        state['_cut_has_bp_change'] = getattr(self, '_cut_has_bp_change', False)
+        state['_cut_num_levels_before'] = getattr(self, '_cut_num_levels_before', 0)
+
         # Transparency
         state['transparency'] = getattr(self, 'transparency', 1.0)
 
@@ -17285,6 +17580,14 @@ class ContourMeshMixin:
         self._smooth_twist_data = state.get('_smooth_twist_data')
         self._smooth_num_levels = state.get('_smooth_num_levels', 0)
 
+        # Cut animation data
+        self._cut_color_before = state.get('_cut_color_before')
+        self._cut_color_after = state.get('_cut_color_after')
+        self._cut_bp_before = state.get('_cut_bp_before')
+        self._cut_bp_after = state.get('_cut_bp_after')
+        self._cut_has_bp_change = state.get('_cut_has_bp_change', False)
+        self._cut_num_levels_before = state.get('_cut_num_levels_before', 0)
+
         # Transparency
         self.transparency = state.get('transparency', 1.0)
 
@@ -17307,6 +17610,10 @@ class ContourMeshMixin:
         self._smooth_anim_active = False
         self._smooth_anim_progress = 0.0
         self._smooth_replayed = False
+        self._cut_anim_active = False
+        self._cut_anim_progress = 0.0
+        self._cut_anim_contour_colors = None
+        self._cut_replayed = False
 
         print(f"Animation state loaded from {filepath}")
 

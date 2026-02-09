@@ -1018,6 +1018,8 @@ class GLFWApp():
                     obj.update_transitions_animation(1.0 / 30.0)
                 if getattr(obj, '_smooth_anim_active', False):
                     obj.update_smooth_animation(1.0 / 30.0)
+                if getattr(obj, '_cut_anim_active', False):
+                    obj.update_cut_animation(1.0 / 30.0)
 
             # Auto-rotate around focused muscle
             if self.auto_rotate:

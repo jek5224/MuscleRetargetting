@@ -3051,6 +3051,17 @@ class MuscleMeshMixin:
         self._smooth_twist_data = None
         self._smooth_replayed = False
 
+        # Cut animation state
+        self._cut_anim_active = False
+        self._cut_anim_progress = 0.0
+        self._cut_color_before = None
+        self._cut_color_after = None
+        self._cut_bp_before = None
+        self._cut_bp_after = None
+        self._cut_anim_contour_colors = None
+        self._cut_replayed = False
+        self._cut_num_levels_before = 0
+
         # Level selection backup
         self._contours_backup = None
         self._bounding_planes_backup = None

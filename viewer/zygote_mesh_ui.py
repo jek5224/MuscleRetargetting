@@ -522,7 +522,7 @@ def draw_zygote_muscle_ui(v):
                         # Step 6: Cut
                         if start_step <= 6 <= max_step and obj.contours is not None and len(obj.contours) > 0 and obj.bounding_planes is not None:
                             print(f"  [6/{max_step}] Cutting streams...")
-                            obj.cut_streams(cut_method=obj.cutting_method, muscle_name=name)
+                            obj.cut_streams_animated(defer=defer, cut_method=obj.cutting_method, muscle_name=name)
                             # Check if waiting for manual cut
                             if hasattr(obj, '_manual_cut_pending') and obj._manual_cut_pending or hasattr(obj, '_manual_cut_data') and obj._manual_cut_data is not None:
                                 obj._pipeline_paused_at = 7  # Resume from step 7 after cut is complete
@@ -731,15 +731,23 @@ def draw_zygote_muscle_ui(v):
                             print(f"[{name}] Prerequisites: Run 'Find Contours' first")
 
                 # Step 6: Cut (standalone button)
-                if colored_button(f"Cut##{name}", 6, col_button_width):
+                cut_w = col_button_width - replay_w - imgui.get_style().item_spacing[0] if animate else col_button_width
+                if colored_button(f"Cut##{name}", 6, cut_w):
                     if obj.contours is not None and len(obj.contours) > 0 and obj.bounding_planes is not None and len(obj.bounding_planes) > 0:
                         try:
-                            obj.cut_streams(cut_method=obj.cutting_method, muscle_name=name)
+                            if animate:
+                                obj.cut_streams_animated(defer=True, cut_method=obj.cutting_method, muscle_name=name)
+                            else:
+                                obj.cut_streams(cut_method=obj.cutting_method, muscle_name=name)
                         except Exception as e:
                             print(f"[{name}] Cut Streams error: {e}")
                             traceback.print_exc()
                     else:
                         print(f"[{name}] Prerequisites: Run 'Find Contours' first")
+                if animate and getattr(obj, '_cut_color_after', None) is not None and getattr(obj, '_smooth_replayed', False):
+                    imgui.same_line()
+                    if imgui.button(f">##{name}_cut_replay", width=replay_w):
+                        obj.replay_cut_animation()
 
                 # Step 7: Stream Smoothen buttons: z, x, bp (3 buttons in same row - after cut)
                 if colored_button(f"z##stream{name}", 7, sub_button_width):
