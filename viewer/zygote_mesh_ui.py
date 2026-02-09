@@ -5649,7 +5649,7 @@ def find_inter_muscle_constraints(v, threshold=None):
     return len(v.inter_muscle_constraints)
 
 
-def run_all_tet_sim_with_constraints(v, max_iterations=100, tolerance=1e-4, outer_iterations=10):
+def run_all_tet_sim_with_constraints(v, max_iterations=100, tolerance=1e-4, outer_iterations=20):
     """
     Run tet simulation for all muscles together, respecting inter-muscle constraints.
     Uses ARAP with collision detection integrated.
@@ -5915,7 +5915,7 @@ def _run_unified_volume_sim(v, active_muscles, max_iterations=100, tolerance=1e-
     print(f"Unified volume sim complete (max change: {total_change:.4f}m)")
 
 
-def _enforce_inter_muscle_constraints(v, active_muscles, stiffness=0.5):
+def _enforce_inter_muscle_constraints(v, active_muscles, stiffness=0.9):
     """
     Enforce inter-muscle distance constraints by adjusting vertex positions.
     Respects fixed vertices - only moves free vertices.
