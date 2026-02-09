@@ -1468,6 +1468,7 @@ class MuscleMeshMixin:
         self._scalar_anim_progress = 0.0
         self._scalar_anim_target_colors = None
         self._scalar_anim_normalized_u = None
+        self._scalar_replayed = False
         self.contours = None
         self.contour_mesh_vertices = None
         self.contour_mesh_faces = None
@@ -3065,8 +3066,9 @@ class MuscleMeshMixin:
 
         print("Process reset complete")
 
-    def compute_scalar_field(self):
-        """Compute scalar field from origin/insertion edge groups."""
+    def compute_scalar_field(self, defer=False):
+        """Compute scalar field from origin/insertion edge groups.
+        If defer=True, save animation data but keep visual state unchanged until replay."""
         origin_indices = []
         insertion_indices = []
 
@@ -3089,12 +3091,20 @@ class MuscleMeshMixin:
         target_colors = np.array(target_colors, dtype=np.float32)
         target_colors[:, 3] = self.transparency
 
-        # Apply colors instantly and save animation data for replay
+        # Save animation data for replay
         self._scalar_anim_target_colors = target_colors[self.faces_3[:, :, 0].flatten()]
         self._scalar_anim_normalized_u = normalized_u[self.faces_3[:, :, 0].flatten()]
         self._scalar_anim_active = False
-        self.vertex_colors = self._scalar_anim_target_colors.copy()
-        self.is_draw_scalar_field = True
+        self._scalar_replayed = False
+
+        if defer:
+            # Keep default muscle color, don't show scalar field yet
+            self.is_draw_scalar_field = False
+        else:
+            # Apply colors immediately
+            self.vertex_colors = self._scalar_anim_target_colors.copy()
+            self.is_draw_scalar_field = True
+            self._scalar_replayed = True
 
     def replay_scalar_animation(self):
         """Start replaying the scalar field color flood animation."""
@@ -3102,6 +3112,7 @@ class MuscleMeshMixin:
             return
         self._scalar_anim_progress = 0.0
         self._scalar_anim_active = True
+        self.is_draw_scalar_field = True
         # Reset to default muscle color
         n = len(self._scalar_anim_target_colors)
         self.vertex_colors = np.tile(
@@ -3118,6 +3129,7 @@ class MuscleMeshMixin:
         if self._scalar_anim_progress >= 1.0:
             self._scalar_anim_progress = 1.0
             self._scalar_anim_active = False
+            self._scalar_replayed = True
             self.vertex_colors = self._scalar_anim_target_colors.copy()
             return False
 

@@ -491,6 +491,7 @@ class ContourMeshMixin:
         self._contour_anim_active = False
         self._contour_anim_progress = 0.0
         self._contour_anim_total = 0
+        self._contour_replayed = False
 
         # Inspector highlight (set by viewer when 2D inspector is open)
         self.inspector_highlight_stream = None  # Stream index to highlight
@@ -1072,7 +1073,7 @@ class ContourMeshMixin:
 
         self.is_draw_contours = True
 
-    def find_contours(self, scalar_step=0.1, skeleton_meshes=None, use_geodesic_edges=False, spacing_scale=1.0):
+    def find_contours(self, scalar_step=0.1, skeleton_meshes=None, use_geodesic_edges=False, spacing_scale=1.0, defer=False):
         if self.scalar_field is None:
             print("Please compute scalar field first")
             return
@@ -1279,9 +1280,17 @@ class ContourMeshMixin:
         contours.append(insertion_contours)
         contours_orig.append(insertion_contours_orig)
 
-        self.draw_contour_stream = [True] * len(contours)
-        self.is_draw_contours = True
         self.contours = contours
+        self._contour_replayed = False
+
+        if defer:
+            # Save contours but don't show them yet
+            self.draw_contour_stream = [False] * len(contours)
+            self.is_draw_contours = False
+        else:
+            self.draw_contour_stream = [True] * len(contours)
+            self.is_draw_contours = True
+            self._contour_replayed = True
 
         # # Auto-detect skeleton attachments if skeleton_meshes provided
         # if skeleton_meshes is not None and len(skeleton_meshes) > 0:
@@ -1316,6 +1325,7 @@ class ContourMeshMixin:
 
         if revealed >= total:
             self._contour_anim_active = False
+            self._contour_replayed = True
             self.draw_contour_stream = [True] * total
             return False
 

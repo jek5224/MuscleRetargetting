@@ -478,14 +478,15 @@ def draw_zygote_muscle_ui(v):
                             print(f"[{name}] Running pipeline steps 1 to {max_step}...")
 
                         # Step 1: Scalar Field
+                        defer = getattr(obj, 'animate_process', False)
                         if start_step <= 1 <= max_step and len(obj.edge_groups) > 0 and len(obj.edge_classes) > 0:
                             print(f"  [1/{max_step}] Computing Scalar Field...")
-                            obj.compute_scalar_field()
+                            obj.compute_scalar_field(defer=defer)
 
                         # Step 2: Find Contours
                         if start_step <= 2 <= max_step and obj.scalar_field is not None:
                             print(f"  [2/{max_step}] Finding Contours...")
-                            obj.find_contours(skeleton_meshes=v.zygote_skeleton_meshes, spacing_scale=obj.contour_spacing_scale)
+                            obj.find_contours(skeleton_meshes=v.zygote_skeleton_meshes, spacing_scale=obj.contour_spacing_scale, defer=defer)
                             obj.is_draw_bounding_box = True
 
                         # Step 3: Fill Gaps
@@ -593,18 +594,19 @@ def draw_zygote_muscle_ui(v):
                         imgui.pop_style_color(2)
                     return clicked
 
+                animate = getattr(obj, 'animate_process', False)
                 replay_w = 25
-                proc_w = col_button_width - replay_w - imgui.get_style().item_spacing[0]
+                proc_w = col_button_width - replay_w - imgui.get_style().item_spacing[0] if animate else col_button_width
 
                 if colored_button(f"Scalar Field##{name}", 1, proc_w):
                     if len(obj.edge_groups) > 0 and len(obj.edge_classes) > 0:
                         try:
-                            obj.compute_scalar_field()
+                            obj.compute_scalar_field(defer=animate)
                         except Exception as e:
                             print(f"[{name}] Scalar Field error: {e}")
                     else:
                         print(f"[{name}] Need edge_groups and edge_classes")
-                if getattr(obj, 'animate_process', False) and obj._scalar_anim_target_colors is not None:
+                if animate and obj._scalar_anim_target_colors is not None:
                     imgui.same_line()
                     if imgui.button(f">##{name}_scalar_replay", width=replay_w):
                         obj.replay_scalar_animation()
@@ -612,13 +614,14 @@ def draw_zygote_muscle_ui(v):
                 if colored_button(f"Find Contours##{name}", 2, proc_w):
                     if obj.scalar_field is not None:
                         try:
-                            obj.find_contours(skeleton_meshes=v.zygote_skeleton_meshes, spacing_scale=obj.contour_spacing_scale)
+                            obj.find_contours(skeleton_meshes=v.zygote_skeleton_meshes, spacing_scale=obj.contour_spacing_scale, defer=animate)
                             obj.is_draw_bounding_box = True
                         except Exception as e:
                             print(f"[{name}] Find Contours error: {e}")
                     else:
                         print(f"[{name}] Prerequisites: Run 'Scalar Field' first")
-                if getattr(obj, 'animate_process', False) and obj.contours is not None and len(obj.contours) > 0:
+                # Contour replay: only available after scalar replay has been played
+                if animate and obj.contours is not None and len(obj.contours) > 0 and getattr(obj, '_scalar_replayed', False):
                     imgui.same_line()
                     if imgui.button(f">##{name}_contour_replay", width=replay_w):
                         obj.replay_contour_animation()
