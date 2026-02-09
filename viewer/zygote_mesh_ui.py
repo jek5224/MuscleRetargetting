@@ -3319,9 +3319,7 @@ def _render_manual_cut_windows(v):
 
         # Neck finding for SEPARATE mode only (multiple separate sources → one target)
         # Skip for: COMMON mode (sources share boundary), sub-windows, or sub-cuts
-        # Also skip if no transitions found by find_all_transitions (1:1 case)
-        has_transitions = hasattr(obj, '_neck_viz_data') and obj._neck_viz_data and len(obj._neck_viz_data) > 0
-        skip_neck = is_common_mode or is_subwindow or subcut_level > 0 or not has_transitions
+        skip_neck = is_common_mode or is_subwindow or subcut_level > 0
         if need_new_recommendation and not skip_neck:
             current_pieces = obj._manual_cut_data.get('current_pieces', [target_2d])
             contour_range = np.max(target_2d.max(axis=0) - target_2d.min(axis=0))
