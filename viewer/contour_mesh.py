@@ -1539,11 +1539,8 @@ class ContourMeshMixin:
         # Snapshot after
         bp_after = self._snapshot_bounding_planes()
 
-        # Precompute relative rotations (before→after) as axis-angle with consistent direction
-        smooth_rot_data = []  # List of levels, each a list of (R_before, axis, angle) or None
-        # First pass: compute all relative rotations as axis-angle
-        all_axes = []  # Flat list for consistency pass
-        all_indices = []  # (i, j) for each entry
+        # Precompute relative rotations (before→after) as axis-angle
+        smooth_rot_data = []
         for i in range(len(bp_before)):
             level_data = []
             for j in range(len(bp_before[i])):
@@ -1567,37 +1564,23 @@ class ContourMeshMixin:
                         else:
                             axis = np.array([0.0, 0.0, 1.0])
                             angle = 0.0
+                        # Enforce consistent rotation: axis should align with local z
+                        # (the along-muscle direction) so all BPs rotate the same way
+                        local_z = before['basis_z']
+                        if angle > 1e-10 and np.dot(axis, local_z) < 0:
+                            axis = -axis
+                            angle = 2.0 * np.pi - angle  # go the long way around
                         level_data.append((r_before, axis, angle))
-                        all_axes.append(axis)
-                        all_indices.append((i, j))
                     except Exception:
                         level_data.append(None)
                 else:
                     level_data.append(None)
             smooth_rot_data.append(level_data)
 
-        # Second pass: enforce consistent rotation axis direction
-        # Use the first non-trivial rotation axis as reference
-        ref_axis = None
-        for axis in all_axes:
-            if np.linalg.norm(axis) > 1e-10:
-                ref_axis = axis.copy()
-                break
-        if ref_axis is not None:
-            for k, (i, j) in enumerate(all_indices):
-                data = smooth_rot_data[i][j]
-                if data is None:
-                    continue
-                r_before, axis, angle = data
-                if angle > 1e-10 and np.dot(axis, ref_axis) < 0:
-                    # Flip: negate axis and angle to rotate the other way
-                    axis = -axis
-                    angle = -angle
-                    smooth_rot_data[i][j] = (r_before, axis, angle)
-
         self._smooth_bp_before = bp_before
         self._smooth_bp_after = bp_after
         self._smooth_rot_data = smooth_rot_data
+        self._smooth_num_levels = len(bp_before)
         self._smooth_replayed = False
 
         if defer:
@@ -1680,11 +1663,24 @@ class ContourMeshMixin:
         if self.vertex_colors is not None and self.is_draw_scalar_field:
             self.vertex_colors[:, 3] = target_alpha
 
-        # Phase 2: interpolate axes/bounding planes
-        rot_t = min((progress - phase1_duration) / phase2_duration, 1.0)
-        t = rot_t * rot_t * (3.0 - 2.0 * rot_t)  # ease in-out
+        # Phase 2: interpolate axes/bounding planes, sweeping origin → insertion
+        num_levels = getattr(self, '_smooth_num_levels', len(bp_before))
+        overall_t = min((progress - phase1_duration) / phase2_duration, 1.0)
+
+        # Each level gets a staggered start time based on its position
+        # Overlap factor: each level's animation lasts this fraction of total time
+        overlap = 0.4  # 40% of total — enough overlap to look like a wave
 
         for i in range(min(len(bp_before), len(self.bounding_planes))):
+            # Compute per-level t with staggered start
+            if num_levels <= 1:
+                level_t = overall_t
+            else:
+                level_start = (1.0 - overlap) * (i / (num_levels - 1))
+                level_t = np.clip((overall_t - level_start) / overlap, 0.0, 1.0)
+            # Ease in-out per level
+            t = level_t * level_t * (3.0 - 2.0 * level_t)
+
             for j in range(min(len(bp_before[i]), len(self.bounding_planes[i]))):
                 if j >= len(bp_after[i]):
                     continue
