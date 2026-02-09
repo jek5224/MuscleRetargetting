@@ -3061,6 +3061,9 @@ class MuscleMeshMixin:
         self._stream_smooth_num_levels = 0
         self._stream_smooth_replayed = False
 
+        # BP color override during smooth animations
+        self._smooth_anim_bp_colors = None
+
         # Reset transparency
         self.transparency = 1.0
         if self.vertex_colors is not None:

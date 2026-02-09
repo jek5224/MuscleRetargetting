@@ -694,7 +694,11 @@ class MeshLoader(ContourMeshMixin, TetrahedronMeshMixin, FiberArchitectureMixin,
                 glEnd()
 
                 if plane_info.get('bounding_plane') is not None:
-                    if plane_info['square_like']:
+                    bp_color_override = getattr(self, '_smooth_anim_bp_colors', None)
+                    if bp_color_override and (i, j) in bp_color_override:
+                        c = bp_color_override[(i, j)]
+                        glColor4f(c[0], c[1], c[2], c[3] * bp_alpha)
+                    elif plane_info['square_like']:
                         glColor4f(1, 0, 0, bp_alpha)
                     else:
                         glColor4f(0, 0, 0, bp_alpha)

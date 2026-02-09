@@ -526,6 +526,9 @@ class ContourMeshMixin:
         self._stream_smooth_num_levels = 0
         self._stream_smooth_replayed = False
 
+        # BP color override during smooth animations {(i,j): (r,g,b,a)}
+        self._smooth_anim_bp_colors = None
+
         # Cut animation replay state
         self._cut_anim_active = False
         self._cut_anim_progress = 0.0
@@ -1649,6 +1652,7 @@ class ContourMeshMixin:
                     'basis_y': bp['basis_y'].copy(),
                     'basis_z': bp['basis_z'].copy(),
                     'bounding_plane': np.array(bp['bounding_plane']).copy() if bp.get('bounding_plane') is not None else None,
+                    'square_like': bp.get('square_like', False),
                 })
             snapshot.append(level_snap)
         return snapshot
@@ -1763,6 +1767,7 @@ class ContourMeshMixin:
                 bp['basis_z'] = snap['basis_z'].copy()
                 if snap['bounding_plane'] is not None:
                     bp['bounding_plane'] = snap['bounding_plane'].copy()
+                bp['square_like'] = snap.get('square_like', False)
 
     def replay_smooth_animation(self):
         """Start replaying the smoothing animation.
@@ -1773,6 +1778,7 @@ class ContourMeshMixin:
             return
         # Reset to initial state
         self._apply_bp_snapshot(self._smooth_bp_before)
+        self._smooth_anim_bp_colors = None
         self._smooth_anim_progress = 0.0
         self._smooth_anim_active = True
         self._smooth_anim_orig_transparency = getattr(self, 'transparency', 1.0)
@@ -1905,9 +1911,23 @@ class ContourMeshMixin:
                 if before['bounding_plane'] is not None and after['bounding_plane'] is not None:
                     bpl['bounding_plane'] = (1 - bp_t) * before['bounding_plane'] + bp_t * after['bounding_plane']
 
+                # Color lerp when square_like changes
+                sq_before = before.get('square_like', False)
+                sq_after = after.get('square_like', False)
+                if sq_before != sq_after:
+                    color_b = (1, 0, 0, 1) if sq_before else (0, 0, 0, 1)
+                    color_a = (1, 0, 0, 1) if sq_after else (0, 0, 0, 1)
+                    lerped = tuple((1 - bp_t) * b + bp_t * a for b, a in zip(color_b, color_a))
+                    if self._smooth_anim_bp_colors is None:
+                        self._smooth_anim_bp_colors = {}
+                    self._smooth_anim_bp_colors[(i, j)] = lerped
+                elif self._smooth_anim_bp_colors is not None and (i, j) in self._smooth_anim_bp_colors:
+                    del self._smooth_anim_bp_colors[(i, j)]
+
         if progress >= total_duration:
             self._smooth_anim_active = False
             self._smooth_replayed = True
+            self._smooth_anim_bp_colors = None
             self._apply_bp_snapshot(bp_after)
             return False
 
@@ -2028,6 +2048,7 @@ class ContourMeshMixin:
             self._stream_smooth_replayed = True
             return
         self._apply_bp_snapshot(self._stream_smooth_bp_before)
+        self._smooth_anim_bp_colors = None
         self._stream_smooth_anim_progress = 0.0
         self._stream_smooth_anim_active = True
 
@@ -2134,9 +2155,23 @@ class ContourMeshMixin:
                 if before['bounding_plane'] is not None and after['bounding_plane'] is not None:
                     bpl['bounding_plane'] = (1 - bp_t) * before['bounding_plane'] + bp_t * after['bounding_plane']
 
+                # Color lerp when square_like changes
+                sq_before = before.get('square_like', False)
+                sq_after = after.get('square_like', False)
+                if sq_before != sq_after:
+                    color_b = (1, 0, 0, 1) if sq_before else (0, 0, 0, 1)
+                    color_a = (1, 0, 0, 1) if sq_after else (0, 0, 0, 1)
+                    lerped = tuple((1 - bp_t) * b + bp_t * a for b, a in zip(color_b, color_a))
+                    if self._smooth_anim_bp_colors is None:
+                        self._smooth_anim_bp_colors = {}
+                    self._smooth_anim_bp_colors[(i, j)] = lerped
+                elif self._smooth_anim_bp_colors is not None and (i, j) in self._smooth_anim_bp_colors:
+                    del self._smooth_anim_bp_colors[(i, j)]
+
         if progress >= total_duration:
             self._stream_smooth_anim_active = False
             self._stream_smooth_replayed = True
+            self._smooth_anim_bp_colors = None
             self._apply_bp_snapshot(bp_after)
             return False
 
@@ -2392,6 +2427,8 @@ class ContourMeshMixin:
                 for key in ('mean', 'basis_x', 'basis_y', 'basis_z', 'bounding_plane'):
                     if key in snap and snap[key] is not None:
                         bp[key] = np.array(snap[key]).copy()
+                if 'square_like' in snap:
+                    bp['square_like'] = snap['square_like']
 
     def replay_cut_animation(self):
         """Start replaying the cut animation from the beginning."""
