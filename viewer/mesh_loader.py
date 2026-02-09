@@ -639,6 +639,8 @@ class MeshLoader(ContourMeshMixin, TetrahedronMeshMixin, FiberArchitectureMixin,
 
         glLineWidth(0.5)
         glDisable(GL_LIGHTING)
+        glEnable(GL_BLEND)
+        glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
         for i, bounding_planes in enumerate(self.bounding_planes):
             for j, plane_info in enumerate(bounding_planes):
                 # Check visibility based on draw_contour_stream structure
@@ -662,29 +664,30 @@ class MeshLoader(ContourMeshMixin, TetrahedronMeshMixin, FiberArchitectureMixin,
                                  len(self.draw_contour_stream) > 0 and
                                  isinstance(self.draw_contour_stream[0], list)) else i
                 bp_s = bp_scale_dict.get(bp_level, 1.0) if bp_scale_dict else 1.0
+                bp_alpha = bp_s  # Fade axes/plane with scale
                 mean = plane_info['mean']
 
                 glPushMatrix()
                 glPointSize(5)
-                glColor3f(0, 0, 0)
+                glColor4f(0, 0, 0, bp_alpha)
                 glBegin(GL_POINTS)
                 glVertex3fv(mean)
                 glEnd()
                 glPopMatrix()
 
-                glColor3f(1, 0, 0)
+                glColor4f(1, 0, 0, bp_alpha)
                 glBegin(GL_LINES)
                 glVertex3fv(mean)
                 glVertex3fv(mean + plane_info['basis_x'] * scale * 0.1 * bp_s)
                 glEnd()
 
-                glColor3f(0, 1, 0)
+                glColor4f(0, 1, 0, bp_alpha)
                 glBegin(GL_LINES)
                 glVertex3fv(mean)
                 glVertex3fv(mean + plane_info['basis_y'] * scale * 0.1 * bp_s)
                 glEnd()
 
-                glColor3f(0, 0, 1)
+                glColor4f(0, 0, 1, bp_alpha)
                 glBegin(GL_LINES)
                 glVertex3fv(mean)
                 glVertex3fv(mean + plane_info['basis_z'] * scale * 0.1 * bp_s)
@@ -692,9 +695,9 @@ class MeshLoader(ContourMeshMixin, TetrahedronMeshMixin, FiberArchitectureMixin,
 
                 if plane_info.get('bounding_plane') is not None:
                     if plane_info['square_like']:
-                        glColor3f(1, 0, 0)
+                        glColor4f(1, 0, 0, bp_alpha)
                     else:
-                        glColor3f(0, 0, 0)
+                        glColor4f(0, 0, 0, bp_alpha)
                     glBegin(GL_LINE_LOOP)
                     for point in plane_info['bounding_plane']:
                         glVertex3fv(mean + (point - mean) * bp_s)
@@ -740,6 +743,8 @@ class MeshLoader(ContourMeshMixin, TetrahedronMeshMixin, FiberArchitectureMixin,
                     # Apply BP scale animation if active
                     s1 = bp_scale_dict.get(j, 1.0) if bp_scale_dict else 1.0
                     s2 = bp_scale_dict.get(j + 1, 1.0) if bp_scale_dict else 1.0
+                    line_alpha = min(s1, s2)
+                    glColor4f(0, 0, 0, line_alpha)
                     glBegin(GL_LINES)
                     for p1, p2 in zip(bp1['bounding_plane'], bp2['bounding_plane']):
                         glVertex3fv(bp1['mean'] + (p1 - bp1['mean']) * s1)

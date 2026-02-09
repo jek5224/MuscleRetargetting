@@ -1984,12 +1984,20 @@ class ContourMeshMixin:
             color_before.append(cb_stream)
             color_after.append(ca_stream)
 
+        # ── Detect levels where cutting actually split contours ──
+        bp_changed_levels = set()
+        for level_i in range(num_levels):
+            if level_i < len(self.stream_groups):
+                for group in self.stream_groups[level_i]:
+                    if len(group) > 1:
+                        bp_changed_levels.add(level_i)
+                        break
+        has_bp_change = len(bp_changed_levels) > 0
+
         # ── BP before/after ──
         # bp_before: for each (stream, level), the BP of the original contour it came from
         bp_before = []
         bp_after = []
-        has_bp_change = False
-        bp_changed_levels = set()
         for stream_i in range(num_streams):
             bb_stream = []
             ba_stream = []
@@ -2016,12 +2024,6 @@ class ContourMeshMixin:
                 else:
                     bp_final = None
                 ba_stream.append(bp_final)
-
-                # Track per-level BP changes
-                if bp_orig is not None and bp_final is not None:
-                    if not np.allclose(bp_orig.get('mean', np.zeros(3)), bp_final.get('mean', np.zeros(3)), atol=1e-6):
-                        has_bp_change = True
-                        bp_changed_levels.add(level_i)
 
             bp_before.append(bb_stream)
             bp_after.append(ba_stream)
