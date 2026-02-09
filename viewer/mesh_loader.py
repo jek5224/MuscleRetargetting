@@ -634,6 +634,9 @@ class MeshLoader(ContourMeshMixin, TetrahedronMeshMixin, FiberArchitectureMixin,
         #         glVertex3fv(face_info[1])
         #         glEnd()
 
+        # BP scale animation dict (used during contour reveal animation)
+        bp_scale_dict = getattr(self, '_contour_anim_bp_scale', None)
+
         glLineWidth(0.5)
         glDisable(GL_LIGHTING)
         for i, bounding_planes in enumerate(self.bounding_planes):
@@ -652,37 +655,40 @@ class MeshLoader(ContourMeshMixin, TetrahedronMeshMixin, FiberArchitectureMixin,
                             continue
                 glPushMatrix()
 
+                # BP scale animation: _contour_anim_bp_scale keys are level indices
+                # After find_contours (pre-cut): i=level, j=contour within level
+                # After cut_streams (post-cut): i=stream, j=level (draw_contour_stream is 2D)
+                bp_level = j if (self.draw_contour_stream is not None and
+                                 len(self.draw_contour_stream) > 0 and
+                                 isinstance(self.draw_contour_stream[0], list)) else i
+                bp_s = bp_scale_dict.get(bp_level, 1.0) if bp_scale_dict else 1.0
+                mean = plane_info['mean']
+
                 glPushMatrix()
                 glPointSize(5)
                 glColor3f(0, 0, 0)
                 glBegin(GL_POINTS)
-                glVertex3fv(plane_info['mean'])
+                glVertex3fv(mean)
                 glEnd()
                 glPopMatrix()
 
                 glColor3f(1, 0, 0)
                 glBegin(GL_LINES)
-                glVertex3fv(plane_info['mean'])
-                glVertex3fv(plane_info['mean'] + plane_info['basis_x'] * scale * 0.1)
+                glVertex3fv(mean)
+                glVertex3fv(mean + plane_info['basis_x'] * scale * 0.1 * bp_s)
                 glEnd()
 
                 glColor3f(0, 1, 0)
                 glBegin(GL_LINES)
-                glVertex3fv(plane_info['mean'])
-                glVertex3fv(plane_info['mean'] + plane_info['basis_y'] * scale * 0.1)
+                glVertex3fv(mean)
+                glVertex3fv(mean + plane_info['basis_y'] * scale * 0.1 * bp_s)
                 glEnd()
 
                 glColor3f(0, 0, 1)
                 glBegin(GL_LINES)
-                glVertex3fv(plane_info['mean'])
-                glVertex3fv(plane_info['mean'] + plane_info['basis_z'] * scale * 0.1)
+                glVertex3fv(mean)
+                glVertex3fv(mean + plane_info['basis_z'] * scale * 0.1 * bp_s)
                 glEnd()
-
-                # glColor3f(0, 1, 1)
-                # glBegin(GL_LINES)
-                # glVertex3fv(plane_info['mean'])
-                # glVertex3fv(plane_info['mean'] + plane_info['newell_normal'] * scale * 0.1)
-                # glEnd()
 
                 if plane_info['square_like']:
                     glColor3f(1, 0, 0)
@@ -690,7 +696,7 @@ class MeshLoader(ContourMeshMixin, TetrahedronMeshMixin, FiberArchitectureMixin,
                     glColor3f(0, 0, 0)
                 glBegin(GL_LINE_LOOP)
                 for point in plane_info['bounding_plane']:
-                    glVertex3fv(point)
+                    glVertex3fv(mean + (point - mean) * bp_s)
                 glEnd()
 
                 # glBegin(GL_LINE_LOOP)
@@ -712,12 +718,17 @@ class MeshLoader(ContourMeshMixin, TetrahedronMeshMixin, FiberArchitectureMixin,
                 if self.draw_contour_stream is not None and not self.draw_contour_stream[i]:
                     continue
                 for j in range(len(bounding_plane_stream) - 1):
+                    bp1 = bounding_plane_stream[j]
+                    bp2 = bounding_plane_stream[j + 1]
+                    # Apply BP scale animation if active
+                    s1 = bp_scale_dict.get(j, 1.0) if bp_scale_dict else 1.0
+                    s2 = bp_scale_dict.get(j + 1, 1.0) if bp_scale_dict else 1.0
                     glBegin(GL_LINES)
-                    for p1, p2 in zip(bounding_plane_stream[j]['bounding_plane'], bounding_plane_stream[j + 1]['bounding_plane']):
-                        glVertex3fv(p1)
-                        glVertex3fv(p2)
-                    glVertex3fv(bounding_plane_stream[j]['mean'])
-                    glVertex3fv(bounding_plane_stream[j + 1]['mean'])
+                    for p1, p2 in zip(bp1['bounding_plane'], bp2['bounding_plane']):
+                        glVertex3fv(bp1['mean'] + (p1 - bp1['mean']) * s1)
+                        glVertex3fv(bp2['mean'] + (p2 - bp2['mean']) * s2)
+                    glVertex3fv(bp1['mean'])
+                    glVertex3fv(bp2['mean'])
                     glEnd()
             glEnable(GL_LIGHTING)
                 

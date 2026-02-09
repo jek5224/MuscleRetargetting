@@ -1436,7 +1436,7 @@ class ContourMeshMixin:
 
     def replay_contour_animation(self):
         """Start replaying the contour reveal animation from origin to insertion.
-        Only animates contours from find_contours, not gap-filled ones."""
+        Each contour appears one by one with a highlight pulse and BP grow effect."""
         if self.contours is None or len(self.contours) == 0:
             return
         total = self._num_levels()
@@ -1447,14 +1447,16 @@ class ContourMeshMixin:
         self._contour_anim_total = len(self._contour_anim_original_indices)
         # Hide all contours
         self._hide_all_levels()
+        # BP scale per level: 0.0 = point, 1.0 = full size
+        self._contour_anim_bp_scale = {}
         self._contour_anim_progress = 0.0
         self._contour_anim_active = True
         self.is_draw_contours = True
         self.is_draw_bounding_box = True
 
     def update_contour_animation(self, dt):
-        """Advance contour reveal animation. Returns True while active.
-        Only reveals original find_contours results, gap-filled contours stay hidden."""
+        """Advance contour reveal animation with highlight and BP grow.
+        Each contour gets a time slot: appear + highlight pulse + BP grows from point to full."""
         if not self._contour_anim_active:
             return False
 
@@ -1464,18 +1466,37 @@ class ContourMeshMixin:
             self._contour_anim_active = False
             return False
 
-        self._contour_anim_progress += dt * 0.5  # ~2 seconds for full reveal
-        revealed = int(self._contour_anim_progress * total)
-        revealed = min(revealed, total)
+        time_per_contour = 0.3
+        self._contour_anim_progress += dt
 
-        # Reveal only original contour level indices in order
-        for k in range(total):
+        # +1 so first contour appears immediately
+        revealed = min(int(self._contour_anim_progress / time_per_contour) + 1, total)
+
+        # Reveal contours and update BP scale
+        for k in range(revealed):
             idx = orig_indices[k]
-            self._set_level_visible(idx, k < revealed)
+            self._set_level_visible(idx, True)
+            # BP scale: grows during this contour's time slot
+            slot_start = k * time_per_contour
+            t_in_slot = (self._contour_anim_progress - slot_start) / time_per_contour
+            bp_t = min(max(t_in_slot, 0.0), 1.0)
+            # Ease out: fast start, gentle finish
+            bp_t = 1.0 - (1.0 - bp_t) * (1.0 - bp_t)
+            self._contour_anim_bp_scale[idx] = bp_t
 
-        if revealed >= total:
+        # Highlight the most recently revealed contour
+        current_slot = revealed - 1
+        self._anim_highlight_contour_idx = orig_indices[current_slot]
+        time_in_slot = self._contour_anim_progress - current_slot * time_per_contour
+        self._anim_highlight_fade = max(0.0, 1.0 - time_in_slot / time_per_contour)
+
+        # Done when last contour's slot is complete
+        if self._contour_anim_progress >= total * time_per_contour:
             self._contour_anim_active = False
             self._contour_replayed = True
+            self._anim_highlight_contour_idx = -1
+            self._anim_highlight_fade = 0.0
+            self._contour_anim_bp_scale = {}
             for idx in orig_indices:
                 self._set_level_visible(idx, True)
             return False
