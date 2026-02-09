@@ -2000,6 +2000,10 @@ class ContourMeshMixin:
         self._cut_num_levels_before = num_levels_before
         self._cut_replayed = False
 
+        # Remap smooth animation data from [level][contour] to [stream][level]
+        # so smooth replay works with the post-cut stream-mode bounding_planes
+        self._remap_smooth_data_to_stream_mode(num_streams, num_levels)
+
         if defer:
             # Show pre-cut colors and BPs until replay
             self._cut_anim_contour_colors = [[c.copy() for c in stream] for stream in color_before]
@@ -2007,6 +2011,53 @@ class ContourMeshMixin:
             self._apply_stream_bp_snapshot(bp_before)
         else:
             self._cut_replayed = True
+
+    def _remap_smooth_data_to_stream_mode(self, num_streams, num_levels):
+        """Remap smooth animation snapshots from [level][contour] to [stream][level].
+
+        After cut, bounding_planes change from [level][contour] to [stream][level].
+        The smooth snapshots were captured in level mode, so we remap them using
+        stream_groups to match the new stream layout.
+        """
+        smooth_bp_before = getattr(self, '_smooth_bp_before', None)
+        smooth_bp_after = getattr(self, '_smooth_bp_after', None)
+        smooth_swing = getattr(self, '_smooth_swing_data', None)
+        smooth_twist = getattr(self, '_smooth_twist_data', None)
+
+        if smooth_bp_before is None or smooth_bp_after is None:
+            return
+
+        if not hasattr(self, 'stream_groups') or self.stream_groups is None:
+            return
+
+        def _remap(data):
+            """Remap [level][contour] data to [stream][level]."""
+            remapped = [[] for _ in range(num_streams)]
+            for level_i in range(num_levels):
+                for stream_i in range(num_streams):
+                    # Find which group this stream belongs to at this level
+                    group_idx = 0
+                    if level_i < len(self.stream_groups):
+                        for gi, group in enumerate(self.stream_groups[level_i]):
+                            if stream_i in group:
+                                group_idx = gi
+                                break
+                    # Get the data for this original contour
+                    if level_i < len(data) and group_idx < len(data[level_i]):
+                        remapped[stream_i].append(copy.deepcopy(data[level_i][group_idx]))
+                    elif level_i < len(data) and len(data[level_i]) > 0:
+                        remapped[stream_i].append(copy.deepcopy(data[level_i][0]))
+                    else:
+                        remapped[stream_i].append(None)
+            return remapped
+
+        self._smooth_bp_before = _remap(smooth_bp_before)
+        self._smooth_bp_after = _remap(smooth_bp_after)
+        if smooth_swing is not None:
+            self._smooth_swing_data = _remap(smooth_swing)
+        if smooth_twist is not None:
+            self._smooth_twist_data = _remap(smooth_twist)
+        self._smooth_num_levels = num_levels
 
     def _apply_stream_bp_snapshot(self, snapshot):
         """Apply a BP snapshot to stream_bounding_planes[stream][level]."""
