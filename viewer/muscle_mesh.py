@@ -3066,6 +3066,7 @@ class MuscleMeshMixin:
         self._cut_bp_after = None
         self._cut_anim_contour_colors = None
         self._cut_replayed = False
+        self._cut_bp_switched = False
         self._cut_num_levels_before = 0
         self._precut_contours = None
         self._precut_bounding_planes = None

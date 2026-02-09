@@ -2154,6 +2154,8 @@ class ContourMeshMixin:
         # Reset BPs to pre-cut state
         if self._cut_has_bp_change:
             self._apply_stream_bp_snapshot(self._cut_bp_before)
+        self._contour_anim_bp_scale = {}
+        self._cut_bp_switched = False
         self._cut_anim_progress = 0.0
         self._cut_anim_active = True
 
@@ -2170,7 +2172,8 @@ class ContourMeshMixin:
         """Advance cut animation.
 
         Phase 1 (0-2s): Color wave — lerp per-contour color from before to after.
-        Phase 2 (2-4s): BP wave — lerp stream BPs from before to after (skip if 1:1).
+        Phase 2a (2-3s): BP shrink — pre-cut BPs scale from 1→0 (wave).
+        Phase 2b (3-4s): BP grow — post-cut BPs scale from 0→1 (wave).
         """
         if not self._cut_anim_active:
             return False
@@ -2191,7 +2194,10 @@ class ContourMeshMixin:
 
         # Phase durations
         color_dur = 2.0
-        bp_dur = 2.0 if getattr(self, '_cut_has_bp_change', False) else 0.0
+        bp_shrink_dur = 1.0
+        bp_grow_dur = 1.0
+        has_bp = getattr(self, '_cut_has_bp_change', False)
+        bp_dur = (bp_shrink_dur + bp_grow_dur) if has_bp else 0.0
         total_duration = color_dur + bp_dur
 
         progress = self._cut_anim_progress
@@ -2207,44 +2213,39 @@ class ContourMeshMixin:
                 t = self._cut_wave_t(overall_t, j, num_levels)
                 self._cut_anim_contour_colors[i][j] = (1 - t) * color_before[i][j] + t * color_after[i][j]
 
-        # Phase 2: BP wave (only if BPs actually changed)
-        if bp_dur > 0 and bp_before is not None and bp_after is not None:
-            if progress > color_dur:
-                bp_overall_t = min((progress - color_dur) / bp_dur, 1.0)
-            else:
-                bp_overall_t = 0.0
+        # Phase 2: BP shrink-then-grow (only if BPs actually changed)
+        if has_bp and bp_before is not None and bp_after is not None:
+            bp_start = color_dur
+            bp_mid = bp_start + bp_shrink_dur
 
-            if bp_overall_t > 0 and hasattr(self, 'stream_bounding_planes') and self.stream_bounding_planes is not None:
-                for i in range(num_streams):
-                    if i >= len(self.stream_bounding_planes):
-                        break
-                    for j in range(num_levels):
-                        if j >= len(self.stream_bounding_planes[i]):
-                            break
-                        before = bp_before[i][j]
-                        after = bp_after[i][j]
-                        if before is None or after is None:
-                            continue
-                        t = self._cut_wave_t(bp_overall_t, j, num_levels)
-                        bp = self.stream_bounding_planes[i][j]
-                        bp['mean'] = (1 - t) * before['mean'] + t * after['mean']
-                        for key in ('basis_x', 'basis_y', 'basis_z'):
-                            if key in before and key in after and before[key] is not None and after[key] is not None:
-                                bp[key] = (1 - t) * before[key] + t * after[key]
-                                # Re-normalize
-                                n = np.linalg.norm(bp[key])
-                                if n > 1e-10:
-                                    bp[key] /= n
-                        if before.get('bounding_plane') is not None and after.get('bounding_plane') is not None:
-                            bp['bounding_plane'] = (1 - t) * before['bounding_plane'] + t * after['bounding_plane']
+            if progress > bp_start and progress < bp_mid:
+                # Phase 2a: Shrink pre-cut BPs to their means
+                shrink_t = (progress - bp_start) / bp_shrink_dur
+                for j in range(num_levels):
+                    wave_t = self._cut_wave_t(shrink_t, j, num_levels)
+                    self._contour_anim_bp_scale[j] = 1.0 - wave_t
+
+            elif progress >= bp_mid:
+                # Transition: switch from pre-cut to post-cut BP positions (once)
+                if not getattr(self, '_cut_bp_switched', False):
+                    self._apply_stream_bp_snapshot(bp_after)
+                    self._cut_bp_switched = True
+
+                # Phase 2b: Grow post-cut BPs from their means
+                grow_t = min((progress - bp_mid) / bp_grow_dur, 1.0)
+                for j in range(num_levels):
+                    wave_t = self._cut_wave_t(grow_t, j, num_levels)
+                    self._contour_anim_bp_scale[j] = wave_t
 
         # Done?
         if progress >= total_duration:
             self._cut_anim_active = False
             self._cut_replayed = True
             self._cut_anim_contour_colors = None
-            # Apply final BPs
-            if bp_dur > 0:
+            self._contour_anim_bp_scale = {}
+            self._cut_bp_switched = False
+            # Ensure final BP state
+            if has_bp:
                 self._apply_stream_bp_snapshot(bp_after)
             return False
 
