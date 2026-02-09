@@ -493,6 +493,13 @@ class ContourMeshMixin:
         self._contour_anim_total = 0
         self._contour_replayed = False
 
+        # Fill gaps animation replay state
+        self._fill_gaps_inserted_indices = []  # Indices of contours inserted by refine_contours
+        self._fill_gaps_anim_active = False
+        self._fill_gaps_anim_progress = 0.0
+        self._fill_gaps_anim_step = 0  # Current gap being highlighted
+        self._fill_gaps_replayed = False
+
         # Inspector highlight (set by viewer when 2D inspector is open)
         self.inspector_highlight_stream = None  # Stream index to highlight
         self.inspector_highlight_level = None   # Level index to highlight
@@ -1327,6 +1334,59 @@ class ContourMeshMixin:
             self._contour_anim_active = False
             self._contour_replayed = True
             self.draw_contour_stream = [True] * total
+            return False
+
+        return True
+
+    def replay_fill_gaps_animation(self):
+        """Start replaying the fill gaps animation, revealing inserted contours one by one."""
+        if not self._fill_gaps_inserted_indices or len(self._fill_gaps_inserted_indices) == 0:
+            # No gaps were filled - mark as replayed immediately
+            self._fill_gaps_replayed = True
+            return
+        # Make sure all existing contours are visible, but hide the gap-filled ones
+        self.draw_contour_stream = [True] * len(self.contours)
+        for idx in self._fill_gaps_inserted_indices:
+            if idx < len(self.draw_contour_stream):
+                self.draw_contour_stream[idx] = False
+        self._fill_gaps_anim_step = 0
+        self._fill_gaps_anim_progress = 0.0
+        self._fill_gaps_anim_active = True
+        self.is_draw_contours = True
+
+    def update_fill_gaps_animation(self, dt):
+        """Advance fill gaps animation. Reveals inserted contours one by one with a brief highlight."""
+        if not self._fill_gaps_anim_active:
+            return False
+
+        indices = self._fill_gaps_inserted_indices
+        if len(indices) == 0:
+            self._fill_gaps_anim_active = False
+            self._fill_gaps_replayed = True
+            return False
+
+        # Time per gap reveal: 0.4 seconds each
+        time_per_gap = 0.4
+        self._fill_gaps_anim_progress += dt
+
+        # Determine how many gaps should be revealed so far
+        revealed = int(self._fill_gaps_anim_progress / time_per_gap)
+        revealed = min(revealed, len(indices))
+
+        # Reveal gaps up to current step
+        for i in range(revealed):
+            idx = indices[i]
+            if idx < len(self.draw_contour_stream):
+                self.draw_contour_stream[idx] = True
+
+        # Track which gap is currently being highlighted (for external highlight use)
+        self._fill_gaps_anim_step = min(revealed, len(indices) - 1)
+
+        if revealed >= len(indices):
+            self._fill_gaps_anim_active = False
+            self._fill_gaps_replayed = True
+            # Ensure all are visible
+            self.draw_contour_stream = [True] * len(self.contours)
             return False
 
         return True
@@ -2321,7 +2381,7 @@ class ContourMeshMixin:
         self.draw_contour_stream = [True] * len(self.contours)
         print(f"=== Transition Refinement Done: {len(self.bounding_planes)} contour levels ===")
 
-    def refine_contours(self, max_spacing_threshold, max_refinement_depth=3):
+    def refine_contours(self, max_spacing_threshold, max_refinement_depth=3, defer=False):
         """
         Refine contours by inserting new contours where physical spacing exceeds threshold.
 
@@ -2332,8 +2392,11 @@ class ContourMeshMixin:
         Args:
             max_spacing_threshold: Maximum allowed physical spacing between contours
             max_refinement_depth: Maximum recursion depth to prevent infinite refinement
+            defer: If True, newly inserted contours are hidden until replay
         """
         if len(self.bounding_planes) < 2:
+            self._fill_gaps_inserted_indices = []
+            self._fill_gaps_replayed = False
             return
 
         # NOTE: Transition point refinement is now handled separately by find_all_transitions()
@@ -2364,6 +2427,7 @@ class ContourMeshMixin:
         refinement_iteration = 0
         max_refinement_iterations = 50  # Safety limit
         failed_scalar_ranges = set()  # Track ranges where we couldn't insert contours
+        all_inserted_indices = []  # Track all inserted indices for animation
 
         while refinement_iteration < max_refinement_iterations:
             refinement_iteration += 1
@@ -2475,6 +2539,9 @@ class ContourMeshMixin:
                     print(f"  Inserting contour at scalar {best_scalar:.4f} (index {insert_idx})")
                     self.bounding_planes.insert(insert_idx, best_planes)
                     self.contours.insert(insert_idx, best_contours)
+                    # Update previously tracked indices that shifted
+                    all_inserted_indices = [idx + 1 if idx >= insert_idx else idx for idx in all_inserted_indices]
+                    all_inserted_indices.append(insert_idx)
                     contours_inserted += 1
                 else:
                     # Mark this range as failed to avoid retrying
@@ -2493,7 +2560,21 @@ class ContourMeshMixin:
         if refinement_iteration >= max_refinement_iterations:
             print(f"Warning: Refinement reached max iterations ({max_refinement_iterations})")
 
-        print(f"=== Refinement Done: {len(self.bounding_planes)} contour levels ===\n")
+        # Save inserted indices for animation replay
+        all_inserted_indices.sort()
+        self._fill_gaps_inserted_indices = all_inserted_indices
+        self._fill_gaps_replayed = False
+
+        if defer and len(all_inserted_indices) > 0:
+            # Hide newly inserted contours until replay
+            self.draw_contour_stream = [True] * len(self.contours)
+            for idx in all_inserted_indices:
+                if idx < len(self.draw_contour_stream):
+                    self.draw_contour_stream[idx] = False
+        else:
+            self._fill_gaps_replayed = True
+
+        print(f"=== Refinement Done: {len(self.bounding_planes)} contour levels ({len(all_inserted_indices)} gaps filled) ===\n")
 
     # _trim_independent_section moved to MuscleMeshMixin in muscle_mesh.py
 

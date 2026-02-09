@@ -492,7 +492,7 @@ def draw_zygote_muscle_ui(v):
                         # Step 3: Fill Gaps
                         if start_step <= 3 <= max_step and obj.contours is not None and len(obj.contours) > 0:
                             print(f"  [3/{max_step}] Filling Gaps...")
-                            obj.refine_contours(max_spacing_threshold=0.01)
+                            obj.refine_contours(max_spacing_threshold=0.01, defer=defer)
 
                         # Step 4: Find Transitions
                         if start_step <= 4 <= max_step and obj.scalar_field is not None:
@@ -625,14 +625,19 @@ def draw_zygote_muscle_ui(v):
                     imgui.same_line()
                     if imgui.button(f">##{name}_contour_replay", width=replay_w):
                         obj.replay_contour_animation()
-                if colored_button(f"Fill Gaps##{name}", 3, col_button_width):
+                if colored_button(f"Fill Gaps##{name}", 3, proc_w):
                     if obj.contours is not None and len(obj.contours) > 0:
                         try:
-                            obj.refine_contours(max_spacing_threshold=0.01)
+                            obj.refine_contours(max_spacing_threshold=0.01, defer=animate)
                         except Exception as e:
                             print(f"[{name}] Fill Gaps error: {e}")
                     else:
                         print(f"[{name}] Prerequisites: Run 'Find Contours' first")
+                # Fill gaps replay: only available after contour replay has been played
+                if animate and getattr(obj, '_fill_gaps_inserted_indices', None) is not None and getattr(obj, '_contour_replayed', False):
+                    imgui.same_line()
+                    if imgui.button(f">##{name}_fillgaps_replay", width=replay_w):
+                        obj.replay_fill_gaps_animation()
 
                 # Find Transitions button - fast scan for contour count changes (step 4)
                 if colored_button(f"Find Transitions##{name}", 4, col_button_width):

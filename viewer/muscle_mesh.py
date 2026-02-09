@@ -2992,6 +2992,13 @@ class MuscleMeshMixin:
         self.vertex_colors = None
         self.is_draw_scalar_field = False
 
+        # Scalar field animation state
+        self._scalar_anim_active = False
+        self._scalar_anim_progress = 0.0
+        self._scalar_anim_target_colors = None
+        self._scalar_anim_normalized_u = None
+        self._scalar_replayed = False
+
         # Clear precomputed face scalar ranges
         if hasattr(self, '_face_scalar_ranges'):
             self._face_scalar_ranges = None
@@ -3008,6 +3015,19 @@ class MuscleMeshMixin:
         self.draw_contour_stream = None
         self.is_draw_contours = False
         self.is_draw_bounding_box = False
+
+        # Contour animation state
+        self._contour_anim_active = False
+        self._contour_anim_progress = 0.0
+        self._contour_anim_total = 0
+        self._contour_replayed = False
+
+        # Fill gaps animation state
+        self._fill_gaps_inserted_indices = []
+        self._fill_gaps_anim_active = False
+        self._fill_gaps_anim_progress = 0.0
+        self._fill_gaps_anim_step = 0
+        self._fill_gaps_replayed = False
 
         # Level selection backup
         self._contours_backup = None
