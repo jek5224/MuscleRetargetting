@@ -178,7 +178,7 @@ class GLFWApp():
 
         ## Auto-rotate around focused muscle
         self.auto_rotate = False
-        self.auto_rotate_speed = 1.0  # radians per second
+        self.auto_rotate_speed = 0.5  # radians per second
 
         self.mouse_x = 0
         self.mouse_y = 0
