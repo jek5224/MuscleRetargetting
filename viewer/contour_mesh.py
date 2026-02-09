@@ -1623,7 +1623,9 @@ class ContourMeshMixin:
                     bp['bounding_plane'] = snap['bounding_plane'].copy()
 
     def replay_smooth_animation(self):
-        """Start replaying the smoothing animation (interpolate from before to after)."""
+        """Start replaying the smoothing animation.
+        Phase 1: fade muscle transparency from current to 0.5
+        Phase 2: interpolate axes/bounding planes"""
         if self._smooth_bp_before is None or self._smooth_bp_after is None:
             self._smooth_replayed = True
             return
@@ -1631,9 +1633,12 @@ class ContourMeshMixin:
         self._apply_bp_snapshot(self._smooth_bp_before)
         self._smooth_anim_progress = 0.0
         self._smooth_anim_active = True
+        self._smooth_anim_orig_transparency = getattr(self, 'transparency', 1.0)
 
     def update_smooth_animation(self, dt):
-        """Advance smoothing animation. Interpolates bounding planes from before to after."""
+        """Advance smoothing animation in two phases.
+        Phase 1 (0.0-1.0): fade muscle transparency to 0.5
+        Phase 2 (1.0-3.0): interpolate axes/bounding planes"""
         from scipy.spatial.transform import Rotation as R
 
         if not self._smooth_anim_active:
@@ -1647,10 +1652,31 @@ class ContourMeshMixin:
             self._smooth_replayed = True
             return False
 
-        self._smooth_anim_progress += dt * 0.5  # ~2 seconds total
-        t = min(self._smooth_anim_progress, 1.0)
-        # Ease in-out
-        t = t * t * (3.0 - 2.0 * t)
+        self._smooth_anim_progress += dt
+        progress = self._smooth_anim_progress
+
+        # Phase 1: fade transparency (0.0 - 1.0 seconds)
+        phase1_duration = 1.0
+        # Phase 2: axes/bp interpolation (1.0 - 3.0 seconds)
+        phase2_duration = 2.0
+        total_duration = phase1_duration + phase2_duration
+
+        orig_alpha = getattr(self, '_smooth_anim_orig_transparency', 1.0)
+        target_alpha = 0.5
+
+        if progress < phase1_duration:
+            # Phase 1: fade transparency
+            fade_t = progress / phase1_duration
+            fade_t = fade_t * fade_t * (3.0 - 2.0 * fade_t)  # ease in-out
+            self.transparency = orig_alpha + (target_alpha - orig_alpha) * fade_t
+            return True
+
+        # Phase 1 done — ensure transparency is at target
+        self.transparency = target_alpha
+
+        # Phase 2: interpolate axes/bounding planes
+        rot_t = min((progress - phase1_duration) / phase2_duration, 1.0)
+        t = rot_t * rot_t * (3.0 - 2.0 * rot_t)  # ease in-out
 
         for i in range(min(len(bp_before), len(self.bounding_planes))):
             for j in range(min(len(bp_before[i]), len(self.bounding_planes[i]))):
@@ -1667,7 +1693,6 @@ class ContourMeshMixin:
                            j < len(rot_data[i]) and rot_data[i][j] is not None)
                 if has_rot:
                     r_before, axis, angle = rot_data[i][j]
-                    # Apply fraction t of the relative rotation to the before frame
                     partial_rotvec = axis * (angle * t)
                     r_partial = R.from_rotvec(partial_rotvec)
                     r_interp = r_partial * r_before
@@ -1676,7 +1701,6 @@ class ContourMeshMixin:
                     bp['basis_y'] = mat[:, 1]
                     bp['basis_z'] = mat[:, 2]
                 else:
-                    # Fallback: nlerp
                     for key in ('basis_x', 'basis_y', 'basis_z'):
                         interp = (1 - t) * before[key] + t * after[key]
                         norm = np.linalg.norm(interp)
@@ -1684,14 +1708,12 @@ class ContourMeshMixin:
                             interp = interp / norm
                         bp[key] = interp
 
-                # Interpolate bounding plane corners
                 if before['bounding_plane'] is not None and after['bounding_plane'] is not None:
                     bp['bounding_plane'] = (1 - t) * before['bounding_plane'] + t * after['bounding_plane']
 
-        if self._smooth_anim_progress >= 1.0:
+        if progress >= total_duration:
             self._smooth_anim_active = False
             self._smooth_replayed = True
-            # Ensure final state is exact
             self._apply_bp_snapshot(bp_after)
             return False
 
