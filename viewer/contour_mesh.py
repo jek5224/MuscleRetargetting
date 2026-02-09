@@ -2027,9 +2027,12 @@ class ContourMeshMixin:
 
     def update_stream_smooth_animation(self, dt):
         """Advance stream smooth animation in three phases (no transparency fade).
-        Phase 1 (0-1.5s): rotate axes to align z-axis (swing)
-        Phase 2 (1.5-3.0s): twist around z to align x/y
-        Phase 3 (3.0-4.0s): interpolate bounding plane corners"""
+        Streams are staggered: each stream starts its 3-phase animation slightly
+        after the previous, with overlap.
+        Per-stream phases:
+          Phase 1 (1.5s): rotate axes to align z-axis (swing)
+          Phase 2 (1.5s): twist around z to align x/y
+          Phase 3 (1.0s): interpolate bounding plane corners"""
         if not self._stream_smooth_anim_active:
             return False
 
@@ -2045,27 +2048,32 @@ class ContourMeshMixin:
         self._stream_smooth_anim_progress += dt
         progress = self._stream_smooth_anim_progress
 
-        # Phase durations (no transparency fade)
+        # Per-stream phase durations
         p1_dur = 1.5   # z-axis swing
         p2_dur = 1.5   # x/y twist around z
         p3_dur = 1.0   # bounding plane corners
-        p1_end = p1_dur
-        p2_end = p1_end + p2_dur
-        p3_end = p2_end + p3_dur
-        total_duration = p3_end
+        per_stream_dur = p1_dur + p2_dur + p3_dur  # 4.0s per stream
 
         num_levels = self._stream_smooth_num_levels
+        num_streams = min(len(bp_before), len(self.bounding_planes))
 
-        # Compute sub-phase overall progress (0..1 within each sub-phase)
-        swing_overall = np.clip(progress / p1_dur, 0.0, 1.0)
-        twist_overall = np.clip((progress - p1_end) / p2_dur, 0.0, 1.0) if progress > p1_end else 0.0
-        bp_overall = np.clip((progress - p2_end) / p3_dur, 0.0, 1.0) if progress > p2_end else 0.0
+        # Stagger: each stream starts 0.5s after the previous
+        stream_stagger = 0.5
+        total_duration = per_stream_dur + stream_stagger * max(num_streams - 1, 0)
 
         rod = self._rodrigues
 
-        # Outer loop i = stream (or level in level-mode), inner j = level (or contour)
-        # Wave timing uses j (level index) to propagate origin→insertion
-        for i in range(min(len(bp_before), len(self.bounding_planes))):
+        for i in range(num_streams):
+            # Per-stream progress offset by stagger
+            sp = progress - stream_stagger * i
+            if sp < 0:
+                continue  # This stream hasn't started yet
+
+            # Sub-phase progress for this stream
+            swing_overall = np.clip(sp / p1_dur, 0.0, 1.0)
+            twist_overall = np.clip((sp - p1_dur) / p2_dur, 0.0, 1.0) if sp > p1_dur else 0.0
+            bp_overall = np.clip((sp - p1_dur - p2_dur) / p3_dur, 0.0, 1.0) if sp > p1_dur + p2_dur else 0.0
+
             for j in range(min(len(bp_before[i]), len(self.bounding_planes[i]))):
                 if j >= len(bp_after[i]):
                     continue
