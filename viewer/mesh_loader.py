@@ -675,24 +675,25 @@ class MeshLoader(ContourMeshMixin, TetrahedronMeshMixin, FiberArchitectureMixin,
                 glEnd()
                 glPopMatrix()
 
-                if bp_s >= 1.0:
-                    glColor3f(1, 0, 0)
-                    glBegin(GL_LINES)
-                    glVertex3fv(mean)
-                    glVertex3fv(mean + plane_info['basis_x'] * scale * 0.1)
-                    glEnd()
+                glDepthMask(GL_FALSE)
+                glColor4f(1, 0, 0, bp_alpha)
+                glBegin(GL_LINES)
+                glVertex3fv(mean)
+                glVertex3fv(mean + plane_info['basis_x'] * scale * 0.1 * bp_s)
+                glEnd()
 
-                    glColor3f(0, 1, 0)
-                    glBegin(GL_LINES)
-                    glVertex3fv(mean)
-                    glVertex3fv(mean + plane_info['basis_y'] * scale * 0.1)
-                    glEnd()
+                glColor4f(0, 1, 0, bp_alpha)
+                glBegin(GL_LINES)
+                glVertex3fv(mean)
+                glVertex3fv(mean + plane_info['basis_y'] * scale * 0.1 * bp_s)
+                glEnd()
 
-                    glColor3f(0, 0, 1)
-                    glBegin(GL_LINES)
-                    glVertex3fv(mean)
-                    glVertex3fv(mean + plane_info['basis_z'] * scale * 0.1)
-                    glEnd()
+                glColor4f(0, 0, 1, bp_alpha)
+                glBegin(GL_LINES)
+                glVertex3fv(mean)
+                glVertex3fv(mean + plane_info['basis_z'] * scale * 0.1 * bp_s)
+                glEnd()
+                glDepthMask(GL_TRUE)
 
                 if plane_info.get('bounding_plane') is not None:
                     if plane_info['square_like']:
