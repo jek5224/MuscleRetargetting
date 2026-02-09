@@ -656,14 +656,12 @@ class ContourMeshMixin:
                 # Highlighted contours drawn with immediate mode (rare)
                 if is_highlighted or is_anim_highlighted:
                     if is_anim_highlighted and len(contour) >= 2:
-                        # Pulse line width: 1 → 6 → 1, with bright white highlight
+                        # Pulse line width: 1 → 6 → 1
                         # fade goes 1.0→0.0; pulse peaks at fade=0.5
                         pulse = 1.0 - abs(2.0 * anim_highlight_fade - 1.0)
                         lw = 1.0 + 5.0 * pulse
                         glLineWidth(lw)
-                        # Lerp from white (highlight) to contour color as pulse fades
-                        hc = (1.0 - pulse) * color + pulse * np.array([1.0, 1.0, 1.0], dtype=np.float32)
-                        glColor3fv(hc)
+                        glColor3fv(color)
                         glBegin(GL_LINE_LOOP)
                         for v in contour:
                             v_arr = np.asarray(v).flatten()
