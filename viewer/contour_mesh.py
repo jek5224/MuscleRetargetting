@@ -537,9 +537,8 @@ class ContourMeshMixin:
         self._cut_replayed = False
         self._cut_num_levels_before = 0
 
-        # Animation highlight for newly revealed contours
-        self._anim_highlight_contour_idx = -1   # Flat contour index being highlighted
-        self._anim_highlight_fade = 0.0         # 1.0 = just appeared, fades to 0.0
+        # Animation highlight for newly revealed contours (multiple simultaneous)
+        self._anim_highlight_fades = {}   # {contour_idx: fade_value} 1.0→0.0
 
         # Inspector highlight (set by viewer when 2D inspector is open)
         self.inspector_highlight_stream = None  # Stream index to highlight
@@ -606,8 +605,7 @@ class ContourMeshMixin:
 
         highlight_stream = getattr(self, 'inspector_highlight_stream', None)
         highlight_level = getattr(self, 'inspector_highlight_level', None)
-        anim_highlight_idx = getattr(self, '_anim_highlight_contour_idx', -1)
-        anim_highlight_fade = getattr(self, '_anim_highlight_fade', 0.0)
+        anim_fades = getattr(self, '_anim_highlight_fades', {})
         draw_vertices = getattr(self, 'is_draw_contour_vertices', False)
         draw_farthest = getattr(self, 'is_draw_farthest_pair', False)
 
@@ -650,9 +648,10 @@ class ContourMeshMixin:
                     color = cut_colors[i][j]
 
                 is_highlighted = (highlight_stream == i and highlight_level == j)
-                # In stream mode, highlight index is a level (j), not stream (i)
-                anim_match = (j if self._is_stream_mode() else i) == anim_highlight_idx
-                is_anim_highlighted = (anim_match and anim_highlight_fade > 0.01)
+                # In stream mode, highlight key is level (j), not stream (i)
+                anim_key = j if self._is_stream_mode() else i
+                anim_highlight_fade = anim_fades.get(anim_key, 0.0)
+                is_anim_highlighted = anim_highlight_fade > 0.01
 
                 # Highlighted contours drawn with immediate mode (rare)
                 if is_highlighted or is_anim_highlighted:
@@ -1468,6 +1467,7 @@ class ContourMeshMixin:
         self._hide_all_levels()
         # BP scale per level: 0.0 = point, 1.0 = full size
         self._contour_anim_bp_scale = {}
+        self._anim_highlight_fades = {}
         self._contour_anim_progress = 0.0
         self._contour_anim_active = True
         self.is_draw_contours = True
@@ -1475,7 +1475,8 @@ class ContourMeshMixin:
 
     def update_contour_animation(self, dt):
         """Advance contour reveal animation with highlight and BP grow.
-        Each contour gets a time slot: appear + highlight pulse + BP grows from point to full."""
+        Contours are revealed staggered within reveal_dur. Each highlight pulse
+        lasts highlight_dur independently, so multiple can overlap."""
         if not self._contour_anim_active:
             return False
 
@@ -1485,37 +1486,43 @@ class ContourMeshMixin:
             self._contour_anim_active = False
             return False
 
-        total_duration = 2.0  # 2 seconds for entire animation
-        time_per_contour = total_duration / max(total, 1)
+        reveal_dur = 2.0     # all contours appear within this time
+        highlight_dur = 0.5  # each highlight pulse lasts this long
+        time_per_contour = reveal_dur / max(total, 1)
         self._contour_anim_progress += dt
+        progress = self._contour_anim_progress
 
         # +1 so first contour appears immediately
-        revealed = min(int(self._contour_anim_progress / time_per_contour) + 1, total)
+        revealed = min(int(progress / time_per_contour) + 1, total)
 
         # Reveal contours and update BP scale
         for k in range(revealed):
             idx = orig_indices[k]
             self._set_level_visible(idx, True)
-            # BP scale: grows during this contour's time slot
+            # BP scale: grows over highlight_dur from reveal time
             slot_start = k * time_per_contour
-            t_in_slot = (self._contour_anim_progress - slot_start) / time_per_contour
-            bp_t = min(max(t_in_slot, 0.0), 1.0)
+            bp_t = min(max((progress - slot_start) / highlight_dur, 0.0), 1.0)
             # Ease out: fast start, gentle finish
             bp_t = 1.0 - (1.0 - bp_t) * (1.0 - bp_t)
             self._contour_anim_bp_scale[idx] = bp_t
 
-        # Highlight the most recently revealed contour
-        current_slot = revealed - 1
-        self._anim_highlight_contour_idx = orig_indices[current_slot]
-        time_in_slot = self._contour_anim_progress - current_slot * time_per_contour
-        self._anim_highlight_fade = max(0.0, 1.0 - time_in_slot / time_per_contour)
+        # Update highlight fades for all revealed contours
+        fades = {}
+        for k in range(revealed):
+            idx = orig_indices[k]
+            slot_start = k * time_per_contour
+            elapsed = progress - slot_start
+            fade = max(0.0, 1.0 - elapsed / highlight_dur)
+            if fade > 0.01:
+                fades[idx] = fade
+        self._anim_highlight_fades = fades
 
-        # Done when last contour's slot is complete
-        if self._contour_anim_progress >= total * time_per_contour:
+        # Done when last highlight has faded
+        last_reveal_time = (total - 1) * time_per_contour
+        if progress >= last_reveal_time + highlight_dur:
             self._contour_anim_active = False
             self._contour_replayed = True
-            self._anim_highlight_contour_idx = -1
-            self._anim_highlight_fade = 0.0
+            self._anim_highlight_fades = {}
             self._contour_anim_bp_scale = {}
             for idx in orig_indices:
                 self._set_level_visible(idx, True)
@@ -1546,7 +1553,7 @@ class ContourMeshMixin:
         if len(indices) == 0:
             self._fill_gaps_anim_active = False
             self._fill_gaps_replayed = True
-            self._anim_highlight_contour_idx = -1
+            self._anim_highlight_fades = {}
             return False
 
         time_per_gap = 0.5
@@ -1560,18 +1567,18 @@ class ContourMeshMixin:
 
         self._fill_gaps_anim_step = revealed - 1
 
-        # Highlight the most recently revealed contour — fade during its slot
+        # Highlight the most recently revealed contour
         current_slot = revealed - 1
-        self._anim_highlight_contour_idx = indices[current_slot]
+        idx = indices[current_slot]
         time_in_slot = self._fill_gaps_anim_progress - current_slot * time_per_gap
-        self._anim_highlight_fade = max(0.0, 1.0 - time_in_slot / time_per_gap)
+        fade = max(0.0, 1.0 - time_in_slot / time_per_gap)
+        self._anim_highlight_fades = {idx: fade} if fade > 0.01 else {}
 
         # Done when last contour's highlight has faded
         if self._fill_gaps_anim_progress >= len(indices) * time_per_gap:
             self._fill_gaps_anim_active = False
             self._fill_gaps_replayed = True
-            self._anim_highlight_contour_idx = -1
-            self._anim_highlight_fade = 0.0
+            self._anim_highlight_fades = {}
             for idx in indices:
                 self._set_level_visible(idx, True)
             return False
@@ -1600,7 +1607,7 @@ class ContourMeshMixin:
         if len(indices) == 0:
             self._transitions_anim_active = False
             self._transitions_replayed = True
-            self._anim_highlight_contour_idx = -1
+            self._anim_highlight_fades = {}
             return False
 
         time_per_item = 0.5
@@ -1614,18 +1621,18 @@ class ContourMeshMixin:
 
         self._transitions_anim_step = revealed - 1
 
-        # Highlight the most recently revealed contour — fade during its slot
+        # Highlight the most recently revealed contour
         current_slot = revealed - 1
-        self._anim_highlight_contour_idx = indices[current_slot]
+        idx = indices[current_slot]
         time_in_slot = self._transitions_anim_progress - current_slot * time_per_item
-        self._anim_highlight_fade = max(0.0, 1.0 - time_in_slot / time_per_item)
+        fade = max(0.0, 1.0 - time_in_slot / time_per_item)
+        self._anim_highlight_fades = {idx: fade} if fade > 0.01 else {}
 
         # Done when last contour's highlight has faded
         if self._transitions_anim_progress >= len(indices) * time_per_item:
             self._transitions_anim_active = False
             self._transitions_replayed = True
-            self._anim_highlight_contour_idx = -1
-            self._anim_highlight_fade = 0.0
+            self._anim_highlight_fades = {}
             for idx in indices:
                 self._set_level_visible(idx, True)
             return False

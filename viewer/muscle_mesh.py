@@ -3033,8 +3033,7 @@ class MuscleMeshMixin:
         self._fill_gaps_replayed = False
 
         # Animation highlight
-        self._anim_highlight_contour_idx = -1
-        self._anim_highlight_fade = 0.0
+        self._anim_highlight_fades = {}
 
         # Transitions animation state
         self._transitions_inserted_indices = []
