@@ -17703,8 +17703,16 @@ class ContourMeshMixin:
         self._cut_color_after = state.get('_cut_color_after')
         self._cut_bp_before = state.get('_cut_bp_before')
         self._cut_bp_after = state.get('_cut_bp_after')
-        self._cut_has_bp_change = state.get('_cut_has_bp_change', False)
-        self._cut_bp_changed_levels = state.get('_cut_bp_changed_levels', set())
+        # Recompute changed levels from stream_groups (levels where contours were split)
+        bp_changed_levels = set()
+        if hasattr(self, 'stream_groups') and self.stream_groups is not None:
+            for level_i, groups in enumerate(self.stream_groups):
+                for group in groups:
+                    if len(group) > 1:
+                        bp_changed_levels.add(level_i)
+                        break
+        self._cut_bp_changed_levels = bp_changed_levels
+        self._cut_has_bp_change = len(bp_changed_levels) > 0
         self._cut_num_levels_before = state.get('_cut_num_levels_before', 0)
 
         # Transparency — save the processed value but reset to 1.0 for deferred replay
