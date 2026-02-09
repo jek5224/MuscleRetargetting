@@ -631,42 +631,18 @@ class ContourMeshMixin:
                         ha = 0.25
 
                     if is_anim_highlighted and len(contour) >= 2:
-                        # Draw on top of mesh
+                        # Draw on top of mesh — bold bright line
                         glDisable(GL_DEPTH_TEST)
                         glEnable(GL_BLEND)
                         glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
-
-                        # Bright filled polygon
-                        if len(contour) >= 3:
-                            glColor4f(1.0, 1.0, 0.3, ha)
-                            centroid = np.mean(contour, axis=0)
-                            glBegin(GL_TRIANGLE_FAN)
-                            glVertex3fv(centroid)
-                            for v in contour:
-                                glVertex3fv(v)
-                            glVertex3fv(contour[0])
-                            glEnd()
-
-                        # Outer glow: very thick semi-transparent line
-                        glLineWidth(10.0 + 6.0 * fade)
-                        glColor4f(1.0, 1.0, 0.5, 0.25 + 0.35 * fade)
+                        glLineWidth(5.0 + 5.0 * fade)
+                        glColor4f(1.0, 1.0, 0.0, 0.5 + 0.5 * fade)
                         glBegin(GL_LINE_LOOP)
                         for v in contour:
                             v_arr = np.asarray(v).flatten()
                             if len(v_arr) >= 3:
                                 glVertex3fv(v_arr[:3])
                         glEnd()
-
-                        # Inner bright line
-                        glLineWidth(4.0 + 3.0 * fade)
-                        glColor4f(1.0, 1.0, 0.0, 1.0)
-                        glBegin(GL_LINE_LOOP)
-                        for v in contour:
-                            v_arr = np.asarray(v).flatten()
-                            if len(v_arr) >= 3:
-                                glVertex3fv(v_arr[:3])
-                        glEnd()
-
                         glDisable(GL_BLEND)
                         glEnable(GL_DEPTH_TEST)
                         glLineWidth(1.0)
@@ -1487,29 +1463,27 @@ class ContourMeshMixin:
             self._anim_highlight_contour_idx = -1
             return False
 
-        time_per_gap = 0.4
+        time_per_gap = 0.5
         self._fill_gaps_anim_progress += dt
 
-        revealed = int(self._fill_gaps_anim_progress / time_per_gap)
-        revealed = min(revealed, len(indices))
+        # +1 so first contour appears immediately at t=0
+        revealed = min(int(self._fill_gaps_anim_progress / time_per_gap) + 1, len(indices))
 
-        # Reveal gaps up to current step
         for i in range(revealed):
             idx = indices[i]
             if idx < len(self.draw_contour_stream):
                 self.draw_contour_stream[idx] = True
 
-        self._fill_gaps_anim_step = min(revealed, len(indices) - 1)
+        self._fill_gaps_anim_step = revealed - 1
 
-        # Highlight the most recently revealed contour with fade
-        if revealed > 0 and revealed <= len(indices):
-            current_idx = indices[revealed - 1]
-            self._anim_highlight_contour_idx = current_idx
-            # Fade within the current gap's time slot (1.0 at start, 0.0 at end)
-            time_in_slot = self._fill_gaps_anim_progress - (revealed - 1) * time_per_gap
-            self._anim_highlight_fade = max(0.0, 1.0 - time_in_slot / time_per_gap)
+        # Highlight the most recently revealed contour — fade during its slot
+        current_slot = revealed - 1
+        self._anim_highlight_contour_idx = indices[current_slot]
+        time_in_slot = self._fill_gaps_anim_progress - current_slot * time_per_gap
+        self._anim_highlight_fade = max(0.0, 1.0 - time_in_slot / time_per_gap)
 
-        if revealed >= len(indices):
+        # Done when last contour's highlight has faded
+        if self._fill_gaps_anim_progress >= len(indices) * time_per_gap:
             self._fill_gaps_anim_active = False
             self._fill_gaps_replayed = True
             self._anim_highlight_contour_idx = -1
@@ -1547,27 +1521,27 @@ class ContourMeshMixin:
             self._anim_highlight_contour_idx = -1
             return False
 
-        time_per_item = 0.4
+        time_per_item = 0.5
         self._transitions_anim_progress += dt
 
-        revealed = int(self._transitions_anim_progress / time_per_item)
-        revealed = min(revealed, len(indices))
+        # +1 so first contour appears immediately at t=0
+        revealed = min(int(self._transitions_anim_progress / time_per_item) + 1, len(indices))
 
         for i in range(revealed):
             idx = indices[i]
             if idx < len(self.draw_contour_stream):
                 self.draw_contour_stream[idx] = True
 
-        self._transitions_anim_step = min(revealed, len(indices) - 1)
+        self._transitions_anim_step = revealed - 1
 
-        # Highlight the most recently revealed contour with fade
-        if revealed > 0 and revealed <= len(indices):
-            current_idx = indices[revealed - 1]
-            self._anim_highlight_contour_idx = current_idx
-            time_in_slot = self._transitions_anim_progress - (revealed - 1) * time_per_item
-            self._anim_highlight_fade = max(0.0, 1.0 - time_in_slot / time_per_item)
+        # Highlight the most recently revealed contour — fade during its slot
+        current_slot = revealed - 1
+        self._anim_highlight_contour_idx = indices[current_slot]
+        time_in_slot = self._transitions_anim_progress - current_slot * time_per_item
+        self._anim_highlight_fade = max(0.0, 1.0 - time_in_slot / time_per_item)
 
-        if revealed >= len(indices):
+        # Done when last contour's highlight has faded
+        if self._transitions_anim_progress >= len(indices) * time_per_item:
             self._transitions_anim_active = False
             self._transitions_replayed = True
             self._anim_highlight_contour_idx = -1
