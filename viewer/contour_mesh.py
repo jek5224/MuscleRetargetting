@@ -1876,10 +1876,24 @@ class ContourMeshMixin:
                 bpl['basis_y'] = y
                 bpl['basis_z'] = z
 
-                # Phase 2c: bounding plane corners + mean
-                bpl['mean'] = (1 - bp_t) * before['mean'] + bp_t * after['mean']
+                # Rotate bounding plane corners to match current axis orientation
                 if before['bounding_plane'] is not None and after['bounding_plane'] is not None:
-                    bpl['bounding_plane'] = (1 - bp_t) * before['bounding_plane'] + bp_t * after['bounding_plane']
+                    offsets = before['bounding_plane'] - before['mean']
+                    if has_swing:
+                        swing_axis_v, swing_angle_v = swing_data[i][j]
+                        if swing_angle_v > 1e-10 and swing_t > 0:
+                            a = swing_angle_v * swing_t
+                            offsets = np.array([rod(o, swing_axis_v, a) for o in offsets])
+                    if has_twist and abs(twist_data[i][j]) > 1e-10 and twist_t > 0:
+                        ta = twist_data[i][j] * twist_t
+                        offsets = np.array([rod(o, z_a, ta) for o in offsets])
+                    rotated_corners = before['mean'] + offsets
+
+                    # Phase 2c: blend from rotated corners to final, mean from before to after
+                    bpl['mean'] = (1 - bp_t) * before['mean'] + bp_t * after['mean']
+                    bpl['bounding_plane'] = (1 - bp_t) * rotated_corners + bp_t * after['bounding_plane']
+                else:
+                    bpl['mean'] = (1 - bp_t) * before['mean'] + bp_t * after['mean']
 
         if progress >= total_duration:
             self._smooth_anim_active = False
