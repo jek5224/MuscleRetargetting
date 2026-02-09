@@ -17166,6 +17166,112 @@ class ContourMeshMixin:
         if hasattr(self, 'stream_contours') and self.stream_contours is not None:
             print(f"  {len(self.stream_contours)} streams saved")
 
+    def save_animation_state(self, filepath):
+        """Save all processed state + animation replay data to a pickle file."""
+        import pickle
+
+        state = {}
+
+        # Scalar field
+        state['scalar_field'] = self.scalar_field
+        state['vertex_colors'] = self.vertex_colors
+        state['is_draw_scalar_field'] = self.is_draw_scalar_field
+        state['_scalar_anim_target_colors'] = getattr(self, '_scalar_anim_target_colors', None)
+        state['_scalar_anim_normalized_u'] = getattr(self, '_scalar_anim_normalized_u', None)
+
+        # Contours and bounding planes (the final processed state)
+        state['contours'] = self.contours
+        state['bounding_planes'] = self.bounding_planes
+        state['draw_contour_stream'] = getattr(self, 'draw_contour_stream', None)
+        state['is_draw_contours'] = self.is_draw_contours
+        state['is_draw_bounding_box'] = self.is_draw_bounding_box
+
+        # Contour animation data
+        state['_find_contours_count'] = getattr(self, '_find_contours_count', 0)
+
+        # Fill gaps animation data
+        state['_fill_gaps_inserted_indices'] = getattr(self, '_fill_gaps_inserted_indices', [])
+
+        # Transitions animation data
+        state['_transitions_inserted_indices'] = getattr(self, '_transitions_inserted_indices', [])
+
+        # Smooth animation data
+        state['_smooth_bp_before'] = getattr(self, '_smooth_bp_before', None)
+        state['_smooth_bp_after'] = getattr(self, '_smooth_bp_after', None)
+        state['_smooth_swing_data'] = getattr(self, '_smooth_swing_data', None)
+        state['_smooth_twist_data'] = getattr(self, '_smooth_twist_data', None)
+        state['_smooth_num_levels'] = getattr(self, '_smooth_num_levels', 0)
+
+        # Transparency
+        state['transparency'] = getattr(self, 'transparency', 1.0)
+
+        with open(filepath, 'wb') as f:
+            pickle.dump(state, f, protocol=pickle.HIGHEST_PROTOCOL)
+
+        print(f"Animation state saved to {filepath}")
+
+    def load_animation_state(self, filepath):
+        """Load processed state + animation replay data from a pickle file."""
+        import pickle
+
+        with open(filepath, 'rb') as f:
+            state = pickle.load(f)
+
+        # Scalar field
+        self.scalar_field = state.get('scalar_field')
+        self.vertex_colors = state.get('vertex_colors')
+        self.is_draw_scalar_field = state.get('is_draw_scalar_field', False)
+        self._scalar_anim_target_colors = state.get('_scalar_anim_target_colors')
+        self._scalar_anim_normalized_u = state.get('_scalar_anim_normalized_u')
+
+        # Contours and bounding planes
+        self.contours = state.get('contours')
+        self.bounding_planes = state.get('bounding_planes', [])
+        self.draw_contour_stream = state.get('draw_contour_stream')
+        self.is_draw_contours = state.get('is_draw_contours', False)
+        self.is_draw_bounding_box = state.get('is_draw_bounding_box', False)
+
+        # Contour animation data
+        self._find_contours_count = state.get('_find_contours_count', 0)
+
+        # Fill gaps animation data
+        self._fill_gaps_inserted_indices = state.get('_fill_gaps_inserted_indices', [])
+
+        # Transitions animation data
+        self._transitions_inserted_indices = state.get('_transitions_inserted_indices', [])
+
+        # Smooth animation data
+        self._smooth_bp_before = state.get('_smooth_bp_before')
+        self._smooth_bp_after = state.get('_smooth_bp_after')
+        self._smooth_swing_data = state.get('_smooth_swing_data')
+        self._smooth_twist_data = state.get('_smooth_twist_data')
+        self._smooth_num_levels = state.get('_smooth_num_levels', 0)
+
+        # Transparency
+        self.transparency = state.get('transparency', 1.0)
+
+        # Reset all animation playback states (ready for replay)
+        self._scalar_anim_active = False
+        self._scalar_anim_progress = 0.0
+        self._scalar_replayed = False
+        self._contour_anim_active = False
+        self._contour_anim_progress = 0.0
+        self._contour_anim_original_indices = []
+        self._contour_replayed = False
+        self._fill_gaps_anim_active = False
+        self._fill_gaps_anim_progress = 0.0
+        self._fill_gaps_anim_step = 0
+        self._fill_gaps_replayed = False
+        self._transitions_anim_active = False
+        self._transitions_anim_progress = 0.0
+        self._transitions_anim_step = 0
+        self._transitions_replayed = False
+        self._smooth_anim_active = False
+        self._smooth_anim_progress = 0.0
+        self._smooth_replayed = False
+
+        print(f"Animation state loaded from {filepath}")
+
     def load_contours(self, filepath):
         """
         Load contours and bounding planes from a file.
