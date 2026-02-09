@@ -1466,7 +1466,7 @@ class ContourMeshMixin:
             self._contour_anim_active = False
             return False
 
-        time_per_contour = 0.3
+        time_per_contour = 0.15
         self._contour_anim_progress += dt
 
         # +1 so first contour appears immediately
