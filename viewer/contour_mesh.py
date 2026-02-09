@@ -640,7 +640,9 @@ class ContourMeshMixin:
                     color = cut_colors[i][j]
 
                 is_highlighted = (highlight_stream == i and highlight_level == j)
-                is_anim_highlighted = (i == anim_highlight_idx and anim_highlight_fade > 0.01)
+                # In stream mode, highlight index is a level (j), not stream (i)
+                anim_match = (j if self._is_stream_mode() else i) == anim_highlight_idx
+                is_anim_highlighted = (anim_match and anim_highlight_fade > 0.01)
 
                 # Highlighted contours drawn with immediate mode (rare)
                 if is_highlighted or is_anim_highlighted:
