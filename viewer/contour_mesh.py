@@ -1984,6 +1984,7 @@ class ContourMeshMixin:
         bp_before = []
         bp_after = []
         has_bp_change = False
+        bp_changed_levels = set()
         for stream_i in range(num_streams):
             bb_stream = []
             ba_stream = []
@@ -2011,10 +2012,11 @@ class ContourMeshMixin:
                     bp_final = None
                 ba_stream.append(bp_final)
 
-                # Check if BP actually changed (skip BP animation for 1:1)
+                # Track per-level BP changes
                 if bp_orig is not None and bp_final is not None:
                     if not np.allclose(bp_orig.get('mean', np.zeros(3)), bp_final.get('mean', np.zeros(3)), atol=1e-6):
                         has_bp_change = True
+                        bp_changed_levels.add(level_i)
 
             bp_before.append(bb_stream)
             bp_after.append(ba_stream)
@@ -2024,6 +2026,7 @@ class ContourMeshMixin:
         self._cut_bp_before = bp_before
         self._cut_bp_after = bp_after
         self._cut_has_bp_change = has_bp_change
+        self._cut_bp_changed_levels = bp_changed_levels
         self._cut_num_levels_before = num_levels_before
         self._cut_replayed = False
 
@@ -2156,6 +2159,7 @@ class ContourMeshMixin:
             self._apply_stream_bp_snapshot(self._cut_bp_before)
         self._contour_anim_bp_scale = {}
         self._cut_bp_switched = False
+        self._cut_anim_orig_transparency = self.transparency
         self._cut_anim_progress = 0.0
         self._cut_anim_active = True
 
@@ -2171,9 +2175,10 @@ class ContourMeshMixin:
     def update_cut_animation(self, dt):
         """Advance cut animation.
 
+        Phase 0 (0-0.5s): Fade transparency to 0.5 (if not already).
         Phase 1 (0-2s): Color wave — lerp per-contour color from before to after.
-        Phase 2a (2-3s): BP shrink — pre-cut BPs scale from 1→0 (wave).
-        Phase 2b (3-4s): BP grow — post-cut BPs scale from 0→1 (wave).
+        Phase 2a (2-3s): BP shrink — cut-level BPs scale from 1→0 (wave).
+        Phase 2b (3-4s): BP grow — cut-level BPs scale from 0→1 (wave).
         """
         if not self._cut_anim_active:
             return False
@@ -2193,14 +2198,34 @@ class ContourMeshMixin:
         num_levels = len(color_before[0]) if num_streams > 0 else 0
 
         # Phase durations
+        fade_dur = 0.5
         color_dur = 2.0
         bp_shrink_dur = 1.0
         bp_grow_dur = 1.0
         has_bp = getattr(self, '_cut_has_bp_change', False)
         bp_dur = (bp_shrink_dur + bp_grow_dur) if has_bp else 0.0
         total_duration = color_dur + bp_dur
+        changed_levels = getattr(self, '_cut_bp_changed_levels', set())
 
         progress = self._cut_anim_progress
+
+        # Phase 0: Fade transparency (overlaps with color phase start)
+        if progress < fade_dur:
+            orig_alpha = getattr(self, '_cut_anim_orig_transparency', self.transparency)
+            if not hasattr(self, '_cut_anim_orig_transparency'):
+                self._cut_anim_orig_transparency = self.transparency
+            target_alpha = 0.5
+            fade_t = progress / fade_dur
+            fade_t = fade_t * fade_t * (3.0 - 2.0 * fade_t)  # smoothstep
+            new_alpha = orig_alpha + (target_alpha - orig_alpha) * fade_t
+            self.transparency = new_alpha
+            if self.vertex_colors is not None and self.is_draw_scalar_field:
+                self.vertex_colors[:, 3] = new_alpha
+        else:
+            # Ensure transparency at 0.5
+            self.transparency = 0.5
+            if self.vertex_colors is not None and self.is_draw_scalar_field:
+                self.vertex_colors[:, 3] = 0.5
 
         # Phase 1: Color wave
         if progress < color_dur:
@@ -2213,15 +2238,15 @@ class ContourMeshMixin:
                 t = self._cut_wave_t(overall_t, j, num_levels)
                 self._cut_anim_contour_colors[i][j] = (1 - t) * color_before[i][j] + t * color_after[i][j]
 
-        # Phase 2: BP shrink-then-grow (only if BPs actually changed)
+        # Phase 2: BP shrink-then-grow (only at levels where cutting occurred)
         if has_bp and bp_before is not None and bp_after is not None:
             bp_start = color_dur
             bp_mid = bp_start + bp_shrink_dur
 
             if progress > bp_start and progress < bp_mid:
-                # Phase 2a: Shrink pre-cut BPs to their means
+                # Phase 2a: Shrink cut-level BPs to their means
                 shrink_t = (progress - bp_start) / bp_shrink_dur
-                for j in range(num_levels):
+                for j in changed_levels:
                     wave_t = self._cut_wave_t(shrink_t, j, num_levels)
                     self._contour_anim_bp_scale[j] = 1.0 - wave_t
 
@@ -2231,9 +2256,9 @@ class ContourMeshMixin:
                     self._apply_stream_bp_snapshot(bp_after)
                     self._cut_bp_switched = True
 
-                # Phase 2b: Grow post-cut BPs from their means
+                # Phase 2b: Grow cut-level BPs from their means
                 grow_t = min((progress - bp_mid) / bp_grow_dur, 1.0)
-                for j in range(num_levels):
+                for j in changed_levels:
                     wave_t = self._cut_wave_t(grow_t, j, num_levels)
                     self._contour_anim_bp_scale[j] = wave_t
 
@@ -17598,6 +17623,7 @@ class ContourMeshMixin:
         state['_cut_bp_before'] = getattr(self, '_cut_bp_before', None)
         state['_cut_bp_after'] = getattr(self, '_cut_bp_after', None)
         state['_cut_has_bp_change'] = getattr(self, '_cut_has_bp_change', False)
+        state['_cut_bp_changed_levels'] = getattr(self, '_cut_bp_changed_levels', set())
         state['_cut_num_levels_before'] = getattr(self, '_cut_num_levels_before', 0)
 
         # Transparency
@@ -17671,6 +17697,7 @@ class ContourMeshMixin:
         self._cut_bp_before = state.get('_cut_bp_before')
         self._cut_bp_after = state.get('_cut_bp_after')
         self._cut_has_bp_change = state.get('_cut_has_bp_change', False)
+        self._cut_bp_changed_levels = state.get('_cut_bp_changed_levels', set())
         self._cut_num_levels_before = state.get('_cut_num_levels_before', 0)
 
         # Transparency — save the processed value but reset to 1.0 for deferred replay
