@@ -1706,10 +1706,10 @@ class ContourMeshMixin:
 
     def update_smooth_animation(self, dt):
         """Advance smoothing animation in four phases.
-        Phase 1 (0-1s):   fade transparency to 0.5
-        Phase 2a (1-2.2s): animate z-axis (swing) wave
-        Phase 2b (2.2-3.4s): animate x/y twist wave
-        Phase 2c (3.4-4.0s): animate bounding plane corners wave"""
+        Phase 1 (0-0.5s):   fade transparency to 0.5
+        Phase 2a (0.5-2.0s): rotate axes to align z-axis
+        Phase 2b (2.0-3.5s): twist around z to align x/y
+        Phase 2c (3.5-4.5s): interpolate bounding plane corners"""
         from scipy.spatial.transform import Rotation as R
 
         if not self._smooth_anim_active:
@@ -1728,10 +1728,10 @@ class ContourMeshMixin:
         progress = self._smooth_anim_progress
 
         # Phase durations
-        p1_dur = 1.0   # transparency fade
-        p2a_dur = 1.2   # z-axis swing
-        p2b_dur = 1.2   # x/y twist
-        p2c_dur = 0.6   # bounding plane corners
+        p1_dur = 0.5    # transparency fade (fast)
+        p2a_dur = 1.5   # z-axis swing
+        p2b_dur = 1.5   # x/y twist around z
+        p2c_dur = 1.0   # bounding plane corners
         p1_end = p1_dur
         p2a_end = p1_end + p2a_dur
         p2b_end = p2a_end + p2b_dur
