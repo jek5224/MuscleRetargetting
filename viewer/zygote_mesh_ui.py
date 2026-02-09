@@ -445,13 +445,11 @@ def draw_zygote_muscle_ui(v):
                     obj._process_step = 12
 
                 # Vertical slider for step selection (top=1, bottom=12)
-                # v_slider_int format: label, width, height, value, min, max
-                # To get 1 at top and 12 at bottom, we invert: display (13 - value)
-                display_step = 13 - obj._process_step  # Convert for display
-                changed, new_display = imgui.v_slider_int(
-                    f"##step{name}", 20, process_all_height, display_step, 1, 12)
+                # Reversed min/max (12, 1) makes value increase downward
+                changed, new_val = imgui.v_slider_int(
+                    f"##step{name}", 20, process_all_height, obj._process_step, 12, 1)
                 if changed:
-                    obj._process_step = 13 - new_display  # Convert back
+                    obj._process_step = new_val
                 imgui.same_line()
 
                 # Step names matching button order (1=top, 12=bottom)
