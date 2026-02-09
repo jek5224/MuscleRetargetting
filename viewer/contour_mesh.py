@@ -2213,7 +2213,6 @@ class ContourMeshMixin:
         num_levels = len(color_before[0]) if num_streams > 0 else 0
 
         # Phase durations
-        fade_dur = 0.5
         color_dur = 2.0
         bp_shrink_dur = 1.0
         bp_grow_dur = 1.0
@@ -2223,24 +2222,6 @@ class ContourMeshMixin:
         changed_levels = getattr(self, '_cut_bp_changed_levels', set())
 
         progress = self._cut_anim_progress
-
-        # Phase 0: Fade transparency (overlaps with color phase start)
-        if progress < fade_dur:
-            orig_alpha = getattr(self, '_cut_anim_orig_transparency', self.transparency)
-            if not hasattr(self, '_cut_anim_orig_transparency'):
-                self._cut_anim_orig_transparency = self.transparency
-            target_alpha = 0.5
-            fade_t = progress / fade_dur
-            fade_t = fade_t * fade_t * (3.0 - 2.0 * fade_t)  # smoothstep
-            new_alpha = orig_alpha + (target_alpha - orig_alpha) * fade_t
-            self.transparency = new_alpha
-            if self.vertex_colors is not None and self.is_draw_scalar_field:
-                self.vertex_colors[:, 3] = new_alpha
-        else:
-            # Ensure transparency at 0.5
-            self.transparency = 0.5
-            if self.vertex_colors is not None and self.is_draw_scalar_field:
-                self.vertex_colors[:, 3] = 0.5
 
         # Phase 1: Color wave
         if progress < color_dur:
