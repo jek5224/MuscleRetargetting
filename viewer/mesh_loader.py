@@ -677,20 +677,29 @@ class MeshLoader(ContourMeshMixin, TetrahedronMeshMixin, FiberArchitectureMixin,
                 glEnd()
                 glPopMatrix()
 
-                a = bp_alpha
-                glColor4f(a, 0, 0, a)
+                # Use full color when not animating, black+alpha when fading
+                if bp_alpha >= 1.0:
+                    glColor3f(1, 0, 0)
+                else:
+                    glColor4f(0, 0, 0, bp_alpha)
                 glBegin(GL_LINES)
                 glVertex3fv(mean)
                 glVertex3fv(mean + plane_info['basis_x'] * scale * 0.1 * bp_s)
                 glEnd()
 
-                glColor4f(0, a, 0, a)
+                if bp_alpha >= 1.0:
+                    glColor3f(0, 1, 0)
+                else:
+                    glColor4f(0, 0, 0, bp_alpha)
                 glBegin(GL_LINES)
                 glVertex3fv(mean)
                 glVertex3fv(mean + plane_info['basis_y'] * scale * 0.1 * bp_s)
                 glEnd()
 
-                glColor4f(0, 0, a, a)
+                if bp_alpha >= 1.0:
+                    glColor3f(0, 0, 1)
+                else:
+                    glColor4f(0, 0, 0, bp_alpha)
                 glBegin(GL_LINES)
                 glVertex3fv(mean)
                 glVertex3fv(mean + plane_info['basis_z'] * scale * 0.1 * bp_s)
