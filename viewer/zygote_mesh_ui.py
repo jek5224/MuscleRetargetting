@@ -686,6 +686,7 @@ def draw_zygote_muscle_ui(v):
                         obj.replay_transitions_animation()
 
                 # Step 5: Smoothen buttons
+                sub_button_width = (col_button_width - 8) // 3  # 3 buttons with small margins
                 if animate:
                     # Single "Smooth" button with replay when animate is on
                     if colored_button(f"Smooth##{name}", 5, proc_w):
@@ -702,7 +703,6 @@ def draw_zygote_muscle_ui(v):
                             obj.replay_smooth_animation()
                 else:
                     # Individual z, x, bp buttons when animate is off
-                    sub_button_width = (col_button_width - 8) // 3
                     if colored_button(f"z##{name}", 5, sub_button_width):
                         if obj.contours is not None and len(obj.contours) > 0:
                             try:
