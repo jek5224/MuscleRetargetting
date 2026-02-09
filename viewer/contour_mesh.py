@@ -1913,6 +1913,19 @@ class ContourMeshMixin:
         """Run z, x, bp smoothing on stream-mode BPs with optional animation support.
         If defer=True, saves before/after snapshots and restores initial state for replay."""
 
+        # Ensure we're operating on stream-mode data (cut defer may have restored level mode)
+        saved_contours = saved_bps = saved_dcs = None
+        if (hasattr(self, 'stream_contours') and self.stream_contours is not None
+                and self.contours is not self.stream_contours):
+            saved_contours = self.contours
+            saved_bps = self.bounding_planes
+            saved_dcs = self.draw_contour_stream
+            self.contours = self.stream_contours
+            self.bounding_planes = self.stream_bounding_planes
+            num_streams = len(self.stream_contours)
+            num_levels = len(self.stream_contours[0]) if num_streams > 0 else 0
+            self.draw_contour_stream = [[True] * num_levels for _ in range(num_streams)]
+
         # Snapshot before
         bp_before = self._snapshot_bounding_planes()
 
@@ -1995,6 +2008,11 @@ class ContourMeshMixin:
 
         if defer:
             self._apply_bp_snapshot(bp_before)
+            # Restore level-mode data if we swapped to stream mode
+            if saved_contours is not None:
+                self.contours = saved_contours
+                self.bounding_planes = saved_bps
+                self.draw_contour_stream = saved_dcs
         else:
             self._stream_smooth_replayed = True
 
