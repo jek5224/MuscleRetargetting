@@ -13797,6 +13797,19 @@ class ContourMeshMixin:
         # Save pre-build transparency
         self._fiber_anim_orig_transparency = getattr(self, 'transparency', 1.0)
 
+        # Debug: check for NaN/inf in waypoints
+        nan_count = 0
+        for s_idx, stream in enumerate(self._fiber_anim_waypoints):
+            for l_idx, level in enumerate(stream):
+                for f_idx, wp in enumerate(level):
+                    if not np.all(np.isfinite(wp)):
+                        nan_count += 1
+                        if nan_count <= 5:
+                            print(f"[_save_fiber_anim_data] WARNING: NaN/inf waypoint at "
+                                  f"stream={s_idx} level={l_idx} fiber={f_idx}: {wp}")
+        if nan_count > 0:
+            print(f"[_save_fiber_anim_data] TOTAL NaN/inf waypoints: {nan_count}")
+
     def replay_fiber_animation(self):
         """Start fiber build animation: mesh fades, fibers grow origin->insertion."""
         if self._fiber_anim_waypoints is None:
