@@ -13566,6 +13566,7 @@ class ContourMeshMixin:
                     unselected.add((stream_i, level_i))
 
         if not unselected:
+            self._level_select_replayed = True
             return
 
         # Restore all levels visible from saved pre-selection state (deep copies to avoid corruption)

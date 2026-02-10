@@ -548,6 +548,8 @@ def draw_zygote_muscle_ui(v):
                         if start_step <= 9 <= max_step and hasattr(obj, 'stream_contours') and obj.stream_contours is not None:
                             print(f"  [9/{max_step}] Building fibers...")
                             obj.build_fibers(skeleton_meshes=v.zygote_skeleton_meshes, defer=defer)
+                            if defer:
+                                obj._level_select_replayed = False
 
                         # Step 10: Resample Contours
                         if start_step <= 10 <= max_step and obj.contours is not None and len(obj.contours) > 0 and obj.bounding_planes is not None:
@@ -4853,6 +4855,8 @@ def _render_manual_cut_windows(v):
                                             print(f"  [9/{max_step}] Building fibers...")
                                             _defer = getattr(obj, 'animate_process', False)
                                             obj.build_fibers(skeleton_meshes=v.zygote_skeleton_meshes, defer=_defer)
+                                            if _defer:
+                                                obj._level_select_replayed = False
 
                                         # Step 10: Resample Contours
                                         if start_step <= 10 <= max_step and obj.contours is not None and len(obj.contours) > 0 and obj.bounding_planes is not None:
@@ -5236,6 +5240,8 @@ def _render_level_select_windows(v):
                         if start_step <= 9 <= max_step and hasattr(obj, 'stream_contours') and obj.stream_contours is not None:
                             print(f"  [9/{max_step}] Building fibers...")
                             obj.build_fibers(skeleton_meshes=v.zygote_skeleton_meshes, defer=_defer)
+                            if _defer:
+                                obj._level_select_replayed = False
 
                         # Step 10: Resample Contours
                         if start_step <= 10 <= max_step and obj.contours is not None and len(obj.contours) > 0 and obj.bounding_planes is not None:
