@@ -13283,23 +13283,20 @@ class ContourMeshMixin:
                         print(f"  WARNING: Level {level_i} group {group} - contours are DIFFERENT!")
 
     def _save_level_select_post_state(self):
-        """Save post-selection state for replay restoration (avoids destructive re-apply)."""
-        max_stream_count = self.max_stream_count
+        """Save post-selection state for replay restoration (avoids destructive re-apply).
+        Saves the filtered contours/bps — stream_contours stays unfiltered."""
         self._level_select_anim_post = {
-            'stream_contours': [list(sc) for sc in self.stream_contours],
-            'stream_bounding_planes': [list(bp) for bp in self.stream_bounding_planes],
-            'stream_groups': list(self.stream_groups),
+            'contours': [list(sc) for sc in self.contours],
+            'bounding_planes': [list(bp) for bp in self.bounding_planes],
             'draw_contour_stream': [list(dcs) for dcs in self.draw_contour_stream],
         }
 
     def _restore_level_select_post_state(self):
-        """Restore post-selection state from saved snapshot (for replay completion)."""
+        """Restore post-selection state from saved snapshot (for replay completion).
+        Only restores contours/bps/dcs — does NOT touch stream_contours."""
         post = self._level_select_anim_post
-        self.stream_contours = [list(sc) for sc in post['stream_contours']]
-        self.stream_bounding_planes = [list(bp) for bp in post['stream_bounding_planes']]
-        self.stream_groups = list(post['stream_groups'])
-        self.contours = self.stream_contours
-        self.bounding_planes = self.stream_bounding_planes
+        self.contours = [list(sc) for sc in post['contours']]
+        self.bounding_planes = [list(bp) for bp in post['bounding_planes']]
         self.draw_contour_stream = [list(dcs) for dcs in post['draw_contour_stream']]
 
     def _start_level_select_animation(self, defer=False):
@@ -13487,17 +13484,17 @@ class ContourMeshMixin:
                     new_stream_contours[stream_i].append(orig_stream_contours[stream_i][level_i])
                     new_stream_bounding_planes[stream_i].append(orig_stream_bounding_planes[stream_i][level_i])
 
-        self.stream_contours = new_stream_contours
-        self.stream_bounding_planes = new_stream_bounding_planes
-        self.stream_groups = new_stream_groups
+        # Store filtered results separately — stream_contours stays unfiltered for replays
+        self._selected_stream_contours = new_stream_contours
+        self._selected_stream_bounding_planes = new_stream_bounding_planes
+        self._selected_stream_groups = new_stream_groups
 
-        # Update visualization
-        self.contours = self.stream_contours
-        self.bounding_planes = self.stream_bounding_planes
-        # Each stream may have different number of levels now
-        self.draw_contour_stream = [[True] * len(self.stream_contours[s]) for s in range(max_stream_count)]
+        # Update visualization from selected data
+        self.contours = self._selected_stream_contours
+        self.bounding_planes = self._selected_stream_bounding_planes
+        self.draw_contour_stream = [[True] * len(self._selected_stream_contours[s]) for s in range(max_stream_count)]
 
-        level_counts = [len(self.stream_contours[s]) for s in range(max_stream_count)]
+        level_counts = [len(self._selected_stream_contours[s]) for s in range(max_stream_count)]
         print(f"Levels updated: {level_counts} per stream")
 
         # Close window and clean up
@@ -13554,20 +13551,30 @@ class ContourMeshMixin:
         Converts stream_contours/stream_bounding_planes to the format
         used by downstream operations (mesh building, visualization).
         Each stream may have different number of levels.
+        Uses _selected_stream_* if level selection was applied, otherwise stream_*.
         """
         if not hasattr(self, 'stream_contours') or self.stream_contours is None:
             print("Run cut_streams and select_levels first")
             return
 
+        # Use selected data if level selection was applied
+        src_contours = getattr(self, '_selected_stream_contours', None) or self.stream_contours
+        src_bps = getattr(self, '_selected_stream_bounding_planes', None) or self.stream_bounding_planes
+
         max_stream_count = self.max_stream_count
-        level_counts = [len(self.stream_contours[s]) for s in range(max_stream_count)]
+        level_counts = [len(src_contours[s]) for s in range(max_stream_count)]
 
         print(f"\n=== Build Fibers ===")
         print(f"Streams: {max_stream_count}, Levels per stream: {level_counts}")
 
         # Convert to format expected by downstream: [stream_i][level_i]
-        self.contours = self.stream_contours
-        self.bounding_planes = self.stream_bounding_planes
+        self.contours = src_contours
+        self.bounding_planes = src_bps
+
+        # Also update stream_groups to selected if available
+        selected_groups = getattr(self, '_selected_stream_groups', None)
+        if selected_groups is not None:
+            self.stream_groups = selected_groups
 
         # Set up draw flags - each stream may have different number of levels
         self.draw_contour_stream = [[True] * level_counts[s] for s in range(max_stream_count)]
