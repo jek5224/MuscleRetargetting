@@ -684,14 +684,23 @@ class GLFWApp():
         if self.draw_body:
             self.drawSkeleton(self.env.skel.getPositions(), np.array([0.5, 0.5, 0.5, self.body_trans]))
 
-        # Draw fiber structure (middle layer)
+        # Draw zygote skeleton meshes (before muscle mesh so they're visible through transparency)
+        for name, obj in self.zygote_skeleton_meshes.items():
+            if obj.is_draw:
+                obj.draw([obj.color[0], obj.color[1], obj.color[2], obj.transparency])
+            if obj.is_draw_corners:
+                obj.draw_corners()
+            if obj.is_draw_edges:
+                obj.draw_edges()
+
+        # Draw fiber structure
         for name, obj in self.zygote_muscle_meshes.items():
             viper_only = obj.viper_sim is not None and obj.viper_only_mode
             if not viper_only and obj.is_draw_fiber_architecture:
                 obj.fiber_transparency = self.zygote_fiber_transparency
                 obj.draw_fiber_architecture()
 
-        # Draw muscle mesh (after fibers so transparency shows fibers through mesh)
+        # Draw muscle mesh (last so transparency shows skeleton and fibers through it)
         for name, obj in self.zygote_muscle_meshes.items():
             viper_only = obj.viper_sim is not None and obj.viper_only_mode
             if not viper_only and obj.is_draw:
@@ -703,15 +712,6 @@ class GLFWApp():
             if not viper_only and obj.is_draw_tet_mesh:
                 obj.contour_mesh_transparency = self.zygote_tet_transparency
                 obj.draw_tetrahedron_mesh(draw_tets=obj.is_draw_tet_edges)
-
-        # Draw zygote skeleton meshes
-        for name, obj in self.zygote_skeleton_meshes.items():
-            if obj.is_draw:
-                obj.draw([obj.color[0], obj.color[1], obj.color[2], obj.transparency])
-            if obj.is_draw_corners:
-                obj.draw_corners()
-            if obj.is_draw_edges:
-                obj.draw_edges()
 
         # if self.draw_pd_target:
         #     self.drawSkeleton(self.env.pd_target, np.array([0.3, 0.3, 1.0, 0.5]))
