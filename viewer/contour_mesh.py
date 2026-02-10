@@ -12588,6 +12588,7 @@ class ContourMeshMixin(ContourAnimationMixin):
 
         # Save animation data (waypoints + random offsets)
         self._save_fiber_anim_data()
+        self.bounding_box_draw_mode = 1  # boxes (planes + connecting lines)
 
         if defer:
             # Restore pre-fiber visual state for later replay

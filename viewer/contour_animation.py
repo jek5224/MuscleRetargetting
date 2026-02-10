@@ -1321,6 +1321,7 @@ class ContourAnimationMixin:
         num_levels = max(len(s) for s in self.waypoints) if self.waypoints else 1
 
         # Start state: mesh visible at 0.5 transparency, fibers hidden (grow from level 0)
+        self.bounding_box_draw_mode = 1  # boxes (planes + connecting lines)
         self.is_draw = True
         self.transparency = 0.5
         self.is_draw_fiber_architecture = True
