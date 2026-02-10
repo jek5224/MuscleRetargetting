@@ -812,7 +812,11 @@ def draw_zygote_muscle_ui(v):
                 if colored_button(f"Build Fiber##{name}", 9, proc_w if animate else col_button_width):
                     if hasattr(obj, 'stream_contours') and obj.stream_contours is not None:
                         try:
-                            obj.build_fibers(skeleton_meshes=v.zygote_skeleton_meshes, defer=animate)
+                            if animate:
+                                obj.build_fibers(skeleton_meshes=v.zygote_skeleton_meshes, defer=False)
+                                obj.replay_fiber_animation()
+                            else:
+                                obj.build_fibers(skeleton_meshes=v.zygote_skeleton_meshes)
                         except Exception as e:
                             print(f"[{name}] Build Fibers error: {e}")
                             traceback.print_exc()
