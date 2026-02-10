@@ -700,7 +700,7 @@ class ContourMeshMixin:
                         if len(contour) >= 3:
                             glEnable(GL_BLEND)
                             glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
-                            glColor4f(0.3, 0.6, 0.9, ha)
+                            glColor4f(0.3, 0.6, 0.9, 0.3)
                             centroid = np.mean(contour, axis=0)
                             if ls_mean is not None:
                                 centroid = ls_mean + (centroid - ls_mean) * ls_s
