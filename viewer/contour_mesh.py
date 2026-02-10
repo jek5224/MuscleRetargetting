@@ -13787,7 +13787,10 @@ class ContourMeshMixin:
             self.draw_contour_stream = [[True] * len(src[s]) for s in range(len(src))]
 
         self._fiber_anim_progress = 0.0
-        self._fiber_anim_level_progress = []  # Initialize empty, computed in update
+        # Initialize all fibers at level_progress=0 so first frame clips everything
+        self._fiber_anim_level_progress = [
+            [0.0] * len(offsets) for offsets in self._fiber_anim_offsets
+        ]
         self._fiber_anim_active = True
 
     def update_fiber_animation(self, dt):
