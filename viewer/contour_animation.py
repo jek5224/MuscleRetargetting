@@ -1426,6 +1426,26 @@ class ContourAnimationMixin:
         state['_stream_smooth_twist_data'] = getattr(self, '_stream_smooth_twist_data', None)
         state['_stream_smooth_num_levels'] = getattr(self, '_stream_smooth_num_levels', 0)
 
+        # Level select animation data
+        state['_level_select_anim_original'] = getattr(self, '_level_select_anim_original', None)
+        state['_level_select_anim_post'] = getattr(self, '_level_select_anim_post', None)
+        state['_level_select_anim_unselected'] = getattr(self, '_level_select_anim_unselected', None)
+        state['_level_select_anim_num_levels'] = getattr(self, '_level_select_anim_num_levels', 0)
+        state['stream_selected_levels'] = getattr(self, 'stream_selected_levels', None)
+        state['_selected_stream_contours'] = getattr(self, '_selected_stream_contours', None)
+        state['_selected_stream_bounding_planes'] = getattr(self, '_selected_stream_bounding_planes', None)
+        state['_selected_stream_groups'] = getattr(self, '_selected_stream_groups', None)
+
+        # Fiber animation data
+        state['_fiber_anim_waypoints'] = getattr(self, '_fiber_anim_waypoints', None)
+        state['_fiber_anim_stream_endpoints'] = getattr(self, '_fiber_anim_stream_endpoints', None)
+        state['waypoints'] = getattr(self, 'waypoints', None)
+        state['_stream_endpoints'] = getattr(self, '_stream_endpoints', None)
+
+        # Pipeline state
+        state['max_stream_count'] = getattr(self, 'max_stream_count', None)
+        state['_cut_sq_changed'] = getattr(self, '_cut_sq_changed', set())
+
         # Transparency
         state['transparency'] = getattr(self, 'transparency', 1.0)
 
@@ -1517,6 +1537,27 @@ class ContourAnimationMixin:
         self._stream_smooth_twist_data = state.get('_stream_smooth_twist_data')
         self._stream_smooth_num_levels = state.get('_stream_smooth_num_levels', 0)
 
+        # Level select animation data
+        self._level_select_anim_original = state.get('_level_select_anim_original')
+        self._level_select_anim_post = state.get('_level_select_anim_post')
+        self._level_select_anim_unselected = state.get('_level_select_anim_unselected')
+        self._level_select_anim_num_levels = state.get('_level_select_anim_num_levels', 0)
+        self.stream_selected_levels = state.get('stream_selected_levels')
+        self._selected_stream_contours = state.get('_selected_stream_contours')
+        self._selected_stream_bounding_planes = state.get('_selected_stream_bounding_planes')
+        self._selected_stream_groups = state.get('_selected_stream_groups')
+
+        # Fiber animation data
+        self._fiber_anim_waypoints = state.get('_fiber_anim_waypoints')
+        self._fiber_anim_stream_endpoints = state.get('_fiber_anim_stream_endpoints')
+        self.waypoints = state.get('waypoints')
+        self._stream_endpoints = state.get('_stream_endpoints')
+
+        # Pipeline state
+        if state.get('max_stream_count') is not None:
+            self.max_stream_count = state['max_stream_count']
+        self._cut_sq_changed = state.get('_cut_sq_changed', set())
+
         # Transparency — save the processed value but reset to 1.0 for deferred replay
         # (smooth animation will fade it down during its replay)
         self._smooth_anim_orig_transparency = state.get('transparency', 1.0)
@@ -1553,6 +1594,15 @@ class ContourAnimationMixin:
         self._stream_smooth_anim_active = False
         self._stream_smooth_anim_progress = 0.0
         self._stream_smooth_replayed = False
+        self._level_select_anim_active = False
+        self._level_select_anim_progress = 0.0
+        self._level_select_anim_scales = None
+        self._level_select_anim_pending_resume = False
+        self._level_select_replayed = False
+        self._fiber_anim_active = False
+        self._fiber_anim_progress = 0.0
+        self._fiber_anim_level_progress = None
+        self._build_fibers_replayed = False
 
         # ── Restore deferred visual state so everything looks pre-processed ──
 
@@ -1611,5 +1661,9 @@ class ContourAnimationMixin:
                 if not hasattr(self, 'stream_bounding_planes') or self.stream_bounding_planes is None:
                     self.stream_bounding_planes = self.bounding_planes
                 self._apply_stream_bp_snapshot(self._cut_bp_before)
+
+        # 5. Fibers: hide fiber architecture for deferred replay
+        if self._fiber_anim_waypoints is not None:
+            self.is_draw_fiber_architecture = False
 
         print(f"Animation state loaded from {filepath}")
