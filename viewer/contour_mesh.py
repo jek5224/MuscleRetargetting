@@ -1625,6 +1625,8 @@ class ContourMeshMixin(ContourAnimationMixin):
             defer: If True, restore pre-cut visual state so animation can replay later.
             **kwargs: Passed through to cut_streams().
         """
+        self.bounding_box_draw_mode = 0  # planes only during cut, no connecting lines
+
         # Ensure post-smooth BPs are applied (smooth defer may have restored pre-smooth)
         smooth_bp_after = getattr(self, '_smooth_bp_after', None)
         if smooth_bp_after is not None:
