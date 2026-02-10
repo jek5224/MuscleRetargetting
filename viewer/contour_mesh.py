@@ -13413,10 +13413,35 @@ class ContourMeshMixin:
     def _save_level_select_post_state(self):
         """Save post-selection state for replay restoration (avoids destructive re-apply).
         Saves the filtered contours/bps — stream_contours stays unfiltered.
-        Deep copies BPs to avoid corruption by other replays."""
+        Deep copies BPs to avoid corruption by other replays.
+        Applies post-stream-smooth axes if smooth was deferred."""
+        saved_bps = [[copy.deepcopy(bp) for bp in level] for level in self.bounding_planes]
+
+        # Apply post-stream-smooth axes if smooth was deferred
+        ss_after = getattr(self, '_stream_smooth_bp_after', None)
+        if ss_after is not None and not getattr(self, '_stream_smooth_replayed', False):
+            sel_levels = getattr(self, 'stream_selected_levels', None)
+            for i in range(len(saved_bps)):
+                if i >= len(ss_after):
+                    continue
+                for k in range(len(saved_bps[i])):
+                    if sel_levels is not None and i < len(sel_levels) and k < len(sel_levels[i]):
+                        orig_j = sel_levels[i][k]
+                    else:
+                        orig_j = k
+                    if orig_j < len(ss_after[i]):
+                        snap = ss_after[i][orig_j]
+                        bp = saved_bps[i][k]
+                        bp['mean'] = snap['mean'].copy()
+                        bp['basis_x'] = snap['basis_x'].copy()
+                        bp['basis_y'] = snap['basis_y'].copy()
+                        bp['basis_z'] = snap['basis_z'].copy()
+                        if snap['bounding_plane'] is not None:
+                            bp['bounding_plane'] = snap['bounding_plane'].copy()
+
         self._level_select_anim_post = {
             'contours': [list(sc) for sc in self.contours],
-            'bounding_planes': [[copy.deepcopy(bp) for bp in level] for level in self.bounding_planes],
+            'bounding_planes': saved_bps,
             'draw_contour_stream': [list(dcs) for dcs in self.draw_contour_stream],
         }
 
@@ -13845,6 +13870,9 @@ class ContourMeshMixin:
         t = self._fiber_anim_progress / fade_dur
         t = t * t * (3.0 - 2.0 * t)
         self.transparency = 0.5 * (1.0 - t)
+        # Also update vertex color alpha so scalar field rendering fades too
+        if self.vertex_colors is not None and self.is_draw_scalar_field:
+            self.vertex_colors[:, 3] = self.transparency
         return True
 
     def _cut_contour_mesh_aware(self, contour, bp, projected_refs, stream_indices):
