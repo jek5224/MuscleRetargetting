@@ -865,7 +865,7 @@ class ContourAnimationMixin:
         self.is_draw = True
         self.is_draw_contours = True
         self.is_draw_bounding_box = True
-        self.bounding_box_draw_mode = 1  # boxes (planes + connecting lines)
+        self.bounding_box_draw_mode = 0  # planes only, no connecting lines
 
     def update_cut_animation(self, dt):
         """Advance cut animation.
