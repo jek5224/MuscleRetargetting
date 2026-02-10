@@ -2357,6 +2357,16 @@ class ContourMeshMixin:
         self._cut_num_levels_before = num_levels_before
         self._cut_replayed = False
 
+        # Pre-compute (stream, level) pairs where square_like changes between bp_before/bp_after
+        self._cut_sq_changed = set()
+        for i in range(num_streams):
+            for j in range(num_levels):
+                bb = bp_before[i][j]
+                ba = bp_after[i][j]
+                if bb is not None and ba is not None:
+                    if bb.get('square_like', False) != ba.get('square_like', False):
+                        self._cut_sq_changed.add((i, j))
+
         # Save level-mode smooth data before remapping
         self._smooth_bp_before_level = copy.deepcopy(self._smooth_bp_before) if self._smooth_bp_before else None
         self._smooth_bp_after_level = copy.deepcopy(self._smooth_bp_after) if self._smooth_bp_after else None
@@ -2488,6 +2498,7 @@ class ContourMeshMixin:
             self._apply_stream_bp_snapshot(self._cut_bp_before)
         self._contour_anim_bp_scale = {}
         self._cut_bp_switched = False
+        self._smooth_anim_bp_colors = None
         self._cut_anim_orig_transparency = self.transparency
         self._cut_anim_progress = 0.0
         self._cut_anim_active = True
@@ -2572,6 +2583,23 @@ class ContourMeshMixin:
                     wave_t = self._cut_wave_t(grow_t, j, num_levels)
                     self._contour_anim_bp_scale[j] = wave_t
 
+            # Animate square_like color transitions over Phase 2
+            sq_changed = getattr(self, '_cut_sq_changed', set())
+            if sq_changed:
+                phase2_t = max(0.0, min((progress - bp_start) / (bp_shrink_dur + bp_grow_dur), 1.0))
+                for (i, j) in sq_changed:
+                    bb = bp_before[i][j]
+                    ba = bp_after[i][j]
+                    if bb is None or ba is None:
+                        continue
+                    color_b = (1, 0, 0, 1) if bb.get('square_like', False) else (0, 0, 0, 1)
+                    color_a = (1, 0, 0, 1) if ba.get('square_like', False) else (0, 0, 0, 1)
+                    bp_t = self._cut_wave_t(phase2_t, j, num_levels)
+                    lerped = tuple((1 - bp_t) * b + bp_t * a for b, a in zip(color_b, color_a))
+                    if self._smooth_anim_bp_colors is None:
+                        self._smooth_anim_bp_colors = {}
+                    self._smooth_anim_bp_colors[(i, j)] = lerped
+
         # Done?
         if progress >= total_duration:
             self._cut_anim_active = False
@@ -2579,6 +2607,7 @@ class ContourMeshMixin:
             self._cut_anim_contour_colors = None
             self._contour_anim_bp_scale = {}
             self._cut_bp_switched = False
+            self._smooth_anim_bp_colors = None
             # Ensure final BP state
             if has_bp:
                 self._apply_stream_bp_snapshot(bp_after)
