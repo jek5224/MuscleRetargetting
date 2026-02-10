@@ -542,6 +542,7 @@ class ContourMeshMixin:
         self._fiber_anim_offsets = None         # [[float]*fibers]*streams - random start offsets
         self._fiber_anim_orig_transparency = 1.0
         self._fiber_anim_level_progress = None  # [[float]*fibers]*streams - per-fiber level progress
+        self._fiber_anim_stream_endpoints = None  # saved _stream_endpoints during defer
         self._build_fibers_replayed = False
 
         # BP color override during smooth animations {(i,j): (r,g,b,a)}
@@ -13755,6 +13756,9 @@ class ContourMeshMixin:
             self.is_draw = True
             self.is_draw_fiber_architecture = False
             self._build_fibers_replayed = False
+            # Save and clear _stream_endpoints so earlier replays don't draw connecting lines
+            self._fiber_anim_stream_endpoints = getattr(self, '_stream_endpoints', None)
+            self._stream_endpoints = None
         else:
             self._build_fibers_replayed = True
 
@@ -13808,6 +13812,11 @@ class ContourMeshMixin:
             self.contours = src
             self.bounding_planes = src_bps
             self.draw_contour_stream = [[True] * len(src[s]) for s in range(len(src))]
+
+        # Restore _stream_endpoints (cleared during defer to hide connecting lines)
+        saved_ep = getattr(self, '_fiber_anim_stream_endpoints', None)
+        if saved_ep is not None:
+            self._stream_endpoints = saved_ep
 
         self._fiber_anim_progress = 0.0
         # Initialize all fibers at level_progress=0 so first frame clips everything
