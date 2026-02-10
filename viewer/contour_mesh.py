@@ -13700,16 +13700,23 @@ class ContourMeshMixin:
             print("Run cut_streams and select_levels first")
             return
 
+        # If level select animation is still running, force-apply the selection now
+        if getattr(self, '_selected_stream_contours', None) is None and getattr(self, '_level_select_anim_active', False):
+            print(f"[build_fibers] Level select animation still running — force-applying selection")
+            self._apply_level_selection()
+            self._save_level_select_post_state()
+            self._level_select_anim_active = False
+            self._level_select_anim_scales = None
+            self._level_select_anim_unselected = None
+            self._level_select_replayed = True
+
         # Use selected data if level selection was applied
         src_contours = getattr(self, '_selected_stream_contours', None) or self.stream_contours
         src_bps = getattr(self, '_selected_stream_bounding_planes', None) or self.stream_bounding_planes
 
-        # Debug: track which data source is used
-        _using_selected = getattr(self, '_selected_stream_contours', None) is not None
         _all_levels = [len(self.stream_contours[s]) for s in range(self.max_stream_count)]
-        _sel_levels = [len(src_contours[s]) for s in range(len(src_contours))]
-        print(f"[build_fibers] defer={defer}, using={'SELECTED' if _using_selected else 'ALL'} contours")
-        print(f"[build_fibers]   selected levels: {_sel_levels}, all levels: {_all_levels}")
+        _used_levels = [len(src_contours[s]) for s in range(len(src_contours))]
+        print(f"[build_fibers] defer={defer}, all levels: {_all_levels}, using: {_used_levels}")
 
         # Apply post-stream-smooth axes if smooth was deferred
         # Apply directly to src_bps using selected-level index mapping
