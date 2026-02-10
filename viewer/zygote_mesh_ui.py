@@ -547,7 +547,7 @@ def draw_zygote_muscle_ui(v):
                         # Step 9: Build Fiber
                         if start_step <= 9 <= max_step and hasattr(obj, 'stream_contours') and obj.stream_contours is not None:
                             print(f"  [9/{max_step}] Building fibers...")
-                            obj.build_fibers(skeleton_meshes=v.zygote_skeleton_meshes)
+                            obj.build_fibers(skeleton_meshes=v.zygote_skeleton_meshes, defer=defer)
 
                         # Step 10: Resample Contours
                         if start_step <= 10 <= max_step and obj.contours is not None and len(obj.contours) > 0 and obj.bounding_planes is not None:
@@ -807,15 +807,23 @@ def draw_zygote_muscle_ui(v):
                         obj.replay_level_select_animation()
 
                 # Step 9: Build Fiber (standalone button)
-                if colored_button(f"Build Fiber##{name}", 9, col_button_width):
+                if colored_button(f"Build Fiber##{name}", 9, proc_w if animate else col_button_width):
                     if hasattr(obj, 'stream_contours') and obj.stream_contours is not None:
                         try:
-                            obj.build_fibers(skeleton_meshes=v.zygote_skeleton_meshes)
+                            if animate:
+                                obj.build_fibers(skeleton_meshes=v.zygote_skeleton_meshes, defer=False)
+                                obj.replay_fiber_animation()
+                            else:
+                                obj.build_fibers(skeleton_meshes=v.zygote_skeleton_meshes)
                         except Exception as e:
                             print(f"[{name}] Build Fibers error: {e}")
                             traceback.print_exc()
                     else:
                         print(f"[{name}] Prerequisites: Run 'Cut' first")
+                if animate and getattr(obj, '_fiber_anim_waypoints', None) is not None and getattr(obj, '_level_select_replayed', False):
+                    imgui.same_line()
+                    if imgui.button(f">##{name}_fiber_replay", width=replay_w):
+                        obj.replay_fiber_animation()
 
                 # Step 10: Resample Contours
                 if colored_button(f"Resample Contours##{name}", 10, col_button_width):
@@ -2946,6 +2954,9 @@ def _delete_fiber(v, name, obj, stream_idx, fiber_idx, is_post_stream):
     # Recompute waypoints and MVC weights for all levels in this stream
     _recompute_fiber_data_for_stream(v, obj, stream_idx, is_post_stream)
 
+    # Resave animation data so replay uses updated fiber structure
+    obj._save_fiber_anim_data()
+
     print("  Fiber deleted successfully")
 
 
@@ -2988,6 +2999,9 @@ def _add_fiber(v, name, obj, stream_idx, position, is_post_stream):
 
     # Recompute waypoints and MVC weights for all levels in this stream
     _recompute_fiber_data_for_stream(v, obj, stream_idx, is_post_stream)
+
+    # Resave animation data so replay uses updated fiber structure
+    obj._save_fiber_anim_data()
 
     print("  Fiber added successfully")
 
@@ -4841,7 +4855,8 @@ def _render_manual_cut_windows(v):
                                         # Step 9: Build Fiber
                                         if start_step <= 9 <= max_step and hasattr(obj, 'stream_contours') and obj.stream_contours is not None:
                                             print(f"  [9/{max_step}] Building fibers...")
-                                            obj.build_fibers(skeleton_meshes=v.zygote_skeleton_meshes)
+                                            _defer = getattr(obj, 'animate_process', False)
+                                            obj.build_fibers(skeleton_meshes=v.zygote_skeleton_meshes, defer=_defer)
 
                                         # Step 10: Resample Contours
                                         if start_step <= 10 <= max_step and obj.contours is not None and len(obj.contours) > 0 and obj.bounding_planes is not None:
@@ -5220,10 +5235,11 @@ def _render_level_select_windows(v):
                 if start_step <= max_step:
                     print(f"[{name}] Auto-resuming pipeline from step {start_step} to {max_step}...")
                     try:
+                        _defer = getattr(obj, 'animate_process', False)
                         # Step 9: Build Fiber
                         if start_step <= 9 <= max_step and hasattr(obj, 'stream_contours') and obj.stream_contours is not None:
                             print(f"  [9/{max_step}] Building fibers...")
-                            obj.build_fibers(skeleton_meshes=v.zygote_skeleton_meshes)
+                            obj.build_fibers(skeleton_meshes=v.zygote_skeleton_meshes, defer=_defer)
 
                         # Step 10: Resample Contours
                         if start_step <= 10 <= max_step and obj.contours is not None and len(obj.contours) > 0 and obj.bounding_planes is not None:

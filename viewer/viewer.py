@@ -1024,6 +1024,8 @@ class GLFWApp():
                     obj.update_stream_smooth_animation(1.0 / 30.0)
                 if getattr(obj, '_level_select_anim_active', False):
                     obj.update_level_select_animation(1.0 / 30.0)
+                if getattr(obj, '_fiber_anim_active', False):
+                    obj.update_fiber_animation(1.0 / 30.0)
 
             # Auto-rotate around focused muscle
             if self.auto_rotate:

@@ -1865,6 +1865,9 @@ class FiberArchitectureMixin:
         glDisable(GL_LIGHTING)
         glEnableClientState(GL_VERTEX_ARRAY)
 
+        # Animation level progress for fiber growth
+        anim_lp = getattr(self, '_fiber_anim_level_progress', None)
+
         # Collect waypoints by highlight status
         normal_pts = []
         highlight_pts = []
@@ -1873,10 +1876,15 @@ class FiberArchitectureMixin:
             if self.draw_contour_stream is not None and stream_idx < len(self.draw_contour_stream) and self.draw_contour_stream[stream_idx]:
                 for level_idx, waypoints in enumerate(waypoint_group):
                     is_highlighted = (highlight_stream == stream_idx and highlight_level == level_idx)
-                    if is_highlighted:
-                        highlight_pts.extend(waypoints)
-                    else:
-                        normal_pts.extend(waypoints)
+                    for fi, wp in enumerate(waypoints):
+                        # Animation clipping: skip waypoints beyond fiber's current progress
+                        if anim_lp is not None and stream_idx < len(anim_lp) and fi < len(anim_lp[stream_idx]):
+                            if level_idx > anim_lp[stream_idx][fi]:
+                                continue
+                        if is_highlighted:
+                            highlight_pts.append(wp)
+                        else:
+                            normal_pts.append(wp)
 
         # Draw normal waypoints (red)
         if len(normal_pts) > 0:
@@ -1901,9 +1909,21 @@ class FiberArchitectureMixin:
         for stream_idx, waypoint_group in enumerate(self.waypoints):
             if self.draw_contour_stream is not None and stream_idx < len(self.draw_contour_stream) and self.draw_contour_stream[stream_idx]:
                 for contour_idx in range(len(waypoint_group) - 1):
-                    for p1, p2 in zip(waypoint_group[contour_idx], waypoint_group[contour_idx + 1]):
-                        fiber_lines.append(p1)
-                        fiber_lines.append(p2)
+                    wps_curr = waypoint_group[contour_idx]
+                    wps_next = waypoint_group[contour_idx + 1]
+                    for fi in range(min(len(wps_curr), len(wps_next))):
+                        if anim_lp is not None and stream_idx < len(anim_lp) and fi < len(anim_lp[stream_idx]):
+                            fp = anim_lp[stream_idx][fi]
+                            if contour_idx >= fp:
+                                continue  # Not reached yet
+                            elif contour_idx + 1 <= fp:
+                                fiber_lines.extend([wps_curr[fi], wps_next[fi]])  # Full segment
+                            else:
+                                frac = fp - contour_idx  # Partial segment
+                                interp = wps_curr[fi] + (wps_next[fi] - wps_curr[fi]) * frac
+                                fiber_lines.extend([wps_curr[fi], interp])
+                        else:
+                            fiber_lines.extend([wps_curr[fi], wps_next[fi]])  # No animation
 
         if len(fiber_lines) > 0:
             lines = np.array(fiber_lines, dtype=np.float32)

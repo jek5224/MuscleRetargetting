@@ -535,6 +535,15 @@ class ContourMeshMixin:
         self._level_select_replayed = False
         self._level_select_anim_pending_resume = False
 
+        # Build fibers animation state
+        self._fiber_anim_active = False
+        self._fiber_anim_progress = 0.0
+        self._fiber_anim_waypoints = None      # Deep copy of waypoints for replay
+        self._fiber_anim_offsets = None         # [[float]*fibers]*streams - random start offsets
+        self._fiber_anim_orig_transparency = 1.0
+        self._fiber_anim_level_progress = None  # [[float]*fibers]*streams - per-fiber level progress
+        self._build_fibers_replayed = False
+
         # BP color override during smooth animations {(i,j): (r,g,b,a)}
         self._smooth_anim_bp_colors = None
 
@@ -13668,7 +13677,7 @@ class ContourMeshMixin:
         self.bounding_planes = temp_bps
         self.draw_contour_stream = [[True] * len(temp_contours[s]) for s in range(max_stream_count)]
 
-    def build_fibers(self, skeleton_meshes=None):
+    def build_fibers(self, skeleton_meshes=None, defer=False):
         """
         Step 3: Build final fiber structure from selected streams.
 
@@ -13706,7 +13715,116 @@ class ContourMeshMixin:
         # Call post-processing to compute fiber architecture
         self._find_contour_stream_post_process(skeleton_meshes)
 
+        # Save animation data (waypoints + random offsets)
+        self._save_fiber_anim_data()
+
+        if defer:
+            # Restore pre-fiber visual state for later replay
+            self.is_draw = True
+            self.is_draw_fiber_architecture = False
+            self._build_fibers_replayed = False
+        else:
+            self._build_fibers_replayed = True
+
         print(f"Build fibers complete: {max_stream_count} streams, levels: {level_counts}")
+
+    def _save_fiber_anim_data(self):
+        """Save waypoints and generate random offsets for fiber animation."""
+        if self.waypoints is None:
+            return
+        import random
+        # Deep copy waypoints
+        self._fiber_anim_waypoints = [
+            [[np.array(wp).copy() for wp in level] for level in stream]
+            for stream in self.waypoints
+        ]
+        # Random start offset per fiber (0 to 0.5s)
+        self._fiber_anim_offsets = []
+        for stream_wps in self.waypoints:
+            num_fibers = len(stream_wps[0]) if len(stream_wps) > 0 else 0
+            self._fiber_anim_offsets.append(
+                [random.uniform(0, 0.5) for _ in range(num_fibers)]
+            )
+        # Save pre-build transparency
+        self._fiber_anim_orig_transparency = getattr(self, 'transparency', 1.0)
+
+    def replay_fiber_animation(self):
+        """Start fiber build animation: mesh fades, fibers grow origin->insertion."""
+        if self._fiber_anim_waypoints is None:
+            self._build_fibers_replayed = True
+            return
+
+        # Restore waypoints from saved data
+        self.waypoints = [
+            [[np.array(wp).copy() for wp in level] for level in stream]
+            for stream in self._fiber_anim_waypoints
+        ]
+
+        # Set starting state: mesh visible, fibers drawn but clipped at progress=0
+        self.transparency = self._fiber_anim_orig_transparency
+        if self.vertex_colors is not None and self.is_draw_scalar_field:
+            self.vertex_colors[:, 3] = self.transparency
+        self.is_draw = True
+        self.is_draw_fiber_architecture = True
+
+        # Ensure stream-mode draw_contour_stream
+        if hasattr(self, 'stream_contours') and self.stream_contours is not None:
+            src = getattr(self, '_selected_stream_contours', None) or self.stream_contours
+            self.draw_contour_stream = [[True] * len(src[s]) for s in range(len(src))]
+
+        self._fiber_anim_progress = 0.0
+        self._fiber_anim_level_progress = []  # Initialize empty, computed in update
+        self._fiber_anim_active = True
+
+    def update_fiber_animation(self, dt):
+        """Update fiber build animation each frame."""
+        if not self._fiber_anim_active:
+            return False
+
+        self._fiber_anim_progress += dt
+        progress = self._fiber_anim_progress
+
+        # Phase 1: Mesh transparency fade (0-0.5s)
+        fade_dur = 0.5
+        target_alpha = 0.1
+        orig_alpha = self._fiber_anim_orig_transparency
+        if progress < fade_dur:
+            t = progress / fade_dur
+            t = t * t * (3.0 - 2.0 * t)  # smoothstep
+            self.transparency = orig_alpha + (target_alpha - orig_alpha) * t
+        else:
+            self.transparency = target_alpha
+        if self.vertex_colors is not None and self.is_draw_scalar_field:
+            self.vertex_colors[:, 3] = self.transparency
+
+        # Phase 2: Per-fiber growth
+        fiber_grow_dur = 2.5
+        total_dur = 3.0  # fiber_grow_dur + max_offset(0.5)
+
+        self._fiber_anim_level_progress = []
+        for stream_idx, stream_wps in enumerate(self._fiber_anim_waypoints):
+            num_levels = len(stream_wps)
+            offsets = self._fiber_anim_offsets[stream_idx]
+            stream_prog = []
+            for fi, offset in enumerate(offsets):
+                fiber_t = max(0.0, min((progress - offset) / fiber_grow_dur, 1.0))
+                level_prog = fiber_t * max(num_levels - 1, 0)
+                stream_prog.append(level_prog)
+            self._fiber_anim_level_progress.append(stream_prog)
+
+        # Done
+        if progress >= total_dur:
+            self._fiber_anim_active = False
+            self._build_fibers_replayed = True
+            self._fiber_anim_level_progress = None
+            self.transparency = target_alpha
+            if self.vertex_colors is not None and self.is_draw_scalar_field:
+                self.vertex_colors[:, 3] = self.transparency
+            self.is_draw = False  # Match post-process end state
+            self.is_draw_fiber_architecture = True
+            return False
+
+        return True
 
     def _cut_contour_mesh_aware(self, contour, bp, projected_refs, stream_indices):
         """
