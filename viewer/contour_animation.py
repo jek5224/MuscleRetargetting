@@ -158,6 +158,7 @@ class ContourAnimationMixin:
         self._anim_highlight_fades = {}
         self._contour_anim_progress = 0.0
         self._contour_anim_active = True
+        self.is_draw = True
         self.is_draw_contours = True
         self.is_draw_bounding_box = True
 
@@ -251,7 +252,9 @@ class ContourAnimationMixin:
         self._fill_gaps_anim_step = 0
         self._fill_gaps_anim_progress = 0.0
         self._fill_gaps_anim_active = True
+        self.is_draw = True
         self.is_draw_contours = True
+        self.is_draw_bounding_box = True
 
     def update_fill_gaps_animation(self, dt):
         """Advance fill gaps animation. Reveals inserted contours one by one with highlight."""
@@ -324,7 +327,9 @@ class ContourAnimationMixin:
         self._transitions_anim_step = 0
         self._transitions_anim_progress = 0.0
         self._transitions_anim_active = True
+        self.is_draw = True
         self.is_draw_contours = True
+        self.is_draw_bounding_box = True
 
     def update_transitions_animation(self, dt):
         """Advance transitions animation. Reveals inserted contours one by one with highlight."""
@@ -545,6 +550,9 @@ class ContourAnimationMixin:
         self._contour_anim_bp_scale = {}
         self._smooth_anim_progress = 0.0
         self._smooth_anim_active = True
+        self.is_draw = True
+        self.is_draw_contours = True
+        self.is_draw_bounding_box = True
         self._smooth_anim_orig_transparency = getattr(self, 'transparency', 1.0)
 
     def update_smooth_animation(self, dt):
@@ -700,6 +708,9 @@ class ContourAnimationMixin:
         self._contour_anim_bp_scale = {}
         self._stream_smooth_anim_progress = 0.0
         self._stream_smooth_anim_active = True
+        self.is_draw = True
+        self.is_draw_contours = True
+        self.is_draw_bounding_box = True
 
     def update_stream_smooth_animation(self, dt):
         """Advance stream smooth animation in three phases (no transparency fade).
@@ -851,6 +862,9 @@ class ContourAnimationMixin:
         self._cut_anim_orig_transparency = self.transparency
         self._cut_anim_progress = 0.0
         self._cut_anim_active = True
+        self.is_draw = True
+        self.is_draw_contours = True
+        self.is_draw_bounding_box = True
 
     def update_cut_animation(self, dt):
         """Advance cut animation.
@@ -1152,6 +1166,9 @@ class ContourAnimationMixin:
         self._level_select_anim_scales = {key: 1.0 for key in unselected}
         self._level_select_anim_progress = 0.0
         self._level_select_anim_active = True
+        self.is_draw = True
+        self.is_draw_contours = True
+        self.is_draw_bounding_box = True
 
         print(f"Replaying level select animation: {len(unselected)} unselected contours")
 

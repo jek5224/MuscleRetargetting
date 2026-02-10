@@ -3014,7 +3014,7 @@ class MuscleMeshMixin:
         self.bounding_planes_discarded = None
         self.draw_contour_stream = None
         self.is_draw_contours = False
-        self.is_draw_bounding_box = False
+        self.is_draw_bounding_box = True
 
         # Contour animation state
         self._contour_anim_active = False
@@ -3222,6 +3222,7 @@ class MuscleMeshMixin:
         """Start replaying the scalar field color flood animation."""
         if self._scalar_anim_target_colors is None:
             return
+        self.is_draw = True
         self._scalar_anim_progress = 0.0
         self._scalar_anim_active = True
         self.is_draw_scalar_field = True
