@@ -1440,7 +1440,7 @@ class ContourAnimationMixin:
             self._resample_anim_active = False
             self._resample_anim_point_sizes = {}
             self._resample_replayed = True
-            self.is_draw_resampled_vertices = True
+            self.is_draw_resampled_vertices = False
             return False
 
         return True

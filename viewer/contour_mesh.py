@@ -5552,7 +5552,7 @@ class ContourMeshMixin(ContourAnimationMixin):
             self.is_draw_resampled_vertices = False
         else:
             self._resample_replayed = True
-            self.is_draw_resampled_vertices = True
+            self.is_draw_resampled_vertices = False
 
         # Restore level-mode if we swapped
         if need_swap:
