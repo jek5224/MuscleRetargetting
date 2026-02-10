@@ -7058,7 +7058,7 @@ class ContourMeshMixin(ContourAnimationMixin):
 
         return aligned
 
-    def build_contour_mesh(self):
+    def build_contour_mesh(self, defer=False):
         """
         Build a triangle mesh from contours after find_contour_stream has been called.
         Handles merged streams properly by sharing vertices and stitching at merge points.
@@ -7076,9 +7076,32 @@ class ContourMeshMixin(ContourAnimationMixin):
           IDENTICAL positions (not just close) across different streams
         - Deduplication with eps=1e-6 merges these into single vertices
         - This ensures the resulting tet mesh has proper connectivity
+
+        Args:
+            defer: bool - if True, classify for animation and hide mesh for deferred replay
         """
+        # Mode swap: if in deferred level-mode, swap to stream data first
+        need_swap = (hasattr(self, 'stream_contours') and self.stream_contours is not None
+                     and self.contours is not self.stream_contours)
+        saved_contours = None
+        saved_bps = None
+        saved_dcs = None
+        if need_swap:
+            saved_contours = self.contours
+            saved_bps = self.bounding_planes
+            saved_dcs = self.draw_contour_stream
+            src = getattr(self, '_selected_stream_contours', None) or self.stream_contours
+            src_bps = getattr(self, '_selected_stream_bounding_planes', None) or self.stream_bounding_planes
+            self.contours = src
+            self.bounding_planes = src_bps
+            self.draw_contour_stream = [[True] * len(src[s]) for s in range(len(src))]
+
         if self.contours is None or len(self.contours) == 0:
             print("No contours found. Run find_contours, resample_contours, and find_contour_stream first.")
+            if need_swap:
+                self.contours = saved_contours
+                self.bounding_planes = saved_bps
+                self.draw_contour_stream = saved_dcs
             return
 
         # Clear existing mesh to force rebuild
@@ -7342,8 +7365,24 @@ class ContourMeshMixin(ContourAnimationMixin):
         # Compute normals
         self._compute_contour_mesh_normals()
 
+        # Classify faces into bands for animation
+        self._classify_mesh_faces_into_bands()
+
+        if defer:
+            self._build_mesh_replayed = False
+            self.is_draw_contour_mesh = False
+        else:
+            self._build_mesh_replayed = True
+            self.is_draw_contour_mesh = True
+
         print(f"Built contour mesh: {len(self.contour_mesh_vertices)} vertices, "
               f"{len(self.contour_mesh_faces)} faces from {num_streams} streams")
+
+        # Restore level-mode refs if we swapped
+        if need_swap:
+            self.contours = saved_contours
+            self.bounding_planes = saved_bps
+            self.draw_contour_stream = saved_dcs
 
     def _close_contour_mesh_gaps(self, num_levels, stream_max_levels):
         """
@@ -7768,8 +7807,139 @@ class ContourMeshMixin(ContourAnimationMixin):
         norms[norms < 1e-10] = 1
         self.contour_mesh_normals = normals / norms
 
+    def _draw_contour_mesh_animated(self):
+        """Draw the contour mesh animation: wireframe sweep → face fill → settle."""
+        if self.contour_mesh_vertices is None or self.contour_mesh_faces is None:
+            return
+
+        verts = self.contour_mesh_vertices
+        faces = self.contour_mesh_faces
+        normals = self.contour_mesh_normals
+        color = self.contour_mesh_color
+        target_alpha = self.contour_mesh_transparency
+        num_bands = self._mesh_anim_num_bands
+        face_bands = self._mesh_anim_face_bands
+        band_edges = self._mesh_anim_band_edges
+        phase = self._mesh_anim_phase
+        progress = self._mesh_anim_progress
+
+        wireframe_dur = 2.0
+        fill_dur = 1.5
+        settle_dur = 0.5
+
+        def smoothstep(t):
+            t = max(0.0, min(1.0, t))
+            return t * t * (3.0 - 2.0 * t)
+
+        glPushMatrix()
+        glEnable(GL_BLEND)
+        glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
+
+        # Phase 0: Wireframe sweep — reveal bands one by one origin→insertion
+        if phase == 0:
+            t = progress / wireframe_dur if wireframe_dur > 0 else 1.0
+            revealed_bands = min(int(t * num_bands) + 1, num_bands)
+
+            glDisable(GL_LIGHTING)
+            glLineWidth(1.5)
+            glColor4f(color[0], color[1], color[2], 1.0)
+            glBegin(GL_LINES)
+            for band_idx in range(revealed_bands):
+                if band_idx < len(band_edges):
+                    for v0, v1 in band_edges[band_idx]:
+                        glVertex3fv(verts[v0])
+                        glVertex3fv(verts[v1])
+            glEnd()
+            glEnable(GL_LIGHTING)
+
+        # Phase 1: Face fill — all wireframe visible, faces fade in
+        elif phase == 1:
+            fill_t = (progress - wireframe_dur) / fill_dur if fill_dur > 0 else 1.0
+            face_alpha = smoothstep(fill_t) * target_alpha
+
+            # Draw wireframe (full)
+            glDisable(GL_LIGHTING)
+            glLineWidth(1.5)
+            glColor4f(color[0], color[1], color[2], 1.0)
+            glBegin(GL_LINES)
+            for band_idx in range(num_bands):
+                if band_idx < len(band_edges):
+                    for v0, v1 in band_edges[band_idx]:
+                        glVertex3fv(verts[v0])
+                        glVertex3fv(verts[v1])
+            glEnd()
+            glEnable(GL_LIGHTING)
+
+            # Draw faces with fading alpha (two-pass for transparency)
+            glEnable(GL_COLOR_MATERIAL)
+            glColorMaterial(GL_FRONT_AND_BACK, GL_AMBIENT_AND_DIFFUSE)
+            glColor4f(color[0], color[1], color[2], face_alpha)
+
+            def draw_all_faces():
+                glBegin(GL_TRIANGLES)
+                for face in faces:
+                    for vi in face:
+                        if normals is not None:
+                            glNormal3fv(normals[vi])
+                        glVertex3fv(verts[vi])
+                glEnd()
+
+            glEnable(GL_CULL_FACE)
+            glCullFace(GL_FRONT)
+            draw_all_faces()
+            glCullFace(GL_BACK)
+            draw_all_faces()
+            glDisable(GL_CULL_FACE)
+
+        # Phase 2: Settle — faces at target alpha, wireframe fading out
+        elif phase == 2:
+            settle_t = (progress - wireframe_dur - fill_dur) / settle_dur if settle_dur > 0 else 1.0
+            wire_alpha = 1.0 - smoothstep(settle_t)
+
+            # Draw faces at target alpha (two-pass)
+            glEnable(GL_LIGHTING)
+            glEnable(GL_COLOR_MATERIAL)
+            glColorMaterial(GL_FRONT_AND_BACK, GL_AMBIENT_AND_DIFFUSE)
+            glColor4f(color[0], color[1], color[2], target_alpha)
+
+            def draw_all_faces():
+                glBegin(GL_TRIANGLES)
+                for face in faces:
+                    for vi in face:
+                        if normals is not None:
+                            glNormal3fv(normals[vi])
+                        glVertex3fv(verts[vi])
+                glEnd()
+
+            glEnable(GL_CULL_FACE)
+            glCullFace(GL_FRONT)
+            draw_all_faces()
+            glCullFace(GL_BACK)
+            draw_all_faces()
+            glDisable(GL_CULL_FACE)
+
+            # Draw wireframe fading out on top
+            if wire_alpha > 0.01:
+                glDisable(GL_LIGHTING)
+                glLineWidth(1.5)
+                glColor4f(color[0], color[1], color[2], wire_alpha)
+                glBegin(GL_LINES)
+                for band_idx in range(num_bands):
+                    if band_idx < len(band_edges):
+                        for v0, v1 in band_edges[band_idx]:
+                            glVertex3fv(verts[v0])
+                            glVertex3fv(verts[v1])
+                glEnd()
+                glEnable(GL_LIGHTING)
+
+        glPopMatrix()
+
     def draw_contour_mesh(self):
         """Draw the contour mesh using OpenGL."""
+        if getattr(self, '_mesh_anim_active', False):
+            self._draw_contour_mesh_animated()
+            return
+
         if self.contour_mesh_vertices is None or self.contour_mesh_faces is None:
             return
 

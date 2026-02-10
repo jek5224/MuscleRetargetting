@@ -3138,6 +3138,15 @@ class MuscleMeshMixin:
         self.contour_mesh_normals = None
         self.is_draw_contour_mesh = False
 
+        # Contour mesh animation
+        self._mesh_anim_active = False
+        self._mesh_anim_progress = 0.0
+        self._mesh_anim_phase = 0
+        self._mesh_anim_num_bands = 0
+        self._mesh_anim_face_bands = None
+        self._mesh_anim_band_edges = None
+        self._build_mesh_replayed = False
+
         # Tetrahedron mesh
         self.tet_vertices = None
         self.tet_faces = None  # Backwards compat alias to tet_render_faces

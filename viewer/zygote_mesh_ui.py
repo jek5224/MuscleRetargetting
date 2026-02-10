@@ -561,7 +561,9 @@ def draw_zygote_muscle_ui(v):
                         # Step 11: Build Contour Mesh
                         if start_step <= 11 <= max_step and obj.contours is not None and len(obj.contours) > 0 and obj.draw_contour_stream is not None:
                             print(f"  [11/{max_step}] Building Contour Mesh...")
-                            obj.build_contour_mesh()
+                            obj.build_contour_mesh(defer=defer)
+                            if defer:
+                                obj._resample_replayed = False
 
                         # Step 12: Tetrahedralize
                         if start_step <= 12 <= max_step and obj.contour_mesh_vertices is not None:
@@ -840,14 +842,20 @@ def draw_zygote_muscle_ui(v):
                         obj.replay_resample_animation()
 
                 # Step 11: Build Contour Mesh
-                if colored_button(f"Build Contour Mesh##{name}", 11, col_button_width):
+                if colored_button(f"Build Contour Mesh##{name}", 11, proc_w if animate else col_button_width):
                     if obj.contours is not None and len(obj.contours) > 0 and obj.draw_contour_stream is not None:
                         try:
-                            obj.build_contour_mesh()
+                            obj.build_contour_mesh(defer=animate)
                         except Exception as e:
                             print(f"[{name}] Build Contour Mesh error: {e}")
+                            import traceback
+                            traceback.print_exc()
                     else:
                         print(f"[{name}] Prerequisites: Run 'Build Fiber' first")
+                if animate and getattr(obj, '_mesh_anim_face_bands', None) is not None and getattr(obj, '_resample_replayed', False) and not getattr(obj, '_resample_anim_active', False):
+                    imgui.same_line()
+                    if imgui.button(f">##{name}_mesh_replay", width=replay_w):
+                        obj.replay_mesh_animation()
 
                 # Step 12: Tetrahedralize
                 if colored_button(f"Tetrahedralize##{name}", 12, col_button_width):
@@ -4888,7 +4896,9 @@ def _render_manual_cut_windows(v):
                                         # Step 11: Build Contour Mesh
                                         if start_step <= 11 <= max_step and obj.contours is not None and len(obj.contours) > 0 and obj.draw_contour_stream is not None:
                                             print(f"  [11/{max_step}] Building Contour Mesh...")
-                                            obj.build_contour_mesh()
+                                            obj.build_contour_mesh(defer=_defer)
+                                            if _defer:
+                                                obj._resample_replayed = False
 
                                         # Step 12: Tetrahedralize
                                         if start_step <= 12 <= max_step and obj.contour_mesh_vertices is not None:
@@ -5275,7 +5285,9 @@ def _render_level_select_windows(v):
                         # Step 11: Build Contour Mesh
                         if start_step <= 11 <= max_step and obj.contours is not None and len(obj.contours) > 0 and obj.draw_contour_stream is not None:
                             print(f"  [11/{max_step}] Building Contour Mesh...")
-                            obj.build_contour_mesh()
+                            obj.build_contour_mesh(defer=_defer)
+                            if _defer:
+                                obj._resample_replayed = False
 
                         # Step 12: Tetrahedralize
                         if start_step <= 12 <= max_step and obj.contour_mesh_vertices is not None:

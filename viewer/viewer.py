@@ -658,7 +658,7 @@ class GLFWApp():
                     obj.draw_bounding_box()
                 if obj.is_draw_edges:
                     obj.draw_edges()
-                if obj.is_draw_contour_mesh:
+                if obj.is_draw_contour_mesh or getattr(obj, '_mesh_anim_active', False):
                     obj.draw_contour_mesh()
                 if obj.is_draw_constraints:
                     obj.draw_constraints()
@@ -1032,6 +1032,8 @@ class GLFWApp():
                     obj.update_fiber_animation(1.0 / 30.0)
                 if getattr(obj, '_resample_anim_active', False):
                     obj.update_resample_animation(1.0 / 30.0)
+                if getattr(obj, '_mesh_anim_active', False):
+                    obj.update_mesh_animation(1.0 / 30.0)
 
             # Auto-rotate around focused muscle
             if self.auto_rotate:

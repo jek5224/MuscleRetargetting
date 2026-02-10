@@ -84,6 +84,15 @@ class ContourAnimationMixin:
         self._resample_anim_data = None        # Deep copy of contours_resampled for replay
         self.is_draw_resampled_vertices = False
 
+        # Build contour mesh animation state
+        self._mesh_anim_active = False
+        self._mesh_anim_progress = 0.0
+        self._mesh_anim_phase = 0       # 0=wireframe, 1=fill, 2=settle
+        self._mesh_anim_num_bands = 0
+        self._mesh_anim_face_bands = None  # np.array[F] → band_idx
+        self._mesh_anim_band_edges = None  # list[band] = [(v0,v1), ...]
+        self._build_mesh_replayed = False
+
         # BP color override during smooth animations {(i,j): (r,g,b,a)}
         self._smooth_anim_bp_colors = None
 
@@ -1445,6 +1454,105 @@ class ContourAnimationMixin:
 
         return True
 
+    # ── Build Contour Mesh Animation ─────────────────────────────────
+
+    def _classify_mesh_faces_into_bands(self):
+        """Classify mesh faces into level bands using vertex_contour_level.
+        Each face's band = min level of its vertices. Extracts unique edges per band."""
+        if self.contour_mesh_faces is None or self.vertex_contour_level is None:
+            return
+
+        num_faces = len(self.contour_mesh_faces)
+        face_bands = np.zeros(num_faces, dtype=np.int32)
+
+        for fi, face in enumerate(self.contour_mesh_faces):
+            levels = self.vertex_contour_level[face]
+            # Guard for -1 (gap centroids): use max of non-negative, or 0
+            valid = levels[levels >= 0]
+            if len(valid) > 0:
+                face_bands[fi] = int(np.min(valid))
+            else:
+                face_bands[fi] = 0
+
+        num_bands = int(np.max(face_bands)) + 1 if num_faces > 0 else 0
+
+        # Extract unique edges per band
+        band_edges = [set() for _ in range(num_bands)]
+        for fi, face in enumerate(self.contour_mesh_faces):
+            band = face_bands[fi]
+            for k in range(3):
+                vi, vj = int(face[k]), int(face[(k + 1) % 3])
+                edge = (min(vi, vj), max(vi, vj))
+                band_edges[band].add(edge)
+
+        # Convert sets to sorted lists
+        self._mesh_anim_band_edges = [sorted(edges) for edges in band_edges]
+        self._mesh_anim_face_bands = face_bands
+        self._mesh_anim_num_bands = num_bands
+
+    def replay_mesh_animation(self):
+        """Start the build contour mesh animation: wireframe sweep → face fill → settle."""
+        if self.contour_mesh_faces is None or self.contour_mesh_vertices is None:
+            self._build_mesh_replayed = True
+            return
+
+        # Set contours/BPs to post-selection state (same pattern as resample/fiber replay)
+        src = getattr(self, '_selected_stream_contours', None) or \
+              (self.stream_contours if hasattr(self, 'stream_contours') and self.stream_contours is not None else None)
+        src_bps = getattr(self, '_selected_stream_bounding_planes', None) or \
+                  (self.stream_bounding_planes if hasattr(self, 'stream_bounding_planes') and self.stream_bounding_planes is not None else None)
+        if src is not None:
+            self.contours = src
+            self.bounding_planes = src_bps
+            self.draw_contour_stream = [[True] * len(src[s]) for s in range(len(src))]
+
+        self._classify_mesh_faces_into_bands()
+        if self._mesh_anim_num_bands == 0:
+            self._build_mesh_replayed = True
+            self.is_draw_contour_mesh = True
+            return
+
+        # Start state: contours+fibers visible, mesh hidden
+        self.is_draw_contours = True
+        self.is_draw_bounding_box = True
+        self.bounding_box_draw_mode = 1
+        self.is_draw_fiber_architecture = True
+        self.is_draw_resampled_vertices = False
+        self.is_draw_contour_mesh = False
+        self._mesh_anim_progress = 0.0
+        self._mesh_anim_phase = 0
+        self._mesh_anim_active = True
+
+    def update_mesh_animation(self, dt):
+        """Update build contour mesh animation: wireframe sweep → face fill → settle."""
+        if not self._mesh_anim_active:
+            return False
+
+        self._mesh_anim_progress += dt
+
+        wireframe_dur = 2.0
+        fill_dur = 1.5
+        settle_dur = 0.5
+        total_dur = wireframe_dur + fill_dur + settle_dur
+
+        t = self._mesh_anim_progress
+        if t < wireframe_dur:
+            self._mesh_anim_phase = 0  # wireframe sweep
+        elif t < wireframe_dur + fill_dur:
+            self._mesh_anim_phase = 1  # face fill
+        elif t < total_dur:
+            self._mesh_anim_phase = 2  # settle (wireframe fade out)
+        else:
+            # Completion
+            self._mesh_anim_active = False
+            self._mesh_anim_phase = 0
+            self._mesh_anim_progress = 0.0
+            self.is_draw_contour_mesh = True
+            self._build_mesh_replayed = True
+            return False
+
+        return True
+
     # ── Persistence ─────────────────────────────────────────────────
 
     def save_animation_state(self, filepath):
@@ -1545,6 +1653,17 @@ class ContourAnimationMixin:
         state['contours_resampled_fixed'] = getattr(self, 'contours_resampled_fixed', None)
         state['contours_resampled_types'] = getattr(self, 'contours_resampled_types', None)
         state['is_draw_resampled_vertices'] = getattr(self, 'is_draw_resampled_vertices', False)
+
+        # Build contour mesh data
+        state['contour_mesh_vertices'] = getattr(self, 'contour_mesh_vertices', None)
+        state['contour_mesh_faces'] = getattr(self, 'contour_mesh_faces', None)
+        state['contour_mesh_normals'] = getattr(self, 'contour_mesh_normals', None)
+        state['vertex_contour_level'] = getattr(self, 'vertex_contour_level', None)
+        state['contour_mesh_vertices_original'] = getattr(self, 'contour_mesh_vertices_original', None)
+        state['_mesh_anim_face_bands'] = getattr(self, '_mesh_anim_face_bands', None)
+        state['_mesh_anim_band_edges'] = getattr(self, '_mesh_anim_band_edges', None)
+        state['_mesh_anim_num_bands'] = getattr(self, '_mesh_anim_num_bands', 0)
+        state['is_draw_contour_mesh'] = getattr(self, 'is_draw_contour_mesh', False)
 
         # Pipeline state
         state['max_stream_count'] = getattr(self, 'max_stream_count', None)
@@ -1669,6 +1788,17 @@ class ContourAnimationMixin:
         self.contours_resampled_types = state.get('contours_resampled_types')
         self.is_draw_resampled_vertices = state.get('is_draw_resampled_vertices', False)
 
+        # Build contour mesh data
+        self.contour_mesh_vertices = state.get('contour_mesh_vertices')
+        self.contour_mesh_faces = state.get('contour_mesh_faces')
+        self.contour_mesh_normals = state.get('contour_mesh_normals')
+        self.vertex_contour_level = state.get('vertex_contour_level')
+        self.contour_mesh_vertices_original = state.get('contour_mesh_vertices_original')
+        self._mesh_anim_face_bands = state.get('_mesh_anim_face_bands')
+        self._mesh_anim_band_edges = state.get('_mesh_anim_band_edges')
+        self._mesh_anim_num_bands = state.get('_mesh_anim_num_bands', 0)
+        self.is_draw_contour_mesh = state.get('is_draw_contour_mesh', False)
+
         # Pipeline state
         if state.get('max_stream_count') is not None:
             self.max_stream_count = state['max_stream_count']
@@ -1723,6 +1853,10 @@ class ContourAnimationMixin:
         self._resample_anim_progress = 0.0
         self._resample_anim_point_sizes = {}
         self._resample_replayed = False
+        self._mesh_anim_active = False
+        self._mesh_anim_progress = 0.0
+        self._mesh_anim_phase = 0
+        self._build_mesh_replayed = False
 
         # ── Restore deferred visual state so everything looks pre-processed ──
 
@@ -1789,5 +1923,9 @@ class ContourAnimationMixin:
         # 6. Resample: hide resampled vertices for deferred replay
         if self._resample_anim_data is not None:
             self.is_draw_resampled_vertices = False
+
+        # 7. Contour mesh: hide mesh for deferred replay
+        if self._mesh_anim_face_bands is not None:
+            self.is_draw_contour_mesh = False
 
         print(f"Animation state loaded from {filepath}")
