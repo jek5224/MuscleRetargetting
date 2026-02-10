@@ -13709,6 +13709,13 @@ class ContourMeshMixin:
         src_contours = getattr(self, '_selected_stream_contours', None) or self.stream_contours
         src_bps = getattr(self, '_selected_stream_bounding_planes', None) or self.stream_bounding_planes
 
+        # Debug: track which data source is used
+        _using_selected = getattr(self, '_selected_stream_contours', None) is not None
+        _all_levels = [len(self.stream_contours[s]) for s in range(self.max_stream_count)]
+        _sel_levels = [len(src_contours[s]) for s in range(len(src_contours))]
+        print(f"[build_fibers] defer={defer}, using={'SELECTED' if _using_selected else 'ALL'} contours")
+        print(f"[build_fibers]   selected levels: {_sel_levels}, all levels: {_all_levels}")
+
         # Apply post-stream-smooth axes if smooth was deferred
         # Apply directly to src_bps using selected-level index mapping
         ss_after = getattr(self, '_stream_smooth_bp_after', None)
@@ -13796,6 +13803,13 @@ class ContourMeshMixin:
             self._build_fibers_replayed = True
             return
 
+        # Debug: show animation data structure
+        wp_levels = [len(s) for s in self._fiber_anim_waypoints]
+        wp_fibers = [len(s[0]) if len(s) > 0 else 0 for s in self._fiber_anim_waypoints]
+        off_fibers = [len(o) for o in self._fiber_anim_offsets]
+        print(f"[replay_fiber_animation] waypoints: {len(self._fiber_anim_waypoints)} streams, "
+              f"levels={wp_levels}, fibers={wp_fibers}, offsets={off_fibers}")
+
         # Restore waypoints from saved data
         self.waypoints = [
             [[np.array(wp).copy() for wp in level] for level in stream]
@@ -13818,6 +13832,9 @@ class ContourMeshMixin:
             self.contours = src
             self.bounding_planes = src_bps
             self.draw_contour_stream = [[True] * len(src[s]) for s in range(len(src))]
+            _src_levels = [len(src[s]) for s in range(len(src))]
+            print(f"[replay_fiber_animation] contours: {_src_levels} levels "
+                  f"(selected={getattr(self, '_selected_stream_contours', None) is not None})")
 
         # Restore _stream_endpoints (cleared during defer to hide connecting lines)
         saved_ep = getattr(self, '_fiber_anim_stream_endpoints', None)
