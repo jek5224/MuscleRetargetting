@@ -806,23 +806,23 @@ class ContourMeshMixin(ContourAnimationMixin):
             if resample_src is not None and len(resample_src) > 0:
                 anim_active = getattr(self, '_resample_anim_active', False)
                 anim_sizes = getattr(self, '_resample_anim_point_sizes', {})
-                num_streams = len(resample_src)
-                rs_values = np.linspace(0, 1, num_streams + 2)[1:-1]
-                rs_use_colormap = num_streams > 8
 
                 base_point_size = 5.0
                 glEnable(GL_BLEND)
                 glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
 
                 for s_idx, stream in enumerate(resample_src):
-                    # Stream color (same logic as contour drawing)
-                    if rs_use_colormap:
-                        rs_color = np.array(COLOR_MAP(1 - rs_values[s_idx])[:3], dtype=np.float32)
+                    # Reuse parent-scope color variables for stream color matching
+                    if s_idx < len(values):
+                        if use_colormap:
+                            rs_color = np.array(COLOR_MAP(1 - values[s_idx])[:3], dtype=np.float32)
+                        else:
+                            rs_color = small_colors[s_idx] if s_idx < len(small_colors) else np.array(COLOR_MAP(1 - values[s_idx])[:3], dtype=np.float32)
                     else:
-                        rs_color = small_colors[s_idx] if s_idx < len(small_colors) else np.array(COLOR_MAP(1 - rs_values[s_idx])[:3], dtype=np.float32)
+                        rs_color = np.array([1, 1, 1], dtype=np.float32)
 
                     for lvl, contour in enumerate(stream):
-                        # During animation, skip unrevealed levels
+                        # During animation, only draw levels with active pulse
                         if anim_active and lvl not in anim_sizes:
                             continue
 
@@ -5275,13 +5275,39 @@ class ContourMeshMixin(ContourAnimationMixin):
 
         Args:
             base_samples: int - base number of vertices (default 32)
+            defer: bool - if True, hide resampled vertices for deferred replay
         """
+        # Mode swap: if in deferred level-mode, swap to stream data first
+        need_swap = (hasattr(self, 'stream_contours') and self.stream_contours is not None
+                     and self.contours is not self.stream_contours)
+        saved_contours = None
+        saved_bps = None
+        saved_dcs = None
+        if need_swap:
+            saved_contours = self.contours
+            saved_bps = self.bounding_planes
+            saved_dcs = self.draw_contour_stream
+            # Use selected data if available, otherwise stream data
+            src = getattr(self, '_selected_stream_contours', None) or self.stream_contours
+            src_bps = getattr(self, '_selected_stream_bounding_planes', None) or self.stream_bounding_planes
+            self.contours = src
+            self.bounding_planes = src_bps
+            self.draw_contour_stream = [[True] * len(src[s]) for s in range(len(src))]
+
         if self.contours is None or len(self.contours) == 0:
             print("No contours found. Please run find_contours first.")
+            if need_swap:
+                self.contours = saved_contours
+                self.bounding_planes = saved_bps
+                self.draw_contour_stream = saved_dcs
             return
 
         if self.bounding_planes is None or len(self.bounding_planes) == 0:
             print("No bounding planes found. Please run find_contours first.")
+            if need_swap:
+                self.contours = saved_contours
+                self.bounding_planes = saved_bps
+                self.draw_contour_stream = saved_dcs
             return
 
         # Get intersection points if available
@@ -5527,6 +5553,12 @@ class ContourMeshMixin(ContourAnimationMixin):
         else:
             self._resample_replayed = True
             self.is_draw_resampled_vertices = True
+
+        # Restore level-mode if we swapped
+        if need_swap:
+            self.contours = saved_contours
+            self.bounding_planes = saved_bps
+            self.draw_contour_stream = saved_dcs
 
     def _find_vertex_in_contour(self, contour, target_vertex, tolerance=0.01):
         """Find the index of a vertex in a contour, or None if not found.

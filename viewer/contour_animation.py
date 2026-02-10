@@ -1412,44 +1412,31 @@ class ContourAnimationMixin:
         self._resample_anim_active = True
 
     def update_resample_animation(self, dt):
-        """Reveal resampled vertices level by level with point-size pulse."""
+        """Sweep resampled vertices level by level: grow → shrink → disappear."""
         if not self._resample_anim_active:
             return False
 
         self._resample_anim_progress += dt
         num_levels = self._resample_anim_num_levels
-        reveal_dur = 2.0
-        highlight_dur = 0.5
-        time_per_level = reveal_dur / max(num_levels, 1)
-        total_dur = reveal_dur + highlight_dur
+        pulse_dur = 0.5   # each level's grow-shrink cycle
+        stagger = pulse_dur * 0.7  # overlap between levels
+        total_dur = stagger * max(num_levels - 1, 0) + pulse_dur
 
-        # How many levels revealed so far
-        revealed = min(int(self._resample_anim_progress / time_per_level) + 1, num_levels) if self._resample_anim_progress < reveal_dur else num_levels
-
-        # Show vertices once animation starts
         self.is_draw_resampled_vertices = True
 
-        # Compute per-level point size pulse
+        # Compute per-level point size: sine pulse (0 → peak → 0)
         point_sizes = {}
-        for lvl in range(revealed):
-            # Time when this level was first revealed
-            level_start = lvl * time_per_level
+        for lvl in range(num_levels):
+            level_start = lvl * stagger
             age = self._resample_anim_progress - level_start
-            if age < highlight_dur:
-                # Pulse: grow from 0 to peak then settle
-                t = age / highlight_dur
-                # smoothstep ease: peak at t=0.3, settle to 1.0
-                if t < 0.3:
-                    pulse = t / 0.3
-                else:
-                    pulse = 1.0 + (1.5 - 1.0) * (1.0 - (t - 0.3) / 0.7)
-                point_sizes[lvl] = pulse
-            else:
-                point_sizes[lvl] = 1.0
+            if age < 0 or age > pulse_dur:
+                continue  # not started or already gone
+            t = age / pulse_dur
+            pulse = np.sin(t * np.pi) * 1.5  # 0 → 1.5 → 0
+            point_sizes[lvl] = pulse
         self._resample_anim_point_sizes = point_sizes
 
         if self._resample_anim_progress >= total_dur:
-            # Done
             self._resample_anim_active = False
             self._resample_anim_point_sizes = {}
             self._resample_replayed = True
