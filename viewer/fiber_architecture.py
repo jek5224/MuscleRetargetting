@@ -1940,8 +1940,20 @@ class FiberArchitectureMixin:
 
         if len(fiber_lines) > 0:
             lines = np.array(fiber_lines, dtype=np.float32)
-            glVertexPointer(3, GL_FLOAT, 0, lines)
-            glDrawArrays(GL_LINES, 0, len(lines))
+            # Filter out line segments that are too long (infinite line protection)
+            if anim_lp is not None and len(lines) >= 2:
+                good_lines = []
+                for k in range(0, len(lines) - 1, 2):
+                    seg_len = np.linalg.norm(lines[k+1] - lines[k])
+                    if seg_len < 1.0:  # 1 meter max segment length
+                        good_lines.extend([lines[k], lines[k+1]])
+                if len(good_lines) > 0:
+                    lines = np.array(good_lines, dtype=np.float32)
+                else:
+                    lines = None
+            if lines is not None:
+                glVertexPointer(3, GL_FLOAT, 0, lines)
+                glDrawArrays(GL_LINES, 0, len(lines))
 
         # Draw test fiber (blue) if available
         test_waypoints = getattr(self, 'test_fiber_waypoints', None)
