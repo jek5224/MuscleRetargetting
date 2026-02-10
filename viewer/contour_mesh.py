@@ -13708,7 +13708,6 @@ class ContourMeshMixin:
             self._level_select_anim_active = False
             self._level_select_anim_scales = None
             self._level_select_anim_unselected = None
-            self._level_select_replayed = True
 
         # Use selected data if level selection was applied
         src_contours = getattr(self, '_selected_stream_contours', None) or self.stream_contours
