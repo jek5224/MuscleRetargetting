@@ -739,9 +739,15 @@ class MeshLoader(ContourMeshMixin, TetrahedronMeshMixin, FiberArchitectureMixin,
                     else:
                         if not self.draw_contour_stream[i]:
                             continue
+                # Fiber animation growth progress
+                level_prog = getattr(self, '_fiber_anim_level_progress', None)
+
                 for j in range(len(bounding_plane_stream) - 1):
                     bp1 = bounding_plane_stream[j]
                     bp2 = bounding_plane_stream[j + 1]
+                    # Growth clipping: skip segments beyond current progress
+                    if level_prog is not None and j >= level_prog:
+                        continue
                     # Skip if either level is hidden in 2D mode
                     if is_2d and i < len(self.draw_contour_stream):
                         dcs = self.draw_contour_stream[i]
@@ -753,13 +759,26 @@ class MeshLoader(ContourMeshMixin, TetrahedronMeshMixin, FiberArchitectureMixin,
                     s1 = bp_scale_dict.get(j, 1.0) if bp_scale_dict else 1.0
                     s2 = bp_scale_dict.get(j + 1, 1.0) if bp_scale_dict else 1.0
                     line_alpha = min(s1, s2)
+                    is_partial = level_prog is not None and j + 1 > level_prog
+                    frac = level_prog - j if is_partial else 1.0
                     glColor4f(0, 0, 0, line_alpha)
                     glBegin(GL_LINES)
                     for p1, p2 in zip(bp1['bounding_plane'], bp2['bounding_plane']):
-                        glVertex3fv(bp1['mean'] + (p1 - bp1['mean']) * s1)
-                        glVertex3fv(bp2['mean'] + (p2 - bp2['mean']) * s2)
-                    glVertex3fv(bp1['mean'])
-                    glVertex3fv(bp2['mean'])
+                        v1 = bp1['mean'] + (p1 - bp1['mean']) * s1
+                        if is_partial:
+                            v2_full = bp2['mean'] + (p2 - bp2['mean']) * s2
+                            v2 = v1 + (v2_full - v1) * frac
+                        else:
+                            v2 = bp2['mean'] + (p2 - bp2['mean']) * s2
+                        glVertex3fv(v1)
+                        glVertex3fv(v2)
+                    m1 = bp1['mean']
+                    if is_partial:
+                        m2 = m1 + (bp2['mean'] - m1) * frac
+                    else:
+                        m2 = bp2['mean']
+                    glVertex3fv(m1)
+                    glVertex3fv(m2)
                     glEnd()
             glEnable(GL_LIGHTING)
                 

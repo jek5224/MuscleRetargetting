@@ -1865,6 +1865,9 @@ class FiberArchitectureMixin:
         glDisable(GL_LIGHTING)
         glEnableClientState(GL_VERTEX_ARRAY)
 
+        # Animation growth progress (None = no animation, draw everything)
+        level_prog = getattr(self, '_fiber_anim_level_progress', None)
+
         # Collect waypoints by highlight status
         normal_pts = []
         highlight_pts = []
@@ -1876,6 +1879,9 @@ class FiberArchitectureMixin:
         for stream_idx, waypoint_group in enumerate(self.waypoints):
             if self.draw_contour_stream is not None and stream_idx < len(self.draw_contour_stream) and self.draw_contour_stream[stream_idx]:
                 for level_idx, waypoints in enumerate(waypoint_group):
+                    # Skip waypoints beyond current growth progress
+                    if level_prog is not None and level_idx > level_prog:
+                        continue
                     is_highlighted = (highlight_stream == stream_idx and highlight_level == level_idx)
                     for fi, wp in enumerate(waypoints):
                         if not _wp_valid(wp):
@@ -1908,12 +1914,21 @@ class FiberArchitectureMixin:
         for stream_idx, waypoint_group in enumerate(self.waypoints):
             if self.draw_contour_stream is not None and stream_idx < len(self.draw_contour_stream) and self.draw_contour_stream[stream_idx]:
                 for contour_idx in range(len(waypoint_group) - 1):
+                    # Growth clipping
+                    if level_prog is not None and contour_idx >= level_prog:
+                        continue
                     wps_curr = waypoint_group[contour_idx]
                     wps_next = waypoint_group[contour_idx + 1]
+                    is_partial = level_prog is not None and contour_idx + 1 > level_prog
+                    frac = level_prog - contour_idx if is_partial else 1.0
                     for fi in range(min(len(wps_curr), len(wps_next))):
                         if not _wp_valid(wps_curr[fi]) or not _wp_valid(wps_next[fi]):
                             continue
-                        fiber_lines.extend([wps_curr[fi], wps_next[fi]])
+                        if is_partial:
+                            interp = wps_curr[fi] + (wps_next[fi] - wps_curr[fi]) * frac
+                            fiber_lines.extend([wps_curr[fi], interp])
+                        else:
+                            fiber_lines.extend([wps_curr[fi], wps_next[fi]])
 
         if len(fiber_lines) > 0:
             lines = np.array(fiber_lines, dtype=np.float32)

@@ -3123,6 +3123,7 @@ class MuscleMeshMixin:
         self._fiber_anim_stream_endpoints = None
         self._fiber_anim_active = False
         self._fiber_anim_progress = 0.0
+        self._fiber_anim_level_progress = None
         self._build_fibers_replayed = False
 
         # Smoothening state

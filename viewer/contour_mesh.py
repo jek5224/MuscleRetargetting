@@ -540,6 +540,7 @@ class ContourMeshMixin:
         self._fiber_anim_stream_endpoints = None  # saved _stream_endpoints during defer
         self._fiber_anim_active = False
         self._fiber_anim_progress = 0.0
+        self._fiber_anim_level_progress = None   # float: growth progress in levels (0..num_levels-1)
         self._build_fibers_replayed = False
 
         # BP color override during smooth animations {(i,j): (r,g,b,a)}
@@ -13842,37 +13843,56 @@ class ContourMeshMixin:
         if saved_ep is not None:
             self._stream_endpoints = saved_ep
 
-        # Start state: mesh visible at 0.5 transparency, fibers visible
+        # Compute num_levels for growth phase
+        num_levels = max(len(s) for s in self.waypoints) if self.waypoints else 1
+
+        # Start state: mesh visible at 0.5 transparency, fibers hidden (grow from level 0)
         self.is_draw = True
         self.transparency = 0.5
         self.is_draw_fiber_architecture = True
         self._fiber_anim_progress = 0.0
+        self._fiber_anim_level_progress = 0.0
+        self._fiber_anim_num_levels = num_levels
         self._fiber_anim_active = True
 
     def update_fiber_animation(self, dt):
-        """Animate mesh transparency from 0.5 to 0.0, then turn off mesh."""
+        """Phase 1: mesh fades 0.5→0.0. Phase 2: lines grow from origin to insertion."""
         if not self._fiber_anim_active:
             return False
 
         self._fiber_anim_progress += dt
-        fade_dur = 1.0  # 1 second fade
+        fade_dur = 1.0
+        grow_dur = 2.0
+        total_dur = fade_dur + grow_dur
+        num_levels = getattr(self, '_fiber_anim_num_levels', 1)
 
-        if self._fiber_anim_progress >= fade_dur:
-            # Done: mesh off, fibers on
+        if self._fiber_anim_progress >= total_dur:
+            # Done: mesh off, fibers fully drawn
             self.transparency = 0.0
             self.is_draw = False
             self.is_draw_fiber_architecture = True
             self._fiber_anim_active = False
+            self._fiber_anim_level_progress = None
             self._build_fibers_replayed = True
             return False
 
-        # Smoothstep fade from 0.5 to 0.0
-        t = self._fiber_anim_progress / fade_dur
-        t = t * t * (3.0 - 2.0 * t)
-        self.transparency = 0.5 * (1.0 - t)
-        # Also update vertex color alpha so scalar field rendering fades too
-        if self.vertex_colors is not None and self.is_draw_scalar_field:
-            self.vertex_colors[:, 3] = self.transparency
+        if self._fiber_anim_progress < fade_dur:
+            # Phase 1: mesh transparency fade
+            t = self._fiber_anim_progress / fade_dur
+            t = t * t * (3.0 - 2.0 * t)
+            self.transparency = 0.5 * (1.0 - t)
+            if self.vertex_colors is not None and self.is_draw_scalar_field:
+                self.vertex_colors[:, 3] = self.transparency
+            self._fiber_anim_level_progress = 0.0
+        else:
+            # Phase 2: lines grow level by level
+            self.transparency = 0.0
+            self.is_draw = False
+            if self.vertex_colors is not None and self.is_draw_scalar_field:
+                self.vertex_colors[:, 3] = 0.0
+            grow_t = (self._fiber_anim_progress - fade_dur) / grow_dur
+            self._fiber_anim_level_progress = grow_t * max(num_levels - 1, 1)
+
         return True
 
     def _cut_contour_mesh_aware(self, contour, bp, projected_refs, stream_indices):
