@@ -3111,6 +3111,7 @@ class MuscleMeshMixin:
         self._selected_stream_contours = None
         self._selected_stream_bounding_planes = None
         self._selected_stream_groups = None
+        self._replay_saved_state = None
 
         # Level selection backup
         self._contours_backup = None
