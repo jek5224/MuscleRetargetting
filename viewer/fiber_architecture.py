@@ -2033,6 +2033,12 @@ class FiberArchitectureMixin:
 
         # MVC computation using Q polygon
         fiber_samples = np.array(fiber_architecture)
+        # Ensure fiber_samples is 2D with 2 columns (unit square coords)
+        if fiber_samples.ndim == 1:
+            fiber_samples = fiber_samples.reshape(1, -1)
+        if fiber_samples.ndim == 2 and fiber_samples.shape[1] > 2:
+            # 3D barycentric coords [u, v, w] → take first 2 components
+            fiber_samples = fiber_samples[:, :2]
         EPS = 1e-10
         mvc_polygon = Qs_normalized
 

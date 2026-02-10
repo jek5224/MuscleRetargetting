@@ -1441,6 +1441,8 @@ class ContourAnimationMixin:
         state['_fiber_anim_stream_endpoints'] = getattr(self, '_fiber_anim_stream_endpoints', None)
         state['waypoints'] = getattr(self, 'waypoints', None)
         state['_stream_endpoints'] = getattr(self, '_stream_endpoints', None)
+        state['fiber_architecture'] = getattr(self, 'fiber_architecture', None)
+        state['mvc_weights'] = getattr(self, 'mvc_weights', None)
 
         # Pipeline state
         state['max_stream_count'] = getattr(self, 'max_stream_count', None)
@@ -1552,6 +1554,10 @@ class ContourAnimationMixin:
         self._fiber_anim_stream_endpoints = state.get('_fiber_anim_stream_endpoints')
         self.waypoints = state.get('waypoints')
         self._stream_endpoints = state.get('_stream_endpoints')
+        if state.get('fiber_architecture') is not None:
+            self.fiber_architecture = state['fiber_architecture']
+        if state.get('mvc_weights') is not None:
+            self.mvc_weights = state['mvc_weights']
 
         # Pipeline state
         if state.get('max_stream_count') is not None:

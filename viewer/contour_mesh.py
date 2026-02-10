@@ -8266,7 +8266,7 @@ class ContourMeshMixin(ContourAnimationMixin):
         # First vertex of each contour connects to first vertex of next contour
 
         if self.is_one_fiber:
-            self.fiber_architecture = [np.array([0.5, 0.5])]
+            self.fiber_architecture = [np.array([[0.5, 0.5]])]
             triplet_num = len(self.contours[0]) // 3
             self.contours = [[self.contours[0][0], self.contours[0][triplet_num], self.contours[0][triplet_num * 2], self.contours[0][-1]]]
             self.bounding_planes = [[self.bounding_planes[0][0], self.bounding_planes[0][triplet_num], self.bounding_planes[0][triplet_num * 2], self.bounding_planes[0][-1]]]
