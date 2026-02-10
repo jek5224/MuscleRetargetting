@@ -534,6 +534,7 @@ class ContourAnimationMixin:
         # Reset to initial state
         self._apply_bp_snapshot(self._smooth_bp_before)
         self._smooth_anim_bp_colors = None
+        self._contour_anim_bp_scale = {}
         self._smooth_anim_progress = 0.0
         self._smooth_anim_active = True
         self._smooth_anim_orig_transparency = getattr(self, 'transparency', 1.0)
@@ -688,6 +689,7 @@ class ContourAnimationMixin:
             self.draw_contour_stream = [[True] * num_levels for _ in range(num_streams)]
         self._apply_bp_snapshot(self._stream_smooth_bp_before)
         self._smooth_anim_bp_colors = None
+        self._contour_anim_bp_scale = {}
         self._stream_smooth_anim_progress = 0.0
         self._stream_smooth_anim_active = True
 
