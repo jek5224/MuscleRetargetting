@@ -640,7 +640,7 @@ class GLFWApp():
             glLineWidth(1.5)
             mygl.draw_axis()
 
-        # Draw opaque parts of muscle meshes first
+        # Draw muscle mesh parts (contours, bounding boxes, edges — NOT the mesh itself)
         for name, obj in self.zygote_muscle_meshes.items():
             viper_only = obj.viper_sim is not None and obj.viper_only_mode
             if obj.viper_sim is not None and obj.is_draw_viper:
@@ -662,8 +662,6 @@ class GLFWApp():
                     obj.draw_contour_mesh()
                 if obj.is_draw_constraints:
                     obj.draw_constraints()
-                if obj.is_draw:
-                    obj.draw([obj.color[0], obj.color[1], obj.color[2], obj.transparency])
 
         # Draw inter-muscle constraints if enabled
         if getattr(self, 'draw_inter_muscle_constraints', False):
@@ -692,6 +690,12 @@ class GLFWApp():
             if not viper_only and obj.is_draw_fiber_architecture:
                 obj.fiber_transparency = self.zygote_fiber_transparency
                 obj.draw_fiber_architecture()
+
+        # Draw muscle mesh (after fibers so transparency shows fibers through mesh)
+        for name, obj in self.zygote_muscle_meshes.items():
+            viper_only = obj.viper_sim is not None and obj.viper_only_mode
+            if not viper_only and obj.is_draw:
+                obj.draw([obj.color[0], obj.color[1], obj.color[2], obj.transparency])
 
         # Draw tet mesh last (outermost layer)
         for name, obj in self.zygote_muscle_meshes.items():
@@ -1024,7 +1028,8 @@ class GLFWApp():
                     obj.update_stream_smooth_animation(1.0 / 30.0)
                 if getattr(obj, '_level_select_anim_active', False):
                     obj.update_level_select_animation(1.0 / 30.0)
-
+                if getattr(obj, '_fiber_anim_active', False):
+                    obj.update_fiber_animation(1.0 / 30.0)
 
             # Auto-rotate around focused muscle
             if self.auto_rotate:

@@ -538,6 +538,8 @@ class ContourMeshMixin:
         # Build fibers replay state
         self._fiber_anim_waypoints = None      # Deep copy of waypoints for replay
         self._fiber_anim_stream_endpoints = None  # saved _stream_endpoints during defer
+        self._fiber_anim_active = False
+        self._fiber_anim_progress = 0.0
         self._build_fibers_replayed = False
 
         # BP color override during smooth animations {(i,j): (r,g,b,a)}
@@ -13789,7 +13791,7 @@ class ContourMeshMixin:
         ]
 
     def replay_fiber_animation(self):
-        """Show build fibers result: restore waypoints and display fibers."""
+        """Animate build fibers: mesh fades from 0.5 to 0.0, then fibers shown."""
         if self._fiber_anim_waypoints is None:
             self._build_fibers_replayed = True
             return
@@ -13815,10 +13817,35 @@ class ContourMeshMixin:
         if saved_ep is not None:
             self._stream_endpoints = saved_ep
 
-        # Show final state: fibers visible, mesh hidden (same as non-animated build_fibers)
-        self.is_draw = False
+        # Start state: mesh visible at 0.5 transparency, fibers visible
+        self.is_draw = True
+        self.transparency = 0.5
         self.is_draw_fiber_architecture = True
-        self._build_fibers_replayed = True
+        self._fiber_anim_progress = 0.0
+        self._fiber_anim_active = True
+
+    def update_fiber_animation(self, dt):
+        """Animate mesh transparency from 0.5 to 0.0, then turn off mesh."""
+        if not self._fiber_anim_active:
+            return False
+
+        self._fiber_anim_progress += dt
+        fade_dur = 1.0  # 1 second fade
+
+        if self._fiber_anim_progress >= fade_dur:
+            # Done: mesh off, fibers on
+            self.transparency = 0.0
+            self.is_draw = False
+            self.is_draw_fiber_architecture = True
+            self._fiber_anim_active = False
+            self._build_fibers_replayed = True
+            return False
+
+        # Smoothstep fade from 0.5 to 0.0
+        t = self._fiber_anim_progress / fade_dur
+        t = t * t * (3.0 - 2.0 * t)
+        self.transparency = 0.5 * (1.0 - t)
+        return True
 
     def _cut_contour_mesh_aware(self, contour, bp, projected_refs, stream_indices):
         """
