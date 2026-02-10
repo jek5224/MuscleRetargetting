@@ -13781,9 +13781,14 @@ class ContourMeshMixin:
         self.is_draw = True
         self.is_draw_fiber_architecture = True
 
-        # Ensure stream-mode draw_contour_stream
-        if hasattr(self, 'stream_contours') and self.stream_contours is not None:
-            src = getattr(self, '_selected_stream_contours', None) or self.stream_contours
+        # Ensure contours/BPs use selected (post-level-select) data
+        src = getattr(self, '_selected_stream_contours', None) or \
+              (self.stream_contours if hasattr(self, 'stream_contours') and self.stream_contours is not None else None)
+        src_bps = getattr(self, '_selected_stream_bounding_planes', None) or \
+                  (self.stream_bounding_planes if hasattr(self, 'stream_bounding_planes') and self.stream_bounding_planes is not None else None)
+        if src is not None:
+            self.contours = src
+            self.bounding_planes = src_bps
             self.draw_contour_stream = [[True] * len(src[s]) for s in range(len(src))]
 
         self._fiber_anim_progress = 0.0
