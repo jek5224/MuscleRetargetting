@@ -658,8 +658,6 @@ class GLFWApp():
                     obj.draw_bounding_box()
                 if obj.is_draw_edges:
                     obj.draw_edges()
-                if obj.is_draw_contour_mesh or getattr(obj, '_mesh_anim_active', False):
-                    obj.draw_contour_mesh()
                 if obj.is_draw_constraints:
                     obj.draw_constraints()
 
@@ -699,6 +697,12 @@ class GLFWApp():
             if not viper_only and obj.is_draw_fiber_architecture:
                 obj.fiber_transparency = self.zygote_fiber_transparency
                 obj.draw_fiber_architecture()
+
+        # Draw contour mesh (after fibers so fibers show through transparency)
+        for name, obj in self.zygote_muscle_meshes.items():
+            viper_only = obj.viper_sim is not None and obj.viper_only_mode
+            if not viper_only and (obj.is_draw_contour_mesh or getattr(obj, '_mesh_anim_active', False)):
+                obj.draw_contour_mesh()
 
         # Draw muscle mesh (last so transparency shows skeleton and fibers through it)
         for name, obj in self.zygote_muscle_meshes.items():
