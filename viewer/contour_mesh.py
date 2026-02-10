@@ -1490,8 +1490,6 @@ class ContourMeshMixin:
         Each contour appears one by one with a highlight pulse and BP grow effect."""
         if self.contours is None or len(self.contours) == 0:
             return
-        # Save current state for restoration after replay
-        self._replay_saved_state = self._save_replay_state()
         # Switch to level mode if in stream mode (e.g. after cut replay)
         if hasattr(self, '_precut_contours') and self._precut_contours is not None:
             self.contours = [list(c) for c in self._precut_contours]
@@ -1566,14 +1564,8 @@ class ContourMeshMixin:
             self._contour_replayed = True
             self._anim_highlight_fades = {}
             self._contour_anim_bp_scale = {}
-            # Restore pre-replay display state if replaying
-            saved = getattr(self, '_replay_saved_state', None)
-            if saved is not None:
-                self._restore_replay_state(saved)
-                self._replay_saved_state = None
-            else:
-                for idx in orig_indices:
-                    self._set_level_visible(idx, True)
+            for idx in orig_indices:
+                self._set_level_visible(idx, True)
             return False
 
         return True
@@ -1584,8 +1576,6 @@ class ContourMeshMixin:
             # No gaps were filled - mark as replayed immediately
             self._fill_gaps_replayed = True
             return
-        # Save current state for restoration after replay
-        self._replay_saved_state = self._save_replay_state()
         # Switch to level mode if in stream mode
         if hasattr(self, '_precut_contours') and self._precut_contours is not None:
             self.contours = [list(c) for c in self._precut_contours]
@@ -1636,14 +1626,8 @@ class ContourMeshMixin:
             self._fill_gaps_anim_active = False
             self._fill_gaps_replayed = True
             self._anim_highlight_fades = {}
-            # Restore pre-replay display state if replaying
-            saved = getattr(self, '_replay_saved_state', None)
-            if saved is not None:
-                self._restore_replay_state(saved)
-                self._replay_saved_state = None
-            else:
-                for idx in indices:
-                    self._set_level_visible(idx, True)
+            for idx in indices:
+                self._set_level_visible(idx, True)
             return False
 
         return True
@@ -1653,8 +1637,6 @@ class ContourMeshMixin:
         if not self._transitions_inserted_indices or len(self._transitions_inserted_indices) == 0:
             self._transitions_replayed = True
             return
-        # Save current state for restoration after replay
-        self._replay_saved_state = self._save_replay_state()
         # Switch to level mode if in stream mode
         if hasattr(self, '_precut_contours') and self._precut_contours is not None:
             self.contours = [list(c) for c in self._precut_contours]
@@ -1705,14 +1687,8 @@ class ContourMeshMixin:
             self._transitions_anim_active = False
             self._transitions_replayed = True
             self._anim_highlight_fades = {}
-            # Restore pre-replay display state if replaying
-            saved = getattr(self, '_replay_saved_state', None)
-            if saved is not None:
-                self._restore_replay_state(saved)
-                self._replay_saved_state = None
-            else:
-                for idx in indices:
-                    self._set_level_visible(idx, True)
+            for idx in indices:
+                self._set_level_visible(idx, True)
             return False
 
         return True
@@ -1893,8 +1869,6 @@ class ContourMeshMixin:
         if self._smooth_bp_before is None or self._smooth_bp_after is None:
             self._smooth_replayed = True
             return
-        # Save current state for restoration after replay
-        self._replay_saved_state = self._save_replay_state()
         # Switch to level mode if we're in stream mode (e.g. after cut replay)
         if hasattr(self, '_precut_contours') and self._precut_contours is not None:
             self.contours = [list(c) for c in self._precut_contours]
@@ -2054,13 +2028,7 @@ class ContourMeshMixin:
             self._smooth_anim_active = False
             self._smooth_replayed = True
             self._smooth_anim_bp_colors = None
-            # Restore pre-replay display state if replaying, otherwise apply bp_after
-            saved = getattr(self, '_replay_saved_state', None)
-            if saved is not None:
-                self._restore_replay_state(saved)
-                self._replay_saved_state = None
-            else:
-                self._apply_bp_snapshot(bp_after)
+            self._apply_bp_snapshot(bp_after)
             return False
 
         return True
@@ -2179,8 +2147,6 @@ class ContourMeshMixin:
         if self._stream_smooth_bp_before is None or self._stream_smooth_bp_after is None:
             self._stream_smooth_replayed = True
             return
-        # Save current state for restoration after replay
-        self._replay_saved_state = self._save_replay_state()
         # Ensure we're in stream mode
         if hasattr(self, 'stream_contours') and self.stream_contours is not None:
             self.contours = self.stream_contours
@@ -2313,13 +2279,7 @@ class ContourMeshMixin:
             self._stream_smooth_anim_active = False
             self._stream_smooth_replayed = True
             self._smooth_anim_bp_colors = None
-            # Restore pre-replay display state if replaying, otherwise apply bp_after
-            saved = getattr(self, '_replay_saved_state', None)
-            if saved is not None:
-                self._restore_replay_state(saved)
-                self._replay_saved_state = None
-            else:
-                self._apply_bp_snapshot(bp_after)
+            self._apply_bp_snapshot(bp_after)
             return False
 
         return True
@@ -2592,8 +2552,6 @@ class ContourMeshMixin:
         if self._cut_color_before is None or self._cut_color_after is None:
             self._cut_replayed = True
             return
-        # Save current state for restoration after replay
-        self._replay_saved_state = self._save_replay_state()
         # Swap to stream-mode (post-cut) contour geometry
         if hasattr(self, 'stream_contours') and self.stream_contours is not None:
             self.contours = self.stream_contours
@@ -2718,12 +2676,7 @@ class ContourMeshMixin:
             self._contour_anim_bp_scale = {}
             self._cut_bp_switched = False
             self._smooth_anim_bp_colors = None
-            # Restore pre-replay display state if replaying, otherwise apply bp_after
-            saved = getattr(self, '_replay_saved_state', None)
-            if saved is not None:
-                self._restore_replay_state(saved)
-                self._replay_saved_state = None
-            elif has_bp:
+            if has_bp:
                 self._apply_stream_bp_snapshot(bp_after)
             return False
 
@@ -13536,13 +13489,8 @@ class ContourMeshMixin:
             self._level_select_anim_scales = None
             self._level_select_anim_unselected = None
             if getattr(self, '_level_select_anim_is_replay', False):
-                # Replay: restore pre-replay display state
-                saved = getattr(self, '_replay_saved_state', None)
-                if saved is not None:
-                    self._restore_replay_state(saved)
-                    self._replay_saved_state = None
-                else:
-                    self._restore_level_select_post_state()
+                # Replay: restore to post-selection state (after this step)
+                self._restore_level_select_post_state()
             else:
                 # First run: apply selection and save post state
                 self._apply_level_selection()
@@ -13570,9 +13518,6 @@ class ContourMeshMixin:
 
         if not unselected:
             return
-
-        # Save current state for restoration after replay
-        self._replay_saved_state = self._save_replay_state()
 
         # Restore all levels visible from saved pre-selection state (deep copies to avoid corruption)
         self.contours = [list(sc) for sc in anim_orig['stream_contours']]
