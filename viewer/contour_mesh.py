@@ -13455,10 +13455,24 @@ class ContourMeshMixin:
         self._level_select_anim_unselected = unselected
         self._level_select_anim_num_levels = num_levels
         # Save pre-selection data for replay (deep copy BPs to avoid corruption by other replays)
+        # Use post-stream-smooth axes if smooth was deferred (stream_bounding_planes still has pre-smooth)
+        anim_bps = [[copy.deepcopy(bp) for bp in sbs]
+                     for sbs in orig['stream_bounding_planes']]
+        ss_after = getattr(self, '_stream_smooth_bp_after', None)
+        if ss_after is not None and not getattr(self, '_stream_smooth_replayed', False):
+            for i, stream_snaps in enumerate(ss_after):
+                if i < len(anim_bps):
+                    for j, snap in enumerate(stream_snaps):
+                        if j < len(anim_bps[i]):
+                            anim_bps[i][j]['mean'] = snap['mean'].copy()
+                            anim_bps[i][j]['basis_x'] = snap['basis_x'].copy()
+                            anim_bps[i][j]['basis_y'] = snap['basis_y'].copy()
+                            anim_bps[i][j]['basis_z'] = snap['basis_z'].copy()
+                            if snap['bounding_plane'] is not None:
+                                anim_bps[i][j]['bounding_plane'] = snap['bounding_plane'].copy()
         self._level_select_anim_original = {
             'stream_contours': [list(sc) for sc in orig['stream_contours']],
-            'stream_bounding_planes': [[copy.deepcopy(bp) for bp in sbs]
-                                       for sbs in orig['stream_bounding_planes']],
+            'stream_bounding_planes': anim_bps,
             'checkboxes': [list(cb) for cb in self._level_select_checkboxes],
         }
 
