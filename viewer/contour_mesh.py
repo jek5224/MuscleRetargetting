@@ -13704,6 +13704,24 @@ class ContourMeshMixin:
             print("Run cut_streams and select_levels first")
             return
 
+        # Apply post-stream-smooth axes if smooth was deferred
+        # (stream_bounding_planes still has pre-smooth values from defer restore;
+        #  _selected_stream_bounding_planes shares the same BP dict objects, so
+        #  modifying stream_bounding_planes in-place updates both)
+        ss_after = getattr(self, '_stream_smooth_bp_after', None)
+        if ss_after is not None and not getattr(self, '_stream_smooth_replayed', False):
+            for i, stream_snaps in enumerate(ss_after):
+                if i < len(self.stream_bounding_planes):
+                    for j, snap in enumerate(stream_snaps):
+                        if j < len(self.stream_bounding_planes[i]):
+                            bp = self.stream_bounding_planes[i][j]
+                            bp['mean'] = snap['mean'].copy()
+                            bp['basis_x'] = snap['basis_x'].copy()
+                            bp['basis_y'] = snap['basis_y'].copy()
+                            bp['basis_z'] = snap['basis_z'].copy()
+                            if snap['bounding_plane'] is not None:
+                                bp['bounding_plane'] = snap['bounding_plane'].copy()
+
         # Use selected data if level selection was applied
         src_contours = getattr(self, '_selected_stream_contours', None) or self.stream_contours
         src_bps = getattr(self, '_selected_stream_bounding_planes', None) or self.stream_bounding_planes
