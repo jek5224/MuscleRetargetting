@@ -665,6 +665,11 @@ class MeshLoader(ContourMeshMixin, TetrahedronMeshMixin, FiberArchitectureMixin,
                                  isinstance(self.draw_contour_stream[0], list)) else i
                 bp_s = bp_scale_dict.get(bp_level, 1.0) if bp_scale_dict else 1.0
                 bp_alpha = bp_s  # Fade bounding plane with scale
+                # Level select shrink animation
+                ls_scales = getattr(self, '_level_select_anim_scales', None)
+                if ls_scales and (i, j) in ls_scales:
+                    bp_s *= ls_scales[(i, j)]
+                    bp_alpha *= ls_scales[(i, j)]
                 mean = plane_info['mean']
 
                 glPushMatrix()

@@ -526,6 +526,15 @@ class ContourMeshMixin:
         self._stream_smooth_num_levels = 0
         self._stream_smooth_replayed = False
 
+        # Level select shrink animation state
+        self._level_select_anim_active = False
+        self._level_select_anim_progress = 0.0
+        self._level_select_anim_scales = None   # {(stream_i, level_j): float 0-1}
+        self._level_select_anim_unselected = None  # set of (stream_i, level_j)
+        self._level_select_anim_num_levels = 0
+        self._level_select_replayed = False
+        self._level_select_anim_pending_resume = False
+
         # BP color override during smooth animations {(i,j): (r,g,b,a)}
         self._smooth_anim_bp_colors = None
 
@@ -611,6 +620,7 @@ class ContourMeshMixin:
         anim_fades = getattr(self, '_anim_highlight_fades', {})
         draw_vertices = getattr(self, 'is_draw_contour_vertices', False)
         draw_farthest = getattr(self, 'is_draw_farthest_pair', False)
+        ls_scales = getattr(self, '_level_select_anim_scales', None)
 
         # Pre-compute colors per contour level
         small_colors = [
@@ -645,6 +655,14 @@ class ContourMeshMixin:
                 if isinstance(dcs_i, list) and j < len(dcs_i) and not dcs_i[j]:
                     continue
 
+                # Level select shrink scale
+                ls_s = ls_scales.get((i, j), 1.0) if ls_scales else 1.0
+                if ls_s < 0.01 and ls_scales:
+                    continue  # Fully shrunk, skip drawing
+                ls_mean = None
+                if ls_scales and (i, j) in ls_scales and self.bounding_planes is not None and i < len(self.bounding_planes) and j < len(self.bounding_planes[i]):
+                    ls_mean = self.bounding_planes[i][j]['mean']
+
                 # Cut animation color override
                 cut_colors = getattr(self, '_cut_anim_contour_colors', None)
                 if cut_colors is not None and i < len(cut_colors) and j < len(cut_colors[i]):
@@ -664,12 +682,13 @@ class ContourMeshMixin:
                         pulse = 1.0 - abs(2.0 * anim_highlight_fade - 1.0)
                         lw = 1.0 + 5.0 * pulse
                         glLineWidth(lw)
-                        glColor3fv(color)
+                        glColor3fv(color * ls_s if ls_mean is not None else color)
                         glBegin(GL_LINE_LOOP)
                         for v in contour:
                             v_arr = np.asarray(v).flatten()
                             if len(v_arr) >= 3:
-                                glVertex3fv(v_arr[:3])
+                                v_pos = ls_mean + (v_arr[:3] - ls_mean) * ls_s if ls_mean is not None else v_arr[:3]
+                                glVertex3fv(v_pos)
                         glEnd()
                         glLineWidth(1.0)
                     elif is_highlighted:
@@ -678,11 +697,15 @@ class ContourMeshMixin:
                             glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
                             glColor4f(0.3, 0.6, 0.9, ha)
                             centroid = np.mean(contour, axis=0)
+                            if ls_mean is not None:
+                                centroid = ls_mean + (centroid - ls_mean) * ls_s
                             glBegin(GL_TRIANGLE_FAN)
                             glVertex3fv(centroid)
                             for v in contour:
-                                glVertex3fv(v)
-                            glVertex3fv(contour[0])
+                                v_pos = ls_mean + (np.asarray(v).flatten()[:3] - ls_mean) * ls_s if ls_mean is not None else v
+                                glVertex3fv(v_pos)
+                            v_pos = ls_mean + (np.asarray(contour[0]).flatten()[:3] - ls_mean) * ls_s if ls_mean is not None else contour[0]
+                            glVertex3fv(v_pos)
                             glEnd()
                             glDisable(GL_BLEND)
 
@@ -692,7 +715,8 @@ class ContourMeshMixin:
                         for v in contour:
                             v_arr = np.asarray(v).flatten()
                             if len(v_arr) >= 3:
-                                glVertex3fv(v_arr[:3])
+                                v_pos = ls_mean + (v_arr[:3] - ls_mean) * ls_s if ls_mean is not None else v_arr[:3]
+                                glVertex3fv(v_pos)
                         glEnd()
                         glLineWidth(1.0)
                 else:
@@ -702,6 +726,9 @@ class ContourMeshMixin:
                         continue
                     if pts.ndim == 2 and pts.shape[0] >= 2 and pts.shape[1] >= 3:
                         pts = pts[:, :3].copy()
+                        # Apply level select shrink toward BP mean
+                        if ls_mean is not None:
+                            pts = ls_mean + (pts - ls_mean) * ls_s
                         n = len(pts)
                         # Each edge: pts[k] -> pts[k+1], plus closing edge pts[-1] -> pts[0]
                         seg_starts = pts  # shape (n, 3)
@@ -711,8 +738,9 @@ class ContourMeshMixin:
                         segs[0::2] = seg_starts
                         segs[1::2] = seg_ends
                         batch_verts.append(segs)
-                        # Color for all these vertices
-                        seg_colors = np.tile(color, (n * 2, 1))
+                        # Color for all these vertices (darken by scale)
+                        draw_color = color * ls_s if ls_mean is not None else color
+                        seg_colors = np.tile(draw_color, (n * 2, 1))
                         batch_colors.append(seg_colors)
 
                 # Draw vertices with color gradient (only when enabled)
@@ -732,7 +760,8 @@ class ContourMeshMixin:
                         else:
                             t = k / max(n_verts - 1, 1)
                             glColor3f(1 - t, 0, 0)
-                        glVertex3fv(v_arr[:3])
+                        v_pos = ls_mean + (v_arr[:3] - ls_mean) * ls_s if ls_mean is not None else v_arr[:3]
+                        glVertex3fv(v_pos)
                     glEnd()
 
                 # Draw small x, y, z axes from bounding plane info
@@ -754,6 +783,9 @@ class ContourMeshMixin:
                                  isinstance(self.draw_contour_stream[0], list))
                         bp_lev = j if is_2d else i
                         bp_s = bp_scale_dict.get(bp_lev, 1.0) if bp_scale_dict else 1.0
+                        # Apply level select shrink to axes
+                        if ls_mean is not None:
+                            bp_s *= ls_s
 
                         glLineWidth(2.0)
                         glColor3f(1.0, 0.0, 0.0)
@@ -13249,6 +13281,144 @@ class ContourMeshMixin:
                                 break
                     if not contours_same:
                         print(f"  WARNING: Level {level_i} group {group} - contours are DIFFERENT!")
+
+    def _start_level_select_animation(self, defer=False):
+        """Start shrink animation for unselected levels before applying selection.
+
+        Args:
+            defer: If True, compute animation data but apply selection immediately
+                   without animating (for later replay).
+        """
+        if not hasattr(self, '_level_select_checkboxes') or self._level_select_checkboxes is None:
+            return
+
+        max_stream_count = self.max_stream_count
+        orig = self._level_select_original
+
+        # Identify unselected (stream, level) pairs
+        unselected = set()
+        for stream_i in range(max_stream_count):
+            for level_i, checked in enumerate(self._level_select_checkboxes[stream_i]):
+                if not checked:
+                    unselected.add((stream_i, level_i))
+
+        # Store animation data for replay (even when deferring)
+        num_levels = len(orig['stream_contours'][0]) if max_stream_count > 0 else 0
+        self._level_select_anim_unselected = unselected
+        self._level_select_anim_num_levels = num_levels
+        # Save original data for replay
+        self._level_select_anim_original = {
+            'stream_contours': [list(sc) for sc in orig['stream_contours']],
+            'stream_bounding_planes': [list(bp) for bp in orig['stream_bounding_planes']],
+            'checkboxes': [list(cb) for cb in self._level_select_checkboxes],
+        }
+
+        # If nothing unselected, just apply directly
+        if not unselected:
+            self._level_select_window_open = False
+            self._apply_level_selection()
+            self._level_select_anim_pending_resume = True
+            self._level_select_replayed = True
+            return
+
+        if defer:
+            # Deferred: apply selection immediately, replay animation later
+            self._level_select_window_open = False
+            self._apply_level_selection()
+            self._level_select_anim_pending_resume = True
+            self._level_select_replayed = False
+            print(f"Level select animation deferred: {len(unselected)} unselected contours")
+            return
+
+        # Restore ALL levels visible (from original) so we can animate the shrink
+        self.contours = [list(sc) for sc in orig['stream_contours']]
+        self.bounding_planes = [list(bp) for bp in orig['stream_bounding_planes']]
+        self.draw_contour_stream = [[True] * len(orig['stream_contours'][s]) for s in range(max_stream_count)]
+        # Also update the stream aliases so draw_bounding_box sees them
+        self.stream_contours = self.contours
+        self.stream_bounding_planes = self.bounding_planes
+
+        # Close selection window but keep checkboxes/original alive for _apply_level_selection
+        self._level_select_window_open = False
+
+        # Initialize animation
+        self._level_select_anim_scales = {key: 1.0 for key in unselected}
+        self._level_select_anim_progress = 0.0
+        self._level_select_anim_active = True
+
+        print(f"Level select animation started: {len(unselected)} unselected contours, {num_levels} levels")
+
+    def update_level_select_animation(self, dt):
+        """Advance level select shrink animation: wave from origin to insertion."""
+        if not self._level_select_anim_active:
+            return False
+
+        duration = 2.0
+        self._level_select_anim_progress += dt / duration
+        overall_t = min(self._level_select_anim_progress, 1.0)
+
+        num_levels = self._level_select_anim_num_levels
+        unselected = self._level_select_anim_unselected
+
+        # Update scales for each unselected contour using wave
+        for (s, l) in unselected:
+            wave_t = self._smooth_wave_t(overall_t, l, num_levels)
+            self._level_select_anim_scales[(s, l)] = 1.0 - wave_t  # shrink 1→0
+
+        # Check completion
+        if overall_t >= 1.0:
+            self._level_select_anim_active = False
+            self._level_select_anim_scales = None
+            self._level_select_anim_unselected = None
+            self._apply_level_selection()
+            self._level_select_anim_pending_resume = True
+            self._level_select_replayed = True
+            print("Level select animation complete")
+
+        return True
+
+    def replay_level_select_animation(self):
+        """Replay the level select shrink animation from saved data."""
+        anim_orig = getattr(self, '_level_select_anim_original', None)
+        if anim_orig is None:
+            print("No level select animation data to replay")
+            return
+
+        unselected = set()
+        checkboxes = anim_orig['checkboxes']
+        max_stream_count = len(checkboxes)
+        for stream_i in range(max_stream_count):
+            for level_i, checked in enumerate(checkboxes[stream_i]):
+                if not checked:
+                    unselected.add((stream_i, level_i))
+
+        if not unselected:
+            return
+
+        # Restore all levels visible from saved original
+        self.contours = [list(sc) for sc in anim_orig['stream_contours']]
+        self.bounding_planes = [list(bp) for bp in anim_orig['stream_bounding_planes']]
+        self.draw_contour_stream = [[True] * len(anim_orig['stream_contours'][s]) for s in range(max_stream_count)]
+        self.stream_contours = self.contours
+        self.stream_bounding_planes = self.bounding_planes
+
+        # Re-populate _level_select_checkboxes and _level_select_original for _apply_level_selection
+        self._level_select_checkboxes = [list(cb) for cb in checkboxes]
+        self._level_select_original = {
+            'stream_contours': [list(sc) for sc in anim_orig['stream_contours']],
+            'stream_bounding_planes': [list(bp) for bp in anim_orig['stream_bounding_planes']],
+            'stream_groups': list(self.stream_groups),
+        }
+
+        # Start animation
+        num_levels = len(anim_orig['stream_contours'][0]) if max_stream_count > 0 else 0
+        self._level_select_anim_unselected = unselected
+        self._level_select_anim_num_levels = num_levels
+        self._level_select_anim_scales = {key: 1.0 for key in unselected}
+        self._level_select_anim_progress = 0.0
+        self._level_select_anim_active = True
+
+        print(f"Replaying level select animation: {len(unselected)} unselected contours")
 
     def _apply_level_selection(self):
         """Apply the current checkbox selection to stream data (called by Finish Select)."""

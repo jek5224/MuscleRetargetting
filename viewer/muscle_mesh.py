@@ -3096,6 +3096,16 @@ class MuscleMeshMixin:
         self._smooth_twist_data_stream = None
         self._smooth_num_levels_stream = 0
 
+        # Level select shrink animation state
+        self._level_select_anim_active = False
+        self._level_select_anim_progress = 0.0
+        self._level_select_anim_scales = None
+        self._level_select_anim_unselected = None
+        self._level_select_anim_num_levels = 0
+        self._level_select_replayed = False
+        self._level_select_anim_pending_resume = False
+        self._level_select_anim_original = None
+
         # Level selection backup
         self._contours_backup = None
         self._bounding_planes_backup = None
