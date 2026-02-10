@@ -13710,30 +13710,28 @@ class ContourMeshMixin:
         src_bps = getattr(self, '_selected_stream_bounding_planes', None) or self.stream_bounding_planes
 
         # Apply post-stream-smooth axes if smooth was deferred
-        # Apply to all BP sources: stream_bounding_planes, _level_select_original,
-        # and src_bps — these may reference different dict objects after non-deferred
-        # level select animation reassigns stream_bounding_planes
+        # Apply directly to src_bps using selected-level index mapping
         ss_after = getattr(self, '_stream_smooth_bp_after', None)
         if ss_after is not None and not getattr(self, '_stream_smooth_replayed', False):
-            def _apply_smooth(bp_list):
-                for i, stream_snaps in enumerate(ss_after):
-                    if i >= len(bp_list):
-                        continue
-                    for j, snap in enumerate(stream_snaps):
-                        if j >= len(bp_list[i]):
-                            continue
-                        bp = bp_list[i][j]
+            sel_levels = getattr(self, 'stream_selected_levels', None)
+            for i in range(len(src_bps)):
+                if i >= len(ss_after):
+                    continue
+                for k in range(len(src_bps[i])):
+                    # Map selected index k back to original level index
+                    if sel_levels is not None and i < len(sel_levels) and k < len(sel_levels[i]):
+                        orig_j = sel_levels[i][k]
+                    else:
+                        orig_j = k
+                    if orig_j < len(ss_after[i]):
+                        snap = ss_after[i][orig_j]
+                        bp = src_bps[i][k]
                         bp['mean'] = snap['mean'].copy()
                         bp['basis_x'] = snap['basis_x'].copy()
                         bp['basis_y'] = snap['basis_y'].copy()
                         bp['basis_z'] = snap['basis_z'].copy()
                         if snap['bounding_plane'] is not None:
                             bp['bounding_plane'] = snap['bounding_plane'].copy()
-            _apply_smooth(self.stream_bounding_planes)
-            # Also apply to _level_select_original BPs (shared by _selected_stream_bounding_planes)
-            ls_orig = getattr(self, '_level_select_original', None)
-            if ls_orig is not None and 'stream_bounding_planes' in ls_orig:
-                _apply_smooth(ls_orig['stream_bounding_planes'])
 
         max_stream_count = self.max_stream_count
         level_counts = [len(src_contours[s]) for s in range(max_stream_count)]
