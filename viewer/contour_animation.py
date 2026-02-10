@@ -1491,7 +1491,7 @@ class ContourAnimationMixin:
         self._mesh_anim_num_bands = num_bands
 
     def replay_mesh_animation(self):
-        """Start the build contour mesh animation: wireframe sweep → face fill → settle."""
+        """Start the build contour mesh animation: smooth sweep origin→insertion like fibers."""
         if self.contour_mesh_faces is None or self.contour_mesh_vertices is None:
             self._build_mesh_replayed = True
             return
@@ -1524,32 +1524,28 @@ class ContourAnimationMixin:
         self._mesh_anim_active = True
 
     def update_mesh_animation(self, dt):
-        """Update build contour mesh animation: wireframe sweep → face fill → settle."""
+        """Smooth sweep origin→insertion: continuous float level progress like fiber animation."""
         if not self._mesh_anim_active:
             return False
 
         self._mesh_anim_progress += dt
+        num_bands = self._mesh_anim_num_bands
+        grow_dur = 3.0  # total sweep duration
 
-        wireframe_dur = 2.0
-        fill_dur = 1.5
-        settle_dur = 0.5
-        total_dur = wireframe_dur + fill_dur + settle_dur
-
-        t = self._mesh_anim_progress
-        if t < wireframe_dur:
-            self._mesh_anim_phase = 0  # wireframe sweep
-        elif t < wireframe_dur + fill_dur:
-            self._mesh_anim_phase = 1  # face fill
-        elif t < total_dur:
-            self._mesh_anim_phase = 2  # settle (wireframe fade out)
-        else:
-            # Completion
+        if self._mesh_anim_progress >= grow_dur:
+            # Done
             self._mesh_anim_active = False
-            self._mesh_anim_phase = 0
             self._mesh_anim_progress = 0.0
+            self._mesh_anim_phase = 0
             self.is_draw_contour_mesh = True
             self._build_mesh_replayed = True
             return False
+
+        # Continuous level progress (like fiber_anim_level_progress)
+        t = self._mesh_anim_progress / grow_dur
+        # Smoothstep for easing
+        t = t * t * (3.0 - 2.0 * t)
+        self._mesh_anim_phase = t * max(num_bands - 1, 1)
 
         return True
 

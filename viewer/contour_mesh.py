@@ -7808,7 +7808,9 @@ class ContourMeshMixin(ContourAnimationMixin):
         self.contour_mesh_normals = normals / norms
 
     def _draw_contour_mesh_animated(self):
-        """Draw the contour mesh animation: wireframe sweep → face fill → settle."""
+        """Draw contour mesh growing smoothly from origin→insertion like fiber animation.
+        _mesh_anim_phase is a continuous float (0..num_bands-1) representing growth progress.
+        Faces fade in with a soft alpha gradient at the wavefront."""
         if self.contour_mesh_vertices is None or self.contour_mesh_faces is None:
             return
 
@@ -7817,121 +7819,51 @@ class ContourMeshMixin(ContourAnimationMixin):
         normals = self.contour_mesh_normals
         color = self.contour_mesh_color
         target_alpha = self.contour_mesh_transparency
-        num_bands = self._mesh_anim_num_bands
         face_bands = self._mesh_anim_face_bands
-        band_edges = self._mesh_anim_band_edges
-        phase = self._mesh_anim_phase
-        progress = self._mesh_anim_progress
-
-        wireframe_dur = 2.0
-        fill_dur = 1.5
-        settle_dur = 0.5
-
-        def smoothstep(t):
-            t = max(0.0, min(1.0, t))
-            return t * t * (3.0 - 2.0 * t)
+        level_prog = self._mesh_anim_phase  # continuous float like fiber_anim_level_progress
+        fade_width = 1.5  # bands over which alpha ramps from 0→target
 
         glPushMatrix()
         glEnable(GL_BLEND)
         glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
+        glEnable(GL_LIGHTING)
+        glEnable(GL_COLOR_MATERIAL)
+        glColorMaterial(GL_FRONT_AND_BACK, GL_AMBIENT_AND_DIFFUSE)
 
-        # Phase 0: Wireframe sweep — reveal bands one by one origin→insertion
-        if phase == 0:
-            t = progress / wireframe_dur if wireframe_dur > 0 else 1.0
-            revealed_bands = min(int(t * num_bands) + 1, num_bands)
+        # Draw faces with per-band alpha based on distance from wavefront
+        # Two-pass for transparency (back faces first, then front)
+        glEnable(GL_CULL_FACE)
+        for cull_pass in range(2):
+            if cull_pass == 0:
+                glCullFace(GL_FRONT)  # draw back faces
+            else:
+                glCullFace(GL_BACK)   # draw front faces
 
-            glDisable(GL_LIGHTING)
-            glLineWidth(1.5)
-            glColor4f(color[0], color[1], color[2], 1.0)
-            glBegin(GL_LINES)
-            for band_idx in range(revealed_bands):
-                if band_idx < len(band_edges):
-                    for v0, v1 in band_edges[band_idx]:
-                        glVertex3fv(verts[v0])
-                        glVertex3fv(verts[v1])
+            glBegin(GL_TRIANGLES)
+            for fi, face in enumerate(faces):
+                band = face_bands[fi]
+                # Skip faces beyond the wavefront
+                if band > level_prog + 0.5:
+                    continue
+                # Compute alpha: fully opaque well behind wavefront, fading at edge
+                dist_behind = level_prog - band
+                if dist_behind < 0:
+                    alpha = 0.0
+                elif dist_behind >= fade_width:
+                    alpha = target_alpha
+                else:
+                    t = dist_behind / fade_width
+                    alpha = t * t * (3.0 - 2.0 * t) * target_alpha  # smoothstep
+                if alpha < 0.005:
+                    continue
+                glColor4f(color[0], color[1], color[2], alpha)
+                for vi in face:
+                    if normals is not None:
+                        glNormal3fv(normals[vi])
+                    glVertex3fv(verts[vi])
             glEnd()
-            glEnable(GL_LIGHTING)
 
-        # Phase 1: Face fill — all wireframe visible, faces fade in
-        elif phase == 1:
-            fill_t = (progress - wireframe_dur) / fill_dur if fill_dur > 0 else 1.0
-            face_alpha = smoothstep(fill_t) * target_alpha
-
-            # Draw wireframe (full)
-            glDisable(GL_LIGHTING)
-            glLineWidth(1.5)
-            glColor4f(color[0], color[1], color[2], 1.0)
-            glBegin(GL_LINES)
-            for band_idx in range(num_bands):
-                if band_idx < len(band_edges):
-                    for v0, v1 in band_edges[band_idx]:
-                        glVertex3fv(verts[v0])
-                        glVertex3fv(verts[v1])
-            glEnd()
-            glEnable(GL_LIGHTING)
-
-            # Draw faces with fading alpha (two-pass for transparency)
-            glEnable(GL_COLOR_MATERIAL)
-            glColorMaterial(GL_FRONT_AND_BACK, GL_AMBIENT_AND_DIFFUSE)
-            glColor4f(color[0], color[1], color[2], face_alpha)
-
-            def draw_all_faces():
-                glBegin(GL_TRIANGLES)
-                for face in faces:
-                    for vi in face:
-                        if normals is not None:
-                            glNormal3fv(normals[vi])
-                        glVertex3fv(verts[vi])
-                glEnd()
-
-            glEnable(GL_CULL_FACE)
-            glCullFace(GL_FRONT)
-            draw_all_faces()
-            glCullFace(GL_BACK)
-            draw_all_faces()
-            glDisable(GL_CULL_FACE)
-
-        # Phase 2: Settle — faces at target alpha, wireframe fading out
-        elif phase == 2:
-            settle_t = (progress - wireframe_dur - fill_dur) / settle_dur if settle_dur > 0 else 1.0
-            wire_alpha = 1.0 - smoothstep(settle_t)
-
-            # Draw faces at target alpha (two-pass)
-            glEnable(GL_LIGHTING)
-            glEnable(GL_COLOR_MATERIAL)
-            glColorMaterial(GL_FRONT_AND_BACK, GL_AMBIENT_AND_DIFFUSE)
-            glColor4f(color[0], color[1], color[2], target_alpha)
-
-            def draw_all_faces():
-                glBegin(GL_TRIANGLES)
-                for face in faces:
-                    for vi in face:
-                        if normals is not None:
-                            glNormal3fv(normals[vi])
-                        glVertex3fv(verts[vi])
-                glEnd()
-
-            glEnable(GL_CULL_FACE)
-            glCullFace(GL_FRONT)
-            draw_all_faces()
-            glCullFace(GL_BACK)
-            draw_all_faces()
-            glDisable(GL_CULL_FACE)
-
-            # Draw wireframe fading out on top
-            if wire_alpha > 0.01:
-                glDisable(GL_LIGHTING)
-                glLineWidth(1.5)
-                glColor4f(color[0], color[1], color[2], wire_alpha)
-                glBegin(GL_LINES)
-                for band_idx in range(num_bands):
-                    if band_idx < len(band_edges):
-                        for v0, v1 in band_edges[band_idx]:
-                            glVertex3fv(verts[v0])
-                            glVertex3fv(verts[v1])
-                glEnd()
-                glEnable(GL_LIGHTING)
-
+        glDisable(GL_CULL_FACE)
         glPopMatrix()
 
     def draw_contour_mesh(self):
