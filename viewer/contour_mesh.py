@@ -798,6 +798,54 @@ class ContourMeshMixin(ContourAnimationMixin):
                 glDrawArrays(GL_LINES, 0, len(all_disc))
                 glDisableClientState(GL_VERTEX_ARRAY)
 
+        # Draw resampled vertices (during animation or static display)
+        if getattr(self, 'is_draw_resampled_vertices', False) or getattr(self, '_resample_anim_active', False):
+            resample_src = getattr(self, '_resample_anim_data', None) if getattr(self, '_resample_anim_active', False) else None
+            if resample_src is None:
+                resample_src = getattr(self, 'contours_resampled', None)
+            if resample_src is not None and len(resample_src) > 0:
+                anim_active = getattr(self, '_resample_anim_active', False)
+                anim_sizes = getattr(self, '_resample_anim_point_sizes', {})
+                num_streams = len(resample_src)
+                rs_values = np.linspace(0, 1, num_streams + 2)[1:-1]
+                rs_use_colormap = num_streams > 8
+
+                base_point_size = 5.0
+                glEnable(GL_BLEND)
+                glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
+
+                for s_idx, stream in enumerate(resample_src):
+                    # Stream color (same logic as contour drawing)
+                    if rs_use_colormap:
+                        rs_color = np.array(COLOR_MAP(1 - rs_values[s_idx])[:3], dtype=np.float32)
+                    else:
+                        rs_color = small_colors[s_idx] if s_idx < len(small_colors) else np.array(COLOR_MAP(1 - rs_values[s_idx])[:3], dtype=np.float32)
+
+                    for lvl, contour in enumerate(stream):
+                        # During animation, skip unrevealed levels
+                        if anim_active and lvl not in anim_sizes:
+                            continue
+
+                        pts = np.asarray(contour, dtype=np.float32)
+                        if pts.ndim != 2 or pts.shape[0] < 1 or pts.shape[1] < 3:
+                            continue
+
+                        # Point size: animated pulse or static
+                        if anim_active and lvl in anim_sizes:
+                            ps = base_point_size * anim_sizes[lvl]
+                        else:
+                            ps = base_point_size
+                        glPointSize(max(ps, 1.0))
+                        glColor3fv(rs_color)
+                        glEnableClientState(GL_VERTEX_ARRAY)
+                        verts = pts[:, :3].copy()
+                        glVertexPointer(3, GL_FLOAT, 0, verts)
+                        glDrawArrays(GL_POINTS, 0, len(verts))
+                        glDisableClientState(GL_VERTEX_ARRAY)
+
+                glPointSize(5)
+                glDisable(GL_BLEND)
+
         glEnable(GL_LIGHTING)
 
     def find_reference_intersection(self, contour_value):
@@ -5207,7 +5255,7 @@ class ContourMeshMixin(ContourAnimationMixin):
 
         return resampled
 
-    def resample_contours(self, base_samples=32):
+    def resample_contours(self, base_samples=32, defer=False):
         """
         Resample all contours with proper handling of cut boundaries.
 
@@ -5466,6 +5514,19 @@ class ContourMeshMixin(ContourAnimationMixin):
         print(f"Resampling complete: {len(self.contours_resampled)} streams stored in contours_resampled")
         print(f"  Parameters and fixed indices stored for mesh building")
         print(f"  Original contours and bounding_planes preserved for fiber/MVC")
+
+        # Save deep copy for animation replay
+        self._resample_anim_data = [
+            [np.array(c).copy() for c in stream]
+            for stream in self.contours_resampled
+        ]
+
+        if defer:
+            self._resample_replayed = False
+            self.is_draw_resampled_vertices = False
+        else:
+            self._resample_replayed = True
+            self.is_draw_resampled_vertices = True
 
     def _find_vertex_in_contour(self, contour, target_vertex, tolerance=0.01):
         """Find the index of a vertex in a contour, or None if not found.

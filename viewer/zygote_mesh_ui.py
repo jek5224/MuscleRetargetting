@@ -554,7 +554,9 @@ def draw_zygote_muscle_ui(v):
                         # Step 10: Resample Contours
                         if start_step <= 10 <= max_step and obj.contours is not None and len(obj.contours) > 0 and obj.bounding_planes is not None:
                             print(f"  [10/{max_step}] Resampling Contours...")
-                            obj.resample_contours(base_samples=32)
+                            obj.resample_contours(base_samples=32, defer=defer)
+                            if defer:
+                                obj._build_fibers_replayed = False
 
                         # Step 11: Build Contour Mesh
                         if start_step <= 11 <= max_step and obj.contours is not None and len(obj.contours) > 0 and obj.draw_contour_stream is not None:
@@ -824,14 +826,18 @@ def draw_zygote_muscle_ui(v):
                         obj.replay_fiber_animation()
 
                 # Step 10: Resample Contours
-                if colored_button(f"Resample Contours##{name}", 10, col_button_width):
+                if colored_button(f"Resample Contours##{name}", 10, proc_w if animate else col_button_width):
                     if obj.contours is not None and len(obj.contours) > 0 and obj.bounding_planes is not None:
                         try:
-                            obj.resample_contours(base_samples=32)
+                            obj.resample_contours(base_samples=32, defer=animate)
                         except Exception as e:
                             print(f"[{name}] Resample Contours error: {e}")
                     else:
                         print(f"[{name}] Prerequisites: Run 'Smoothen Contours' first")
+                if animate and getattr(obj, '_resample_anim_data', None) is not None and getattr(obj, '_build_fibers_replayed', False) and not getattr(obj, '_fiber_anim_active', False):
+                    imgui.same_line()
+                    if imgui.button(f">##{name}_resample_replay", width=replay_w):
+                        obj.replay_resample_animation()
 
                 # Step 11: Build Contour Mesh
                 if colored_button(f"Build Contour Mesh##{name}", 11, col_button_width):
@@ -1155,6 +1161,8 @@ def draw_zygote_muscle_ui(v):
                         obj.bounding_box_draw_mode = new_mode
                 _, obj.is_draw_discarded = imgui.checkbox("Draw Discarded", obj.is_draw_discarded)
                 _, obj.is_draw_fiber_architecture = imgui.checkbox("Draw Fiber Architecture", obj.is_draw_fiber_architecture)
+                if getattr(obj, 'contours_resampled', None) is not None:
+                    _, obj.is_draw_resampled_vertices = imgui.checkbox("Draw Resampled Vertices", obj.is_draw_resampled_vertices)
                 _, obj.is_draw_contour_mesh = imgui.checkbox("Draw Contour Mesh", obj.is_draw_contour_mesh)
                 _, obj.is_draw_tet_mesh = imgui.checkbox("Draw Tet Mesh", obj.is_draw_tet_mesh)
                 imgui.same_line()
@@ -4873,7 +4881,9 @@ def _render_manual_cut_windows(v):
                                         # Step 10: Resample Contours
                                         if start_step <= 10 <= max_step and obj.contours is not None and len(obj.contours) > 0 and obj.bounding_planes is not None:
                                             print(f"  [10/{max_step}] Resampling Contours...")
-                                            obj.resample_contours(base_samples=32)
+                                            obj.resample_contours(base_samples=32, defer=_defer)
+                                            if _defer:
+                                                obj._build_fibers_replayed = False
 
                                         # Step 11: Build Contour Mesh
                                         if start_step <= 11 <= max_step and obj.contours is not None and len(obj.contours) > 0 and obj.draw_contour_stream is not None:
@@ -5258,7 +5268,9 @@ def _render_level_select_windows(v):
                         # Step 10: Resample Contours
                         if start_step <= 10 <= max_step and obj.contours is not None and len(obj.contours) > 0 and obj.bounding_planes is not None:
                             print(f"  [10/{max_step}] Resampling Contours...")
-                            obj.resample_contours(base_samples=32)
+                            obj.resample_contours(base_samples=32, defer=_defer)
+                            if _defer:
+                                obj._build_fibers_replayed = False
 
                         # Step 11: Build Contour Mesh
                         if start_step <= 11 <= max_step and obj.contours is not None and len(obj.contours) > 0 and obj.draw_contour_stream is not None:

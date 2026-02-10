@@ -75,6 +75,15 @@ class ContourAnimationMixin:
         self._fiber_anim_level_progress = None   # float: growth progress in levels (0..num_levels-1)
         self._build_fibers_replayed = False
 
+        # Resample contours animation state
+        self._resample_anim_active = False
+        self._resample_anim_progress = 0.0
+        self._resample_anim_point_sizes = {}   # {level_idx: size_factor}
+        self._resample_anim_num_levels = 0
+        self._resample_replayed = False
+        self._resample_anim_data = None        # Deep copy of contours_resampled for replay
+        self.is_draw_resampled_vertices = False
+
         # BP color override during smooth animations {(i,j): (r,g,b,a)}
         self._smooth_anim_bp_colors = None
 
@@ -1370,6 +1379,85 @@ class ContourAnimationMixin:
 
         return True
 
+    # ── Resample Contours Animation ─────────────────────────────────
+
+    def replay_resample_animation(self):
+        """Animate resampled vertices: point-size pulse, level by level, origin→insertion."""
+        if self._resample_anim_data is None:
+            self._resample_replayed = True
+            return
+
+        # Set contours/BPs to post-selection state (same as fiber replay)
+        src = getattr(self, '_selected_stream_contours', None) or \
+              (self.stream_contours if hasattr(self, 'stream_contours') and self.stream_contours is not None else None)
+        src_bps = getattr(self, '_selected_stream_bounding_planes', None) or \
+                  (self.stream_bounding_planes if hasattr(self, 'stream_bounding_planes') and self.stream_bounding_planes is not None else None)
+        if src is not None:
+            self.contours = src
+            self.bounding_planes = src_bps
+            self.draw_contour_stream = [[True] * len(src[s]) for s in range(len(src))]
+
+        # Compute num_levels from anim data
+        num_levels = max(len(stream) for stream in self._resample_anim_data) if self._resample_anim_data else 1
+
+        # Start state: contours visible, fibers visible, resampled vertices hidden
+        self.is_draw_contours = True
+        self.is_draw_bounding_box = True
+        self.bounding_box_draw_mode = 1
+        self.is_draw_fiber_architecture = True
+        self.is_draw_resampled_vertices = False
+        self._resample_anim_progress = 0.0
+        self._resample_anim_point_sizes = {}
+        self._resample_anim_num_levels = num_levels
+        self._resample_anim_active = True
+
+    def update_resample_animation(self, dt):
+        """Reveal resampled vertices level by level with point-size pulse."""
+        if not self._resample_anim_active:
+            return False
+
+        self._resample_anim_progress += dt
+        num_levels = self._resample_anim_num_levels
+        reveal_dur = 2.0
+        highlight_dur = 0.5
+        time_per_level = reveal_dur / max(num_levels, 1)
+        total_dur = reveal_dur + highlight_dur
+
+        # How many levels revealed so far
+        revealed = min(int(self._resample_anim_progress / time_per_level) + 1, num_levels) if self._resample_anim_progress < reveal_dur else num_levels
+
+        # Show vertices once animation starts
+        self.is_draw_resampled_vertices = True
+
+        # Compute per-level point size pulse
+        point_sizes = {}
+        for lvl in range(revealed):
+            # Time when this level was first revealed
+            level_start = lvl * time_per_level
+            age = self._resample_anim_progress - level_start
+            if age < highlight_dur:
+                # Pulse: grow from 0 to peak then settle
+                t = age / highlight_dur
+                # smoothstep ease: peak at t=0.3, settle to 1.0
+                if t < 0.3:
+                    pulse = t / 0.3
+                else:
+                    pulse = 1.0 + (1.5 - 1.0) * (1.0 - (t - 0.3) / 0.7)
+                point_sizes[lvl] = pulse
+            else:
+                point_sizes[lvl] = 1.0
+        self._resample_anim_point_sizes = point_sizes
+
+        if self._resample_anim_progress >= total_dur:
+            # Done
+            self._resample_anim_active = False
+            self._resample_anim_point_sizes = {}
+            self._resample_replayed = True
+            self.is_draw_resampled_vertices = True
+            return False
+
+        return True
+
     # ── Persistence ─────────────────────────────────────────────────
 
     def save_animation_state(self, filepath):
@@ -1462,6 +1550,14 @@ class ContourAnimationMixin:
         state['_stream_endpoints'] = getattr(self, '_stream_endpoints', None)
         state['fiber_architecture'] = getattr(self, 'fiber_architecture', None)
         state['mvc_weights'] = getattr(self, 'mvc_weights', None)
+
+        # Resample animation data
+        state['_resample_anim_data'] = getattr(self, '_resample_anim_data', None)
+        state['contours_resampled'] = getattr(self, 'contours_resampled', None)
+        state['contours_resampled_params'] = getattr(self, 'contours_resampled_params', None)
+        state['contours_resampled_fixed'] = getattr(self, 'contours_resampled_fixed', None)
+        state['contours_resampled_types'] = getattr(self, 'contours_resampled_types', None)
+        state['is_draw_resampled_vertices'] = getattr(self, 'is_draw_resampled_vertices', False)
 
         # Pipeline state
         state['max_stream_count'] = getattr(self, 'max_stream_count', None)
@@ -1578,6 +1674,14 @@ class ContourAnimationMixin:
         if state.get('mvc_weights') is not None:
             self.mvc_weights = state['mvc_weights']
 
+        # Resample animation data
+        self._resample_anim_data = state.get('_resample_anim_data')
+        self.contours_resampled = state.get('contours_resampled')
+        self.contours_resampled_params = state.get('contours_resampled_params')
+        self.contours_resampled_fixed = state.get('contours_resampled_fixed')
+        self.contours_resampled_types = state.get('contours_resampled_types')
+        self.is_draw_resampled_vertices = state.get('is_draw_resampled_vertices', False)
+
         # Pipeline state
         if state.get('max_stream_count') is not None:
             self.max_stream_count = state['max_stream_count']
@@ -1628,6 +1732,10 @@ class ContourAnimationMixin:
         self._fiber_anim_progress = 0.0
         self._fiber_anim_level_progress = None
         self._build_fibers_replayed = False
+        self._resample_anim_active = False
+        self._resample_anim_progress = 0.0
+        self._resample_anim_point_sizes = {}
+        self._resample_replayed = False
 
         # ── Restore deferred visual state so everything looks pre-processed ──
 
@@ -1690,5 +1798,9 @@ class ContourAnimationMixin:
         # 5. Fibers: hide fiber architecture for deferred replay
         if self._fiber_anim_waypoints is not None:
             self.is_draw_fiber_architecture = False
+
+        # 6. Resample: hide resampled vertices for deferred replay
+        if self._resample_anim_data is not None:
+            self.is_draw_resampled_vertices = False
 
         print(f"Animation state loaded from {filepath}")
