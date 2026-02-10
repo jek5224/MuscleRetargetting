@@ -816,7 +816,7 @@ def draw_zygote_muscle_ui(v):
                             traceback.print_exc()
                     else:
                         print(f"[{name}] Prerequisites: Run 'Cut' first")
-                if animate and getattr(obj, '_fiber_anim_waypoints', None) is not None and getattr(obj, '_level_select_replayed', False):
+                if animate and getattr(obj, '_fiber_anim_waypoints', None) is not None and getattr(obj, '_level_select_replayed', False) and not getattr(obj, '_level_select_anim_active', False):
                     imgui.same_line()
                     if imgui.button(f">##{name}_fiber_replay", width=replay_w):
                         obj.replay_fiber_animation()

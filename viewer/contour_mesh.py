@@ -13705,27 +13705,35 @@ class ContourMeshMixin:
             print("Run cut_streams and select_levels first")
             return
 
-        # Apply post-stream-smooth axes if smooth was deferred
-        # (stream_bounding_planes still has pre-smooth values from defer restore;
-        #  _selected_stream_bounding_planes shares the same BP dict objects, so
-        #  modifying stream_bounding_planes in-place updates both)
-        ss_after = getattr(self, '_stream_smooth_bp_after', None)
-        if ss_after is not None and not getattr(self, '_stream_smooth_replayed', False):
-            for i, stream_snaps in enumerate(ss_after):
-                if i < len(self.stream_bounding_planes):
-                    for j, snap in enumerate(stream_snaps):
-                        if j < len(self.stream_bounding_planes[i]):
-                            bp = self.stream_bounding_planes[i][j]
-                            bp['mean'] = snap['mean'].copy()
-                            bp['basis_x'] = snap['basis_x'].copy()
-                            bp['basis_y'] = snap['basis_y'].copy()
-                            bp['basis_z'] = snap['basis_z'].copy()
-                            if snap['bounding_plane'] is not None:
-                                bp['bounding_plane'] = snap['bounding_plane'].copy()
-
         # Use selected data if level selection was applied
         src_contours = getattr(self, '_selected_stream_contours', None) or self.stream_contours
         src_bps = getattr(self, '_selected_stream_bounding_planes', None) or self.stream_bounding_planes
+
+        # Apply post-stream-smooth axes if smooth was deferred
+        # Apply to all BP sources: stream_bounding_planes, _level_select_original,
+        # and src_bps — these may reference different dict objects after non-deferred
+        # level select animation reassigns stream_bounding_planes
+        ss_after = getattr(self, '_stream_smooth_bp_after', None)
+        if ss_after is not None and not getattr(self, '_stream_smooth_replayed', False):
+            def _apply_smooth(bp_list):
+                for i, stream_snaps in enumerate(ss_after):
+                    if i >= len(bp_list):
+                        continue
+                    for j, snap in enumerate(stream_snaps):
+                        if j >= len(bp_list[i]):
+                            continue
+                        bp = bp_list[i][j]
+                        bp['mean'] = snap['mean'].copy()
+                        bp['basis_x'] = snap['basis_x'].copy()
+                        bp['basis_y'] = snap['basis_y'].copy()
+                        bp['basis_z'] = snap['basis_z'].copy()
+                        if snap['bounding_plane'] is not None:
+                            bp['bounding_plane'] = snap['bounding_plane'].copy()
+            _apply_smooth(self.stream_bounding_planes)
+            # Also apply to _level_select_original BPs (shared by _selected_stream_bounding_planes)
+            ls_orig = getattr(self, '_level_select_original', None)
+            if ls_orig is not None and 'stream_bounding_planes' in ls_orig:
+                _apply_smooth(ls_orig['stream_bounding_planes'])
 
         max_stream_count = self.max_stream_count
         level_counts = [len(src_contours[s]) for s in range(max_stream_count)]
@@ -13796,8 +13804,8 @@ class ContourMeshMixin:
             for stream in self._fiber_anim_waypoints
         ]
 
-        # Set starting state: mesh visible, fibers drawn but clipped at progress=0
-        self.transparency = self._fiber_anim_orig_transparency
+        # Set starting state: mesh visible at 0.5, fibers drawn but clipped at progress=0
+        self.transparency = 0.5
         if self.vertex_colors is not None and self.is_draw_scalar_field:
             self.vertex_colors[:, 3] = self.transparency
         self.is_draw = True
@@ -13835,8 +13843,8 @@ class ContourMeshMixin:
 
         # Phase 1: Mesh transparency fade (0-0.5s)
         fade_dur = 0.5
-        target_alpha = 0.1
-        orig_alpha = self._fiber_anim_orig_transparency
+        target_alpha = 0.0
+        orig_alpha = 0.5
         if progress < fade_dur:
             t = progress / fade_dur
             t = t * t * (3.0 - 2.0 * t)  # smoothstep
