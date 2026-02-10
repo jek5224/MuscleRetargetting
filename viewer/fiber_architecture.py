@@ -2117,6 +2117,20 @@ class FiberArchitectureMixin:
         # Apply MVC weights to corresponding contour vertices
         waypoints = np.dot(fs, Ps)
 
+        # Validate waypoints: clamp extreme values to contour centroid
+        centroid = np.mean(Ps, axis=0)
+        max_dist_sq = 0.0
+        for p in Ps:
+            d_sq = np.sum((p - centroid) ** 2)
+            if d_sq > max_dist_sq:
+                max_dist_sq = d_sq
+        # Threshold: 2x the contour radius
+        threshold_sq = max_dist_sq * 4.0
+        for i in range(len(waypoints)):
+            d_sq = np.sum((waypoints[i] - centroid) ** 2)
+            if d_sq > threshold_sq or not np.all(np.isfinite(waypoints[i])):
+                waypoints[i] = centroid
+
         return Qs_normalized, waypoints, fs
 
     def find_waypoints_radial(self, bounding_plane_info, fiber_architecture):
