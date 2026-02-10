@@ -1144,6 +1144,15 @@ def draw_zygote_muscle_ui(v):
                 _, obj.is_draw_edges = imgui.checkbox("Draw Edges", obj.is_draw_edges)
                 _, obj.is_draw_centroid = imgui.checkbox("Draw Centroid", obj.is_draw_centroid)
                 _, obj.is_draw_bounding_box = imgui.checkbox("Draw Bounding Box", obj.is_draw_bounding_box)
+                if obj.is_draw_bounding_box:
+                    imgui.same_line()
+                    bb_mode = getattr(obj, 'bounding_box_draw_mode', 0)
+                    bb_labels = ["Axes", "Planes", "Boxes"]
+                    imgui.push_item_width(80)
+                    changed, new_mode = imgui.combo(f"##bb_mode_{name}", bb_mode, bb_labels)
+                    imgui.pop_item_width()
+                    if changed:
+                        obj.bounding_box_draw_mode = new_mode
                 _, obj.is_draw_discarded = imgui.checkbox("Draw Discarded", obj.is_draw_discarded)
                 _, obj.is_draw_fiber_architecture = imgui.checkbox("Draw Fiber Architecture", obj.is_draw_fiber_architecture)
                 _, obj.is_draw_contour_mesh = imgui.checkbox("Draw Contour Mesh", obj.is_draw_contour_mesh)

@@ -3015,6 +3015,7 @@ class MuscleMeshMixin:
         self.draw_contour_stream = None
         self.is_draw_contours = False
         self.is_draw_bounding_box = True
+        self.bounding_box_draw_mode = 1  # 0 = axes, 1 = + planes, 2 = + connecting lines
 
         # Contour animation state
         self._contour_anim_active = False
