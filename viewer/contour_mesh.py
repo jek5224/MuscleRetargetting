@@ -13282,6 +13282,26 @@ class ContourMeshMixin:
                     if not contours_same:
                         print(f"  WARNING: Level {level_i} group {group} - contours are DIFFERENT!")
 
+    def _save_level_select_post_state(self):
+        """Save post-selection state for replay restoration (avoids destructive re-apply)."""
+        max_stream_count = self.max_stream_count
+        self._level_select_anim_post = {
+            'stream_contours': [list(sc) for sc in self.stream_contours],
+            'stream_bounding_planes': [list(bp) for bp in self.stream_bounding_planes],
+            'stream_groups': list(self.stream_groups),
+            'draw_contour_stream': [list(dcs) for dcs in self.draw_contour_stream],
+        }
+
+    def _restore_level_select_post_state(self):
+        """Restore post-selection state from saved snapshot (for replay completion)."""
+        post = self._level_select_anim_post
+        self.stream_contours = [list(sc) for sc in post['stream_contours']]
+        self.stream_bounding_planes = [list(bp) for bp in post['stream_bounding_planes']]
+        self.stream_groups = list(post['stream_groups'])
+        self.contours = self.stream_contours
+        self.bounding_planes = self.stream_bounding_planes
+        self.draw_contour_stream = [list(dcs) for dcs in post['draw_contour_stream']]
+
     def _start_level_select_animation(self, defer=False):
         """Start shrink animation for unselected levels before applying selection.
 
@@ -13306,7 +13326,7 @@ class ContourMeshMixin:
         num_levels = len(orig['stream_contours'][0]) if max_stream_count > 0 else 0
         self._level_select_anim_unselected = unselected
         self._level_select_anim_num_levels = num_levels
-        # Save original data for replay
+        # Save pre-selection data for replay
         self._level_select_anim_original = {
             'stream_contours': [list(sc) for sc in orig['stream_contours']],
             'stream_bounding_planes': [list(bp) for bp in orig['stream_bounding_planes']],
@@ -13317,6 +13337,7 @@ class ContourMeshMixin:
         if not unselected:
             self._level_select_window_open = False
             self._apply_level_selection()
+            self._save_level_select_post_state()
             self._level_select_anim_pending_resume = True
             self._level_select_replayed = True
             return
@@ -13325,6 +13346,7 @@ class ContourMeshMixin:
             # Deferred: apply selection immediately, replay animation later
             self._level_select_window_open = False
             self._apply_level_selection()
+            self._save_level_select_post_state()
             self._level_select_anim_pending_resume = True
             self._level_select_replayed = False
             print(f"Level select animation deferred: {len(unselected)} unselected contours")
@@ -13341,7 +13363,8 @@ class ContourMeshMixin:
         # Close selection window but keep checkboxes/original alive for _apply_level_selection
         self._level_select_window_open = False
 
-        # Initialize animation
+        # Initialize animation (first run, not replay)
+        self._level_select_anim_is_replay = False
         self._level_select_anim_scales = {key: 1.0 for key in unselected}
         self._level_select_anim_progress = 0.0
         self._level_select_anim_active = True
@@ -13370,8 +13393,14 @@ class ContourMeshMixin:
             self._level_select_anim_active = False
             self._level_select_anim_scales = None
             self._level_select_anim_unselected = None
-            self._apply_level_selection()
-            self._level_select_anim_pending_resume = True
+            if getattr(self, '_level_select_anim_is_replay', False):
+                # Replay: restore from saved post-selection state (non-destructive)
+                self._restore_level_select_post_state()
+            else:
+                # First run: apply selection and save post state
+                self._apply_level_selection()
+                self._save_level_select_post_state()
+                self._level_select_anim_pending_resume = True
             self._level_select_replayed = True
             print("Level select animation complete")
 
@@ -13395,23 +13424,16 @@ class ContourMeshMixin:
         if not unselected:
             return
 
-        # Restore all levels visible from saved original
+        # Restore all levels visible from saved pre-selection state
         self.contours = [list(sc) for sc in anim_orig['stream_contours']]
         self.bounding_planes = [list(bp) for bp in anim_orig['stream_bounding_planes']]
         self.draw_contour_stream = [[True] * len(anim_orig['stream_contours'][s]) for s in range(max_stream_count)]
         self.stream_contours = self.contours
         self.stream_bounding_planes = self.bounding_planes
 
-        # Re-populate _level_select_checkboxes and _level_select_original for _apply_level_selection
-        self._level_select_checkboxes = [list(cb) for cb in checkboxes]
-        self._level_select_original = {
-            'stream_contours': [list(sc) for sc in anim_orig['stream_contours']],
-            'stream_bounding_planes': [list(bp) for bp in anim_orig['stream_bounding_planes']],
-            'stream_groups': list(self.stream_groups),
-        }
-
-        # Start animation
+        # Start animation (replay mode — restores post state on completion, no _apply)
         num_levels = len(anim_orig['stream_contours'][0]) if max_stream_count > 0 else 0
+        self._level_select_anim_is_replay = True
         self._level_select_anim_unselected = unselected
         self._level_select_anim_num_levels = num_levels
         self._level_select_anim_scales = {key: 1.0 for key in unselected}
