@@ -45,7 +45,7 @@ class MeshLoader(ContourMeshMixin, TetrahedronMeshMixin, FiberArchitectureMixin,
         self.is_draw_edges = False
         self.is_draw_centroid = False
         self.is_draw_bounding_box = False
-        self.bounding_box_draw_mode = 0  # 0 = axes, 1 = + planes, 2 = + connecting lines
+        self.bounding_box_draw_mode = 0  # 0 = planes, 1 = + connecting lines (boxes)
         self.is_draw_discarded = False
         self.draw_contour_stream = None
 
@@ -672,9 +672,8 @@ class MeshLoader(ContourMeshMixin, TetrahedronMeshMixin, FiberArchitectureMixin,
                     bp_s *= ls_scales[(i, j)]
                     bp_alpha *= ls_scales[(i, j)]
                 mean = plane_info['mean']
-                bb_mode = getattr(self, 'bounding_box_draw_mode', 0)
 
-                # Axes always drawn (center point + RGB axis lines)
+                # Axes (center point + RGB axis lines)
                 glPushMatrix()
                 glPointSize(max(5 * bp_s, 0.1))
                 glColor4f(0, 0, 0, bp_alpha)
@@ -701,8 +700,8 @@ class MeshLoader(ContourMeshMixin, TetrahedronMeshMixin, FiberArchitectureMixin,
                 glVertex3fv(mean + plane_info['basis_z'] * scale * 0.1 * bp_s)
                 glEnd()
 
-                # Mode >= 1: also draw bounding plane quad outlines
-                if bb_mode >= 1 and plane_info.get('bounding_plane') is not None:
+                # Bounding plane quad outlines (always drawn, axes + planes is the base)
+                if plane_info.get('bounding_plane') is not None:
                     bp_color_override = getattr(self, '_smooth_anim_bp_colors', None)
                     if bp_color_override and (i, j) in bp_color_override:
                         c = bp_color_override[(i, j)]
@@ -723,13 +722,13 @@ class MeshLoader(ContourMeshMixin, TetrahedronMeshMixin, FiberArchitectureMixin,
                 glPopMatrix()
         glEnable(GL_LIGHTING)
 
-        # Mode 2: also draw connecting lines between adjacent levels
+        # Mode 1: also draw connecting lines between adjacent levels (boxes)
         # Only possible after find_contour_stream (streams have been built)
         streams_built = (hasattr(self, '_stream_endpoints') and
                          self._stream_endpoints is not None and
                          len(self._stream_endpoints) > 0)
         bb_mode = getattr(self, 'bounding_box_draw_mode', 0)
-        if bb_mode >= 2 and streams_built:
+        if bb_mode >= 1 and streams_built:
             is_2d = (self.draw_contour_stream is not None and
                      len(self.draw_contour_stream) > 0 and
                      isinstance(self.draw_contour_stream[0], list))

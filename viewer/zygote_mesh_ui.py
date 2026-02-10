@@ -1147,7 +1147,7 @@ def draw_zygote_muscle_ui(v):
                 if obj.is_draw_bounding_box:
                     imgui.same_line()
                     bb_mode = getattr(obj, 'bounding_box_draw_mode', 0)
-                    bb_labels = ["Axes", "Planes", "Boxes"]
+                    bb_labels = ["Planes", "Boxes"]
                     imgui.push_item_width(80)
                     changed, new_mode = imgui.combo(f"##bb_mode_{name}", bb_mode, bb_labels)
                     imgui.pop_item_width()
