@@ -14,6 +14,14 @@ ray_results/
 # Python virtualenv
 pyMAC/
 
+# Audio
+*.wav
+
 # Model files
 models/smpl/
 models/skel_models_v1.1/
+
+# Large mesh/data directories
+ChaosFleshNodes/
+LBS/
+Zygote_Meshes_*/
