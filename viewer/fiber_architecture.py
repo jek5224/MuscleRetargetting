@@ -1865,9 +1865,6 @@ class FiberArchitectureMixin:
         glDisable(GL_LIGHTING)
         glEnableClientState(GL_VERTEX_ARRAY)
 
-        # Animation level progress for fiber growth
-        anim_lp = getattr(self, '_fiber_anim_level_progress', None)
-
         # Collect waypoints by highlight status
         normal_pts = []
         highlight_pts = []
@@ -1881,13 +1878,6 @@ class FiberArchitectureMixin:
                 for level_idx, waypoints in enumerate(waypoint_group):
                     is_highlighted = (highlight_stream == stream_idx and highlight_level == level_idx)
                     for fi, wp in enumerate(waypoints):
-                        # Animation clipping: skip waypoints beyond fiber's current progress
-                        if anim_lp is not None:
-                            if stream_idx < len(anim_lp) and fi < len(anim_lp[stream_idx]):
-                                if level_idx > anim_lp[stream_idx][fi]:
-                                    continue
-                            else:
-                                continue  # Animation active but fiber not covered — skip
                         if not _wp_valid(wp):
                             continue
                         if is_highlighted:
@@ -1923,37 +1913,12 @@ class FiberArchitectureMixin:
                     for fi in range(min(len(wps_curr), len(wps_next))):
                         if not _wp_valid(wps_curr[fi]) or not _wp_valid(wps_next[fi]):
                             continue
-                        if anim_lp is not None:
-                            if stream_idx < len(anim_lp) and fi < len(anim_lp[stream_idx]):
-                                fp = anim_lp[stream_idx][fi]
-                                if contour_idx >= fp:
-                                    continue  # Not reached yet
-                                elif contour_idx + 1 <= fp:
-                                    fiber_lines.extend([wps_curr[fi], wps_next[fi]])  # Full segment
-                                else:
-                                    frac = fp - contour_idx  # Partial segment
-                                    interp = wps_curr[fi] + (wps_next[fi] - wps_curr[fi]) * frac
-                                    fiber_lines.extend([wps_curr[fi], interp])
-                            # else: animation active but fiber not covered — skip
-                        else:
-                            fiber_lines.extend([wps_curr[fi], wps_next[fi]])  # No animation
+                        fiber_lines.extend([wps_curr[fi], wps_next[fi]])
 
         if len(fiber_lines) > 0:
             lines = np.array(fiber_lines, dtype=np.float32)
-            # Filter out line segments that are too long (infinite line protection)
-            if anim_lp is not None and len(lines) >= 2:
-                good_lines = []
-                for k in range(0, len(lines) - 1, 2):
-                    seg_len = np.linalg.norm(lines[k+1] - lines[k])
-                    if seg_len < 1.0:  # 1 meter max segment length
-                        good_lines.extend([lines[k], lines[k+1]])
-                if len(good_lines) > 0:
-                    lines = np.array(good_lines, dtype=np.float32)
-                else:
-                    lines = None
-            if lines is not None:
-                glVertexPointer(3, GL_FLOAT, 0, lines)
-                glDrawArrays(GL_LINES, 0, len(lines))
+            glVertexPointer(3, GL_FLOAT, 0, lines)
+            glDrawArrays(GL_LINES, 0, len(lines))
 
         # Draw test fiber (blue) if available
         test_waypoints = getattr(self, 'test_fiber_waypoints', None)

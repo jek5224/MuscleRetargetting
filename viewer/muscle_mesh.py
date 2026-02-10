@@ -3118,12 +3118,8 @@ class MuscleMeshMixin:
         self._bounding_planes_backup = None
         self.selected_stream_levels = None
 
-        # Build fibers animation state
-        self._fiber_anim_active = False
-        self._fiber_anim_progress = 0.0
+        # Build fibers replay state
         self._fiber_anim_waypoints = None
-        self._fiber_anim_offsets = None
-        self._fiber_anim_level_progress = None
         self._fiber_anim_stream_endpoints = None
         self._build_fibers_replayed = False
 

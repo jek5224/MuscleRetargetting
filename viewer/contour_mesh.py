@@ -535,12 +535,8 @@ class ContourMeshMixin:
         self._level_select_replayed = False
         self._level_select_anim_pending_resume = False
 
-        # Build fibers animation state
-        self._fiber_anim_active = False
-        self._fiber_anim_progress = 0.0
+        # Build fibers replay state
         self._fiber_anim_waypoints = None      # Deep copy of waypoints for replay
-        self._fiber_anim_offsets = None         # [[float]*fibers]*streams - random start offsets
-        self._fiber_anim_level_progress = None  # [[float]*fibers]*streams - per-fiber level progress
         self._fiber_anim_stream_endpoints = None  # saved _stream_endpoints during defer
         self._build_fibers_replayed = False
 
@@ -13777,47 +13773,20 @@ class ContourMeshMixin:
         print(f"Build fibers complete: {max_stream_count} streams, levels: {level_counts}")
 
     def _save_fiber_anim_data(self):
-        """Save waypoints and generate random offsets for fiber animation."""
+        """Save waypoints for replay."""
         if self.waypoints is None:
             return
-        import random
         # Deep copy waypoints
         self._fiber_anim_waypoints = [
             [[np.array(wp).copy() for wp in level] for level in stream]
             for stream in self.waypoints
         ]
-        # Random start offset per fiber (0 to 0.5s)
-        self._fiber_anim_offsets = []
-        for stream_wps in self.waypoints:
-            num_fibers = len(stream_wps[0]) if len(stream_wps) > 0 else 0
-            self._fiber_anim_offsets.append(
-                [random.uniform(0, 0.5) for _ in range(num_fibers)]
-            )
-        # Debug: check for NaN/inf in waypoints
-        nan_count = 0
-        for s_idx, stream in enumerate(self._fiber_anim_waypoints):
-            for l_idx, level in enumerate(stream):
-                for f_idx, wp in enumerate(level):
-                    if not np.all(np.isfinite(wp)):
-                        nan_count += 1
-                        if nan_count <= 5:
-                            print(f"[_save_fiber_anim_data] WARNING: NaN/inf waypoint at "
-                                  f"stream={s_idx} level={l_idx} fiber={f_idx}: {wp}")
-        if nan_count > 0:
-            print(f"[_save_fiber_anim_data] TOTAL NaN/inf waypoints: {nan_count}")
 
     def replay_fiber_animation(self):
-        """Start fiber build animation: mesh fades, fibers grow origin->insertion."""
+        """Show build fibers result: restore waypoints and display fibers."""
         if self._fiber_anim_waypoints is None:
             self._build_fibers_replayed = True
             return
-
-        # Debug: show animation data structure
-        wp_levels = [len(s) for s in self._fiber_anim_waypoints]
-        wp_fibers = [len(s[0]) if len(s) > 0 else 0 for s in self._fiber_anim_waypoints]
-        off_fibers = [len(o) for o in self._fiber_anim_offsets]
-        print(f"[replay_fiber_animation] waypoints: {len(self._fiber_anim_waypoints)} streams, "
-              f"levels={wp_levels}, fibers={wp_fibers}, offsets={off_fibers}")
 
         # Restore waypoints from saved data
         self.waypoints = [
@@ -13825,11 +13794,7 @@ class ContourMeshMixin:
             for stream in self._fiber_anim_waypoints
         ]
 
-        # Set starting state: mesh visible, fibers drawn but clipped at progress=0
-        self.is_draw = True
-        self.is_draw_fiber_architecture = True
-
-        # Ensure contours/BPs use selected (post-level-select) data
+        # Set contours/BPs to selected data (same as what build_fibers used)
         src = getattr(self, '_selected_stream_contours', None) or \
               (self.stream_contours if hasattr(self, 'stream_contours') and self.stream_contours is not None else None)
         src_bps = getattr(self, '_selected_stream_bounding_planes', None) or \
@@ -13838,55 +13803,16 @@ class ContourMeshMixin:
             self.contours = src
             self.bounding_planes = src_bps
             self.draw_contour_stream = [[True] * len(src[s]) for s in range(len(src))]
-            _src_levels = [len(src[s]) for s in range(len(src))]
-            print(f"[replay_fiber_animation] contours: {_src_levels} levels "
-                  f"(selected={getattr(self, '_selected_stream_contours', None) is not None})")
 
-        # Restore _stream_endpoints (cleared during defer to hide connecting lines)
+        # Restore _stream_endpoints (cleared during defer)
         saved_ep = getattr(self, '_fiber_anim_stream_endpoints', None)
         if saved_ep is not None:
             self._stream_endpoints = saved_ep
 
-        self._fiber_anim_progress = 0.0
-        # Initialize all fibers at level_progress=0 so first frame clips everything
-        self._fiber_anim_level_progress = [
-            [0.0] * len(offsets) for offsets in self._fiber_anim_offsets
-        ]
-        self._fiber_anim_active = True
-
-    def update_fiber_animation(self, dt):
-        """Update fiber build animation each frame."""
-        if not self._fiber_anim_active:
-            return False
-
-        self._fiber_anim_progress += dt
-        progress = self._fiber_anim_progress
-
-        # Per-fiber growth
-        fiber_grow_dur = 2.5
-        total_dur = 3.0  # fiber_grow_dur + max_offset(0.5)
-
-        self._fiber_anim_level_progress = []
-        for stream_idx, stream_wps in enumerate(self._fiber_anim_waypoints):
-            num_levels = len(stream_wps)
-            offsets = self._fiber_anim_offsets[stream_idx]
-            stream_prog = []
-            for fi, offset in enumerate(offsets):
-                fiber_t = max(0.0, min((progress - offset) / fiber_grow_dur, 1.0))
-                level_prog = fiber_t * max(num_levels - 1, 0)
-                stream_prog.append(level_prog)
-            self._fiber_anim_level_progress.append(stream_prog)
-
-        # Done
-        if progress >= total_dur:
-            self._fiber_anim_active = False
-            self._build_fibers_replayed = True
-            self._fiber_anim_level_progress = None
-            self.is_draw = False  # Match post-process end state
-            self.is_draw_fiber_architecture = True
-            return False
-
-        return True
+        # Show final state: fibers visible, mesh hidden (same as non-animated build_fibers)
+        self.is_draw = False
+        self.is_draw_fiber_architecture = True
+        self._build_fibers_replayed = True
 
     def _cut_contour_mesh_aware(self, contour, bp, projected_refs, stream_indices):
         """
