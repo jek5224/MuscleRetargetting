@@ -5297,6 +5297,8 @@ def _render_level_select_windows(v):
             obj._level_select_window_open = False
             obj._level_select_checkboxes = None
             obj._level_select_original = None
+            # Clear pipeline pause so "Resume" doesn't skip level select
+            obj._pipeline_paused_at = None
             imgui.end()
             continue
 
