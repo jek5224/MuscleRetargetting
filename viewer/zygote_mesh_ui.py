@@ -2910,6 +2910,9 @@ def _apply_corner_correspondence(v, name, obj, stream_idx, level_idx, corner_idx
                         obj.mvc_weights[stream_idx][level_idx] = mvc_weights
                         print(f"  Updated MVC weights")
 
+                # Resave animation data so replay uses updated waypoints
+                obj._save_fiber_anim_data()
+
     print("  Correspondence applied successfully")
 
 
