@@ -2594,8 +2594,8 @@ class ContourMeshMixin:
             self.draw_contour_stream = [[True] * num_levels for _ in range(num_streams)]
         # Reset to pre-cut colors
         self._cut_anim_contour_colors = [[c.copy() for c in stream] for stream in self._cut_color_before]
-        # Reset BPs to pre-cut state
-        if self._cut_has_bp_change:
+        # Reset BPs to pre-cut state (includes smooth result axes)
+        if self._cut_bp_before is not None:
             self._apply_stream_bp_snapshot(self._cut_bp_before)
         self._contour_anim_bp_scale = {}
         self._cut_bp_switched = False
