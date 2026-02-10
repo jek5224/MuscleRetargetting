@@ -1659,7 +1659,11 @@ class ContourMeshMixin:
             self._apply_bp_snapshot(self._smooth_bp_before_level)
         elif getattr(self, '_smooth_bp_before', None) is not None:
             self._apply_bp_snapshot(self._smooth_bp_before)
-        # Show all currently visible contours, but hide the transition-inserted ones
+        # _precut_draw_contour_stream may have fill-gap contours hidden (deferred).
+        # Transitions starts after fill-gaps, so fill-gap contours must be visible.
+        for idx in getattr(self, '_fill_gaps_inserted_indices', []):
+            self._set_level_visible(idx, True)
+        # Hide the transition-inserted ones (to reveal them during animation)
         for idx in self._transitions_inserted_indices:
             self._set_level_visible(idx, False)
         self._transitions_anim_step = 0
@@ -1891,6 +1895,12 @@ class ContourMeshMixin:
                                     for level in self._precut_bounding_planes]
             if hasattr(self, '_precut_draw_contour_stream') and self._precut_draw_contour_stream is not None:
                 self.draw_contour_stream = list(self._precut_draw_contour_stream)
+        # _precut_draw_contour_stream may have fill-gap/transition contours hidden (deferred).
+        # Smooth starts after all pre-cut steps, so all contours must be visible.
+        for idx in getattr(self, '_fill_gaps_inserted_indices', []):
+            self._set_level_visible(idx, True)
+        for idx in getattr(self, '_transitions_inserted_indices', []):
+            self._set_level_visible(idx, True)
         # Reset to initial state
         self._apply_bp_snapshot(self._smooth_bp_before)
         self._smooth_anim_bp_colors = None
