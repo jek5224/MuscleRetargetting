@@ -13483,7 +13483,6 @@ class ContourMeshMixin:
             self._apply_level_selection()
             self._save_level_select_post_state()
             self._level_select_anim_pending_resume = True
-            self._level_select_replayed = True
             return
 
         if defer:
@@ -13540,12 +13539,12 @@ class ContourMeshMixin:
             if getattr(self, '_level_select_anim_is_replay', False):
                 # Replay: restore to post-selection state (after this step)
                 self._restore_level_select_post_state()
+                self._level_select_replayed = True
             else:
                 # First run: apply selection and save post state
                 self._apply_level_selection()
                 self._save_level_select_post_state()
                 self._level_select_anim_pending_resume = True
-            self._level_select_replayed = True
             print("Level select animation complete")
 
         return True
