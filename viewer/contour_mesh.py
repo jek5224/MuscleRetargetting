@@ -7852,27 +7852,19 @@ class ContourMeshMixin(ContourAnimationMixin):
                 glEnd()
             glEnable(GL_LIGHTING)
         else:
-            # Phase 1: Face fill — all edges visible, faces fade in
+            # Phase 1: Face fill — faces fade in, then wireframe fades out on top
             fill_frac = min(abs(phase_val), 1.0)
             face_alpha = fill_frac * target_alpha
 
-            # Draw all edges at full opacity
-            glDisable(GL_LIGHTING)
-            glLineWidth(1.5)
-            wire_alpha = 1.0 - fill_frac  # fade wireframe out as faces come in
-            if wire_alpha > 0.01:
-                glColor4f(color[0], color[1], color[2], wire_alpha)
-                for band_idx in range(num_bands):
-                    if band_idx >= len(band_edges):
-                        continue
-                    glBegin(GL_LINES)
-                    for v0, v1 in band_edges[band_idx]:
-                        glVertex3fv(verts[v0])
-                        glVertex3fv(verts[v1])
-                    glEnd()
-            glEnable(GL_LIGHTING)
+            # Wireframe stays full until faces are 60% in, then fades out
+            if fill_frac < 0.6:
+                wire_alpha = 1.0
+            else:
+                t = (fill_frac - 0.6) / 0.4  # 0→1 over last 40%
+                wire_alpha = 1.0 - t * t * (3.0 - 2.0 * t)  # smoothstep out
 
-            # Draw faces with fill alpha (two-pass for transparency)
+            # Draw faces first (behind wireframe)
+            glEnable(GL_LIGHTING)
             glEnable(GL_COLOR_MATERIAL)
             glColorMaterial(GL_FRONT_AND_BACK, GL_AMBIENT_AND_DIFFUSE)
             glColor4f(color[0], color[1], color[2], face_alpha)
@@ -7891,6 +7883,23 @@ class ContourMeshMixin(ContourAnimationMixin):
                         glVertex3fv(verts[vi])
                 glEnd()
             glDisable(GL_CULL_FACE)
+
+            # Draw wireframe on top of faces so it's visible
+            if wire_alpha > 0.01:
+                glDisable(GL_LIGHTING)
+                glLineWidth(1.5)
+                glDepthFunc(GL_LEQUAL)
+                glColor4f(color[0], color[1], color[2], wire_alpha)
+                for band_idx in range(num_bands):
+                    if band_idx >= len(band_edges):
+                        continue
+                    glBegin(GL_LINES)
+                    for v0, v1 in band_edges[band_idx]:
+                        glVertex3fv(verts[v0])
+                        glVertex3fv(verts[v1])
+                    glEnd()
+                glDepthFunc(GL_LESS)
+                glEnable(GL_LIGHTING)
 
         glPopMatrix()
 
