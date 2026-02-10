@@ -1872,6 +1872,10 @@ class FiberArchitectureMixin:
         normal_pts = []
         highlight_pts = []
 
+        def _wp_valid(w):
+            """Check waypoint is finite and not extreme."""
+            return np.all(np.isfinite(w))
+
         for stream_idx, waypoint_group in enumerate(self.waypoints):
             if self.draw_contour_stream is not None and stream_idx < len(self.draw_contour_stream) and self.draw_contour_stream[stream_idx]:
                 for level_idx, waypoints in enumerate(waypoint_group):
@@ -1884,6 +1888,8 @@ class FiberArchitectureMixin:
                                     continue
                             else:
                                 continue  # Animation active but fiber not covered — skip
+                        if not _wp_valid(wp):
+                            continue
                         if is_highlighted:
                             highlight_pts.append(wp)
                         else:
@@ -1915,6 +1921,8 @@ class FiberArchitectureMixin:
                     wps_curr = waypoint_group[contour_idx]
                     wps_next = waypoint_group[contour_idx + 1]
                     for fi in range(min(len(wps_curr), len(wps_next))):
+                        if not _wp_valid(wps_curr[fi]) or not _wp_valid(wps_next[fi]):
+                            continue
                         if anim_lp is not None:
                             if stream_idx < len(anim_lp) and fi < len(anim_lp[stream_idx]):
                                 fp = anim_lp[stream_idx][fi]

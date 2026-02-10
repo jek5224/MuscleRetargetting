@@ -540,7 +540,6 @@ class ContourMeshMixin:
         self._fiber_anim_progress = 0.0
         self._fiber_anim_waypoints = None      # Deep copy of waypoints for replay
         self._fiber_anim_offsets = None         # [[float]*fibers]*streams - random start offsets
-        self._fiber_anim_orig_transparency = 1.0
         self._fiber_anim_level_progress = None  # [[float]*fibers]*streams - per-fiber level progress
         self._fiber_anim_stream_endpoints = None  # saved _stream_endpoints during defer
         self._build_fibers_replayed = False
@@ -9251,8 +9250,8 @@ class ContourMeshMixin:
             fiber_samples = self.fiber_architecture[i]
 
             for j, bounding_plane in enumerate(bounding_plane_stream):
-                # Ensure contour_vertices is set from actual contour
-                if 'contour_vertices' not in bounding_plane and i < len(self.contours) and j < len(self.contours[i]):
+                # Always update contour_vertices from current contour data
+                if i < len(self.contours) and j < len(self.contours[i]):
                     bounding_plane['contour_vertices'] = np.array(self.contours[i][j])
 
                 if positioning_method == 'radial':
@@ -13794,9 +13793,6 @@ class ContourMeshMixin:
             self._fiber_anim_offsets.append(
                 [random.uniform(0, 0.5) for _ in range(num_fibers)]
             )
-        # Save pre-build transparency
-        self._fiber_anim_orig_transparency = getattr(self, 'transparency', 1.0)
-
         # Debug: check for NaN/inf in waypoints
         nan_count = 0
         for s_idx, stream in enumerate(self._fiber_anim_waypoints):
@@ -13829,10 +13825,7 @@ class ContourMeshMixin:
             for stream in self._fiber_anim_waypoints
         ]
 
-        # Set starting state: mesh visible at 0.5, fibers drawn but clipped at progress=0
-        self.transparency = 0.5
-        if self.vertex_colors is not None and self.is_draw_scalar_field:
-            self.vertex_colors[:, 3] = self.transparency
+        # Set starting state: mesh visible, fibers drawn but clipped at progress=0
         self.is_draw = True
         self.is_draw_fiber_architecture = True
 
@@ -13869,20 +13862,7 @@ class ContourMeshMixin:
         self._fiber_anim_progress += dt
         progress = self._fiber_anim_progress
 
-        # Phase 1: Mesh transparency fade (0-0.5s)
-        fade_dur = 0.5
-        target_alpha = 0.0
-        orig_alpha = 0.5
-        if progress < fade_dur:
-            t = progress / fade_dur
-            t = t * t * (3.0 - 2.0 * t)  # smoothstep
-            self.transparency = orig_alpha + (target_alpha - orig_alpha) * t
-        else:
-            self.transparency = target_alpha
-        if self.vertex_colors is not None and self.is_draw_scalar_field:
-            self.vertex_colors[:, 3] = self.transparency
-
-        # Phase 2: Per-fiber growth
+        # Per-fiber growth
         fiber_grow_dur = 2.5
         total_dur = 3.0  # fiber_grow_dur + max_offset(0.5)
 
@@ -13902,9 +13882,6 @@ class ContourMeshMixin:
             self._fiber_anim_active = False
             self._build_fibers_replayed = True
             self._fiber_anim_level_progress = None
-            self.transparency = target_alpha
-            if self.vertex_colors is not None and self.is_draw_scalar_field:
-                self.vertex_colors[:, 3] = self.transparency
             self.is_draw = False  # Match post-process end state
             self.is_draw_fiber_architecture = True
             return False
