@@ -1497,6 +1497,11 @@ class ContourMeshMixin:
                                     for level in self._precut_bounding_planes]
             if hasattr(self, '_precut_draw_contour_stream') and self._precut_draw_contour_stream is not None:
                 self.draw_contour_stream = list(self._precut_draw_contour_stream)
+        # _precut_bounding_planes is post-smooth; revert to pre-smooth BPs
+        if getattr(self, '_smooth_bp_before_level', None) is not None:
+            self._apply_bp_snapshot(self._smooth_bp_before_level)
+        elif getattr(self, '_smooth_bp_before', None) is not None:
+            self._apply_bp_snapshot(self._smooth_bp_before)
         total = self._num_levels()
         # Build set of indices inserted by later steps to skip during contour animation
         skip_indices = set(getattr(self, '_fill_gaps_inserted_indices', []))
@@ -1583,6 +1588,11 @@ class ContourMeshMixin:
                                     for level in self._precut_bounding_planes]
             if hasattr(self, '_precut_draw_contour_stream') and self._precut_draw_contour_stream is not None:
                 self.draw_contour_stream = list(self._precut_draw_contour_stream)
+        # _precut_bounding_planes is post-smooth; revert to pre-smooth BPs
+        if getattr(self, '_smooth_bp_before_level', None) is not None:
+            self._apply_bp_snapshot(self._smooth_bp_before_level)
+        elif getattr(self, '_smooth_bp_before', None) is not None:
+            self._apply_bp_snapshot(self._smooth_bp_before)
         # Hide only the gap-filled contours, leave everything else as-is
         for idx in self._fill_gaps_inserted_indices:
             self._set_level_visible(idx, False)
@@ -1644,6 +1654,11 @@ class ContourMeshMixin:
                                     for level in self._precut_bounding_planes]
             if hasattr(self, '_precut_draw_contour_stream') and self._precut_draw_contour_stream is not None:
                 self.draw_contour_stream = list(self._precut_draw_contour_stream)
+        # _precut_bounding_planes is post-smooth; revert to pre-smooth BPs
+        if getattr(self, '_smooth_bp_before_level', None) is not None:
+            self._apply_bp_snapshot(self._smooth_bp_before_level)
+        elif getattr(self, '_smooth_bp_before', None) is not None:
+            self._apply_bp_snapshot(self._smooth_bp_before)
         # Show all currently visible contours, but hide the transition-inserted ones
         for idx in self._transitions_inserted_indices:
             self._set_level_visible(idx, False)
