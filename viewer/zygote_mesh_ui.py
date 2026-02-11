@@ -571,8 +571,14 @@ def draw_zygote_muscle_ui(v):
                             obj.soft_body = None
                             obj.tetrahedralize_contour_mesh()
                             if obj.tet_vertices is not None:
-                                obj.is_draw_contours = False
-                                obj.is_draw_tet_mesh = True
+                                if defer:
+                                    obj._extract_internal_tet_edges()
+                                    obj._build_mesh_replayed = False
+                                    obj._tetrahedralize_replayed = False
+                                else:
+                                    obj.is_draw_contours = False
+                                    obj.is_draw_tet_mesh = True
+                                    obj._tetrahedralize_replayed = True
 
                         obj._pipeline_paused_at = None  # Clear pause state on completion
                         print(f"[{name}] Pipeline complete (steps {start_step}-{max_step})!")
@@ -858,18 +864,30 @@ def draw_zygote_muscle_ui(v):
                         obj.replay_mesh_animation()
 
                 # Step 12: Tetrahedralize
-                if colored_button(f"Tetrahedralize##{name}", 12, col_button_width):
+                if colored_button(f"Tetrahedralize##{name}", 12, proc_w if animate else col_button_width):
                     if obj.contour_mesh_vertices is not None:
                         try:
                             obj.soft_body = None  # Reset soft body when re-tetrahedralizing
                             obj.tetrahedralize_contour_mesh()
                             if obj.tet_vertices is not None:
-                                obj.is_draw_contours = False
-                                obj.is_draw_tet_mesh = True
+                                if animate:
+                                    obj._extract_internal_tet_edges()
+                                    obj._build_mesh_replayed = False
+                                    obj._tetrahedralize_replayed = False
+                                else:
+                                    obj.is_draw_contours = False
+                                    obj.is_draw_tet_mesh = True
+                                    obj._tetrahedralize_replayed = True
                         except Exception as e:
                             print(f"[{name}] Tetrahedralize error: {e}")
+                            import traceback
+                            traceback.print_exc()
                     else:
                         print(f"[{name}] Prerequisites: Run 'Build Contour Mesh' first")
+                if animate and getattr(obj, '_tet_anim_internal_edges', None) is not None and getattr(obj, '_build_mesh_replayed', False) and not getattr(obj, '_mesh_anim_active', False):
+                    imgui.same_line()
+                    if imgui.button(f">##{name}_tet_replay", width=replay_w):
+                        obj.replay_tet_animation()
 
                 # End two-column layout - back to full width for remaining GUI elements
                 imgui.columns(1)
@@ -4906,8 +4924,14 @@ def _render_manual_cut_windows(v):
                                             obj.soft_body = None
                                             obj.tetrahedralize_contour_mesh()
                                             if obj.tet_vertices is not None:
-                                                obj.is_draw_contours = False
-                                                obj.is_draw_tet_mesh = True
+                                                if _defer:
+                                                    obj._extract_internal_tet_edges()
+                                                    obj._build_mesh_replayed = False
+                                                    obj._tetrahedralize_replayed = False
+                                                else:
+                                                    obj.is_draw_contours = False
+                                                    obj.is_draw_tet_mesh = True
+                                                    obj._tetrahedralize_replayed = True
 
                                         print(f"[{name}] Pipeline complete (steps {start_step}-{max_step})!")
                                     except Exception as e:
@@ -5295,8 +5319,14 @@ def _render_level_select_windows(v):
                             obj.soft_body = None
                             obj.tetrahedralize_contour_mesh()
                             if obj.tet_vertices is not None:
-                                obj.is_draw_contours = False
-                                obj.is_draw_tet_mesh = True
+                                if _defer:
+                                    obj._extract_internal_tet_edges()
+                                    obj._build_mesh_replayed = False
+                                    obj._tetrahedralize_replayed = False
+                                else:
+                                    obj.is_draw_contours = False
+                                    obj.is_draw_tet_mesh = True
+                                    obj._tetrahedralize_replayed = True
 
                         print(f"[{name}] Pipeline complete (steps {start_step}-{max_step})!")
                     except Exception as e:

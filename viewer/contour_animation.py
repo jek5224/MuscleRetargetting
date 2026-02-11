@@ -93,6 +93,15 @@ class ContourAnimationMixin:
         self._mesh_anim_band_edges = None  # list[band] = [(v0,v1), ...]
         self._build_mesh_replayed = False
 
+        # Tetrahedralize animation state
+        self._tet_anim_active = False
+        self._tet_anim_progress = 0.0
+        self._tet_anim_phase = 0       # 0=fade scaffolding, 1=xray flash, 2=done
+        self._tet_anim_internal_edges = None  # np.array of internal edge vertices for GL_LINES
+        self._tet_anim_internal_alpha = 0.0
+        self._tet_anim_target_alpha = 0.8
+        self._tetrahedralize_replayed = False
+
         # BP color override during smooth animations {(i,j): (r,g,b,a)}
         self._smooth_anim_bp_colors = None
 
@@ -1565,6 +1574,137 @@ class ContourAnimationMixin:
 
         return True
 
+    # ── Tetrahedralize Animation ─────────────────────────────────────
+
+    def _extract_internal_tet_edges(self):
+        """Extract tet edges that are NOT on the surface (internal edges) for X-ray flash."""
+        if self.tet_tetrahedra is None or self.tet_vertices is None:
+            self._tet_anim_internal_edges = None
+            return
+
+        # Collect all surface edges from render faces
+        render_faces = self.tet_render_faces if hasattr(self, 'tet_render_faces') and self.tet_render_faces is not None else self.tet_faces
+        surface_edges = set()
+        if render_faces is not None:
+            for face in render_faces:
+                for k in range(3):
+                    v0, v1 = int(face[k]), int(face[(k + 1) % 3])
+                    surface_edges.add((min(v0, v1), max(v0, v1)))
+
+        # Collect all tet edges
+        all_tet_edges = set()
+        for tet in self.tet_tetrahedra:
+            for i in range(4):
+                for j in range(i + 1, 4):
+                    v0, v1 = int(tet[i]), int(tet[j])
+                    all_tet_edges.add((min(v0, v1), max(v0, v1)))
+
+        # Internal = tet edges minus surface edges
+        internal_edges = all_tet_edges - surface_edges
+
+        if len(internal_edges) == 0:
+            self._tet_anim_internal_edges = None
+            return
+
+        # Build vertex array for GL_LINES
+        verts = self.tet_vertices
+        edge_verts = []
+        for v0, v1 in internal_edges:
+            edge_verts.append(verts[v0])
+            edge_verts.append(verts[v1])
+        self._tet_anim_internal_edges = np.array(edge_verts, dtype=np.float32)
+
+    def replay_tet_animation(self):
+        """Start tetrahedralize animation: fade scaffolding, X-ray flash, settle."""
+        if self.tet_vertices is None:
+            self._tetrahedralize_replayed = True
+            return
+
+        # Set contours/BPs to post-selection state
+        src = getattr(self, '_selected_stream_contours', None) or \
+              (self.stream_contours if hasattr(self, 'stream_contours') and self.stream_contours is not None else None)
+        src_bps = getattr(self, '_selected_stream_bounding_planes', None) or \
+                  (self.stream_bounding_planes if hasattr(self, 'stream_bounding_planes') and self.stream_bounding_planes is not None else None)
+        if src is not None:
+            self.contours = src
+            self.bounding_planes = src_bps
+            self.draw_contour_stream = [[True] * len(src[s]) for s in range(len(src))]
+
+        self._extract_internal_tet_edges()
+        self._tet_anim_target_alpha = self.contour_mesh_transparency
+
+        # Start state: contours+BPs+fibers visible, contour mesh visible, tet mesh off
+        self.is_draw_contours = True
+        self.is_draw_bounding_box = True
+        self.bounding_box_draw_mode = 1
+        self.is_draw_fiber_architecture = True
+        self.is_draw_resampled_vertices = False
+        self.is_draw_contour_mesh = True
+        self.is_draw_tet_mesh = False
+        self._tet_anim_progress = 0.0
+        self._tet_anim_phase = 0
+        self._tet_anim_active = True
+
+    def update_tet_animation(self, dt):
+        """Phase 0: fade out contour mesh + scaffolding. Phase 1: X-ray flash of internal edges."""
+        if not self._tet_anim_active:
+            return False
+
+        self._tet_anim_progress += dt
+        scaffold_dur = 1.0
+        xray_dur = 2.0
+        total_dur = scaffold_dur + xray_dur
+
+        def smoothstep(x):
+            x = max(0.0, min(1.0, x))
+            return x * x * (3.0 - 2.0 * x)
+
+        if self._tet_anim_progress >= total_dur:
+            # Done — tet mesh at target alpha
+            self._tet_anim_active = False
+            self._tet_anim_progress = 0.0
+            self._tet_anim_phase = 0
+            self.is_draw_contours = False
+            self.is_draw_bounding_box = False
+            self.is_draw_fiber_architecture = False
+            self.is_draw_contour_mesh = False
+            self.is_draw_tet_mesh = True
+            self.contour_mesh_transparency = self._tet_anim_target_alpha
+            self._tet_anim_internal_alpha = 0.0
+            self._tetrahedralize_replayed = True
+            return False
+
+        if self._tet_anim_progress < scaffold_dur:
+            # Phase 0: fade out contour mesh and scaffolding
+            self._tet_anim_phase = 0
+            t = self._tet_anim_progress / scaffold_dur
+            fade = smoothstep(t)
+            # Fade contour mesh transparency down to 0
+            self.contour_mesh_transparency = self._tet_anim_target_alpha * (1.0 - fade)
+        else:
+            # Phase 1: X-ray flash of internal tet edges
+            if self._tet_anim_phase != 1:
+                # First frame: turn off all scaffolding, switch to tet mesh
+                self.is_draw_contours = False
+                self.is_draw_bounding_box = False
+                self.is_draw_fiber_architecture = False
+                self.is_draw_contour_mesh = False
+                self.is_draw_tet_mesh = True
+            self._tet_anim_phase = 1
+            xt = (self._tet_anim_progress - scaffold_dur) / xray_dur
+            if xt < 0.5:
+                # Surface fades down to 20%, internal edges fade in
+                fade_t = smoothstep(xt * 2.0)
+                self.contour_mesh_transparency = self._tet_anim_target_alpha * (1.0 - 0.8 * fade_t)
+                self._tet_anim_internal_alpha = fade_t
+            else:
+                # Surface comes back to target, internal edges fade out
+                fade_t = smoothstep((xt - 0.5) * 2.0)
+                self.contour_mesh_transparency = self._tet_anim_target_alpha * (0.2 + 0.8 * fade_t)
+                self._tet_anim_internal_alpha = 1.0 - fade_t
+
+        return True
+
     # ── Persistence ─────────────────────────────────────────────────
 
     def save_animation_state(self, filepath):
@@ -1676,6 +1816,18 @@ class ContourAnimationMixin:
         state['_mesh_anim_band_edges'] = getattr(self, '_mesh_anim_band_edges', None)
         state['_mesh_anim_num_bands'] = getattr(self, '_mesh_anim_num_bands', 0)
         state['is_draw_contour_mesh'] = getattr(self, 'is_draw_contour_mesh', False)
+
+        # Tetrahedralize animation data
+        state['tet_vertices'] = getattr(self, 'tet_vertices', None)
+        state['tet_tetrahedra'] = getattr(self, 'tet_tetrahedra', None)
+        state['tet_render_faces'] = getattr(self, 'tet_render_faces', None)
+        state['tet_faces'] = getattr(self, 'tet_faces', None)
+        state['tet_cap_face_indices'] = getattr(self, 'tet_cap_face_indices', [])
+        state['tet_anchor_vertices'] = getattr(self, 'tet_anchor_vertices', [])
+        state['tet_surface_face_count'] = getattr(self, 'tet_surface_face_count', 0)
+        state['tet_cap_attachments'] = getattr(self, 'tet_cap_attachments', [])
+        state['is_draw_tet_mesh'] = getattr(self, 'is_draw_tet_mesh', False)
+        state['_tet_anim_internal_edges'] = getattr(self, '_tet_anim_internal_edges', None)
 
         # Pipeline state
         state['max_stream_count'] = getattr(self, 'max_stream_count', None)
@@ -1811,6 +1963,24 @@ class ContourAnimationMixin:
         self._mesh_anim_num_bands = state.get('_mesh_anim_num_bands', 0)
         self.is_draw_contour_mesh = state.get('is_draw_contour_mesh', False)
 
+        # Tetrahedralize animation data
+        if state.get('tet_vertices') is not None:
+            self.tet_vertices = state['tet_vertices']
+        if state.get('tet_tetrahedra') is not None:
+            self.tet_tetrahedra = state['tet_tetrahedra']
+        if state.get('tet_render_faces') is not None:
+            self.tet_render_faces = state['tet_render_faces']
+        if state.get('tet_faces') is not None:
+            self.tet_faces = state['tet_faces']
+        self.tet_cap_face_indices = state.get('tet_cap_face_indices', [])
+        self.tet_anchor_vertices = state.get('tet_anchor_vertices', [])
+        self.tet_surface_face_count = state.get('tet_surface_face_count', 0)
+        self.tet_cap_attachments = state.get('tet_cap_attachments', [])
+        self.is_draw_tet_mesh = state.get('is_draw_tet_mesh', False)
+        self._tet_anim_internal_edges = state.get('_tet_anim_internal_edges')
+        # Reset tet draw arrays so they get rebuilt from loaded data
+        self._tet_surface_verts = None
+
         # Pipeline state
         if state.get('max_stream_count') is not None:
             self.max_stream_count = state['max_stream_count']
@@ -1869,6 +2039,11 @@ class ContourAnimationMixin:
         self._mesh_anim_progress = 0.0
         self._mesh_anim_phase = 0
         self._build_mesh_replayed = False
+        self._tet_anim_active = False
+        self._tet_anim_progress = 0.0
+        self._tet_anim_phase = 0
+        self._tet_anim_internal_alpha = 0.0
+        self._tetrahedralize_replayed = False
 
         # ── Restore deferred visual state so everything looks pre-processed ──
 
@@ -1939,5 +2114,9 @@ class ContourAnimationMixin:
         # 7. Contour mesh: hide mesh for deferred replay
         if self._mesh_anim_face_bands is not None:
             self.is_draw_contour_mesh = False
+
+        # 8. Tet mesh: hide for deferred replay
+        if self._tet_anim_internal_edges is not None:
+            self.is_draw_tet_mesh = False
 
         print(f"Animation state loaded from {filepath}")

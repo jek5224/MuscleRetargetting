@@ -3160,6 +3160,15 @@ class MuscleMeshMixin:
         self.is_draw_tet_edges = False
         self.tet_cap_attachments = []
 
+        # Tetrahedralize animation
+        self._tet_anim_active = False
+        self._tet_anim_progress = 0.0
+        self._tet_anim_phase = 0
+        self._tet_anim_internal_edges = None
+        self._tet_anim_internal_alpha = 0.0
+        self._tet_anim_target_alpha = 0.8
+        self._tetrahedralize_replayed = False
+
         # Soft body
         self.soft_body = None
 

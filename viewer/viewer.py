@@ -713,8 +713,9 @@ class GLFWApp():
         # Draw tet mesh last (outermost layer)
         for name, obj in self.zygote_muscle_meshes.items():
             viper_only = obj.viper_sim is not None and obj.viper_only_mode
-            if not viper_only and obj.is_draw_tet_mesh:
-                obj.contour_mesh_transparency = self.zygote_tet_transparency
+            if not viper_only and (obj.is_draw_tet_mesh or getattr(obj, '_tet_anim_active', False)):
+                if not getattr(obj, '_tet_anim_active', False):
+                    obj.contour_mesh_transparency = self.zygote_tet_transparency
                 obj.draw_tetrahedron_mesh(draw_tets=obj.is_draw_tet_edges)
 
         # if self.draw_pd_target:
@@ -1038,6 +1039,8 @@ class GLFWApp():
                     obj.update_resample_animation(1.0 / 30.0)
                 if getattr(obj, '_mesh_anim_active', False):
                     obj.update_mesh_animation(1.0 / 30.0)
+                if getattr(obj, '_tet_anim_active', False):
+                    obj.update_tet_animation(1.0 / 30.0)
 
             # Auto-rotate around focused muscle
             if self.auto_rotate:
