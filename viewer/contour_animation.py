@@ -1771,6 +1771,7 @@ class ContourAnimationMixin:
         self._tet_anim_scaffold_alpha = 1.0
         self._tet_anim_tet_alpha = 0.0
         self._contour_anim_bp_scale = {}
+        self._level_select_anim_scales = None
         self._tet_anim_progress = 0.0
         self._tet_anim_phase = 0
         self._tet_anim_active = True
@@ -1803,6 +1804,7 @@ class ContourAnimationMixin:
             self._tet_anim_tet_alpha = 0.0
             self._tet_anim_scaffold_alpha = 1.0
             self._contour_anim_bp_scale = {}
+            self._level_select_anim_scales = None
             self._tetrahedralize_replayed = True
             return False
 
@@ -1818,6 +1820,14 @@ class ContourAnimationMixin:
             # BP/axes shrink
             num_levels = getattr(self, '_tet_anim_num_bp_levels', 0)
             self._contour_anim_bp_scale = {lv: 1.0 - fade for lv in range(num_levels)}
+            # Shrink contours toward their BP centers (same rate as axes/BPs)
+            contour_scale = 1.0 - fade
+            num_streams = len(self.contours) if self.contours else 0
+            self._level_select_anim_scales = {}
+            for i in range(num_streams):
+                n_lev = len(self.contours[i]) if i < len(self.contours) else 0
+                for j in range(n_lev):
+                    self._level_select_anim_scales[(i, j)] = contour_scale
             return True
 
         # Phase 1: tet mesh on, alpha 0 → 0.8
@@ -1828,6 +1838,7 @@ class ContourAnimationMixin:
             self.is_draw_bounding_box = False
             self._tet_anim_scaffold_alpha = 1.0
             self._contour_anim_bp_scale = {}
+            self._level_select_anim_scales = None
             self.is_draw_tet_mesh = True
         self._tet_anim_phase = 1
         t = (self._tet_anim_progress - fadeout_dur) / tet_in_dur
