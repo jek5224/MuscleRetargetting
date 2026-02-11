@@ -983,63 +983,29 @@ class TetrahedronMeshMixin:
         alpha = self.contour_mesh_transparency
         color = self.contour_mesh_color
 
-        # During tet animation X-ray phase (phase 4), use two-pass transparency for surface
-        is_xray = getattr(self, '_tet_anim_active', False) and getattr(self, '_tet_anim_phase', 0) == 4
-
         # Draw surface faces
         if self._tet_surface_verts is not None and len(self._tet_surface_verts) > 0:
             glColor4f(color[0], color[1], color[2], alpha)
-            if is_xray:
-                glEnable(GL_CULL_FACE)
-                glCullFace(GL_FRONT)
-                glVertexPointer(3, GL_FLOAT, 0, self._tet_surface_verts)
-                glNormalPointer(GL_FLOAT, 0, self._tet_surface_normals)
-                glDrawArrays(GL_TRIANGLES, 0, len(self._tet_surface_verts))
-                glCullFace(GL_BACK)
-                glDrawArrays(GL_TRIANGLES, 0, len(self._tet_surface_verts))
-                glDisable(GL_CULL_FACE)
-            else:
-                glVertexPointer(3, GL_FLOAT, 0, self._tet_surface_verts)
-                glNormalPointer(GL_FLOAT, 0, self._tet_surface_normals)
-                glDrawArrays(GL_TRIANGLES, 0, len(self._tet_surface_verts))
+            glVertexPointer(3, GL_FLOAT, 0, self._tet_surface_verts)
+            glNormalPointer(GL_FLOAT, 0, self._tet_surface_normals)
+            glDrawArrays(GL_TRIANGLES, 0, len(self._tet_surface_verts))
 
         # Draw cap faces in green
         if draw_caps and self._tet_cap_verts is not None and len(self._tet_cap_verts) > 0:
             glColor4f(0.2, 0.6, 0.2, alpha)
-            if is_xray:
-                glEnable(GL_CULL_FACE)
-                glCullFace(GL_FRONT)
-                glVertexPointer(3, GL_FLOAT, 0, self._tet_cap_verts)
-                glNormalPointer(GL_FLOAT, 0, self._tet_cap_normals)
-                glDrawArrays(GL_TRIANGLES, 0, len(self._tet_cap_verts))
-                glCullFace(GL_BACK)
-                glDrawArrays(GL_TRIANGLES, 0, len(self._tet_cap_verts))
-                glDisable(GL_CULL_FACE)
-            else:
-                glVertexPointer(3, GL_FLOAT, 0, self._tet_cap_verts)
-                glNormalPointer(GL_FLOAT, 0, self._tet_cap_normals)
-                glDrawArrays(GL_TRIANGLES, 0, len(self._tet_cap_verts))
+            glVertexPointer(3, GL_FLOAT, 0, self._tet_cap_verts)
+            glNormalPointer(GL_FLOAT, 0, self._tet_cap_normals)
+            glDrawArrays(GL_TRIANGLES, 0, len(self._tet_cap_verts))
 
         glDisableClientState(GL_NORMAL_ARRAY)
 
-        # Draw tetrahedra edges (lines don't need two-pass)
+        # Draw tetrahedra edges
         if draw_tets and self._tet_edge_verts is not None and len(self._tet_edge_verts) > 0:
             glDisable(GL_LIGHTING)
             glColor4f(0.5, 0.5, 0.5, 0.3)
             glLineWidth(1.0)
             glVertexPointer(3, GL_FLOAT, 0, self._tet_edge_verts)
             glDrawArrays(GL_LINES, 0, len(self._tet_edge_verts))
-            glEnable(GL_LIGHTING)
-
-        # Draw internal tet edges during X-ray flash
-        internal_alpha = getattr(self, '_tet_anim_internal_alpha', 0.0)
-        internal_edges = getattr(self, '_tet_anim_internal_edges', None)
-        if is_xray and internal_edges is not None and internal_alpha > 0.005:
-            glDisable(GL_LIGHTING)
-            glColor4f(0.3, 0.7, 1.0, internal_alpha * 0.6)
-            glLineWidth(1.0)
-            glVertexPointer(3, GL_FLOAT, 0, internal_edges)
-            glDrawArrays(GL_LINES, 0, len(internal_edges))
             glEnable(GL_LIGHTING)
 
         glDisableClientState(GL_VERTEX_ARRAY)
