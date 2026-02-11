@@ -1785,22 +1785,34 @@ class ContourMeshMixin(ContourAnimationMixin):
 
         # ── BP before/after ──
         # bp_before: for each (stream, level), the BP of the original contour it came from
+        # Match by contour centroid proximity (stream_groups ordering may not match
+        # original contour ordering after _reorder_streams_for_correspondence)
+        precut_contours = getattr(self, '_precut_contours', None)
         bp_before = []
         bp_after = []
         for stream_i in range(num_streams):
             bb_stream = []
             ba_stream = []
             for level_i in range(num_levels):
-                # Find which original contour group this stream belongs to
-                group_idx = 0
-                if level_i < len(self.stream_groups):
-                    for gi, group in enumerate(self.stream_groups[level_i]):
-                        if stream_i in group:
-                            group_idx = gi
-                            break
-                # Get the original BP for this group
-                if level_i < len(orig_bps_backup) and group_idx < len(orig_bps_backup[level_i]):
-                    bp_orig = copy.deepcopy(orig_bps_backup[level_i][group_idx])
+                # Find best-matching original contour by centroid proximity
+                best_ci = 0
+                if (precut_contours is not None and level_i < len(precut_contours)
+                        and level_i < len(orig_bps_backup)):
+                    sc = self.stream_contours[stream_i][level_i]
+                    if sc is not None and len(sc) > 0:
+                        sc_center = np.array(sc).mean(axis=0)
+                        best_dist = float('inf')
+                        for ci in range(len(precut_contours[level_i])):
+                            pc = precut_contours[level_i][ci]
+                            if pc is not None and len(pc) > 0:
+                                pc_center = np.array(pc).mean(axis=0)
+                                dist = np.linalg.norm(sc_center - pc_center)
+                                if dist < best_dist:
+                                    best_dist = dist
+                                    best_ci = ci
+                # Get the original BP for the matched contour
+                if level_i < len(orig_bps_backup) and best_ci < len(orig_bps_backup[level_i]):
+                    bp_orig = copy.deepcopy(orig_bps_backup[level_i][best_ci])
                 else:
                     bp_orig = None
                 bb_stream.append(bp_orig)
@@ -1821,6 +1833,19 @@ class ContourMeshMixin(ContourAnimationMixin):
         self._cut_color_after = color_after
         self._cut_bp_before = bp_before
         self._cut_bp_after = bp_after
+        # Recompute changed levels from actual BP position differences
+        # (stream_groups may flag levels where no actual BP split occurred)
+        bp_changed_levels = set()
+        for level_i in range(num_levels):
+            for stream_i in range(num_streams):
+                bf = bp_before[stream_i][level_i]
+                ba = bp_after[stream_i][level_i]
+                if bf is not None and ba is not None:
+                    diff = np.linalg.norm(bf['mean'] - ba['mean'])
+                    if diff > 0.01:
+                        bp_changed_levels.add(level_i)
+                        break
+        has_bp_change = len(bp_changed_levels) > 0
         self._cut_has_bp_change = has_bp_change
         self._cut_bp_changed_levels = bp_changed_levels
         self._cut_num_levels_before = num_levels_before

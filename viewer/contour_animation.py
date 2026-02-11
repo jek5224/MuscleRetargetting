@@ -193,7 +193,6 @@ class ContourAnimationMixin:
         self.is_draw = True
         self.is_draw_contours = True
         self.is_draw_bounding_box = True
-        self.bounding_box_draw_mode = 0  # planes only (pre-cut)
         # Hide later-step visuals
         self.is_draw_contour_mesh = False
         self.is_draw_tet_mesh = False
@@ -293,7 +292,6 @@ class ContourAnimationMixin:
         self.is_draw = True
         self.is_draw_contours = True
         self.is_draw_bounding_box = True
-        self.bounding_box_draw_mode = 0  # planes only (pre-cut)
         # Hide later-step visuals
         self.is_draw_contour_mesh = False
         self.is_draw_tet_mesh = False
@@ -374,7 +372,6 @@ class ContourAnimationMixin:
         self.is_draw = True
         self.is_draw_contours = True
         self.is_draw_bounding_box = True
-        self.bounding_box_draw_mode = 0  # planes only (pre-cut)
         # Hide later-step visuals
         self.is_draw_contour_mesh = False
         self.is_draw_tet_mesh = False
@@ -603,7 +600,6 @@ class ContourAnimationMixin:
         self.is_draw = True
         self.is_draw_contours = True
         self.is_draw_bounding_box = True
-        self.bounding_box_draw_mode = 0  # planes only (pre-cut)
         # Hide later-step visuals
         self.is_draw_contour_mesh = False
         self.is_draw_tet_mesh = False
@@ -767,7 +763,6 @@ class ContourAnimationMixin:
         self.is_draw = True
         self.is_draw_contours = True
         self.is_draw_bounding_box = True
-        self.bounding_box_draw_mode = 0  # planes only (post-cut, pre-fiber)
         # Hide later-step visuals
         self.is_draw_contour_mesh = False
         self.is_draw_tet_mesh = False
@@ -937,6 +932,7 @@ class ContourAnimationMixin:
     def update_cut_animation(self, dt):
         """Advance cut animation.
 
+        Phase 0 (0-0.5s): Fade transparency to 0.5 (if not already).
         Phase 1 (0-2s): Color wave — lerp per-contour color from before to after.
         Phase 2a (2-3s): BP shrink — cut-level BPs scale from 1→0 (wave).
         Phase 2b (3-4s): BP grow — cut-level BPs scale from 0→1 (wave).
@@ -1236,7 +1232,6 @@ class ContourAnimationMixin:
         self.is_draw = True
         self.is_draw_contours = True
         self.is_draw_bounding_box = True
-        self.bounding_box_draw_mode = 0  # planes only (post-cut, pre-fiber)
         # Hide later-step visuals
         self.is_draw_contour_mesh = False
         self.is_draw_tet_mesh = False
@@ -2043,14 +2038,20 @@ class ContourAnimationMixin:
         self._cut_color_after = state.get('_cut_color_after')
         self._cut_bp_before = state.get('_cut_bp_before')
         self._cut_bp_after = state.get('_cut_bp_after')
-        # Recompute changed levels from stream_groups (levels where contours were split)
+        # Recompute changed levels by comparing bp_before vs bp_after positions
         bp_changed_levels = set()
-        if hasattr(self, 'stream_groups') and self.stream_groups is not None:
-            for level_i, groups in enumerate(self.stream_groups):
-                for group in groups:
-                    if len(group) > 1:
-                        bp_changed_levels.add(level_i)
-                        break
+        if self._cut_bp_before is not None and self._cut_bp_after is not None:
+            n_streams = len(self._cut_bp_before)
+            n_levels = len(self._cut_bp_before[0]) if n_streams > 0 else 0
+            for level_i in range(n_levels):
+                for stream_i in range(n_streams):
+                    bf = self._cut_bp_before[stream_i][level_i]
+                    ba = self._cut_bp_after[stream_i][level_i]
+                    if bf is not None and ba is not None:
+                        diff = np.linalg.norm(bf['mean'] - ba['mean'])
+                        if diff > 0.01:
+                            bp_changed_levels.add(level_i)
+                            break
         self._cut_bp_changed_levels = bp_changed_levels
         self._cut_has_bp_change = len(bp_changed_levels) > 0
         self._cut_num_levels_before = state.get('_cut_num_levels_before', 0)
