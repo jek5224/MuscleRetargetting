@@ -769,11 +769,23 @@ class ContourMeshMixin(ContourAnimationMixin):
         if batch_verts:
             all_verts = np.concatenate(batch_verts, axis=0)
             all_colors = np.concatenate(batch_colors, axis=0)
+            # Apply scaffold alpha override (tet animation fade)
+            scaffold_alpha = getattr(self, '_tet_anim_scaffold_alpha', 1.0)
+            if scaffold_alpha < 1.0:
+                # Expand RGB to RGBA with scaffold alpha
+                n_verts = len(all_colors)
+                rgba = np.empty((n_verts, 4), dtype=np.float32)
+                rgba[:, :3] = all_colors
+                rgba[:, 3] = scaffold_alpha
+                all_colors = rgba
+                color_components = 4
+            else:
+                color_components = 3
             glLineWidth(1.0)
             glEnableClientState(GL_VERTEX_ARRAY)
             glEnableClientState(GL_COLOR_ARRAY)
             glVertexPointer(3, GL_FLOAT, 0, all_verts)
-            glColorPointer(3, GL_FLOAT, 0, all_colors)
+            glColorPointer(color_components, GL_FLOAT, 0, all_colors)
             glDrawArrays(GL_LINES, 0, len(all_verts))
             glDisableClientState(GL_COLOR_ARRAY)
             glDisableClientState(GL_VERTEX_ARRAY)

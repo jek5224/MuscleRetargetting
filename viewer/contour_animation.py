@@ -96,9 +96,11 @@ class ContourAnimationMixin:
         # Tetrahedralize animation state
         self._tet_anim_active = False
         self._tet_anim_progress = 0.0
-        self._tet_anim_phase = 0       # 0=fade scaffolding, 1=xray flash, 2=done
+        self._tet_anim_phase = 0       # 0=cross-fade, 1=xray flash
         self._tet_anim_internal_edges = None  # np.array of internal edge vertices for GL_LINES
         self._tet_anim_internal_alpha = 0.0
+        self._tet_anim_scaffold_alpha = 1.0   # Fades contour lines during phase 0
+        self._tet_anim_tet_alpha = 0.0        # Tet mesh alpha override during animation
         self._tet_anim_target_alpha = 0.8
         self._tetrahedralize_replayed = False
 
@@ -1615,7 +1617,7 @@ class ContourAnimationMixin:
         self._tet_anim_internal_edges = np.array(edge_verts, dtype=np.float32)
 
     def replay_tet_animation(self):
-        """Start tetrahedralize animation: fade scaffolding, X-ray flash, settle."""
+        """Start tetrahedralize animation: cross-fade scaffolding→tet, then X-ray flash."""
         if self.tet_vertices is None:
             self._tetrahedralize_replayed = True
             return
@@ -1632,35 +1634,52 @@ class ContourAnimationMixin:
 
         self._extract_internal_tet_edges()
         self._tet_anim_target_alpha = self.contour_mesh_transparency
+        self._tet_anim_orig_fiber_alpha = getattr(self, 'fiber_transparency', 1.0)
 
-        # Start state: contours+BPs+fibers visible, contour mesh visible, tet mesh off
+        # Count BP levels for fade
+        if self.bounding_planes is not None:
+            is_2d = (self.draw_contour_stream is not None and
+                     len(self.draw_contour_stream) > 0 and
+                     isinstance(self.draw_contour_stream[0], list))
+            if is_2d:
+                self._tet_anim_num_bp_levels = max(len(s) for s in self.bounding_planes) if self.bounding_planes else 0
+            else:
+                self._tet_anim_num_bp_levels = len(self.bounding_planes) if self.bounding_planes else 0
+        else:
+            self._tet_anim_num_bp_levels = 0
+
+        # Start state: everything visible, tet mesh also visible (at alpha 0)
         self.is_draw_contours = True
         self.is_draw_bounding_box = True
         self.bounding_box_draw_mode = 1
         self.is_draw_fiber_architecture = True
         self.is_draw_resampled_vertices = False
         self.is_draw_contour_mesh = True
-        self.is_draw_tet_mesh = False
+        self.is_draw_tet_mesh = True
+        self._tet_anim_scaffold_alpha = 1.0
+        self._tet_anim_tet_alpha = 0.0
+        self._tet_anim_internal_alpha = 0.0
+        self._contour_anim_bp_scale = {}
         self._tet_anim_progress = 0.0
         self._tet_anim_phase = 0
         self._tet_anim_active = True
 
     def update_tet_animation(self, dt):
-        """Phase 0: fade out contour mesh + scaffolding. Phase 1: X-ray flash of internal edges."""
+        """Phase 0: cross-fade scaffolding→tet. Phase 1: X-ray flash of internal edges."""
         if not self._tet_anim_active:
             return False
 
         self._tet_anim_progress += dt
-        scaffold_dur = 1.0
+        crossfade_dur = 1.5
         xray_dur = 2.0
-        total_dur = scaffold_dur + xray_dur
+        total_dur = crossfade_dur + xray_dur
 
         def smoothstep(x):
             x = max(0.0, min(1.0, x))
             return x * x * (3.0 - 2.0 * x)
 
         if self._tet_anim_progress >= total_dur:
-            # Done — tet mesh at target alpha
+            # Done — tet mesh at target alpha, all scaffolding off
             self._tet_anim_active = False
             self._tet_anim_progress = 0.0
             self._tet_anim_phase = 0
@@ -1670,28 +1689,52 @@ class ContourAnimationMixin:
             self.is_draw_contour_mesh = False
             self.is_draw_tet_mesh = True
             self.contour_mesh_transparency = self._tet_anim_target_alpha
+            self._tet_anim_tet_alpha = 0.0
+            self._tet_anim_scaffold_alpha = 1.0
             self._tet_anim_internal_alpha = 0.0
+            self._contour_anim_bp_scale = {}
+            self.fiber_transparency = getattr(self, '_tet_anim_orig_fiber_alpha', 1.0)
             self._tetrahedralize_replayed = True
             return False
 
-        if self._tet_anim_progress < scaffold_dur:
-            # Phase 0: fade out contour mesh and scaffolding
+        if self._tet_anim_progress < crossfade_dur:
+            # Phase 0: cross-fade — scaffolding fades out, tet mesh fades in
             self._tet_anim_phase = 0
-            t = self._tet_anim_progress / scaffold_dur
+            t = self._tet_anim_progress / crossfade_dur
             fade = smoothstep(t)
-            # Fade contour mesh transparency down to 0
+
+            # Contour lines: fade alpha via scaffold_alpha
+            self._tet_anim_scaffold_alpha = 1.0 - fade
+
+            # Bounding planes: fade via bp_scale dict
+            num_levels = getattr(self, '_tet_anim_num_bp_levels', 0)
+            scale_val = 1.0 - fade
+            self._contour_anim_bp_scale = {lv: scale_val for lv in range(num_levels)}
+
+            # Fibers: fade transparency
+            orig_fiber = getattr(self, '_tet_anim_orig_fiber_alpha', 1.0)
+            self.fiber_transparency = orig_fiber * (1.0 - fade)
+
+            # Contour mesh fades out
             self.contour_mesh_transparency = self._tet_anim_target_alpha * (1.0 - fade)
+
+            # Tet mesh fades in
+            self._tet_anim_tet_alpha = self._tet_anim_target_alpha * fade
         else:
             # Phase 1: X-ray flash of internal tet edges
             if self._tet_anim_phase != 1:
-                # First frame: turn off all scaffolding, switch to tet mesh
+                # First frame of phase 1: turn off scaffolding, contour mesh off
                 self.is_draw_contours = False
                 self.is_draw_bounding_box = False
                 self.is_draw_fiber_architecture = False
                 self.is_draw_contour_mesh = False
-                self.is_draw_tet_mesh = True
+                self._tet_anim_scaffold_alpha = 1.0
+                self._contour_anim_bp_scale = {}
+                self.fiber_transparency = getattr(self, '_tet_anim_orig_fiber_alpha', 1.0)
+                self._tet_anim_tet_alpha = 0.0  # Stop override, use contour_mesh_transparency
+                self.contour_mesh_transparency = self._tet_anim_target_alpha
             self._tet_anim_phase = 1
-            xt = (self._tet_anim_progress - scaffold_dur) / xray_dur
+            xt = (self._tet_anim_progress - crossfade_dur) / xray_dur
             if xt < 0.5:
                 # Surface fades down to 20%, internal edges fade in
                 fade_t = smoothstep(xt * 2.0)

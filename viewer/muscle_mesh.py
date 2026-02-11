@@ -3166,6 +3166,8 @@ class MuscleMeshMixin:
         self._tet_anim_phase = 0
         self._tet_anim_internal_edges = None
         self._tet_anim_internal_alpha = 0.0
+        self._tet_anim_scaffold_alpha = 1.0
+        self._tet_anim_tet_alpha = 0.0
         self._tet_anim_target_alpha = 0.8
         self._tetrahedralize_replayed = False
 

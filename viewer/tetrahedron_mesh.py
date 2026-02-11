@@ -885,6 +885,11 @@ class TetrahedronMeshMixin:
         alpha = self.contour_mesh_transparency
         color = self.contour_mesh_color
 
+        # During tet animation cross-fade phase, override alpha
+        tet_alpha_override = getattr(self, '_tet_anim_tet_alpha', 0.0)
+        if getattr(self, '_tet_anim_active', False) and getattr(self, '_tet_anim_phase', 0) == 0:
+            alpha = tet_alpha_override
+
         # During tet animation X-ray phase, use two-pass transparency for surface
         is_xray = getattr(self, '_tet_anim_active', False) and getattr(self, '_tet_anim_phase', 0) == 1
 
