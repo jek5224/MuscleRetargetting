@@ -1684,7 +1684,7 @@ class ContourAnimationMixin:
         self._tet_anim_num_bands = num_bands
 
     def replay_tet_animation(self):
-        """Start tetrahedralize animation: fade scaffolding, grow all tet edges, fill."""
+        """Start tetrahedralize animation: fade scaffolding, cross-fade contour mesh→tet."""
         if self.tet_vertices is None:
             self._tetrahedralize_replayed = True
             return
@@ -1699,9 +1699,7 @@ class ContourAnimationMixin:
             self.bounding_planes = src_bps
             self.draw_contour_stream = [[True] * len(src[s]) for s in range(len(src))]
 
-        self._classify_tet_faces_into_bands()
         self._tet_anim_target_alpha = self.contour_mesh_transparency
-        self._tet_anim_orig_fiber_alpha = getattr(self, 'fiber_transparency', 1.0)
 
         # Count BP levels for fade
         if self.bounding_planes is not None:
@@ -1715,7 +1713,7 @@ class ContourAnimationMixin:
         else:
             self._tet_anim_num_bp_levels = 0
 
-        # Start state: scaffolding visible, contour mesh visible, fibers visible, tet off
+        # Start state: scaffolding + contour mesh + fibers visible, tet off
         self.is_draw_contours = True
         self.is_draw_bounding_box = True
         self.bounding_box_draw_mode = 1
@@ -1725,101 +1723,70 @@ class ContourAnimationMixin:
         self.is_draw_tet_mesh = False
         self._tet_anim_scaffold_alpha = 1.0
         self._tet_anim_tet_alpha = 0.0
-        self._tet_anim_internal_alpha = 0.0
         self._contour_anim_bp_scale = {}
         self._tet_anim_progress = 0.0
         self._tet_anim_phase = 0
         self._tet_anim_active = True
 
     def update_tet_animation(self, dt):
-        """Phase 0: fade contours/BPs/contour mesh (keep fibers).
-        Phase 1: all tet edges grow origin→insertion (fibers visible).
-        Phase 2: tet edges fade + fibers fade.
-        Phase 3: normal tet draw, transparency ramp 0→target."""
+        """Phase 0: BP/axes/contour lines shrink and disappear (fibers+contour mesh stay).
+        Phase 1: tet mesh on 0→target, contour mesh target→0→off."""
         if not self._tet_anim_active:
             return False
 
         self._tet_anim_progress += dt
-        fade_dur = 1.5       # Phase 0: fade scaffolding + contour mesh (keep fibers)
-        grow_dur = 2.0       # Phase 1: all tet edges grow origin→insertion
-        edge_fade_dur = 0.8  # Phase 2: tet edges fade + fibers fade
-        fill_dur = 1.0       # Phase 3: tet mesh transparency ramp
-        total_dur = fade_dur + grow_dur + edge_fade_dur + fill_dur
+        scaffold_dur = 1.5   # Phase 0: BP/axes/contour lines shrink
+        crossfade_dur = 1.5  # Phase 1: tet in, contour mesh out
+        total_dur = scaffold_dur + crossfade_dur
 
         def smoothstep(x):
             x = max(0.0, min(1.0, x))
             return x * x * (3.0 - 2.0 * x)
 
         if self._tet_anim_progress >= total_dur:
-            # Done — tet mesh at target alpha, everything else off
+            # Done — tet mesh at target alpha, contour mesh off, fibers stay
             self._tet_anim_active = False
             self._tet_anim_progress = 0.0
             self._tet_anim_phase = 0
             self.is_draw_contours = False
             self.is_draw_bounding_box = False
-            self.is_draw_fiber_architecture = False
             self.is_draw_contour_mesh = False
             self.is_draw_tet_mesh = True
             self.contour_mesh_transparency = self._tet_anim_target_alpha
+            self._tet_anim_tet_alpha = 0.0
             self._tet_anim_scaffold_alpha = 1.0
             self._contour_anim_bp_scale = {}
-            self.fiber_transparency = getattr(self, '_tet_anim_orig_fiber_alpha', 1.0)
             self._tetrahedralize_replayed = True
             return False
 
-        t_acc = 0.0
-
-        # Phase 0: fade contours, BPs, contour mesh (keep fibers visible)
-        if self._tet_anim_progress < fade_dur:
+        # Phase 0: BP/axes/contour lines shrink and disappear
+        if self._tet_anim_progress < scaffold_dur:
             self._tet_anim_phase = 0
-            t = self._tet_anim_progress / fade_dur
+            t = self._tet_anim_progress / scaffold_dur
             fade = smoothstep(t)
 
             self._tet_anim_scaffold_alpha = 1.0 - fade
             num_levels = getattr(self, '_tet_anim_num_bp_levels', 0)
             self._contour_anim_bp_scale = {lv: 1.0 - fade for lv in range(num_levels)}
-            self.contour_mesh_transparency = self._tet_anim_target_alpha * (1.0 - fade)
-            # Fibers stay visible — don't touch fiber_transparency
+            # Contour mesh and fibers untouched
             return True
-        t_acc += fade_dur
 
-        # Phase 1: all tet edges grow origin→insertion (fibers still visible)
-        if self._tet_anim_progress < t_acc + grow_dur:
-            if self._tet_anim_phase != 1:
-                # First frame: turn off contours/BPs/contour mesh, enable tet draw
-                self.is_draw_contours = False
-                self.is_draw_bounding_box = False
-                self.is_draw_contour_mesh = False
-                self._tet_anim_scaffold_alpha = 1.0
-                self._contour_anim_bp_scale = {}
-                # Fibers stay on
-                self.is_draw_tet_mesh = True
-            self._tet_anim_phase = 1
-            return True
-        t_acc += grow_dur
+        # Phase 1: cross-fade contour mesh → tet mesh
+        if self._tet_anim_phase != 1:
+            # First frame: turn off contours/BPs, turn on tet mesh
+            self.is_draw_contours = False
+            self.is_draw_bounding_box = False
+            self._tet_anim_scaffold_alpha = 1.0
+            self._contour_anim_bp_scale = {}
+            self.is_draw_tet_mesh = True
+        self._tet_anim_phase = 1
+        t = (self._tet_anim_progress - scaffold_dur) / crossfade_dur
+        fade = smoothstep(t)
 
-        # Phase 2: tet edges fade out + fibers fade out simultaneously
-        if self._tet_anim_progress < t_acc + edge_fade_dur:
-            if self._tet_anim_phase != 2:
-                pass  # No special first-frame setup needed
-            self._tet_anim_phase = 2
-            t = (self._tet_anim_progress - t_acc) / edge_fade_dur
-            fade = smoothstep(t)
-            # Fade fibers during edge fade
-            orig_fiber = getattr(self, '_tet_anim_orig_fiber_alpha', 1.0)
-            self.fiber_transparency = orig_fiber * (1.0 - fade)
-            return True
-        t_acc += edge_fade_dur
-
-        # Phase 3: normal tet mesh draw, transparency ramp 0→target
-        if self._tet_anim_phase != 3:
-            # First frame: turn off fibers, start at transparency 0
-            self.is_draw_fiber_architecture = False
-            self.fiber_transparency = getattr(self, '_tet_anim_orig_fiber_alpha', 1.0)
-            self.contour_mesh_transparency = 0.0
-        self._tet_anim_phase = 3
-        t = (self._tet_anim_progress - t_acc) / fill_dur
-        self.contour_mesh_transparency = smoothstep(t) * self._tet_anim_target_alpha
+        # Tet mesh fades in: 0 → target_alpha
+        self._tet_anim_tet_alpha = self._tet_anim_target_alpha * fade
+        # Contour mesh fades out: target_alpha → 0
+        self.contour_mesh_transparency = self._tet_anim_target_alpha * (1.0 - fade)
 
         return True
 

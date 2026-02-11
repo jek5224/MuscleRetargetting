@@ -963,10 +963,8 @@ class TetrahedronMeshMixin:
         if not hasattr(self, 'tet_vertices') or self.tet_vertices is None:
             return
 
-        # During tet animation: phase 0 = nothing drawn, 1-2 = animated edges
-        if getattr(self, '_tet_anim_active', False) and self._tet_anim_phase in (0, 1, 2):
-            if self._tet_anim_phase in (1, 2):
-                self._draw_tet_mesh_animated()
+        # During tet animation phase 0: tet not visible yet, skip draw
+        if getattr(self, '_tet_anim_active', False) and self._tet_anim_phase == 0:
             return
 
         # Prepare arrays if not done yet
@@ -982,6 +980,10 @@ class TetrahedronMeshMixin:
 
         alpha = self.contour_mesh_transparency
         color = self.contour_mesh_color
+
+        # During tet animation cross-fade (phase 1), use override alpha
+        if getattr(self, '_tet_anim_active', False) and self._tet_anim_phase == 1:
+            alpha = getattr(self, '_tet_anim_tet_alpha', alpha)
 
         # Draw surface faces
         if self._tet_surface_verts is not None and len(self._tet_surface_verts) > 0:
