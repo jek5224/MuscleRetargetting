@@ -3128,6 +3128,14 @@ class MuscleMeshMixin:
         self._fiber_anim_level_progress = None
         self._build_fibers_replayed = False
 
+        # Resample contours animation state
+        self._resample_anim_active = False
+        self._resample_anim_progress = 0.0
+        self._resample_anim_point_sizes = {}
+        self._resample_anim_num_levels = 0
+        self._resample_replayed = False
+        self._resample_anim_data = None
+
         # Smoothening state
         if hasattr(self, '_smoothen_anchor_level'):
             self._smoothen_anchor_level = None
