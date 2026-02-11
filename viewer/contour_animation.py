@@ -1524,16 +1524,17 @@ class ContourAnimationMixin:
         self._mesh_anim_active = True
 
     def update_mesh_animation(self, dt):
-        """Two-phase: edges sweep origin→insertion, then faces fill in.
-        _mesh_anim_phase: positive = edge level progress, negative = fill phase."""
+        """Three phases: edges grow origin→insertion, edges fade 1→0, faces fill 0→0.5.
+        _mesh_anim_phase: 0=edge grow, 1=edge fade, 2=face fill."""
         if not self._mesh_anim_active:
             return False
 
         self._mesh_anim_progress += dt
         num_bands = self._mesh_anim_num_bands
-        edge_dur = 2.0
-        fill_dur = 1.5
-        total_dur = edge_dur + fill_dur
+        grow_dur = 2.0
+        fade_dur = 0.8
+        fill_dur = 1.0
+        total_dur = grow_dur + fade_dur + fill_dur
 
         if self._mesh_anim_progress >= total_dur:
             # Done
@@ -1544,16 +1545,12 @@ class ContourAnimationMixin:
             self._build_mesh_replayed = True
             return False
 
-        if self._mesh_anim_progress < edge_dur:
-            # Edge sweep: continuous level progress (like fiber animation)
-            t = self._mesh_anim_progress / edge_dur
-            t = t * t * (3.0 - 2.0 * t)  # smoothstep
-            self._mesh_anim_phase = t * max(num_bands - 1, 1)
+        if self._mesh_anim_progress < grow_dur:
+            self._mesh_anim_phase = 0  # edge grow
+        elif self._mesh_anim_progress < grow_dur + fade_dur:
+            self._mesh_anim_phase = 1  # edge fade
         else:
-            # Face fill: negative value encodes fill fraction (0→1)
-            fill_t = (self._mesh_anim_progress - edge_dur) / fill_dur
-            fill_t = fill_t * fill_t * (3.0 - 2.0 * fill_t)  # smoothstep
-            self._mesh_anim_phase = -(fill_t + 0.001)  # negative = fill phase
+            self._mesh_anim_phase = 2  # face fill
 
         return True
 

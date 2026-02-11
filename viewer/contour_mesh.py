@@ -7808,9 +7808,10 @@ class ContourMeshMixin(ContourAnimationMixin):
         self.contour_mesh_normals = normals / norms
 
     def _draw_contour_mesh_animated(self):
-        """Two-phase mesh animation: edges sweep origin→insertion, then faces fill in.
-        _mesh_anim_phase: positive = edge level progress (continuous float),
-                          negative = face fill phase (abs value = fill fraction 0→1)."""
+        """Three-phase mesh animation:
+        Phase 0: edges grow from origin→insertion (lines interpolated like fiber anim)
+        Phase 1: edges fade out alpha 1.0→0.0
+        Phase 2: faces fade in alpha 0.0→0.5"""
         if self.contour_mesh_vertices is None or self.contour_mesh_faces is None:
             return
 
@@ -7818,53 +7819,92 @@ class ContourMeshMixin(ContourAnimationMixin):
         faces = self.contour_mesh_faces
         normals = self.contour_mesh_normals
         color = self.contour_mesh_color
-        target_alpha = self.contour_mesh_transparency
         num_bands = self._mesh_anim_num_bands
-        face_bands = self._mesh_anim_face_bands
         band_edges = self._mesh_anim_band_edges
-        phase_val = self._mesh_anim_phase
+        vcl = self.vertex_contour_level  # vertex → level mapping
+        phase = self._mesh_anim_phase
+        progress = self._mesh_anim_progress
+
+        grow_dur = 2.0
+        fade_dur = 0.8
+        fill_dur = 1.0
+
+        def smoothstep(x):
+            x = max(0.0, min(1.0, x))
+            return x * x * (3.0 - 2.0 * x)
 
         glPushMatrix()
         glEnable(GL_BLEND)
         glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
 
-        if phase_val >= 0:
-            # Phase 0: Edge sweep — grow from origin to insertion like fiber field
-            level_prog = phase_val
+        if phase == 0:
+            # Edge grow: lines grow from origin→insertion like fiber animation
+            t = progress / grow_dur if grow_dur > 0 else 1.0
+            level_prog = smoothstep(t) * max(num_bands - 1, 1)
+
             glDisable(GL_LIGHTING)
             glLineWidth(1.5)
             glColor4f(color[0], color[1], color[2], 1.0)
+            glBegin(GL_LINES)
             for band_idx in range(num_bands):
-                if band_idx > level_prog:
+                if band_idx > level_prog + 1:
                     break
                 if band_idx >= len(band_edges):
                     continue
-                glBegin(GL_LINES)
-                for v0, v1 in band_edges[band_idx]:
-                    glVertex3fv(verts[v0])
-                    glVertex3fv(verts[v1])
-                glEnd()
+                for vi0, vi1 in band_edges[band_idx]:
+                    lv0 = max(int(vcl[vi0]), 0)
+                    lv1 = max(int(vcl[vi1]), 0)
+                    min_lv = min(lv0, lv1)
+                    max_lv = max(lv0, lv1)
+                    if min_lv > level_prog:
+                        continue
+                    p0 = verts[vi0]
+                    p1 = verts[vi1]
+                    if lv0 == lv1:
+                        # Same-level edge: fully visible once level reached
+                        glVertex3fv(p0)
+                        glVertex3fv(p1)
+                    elif max_lv <= level_prog:
+                        # Cross-level edge fully revealed
+                        glVertex3fv(p0)
+                        glVertex3fv(p1)
+                    else:
+                        # Partial cross-level edge: interpolate the far end
+                        frac = max(0.0, min(1.0, level_prog - min_lv))
+                        if lv0 <= lv1:
+                            glVertex3fv(p0)
+                            glVertex3fv(p0 + frac * (p1 - p0))
+                        else:
+                            glVertex3fv(p1)
+                            glVertex3fv(p1 + frac * (p0 - p1))
+            glEnd()
             glEnable(GL_LIGHTING)
-        else:
-            # Phase 1: Face fill — all edges at 1.0, faces grow on top
-            fill_frac = min(abs(phase_val), 1.0)
-            face_alpha = fill_frac * target_alpha
 
-            # Draw all wireframe at full opacity
-            glDisable(GL_LIGHTING)
-            glLineWidth(1.5)
-            glColor4f(color[0], color[1], color[2], 1.0)
-            for band_idx in range(num_bands):
-                if band_idx >= len(band_edges):
-                    continue
+        elif phase == 1:
+            # Edge fade: all edges visible, alpha 1.0→0.0
+            t = (progress - grow_dur) / fade_dur if fade_dur > 0 else 1.0
+            wire_alpha = 1.0 - smoothstep(t)
+
+            if wire_alpha > 0.005:
+                glDisable(GL_LIGHTING)
+                glLineWidth(1.5)
+                glColor4f(color[0], color[1], color[2], wire_alpha)
                 glBegin(GL_LINES)
-                for v0, v1 in band_edges[band_idx]:
-                    glVertex3fv(verts[v0])
-                    glVertex3fv(verts[v1])
+                for band_idx in range(num_bands):
+                    if band_idx >= len(band_edges):
+                        continue
+                    for v0, v1 in band_edges[band_idx]:
+                        glVertex3fv(verts[v0])
+                        glVertex3fv(verts[v1])
                 glEnd()
-            glEnable(GL_LIGHTING)
+                glEnable(GL_LIGHTING)
 
-            # Draw faces on top (two-pass for transparency)
+        elif phase == 2:
+            # Face fill: alpha 0.0→0.5
+            t = (progress - grow_dur - fade_dur) / fill_dur if fill_dur > 0 else 1.0
+            face_alpha = smoothstep(t) * 0.5
+
+            glEnable(GL_LIGHTING)
             glEnable(GL_COLOR_MATERIAL)
             glColorMaterial(GL_FRONT_AND_BACK, GL_AMBIENT_AND_DIFFUSE)
             glColor4f(color[0], color[1], color[2], face_alpha)
