@@ -690,7 +690,7 @@ def draw_zygote_muscle_ui(v):
                     else:
                         print(f"[{name}] Prerequisites: Run 'Scalar Field' first")
                 # Transitions replay: only available after fill gaps replay has been played
-                if animate and getattr(obj, '_transitions_inserted_indices', None) is not None and getattr(obj, '_fill_gaps_replayed', False):
+                if animate and getattr(obj, '_transitions_inserted_indices', None) is not None and (getattr(obj, '_fill_gaps_replayed', False) or getattr(obj, '_fill_gaps_inserted_indices', None) is None):
                     imgui.same_line()
                     if imgui.button(f">##{name}_transitions_replay", width=replay_w):
                         obj.replay_transitions_animation()
@@ -707,7 +707,7 @@ def draw_zygote_muscle_ui(v):
                                 print(f"[{name}] Smooth error: {e}")
                         else:
                             print(f"[{name}] Prerequisites: Run 'Find Contours' first")
-                    if getattr(obj, '_smooth_bp_after', None) is not None and getattr(obj, '_transitions_replayed', False):
+                    if getattr(obj, '_smooth_bp_after', None) is not None and (getattr(obj, '_transitions_replayed', False) or getattr(obj, '_transitions_inserted_indices', None) is None):
                         imgui.same_line()
                         if imgui.button(f">##{name}_smooth_replay", width=replay_w):
                             obj.replay_smooth_animation()
@@ -754,7 +754,7 @@ def draw_zygote_muscle_ui(v):
                             traceback.print_exc()
                     else:
                         print(f"[{name}] Prerequisites: Run 'Find Contours' first")
-                if animate and getattr(obj, '_cut_color_after', None) is not None and getattr(obj, '_smooth_replayed', False):
+                if animate and getattr(obj, '_cut_color_after', None) is not None and (getattr(obj, '_smooth_replayed', False) or getattr(obj, '_smooth_bp_after', None) is None):
                     imgui.same_line()
                     if imgui.button(f">##{name}_cut_replay", width=replay_w):
                         obj.replay_cut_animation()
@@ -770,7 +770,7 @@ def draw_zygote_muscle_ui(v):
                                 print(f"[{name}] Stream Smooth error: {e}")
                         else:
                             print(f"[{name}] Prerequisites: Run 'Cut' first")
-                    if getattr(obj, '_stream_smooth_bp_after', None) is not None and getattr(obj, '_cut_replayed', False):
+                    if getattr(obj, '_stream_smooth_bp_after', None) is not None and (getattr(obj, '_cut_replayed', False) or getattr(obj, '_cut_color_after', None) is None):
                         imgui.same_line()
                         if imgui.button(f">##{name}_stream_smooth_replay", width=replay_w):
                             obj.replay_stream_smooth_animation()
@@ -813,7 +813,7 @@ def draw_zygote_muscle_ui(v):
                             traceback.print_exc()
                     else:
                         print(f"[{name}] Prerequisites: Run 'Cut' first")
-                if animate and getattr(obj, '_level_select_anim_original', None) is not None and getattr(obj, '_stream_smooth_replayed', False):
+                if animate and getattr(obj, '_level_select_anim_original', None) is not None and (getattr(obj, '_stream_smooth_replayed', False) or getattr(obj, '_stream_smooth_bp_after', None) is None):
                     imgui.same_line()
                     if imgui.button(f">##{name}_level_select_replay", width=replay_w):
                         obj.replay_level_select_animation()
@@ -828,7 +828,7 @@ def draw_zygote_muscle_ui(v):
                             traceback.print_exc()
                     else:
                         print(f"[{name}] Prerequisites: Run 'Cut' first")
-                if animate and getattr(obj, '_fiber_anim_waypoints', None) is not None and getattr(obj, '_level_select_replayed', False) and not getattr(obj, '_level_select_anim_active', False):
+                if animate and getattr(obj, '_fiber_anim_waypoints', None) is not None and (getattr(obj, '_level_select_replayed', False) or getattr(obj, '_level_select_anim_original', None) is None) and not getattr(obj, '_level_select_anim_active', False):
                     imgui.same_line()
                     if imgui.button(f">##{name}_fiber_replay", width=replay_w):
                         obj.replay_fiber_animation()
@@ -842,7 +842,7 @@ def draw_zygote_muscle_ui(v):
                             print(f"[{name}] Resample Contours error: {e}")
                     else:
                         print(f"[{name}] Prerequisites: Run 'Smoothen Contours' first")
-                if animate and getattr(obj, '_resample_anim_data', None) is not None and getattr(obj, '_build_fibers_replayed', False) and not getattr(obj, '_fiber_anim_active', False):
+                if animate and getattr(obj, '_resample_anim_data', None) is not None and (getattr(obj, '_build_fibers_replayed', False) or getattr(obj, '_fiber_anim_waypoints', None) is None) and not getattr(obj, '_fiber_anim_active', False):
                     imgui.same_line()
                     if imgui.button(f">##{name}_resample_replay", width=replay_w):
                         obj.replay_resample_animation()
@@ -858,7 +858,7 @@ def draw_zygote_muscle_ui(v):
                             traceback.print_exc()
                     else:
                         print(f"[{name}] Prerequisites: Run 'Build Fiber' first")
-                if animate and getattr(obj, '_mesh_anim_face_bands', None) is not None and getattr(obj, '_resample_replayed', False) and not getattr(obj, '_resample_anim_active', False):
+                if animate and getattr(obj, '_mesh_anim_face_bands', None) is not None and (getattr(obj, '_resample_replayed', False) or getattr(obj, '_resample_anim_data', None) is None) and not getattr(obj, '_resample_anim_active', False):
                     imgui.same_line()
                     if imgui.button(f">##{name}_mesh_replay", width=replay_w):
                         obj.replay_mesh_animation()
@@ -884,7 +884,7 @@ def draw_zygote_muscle_ui(v):
                             traceback.print_exc()
                     else:
                         print(f"[{name}] Prerequisites: Run 'Build Contour Mesh' first")
-                if animate and getattr(obj, 'tet_vertices', None) is not None and getattr(obj, '_build_mesh_replayed', False) and not getattr(obj, '_tet_anim_active', False):
+                if animate and getattr(obj, 'tet_vertices', None) is not None and (getattr(obj, '_build_mesh_replayed', False) or getattr(obj, '_mesh_anim_face_bands', None) is None) and not getattr(obj, '_tet_anim_active', False):
                     imgui.same_line()
                     if imgui.button(f">##{name}_tet_replay", width=replay_w):
                         obj.replay_tet_animation()

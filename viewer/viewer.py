@@ -1089,6 +1089,9 @@ class GLFWApp():
                                     setattr(obj, prev_flag, True)
                                 replay(obj); started = True
                         if not started:
+                            # All remaining steps had no data — set all replayed flags
+                            for _, _, flag in _play_all_steps:
+                                setattr(obj, flag, True)
                             obj._play_all_active = False
 
             # Auto-rotate around focused muscle
