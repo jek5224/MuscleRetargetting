@@ -1043,6 +1043,46 @@ class GLFWApp():
                     if not obj.update_tet_animation(1.0 / 30.0):
                         self.zygote_tet_transparency = obj.contour_mesh_transparency
 
+                # Play All sequencing
+                if getattr(obj, '_play_all_active', False):
+                    any_active = any(getattr(obj, f, False) for f in [
+                        '_scalar_anim_active', '_contour_anim_active', '_fill_gaps_anim_active',
+                        '_transitions_anim_active', '_smooth_anim_active', '_cut_anim_active',
+                        '_stream_smooth_anim_active', '_level_select_anim_active',
+                        '_fiber_anim_active', '_resample_anim_active', '_mesh_anim_active',
+                        '_tet_anim_active'])
+                    if not any_active:
+                        started = False
+                        while obj._play_all_step < 12 and not started:
+                            step = obj._play_all_step
+                            obj._play_all_step += 1
+                            if step == 0 and getattr(obj, '_scalar_anim_target_colors', None) is not None:
+                                obj.replay_scalar_animation(); started = True
+                            elif step == 1 and obj.contours is not None and len(obj.contours) > 0:
+                                obj.replay_contour_animation(); started = True
+                            elif step == 2 and getattr(obj, '_fill_gaps_inserted_indices', None) is not None:
+                                obj.replay_fill_gaps_animation(); started = True
+                            elif step == 3 and getattr(obj, '_transitions_inserted_indices', None) is not None:
+                                obj.replay_transitions_animation(); started = True
+                            elif step == 4 and getattr(obj, '_smooth_bp_after', None) is not None:
+                                obj.replay_smooth_animation(); started = True
+                            elif step == 5 and getattr(obj, '_cut_color_after', None) is not None:
+                                obj.replay_cut_animation(); started = True
+                            elif step == 6 and getattr(obj, '_stream_smooth_bp_after', None) is not None:
+                                obj.replay_stream_smooth_animation(); started = True
+                            elif step == 7 and getattr(obj, '_level_select_anim_original', None) is not None:
+                                obj.replay_level_select_animation(); started = True
+                            elif step == 8 and getattr(obj, '_fiber_anim_waypoints', None) is not None:
+                                obj.replay_fiber_animation(); started = True
+                            elif step == 9 and getattr(obj, '_resample_anim_data', None) is not None:
+                                obj.replay_resample_animation(); started = True
+                            elif step == 10 and getattr(obj, '_mesh_anim_face_bands', None) is not None:
+                                obj.replay_mesh_animation(); started = True
+                            elif step == 11 and getattr(obj, 'tet_vertices', None) is not None:
+                                obj.replay_tet_animation(); started = True
+                        if not started:
+                            obj._play_all_active = False
+
             # Auto-rotate around focused muscle
             if self.auto_rotate:
                 ar_dt = start_time - getattr(self, '_auto_rotate_last_time', start_time)

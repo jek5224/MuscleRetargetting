@@ -3201,6 +3201,10 @@ class MuscleMeshMixin:
         self.normalized_contours = []
         self.waypoints = []
 
+        # Play all animations sequencing
+        self._play_all_active = False
+        self._play_all_step = 0
+
         print("Process reset complete")
 
     def compute_scalar_field(self, defer=False):

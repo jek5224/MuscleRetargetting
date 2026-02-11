@@ -1001,20 +1001,26 @@ def draw_zygote_muscle_ui(v):
                     obj.animate_process = True
                 _, obj.animate_process = imgui.checkbox(f"Animate##{name}", obj.animate_process)
 
-                # Save/Load animation state
+                # Save/Load animation state + Play All
                 imgui.same_line()
+                avail = imgui.get_content_region_available_width()
+                anim_btn_w = (avail - imgui.get_style().item_spacing[0] * 2) / 3
                 anim_filepath = f"{v.zygote_muscle_dir}{name}.anim.pkl"
-                if imgui.button(f"Save Anim##{name}"):
+                if imgui.button(f"Save Anim##{name}", width=anim_btn_w):
                     try:
                         obj.save_animation_state(anim_filepath)
                     except Exception as e:
                         print(f"[{name}] Save Animation error: {e}")
                 imgui.same_line()
-                if imgui.button(f"Load Anim##{name}"):
+                if imgui.button(f"Load Anim##{name}", width=anim_btn_w):
                     try:
                         obj.load_animation_state(anim_filepath)
                     except Exception as e:
                         print(f"[{name}] Load Animation error: {e}")
+                imgui.same_line()
+                if imgui.button(f"Play All##{name}", width=anim_btn_w):
+                    obj._play_all_active = True
+                    obj._play_all_step = 0
 
                 # Bounding box method selector
                 bbox_methods = ['farthest_vertex', 'pca', 'bbox']
