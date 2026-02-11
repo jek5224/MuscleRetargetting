@@ -66,6 +66,9 @@ class ContourAnimationMixin:
         self._level_select_anim_num_levels = 0
         self._level_select_replayed = False
         self._level_select_anim_pending_resume = False
+        self._level_select_anim_original = None
+        self._level_select_anim_post = None
+        self._level_select_anim_is_replay = False
 
         # Build fibers replay state
         self._fiber_anim_waypoints = None      # Deep copy of waypoints for replay
