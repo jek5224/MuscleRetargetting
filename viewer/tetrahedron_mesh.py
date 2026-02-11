@@ -864,11 +864,109 @@ class TetrahedronMeshMixin:
         if self._tet_edge_vidx is not None and self._tet_edge_verts is not None:
             self._tet_edge_verts[:] = verts[self._tet_edge_vidx]
 
+    def _draw_tet_mesh_animated(self):
+        """Tet edge animation phases 1-2 (phase 3+ uses normal draw_tetrahedron_mesh).
+        Phase 1: edges grow from origin→insertion (like contour mesh edge anim)
+        Phase 2: edges fade out alpha 1.0→0.0"""
+        if self.tet_vertices is None:
+            return
+
+        verts = self.tet_vertices
+        color = self.contour_mesh_color
+        num_bands = getattr(self, '_tet_anim_num_bands', 0)
+        band_edges = getattr(self, '_tet_anim_band_edges', None)
+        vcl = getattr(self, '_tet_vertex_level', None)
+        phase = self._tet_anim_phase
+        progress = self._tet_anim_progress
+
+        if band_edges is None or vcl is None or num_bands == 0:
+            return
+
+        # Timing must match update_tet_animation
+        fade_dur = 1.5
+        grow_dur = 2.0
+        edge_fade_dur = 0.8
+
+        def smoothstep(x):
+            x = max(0.0, min(1.0, x))
+            return x * x * (3.0 - 2.0 * x)
+
+        glPushMatrix()
+        glEnable(GL_BLEND)
+        glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
+
+        if phase == 1:
+            # Edge grow: lines grow from origin→insertion
+            t = (progress - fade_dur) / grow_dur if grow_dur > 0 else 1.0
+            level_prog = smoothstep(t) * num_bands
+
+            glDisable(GL_LIGHTING)
+            glLineWidth(1.5)
+            glColor4f(color[0], color[1], color[2], 1.0)
+            glBegin(GL_LINES)
+            for band_idx in range(num_bands):
+                if band_idx > level_prog + 1:
+                    break
+                if band_idx >= len(band_edges):
+                    continue
+                for vi0, vi1 in band_edges[band_idx]:
+                    lv0 = max(int(vcl[vi0]), 0)
+                    lv1 = max(int(vcl[vi1]), 0)
+                    min_lv = min(lv0, lv1)
+                    max_lv = max(lv0, lv1)
+                    if min_lv > level_prog:
+                        continue
+                    p0 = verts[vi0]
+                    p1 = verts[vi1]
+                    if lv0 == lv1:
+                        glVertex3fv(p0)
+                        glVertex3fv(p1)
+                    elif max_lv <= level_prog:
+                        glVertex3fv(p0)
+                        glVertex3fv(p1)
+                    else:
+                        frac = max(0.0, min(1.0, level_prog - min_lv))
+                        if lv0 <= lv1:
+                            glVertex3fv(p0)
+                            glVertex3fv(p0 + frac * (p1 - p0))
+                        else:
+                            glVertex3fv(p1)
+                            glVertex3fv(p1 + frac * (p0 - p1))
+            glEnd()
+            glEnable(GL_LIGHTING)
+
+        elif phase == 2:
+            # Edge fade: all edges visible, alpha 1.0→0.0
+            t = (progress - fade_dur - grow_dur) / edge_fade_dur if edge_fade_dur > 0 else 1.0
+            wire_alpha = 1.0 - smoothstep(t)
+
+            if wire_alpha > 0.005:
+                glDisable(GL_LIGHTING)
+                glLineWidth(1.5)
+                glColor4f(color[0], color[1], color[2], wire_alpha)
+                glBegin(GL_LINES)
+                for band_idx in range(num_bands):
+                    if band_idx >= len(band_edges):
+                        continue
+                    for v0, v1 in band_edges[band_idx]:
+                        glVertex3fv(verts[v0])
+                        glVertex3fv(verts[v1])
+                glEnd()
+                glEnable(GL_LIGHTING)
+
+        glPopMatrix()
+
     def draw_tetrahedron_mesh(self, draw_tets=False, draw_caps=True):
         """
         Draw the tetrahedron mesh surface using vertex arrays for efficiency.
         """
         if not hasattr(self, 'tet_vertices') or self.tet_vertices is None:
+            return
+
+        # During tet animation: phase 0 = nothing drawn, 1-2 = animated edges
+        if getattr(self, '_tet_anim_active', False) and self._tet_anim_phase in (0, 1, 2):
+            if self._tet_anim_phase in (1, 2):
+                self._draw_tet_mesh_animated()
             return
 
         # Prepare arrays if not done yet
@@ -885,13 +983,8 @@ class TetrahedronMeshMixin:
         alpha = self.contour_mesh_transparency
         color = self.contour_mesh_color
 
-        # During tet animation cross-fade phase, override alpha
-        tet_alpha_override = getattr(self, '_tet_anim_tet_alpha', 0.0)
-        if getattr(self, '_tet_anim_active', False) and getattr(self, '_tet_anim_phase', 0) == 0:
-            alpha = tet_alpha_override
-
-        # During tet animation X-ray phase, use two-pass transparency for surface
-        is_xray = getattr(self, '_tet_anim_active', False) and getattr(self, '_tet_anim_phase', 0) == 1
+        # During tet animation X-ray phase (phase 4), use two-pass transparency for surface
+        is_xray = getattr(self, '_tet_anim_active', False) and getattr(self, '_tet_anim_phase', 0) == 4
 
         # Draw surface faces
         if self._tet_surface_verts is not None and len(self._tet_surface_verts) > 0:

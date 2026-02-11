@@ -96,12 +96,15 @@ class ContourAnimationMixin:
         # Tetrahedralize animation state
         self._tet_anim_active = False
         self._tet_anim_progress = 0.0
-        self._tet_anim_phase = 0       # 0=cross-fade, 1=xray flash
+        self._tet_anim_phase = 0       # 0=fade, 1=edge grow, 2=edge fade, 3=fill, 4=xray
         self._tet_anim_internal_edges = None  # np.array of internal edge vertices for GL_LINES
         self._tet_anim_internal_alpha = 0.0
         self._tet_anim_scaffold_alpha = 1.0   # Fades contour lines during phase 0
         self._tet_anim_tet_alpha = 0.0        # Tet mesh alpha override during animation
         self._tet_anim_target_alpha = 0.8
+        self._tet_anim_band_edges = None      # Tet surface edges per level band
+        self._tet_anim_num_bands = 0
+        self._tet_vertex_level = None         # Contour level per tet vertex
         self._tetrahedralize_replayed = False
 
         # BP color override during smooth animations {(i,j): (r,g,b,a)}
@@ -1616,8 +1619,79 @@ class ContourAnimationMixin:
             edge_verts.append(verts[v1])
         self._tet_anim_internal_edges = np.array(edge_verts, dtype=np.float32)
 
+    def _classify_tet_faces_into_bands(self):
+        """Classify tet surface faces into level bands for growing animation.
+        Maps tet vertices to contour levels via nearest-neighbor position matching."""
+        if self.tet_vertices is None or self.tet_render_faces is None:
+            self._tet_anim_band_edges = None
+            self._tet_anim_num_bands = 0
+            return
+
+        # Build tet_vertex_level by matching tet vertices to contour mesh vertices
+        vcl = self.vertex_contour_level
+        cm_verts = self.contour_mesh_vertices
+        tet_verts = self.tet_vertices
+        n_tet = len(tet_verts)
+        tet_level = np.full(n_tet, -1, dtype=np.int32)
+
+        if vcl is not None and cm_verts is not None and len(cm_verts) > 0:
+            from scipy.spatial import cKDTree
+            tree = cKDTree(cm_verts[:, :3])
+            dists, indices = tree.query(tet_verts[:, :3])
+            for ti in range(n_tet):
+                if dists[ti] < 0.01:  # Close enough to be the same vertex
+                    tet_level[ti] = vcl[indices[ti]]
+
+        # Cap anchor vertices: assign level 0 (origin) or max_level (insertion)
+        max_level = int(np.max(vcl[vcl >= 0])) if vcl is not None and np.any(vcl >= 0) else 0
+        for cap_info in getattr(self, 'tet_cap_attachments', []):
+            anchor_idx = cap_info[0]
+            end_type = cap_info[2]  # 0=origin, 1=insertion
+            if anchor_idx < n_tet:
+                tet_level[anchor_idx] = 0 if end_type == 0 else max_level
+
+        # Any still-unassigned vertices: interpolate from neighbors
+        unassigned = np.where(tet_level < 0)[0]
+        if len(unassigned) > 0 and vcl is not None and cm_verts is not None:
+            # Fall back to nearest assigned vertex level
+            assigned_mask = tet_level >= 0
+            if np.any(assigned_mask):
+                assigned_verts = tet_verts[assigned_mask]
+                assigned_levels = tet_level[assigned_mask]
+                tree2 = cKDTree(assigned_verts[:, :3])
+                _, idx = tree2.query(tet_verts[unassigned][:, :3])
+                tet_level[unassigned] = assigned_levels[idx]
+
+        self._tet_vertex_level = tet_level
+
+        # Classify render faces (surface only, not caps) into bands
+        render_faces = self.tet_render_faces
+        surface_count = getattr(self, 'tet_surface_face_count', len(render_faces))
+        cap_set = set(getattr(self, 'tet_cap_face_indices', []))
+
+        num_bands = int(np.max(tet_level[tet_level >= 0])) + 1 if np.any(tet_level >= 0) else 0
+        band_edges = [set() for _ in range(num_bands)]
+
+        for fi, face in enumerate(render_faces):
+            levels = tet_level[face]
+            valid = levels[levels >= 0]
+            if len(valid) == 0:
+                band = 0
+            else:
+                band = int(np.min(valid))
+            if band >= num_bands:
+                band = num_bands - 1
+            # Extract edges
+            for k in range(3):
+                vi, vj = int(face[k]), int(face[(k + 1) % 3])
+                edge = (min(vi, vj), max(vi, vj))
+                band_edges[band].add(edge)
+
+        self._tet_anim_band_edges = [sorted(edges) for edges in band_edges]
+        self._tet_anim_num_bands = num_bands
+
     def replay_tet_animation(self):
-        """Start tetrahedralize animation: cross-fade scaffolding→tet, then X-ray flash."""
+        """Start tetrahedralize animation: fade scaffolding, grow tet edges, fill, X-ray."""
         if self.tet_vertices is None:
             self._tetrahedralize_replayed = True
             return
@@ -1633,6 +1707,7 @@ class ContourAnimationMixin:
             self.draw_contour_stream = [[True] * len(src[s]) for s in range(len(src))]
 
         self._extract_internal_tet_edges()
+        self._classify_tet_faces_into_bands()
         self._tet_anim_target_alpha = self.contour_mesh_transparency
         self._tet_anim_orig_fiber_alpha = getattr(self, 'fiber_transparency', 1.0)
 
@@ -1648,14 +1723,14 @@ class ContourAnimationMixin:
         else:
             self._tet_anim_num_bp_levels = 0
 
-        # Start state: everything visible, tet mesh also visible (at alpha 0)
+        # Start state: scaffolding visible, contour mesh visible, tet off
         self.is_draw_contours = True
         self.is_draw_bounding_box = True
         self.bounding_box_draw_mode = 1
         self.is_draw_fiber_architecture = True
         self.is_draw_resampled_vertices = False
         self.is_draw_contour_mesh = True
-        self.is_draw_tet_mesh = True
+        self.is_draw_tet_mesh = False
         self._tet_anim_scaffold_alpha = 1.0
         self._tet_anim_tet_alpha = 0.0
         self._tet_anim_internal_alpha = 0.0
@@ -1665,14 +1740,18 @@ class ContourAnimationMixin:
         self._tet_anim_active = True
 
     def update_tet_animation(self, dt):
-        """Phase 0: cross-fade scaffolding→tet. Phase 1: X-ray flash of internal edges."""
+        """Phase 0: fade scaffolding+contour mesh. Phase 1: tet edges grow.
+        Phase 2: tet edges fade. Phase 3: tet mesh fill. Phase 4: X-ray flash."""
         if not self._tet_anim_active:
             return False
 
         self._tet_anim_progress += dt
-        crossfade_dur = 1.5
-        xray_dur = 2.0
-        total_dur = crossfade_dur + xray_dur
+        fade_dur = 1.5     # Phase 0: fade out scaffolding + contour mesh
+        grow_dur = 2.0     # Phase 1: tet edges grow origin→insertion
+        edge_fade_dur = 0.8  # Phase 2: tet edges fade out
+        fill_dur = 1.0     # Phase 3: tet mesh fill (transparency ramp)
+        xray_dur = 2.0     # Phase 4: X-ray flash
+        total_dur = fade_dur + grow_dur + edge_fade_dur + fill_dur + xray_dur
 
         def smoothstep(x):
             x = max(0.0, min(1.0, x))
@@ -1697,33 +1776,27 @@ class ContourAnimationMixin:
             self._tetrahedralize_replayed = True
             return False
 
-        if self._tet_anim_progress < crossfade_dur:
-            # Phase 0: cross-fade — scaffolding fades out, tet mesh fades in
+        t_acc = 0.0
+
+        # Phase 0: fade out scaffolding + contour mesh
+        if self._tet_anim_progress < fade_dur:
             self._tet_anim_phase = 0
-            t = self._tet_anim_progress / crossfade_dur
+            t = self._tet_anim_progress / fade_dur
             fade = smoothstep(t)
 
-            # Contour lines: fade alpha via scaffold_alpha
             self._tet_anim_scaffold_alpha = 1.0 - fade
-
-            # Bounding planes: fade via bp_scale dict
             num_levels = getattr(self, '_tet_anim_num_bp_levels', 0)
-            scale_val = 1.0 - fade
-            self._contour_anim_bp_scale = {lv: scale_val for lv in range(num_levels)}
-
-            # Fibers: fade transparency
+            self._contour_anim_bp_scale = {lv: 1.0 - fade for lv in range(num_levels)}
             orig_fiber = getattr(self, '_tet_anim_orig_fiber_alpha', 1.0)
             self.fiber_transparency = orig_fiber * (1.0 - fade)
-
-            # Contour mesh fades out
             self.contour_mesh_transparency = self._tet_anim_target_alpha * (1.0 - fade)
+            return True
+        t_acc += fade_dur
 
-            # Tet mesh fades in
-            self._tet_anim_tet_alpha = self._tet_anim_target_alpha * fade
-        else:
-            # Phase 1: X-ray flash of internal tet edges
+        # Phase 1: tet edges grow origin→insertion
+        if self._tet_anim_progress < t_acc + grow_dur:
             if self._tet_anim_phase != 1:
-                # First frame of phase 1: turn off scaffolding, contour mesh off
+                # First frame: turn off scaffolding + contour mesh, enable tet draw
                 self.is_draw_contours = False
                 self.is_draw_bounding_box = False
                 self.is_draw_fiber_architecture = False
@@ -1731,20 +1804,41 @@ class ContourAnimationMixin:
                 self._tet_anim_scaffold_alpha = 1.0
                 self._contour_anim_bp_scale = {}
                 self.fiber_transparency = getattr(self, '_tet_anim_orig_fiber_alpha', 1.0)
-                self._tet_anim_tet_alpha = 0.0  # Stop override, use contour_mesh_transparency
-                self.contour_mesh_transparency = self._tet_anim_target_alpha
+                self.is_draw_tet_mesh = True
             self._tet_anim_phase = 1
-            xt = (self._tet_anim_progress - crossfade_dur) / xray_dur
-            if xt < 0.5:
-                # Surface fades down to 20%, internal edges fade in
-                fade_t = smoothstep(xt * 2.0)
-                self.contour_mesh_transparency = self._tet_anim_target_alpha * (1.0 - 0.8 * fade_t)
-                self._tet_anim_internal_alpha = fade_t
-            else:
-                # Surface comes back to target, internal edges fade out
-                fade_t = smoothstep((xt - 0.5) * 2.0)
-                self.contour_mesh_transparency = self._tet_anim_target_alpha * (0.2 + 0.8 * fade_t)
-                self._tet_anim_internal_alpha = 1.0 - fade_t
+            return True
+        t_acc += grow_dur
+
+        # Phase 2: tet edges fade out
+        if self._tet_anim_progress < t_acc + edge_fade_dur:
+            self._tet_anim_phase = 2
+            return True
+        t_acc += edge_fade_dur
+
+        # Phase 3: tet mesh fill (transparency ramp 0→target)
+        if self._tet_anim_progress < t_acc + fill_dur:
+            if self._tet_anim_phase != 3:
+                # First frame: start at transparency 0
+                self.contour_mesh_transparency = 0.0
+            self._tet_anim_phase = 3
+            t = (self._tet_anim_progress - t_acc) / fill_dur
+            self.contour_mesh_transparency = smoothstep(t) * self._tet_anim_target_alpha
+            return True
+        t_acc += fill_dur
+
+        # Phase 4: X-ray flash of internal tet edges
+        if self._tet_anim_phase != 4:
+            self.contour_mesh_transparency = self._tet_anim_target_alpha
+        self._tet_anim_phase = 4
+        xt = (self._tet_anim_progress - t_acc) / xray_dur
+        if xt < 0.5:
+            fade_t = smoothstep(xt * 2.0)
+            self.contour_mesh_transparency = self._tet_anim_target_alpha * (1.0 - 0.8 * fade_t)
+            self._tet_anim_internal_alpha = fade_t
+        else:
+            fade_t = smoothstep((xt - 0.5) * 2.0)
+            self.contour_mesh_transparency = self._tet_anim_target_alpha * (0.2 + 0.8 * fade_t)
+            self._tet_anim_internal_alpha = 1.0 - fade_t
 
         return True
 
@@ -1871,6 +1965,9 @@ class ContourAnimationMixin:
         state['tet_cap_attachments'] = getattr(self, 'tet_cap_attachments', [])
         state['is_draw_tet_mesh'] = getattr(self, 'is_draw_tet_mesh', False)
         state['_tet_anim_internal_edges'] = getattr(self, '_tet_anim_internal_edges', None)
+        state['_tet_anim_band_edges'] = getattr(self, '_tet_anim_band_edges', None)
+        state['_tet_anim_num_bands'] = getattr(self, '_tet_anim_num_bands', 0)
+        state['_tet_vertex_level'] = getattr(self, '_tet_vertex_level', None)
 
         # Pipeline state
         state['max_stream_count'] = getattr(self, 'max_stream_count', None)
@@ -2021,6 +2118,9 @@ class ContourAnimationMixin:
         self.tet_cap_attachments = state.get('tet_cap_attachments', [])
         self.is_draw_tet_mesh = state.get('is_draw_tet_mesh', False)
         self._tet_anim_internal_edges = state.get('_tet_anim_internal_edges')
+        self._tet_anim_band_edges = state.get('_tet_anim_band_edges')
+        self._tet_anim_num_bands = state.get('_tet_anim_num_bands', 0)
+        self._tet_vertex_level = state.get('_tet_vertex_level')
         # Reset tet draw arrays so they get rebuilt from loaded data
         self._tet_surface_verts = None
 

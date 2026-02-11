@@ -3169,6 +3169,9 @@ class MuscleMeshMixin:
         self._tet_anim_scaffold_alpha = 1.0
         self._tet_anim_tet_alpha = 0.0
         self._tet_anim_target_alpha = 0.8
+        self._tet_anim_band_edges = None
+        self._tet_anim_num_bands = 0
+        self._tet_vertex_level = None
         self._tetrahedralize_replayed = False
 
         # Soft body

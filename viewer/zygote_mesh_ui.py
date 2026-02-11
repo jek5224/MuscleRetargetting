@@ -573,6 +573,7 @@ def draw_zygote_muscle_ui(v):
                             if obj.tet_vertices is not None:
                                 if defer:
                                     obj._extract_internal_tet_edges()
+                                    obj._classify_tet_faces_into_bands()
                                     obj._build_mesh_replayed = False
                                     obj._tetrahedralize_replayed = False
                                 else:
@@ -872,6 +873,7 @@ def draw_zygote_muscle_ui(v):
                             if obj.tet_vertices is not None:
                                 if animate:
                                     obj._extract_internal_tet_edges()
+                                    obj._classify_tet_faces_into_bands()
                                     obj._build_mesh_replayed = False
                                     obj._tetrahedralize_replayed = False
                                 else:
@@ -4926,6 +4928,7 @@ def _render_manual_cut_windows(v):
                                             if obj.tet_vertices is not None:
                                                 if _defer:
                                                     obj._extract_internal_tet_edges()
+                                                    obj._classify_tet_faces_into_bands()
                                                     obj._build_mesh_replayed = False
                                                     obj._tetrahedralize_replayed = False
                                                 else:
@@ -5321,6 +5324,7 @@ def _render_level_select_windows(v):
                             if obj.tet_vertices is not None:
                                 if _defer:
                                     obj._extract_internal_tet_edges()
+                                    obj._classify_tet_faces_into_bands()
                                     obj._build_mesh_replayed = False
                                     obj._tetrahedralize_replayed = False
                                 else:
