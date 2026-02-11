@@ -1052,34 +1052,41 @@ class GLFWApp():
                         '_fiber_anim_active', '_resample_anim_active', '_mesh_anim_active',
                         '_tet_anim_active'])
                     if not any_active:
+                        _play_all_steps = [
+                            (lambda o: getattr(o, '_scalar_anim_target_colors', None) is not None,
+                             lambda o: o.replay_scalar_animation(), '_scalar_replayed'),
+                            (lambda o: o.contours is not None and len(o.contours) > 0,
+                             lambda o: o.replay_contour_animation(), '_contour_replayed'),
+                            (lambda o: len(getattr(o, '_fill_gaps_inserted_indices', None) or []) > 0,
+                             lambda o: o.replay_fill_gaps_animation(), '_fill_gaps_replayed'),
+                            (lambda o: len(getattr(o, '_transitions_inserted_indices', None) or []) > 0,
+                             lambda o: o.replay_transitions_animation(), '_transitions_replayed'),
+                            (lambda o: getattr(o, '_smooth_bp_after', None) is not None,
+                             lambda o: o.replay_smooth_animation(), '_smooth_replayed'),
+                            (lambda o: getattr(o, '_cut_color_after', None) is not None,
+                             lambda o: o.replay_cut_animation(), '_cut_replayed'),
+                            (lambda o: getattr(o, '_stream_smooth_bp_after', None) is not None,
+                             lambda o: o.replay_stream_smooth_animation(), '_stream_smooth_replayed'),
+                            (lambda o: getattr(o, '_level_select_anim_original', None) is not None,
+                             lambda o: o.replay_level_select_animation(), '_level_select_replayed'),
+                            (lambda o: getattr(o, '_fiber_anim_waypoints', None) is not None,
+                             lambda o: o.replay_fiber_animation(), '_build_fibers_replayed'),
+                            (lambda o: getattr(o, '_resample_anim_data', None) is not None,
+                             lambda o: o.replay_resample_animation(), '_resample_replayed'),
+                            (lambda o: getattr(o, '_mesh_anim_face_bands', None) is not None,
+                             lambda o: o.replay_mesh_animation(), '_build_mesh_replayed'),
+                            (lambda o: getattr(o, 'tet_vertices', None) is not None,
+                             lambda o: o.replay_tet_animation(), '_tetrahedralize_replayed'),
+                        ]
                         started = False
                         while obj._play_all_step < 12 and not started:
                             step = obj._play_all_step
                             obj._play_all_step += 1
-                            if step == 0 and getattr(obj, '_scalar_anim_target_colors', None) is not None:
-                                obj.replay_scalar_animation(); started = True
-                            elif step == 1 and obj.contours is not None and len(obj.contours) > 0:
-                                obj.replay_contour_animation(); started = True
-                            elif step == 2 and len(getattr(obj, '_fill_gaps_inserted_indices', None) or []) > 0:
-                                obj.replay_fill_gaps_animation(); started = True
-                            elif step == 3 and len(getattr(obj, '_transitions_inserted_indices', None) or []) > 0:
-                                obj.replay_transitions_animation(); started = True
-                            elif step == 4 and getattr(obj, '_smooth_bp_after', None) is not None:
-                                obj.replay_smooth_animation(); started = True
-                            elif step == 5 and getattr(obj, '_cut_color_after', None) is not None:
-                                obj.replay_cut_animation(); started = True
-                            elif step == 6 and getattr(obj, '_stream_smooth_bp_after', None) is not None:
-                                obj.replay_stream_smooth_animation(); started = True
-                            elif step == 7 and getattr(obj, '_level_select_anim_original', None) is not None:
-                                obj.replay_level_select_animation(); started = True
-                            elif step == 8 and getattr(obj, '_fiber_anim_waypoints', None) is not None:
-                                obj.replay_fiber_animation(); started = True
-                            elif step == 9 and getattr(obj, '_resample_anim_data', None) is not None:
-                                obj.replay_resample_animation(); started = True
-                            elif step == 10 and getattr(obj, '_mesh_anim_face_bands', None) is not None:
-                                obj.replay_mesh_animation(); started = True
-                            elif step == 11 and getattr(obj, 'tet_vertices', None) is not None:
-                                obj.replay_tet_animation(); started = True
+                            has_data, replay, replayed_flag = _play_all_steps[step]
+                            if has_data(obj):
+                                replay(obj); started = True
+                            else:
+                                setattr(obj, replayed_flag, True)
                         if not started:
                             obj._play_all_active = False
 
