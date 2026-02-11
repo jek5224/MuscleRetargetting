@@ -1021,6 +1021,35 @@ def draw_zygote_muscle_ui(v):
                 if imgui.button(f"Play All##{name}", width=anim_btn_w):
                     obj._play_all_active = True
                     obj._play_all_step = 0
+                    # Reset visibility to pre-scalar start state
+                    obj.is_draw = True
+                    obj.is_draw_scalar_field = False
+                    obj.is_draw_contours = False
+                    obj.is_draw_bounding_box = False
+                    obj.is_draw_contour_mesh = False
+                    obj.is_draw_tet_mesh = False
+                    obj.is_draw_fiber_architecture = False
+                    obj.is_draw_resampled_vertices = False
+                    # Reset vertex colors to default muscle color
+                    if obj.vertex_colors is not None:
+                        n = len(obj.vertex_colors)
+                        obj.vertex_colors = np.tile(
+                            np.array([obj.color[0], obj.color[1], obj.color[2], obj.transparency], dtype=np.float32),
+                            (n, 1)
+                        )
+                    # Reset all replayed flags
+                    obj._scalar_replayed = False
+                    obj._contour_replayed = False
+                    obj._fill_gaps_replayed = False
+                    obj._transitions_replayed = False
+                    obj._smooth_replayed = False
+                    obj._cut_replayed = False
+                    obj._stream_smooth_replayed = False
+                    obj._level_select_replayed = False
+                    obj._build_fibers_replayed = False
+                    obj._resample_replayed = False
+                    obj._build_mesh_replayed = False
+                    obj._tetrahedralize_replayed = False
 
                 # Bounding box method selector
                 bbox_methods = ['farthest_vertex', 'pca', 'bbox']
