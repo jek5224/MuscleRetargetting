@@ -193,6 +193,7 @@ class ContourAnimationMixin:
         self.is_draw = True
         self.is_draw_contours = True
         self.is_draw_bounding_box = True
+        self.bounding_box_draw_mode = 0  # planes only (pre-cut)
         # Hide later-step visuals
         self.is_draw_contour_mesh = False
         self.is_draw_tet_mesh = False
@@ -292,6 +293,7 @@ class ContourAnimationMixin:
         self.is_draw = True
         self.is_draw_contours = True
         self.is_draw_bounding_box = True
+        self.bounding_box_draw_mode = 0  # planes only (pre-cut)
         # Hide later-step visuals
         self.is_draw_contour_mesh = False
         self.is_draw_tet_mesh = False
@@ -372,6 +374,7 @@ class ContourAnimationMixin:
         self.is_draw = True
         self.is_draw_contours = True
         self.is_draw_bounding_box = True
+        self.bounding_box_draw_mode = 0  # planes only (pre-cut)
         # Hide later-step visuals
         self.is_draw_contour_mesh = False
         self.is_draw_tet_mesh = False
@@ -600,6 +603,7 @@ class ContourAnimationMixin:
         self.is_draw = True
         self.is_draw_contours = True
         self.is_draw_bounding_box = True
+        self.bounding_box_draw_mode = 0  # planes only (pre-cut)
         # Hide later-step visuals
         self.is_draw_contour_mesh = False
         self.is_draw_tet_mesh = False
@@ -763,6 +767,7 @@ class ContourAnimationMixin:
         self.is_draw = True
         self.is_draw_contours = True
         self.is_draw_bounding_box = True
+        self.bounding_box_draw_mode = 0  # planes only (post-cut, pre-fiber)
         # Hide later-step visuals
         self.is_draw_contour_mesh = False
         self.is_draw_tet_mesh = False
@@ -1232,6 +1237,7 @@ class ContourAnimationMixin:
         self.is_draw = True
         self.is_draw_contours = True
         self.is_draw_bounding_box = True
+        self.bounding_box_draw_mode = 0  # planes only (post-cut, pre-fiber)
         # Hide later-step visuals
         self.is_draw_contour_mesh = False
         self.is_draw_tet_mesh = False
