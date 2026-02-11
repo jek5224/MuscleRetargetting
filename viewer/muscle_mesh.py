@@ -3128,6 +3128,13 @@ class MuscleMeshMixin:
         self._fiber_anim_level_progress = None
         self._build_fibers_replayed = False
 
+        # Resample contours state
+        self.contours_resampled = None
+        self.contours_resampled_params = None
+        self.contours_resampled_fixed = None
+        self.contours_resampled_types = None
+        self.is_draw_resampled_vertices = False
+
         # Resample contours animation state
         self._resample_anim_active = False
         self._resample_anim_progress = 0.0
@@ -3145,6 +3152,7 @@ class MuscleMeshMixin:
         self.contour_mesh_faces = None
         self.contour_mesh_normals = None
         self.is_draw_contour_mesh = False
+        self.contour_mesh_transparency = 0.8
 
         # Contour mesh animation
         self._mesh_anim_active = False
