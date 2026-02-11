@@ -3255,6 +3255,13 @@ class MuscleMeshMixin:
         self._scalar_anim_progress = 0.0
         self._scalar_anim_active = True
         self.is_draw_scalar_field = True
+        # Hide later-step visuals
+        self.is_draw_contours = False
+        self.is_draw_bounding_box = False
+        self.is_draw_contour_mesh = False
+        self.is_draw_tet_mesh = False
+        self.is_draw_fiber_architecture = False
+        self.is_draw_resampled_vertices = False
         # Reset to default muscle color
         n = len(self._scalar_anim_target_colors)
         self.vertex_colors = np.tile(

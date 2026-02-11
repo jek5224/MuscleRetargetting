@@ -193,6 +193,11 @@ class ContourAnimationMixin:
         self.is_draw = True
         self.is_draw_contours = True
         self.is_draw_bounding_box = True
+        # Hide later-step visuals
+        self.is_draw_contour_mesh = False
+        self.is_draw_tet_mesh = False
+        self.is_draw_fiber_architecture = False
+        self.is_draw_resampled_vertices = False
 
     def update_contour_animation(self, dt):
         """Advance contour reveal animation with highlight and BP grow.
@@ -287,6 +292,11 @@ class ContourAnimationMixin:
         self.is_draw = True
         self.is_draw_contours = True
         self.is_draw_bounding_box = True
+        # Hide later-step visuals
+        self.is_draw_contour_mesh = False
+        self.is_draw_tet_mesh = False
+        self.is_draw_fiber_architecture = False
+        self.is_draw_resampled_vertices = False
 
     def update_fill_gaps_animation(self, dt):
         """Advance fill gaps animation. Reveals inserted contours one by one with highlight."""
@@ -362,6 +372,11 @@ class ContourAnimationMixin:
         self.is_draw = True
         self.is_draw_contours = True
         self.is_draw_bounding_box = True
+        # Hide later-step visuals
+        self.is_draw_contour_mesh = False
+        self.is_draw_tet_mesh = False
+        self.is_draw_fiber_architecture = False
+        self.is_draw_resampled_vertices = False
 
     def update_transitions_animation(self, dt):
         """Advance transitions animation. Reveals inserted contours one by one with highlight."""
@@ -585,6 +600,11 @@ class ContourAnimationMixin:
         self.is_draw = True
         self.is_draw_contours = True
         self.is_draw_bounding_box = True
+        # Hide later-step visuals
+        self.is_draw_contour_mesh = False
+        self.is_draw_tet_mesh = False
+        self.is_draw_fiber_architecture = False
+        self.is_draw_resampled_vertices = False
         self._smooth_anim_orig_transparency = getattr(self, 'transparency', 1.0)
 
     def update_smooth_animation(self, dt):
@@ -743,6 +763,11 @@ class ContourAnimationMixin:
         self.is_draw = True
         self.is_draw_contours = True
         self.is_draw_bounding_box = True
+        # Hide later-step visuals
+        self.is_draw_contour_mesh = False
+        self.is_draw_tet_mesh = False
+        self.is_draw_fiber_architecture = False
+        self.is_draw_resampled_vertices = False
 
     def update_stream_smooth_animation(self, dt):
         """Advance stream smooth animation in three phases (no transparency fade).
@@ -898,6 +923,11 @@ class ContourAnimationMixin:
         self.is_draw_contours = True
         self.is_draw_bounding_box = True
         self.bounding_box_draw_mode = 0  # planes only, no connecting lines
+        # Hide later-step visuals
+        self.is_draw_contour_mesh = False
+        self.is_draw_tet_mesh = False
+        self.is_draw_fiber_architecture = False
+        self.is_draw_resampled_vertices = False
 
     def update_cut_animation(self, dt):
         """Advance cut animation.
@@ -1202,6 +1232,11 @@ class ContourAnimationMixin:
         self.is_draw = True
         self.is_draw_contours = True
         self.is_draw_bounding_box = True
+        # Hide later-step visuals
+        self.is_draw_contour_mesh = False
+        self.is_draw_tet_mesh = False
+        self.is_draw_fiber_architecture = False
+        self.is_draw_resampled_vertices = False
 
         print(f"Replaying level select animation: {len(unselected)} unselected contours")
 
@@ -1355,8 +1390,14 @@ class ContourAnimationMixin:
         # Start state: mesh visible at 0.5 transparency, fibers hidden (grow from level 0)
         self.bounding_box_draw_mode = 1  # boxes (planes + connecting lines)
         self.is_draw = True
+        self.is_draw_contours = True
+        self.is_draw_bounding_box = True
         self.transparency = 0.5
         self.is_draw_fiber_architecture = True
+        # Hide later-step visuals
+        self.is_draw_contour_mesh = False
+        self.is_draw_tet_mesh = False
+        self.is_draw_resampled_vertices = False
         self._fiber_anim_progress = 0.0
         self._fiber_anim_level_progress = 0.0
         self._fiber_anim_num_levels = num_levels
@@ -1429,6 +1470,9 @@ class ContourAnimationMixin:
         self.bounding_box_draw_mode = 1
         self.is_draw_fiber_architecture = True
         self.is_draw_resampled_vertices = False
+        # Hide later-step visuals
+        self.is_draw_contour_mesh = False
+        self.is_draw_tet_mesh = False
         self._resample_anim_progress = 0.0
         self._resample_anim_point_sizes = {}
         self._resample_anim_num_levels = num_levels
@@ -1533,6 +1577,8 @@ class ContourAnimationMixin:
         self.is_draw_fiber_architecture = True
         self.is_draw_resampled_vertices = False
         self.is_draw_contour_mesh = False
+        # Hide later-step visuals
+        self.is_draw_tet_mesh = False
         self._mesh_anim_target_alpha = 0.5
         self._mesh_anim_progress = 0.0
         self._mesh_anim_phase = 0
