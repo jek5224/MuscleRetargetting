@@ -884,7 +884,7 @@ def draw_zygote_muscle_ui(v):
                             traceback.print_exc()
                     else:
                         print(f"[{name}] Prerequisites: Run 'Build Contour Mesh' first")
-                if animate and getattr(obj, '_build_mesh_replayed', False) and not getattr(obj, '_tet_anim_active', False):
+                if animate and getattr(obj, 'tet_vertices', None) is not None and getattr(obj, '_build_mesh_replayed', False) and not getattr(obj, '_tet_anim_active', False):
                     imgui.same_line()
                     if imgui.button(f">##{name}_tet_replay", width=replay_w):
                         obj.replay_tet_animation()
