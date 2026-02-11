@@ -793,16 +793,16 @@ class ContourAnimationMixin:
         progress = self._stream_smooth_anim_progress
 
         # Per-stream phase durations
-        p1_dur = 1.5   # z-axis swing
-        p2_dur = 1.5   # x/y twist around z
-        p3_dur = 1.0   # bounding plane corners
-        per_stream_dur = p1_dur + p2_dur + p3_dur  # 4.0s per stream
+        p1_dur = 1.0   # z-axis swing
+        p2_dur = 1.0   # x/y twist around z
+        p3_dur = 0.75  # bounding plane corners
+        per_stream_dur = p1_dur + p2_dur + p3_dur
 
         num_levels = self._stream_smooth_num_levels
         num_streams = min(len(bp_before), len(self.bounding_planes))
 
-        # Stagger: each stream starts 0.5s after the previous
-        stream_stagger = 0.5
+        # Stagger: each stream starts 0.3s after the previous
+        stream_stagger = 0.3
         total_duration = per_stream_dur + stream_stagger * max(num_streams - 1, 0)
 
         rod = self._rodrigues
