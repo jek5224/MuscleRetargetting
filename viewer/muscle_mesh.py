@@ -3476,15 +3476,26 @@ class MuscleMeshMixin:
             basis_y = np.cross(basis_z, basis_x)
             basis_y = basis_y / (np.linalg.norm(basis_y) + 1e-10)
 
-            # Align with previous bounding plane orientation (sign flip only)
+            # Align with previous bounding plane orientation (best 90° rotation)
             proj_prev_x = prev_basis_x - np.dot(prev_basis_x, basis_z) * basis_z
             proj_norm = np.linalg.norm(proj_prev_x)
             if proj_norm > 1e-6:
                 proj_prev_x = proj_prev_x / proj_norm
-                if np.dot(basis_x, proj_prev_x) < 0:
-                    basis_x = -basis_x
-                    basis_y = np.cross(basis_z, basis_x)
-                    basis_y = basis_y / (np.linalg.norm(basis_y) + 1e-10)
+                candidates = [
+                    (basis_x, basis_y),       # 0°
+                    (basis_y, -basis_x),      # 90°
+                    (-basis_x, -basis_y),     # 180°
+                    (-basis_y, basis_x),      # 270°
+                ]
+                best_dot = -np.inf
+                best_bx, best_by = basis_x, basis_y
+                for cand_x, cand_y in candidates:
+                    dot = np.dot(cand_x, proj_prev_x)
+                    if dot > best_dot:
+                        best_dot = dot
+                        best_bx, best_by = cand_x, cand_y
+                basis_x = best_bx
+                basis_y = best_by
 
         elif bbox_method == 'pca':
             # Project contour points onto the plane and do 2D PCA to find principal direction
@@ -3547,18 +3558,28 @@ class MuscleMeshMixin:
             basis_y = np.cross(basis_z, basis_x)
             basis_y = basis_y / (np.linalg.norm(basis_y) + 1e-10)
 
-            # Step 4: Only sign flip for continuity (no rotation)
+            # Step 4: Align with previous reference using best 90° rotation
             if has_prev_reference:
                 # Project prev_basis_x onto current plane
                 prev_x_proj = prev_basis_x - np.dot(prev_basis_x, basis_z) * basis_z
                 prev_x_norm = np.linalg.norm(prev_x_proj)
                 if prev_x_norm > 1e-10:
                     prev_x_proj = prev_x_proj / prev_x_norm
-                    # Only flip sign if facing opposite direction
-                    if np.dot(basis_x, prev_x_proj) < 0:
-                        basis_x = -basis_x
-                        basis_y = np.cross(basis_z, basis_x)
-                        basis_y = basis_y / (np.linalg.norm(basis_y) + 1e-10)
+                    candidates = [
+                        (basis_x, basis_y),       # 0°
+                        (basis_y, -basis_x),      # 90°
+                        (-basis_x, -basis_y),     # 180°
+                        (-basis_y, basis_x),      # 270°
+                    ]
+                    best_dot = -np.inf
+                    best_bx, best_by = basis_x, basis_y
+                    for cand_x, cand_y in candidates:
+                        dot = np.dot(cand_x, prev_x_proj)
+                        if dot > best_dot:
+                            best_dot = dot
+                            best_bx, best_by = cand_x, cand_y
+                    basis_x = best_bx
+                    basis_y = best_by
 
         # Reproject with final basis
         projected_2d = np.array([[np.dot(v - mean, basis_x), np.dot(v - mean, basis_y)] for v in contour_points])
