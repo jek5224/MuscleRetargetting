@@ -1216,6 +1216,23 @@ class ContourAnimationMixin:
             self._level_select_replayed = True
             return
 
+        # Ensure post state exists for restore at animation completion
+        if self._level_select_anim_post is None:
+            post_contours = [[] for _ in range(max_stream_count)]
+            post_bps = [[] for _ in range(max_stream_count)]
+            post_dcs = [[] for _ in range(max_stream_count)]
+            for s in range(max_stream_count):
+                for l, checked in enumerate(checkboxes[s]):
+                    if checked and s < len(anim_orig['stream_contours']) and l < len(anim_orig['stream_contours'][s]):
+                        post_contours[s].append(anim_orig['stream_contours'][s][l])
+                        post_bps[s].append(copy.deepcopy(anim_orig['stream_bounding_planes'][s][l]))
+                        post_dcs[s].append(True)
+            self._level_select_anim_post = {
+                'contours': post_contours,
+                'bounding_planes': post_bps,
+                'draw_contour_stream': post_dcs,
+            }
+
         # Restore all levels visible from saved pre-selection state (deep copies to avoid corruption)
         self.contours = [list(sc) for sc in anim_orig['stream_contours']]
         self.bounding_planes = [[copy.deepcopy(bp) for bp in sbs]
