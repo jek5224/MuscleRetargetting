@@ -698,7 +698,15 @@ class GLFWApp():
                 obj.fiber_transparency = self.zygote_fiber_transparency
                 obj.draw_fiber_architecture()
 
-        # Draw contour mesh (after fibers so fibers show through transparency)
+        # Draw tet mesh (before contour mesh so contour mesh fades on top during animation)
+        for name, obj in self.zygote_muscle_meshes.items():
+            viper_only = obj.viper_sim is not None and obj.viper_only_mode
+            if not viper_only and (obj.is_draw_tet_mesh or getattr(obj, '_tet_anim_active', False)):
+                if not getattr(obj, '_tet_anim_active', False):
+                    obj.contour_mesh_transparency = self.zygote_tet_transparency
+                obj.draw_tetrahedron_mesh(draw_tets=obj.is_draw_tet_edges)
+
+        # Draw contour mesh (after fibers and tet so it fades cleanly on top)
         for name, obj in self.zygote_muscle_meshes.items():
             viper_only = obj.viper_sim is not None and obj.viper_only_mode
             if not viper_only and (obj.is_draw_contour_mesh or getattr(obj, '_mesh_anim_active', False)):
@@ -709,14 +717,6 @@ class GLFWApp():
             viper_only = obj.viper_sim is not None and obj.viper_only_mode
             if not viper_only and obj.is_draw:
                 obj.draw([obj.color[0], obj.color[1], obj.color[2], obj.transparency])
-
-        # Draw tet mesh last (outermost layer)
-        for name, obj in self.zygote_muscle_meshes.items():
-            viper_only = obj.viper_sim is not None and obj.viper_only_mode
-            if not viper_only and (obj.is_draw_tet_mesh or getattr(obj, '_tet_anim_active', False)):
-                if not getattr(obj, '_tet_anim_active', False):
-                    obj.contour_mesh_transparency = self.zygote_tet_transparency
-                obj.draw_tetrahedron_mesh(draw_tets=obj.is_draw_tet_edges)
 
         # if self.draw_pd_target:
         #     self.drawSkeleton(self.env.pd_target, np.array([0.3, 0.3, 1.0, 0.5]))
