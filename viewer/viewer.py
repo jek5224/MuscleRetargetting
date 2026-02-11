@@ -1060,9 +1060,9 @@ class GLFWApp():
                                 obj.replay_scalar_animation(); started = True
                             elif step == 1 and obj.contours is not None and len(obj.contours) > 0:
                                 obj.replay_contour_animation(); started = True
-                            elif step == 2 and getattr(obj, '_fill_gaps_inserted_indices', None) is not None:
+                            elif step == 2 and len(getattr(obj, '_fill_gaps_inserted_indices', None) or []) > 0:
                                 obj.replay_fill_gaps_animation(); started = True
-                            elif step == 3 and getattr(obj, '_transitions_inserted_indices', None) is not None:
+                            elif step == 3 and len(getattr(obj, '_transitions_inserted_indices', None) or []) > 0:
                                 obj.replay_transitions_animation(); started = True
                             elif step == 4 and getattr(obj, '_smooth_bp_after', None) is not None:
                                 obj.replay_smooth_animation(); started = True
