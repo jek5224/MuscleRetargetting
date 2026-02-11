@@ -1533,7 +1533,7 @@ class ContourAnimationMixin:
         self.is_draw_fiber_architecture = True
         self.is_draw_resampled_vertices = False
         self.is_draw_contour_mesh = False
-        self._mesh_anim_target_alpha = self.contour_mesh_transparency
+        self._mesh_anim_target_alpha = 0.5
         self._mesh_anim_progress = 0.0
         self._mesh_anim_phase = 0
         self._mesh_anim_active = True
