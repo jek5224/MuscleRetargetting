@@ -1519,29 +1519,33 @@ class ContourAnimationMixin:
         self.is_draw_fiber_architecture = True
         self.is_draw_resampled_vertices = False
         self.is_draw_contour_mesh = False
+        self._mesh_anim_target_alpha = self.contour_mesh_transparency
         self._mesh_anim_progress = 0.0
         self._mesh_anim_phase = 0
         self._mesh_anim_active = True
 
     def update_mesh_animation(self, dt):
-        """Three phases: edges grow origin→insertion, edges fade 1→0, faces fill 0→0.5.
-        _mesh_anim_phase: 0=edge grow, 1=edge fade, 2=face fill."""
+        """Three phases: edges grow origin→insertion, edges fade 1→0, mesh fades in 0→target.
+        _mesh_anim_phase: 0=edge grow, 1=edge fade, 2=mesh transparency ramp."""
         if not self._mesh_anim_active:
             return False
 
         self._mesh_anim_progress += dt
-        num_bands = self._mesh_anim_num_bands
         grow_dur = 2.0
         fade_dur = 0.8
         fill_dur = 1.0
         total_dur = grow_dur + fade_dur + fill_dur
 
+        def smoothstep(x):
+            x = max(0.0, min(1.0, x))
+            return x * x * (3.0 - 2.0 * x)
+
         if self._mesh_anim_progress >= total_dur:
-            # Done
+            # Done — transparency already at target, mesh already on
             self._mesh_anim_active = False
             self._mesh_anim_progress = 0.0
             self._mesh_anim_phase = 0
-            self.is_draw_contour_mesh = True
+            self.contour_mesh_transparency = self._mesh_anim_target_alpha
             self._build_mesh_replayed = True
             return False
 
@@ -1550,7 +1554,14 @@ class ContourAnimationMixin:
         elif self._mesh_anim_progress < grow_dur + fade_dur:
             self._mesh_anim_phase = 1  # edge fade
         else:
-            self._mesh_anim_phase = 2  # face fill
+            # Phase 2: turn on normal mesh drawing, ramp transparency
+            if self._mesh_anim_phase != 2:
+                # First frame of phase 2: turn on mesh, start at 0
+                self.is_draw_contour_mesh = True
+                self.contour_mesh_transparency = 0.0
+            self._mesh_anim_phase = 2
+            t = (self._mesh_anim_progress - grow_dur - fade_dur) / fill_dur
+            self.contour_mesh_transparency = smoothstep(t) * self._mesh_anim_target_alpha
 
         return True
 

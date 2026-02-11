@@ -7808,26 +7808,22 @@ class ContourMeshMixin(ContourAnimationMixin):
         self.contour_mesh_normals = normals / norms
 
     def _draw_contour_mesh_animated(self):
-        """Three-phase mesh animation:
+        """Mesh edge animation phases 0-1 (phase 2 uses normal draw_contour_mesh).
         Phase 0: edges grow from origin→insertion (lines interpolated like fiber anim)
-        Phase 1: edges fade out alpha 1.0→0.0
-        Phase 2: faces fade in alpha 0.0→0.5"""
+        Phase 1: edges fade out alpha 1.0→0.0"""
         if self.contour_mesh_vertices is None or self.contour_mesh_faces is None:
             return
 
         verts = self.contour_mesh_vertices
-        faces = self.contour_mesh_faces
-        normals = self.contour_mesh_normals
         color = self.contour_mesh_color
         num_bands = self._mesh_anim_num_bands
         band_edges = self._mesh_anim_band_edges
-        vcl = self.vertex_contour_level  # vertex → level mapping
+        vcl = self.vertex_contour_level
         phase = self._mesh_anim_phase
         progress = self._mesh_anim_progress
 
         grow_dur = 2.0
         fade_dur = 0.8
-        fill_dur = 1.0
 
         def smoothstep(x):
             x = max(0.0, min(1.0, x))
@@ -7840,7 +7836,7 @@ class ContourMeshMixin(ContourAnimationMixin):
         if phase == 0:
             # Edge grow: lines grow from origin→insertion like fiber animation
             t = progress / grow_dur if grow_dur > 0 else 1.0
-            level_prog = smoothstep(t) * max(num_bands - 1, 1)
+            level_prog = smoothstep(t) * num_bands  # go up to num_bands so last band fully grows
 
             glDisable(GL_LIGHTING)
             glLineWidth(1.5)
@@ -7899,36 +7895,12 @@ class ContourMeshMixin(ContourAnimationMixin):
                 glEnd()
                 glEnable(GL_LIGHTING)
 
-        elif phase == 2:
-            # Face fill: alpha 0.0→0.5
-            t = (progress - grow_dur - fade_dur) / fill_dur if fill_dur > 0 else 1.0
-            face_alpha = smoothstep(t) * 0.5
-
-            glEnable(GL_LIGHTING)
-            glEnable(GL_COLOR_MATERIAL)
-            glColorMaterial(GL_FRONT_AND_BACK, GL_AMBIENT_AND_DIFFUSE)
-            glColor4f(color[0], color[1], color[2], face_alpha)
-
-            glEnable(GL_CULL_FACE)
-            for cull_pass in range(2):
-                if cull_pass == 0:
-                    glCullFace(GL_FRONT)
-                else:
-                    glCullFace(GL_BACK)
-                glBegin(GL_TRIANGLES)
-                for face in faces:
-                    for vi in face:
-                        if normals is not None:
-                            glNormal3fv(normals[vi])
-                        glVertex3fv(verts[vi])
-                glEnd()
-            glDisable(GL_CULL_FACE)
-
         glPopMatrix()
 
     def draw_contour_mesh(self):
         """Draw the contour mesh using OpenGL."""
-        if getattr(self, '_mesh_anim_active', False):
+        # During edge phases (0,1) draw animated edges; phase 2 falls through to normal draw
+        if getattr(self, '_mesh_anim_active', False) and self._mesh_anim_phase < 2:
             self._draw_contour_mesh_animated()
             return
 
