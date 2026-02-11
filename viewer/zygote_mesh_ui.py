@@ -983,16 +983,6 @@ def draw_zygote_muscle_ui(v):
                     if v.auto_rotate:
                         v.auto_rotate = False
                     else:
-                        # Focus on muscle first, then start rotating
-                        if obj.vertices is not None and len(obj.vertices) > 0:
-                            min_pt = np.min(obj.vertices, axis=0)
-                            max_pt = np.max(obj.vertices, axis=0)
-                            center = (min_pt + max_pt) / 2
-                            bbox_size = np.linalg.norm(max_pt - min_pt)
-                            v.trans = -center * 1000.0
-                            distance = bbox_size * 2.0
-                            eye_dir = v.eye / (np.linalg.norm(v.eye) + 1e-10)
-                            v.eye = eye_dir * max(distance, MIN_EYE_DISTANCE)
                         v.auto_rotate = True
                 if is_rotating:
                     imgui.pop_style_color(3)
