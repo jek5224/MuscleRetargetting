@@ -1729,22 +1729,24 @@ class ContourAnimationMixin:
         self._tet_anim_active = True
 
     def update_tet_animation(self, dt):
-        """Phase 0: BP/axes/contour lines shrink and disappear (fibers+contour mesh stay).
-        Phase 1: tet mesh on 0→target, contour mesh target→0→off."""
+        """Phase 0: BP/axes/contour lines shrink.
+        Phase 1: tet mesh on, 0→0.5.
+        Phase 2: contour mesh 0.5→0, then off."""
         if not self._tet_anim_active:
             return False
 
         self._tet_anim_progress += dt
-        scaffold_dur = 1.5   # Phase 0: BP/axes/contour lines shrink
-        crossfade_dur = 1.5  # Phase 1: tet in, contour mesh out
-        total_dur = scaffold_dur + crossfade_dur
+        scaffold_dur = 1.5  # Phase 0: BP/axes/contour lines shrink
+        tet_in_dur = 1.5    # Phase 1: tet mesh fades in
+        cm_out_dur = 1.5    # Phase 2: contour mesh fades out
+        total_dur = scaffold_dur + tet_in_dur + cm_out_dur
 
         def smoothstep(x):
             x = max(0.0, min(1.0, x))
             return x * x * (3.0 - 2.0 * x)
 
         if self._tet_anim_progress >= total_dur:
-            # Done — tet mesh at target alpha, contour mesh off, fibers stay
+            # Done — tet mesh at 0.5, contour mesh off, fibers stay
             self._tet_anim_active = False
             self._tet_anim_progress = 0.0
             self._tet_anim_phase = 0
@@ -1752,41 +1754,47 @@ class ContourAnimationMixin:
             self.is_draw_bounding_box = False
             self.is_draw_contour_mesh = False
             self.is_draw_tet_mesh = True
-            self.contour_mesh_transparency = self._tet_anim_target_alpha
+            self.contour_mesh_transparency = 0.5
             self._tet_anim_tet_alpha = 0.0
             self._tet_anim_scaffold_alpha = 1.0
             self._contour_anim_bp_scale = {}
             self._tetrahedralize_replayed = True
             return False
 
+        t_acc = 0.0
+
         # Phase 0: BP/axes/contour lines shrink and disappear
         if self._tet_anim_progress < scaffold_dur:
             self._tet_anim_phase = 0
             t = self._tet_anim_progress / scaffold_dur
             fade = smoothstep(t)
-
             self._tet_anim_scaffold_alpha = 1.0 - fade
             num_levels = getattr(self, '_tet_anim_num_bp_levels', 0)
             self._contour_anim_bp_scale = {lv: 1.0 - fade for lv in range(num_levels)}
-            # Contour mesh and fibers untouched
             return True
+        t_acc += scaffold_dur
 
-        # Phase 1: cross-fade contour mesh → tet mesh
-        if self._tet_anim_phase != 1:
-            # First frame: turn off contours/BPs, turn on tet mesh
-            self.is_draw_contours = False
-            self.is_draw_bounding_box = False
-            self._tet_anim_scaffold_alpha = 1.0
-            self._contour_anim_bp_scale = {}
-            self.is_draw_tet_mesh = True
-        self._tet_anim_phase = 1
-        t = (self._tet_anim_progress - scaffold_dur) / crossfade_dur
+        # Phase 1: tet mesh on, alpha 0 → 0.5
+        if self._tet_anim_progress < t_acc + tet_in_dur:
+            if self._tet_anim_phase != 1:
+                self.is_draw_contours = False
+                self.is_draw_bounding_box = False
+                self._tet_anim_scaffold_alpha = 1.0
+                self._contour_anim_bp_scale = {}
+                self.is_draw_tet_mesh = True
+            self._tet_anim_phase = 1
+            t = (self._tet_anim_progress - t_acc) / tet_in_dur
+            self._tet_anim_tet_alpha = 0.5 * smoothstep(t)
+            return True
+        t_acc += tet_in_dur
+
+        # Phase 2: contour mesh 0.5 → 0, then off
+        if self._tet_anim_phase != 2:
+            self._tet_anim_tet_alpha = 0.5
+        self._tet_anim_phase = 2
+        t = (self._tet_anim_progress - t_acc) / cm_out_dur
         fade = smoothstep(t)
-
-        # Tet mesh fades in: 0 → target_alpha
-        self._tet_anim_tet_alpha = self._tet_anim_target_alpha * fade
-        # Contour mesh fades out: target_alpha → 0
-        self.contour_mesh_transparency = self._tet_anim_target_alpha * (1.0 - fade)
+        self.contour_mesh_transparency = 0.5 * (1.0 - fade)
 
         return True
 

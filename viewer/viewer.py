@@ -1040,7 +1040,8 @@ class GLFWApp():
                 if getattr(obj, '_mesh_anim_active', False):
                     obj.update_mesh_animation(1.0 / 30.0)
                 if getattr(obj, '_tet_anim_active', False):
-                    obj.update_tet_animation(1.0 / 30.0)
+                    if not obj.update_tet_animation(1.0 / 30.0):
+                        self.zygote_tet_transparency = obj.contour_mesh_transparency
 
             # Auto-rotate around focused muscle
             if self.auto_rotate:
