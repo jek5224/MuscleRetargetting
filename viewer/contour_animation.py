@@ -179,8 +179,8 @@ class ContourAnimationMixin:
             self._apply_bp_snapshot(self._smooth_bp_before)
         total = self._num_levels()
         # Build set of indices inserted by later steps to skip during contour animation
-        skip_indices = set(getattr(self, '_fill_gaps_inserted_indices', []))
-        skip_indices.update(getattr(self, '_transitions_inserted_indices', []))
+        skip_indices = set(getattr(self, '_fill_gaps_inserted_indices', None) or [])
+        skip_indices.update(getattr(self, '_transitions_inserted_indices', None) or [])
         self._contour_anim_original_indices = [i for i in range(total) if i not in skip_indices]
         self._contour_anim_total = len(self._contour_anim_original_indices)
         # Hide all contours
@@ -284,7 +284,7 @@ class ContourAnimationMixin:
                 self.draw_contour_stream[idx] = True
         for idx in self._fill_gaps_inserted_indices:
             self._set_level_visible(idx, False)
-        for idx in getattr(self, '_transitions_inserted_indices', []):
+        for idx in (getattr(self, '_transitions_inserted_indices', None) or []):
             self._set_level_visible(idx, False)
         self._fill_gaps_anim_step = 0
         self._fill_gaps_anim_progress = 0.0
