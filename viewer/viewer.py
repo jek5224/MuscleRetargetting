@@ -1083,9 +1083,9 @@ class GLFWApp():
                             obj._play_all_step += 1
                             has_data, replay, replayed_flag = _play_all_steps[step]
                             if has_data(obj):
-                                # Set previous step's replayed flag so this step's replay button appears
-                                if step > 0:
-                                    _, _, prev_flag = _play_all_steps[step - 1]
+                                # Set all prior steps' replayed flags so replay buttons appear
+                                for prev_i in range(step):
+                                    _, _, prev_flag = _play_all_steps[prev_i]
                                     setattr(obj, prev_flag, True)
                                 replay(obj); started = True
                         if not started:
