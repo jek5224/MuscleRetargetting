@@ -938,8 +938,8 @@ class ContourAnimationMixin:
         """Advance cut animation.
 
         Phase 1 (0-2s): Color wave — lerp per-contour color from before to after.
-        Phase 2a (2-3s): BP shrink — all changed BPs scale from 1→0 simultaneously.
-        Phase 2b (3-4s): BP grow — all changed BPs scale from 0→1 simultaneously.
+        Phase 2a (2-3s): BP shrink — cut-level BPs scale from 1→0 (wave).
+        Phase 2b (3-4s): BP grow — cut-level BPs scale from 0→1 (wave).
         """
         if not self._cut_anim_active:
             return False
@@ -981,21 +981,16 @@ class ContourAnimationMixin:
                 self._cut_anim_contour_colors[i][j] = (1 - t) * color_before[i][j] + t * color_after[i][j]
 
         # Phase 2: BP shrink-then-grow (only at levels where cutting occurred)
-        # All changed levels animate simultaneously (no wave stagger) so there's
-        # no gap between shrink end and grow start.
         if has_bp and bp_before is not None and bp_after is not None:
             bp_start = color_dur
             bp_mid = bp_start + bp_shrink_dur
 
-            def _smoothstep(t):
-                t = max(0.0, min(t, 1.0))
-                return t * t * (3.0 - 2.0 * t)
-
             if progress > bp_start and progress < bp_mid:
                 # Phase 2a: Shrink cut-level BPs to their means
-                shrink_t = _smoothstep((progress - bp_start) / bp_shrink_dur)
+                shrink_t = (progress - bp_start) / bp_shrink_dur
                 for j in changed_levels:
-                    self._contour_anim_bp_scale[j] = 1.0 - shrink_t
+                    wave_t = self._cut_wave_t(shrink_t, j, num_levels)
+                    self._contour_anim_bp_scale[j] = 1.0 - wave_t
 
             elif progress >= bp_mid:
                 # Transition: switch from pre-cut to post-cut BP positions (once)
@@ -1004,15 +999,15 @@ class ContourAnimationMixin:
                     self._cut_bp_switched = True
 
                 # Phase 2b: Grow cut-level BPs from their means
-                grow_t = _smoothstep(min((progress - bp_mid) / bp_grow_dur, 1.0))
+                grow_t = min((progress - bp_mid) / bp_grow_dur, 1.0)
                 for j in changed_levels:
-                    self._contour_anim_bp_scale[j] = grow_t
+                    wave_t = self._cut_wave_t(grow_t, j, num_levels)
+                    self._contour_anim_bp_scale[j] = wave_t
 
             # Animate square_like color transitions over Phase 2
             sq_changed = getattr(self, '_cut_sq_changed', set())
             if sq_changed:
                 phase2_t = max(0.0, min((progress - bp_start) / (bp_shrink_dur + bp_grow_dur), 1.0))
-                sq_t = _smoothstep(phase2_t)
                 for (i, j) in sq_changed:
                     bb = bp_before[i][j]
                     ba = bp_after[i][j]
@@ -1020,7 +1015,8 @@ class ContourAnimationMixin:
                         continue
                     color_b = (1, 0, 0, 1) if bb.get('square_like', False) else (0, 0, 0, 1)
                     color_a = (1, 0, 0, 1) if ba.get('square_like', False) else (0, 0, 0, 1)
-                    lerped = tuple((1 - sq_t) * b + sq_t * a for b, a in zip(color_b, color_a))
+                    bp_t = self._cut_wave_t(phase2_t, j, num_levels)
+                    lerped = tuple((1 - bp_t) * b + bp_t * a for b, a in zip(color_b, color_a))
                     if self._smooth_anim_bp_colors is None:
                         self._smooth_anim_bp_colors = {}
                     self._smooth_anim_bp_colors[(i, j)] = lerped
