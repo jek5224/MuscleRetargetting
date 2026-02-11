@@ -28,14 +28,14 @@ class ContourAnimationMixin:
         self._find_contours_count = 0
 
         # Fill gaps animation replay state
-        self._fill_gaps_inserted_indices = []  # Indices of contours inserted by refine_contours
+        self._fill_gaps_inserted_indices = None  # Indices of contours inserted by refine_contours
         self._fill_gaps_anim_active = False
         self._fill_gaps_anim_progress = 0.0
         self._fill_gaps_anim_step = 0  # Current gap being highlighted
         self._fill_gaps_replayed = False
 
         # Find transitions animation replay state
-        self._transitions_inserted_indices = []
+        self._transitions_inserted_indices = None
         self._transitions_anim_active = False
         self._transitions_anim_progress = 0.0
         self._transitions_anim_step = 0

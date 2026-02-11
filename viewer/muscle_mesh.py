@@ -3028,7 +3028,7 @@ class MuscleMeshMixin:
         self._find_contours_count = 0
 
         # Fill gaps animation state
-        self._fill_gaps_inserted_indices = []
+        self._fill_gaps_inserted_indices = None
         self._fill_gaps_anim_active = False
         self._fill_gaps_anim_progress = 0.0
         self._fill_gaps_anim_step = 0
@@ -3038,7 +3038,7 @@ class MuscleMeshMixin:
         self._anim_highlight_fades = {}
 
         # Transitions animation state
-        self._transitions_inserted_indices = []
+        self._transitions_inserted_indices = None
         self._transitions_anim_active = False
         self._transitions_anim_progress = 0.0
         self._transitions_anim_step = 0

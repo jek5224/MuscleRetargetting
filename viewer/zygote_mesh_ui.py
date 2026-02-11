@@ -644,7 +644,7 @@ def draw_zygote_muscle_ui(v):
                     else:
                         print(f"[{name}] Prerequisites: Run 'Find Contours' first")
                 # Fill gaps replay: only available after contour replay has been played
-                if animate and len(getattr(obj, '_fill_gaps_inserted_indices', None) or []) > 0 and getattr(obj, '_contour_replayed', False):
+                if animate and getattr(obj, '_fill_gaps_inserted_indices', None) is not None and getattr(obj, '_contour_replayed', False):
                     imgui.same_line()
                     if imgui.button(f">##{name}_fillgaps_replay", width=replay_w):
                         obj.replay_fill_gaps_animation()
@@ -690,7 +690,7 @@ def draw_zygote_muscle_ui(v):
                     else:
                         print(f"[{name}] Prerequisites: Run 'Scalar Field' first")
                 # Transitions replay: only available after fill gaps replay has been played
-                if animate and len(getattr(obj, '_transitions_inserted_indices', None) or []) > 0 and getattr(obj, '_fill_gaps_replayed', False):
+                if animate and getattr(obj, '_transitions_inserted_indices', None) is not None and getattr(obj, '_fill_gaps_replayed', False):
                     imgui.same_line()
                     if imgui.button(f">##{name}_transitions_replay", width=replay_w):
                         obj.replay_transitions_animation()
