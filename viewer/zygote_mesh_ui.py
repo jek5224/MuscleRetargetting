@@ -574,7 +574,6 @@ def draw_zygote_muscle_ui(v):
                                 if defer:
                                     obj._extract_internal_tet_edges()
                                     obj._classify_tet_faces_into_bands()
-                                    obj._build_mesh_replayed = False
                                     obj._tetrahedralize_replayed = False
                                 else:
                                     obj.is_draw_contours = False
@@ -874,7 +873,6 @@ def draw_zygote_muscle_ui(v):
                                 if animate:
                                     obj._extract_internal_tet_edges()
                                     obj._classify_tet_faces_into_bands()
-                                    obj._build_mesh_replayed = False
                                     obj._tetrahedralize_replayed = False
                                 else:
                                     obj.is_draw_contours = False
@@ -886,7 +884,7 @@ def draw_zygote_muscle_ui(v):
                             traceback.print_exc()
                     else:
                         print(f"[{name}] Prerequisites: Run 'Build Contour Mesh' first")
-                if animate and getattr(obj, 'tet_vertices', None) is not None and not getattr(obj, '_tet_anim_active', False):
+                if animate and getattr(obj, '_build_mesh_replayed', False) and not getattr(obj, '_tet_anim_active', False):
                     imgui.same_line()
                     if imgui.button(f">##{name}_tet_replay", width=replay_w):
                         obj.replay_tet_animation()
@@ -4929,7 +4927,6 @@ def _render_manual_cut_windows(v):
                                                 if _defer:
                                                     obj._extract_internal_tet_edges()
                                                     obj._classify_tet_faces_into_bands()
-                                                    obj._build_mesh_replayed = False
                                                     obj._tetrahedralize_replayed = False
                                                 else:
                                                     obj.is_draw_contours = False
@@ -5325,7 +5322,6 @@ def _render_level_select_windows(v):
                                 if _defer:
                                     obj._extract_internal_tet_edges()
                                     obj._classify_tet_faces_into_bands()
-                                    obj._build_mesh_replayed = False
                                     obj._tetrahedralize_replayed = False
                                 else:
                                     obj.is_draw_contours = False

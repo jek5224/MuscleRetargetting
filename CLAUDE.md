@@ -10,6 +10,7 @@
 ## Before Destructive Git Operations
 - Before `git checkout`, `git reset`, or `git stash`: check for uncommitted changes and commit them first
 - Warn the user if there are uncommitted changes that could be lost
+- Never use `git revert`. Instead, manually undo the changes with edits.
 
 ## Code Change Thoroughness
 - When modifying code, trace through the ENTIRE code flow to find related changes needed
