@@ -1833,19 +1833,6 @@ class ContourMeshMixin(ContourAnimationMixin):
         self._cut_color_after = color_after
         self._cut_bp_before = bp_before
         self._cut_bp_after = bp_after
-        # Recompute changed levels from actual BP position differences
-        # (stream_groups may flag levels where no actual BP split occurred)
-        bp_changed_levels = set()
-        for level_i in range(num_levels):
-            for stream_i in range(num_streams):
-                bf = bp_before[stream_i][level_i]
-                ba = bp_after[stream_i][level_i]
-                if bf is not None and ba is not None:
-                    diff = np.linalg.norm(bf['mean'] - ba['mean'])
-                    if diff > 0.01:
-                        bp_changed_levels.add(level_i)
-                        break
-        has_bp_change = len(bp_changed_levels) > 0
         self._cut_has_bp_change = has_bp_change
         self._cut_bp_changed_levels = bp_changed_levels
         self._cut_num_levels_before = num_levels_before

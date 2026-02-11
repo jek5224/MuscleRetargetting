@@ -2038,20 +2038,14 @@ class ContourAnimationMixin:
         self._cut_color_after = state.get('_cut_color_after')
         self._cut_bp_before = state.get('_cut_bp_before')
         self._cut_bp_after = state.get('_cut_bp_after')
-        # Recompute changed levels by comparing bp_before vs bp_after positions
+        # Recompute changed levels from stream_groups (levels where contours were split)
         bp_changed_levels = set()
-        if self._cut_bp_before is not None and self._cut_bp_after is not None:
-            n_streams = len(self._cut_bp_before)
-            n_levels = len(self._cut_bp_before[0]) if n_streams > 0 else 0
-            for level_i in range(n_levels):
-                for stream_i in range(n_streams):
-                    bf = self._cut_bp_before[stream_i][level_i]
-                    ba = self._cut_bp_after[stream_i][level_i]
-                    if bf is not None and ba is not None:
-                        diff = np.linalg.norm(bf['mean'] - ba['mean'])
-                        if diff > 0.01:
-                            bp_changed_levels.add(level_i)
-                            break
+        if hasattr(self, 'stream_groups') and self.stream_groups is not None:
+            for level_i, groups in enumerate(self.stream_groups):
+                for group in groups:
+                    if len(group) > 1:
+                        bp_changed_levels.add(level_i)
+                        break
         self._cut_bp_changed_levels = bp_changed_levels
         self._cut_has_bp_change = len(bp_changed_levels) > 0
         self._cut_num_levels_before = state.get('_cut_num_levels_before', 0)
