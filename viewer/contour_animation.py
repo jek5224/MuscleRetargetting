@@ -207,7 +207,7 @@ class ContourAnimationMixin:
             self._contour_anim_active = False
             return False
 
-        reveal_dur = 2.0     # all contours appear within this time
+        reveal_dur = 1.3     # all contours appear within this time
         highlight_dur = 0.5  # each highlight pulse lasts this long
         time_per_contour = reveal_dur / max(total, 1)
         self._contour_anim_progress += dt
@@ -1441,7 +1441,7 @@ class ContourAnimationMixin:
 
         self._resample_anim_progress += dt
         num_levels = self._resample_anim_num_levels
-        pulse_dur = 0.5   # each level's grow-shrink cycle
+        pulse_dur = 0.35   # each level's grow-shrink cycle
         stagger = pulse_dur * 0.7  # overlap between levels
         total_dur = stagger * max(num_levels - 1, 0) + pulse_dur
 

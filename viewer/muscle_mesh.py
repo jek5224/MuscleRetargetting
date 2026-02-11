@@ -3263,7 +3263,7 @@ class MuscleMeshMixin:
         if not self._scalar_anim_active:
             return False
 
-        self._scalar_anim_progress += dt * 0.5  # 2 seconds for full reveal
+        self._scalar_anim_progress += dt * 0.75  # ~1.3 seconds for full reveal
         if self._scalar_anim_progress >= 1.0:
             self._scalar_anim_progress = 1.0
             self._scalar_anim_active = False
