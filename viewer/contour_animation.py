@@ -1713,13 +1713,14 @@ class ContourAnimationMixin:
         else:
             self._tet_anim_num_bp_levels = 0
 
-        # Start state: scaffolding + contour mesh + fibers visible, tet off
+        # Start state: scaffolding + contour mesh at 0.5 + fibers visible, tet off
         self.is_draw_contours = True
         self.is_draw_bounding_box = True
         self.bounding_box_draw_mode = 1
         self.is_draw_fiber_architecture = True
         self.is_draw_resampled_vertices = False
         self.is_draw_contour_mesh = True
+        self.contour_mesh_transparency = 0.5
         self.is_draw_tet_mesh = False
         self._tet_anim_scaffold_alpha = 1.0
         self._tet_anim_tet_alpha = 0.0
@@ -1729,17 +1730,15 @@ class ContourAnimationMixin:
         self._tet_anim_active = True
 
     def update_tet_animation(self, dt):
-        """Phase 0: BP/axes/contour lines shrink.
-        Phase 1: tet mesh on, 0→0.5.
-        Phase 2: contour mesh 0.5→0, then off."""
+        """Phase 0: contour mesh 0.5→0 + BP/axes/contour lines shrink simultaneously, then off.
+        Phase 1: tet mesh on, 0→0.5."""
         if not self._tet_anim_active:
             return False
 
         self._tet_anim_progress += dt
-        scaffold_dur = 1.5  # Phase 0: BP/axes/contour lines shrink
+        fadeout_dur = 1.5   # Phase 0: contour mesh + scaffold fade out
         tet_in_dur = 1.5    # Phase 1: tet mesh fades in
-        cm_out_dur = 1.5    # Phase 2: contour mesh fades out
-        total_dur = scaffold_dur + tet_in_dur + cm_out_dur
+        total_dur = fadeout_dur + tet_in_dur
 
         def smoothstep(x):
             x = max(0.0, min(1.0, x))
@@ -1761,40 +1760,32 @@ class ContourAnimationMixin:
             self._tetrahedralize_replayed = True
             return False
 
-        t_acc = 0.0
-
-        # Phase 0: BP/axes/contour lines shrink and disappear
-        if self._tet_anim_progress < scaffold_dur:
+        # Phase 0: contour mesh 0.5→0 + BP/axes/contour lines shrink simultaneously
+        if self._tet_anim_progress < fadeout_dur:
             self._tet_anim_phase = 0
-            t = self._tet_anim_progress / scaffold_dur
+            t = self._tet_anim_progress / fadeout_dur
             fade = smoothstep(t)
+            # Contour mesh transparency: 0.5 → 0
+            self.contour_mesh_transparency = 0.5 * (1.0 - fade)
+            # Scaffold (contour lines) fade
             self._tet_anim_scaffold_alpha = 1.0 - fade
+            # BP/axes shrink
             num_levels = getattr(self, '_tet_anim_num_bp_levels', 0)
             self._contour_anim_bp_scale = {lv: 1.0 - fade for lv in range(num_levels)}
             return True
-        t_acc += scaffold_dur
 
         # Phase 1: tet mesh on, alpha 0 → 0.5
-        if self._tet_anim_progress < t_acc + tet_in_dur:
-            if self._tet_anim_phase != 1:
-                self.is_draw_contours = False
-                self.is_draw_bounding_box = False
-                self._tet_anim_scaffold_alpha = 1.0
-                self._contour_anim_bp_scale = {}
-                self.is_draw_tet_mesh = True
-            self._tet_anim_phase = 1
-            t = (self._tet_anim_progress - t_acc) / tet_in_dur
-            self._tet_anim_tet_alpha = 0.5 * smoothstep(t)
-            return True
-        t_acc += tet_in_dur
-
-        # Phase 2: contour mesh 0.5 → 0, then off
-        if self._tet_anim_phase != 2:
-            self._tet_anim_tet_alpha = 0.5
-        self._tet_anim_phase = 2
-        t = (self._tet_anim_progress - t_acc) / cm_out_dur
-        fade = smoothstep(t)
-        self.contour_mesh_transparency = 0.5 * (1.0 - fade)
+        if self._tet_anim_phase != 1:
+            # Transition: turn off contour mesh, turn on tet
+            self.is_draw_contour_mesh = False
+            self.is_draw_contours = False
+            self.is_draw_bounding_box = False
+            self._tet_anim_scaffold_alpha = 1.0
+            self._contour_anim_bp_scale = {}
+            self.is_draw_tet_mesh = True
+        self._tet_anim_phase = 1
+        t = (self._tet_anim_progress - fadeout_dur) / tet_in_dur
+        self._tet_anim_tet_alpha = 0.5 * smoothstep(t)
 
         return True
 
