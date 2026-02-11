@@ -1745,7 +1745,7 @@ class ContourAnimationMixin:
             return x * x * (3.0 - 2.0 * x)
 
         if self._tet_anim_progress >= total_dur:
-            # Done — tet mesh at 0.5, contour mesh off, fibers stay
+            # Done — tet mesh at 0.8, contour mesh off, fibers stay
             self._tet_anim_active = False
             self._tet_anim_progress = 0.0
             self._tet_anim_phase = 0
@@ -1753,7 +1753,7 @@ class ContourAnimationMixin:
             self.is_draw_bounding_box = False
             self.is_draw_contour_mesh = False
             self.is_draw_tet_mesh = True
-            self.contour_mesh_transparency = 0.5
+            self.contour_mesh_transparency = 0.8
             self._tet_anim_tet_alpha = 0.0
             self._tet_anim_scaffold_alpha = 1.0
             self._contour_anim_bp_scale = {}
@@ -1774,7 +1774,7 @@ class ContourAnimationMixin:
             self._contour_anim_bp_scale = {lv: 1.0 - fade for lv in range(num_levels)}
             return True
 
-        # Phase 1: tet mesh on, alpha 0 → 0.5
+        # Phase 1: tet mesh on, alpha 0 → 0.8
         if self._tet_anim_phase != 1:
             # Transition: turn off contour mesh, turn on tet
             self.is_draw_contour_mesh = False
@@ -1785,7 +1785,7 @@ class ContourAnimationMixin:
             self.is_draw_tet_mesh = True
         self._tet_anim_phase = 1
         t = (self._tet_anim_progress - fadeout_dur) / tet_in_dur
-        self._tet_anim_tet_alpha = 0.5 * smoothstep(t)
+        self._tet_anim_tet_alpha = 0.8 * smoothstep(t)
 
         return True
 
