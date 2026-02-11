@@ -179,6 +179,7 @@ class GLFWApp():
         ## Auto-rotate around focused muscle
         self.auto_rotate = False
         self.auto_rotate_speed = 0.5  # radians per second
+        self._auto_rotate_paused = False
 
         self.mouse_x = 0
         self.mouse_y = 0
@@ -434,11 +435,11 @@ class GLFWApp():
 
     ## mousce button callback function
     def mousePress(self, button, action, mods):
-        if self.auto_rotate:
-            return
         if action == glfw.PRESS:
             self.mouse_down = True
             if button == glfw.MOUSE_BUTTON_LEFT:
+                if self.auto_rotate:
+                    self._auto_rotate_paused = True
                 self.rotate = True
                 self.trackball.start_ball(self.mouse_x, self.height - self.mouse_y)
             elif button == glfw.MOUSE_BUTTON_RIGHT:
@@ -446,14 +447,14 @@ class GLFWApp():
         elif action == glfw.RELEASE:
             self.mouse_down = False
             if button == glfw.MOUSE_BUTTON_LEFT:
+                if self.auto_rotate:
+                    self._auto_rotate_paused = False
                 self.rotate = False
             elif button == glfw.MOUSE_BUTTON_RIGHT:
                 self.translate = False
 
     ## mouse move callback function
     def mouseMove(self, xpos, ypos):
-        if self.auto_rotate:
-            return
         dx = xpos - self.mouse_x
         dy = ypos - self.mouse_y
 
@@ -470,8 +471,6 @@ class GLFWApp():
         
     ## mouse scroll callback function
     def mouseScroll(self, xoffset, yoffset):
-        if self.auto_rotate:
-            return
         if yoffset < 0:
             self.eye *= CAMERA_ZOOM_FACTOR
         elif (yoffset > 0) and (np.linalg.norm(self.eye) > MIN_EYE_DISTANCE):
@@ -1093,7 +1092,7 @@ class GLFWApp():
                             obj._play_all_active = False
 
             # Auto-rotate around focused muscle
-            if self.auto_rotate:
+            if self.auto_rotate and not self._auto_rotate_paused:
                 ar_dt = start_time - getattr(self, '_auto_rotate_last_time', start_time)
                 if ar_dt <= 0:
                     ar_dt = 1.0 / 30.0
