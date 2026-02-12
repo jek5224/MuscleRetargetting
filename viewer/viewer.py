@@ -1074,7 +1074,7 @@ class GLFWApp():
                              lambda o: o.replay_resample_animation(), '_resample_replayed'),
                             (lambda o: getattr(o, '_mesh_anim_face_bands', None) is not None,
                              lambda o: o.replay_mesh_animation(), '_build_mesh_replayed'),
-                            (lambda o: getattr(o, 'tet_vertices', None) is not None,
+                            (lambda o: getattr(o, '_tet_anim_internal_edges', None) is not None,
                              lambda o: o.replay_tet_animation(), '_tetrahedralize_replayed'),
                         ]
                         started = False
