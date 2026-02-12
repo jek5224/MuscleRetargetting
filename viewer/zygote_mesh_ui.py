@@ -1759,10 +1759,17 @@ def _draw_motion_browser_ui(v):
         return
 
     imgui.push_item_width(200)
-    changed, new_idx = imgui.combo("Motion##bvh_select", v.motion_selected_idx, bvh_names)
+    preview = bvh_names[v.motion_selected_idx] if 0 <= v.motion_selected_idx < len(bvh_names) else "-- Select BVH --"
+    if imgui.begin_combo("Motion##bvh_select", preview):
+        for i, bname in enumerate(bvh_names):
+            is_selected = (i == v.motion_selected_idx)
+            clicked, _ = imgui.selectable(bname, is_selected)
+            if clicked and i != v.motion_selected_idx:
+                _load_motion_bvh(v, i)
+            if is_selected:
+                imgui.set_item_default_focus()
+        imgui.end_combo()
     imgui.pop_item_width()
-    if changed and new_idx != v.motion_selected_idx:
-        _load_motion_bvh(v, new_idx)
 
     # Show info if loaded
     if v.motion_bvh is not None:
