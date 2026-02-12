@@ -481,23 +481,30 @@ def draw_zygote_muscle_ui(v):
                         defer = getattr(obj, 'animate_process', False)
                         if start_step <= 1 <= max_step and len(obj.edge_groups) > 0 and len(obj.edge_classes) > 0:
                             print(f"  [1/{max_step}] Computing Scalar Field...")
+                            _t0 = time.time()
                             obj.compute_scalar_field(defer=defer)
+                            print(f"  [1/{max_step}] Done in {time.time()-_t0:.3f}s")
 
                         # Step 2: Find Contours
                         if start_step <= 2 <= max_step and obj.scalar_field is not None:
                             print(f"  [2/{max_step}] Finding Contours...")
+                            _t0 = time.time()
                             obj.find_contours(skeleton_meshes=v.zygote_skeleton_meshes, spacing_scale=obj.contour_spacing_scale, defer=defer)
+                            print(f"  [2/{max_step}] Done in {time.time()-_t0:.3f}s")
                             if not defer:
                                 obj.is_draw_bounding_box = True
 
                         # Step 3: Fill Gaps
                         if start_step <= 3 <= max_step and obj.contours is not None and len(obj.contours) > 0:
                             print(f"  [3/{max_step}] Filling Gaps...")
+                            _t0 = time.time()
                             obj.refine_contours(max_spacing_threshold=0.01, defer=defer)
+                            print(f"  [3/{max_step}] Done in {time.time()-_t0:.3f}s")
 
                         # Step 4: Find Transitions
                         if start_step <= 4 <= max_step and obj.scalar_field is not None:
                             print(f"  [4/{max_step}] Finding Transitions...")
+                            _t0 = time.time()
                             field_min = float(obj.scalar_field.min())
                             field_max = float(obj.scalar_field.max())
                             scalar_min, scalar_max = field_min, field_max
@@ -513,16 +520,21 @@ def draw_zygote_muscle_ui(v):
                                                     expected_origin=exp_origin, expected_insertion=exp_insertion)
                             if obj.contours is not None and len(obj.contours) > 0:
                                 obj.add_transitions_to_contours(defer=defer)
+                            print(f"  [4/{max_step}] Done in {time.time()-_t0:.3f}s")
 
                         # Step 5: Smooth (z, x, bp - before cut)
                         if start_step <= 5 <= max_step and obj.contours is not None and len(obj.contours) > 0:
                             print(f"  [5/{max_step}] Smoothening (z, x, bp)...")
+                            _t0 = time.time()
                             obj.smoothen_all(defer=defer)
+                            print(f"  [5/{max_step}] Done in {time.time()-_t0:.3f}s")
 
                         # Step 6: Cut
                         if start_step <= 6 <= max_step and obj.contours is not None and len(obj.contours) > 0 and obj.bounding_planes is not None:
                             print(f"  [6/{max_step}] Cutting streams...")
+                            _t0 = time.time()
                             obj.cut_streams_animated(defer=defer, cut_method=obj.cutting_method, muscle_name=name)
+                            print(f"  [6/{max_step}] Done in {time.time()-_t0:.3f}s")
                             # Check if waiting for manual cut
                             if hasattr(obj, '_manual_cut_pending') and obj._manual_cut_pending or hasattr(obj, '_manual_cut_data') and obj._manual_cut_data is not None:
                                 obj._pipeline_paused_at = 7  # Resume from step 7 after cut is complete
@@ -532,12 +544,16 @@ def draw_zygote_muscle_ui(v):
                         # Step 7: Stream Smooth (z, x, bp - after cut)
                         if start_step <= 7 <= max_step and hasattr(obj, 'stream_contours') and obj.stream_contours is not None:
                             print(f"  [7/{max_step}] Stream Smoothening (z, x, bp)...")
+                            _t0 = time.time()
                             obj.stream_smoothen_all(defer=defer)
+                            print(f"  [7/{max_step}] Done in {time.time()-_t0:.3f}s")
 
                         # Step 8: Contour Select
                         if start_step <= 8 <= max_step and hasattr(obj, 'stream_contours') and obj.stream_contours is not None:
                             print(f"  [8/{max_step}] Selecting contours...")
+                            _t0 = time.time()
                             obj.select_levels()
+                            print(f"  [8/{max_step}] Done in {time.time()-_t0:.3f}s")
                             # Check if waiting for manual level selection
                             if hasattr(obj, '_level_select_window_open') and obj._level_select_window_open:
                                 obj._pipeline_paused_at = 9  # Resume from step 9 after selection
@@ -547,27 +563,34 @@ def draw_zygote_muscle_ui(v):
                         # Step 9: Build Fiber
                         if start_step <= 9 <= max_step and hasattr(obj, 'stream_contours') and obj.stream_contours is not None:
                             print(f"  [9/{max_step}] Building fibers...")
+                            _t0 = time.time()
                             obj.build_fibers(skeleton_meshes=v.zygote_skeleton_meshes, defer=defer)
+                            print(f"  [9/{max_step}] Done in {time.time()-_t0:.3f}s")
                             if defer:
                                 obj._level_select_replayed = False
 
                         # Step 10: Resample Contours
                         if start_step <= 10 <= max_step and obj.contours is not None and len(obj.contours) > 0 and obj.bounding_planes is not None:
                             print(f"  [10/{max_step}] Resampling Contours...")
+                            _t0 = time.time()
                             obj.resample_contours(base_samples=32, defer=defer)
+                            print(f"  [10/{max_step}] Done in {time.time()-_t0:.3f}s")
                             if defer:
                                 obj._build_fibers_replayed = False
 
                         # Step 11: Build Contour Mesh
                         if start_step <= 11 <= max_step and obj.contours is not None and len(obj.contours) > 0 and obj.draw_contour_stream is not None:
                             print(f"  [11/{max_step}] Building Contour Mesh...")
+                            _t0 = time.time()
                             obj.build_contour_mesh(defer=defer)
+                            print(f"  [11/{max_step}] Done in {time.time()-_t0:.3f}s")
                             if defer:
                                 obj._resample_replayed = False
 
                         # Step 12: Tetrahedralize
                         if start_step <= 12 <= max_step and obj.contour_mesh_vertices is not None:
                             print(f"  [12/{max_step}] Tetrahedralizing...")
+                            _t0 = time.time()
                             obj.soft_body = None
                             obj.tetrahedralize_contour_mesh()
                             if obj.tet_vertices is not None:
@@ -579,6 +602,7 @@ def draw_zygote_muscle_ui(v):
                                     obj.is_draw_contours = False
                                     obj.is_draw_tet_mesh = True
                                     obj._tetrahedralize_replayed = True
+                            print(f"  [12/{max_step}] Done in {time.time()-_t0:.3f}s")
 
                         obj._pipeline_paused_at = None  # Clear pause state on completion
                         print(f"[{name}] Pipeline complete (steps {start_step}-{max_step})!")
@@ -610,7 +634,9 @@ def draw_zygote_muscle_ui(v):
                 if colored_button(f"Scalar Field##{name}", 1, proc_w):
                     if len(obj.edge_groups) > 0 and len(obj.edge_classes) > 0:
                         try:
+                            _t0 = time.time()
                             obj.compute_scalar_field(defer=animate)
+                            print(f"[{name}] Scalar Field done in {time.time()-_t0:.3f}s")
                         except Exception as e:
                             print(f"[{name}] Scalar Field error: {e}")
                     else:
@@ -623,7 +649,9 @@ def draw_zygote_muscle_ui(v):
                 if colored_button(f"Find Contours##{name}", 2, proc_w):
                     if obj.scalar_field is not None:
                         try:
+                            _t0 = time.time()
                             obj.find_contours(skeleton_meshes=v.zygote_skeleton_meshes, spacing_scale=obj.contour_spacing_scale, defer=animate)
+                            print(f"[{name}] Find Contours done in {time.time()-_t0:.3f}s")
                             if not animate:
                                 obj.is_draw_bounding_box = True
                         except Exception as e:
@@ -638,7 +666,9 @@ def draw_zygote_muscle_ui(v):
                 if colored_button(f"Fill Gaps##{name}", 3, proc_w):
                     if obj.contours is not None and len(obj.contours) > 0:
                         try:
+                            _t0 = time.time()
                             obj.refine_contours(max_spacing_threshold=0.01, defer=animate)
+                            print(f"[{name}] Fill Gaps done in {time.time()-_t0:.3f}s")
                         except Exception as e:
                             print(f"[{name}] Fill Gaps error: {e}")
                     else:
@@ -653,6 +683,7 @@ def draw_zygote_muscle_ui(v):
                 if colored_button(f"Find Transitions##{name}", 4, proc_w):
                     if hasattr(obj, 'scalar_field') and obj.scalar_field is not None:
                         try:
+                            _t0 = time.time()
                             # Use actual scalar field range
                             field_min = float(obj.scalar_field.min())
                             field_max = float(obj.scalar_field.max())
@@ -684,6 +715,7 @@ def draw_zygote_muscle_ui(v):
                             # Auto-add transitions to contours if contours exist
                             if obj.contours is not None and len(obj.contours) > 0:
                                 obj.add_transitions_to_contours(defer=animate)
+                            print(f"[{name}] Find Transitions done in {time.time()-_t0:.3f}s")
                         except Exception as e:
                             print(f"[{name}] Find Transitions error: {e}")
                             traceback.print_exc()
@@ -702,7 +734,9 @@ def draw_zygote_muscle_ui(v):
                     if colored_button(f"Smooth##{name}", 5, proc_w):
                         if obj.contours is not None and len(obj.contours) > 0:
                             try:
+                                _t0 = time.time()
                                 obj.smoothen_all(defer=True)
+                                print(f"[{name}] Smooth done in {time.time()-_t0:.3f}s")
                             except Exception as e:
                                 print(f"[{name}] Smooth error: {e}")
                         else:
@@ -716,7 +750,9 @@ def draw_zygote_muscle_ui(v):
                     if colored_button(f"z##{name}", 5, sub_button_width):
                         if obj.contours is not None and len(obj.contours) > 0:
                             try:
+                                _t0 = time.time()
                                 obj.smoothen_contours_z()
+                                print(f"[{name}] Smooth Z done in {time.time()-_t0:.3f}s")
                             except Exception as e:
                                 print(f"[{name}] Smoothen Z error: {e}")
                         else:
@@ -725,7 +761,9 @@ def draw_zygote_muscle_ui(v):
                     if colored_button(f"x##{name}", 5, sub_button_width):
                         if obj.contours is not None and len(obj.contours) > 0:
                             try:
+                                _t0 = time.time()
                                 obj.smoothen_contours_x()
+                                print(f"[{name}] Smooth X done in {time.time()-_t0:.3f}s")
                             except Exception as e:
                                 print(f"[{name}] Smoothen X error: {e}")
                         else:
@@ -734,7 +772,9 @@ def draw_zygote_muscle_ui(v):
                     if colored_button(f"bp##{name}", 5, sub_button_width):
                         if obj.contours is not None and len(obj.contours) > 0:
                             try:
+                                _t0 = time.time()
                                 obj.smoothen_contours_bp()
+                                print(f"[{name}] Smooth BP done in {time.time()-_t0:.3f}s")
                             except Exception as e:
                                 print(f"[{name}] Smoothen BP error: {e}")
                         else:
@@ -745,10 +785,12 @@ def draw_zygote_muscle_ui(v):
                 if colored_button(f"Cut##{name}", 6, cut_w):
                     if obj.contours is not None and len(obj.contours) > 0 and obj.bounding_planes is not None and len(obj.bounding_planes) > 0:
                         try:
+                            _t0 = time.time()
                             if animate:
                                 obj.cut_streams_animated(defer=True, cut_method=obj.cutting_method, muscle_name=name)
                             else:
                                 obj.cut_streams(cut_method=obj.cutting_method, muscle_name=name)
+                            print(f"[{name}] Cut done in {time.time()-_t0:.3f}s")
                         except Exception as e:
                             print(f"[{name}] Cut Streams error: {e}")
                             traceback.print_exc()
@@ -765,7 +807,9 @@ def draw_zygote_muscle_ui(v):
                     if colored_button(f"Stream Smooth##{name}", 7, proc_w):
                         if hasattr(obj, 'stream_contours') and obj.stream_contours is not None:
                             try:
+                                _t0 = time.time()
                                 obj.stream_smoothen_all(defer=True)
+                                print(f"[{name}] Stream Smooth done in {time.time()-_t0:.3f}s")
                             except Exception as e:
                                 print(f"[{name}] Stream Smooth error: {e}")
                         else:
@@ -779,7 +823,9 @@ def draw_zygote_muscle_ui(v):
                     if colored_button(f"z##stream{name}", 7, sub_button_width):
                         if hasattr(obj, 'stream_contours') and obj.stream_contours is not None:
                             try:
+                                _t0 = time.time()
                                 obj.smoothen_contours_z()
+                                print(f"[{name}] Stream Smooth Z done in {time.time()-_t0:.3f}s")
                             except Exception as e:
                                 print(f"[{name}] Stream Smoothen Z error: {e}")
                         else:
@@ -788,7 +834,9 @@ def draw_zygote_muscle_ui(v):
                     if colored_button(f"x##stream{name}", 7, sub_button_width):
                         if hasattr(obj, 'stream_contours') and obj.stream_contours is not None:
                             try:
+                                _t0 = time.time()
                                 obj.smoothen_contours_x()
+                                print(f"[{name}] Stream Smooth X done in {time.time()-_t0:.3f}s")
                             except Exception as e:
                                 print(f"[{name}] Stream Smoothen X error: {e}")
                         else:
@@ -797,7 +845,9 @@ def draw_zygote_muscle_ui(v):
                     if colored_button(f"bp##stream{name}", 7, sub_button_width):
                         if hasattr(obj, 'stream_contours') and obj.stream_contours is not None:
                             try:
+                                _t0 = time.time()
                                 obj.smoothen_contours_bp()
+                                print(f"[{name}] Stream Smooth BP done in {time.time()-_t0:.3f}s")
                             except Exception as e:
                                 print(f"[{name}] Stream Smoothen BP error: {e}")
                         else:
@@ -807,7 +857,9 @@ def draw_zygote_muscle_ui(v):
                 if colored_button(f"Contour Select##{name}", 8, proc_w if animate else col_button_width):
                     if hasattr(obj, 'stream_contours') and obj.stream_contours is not None:
                         try:
+                            _t0 = time.time()
                             obj.select_levels()
+                            print(f"[{name}] Contour Select done in {time.time()-_t0:.3f}s")
                         except Exception as e:
                             print(f"[{name}] Select Levels error: {e}")
                             traceback.print_exc()
@@ -822,7 +874,9 @@ def draw_zygote_muscle_ui(v):
                 if colored_button(f"Build Fiber##{name}", 9, proc_w if animate else col_button_width):
                     if hasattr(obj, 'stream_contours') and obj.stream_contours is not None:
                         try:
+                            _t0 = time.time()
                             obj.build_fibers(skeleton_meshes=v.zygote_skeleton_meshes, defer=animate)
+                            print(f"[{name}] Build Fiber done in {time.time()-_t0:.3f}s")
                         except Exception as e:
                             print(f"[{name}] Build Fibers error: {e}")
                             traceback.print_exc()
@@ -837,7 +891,9 @@ def draw_zygote_muscle_ui(v):
                 if colored_button(f"Resample Contours##{name}", 10, proc_w if animate else col_button_width):
                     if obj.contours is not None and len(obj.contours) > 0 and obj.bounding_planes is not None:
                         try:
+                            _t0 = time.time()
                             obj.resample_contours(base_samples=32, defer=animate)
+                            print(f"[{name}] Resample Contours done in {time.time()-_t0:.3f}s")
                         except Exception as e:
                             print(f"[{name}] Resample Contours error: {e}")
                     else:
@@ -851,7 +907,9 @@ def draw_zygote_muscle_ui(v):
                 if colored_button(f"Build Contour Mesh##{name}", 11, proc_w if animate else col_button_width):
                     if obj.contours is not None and len(obj.contours) > 0 and obj.draw_contour_stream is not None:
                         try:
+                            _t0 = time.time()
                             obj.build_contour_mesh(defer=animate)
+                            print(f"[{name}] Build Contour Mesh done in {time.time()-_t0:.3f}s")
                         except Exception as e:
                             print(f"[{name}] Build Contour Mesh error: {e}")
                             import traceback
@@ -867,8 +925,10 @@ def draw_zygote_muscle_ui(v):
                 if colored_button(f"Tetrahedralize##{name}", 12, proc_w if animate else col_button_width):
                     if obj.contour_mesh_vertices is not None:
                         try:
+                            _t0 = time.time()
                             obj.soft_body = None  # Reset soft body when re-tetrahedralizing
                             obj.tetrahedralize_contour_mesh()
+                            print(f"[{name}] Tetrahedralize done in {time.time()-_t0:.3f}s")
                             if obj.tet_vertices is not None:
                                 if animate:
                                     obj._extract_internal_tet_edges()
@@ -4913,14 +4973,18 @@ def _render_manual_cut_windows(v):
                                         # Step 7: Stream Smooth (z, x, bp - after cut)
                                         if start_step <= 7 <= max_step and hasattr(obj, 'stream_contours') and obj.stream_contours is not None:
                                             print(f"  [7/{max_step}] Stream Smoothening (z, x, bp)...")
+                                            _t0 = time.time()
                                             obj.smoothen_contours_z()
                                             obj.smoothen_contours_x()
                                             obj.smoothen_contours_bp()
+                                            print(f"  [7/{max_step}] Done in {time.time()-_t0:.3f}s")
 
                                         # Step 8: Contour Select
                                         if start_step <= 8 <= max_step and hasattr(obj, 'stream_contours') and obj.stream_contours is not None:
                                             print(f"  [8/{max_step}] Selecting contours...")
+                                            _t0 = time.time()
                                             obj.select_levels()
+                                            print(f"  [8/{max_step}] Done in {time.time()-_t0:.3f}s")
                                             # Check if waiting for manual level selection
                                             if hasattr(obj, '_level_select_window_open') and obj._level_select_window_open:
                                                 obj._pipeline_paused_at = 9  # Resume from step 9 after selection
@@ -4931,30 +4995,38 @@ def _render_manual_cut_windows(v):
                                         # Step 9: Build Fiber
                                         if start_step <= 9 <= max_step and hasattr(obj, 'stream_contours') and obj.stream_contours is not None:
                                             print(f"  [9/{max_step}] Building fibers...")
+                                            _t0 = time.time()
                                             _defer = getattr(obj, 'animate_process', False)
                                             obj.build_fibers(skeleton_meshes=v.zygote_skeleton_meshes, defer=_defer)
+                                            print(f"  [9/{max_step}] Done in {time.time()-_t0:.3f}s")
                                             if _defer:
                                                 obj._level_select_replayed = False
 
                                         # Step 10: Resample Contours
                                         if start_step <= 10 <= max_step and obj.contours is not None and len(obj.contours) > 0 and obj.bounding_planes is not None:
                                             print(f"  [10/{max_step}] Resampling Contours...")
+                                            _t0 = time.time()
                                             obj.resample_contours(base_samples=32, defer=_defer)
+                                            print(f"  [10/{max_step}] Done in {time.time()-_t0:.3f}s")
                                             if _defer:
                                                 obj._build_fibers_replayed = False
 
                                         # Step 11: Build Contour Mesh
                                         if start_step <= 11 <= max_step and obj.contours is not None and len(obj.contours) > 0 and obj.draw_contour_stream is not None:
                                             print(f"  [11/{max_step}] Building Contour Mesh...")
+                                            _t0 = time.time()
                                             obj.build_contour_mesh(defer=_defer)
+                                            print(f"  [11/{max_step}] Done in {time.time()-_t0:.3f}s")
                                             if _defer:
                                                 obj._resample_replayed = False
 
                                         # Step 12: Tetrahedralize
                                         if start_step <= 12 <= max_step and obj.contour_mesh_vertices is not None:
                                             print(f"  [12/{max_step}] Tetrahedralizing...")
+                                            _t0 = time.time()
                                             obj.soft_body = None
                                             obj.tetrahedralize_contour_mesh()
+                                            print(f"  [12/{max_step}] Done in {time.time()-_t0:.3f}s")
                                             if obj.tet_vertices is not None:
                                                 if _defer:
                                                     obj._extract_internal_tet_edges()
@@ -5327,29 +5399,37 @@ def _render_level_select_windows(v):
                         # Step 9: Build Fiber
                         if start_step <= 9 <= max_step and hasattr(obj, 'stream_contours') and obj.stream_contours is not None:
                             print(f"  [9/{max_step}] Building fibers...")
+                            _t0 = time.time()
                             obj.build_fibers(skeleton_meshes=v.zygote_skeleton_meshes, defer=_defer)
+                            print(f"  [9/{max_step}] Done in {time.time()-_t0:.3f}s")
                             if _defer:
                                 obj._level_select_replayed = False
 
                         # Step 10: Resample Contours
                         if start_step <= 10 <= max_step and obj.contours is not None and len(obj.contours) > 0 and obj.bounding_planes is not None:
                             print(f"  [10/{max_step}] Resampling Contours...")
+                            _t0 = time.time()
                             obj.resample_contours(base_samples=32, defer=_defer)
+                            print(f"  [10/{max_step}] Done in {time.time()-_t0:.3f}s")
                             if _defer:
                                 obj._build_fibers_replayed = False
 
                         # Step 11: Build Contour Mesh
                         if start_step <= 11 <= max_step and obj.contours is not None and len(obj.contours) > 0 and obj.draw_contour_stream is not None:
                             print(f"  [11/{max_step}] Building Contour Mesh...")
+                            _t0 = time.time()
                             obj.build_contour_mesh(defer=_defer)
+                            print(f"  [11/{max_step}] Done in {time.time()-_t0:.3f}s")
                             if _defer:
                                 obj._resample_replayed = False
 
                         # Step 12: Tetrahedralize
                         if start_step <= 12 <= max_step and obj.contour_mesh_vertices is not None:
                             print(f"  [12/{max_step}] Tetrahedralizing...")
+                            _t0 = time.time()
                             obj.soft_body = None
                             obj.tetrahedralize_contour_mesh()
+                            print(f"  [12/{max_step}] Done in {time.time()-_t0:.3f}s")
                             if obj.tet_vertices is not None:
                                 if _defer:
                                     obj._extract_internal_tet_edges()
