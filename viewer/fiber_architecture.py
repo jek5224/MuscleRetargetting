@@ -1891,17 +1891,17 @@ class FiberArchitectureMixin:
                         else:
                             normal_pts.append(wp)
 
-        # Draw normal waypoints (red)
+        # Draw normal waypoints (orange-yellow, larger than fiber lines)
         if len(normal_pts) > 0:
-            glPointSize(3)
-            glColor4f(1, 0, 0, alpha)
+            glPointSize(5)
+            glColor4f(1.0, 0.6, 0.0, alpha)
             pts = np.array(normal_pts, dtype=np.float32)
             glVertexPointer(3, GL_FLOAT, 0, pts)
             glDrawArrays(GL_POINTS, 0, len(pts))
 
         # Draw highlighted waypoints (blue)
         if len(highlight_pts) > 0:
-            glPointSize(5)
+            glPointSize(7)
             glColor4f(0.3, 0.6, 0.9, alpha)
             pts = np.array(highlight_pts, dtype=np.float32)
             glVertexPointer(3, GL_FLOAT, 0, pts)
