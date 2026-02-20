@@ -6098,28 +6098,114 @@ def _run_unified_volume_sim(v, active_muscles, max_iterations=100, tolerance=1e-
         if hasattr(mobj, '_update_fixed_targets_from_skeleton'):
             mobj._update_fixed_targets_from_skeleton(v.zygote_skeleton_meshes, v.env.skel)
 
-    # Build global vertex indexing
+    # Check if we have valid cached topology from a previous frame
     muscle_names = list(active_muscles.keys())
-    global_offset = {}  # muscle_name -> starting index in global array
-    total_verts = 0
-    for name in muscle_names:
-        global_offset[name] = total_verts
-        total_verts += active_muscles[name].soft_body.num_vertices
+    total_verts = sum(active_muscles[n].soft_body.num_vertices for n in muscle_names)
 
-    print(f"  Total vertices: {total_verts}")
+    cache = getattr(v, '_unified_sim_cache', None)
+    cache_valid = (cache is not None
+                   and cache['muscle_names'] == muscle_names
+                   and cache['total_verts'] == total_verts)
 
-    # Collect all positions into one array
+    if cache_valid:
+        # Reuse cached topology
+        global_offset = cache['global_offset']
+        global_rest_positions = cache['global_rest_positions']
+        global_fixed_mask = cache['global_fixed_mask']
+        neighbors = cache['neighbors']
+        edge_weights = cache['edge_weights']
+        rest_edge_vectors = cache['rest_edge_vectors']
+        print(f"  Using cached topology ({total_verts} verts)")
+    else:
+        # Build global vertex indexing
+        global_offset = {}  # muscle_name -> starting index in global array
+        offset_accum = 0
+        for name in muscle_names:
+            global_offset[name] = offset_accum
+            offset_accum += active_muscles[name].soft_body.num_vertices
+
+        print(f"  Total vertices: {total_verts}")
+
+        # Collect rest positions and fixed mask (topology-invariant)
+        global_rest_positions = np.zeros((total_verts, 3))
+        global_fixed_mask = np.zeros(total_verts, dtype=bool)
+
+        for name, mobj in active_muscles.items():
+            offset = global_offset[name]
+            n = mobj.soft_body.num_vertices
+            global_rest_positions[offset:offset+n] = mobj.soft_body.rest_positions
+            global_fixed_mask[offset:offset+n] = mobj.soft_body.fixed_mask
+
+        # Build combined edge list (internal edges + inter-muscle constraints)
+        all_edges = []  # (global_i, global_j, rest_length, weight)
+
+        # Add internal edges from each muscle
+        for name, mobj in active_muscles.items():
+            offset = global_offset[name]
+            sb = mobj.soft_body
+            for edge_idx, (i, j) in enumerate(zip(sb.edge_i, sb.edge_j)):
+                # Use stored rest_lengths if available, otherwise compute from rest positions
+                if hasattr(sb, 'rest_lengths') and sb.rest_lengths is not None and edge_idx < len(sb.rest_lengths):
+                    rest_len = sb.rest_lengths[edge_idx]
+                else:
+                    rest_len = np.linalg.norm(sb.rest_positions[j] - sb.rest_positions[i])
+                all_edges.append((offset + i, offset + j, rest_len, 1.0))
+
+        n_internal = len(all_edges)
+
+        # Add inter-muscle constraints as edges
+        for constraint in v.inter_muscle_constraints:
+            name1, v1_idx, v1_fixed, name2, v2_idx, v2_fixed, rest_dist = constraint
+            if name1 in active_muscles and name2 in active_muscles:
+                global_i = global_offset[name1] + v1_idx
+                global_j = global_offset[name2] + v2_idx
+                all_edges.append((global_i, global_j, rest_dist, 1.0))  # Same weight as internal
+
+        n_inter = len(all_edges) - n_internal
+        print(f"  Edges: {n_internal} internal + {n_inter} inter-muscle = {len(all_edges)} total")
+
+        # Build neighbor list
+        neighbors = [[] for _ in range(total_verts)]
+        edge_weights = {}
+        rest_edge_vectors = [{} for _ in range(total_verts)]
+
+        for gi, gj, rest_len, weight in all_edges:
+            neighbors[gi].append(gj)
+            neighbors[gj].append(gi)
+            edge_weights[(gi, gj)] = weight
+            edge_weights[(gj, gi)] = weight
+            # Store rest edge vectors
+            rest_edge_vectors[gi][gj] = global_rest_positions[gj] - global_rest_positions[gi]
+            rest_edge_vectors[gj][gi] = global_rest_positions[gi] - global_rest_positions[gj]
+
+        # Debug: check neighbor distribution
+        neighbor_counts = [len(neighbors[i]) for i in range(total_verts)]
+        n0 = sum(1 for c in neighbor_counts if c == 0)
+        n1 = sum(1 for c in neighbor_counts if c == 1)
+        n2 = sum(1 for c in neighbor_counts if c == 2)
+        if n0 > 0 or n1 > 0:
+            print(f"  WARNING: {n0} isolated, {n1} single-neighbor, {n2} two-neighbor vertices")
+
+        # Cache topology for subsequent frames
+        v._unified_sim_cache = {
+            'global_offset': global_offset,
+            'total_verts': total_verts,
+            'global_rest_positions': global_rest_positions,
+            'global_fixed_mask': global_fixed_mask,
+            'neighbors': neighbors,
+            'edge_weights': edge_weights,
+            'rest_edge_vectors': rest_edge_vectors,
+            'muscle_names': muscle_names,
+        }
+
+    # Always collect current positions and fixed targets (these change per frame)
     global_positions = np.zeros((total_verts, 3))
-    global_rest_positions = np.zeros((total_verts, 3))
-    global_fixed_mask = np.zeros(total_verts, dtype=bool)
     global_fixed_targets = {}  # global_idx -> target position
 
     for name, mobj in active_muscles.items():
         offset = global_offset[name]
         n = mobj.soft_body.num_vertices
         global_positions[offset:offset+n] = mobj.soft_body.positions
-        global_rest_positions[offset:offset+n] = mobj.soft_body.rest_positions
-        global_fixed_mask[offset:offset+n] = mobj.soft_body.fixed_mask
 
         # Store fixed targets
         if mobj.soft_body.fixed_targets is not None and len(mobj.soft_body.fixed_indices) > 0:
@@ -6138,56 +6224,6 @@ def _run_unified_volume_sim(v, active_muscles, max_iterations=100, tolerance=1e-
     if n_fixed_mask != n_fixed_targets:
         print(f"  WARNING: Mismatch between fixed_mask ({n_fixed_mask}) and fixed_targets ({n_fixed_targets})")
 
-    # Build combined edge list (internal edges + inter-muscle constraints)
-    all_edges = []  # (global_i, global_j, rest_length, weight)
-
-    # Add internal edges from each muscle
-    for name, mobj in active_muscles.items():
-        offset = global_offset[name]
-        sb = mobj.soft_body
-        for edge_idx, (i, j) in enumerate(zip(sb.edge_i, sb.edge_j)):
-            # Use stored rest_lengths if available, otherwise compute from rest positions
-            if hasattr(sb, 'rest_lengths') and sb.rest_lengths is not None and edge_idx < len(sb.rest_lengths):
-                rest_len = sb.rest_lengths[edge_idx]
-            else:
-                rest_len = np.linalg.norm(sb.rest_positions[j] - sb.rest_positions[i])
-            all_edges.append((offset + i, offset + j, rest_len, 1.0))
-
-    n_internal = len(all_edges)
-
-    # Add inter-muscle constraints as edges
-    for constraint in v.inter_muscle_constraints:
-        name1, v1_idx, v1_fixed, name2, v2_idx, v2_fixed, rest_dist = constraint
-        if name1 in active_muscles and name2 in active_muscles:
-            global_i = global_offset[name1] + v1_idx
-            global_j = global_offset[name2] + v2_idx
-            all_edges.append((global_i, global_j, rest_dist, 1.0))  # Same weight as internal
-
-    n_inter = len(all_edges) - n_internal
-    print(f"  Edges: {n_internal} internal + {n_inter} inter-muscle = {len(all_edges)} total")
-
-    # Build neighbor list
-    neighbors = [[] for _ in range(total_verts)]
-    edge_weights = {}
-    rest_edge_vectors = [{} for _ in range(total_verts)]
-
-    for gi, gj, rest_len, weight in all_edges:
-        neighbors[gi].append(gj)
-        neighbors[gj].append(gi)
-        edge_weights[(gi, gj)] = weight
-        edge_weights[(gj, gi)] = weight
-        # Store rest edge vectors
-        rest_edge_vectors[gi][gj] = global_rest_positions[gj] - global_rest_positions[gi]
-        rest_edge_vectors[gj][gi] = global_rest_positions[gi] - global_rest_positions[gj]
-
-    # Debug: check neighbor distribution
-    neighbor_counts = [len(neighbors[i]) for i in range(total_verts)]
-    n0 = sum(1 for c in neighbor_counts if c == 0)
-    n1 = sum(1 for c in neighbor_counts if c == 1)
-    n2 = sum(1 for c in neighbor_counts if c == 2)
-    if n0 > 0 or n1 > 0:
-        print(f"  WARNING: {n0} isolated, {n1} single-neighbor, {n2} two-neighbor vertices")
-
     # Reuse cached backend to avoid Taichi field re-allocation errors
     cached = getattr(v, '_unified_arap_backend', None)
     if cached is not None and getattr(cached, '_backend_name', None) == backend_name:
@@ -6201,10 +6237,16 @@ def _run_unified_volume_sim(v, active_muscles, max_iterations=100, tolerance=1e-
     fixed_indices = np.where(global_fixed_mask)[0]
     fixed_targets_array = np.array([global_fixed_targets.get(i, global_rest_positions[i]) for i in fixed_indices])
 
-    # Build system and run ARAP
-    start_time = time.time()
-    backend.build_system(total_verts, neighbors, edge_weights, global_fixed_mask, regularization=1e-6)
-    print(f"  System built in {time.time() - start_time:.3f}s")
+    # Build system only on first frame (when solver hasn't been factorized yet)
+    need_build = (not cache_valid
+                  or (getattr(backend, 'solver', None) is None
+                      and getattr(backend, '_scipy_solver', None) is None))
+    if need_build:
+        start_time = time.time()
+        backend.build_system(total_verts, neighbors, edge_weights, global_fixed_mask, regularization=1e-6)
+        print(f"  System built in {time.time() - start_time:.3f}s")
+    else:
+        print(f"  Reusing cached system (skipping build_system)")
 
     start_time = time.time()
     global_positions, iterations, max_disp = backend.solve(
@@ -6960,8 +7002,9 @@ def _motion_start_bake(v):
         if mobj.soft_body is not None:
             mobj.soft_body.positions = mobj.soft_body.rest_positions.copy()
             mobj.tet_vertices = mobj.soft_body.rest_positions.astype(np.float32).copy()
-    # Clear cached backend so system is rebuilt fresh
+    # Clear cached backend and topology so system is rebuilt fresh
     v._unified_arap_backend = None
+    v._unified_sim_cache = None
     v.motion_baking = True
     v.motion_bake_current = 0
     v.motion_is_playing = False
