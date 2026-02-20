@@ -7025,7 +7025,9 @@ def _motion_start_bake(v):
     v._bake_start_time = time.time()
     for mname, mobj in v.zygote_muscle_meshes.items():
         if mobj.soft_body is not None:
-            v._bake_data[mname] = {}
+            v._bake_data[mname] = {
+                0: {'positions': mobj.soft_body.get_positions().astype(np.float32)}
+            }
     print(f"Started bake: frames 0-{v.motion_bake_end_frame}")
 
 
@@ -7129,14 +7131,14 @@ def _motion_bake_finish(v):
     v.motion_baking = False
     v._bake_data = {}
     _motion_load_cache(v)
-    n_frames = v.motion_bake_end_frame + 1
+    n_simulated = v.motion_bake_end_frame  # frames 1..end (frame 0 is rest pose)
     elapsed = time.time() - getattr(v, '_bake_start_time', time.time())
-    avg_frame = elapsed / max(n_frames, 1)
+    avg_frame = elapsed / max(n_simulated, 1)
     cache = getattr(v, '_unified_sim_cache', None)
     n_muscles = len(cache['muscle_names']) if cache else 0
     total_verts = cache['total_verts'] if cache else 0
     avg_muscle = avg_frame / max(n_muscles, 1)
-    print(f"Bake complete: {n_frames} frames in {elapsed:.1f}s — "
+    print(f"Bake complete: {n_simulated} frames in {elapsed:.1f}s — "
           f"{n_muscles} muscles, {total_verts * 3} params ({total_verts} verts × 3), "
           f"{avg_frame:.2f}s/frame, {avg_muscle:.2f}s/muscle. Recomputing waypoints...")
     # Automatically recompute waypoints after baking
