@@ -609,35 +609,27 @@ class ARAPBackendTaichi(ARAPBackend):
 
         # Fields will be allocated when needed
         self.n_verts = 0
-        self.n_edges = 0
         self._fields_allocated = False
 
         # Scipy solver cache
         self._scipy_solver = None
         self._L_scipy = None
 
-    def _allocate_fields(self, n_verts, n_edges, n_csr_edges):
+    def _allocate_fields(self, n_verts, n_csr_edges):
         """Allocate Taichi fields for computation."""
         ti = self.ti
 
-        if self._fields_allocated and self.n_verts == n_verts and self.n_edges == n_edges:
+        if self._fields_allocated and self.n_verts == n_verts:
             return
 
         self.n_verts = n_verts
-        self.n_edges = n_edges
 
         # Vertex data
         self.positions = ti.Vector.field(3, dtype=ti.f64, shape=n_verts)
         self.rest_positions = ti.Vector.field(3, dtype=ti.f64, shape=n_verts)
         self.rhs = ti.Vector.field(3, dtype=ti.f64, shape=n_verts)
 
-        # Edge data (used by RHS kernel)
-        self.edge_i = ti.field(dtype=ti.i32, shape=n_edges)
-        self.edge_j = ti.field(dtype=ti.i32, shape=n_edges)
-        self.edge_w = ti.field(dtype=ti.f64, shape=n_edges)
-        self.edge_rest = ti.Vector.field(3, dtype=ti.f64, shape=n_edges)
-
-        # CSR neighbor data (used by fused local kernel)
+        # CSR neighbor data (used by fused local kernel + RHS kernel)
         self.neighbor_offsets = ti.field(dtype=ti.i32, shape=n_verts + 1)
         self.neighbor_indices = ti.field(dtype=ti.i32, shape=n_csr_edges)
         self.neighbor_weights = ti.field(dtype=ti.f64, shape=n_csr_edges)
@@ -658,23 +650,7 @@ class ARAPBackendTaichi(ARAPBackend):
         self.weights = weights
         self.regularization = regularization
 
-        # Build edge lists
-        edge_i = []
-        edge_j = []
-        edge_w = []
-
-        for i, neighs in enumerate(neighbors):
-            for j in neighs:
-                edge_i.append(i)
-                edge_j.append(j)
-                edge_w.append(weights.get((i, j), weights.get((j, i), 1.0)))
-
-        self.edge_i_np = np.array(edge_i, dtype=np.int32)
-        self.edge_j_np = np.array(edge_j, dtype=np.int32)
-        self.edge_w_np = np.array(edge_w, dtype=np.float64)
-        self.n_edges_total = len(edge_i)
-
-        # Build CSR structure for vertex-centric gather (used by fused local kernel + PCG matvec)
+        # Build CSR structure for vertex-centric gather (used by fused local + RHS kernels)
         neighbor_offsets = np.zeros(n + 1, dtype=np.int32)
         for i, neighs in enumerate(neighbors):
             neighbor_offsets[i + 1] = neighbor_offsets[i] + len(neighs)
@@ -776,42 +752,28 @@ class ARAPBackendTaichi(ARAPBackend):
         @ti.kernel
         def compute_rhs(
             rest_positions: ti.template(),
-            edge_i: ti.template(),
-            edge_j: ti.template(),
-            edge_w: ti.template(),
-            edge_rest: ti.template(),
+            neighbor_offsets: ti.template(),
+            neighbor_indices: ti.template(),
+            neighbor_weights: ti.template(),
+            neighbor_rest: ti.template(),
             rotations: ti.template(),
             rhs: ti.template(),
             regularization: ti.f64,
-            n_verts: ti.i32,
-            n_edges: ti.i32
+            n_verts: ti.i32
         ):
-            # Clear RHS
             for i in range(n_verts):
-                rhs[i] = ti.Vector.zero(ti.f64, 3)
-
-            # Add edge contributions
-            for e in range(n_edges):
-                i = edge_i[e]
-                j = edge_j[e]
-                w = edge_w[e]
-
-                # Rest edge negated: p_i - p_j
-                e_rest_neg = -edge_rest[e]
-
-                # R_avg @ e_rest_neg
                 R_i = rotations[i]
-                R_j = rotations[j]
-                R_avg = 0.5 * (R_i + R_j)
-
-                contrib = w * (R_avg @ e_rest_neg)
-
-                for d in ti.static(range(3)):
-                    rhs[i][d] += contrib[d]
-
-            # Add regularization term
-            for i in range(n_verts):
-                rhs[i] += regularization * rest_positions[i]
+                rhs_val = regularization * rest_positions[i]
+                start = neighbor_offsets[i]
+                end = neighbor_offsets[i + 1]
+                for idx in range(start, end):
+                    j = neighbor_indices[idx]
+                    w = neighbor_weights[idx]
+                    # Rest edge negated: p_i - p_j (neighbor_rest stores p_j - p_i)
+                    e_rest_neg = -neighbor_rest[idx]
+                    R_avg = ti.cast(0.5, ti.f64) * (R_i + rotations[j])
+                    rhs_val += w * (R_avg @ e_rest_neg)
+                rhs[i] = rhs_val
 
         return compute_rhs
 
@@ -822,17 +784,6 @@ class ARAPBackendTaichi(ARAPBackend):
 
         # Allocate fields if needed
         if not self._fields_allocated or self.n_verts != n:
-            # Build edge rest vectors (for RHS kernel)
-            edge_rest_list = []
-            for i in range(len(self.edge_i_np)):
-                ei = self.edge_i_np[i]
-                ej = self.edge_j_np[i]
-                if ej in rest_edges[ei]:
-                    edge_rest_list.append(rest_edges[ei][ej])
-                else:
-                    edge_rest_list.append(rest_positions[ej] - rest_positions[ei])
-            self.edge_rest_np = np.array(edge_rest_list, dtype=np.float64)
-
             # Build CSR rest edge vectors
             neighbor_rest_list = []
             for i, neighs in enumerate(neighbors):
@@ -843,13 +794,7 @@ class ARAPBackendTaichi(ARAPBackend):
                         neighbor_rest_list.append(rest_positions[j] - rest_positions[i])
             self.neighbor_rest_np = np.array(neighbor_rest_list, dtype=np.float64)
 
-            self._allocate_fields(n, self.n_edges_total, self.n_csr_edges)
-
-            # Copy edge data to Taichi fields (for RHS kernel)
-            self.edge_i.from_numpy(self.edge_i_np)
-            self.edge_j.from_numpy(self.edge_j_np)
-            self.edge_w.from_numpy(self.edge_w_np)
-            self.edge_rest.from_numpy(self.edge_rest_np)
+            self._allocate_fields(n, self.n_csr_edges)
 
             # Copy CSR data to Taichi fields
             self.neighbor_offsets.from_numpy(self.neighbor_offsets_np)
@@ -891,12 +836,13 @@ class ARAPBackendTaichi(ARAPBackend):
         if not hasattr(self, '_rhs_kernel'):
             self._rhs_kernel = self._build_rhs_kernel()
 
-        # Compute RHS on GPU
+        # Compute RHS on GPU (CSR gather, no atomics)
         self._rhs_kernel(
             self.rest_positions,
-            self.edge_i, self.edge_j, self.edge_w, self.edge_rest,
+            self.neighbor_offsets, self.neighbor_indices,
+            self.neighbor_weights, self.neighbor_rest,
             self.rotations_field_local, self.rhs,
-            regularization, n, self.n_edges_total
+            regularization, n
         )
 
         # Get RHS back to numpy
