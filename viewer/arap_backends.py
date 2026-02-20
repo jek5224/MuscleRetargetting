@@ -1111,8 +1111,9 @@ class ARAPBackendTaichi(ARAPBackend):
 
         rest_pos_f64 = rest_positions if rest_positions.dtype == np.float64 else rest_positions.astype(np.float64)
 
-        # Try GPU CG path (available after build_system prepares L CSR data)
-        use_gpu_cg = hasattr(self, '_L_nnz') and self._L_nnz is not None
+        # GPU CG path disabled: iterative CG is slower than scipy's direct
+        # LU forward/back-sub for this problem size (~11k verts).
+        use_gpu_cg = False
         if use_gpu_cg and not getattr(self, '_cg_kernels_built', False):
             self._build_cg_kernels()
 
