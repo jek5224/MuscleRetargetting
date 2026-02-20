@@ -637,21 +637,11 @@ class ARAPBackendTaichi(ARAPBackend):
         self.edge_w = ti.field(dtype=ti.f64, shape=n_edges)
         self.edge_rest = ti.Vector.field(3, dtype=ti.f64, shape=n_edges)
 
-        # CSR neighbor data (used by fused local kernel + PCG matvec)
+        # CSR neighbor data (used by fused local kernel)
         self.neighbor_offsets = ti.field(dtype=ti.i32, shape=n_verts + 1)
         self.neighbor_indices = ti.field(dtype=ti.i32, shape=n_csr_edges)
         self.neighbor_weights = ti.field(dtype=ti.f64, shape=n_csr_edges)
         self.neighbor_rest = ti.Vector.field(3, dtype=ti.f64, shape=n_csr_edges)
-
-        # PCG solver fields
-        self.pcg_r = ti.field(dtype=ti.f64, shape=n_verts)
-        self.pcg_p = ti.field(dtype=ti.f64, shape=n_verts)
-        self.pcg_Ap = ti.field(dtype=ti.f64, shape=n_verts)
-        self.pcg_x = ti.field(dtype=ti.f64, shape=n_verts)
-        self.pcg_b = ti.field(dtype=ti.f64, shape=n_verts)
-        self.pcg_M_inv = ti.field(dtype=ti.f64, shape=n_verts)
-        self.pcg_z = ti.field(dtype=ti.f64, shape=n_verts)
-        self.fixed_mask_field = ti.field(dtype=ti.i32, shape=n_verts)
 
         self._fields_allocated = True
 
@@ -727,23 +717,12 @@ class ARAPBackendTaichi(ARAPBackend):
             (vals, (rows, cols)), shape=(n, n)
         )
 
-        # Pre-factorize (kept as fallback for PCG)
+        # Pre-factorize
         import scipy.sparse.linalg
         try:
             self._scipy_solver = scipy.sparse.linalg.factorized(self._L_scipy)
         except Exception:
             self._scipy_solver = None
-
-        # Jacobi preconditioner for PCG: 1/diag(L)
-        self.pcg_M_inv_np = np.zeros(n, dtype=np.float64)
-        for i in range(n):
-            if fixed_mask[i]:
-                self.pcg_M_inv_np[i] = 1.0
-            else:
-                weight_sum = 0.0
-                for j in neighbors[i]:
-                    weight_sum += weights.get((i, j), weights.get((j, i), 1.0))
-                self.pcg_M_inv_np[i] = 1.0 / (weight_sum + regularization)
 
         return True
 
@@ -836,174 +815,6 @@ class ARAPBackendTaichi(ARAPBackend):
 
         return compute_rhs
 
-    def _build_pcg_kernels(self):
-        """Create Taichi kernels for PCG solver."""
-        ti = self.ti
-
-        @ti.kernel
-        def apply_laplacian(
-            x: ti.template(), Ax: ti.template(),
-            fixed_mask: ti.template(),
-            neighbor_offsets: ti.template(),
-            neighbor_indices: ti.template(),
-            neighbor_weights: ti.template(),
-            regularization: ti.f64, n_verts: ti.i32
-        ):
-            for i in range(n_verts):
-                if fixed_mask[i]:
-                    Ax[i] = x[i]
-                else:
-                    start = neighbor_offsets[i]
-                    end = neighbor_offsets[i + 1]
-                    result = ti.cast(0.0, ti.f64)
-                    weight_sum = ti.cast(0.0, ti.f64)
-                    for idx in range(start, end):
-                        j = neighbor_indices[idx]
-                        w = neighbor_weights[idx]
-                        result -= w * x[j]
-                        weight_sum += w
-                    Ax[i] = result + (weight_sum + regularization) * x[i]
-
-        @ti.kernel
-        def pcg_init(
-            x: ti.template(), b: ti.template(), Ax: ti.template(),
-            r: ti.template(), z: ti.template(), p: ti.template(),
-            M_inv: ti.template(), n_verts: ti.i32
-        ) -> ti.f64:
-            """r = b - Ax; z = M_inv * r; p = z; return r.z"""
-            rz = ti.cast(0.0, ti.f64)
-            for i in range(n_verts):
-                ri = b[i] - Ax[i]
-                r[i] = ri
-                zi = M_inv[i] * ri
-                z[i] = zi
-                p[i] = zi
-                rz += ri * zi
-            return rz
-
-        @ti.kernel
-        def pcg_dot(a: ti.template(), b: ti.template(), n_verts: ti.i32) -> ti.f64:
-            result = ti.cast(0.0, ti.f64)
-            for i in range(n_verts):
-                result += a[i] * b[i]
-            return result
-
-        @ti.kernel
-        def pcg_update_x_r(
-            x: ti.template(), p: ti.template(),
-            r: ti.template(), Ap: ti.template(),
-            alpha: ti.f64, n_verts: ti.i32
-        ):
-            for i in range(n_verts):
-                x[i] += alpha * p[i]
-                r[i] -= alpha * Ap[i]
-
-        @ti.kernel
-        def pcg_update_z_p(
-            z: ti.template(), r: ti.template(), p: ti.template(),
-            M_inv: ti.template(), rz_old: ti.f64, n_verts: ti.i32
-        ) -> ti.f64:
-            """z = M_inv * r; compute rz_new; beta = rz_new/rz_old; p = z + beta * p; return rz_new.
-
-            Two-pass: first compute z and rz_new, then update p.
-            """
-            rz_new = ti.cast(0.0, ti.f64)
-            for i in range(n_verts):
-                zi = M_inv[i] * r[i]
-                z[i] = zi
-                rz_new += r[i] * zi
-            # Compute beta and update p
-            beta = rz_new / (rz_old + 1e-30)
-            for i in range(n_verts):
-                p[i] = z[i] + beta * p[i]
-            return rz_new
-
-        @ti.kernel
-        def extract_rhs_dim(rhs: ti.template(), b: ti.template(), dim: ti.i32, n_verts: ti.i32):
-            """Copy one dimension from Vector.field rhs to scalar field b."""
-            for i in range(n_verts):
-                b[i] = rhs[i][dim]
-
-        @ti.kernel
-        def set_fixed_rhs(b: ti.template(), fixed_mask: ti.template(),
-                          fixed_vals: ti.template(), dim: ti.i32, n_verts: ti.i32):
-            """Overwrite fixed vertex entries in b."""
-            for i in range(n_verts):
-                if fixed_mask[i]:
-                    b[i] = fixed_vals[i][dim]
-
-        @ti.kernel
-        def copy_solution_to_positions(x: ti.template(), positions: ti.template(),
-                                       dim: ti.i32, n_verts: ti.i32):
-            """Copy scalar solution back to one dimension of positions."""
-            for i in range(n_verts):
-                positions[i][dim] = x[i]
-
-        @ti.kernel
-        def copy_dim_to_x(positions: ti.template(), x: ti.template(),
-                          dim: ti.i32, n_verts: ti.i32):
-            """Initialize x from current positions (warm start)."""
-            for i in range(n_verts):
-                x[i] = positions[i][dim]
-
-        return (apply_laplacian, pcg_init, pcg_dot, pcg_update_x_r,
-                pcg_update_z_p, extract_rhs_dim, set_fixed_rhs,
-                copy_solution_to_positions, copy_dim_to_x)
-
-    def pcg_solve(self, dim, max_pcg_iter=300, pcg_tol=1e-10):
-        """Solve L @ x = b for one dimension using PCG on GPU.
-
-        Returns True if converged, False otherwise.
-        """
-        n = self.n_verts
-        reg = self.regularization
-        (apply_lap, pcg_init, pcg_dot, pcg_update_x_r,
-         pcg_update_z_p, _, _, _, _) = self._pcg_kernels
-
-        # Warm-start: x already contains previous iteration's solution
-        # Compute Ax
-        apply_lap(self.pcg_x, self.pcg_Ap,
-                  self.fixed_mask_field, self.neighbor_offsets,
-                  self.neighbor_indices, self.neighbor_weights,
-                  reg, n)
-
-        # r = b - Ax; z = M*r; p = z
-        rz = pcg_init(self.pcg_x, self.pcg_b, self.pcg_Ap,
-                       self.pcg_r, self.pcg_z, self.pcg_p,
-                       self.pcg_M_inv, n)
-
-        if abs(rz) < pcg_tol * pcg_tol:
-            return True
-
-        for it in range(max_pcg_iter):
-            # Ap = A @ p
-            apply_lap(self.pcg_p, self.pcg_Ap,
-                      self.fixed_mask_field, self.neighbor_offsets,
-                      self.neighbor_indices, self.neighbor_weights,
-                      reg, n)
-
-            pAp = pcg_dot(self.pcg_p, self.pcg_Ap, n)
-            if abs(pAp) < 1e-30:
-                return False
-
-            alpha = rz / pAp
-
-            # x += alpha*p; r -= alpha*Ap
-            pcg_update_x_r(self.pcg_x, self.pcg_p,
-                           self.pcg_r, self.pcg_Ap, alpha, n)
-
-            # Check convergence via residual norm
-            r_norm_sq = pcg_dot(self.pcg_r, self.pcg_r, n)
-            if r_norm_sq < pcg_tol * pcg_tol:
-                return True
-
-            # z = M*r; compute beta; p = z + beta*p
-            rz_new = pcg_update_z_p(self.pcg_z, self.pcg_r, self.pcg_p,
-                                     self.pcg_M_inv, rz, n)
-            rz = rz_new
-
-        return False
-
     def local_step(self, positions, rest_positions, neighbors, weights, rest_edges, target_edges=None):
         """Compute optimal rotations using fused CSR gather + ti.svd (fully on GPU)."""
         ti = self.ti
@@ -1046,10 +857,6 @@ class ARAPBackendTaichi(ARAPBackend):
             self.neighbor_weights.from_numpy(self.neighbor_weights_csr_np)
             self.neighbor_rest.from_numpy(self.neighbor_rest_np)
 
-            # Copy PCG preconditioner and fixed mask
-            self.pcg_M_inv.from_numpy(self.pcg_M_inv_np)
-            self.fixed_mask_field.from_numpy(self.fixed_mask.astype(np.int32))
-
         # Allocate rotation field if needed
         if not hasattr(self, 'rotations_field_local') or self.rotations_field_local.shape[0] != n:
             self.rotations_field_local = ti.Matrix.field(3, 3, dtype=ti.f64, shape=n)
@@ -1073,20 +880,16 @@ class ARAPBackendTaichi(ARAPBackend):
 
     def global_step(self, rest_positions, neighbors, weights, rest_edges,
                     fixed_mask, fixed_targets, target_edges=None):
-        """Solve linear system using Taichi RHS + GPU PCG solver."""
+        """Solve linear system using Taichi for RHS, scipy for solve."""
+        import scipy.sparse.linalg
         ti = self.ti
 
         n = len(rest_positions)
         regularization = self.regularization
 
-        # Build kernels if not cached
+        # Build RHS kernel if not cached
         if not hasattr(self, '_rhs_kernel'):
             self._rhs_kernel = self._build_rhs_kernel()
-        if not hasattr(self, '_pcg_kernels'):
-            self._pcg_kernels = self._build_pcg_kernels()
-
-        (_, _, _, _, _, extract_rhs_dim, set_fixed_rhs,
-         copy_solution_to_positions, copy_dim_to_x) = self._pcg_kernels
 
         # Compute RHS on GPU
         self._rhs_kernel(
@@ -1096,56 +899,34 @@ class ARAPBackendTaichi(ARAPBackend):
             regularization, n, self.n_edges_total
         )
 
-        # Create output positions field if needed
-        if not hasattr(self, '_result_positions') or self._result_positions.shape[0] != n:
-            self._result_positions = ti.Vector.field(3, dtype=ti.f64, shape=n)
+        # Get RHS back to numpy
+        b_np = self.rhs.to_numpy()
 
-        # Solve each dimension with PCG on GPU
-        pcg_failed = False
-        for dim in range(3):
-            # Extract RHS for this dimension
-            extract_rhs_dim(self.rhs, self.pcg_b, dim, n)
-            # Set fixed vertex RHS
-            set_fixed_rhs(self.pcg_b, self.fixed_mask_field,
-                          self._fixed_targets_field, dim, n)
-            # Warm-start x from current positions
-            copy_dim_to_x(self.positions, self.pcg_x, dim, n)
-            # Solve
-            converged = self.pcg_solve(dim)
-            if not converged:
-                pcg_failed = True
-                break
-            # Copy solution to result
-            copy_solution_to_positions(self.pcg_x, self._result_positions, dim, n)
+        # Set fixed vertex RHS
+        fixed_indices = np.where(fixed_mask)[0]
+        if fixed_targets is not None and len(fixed_targets) > 0:
+            b_np[fixed_indices] = fixed_targets
+        else:
+            b_np[fixed_indices] = rest_positions[fixed_indices]
 
-        if pcg_failed:
-            # Fallback to scipy
-            b_np = self.rhs.to_numpy()
-            fixed_indices = np.where(fixed_mask)[0]
-            if fixed_targets is not None and len(fixed_targets) > 0:
-                b_np[fixed_indices] = fixed_targets
-            else:
-                b_np[fixed_indices] = rest_positions[fixed_indices]
+        # Solve using scipy
+        new_positions_np = np.zeros((n, 3))
 
-            new_positions_np = np.zeros((n, 3))
-            if self._scipy_solver is not None:
-                for dim in range(3):
-                    new_positions_np[:, dim] = self._scipy_solver(b_np[:, dim])
-            else:
-                import scipy.sparse.linalg
-                for dim in range(3):
-                    new_positions_np[:, dim] = scipy.sparse.linalg.spsolve(
-                        self._L_scipy, b_np[:, dim]
-                    )
-            return new_positions_np
+        if self._scipy_solver is not None:
+            for dim in range(3):
+                new_positions_np[:, dim] = self._scipy_solver(b_np[:, dim])
+        else:
+            for dim in range(3):
+                new_positions_np[:, dim] = scipy.sparse.linalg.spsolve(
+                    self._L_scipy, b_np[:, dim]
+                )
 
-        return self._result_positions.to_numpy()
+        return new_positions_np
 
     def solve(self, positions, rest_positions, neighbors, weights, rest_edges,
               fixed_mask, fixed_targets, max_iterations=20, tolerance=1e-4,
               target_edges=None, verbose=False):
         """Run full ARAP iteration using Taichi."""
-        n = len(positions)
         positions = positions.copy()
         free_indices = np.where(~fixed_mask)[0]
         fixed_indices = np.where(fixed_mask)[0]
@@ -1157,28 +938,16 @@ class ARAPBackendTaichi(ARAPBackend):
         # Pre-compute rest_positions as float64 (used for GPU upload)
         rest_pos_f64 = rest_positions if rest_positions.dtype == np.float64 else rest_positions.astype(np.float64)
         rest_uploaded = False
-        fixed_targets_uploaded = False
 
         for iteration in range(max_iterations):
 
             # Local step (first call may allocate GPU fields)
             self.local_step(positions, rest_positions, neighbors, weights, rest_edges, target_edges)
 
-            # Upload rest_positions and fixed targets to GPU once after fields are allocated
+            # Upload rest_positions to GPU once after fields are allocated
             if not rest_uploaded:
                 self.rest_positions.from_numpy(rest_pos_f64)
                 rest_uploaded = True
-            if not fixed_targets_uploaded:
-                ti = self.ti
-                if not hasattr(self, '_fixed_targets_field') or self._fixed_targets_field.shape[0] != n:
-                    self._fixed_targets_field = ti.Vector.field(3, dtype=ti.f64, shape=n)
-                if fixed_targets is not None and len(fixed_targets) > 0:
-                    ft_full = np.zeros((n, 3), dtype=np.float64)
-                    ft_full[fixed_indices] = fixed_targets
-                    self._fixed_targets_field.from_numpy(ft_full)
-                else:
-                    self._fixed_targets_field.from_numpy(rest_pos_f64)
-                fixed_targets_uploaded = True
 
             # Debug output
             if verbose and iteration == 0:
