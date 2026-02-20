@@ -7131,8 +7131,14 @@ def _motion_bake_finish(v):
     _motion_load_cache(v)
     n_frames = v.motion_bake_end_frame + 1
     elapsed = time.time() - getattr(v, '_bake_start_time', time.time())
-    avg = elapsed / max(n_frames, 1)
-    print(f"Bake complete: {n_frames} frames in {elapsed:.1f}s ({avg:.2f}s/frame). Recomputing waypoints...")
+    avg_frame = elapsed / max(n_frames, 1)
+    cache = getattr(v, '_unified_sim_cache', None)
+    n_muscles = len(cache['muscle_names']) if cache else 0
+    total_verts = cache['total_verts'] if cache else 0
+    avg_muscle = avg_frame / max(n_muscles, 1)
+    print(f"Bake complete: {n_frames} frames in {elapsed:.1f}s — "
+          f"{n_muscles} muscles, {total_verts * 3} params ({total_verts} verts × 3), "
+          f"{avg_frame:.2f}s/frame, {avg_muscle:.2f}s/muscle. Recomputing waypoints...")
     # Automatically recompute waypoints after baking
     _motion_patch_waypoints(v)
 
