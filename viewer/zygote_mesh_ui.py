@@ -6247,7 +6247,8 @@ def _run_unified_volume_sim(v, active_muscles, max_iterations=100, tolerance=1e-
     # Build system only on first frame (when solver hasn't been factorized yet)
     need_build = (not cache_valid
                   or (getattr(backend, 'solver', None) is None
-                      and getattr(backend, '_scipy_solver', None) is None))
+                      and getattr(backend, '_scipy_solver', None) is None
+                      and getattr(backend, '_splu', None) is None))
     if need_build:
         start_time = time.time()
         backend.build_system(total_verts, neighbors, edge_weights, global_fixed_mask, regularization=1e-6)
