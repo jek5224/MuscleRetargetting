@@ -695,24 +695,24 @@ class ARAPBackendTaichi(ARAPBackend):
             (vals, (rows, cols)), shape=(n, n)
         )
 
-        # Extract free-DOF subblock and factorize for reduced solve
+        # Extract free-DOF subblock and factorize with splu for batched solve
         import scipy.sparse.linalg
         free_idx = np.where(~np.array(fixed_mask))[0]
         fixed_idx = np.where(np.array(fixed_mask))[0]
         self._free_idx = free_idx
         self._fixed_idx = fixed_idx
+        self._splu = None
+        self._scipy_solver = None
         try:
             L_ff = self._L_scipy[np.ix_(free_idx, free_idx)].tocsc()
-            self._L_fc = self._L_scipy[np.ix_(free_idx, fixed_idx)]
-            self._reduced_solver = scipy.sparse.linalg.factorized(L_ff)
+            self._L_fc = self._L_scipy[np.ix_(free_idx, fixed_idx)].tocsc()
+            self._splu = scipy.sparse.linalg.splu(L_ff)
         except Exception:
-            self._reduced_solver = None
-
-        # Pre-factorize full system for fallback
-        try:
-            self._scipy_solver = scipy.sparse.linalg.factorized(self._L_scipy)
-        except Exception:
-            self._scipy_solver = None
+            # Fallback: factorize full system
+            try:
+                self._scipy_solver = scipy.sparse.linalg.factorized(self._L_scipy)
+            except Exception:
+                pass
 
         # Build L CSR arrays for GPU CG solver
         L_csr = self._L_scipy.tocsr()
@@ -896,14 +896,13 @@ class ARAPBackendTaichi(ARAPBackend):
         else:
             b_np[fixed_indices] = rest_positions[fixed_indices]
 
-        # Solve using reduced system or full system fallback
+        # Solve using reduced system (splu batched) or full system fallback
         new_positions_np = np.zeros((n, 3))
 
-        if getattr(self, '_reduced_solver', None) is not None:
+        if getattr(self, '_splu', None) is not None:
             fixed_pos = b_np[self._fixed_idx]
-            for dim in range(3):
-                b_free_dim = b_np[self._free_idx, dim] - self._L_fc @ fixed_pos[:, dim]
-                new_positions_np[self._free_idx, dim] = self._reduced_solver(b_free_dim)
+            b_free = b_np[self._free_idx] - self._L_fc.dot(fixed_pos)
+            new_positions_np[self._free_idx] = self._splu.solve(b_free)
             new_positions_np[self._fixed_idx] = fixed_pos
         elif self._scipy_solver is not None:
             for dim in range(3):
