@@ -6199,14 +6199,21 @@ def _run_unified_volume_sim(v, active_muscles, max_iterations=100, tolerance=1e-
         }
 
     # Always collect current positions and fixed targets (these change per frame)
-    global_positions = np.zeros((total_verts, 3))
-    global_fixed_targets = {}  # global_idx -> target position
+    # Warm-start: use previous frame's solution as initial guess when available
+    prev_solution = cache.get('prev_solution', None) if cache_valid else None
+    if prev_solution is not None and prev_solution.shape[0] == total_verts:
+        global_positions = prev_solution.copy()
+        print(f"  Warm-starting from previous frame's solution")
+    else:
+        global_positions = np.zeros((total_verts, 3))
+        for name, mobj in active_muscles.items():
+            offset = global_offset[name]
+            n = mobj.soft_body.num_vertices
+            global_positions[offset:offset+n] = mobj.soft_body.positions
 
+    global_fixed_targets = {}  # global_idx -> target position
     for name, mobj in active_muscles.items():
         offset = global_offset[name]
-        n = mobj.soft_body.num_vertices
-        global_positions[offset:offset+n] = mobj.soft_body.positions
-
         # Store fixed targets
         if mobj.soft_body.fixed_targets is not None and len(mobj.soft_body.fixed_indices) > 0:
             for local_idx, target in zip(mobj.soft_body.fixed_indices, mobj.soft_body.fixed_targets):
@@ -6300,6 +6307,10 @@ def _run_unified_volume_sim(v, active_muscles, max_iterations=100, tolerance=1e-
                     stuck_count += 1
         if stuck_count > 0:
             print(f"  Fixed {stuck_count} stuck vertices by moving toward neighbors")
+
+    # Stash solution for warm-starting the next frame
+    if v._unified_sim_cache is not None:
+        v._unified_sim_cache['prev_solution'] = global_positions.copy()
 
     # Distribute results back to individual muscles
     total_change = 0.0
