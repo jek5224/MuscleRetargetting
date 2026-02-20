@@ -638,9 +638,6 @@ class ARAPBackendTaichi(ARAPBackend):
         self.edge_w = ti.field(dtype=ti.f64, shape=n_edges)
         self.edge_rest = ti.Vector.field(3, dtype=ti.f64, shape=n_edges)
 
-        # Rotation matrices (stored as numpy, computed per iteration)
-        self.rotations_np = np.zeros((n_verts, 3, 3))
-
         self._fields_allocated = True
 
     def build_system(self, num_vertices, neighbors, weights, fixed_mask, regularization=1e-6):
@@ -759,7 +756,7 @@ class ARAPBackendTaichi(ARAPBackend):
             AtA = A.transpose() @ A
 
             # Jacobi iterations to diagonalize AtA -> V @ D @ V^T
-            for _ in ti.static(range(10)):  # 10 iterations usually enough for 3x3
+            for _ in ti.static(range(6)):  # 6 iterations sufficient for 3x3
                 # Off-diagonal elements
                 for p, q in ti.static([(0, 1), (0, 2), (1, 2)]):
                     if ti.abs(AtA[p, q]) > 1e-10:
@@ -932,8 +929,7 @@ class ARAPBackendTaichi(ARAPBackend):
             self.rotations_field_local = ti.Matrix.field(3, 3, dtype=ti.f64, shape=n)
 
         # Copy positions to Taichi fields
-        self.positions.from_numpy(positions.astype(np.float64))
-        self.rest_positions.from_numpy(rest_positions.astype(np.float64))
+        self.positions.from_numpy(positions if positions.dtype == np.float64 else positions.astype(np.float64))
 
         # Build kernels if not cached
         if not hasattr(self, '_covariance_kernel'):
@@ -955,31 +951,16 @@ class ARAPBackendTaichi(ARAPBackend):
             n
         )
 
-        # Get rotations back to numpy (as list for compatibility)
-        rotations_np = self.rotations_field_local.to_numpy()
-        rotations = [rotations_np[i] for i in range(n)]
-
-        return rotations
+        return None
 
     def global_step(self, rest_positions, neighbors, weights, rest_edges,
-                    rotations, fixed_mask, fixed_targets, target_edges=None):
+                    fixed_mask, fixed_targets, target_edges=None):
         """Solve linear system using Taichi for RHS, scipy for solve."""
         import scipy.sparse.linalg
         ti = self.ti
 
         n = len(rest_positions)
         regularization = self.regularization
-
-        # Store rotations in numpy array for Taichi
-        rotations_np = np.array(rotations, dtype=np.float64)
-
-        # Allocate rotation field if needed
-        if not hasattr(self, 'rotations_field') or self.rotations_field.shape[0] != n:
-            self.rotations_field = ti.Matrix.field(3, 3, dtype=ti.f64, shape=n)
-
-        # Copy data to Taichi
-        self.rest_positions.from_numpy(rest_positions.astype(np.float64))
-        self.rotations_field.from_numpy(rotations_np)
 
         # Build RHS kernel if not cached
         if not hasattr(self, '_rhs_kernel'):
@@ -989,7 +970,7 @@ class ARAPBackendTaichi(ARAPBackend):
         self._rhs_kernel(
             self.rest_positions,
             self.edge_i, self.edge_j, self.edge_w, self.edge_rest,
-            self.rotations_field, self.rhs,
+            self.rotations_field_local, self.rhs,
             regularization, n, self.n_edges_total
         )
 
@@ -1023,50 +1004,60 @@ class ARAPBackendTaichi(ARAPBackend):
         """Run full ARAP iteration using Taichi."""
         positions = positions.copy()
         free_indices = np.where(~fixed_mask)[0]
+        fixed_indices = np.where(fixed_mask)[0]
 
         # Set fixed positions
         if fixed_targets is not None:
-            fixed_indices = np.where(fixed_mask)[0]
             positions[fixed_indices] = fixed_targets
 
-        for iteration in range(max_iterations):
-            old_positions = positions.copy()
+        # Pre-compute rest_positions as float64 (used for GPU upload)
+        rest_pos_f64 = rest_positions if rest_positions.dtype == np.float64 else rest_positions.astype(np.float64)
+        rest_uploaded = False
 
-            # Local step
-            rotations = self.local_step(positions, rest_positions, neighbors, weights, rest_edges, target_edges)
+        for iteration in range(max_iterations):
+
+            # Local step (first call may allocate GPU fields)
+            self.local_step(positions, rest_positions, neighbors, weights, rest_edges, target_edges)
+
+            # Upload rest_positions to GPU once after fields are allocated
+            if not rest_uploaded:
+                self.rest_positions.from_numpy(rest_pos_f64)
+                rest_uploaded = True
 
             # Debug output
             if verbose and iteration == 0:
-                rot_errors = [np.linalg.norm(r - np.eye(3)) for r in rotations]
+                rotations_np = self.rotations_field_local.to_numpy()
+                rot_errors = [np.linalg.norm(rotations_np[i] - np.eye(3)) for i in range(len(positions))]
                 print(f"  DEBUG: max rotation deviation from I: {max(rot_errors):.6f}")
 
             # Global step
-            positions = self.global_step(rest_positions, neighbors, weights, rest_edges,
-                                         rotations, fixed_mask, fixed_targets, target_edges)
+            new_positions = self.global_step(rest_positions, neighbors, weights, rest_edges,
+                                             fixed_mask, fixed_targets, target_edges)
 
             # Debug output
             if verbose and iteration == 0:
-                pos_diff = np.linalg.norm(positions - rest_positions, axis=1)
+                pos_diff = np.linalg.norm(new_positions - rest_positions, axis=1)
                 print(f"  DEBUG: max position diff from rest after iter 0: {np.max(pos_diff):.6f}")
 
             # Check for NaN
-            if not np.isfinite(positions).all():
+            if not np.isfinite(new_positions).all():
                 if verbose:
                     print(f"  Taichi: Non-finite at iteration {iteration}, reverting")
-                positions = old_positions
                 break
 
-            # Re-enforce fixed
-            if fixed_targets is not None:
-                fixed_indices = np.where(fixed_mask)[0]
-                positions[fixed_indices] = fixed_targets
-
-            # Check convergence
+            # Check convergence (before overwriting positions)
             if len(free_indices) > 0:
-                disp = np.linalg.norm(positions[free_indices] - old_positions[free_indices], axis=1)
+                disp = np.linalg.norm(new_positions[free_indices] - positions[free_indices], axis=1)
                 max_disp = np.max(disp)
             else:
                 max_disp = 0.0
+
+            # Update positions
+            positions = new_positions
+
+            # Re-enforce fixed
+            if fixed_targets is not None:
+                positions[fixed_indices] = fixed_targets
 
             if verbose and (iteration + 1) % 5 == 0:
                 print(f"  Iter {iteration+1}: max_disp={max_disp:.2e}")
