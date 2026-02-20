@@ -1159,6 +1159,39 @@ class ARAPBackendTaichi(ARAPBackend):
         """ARAP solve with GPU PCG: positions stay on GPU between iterations."""
         ti = self.ti
 
+        # Ensure fields are allocated before any GPU uploads
+        if self._data_stale:
+            if not hasattr(self, 'neighbor_rest_np') or len(self.neighbor_rest_np) != self.n_csr_edges:
+                neighbor_rest_list = []
+                for i, neighs in enumerate(neighbors):
+                    for j in neighs:
+                        if j in rest_edges[i]:
+                            neighbor_rest_list.append(rest_edges[i][j])
+                        else:
+                            neighbor_rest_list.append(rest_pos_f64[j] - rest_pos_f64[i])
+                self.neighbor_rest_np = np.array(neighbor_rest_list, dtype=np.float64)
+            if not self._fields_allocated or self.n_verts != n:
+                self._allocate_fields(n, self.n_csr_edges)
+            self.neighbor_offsets.from_numpy(self.neighbor_offsets_np)
+            self.neighbor_indices.from_numpy(self.neighbor_indices_np)
+            self.neighbor_weights.from_numpy(self.neighbor_weights_csr_np)
+            self.neighbor_rest.from_numpy(self.neighbor_rest_np)
+            self._data_stale = False
+        elif not self._fields_allocated or self.n_verts != n:
+            self._allocate_fields(n, self.n_csr_edges)
+
+        # Allocate CG fields if needed
+        if not self._cg_allocated:
+            self._allocate_cg_fields()
+
+        # Ensure kernels are built
+        if not hasattr(self, '_fused_local_kernel'):
+            self._fused_local_kernel = self._build_fused_local_kernel()
+        if not hasattr(self, '_rhs_kernel'):
+            self._rhs_kernel = self._build_rhs_kernel()
+        if not hasattr(self, 'rotations_field_local') or self.rotations_field_local.shape[0] != n:
+            self.rotations_field_local = ti.Matrix.field(3, 3, dtype=ti.f64, shape=n)
+
         # Upload all data to GPU once
         pos_f64 = positions if positions.dtype == np.float64 else positions.astype(np.float64)
         self.positions.from_numpy(pos_f64)
@@ -1180,39 +1213,6 @@ class ARAPBackendTaichi(ARAPBackend):
         if not hasattr(self, '_fixed_mask_field') or self._fixed_mask_field.shape[0] != n:
             self._fixed_mask_field = ti.field(dtype=ti.i32, shape=n)
         self._fixed_mask_field.from_numpy(fixed_mask.astype(np.int32))
-
-        # Ensure local step kernel + RHS kernel are built
-        if not hasattr(self, '_fused_local_kernel'):
-            self._fused_local_kernel = self._build_fused_local_kernel()
-        if not hasattr(self, '_rhs_kernel'):
-            self._rhs_kernel = self._build_rhs_kernel()
-
-        # Ensure rotation field exists
-        if not hasattr(self, 'rotations_field_local') or self.rotations_field_local.shape[0] != n:
-            self.rotations_field_local = ti.Matrix.field(3, 3, dtype=ti.f64, shape=n)
-
-        # Ensure CSR data is on GPU (handles first call or stale data)
-        if self._data_stale:
-            if not hasattr(self, 'neighbor_rest_np') or len(self.neighbor_rest_np) != self.n_csr_edges:
-                neighbor_rest_list = []
-                for i, neighs in enumerate(neighbors):
-                    for j in neighs:
-                        if j in rest_edges[i]:
-                            neighbor_rest_list.append(rest_edges[i][j])
-                        else:
-                            neighbor_rest_list.append(rest_pos_f64[j] - rest_pos_f64[i])
-                self.neighbor_rest_np = np.array(neighbor_rest_list, dtype=np.float64)
-            if not self._fields_allocated or self.n_verts != n:
-                self._allocate_fields(n, self.n_csr_edges)
-            self.neighbor_offsets.from_numpy(self.neighbor_offsets_np)
-            self.neighbor_indices.from_numpy(self.neighbor_indices_np)
-            self.neighbor_weights.from_numpy(self.neighbor_weights_csr_np)
-            self.neighbor_rest.from_numpy(self.neighbor_rest_np)
-            self._data_stale = False
-
-        # Allocate CG fields if needed
-        if not self._cg_allocated:
-            self._allocate_cg_fields()
 
         # Keep a numpy fallback in case of NaN
         fallback_positions = positions.copy()
