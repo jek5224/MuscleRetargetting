@@ -954,6 +954,7 @@ class ARAPBackendTaichi(ARAPBackend):
         @ti.kernel
         def cg_dot(x: ti.template(), y: ti.template(),
                     out: ti.template(), n: ti.i32):
+            out[None] = 0.0
             for i in range(n):
                 ti.atomic_add(out[None], x[i].dot(y[i]))
 
@@ -1004,6 +1005,7 @@ class ARAPBackendTaichi(ARAPBackend):
         def cg_convergence(new_pos: ti.template(), old_pos: ti.template(),
                             free_mask: ti.template(),
                             out: ti.template(), n: ti.i32):
+            out[None] = 0.0
             for i in range(n):
                 if free_mask[i] == 0:
                     diff = (new_pos[i] - old_pos[i]).norm()
@@ -1044,7 +1046,6 @@ class ARAPBackendTaichi(ARAPBackend):
         self._cg_copy_k(self.cg_z, self.cg_p, n)
 
         # rz = r . z
-        self.cg_rz[None] = 0.0
         self._cg_dot_k(self.cg_r, self.cg_z, self.cg_rz, n)
 
         # Read initial rz for relative convergence check
@@ -1062,7 +1063,6 @@ class ARAPBackendTaichi(ARAPBackend):
                              self.cg_p, self.cg_Ap, n)
 
             # pAp = p . Ap
-            self.cg_pAp[None] = 0.0
             self._cg_dot_k(self.cg_p, self.cg_Ap, self.cg_pAp, n)
 
             # alpha = rz/pAp, x += alpha*p, r -= alpha*Ap
@@ -1073,7 +1073,6 @@ class ARAPBackendTaichi(ARAPBackend):
             self._cg_precond_k(self.cg_diag_inv, self.cg_r, self.cg_z, n)
 
             # rz_new = r . z
-            self.cg_rz_new[None] = 0.0
             self._cg_dot_k(self.cg_r, self.cg_z, self.cg_rz_new, n)
 
             # beta = rz_new/rz, p = z + beta*p, rz = rz_new
@@ -1112,8 +1111,8 @@ class ARAPBackendTaichi(ARAPBackend):
 
         rest_pos_f64 = rest_positions if rest_positions.dtype == np.float64 else rest_positions.astype(np.float64)
 
-        # Try GPU CG path
-        use_gpu_cg = getattr(self, '_cg_allocated', False)
+        # Try GPU CG path (available after build_system prepares L CSR data)
+        use_gpu_cg = hasattr(self, '_L_nnz') and self._L_nnz is not None
         if use_gpu_cg and not getattr(self, '_cg_kernels_built', False):
             self._build_cg_kernels()
 
@@ -1253,7 +1252,6 @@ class ARAPBackendTaichi(ARAPBackend):
                                       self._fixed_tgt_field, n_fixed)
 
             # Convergence check on GPU (one scalar download)
-            self.cg_max_disp[None] = 0.0
             self._cg_convergence_k(self.positions, self._old_positions,
                                     self._fixed_mask_field, self.cg_max_disp, n)
             max_disp = self.cg_max_disp[None]
