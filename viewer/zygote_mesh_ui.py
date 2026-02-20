@@ -7019,15 +7019,14 @@ def _motion_start_bake(v):
     v._unified_sim_cache = None
     v.motion_baking = True
     v.motion_bake_current = 0
+    v.motion_current_frame = -1  # so first _motion_bake_step processes frame 0
     v.motion_is_playing = False
     # Init per-muscle accumulator for baked results
     v._bake_data = {}
     v._bake_start_time = time.time()
     for mname, mobj in v.zygote_muscle_meshes.items():
         if mobj.soft_body is not None:
-            v._bake_data[mname] = {
-                0: {'positions': mobj.soft_body.get_positions().astype(np.float32)}
-            }
+            v._bake_data[mname] = {}
     print(f"Started bake: frames 0-{v.motion_bake_end_frame}")
 
 
@@ -7131,7 +7130,7 @@ def _motion_bake_finish(v):
     v.motion_baking = False
     v._bake_data = {}
     _motion_load_cache(v)
-    n_simulated = v.motion_bake_end_frame  # frames 1..end (frame 0 is rest pose)
+    n_simulated = v.motion_bake_end_frame + 1  # frames 0..end
     elapsed = time.time() - getattr(v, '_bake_start_time', time.time())
     avg_frame = elapsed / max(n_simulated, 1)
     cache = getattr(v, '_unified_sim_cache', None)
