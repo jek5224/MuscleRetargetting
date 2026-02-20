@@ -642,6 +642,7 @@ class ARAPBackendTaichi(ARAPBackend):
         import scipy.sparse
 
         self._scipy_solver = None  # Clear cache
+        self._fields_allocated = False  # Force re-upload of GPU fields
 
         n = num_vertices
         self.num_vertices = n
