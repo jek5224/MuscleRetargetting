@@ -695,7 +695,7 @@ class ARAPBackendTaichi(ARAPBackend):
             (vals, (rows, cols)), shape=(n, n)
         )
 
-        # Extract free-DOF subblock and factorize with splu for batched solve
+        # Extract free-DOF subblock and factorize for reduced solve
         import scipy.sparse.linalg
         free_idx = np.where(~np.array(fixed_mask))[0]
         fixed_idx = np.where(np.array(fixed_mask))[0]
@@ -704,11 +704,11 @@ class ARAPBackendTaichi(ARAPBackend):
         try:
             L_ff = self._L_scipy[np.ix_(free_idx, free_idx)].tocsc()
             self._L_fc = self._L_scipy[np.ix_(free_idx, fixed_idx)]
-            self._splu = scipy.sparse.linalg.splu(L_ff)
+            self._reduced_solver = scipy.sparse.linalg.factorized(L_ff)
         except Exception:
-            self._splu = None
+            self._reduced_solver = None
 
-        # Pre-factorize full system for scipy fallback
+        # Pre-factorize full system for fallback
         try:
             self._scipy_solver = scipy.sparse.linalg.factorized(self._L_scipy)
         except Exception:
@@ -896,14 +896,14 @@ class ARAPBackendTaichi(ARAPBackend):
         else:
             b_np[fixed_indices] = rest_positions[fixed_indices]
 
-        # Solve using reduced system (splu) or full system fallback
+        # Solve using reduced system or full system fallback
         new_positions_np = np.zeros((n, 3))
 
-        if getattr(self, '_splu', None) is not None:
+        if getattr(self, '_reduced_solver', None) is not None:
             fixed_pos = b_np[self._fixed_idx]
-            b_free = b_np[self._free_idx] - self._L_fc @ fixed_pos
-            x_free = self._splu.solve(b_free)  # (n_free, 3) batched
-            new_positions_np[self._free_idx] = x_free
+            for dim in range(3):
+                b_free_dim = b_np[self._free_idx, dim] - self._L_fc @ fixed_pos[:, dim]
+                new_positions_np[self._free_idx, dim] = self._reduced_solver(b_free_dim)
             new_positions_np[self._fixed_idx] = fixed_pos
         elif self._scipy_solver is not None:
             for dim in range(3):
