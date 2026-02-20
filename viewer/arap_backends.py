@@ -610,6 +610,7 @@ class ARAPBackendTaichi(ARAPBackend):
         # Fields will be allocated when needed
         self.n_verts = 0
         self._fields_allocated = False
+        self._data_stale = True  # True = CSR data needs re-upload to GPU
 
         # Scipy solver cache
         self._scipy_solver = None
@@ -642,7 +643,7 @@ class ARAPBackendTaichi(ARAPBackend):
         import scipy.sparse
 
         self._scipy_solver = None  # Clear cache
-        self._fields_allocated = False  # Force re-upload of GPU fields
+        self._data_stale = True  # Force re-upload of CSR data to GPU
 
         n = num_vertices
         self.num_vertices = n
@@ -783,7 +784,7 @@ class ARAPBackendTaichi(ARAPBackend):
         ti = self.ti
         n = len(positions)
 
-        # Allocate fields if needed
+        # Allocate fields if size changed
         if not self._fields_allocated or self.n_verts != n:
             # Build CSR rest edge vectors
             neighbor_rest_list = []
@@ -796,12 +797,26 @@ class ARAPBackendTaichi(ARAPBackend):
             self.neighbor_rest_np = np.array(neighbor_rest_list, dtype=np.float64)
 
             self._allocate_fields(n, self.n_csr_edges)
+            self._data_stale = True  # New fields need data upload
 
-            # Copy CSR data to Taichi fields
+        # Re-upload CSR data if stale (build_system was called with new data)
+        if self._data_stale:
+            # Rebuild CSR rest edge vectors if not already done above
+            if not hasattr(self, 'neighbor_rest_np') or len(self.neighbor_rest_np) != self.n_csr_edges:
+                neighbor_rest_list = []
+                for i, neighs in enumerate(neighbors):
+                    for j in neighs:
+                        if j in rest_edges[i]:
+                            neighbor_rest_list.append(rest_edges[i][j])
+                        else:
+                            neighbor_rest_list.append(rest_positions[j] - rest_positions[i])
+                self.neighbor_rest_np = np.array(neighbor_rest_list, dtype=np.float64)
+
             self.neighbor_offsets.from_numpy(self.neighbor_offsets_np)
             self.neighbor_indices.from_numpy(self.neighbor_indices_np)
             self.neighbor_weights.from_numpy(self.neighbor_weights_csr_np)
             self.neighbor_rest.from_numpy(self.neighbor_rest_np)
+            self._data_stale = False
 
         # Allocate rotation field if needed
         if not hasattr(self, 'rotations_field_local') or self.rotations_field_local.shape[0] != n:
