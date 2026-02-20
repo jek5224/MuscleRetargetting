@@ -695,12 +695,25 @@ class ARAPBackendTaichi(ARAPBackend):
             (vals, (rows, cols)), shape=(n, n)
         )
 
-        # Pre-factorize
+        # Pre-factorize for scipy fallback
         import scipy.sparse.linalg
         try:
             self._scipy_solver = scipy.sparse.linalg.factorized(self._L_scipy)
         except Exception:
             self._scipy_solver = None
+
+        # Build L CSR arrays for GPU CG solver
+        L_csr = self._L_scipy.tocsr()
+        self._L_csr_offsets_np = L_csr.indptr.astype(np.int32)
+        self._L_csr_indices_np = L_csr.indices.astype(np.int32)
+        self._L_csr_values_np = L_csr.data.astype(np.float64)
+        self._L_nnz = len(self._L_csr_values_np)
+
+        # Jacobi preconditioner: inverse diagonal
+        diag = np.array(L_csr.diagonal(), dtype=np.float64)
+        self._L_diag_inv_np = np.where(np.abs(diag) > 1e-15, 1.0 / diag, 1.0)
+
+        self._cg_allocated = False
 
         return True
 
@@ -885,10 +898,210 @@ class ARAPBackendTaichi(ARAPBackend):
 
         return new_positions_np
 
+    # ── GPU CG solver ──────────────────────────────────────────────────
+
+    def _allocate_cg_fields(self):
+        """Allocate Taichi fields for GPU PCG solver."""
+        ti = self.ti
+        n = self.num_vertices
+        nnz = self._L_nnz
+
+        # L matrix CSR on GPU
+        self.L_cg_offsets = ti.field(dtype=ti.i32, shape=n + 1)
+        self.L_cg_indices = ti.field(dtype=ti.i32, shape=nnz)
+        self.L_cg_values = ti.field(dtype=ti.f64, shape=nnz)
+        self.cg_diag_inv = ti.field(dtype=ti.f64, shape=n)
+
+        # CG work vectors (3-component to handle x/y/z simultaneously)
+        self.cg_x = ti.Vector.field(3, dtype=ti.f64, shape=n)
+        self.cg_r = ti.Vector.field(3, dtype=ti.f64, shape=n)
+        self.cg_z = ti.Vector.field(3, dtype=ti.f64, shape=n)
+        self.cg_p = ti.Vector.field(3, dtype=ti.f64, shape=n)
+        self.cg_Ap = ti.Vector.field(3, dtype=ti.f64, shape=n)
+
+        # Old positions for ARAP convergence check
+        self._old_positions = ti.Vector.field(3, dtype=ti.f64, shape=n)
+
+        # Reduction scalars
+        self.cg_rz = ti.field(dtype=ti.f64, shape=())
+        self.cg_pAp = ti.field(dtype=ti.f64, shape=())
+        self.cg_rz_new = ti.field(dtype=ti.f64, shape=())
+        self.cg_max_disp = ti.field(dtype=ti.f64, shape=())
+
+        # Upload L data to GPU
+        self.L_cg_offsets.from_numpy(self._L_csr_offsets_np)
+        self.L_cg_indices.from_numpy(self._L_csr_indices_np)
+        self.L_cg_values.from_numpy(self._L_csr_values_np)
+        self.cg_diag_inv.from_numpy(self._L_diag_inv_np)
+
+        self._cg_allocated = True
+
+    def _build_cg_kernels(self):
+        """Build all Taichi kernels for PCG solver."""
+        ti = self.ti
+
+        @ti.kernel
+        def cg_spmv(offsets: ti.template(), indices: ti.template(),
+                     values: ti.template(), x: ti.template(),
+                     out: ti.template(), n: ti.i32):
+            for i in range(n):
+                val = ti.Vector([0.0, 0.0, 0.0], dt=ti.f64)
+                for idx in range(offsets[i], offsets[i + 1]):
+                    j = indices[idx]
+                    val += values[idx] * x[j]
+                out[i] = val
+
+        @ti.kernel
+        def cg_dot(x: ti.template(), y: ti.template(),
+                    out: ti.template(), n: ti.i32):
+            for i in range(n):
+                ti.atomic_add(out[None], x[i].dot(y[i]))
+
+        @ti.kernel
+        def cg_residual(b: ti.template(), Ax: ti.template(),
+                         r: ti.template(), n: ti.i32):
+            for i in range(n):
+                r[i] = b[i] - Ax[i]
+
+        @ti.kernel
+        def cg_precond(diag_inv: ti.template(), r: ti.template(),
+                        z: ti.template(), n: ti.i32):
+            for i in range(n):
+                z[i] = diag_inv[i] * r[i]
+
+        @ti.kernel
+        def cg_copy(src: ti.template(), dst: ti.template(), n: ti.i32):
+            for i in range(n):
+                dst[i] = src[i]
+
+        @ti.kernel
+        def cg_step1(cg_x: ti.template(), cg_r: ti.template(),
+                      cg_p: ti.template(), cg_Ap: ti.template(),
+                      rz: ti.template(), pAp: ti.template(), n: ti.i32):
+            """alpha = rz/pAp; x += alpha*p; r -= alpha*Ap"""
+            alpha = rz[None] / pAp[None]
+            for i in range(n):
+                cg_x[i] += alpha * cg_p[i]
+                cg_r[i] -= alpha * cg_Ap[i]
+
+        @ti.kernel
+        def cg_step2(cg_p: ti.template(), cg_z: ti.template(),
+                      rz: ti.template(), rz_new: ti.template(), n: ti.i32):
+            """beta = rz_new/rz; p = z + beta*p; rz = rz_new"""
+            beta = rz_new[None] / rz[None]
+            rz[None] = rz_new[None]
+            for i in range(n):
+                cg_p[i] = cg_z[i] + beta * cg_p[i]
+
+        @ti.kernel
+        def cg_set_fixed(field: ti.template(), indices: ti.template(),
+                          targets: ti.template(), n_fixed: ti.i32):
+            for k in range(n_fixed):
+                i = indices[k]
+                field[i] = targets[k]
+
+        @ti.kernel
+        def cg_convergence(new_pos: ti.template(), old_pos: ti.template(),
+                            free_mask: ti.template(),
+                            out: ti.template(), n: ti.i32):
+            for i in range(n):
+                if free_mask[i] == 0:
+                    diff = (new_pos[i] - old_pos[i]).norm()
+                    ti.atomic_max(out[None], diff)
+
+        self._cg_spmv_k = cg_spmv
+        self._cg_dot_k = cg_dot
+        self._cg_residual_k = cg_residual
+        self._cg_precond_k = cg_precond
+        self._cg_copy_k = cg_copy
+        self._cg_step1_k = cg_step1
+        self._cg_step2_k = cg_step2
+        self._cg_set_fixed_k = cg_set_fixed
+        self._cg_convergence_k = cg_convergence
+        self._cg_kernels_built = True
+
+    def _gpu_pcg_solve(self, n, max_iter=200, cg_tol=1e-10):
+        """Run Jacobi-preconditioned CG on GPU: L @ x = rhs.
+
+        Initial guess read from self.positions, RHS from self.rhs.
+        Solution written to self.positions.
+        Returns number of CG iterations.
+        """
+        # x = initial guess (copy positions)
+        self._cg_copy_k(self.positions, self.cg_x, n)
+
+        # Ap = L @ x0
+        self._cg_spmv_k(self.L_cg_offsets, self.L_cg_indices, self.L_cg_values,
+                         self.cg_x, self.cg_Ap, n)
+
+        # r = b - Ax0
+        self._cg_residual_k(self.rhs, self.cg_Ap, self.cg_r, n)
+
+        # z = M^{-1} r
+        self._cg_precond_k(self.cg_diag_inv, self.cg_r, self.cg_z, n)
+
+        # p = z
+        self._cg_copy_k(self.cg_z, self.cg_p, n)
+
+        # rz = r . z
+        self.cg_rz[None] = 0.0
+        self._cg_dot_k(self.cg_r, self.cg_z, self.cg_rz, n)
+
+        # Read initial rz for relative convergence check
+        rz0 = self.cg_rz[None]
+        if rz0 < 1e-30:
+            self._cg_copy_k(self.cg_x, self.positions, n)
+            return 0
+
+        cg_tol_sq = cg_tol * cg_tol
+        iters = 0
+
+        for k in range(max_iter):
+            # Ap = L @ p
+            self._cg_spmv_k(self.L_cg_offsets, self.L_cg_indices, self.L_cg_values,
+                             self.cg_p, self.cg_Ap, n)
+
+            # pAp = p . Ap
+            self.cg_pAp[None] = 0.0
+            self._cg_dot_k(self.cg_p, self.cg_Ap, self.cg_pAp, n)
+
+            # alpha = rz/pAp, x += alpha*p, r -= alpha*Ap
+            self._cg_step1_k(self.cg_x, self.cg_r, self.cg_p, self.cg_Ap,
+                              self.cg_rz, self.cg_pAp, n)
+
+            # z = M^{-1} r
+            self._cg_precond_k(self.cg_diag_inv, self.cg_r, self.cg_z, n)
+
+            # rz_new = r . z
+            self.cg_rz_new[None] = 0.0
+            self._cg_dot_k(self.cg_r, self.cg_z, self.cg_rz_new, n)
+
+            # beta = rz_new/rz, p = z + beta*p, rz = rz_new
+            self._cg_step2_k(self.cg_p, self.cg_z, self.cg_rz, self.cg_rz_new, n)
+
+            iters = k + 1
+
+            # Check convergence periodically (one scalar download)
+            if (k + 1) % 20 == 0 or k == max_iter - 1:
+                rz_val = self.cg_rz[None]
+                if rz_val < rz0 * cg_tol_sq:
+                    break
+
+        # Copy solution to positions
+        self._cg_copy_k(self.cg_x, self.positions, n)
+        return iters
+
+    # ── Solve methods ────────────────────────────────────────────────
+
     def solve(self, positions, rest_positions, neighbors, weights, rest_edges,
               fixed_mask, fixed_targets, max_iterations=20, tolerance=1e-4,
               target_edges=None, verbose=False):
-        """Run full ARAP iteration using Taichi."""
+        """Run full ARAP iteration using Taichi.
+        Uses GPU PCG for the linear solve when CG fields are allocated,
+        keeping positions on GPU between iterations to eliminate transfers.
+        Falls back to scipy otherwise.
+        """
+        n = len(positions)
         positions = positions.copy()
         free_indices = np.where(~fixed_mask)[0]
         fixed_indices = np.where(fixed_mask)[0]
@@ -897,66 +1110,174 @@ class ARAPBackendTaichi(ARAPBackend):
         if fixed_targets is not None:
             positions[fixed_indices] = fixed_targets
 
-        # Pre-compute rest_positions as float64 (used for GPU upload)
         rest_pos_f64 = rest_positions if rest_positions.dtype == np.float64 else rest_positions.astype(np.float64)
+
+        # Try GPU CG path
+        use_gpu_cg = getattr(self, '_cg_allocated', False)
+        if use_gpu_cg and not getattr(self, '_cg_kernels_built', False):
+            self._build_cg_kernels()
+
+        if use_gpu_cg:
+            return self._solve_gpu_cg(
+                positions, rest_pos_f64, n, free_indices, fixed_indices,
+                fixed_mask, fixed_targets, neighbors, weights, rest_edges,
+                target_edges, max_iterations, tolerance, verbose)
+
+        # Fallback: original scipy path
         rest_uploaded = False
-
         for iteration in range(max_iterations):
-
-            # Local step (first call may allocate GPU fields)
             self.local_step(positions, rest_positions, neighbors, weights, rest_edges, target_edges)
-
-            # Upload rest_positions to GPU once after fields are allocated
             if not rest_uploaded:
                 self.rest_positions.from_numpy(rest_pos_f64)
                 rest_uploaded = True
-
-            # Debug output
-            if verbose and iteration == 0:
-                rotations_np = self.rotations_field_local.to_numpy()
-                rot_errors = [np.linalg.norm(rotations_np[i] - np.eye(3)) for i in range(len(positions))]
-                print(f"  DEBUG: max rotation deviation from I: {max(rot_errors):.6f}")
-
-            # Global step
             new_positions = self.global_step(rest_positions, neighbors, weights, rest_edges,
                                              fixed_mask, fixed_targets, target_edges)
-
-            # Debug output
-            if verbose and iteration == 0:
-                pos_diff = np.linalg.norm(new_positions - rest_positions, axis=1)
-                print(f"  DEBUG: max position diff from rest after iter 0: {np.max(pos_diff):.6f}")
-
-            # Check for NaN
             if not np.isfinite(new_positions).all():
                 if verbose:
                     print(f"  Taichi: Non-finite at iteration {iteration}, reverting")
                 break
-
-            # Check convergence (before overwriting positions)
             if len(free_indices) > 0:
                 disp = np.linalg.norm(new_positions[free_indices] - positions[free_indices], axis=1)
                 max_disp = np.max(disp)
             else:
                 max_disp = 0.0
-
-            # Update positions
             positions = new_positions
-
-            # Re-enforce fixed
             if fixed_targets is not None:
                 positions[fixed_indices] = fixed_targets
-
             if verbose and (iteration + 1) % 5 == 0:
                 print(f"  Iter {iteration+1}: max_disp={max_disp:.2e}")
-
             if max_disp < tolerance:
                 if verbose:
                     print(f"  Converged at iteration {iteration+1}, max_disp={max_disp:.2e}")
                 return positions, iteration + 1, max_disp
-
         if verbose:
             print(f"  Max iterations reached, max_disp={max_disp:.2e}")
         return positions, max_iterations, max_disp
+
+    def _solve_gpu_cg(self, positions, rest_pos_f64, n, free_indices, fixed_indices,
+                       fixed_mask, fixed_targets, neighbors, weights, rest_edges,
+                       target_edges, max_iterations, tolerance, verbose):
+        """ARAP solve with GPU PCG: positions stay on GPU between iterations."""
+        ti = self.ti
+
+        # Upload all data to GPU once
+        pos_f64 = positions if positions.dtype == np.float64 else positions.astype(np.float64)
+        self.positions.from_numpy(pos_f64)
+        self.rest_positions.from_numpy(rest_pos_f64)
+
+        # Upload fixed target info to GPU
+        n_fixed = len(fixed_indices)
+        if n_fixed > 0:
+            if not hasattr(self, '_fixed_idx_field') or self._fixed_idx_field.shape[0] != n_fixed:
+                self._fixed_idx_field = ti.field(dtype=ti.i32, shape=n_fixed)
+                self._fixed_tgt_field = ti.Vector.field(3, dtype=ti.f64, shape=n_fixed)
+            self._fixed_idx_field.from_numpy(fixed_indices.astype(np.int32))
+            if fixed_targets is not None:
+                self._fixed_tgt_field.from_numpy(fixed_targets.astype(np.float64))
+            else:
+                self._fixed_tgt_field.from_numpy(rest_pos_f64[fixed_indices])
+
+        # Upload fixed mask as int for convergence kernel
+        if not hasattr(self, '_fixed_mask_field') or self._fixed_mask_field.shape[0] != n:
+            self._fixed_mask_field = ti.field(dtype=ti.i32, shape=n)
+        self._fixed_mask_field.from_numpy(fixed_mask.astype(np.int32))
+
+        # Ensure local step kernel + RHS kernel are built
+        if not hasattr(self, '_fused_local_kernel'):
+            self._fused_local_kernel = self._build_fused_local_kernel()
+        if not hasattr(self, '_rhs_kernel'):
+            self._rhs_kernel = self._build_rhs_kernel()
+
+        # Ensure rotation field exists
+        if not hasattr(self, 'rotations_field_local') or self.rotations_field_local.shape[0] != n:
+            self.rotations_field_local = ti.Matrix.field(3, 3, dtype=ti.f64, shape=n)
+
+        # Ensure CSR data is on GPU (handles first call or stale data)
+        if self._data_stale:
+            if not hasattr(self, 'neighbor_rest_np') or len(self.neighbor_rest_np) != self.n_csr_edges:
+                neighbor_rest_list = []
+                for i, neighs in enumerate(neighbors):
+                    for j in neighs:
+                        if j in rest_edges[i]:
+                            neighbor_rest_list.append(rest_edges[i][j])
+                        else:
+                            neighbor_rest_list.append(rest_pos_f64[j] - rest_pos_f64[i])
+                self.neighbor_rest_np = np.array(neighbor_rest_list, dtype=np.float64)
+            if not self._fields_allocated or self.n_verts != n:
+                self._allocate_fields(n, self.n_csr_edges)
+            self.neighbor_offsets.from_numpy(self.neighbor_offsets_np)
+            self.neighbor_indices.from_numpy(self.neighbor_indices_np)
+            self.neighbor_weights.from_numpy(self.neighbor_weights_csr_np)
+            self.neighbor_rest.from_numpy(self.neighbor_rest_np)
+            self._data_stale = False
+
+        # Allocate CG fields if needed
+        if not self._cg_allocated:
+            self._allocate_cg_fields()
+
+        # Keep a numpy fallback in case of NaN
+        fallback_positions = positions.copy()
+
+        for iteration in range(max_iterations):
+            # Save old positions for convergence check (GPU copy)
+            self._cg_copy_k(self.positions, self._old_positions, n)
+
+            # Local step: reads self.positions, writes self.rotations_field_local
+            self._fused_local_kernel(
+                self.positions,
+                self.neighbor_offsets, self.neighbor_indices,
+                self.neighbor_weights, self.neighbor_rest,
+                self.rotations_field_local, n
+            )
+
+            # RHS kernel: reads rest_positions + rotations → writes self.rhs
+            self._rhs_kernel(
+                self.rest_positions,
+                self.neighbor_offsets, self.neighbor_indices,
+                self.neighbor_weights, self.neighbor_rest,
+                self.rotations_field_local, self.rhs,
+                self.regularization, n
+            )
+
+            # Set fixed vertex RHS on GPU
+            if n_fixed > 0:
+                self._cg_set_fixed_k(self.rhs, self._fixed_idx_field,
+                                      self._fixed_tgt_field, n_fixed)
+
+            # Solve L @ x = rhs using PCG on GPU
+            cg_iters = self._gpu_pcg_solve(n)
+
+            # Re-enforce fixed positions on GPU
+            if n_fixed > 0:
+                self._cg_set_fixed_k(self.positions, self._fixed_idx_field,
+                                      self._fixed_tgt_field, n_fixed)
+
+            # Convergence check on GPU (one scalar download)
+            self.cg_max_disp[None] = 0.0
+            self._cg_convergence_k(self.positions, self._old_positions,
+                                    self._fixed_mask_field, self.cg_max_disp, n)
+            max_disp = self.cg_max_disp[None]
+
+            if not np.isfinite(max_disp) or max_disp > 1e6:
+                if verbose:
+                    print(f"  GPU CG: Non-finite at iteration {iteration}, reverting")
+                return fallback_positions, iteration, float('inf')
+
+            if verbose and (iteration + 1) % 5 == 0:
+                print(f"  Iter {iteration+1}: max_disp={max_disp:.2e} (CG:{cg_iters})")
+
+            if max_disp < tolerance:
+                if verbose:
+                    print(f"  Converged at iteration {iteration+1}, max_disp={max_disp:.2e}")
+                return self.positions.to_numpy(), iteration + 1, max_disp
+
+            # Periodic numpy backup for NaN fallback
+            if iteration % 20 == 0:
+                fallback_positions = self.positions.to_numpy().copy()
+
+        if verbose:
+            print(f"  Max iterations reached, max_disp={max_disp:.2e}")
+        return self.positions.to_numpy(), max_iterations, max_disp
 
 
 def get_backend(name='cpu', device=None):
