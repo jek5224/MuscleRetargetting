@@ -695,8 +695,20 @@ class ARAPBackendTaichi(ARAPBackend):
             (vals, (rows, cols)), shape=(n, n)
         )
 
-        # Pre-factorize for scipy fallback
+        # Extract free-DOF subblock and factorize with splu for batched solve
         import scipy.sparse.linalg
+        free_idx = np.where(~np.array(fixed_mask))[0]
+        fixed_idx = np.where(np.array(fixed_mask))[0]
+        self._free_idx = free_idx
+        self._fixed_idx = fixed_idx
+        try:
+            L_ff = self._L_scipy[np.ix_(free_idx, free_idx)].tocsc()
+            self._L_fc = self._L_scipy[np.ix_(free_idx, fixed_idx)]
+            self._splu = scipy.sparse.linalg.splu(L_ff)
+        except Exception:
+            self._splu = None
+
+        # Pre-factorize full system for scipy fallback
         try:
             self._scipy_solver = scipy.sparse.linalg.factorized(self._L_scipy)
         except Exception:
@@ -884,10 +896,16 @@ class ARAPBackendTaichi(ARAPBackend):
         else:
             b_np[fixed_indices] = rest_positions[fixed_indices]
 
-        # Solve using scipy
+        # Solve using reduced system (splu) or full system fallback
         new_positions_np = np.zeros((n, 3))
 
-        if self._scipy_solver is not None:
+        if getattr(self, '_splu', None) is not None:
+            fixed_pos = b_np[self._fixed_idx]
+            b_free = b_np[self._free_idx] - self._L_fc @ fixed_pos
+            x_free = self._splu.solve(b_free)  # (n_free, 3) batched
+            new_positions_np[self._free_idx] = x_free
+            new_positions_np[self._fixed_idx] = fixed_pos
+        elif self._scipy_solver is not None:
             for dim in range(3):
                 new_positions_np[:, dim] = self._scipy_solver(b_np[:, dim])
         else:
