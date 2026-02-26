@@ -6031,7 +6031,7 @@ def run_all_tet_sim_with_constraints(v, max_iterations=100, tolerance=1e-4, oute
 
     n_constraints = len(v.inter_muscle_constraints)
 
-    if v.coupled_as_unified_volume and n_constraints > 0:
+    if v.coupled_as_unified_volume:
         # Unified volume mode: treat all muscles as one system
         _run_unified_volume_sim(v, active_muscles, max_iterations, tolerance)
     else:
