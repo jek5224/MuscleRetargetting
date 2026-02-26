@@ -631,6 +631,11 @@ class TetrahedronMeshMixin:
                 'draw_contour_stream': self.draw_contour_stream if hasattr(self, 'draw_contour_stream') else None,
                 'contour_to_tet_mapping': contour_mapping_data,
                 'fiber_sampling_seed': getattr(self, 'fiber_sampling_seed', 42),
+                'mvc_weights': getattr(self, 'mvc_weights', None),
+                '_stream_endpoints': getattr(self, '_stream_endpoints', None),
+                'stream_contours': getattr(self, 'stream_contours', None),
+                'stream_bounding_planes': getattr(self, 'stream_bounding_planes', None),
+                'stream_groups': getattr(self, 'stream_groups', None),
             }
 
             with open(filepath, 'wb') as f:
@@ -735,6 +740,25 @@ class TetrahedronMeshMixin:
             # Load fiber sampling seed
             if 'fiber_sampling_seed' in data:
                 self.fiber_sampling_seed = data['fiber_sampling_seed']
+
+            # Load MVC weights (for deforming waypoints with tet sim)
+            if 'mvc_weights' in data and data['mvc_weights'] is not None:
+                self.mvc_weights = data['mvc_weights']
+                print(f"  Loaded MVC weights")
+
+            # Load stream endpoints (for fiber architecture)
+            if '_stream_endpoints' in data and data['_stream_endpoints'] is not None:
+                self._stream_endpoints = data['_stream_endpoints']
+                print(f"  Loaded stream endpoints")
+
+            # Load stream data (post-cut contours/BPs/groups)
+            if 'stream_contours' in data and data['stream_contours'] is not None:
+                self.stream_contours = data['stream_contours']
+                print(f"  Loaded {len(self.stream_contours)} stream contours")
+            if 'stream_bounding_planes' in data and data['stream_bounding_planes'] is not None:
+                self.stream_bounding_planes = data['stream_bounding_planes']
+            if 'stream_groups' in data and data['stream_groups'] is not None:
+                self.stream_groups = data['stream_groups']
 
             print(f"[{name}] Loaded tetrahedron mesh from {filepath}")
             print(f"  Vertices: {len(self.tet_vertices)}, Render faces: {len(self.tet_render_faces)}, Sim faces: {len(self.tet_sim_faces)}, Tets: {len(self.tet_tetrahedra)}")
