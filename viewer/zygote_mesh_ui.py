@@ -1868,9 +1868,9 @@ def _draw_motion_browser_ui(v):
                     v.motion_is_playing = True
                     v.motion_play_accumulator = 0.0
         imgui.same_line()
-        speed_options = [0.25, 0.5, 1.0, 2.0]
-        speed_labels = ["0.25x", "0.5x", "1.0x", "2.0x"]
-        current_speed_idx = speed_options.index(v.motion_play_speed) if v.motion_play_speed in speed_options else 2
+        speed_options = [0.1, 0.25, 0.5, 1.0, 2.0]
+        speed_labels = ["0.1x", "0.25x", "0.5x", "1.0x", "2.0x"]
+        current_speed_idx = speed_options.index(v.motion_play_speed) if v.motion_play_speed in speed_options else 3
         imgui.push_item_width(80)
         changed, new_speed_idx = imgui.combo("Speed##motion", current_speed_idx, speed_labels)
         imgui.pop_item_width()
