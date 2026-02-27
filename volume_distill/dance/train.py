@@ -16,12 +16,12 @@ from volume_distill.dataset import MuscleDistillDataset, distill_collate_fn
 DATA_PATH = "data/motion_cache/dance/preprocessed.pt"
 CHECKPOINT_DIR = "volume_distill/dance/checkpoints"
 LOG_DIR = "volume_distill/dance/runs"
-EPOCHS = 200
+EPOCHS = 400
 BATCH_SIZE = 512
-LR = 1e-4
+LR = 3e-4
 WEIGHT_DECAY = 1e-5
 SCHEDULER_FACTOR = 0.5
-SCHEDULER_PATIENCE = 10
+SCHEDULER_PATIENCE = 20
 
 
 def train():
