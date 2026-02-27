@@ -6979,13 +6979,6 @@ def _motion_apply_nn_deformation(v, frame):
                 continue
             # Transform pelvis-local → world
             world_pos = (R @ local_pos.T).T + t
-            # Snap fixed vertices (origin/insertion) to their bone-attached positions
-            if hasattr(mobj, 'soft_body_local_anchors') and mobj.soft_body_local_anchors:
-                for v_idx, (body_name, local_p) in mobj.soft_body_local_anchors.items():
-                    bn = v.env.skel.getBodyNode(body_name)
-                    if bn is not None:
-                        bT = bn.getWorldTransform()
-                        world_pos[v_idx] = bT.rotation() @ local_p + bT.translation()
             if mobj.soft_body is not None:
                 mobj.soft_body.positions = world_pos.astype(np.float64)
             mobj.tet_vertices = world_pos.astype(np.float32).copy()

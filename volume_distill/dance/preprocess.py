@@ -1,8 +1,8 @@
 """Preprocess dance motion cache into training-ready .pt file.
 
 Transforms world-space vertex positions to pelvis-local frame and computes
-displacements from rest pose. Fixed vertices (origin/insertion) are snapped
-back to their bone-attached positions at inference time.
+displacements from rest pose. Anchor vertex indices (origin/insertion caps)
+are extracted from tet mesh files for loss weighting during training.
 
 Requires dartpy environment.
 
@@ -20,6 +20,7 @@ from core.bvhparser import MyBVH
 SKEL_XML = "data/zygote_skel.xml"
 BVH_PATH = "data/motion/dance.bvh"
 CACHE_DIR = "data/motion_cache/dance"
+TET_DIR = "tet"
 OUTPUT_PATH = "data/motion_cache/dance/preprocessed.pt"
 # Hip ball joint DOFs 6-8, knee revolute DOF 9
 INPUT_DOF_INDICES = [6, 7, 8, 9]
@@ -63,6 +64,7 @@ def main():
     muscle_names = []
     rest_positions = {}
     displacements = {}
+    anchor_vertices = {}
 
     for npz_path in npz_files:
         mname = os.path.splitext(os.path.basename(npz_path))[0]
@@ -92,11 +94,20 @@ def main():
         rest = local_pos[0].copy()  # (V, 3)
         disp = local_pos - rest[None, :, :]  # (N, V, 3)
 
+        # Load anchor vertex indices from tet mesh
+        tet_path = os.path.join(TET_DIR, f"{mname}_tet.npz")
+        anchors = []
+        if os.path.exists(tet_path):
+            tet_data = np.load(tet_path, allow_pickle=True)
+            if 'anchor_vertices' in tet_data and len(tet_data['anchor_vertices']) > 0:
+                anchors = list(tet_data['anchor_vertices'])
+
         muscle_names.append(mname)
         rest_positions[mname] = torch.from_numpy(rest.astype(np.float32))
         displacements[mname] = torch.from_numpy(disp.astype(np.float32))
+        anchor_vertices[mname] = torch.tensor(anchors, dtype=torch.long)
 
-        print(f"  {mname}: {num_verts} verts, disp range [{disp.min():.4f}, {disp.max():.4f}]")
+        print(f"  {mname}: {num_verts} verts, {len(anchors)} anchors, disp range [{disp.min():.4f}, {disp.max():.4f}]")
 
     # Extract input DOFs
     input_dofs = torch.from_numpy(mocap_refs[:, INPUT_DOF_INDICES].astype(np.float32))
@@ -115,6 +126,7 @@ def main():
         "muscle_names": muscle_names,
         "rest_positions": rest_positions,
         "displacements": displacements,
+        "anchor_vertices": anchor_vertices,
         "train_indices": train_indices,
         "val_indices": val_indices,
     }

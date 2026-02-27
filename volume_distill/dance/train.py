@@ -23,6 +23,7 @@ LR = 3e-4
 WEIGHT_DECAY = 1e-5
 SCHEDULER_FACTOR = 0.5
 SCHEDULER_PATIENCE = 20
+ANCHOR_LOSS_WEIGHT = 10.0
 
 
 def train():
@@ -57,7 +58,21 @@ def train():
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
         optimizer, factor=SCHEDULER_FACTOR, patience=SCHEDULER_PATIENCE,
     )
-    criterion = nn.MSELoss()
+
+    # Build per-muscle vertex weight vectors (higher weight on anchor vertices)
+    anchor_data = data.get("anchor_vertices", {})
+    vertex_weights = {}
+    for name in data["muscle_names"]:
+        n_verts = muscle_vertex_counts[name]
+        w = torch.ones(n_verts * 3, device=device)
+        if name in anchor_data and len(anchor_data[name]) > 0:
+            for vi in anchor_data[name].tolist():
+                w[vi * 3: vi * 3 + 3] = ANCHOR_LOSS_WEIGHT
+            print(f"  {name}: {len(anchor_data[name])} anchor verts weighted x{ANCHOR_LOSS_WEIGHT}")
+        vertex_weights[name] = w
+
+    def weighted_mse(pred, target, weights):
+        return (weights * (pred - target) ** 2).mean()
 
     os.makedirs(CHECKPOINT_DIR, exist_ok=True)
     run_name = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -76,7 +91,7 @@ def train():
             x = x.to(device)
             targets = {k: v.to(device) for k, v in targets.items()}
             preds = model(x)
-            loss = sum(criterion(preds[name], targets[name]) for name in muscle_names) / len(muscle_names)
+            loss = sum(weighted_mse(preds[name], targets[name], vertex_weights[name]) for name in muscle_names) / len(muscle_names)
             optimizer.zero_grad()
             loss.backward()
             optimizer.step()
@@ -96,7 +111,7 @@ def train():
                 preds = model(x)
                 batch_loss = 0.0
                 for name in muscle_names:
-                    ml = criterion(preds[name], targets[name]).item()
+                    ml = weighted_mse(preds[name], targets[name], vertex_weights[name]).item()
                     per_muscle_val[name] += ml
                     batch_loss += ml
                 val_loss_sum += batch_loss / len(muscle_names)
