@@ -6103,17 +6103,31 @@ def _run_unified_volume_sim(v, active_muscles, max_iterations=100, tolerance=1e-
     for name, mobj in active_muscles.items():
         if getattr(mobj, 'soft_body_collision', False):
             collision_margin = max(collision_margin, getattr(mobj, 'soft_body_collision_margin', 0.008))
-    collision_trimeshes = []
+    collision_mesh = None
     if collision_margin > 0:
+        import trimesh
         # Use the first muscle's methods to build collision meshes (they're class methods in practice)
         first_mobj = next(iter(active_muscles.values()))
+        parts = []
         if hasattr(first_mobj, '_build_transformed_collision_meshes'):
-            collision_trimeshes = first_mobj._build_transformed_collision_meshes(
-                v.zygote_skeleton_meshes, v.env.skel)
+            parts.extend(first_mobj._build_transformed_collision_meshes(
+                v.zygote_skeleton_meshes, v.env.skel))
         if hasattr(first_mobj, '_build_dart_shape_collision_meshes'):
-            collision_trimeshes.extend(first_mobj._build_dart_shape_collision_meshes(v.env.skel))
-        if collision_trimeshes:
-            print(f"  Collision: {len(collision_trimeshes)} skeleton meshes (margin={collision_margin:.4f}m)")
+            parts.extend(first_mobj._build_dart_shape_collision_meshes(v.env.skel))
+        # Merge into one trimesh for single BVH build + single query
+        if parts:
+            all_verts = []
+            all_faces = []
+            vert_offset = 0
+            for m in parts:
+                all_verts.append(m.vertices)
+                all_faces.append(m.faces + vert_offset)
+                vert_offset += len(m.vertices)
+            collision_mesh = trimesh.Trimesh(
+                vertices=np.vstack(all_verts),
+                faces=np.vstack(all_faces),
+                process=False)
+            print(f"  Collision: {len(parts)} skeleton meshes merged ({vert_offset} verts, margin={collision_margin:.4f}m)")
 
     # Check if we have valid cached topology from a previous frame
     muscle_names = list(active_muscles.keys())
@@ -6466,11 +6480,11 @@ def _run_unified_volume_sim(v, active_muscles, max_iterations=100, tolerance=1e-
             print(f"  Fixed {stuck_count} stuck vertices by moving toward neighbors")
 
     # Resolve skeleton collisions
-    if collision_trimeshes and collision_margin > 0:
+    if collision_mesh is not None and collision_margin > 0:
         total_pushed = 0
         for pass_i in range(5):
             pushed = _resolve_collisions_unified(
-                global_positions, global_fixed_mask, collision_trimeshes, collision_margin,
+                global_positions, global_fixed_mask, collision_mesh, collision_margin,
                 cache['global_edge_i'], cache['global_edge_j'], cache.get('global_tet_faces'))
             total_pushed += pushed
             if pushed == 0:
@@ -6507,100 +6521,93 @@ def _run_unified_volume_sim(v, active_muscles, max_iterations=100, tolerance=1e-
     print(f"Unified volume sim complete (max change: {total_change:.4f}m)")
 
 
-def _resolve_collisions_unified(positions, fixed_mask, collision_meshes, margin,
+def _resolve_collisions_unified(positions, fixed_mask, mesh, margin,
                                  edge_i, edge_j, tet_faces=None):
     """
     Resolve collisions for unified volume sim by pushing free vertices
-    out of collision meshes. Adapted from SoftBodySimulation._resolve_collisions_arap.
+    out of a single merged collision mesh.
 
     Returns number of vertices pushed.
     """
     total_pushed = 0
     free_indices = np.where(~fixed_mask)[0]
 
-    for mesh in collision_meshes:
-        if mesh is None:
-            continue
+    try:
+        # 1. Free vertices
+        free_positions = positions[free_indices]
+        n_free = len(free_positions)
 
-        try:
-            # 1. Free vertices
-            free_positions = positions[free_indices]
-            n_free = len(free_positions)
+        # 2. Edge midpoints (sample for speed)
+        step = max(1, len(edge_i) // 500)
+        sample_idx = np.arange(0, len(edge_i), step)
+        ei_sample = edge_i[sample_idx]
+        ej_sample = edge_j[sample_idx]
+        edge_midpoints = (positions[ei_sample] + positions[ej_sample]) * 0.5
+        n_edges = len(edge_midpoints)
 
-            # 2. Edge midpoints (sample for speed)
-            edge_midpoints = []
-            edge_vertex_pairs = []
-            step = max(1, len(edge_i) // 500)
-            for idx in range(0, len(edge_i), step):
-                i, j = edge_i[idx], edge_j[idx]
-                edge_midpoints.append((positions[i] + positions[j]) * 0.5)
-                edge_vertex_pairs.append((i, j))
-            edge_midpoints = np.array(edge_midpoints) if edge_midpoints else np.zeros((0, 3))
-            n_edges = len(edge_midpoints)
-
-            # 3. Face centroids (sample for speed)
-            face_centroids = []
-            face_vertex_lists = []
-            if tet_faces is not None and len(tet_faces) > 0:
-                step = max(1, len(tet_faces) // 300)
-                for idx in range(0, len(tet_faces), step):
-                    face = tet_faces[idx]
-                    face_centroids.append(np.mean(positions[face], axis=0))
-                    face_vertex_lists.append(face)
-            face_centroids = np.array(face_centroids) if face_centroids else np.zeros((0, 3))
+        # 3. Face centroids (sample for speed)
+        face_centroids = np.zeros((0, 3))
+        face_sample_idx = np.array([], dtype=np.int32)
+        n_faces = 0
+        if tet_faces is not None and len(tet_faces) > 0:
+            step = max(1, len(tet_faces) // 300)
+            face_sample_idx = np.arange(0, len(tet_faces), step)
+            sampled_faces = tet_faces[face_sample_idx]
+            face_centroids = positions[sampled_faces].mean(axis=1)
             n_faces = len(face_centroids)
 
-            # 4. Batch query
-            if n_edges > 0 or n_faces > 0:
-                all_points = np.vstack([free_positions, edge_midpoints, face_centroids])
-            else:
-                all_points = free_positions
+        # 4. Batch query (single call to merged mesh)
+        all_points = np.vstack([free_positions, edge_midpoints, face_centroids])
 
-            closest_points, distances, face_ids = mesh.nearest.on_surface(all_points)
-            face_normals = mesh.face_normals[face_ids]
-            to_point = all_points - closest_points
-            dot_products = np.sum(to_point * face_normals, axis=1)
+        closest_points, distances, face_ids = mesh.nearest.on_surface(all_points)
+        face_normals = mesh.face_normals[face_ids]
+        dot_products = np.sum((all_points - closest_points) * face_normals, axis=1)
 
-            inside_mask = dot_products < 0
-            too_close = distances < margin
-            needs_push = inside_mask | too_close
+        needs_push = (dot_products < 0) | (distances < margin)
 
-            # 5. Push free vertices
-            vertex_push = needs_push[:n_free]
-            if np.any(vertex_push):
-                push_idx = np.where(vertex_push)[0]
-                positions[free_indices[push_idx]] = (
-                    closest_points[push_idx] + face_normals[push_idx] * margin
-                )
-                total_pushed += len(push_idx)
+        # 5. Push free vertices
+        vertex_push = needs_push[:n_free]
+        if np.any(vertex_push):
+            push_idx = np.where(vertex_push)[0]
+            positions[free_indices[push_idx]] = (
+                closest_points[push_idx] + face_normals[push_idx] * margin
+            )
+            total_pushed += len(push_idx)
 
-            # 6. Push edge midpoint collisions → both vertices
-            if n_edges > 0:
-                edge_push = needs_push[n_free:n_free + n_edges]
-                for idx in np.where(edge_push)[0]:
-                    i, j = edge_vertex_pairs[idx]
-                    push_dir = face_normals[n_free + idx]
-                    off = n_free + idx
-                    push_dist = (margin - distances[off]) if not inside_mask[off] else (distances[off] + margin)
-                    positions[i] += push_dir * (push_dist * 0.5)
-                    positions[j] += push_dir * (push_dist * 0.5)
-                    total_pushed += 2
+        # 6. Push edge midpoint collisions → both vertices
+        edge_push = needs_push[n_free:n_free + n_edges]
+        if np.any(edge_push):
+            ep_idx = np.where(edge_push)[0]
+            off = n_free + ep_idx
+            push_dir = face_normals[off]
+            push_dist = np.where(dot_products[off] < 0,
+                                 distances[off] + margin,
+                                 margin - distances[off])
+            half_push = push_dir * (push_dist * 0.5)[:, np.newaxis]
+            # Scatter-add to both edge endpoints
+            np.add.at(positions, ei_sample[ep_idx], half_push)
+            np.add.at(positions, ej_sample[ep_idx], half_push)
+            total_pushed += len(ep_idx) * 2
 
-            # 7. Push face centroid collisions → all face vertices
-            if n_faces > 0:
-                face_push = needs_push[n_free + n_edges:]
-                for idx in np.where(face_push)[0]:
-                    face_verts = face_vertex_lists[idx]
-                    off = n_free + n_edges + idx
-                    push_dir = face_normals[off]
-                    push_dist = (margin - distances[off]) if not inside_mask[off] else (distances[off] + margin)
-                    for vi in face_verts:
-                        positions[vi] += push_dir * (push_dist * 0.35)
-                    total_pushed += len(face_verts)
+        # 7. Push face centroid collisions → all face vertices
+        if n_faces > 0:
+            face_push = needs_push[n_free + n_edges:]
+            if np.any(face_push):
+                fp_idx = np.where(face_push)[0]
+                off = n_free + n_edges + fp_idx
+                push_dir = face_normals[off]
+                push_dist = np.where(dot_products[off] < 0,
+                                     distances[off] + margin,
+                                     margin - distances[off])
+                vert_push = push_dir * (push_dist * 0.35)[:, np.newaxis]
+                pushed_faces = tet_faces[face_sample_idx[fp_idx]]
+                for k, face in enumerate(pushed_faces):
+                    for vi in face:
+                        positions[vi] += vert_push[k]
+                total_pushed += len(fp_idx) * len(pushed_faces[0])
 
-        except Exception as e:
-            print(f"  Collision error: {e}")
-            continue
+    except Exception as e:
+        print(f"  Collision error: {e}")
 
     return total_pushed
 
