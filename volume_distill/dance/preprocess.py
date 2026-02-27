@@ -22,9 +22,8 @@ SKEL_XML = "data/zygote_skel.xml"
 BVH_PATH = "data/motion/dance.bvh"
 CACHE_DIR = "data/motion_cache/dance"
 OUTPUT_PATH = "data/motion_cache/dance/preprocessed.pt"
-# L_Femur0 (hip ball joint) DOFs 6-8, L_Tibia_Fibula0 (knee revolute) DOF 9,
-# L_Talus0 (ankle ball joint) DOFs 10-12
-INPUT_DOF_INDICES = [6, 7, 8, 9, 10, 11, 12]
+# L_Femur0 (hip ball joint) DOFs 6-8, L_Tibia_Fibula0 (knee revolute) DOF 9
+INPUT_DOF_INDICES = [6, 7, 8, 9]
 VAL_FRACTION = 0.15
 
 
