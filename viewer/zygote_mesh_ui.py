@@ -6448,8 +6448,7 @@ def _run_unified_volume_sim(v, active_muscles, max_iterations=100, tolerance=1e-
             total_iterations += iterations
             # Collision pass
             pushed = _resolve_collisions_unified(
-                global_positions, global_fixed_mask, collision_mesh, collision_margin,
-                cache['global_edge_i'], cache['global_edge_j'], cache.get('global_tet_faces'))
+                global_positions, global_fixed_mask, collision_mesh, collision_margin)
             total_collision_pushed += pushed
             if iterations < batch and pushed == 0:
                 break  # ARAP converged and no collisions
@@ -6538,102 +6537,34 @@ def _run_unified_volume_sim(v, active_muscles, max_iterations=100, tolerance=1e-
 
 
 def _resolve_collisions_unified(positions, fixed_mask, mesh, margin,
-                                 edge_i, edge_j, tet_faces=None):
+                                 edge_i=None, edge_j=None, tet_faces=None):
     """
     Resolve collisions for unified volume sim by pushing free vertices
-    out of a single merged collision mesh.
+    away from a merged collision mesh. Uses proximity-only detection
+    (no inside/outside test) to avoid false positives from non-watertight mesh.
 
     Returns number of vertices pushed.
     """
-    total_pushed = 0
     free_indices = np.where(~fixed_mask)[0]
+    if len(free_indices) == 0:
+        return 0
 
     try:
-        # 1. Free vertices
         free_positions = positions[free_indices]
-        n_free = len(free_positions)
+        closest_points, distances, face_ids = mesh.nearest.on_surface(free_positions)
 
-        # 2. Edge midpoints (sample for speed)
-        step = max(1, len(edge_i) // 500)
-        sample_idx = np.arange(0, len(edge_i), step)
-        ei_sample = edge_i[sample_idx]
-        ej_sample = edge_j[sample_idx]
-        edge_midpoints = (positions[ei_sample] + positions[ej_sample]) * 0.5
-        n_edges = len(edge_midpoints)
+        too_close = distances < margin
+        if not np.any(too_close):
+            return 0
 
-        # 3. Face centroids (sample for speed)
-        face_centroids = np.zeros((0, 3))
-        face_sample_idx = np.array([], dtype=np.int32)
-        n_faces = 0
-        if tet_faces is not None and len(tet_faces) > 0:
-            step = max(1, len(tet_faces) // 300)
-            face_sample_idx = np.arange(0, len(tet_faces), step)
-            sampled_faces = tet_faces[face_sample_idx]
-            face_centroids = positions[sampled_faces].mean(axis=1)
-            n_faces = len(face_centroids)
-
-        # 4. Batch query (single call to merged mesh)
-        all_points = np.vstack([free_positions, edge_midpoints, face_centroids])
-
-        closest_points, distances, face_ids = mesh.nearest.on_surface(all_points)
-        face_normals = mesh.face_normals[face_ids]
-        dot_products = np.sum((all_points - closest_points) * face_normals, axis=1)
-
-        # Inside detection limited to 3x margin to avoid false positives from
-        # merged non-watertight mesh (back-faces of distant bones)
-        max_inside_dist = 3.0 * margin
-        needs_push = ((dot_products < 0) & (distances < max_inside_dist)) | (distances < margin)
-
-        # 5. Push free vertices (place at closest_point + margin along normal, clamped)
-        vertex_push = needs_push[:n_free]
-        if np.any(vertex_push):
-            push_idx = np.where(vertex_push)[0]
-            target = closest_points[push_idx] + face_normals[push_idx] * margin
-            # Clamp displacement to avoid explosions
-            disp = target - positions[free_indices[push_idx]]
-            disp_len = np.linalg.norm(disp, axis=1, keepdims=True)
-            max_push = 2.0 * margin
-            scale = np.minimum(1.0, max_push / np.maximum(disp_len, 1e-10))
-            positions[free_indices[push_idx]] += disp * scale
-            total_pushed += len(push_idx)
-
-        # 6. Push edge midpoint collisions → both vertices
-        edge_push = needs_push[n_free:n_free + n_edges]
-        if np.any(edge_push):
-            ep_idx = np.where(edge_push)[0]
-            off = n_free + ep_idx
-            push_dir = face_normals[off]
-            push_dist = np.where(dot_products[off] < 0,
-                                 distances[off] + margin,
-                                 margin - distances[off])
-            push_dist = np.clip(push_dist, 0.0, 2.0 * margin)
-            half_push = push_dir * (push_dist * 0.5)[:, np.newaxis]
-            np.add.at(positions, ei_sample[ep_idx], half_push)
-            np.add.at(positions, ej_sample[ep_idx], half_push)
-            total_pushed += len(ep_idx) * 2
-
-        # 7. Push face centroid collisions → all face vertices
-        if n_faces > 0:
-            face_push = needs_push[n_free + n_edges:]
-            if np.any(face_push):
-                fp_idx = np.where(face_push)[0]
-                off = n_free + n_edges + fp_idx
-                push_dir = face_normals[off]
-                push_dist = np.where(dot_products[off] < 0,
-                                     distances[off] + margin,
-                                     margin - distances[off])
-                push_dist = np.clip(push_dist, 0.0, 2.0 * margin)
-                vert_push = push_dir * (push_dist * 0.35)[:, np.newaxis]
-                pushed_faces = tet_faces[face_sample_idx[fp_idx]]
-                for k, face in enumerate(pushed_faces):
-                    for vi in face:
-                        positions[vi] += vert_push[k]
-                total_pushed += len(fp_idx) * len(pushed_faces[0])
+        push_idx = np.where(too_close)[0]
+        normals = mesh.face_normals[face_ids[push_idx]]
+        positions[free_indices[push_idx]] = closest_points[push_idx] + normals * margin
+        return len(push_idx)
 
     except Exception as e:
         print(f"  Collision error: {e}")
-
-    return total_pushed
+        return 0
 
 
 def _enforce_inter_muscle_constraints(v, active_muscles, stiffness=0.9):
