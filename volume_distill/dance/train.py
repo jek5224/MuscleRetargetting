@@ -7,6 +7,7 @@ import time
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader
+from torch.utils.tensorboard import SummaryWriter
 
 from volume_distill.model import DistillNet
 from volume_distill.dataset import MuscleDistillDataset, distill_collate_fn
@@ -14,6 +15,7 @@ from volume_distill.dataset import MuscleDistillDataset, distill_collate_fn
 
 DATA_PATH = "data/motion_cache/dance/preprocessed.pt"
 CHECKPOINT_DIR = "volume_distill/dance/checkpoints"
+LOG_DIR = "volume_distill/dance/runs"
 EPOCHS = 200
 BATCH_SIZE = 512
 LR = 1e-4
@@ -56,6 +58,7 @@ def train():
     criterion = nn.MSELoss()
 
     os.makedirs(CHECKPOINT_DIR, exist_ok=True)
+    writer = SummaryWriter(LOG_DIR)
     best_val_loss = float("inf")
     muscle_names = data["muscle_names"]
 
@@ -104,6 +107,13 @@ def train():
         lr = optimizer.param_groups[0]["lr"]
         print(f"Epoch {epoch:3d}/{EPOCHS} | Train MSE: {train_loss:.6f} | Val MSE: {val_loss:.6f} | LR: {lr:.2e} | {elapsed:.1f}s")
 
+        # TensorBoard scalars
+        writer.add_scalar("loss/train", train_loss, epoch)
+        writer.add_scalar("loss/val", val_loss, epoch)
+        writer.add_scalar("lr", lr, epoch)
+        for name in muscle_names:
+            writer.add_scalar(f"val_muscle/{name}", per_muscle_val[name], epoch)
+
         # Per-muscle breakdown every 10 epochs
         if epoch % 10 == 0:
             print("  Per-muscle val MSE:")
@@ -132,6 +142,7 @@ def train():
                 "muscle_vertex_counts": muscle_vertex_counts,
             }, os.path.join(CHECKPOINT_DIR, f"epoch_{epoch:03d}.pt"))
 
+    writer.close()
     print(f"Training complete. Best val MSE: {best_val_loss:.6f}")
 
 
