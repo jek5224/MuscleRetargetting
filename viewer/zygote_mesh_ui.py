@@ -1849,7 +1849,10 @@ def _draw_motion_browser_ui(v):
         imgui.pop_item_width()
         if changed and new_frame != v.motion_current_frame:
             _motion_apply_pose(v, new_frame)
-            _motion_apply_cached_deformation(v, new_frame)
+            if v.motion_use_nn and v.motion_nn_model is not None:
+                _motion_apply_nn_deformation(v, new_frame)
+            else:
+                _motion_apply_cached_deformation(v, new_frame)
 
         # Transport buttons
         if imgui.button("Reset##motion"):
@@ -1937,6 +1940,22 @@ def _draw_motion_browser_ui(v):
         if num_cached > 0 and has_soft_bodies and not v.motion_baking:
             if imgui.button("Recompute Waypoints in Cache##motion_cache"):
                 _motion_patch_waypoints(v)
+
+        # --- Neural Network ---
+        imgui.separator()
+        imgui.text("--- Neural Network ---")
+        nn_available = v.motion_nn_model is not None
+        if not nn_available:
+            imgui.push_style_var(imgui.STYLE_ALPHA, 0.5)
+        changed_nn, v.motion_use_nn = imgui.checkbox("Use NN Checkpoint##motion_nn", v.motion_use_nn)
+        if not nn_available:
+            imgui.pop_style_var()
+            if changed_nn:
+                v.motion_use_nn = False  # Revert — no model loaded
+            imgui.text("No checkpoint found")
+        else:
+            val_str = f", val={v._motion_nn_val_loss:.6f}" if v._motion_nn_val_loss is not None else ""
+            imgui.text(f"best.pt (epoch {v._motion_nn_epoch}{val_str})")
 
 
 def _render_inspect_2d_windows(v):
@@ -6835,6 +6854,8 @@ def _load_motion_bvh(v, idx):
         v.draw_obj = True
         # Load cached deformation data if available
         _motion_load_cache(v)
+        # Load NN checkpoint if available
+        _motion_load_nn_checkpoint(v)
         v.motion_bake_end_frame = min(v.motion_bake_end_frame, v.motion_total_frames - 1)
         # Apply frame 0 pose and initialize tet meshes from cache if available
         _motion_reset(v)
@@ -6878,7 +6899,9 @@ def _motion_step_forward(v, count=1, run_tet=False):
                 v.motion_is_playing = False
                 return
         _motion_apply_pose(v, next_frame)
-        if not _motion_apply_cached_deformation(v, next_frame):
+        if v.motion_use_nn and v.motion_nn_model is not None:
+            _motion_apply_nn_deformation(v, next_frame)
+        elif not _motion_apply_cached_deformation(v, next_frame):
             if run_tet:
                 _motion_run_tet_settle(v)
 
@@ -6899,6 +6922,72 @@ def _motion_cache_dir(v):
     cache_dir = f'data/motion_cache/{bvh_name}'
     os.makedirs(cache_dir, exist_ok=True)
     return cache_dir
+
+
+def _motion_load_nn_checkpoint(v):
+    """Load NN checkpoint and rest positions for the current BVH motion."""
+    v.motion_nn_model = None
+    v.motion_nn_rest_positions = None
+    v.motion_nn_checkpoint_path = None
+    if v.motion_selected_idx < 0:
+        return
+    bvh_name = os.path.splitext(os.path.basename(v.motion_bvh_files[v.motion_selected_idx]))[0]
+    ckpt_path = f'volume_distill/{bvh_name}/checkpoints/best.pt'
+    preproc_path = f'data/motion_cache/{bvh_name}/preprocessed.pt'
+    if not os.path.exists(ckpt_path) or not os.path.exists(preproc_path):
+        return
+    try:
+        import torch
+        from volume_distill.dance.evaluate import load_model
+        model, _ = load_model(ckpt_path)
+        data = torch.load(preproc_path, map_location='cpu', weights_only=False)
+        rest_positions = data["rest_positions"]
+        # Extract checkpoint metadata for UI display
+        ckpt = torch.load(ckpt_path, map_location='cpu', weights_only=False)
+        v.motion_nn_model = model
+        v.motion_nn_rest_positions = rest_positions
+        v.motion_nn_checkpoint_path = ckpt_path
+        v._motion_nn_epoch = ckpt.get("epoch", "?")
+        v._motion_nn_val_loss = ckpt.get("val_loss", None)
+        print(f"[Motion] Loaded NN checkpoint: {ckpt_path} (epoch {v._motion_nn_epoch})")
+    except Exception as e:
+        print(f"[Motion] Failed to load NN checkpoint: {e}")
+        v.motion_nn_model = None
+
+
+def _motion_apply_nn_deformation(v, frame):
+    """Apply NN-predicted deformation for the given frame. Returns True if any muscle updated."""
+    if v.motion_nn_model is None or v.motion_nn_rest_positions is None:
+        return False
+    if v.motion_bvh is None or frame >= v.motion_total_frames:
+        return False
+    try:
+        from volume_distill.dance.evaluate import predict_frame
+        # Extract DOFs: indices 6,7,8 = hip, 9 = knee
+        dofs = v.motion_bvh.mocap_refs[frame, [6, 7, 8, 9]]
+        predictions = predict_frame(v.motion_nn_model, dofs[:3], dofs[3], v.motion_nn_rest_positions)
+        # Get pelvis (body node 0) world transform
+        T = v.env.skel.getBodyNode(0).getWorldTransform().matrix()
+        R = T[:3, :3]
+        t = T[:3, 3]
+        any_applied = False
+        for mname, local_pos in predictions.items():
+            if mname not in v.zygote_muscle_meshes:
+                continue
+            mobj = v.zygote_muscle_meshes[mname]
+            if mobj.tet_vertices is None:
+                continue
+            # Transform pelvis-local → world
+            world_pos = (R @ local_pos.T).T + t
+            if mobj.soft_body is not None:
+                mobj.soft_body.positions = world_pos.astype(np.float64)
+            mobj.tet_vertices = world_pos.astype(np.float32).copy()
+            mobj._update_tet_draw_positions()
+            any_applied = True
+        return any_applied
+    except Exception as e:
+        print(f"[Motion] NN inference error: {e}")
+        return False
 
 
 def _motion_save_current_frame(v):
@@ -7274,8 +7363,11 @@ def _motion_reset(v):
         v.env.skel.setPositions(np.zeros(v.env.skel.getNumDofs()))
         if hasattr(v, '_skel_dofs'):
             v._skel_dofs = np.zeros(v.env.skel.getNumDofs())
-    # Reset soft bodies — use cached frame 0 if available, otherwise reset from skeleton
-    if not _motion_apply_cached_deformation(v, 0):
+    # Reset soft bodies — use NN, cached deformation, or reset from skeleton
+    nn_applied = False
+    if v.motion_use_nn and v.motion_nn_model is not None:
+        nn_applied = _motion_apply_nn_deformation(v, 0)
+    if not nn_applied and not _motion_apply_cached_deformation(v, 0):
         for mname, mobj in v.zygote_muscle_meshes.items():
             if mobj.soft_body is not None:
                 mobj._update_tet_positions_from_skeleton(v.env.skel)
