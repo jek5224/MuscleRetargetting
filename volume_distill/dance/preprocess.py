@@ -1,7 +1,11 @@
 """Preprocess dance motion cache into training-ready .pt file.
 
-Transforms world-space vertex positions to pelvis-local frame and computes
-displacements from rest pose. Requires dartpy environment.
+Transforms world-space vertex positions to femur-local frame and computes
+displacements from rest pose. Using the femur (rather than pelvis) factors
+out the hip rotation — the largest rigid-motion component — so the NN only
+needs to learn knee-driven motion plus soft deformation.
+
+Requires dartpy environment.
 
 Usage: python -m volume_distill.dance.preprocess
 """
@@ -37,16 +41,19 @@ def main():
     num_frames = mocap_refs.shape[0]
     print(f"  Frames: {num_frames}, DOFs per frame: {mocap_refs.shape[1]}")
 
-    # Compute pelvis transforms for every frame
-    print("Computing pelvis transforms...")
-    pelvis_R = np.zeros((num_frames, 3, 3), dtype=np.float64)
-    pelvis_t = np.zeros((num_frames, 3), dtype=np.float64)
-    pelvis_bn = skel.getBodyNode(0)
+    # Compute femur transforms for every frame.
+    # Using the femur (not pelvis) factors out hip rotation so the NN learns
+    # smaller residual displacements instead of large rigid bone sweeps.
+    REF_BODY = "L_Femur0"
+    print(f"Computing {REF_BODY} transforms...")
+    ref_R = np.zeros((num_frames, 3, 3), dtype=np.float64)
+    ref_t = np.zeros((num_frames, 3), dtype=np.float64)
+    ref_bn = skel.getBodyNode(REF_BODY)
     for i in range(num_frames):
         skel.setPositions(mocap_refs[i])
-        T = pelvis_bn.getWorldTransform().matrix()  # 4x4
-        pelvis_R[i] = T[:3, :3]
-        pelvis_t[i] = T[:3, 3]
+        T = ref_bn.getWorldTransform().matrix()  # 4x4
+        ref_R[i] = T[:3, :3]
+        ref_t[i] = T[:3, 3]
         if i % 1000 == 0:
             print(f"  Frame {i}/{num_frames}")
 
@@ -77,14 +84,14 @@ def main():
 
         num_verts = positions.shape[1]
 
-        # Transform to pelvis-local: v_local = R^T @ (v_world - t)
-        # positions: (N, V, 3), pelvis_R: (N, 3, 3), pelvis_t: (N, 3)
-        centered = positions - pelvis_t[:, None, :]  # (N, V, 3)
+        # Transform to femur-local: v_local = R^T @ (v_world - t)
+        # positions: (N, V, 3), ref_R: (N, 3, 3), ref_t: (N, 3)
+        centered = positions - ref_t[:, None, :]  # (N, V, 3)
         # Batch matrix multiply: (N, 3, 3)^T @ (N, V, 3)^T -> transpose back
-        R_inv = np.transpose(pelvis_R, (0, 2, 1))  # (N, 3, 3)
+        R_inv = np.transpose(ref_R, (0, 2, 1))  # (N, 3, 3)
         local_pos = np.einsum("nij,nvj->nvi", R_inv, centered)  # (N, V, 3)
 
-        # Rest = frame 0 in pelvis-local
+        # Rest = frame 0 in femur-local
         rest = local_pos[0].copy()  # (V, 3)
         disp = local_pos - rest[None, :, :]  # (N, V, 3)
 
