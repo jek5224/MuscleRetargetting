@@ -6563,15 +6563,22 @@ def _resolve_collisions_unified(positions, fixed_mask, mesh, margin,
         face_normals = mesh.face_normals[face_ids]
         dot_products = np.sum((all_points - closest_points) * face_normals, axis=1)
 
-        needs_push = (dot_products < 0) | (distances < margin)
+        # Inside detection limited to 3x margin to avoid false positives from
+        # merged non-watertight mesh (back-faces of distant bones)
+        max_inside_dist = 3.0 * margin
+        needs_push = ((dot_products < 0) & (distances < max_inside_dist)) | (distances < margin)
 
-        # 5. Push free vertices
+        # 5. Push free vertices (place at closest_point + margin along normal, clamped)
         vertex_push = needs_push[:n_free]
         if np.any(vertex_push):
             push_idx = np.where(vertex_push)[0]
-            positions[free_indices[push_idx]] = (
-                closest_points[push_idx] + face_normals[push_idx] * margin
-            )
+            target = closest_points[push_idx] + face_normals[push_idx] * margin
+            # Clamp displacement to avoid explosions
+            disp = target - positions[free_indices[push_idx]]
+            disp_len = np.linalg.norm(disp, axis=1, keepdims=True)
+            max_push = 2.0 * margin
+            scale = np.minimum(1.0, max_push / np.maximum(disp_len, 1e-10))
+            positions[free_indices[push_idx]] += disp * scale
             total_pushed += len(push_idx)
 
         # 6. Push edge midpoint collisions → both vertices
@@ -6583,8 +6590,8 @@ def _resolve_collisions_unified(positions, fixed_mask, mesh, margin,
             push_dist = np.where(dot_products[off] < 0,
                                  distances[off] + margin,
                                  margin - distances[off])
+            push_dist = np.clip(push_dist, 0.0, 2.0 * margin)
             half_push = push_dir * (push_dist * 0.5)[:, np.newaxis]
-            # Scatter-add to both edge endpoints
             np.add.at(positions, ei_sample[ep_idx], half_push)
             np.add.at(positions, ej_sample[ep_idx], half_push)
             total_pushed += len(ep_idx) * 2
@@ -6599,6 +6606,7 @@ def _resolve_collisions_unified(positions, fixed_mask, mesh, margin,
                 push_dist = np.where(dot_products[off] < 0,
                                      distances[off] + margin,
                                      margin - distances[off])
+                push_dist = np.clip(push_dist, 0.0, 2.0 * margin)
                 vert_push = push_dir * (push_dist * 0.35)[:, np.newaxis]
                 pushed_faces = tet_faces[face_sample_idx[fp_idx]]
                 for k, face in enumerate(pushed_faces):
