@@ -7229,10 +7229,32 @@ def _motion_start_bake(v):
     # Init per-muscle accumulator for baked results
     v._bake_data = {}
     v._bake_start_time = time.time()
+    v._bake_flush_count = 0  # number of partial flushes done
+    v._bake_flush_interval = 500  # flush to disk every N frames
+    cache_dir = _motion_cache_dir(v)
+    v._bake_temp_dir = os.path.join(cache_dir, '_bake_temp')
+    os.makedirs(v._bake_temp_dir, exist_ok=True)
     for mname, mobj in v.zygote_muscle_meshes.items():
         if mobj.soft_body is not None:
             v._bake_data[mname] = {}
     print(f"Started bake: frames 0-{v.motion_bake_end_frame}")
+
+
+def _motion_bake_flush(v):
+    """Flush accumulated bake data to temporary per-muscle files on disk, then clear memory."""
+    if not v._bake_data:
+        return
+    for mname, frame_data in v._bake_data.items():
+        if len(frame_data) == 0:
+            continue
+        sorted_frames = sorted(frame_data.keys())
+        filepath = os.path.join(v._bake_temp_dir, f'{mname}_{v._bake_flush_count:04d}.npz')
+        np.savez(filepath,
+            frames=np.array(sorted_frames, dtype=np.int32),
+            positions=np.array([frame_data[f]['positions'] for f in sorted_frames], dtype=np.float32),
+        )
+        frame_data.clear()
+    v._bake_flush_count += 1
 
 
 def _motion_bake_step(v):
@@ -7263,7 +7285,7 @@ def _motion_bake_step(v):
                 mobj.waypoints_from_tet_sim = False
                 mobj._baking_mode = True
 
-        run_all_tet_sim_with_constraints(v, 
+        run_all_tet_sim_with_constraints(v,
             max_iterations=v.motion_settle_iters,
             tolerance=1e-4
         )
@@ -7295,42 +7317,78 @@ def _motion_bake_step(v):
 
     v.motion_bake_current = frame
 
+    # Periodically flush to disk to prevent memory explosion
+    n_accumulated = sum(len(fd) for fd in v._bake_data.values())
+    if n_accumulated >= v._bake_flush_interval * len(v._bake_data):
+        _motion_bake_flush(v)
+
 
 def _motion_bake_finish(v):
     """Write accumulated bake results to disk and reload cache.
     Bake only saves positions. Use 'Recompute Waypoints' to patch waypoints after."""
+    # Flush any remaining in-memory data
+    _motion_bake_flush(v)
+
     cache_dir = _motion_cache_dir(v)
-    for mname, frame_data in v._bake_data.items():
-        if len(frame_data) == 0:
+    temp_dir = v._bake_temp_dir
+
+    # Merge all temp files per muscle into final NPZ
+    muscle_names = list(v._bake_data.keys())
+    for mname in muscle_names:
+        # Collect all temp chunks for this muscle
+        chunk_files = sorted(glob.glob(os.path.join(temp_dir, f'{mname}_*.npz')))
+        if not chunk_files:
             continue
+
+        # Load and merge chunks — only frames+positions arrays, not full dicts
+        all_frames = []
+        all_positions = []
+        for cf in chunk_files:
+            chunk = np.load(cf)
+            all_frames.append(chunk['frames'])
+            all_positions.append(chunk['positions'])
+        all_frames = np.concatenate(all_frames)
+        all_positions = np.concatenate(all_positions)
+
+        # Sort by frame number
+        order = np.argsort(all_frames)
+        all_frames = all_frames[order]
+        all_positions = all_positions[order]
+
+        expected_shape = all_positions[0].shape
+
+        # Merge with existing cache: keep old frames not in this bake
+        baked_frame_set = set(all_frames.tolist())
         filepath = os.path.join(cache_dir, f'{mname}.npz')
-        # Get expected shape from current bake data
-        expected_shape = None
-        for f in frame_data:
-            expected_shape = frame_data[f]['positions'].shape
-            break
-        # Merge with existing cache: keep old frames not in this bake, positions only
-        # Only merge if shapes match (otherwise mesh was modified, discard old cache)
-        if os.path.exists(filepath) and expected_shape is not None:
+        if os.path.exists(filepath):
             try:
                 existing = np.load(filepath, allow_pickle=True)
+                old_frames = []
+                old_positions = []
                 for i, f in enumerate(existing['frames']):
                     fi = int(f)
-                    if fi not in frame_data:
+                    if fi not in baked_frame_set:
                         existing_pos = existing['positions'][i]
-                        # Only merge if shape matches
                         if existing_pos.shape == expected_shape:
-                            frame_data[fi] = {'positions': existing_pos}
-                        else:
-                            print(f"[{mname}] Discarding cached frame {fi}: shape {existing_pos.shape} != expected {expected_shape}")
+                            old_frames.append(fi)
+                            old_positions.append(existing_pos)
+                if old_frames:
+                    all_frames = np.concatenate([all_frames, np.array(old_frames, dtype=np.int32)])
+                    all_positions = np.concatenate([all_positions, np.array(old_positions, dtype=np.float32)])
+                    order = np.argsort(all_frames)
+                    all_frames = all_frames[order]
+                    all_positions = all_positions[order]
             except Exception as e:
                 print(f"[{mname}] Could not load existing cache: {e}")
-        sorted_frames = sorted(frame_data.keys())
-        save_dict = dict(
-            frames=np.array(sorted_frames, dtype=np.int32),
-            positions=np.array([frame_data[f]['positions'] for f in sorted_frames], dtype=np.float32),
+
+        np.savez_compressed(filepath,
+            frames=all_frames,
+            positions=all_positions,
         )
-        np.savez_compressed(filepath, **save_dict)
+
+    # Clean up temp directory
+    import shutil
+    shutil.rmtree(temp_dir, ignore_errors=True)
 
     v.motion_baking = False
     v._bake_data = {}
