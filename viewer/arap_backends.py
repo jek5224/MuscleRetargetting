@@ -33,7 +33,7 @@ class ARAPBackend(ABC):
     @abstractmethod
     def solve(self, positions, rest_positions, neighbors, weights, rest_edges,
               fixed_mask, fixed_targets, max_iterations=20, tolerance=1e-4,
-              target_edges=None, verbose=False):
+              target_edges=None, verbose=False, collision_callback=None):
         """Run full ARAP solve."""
         pass
 
@@ -162,7 +162,7 @@ class ARAPBackendCPU(ARAPBackend):
 
     def solve(self, positions, rest_positions, neighbors, weights, rest_edges,
               fixed_mask, fixed_targets, max_iterations=20, tolerance=1e-4,
-              target_edges=None, verbose=False):
+              target_edges=None, verbose=False, collision_callback=None):
         """Run full ARAP iteration."""
         positions = positions.copy()
         free_indices = np.where(~fixed_mask)[0]
@@ -193,6 +193,10 @@ class ARAPBackendCPU(ARAPBackend):
             if fixed_targets is not None:
                 fixed_indices = np.where(fixed_mask)[0]
                 positions[fixed_indices] = fixed_targets
+
+            # Collision resolution
+            if collision_callback is not None:
+                collision_callback(positions)
 
             # Check convergence
             if len(free_indices) > 0:
@@ -525,7 +529,7 @@ class ARAPBackendGPU(ARAPBackend):
 
     def solve(self, positions, rest_positions, neighbors, weights, rest_edges,
               fixed_mask, fixed_targets, max_iterations=20, tolerance=1e-4,
-              target_edges=None, verbose=False):
+              target_edges=None, verbose=False, collision_callback=None):
         """Run full ARAP iteration on GPU."""
         import torch
 
@@ -568,6 +572,10 @@ class ARAPBackendGPU(ARAPBackend):
             if fixed_targets is not None:
                 fixed_indices = np.where(fixed_mask)[0]
                 positions[fixed_indices] = fixed_targets
+
+            # Collision resolution
+            if collision_callback is not None:
+                collision_callback(positions)
 
             # Check convergence
             if len(free_indices) > 0:
@@ -1127,7 +1135,7 @@ class ARAPBackendTaichi(ARAPBackend):
 
     def solve(self, positions, rest_positions, neighbors, weights, rest_edges,
               fixed_mask, fixed_targets, max_iterations=20, tolerance=1e-4,
-              target_edges=None, verbose=False):
+              target_edges=None, verbose=False, collision_callback=None):
         """Run full ARAP iteration using Taichi.
         Uses GPU PCG for the linear solve when CG fields are allocated,
         keeping positions on GPU between iterations to eliminate transfers.
@@ -1177,6 +1185,9 @@ class ARAPBackendTaichi(ARAPBackend):
             positions = new_positions
             if fixed_targets is not None:
                 positions[fixed_indices] = fixed_targets
+            # Collision resolution
+            if collision_callback is not None:
+                collision_callback(positions)
             if verbose and (iteration + 1) % 5 == 0:
                 print(f"  Iter {iteration+1}: max_disp={max_disp:.2e}")
             if max_disp < tolerance:
