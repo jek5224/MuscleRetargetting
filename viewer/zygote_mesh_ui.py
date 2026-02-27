@@ -6929,8 +6929,6 @@ def _motion_load_nn_checkpoint(v):
     v.motion_nn_model = None
     v.motion_nn_rest_positions = None
     v.motion_nn_checkpoint_path = None
-    if v.motion_selected_idx < 0:
-        return
     ckpt_path = 'volume_distill/dance/checkpoints/best.pt'
     if not os.path.exists(ckpt_path):
         return
