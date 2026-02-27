@@ -81,13 +81,18 @@ class DistillNet(nn.Module):
         """
         super().__init__()
         self.encoder = SharedEncoder(input_dim=input_dim)
+        # Skip connection: decoders receive encoder output + PE features
+        pe_dim = self.encoder.pe.output_dim
         latent_dim = 512
+        decoder_input = latent_dim + pe_dim
         self.decoders = nn.ModuleDict({
-            name: MuscleDecoder(latent_dim=latent_dim, output_dim=v_count * 3)
+            name: MuscleDecoder(latent_dim=decoder_input, output_dim=v_count * 3)
             for name, v_count in muscle_vertex_counts.items()
         })
         self.muscle_vertex_counts = muscle_vertex_counts
 
     def forward(self, x):
-        latent = self.encoder(x)
-        return {name: decoder(latent) for name, decoder in self.decoders.items()}
+        pe_x = self.encoder.pe(x)
+        latent = self.encoder.fc(pe_x)
+        combined = torch.cat([latent, pe_x], dim=-1)
+        return {name: decoder(combined) for name, decoder in self.decoders.items()}
