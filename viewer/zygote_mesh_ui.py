@@ -6966,8 +6966,8 @@ def _motion_apply_nn_deformation(v, frame):
         # Extract DOFs: 6-8 = hip, 9 = knee
         dofs = v.motion_bvh.mocap_refs[frame, [6, 7, 8, 9]]
         predictions = predict_frame(v.motion_nn_model, dofs, v.motion_nn_rest_positions)
-        # Get femur world transform (must match the reference bone used in preprocessing)
-        T = v.env.skel.getBodyNode("L_Femur0").getWorldTransform().matrix()
+        # Get pelvis world transform (must match the reference bone used in preprocessing)
+        T = v.env.skel.getBodyNode("Saccrum_Coccyx0").getWorldTransform().matrix()
         R = T[:3, :3]
         t = T[:3, 3]
         any_applied = False
@@ -6979,6 +6979,13 @@ def _motion_apply_nn_deformation(v, frame):
                 continue
             # Transform pelvis-local → world
             world_pos = (R @ local_pos.T).T + t
+            # Snap fixed vertices (origin/insertion) to their bone-attached positions
+            if hasattr(mobj, 'soft_body_local_anchors') and mobj.soft_body_local_anchors:
+                for v_idx, (body_name, local_p) in mobj.soft_body_local_anchors.items():
+                    bn = v.env.skel.getBodyNode(body_name)
+                    if bn is not None:
+                        bT = bn.getWorldTransform()
+                        world_pos[v_idx] = bT.rotation() @ local_p + bT.translation()
             if mobj.soft_body is not None:
                 mobj.soft_body.positions = world_pos.astype(np.float64)
             mobj.tet_vertices = world_pos.astype(np.float32).copy()
