@@ -7197,13 +7197,25 @@ def _motion_apply_cached_deformation(v, frame):
     """Try to apply cached deformation for the given frame. Returns True if cache was used."""
     if not v.motion_deform_cache:
         return False
+    # Compute translation offset for fixed axes: cached positions were baked with
+    # the skeleton moving freely, so subtract the root displacement on fixed axes.
+    fix_offset = np.zeros(3, dtype=np.float32)
+    if hasattr(v, 'motion_root_translation') and v.motion_root_translation is not None:
+        bvh_trans = v.motion_bvh.mocap_refs[frame, 3:6]  # x, y, z root translation
+        rest_trans = v.motion_root_translation
+        if v.motion_fix_x:
+            fix_offset[0] = rest_trans[0] - bvh_trans[0]
+        if v.motion_fix_y:
+            fix_offset[1] = rest_trans[1] - bvh_trans[1]
+        if v.motion_fix_z:
+            fix_offset[2] = rest_trans[2] - bvh_trans[2]
     any_applied = False
     for mname, mobj in v.zygote_muscle_meshes.items():
         if mobj.tet_vertices is None:
             continue
         if mname in v.motion_deform_cache and frame in v.motion_deform_cache[mname]:
             cached = v.motion_deform_cache[mname][frame]
-            cached_pos = cached['positions']
+            cached_pos = cached['positions'] + fix_offset
             if mobj.soft_body is not None:
                 mobj.soft_body.positions = cached_pos.astype(np.float64)
             mobj.tet_vertices = cached_pos.astype(np.float32).copy()
