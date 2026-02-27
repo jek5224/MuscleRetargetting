@@ -6932,19 +6932,15 @@ def _motion_load_nn_checkpoint(v):
     if v.motion_selected_idx < 0:
         return
     ckpt_path = 'volume_distill/dance/checkpoints/best.pt'
-    preproc_path = 'data/motion_cache/dance/preprocessed.pt'
-    if not os.path.exists(ckpt_path) or not os.path.exists(preproc_path):
+    if not os.path.exists(ckpt_path):
         return
     try:
         import torch
         from volume_distill.dance.evaluate import load_model
         model, _ = load_model(ckpt_path)
-        data = torch.load(preproc_path, map_location='cpu', weights_only=False)
-        rest_positions = data["rest_positions"]
-        # Extract checkpoint metadata for UI display
         ckpt = torch.load(ckpt_path, map_location='cpu', weights_only=False)
         v.motion_nn_model = model
-        v.motion_nn_rest_positions = rest_positions
+        v.motion_nn_rest_positions = ckpt["rest_positions"]
         v.motion_nn_checkpoint_path = ckpt_path
         v._motion_nn_epoch = ckpt.get("epoch", "?")
         v._motion_nn_val_loss = ckpt.get("val_loss", None)

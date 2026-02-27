@@ -162,6 +162,7 @@ def train():
                 "val_loss": val_loss,
                 "muscle_vertex_counts": muscle_vertex_counts,
                 "input_dim": input_dim,
+                "rest_positions": data["rest_positions"],
             }, os.path.join(CHECKPOINT_DIR, "best.pt"))
             print(f"  -> Saved best model (val_loss={val_loss:.6f})")
 
@@ -174,6 +175,7 @@ def train():
                 "val_loss": val_loss,
                 "muscle_vertex_counts": muscle_vertex_counts,
                 "input_dim": input_dim,
+                "rest_positions": data["rest_positions"],
             }, os.path.join(CHECKPOINT_DIR, f"epoch_{epoch:03d}.pt"))
 
     writer.close()
