@@ -4,6 +4,7 @@ Usage: python -m volume_distill.dance.train
 """
 import os
 import time
+from datetime import datetime
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader
@@ -59,7 +60,8 @@ def train():
     criterion = nn.MSELoss()
 
     os.makedirs(CHECKPOINT_DIR, exist_ok=True)
-    writer = SummaryWriter(LOG_DIR)
+    run_name = datetime.now().strftime("%Y%m%d_%H%M%S")
+    writer = SummaryWriter(os.path.join(LOG_DIR, run_name))
     best_val_loss = float("inf")
     muscle_names = data["muscle_names"]
 
