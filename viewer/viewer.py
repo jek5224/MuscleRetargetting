@@ -283,6 +283,7 @@ class GLFWApp():
         self.inter_muscle_constraints = []
         self.inter_muscle_constraint_threshold = 0.015  # 15mm default threshold
         self.coupled_as_unified_volume = True  # Treat all muscles as one unified system
+        self.use_muscle_aware_arap = True  # Fiber-direction + volume-preserving ARAP
 
         # 2D Inspect window state
         self.inspect_2d_open = {}  # Dict: muscle_name -> bool (window open state)

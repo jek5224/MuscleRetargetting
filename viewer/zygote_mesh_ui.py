@@ -392,7 +392,7 @@ def draw_zygote_muscle_ui(v):
         )
         if v.coupled_as_unified_volume:
             imgui.same_line()
-            imgui.text_colored("(all muscles as one system)", 0.5, 0.8, 0.5)
+            _, v.use_muscle_aware_arap = imgui.checkbox("Muscle-Aware", v.use_muscle_aware_arap)
 
         # Backend selection (radio-button style with checkboxes)
         imgui.text("Backend:")
@@ -6139,10 +6139,29 @@ def _run_unified_volume_sim(v, active_muscles, max_iterations=100, tolerance=1e-
         # Build combined edge list (internal edges + inter-muscle constraints)
         all_edges = []  # (global_i, global_j, rest_length, weight)
 
+        # Edge classification for muscle-aware ARAP
+        edge_type_map = {}  # (gi, gj) -> 1=cross, 2=intra, 0=neutral
+        edge_muscle_map = {}  # (gi, gj) -> muscle_name
+        muscle_rest_axis_len = {}  # name -> rest distance between first/last fixed verts
+        muscle_fixed_global = {}  # name -> list of global indices of fixed verts
+
         # Add internal edges from each muscle
         for name, mobj in active_muscles.items():
             offset = global_offset[name]
             sb = mobj.soft_body
+
+            # Compute rest axis length from fixed vertices
+            if hasattr(sb, 'fixed_indices') and sb.fixed_indices is not None and len(sb.fixed_indices) >= 2:
+                rest_fixed = sb.rest_positions[sb.fixed_indices]
+                muscle_rest_axis_len[name] = np.linalg.norm(rest_fixed[-1] - rest_fixed[0])
+                muscle_fixed_global[name] = [offset + fi for fi in sb.fixed_indices]
+            else:
+                muscle_rest_axis_len[name] = 0.0
+                muscle_fixed_global[name] = []
+
+            has_edge_types = (hasattr(sb, 'cross_contour_edges') and sb.cross_contour_edges is not None and
+                              hasattr(sb, 'intra_contour_edges') and sb.intra_contour_edges is not None)
+
             for edge_idx, (i, j) in enumerate(zip(sb.edge_i, sb.edge_j)):
                 # Use stored rest_lengths if available, otherwise compute from rest positions
                 if hasattr(sb, 'rest_lengths') and sb.rest_lengths is not None and edge_idx < len(sb.rest_lengths):
@@ -6150,6 +6169,23 @@ def _run_unified_volume_sim(v, active_muscles, max_iterations=100, tolerance=1e-
                 else:
                     rest_len = np.linalg.norm(sb.rest_positions[j] - sb.rest_positions[i])
                 all_edges.append((offset + i, offset + j, rest_len, 1.0))
+
+                gi, gj = offset + i, offset + j
+                edge_muscle_map[(gi, gj)] = name
+                edge_muscle_map[(gj, gi)] = name
+                if has_edge_types:
+                    if sb.cross_contour_edges[edge_idx]:
+                        edge_type_map[(gi, gj)] = 1
+                        edge_type_map[(gj, gi)] = 1
+                    elif sb.intra_contour_edges[edge_idx]:
+                        edge_type_map[(gi, gj)] = 2
+                        edge_type_map[(gj, gi)] = 2
+                    else:
+                        edge_type_map[(gi, gj)] = 0
+                        edge_type_map[(gj, gi)] = 0
+                else:
+                    edge_type_map[(gi, gj)] = 0
+                    edge_type_map[(gj, gi)] = 0
 
         n_internal = len(all_edges)
 
@@ -6186,6 +6222,31 @@ def _run_unified_volume_sim(v, active_muscles, max_iterations=100, tolerance=1e-
         if n0 > 0 or n1 > 0:
             print(f"  WARNING: {n0} isolated, {n1} single-neighbor, {n2} two-neighbor vertices")
 
+        # Build CSR-ordered arrays for muscle-aware ARAP
+        # Must iterate in same order as backend's build_system: for i, neighs in enumerate(neighbors): for j in neighs
+        muscle_id_map = {name: mid for mid, name in enumerate(muscle_names)}
+        n_csr_edges = sum(len(neighs) for neighs in neighbors)
+        csr_cross_mask = np.zeros(n_csr_edges, dtype=bool)
+        csr_intra_mask = np.zeros(n_csr_edges, dtype=bool)
+        csr_muscle_id = np.full(n_csr_edges, -1, dtype=np.int32)
+        csr_rest_edges_base = np.zeros((n_csr_edges, 3), dtype=np.float64)
+        csr_idx = 0
+        for i, neighs in enumerate(neighbors):
+            for j in neighs:
+                csr_rest_edges_base[csr_idx] = global_rest_positions[j] - global_rest_positions[i]
+                edge_key = (i, j)
+                etype = edge_type_map.get(edge_key, 0)
+                csr_cross_mask[csr_idx] = (etype == 1)
+                csr_intra_mask[csr_idx] = (etype == 2)
+                mname = edge_muscle_map.get(edge_key, None)
+                if mname is not None:
+                    csr_muscle_id[csr_idx] = muscle_id_map[mname]
+                csr_idx += 1
+
+        n_cross = int(csr_cross_mask.sum())
+        n_intra = int(csr_intra_mask.sum())
+        print(f"  Muscle-aware ARAP: {n_cross} cross-contour, {n_intra} intra-contour CSR edges")
+
         # Cache topology for subsequent frames
         v._unified_sim_cache = {
             'global_offset': global_offset,
@@ -6196,6 +6257,13 @@ def _run_unified_volume_sim(v, active_muscles, max_iterations=100, tolerance=1e-
             'edge_weights': edge_weights,
             'rest_edge_vectors': rest_edge_vectors,
             'muscle_names': muscle_names,
+            'muscle_id_map': muscle_id_map,
+            'muscle_rest_axis_len': muscle_rest_axis_len,
+            'muscle_fixed_global': muscle_fixed_global,
+            'csr_cross_mask': csr_cross_mask,
+            'csr_intra_mask': csr_intra_mask,
+            'csr_muscle_id': csr_muscle_id,
+            'csr_rest_edges_base': csr_rest_edges_base,
         }
 
     # Always collect current positions and fixed targets (these change per frame)
@@ -6256,11 +6324,56 @@ def _run_unified_volume_sim(v, active_muscles, max_iterations=100, tolerance=1e-
     else:
         print(f"  Reusing cached system (skipping build_system)")
 
+    # Muscle-aware ARAP: scale rest edges based on fiber contraction
+    cache = v._unified_sim_cache
+    target_edges = None
+    if v.use_muscle_aware_arap and cache.get('csr_cross_mask') is not None:
+        # Compute axis ratio per muscle
+        axis_ratios = {}
+        for name, mobj in active_muscles.items():
+            fixed_globals = cache['muscle_fixed_global'].get(name, [])
+            rest_len = cache['muscle_rest_axis_len'].get(name, 0.0)
+            if len(fixed_globals) >= 2 and rest_len > 1e-6:
+                current_targets = np.array([global_fixed_targets.get(i, global_rest_positions[i]) for i in fixed_globals])
+                current_len = np.linalg.norm(current_targets[-1] - current_targets[0])
+                axis_ratios[name] = np.clip(current_len / rest_len, 0.5, 2.0)
+            else:
+                axis_ratios[name] = 1.0
+
+        # Check if any muscle actually has non-trivial ratio
+        any_scaled = any(abs(r - 1.0) >= 0.02 for r in axis_ratios.values())
+
+        if any_scaled:
+            scaled_rest = cache['csr_rest_edges_base'].copy()
+            for name, mid in cache['muscle_id_map'].items():
+                ratio = axis_ratios.get(name, 1.0)
+                if abs(ratio - 1.0) < 0.02:
+                    continue
+                perp_scale = np.clip(np.sqrt(1.0 / ratio), 1.0, 1.2)
+                muscle_mask = cache['csr_muscle_id'] == mid
+                scaled_rest[muscle_mask & cache['csr_cross_mask']] *= ratio
+                scaled_rest[muscle_mask & cache['csr_intra_mask']] *= perp_scale
+
+            # Upload to backend (Taichi/GPU) or build target_edges dict (CPU)
+            if hasattr(backend, 'update_rest_edges'):
+                backend.update_rest_edges(scaled_rest)
+            else:
+                # CPU backend: build target_edges dict from CSR arrays
+                target_edges = [{} for _ in range(total_verts)]
+                csr_idx = 0
+                for i, neighs in enumerate(neighbors):
+                    for j in neighs:
+                        target_edges[i][j] = scaled_rest[csr_idx]
+                        csr_idx += 1
+
+            ratio_strs = [f"{name}={r:.3f}" for name, r in axis_ratios.items() if abs(r - 1.0) >= 0.02]
+            print(f"  Muscle-aware ARAP: {', '.join(ratio_strs)}")
+
     start_time = time.time()
     global_positions, iterations, max_disp = backend.solve(
         global_positions, global_rest_positions, neighbors, edge_weights, rest_edge_vectors,
         global_fixed_mask, fixed_targets_array, max_iterations=max_iterations, tolerance=tolerance,
-        target_edges=None, verbose=True
+        target_edges=target_edges, verbose=True
     )
     print(f"  ARAP solved in {time.time() - start_time:.3f}s ({iterations} iterations)")
 

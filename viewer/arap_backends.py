@@ -588,6 +588,11 @@ class ARAPBackendGPU(ARAPBackend):
             print(f"  Max iterations reached, max_disp={max_disp:.2e}")
         return positions, max_iterations, max_disp
 
+    def update_rest_edges(self, neighbor_rest_np):
+        """Update precomputed rest edge vectors for muscle-aware target edges."""
+        import torch
+        self._edge_rest = torch.tensor(neighbor_rest_np, dtype=torch.float64, device=self.device)
+
 
 class ARAPBackendTaichi(ARAPBackend):
     """Taichi backend using CUDA for parallel computation."""
@@ -914,6 +919,14 @@ class ARAPBackendTaichi(ARAPBackend):
                 )
 
         return new_positions_np
+
+    def update_rest_edges(self, neighbor_rest_np):
+        """Update CSR rest edge vectors for muscle-aware target edges."""
+        self.neighbor_rest_np = neighbor_rest_np
+        if self._fields_allocated and not self._data_stale:
+            self.neighbor_rest.from_numpy(self.neighbor_rest_np)
+        else:
+            self._data_stale = True
 
     # ── GPU CG solver ──────────────────────────────────────────────────
 
