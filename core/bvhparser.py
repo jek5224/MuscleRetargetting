@@ -62,25 +62,26 @@ class MyBVH():
                     elif "Frame Time:" in line:
                         self.frame_time = float(line[len("Frame Time:"):].strip())
                     else:
-                        self.frames_raw.append(np.array(line.split(" ")).astype(np.float32)) 
-                else: 
-                    if line == "HEIRARCHY": ## Hierarchy
+                        self.frames_raw.append(np.array(line.split()).astype(np.float32))
+                else:
+                    if line.upper() == "HIERARCHY": ## Hierarchy
                         cur_parent = None
+                    line_upper = line.upper()
                     if not motion_reading:
-                        if "JOINT" in line or "ROOT" in line or "End" in line: 
+                        if "JOINT" in line_upper or "ROOT" in line_upper or "END" in line_upper:
                             cur_parent = joint_name
-                            joint_name = line.split(" ")[1]
-                            if "End" in line:
+                            joint_name = line.split()[1]
+                            if "END" in line_upper:
                                 joint_name = "End_" + cur_parent
                                 self.joint_channels[joint_name] = []
                             self.joint_names.append(joint_name)
                             self.parent_joint_name[joint_name] = cur_parent
-                        elif "OFFSET" in line:
-                            offset = line.split(" ")[1:]
+                        elif "OFFSET" in line_upper:
+                            offset = line.split()[1:]
                             offset = np.array([float(x) for x in offset])
                             self.joint_offsets[joint_name] = offset
-                        elif "CHANNELS" in line:
-                            channels = line.lower().split(" ")[2:]
+                        elif "CHANNELS" in line_upper:
+                            channels = line.lower().split()[2:]
                             self.joint_channels[joint_name] = channels
                         elif "}" in line:
                             joint_name = cur_parent
@@ -95,7 +96,31 @@ class MyBVH():
             return
         self.frames_raw = np.array(self.frames_raw)
         self.mocap_refs = np.zeros([self.num_frames, self.skel.getNumDofs()])
-        
+
+        ## Auto-remap bvh_info to match actual BVH joint names
+        if self.bvh_info is not None:
+            bvh_joint_set = set(self.joint_names)
+            remapped = {}
+            for skel_name, bvh_name in self.bvh_info.items():
+                if bvh_name in bvh_joint_set:
+                    remapped[skel_name] = bvh_name
+                else:
+                    # Try stripping common prefixes (e.g. "Character1_Hips" -> "Hips")
+                    stripped = bvh_name.split('_', 1)[1] if '_' in bvh_name else None
+                    if stripped and stripped in bvh_joint_set:
+                        remapped[skel_name] = stripped
+                    else:
+                        # Try all BVH joints that end with the target name
+                        matches = [jn for jn in bvh_joint_set if jn.endswith(bvh_name)]
+                        if len(matches) == 1:
+                            remapped[skel_name] = matches[0]
+                        else:
+                            remapped[skel_name] = bvh_name  # keep original (will be skipped in bvh2sim)
+            if remapped != self.bvh_info:
+                changed = {k: (self.bvh_info[k], v) for k, v in remapped.items() if v != self.bvh_info[k]}
+                print(f"[BVH] Auto-remapped {len(changed)} joint names: {changed}")
+                self.bvh_info = remapped
+
         ## Loading Finish
         self.bvh2rot()
 
