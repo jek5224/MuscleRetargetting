@@ -7223,8 +7223,13 @@ def _motion_apply_cached_deformation(v, frame):
             # Restore cached waypoints if available
             if 'waypoints_flat' in cached and 'waypoints_shape' in cached:
                 if hasattr(mobj, 'waypoints') and len(mobj.waypoints) > 0:
-                    mobj.waypoints = _unflatten_waypoints(
+                    wp = _unflatten_waypoints(
                         cached['waypoints_flat'], cached['waypoints_shape'])
+                    if fix_offset.any():
+                        for stream in wp:
+                            for fi in range(len(stream)):
+                                stream[fi] = stream[fi] + fix_offset
+                    mobj.waypoints = wp
             any_applied = True
     return any_applied
 
