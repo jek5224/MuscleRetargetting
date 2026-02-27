@@ -6517,9 +6517,9 @@ def _run_unified_volume_sim(v, active_muscles, max_iterations=100, tolerance=1e-
 def _resolve_collisions_unified(positions, fixed_mask, mesh, margin,
                                  edge_i=None, edge_j=None, tet_faces=None):
     """
-    Resolve collisions for unified volume sim by pushing free vertices
-    away from a merged collision mesh. Uses proximity-only detection
-    (no inside/outside test) to avoid false positives from non-watertight mesh.
+    Resolve collisions for unified volume sim by pushing penetrating free
+    vertices out of a merged collision mesh. Only pushes vertices that are
+    actually inside (dot product test), not merely close to the surface.
 
     Returns number of vertices pushed.
     """
@@ -6531,13 +6531,22 @@ def _resolve_collisions_unified(positions, fixed_mask, mesh, margin,
         free_positions = positions[free_indices]
         closest_points, distances, face_ids = mesh.nearest.on_surface(free_positions)
 
-        too_close = distances < margin
-        if not np.any(too_close):
+        # Only push vertices that are inside: the vector from closest surface
+        # point to vertex points opposite to the face normal (dot < 0).
+        # Cap distance to avoid false positives from distant back-faces
+        # of other bones in the merged mesh.
+        face_normals = mesh.face_normals[face_ids]
+        to_point = free_positions - closest_points
+        dot_products = np.sum(to_point * face_normals, axis=1)
+        inside = (dot_products < 0) & (distances < margin)
+
+        if not np.any(inside):
             return 0
 
-        push_idx = np.where(too_close)[0]
-        normals = mesh.face_normals[face_ids[push_idx]]
-        positions[free_indices[push_idx]] = closest_points[push_idx] + normals * margin
+        # Push just barely outside the surface (tiny epsilon, no inflation)
+        push_idx = np.where(inside)[0]
+        normals = face_normals[push_idx]
+        positions[free_indices[push_idx]] = closest_points[push_idx] + normals * 1e-4
         return len(push_idx)
 
     except Exception as e:
