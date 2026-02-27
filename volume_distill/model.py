@@ -35,7 +35,7 @@ class PositionalEncoding(nn.Module):
 
 
 class SharedEncoder(nn.Module):
-    def __init__(self, input_dim=4, hidden_sizes=(256, 512, 512), latent_dim=512,
+    def __init__(self, input_dim=4, hidden_sizes=(512, 1024, 1024), latent_dim=1024,
                  num_freqs=6):
         super().__init__()
         self.pe = PositionalEncoding(input_dim, num_freqs)
@@ -55,7 +55,7 @@ class SharedEncoder(nn.Module):
 
 
 class MuscleDecoder(nn.Module):
-    def __init__(self, latent_dim=512, hidden_sizes=(512, 512), output_dim=None):
+    def __init__(self, latent_dim=1024, hidden_sizes=(1024, 1024), output_dim=None):
         super().__init__()
         assert output_dim is not None, "output_dim (V*3) must be specified"
         layers = []
@@ -83,7 +83,7 @@ class DistillNet(nn.Module):
         self.encoder = SharedEncoder(input_dim=input_dim)
         # Skip connection: decoders receive encoder output + PE features
         pe_dim = self.encoder.pe.output_dim
-        latent_dim = 512
+        latent_dim = 1024
         decoder_input = latent_dim + pe_dim
         self.decoders = nn.ModuleDict({
             name: MuscleDecoder(latent_dim=decoder_input, output_dim=v_count * 3)

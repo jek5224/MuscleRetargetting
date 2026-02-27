@@ -17,12 +17,12 @@ from volume_distill.dataset import MuscleDistillDataset, distill_collate_fn
 DATA_PATH = "data/motion_cache/dance/preprocessed.pt"
 CHECKPOINT_DIR = "volume_distill/dance/checkpoints"
 LOG_DIR = "volume_distill/dance/runs"
-EPOCHS = 400
+EPOCHS = 600
 BATCH_SIZE = 512
 LR = 3e-4
 WEIGHT_DECAY = 1e-5
-SCHEDULER_FACTOR = 0.5
-SCHEDULER_PATIENCE = 20
+COSINE_T0 = 50       # epochs per first restart cycle
+COSINE_T_MULT = 2    # cycle length multiplier after each restart
 ANCHOR_LOSS_WEIGHT = 10.0
 
 
@@ -55,8 +55,8 @@ def train():
     print(f"Model params: {total_params:,} (input_dim={input_dim})")
 
     optimizer = torch.optim.Adam(model.parameters(), lr=LR, weight_decay=WEIGHT_DECAY)
-    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-        optimizer, factor=SCHEDULER_FACTOR, patience=SCHEDULER_PATIENCE,
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(
+        optimizer, T_0=COSINE_T0, T_mult=COSINE_T_MULT,
     )
 
     # Build per-muscle vertex weight vectors (higher weight on anchor vertices)
@@ -120,7 +120,7 @@ def train():
         for name in muscle_names:
             per_muscle_val[name] /= val_batches
 
-        scheduler.step(val_loss)
+        scheduler.step()
         elapsed = time.time() - t0
         lr = optimizer.param_groups[0]["lr"]
         print(f"Epoch {epoch:3d}/{EPOCHS} | Train MSE: {train_loss:.6f} | Val MSE: {val_loss:.6f} | LR: {lr:.2e} | {elapsed:.1f}s")
