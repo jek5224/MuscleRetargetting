@@ -1883,6 +1883,13 @@ def _draw_motion_browser_ui(v):
         # Repeat option
         _, v.motion_repeat = imgui.checkbox("Repeat##motion", v.motion_repeat)
 
+        # Fix root translation axes at rest position
+        _, v.motion_fix_x = imgui.checkbox("Fix X##motion", v.motion_fix_x)
+        imgui.same_line()
+        _, v.motion_fix_y = imgui.checkbox("Fix Y##motion", v.motion_fix_y)
+        imgui.same_line()
+        _, v.motion_fix_z = imgui.checkbox("Fix Z##motion", v.motion_fix_z)
+
         # Coupled tet sim option
         _, v.motion_run_tet_sim = imgui.checkbox("Run Coupled Tet Sim##motion", v.motion_run_tet_sim)
         if v.motion_run_tet_sim:
@@ -6873,9 +6880,14 @@ def _motion_apply_pose(v, frame):
         return
     v.motion_current_frame = frame
     pose = v.motion_bvh.mocap_refs[frame].copy()
-    # Fix root z to initial position so skeleton doesn't walk away; keep x and y from motion
+    # Optionally fix root translation axes at rest position
     if hasattr(v, 'motion_root_translation') and v.motion_root_translation is not None:
-        pose[5] = v.motion_root_translation[2]  # z
+        if v.motion_fix_x:
+            pose[3] = v.motion_root_translation[0]
+        if v.motion_fix_y:
+            pose[4] = v.motion_root_translation[1]
+        if v.motion_fix_z:
+            pose[5] = v.motion_root_translation[2]
     v.env.skel.setPositions(pose)
     # Sync the joint angle slider state
     if hasattr(v, '_skel_dofs'):

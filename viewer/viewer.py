@@ -203,6 +203,9 @@ class GLFWApp():
         self.motion_bake_current = 0      # Current progress during bake
         self._bake_data = {}              # Accumulated bake results
         self.motion_use_nn = False           # Toggle: use NN inference instead of cache
+        self.motion_fix_x = False            # Fix root X translation at rest
+        self.motion_fix_y = False            # Fix root Y translation at rest
+        self.motion_fix_z = False            # Fix root Z translation at rest
         self.motion_nn_model = None          # Loaded DistillNet model
         self.motion_nn_rest_positions = None # Rest positions dict for NN inference
         self.motion_nn_checkpoint_path = None # Path to loaded checkpoint
