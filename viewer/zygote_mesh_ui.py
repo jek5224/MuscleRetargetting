@@ -6925,15 +6925,14 @@ def _motion_cache_dir(v):
 
 
 def _motion_load_nn_checkpoint(v):
-    """Load NN checkpoint and rest positions for the current BVH motion."""
+    """Load NN checkpoint and rest positions (shared across all motions)."""
     v.motion_nn_model = None
     v.motion_nn_rest_positions = None
     v.motion_nn_checkpoint_path = None
     if v.motion_selected_idx < 0:
         return
-    bvh_name = os.path.splitext(os.path.basename(v.motion_bvh_files[v.motion_selected_idx]))[0]
-    ckpt_path = f'volume_distill/{bvh_name}/checkpoints/best.pt'
-    preproc_path = f'data/motion_cache/{bvh_name}/preprocessed.pt'
+    ckpt_path = 'volume_distill/dance/checkpoints/best.pt'
+    preproc_path = 'data/motion_cache/dance/preprocessed.pt'
     if not os.path.exists(ckpt_path) or not os.path.exists(preproc_path):
         return
     try:
