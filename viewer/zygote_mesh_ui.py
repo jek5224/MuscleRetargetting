@@ -6098,6 +6098,23 @@ def _run_unified_volume_sim(v, active_muscles, max_iterations=100, tolerance=1e-
         if hasattr(mobj, '_update_fixed_targets_from_skeleton'):
             mobj._update_fixed_targets_from_skeleton(v.zygote_skeleton_meshes, v.env.skel)
 
+    # Build collision meshes from skeleton (if any muscle has collision enabled)
+    collision_margin = 0.0
+    for name, mobj in active_muscles.items():
+        if getattr(mobj, 'soft_body_collision', False):
+            collision_margin = max(collision_margin, getattr(mobj, 'soft_body_collision_margin', 0.008))
+    collision_trimeshes = []
+    if collision_margin > 0:
+        # Use the first muscle's methods to build collision meshes (they're class methods in practice)
+        first_mobj = next(iter(active_muscles.values()))
+        if hasattr(first_mobj, '_build_transformed_collision_meshes'):
+            collision_trimeshes = first_mobj._build_transformed_collision_meshes(
+                v.zygote_skeleton_meshes, v.env.skel)
+        if hasattr(first_mobj, '_build_dart_shape_collision_meshes'):
+            collision_trimeshes.extend(first_mobj._build_dart_shape_collision_meshes(v.env.skel))
+        if collision_trimeshes:
+            print(f"  Collision: {len(collision_trimeshes)} skeleton meshes (margin={collision_margin:.4f}m)")
+
     # Check if we have valid cached topology from a previous frame
     muscle_names = list(active_muscles.keys())
     total_verts = sum(active_muscles[n].soft_body.num_vertices for n in muscle_names)
@@ -6187,6 +6204,24 @@ def _run_unified_volume_sim(v, active_muscles, max_iterations=100, tolerance=1e-
                     edge_type_map[(gi, gj)] = 0
                     edge_type_map[(gj, gi)] = 0
 
+        # Build global edge/face arrays for collision sampling
+        global_edge_i = []
+        global_edge_j = []
+        global_tet_faces = []
+        for name, mobj in active_muscles.items():
+            offset = global_offset[name]
+            sb = mobj.soft_body
+            for i, j in zip(sb.edge_i, sb.edge_j):
+                global_edge_i.append(offset + i)
+                global_edge_j.append(offset + j)
+            # tet_faces lives on the muscle mesh object, not the soft body
+            if hasattr(mobj, 'tet_faces') and mobj.tet_faces is not None:
+                for face in mobj.tet_faces:
+                    global_tet_faces.append(np.array(face) + offset)
+        global_edge_i = np.array(global_edge_i, dtype=np.int32)
+        global_edge_j = np.array(global_edge_j, dtype=np.int32)
+        global_tet_faces = np.array(global_tet_faces, dtype=np.int32) if global_tet_faces else None
+
         n_internal = len(all_edges)
 
         # Add inter-muscle constraints as edges
@@ -6261,6 +6296,9 @@ def _run_unified_volume_sim(v, active_muscles, max_iterations=100, tolerance=1e-
             'edge_weights': edge_weights,
             'rest_edge_vectors': rest_edge_vectors,
             'muscle_names': muscle_names,
+            'global_edge_i': global_edge_i,
+            'global_edge_j': global_edge_j,
+            'global_tet_faces': global_tet_faces,
             'muscle_id_map': muscle_id_map,
             'muscle_rest_axis_len': muscle_rest_axis_len,
             'muscle_fixed_global': muscle_fixed_global,
@@ -6427,6 +6465,19 @@ def _run_unified_volume_sim(v, active_muscles, max_iterations=100, tolerance=1e-
         if stuck_count > 0:
             print(f"  Fixed {stuck_count} stuck vertices by moving toward neighbors")
 
+    # Resolve skeleton collisions
+    if collision_trimeshes and collision_margin > 0:
+        total_pushed = 0
+        for pass_i in range(5):
+            pushed = _resolve_collisions_unified(
+                global_positions, global_fixed_mask, collision_trimeshes, collision_margin,
+                cache['global_edge_i'], cache['global_edge_j'], cache.get('global_tet_faces'))
+            total_pushed += pushed
+            if pushed == 0:
+                break
+        if total_pushed > 0:
+            print(f"  Collision: pushed {total_pushed} vertices out of skeleton")
+
     # Stash solution for warm-starting the next frame
     if v._unified_sim_cache is not None:
         v._unified_sim_cache['prev_solution'] = global_positions.copy()
@@ -6454,6 +6505,104 @@ def _run_unified_volume_sim(v, active_muscles, max_iterations=100, tolerance=1e-
         print(f"    {name}: max vertex change = {change:.4f}m")
 
     print(f"Unified volume sim complete (max change: {total_change:.4f}m)")
+
+
+def _resolve_collisions_unified(positions, fixed_mask, collision_meshes, margin,
+                                 edge_i, edge_j, tet_faces=None):
+    """
+    Resolve collisions for unified volume sim by pushing free vertices
+    out of collision meshes. Adapted from SoftBodySimulation._resolve_collisions_arap.
+
+    Returns number of vertices pushed.
+    """
+    total_pushed = 0
+    free_indices = np.where(~fixed_mask)[0]
+
+    for mesh in collision_meshes:
+        if mesh is None:
+            continue
+
+        try:
+            # 1. Free vertices
+            free_positions = positions[free_indices]
+            n_free = len(free_positions)
+
+            # 2. Edge midpoints (sample for speed)
+            edge_midpoints = []
+            edge_vertex_pairs = []
+            step = max(1, len(edge_i) // 500)
+            for idx in range(0, len(edge_i), step):
+                i, j = edge_i[idx], edge_j[idx]
+                edge_midpoints.append((positions[i] + positions[j]) * 0.5)
+                edge_vertex_pairs.append((i, j))
+            edge_midpoints = np.array(edge_midpoints) if edge_midpoints else np.zeros((0, 3))
+            n_edges = len(edge_midpoints)
+
+            # 3. Face centroids (sample for speed)
+            face_centroids = []
+            face_vertex_lists = []
+            if tet_faces is not None and len(tet_faces) > 0:
+                step = max(1, len(tet_faces) // 300)
+                for idx in range(0, len(tet_faces), step):
+                    face = tet_faces[idx]
+                    face_centroids.append(np.mean(positions[face], axis=0))
+                    face_vertex_lists.append(face)
+            face_centroids = np.array(face_centroids) if face_centroids else np.zeros((0, 3))
+            n_faces = len(face_centroids)
+
+            # 4. Batch query
+            if n_edges > 0 or n_faces > 0:
+                all_points = np.vstack([free_positions, edge_midpoints, face_centroids])
+            else:
+                all_points = free_positions
+
+            closest_points, distances, face_ids = mesh.nearest.on_surface(all_points)
+            face_normals = mesh.face_normals[face_ids]
+            to_point = all_points - closest_points
+            dot_products = np.sum(to_point * face_normals, axis=1)
+
+            inside_mask = dot_products < 0
+            too_close = distances < margin
+            needs_push = inside_mask | too_close
+
+            # 5. Push free vertices
+            vertex_push = needs_push[:n_free]
+            if np.any(vertex_push):
+                push_idx = np.where(vertex_push)[0]
+                positions[free_indices[push_idx]] = (
+                    closest_points[push_idx] + face_normals[push_idx] * margin
+                )
+                total_pushed += len(push_idx)
+
+            # 6. Push edge midpoint collisions → both vertices
+            if n_edges > 0:
+                edge_push = needs_push[n_free:n_free + n_edges]
+                for idx in np.where(edge_push)[0]:
+                    i, j = edge_vertex_pairs[idx]
+                    push_dir = face_normals[n_free + idx]
+                    off = n_free + idx
+                    push_dist = (margin - distances[off]) if not inside_mask[off] else (distances[off] + margin)
+                    positions[i] += push_dir * (push_dist * 0.5)
+                    positions[j] += push_dir * (push_dist * 0.5)
+                    total_pushed += 2
+
+            # 7. Push face centroid collisions → all face vertices
+            if n_faces > 0:
+                face_push = needs_push[n_free + n_edges:]
+                for idx in np.where(face_push)[0]:
+                    face_verts = face_vertex_lists[idx]
+                    off = n_free + n_edges + idx
+                    push_dir = face_normals[off]
+                    push_dist = (margin - distances[off]) if not inside_mask[off] else (distances[off] + margin)
+                    for vi in face_verts:
+                        positions[vi] += push_dir * (push_dist * 0.35)
+                    total_pushed += len(face_verts)
+
+        except Exception as e:
+            print(f"  Collision error: {e}")
+            continue
+
+    return total_pushed
 
 
 def _enforce_inter_muscle_constraints(v, active_muscles, stiffness=0.9):
