@@ -6426,17 +6426,11 @@ def _run_unified_volume_sim(v, active_muscles, max_iterations=100, tolerance=1e-
             ratio_strs = [f"{name}={r:.3f}" for name, r in axis_ratios.items() if abs(r - 1.0) >= 0.02]
             print(f"  Muscle-aware ARAP: {', '.join(ratio_strs)}")
 
-    # Build collision callback for inside-ARAP-loop resolution
-    collision_cb = None
-    if collision_mesh is not None and collision_margin > 0:
-        def collision_cb(positions):
-            _resolve_collisions_unified(positions, global_fixed_mask, collision_mesh, collision_margin)
-
     start_time = time.time()
     global_positions, iterations, max_disp = backend.solve(
         global_positions, global_rest_positions, neighbors, edge_weights, rest_edge_vectors,
         global_fixed_mask, fixed_targets_array, max_iterations=max_iterations, tolerance=tolerance,
-        target_edges=target_edges, verbose=True, collision_callback=collision_cb
+        target_edges=target_edges, verbose=True
     )
     print(f"  ARAP solved in {time.time() - start_time:.3f}s ({iterations} iterations)")
 
@@ -6484,6 +6478,13 @@ def _run_unified_volume_sim(v, active_muscles, max_iterations=100, tolerance=1e-
                     stuck_count += 1
         if stuck_count > 0:
             print(f"  Fixed {stuck_count} stuck vertices by moving toward neighbors")
+
+    # Post-solve collision: push only penetrating vertices just outside surface
+    if collision_mesh is not None and collision_margin > 0:
+        pushed = _resolve_collisions_unified(
+            global_positions, global_fixed_mask, collision_mesh, collision_margin)
+        if pushed > 0:
+            print(f"  Collision: corrected {pushed} penetrating vertices")
 
     # Stash solution for warm-starting the next frame
     if v._unified_sim_cache is not None:
