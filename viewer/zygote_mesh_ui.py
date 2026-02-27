@@ -6098,37 +6098,6 @@ def _run_unified_volume_sim(v, active_muscles, max_iterations=100, tolerance=1e-
         if hasattr(mobj, '_update_fixed_targets_from_skeleton'):
             mobj._update_fixed_targets_from_skeleton(v.zygote_skeleton_meshes, v.env.skel)
 
-    # Build collision meshes from skeleton (if any muscle has collision enabled)
-    collision_margin = 0.0
-    for name, mobj in active_muscles.items():
-        if getattr(mobj, 'soft_body_collision', False):
-            collision_margin = max(collision_margin, getattr(mobj, 'soft_body_collision_margin', 0.008))
-    collision_mesh = None
-    if collision_margin > 0:
-        import trimesh
-        # Use the first muscle's methods to build collision meshes (they're class methods in practice)
-        first_mobj = next(iter(active_muscles.values()))
-        parts = []
-        if hasattr(first_mobj, '_build_transformed_collision_meshes'):
-            parts.extend(first_mobj._build_transformed_collision_meshes(
-                v.zygote_skeleton_meshes, v.env.skel))
-        if hasattr(first_mobj, '_build_dart_shape_collision_meshes'):
-            parts.extend(first_mobj._build_dart_shape_collision_meshes(v.env.skel))
-        # Merge into one trimesh for single BVH build + single query
-        if parts:
-            all_verts = []
-            all_faces = []
-            vert_offset = 0
-            for m in parts:
-                all_verts.append(m.vertices)
-                all_faces.append(m.faces + vert_offset)
-                vert_offset += len(m.vertices)
-            collision_mesh = trimesh.Trimesh(
-                vertices=np.vstack(all_verts),
-                faces=np.vstack(all_faces),
-                process=False)
-            print(f"  Collision: {len(parts)} skeleton meshes merged ({vert_offset} verts, margin={collision_margin:.4f}m)")
-
     # Check if we have valid cached topology from a previous frame
     muscle_names = list(active_muscles.keys())
     total_verts = sum(active_muscles[n].soft_body.num_vertices for n in muscle_names)
@@ -6218,24 +6187,6 @@ def _run_unified_volume_sim(v, active_muscles, max_iterations=100, tolerance=1e-
                     edge_type_map[(gi, gj)] = 0
                     edge_type_map[(gj, gi)] = 0
 
-        # Build global edge/face arrays for collision sampling
-        global_edge_i = []
-        global_edge_j = []
-        global_tet_faces = []
-        for name, mobj in active_muscles.items():
-            offset = global_offset[name]
-            sb = mobj.soft_body
-            for i, j in zip(sb.edge_i, sb.edge_j):
-                global_edge_i.append(offset + i)
-                global_edge_j.append(offset + j)
-            # tet_faces lives on the muscle mesh object, not the soft body
-            if hasattr(mobj, 'tet_faces') and mobj.tet_faces is not None:
-                for face in mobj.tet_faces:
-                    global_tet_faces.append(np.array(face) + offset)
-        global_edge_i = np.array(global_edge_i, dtype=np.int32)
-        global_edge_j = np.array(global_edge_j, dtype=np.int32)
-        global_tet_faces = np.array(global_tet_faces, dtype=np.int32) if global_tet_faces else None
-
         n_internal = len(all_edges)
 
         # Add inter-muscle constraints as edges
@@ -6310,9 +6261,6 @@ def _run_unified_volume_sim(v, active_muscles, max_iterations=100, tolerance=1e-
             'edge_weights': edge_weights,
             'rest_edge_vectors': rest_edge_vectors,
             'muscle_names': muscle_names,
-            'global_edge_i': global_edge_i,
-            'global_edge_j': global_edge_j,
-            'global_tet_faces': global_tet_faces,
             'muscle_id_map': muscle_id_map,
             'muscle_rest_axis_len': muscle_rest_axis_len,
             'muscle_fixed_global': muscle_fixed_global,
@@ -6345,45 +6293,17 @@ def _run_unified_volume_sim(v, active_muscles, max_iterations=100, tolerance=1e-
             for local_idx, target in zip(mobj.soft_body.fixed_indices, mobj.soft_body.fixed_targets):
                 global_fixed_targets[offset + local_idx] = target
 
-    # Pre-solve collision: detect penetrating vertices and fix them as ARAP constraints
-    collision_fixed_set = set()
-    if collision_mesh is not None and collision_margin > 0:
-        free_indices_coll = np.where(~global_fixed_mask)[0]
-        if len(free_indices_coll) > 0:
-            free_positions = global_positions[free_indices_coll]
-            closest_points, distances, face_ids = collision_mesh.nearest.on_surface(free_positions)
-            face_normals = collision_mesh.face_normals[face_ids]
-            to_point = free_positions - closest_points
-            dot_products = np.sum(to_point * face_normals, axis=1)
-            inside = (dot_products < 0) & (distances < collision_margin)
-
-            if np.any(inside):
-                push_idx = np.where(inside)[0]
-                for idx in push_idx:
-                    gi = free_indices_coll[idx]
-                    projected = closest_points[idx] + face_normals[idx] * 1e-4
-                    collision_fixed_set.add(gi)
-                    global_fixed_targets[gi] = projected
-                    global_positions[gi] = projected
-                print(f"  Collision: {len(push_idx)} vertices fixed as ARAP constraints")
-
-    # Create augmented fixed mask with collision-fixed vertices
-    if collision_fixed_set:
-        augmented_fixed_mask = global_fixed_mask.copy()
-        for gi in collision_fixed_set:
-            augmented_fixed_mask[gi] = True
-    else:
-        augmented_fixed_mask = global_fixed_mask
-
     # Debug: check if fixed targets differ from rest
     max_fixed_diff = 0.0
     for gi, target in global_fixed_targets.items():
         diff = np.linalg.norm(target - global_rest_positions[gi])
         max_fixed_diff = max(max_fixed_diff, diff)
 
-    n_fixed_mask = np.sum(augmented_fixed_mask)
+    n_fixed_mask = np.sum(global_fixed_mask)
     n_fixed_targets = len(global_fixed_targets)
-    print(f"  Fixed: {n_fixed_mask} in mask ({len(collision_fixed_set)} collision), {n_fixed_targets} with targets, max displacement from rest: {max_fixed_diff:.4f}m")
+    print(f"  Fixed: {n_fixed_mask} in mask, {n_fixed_targets} with targets, max displacement from rest: {max_fixed_diff:.4f}m")
+    if n_fixed_mask != n_fixed_targets:
+        print(f"  WARNING: Mismatch between fixed_mask ({n_fixed_mask}) and fixed_targets ({n_fixed_targets})")
 
     # Reuse cached backend to avoid Taichi field re-allocation errors
     cached = getattr(v, '_unified_arap_backend', None)
@@ -6394,23 +6314,19 @@ def _run_unified_volume_sim(v, active_muscles, max_iterations=100, tolerance=1e-
         backend._backend_name = backend_name
         v._unified_arap_backend = backend
 
-    # Prepare fixed targets array (ordered by fixed indices in augmented mask)
-    fixed_indices = np.where(augmented_fixed_mask)[0]
+    # Prepare fixed targets array (ordered by fixed indices)
+    fixed_indices = np.where(global_fixed_mask)[0]
     fixed_targets_array = np.array([global_fixed_targets.get(i, global_rest_positions[i]) for i in fixed_indices])
 
-    # Build system when needed: first frame, or collision-fixed set changed
-    prev_collision_set = cache.get('prev_collision_fixed', set()) if cache_valid else set()
-    collision_set_changed = (collision_fixed_set != prev_collision_set)
+    # Build system only on first frame (when solver hasn't been factorized yet)
     need_build = (not cache_valid
-                  or collision_set_changed
                   or (getattr(backend, 'solver', None) is None
                       and getattr(backend, '_scipy_solver', None) is None
                       and getattr(backend, '_splu', None) is None))
     if need_build:
         start_time = time.time()
-        backend.build_system(total_verts, neighbors, edge_weights, augmented_fixed_mask, regularization=1e-6)
-        build_reason = "collision set changed" if collision_set_changed and cache_valid else "initial"
-        print(f"  System built in {time.time() - start_time:.3f}s ({build_reason})")
+        backend.build_system(total_verts, neighbors, edge_weights, global_fixed_mask, regularization=1e-6)
+        print(f"  System built in {time.time() - start_time:.3f}s")
     else:
         print(f"  Reusing cached system (skipping build_system)")
 
@@ -6461,7 +6377,7 @@ def _run_unified_volume_sim(v, active_muscles, max_iterations=100, tolerance=1e-
     start_time = time.time()
     global_positions, iterations, max_disp = backend.solve(
         global_positions, global_rest_positions, neighbors, edge_weights, rest_edge_vectors,
-        augmented_fixed_mask, fixed_targets_array, max_iterations=max_iterations, tolerance=tolerance,
+        global_fixed_mask, fixed_targets_array, max_iterations=max_iterations, tolerance=tolerance,
         target_edges=target_edges, verbose=True
     )
     print(f"  ARAP solved in {time.time() - start_time:.3f}s ({iterations} iterations)")
@@ -6470,7 +6386,7 @@ def _run_unified_volume_sim(v, active_muscles, max_iterations=100, tolerance=1e-
     # and applying same displacement
     isolated_fixed = 0
     for i in range(total_verts):
-        if len(neighbors[i]) == 0 and not augmented_fixed_mask[i]:
+        if len(neighbors[i]) == 0 and not global_fixed_mask[i]:
             # Find closest vertex that has neighbors
             rest_pos = global_rest_positions[i]
             best_dist = float('inf')
@@ -6491,7 +6407,7 @@ def _run_unified_volume_sim(v, active_muscles, max_iterations=100, tolerance=1e-
 
     # Check for other stuck vertices and fix them
     # Only apply if there's actual deformation (fixed vertices moved from rest)
-    fixed_indices = np.where(augmented_fixed_mask)[0]
+    fixed_indices = np.where(global_fixed_mask)[0]
     fixed_disp = np.linalg.norm(global_positions[fixed_indices] - global_rest_positions[fixed_indices], axis=1)
     max_fixed_disp = np.max(fixed_disp) if len(fixed_disp) > 0 else 0.0
 
@@ -6500,7 +6416,7 @@ def _run_unified_volume_sim(v, active_muscles, max_iterations=100, tolerance=1e-
         stuck_threshold = 1e-6
         stuck_count = 0
         for i in range(total_verts):
-            if not augmented_fixed_mask[i] and total_disp_from_rest[i] < stuck_threshold:
+            if not global_fixed_mask[i] and total_disp_from_rest[i] < stuck_threshold:
                 n_neighbors = len(neighbors[i])
                 if n_neighbors > 0:
                     neighbor_positions = [global_positions[j] for j in neighbors[i]]
@@ -6511,10 +6427,9 @@ def _run_unified_volume_sim(v, active_muscles, max_iterations=100, tolerance=1e-
         if stuck_count > 0:
             print(f"  Fixed {stuck_count} stuck vertices by moving toward neighbors")
 
-    # Stash solution and collision set for next frame
+    # Stash solution for warm-starting the next frame
     if v._unified_sim_cache is not None:
         v._unified_sim_cache['prev_solution'] = global_positions.copy()
-        v._unified_sim_cache['prev_collision_fixed'] = collision_fixed_set
 
     # Distribute results back to individual muscles
     total_change = 0.0
@@ -6539,46 +6454,6 @@ def _run_unified_volume_sim(v, active_muscles, max_iterations=100, tolerance=1e-
         print(f"    {name}: max vertex change = {change:.4f}m")
 
     print(f"Unified volume sim complete (max change: {total_change:.4f}m)")
-
-
-def _resolve_collisions_unified(positions, fixed_mask, mesh, margin,
-                                 edge_i=None, edge_j=None, tet_faces=None):
-    """
-    Resolve collisions for unified volume sim by pushing penetrating free
-    vertices out of a merged collision mesh. Only pushes vertices that are
-    actually inside (dot product test), not merely close to the surface.
-
-    Returns number of vertices pushed.
-    """
-    free_indices = np.where(~fixed_mask)[0]
-    if len(free_indices) == 0:
-        return 0
-
-    try:
-        free_positions = positions[free_indices]
-        closest_points, distances, face_ids = mesh.nearest.on_surface(free_positions)
-
-        # Only push vertices that are inside: the vector from closest surface
-        # point to vertex points opposite to the face normal (dot < 0).
-        # Cap distance to avoid false positives from distant back-faces
-        # of other bones in the merged mesh.
-        face_normals = mesh.face_normals[face_ids]
-        to_point = free_positions - closest_points
-        dot_products = np.sum(to_point * face_normals, axis=1)
-        inside = (dot_products < 0) & (distances < margin)
-
-        if not np.any(inside):
-            return 0
-
-        # Push just barely outside the surface (tiny epsilon, no inflation)
-        push_idx = np.where(inside)[0]
-        normals = face_normals[push_idx]
-        positions[free_indices[push_idx]] = closest_points[push_idx] + normals * 1e-4
-        return len(push_idx)
-
-    except Exception as e:
-        print(f"  Collision error: {e}")
-        return 0
 
 
 def _enforce_inter_muscle_constraints(v, active_muscles, stiffness=0.9):
