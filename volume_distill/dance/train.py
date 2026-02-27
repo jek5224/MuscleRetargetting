@@ -18,7 +18,8 @@ DATA_PATH = "data/motion_cache/dance/preprocessed.pt"
 CHECKPOINT_DIR = "volume_distill/dance/checkpoints"
 LOG_DIR = "volume_distill/dance/runs"
 EPOCHS = 600
-BATCH_SIZE = 512
+BATCH_SIZE = 64
+ACCUM_STEPS = 8      # effective batch size = 64 * 8 = 512
 LR = 3e-4
 WEIGHT_DECAY = 1e-5
 COSINE_T0 = 50       # epochs per first restart cycle
@@ -84,20 +85,26 @@ def train():
     for epoch in range(1, EPOCHS + 1):
         t0 = time.time()
 
-        # Train
+        # Train with gradient accumulation
         model.train()
         train_loss_sum = 0.0
         train_batches = 0
-        for x, targets in train_loader:
+        optimizer.zero_grad()
+        for step, (x, targets) in enumerate(train_loader):
             x = x.to(device)
             targets = {k: v.to(device) for k, v in targets.items()}
             preds = model(x, rest_positions)
             loss = sum(weighted_mse(preds[name], targets[name], vertex_weights[name]) for name in muscle_names) / len(muscle_names)
-            optimizer.zero_grad()
-            loss.backward()
-            optimizer.step()
+            (loss / ACCUM_STEPS).backward()
             train_loss_sum += loss.item()
             train_batches += 1
+            if (step + 1) % ACCUM_STEPS == 0:
+                optimizer.step()
+                optimizer.zero_grad()
+        # Handle remaining accumulated gradients
+        if (step + 1) % ACCUM_STEPS != 0:
+            optimizer.step()
+            optimizer.zero_grad()
         train_loss = train_loss_sum / train_batches
 
         # Validate

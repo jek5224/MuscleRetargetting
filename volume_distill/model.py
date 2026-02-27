@@ -86,8 +86,8 @@ class VertexDecoder(nn.Module):
     Takes the concatenation of the DOF latent and vertex rest position,
     and predicts the 3D displacement for that vertex.
     """
-    def __init__(self, latent_dim=256, pos_dim=3, hidden_dim=256,
-                 num_res_blocks=3, omega_0=30.0):
+    def __init__(self, latent_dim=256, pos_dim=3, hidden_dim=128,
+                 num_res_blocks=2, omega_0=30.0):
         super().__init__()
         self.input_proj = SIRENLayer(latent_dim + pos_dim, hidden_dim,
                                      is_first=True, omega_0=omega_0)
