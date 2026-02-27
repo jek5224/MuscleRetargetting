@@ -18,29 +18,28 @@ def load_model(checkpoint_path, device=None):
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     ckpt = torch.load(checkpoint_path, map_location=device, weights_only=False)
     muscle_vertex_counts = ckpt["muscle_vertex_counts"]
-    model = DistillNet(muscle_vertex_counts).to(device)
+    input_dim = ckpt.get("input_dim", 4)
+    model = DistillNet(muscle_vertex_counts, input_dim=input_dim).to(device)
     model.load_state_dict(ckpt["model_state_dict"])
     model.eval()
     return model, muscle_vertex_counts
 
 
-def predict_frame(model, hip_dofs, knee_dof, rest_positions, device=None):
+def predict_frame(model, dofs, rest_positions, device=None):
     """Predict vertex positions for a single frame.
 
     Args:
         model: trained DistillNet
-        hip_dofs: array-like of 3 hip DOF values
-        knee_dof: scalar knee DOF value
-        rest_positions: dict of {muscle_name: Tensor[V, 3]} in pelvis-local frame
+        dofs: array-like of input DOF values (length must match model input_dim)
+        rest_positions: dict of {muscle_name: Tensor[V, 3]} in bone-local frame
 
     Returns:
-        dict of {muscle_name: ndarray[V, 3]} predicted positions in pelvis-local frame
+        dict of {muscle_name: ndarray[V, 3]} predicted positions in bone-local frame
     """
     if device is None:
         device = next(model.parameters()).device
     x = torch.tensor(
-        [hip_dofs[0], hip_dofs[1], hip_dofs[2], knee_dof],
-        dtype=torch.float32,
+        dofs, dtype=torch.float32,
     ).unsqueeze(0).to(device)
 
     with torch.no_grad():

@@ -47,9 +47,10 @@ def train():
         name: data["rest_positions"][name].shape[0]
         for name in data["muscle_names"]
     }
-    model = DistillNet(muscle_vertex_counts).to(device)
+    input_dim = data["input_dofs"].shape[1]
+    model = DistillNet(muscle_vertex_counts, input_dim=input_dim).to(device)
     total_params = sum(p.numel() for p in model.parameters())
-    print(f"Model params: {total_params:,}")
+    print(f"Model params: {total_params:,} (input_dim={input_dim})")
 
     optimizer = torch.optim.Adam(model.parameters(), lr=LR, weight_decay=WEIGHT_DECAY)
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
@@ -129,6 +130,7 @@ def train():
                 "optimizer_state_dict": optimizer.state_dict(),
                 "val_loss": val_loss,
                 "muscle_vertex_counts": muscle_vertex_counts,
+                "input_dim": input_dim,
             }, os.path.join(CHECKPOINT_DIR, "best.pt"))
             print(f"  -> Saved best model (val_loss={val_loss:.6f})")
 
@@ -140,6 +142,7 @@ def train():
                 "optimizer_state_dict": optimizer.state_dict(),
                 "val_loss": val_loss,
                 "muscle_vertex_counts": muscle_vertex_counts,
+                "input_dim": input_dim,
             }, os.path.join(CHECKPOINT_DIR, f"epoch_{epoch:03d}.pt"))
 
     writer.close()

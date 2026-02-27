@@ -6963,9 +6963,9 @@ def _motion_apply_nn_deformation(v, frame):
         return False
     try:
         from volume_distill.dance.evaluate import predict_frame
-        # Extract DOFs: indices 6,7,8 = hip, 9 = knee
-        dofs = v.motion_bvh.mocap_refs[frame, [6, 7, 8, 9]]
-        predictions = predict_frame(v.motion_nn_model, dofs[:3], dofs[3], v.motion_nn_rest_positions)
+        # Extract DOFs: 6-8 = hip, 9 = knee, 10-12 = ankle
+        dofs = v.motion_bvh.mocap_refs[frame, [6, 7, 8, 9, 10, 11, 12]]
+        predictions = predict_frame(v.motion_nn_model, dofs, v.motion_nn_rest_positions)
         # Get femur world transform (must match the reference bone used in preprocessing)
         T = v.env.skel.getBodyNode("L_Femur0").getWorldTransform().matrix()
         R = T[:3, :3]
