@@ -18,13 +18,13 @@ DATA_PATH = "data/motion_cache/dance/preprocessed.pt"
 CHECKPOINT_DIR = "volume_distill/dance/checkpoints"
 LOG_DIR = "volume_distill/dance/runs"
 EPOCHS = 600
-BATCH_SIZE = 64
-ACCUM_STEPS = 8      # effective batch size = 64 * 8 = 512
+BATCH_SIZE = 512
 LR = 3e-4
 WEIGHT_DECAY = 1e-5
 COSINE_T0 = 50       # epochs per first restart cycle
 COSINE_T_MULT = 2    # cycle length multiplier after each restart
 ANCHOR_LOSS_WEIGHT = 10.0
+DIST_LOSS_SCALE = 5.0  # weight scale for distance from pelvis
 
 
 def train():
@@ -51,7 +51,6 @@ def train():
         for name in data["muscle_names"]
     }
     input_dim = data["input_dofs"].shape[1]
-    rest_positions = {name: data["rest_positions"][name].to(device) for name in data["muscle_names"]}
     model = DistillNet(muscle_vertex_counts, input_dim=input_dim).to(device)
     total_params = sum(p.numel() for p in model.parameters())
     print(f"Model params: {total_params:,} (input_dim={input_dim})")
@@ -61,17 +60,30 @@ def train():
         optimizer, T_0=COSINE_T0, T_mult=COSINE_T_MULT,
     )
 
-    # Build per-muscle vertex weight vectors (higher weight on anchor vertices)
+    # Build per-muscle vertex weight vectors
+    # Two components: anchor weighting + distance-from-pelvis weighting
+    # In pelvis-local frame, origin = pelvis, so dist = ||rest_pos||
     anchor_data = data.get("anchor_vertices", {})
     vertex_weights = {}
     for name in data["muscle_names"]:
         n_verts = muscle_vertex_counts[name]
-        w = torch.ones(n_verts * 3, device=device)
+        rest = data["rest_positions"][name]  # (V, 3)
+        # Distance-based weight: vertices farther from pelvis get more weight
+        dist = rest.norm(dim=1)  # (V,)
+        mean_dist = dist.mean()
+        dist_w = 1.0 + DIST_LOSS_SCALE * (dist / mean_dist)
+        # Expand to per-coordinate: (V,) → (V*3,)
+        dist_w = dist_w.unsqueeze(1).expand(-1, 3).reshape(-1)
+        w = dist_w.to(device)
+        # Anchor weighting on top
+        n_anchors = 0
         if name in anchor_data and len(anchor_data[name]) > 0:
             for vi in anchor_data[name].tolist():
                 w[vi * 3: vi * 3 + 3] = ANCHOR_LOSS_WEIGHT
-            print(f"  {name}: {len(anchor_data[name])} anchor verts weighted x{ANCHOR_LOSS_WEIGHT}")
+            n_anchors = len(anchor_data[name])
         vertex_weights[name] = w
+        print(f"  {name}: {n_verts} verts, {n_anchors} anchors, "
+              f"dist weight range [{dist_w.min():.1f}, {dist_w.max():.1f}]")
 
     def weighted_mse(pred, target, weights):
         return (weights * (pred - target) ** 2).mean()
@@ -85,26 +97,20 @@ def train():
     for epoch in range(1, EPOCHS + 1):
         t0 = time.time()
 
-        # Train with gradient accumulation
+        # Train
         model.train()
         train_loss_sum = 0.0
         train_batches = 0
-        optimizer.zero_grad()
-        for step, (x, targets) in enumerate(train_loader):
+        for x, targets in train_loader:
             x = x.to(device)
             targets = {k: v.to(device) for k, v in targets.items()}
-            preds = model(x, rest_positions)
+            preds = model(x)
             loss = sum(weighted_mse(preds[name], targets[name], vertex_weights[name]) for name in muscle_names) / len(muscle_names)
-            (loss / ACCUM_STEPS).backward()
+            optimizer.zero_grad()
+            loss.backward()
+            optimizer.step()
             train_loss_sum += loss.item()
             train_batches += 1
-            if (step + 1) % ACCUM_STEPS == 0:
-                optimizer.step()
-                optimizer.zero_grad()
-        # Handle remaining accumulated gradients
-        if (step + 1) % ACCUM_STEPS != 0:
-            optimizer.step()
-            optimizer.zero_grad()
         train_loss = train_loss_sum / train_batches
 
         # Validate
@@ -116,7 +122,7 @@ def train():
             for x, targets in val_loader:
                 x = x.to(device)
                 targets = {k: v.to(device) for k, v in targets.items()}
-                preds = model(x, rest_positions)
+                preds = model(x)
                 batch_loss = 0.0
                 for name in muscle_names:
                     ml = weighted_mse(preds[name], targets[name], vertex_weights[name]).item()
