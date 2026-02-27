@@ -42,8 +42,12 @@ def predict_frame(model, dofs, rest_positions, device=None):
         dofs, dtype=torch.float32,
     ).unsqueeze(0).to(device)
 
+    # Ensure rest_positions tensors are on the model device
+    rp_device = {name: t.to(device) if isinstance(t, torch.Tensor) else t
+                 for name, t in rest_positions.items()}
+
     with torch.no_grad():
-        preds = model(x)
+        preds = model(x, rp_device)
 
     result = {}
     for name, disp_flat in preds.items():
@@ -67,6 +71,7 @@ def per_muscle_rmse(model, data_path, device=None):
     input_dofs = data["input_dofs"]
     displacements = data["displacements"]
     muscle_names = data["muscle_names"]
+    rest_positions = {name: data["rest_positions"][name].to(device) for name in muscle_names}
 
     model.eval()
     per_muscle_se = {name: 0.0 for name in muscle_names}
@@ -77,7 +82,7 @@ def per_muscle_rmse(model, data_path, device=None):
         idx = val_indices[start : start + batch_size]
         x = input_dofs[idx].to(device)
         with torch.no_grad():
-            preds = model(x)
+            preds = model(x, rest_positions)
         for name in muscle_names:
             gt = displacements[name][idx].reshape(len(idx), -1).to(device)
             se = ((preds[name] - gt) ** 2).sum().item()

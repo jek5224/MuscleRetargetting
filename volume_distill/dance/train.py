@@ -50,6 +50,7 @@ def train():
         for name in data["muscle_names"]
     }
     input_dim = data["input_dofs"].shape[1]
+    rest_positions = {name: data["rest_positions"][name].to(device) for name in data["muscle_names"]}
     model = DistillNet(muscle_vertex_counts, input_dim=input_dim).to(device)
     total_params = sum(p.numel() for p in model.parameters())
     print(f"Model params: {total_params:,} (input_dim={input_dim})")
@@ -90,7 +91,7 @@ def train():
         for x, targets in train_loader:
             x = x.to(device)
             targets = {k: v.to(device) for k, v in targets.items()}
-            preds = model(x)
+            preds = model(x, rest_positions)
             loss = sum(weighted_mse(preds[name], targets[name], vertex_weights[name]) for name in muscle_names) / len(muscle_names)
             optimizer.zero_grad()
             loss.backward()
@@ -108,7 +109,7 @@ def train():
             for x, targets in val_loader:
                 x = x.to(device)
                 targets = {k: v.to(device) for k, v in targets.items()}
-                preds = model(x)
+                preds = model(x, rest_positions)
                 batch_loss = 0.0
                 for name in muscle_names:
                     ml = weighted_mse(preds[name], targets[name], vertex_weights[name]).item()

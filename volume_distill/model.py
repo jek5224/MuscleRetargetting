@@ -3,12 +3,6 @@ import torch
 import torch.nn as nn
 
 
-def weights_init(m):
-    if isinstance(m, nn.Linear):
-        nn.init.xavier_uniform_(m.weight)
-        m.bias.data.zero_()
-
-
 class PositionalEncoding(nn.Module):
     """Sinusoidal positional encoding (NeRF-style) for scalar DOF inputs.
 
@@ -28,48 +22,99 @@ class PositionalEncoding(nn.Module):
 
     def forward(self, x):
         # x: (..., input_dim)
-        # Outer product with frequencies: (..., input_dim, num_freqs)
         xf = x.unsqueeze(-1) * self.freqs  # broadcast
-        # Concatenate raw + sin + cos along last dim
         return torch.cat([x, xf.sin().flatten(-2), xf.cos().flatten(-2)], dim=-1)
 
 
+class SIRENLayer(nn.Module):
+    """Linear layer with sin activation and SIREN-style initialization."""
+    def __init__(self, in_dim, out_dim, is_first=False, omega_0=30.0):
+        super().__init__()
+        self.omega_0 = omega_0
+        self.linear = nn.Linear(in_dim, out_dim)
+        with torch.no_grad():
+            if is_first:
+                self.linear.weight.uniform_(-1.0 / in_dim, 1.0 / in_dim)
+            else:
+                bound = math.sqrt(6.0 / in_dim) / omega_0
+                self.linear.weight.uniform_(-bound, bound)
+            self.linear.bias.zero_()
+
+    def forward(self, x):
+        return torch.sin(self.omega_0 * self.linear(x))
+
+
+class SIRENResBlock(nn.Module):
+    """Residual block with SIREN activations."""
+    def __init__(self, dim, omega_0=30.0):
+        super().__init__()
+        self.layer1 = SIRENLayer(dim, dim, omega_0=omega_0)
+        self.layer2 = SIRENLayer(dim, dim, omega_0=omega_0)
+
+    def forward(self, x):
+        return x + self.layer2(self.layer1(x))
+
+
 class SharedEncoder(nn.Module):
-    def __init__(self, input_dim=4, hidden_sizes=(512, 1024, 1024), latent_dim=1024,
-                 num_freqs=6):
+    def __init__(self, input_dim=4, hidden_dim=512, latent_dim=256,
+                 num_res_blocks=3, num_freqs=6, omega_0=30.0):
         super().__init__()
         self.pe = PositionalEncoding(input_dim, num_freqs)
-        layers = []
-        prev = self.pe.output_dim
-        for h in hidden_sizes:
-            layers.append(nn.Linear(prev, h))
-            layers.append(nn.LeakyReLU(0.2))
-            prev = h
-        layers.append(nn.Linear(prev, latent_dim))
-        layers.append(nn.LeakyReLU(0.2))
-        self.fc = nn.Sequential(*layers)
-        self.fc.apply(weights_init)
+        self.input_proj = SIRENLayer(self.pe.output_dim, hidden_dim,
+                                     is_first=True, omega_0=omega_0)
+        self.res_blocks = nn.Sequential(
+            *[SIRENResBlock(hidden_dim, omega_0=omega_0)
+              for _ in range(num_res_blocks)]
+        )
+        self.output_proj = nn.Linear(hidden_dim, latent_dim)
+        # Output projection uses standard init (no sin activation after it)
+        bound = math.sqrt(6.0 / hidden_dim) / omega_0
+        with torch.no_grad():
+            self.output_proj.weight.uniform_(-bound, bound)
+            self.output_proj.bias.zero_()
 
     def forward(self, x):
-        return self.fc(self.pe(x))
+        h = self.input_proj(self.pe(x))
+        h = self.res_blocks(h)
+        return self.output_proj(h)
 
 
-class MuscleDecoder(nn.Module):
-    def __init__(self, latent_dim=1024, hidden_sizes=(1024, 1024), output_dim=None):
+class VertexDecoder(nn.Module):
+    """Shared per-vertex decoder: (latent, rest_pos) → displacement (3).
+
+    A single decoder shared across all muscles and vertices.
+    Takes the concatenation of the DOF latent and vertex rest position,
+    and predicts the 3D displacement for that vertex.
+    """
+    def __init__(self, latent_dim=256, pos_dim=3, hidden_dim=256,
+                 num_res_blocks=3, omega_0=30.0):
         super().__init__()
-        assert output_dim is not None, "output_dim (V*3) must be specified"
-        layers = []
-        prev = latent_dim
-        for h in hidden_sizes:
-            layers.append(nn.Linear(prev, h))
-            layers.append(nn.LeakyReLU(0.2))
-            prev = h
-        layers.append(nn.Linear(prev, output_dim))
-        self.fc = nn.Sequential(*layers)
-        self.fc.apply(weights_init)
+        self.input_proj = SIRENLayer(latent_dim + pos_dim, hidden_dim,
+                                     is_first=True, omega_0=omega_0)
+        self.res_blocks = nn.Sequential(
+            *[SIRENResBlock(hidden_dim, omega_0=omega_0)
+              for _ in range(num_res_blocks)]
+        )
+        self.output_proj = nn.Linear(hidden_dim, 3)
+        # Small init on output so initial predictions are near zero
+        with torch.no_grad():
+            self.output_proj.weight.uniform_(-1e-4, 1e-4)
+            self.output_proj.bias.zero_()
 
-    def forward(self, x):
-        return self.fc(x)
+    def forward(self, latent, rest_pos):
+        """
+        Args:
+            latent: (B, latent_dim) or (B, V, latent_dim)
+            rest_pos: (B, V, 3)
+        Returns:
+            displacement: (B, V, 3)
+        """
+        if latent.dim() == 2:
+            # Expand latent to match vertices: (B, latent_dim) → (B, V, latent_dim)
+            latent = latent.unsqueeze(1).expand(-1, rest_pos.shape[1], -1)
+        h = self.input_proj(torch.cat([latent, rest_pos], dim=-1))
+        h = self.res_blocks(h)
+        return self.output_proj(h)
 
 
 class DistillNet(nn.Module):
@@ -81,18 +126,23 @@ class DistillNet(nn.Module):
         """
         super().__init__()
         self.encoder = SharedEncoder(input_dim=input_dim)
-        # Skip connection: decoders receive encoder output + PE features
-        pe_dim = self.encoder.pe.output_dim
-        latent_dim = 1024
-        decoder_input = latent_dim + pe_dim
-        self.decoders = nn.ModuleDict({
-            name: MuscleDecoder(latent_dim=decoder_input, output_dim=v_count * 3)
-            for name, v_count in muscle_vertex_counts.items()
-        })
+        latent_dim = self.encoder.output_proj.out_features
+        self.decoder = VertexDecoder(latent_dim=latent_dim)
         self.muscle_vertex_counts = muscle_vertex_counts
 
-    def forward(self, x):
-        pe_x = self.encoder.pe(x)
-        latent = self.encoder.fc(pe_x)
-        combined = torch.cat([latent, pe_x], dim=-1)
-        return {name: decoder(combined) for name, decoder in self.decoders.items()}
+    def forward(self, x, rest_positions):
+        """
+        Args:
+            x: (B, input_dim) DOF values
+            rest_positions: dict of {muscle_name: (V, 3)} tensors
+        Returns:
+            dict of {muscle_name: (B, V*3)} predicted displacements (flat)
+        """
+        latent = self.encoder(x)  # (B, latent_dim)
+        results = {}
+        for name, v_count in self.muscle_vertex_counts.items():
+            # rest_positions[name] is (V, 3), expand to (B, V, 3)
+            rp = rest_positions[name].unsqueeze(0).expand(x.shape[0], -1, -1)
+            disp = self.decoder(latent, rp)  # (B, V, 3)
+            results[name] = disp.reshape(x.shape[0], -1)  # (B, V*3)
+        return results
