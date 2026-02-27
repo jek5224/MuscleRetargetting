@@ -6427,12 +6427,41 @@ def _run_unified_volume_sim(v, active_muscles, max_iterations=100, tolerance=1e-
             print(f"  Muscle-aware ARAP: {', '.join(ratio_strs)}")
 
     start_time = time.time()
-    global_positions, iterations, max_disp = backend.solve(
-        global_positions, global_rest_positions, neighbors, edge_weights, rest_edge_vectors,
-        global_fixed_mask, fixed_targets_array, max_iterations=max_iterations, tolerance=tolerance,
-        target_edges=target_edges, verbose=True
-    )
-    print(f"  ARAP solved in {time.time() - start_time:.3f}s ({iterations} iterations)")
+    has_collision = collision_mesh is not None and collision_margin > 0
+    total_iterations = 0
+    total_collision_pushed = 0
+
+    if has_collision:
+        # Interleave ARAP iterations with collision resolution so the solver
+        # can adapt to collision-corrected positions (prevents fighting/explosions)
+        iters_per_round = max(5, max_iterations // 5)
+        for outer in range(5):
+            remaining = max_iterations - total_iterations
+            if remaining <= 0:
+                break
+            batch = min(iters_per_round, remaining)
+            global_positions, iterations, max_disp = backend.solve(
+                global_positions, global_rest_positions, neighbors, edge_weights, rest_edge_vectors,
+                global_fixed_mask, fixed_targets_array, max_iterations=batch, tolerance=tolerance,
+                target_edges=target_edges, verbose=False
+            )
+            total_iterations += iterations
+            # Collision pass
+            pushed = _resolve_collisions_unified(
+                global_positions, global_fixed_mask, collision_mesh, collision_margin,
+                cache['global_edge_i'], cache['global_edge_j'], cache.get('global_tet_faces'))
+            total_collision_pushed += pushed
+            if iterations < batch and pushed == 0:
+                break  # ARAP converged and no collisions
+        print(f"  ARAP solved in {time.time() - start_time:.3f}s ({total_iterations} iterations, {total_collision_pushed} collision pushes)")
+    else:
+        global_positions, iterations, max_disp = backend.solve(
+            global_positions, global_rest_positions, neighbors, edge_weights, rest_edge_vectors,
+            global_fixed_mask, fixed_targets_array, max_iterations=max_iterations, tolerance=tolerance,
+            target_edges=target_edges, verbose=True
+        )
+        total_iterations = iterations
+        print(f"  ARAP solved in {time.time() - start_time:.3f}s ({iterations} iterations)")
 
     # Fix isolated vertices (0 neighbors) by finding closest non-isolated vertex
     # and applying same displacement
@@ -6478,19 +6507,6 @@ def _run_unified_volume_sim(v, active_muscles, max_iterations=100, tolerance=1e-
                     stuck_count += 1
         if stuck_count > 0:
             print(f"  Fixed {stuck_count} stuck vertices by moving toward neighbors")
-
-    # Resolve skeleton collisions
-    if collision_mesh is not None and collision_margin > 0:
-        total_pushed = 0
-        for pass_i in range(5):
-            pushed = _resolve_collisions_unified(
-                global_positions, global_fixed_mask, collision_mesh, collision_margin,
-                cache['global_edge_i'], cache['global_edge_j'], cache.get('global_tet_faces'))
-            total_pushed += pushed
-            if pushed == 0:
-                break
-        if total_pushed > 0:
-            print(f"  Collision: pushed {total_pushed} vertices out of skeleton")
 
     # Stash solution for warm-starting the next frame
     if v._unified_sim_cache is not None:
