@@ -591,7 +591,10 @@ class ARAPBackendGPU(ARAPBackend):
     def update_rest_edges(self, neighbor_rest_np):
         """Update precomputed rest edge vectors for muscle-aware target edges."""
         import torch
-        self._edge_rest = torch.tensor(neighbor_rest_np, dtype=torch.float64, device=self.device)
+        if self._edge_rest is not None and self._edge_rest.shape[0] == len(neighbor_rest_np):
+            self._edge_rest.copy_(torch.from_numpy(neighbor_rest_np).to(self.device))
+        else:
+            self._edge_rest = torch.tensor(neighbor_rest_np, dtype=torch.float64, device=self.device)
 
 
 class ARAPBackendTaichi(ARAPBackend):

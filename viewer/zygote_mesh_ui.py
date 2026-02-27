@@ -6230,10 +6230,14 @@ def _run_unified_volume_sim(v, active_muscles, max_iterations=100, tolerance=1e-
         csr_intra_mask = np.zeros(n_csr_edges, dtype=bool)
         csr_muscle_id = np.full(n_csr_edges, -1, dtype=np.int32)
         csr_rest_edges_base = np.zeros((n_csr_edges, 3), dtype=np.float64)
+        csr_edge_i = np.zeros(n_csr_edges, dtype=np.int32)
+        csr_edge_j = np.zeros(n_csr_edges, dtype=np.int32)
         csr_idx = 0
         for i, neighs in enumerate(neighbors):
             for j in neighs:
                 csr_rest_edges_base[csr_idx] = global_rest_positions[j] - global_rest_positions[i]
+                csr_edge_i[csr_idx] = i
+                csr_edge_j[csr_idx] = j
                 edge_key = (i, j)
                 etype = edge_type_map.get(edge_key, 0)
                 csr_cross_mask[csr_idx] = (etype == 1)
@@ -6264,6 +6268,8 @@ def _run_unified_volume_sim(v, active_muscles, max_iterations=100, tolerance=1e-
             'csr_intra_mask': csr_intra_mask,
             'csr_muscle_id': csr_muscle_id,
             'csr_rest_edges_base': csr_rest_edges_base,
+            'csr_edge_i': csr_edge_i,
+            'csr_edge_j': csr_edge_j,
         }
 
     # Always collect current positions and fixed targets (these change per frame)
@@ -6358,13 +6364,12 @@ def _run_unified_volume_sim(v, active_muscles, max_iterations=100, tolerance=1e-
             if hasattr(backend, 'update_rest_edges'):
                 backend.update_rest_edges(scaled_rest)
             else:
-                # CPU backend: build target_edges dict from CSR arrays
+                # CPU backend: build target_edges dict from cached CSR index pairs
                 target_edges = [{} for _ in range(total_verts)]
-                csr_idx = 0
-                for i, neighs in enumerate(neighbors):
-                    for j in neighs:
-                        target_edges[i][j] = scaled_rest[csr_idx]
-                        csr_idx += 1
+                ei = cache['csr_edge_i']
+                ej = cache['csr_edge_j']
+                for k in range(len(ei)):
+                    target_edges[ei[k]][ej[k]] = scaled_rest[k]
 
             ratio_strs = [f"{name}={r:.3f}" for name, r in axis_ratios.items() if abs(r - 1.0) >= 0.02]
             print(f"  Muscle-aware ARAP: {', '.join(ratio_strs)}")
