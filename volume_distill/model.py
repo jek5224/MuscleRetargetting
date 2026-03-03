@@ -94,20 +94,29 @@ class MuscleDecoder(nn.Module):
 
 
 class DistillNet(nn.Module):
-    def __init__(self, muscle_vertex_counts, input_dim=4):
+    def __init__(self, muscle_vertex_counts, input_dim=4,
+                 hidden_dim=512, num_encoder_res=3, num_decoder_res=2):
         """
         Args:
             muscle_vertex_counts: dict mapping muscle_name -> num_vertices
             input_dim: number of input DOFs (default 4: 3 hip + 1 knee)
+            hidden_dim: hidden/latent dimension for encoder and decoders
+            num_encoder_res: number of residual blocks in shared encoder
+            num_decoder_res: number of residual blocks in each decoder
         """
         super().__init__()
-        self.encoder = SharedEncoder(input_dim=input_dim)
+        self.encoder = SharedEncoder(
+            input_dim=input_dim, hidden_dim=hidden_dim, latent_dim=hidden_dim,
+            num_res_blocks=num_encoder_res,
+        )
         # Skip connection: decoders receive encoder output + PE features
         pe_dim = self.encoder.pe.output_dim
-        latent_dim = 512
-        decoder_input = latent_dim + pe_dim
+        decoder_input = hidden_dim + pe_dim
         self.decoders = nn.ModuleDict({
-            name: MuscleDecoder(latent_dim=decoder_input, output_dim=v_count * 3)
+            name: MuscleDecoder(
+                latent_dim=decoder_input, hidden_dim=hidden_dim,
+                num_res_blocks=num_decoder_res, output_dim=v_count * 3,
+            )
             for name, v_count in muscle_vertex_counts.items()
         })
         self.muscle_vertex_counts = muscle_vertex_counts

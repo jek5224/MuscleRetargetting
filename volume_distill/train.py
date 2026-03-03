@@ -21,10 +21,10 @@ DATA_PATHS = [
 CHECKPOINT_DIR = "volume_distill/checkpoints"
 LOG_DIR = "volume_distill/runs"
 EPOCHS = 600
-BATCH_SIZE = 512
-LR = 3e-4
+BATCH_SIZE = 2048
+LR = 1e-3
 WEIGHT_DECAY = 1e-5
-COSINE_T0 = 50       # epochs per first restart cycle
+COSINE_T0 = 150      # epochs per first restart cycle
 COSINE_T_MULT = 2    # cycle length multiplier after each restart
 ANCHOR_LOSS_WEIGHT = 10.0
 DIST_LOSS_SCALE = 5.0  # weight scale for distance from pelvis
@@ -54,7 +54,10 @@ def train():
         name: rest_positions[name].shape[0] for name in muscle_names
     }
     input_dim = train_ds.input_dofs.shape[1]
-    model = DistillNet(muscle_vertex_counts, input_dim=input_dim).to(device)
+    model = DistillNet(
+        muscle_vertex_counts, input_dim=input_dim,
+        hidden_dim=768, num_encoder_res=5, num_decoder_res=3,
+    ).to(device)
     total_params = sum(p.numel() for p in model.parameters())
     print(f"Model params: {total_params:,} (input_dim={input_dim})")
 
