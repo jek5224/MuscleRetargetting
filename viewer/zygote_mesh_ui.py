@@ -6947,7 +6947,7 @@ def _motion_load_nn_checkpoint(v):
     try:
         import torch
         from volume_distill.dance.evaluate import load_model
-        model, _ = load_model(ckpt_path)
+        model, _ = load_model(ckpt_path, device='cpu')
         ckpt = torch.load(ckpt_path, map_location='cpu', weights_only=False)
         rest_positions = ckpt.get("rest_positions")
         if rest_positions is None:
