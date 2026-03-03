@@ -6941,7 +6941,7 @@ def _motion_load_nn_checkpoint(v):
     v.motion_nn_model = None
     v.motion_nn_rest_positions = None
     v.motion_nn_checkpoint_path = None
-    ckpt_path = 'volume_distill/dance/checkpoints/best.pt'
+    ckpt_path = 'volume_distill/checkpoints/best.pt'
     if not os.path.exists(ckpt_path):
         return
     try:
@@ -6951,7 +6951,7 @@ def _motion_load_nn_checkpoint(v):
         ckpt = torch.load(ckpt_path, map_location='cpu', weights_only=False)
         rest_positions = ckpt.get("rest_positions")
         if rest_positions is None:
-            preproc_path = 'data/motion_cache/dance/preprocessed.pt'
+            preproc_path = 'data/motion_cache/locomotion/preprocessed.pt'
             data = torch.load(preproc_path, map_location='cpu', weights_only=False)
             rest_positions = data["rest_positions"]
         v.motion_nn_model = model

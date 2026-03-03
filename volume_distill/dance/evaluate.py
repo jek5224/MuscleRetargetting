@@ -19,7 +19,12 @@ def load_model(checkpoint_path, device=None):
     ckpt = torch.load(checkpoint_path, map_location=device, weights_only=False)
     muscle_vertex_counts = ckpt["muscle_vertex_counts"]
     input_dim = ckpt.get("input_dim", 4)
-    model = DistillNet(muscle_vertex_counts, input_dim=input_dim).to(device)
+    model = DistillNet(
+        muscle_vertex_counts, input_dim=input_dim,
+        hidden_dim=ckpt.get("hidden_dim", 512),
+        num_encoder_res=ckpt.get("num_encoder_res", 3),
+        num_decoder_res=ckpt.get("num_decoder_res", 2),
+    ).to(device)
     model.load_state_dict(ckpt["model_state_dict"])
     model.eval()
     return model, muscle_vertex_counts

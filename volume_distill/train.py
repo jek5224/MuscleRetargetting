@@ -54,9 +54,13 @@ def train():
         name: rest_positions[name].shape[0] for name in muscle_names
     }
     input_dim = train_ds.input_dofs.shape[1]
+    hidden_dim = 768
+    num_encoder_res = 5
+    num_decoder_res = 3
     model = DistillNet(
         muscle_vertex_counts, input_dim=input_dim,
-        hidden_dim=768, num_encoder_res=5, num_decoder_res=3,
+        hidden_dim=hidden_dim, num_encoder_res=num_encoder_res,
+        num_decoder_res=num_decoder_res,
     ).to(device)
     total_params = sum(p.numel() for p in model.parameters())
     print(f"Model params: {total_params:,} (input_dim={input_dim})")
@@ -161,6 +165,9 @@ def train():
                 "val_loss": val_loss,
                 "muscle_vertex_counts": muscle_vertex_counts,
                 "input_dim": input_dim,
+                "hidden_dim": hidden_dim,
+                "num_encoder_res": num_encoder_res,
+                "num_decoder_res": num_decoder_res,
                 "rest_positions": rest_positions,
             }, os.path.join(CHECKPOINT_DIR, "best.pt"))
             print(f"  -> Saved best model (val_loss={val_loss:.6f})")
@@ -174,6 +181,9 @@ def train():
                 "val_loss": val_loss,
                 "muscle_vertex_counts": muscle_vertex_counts,
                 "input_dim": input_dim,
+                "hidden_dim": hidden_dim,
+                "num_encoder_res": num_encoder_res,
+                "num_decoder_res": num_decoder_res,
                 "rest_positions": rest_positions,
             }, os.path.join(CHECKPOINT_DIR, f"epoch_{epoch:03d}.pt"))
 
