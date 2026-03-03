@@ -109,8 +109,11 @@ def main():
 
         print(f"  {mname}: {num_verts} verts, {len(anchors)} anchors, disp range [{disp.min():.4f}, {disp.max():.4f}]")
 
-    # Extract input DOFs
-    input_dofs = torch.from_numpy(mocap_refs[:, INPUT_DOF_INDICES].astype(np.float32))
+    # Extract input DOFs + velocity (finite difference)
+    raw_dofs = mocap_refs[:, INPUT_DOF_INDICES].astype(np.float32)  # (N, 4)
+    dof_vel = np.zeros_like(raw_dofs)
+    dof_vel[1:] = raw_dofs[1:] - raw_dofs[:-1]  # frame 0 velocity = 0
+    input_dofs = torch.from_numpy(np.concatenate([raw_dofs, dof_vel], axis=1))  # (N, 8)
     print(f"Input DOFs shape: {input_dofs.shape}")
 
     # Train/val split (random by frame)

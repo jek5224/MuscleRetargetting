@@ -6974,7 +6974,14 @@ def _motion_apply_nn_deformation(v, frame):
     try:
         from volume_distill.dance.evaluate import predict_frame
         # Extract DOFs: 6-8 = hip, 9 = knee
-        dofs = v.motion_bvh.mocap_refs[frame, [6, 7, 8, 9]]
+        dof_indices = [6, 7, 8, 9]
+        cur_dofs = v.motion_bvh.mocap_refs[frame, dof_indices]
+        if frame > 0:
+            prev_dofs = v.motion_bvh.mocap_refs[frame - 1, dof_indices]
+        else:
+            prev_dofs = cur_dofs
+        dof_vel = cur_dofs - prev_dofs
+        dofs = np.concatenate([cur_dofs, dof_vel])
         predictions = predict_frame(v.motion_nn_model, dofs, v.motion_nn_rest_positions)
         # Get pelvis world transform (must match the reference bone used in preprocessing)
         T = v.env.skel.getBodyNode("Saccrum_Coccyx0").getWorldTransform().matrix()
