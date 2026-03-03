@@ -29,6 +29,7 @@ from viewer.zygote_mesh_ui import (
     find_inter_muscle_constraints,
     run_all_tet_sim_with_constraints,
     _detect_bvh_tframe,
+    _flatten_waypoints,
 )
 from viewer.arap_backends import check_taichi_available, check_gpu_available
 
@@ -156,6 +157,100 @@ def build_context(skel, muscle_meshes, skeleton_meshes, mesh_info, args):
         _unified_sim_cache=None,
     )
     return ctx
+
+
+def patch_waypoints(cache_dir, active_muscles, motion_bvh, skel):
+    """Compute waypoints from cached tet positions via barycentric interpolation.
+
+    Mirrors viewer's _motion_patch_waypoints: iterates frames, sets skeleton
+    pose, interpolates waypoints in deformed tetrahedra, and saves them into
+    the existing chunk NPZ files.
+    """
+    import glob as glob_mod
+
+    # Collect muscles that have waypoint bary coords
+    to_patch = {}  # mname -> [(filepath, frames, positions), ...]
+    for mname, mobj in active_muscles.items():
+        if not (hasattr(mobj, 'waypoints') and len(mobj.waypoints) > 0):
+            continue
+        if not (hasattr(mobj, 'waypoint_bary_coords') and len(mobj.waypoint_bary_coords) > 0):
+            continue
+        file_list = sorted(glob_mod.glob(os.path.join(cache_dir, f'{mname}_chunk_*.npz')))
+        if not file_list:
+            continue
+        entries = []
+        for fp in file_list:
+            data = np.load(fp, allow_pickle=True)
+            entries.append((fp, data['frames'], data['positions']))
+        to_patch[mname] = entries
+
+    if not to_patch:
+        print("No muscles with waypoints to patch")
+        return
+
+    # Sorted unique frames across all muscles
+    all_frames = sorted(set(
+        int(f)
+        for entries in to_patch.values()
+        for _, frames, _ in entries
+        for f in frames
+    ))
+
+    # Per-muscle result accumulators
+    muscle_wp = {mname: {} for mname in to_patch}
+    muscle_wp_shape = {}
+
+    # Fast lookup: mname -> {frame: (entry_idx, pos_idx)}
+    muscle_frame_map = {}
+    for mname, entries in to_patch.items():
+        fmap = {}
+        for entry_idx, (fp, frames, positions) in enumerate(entries):
+            for pos_idx, f in enumerate(frames):
+                fmap[int(f)] = (entry_idx, pos_idx)
+        muscle_frame_map[mname] = fmap
+
+    num_frames = len(all_frames)
+    t0 = time.time()
+    for i, frame_idx in enumerate(all_frames):
+        # Set skeleton pose so origin/insertion endpoints update correctly
+        if frame_idx < motion_bvh.mocap_refs.shape[0]:
+            skel.setPositions(motion_bvh.mocap_refs[frame_idx])
+
+        for mname, entries in to_patch.items():
+            fmap = muscle_frame_map[mname]
+            if frame_idx not in fmap:
+                continue
+            entry_idx, pos_idx = fmap[frame_idx]
+            positions = entries[entry_idx][2]
+            mobj = active_muscles[mname]
+            mobj.tet_vertices = positions[pos_idx].astype(np.float32).copy()
+            mobj._update_waypoints_from_tet(skel, verbose=False)
+            wp_flat, wp_shape_str = _flatten_waypoints(mobj.waypoints)
+            muscle_wp[mname][frame_idx] = wp_flat
+            muscle_wp_shape[mname] = wp_shape_str
+
+        if (i + 1) % 100 == 0 or i + 1 == num_frames:
+            elapsed = time.time() - t0
+            print(f"  Waypoints: {i+1}/{num_frames} frames  ({elapsed:.1f}s)")
+
+    # Write patched files
+    patched = 0
+    for mname, entries in to_patch.items():
+        for filepath, frames, positions in entries:
+            frame_list = [int(f) for f in frames]
+            wp_flats = [muscle_wp[mname][f] for f in frame_list]
+            save_dict = dict(
+                frames=frames,
+                positions=positions,
+                waypoints_flat=np.stack(wp_flats).astype(np.float32),
+                waypoints_shape=np.array([muscle_wp_shape[mname].encode('utf-8')]),
+            )
+            np.savez_compressed(filepath, **save_dict)
+        patched += 1
+        n_frames = sum(len(frames) for _, frames, _ in entries)
+        print(f"  Patched {mname}: {n_frames} frames across {len(entries)} file(s)")
+
+    print(f"Waypoint patch complete: {patched} muscles updated")
 
 
 def flush_bake_data(bake_data, cache_dir, flush_count):
@@ -343,17 +438,23 @@ def main():
         if os.path.exists(legacy):
             os.remove(legacy)
 
-    elapsed = time.time() - bake_start
+    bake_elapsed = time.time() - bake_start
     cache = getattr(ctx, "_unified_sim_cache", None)
     n_muscles = len(cache["muscle_names"]) if cache else len(active_muscles)
     total_verts = cache["total_verts"] if cache else "?"
-    avg_frame = elapsed / max(total_frames, 1)
+    avg_frame = bake_elapsed / max(total_frames, 1)
     print(
-        f"\nBake complete: {total_frames} frames in {elapsed:.1f}s — "
+        f"\nBake complete: {total_frames} frames in {bake_elapsed:.1f}s — "
         f"{n_muscles} muscles, {total_verts} verts, "
         f"{avg_frame:.2f}s/frame"
     )
-    print(f"Output: {cache_dir}/")
+
+    # Patch waypoints into chunk files
+    print("\nComputing waypoints...")
+    patch_waypoints(cache_dir, active_muscles, motion_bvh, skel)
+
+    total_elapsed = time.time() - bake_start
+    print(f"\nDone in {total_elapsed:.1f}s. Output: {cache_dir}/")
 
 
 if __name__ == "__main__":
