@@ -25,10 +25,11 @@ LOG_DIR = "volume_distill/runs"
 EPOCHS = 600
 BATCH_SIZE = 2048
 LR = 1e-3
-WEIGHT_DECAY = 1e-5
+WEIGHT_DECAY = 1e-4
 COSINE_T_MAX = 600
 PCA_K = 64
 TEMPORAL_LOSS_WEIGHT = 0.5
+INPUT_NOISE_STD = 0.02
 
 
 def train():
@@ -124,6 +125,8 @@ def train():
         for x_combined, targets_t, targets_prev in train_loader:
             B = targets_t[muscle_names[0]].shape[0]
             x_combined = x_combined.to(device)
+            # Input noise augmentation for regularization
+            x_combined = x_combined + INPUT_NOISE_STD * torch.randn_like(x_combined)
             targets_t = {k: v.to(device) for k, v in targets_t.items()}
             targets_prev = {k: v.to(device) for k, v in targets_prev.items()}
 
