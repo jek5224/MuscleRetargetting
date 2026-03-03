@@ -11,7 +11,7 @@ from torch.utils.data import DataLoader
 from torch.utils.tensorboard import SummaryWriter
 
 from volume_distill.model import DistillNet
-from volume_distill.dataset import MuscleDistillDataset, distill_collate_fn
+from volume_distill.dataset import load_train_val, distill_collate_fn
 
 
 DATA_PATHS = [
@@ -34,9 +34,8 @@ def train():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Device: {device}")
 
-    # Load datasets
-    train_ds = MuscleDistillDataset(DATA_PATHS, split="train")
-    val_ds = MuscleDistillDataset(DATA_PATHS, split="val")
+    # Load datasets (shared memory between train/val)
+    train_ds, val_ds = load_train_val(DATA_PATHS)
     train_loader = DataLoader(
         train_ds, batch_size=BATCH_SIZE, shuffle=True,
         collate_fn=distill_collate_fn, num_workers=4, pin_memory=True,
@@ -47,13 +46,14 @@ def train():
     )
     print(f"Train: {len(train_ds)} frames, Val: {len(val_ds)} frames")
 
-    # Build model — use canonical (first file) rest positions for vertex counts
-    data = torch.load(DATA_PATHS[0], weights_only=False)
+    # Build model from dataset metadata (no extra file load)
+    muscle_names = train_ds.muscle_names
+    rest_positions = train_ds.rest_positions
+    anchor_data = train_ds.anchor_vertices
     muscle_vertex_counts = {
-        name: data["rest_positions"][name].shape[0]
-        for name in data["muscle_names"]
+        name: rest_positions[name].shape[0] for name in muscle_names
     }
-    input_dim = data["input_dofs"].shape[1]
+    input_dim = train_ds.input_dofs.shape[1]
     model = DistillNet(muscle_vertex_counts, input_dim=input_dim).to(device)
     total_params = sum(p.numel() for p in model.parameters())
     print(f"Model params: {total_params:,} (input_dim={input_dim})")
@@ -64,11 +64,10 @@ def train():
     )
 
     # Build per-muscle vertex weight vectors
-    anchor_data = data.get("anchor_vertices", {})
     vertex_weights = {}
-    for name in data["muscle_names"]:
+    for name in muscle_names:
         n_verts = muscle_vertex_counts[name]
-        rest = data["rest_positions"][name]  # (V, 3)
+        rest = rest_positions[name]  # (V, 3)
         dist = rest.norm(dim=1)  # (V,)
         mean_dist = dist.mean()
         dist_w = 1.0 + DIST_LOSS_SCALE * (dist / mean_dist)
@@ -90,7 +89,6 @@ def train():
     run_name = datetime.now().strftime("%Y%m%d_%H%M%S")
     writer = SummaryWriter(os.path.join(LOG_DIR, run_name))
     best_val_loss = float("inf")
-    muscle_names = data["muscle_names"]
 
     for epoch in range(1, EPOCHS + 1):
         t0 = time.time()
@@ -160,7 +158,7 @@ def train():
                 "val_loss": val_loss,
                 "muscle_vertex_counts": muscle_vertex_counts,
                 "input_dim": input_dim,
-                "rest_positions": data["rest_positions"],
+                "rest_positions": rest_positions,
             }, os.path.join(CHECKPOINT_DIR, "best.pt"))
             print(f"  -> Saved best model (val_loss={val_loss:.6f})")
 
@@ -173,7 +171,7 @@ def train():
                 "val_loss": val_loss,
                 "muscle_vertex_counts": muscle_vertex_counts,
                 "input_dim": input_dim,
-                "rest_positions": data["rest_positions"],
+                "rest_positions": rest_positions,
             }, os.path.join(CHECKPOINT_DIR, f"epoch_{epoch:03d}.pt"))
 
     writer.close()
