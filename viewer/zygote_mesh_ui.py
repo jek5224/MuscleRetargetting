@@ -6981,13 +6981,13 @@ def _motion_apply_nn_deformation(v, frame):
         dof_indices = [6, 7, 8, 9]
 
         if v._motion_nn_model_version == "v2":
-            # V2: build sliding window [frame, frame-1, ..., frame-W+1]
-            W = v._motion_nn_window_size
-            window_dofs = []
-            for offset in range(W):
-                f = max(0, frame - offset)
-                window_dofs.append(v.motion_bvh.mocap_refs[f, dof_indices])
-            dofs = np.concatenate(window_dofs)  # (4*W,) = (20,)
+            # V2: derivative features [q_t, dq_t, ddq_t, q_{t-1}, q_{t-2}]
+            q_t = v.motion_bvh.mocap_refs[frame, dof_indices]
+            q_prev1 = v.motion_bvh.mocap_refs[max(0, frame - 1), dof_indices]
+            q_prev2 = v.motion_bvh.mocap_refs[max(0, frame - 2), dof_indices]
+            dq = q_t - q_prev1
+            ddq = q_t - 2 * q_prev1 + q_prev2
+            dofs = np.concatenate([q_t, dq, ddq, q_prev1, q_prev2]).astype(np.float32)  # (20,)
         else:
             # V1: current DOFs + velocity
             cur_dofs = v.motion_bvh.mocap_refs[frame, dof_indices]

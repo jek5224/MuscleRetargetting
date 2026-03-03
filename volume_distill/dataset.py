@@ -196,6 +196,7 @@ def load_train_val_v2(preprocessed_paths, pca_k=64):
         train_ds, val_ds: MuscleDistillDatasetV2 instances
         pca_components: {name: Tensor (K, V*3)}
         pca_means: {name: Tensor (V*3,)}
+        pca_stds: {name: Tensor (K,)} — per-component std for z-score denormalization
         muscle_name_to_idx: {name: int}
         rest_positions: {name: Tensor (V, 3)}
     """
@@ -262,6 +263,7 @@ def load_train_val_v2(preprocessed_paths, pca_k=64):
     # --- Compute PCA per muscle, then free displacement memory ---
     pca_components = {}
     pca_means = {}
+    pca_stds = {}
     pca_targets = {}
     muscle_name_to_idx = {name: i for i, name in enumerate(muscle_names)}
 
@@ -280,11 +282,19 @@ def load_train_val_v2(preprocessed_paths, pca_k=64):
 
         pca_components[name] = torch.from_numpy(pca.components_.astype(np.float32))   # (K, V*3)
         pca_means[name] = torch.from_numpy(pca.mean_.astype(np.float32))              # (V*3,)
-        pca_targets[name] = torch.from_numpy(coeffs.astype(np.float32))               # (N, K)
+
+        # Z-score normalize coefficients so all components contribute equally to loss
+        coeff_std = np.std(coeffs, axis=0)                                             # (K,)
+        coeff_std[coeff_std < 1e-8] = 1.0
+        coeffs_norm = coeffs / coeff_std                                               # (N, K)
+
+        pca_stds[name] = torch.from_numpy(coeff_std.astype(np.float32))               # (K,)
+        pca_targets[name] = torch.from_numpy(coeffs_norm.astype(np.float32))          # (N, K)
 
         explained = pca.explained_variance_ratio_.sum() * 100
-        print(f"    {name}: K={pca_k}, explained variance={explained:.1f}%")
-        del pca, coeffs
+        print(f"    {name}: K={pca_k}, explained variance={explained:.1f}%, "
+              f"std range [{coeff_std.min():.4f}, {coeff_std.max():.4f}]")
+        del pca, coeffs, coeffs_norm
         gc.collect()
 
     del all_disps
@@ -300,4 +310,4 @@ def load_train_val_v2(preprocessed_paths, pca_k=64):
         input_dofs, prev_frame_idx, pca_targets, muscle_names, val_indices,
     )
 
-    return train_ds, val_ds, pca_components, pca_means, muscle_name_to_idx, rest_positions
+    return train_ds, val_ds, pca_components, pca_means, pca_stds, muscle_name_to_idx, rest_positions

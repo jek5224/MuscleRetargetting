@@ -109,34 +109,54 @@ def main():
 
         print(f"  {mname}: {num_verts} verts, {len(anchors)} anchors, disp range [{disp.min():.4f}, {disp.max():.4f}]")
 
-    # Extract input DOFs with sliding window (W=5 frames)
-    WINDOW_SIZE = 5
+    # Extract input DOFs with derivative features: [q_t, dq_t, ddq_t, q_{t-1}, q_{t-2}]
     raw_dofs = mocap_refs[:, INPUT_DOF_INDICES].astype(np.float32)  # (N, 4)
-    # Build sliding window: [dofs[t], dofs[t-1], ..., dofs[t-W+1]], pad with frame 0
-    windows = []
-    for offset in range(WINDOW_SIZE):
-        shifted = np.zeros_like(raw_dofs)
-        if offset == 0:
-            shifted = raw_dofs
-        else:
-            shifted[offset:] = raw_dofs[:-offset]
-            shifted[:offset] = raw_dofs[0]  # pad with frame 0
-        windows.append(shifted)
-    input_dofs = torch.from_numpy(np.concatenate(windows, axis=1))  # (N, 4*W=20)
+    D = raw_dofs.shape[1]  # 4
+
+    # q_{t-1} and q_{t-2} with boundary padding (frame 0 repeats)
+    q_prev1 = np.zeros_like(raw_dofs)
+    q_prev1[1:] = raw_dofs[:-1]
+    q_prev1[0] = raw_dofs[0]
+
+    q_prev2 = np.zeros_like(raw_dofs)
+    q_prev2[2:] = raw_dofs[:-2]
+    q_prev2[:2] = raw_dofs[0]
+
+    # Finite-difference derivatives
+    dq = raw_dofs - q_prev1          # velocity
+    ddq = raw_dofs - 2 * q_prev1 + q_prev2  # acceleration
+
+    # [q_t(4), dq_t(4), ddq_t(4), q_{t-1}(4), q_{t-2}(4)] = 20D
+    input_dofs = torch.from_numpy(
+        np.concatenate([raw_dofs, dq, ddq, q_prev1, q_prev2], axis=1)
+    )  # (N, 20)
 
     # Build prev_frame_idx: frame 0 points to itself, others point to frame-1
     prev_frame_idx = torch.arange(num_frames)
     prev_frame_idx[0] = 0  # boundary: frame 0 → self
     prev_frame_idx[1:] = torch.arange(num_frames - 1)
 
-    print(f"Input DOFs shape: {input_dofs.shape} (window_size={WINDOW_SIZE})")
+    print(f"Input DOFs shape: {input_dofs.shape} (derivative features: q, dq, ddq, q-1, q-2)")
 
-    # Train/val split (random by frame)
-    indices = torch.randperm(num_frames)
-    n_val = int(num_frames * VAL_FRACTION)
-    val_indices = indices[:n_val].sort().values
-    train_indices = indices[n_val:].sort().values
-    print(f"Train: {len(train_indices)}, Val: {len(val_indices)}")
+    # Train/val split (temporal blocks of 120 frames)
+    BLOCK_SIZE = 120
+    num_blocks = (num_frames + BLOCK_SIZE - 1) // BLOCK_SIZE
+    block_perm = torch.randperm(num_blocks)
+    n_val_blocks = max(1, int(num_blocks * VAL_FRACTION))
+    val_blocks = set(block_perm[:n_val_blocks].tolist())
+
+    train_list, val_list = [], []
+    for b in range(num_blocks):
+        start = b * BLOCK_SIZE
+        end = min(start + BLOCK_SIZE, num_frames)
+        block_frames = torch.arange(start, end)
+        if b in val_blocks:
+            val_list.append(block_frames)
+        else:
+            train_list.append(block_frames)
+    train_indices = torch.cat(train_list)
+    val_indices = torch.cat(val_list)
+    print(f"Train: {len(train_indices)}, Val: {len(val_indices)} ({n_val_blocks}/{num_blocks} blocks)")
 
     # Save
     output = {

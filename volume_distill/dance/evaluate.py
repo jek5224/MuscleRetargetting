@@ -42,11 +42,13 @@ def load_model(checkpoint_path, device=None):
         # Attach PCA data for inference
         model._pca_components = ckpt["pca_components"]
         model._pca_means = ckpt["pca_means"]
+        model._pca_stds = ckpt.get("pca_stds")  # z-score denorm (None for old ckpts)
         model._muscle_name_to_idx = ckpt["muscle_name_to_idx"]
         metadata = {
             "muscle_name_to_idx": ckpt["muscle_name_to_idx"],
             "pca_components": ckpt["pca_components"],
             "pca_means": ckpt["pca_means"],
+            "pca_stds": ckpt.get("pca_stds"),
             "window_size": ckpt.get("window_size", 5),
             "model_version": "v2",
             "rest_positions": ckpt.get("rest_positions"),
@@ -102,6 +104,9 @@ def predict_frame(model, dofs, rest_positions, device=None):
         for m_idx, coeffs in preds.items():
             name = idx_to_name[m_idx]
             coeffs_np = coeffs[0].cpu().numpy()                       # (K,)
+            # Denormalize z-scored coefficients if pca_stds available
+            if model._pca_stds is not None and name in model._pca_stds:
+                coeffs_np = coeffs_np * model._pca_stds[name].numpy() # (K,)
             components = model._pca_components[name].numpy()           # (K, V*3)
             mean = model._pca_means[name].numpy()                     # (V*3,)
             disp_flat = coeffs_np @ components + mean                  # (V*3,)

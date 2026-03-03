@@ -37,7 +37,7 @@ def train():
     print(f"Device: {device}")
 
     # Load V2 datasets with PCA
-    train_ds, val_ds, pca_components, pca_means, muscle_name_to_idx, rest_positions = \
+    train_ds, val_ds, pca_components, pca_means, pca_stds, muscle_name_to_idx, rest_positions = \
         load_train_val_v2(DATA_PATHS, pca_k=PCA_K)
     train_loader = DataLoader(
         train_ds, batch_size=BATCH_SIZE, shuffle=True,
@@ -214,6 +214,7 @@ def train():
             "muscle_name_to_idx": muscle_name_to_idx,
             "pca_components": pca_components,
             "pca_means": pca_means,
+            "pca_stds": pca_stds,
             "rest_positions": rest_positions,
             "window_size": WINDOW_SIZE,
         }
