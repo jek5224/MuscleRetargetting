@@ -121,12 +121,27 @@ def main():
 
         print(f"  {mname}: {num_verts} verts, {len(anchors)} anchors, disp range [{disp.min():.4f}, {disp.max():.4f}]")
 
-    # Extract input DOFs + velocity (finite difference)
+    # Extract input DOFs with sliding window (W=5 frames)
+    WINDOW_SIZE = 5
     raw_dofs = mocap_refs[:, INPUT_DOF_INDICES].astype(np.float32)  # (N, 4)
-    dof_vel = np.zeros_like(raw_dofs)
-    dof_vel[1:] = raw_dofs[1:] - raw_dofs[:-1]  # frame 0 velocity = 0
-    input_dofs = torch.from_numpy(np.concatenate([raw_dofs, dof_vel], axis=1))  # (N, 8)
-    print(f"Input DOFs shape: {input_dofs.shape}")
+    # Build sliding window: [dofs[t], dofs[t-1], ..., dofs[t-W+1]], pad with frame 0
+    windows = []
+    for offset in range(WINDOW_SIZE):
+        shifted = np.zeros_like(raw_dofs)
+        if offset == 0:
+            shifted = raw_dofs
+        else:
+            shifted[offset:] = raw_dofs[:-offset]
+            shifted[:offset] = raw_dofs[0]  # pad with frame 0
+        windows.append(shifted)
+    input_dofs = torch.from_numpy(np.concatenate(windows, axis=1))  # (N, 4*W=20)
+
+    # Build prev_frame_idx: frame 0 points to itself, others point to frame-1
+    prev_frame_idx = torch.arange(num_frames)
+    prev_frame_idx[0] = 0  # boundary: frame 0 → self
+    prev_frame_idx[1:] = torch.arange(num_frames - 1)
+
+    print(f"Input DOFs shape: {input_dofs.shape} (window_size={WINDOW_SIZE})")
 
     # Train/val split (random by frame)
     indices = torch.randperm(num_frames)
@@ -138,6 +153,7 @@ def main():
     # Save
     output = {
         "input_dofs": input_dofs,
+        "prev_frame_idx": prev_frame_idx,
         "muscle_names": muscle_names,
         "rest_positions": rest_positions,
         "displacements": displacements,
