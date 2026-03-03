@@ -126,3 +126,82 @@ class DistillNet(nn.Module):
         latent = self.encoder(x)
         combined = torch.cat([latent, pe_x], dim=-1)
         return {name: decoder(combined) for name, decoder in self.decoders.items()}
+
+
+class DistillNetV2(nn.Module):
+    """V2: single decoder conditioned on muscle embedding, PCA output, linear baseline + residual."""
+    def __init__(self, num_muscles, muscle_name_to_idx, input_dim=20,
+                 hidden_dim=768, num_encoder_res=5, num_decoder_res=3,
+                 embed_dim=64, pca_k=64, num_freqs=6):
+        super().__init__()
+        self.num_muscles = num_muscles
+        self.muscle_name_to_idx = muscle_name_to_idx
+        self.input_dim = input_dim
+        self.pca_k = pca_k
+        self.embed_dim = embed_dim
+
+        # Shared encoder
+        self.encoder = SharedEncoder(
+            input_dim=input_dim, hidden_dim=hidden_dim, latent_dim=hidden_dim,
+            num_res_blocks=num_encoder_res, num_freqs=num_freqs,
+        )
+        pe_dim = self.encoder.pe.output_dim
+
+        # Muscle identity embedding
+        self.muscle_embed = nn.Embedding(num_muscles, embed_dim)
+
+        # Single decoder: input = latent + PE + embed
+        decoder_input = hidden_dim + pe_dim + embed_dim
+        self.decoder = MuscleDecoder(
+            latent_dim=decoder_input, hidden_dim=hidden_dim,
+            num_res_blocks=num_decoder_res, output_dim=pca_k,
+        )
+
+        # Linear baseline: input DOFs + embed → PCA coeffs
+        self.linear_baseline = nn.Linear(input_dim + embed_dim, pca_k)
+        self.linear_baseline.apply(weights_init)
+
+    def forward(self, x, muscle_indices=None):
+        """Forward pass.
+
+        Args:
+            x: (B, input_dim) DOF window
+            muscle_indices: optional (M,) tensor of muscle indices to predict.
+                If None, predicts all muscles.
+
+        Returns:
+            dict {muscle_idx: (B, pca_k)} PCA coefficients per muscle
+        """
+        if muscle_indices is None:
+            muscle_indices = torch.arange(self.num_muscles, device=x.device)
+
+        B = x.shape[0]
+        M = muscle_indices.shape[0]
+
+        # Encode once
+        pe_x = self.encoder.pe(x)       # (B, pe_dim)
+        latent = self.encoder(x)         # (B, hidden_dim)
+
+        # Expand for all muscles: (B*M, ...)
+        latent_exp = latent.unsqueeze(1).expand(-1, M, -1).reshape(B * M, -1)
+        pe_exp = pe_x.unsqueeze(1).expand(-1, M, -1).reshape(B * M, -1)
+
+        # Muscle embeddings: (M,) → (B*M, embed_dim)
+        embeds = self.muscle_embed(muscle_indices)  # (M, embed_dim)
+        embeds_exp = embeds.unsqueeze(0).expand(B, -1, -1).reshape(B * M, -1)
+
+        # Decoder: residual path
+        decoder_in = torch.cat([latent_exp, pe_exp, embeds_exp], dim=-1)
+        residual = self.decoder(decoder_in)  # (B*M, pca_k)
+
+        # Linear baseline
+        x_exp = x.unsqueeze(1).expand(-1, M, -1).reshape(B * M, -1)
+        linear_in = torch.cat([x_exp, embeds_exp], dim=-1)
+        baseline = self.linear_baseline(linear_in)  # (B*M, pca_k)
+
+        # Combine
+        output = baseline + residual  # (B*M, pca_k)
+        output = output.reshape(B, M, self.pca_k)
+
+        # Return as dict keyed by muscle index
+        return {muscle_indices[m].item(): output[:, m] for m in range(M)}
