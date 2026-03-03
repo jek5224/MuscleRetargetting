@@ -3114,27 +3114,25 @@ class FiberArchitectureMixin:
 
         print(f"Recomputed {total_recomputed} waypoints from deformed contours using MVC")
 
-    def _build_waypoint_tet_embedding(self):
-        """One-time setup: find containing tetrahedron + bary coords for every waypoint.
+    def _build_waypoint_nn_embedding(self):
+        """Fast setup: KDTree nearest-neighbor weights for all waypoints.
 
-        Stores vectorized arrays for fast per-frame update via update_waypoints_fast().
+        Uses inverse-distance weighting from K=4 nearest tet vertices.
+        ~2ms per muscle — no tet containment search.
         """
         if not hasattr(self, 'waypoints') or self.waypoints is None or len(self.waypoints) == 0:
             return
         if not hasattr(self, 'tet_vertices') or self.tet_vertices is None:
             return
-        if not hasattr(self, 'tet_tetrahedra') or self.tet_tetrahedra is None:
-            return
 
-        tet_verts = np.array(self.tet_vertices)
-        tetrahedra = np.array(self.tet_tetrahedra)
+        tet_verts = np.asarray(self.tet_vertices, dtype=np.float64)
 
-        # Flatten all waypoints into (N, 3) + record structure for scatter-back
+        # Flatten all waypoints + record structure for scatter-back
         all_points = []
         wp_structure = []  # (stream_idx, level_idx, num_fibers)
         for stream_idx, stream in enumerate(self.waypoints):
             for level_idx, level_wps in enumerate(stream):
-                wps = np.array(level_wps)
+                wps = np.asarray(level_wps)
                 if wps.ndim == 1:
                     wps = wps.reshape(1, -1)
                 if wps.shape[-1] != 3 or len(wps) == 0:
@@ -3146,34 +3144,26 @@ class FiberArchitectureMixin:
         if len(all_points) == 0:
             return
 
-        all_points = np.concatenate(all_points, axis=0)  # (N_total, 3)
+        all_points = np.concatenate(all_points, axis=0)  # (N, 3)
         N = len(all_points)
 
-        # Find containing tet + bary for each waypoint
-        tet_idx_arr = np.zeros(N, dtype=np.int64)
-        bary_arr = np.zeros((N, 4), dtype=np.float64)
+        # KDTree: 4 nearest tet vertices per waypoint
+        tree = cKDTree(tet_verts)
+        distances, indices = tree.query(all_points, k=4)  # (N, 4)
 
-        for i in range(N):
-            tet_idx, bary, _ = self._find_containing_tet(all_points[i], tet_verts, tetrahedra)
-            if tet_idx is not None:
-                tet_idx_arr[i] = tet_idx
-                bary_arr[i] = bary
-            else:
-                tet_idx_arr[i] = 0
-                bary_arr[i] = [0.25, 0.25, 0.25, 0.25]
+        # Inverse-distance weights
+        eps = 1e-10
+        inv_dist = 1.0 / (distances + eps)
+        weights = inv_dist / inv_dist.sum(axis=1, keepdims=True)
 
-        # Store vertex indices (4 per waypoint) for vectorized lookup
-        self._wp_tet_vidx = tetrahedra[tet_idx_arr]  # (N, 4)
-        self._wp_bary = bary_arr.astype(np.float32)   # (N, 4)
+        self._wp_nn_idx = indices                          # (N, 4)
+        self._wp_nn_weights = weights.astype(np.float32)   # (N, 4)
         self._wp_structure = wp_structure
-        self._wp_total = N
-
-        print(f"  Built waypoint tet embedding: {N} waypoints in {len(tetrahedra)} tets")
 
     def update_waypoints_fast(self):
-        """Fast waypoint update using cached tet embedding + barycentric interpolation.
+        """Fast per-frame waypoint update using cached nearest-neighbor weights.
 
-        Builds embedding on first call (slow), then vectorized numpy on subsequent calls.
+        First call builds KDTree embedding (~2ms/muscle), then ~0.1ms/muscle after.
         Returns True if any waypoints were updated.
         """
         if not hasattr(self, 'tet_vertices') or self.tet_vertices is None:
@@ -3182,17 +3172,16 @@ class FiberArchitectureMixin:
             return False
 
         # One-time setup
-        if not hasattr(self, '_wp_tet_vidx') or self._wp_tet_vidx is None:
-            self._build_waypoint_tet_embedding()
-        if not hasattr(self, '_wp_tet_vidx') or self._wp_tet_vidx is None:
+        if not hasattr(self, '_wp_nn_idx') or self._wp_nn_idx is None:
+            self._build_waypoint_nn_embedding()
+        if not hasattr(self, '_wp_nn_idx') or self._wp_nn_idx is None:
             return False
 
         tet_verts = np.asarray(self.tet_vertices)
 
-        # Vectorized barycentric interpolation
-        # corners: (N, 4, 3), bary: (N, 4) → new_pos: (N, 3)
-        corners = tet_verts[self._wp_tet_vidx]  # (N, 4, 3)
-        new_pos = np.einsum('ni,nij->nj', self._wp_bary, corners)  # (N, 3)
+        # Weighted sum of 4 nearest vertices: (N, 4, 3) * (N, 4, 1) → (N, 3)
+        neighbors = tet_verts[self._wp_nn_idx]  # (N, 4, 3)
+        new_pos = np.einsum('ni,nij->nj', self._wp_nn_weights, neighbors)
 
         # Scatter back into waypoints structure
         offset = 0
