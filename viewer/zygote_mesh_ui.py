@@ -1962,7 +1962,8 @@ def _draw_motion_browser_ui(v):
             imgui.text("No checkpoint found")
         else:
             val_str = f", val={v._motion_nn_val_loss:.6f}" if v._motion_nn_val_loss is not None else ""
-            imgui.text(f"best.pt (epoch {v._motion_nn_epoch}{val_str})")
+            ver_str = f" [{v._motion_nn_model_version}]" if hasattr(v, '_motion_nn_model_version') else ""
+            imgui.text(f"best.pt (epoch {v._motion_nn_epoch}{val_str}){ver_str}")
 
 
 def _render_inspect_2d_windows(v):
@@ -6941,13 +6942,15 @@ def _motion_load_nn_checkpoint(v):
     v.motion_nn_model = None
     v.motion_nn_rest_positions = None
     v.motion_nn_checkpoint_path = None
+    v._motion_nn_model_version = "v1"
+    v._motion_nn_window_size = 5
     ckpt_path = 'volume_distill/checkpoints/best.pt'
     if not os.path.exists(ckpt_path):
         return
     try:
         import torch
         from volume_distill.dance.evaluate import load_model
-        model, _ = load_model(ckpt_path, device='cpu')
+        model, metadata = load_model(ckpt_path, device='cpu')
         ckpt = torch.load(ckpt_path, map_location='cpu', weights_only=False)
         rest_positions = ckpt.get("rest_positions")
         if rest_positions is None:
@@ -6959,7 +6962,10 @@ def _motion_load_nn_checkpoint(v):
         v.motion_nn_checkpoint_path = ckpt_path
         v._motion_nn_epoch = ckpt.get("epoch", "?")
         v._motion_nn_val_loss = ckpt.get("val_loss", None)
-        print(f"[Motion] Loaded NN checkpoint: {ckpt_path} (epoch {v._motion_nn_epoch})")
+        v._motion_nn_model_version = metadata.get("model_version", "v1")
+        v._motion_nn_window_size = metadata.get("window_size", 5)
+        print(f"[Motion] Loaded NN checkpoint: {ckpt_path} "
+              f"(epoch {v._motion_nn_epoch}, version={v._motion_nn_model_version})")
     except Exception as e:
         print(f"[Motion] Failed to load NN checkpoint: {e}")
         v.motion_nn_model = None
@@ -6973,15 +6979,26 @@ def _motion_apply_nn_deformation(v, frame):
         return False
     try:
         from volume_distill.dance.evaluate import predict_frame
-        # Extract DOFs: 6-8 = hip, 9 = knee
         dof_indices = [6, 7, 8, 9]
-        cur_dofs = v.motion_bvh.mocap_refs[frame, dof_indices]
-        if frame > 0:
-            prev_dofs = v.motion_bvh.mocap_refs[frame - 1, dof_indices]
+
+        if v._motion_nn_model_version == "v2":
+            # V2: build sliding window [frame, frame-1, ..., frame-W+1]
+            W = v._motion_nn_window_size
+            window_dofs = []
+            for offset in range(W):
+                f = max(0, frame - offset)
+                window_dofs.append(v.motion_bvh.mocap_refs[f, dof_indices])
+            dofs = np.concatenate(window_dofs)  # (4*W,) = (20,)
         else:
-            prev_dofs = cur_dofs
-        dof_vel = cur_dofs - prev_dofs
-        dofs = np.concatenate([cur_dofs, dof_vel])
+            # V1: current DOFs + velocity
+            cur_dofs = v.motion_bvh.mocap_refs[frame, dof_indices]
+            if frame > 0:
+                prev_dofs = v.motion_bvh.mocap_refs[frame - 1, dof_indices]
+            else:
+                prev_dofs = cur_dofs
+            dof_vel = cur_dofs - prev_dofs
+            dofs = np.concatenate([cur_dofs, dof_vel])
+
         predictions = predict_frame(v.motion_nn_model, dofs, v.motion_nn_rest_positions)
         # Get pelvis world transform (must match the reference bone used in preprocessing)
         T = v.env.skel.getBodyNode("Saccrum_Coccyx0").getWorldTransform().matrix()
