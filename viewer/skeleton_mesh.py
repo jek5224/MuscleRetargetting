@@ -3,7 +3,10 @@
 # and skeleton binding methods for muscle-skeleton attachment
 
 import numpy as np
-from OpenGL.GL import *
+try:
+    from OpenGL.GL import *
+except ImportError:
+    pass
 from sklearn.decomposition import PCA
 from sklearn.cluster import KMeans, AgglomerativeClustering
 from itertools import product

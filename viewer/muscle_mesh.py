@@ -2,7 +2,10 @@
 # Contains SoftBodySimulation class and MuscleMeshMixin for MeshLoader
 
 import numpy as np
-from OpenGL.GL import *
+try:
+    from OpenGL.GL import *
+except ImportError:
+    pass
 import scipy.sparse
 import scipy.sparse.linalg
 from collections import defaultdict

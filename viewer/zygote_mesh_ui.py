@@ -2,7 +2,10 @@
 
 Free functions that take the viewer instance (v) as first argument.
 """
-import imgui
+try:
+    import imgui
+except ImportError:
+    pass  # Headless mode — imgui not needed for simulation functions
 import numpy as np
 import os
 import traceback
@@ -10,10 +13,16 @@ import glob
 import trimesh
 import json
 import time
-import glfw
+try:
+    import glfw
+except ImportError:
+    pass  # Headless mode
 
-from OpenGL.GL import *
-import viewer.gl_function as mygl
+try:
+    from OpenGL.GL import *
+    import viewer.gl_function as mygl
+except ImportError:
+    pass  # Headless mode
 from viewer.mesh_loader import MeshLoader
 from viewer.arap_backends import get_backend
 from core.bvhparser import MyBVH

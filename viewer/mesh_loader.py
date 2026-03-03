@@ -1,8 +1,11 @@
 # Mesh Loader for the viewer
 import numpy as np
-from OpenGL.GL import *
-from OpenGL.GLU import *
-from OpenGL.GLUT import *
+try:
+    from OpenGL.GL import *
+    from OpenGL.GLU import *
+    from OpenGL.GLUT import *
+except ImportError:
+    pass  # Headless mode — GL functions not needed for mesh loading/simulation
 import trimesh
 
 # Import mixins

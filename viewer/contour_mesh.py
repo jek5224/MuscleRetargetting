@@ -4,7 +4,10 @@
 
 import numpy as np
 import copy
-from OpenGL.GL import *
+try:
+    from OpenGL.GL import *
+except ImportError:
+    pass
 import matplotlib.cm as cm
 from scipy.spatial import cKDTree
 from scipy.spatial.transform import Rotation as R

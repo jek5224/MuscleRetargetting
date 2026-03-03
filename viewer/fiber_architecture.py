@@ -2,7 +2,10 @@
 # Extracted from mesh_loader.py for better organization
 
 import numpy as np
-from OpenGL.GL import *
+try:
+    from OpenGL.GL import *
+except ImportError:
+    pass
 from scipy.spatial import cKDTree, Delaunay
 
 # Constants
