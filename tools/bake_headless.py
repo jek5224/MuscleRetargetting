@@ -30,6 +30,7 @@ from viewer.zygote_mesh_ui import (
     run_all_tet_sim_with_constraints,
     _detect_bvh_tframe,
 )
+from viewer.arap_backends import check_taichi_available, check_gpu_available
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -127,6 +128,19 @@ def init_soft_bodies(muscle_meshes, skeleton_meshes, skel, mesh_info):
 
 def build_context(skel, muscle_meshes, skeleton_meshes, mesh_info, args):
     """Build a lightweight SimpleNamespace that mimics the viewer for baking functions."""
+    # Resolve backend: auto picks taichi > gpu > cpu (same priority as viewer)
+    backend = args.backend
+    if backend == "auto":
+        if check_taichi_available():
+            backend = "taichi"
+        elif check_gpu_available():
+            backend = "gpu"
+        else:
+            backend = "cpu"
+    use_taichi = backend == "taichi"
+    use_gpu = backend == "gpu"
+    print(f"ARAP backend: {backend.upper()}")
+
     ctx = SimpleNamespace(
         env=SimpleNamespace(skel=skel, mesh_info=mesh_info),
         zygote_muscle_meshes=muscle_meshes,
@@ -134,8 +148,8 @@ def build_context(skel, muscle_meshes, skeleton_meshes, mesh_info, args):
         inter_muscle_constraints=[],
         inter_muscle_constraint_threshold=args.constraint_threshold,
         coupled_as_unified_volume=True,
-        use_gpu_arap=False,
-        use_taichi_arap=False,
+        use_gpu_arap=use_gpu,
+        use_taichi_arap=use_taichi,
         use_muscle_aware_arap=True,
         motion_settle_iters=args.settle_iters,
         _unified_arap_backend=None,
@@ -182,6 +196,12 @@ def main():
         type=float,
         default=0.015,
         help="Inter-muscle constraint distance in meters (default: 0.015)",
+    )
+    parser.add_argument(
+        "--backend",
+        choices=["auto", "taichi", "gpu", "cpu"],
+        default="auto",
+        help="ARAP solver backend (default: auto — picks taichi > gpu > cpu)",
     )
     parser.add_argument(
         "--start-frame", type=int, default=0, help="First frame to bake (default: 0)"
