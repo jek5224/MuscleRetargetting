@@ -3114,57 +3114,92 @@ class FiberArchitectureMixin:
 
         print(f"Recomputed {total_recomputed} waypoints from deformed contours using MVC")
 
+    def _build_waypoint_tet_embedding(self):
+        """One-time setup: find containing tetrahedron + bary coords for every waypoint.
+
+        Stores vectorized arrays for fast per-frame update via update_waypoints_fast().
+        """
+        if not hasattr(self, 'waypoints') or self.waypoints is None or len(self.waypoints) == 0:
+            return
+        if not hasattr(self, 'tet_vertices') or self.tet_vertices is None:
+            return
+        if not hasattr(self, 'tet_tetrahedra') or self.tet_tetrahedra is None:
+            return
+
+        tet_verts = np.array(self.tet_vertices)
+        tetrahedra = np.array(self.tet_tetrahedra)
+
+        # Flatten all waypoints into (N, 3) + record structure for scatter-back
+        all_points = []
+        wp_structure = []  # (stream_idx, level_idx, num_fibers)
+        for stream_idx, stream in enumerate(self.waypoints):
+            for level_idx, level_wps in enumerate(stream):
+                wps = np.array(level_wps)
+                if wps.ndim == 1:
+                    wps = wps.reshape(1, -1)
+                if wps.shape[-1] != 3 or len(wps) == 0:
+                    wp_structure.append((stream_idx, level_idx, 0))
+                    continue
+                all_points.append(wps)
+                wp_structure.append((stream_idx, level_idx, len(wps)))
+
+        if len(all_points) == 0:
+            return
+
+        all_points = np.concatenate(all_points, axis=0)  # (N_total, 3)
+        N = len(all_points)
+
+        # Find containing tet + bary for each waypoint
+        tet_idx_arr = np.zeros(N, dtype=np.int64)
+        bary_arr = np.zeros((N, 4), dtype=np.float64)
+
+        for i in range(N):
+            tet_idx, bary, _ = self._find_containing_tet(all_points[i], tet_verts, tetrahedra)
+            if tet_idx is not None:
+                tet_idx_arr[i] = tet_idx
+                bary_arr[i] = bary
+            else:
+                tet_idx_arr[i] = 0
+                bary_arr[i] = [0.25, 0.25, 0.25, 0.25]
+
+        # Store vertex indices (4 per waypoint) for vectorized lookup
+        self._wp_tet_vidx = tetrahedra[tet_idx_arr]  # (N, 4)
+        self._wp_bary = bary_arr.astype(np.float32)   # (N, 4)
+        self._wp_structure = wp_structure
+        self._wp_total = N
+
+        print(f"  Built waypoint tet embedding: {N} waypoints in {len(tetrahedra)} tets")
+
     def update_waypoints_fast(self):
-        """Fast waypoint update using cached MVC weights and deformed tet vertices.
+        """Fast waypoint update using cached tet embedding + barycentric interpolation.
 
-        Requires mvc_weights (from find_waypoints) to already exist.
-        Builds contour_to_tet_mapping on first call if needed.
-
+        Builds embedding on first call (slow), then vectorized numpy on subsequent calls.
         Returns True if any waypoints were updated.
         """
-        if not hasattr(self, 'contour_to_tet_mapping') or self.contour_to_tet_mapping is None:
-            self.build_contour_vertex_mapping()
-        if not hasattr(self, 'contour_to_tet_mapping') or self.contour_to_tet_mapping is None:
-            return False
-        if not hasattr(self, 'mvc_weights') or self.mvc_weights is None:
-            return False
         if not hasattr(self, 'tet_vertices') or self.tet_vertices is None:
             return False
         if not hasattr(self, 'waypoints') or self.waypoints is None or len(self.waypoints) == 0:
             return False
 
-        tet_verts = np.array(self.tet_vertices)
-        any_updated = False
+        # One-time setup
+        if not hasattr(self, '_wp_tet_vidx') or self._wp_tet_vidx is None:
+            self._build_waypoint_tet_embedding()
+        if not hasattr(self, '_wp_tet_vidx') or self._wp_tet_vidx is None:
+            return False
 
-        for stream_idx, stream in enumerate(self.waypoints):
-            if stream_idx >= len(self.contour_to_tet_mapping):
+        tet_verts = np.asarray(self.tet_vertices)
+
+        # Vectorized barycentric interpolation
+        # corners: (N, 4, 3), bary: (N, 4) → new_pos: (N, 3)
+        corners = tet_verts[self._wp_tet_vidx]  # (N, 4, 3)
+        new_pos = np.einsum('ni,nij->nj', self._wp_bary, corners)  # (N, 3)
+
+        # Scatter back into waypoints structure
+        offset = 0
+        for stream_idx, level_idx, n_fibers in self._wp_structure:
+            if n_fibers == 0:
                 continue
-            if stream_idx >= len(self.mvc_weights):
-                continue
+            self.waypoints[stream_idx][level_idx] = new_pos[offset:offset + n_fibers]
+            offset += n_fibers
 
-            for level_idx, level_waypoints in enumerate(stream):
-                if level_idx >= len(self.contour_to_tet_mapping[stream_idx]):
-                    continue
-                if level_idx >= len(self.mvc_weights[stream_idx]):
-                    continue
-
-                mapping = self.contour_to_tet_mapping[stream_idx][level_idx]
-                if len(mapping) == 0:
-                    continue
-
-                mvc_w = self.mvc_weights[stream_idx][level_idx]
-                if mvc_w is None or len(mvc_w) == 0:
-                    continue
-
-                mvc_w = np.asarray(mvc_w)
-                if mvc_w.ndim != 2 or mvc_w.shape[1] != len(mapping):
-                    continue
-
-                # Deformed contour positions from tet vertices
-                Ps = tet_verts[mapping]  # (num_contour_verts, 3)
-
-                # waypoints = mvc_weights @ Ps
-                self.waypoints[stream_idx][level_idx] = mvc_w @ Ps  # (num_fibers, 3)
-                any_updated = True
-
-        return any_updated
+        return True
