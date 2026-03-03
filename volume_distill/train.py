@@ -7,6 +7,7 @@ Usage: python -m volume_distill.train
 """
 import os
 import time
+import math
 from datetime import datetime
 import torch
 from torch.utils.data import DataLoader
@@ -198,9 +199,38 @@ def train():
             writer.add_scalar(f"val_muscle/{name}", per_muscle_val[name], epoch)
 
         if epoch % 10 == 0:
-            print("  Per-muscle val MSE:")
+            # Compute vertex-space RMSE (denormalize PCA → displacement → meters)
+            vertex_se = {name: 0.0 for name in muscle_names}
+            vertex_count = {name: 0 for name in muscle_names}
+            with torch.no_grad():
+                for x_combined, targets_t, targets_prev in val_loader:
+                    B = targets_t[muscle_names[0]].shape[0]
+                    x_combined = x_combined.to(device)
+                    preds = model(x_combined, muscle_indices)
+                    targets_t_dev = {k: v.to(device) for k, v in targets_t.items()}
+                    for m_idx in range(num_muscles):
+                        name = idx_to_name[m_idx]
+                        pred_norm = preds[m_idx][:B]       # (B, K) z-scored
+                        gt_norm = targets_t_dev[name]      # (B, K) z-scored
+                        stds = pca_stds[name].to(device)   # (K,)
+                        comps = pca_components[name].to(device)  # (K, V*3)
+                        # Denormalize and project to vertex space
+                        pred_disp = (pred_norm * stds) @ comps  # (B, V*3)
+                        gt_disp = (gt_norm * stds) @ comps      # (B, V*3)
+                        vertex_se[name] += ((pred_disp - gt_disp) ** 2).sum().item()
+                        vertex_count[name] += gt_disp.numel()
+
+            print("  Per-muscle val (z-scored MSE | vertex RMSE mm):")
+            total_se, total_count = 0.0, 0
             for name in muscle_names:
-                print(f"    {name}: {per_muscle_val[name]:.6f}")
+                rmse_m = math.sqrt(vertex_se[name] / vertex_count[name]) * 1000
+                total_se += vertex_se[name]
+                total_count += vertex_count[name]
+                print(f"    {name}: {per_muscle_val[name]:.6f} | {rmse_m:.2f} mm")
+                writer.add_scalar(f"val_vertex_rmse_mm/{name}", rmse_m, epoch)
+            avg_rmse_mm = math.sqrt(total_se / total_count) * 1000
+            print(f"  Avg vertex RMSE: {avg_rmse_mm:.2f} mm")
+            writer.add_scalar("val_vertex_rmse_mm/avg", avg_rmse_mm, epoch)
 
         # Checkpoint data shared between best/latest
         ckpt_base = {
