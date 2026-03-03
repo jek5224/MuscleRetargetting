@@ -30,6 +30,7 @@ COSINE_T_MAX = 600
 PCA_K = 64
 TEMPORAL_LOSS_WEIGHT = 0.5
 INPUT_NOISE_STD = 0.02
+DROPOUT = 0.1
 
 
 def train():
@@ -66,6 +67,7 @@ def train():
         num_decoder_res=num_decoder_res,
         embed_dim=embed_dim,
         pca_k=PCA_K,
+        dropout=DROPOUT,
     ).to(device)
     total_params = sum(p.numel() for p in model.parameters())
     print(f"Model params: {total_params:,} (input_dim={input_dim})")
@@ -211,6 +213,7 @@ def train():
             "num_encoder_res": num_encoder_res,
             "num_decoder_res": num_decoder_res,
             "embed_dim": embed_dim,
+            "dropout": DROPOUT,
             "pca_k": PCA_K,
             "num_muscles": num_muscles,
             "muscle_name_to_idx": muscle_name_to_idx,

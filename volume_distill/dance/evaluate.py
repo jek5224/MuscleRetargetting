@@ -36,6 +36,7 @@ def load_model(checkpoint_path, device=None):
             num_decoder_res=ckpt.get("num_decoder_res", 3),
             embed_dim=ckpt.get("embed_dim", 64),
             pca_k=ckpt.get("pca_k", 64),
+            dropout=ckpt.get("dropout", 0.0),
         ).to(device)
         model.load_state_dict(ckpt["model_state_dict"])
         model.eval()

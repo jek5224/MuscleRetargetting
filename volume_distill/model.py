@@ -32,22 +32,23 @@ def weights_init(m):
 
 
 class ResBlock(nn.Module):
-    """Residual block with LeakyReLU."""
-    def __init__(self, dim):
+    """Residual block with LeakyReLU and optional dropout."""
+    def __init__(self, dim, dropout=0.0):
         super().__init__()
         self.fc1 = nn.Linear(dim, dim)
         self.fc2 = nn.Linear(dim, dim)
         self.act = nn.LeakyReLU(0.2)
+        self.drop = nn.Dropout(dropout) if dropout > 0 else nn.Identity()
         self.fc1.apply(weights_init)
         self.fc2.apply(weights_init)
 
     def forward(self, x):
-        return x + self.act(self.fc2(self.act(self.fc1(x))))
+        return x + self.drop(self.act(self.fc2(self.act(self.fc1(x)))))
 
 
 class SharedEncoder(nn.Module):
     def __init__(self, input_dim=4, hidden_dim=512, latent_dim=512,
-                 num_res_blocks=3, num_freqs=6):
+                 num_res_blocks=3, num_freqs=6, dropout=0.0):
         super().__init__()
         self.pe = PositionalEncoding(input_dim, num_freqs)
         self.input_proj = nn.Sequential(
@@ -55,7 +56,7 @@ class SharedEncoder(nn.Module):
             nn.LeakyReLU(0.2),
         )
         self.res_blocks = nn.Sequential(
-            *[ResBlock(hidden_dim) for _ in range(num_res_blocks)]
+            *[ResBlock(hidden_dim, dropout=dropout) for _ in range(num_res_blocks)]
         )
         self.output_proj = nn.Sequential(
             nn.Linear(hidden_dim, latent_dim),
@@ -73,7 +74,7 @@ class SharedEncoder(nn.Module):
 class MuscleDecoder(nn.Module):
     """Per-muscle decoder with residual blocks."""
     def __init__(self, latent_dim=512, hidden_dim=512, num_res_blocks=2,
-                 output_dim=None):
+                 output_dim=None, dropout=0.0):
         super().__init__()
         assert output_dim is not None
         self.input_proj = nn.Sequential(
@@ -81,7 +82,7 @@ class MuscleDecoder(nn.Module):
             nn.LeakyReLU(0.2),
         )
         self.res_blocks = nn.Sequential(
-            *[ResBlock(hidden_dim) for _ in range(num_res_blocks)]
+            *[ResBlock(hidden_dim, dropout=dropout) for _ in range(num_res_blocks)]
         )
         self.output_proj = nn.Linear(hidden_dim, output_dim)
         self.input_proj.apply(weights_init)
@@ -132,7 +133,7 @@ class DistillNetV2(nn.Module):
     """V2: single decoder conditioned on muscle embedding, PCA output, linear baseline + residual."""
     def __init__(self, num_muscles, muscle_name_to_idx, input_dim=20,
                  hidden_dim=768, num_encoder_res=5, num_decoder_res=3,
-                 embed_dim=64, pca_k=64, num_freqs=6):
+                 embed_dim=64, pca_k=64, num_freqs=6, dropout=0.0):
         super().__init__()
         self.num_muscles = num_muscles
         self.muscle_name_to_idx = muscle_name_to_idx
@@ -143,7 +144,7 @@ class DistillNetV2(nn.Module):
         # Shared encoder
         self.encoder = SharedEncoder(
             input_dim=input_dim, hidden_dim=hidden_dim, latent_dim=hidden_dim,
-            num_res_blocks=num_encoder_res, num_freqs=num_freqs,
+            num_res_blocks=num_encoder_res, num_freqs=num_freqs, dropout=dropout,
         )
         pe_dim = self.encoder.pe.output_dim
 
@@ -154,7 +155,7 @@ class DistillNetV2(nn.Module):
         decoder_input = hidden_dim + pe_dim + embed_dim
         self.decoder = MuscleDecoder(
             latent_dim=decoder_input, hidden_dim=hidden_dim,
-            num_res_blocks=num_decoder_res, output_dim=pca_k,
+            num_res_blocks=num_decoder_res, output_dim=pca_k, dropout=dropout,
         )
 
         # Linear baseline: input DOFs + embed → PCA coeffs
