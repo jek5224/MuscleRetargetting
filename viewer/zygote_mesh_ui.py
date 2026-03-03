@@ -6835,6 +6835,34 @@ def _scan_motion_files(v):
     v.motion_bvh_files = sorted(glob.glob('data/motion/*.bvh'))
 
 
+def _detect_bvh_tframe(bvh_path):
+    """Detect if a BVH file needs T_frame=0 (non-upright rest pose).
+
+    Checks if leg bone offsets extend primarily in Y (upright rest pose)
+    or in another axis (flat rest pose like LaFAN1). Returns 0 if T-pose
+    correction is needed, None otherwise.
+    """
+    import re
+    with open(bvh_path, 'r') as f:
+        content = f.read()
+    # Find thigh bone offset (LeftLeg or RightLeg joint)
+    for joint in ['LeftLeg', 'RightLeg']:
+        pattern = rf'JOINT\s+{joint}\s*\{{[^}}]*?OFFSET\s+([\d.\-e]+)\s+([\d.\-e]+)\s+([\d.\-e]+)'
+        match = re.search(pattern, content, re.DOTALL | re.IGNORECASE)
+        if match:
+            x, y, z = abs(float(match.group(1))), abs(float(match.group(2))), abs(float(match.group(3)))
+            max_axis = max(x, y, z)
+            if max_axis < 1e-6:
+                continue
+            # If Y is the dominant axis, rest pose is upright -> no T_frame needed
+            if y / max_axis > 0.8:
+                return None
+            # Otherwise rest pose is flat -> need T_frame=0
+            print(f"[Motion] Non-upright rest pose detected (thigh offset: {match.group(1)}, {match.group(2)}, {match.group(3)}), using T_frame=0")
+            return 0
+    return None
+
+
 def _load_motion_bvh(v, idx):
     """Load the BVH file at the given index."""
     if idx < 0 or idx >= len(v.motion_bvh_files):
@@ -6852,7 +6880,9 @@ def _load_motion_bvh(v, idx):
             v.motion_root_translation = None
         print(f"[Motion] bvh_info: {v.env.bvh_info}")
         print(f"[Motion] skel DOFs: {v.env.skel.getNumDofs()}, joints: {v.env.skel.getNumJoints()}")
-        v.motion_bvh = MyBVH(bvh_path, v.env.bvh_info, v.env.skel)
+        # Auto-detect if BVH needs T-pose correction (non-upright rest pose)
+        t_frame = _detect_bvh_tframe(bvh_path)
+        v.motion_bvh = MyBVH(bvh_path, v.env.bvh_info, v.env.skel, T_frame=t_frame)
         print(f"[Motion] mocap_refs shape: {v.motion_bvh.mocap_refs.shape}, max abs: {np.abs(v.motion_bvh.mocap_refs).max():.6f}")
         v.motion_total_frames = v.motion_bvh.num_frames
         v.motion_current_frame = 0
