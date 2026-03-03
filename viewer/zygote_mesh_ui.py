@@ -7056,12 +7056,13 @@ def _motion_save_current_frame(v):
 def _motion_patch_waypoints(v):
     """Patch existing cache files by computing waypoints from cached tet positions.
     Much faster than re-baking since it skips tet sim — only does barycentric interpolation.
-    Sets skeleton pose per frame so origin/insertion endpoints update correctly."""
+    Sets skeleton pose per frame so origin/insertion endpoints update correctly.
+    Supports both legacy single-file and chunked cache formats."""
     cache_dir = _motion_cache_dir(v)
     if cache_dir is None:
         return
-    # Collect muscles that need patching
-    to_patch = {}  # mname -> (filepath, frames, positions)
+    # Collect muscles that need patching — find all cache files (legacy + chunks)
+    to_patch = {}  # mname -> [(filepath, frames, positions), ...]
     for mname, mobj in v.zygote_muscle_meshes.items():
         if mobj.soft_body is None:
             continue
@@ -7069,11 +7070,18 @@ def _motion_patch_waypoints(v):
             continue
         if not (hasattr(mobj, 'waypoint_bary_coords') and len(mobj.waypoint_bary_coords) > 0):
             continue
-        filepath = os.path.join(cache_dir, f'{mname}.npz')
-        if not os.path.exists(filepath):
+        file_list = []
+        legacy = os.path.join(cache_dir, f'{mname}.npz')
+        if os.path.exists(legacy):
+            file_list.append(legacy)
+        file_list.extend(sorted(glob.glob(os.path.join(cache_dir, f'{mname}_chunk_*.npz'))))
+        if not file_list:
             continue
-        data = np.load(filepath, allow_pickle=True)
-        to_patch[mname] = (filepath, data['frames'], data['positions'])
+        entries = []
+        for fp in file_list:
+            data = np.load(fp, allow_pickle=True)
+            entries.append((fp, data['frames'], data['positions']))
+        to_patch[mname] = entries
 
     if not to_patch:
         print("All cache files already have waypoints")
@@ -7081,7 +7089,10 @@ def _motion_patch_waypoints(v):
 
     # Build sorted list of all unique frame indices across muscles
     all_frames = sorted(set(
-        int(f) for _, frames, _ in to_patch.values() for f in frames
+        int(f)
+        for entries in to_patch.values()
+        for _, frames, _ in entries
+        for f in frames
     ))
 
     # Per-muscle: build frame->index mapping and accumulate results
@@ -7090,68 +7101,86 @@ def _motion_patch_waypoints(v):
     for mname in to_patch:
         muscle_wp[mname] = {}
 
+    # Build fast lookup: mname -> {frame_idx: (entry_idx, pos_idx)}
+    muscle_frame_map = {}
+    for mname, entries in to_patch.items():
+        fmap = {}
+        for entry_idx, (fp, frames, positions) in enumerate(entries):
+            for pos_idx, f in enumerate(frames):
+                fmap[int(f)] = (entry_idx, pos_idx)
+        muscle_frame_map[mname] = fmap
+
     # Iterate frames once, update all muscles per frame
     for frame_idx in all_frames:
         if frame_idx < v.motion_total_frames:
             _motion_apply_pose(v, frame_idx)
-        for mname, (filepath, frames, positions) in to_patch.items():
-            frame_list = list(frames)
-            if frame_idx not in frame_list:
+        for mname, entries in to_patch.items():
+            fmap = muscle_frame_map[mname]
+            if frame_idx not in fmap:
                 continue
-            i = frame_list.index(frame_idx)
+            entry_idx, pos_idx = fmap[frame_idx]
+            positions = entries[entry_idx][2]
             mobj = v.zygote_muscle_meshes[mname]
-            mobj.tet_vertices = positions[i].astype(np.float32).copy()
+            mobj.tet_vertices = positions[pos_idx].astype(np.float32).copy()
             mobj._update_waypoints_from_tet(v.env.skel, verbose=False)
             wp_flat, wp_shape_str = _flatten_waypoints(mobj.waypoints)
             muscle_wp[mname][frame_idx] = wp_flat
             muscle_wp_shape[mname] = wp_shape_str
 
-    # Write patched files
+    # Write patched files — one per original file
     patched = 0
-    for mname, (filepath, frames, positions) in to_patch.items():
-        frame_list = [int(f) for f in frames]
-        wp_flats = [muscle_wp[mname][f] for f in frame_list]
-        save_dict = dict(
-            frames=frames,
-            positions=positions,
-            waypoints_flat=np.stack(wp_flats).astype(np.float32),
-            waypoints_shape=np.array([muscle_wp_shape[mname].encode('utf-8')]),
-        )
-        np.savez_compressed(filepath, **save_dict)
+    for mname, entries in to_patch.items():
+        for filepath, frames, positions in entries:
+            frame_list = [int(f) for f in frames]
+            wp_flats = [muscle_wp[mname][f] for f in frame_list]
+            save_dict = dict(
+                frames=frames,
+                positions=positions,
+                waypoints_flat=np.stack(wp_flats).astype(np.float32),
+                waypoints_shape=np.array([muscle_wp_shape[mname].encode('utf-8')]),
+            )
+            np.savez_compressed(filepath, **save_dict)
         patched += 1
-        print(f"  Patched {mname}: {len(frames)} frames")
+        n_frames = sum(len(frames) for _, frames, _ in entries)
+        print(f"  Patched {mname}: {n_frames} frames across {len(entries)} file(s)")
 
     _motion_load_cache(v)
     print(f"Waypoint patch complete: {patched} muscles updated")
 
 
 def _motion_load_cache(v):
-    """Load all cached deformation data for the current BVH into memory."""
+    """Load all cached deformation data for the current BVH into memory.
+    Supports both legacy single-file ({mname}.npz) and chunked ({mname}_chunk_*.npz) formats."""
     v.motion_deform_cache = {}
     cache_dir = _motion_cache_dir(v)
     if cache_dir is None:
         return
     for mname in v.zygote_muscle_meshes:
-        filepath = os.path.join(cache_dir, f'{mname}.npz')
-        if os.path.exists(filepath):
-            data = np.load(filepath, allow_pickle=True)
+        # Collect all files for this muscle: chunks first, then legacy (legacy overrides)
+        npz_files = sorted(glob.glob(os.path.join(cache_dir, f'{mname}_chunk_*.npz')))
+        legacy = os.path.join(cache_dir, f'{mname}.npz')
+        if os.path.exists(legacy):
+            npz_files.append(legacy)
+        if not npz_files:
+            continue
+        cache = {}
+        for npz_path in npz_files:
+            data = np.load(npz_path, allow_pickle=True)
             frames = data['frames']
             positions = data['positions']
             has_wp = 'waypoints_flat' in data and 'waypoints_shape' in data
             wp_flats = data['waypoints_flat'] if has_wp else None
-            # waypoints_shape is a 1-element array containing a JSON byte string
             wp_shape_str = None
             if has_wp:
                 raw = data['waypoints_shape'][0]
                 wp_shape_str = raw.decode('utf-8') if isinstance(raw, (bytes, np.bytes_)) else str(raw)
-            cache = {}
             for i, f in enumerate(frames):
                 entry = {'positions': positions[i]}
                 if has_wp:
                     entry['waypoints_flat'] = wp_flats[i]
                     entry['waypoints_shape'] = wp_shape_str
                 cache[int(f)] = entry
-            v.motion_deform_cache[mname] = cache
+        v.motion_deform_cache[mname] = cache
 
 def _flatten_waypoints(waypoints):
     """Flatten nested waypoints list into a single float32 array + shape JSON string.
@@ -7259,10 +7288,17 @@ def _motion_start_bake(v):
     v._bake_data = {}
     v._bake_start_time = time.time()
     v._bake_flush_count = 0  # number of partial flushes done
-    v._bake_flush_interval = 500  # flush to disk every N frames
+    v._bake_flush_interval = 1000  # flush to disk every N frames
     cache_dir = _motion_cache_dir(v)
-    v._bake_temp_dir = os.path.join(cache_dir, '_bake_temp')
-    os.makedirs(v._bake_temp_dir, exist_ok=True)
+    v._bake_cache_dir = cache_dir
+    # Remove old chunk files from previous bakes
+    for old_chunk in glob.glob(os.path.join(cache_dir, '*_chunk_*.npz')):
+        os.remove(old_chunk)
+    # Clean up legacy temp dir if it exists
+    legacy_temp = os.path.join(cache_dir, '_bake_temp')
+    if os.path.isdir(legacy_temp):
+        import shutil
+        shutil.rmtree(legacy_temp, ignore_errors=True)
     for mname, mobj in v.zygote_muscle_meshes.items():
         if mobj.soft_body is not None:
             v._bake_data[mname] = {}
@@ -7270,20 +7306,23 @@ def _motion_start_bake(v):
 
 
 def _motion_bake_flush(v):
-    """Flush accumulated bake data to temporary per-muscle files on disk, then clear memory."""
+    """Flush accumulated bake data to chunk files on disk, then clear memory and run GC."""
     if not v._bake_data:
         return
+    import gc
+    cache_dir = v._bake_cache_dir
     for mname, frame_data in v._bake_data.items():
         if len(frame_data) == 0:
             continue
         sorted_frames = sorted(frame_data.keys())
-        filepath = os.path.join(v._bake_temp_dir, f'{mname}_{v._bake_flush_count:04d}.npz')
+        filepath = os.path.join(cache_dir, f'{mname}_chunk_{v._bake_flush_count:04d}.npz')
         np.savez(filepath,
             frames=np.array(sorted_frames, dtype=np.int32),
             positions=np.array([frame_data[f]['positions'] for f in sorted_frames], dtype=np.float32),
         )
         frame_data.clear()
     v._bake_flush_count += 1
+    gc.collect()
 
 
 def _motion_bake_step(v):
@@ -7359,65 +7398,13 @@ def _motion_bake_finish(v):
     _motion_bake_flush(v)
 
     cache_dir = _motion_cache_dir(v)
-    temp_dir = v._bake_temp_dir
 
-    # Merge all temp files per muscle into final NPZ
+    # Remove legacy single-file caches — chunk files replace them
     muscle_names = list(v._bake_data.keys())
     for mname in muscle_names:
-        # Collect all temp chunks for this muscle
-        chunk_files = sorted(glob.glob(os.path.join(temp_dir, f'{mname}_*.npz')))
-        if not chunk_files:
-            continue
-
-        # Load and merge chunks — only frames+positions arrays, not full dicts
-        all_frames = []
-        all_positions = []
-        for cf in chunk_files:
-            chunk = np.load(cf)
-            all_frames.append(chunk['frames'])
-            all_positions.append(chunk['positions'])
-        all_frames = np.concatenate(all_frames)
-        all_positions = np.concatenate(all_positions)
-
-        # Sort by frame number
-        order = np.argsort(all_frames)
-        all_frames = all_frames[order]
-        all_positions = all_positions[order]
-
-        expected_shape = all_positions[0].shape
-
-        # Merge with existing cache: keep old frames not in this bake
-        baked_frame_set = set(all_frames.tolist())
-        filepath = os.path.join(cache_dir, f'{mname}.npz')
-        if os.path.exists(filepath):
-            try:
-                existing = np.load(filepath, allow_pickle=True)
-                old_frames = []
-                old_positions = []
-                for i, f in enumerate(existing['frames']):
-                    fi = int(f)
-                    if fi not in baked_frame_set:
-                        existing_pos = existing['positions'][i]
-                        if existing_pos.shape == expected_shape:
-                            old_frames.append(fi)
-                            old_positions.append(existing_pos)
-                if old_frames:
-                    all_frames = np.concatenate([all_frames, np.array(old_frames, dtype=np.int32)])
-                    all_positions = np.concatenate([all_positions, np.array(old_positions, dtype=np.float32)])
-                    order = np.argsort(all_frames)
-                    all_frames = all_frames[order]
-                    all_positions = all_positions[order]
-            except Exception as e:
-                print(f"[{mname}] Could not load existing cache: {e}")
-
-        np.savez_compressed(filepath,
-            frames=all_frames,
-            positions=all_positions,
-        )
-
-    # Clean up temp directory
-    import shutil
-    shutil.rmtree(temp_dir, ignore_errors=True)
+        legacy_file = os.path.join(cache_dir, f'{mname}.npz')
+        if os.path.exists(legacy_file):
+            os.remove(legacy_file)
 
     v.motion_baking = False
     v._bake_data = {}
