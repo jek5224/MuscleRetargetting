@@ -2514,11 +2514,11 @@ class FiberArchitectureMixin:
                 best_tet_idx = tet_idx
                 best_bary = bary
 
-        # Use best candidate with clamped barycentric coords
+        # Use best candidate with unclamped barycentric coords so that
+        # points outside the tet extrapolate naturally during deformation
+        # instead of being projected onto the tet surface.
         if best_tet_idx is not None:
-            clamped_bary = np.maximum(best_bary, 0.0)
-            clamped_bary /= np.sum(clamped_bary)  # Renormalize
-            return best_tet_idx, clamped_bary, False  # was_inside=False
+            return best_tet_idx, best_bary, False  # was_inside=False
 
         # Fallback: use the closest tetrahedron by centroid
         closest_tet_idx = sorted_indices[0]
@@ -2526,10 +2526,7 @@ class FiberArchitectureMixin:
         v0, v1, v2, v3 = tet_verts[tet[0]], tet_verts[tet[1]], tet_verts[tet[2]], tet_verts[tet[3]]
         bary = self._compute_barycentric(point, v0, v1, v2, v3)
         if bary is not None:
-            clamped_bary = np.maximum(bary, 0.0)
-            if np.sum(clamped_bary) > 0:
-                clamped_bary /= np.sum(clamped_bary)
-                return closest_tet_idx, clamped_bary, False  # was_inside=False
+            return closest_tet_idx, bary, False  # was_inside=False
 
         # Ultimate fallback: assign to closest tet with equal weights
         return closest_tet_idx, np.array([0.25, 0.25, 0.25, 0.25]), False
