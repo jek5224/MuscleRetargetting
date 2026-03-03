@@ -6943,7 +6943,6 @@ def _motion_load_nn_checkpoint(v):
     v.motion_nn_rest_positions = None
     v.motion_nn_checkpoint_path = None
     v._motion_nn_model_version = "v1"
-    v._motion_nn_window_size = 5
     ckpt_path = 'volume_distill/checkpoints/best.pt'
     if not os.path.exists(ckpt_path):
         return
@@ -6962,7 +6961,6 @@ def _motion_load_nn_checkpoint(v):
         v._motion_nn_epoch = metadata.get("epoch", "?")
         v._motion_nn_val_loss = metadata.get("val_loss")
         v._motion_nn_model_version = metadata.get("model_version", "v1")
-        v._motion_nn_window_size = metadata.get("window_size", 5)
         print(f"[Motion] Loaded NN checkpoint: {ckpt_path} "
               f"(epoch {v._motion_nn_epoch}, version={v._motion_nn_model_version})")
     except Exception as e:

@@ -29,7 +29,6 @@ WEIGHT_DECAY = 1e-5
 COSINE_T_MAX = 600
 PCA_K = 64
 TEMPORAL_LOSS_WEIGHT = 0.5
-WINDOW_SIZE = 5
 
 
 def train():
@@ -216,7 +215,6 @@ def train():
             "pca_means": pca_means,
             "pca_stds": pca_stds,
             "rest_positions": rest_positions,
-            "window_size": WINDOW_SIZE,
         }
 
         if val_loss < best_val_loss:

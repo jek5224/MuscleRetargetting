@@ -49,7 +49,6 @@ def load_model(checkpoint_path, device=None):
             "pca_components": ckpt["pca_components"],
             "pca_means": ckpt["pca_means"],
             "pca_stds": ckpt.get("pca_stds"),
-            "window_size": ckpt.get("window_size", 5),
             "model_version": "v2",
             "rest_positions": ckpt.get("rest_positions"),
             "epoch": ckpt.get("epoch", "?"),
