@@ -99,13 +99,16 @@ def main():
 
     # Track results
     results = {}  # bvh_path -> ("done"|"FAILED", elapsed)
-    active = {}   # bvh_path -> (Popen, start_time, worker_idx)
+    active = {}   # bvh_path -> (Popen, start_time, worker_idx, log_file, log_path)
+    last_progress = {}  # bvh_path -> last printed progress line
     queue = list(bvh_files)
     batch_start = time.time()
     worker_idx_counter = 0
+    file_counter = 0
 
     def launch(bvh_path):
-        nonlocal worker_idx_counter
+        nonlocal worker_idx_counter, file_counter
+        file_counter += 1
         widx = worker_idx_counter
         worker_idx_counter += 1
         env = os.environ.copy()
@@ -120,12 +123,25 @@ def main():
         proc = subprocess.Popen(
             cmd, stdout=log_file, stderr=subprocess.STDOUT, env=env
         )
-        active[bvh_path] = (proc, time.time(), widx, log_file)
-        print(f"  START  [{widx}] {bvh_path}  (log: {log_path})")
+        active[bvh_path] = (proc, time.time(), widx, log_file, log_path)
+        print(f"  START  [{file_counter}/{len(bvh_files)}] {bvh_path}")
+
+    def _read_last_progress(log_path):
+        """Read the last frame-progress line from a log file."""
+        try:
+            with open(log_path, "r") as f:
+                # Read from end — progress lines contain "Frame " and "/frame"
+                last = None
+                for line in f:
+                    if "Frame " in line and "/frame" in line:
+                        last = line.strip()
+                return last
+        except OSError:
+            return None
 
     def poll_active():
         done = []
-        for bvh_path, (proc, t0, widx, log_file) in active.items():
+        for bvh_path, (proc, t0, widx, log_file, log_path) in active.items():
             ret = proc.poll()
             if ret is not None:
                 elapsed = time.time() - t0
@@ -133,19 +149,35 @@ def main():
                 status = "done" if ret == 0 else "FAILED"
                 results[bvh_path] = (status, elapsed, ret)
                 stem = os.path.splitext(os.path.basename(bvh_path))[0]
-                print(f"  {status:>6}  [{widx}] {stem}  ({elapsed:.1f}s, exit={ret})")
+                print(f"  {status:>6}  {stem}  ({elapsed:.1f}s)")
+                last_progress.pop(bvh_path, None)
                 done.append(bvh_path)
+            else:
+                # Print progress from log, throttled to ~every 100 frames
+                progress = _read_last_progress(log_path)
+                if progress and progress != last_progress.get(bvh_path):
+                    # Parse frame count to throttle — print every ~100 frames
+                    # Format: "  Frame 100/7183  (101/7184)  ..."
+                    try:
+                        parts = progress.split("(")[1].split("/")[0]
+                        frames_done = int(parts)
+                        if frames_done % 100 < 10 or frames_done <= 10:
+                            stem = os.path.splitext(os.path.basename(bvh_path))[0]
+                            print(f"         {stem}: {progress}")
+                            last_progress[bvh_path] = progress
+                    except (IndexError, ValueError):
+                        pass
         for bvh_path in done:
             del active[bvh_path]
 
     # Kill children on Ctrl+C
     def _cleanup(signum, frame):
         print(f"\nInterrupted — terminating {len(active)} worker(s)...")
-        for bvh_path, (proc, t0, widx, log_file) in active.items():
+        for bvh_path, (proc, t0, widx, log_file, log_path) in active.items():
             proc.terminate()
             log_file.close()
         # Give them a moment, then force-kill
-        for bvh_path, (proc, t0, widx, log_file) in active.items():
+        for bvh_path, (proc, t0, widx, log_file, log_path) in active.items():
             try:
                 proc.wait(timeout=5)
             except subprocess.TimeoutExpired:

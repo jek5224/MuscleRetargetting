@@ -425,7 +425,8 @@ def main():
                 f"({frames_done}/{total_frames})  "
                 f"{elapsed:.1f}s elapsed  "
                 f"{avg:.2f}s/frame  "
-                f"ETA {remaining:.0f}s"
+                f"ETA {remaining:.0f}s",
+                flush=True,
             )
 
     # Final flush
