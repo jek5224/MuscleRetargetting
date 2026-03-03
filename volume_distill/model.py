@@ -176,32 +176,25 @@ class DistillNetV2(nn.Module):
             muscle_indices = torch.arange(self.num_muscles, device=x.device)
 
         B = x.shape[0]
-        M = muscle_indices.shape[0]
 
-        # Encode once
+        # Encode once: shared across all muscles
         pe_x = self.encoder.pe(x)       # (B, pe_dim)
         latent = self.encoder(x)         # (B, hidden_dim)
 
-        # Expand for all muscles: (B*M, ...)
-        latent_exp = latent.unsqueeze(1).expand(-1, M, -1).reshape(B * M, -1)
-        pe_exp = pe_x.unsqueeze(1).expand(-1, M, -1).reshape(B * M, -1)
+        # Loop over muscles to avoid B*M memory explosion
+        result = {}
+        for m_idx in muscle_indices:
+            embed = self.muscle_embed(m_idx)             # (embed_dim,)
+            embed_exp = embed.unsqueeze(0).expand(B, -1)  # (B, embed_dim)
 
-        # Muscle embeddings: (M,) → (B*M, embed_dim)
-        embeds = self.muscle_embed(muscle_indices)  # (M, embed_dim)
-        embeds_exp = embeds.unsqueeze(0).expand(B, -1, -1).reshape(B * M, -1)
+            # Decoder: residual path
+            decoder_in = torch.cat([latent, pe_x, embed_exp], dim=-1)  # (B, hidden+pe+embed)
+            residual = self.decoder(decoder_in)  # (B, pca_k)
 
-        # Decoder: residual path
-        decoder_in = torch.cat([latent_exp, pe_exp, embeds_exp], dim=-1)
-        residual = self.decoder(decoder_in)  # (B*M, pca_k)
+            # Linear baseline
+            linear_in = torch.cat([x, embed_exp], dim=-1)  # (B, input+embed)
+            baseline = self.linear_baseline(linear_in)  # (B, pca_k)
 
-        # Linear baseline
-        x_exp = x.unsqueeze(1).expand(-1, M, -1).reshape(B * M, -1)
-        linear_in = torch.cat([x_exp, embeds_exp], dim=-1)
-        baseline = self.linear_baseline(linear_in)  # (B*M, pca_k)
+            result[m_idx.item()] = baseline + residual
 
-        # Combine
-        output = baseline + residual  # (B*M, pca_k)
-        output = output.reshape(B, M, self.pca_k)
-
-        # Return as dict keyed by muscle index
-        return {muscle_indices[m].item(): output[:, m] for m in range(M)}
+        return result
