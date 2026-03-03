@@ -453,6 +453,11 @@ def main():
     print("\nComputing waypoints...")
     patch_waypoints(cache_dir, active_muscles, motion_bvh, skel)
 
+    # Write completion marker so batch runner can detect fully-baked caches
+    done_marker = os.path.join(cache_dir, ".done")
+    with open(done_marker, "w") as f:
+        f.write(f"{total_frames} frames\n")
+
     total_elapsed = time.time() - bake_start
     print(f"\nDone in {total_elapsed:.1f}s. Output: {cache_dir}/")
 

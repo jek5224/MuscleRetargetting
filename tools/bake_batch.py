@@ -15,8 +15,8 @@ Usage:
     python tools/bake_batch.py data/motion/*.bvh --skip-existing
 """
 import argparse
-import glob
 import os
+import signal
 import subprocess
 import sys
 import time
@@ -26,13 +26,10 @@ BAKE_SCRIPT = os.path.join(SCRIPT_DIR, "bake_headless.py")
 CACHE_DIR = os.path.join("data", "motion_cache")
 
 
-def has_cache(bvh_path):
-    """Check if a BVH file already has cached chunk files."""
+def is_bake_complete(bvh_path):
+    """Check if a BVH file has a completed bake (has .done marker)."""
     stem = os.path.splitext(os.path.basename(bvh_path))[0]
-    cache_path = os.path.join(CACHE_DIR, stem)
-    if not os.path.isdir(cache_path):
-        return False
-    return len(glob.glob(os.path.join(cache_path, "*_chunk_*.npz"))) > 0
+    return os.path.exists(os.path.join(CACHE_DIR, stem, ".done"))
 
 
 def main():
@@ -62,7 +59,7 @@ def main():
     bvh_files = args.bvh_files
     if args.skip_existing:
         before = len(bvh_files)
-        bvh_files = [f for f in bvh_files if not has_cache(f)]
+        bvh_files = [f for f in bvh_files if not is_bake_complete(f)]
         skipped = before - len(bvh_files)
         if skipped:
             print(f"Skipped {skipped} already-baked file(s)")
@@ -140,6 +137,23 @@ def main():
                 done.append(bvh_path)
         for bvh_path in done:
             del active[bvh_path]
+
+    # Kill children on Ctrl+C
+    def _cleanup(signum, frame):
+        print(f"\nInterrupted — terminating {len(active)} worker(s)...")
+        for bvh_path, (proc, t0, widx, log_file) in active.items():
+            proc.terminate()
+            log_file.close()
+        # Give them a moment, then force-kill
+        for bvh_path, (proc, t0, widx, log_file) in active.items():
+            try:
+                proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+        sys.exit(1)
+
+    signal.signal(signal.SIGINT, _cleanup)
+    signal.signal(signal.SIGTERM, _cleanup)
 
     # Main loop
     while queue or active:
