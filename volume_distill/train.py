@@ -155,13 +155,12 @@ def train():
             for name in muscle_names:
                 print(f"    {name}: {per_muscle_val[name]:.6f}")
 
-        # Save best
+        # Save best (no optimizer state — inference only, ~550MB vs ~1.6GB)
         if val_loss < best_val_loss:
             best_val_loss = val_loss
             torch.save({
                 "epoch": epoch,
                 "model_state_dict": model.state_dict(),
-                "optimizer_state_dict": optimizer.state_dict(),
                 "val_loss": val_loss,
                 "muscle_vertex_counts": muscle_vertex_counts,
                 "input_dim": input_dim,
@@ -172,8 +171,9 @@ def train():
             }, os.path.join(CHECKPOINT_DIR, "best.pt"))
             print(f"  -> Saved best model (val_loss={val_loss:.6f})")
 
-        # Save periodic
+        # Save latest periodic (with optimizer state for resume, replaces previous)
         if epoch % 10 == 0:
+            ckpt_path = os.path.join(CHECKPOINT_DIR, "latest.pt")
             torch.save({
                 "epoch": epoch,
                 "model_state_dict": model.state_dict(),
@@ -185,7 +185,7 @@ def train():
                 "num_encoder_res": num_encoder_res,
                 "num_decoder_res": num_decoder_res,
                 "rest_positions": rest_positions,
-            }, os.path.join(CHECKPOINT_DIR, f"epoch_{epoch:03d}.pt"))
+            }, ckpt_path)
 
     writer.close()
     print(f"Training complete. Best val MSE: {best_val_loss:.6f}")
