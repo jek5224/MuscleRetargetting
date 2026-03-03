@@ -49,6 +49,9 @@ def load_model(checkpoint_path, device=None):
             "pca_means": ckpt["pca_means"],
             "window_size": ckpt.get("window_size", 5),
             "model_version": "v2",
+            "rest_positions": ckpt.get("rest_positions"),
+            "epoch": ckpt.get("epoch", "?"),
+            "val_loss": ckpt.get("val_loss"),
         }
         return model, metadata
     else:
@@ -65,6 +68,9 @@ def load_model(checkpoint_path, device=None):
         metadata = {
             "muscle_vertex_counts": muscle_vertex_counts,
             "model_version": "v1",
+            "rest_positions": ckpt.get("rest_positions"),
+            "epoch": ckpt.get("epoch", "?"),
+            "val_loss": ckpt.get("val_loss"),
         }
         return model, metadata
 

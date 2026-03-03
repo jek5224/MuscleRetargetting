@@ -6951,8 +6951,7 @@ def _motion_load_nn_checkpoint(v):
         import torch
         from volume_distill.dance.evaluate import load_model
         model, metadata = load_model(ckpt_path, device='cpu')
-        ckpt = torch.load(ckpt_path, map_location='cpu', weights_only=False)
-        rest_positions = ckpt.get("rest_positions")
+        rest_positions = metadata.get("rest_positions")
         if rest_positions is None:
             preproc_path = 'data/motion_cache/locomotion/preprocessed.pt'
             data = torch.load(preproc_path, map_location='cpu', weights_only=False)
@@ -6960,8 +6959,8 @@ def _motion_load_nn_checkpoint(v):
         v.motion_nn_model = model
         v.motion_nn_rest_positions = rest_positions
         v.motion_nn_checkpoint_path = ckpt_path
-        v._motion_nn_epoch = ckpt.get("epoch", "?")
-        v._motion_nn_val_loss = ckpt.get("val_loss", None)
+        v._motion_nn_epoch = metadata.get("epoch", "?")
+        v._motion_nn_val_loss = metadata.get("val_loss")
         v._motion_nn_model_version = metadata.get("model_version", "v1")
         v._motion_nn_window_size = metadata.get("window_size", 5)
         print(f"[Motion] Loaded NN checkpoint: {ckpt_path} "
