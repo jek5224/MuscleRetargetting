@@ -176,25 +176,42 @@ class DistillNetV2(nn.Module):
             muscle_indices = torch.arange(self.num_muscles, device=x.device)
 
         B = x.shape[0]
+        M = muscle_indices.shape[0]
 
         # Encode once: shared across all muscles
         pe_x = self.encoder.pe(x)       # (B, pe_dim)
         latent = self.encoder(x)         # (B, hidden_dim)
 
-        # Loop over muscles to avoid B*M memory explosion
-        result = {}
-        for m_idx in muscle_indices:
-            embed = self.muscle_embed(m_idx)             # (embed_dim,)
-            embed_exp = embed.unsqueeze(0).expand(B, -1)  # (B, embed_dim)
+        # For small B (inference), batch all muscles together.
+        # For large B (training), loop to avoid OOM.
+        if B * M <= 4096:
+            # Batched: expand (B, ...) → (B*M, ...)
+            latent_exp = latent.unsqueeze(1).expand(-1, M, -1).reshape(B * M, -1)
+            pe_exp = pe_x.unsqueeze(1).expand(-1, M, -1).reshape(B * M, -1)
+            embeds = self.muscle_embed(muscle_indices)  # (M, embed_dim)
+            embeds_exp = embeds.unsqueeze(0).expand(B, -1, -1).reshape(B * M, -1)
 
-            # Decoder: residual path
-            decoder_in = torch.cat([latent, pe_x, embed_exp], dim=-1)  # (B, hidden+pe+embed)
-            residual = self.decoder(decoder_in)  # (B, pca_k)
+            decoder_in = torch.cat([latent_exp, pe_exp, embeds_exp], dim=-1)
+            residual = self.decoder(decoder_in)
 
-            # Linear baseline
-            linear_in = torch.cat([x, embed_exp], dim=-1)  # (B, input+embed)
-            baseline = self.linear_baseline(linear_in)  # (B, pca_k)
+            x_exp = x.unsqueeze(1).expand(-1, M, -1).reshape(B * M, -1)
+            linear_in = torch.cat([x_exp, embeds_exp], dim=-1)
+            baseline = self.linear_baseline(linear_in)
 
-            result[m_idx.item()] = baseline + residual
+            output = (baseline + residual).reshape(B, M, self.pca_k)
+            return {muscle_indices[m].item(): output[:, m] for m in range(M)}
+        else:
+            # Sequential: one muscle at a time to stay within VRAM
+            result = {}
+            for m_idx in muscle_indices:
+                embed = self.muscle_embed(m_idx)
+                embed_exp = embed.unsqueeze(0).expand(B, -1)
 
-        return result
+                decoder_in = torch.cat([latent, pe_x, embed_exp], dim=-1)
+                residual = self.decoder(decoder_in)
+
+                linear_in = torch.cat([x, embed_exp], dim=-1)
+                baseline = self.linear_baseline(linear_in)
+
+                result[m_idx.item()] = baseline + residual
+            return result
