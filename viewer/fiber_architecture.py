@@ -3113,3 +3113,58 @@ class FiberArchitectureMixin:
                     print(f"  Warning: Failed to recompute waypoints for stream {stream_idx} level {level_idx}: {e}")
 
         print(f"Recomputed {total_recomputed} waypoints from deformed contours using MVC")
+
+    def update_waypoints_fast(self):
+        """Fast waypoint update using cached MVC weights and deformed tet vertices.
+
+        Requires mvc_weights (from find_waypoints) to already exist.
+        Builds contour_to_tet_mapping on first call if needed.
+
+        Returns True if any waypoints were updated.
+        """
+        if not hasattr(self, 'contour_to_tet_mapping') or self.contour_to_tet_mapping is None:
+            self.build_contour_vertex_mapping()
+        if not hasattr(self, 'contour_to_tet_mapping') or self.contour_to_tet_mapping is None:
+            return False
+        if not hasattr(self, 'mvc_weights') or self.mvc_weights is None:
+            return False
+        if not hasattr(self, 'tet_vertices') or self.tet_vertices is None:
+            return False
+        if not hasattr(self, 'waypoints') or self.waypoints is None or len(self.waypoints) == 0:
+            return False
+
+        tet_verts = np.array(self.tet_vertices)
+        any_updated = False
+
+        for stream_idx, stream in enumerate(self.waypoints):
+            if stream_idx >= len(self.contour_to_tet_mapping):
+                continue
+            if stream_idx >= len(self.mvc_weights):
+                continue
+
+            for level_idx, level_waypoints in enumerate(stream):
+                if level_idx >= len(self.contour_to_tet_mapping[stream_idx]):
+                    continue
+                if level_idx >= len(self.mvc_weights[stream_idx]):
+                    continue
+
+                mapping = self.contour_to_tet_mapping[stream_idx][level_idx]
+                if len(mapping) == 0:
+                    continue
+
+                mvc_w = self.mvc_weights[stream_idx][level_idx]
+                if mvc_w is None or len(mvc_w) == 0:
+                    continue
+
+                mvc_w = np.asarray(mvc_w)
+                if mvc_w.ndim != 2 or mvc_w.shape[1] != len(mapping):
+                    continue
+
+                # Deformed contour positions from tet vertices
+                Ps = tet_verts[mapping]  # (num_contour_verts, 3)
+
+                # waypoints = mvc_weights @ Ps
+                self.waypoints[stream_idx][level_idx] = mvc_w @ Ps  # (num_fibers, 3)
+                any_updated = True
+
+        return any_updated

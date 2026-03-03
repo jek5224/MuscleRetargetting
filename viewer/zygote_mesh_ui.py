@@ -7016,6 +7016,9 @@ def _motion_apply_nn_deformation(v, frame):
                 mobj.soft_body.positions = world_pos.astype(np.float64)
             mobj.tet_vertices = world_pos.astype(np.float32).copy()
             mobj._update_tet_draw_positions()
+            # Fast waypoint update using cached MVC weights
+            if hasattr(mobj, 'update_waypoints_fast'):
+                mobj.update_waypoints_fast()
             any_applied = True
         return any_applied
     except Exception as e:
