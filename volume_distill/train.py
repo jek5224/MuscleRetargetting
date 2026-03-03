@@ -24,8 +24,7 @@ EPOCHS = 600
 BATCH_SIZE = 2048
 LR = 1e-3
 WEIGHT_DECAY = 1e-5
-COSINE_T0 = 150      # epochs per first restart cycle
-COSINE_T_MULT = 2    # cycle length multiplier after each restart
+COSINE_T_MAX = 600   # decay LR to ~0 over full training
 ANCHOR_LOSS_WEIGHT = 10.0
 DIST_LOSS_SCALE = 5.0  # weight scale for distance from pelvis
 
@@ -66,8 +65,8 @@ def train():
     print(f"Model params: {total_params:,} (input_dim={input_dim})")
 
     optimizer = torch.optim.Adam(model.parameters(), lr=LR, weight_decay=WEIGHT_DECAY)
-    scheduler = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(
-        optimizer, T_0=COSINE_T0, T_mult=COSINE_T_MULT,
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+        optimizer, T_max=COSINE_T_MAX,
     )
 
     # Build per-muscle vertex weight vectors
