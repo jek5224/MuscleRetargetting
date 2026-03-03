@@ -3115,24 +3115,27 @@ class FiberArchitectureMixin:
         print(f"Recomputed {total_recomputed} waypoints from deformed contours using MVC")
 
     def _build_waypoint_nn_embedding(self):
-        """Fast setup: KDTree nearest-neighbor weights for all waypoints.
+        """One-time setup: find containing tet + barycentric coords for all waypoints.
 
-        Uses inverse-distance weighting from K=4 nearest tet vertices.
-        ~2ms per muscle — no tet containment search.
+        Uses KDTree on tet centroids to accelerate containment search.
+        ~5ms per muscle. Per-frame update is then ~0.1ms/muscle.
         """
         if not hasattr(self, 'waypoints') or self.waypoints is None or len(self.waypoints) == 0:
             return
         if not hasattr(self, 'tet_vertices') or self.tet_vertices is None:
             return
+        if not hasattr(self, 'tet_tetrahedra') or self.tet_tetrahedra is None:
+            return
 
         tet_verts = np.asarray(self.tet_vertices, dtype=np.float64)
+        tetrahedra = np.asarray(self.tet_tetrahedra)
 
         # Flatten all waypoints + record structure for scatter-back
         all_points = []
         wp_structure = []  # (stream_idx, level_idx, num_fibers)
         for stream_idx, stream in enumerate(self.waypoints):
             for level_idx, level_wps in enumerate(stream):
-                wps = np.asarray(level_wps)
+                wps = np.asarray(level_wps, dtype=np.float64)
                 if wps.ndim == 1:
                     wps = wps.reshape(1, -1)
                 if wps.shape[-1] != 3 or len(wps) == 0:
@@ -3147,23 +3150,63 @@ class FiberArchitectureMixin:
         all_points = np.concatenate(all_points, axis=0)  # (N, 3)
         N = len(all_points)
 
-        # KDTree: 4 nearest tet vertices per waypoint
-        tree = cKDTree(tet_verts)
-        distances, indices = tree.query(all_points, k=4)  # (N, 4)
+        # KDTree on tet centroids for fast candidate lookup
+        tet_centroids = np.mean(tet_verts[tetrahedra], axis=1)  # (T, 3)
+        tree = cKDTree(tet_centroids)
+        K_CANDIDATES = 20
+        _, candidate_tets = tree.query(all_points, k=min(K_CANDIDATES, len(tetrahedra)))
 
-        # Inverse-distance weights
-        eps = 1e-10
-        inv_dist = 1.0 / (distances + eps)
-        weights = inv_dist / inv_dist.sum(axis=1, keepdims=True)
+        # For each waypoint, find containing tet via barycentric coords
+        wp_tet_idx = np.zeros(N, dtype=np.int32)
+        wp_bary = np.zeros((N, 4), dtype=np.float64)
 
-        self._wp_nn_idx = indices                          # (N, 4)
-        self._wp_nn_weights = weights.astype(np.float32)   # (N, 4)
+        for i in range(N):
+            point = all_points[i]
+            best_tet = None
+            best_bary = None
+            best_min_coord = -np.inf
+
+            for t_idx in candidate_tets[i]:
+                tet = tetrahedra[t_idx]
+                v0, v1, v2, v3 = tet_verts[tet[0]], tet_verts[tet[1]], tet_verts[tet[2]], tet_verts[tet[3]]
+                T_mat = np.column_stack([v1 - v0, v2 - v0, v3 - v0])
+                det = np.linalg.det(T_mat)
+                if abs(det) < 1e-10:
+                    continue
+                bary_123 = np.linalg.solve(T_mat, point - v0)
+                bary_0 = 1.0 - np.sum(bary_123)
+                bary = np.array([bary_0, bary_123[0], bary_123[1], bary_123[2]])
+                min_coord = np.min(bary)
+
+                if min_coord >= -0.01:
+                    best_tet = t_idx
+                    best_bary = bary
+                    break
+                if min_coord > best_min_coord:
+                    best_min_coord = min_coord
+                    best_tet = t_idx
+                    best_bary = bary
+
+            if best_tet is not None:
+                # Clamp negative barycentric coords for outside points
+                if np.min(best_bary) < 0:
+                    best_bary = np.maximum(best_bary, 0.0)
+                    best_bary /= np.sum(best_bary)
+                wp_tet_idx[i] = best_tet
+                wp_bary[i] = best_bary
+            else:
+                # Fallback: nearest centroid with equal weights
+                wp_tet_idx[i] = candidate_tets[i, 0]
+                wp_bary[i] = 0.25
+
+        self._wp_tet_idx = wp_tet_idx                      # (N,)
+        self._wp_bary = wp_bary.astype(np.float32)         # (N, 4)
         self._wp_structure = wp_structure
 
     def update_waypoints_fast(self):
-        """Fast per-frame waypoint update using cached nearest-neighbor weights.
+        """Fast per-frame waypoint update using cached tet barycentric coords.
 
-        First call builds KDTree embedding (~2ms/muscle), then ~0.1ms/muscle after.
+        First call builds tet embedding (~5ms/muscle), then ~0.1ms/muscle after.
         Returns True if any waypoints were updated.
         """
         if not hasattr(self, 'tet_vertices') or self.tet_vertices is None:
@@ -3172,16 +3215,20 @@ class FiberArchitectureMixin:
             return False
 
         # One-time setup
-        if not hasattr(self, '_wp_nn_idx') or self._wp_nn_idx is None:
+        if not hasattr(self, '_wp_tet_idx') or self._wp_tet_idx is None:
             self._build_waypoint_nn_embedding()
-        if not hasattr(self, '_wp_nn_idx') or self._wp_nn_idx is None:
+        if not hasattr(self, '_wp_tet_idx') or self._wp_tet_idx is None:
             return False
 
         tet_verts = np.asarray(self.tet_vertices)
+        tetrahedra = np.asarray(self.tet_tetrahedra)
 
-        # Weighted sum of 4 nearest vertices: (N, 4, 3) * (N, 4, 1) → (N, 3)
-        neighbors = tet_verts[self._wp_nn_idx]  # (N, 4, 3)
-        new_pos = np.einsum('ni,nij->nj', self._wp_nn_weights, neighbors)
+        # Gather the 4 vertices of each waypoint's containing tet
+        tet_indices = tetrahedra[self._wp_tet_idx]  # (N, 4) vertex indices
+        v = tet_verts[tet_indices]                   # (N, 4, 3)
+
+        # Barycentric interpolation: new_pos = sum(bary_i * v_i)
+        new_pos = np.einsum('ni,nij->nj', self._wp_bary, v)
 
         # Scatter back into waypoints structure
         offset = 0
