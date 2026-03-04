@@ -1898,6 +1898,8 @@ def _draw_motion_browser_ui(v):
         _, v.motion_fix_y = imgui.checkbox("Fix Y##motion", v.motion_fix_y)
         imgui.same_line()
         _, v.motion_fix_z = imgui.checkbox("Fix Z##motion", v.motion_fix_z)
+        imgui.same_line()
+        _, v.motion_fix_rotation = imgui.checkbox("Fix Rotation##motion", v.motion_fix_rotation)
 
         # Coupled tet sim option
         _, v.motion_run_tet_sim = imgui.checkbox("Run Coupled Tet Sim##motion", v.motion_run_tet_sim)
@@ -6885,8 +6887,10 @@ def _load_motion_bvh(v, idx):
         if root_dofs == 6:
             init_pos = v.env.skel.getPositions()
             v.motion_root_translation = init_pos[3:6].copy()
+            v.motion_root_rotation = init_pos[0:3].copy()
         else:
             v.motion_root_translation = None
+            v.motion_root_rotation = None
         print(f"[Motion] bvh_info: {v.env.bvh_info}")
         print(f"[Motion] skel DOFs: {v.env.skel.getNumDofs()}, joints: {v.env.skel.getNumJoints()}")
         # Auto-detect if BVH needs T-pose correction (non-upright rest pose)
@@ -6928,6 +6932,8 @@ def _motion_apply_pose(v, frame):
             pose[4] = v.motion_root_translation[1]
         if v.motion_fix_z:
             pose[5] = v.motion_root_translation[2]
+    if v.motion_fix_rotation and hasattr(v, 'motion_root_rotation') and v.motion_root_rotation is not None:
+        pose[0:3] = v.motion_root_rotation
     v.env.skel.setPositions(pose)
     # Sync the joint angle slider state
     if hasattr(v, '_skel_dofs'):
@@ -7301,6 +7307,24 @@ def _motion_apply_cached_deformation(v, frame):
             fix_offset[1] = rest_trans[1] - bvh_trans[1]
         if v.motion_fix_z:
             fix_offset[2] = rest_trans[2] - bvh_trans[2]
+    # Compute rotation matrix when fix_rotation is on: rotate cached positions
+    # from frame orientation to rest orientation around the rest root position.
+    fix_rot_mat = None
+    if v.motion_fix_rotation and hasattr(v, 'motion_root_rotation') and v.motion_root_rotation is not None:
+        from scipy.spatial.transform import Rotation as R
+        frame_rotvec = v.motion_bvh.mocap_refs[frame, 0:3]
+        rest_rotvec = v.motion_root_rotation
+        R_frame = R.from_rotvec(frame_rotvec)
+        R_rest = R.from_rotvec(rest_rotvec)
+        fix_rot_mat = (R_rest * R_frame.inv()).as_matrix().astype(np.float32)
+        # Pivot: the root translation for this frame (after translation fix)
+        pivot = v.motion_bvh.mocap_refs[frame, 3:6].copy().astype(np.float32)
+        if v.motion_fix_x:
+            pivot[0] = rest_trans[0]
+        if v.motion_fix_y:
+            pivot[1] = rest_trans[1]
+        if v.motion_fix_z:
+            pivot[2] = rest_trans[2]
     any_applied = False
     for mname, mobj in v.zygote_muscle_meshes.items():
         if mobj.tet_vertices is None:
@@ -7308,6 +7332,8 @@ def _motion_apply_cached_deformation(v, frame):
         if mname in v.motion_deform_cache and frame in v.motion_deform_cache[mname]:
             cached = v.motion_deform_cache[mname][frame]
             cached_pos = cached['positions'] + fix_offset
+            if fix_rot_mat is not None:
+                cached_pos = (fix_rot_mat @ (cached_pos - pivot).T).T + pivot
             if mobj.soft_body is not None:
                 mobj.soft_body.positions = cached_pos.astype(np.float64)
             mobj.tet_vertices = cached_pos.astype(np.float32).copy()
@@ -7317,10 +7343,13 @@ def _motion_apply_cached_deformation(v, frame):
                 if hasattr(mobj, 'waypoints') and len(mobj.waypoints) > 0:
                     wp = _unflatten_waypoints(
                         cached['waypoints_flat'], cached['waypoints_shape'])
-                    if fix_offset.any():
+                    if fix_offset.any() or fix_rot_mat is not None:
                         for stream in wp:
                             for fi in range(len(stream)):
-                                stream[fi] = stream[fi] + fix_offset
+                                pts = stream[fi] + fix_offset
+                                if fix_rot_mat is not None:
+                                    pts = (fix_rot_mat @ (pts - pivot).T).T + pivot
+                                stream[fi] = pts
                     mobj.waypoints = wp
             any_applied = True
     return any_applied
