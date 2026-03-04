@@ -4,10 +4,20 @@ import numpy as np
 import os
 
 def MakeWeldJointProperties(name, T_ParentBodyToJoint, T_ChildBodyToJoint):
-    joint_prop = dart.dynamics.WeldJointProperties()
-    joint_prop.mName = name
-    joint_prop.mT_ParentBodyToJoint = T_ParentBodyToJoint
-    joint_prop.mT_ChildBodyToJoint = T_ChildBodyToJoint
+    _has_weld_props = hasattr(dart.dynamics, 'WeldJointProperties')
+    if _has_weld_props:
+        joint_prop = dart.dynamics.WeldJointProperties()
+        joint_prop.mName = name
+        joint_prop.mT_ParentBodyToJoint = T_ParentBodyToJoint
+        joint_prop.mT_ChildBodyToJoint = T_ChildBodyToJoint
+    else:
+        from types import SimpleNamespace
+        joint_prop = SimpleNamespace(
+            mName=name,
+            mT_ParentBodyToJoint=T_ParentBodyToJoint,
+            mT_ChildBodyToJoint=T_ChildBodyToJoint,
+            _is_weld_compat=True,
+        )
     return joint_prop
 
 def MakeFreeJointProperties(name, T_ParentBodyToJoint, T_ChildBodyToJoint, damping):
@@ -85,7 +95,15 @@ def MakeBodyNode(skel, parent, joint_properties, joint_type, intertia):
     elif joint_type == "Ball":
         [joint, body] = skel.createBallJointAndBodyNodePair(parent, joint_properties, dart.dynamics.BodyNodeProperties(dart.dynamics.BodyNodeAspectProperties(joint_properties.mName)))
     elif joint_type == "Weld":
-        [joint, body] = skel.createWeldJointAndBodyNodePair(parent, joint_properties, dart.dynamics.BodyNodeProperties(dart.dynamics.BodyNodeAspectProperties(joint_properties.mName)))
+        if getattr(joint_properties, '_is_weld_compat', False):
+            bp = dart.dynamics.BodyNodeProperties(dart.dynamics.BodyNodeAspectProperties(joint_properties.mName))
+            [joint, body] = skel.createWeldJointAndBodyNodePair(parent)
+            joint.setName(joint_properties.mName)
+            joint.setTransformFromParentBodyNode(joint_properties.mT_ParentBodyToJoint)
+            joint.setTransformFromChildBodyNode(joint_properties.mT_ChildBodyToJoint)
+            body.setName(joint_properties.mName)
+        else:
+            [joint, body] = skel.createWeldJointAndBodyNodePair(parent, joint_properties, dart.dynamics.BodyNodeProperties(dart.dynamics.BodyNodeAspectProperties(joint_properties.mName)))
 
     body.setInertia(intertia)
     return body

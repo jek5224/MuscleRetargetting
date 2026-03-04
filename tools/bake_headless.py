@@ -307,6 +307,12 @@ def main():
         default=None,
         help="Last frame to bake (default: all frames)",
     )
+    parser.add_argument(
+        "--region-tag",
+        default=None,
+        help="Region tag for per-region baking (e.g. L_UpLeg). "
+             "Output goes to motion_cache/<bvh>/<tag>/ instead of motion_cache/<bvh>/",
+    )
     args = parser.parse_args()
 
     if not os.path.exists(args.bvh):
@@ -349,7 +355,10 @@ def main():
 
     # Prepare output directory
     bvh_stem = os.path.splitext(os.path.basename(args.bvh))[0]
-    cache_dir = os.path.join("data", "motion_cache", bvh_stem)
+    if args.region_tag:
+        cache_dir = os.path.join("data", "motion_cache", bvh_stem, args.region_tag)
+    else:
+        cache_dir = os.path.join("data", "motion_cache", bvh_stem)
     os.makedirs(cache_dir, exist_ok=True)
 
     # Remove old chunk files

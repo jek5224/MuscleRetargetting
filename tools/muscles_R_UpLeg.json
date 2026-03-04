@@ -1,0 +1,102 @@
+[
+  {
+    "name": "R_Adductor_Brevis",
+    "path": "Zygote_Meshes_251229/Muscle/UpLeg/R_Adductor_Brevis.obj"
+  },
+  {
+    "name": "R_Adductor_Longus",
+    "path": "Zygote_Meshes_251229/Muscle/UpLeg/R_Adductor_Longus.obj"
+  },
+  {
+    "name": "R_Adductor_Magnus",
+    "path": "Zygote_Meshes_251229/Muscle/UpLeg/R_Adductor_Magnus.obj"
+  },
+  {
+    "name": "R_Biceps_Femoris",
+    "path": "Zygote_Meshes_251229/Muscle/UpLeg/R_Biceps_Femoris.obj"
+  },
+  {
+    "name": "R_Gluteus_Maximus",
+    "path": "Zygote_Meshes_251229/Muscle/UpLeg/R_Gluteus_Maximus.obj"
+  },
+  {
+    "name": "R_Gluteus_Medius",
+    "path": "Zygote_Meshes_251229/Muscle/UpLeg/R_Gluteus_Medius.obj"
+  },
+  {
+    "name": "R_Gluteus_Minimus",
+    "path": "Zygote_Meshes_251229/Muscle/UpLeg/R_Gluteus_Minimus.obj"
+  },
+  {
+    "name": "R_Gracilis",
+    "path": "Zygote_Meshes_251229/Muscle/UpLeg/R_Gracilis.obj"
+  },
+  {
+    "name": "R_Iliacus",
+    "path": "Zygote_Meshes_251229/Muscle/UpLeg/R_Iliacus.obj"
+  },
+  {
+    "name": "R_Inferior_Gemellus",
+    "path": "Zygote_Meshes_251229/Muscle/UpLeg/R_Inferior_Gemellus.obj"
+  },
+  {
+    "name": "R_Obturator_Externus",
+    "path": "Zygote_Meshes_251229/Muscle/UpLeg/R_Obturator_Externus.obj"
+  },
+  {
+    "name": "R_Obturator_Internus",
+    "path": "Zygote_Meshes_251229/Muscle/UpLeg/R_Obturator_Internus.obj"
+  },
+  {
+    "name": "R_Pectineus",
+    "path": "Zygote_Meshes_251229/Muscle/UpLeg/R_Pectineus.obj"
+  },
+  {
+    "name": "R_Piriformis",
+    "path": "Zygote_Meshes_251229/Muscle/UpLeg/R_Piriformis.obj"
+  },
+  {
+    "name": "R_Popliteus",
+    "path": "Zygote_Meshes_251229/Muscle/UpLeg/R_Popliteus.obj"
+  },
+  {
+    "name": "R_Quadratus_Femoris",
+    "path": "Zygote_Meshes_251229/Muscle/UpLeg/R_Quadratus_Femoris.obj"
+  },
+  {
+    "name": "R_Rectus_Femoris",
+    "path": "Zygote_Meshes_251229/Muscle/UpLeg/R_Rectus_Femoris.obj"
+  },
+  {
+    "name": "R_Sartorius",
+    "path": "Zygote_Meshes_251229/Muscle/UpLeg/R_Sartorius.obj"
+  },
+  {
+    "name": "R_Semimembranosus",
+    "path": "Zygote_Meshes_251229/Muscle/UpLeg/R_Semimembranosus.obj"
+  },
+  {
+    "name": "R_Semitendinosus",
+    "path": "Zygote_Meshes_251229/Muscle/UpLeg/R_Semitendinosus.obj"
+  },
+  {
+    "name": "R_Superior_Gemellus",
+    "path": "Zygote_Meshes_251229/Muscle/UpLeg/R_Superior_Gemellus.obj"
+  },
+  {
+    "name": "R_Tensor_Fascia_Lata",
+    "path": "Zygote_Meshes_251229/Muscle/UpLeg/R_Tensor_Fascia_Lata.obj"
+  },
+  {
+    "name": "R_Vastus_Intermedius",
+    "path": "Zygote_Meshes_251229/Muscle/UpLeg/R_Vastus_Intermedius.obj"
+  },
+  {
+    "name": "R_Vastus_Lateralis",
+    "path": "Zygote_Meshes_251229/Muscle/UpLeg/R_Vastus_Lateralis.obj"
+  },
+  {
+    "name": "R_Vastus_Medialis",
+    "path": "Zygote_Meshes_251229/Muscle/UpLeg/R_Vastus_Medialis.obj"
+  }
+]

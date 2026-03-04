@@ -1,0 +1,50 @@
+[
+  {
+    "name": "L_Extensor_Digitorum_Longus",
+    "path": "Zygote_Meshes_251229/Muscle/LowLeg/L_Extensor_Digitorum_Longus.obj"
+  },
+  {
+    "name": "L_Extensor_Hallucis_Longus",
+    "path": "Zygote_Meshes_251229/Muscle/LowLeg/L_Extensor_Hallucis_Longus.obj"
+  },
+  {
+    "name": "L_Flexor_Digitorum_Longus",
+    "path": "Zygote_Meshes_251229/Muscle/LowLeg/L_Flexor_Digitorum_Longus.obj"
+  },
+  {
+    "name": "L_Flexor_Hallucis",
+    "path": "Zygote_Meshes_251229/Muscle/LowLeg/L_Flexor_Hallucis.obj"
+  },
+  {
+    "name": "L_Gastrocnemius",
+    "path": "Zygote_Meshes_251229/Muscle/LowLeg/L_Gastrocnemius.obj"
+  },
+  {
+    "name": "L_Peroneus_Brevis",
+    "path": "Zygote_Meshes_251229/Muscle/LowLeg/L_Peroneus_Brevis.obj"
+  },
+  {
+    "name": "L_Peroneus_Longus",
+    "path": "Zygote_Meshes_251229/Muscle/LowLeg/L_Peroneus_Longus.obj"
+  },
+  {
+    "name": "L_Peroneus_Tertius",
+    "path": "Zygote_Meshes_251229/Muscle/LowLeg/L_Peroneus_Tertius.obj"
+  },
+  {
+    "name": "L_Plantaris",
+    "path": "Zygote_Meshes_251229/Muscle/LowLeg/L_Plantaris.obj"
+  },
+  {
+    "name": "L_Soleus",
+    "path": "Zygote_Meshes_251229/Muscle/LowLeg/L_Soleus.obj"
+  },
+  {
+    "name": "L_Tibialis_Anterior",
+    "path": "Zygote_Meshes_251229/Muscle/LowLeg/L_Tibialis_Anterior.obj"
+  },
+  {
+    "name": "L_Tibialis_Posterior",
+    "path": "Zygote_Meshes_251229/Muscle/LowLeg/L_Tibialis_Posterior.obj"
+  }
+]
