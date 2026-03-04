@@ -20,8 +20,18 @@
 
 set -euo pipefail
 
+MIN_FREE_GB=10  # cancel entire array if server free space drops below this
+
 cd ~/muscle_imitation_learning_study
 mkdir -p data/motion_cache/logs
+
+# ── Disk space guard ──────────────────────────────────────────────────
+free_gb=$(df --output=avail -BG /home | tail -1 | tr -dc '0-9')
+if [ "$free_gb" -lt "$MIN_FREE_GB" ]; then
+    echo "DISK FULL: only ${free_gb}GB free (need ${MIN_FREE_GB}GB). Cancelling job array."
+    scancel "${SLURM_ARRAY_JOB_ID}"
+    exit 1
+fi
 
 # Activate micromamba
 export MAMBA_EXE='/opt/micromamba/bin/micromamba'
@@ -55,6 +65,7 @@ echo "Task ID: ${SLURM_ARRAY_TASK_ID}, Job ID: ${SLURM_JOB_ID}"
 echo "BVH: ${BVH_FILE}"
 echo "Muscles: ${MUSCLES}"
 echo "GPU: ${CUDA_VISIBLE_DEVICES:-not set}"
+echo "Disk free: ${free_gb}GB"
 echo "Started: $(date)"
 
 python tools/bake_headless.py \

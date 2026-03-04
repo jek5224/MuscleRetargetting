@@ -15,7 +15,39 @@ REMOTE_BASE="~/muscle_imitation_learning_study/data/motion_cache"
 LOCAL_BASE="data/motion_cache"
 REGIONS=(L_UpLeg R_UpLeg L_LowLeg R_LowLeg)
 
+LOCAL_MIN_FREE_GB=5    # pause syncing if local drops below this
+SERVER_MIN_FREE_GB=10  # cancel server jobs if server drops below this
+
+check_local_disk() {
+    local free_gb=$(df --output=avail -BG / | tail -1 | tr -dc '0-9')
+    if [ "$free_gb" -lt "$LOCAL_MIN_FREE_GB" ]; then
+        echo "LOCAL DISK LOW: ${free_gb}GB free (need ${LOCAL_MIN_FREE_GB}GB). Pausing sync."
+        echo "Cancelling server bake jobs to prevent overflow..."
+        $SSH "scancel --user=jek5224 --name=bake" 2>/dev/null || true
+        return 1
+    fi
+    return 0
+}
+
+check_server_disk() {
+    local free_gb=$($SSH "df --output=avail -BG /home | tail -1 | tr -dc '0-9'" 2>/dev/null || echo 999)
+    if [ "$free_gb" -lt "$SERVER_MIN_FREE_GB" ]; then
+        echo "SERVER DISK LOW: ${free_gb}GB free (need ${SERVER_MIN_FREE_GB}GB). Cancelling server jobs."
+        $SSH "scancel --user=jek5224 --name=bake" 2>/dev/null || true
+        return 1
+    fi
+    return 0
+}
+
 sync_once() {
+    # Check server disk first — cancel jobs if too low
+    check_server_disk || true
+
+    # Check local disk — skip downloading if too low
+    if ! check_local_disk; then
+        return 0
+    fi
+
     # Find all .done markers on server
     local found=0
     local synced=0
@@ -33,6 +65,12 @@ sync_once() {
         # Skip if already downloaded locally
         if [ -f "${LOCAL_BASE}/${region_dir}/.done.synced" ]; then
             continue
+        fi
+
+        # Re-check local disk before each download
+        if ! check_local_disk; then
+            echo "Stopping mid-sync due to low local disk."
+            break
         fi
 
         echo "  SYNC  ${bvh_stem}/${region}"
@@ -55,8 +93,9 @@ sync_once() {
     # Count how many total tasks we expect
     local n_bvh=$($SSH "wc -l < ${REMOTE_BASE}/task_list.txt 2>/dev/null" || echo 0)
     local n_local=$(find "$LOCAL_BASE" -name ".done.synced" 2>/dev/null | wc -l)
+    local local_free=$(df --output=avail -BG / | tail -1 | tr -dc '0-9')
 
-    echo "[$(date +%H:%M:%S)] Found ${found} done on server, synced ${synced} new. Local total: ${n_local}/${n_bvh}"
+    echo "[$(date +%H:%M:%S)] Server done: ${found}, synced: ${synced} new, local: ${n_local}/${n_bvh}, disk free: ${local_free}GB"
 
     # Return 1 if all done
     if [ "$n_bvh" -gt 0 ] && [ "$n_local" -ge "$n_bvh" ]; then
@@ -68,6 +107,7 @@ sync_once() {
 
 if [ "${1:-}" = "--loop" ]; then
     echo "Polling server every 60s for completed bakes... (Ctrl+C to stop)"
+    echo "Local min free: ${LOCAL_MIN_FREE_GB}GB, Server min free: ${SERVER_MIN_FREE_GB}GB"
     while true; do
         sync_once || break
         sleep 60
