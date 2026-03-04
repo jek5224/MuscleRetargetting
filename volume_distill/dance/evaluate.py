@@ -26,7 +26,7 @@ def load_model(checkpoint_path, device=None):
 
     version = ckpt.get("model_version", "v1")
 
-    if version == "v2":
+    if version in ("v2", "v3_dof"):
         model = DistillNetV2(
             num_muscles=ckpt["num_muscles"],
             muscle_name_to_idx=ckpt["muscle_name_to_idx"],
@@ -36,6 +36,7 @@ def load_model(checkpoint_path, device=None):
             num_decoder_res=ckpt.get("num_decoder_res", 3),
             embed_dim=ckpt.get("embed_dim", 64),
             pca_k=ckpt.get("pca_k", 64),
+            num_freqs=ckpt.get("num_freqs", 6),
             dropout=ckpt.get("dropout", 0.0),
         ).to(device)
         model.load_state_dict(ckpt["model_state_dict"])
@@ -50,10 +51,13 @@ def load_model(checkpoint_path, device=None):
             "pca_components": ckpt["pca_components"],
             "pca_means": ckpt["pca_means"],
             "pca_stds": ckpt.get("pca_stds"),
-            "model_version": "v2",
+            "model_version": version,
             "rest_positions": ckpt.get("rest_positions"),
             "epoch": ckpt.get("epoch", "?"),
             "val_loss": ckpt.get("val_loss"),
+            "dof_names": ckpt.get("dof_names"),
+            "dof_indices": ckpt.get("dof_indices"),
+            "num_freqs": ckpt.get("num_freqs", 6),
         }
         return model, metadata
     else:

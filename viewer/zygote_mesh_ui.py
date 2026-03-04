@@ -6988,7 +6988,10 @@ def _motion_load_nn_checkpoint(v):
     v.motion_nn_rest_positions = None
     v.motion_nn_checkpoint_path = None
     v._motion_nn_model_version = "v1"
-    ckpt_path = 'volume_distill/checkpoints/best.pt'
+    # Prefer v3_dof checkpoint if available, fall back to v2
+    ckpt_path = 'volume_distill/dof_grid_checkpoints/best.pt'
+    if not os.path.exists(ckpt_path):
+        ckpt_path = 'volume_distill/checkpoints/best.pt'
     if not os.path.exists(ckpt_path):
         return
     try:
@@ -7021,10 +7024,14 @@ def _motion_apply_nn_deformation(v, frame):
         return False
     try:
         from volume_distill.dance.evaluate import predict_frame
-        dof_indices = [6, 7, 8, 9]
 
-        if v._motion_nn_model_version == "v2":
+        if v._motion_nn_model_version == "v3_dof":
+            # V3 DOF: raw 7 DOFs (hip 3, knee 1, ankle 3)
+            dof_indices = [6, 7, 8, 9, 10, 11, 12]
+            dofs = v.motion_bvh.mocap_refs[frame, dof_indices].astype(np.float32)  # (7,)
+        elif v._motion_nn_model_version == "v2":
             # V2: derivative features [q_t, dq_t, ddq_t, q_{t-1}, q_{t-2}]
+            dof_indices = [6, 7, 8, 9]
             q_t = v.motion_bvh.mocap_refs[frame, dof_indices]
             q_prev1 = v.motion_bvh.mocap_refs[max(0, frame - 1), dof_indices]
             q_prev2 = v.motion_bvh.mocap_refs[max(0, frame - 2), dof_indices]
