@@ -8,13 +8,16 @@ sampling feasible and more efficient than motion capture.
 
 All 7 DOFs are sampled together in a single grid so that the same sample
 index maps to a consistent skeleton pose across both L_UpLeg and L_LowLeg.
-Run once per region (or both) — the grid is deterministic and identical.
+
+Samples are ordered by nearest-neighbor traversal starting from rest pose
+(all zeros) so that consecutive poses are close in DOF space. This enables
+warm-starting the FEM solver from the previous frame's deformation, avoiding
+large vertex jumps and improving convergence.
 
 Usage:
-    python tools/bake_dof_grid.py                                  # both regions, LHS 10K
-    python tools/bake_dof_grid.py --region L_UpLeg                 # one region only
-    python tools/bake_dof_grid.py --lhs-samples 20000              # more samples
+    python tools/bake_dof_grid.py --region L_UpLeg                 # one region
     python tools/bake_dof_grid.py --region L_LowLeg --start 5000   # resume
+    python tools/bake_dof_grid.py --lhs-samples 20000              # more samples
 """
 import argparse
 import gc
@@ -113,8 +116,61 @@ def generate_latin_hypercube(n_samples, seed=42):
     return samples
 
 
-def bake_region(region, samples, skel, skeleton_meshes, mesh_info, args,
-                start_idx, output_base):
+def order_nearest_neighbor(samples):
+    """Reorder samples by greedy nearest-neighbor starting from rest pose (origin).
+
+    This ensures temporally smooth traversal so the FEM solver can warm-start
+    from the previous frame's deformation.
+
+    Uses normalized DOF space (each dimension scaled to [0,1]) for fair distance
+    computation across DOFs with different ranges.
+    """
+    n = len(samples)
+    if n <= 1:
+        return samples, np.arange(n)
+
+    # Normalize to [0,1] per DOF for fair distance
+    scales = np.array([DOF_RANGES[name][1] - DOF_RANGES[name][0] for name in ALL_DOF_NAMES])
+    offsets = np.array([DOF_RANGES[name][0] for name in ALL_DOF_NAMES])
+    normed = (samples - offsets) / scales
+
+    # Start from rest pose (origin in normalized space = -offsets/scales)
+    origin_normed = -offsets / scales
+
+    visited = np.zeros(n, dtype=bool)
+    order = np.empty(n, dtype=np.int64)
+
+    # Find nearest to origin first
+    dists_to_origin = np.sum((normed - origin_normed) ** 2, axis=1)
+    current = np.argmin(dists_to_origin)
+    order[0] = current
+    visited[current] = True
+
+    # Greedy nearest-neighbor
+    for step in range(1, n):
+        current_pt = normed[current]
+        dists = np.sum((normed - current_pt) ** 2, axis=1)
+        dists[visited] = np.inf
+        current = np.argmin(dists)
+        order[step] = current
+        visited[current] = True
+
+        if step % 1000 == 0:
+            print(f"  Ordering: {step}/{n}...")
+
+    ordered_samples = samples[order]
+
+    # Report path smoothness
+    steps = np.linalg.norm(np.diff(ordered_samples, axis=0), axis=1)
+    print(f"  Path: mean step={np.degrees(steps.mean()):.1f}°, "
+          f"max step={np.degrees(steps.max()):.1f}°, "
+          f"total path={np.degrees(steps.sum()):.0f}°")
+
+    return ordered_samples, order
+
+
+def bake_region(region, samples, original_indices, skel, skeleton_meshes,
+                mesh_info, args, start_idx, output_base):
     """Bake one region over the given DOF samples."""
     muscles_path = REGION_MUSCLES[region]
     muscle_meshes = load_muscle_meshes(muscles_path)
@@ -149,6 +205,7 @@ def bake_region(region, samples, skel, skeleton_meshes, mesh_info, args,
         "settle_iters": args.settle_iters,
         "lhs_samples": args.lhs_samples,
         "seed": 42,
+        "ordering": "nearest_neighbor",
     }
     with open(os.path.join(cache_dir, "meta.json"), "w") as f:
         json.dump(meta, f, indent=2)
@@ -159,7 +216,7 @@ def bake_region(region, samples, skel, skeleton_meshes, mesh_info, args,
         for old in glob_mod.glob(os.path.join(cache_dir, "*_chunk_*.npz")):
             os.remove(old)
 
-    # Reset soft bodies
+    # Reset soft bodies to rest
     for mobj in active_muscles.values():
         mobj.soft_body.positions = mobj.soft_body.rest_positions.copy()
         mobj.tet_vertices = mobj.soft_body.rest_positions.astype(np.float32).copy()
@@ -169,12 +226,13 @@ def bake_region(region, samples, skel, skeleton_meshes, mesh_info, args,
 
     bake_data = {name: {} for name in active_muscles}
     dof_frames = []
+    orig_idx_frames = []
     flush_count = start_idx // FLUSH_INTERVAL
     bake_start = time.time()
     total = len(samples)
     dof_indices = [L_DOF_MAP[n] for n in ALL_DOF_NAMES]
 
-    print(f"[{region}] Baking {total} poses...")
+    print(f"[{region}] Baking {total} poses (warm-started, nearest-neighbor order)...")
 
     for i, dof_vals in enumerate(samples):
         sample_idx = i + start_idx
@@ -184,6 +242,8 @@ def bake_region(region, samples, skel, skeleton_meshes, mesh_info, args,
         for idx, val in zip(dof_indices, dof_vals):
             pose[idx] = val
         skel.setPositions(pose)
+
+        # NOTE: soft body positions carry over from previous sample (warm-start)
 
         for mobj in active_muscles.values():
             mobj.waypoints_from_tet_sim = False
@@ -196,6 +256,7 @@ def bake_region(region, samples, skel, skeleton_meshes, mesh_info, args,
         for mname, mobj in active_muscles.items():
             bake_data[mname][sample_idx] = mobj.soft_body.get_positions().astype(np.float32)
         dof_frames.append(dof_vals.astype(np.float32))
+        orig_idx_frames.append(original_indices[i + start_idx])
 
         for mobj in active_muscles.values():
             mobj.waypoints_from_tet_sim = True
@@ -210,9 +271,11 @@ def bake_region(region, samples, skel, skeleton_meshes, mesh_info, args,
             np.savez_compressed(
                 dof_path,
                 sample_indices=np.array(frame_indices, dtype=np.int32),
+                original_indices=np.array(orig_idx_frames, dtype=np.int32),
                 dof_values=np.array(dof_frames, dtype=np.float32),
             )
             dof_frames.clear()
+            orig_idx_frames.clear()
             flush_count = flush_bake_data(bake_data, cache_dir, flush_count)
 
         done = i + 1
@@ -234,9 +297,11 @@ def bake_region(region, samples, skel, skeleton_meshes, mesh_info, args,
         np.savez_compressed(
             dof_path,
             sample_indices=np.array(frame_indices, dtype=np.int32),
+            original_indices=np.array(orig_idx_frames, dtype=np.int32),
             dof_values=np.array(dof_frames, dtype=np.float32),
         )
         dof_frames.clear()
+        orig_idx_frames.clear()
         flush_count = flush_bake_data(bake_data, cache_dir, flush_count)
 
     done_marker = os.path.join(cache_dir, ".done")
@@ -253,8 +318,8 @@ def bake_region(region, samples, skel, skeleton_meshes, mesh_info, args,
 def main():
     parser = argparse.ArgumentParser(description="Headless FEM baking over DOF grid")
     parser.add_argument(
-        "--region", choices=["L_UpLeg", "L_LowLeg", "both"], default="both",
-        help="Region(s) to bake (default: both)",
+        "--region", required=True, choices=["L_UpLeg", "L_LowLeg"],
+        help="Region to bake (run one at a time for GPU ARAP)",
     )
     parser.add_argument(
         "--lhs-samples", type=int, default=10000,
@@ -278,26 +343,42 @@ def main():
     )
     parser.add_argument(
         "--start", type=int, default=0,
-        help="Start sample index (for resuming, default: 0)",
+        help="Start sample index in traversal order (for resuming, default: 0)",
     )
     args = parser.parse_args()
 
     output_base = args.output_dir or os.path.join("data", "motion_cache", "dof_grid")
 
-    # Generate the SAME grid for all regions (deterministic seed)
+    # Generate the same LHS grid (deterministic seed)
     print(f"Generating {args.lhs_samples} LHS samples over {len(ALL_DOF_NAMES)} DOFs...")
-    all_samples = generate_latin_hypercube(args.lhs_samples)
-    print(f"  Total: {len(all_samples)} poses")
+    raw_samples = generate_latin_hypercube(args.lhs_samples)
     for name in ALL_DOF_NAMES:
         lo, hi = DOF_RANGES[name]
         print(f"  {name:15s}: [{np.degrees(lo):6.1f}°, {np.degrees(hi):6.1f}°]")
 
-    # Slice for resuming
-    samples = all_samples[args.start:]
-    if args.start > 0:
-        print(f"Resuming from sample {args.start}, {len(samples)} remaining")
+    # Order by nearest-neighbor from rest pose for smooth warm-starting
+    print(f"\nOrdering samples by nearest-neighbor from rest pose...")
+    ordered_samples, order = order_nearest_neighbor(raw_samples)
 
-    if len(samples) == 0:
+    # Save shared grid (unordered + order mapping) for viewer
+    os.makedirs(output_base, exist_ok=True)
+    grid_path = os.path.join(output_base, "dof_grid.npz")
+    np.savez_compressed(
+        grid_path,
+        dof_names=np.array(ALL_DOF_NAMES),
+        dof_indices=np.array([L_DOF_MAP[n] for n in ALL_DOF_NAMES]),
+        raw_samples=raw_samples.astype(np.float32),
+        ordered_samples=ordered_samples.astype(np.float32),
+        traversal_order=order.astype(np.int32),
+    )
+    print(f"Grid saved to {grid_path}")
+
+    # Slice for resuming
+    samples_to_bake = ordered_samples[args.start:]
+    if args.start > 0:
+        print(f"Resuming from traversal step {args.start}, {len(samples_to_bake)} remaining")
+
+    if len(samples_to_bake) == 0:
         print("No samples to bake.")
         return
 
@@ -305,28 +386,13 @@ def main():
     skel, bvh_info, mesh_info = load_skeleton()
     skeleton_meshes = load_skeleton_meshes()
 
-    # Determine regions to bake
-    if args.region == "both":
-        regions = ["L_UpLeg", "L_LowLeg"]
-    else:
-        regions = [args.region]
+    print(f"\n{'='*60}")
+    print(f"  Baking region: {args.region}")
+    print(f"{'='*60}\n")
+    bake_region(args.region, samples_to_bake, order, skel, skeleton_meshes,
+                mesh_info, args, args.start, output_base)
 
-    for region in regions:
-        print(f"\n{'='*60}")
-        print(f"  Baking region: {region}")
-        print(f"{'='*60}\n")
-        bake_region(region, samples, skel, skeleton_meshes, mesh_info, args,
-                    args.start, output_base)
-
-    # Save shared DOF grid to output base (for viewer to load once)
-    np.savez_compressed(
-        os.path.join(output_base, "dof_grid.npz"),
-        dof_names=np.array(ALL_DOF_NAMES),
-        dof_indices=np.array([L_DOF_MAP[n] for n in ALL_DOF_NAMES]),
-        dof_values=all_samples.astype(np.float32),
-    )
-    print(f"\nShared DOF grid saved to {output_base}/dof_grid.npz")
-    print("Done!")
+    print("\nDone!")
 
 
 if __name__ == "__main__":
