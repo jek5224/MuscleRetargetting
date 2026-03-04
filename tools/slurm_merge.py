@@ -29,11 +29,13 @@ def merge_bvh(bvh_stem):
     if not os.path.isdir(base):
         return False, "directory not found"
 
-    # Check all regions are done
+    # Check all regions are done (.done from server, .done.synced from sync script)
     missing = []
     for region in REGIONS:
-        done = os.path.join(base, region, ".done")
-        if not os.path.exists(done):
+        region_dir = os.path.join(base, region)
+        has_done = (os.path.exists(os.path.join(region_dir, ".done"))
+                    or os.path.exists(os.path.join(region_dir, ".done.synced")))
+        if not has_done:
             missing.append(region)
 
     if missing:
