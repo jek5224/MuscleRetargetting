@@ -28,14 +28,16 @@ LOG_DIR = "volume_distill/dof_grid_runs"
 # Training hyperparameters — overfit-friendly
 EPOCHS = 2000
 BATCH_SIZE = 256
-LR = 1e-3
+LR = 3e-4
 WEIGHT_DECAY = 0.0       # no regularization — we want to memorize
 PCA_K = 64
 INPUT_NOISE_STD = 0.0    # no noise — overfit to deterministic mapping
 DROPOUT = 0.0            # no dropout — we want to memorize
+GRAD_CLIP = 1.0          # gradient norm clipping
 
-# Cosine warm restarts: LR resets every T_0 epochs
-COSINE_T0 = 200
+# Cosine warm restarts: LR resets every T_0 epochs, cycle doubles each time
+COSINE_T0 = 300
+COSINE_T_MULT = 2
 
 # Model — larger than V2 to handle 37 muscles
 HIDDEN_DIM = 1024
@@ -127,7 +129,9 @@ def train():
           f"dec_res={NUM_DECODER_RES}, embed={EMBED_DIM}, freqs={NUM_FREQS})")
 
     optimizer = torch.optim.Adam(model.parameters(), lr=LR, weight_decay=WEIGHT_DECAY)
-    scheduler = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(optimizer, T_0=COSINE_T0)
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(
+        optimizer, T_0=COSINE_T0, T_mult=COSINE_T_MULT,
+    )
 
     muscle_indices = torch.arange(num_muscles, device=device)
 
@@ -164,6 +168,7 @@ def train():
 
             optimizer.zero_grad()
             loss.backward()
+            torch.nn.utils.clip_grad_norm_(model.parameters(), GRAD_CLIP)
             optimizer.step()
 
             train_loss_sum += loss.item()
