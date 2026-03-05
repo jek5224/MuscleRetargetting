@@ -31,7 +31,7 @@ def load_region_data(region_dir):
     meta_path = os.path.join(region_dir, "meta.json")
     if not os.path.exists(meta_path):
         print(f"  No meta.json in {region_dir}, skipping")
-        return {}, None
+        return {}, None, None
 
     with open(meta_path) as f:
         meta = json.load(f)
@@ -49,7 +49,7 @@ def load_region_data(region_dir):
 
     if not all_dof_values:
         print(f"  No DOF chunks in {region_dir}")
-        return {}, None
+        return {}, None, None
 
     dof_values = np.concatenate(all_dof_values, axis=0)  # (N, 7)
     sample_indices = np.concatenate(all_sample_indices, axis=0)
@@ -77,7 +77,7 @@ def load_region_data(region_dir):
 
         muscle_data[mname] = positions
 
-    return muscle_data, dof_values
+    return muscle_data, dof_values, sample_indices
 
 
 def preprocess(pca_k=PCA_K, val_fraction=0.15):
@@ -90,10 +90,9 @@ def preprocess(pca_k=PCA_K, val_fraction=0.15):
     skel_info, root_name, bvh_info, _, mesh_info, _ = saveSkeletonInfo(SKEL_XML)
     skel = buildFromInfo(skel_info, root_name)
 
-    # Load both regions
+    # Load both regions, find common sample indices
     regions = ["L_UpLeg", "L_LowLeg"]
-    all_muscle_data = {}
-    dof_values = None
+    region_results = {}
 
     for region in regions:
         region_dir = os.path.join(GRID_BASE, region)
@@ -101,19 +100,39 @@ def preprocess(pca_k=PCA_K, val_fraction=0.15):
             print(f"Region {region} not found at {region_dir}")
             continue
         print(f"\nLoading {region}...")
-        muscle_data, region_dofs = load_region_data(region_dir)
+        muscle_data, region_dofs, sample_idx = load_region_data(region_dir)
         if region_dofs is None:
             continue
+        region_results[region] = (muscle_data, region_dofs, sample_idx)
+        print(f"  Loaded {len(muscle_data)} muscles, {len(sample_idx)} samples "
+              f"(indices {sample_idx[0]}..{sample_idx[-1]})")
+
+    if not region_results:
+        print("ERROR: No data loaded.")
+        return
+
+    # Find common sample indices across all regions
+    common_indices = None
+    for region, (_, _, sample_idx) in region_results.items():
+        idx_set = set(sample_idx.tolist())
+        common_indices = idx_set if common_indices is None else common_indices & idx_set
+    common_indices = sorted(common_indices)
+    print(f"\nCommon samples across regions: {len(common_indices)}")
+
+    # Build aligned data using common indices
+    all_muscle_data = {}
+    dof_values = None
+
+    for region, (muscle_data, region_dofs, sample_idx) in region_results.items():
+        # Build index mapping: sample_idx value → position in region arrays
+        idx_to_pos = {int(s): i for i, s in enumerate(sample_idx)}
+        common_positions = [idx_to_pos[s] for s in common_indices]
 
         if dof_values is None:
-            dof_values = region_dofs
-        else:
-            # Verify both regions have the same DOF samples
-            if not np.allclose(dof_values, region_dofs, atol=1e-6):
-                print("WARNING: DOF values differ between regions! Using first region's values.")
+            dof_values = region_dofs[common_positions]
 
-        all_muscle_data.update(muscle_data)
-        print(f"  Loaded {len(muscle_data)} muscles")
+        for mname, positions in muscle_data.items():
+            all_muscle_data[mname] = positions[common_positions]
 
     if dof_values is None or len(all_muscle_data) == 0:
         print("ERROR: No data loaded.")
