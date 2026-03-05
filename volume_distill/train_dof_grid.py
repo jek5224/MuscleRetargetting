@@ -32,7 +32,7 @@ LR = 5e-4
 WEIGHT_DECAY = 1e-5
 COSINE_T_MAX = 1000
 PCA_K = 64
-INPUT_NOISE_STD = 0.005  # small noise for slight regularization
+INPUT_NOISE_STD = 0.0    # no noise — overfit to deterministic mapping
 DROPOUT = 0.0            # no dropout — we want to memorize
 
 # Model — larger than V2 to handle 37 muscles
@@ -85,25 +85,20 @@ def train():
     pca_means = data["pca_means"]
     pca_stds = data["pca_stds"]
     rest_positions = data["rest_positions"]
-    train_indices = data["train_indices"]
-    val_indices = data["val_indices"]
 
     num_muscles = len(muscle_names)
+    num_samples = len(input_dofs)
     input_dim = input_dofs.shape[1]  # 7
     pca_k = pca_targets[muscle_names[0]].shape[1]
 
-    print(f"Samples: {len(input_dofs)} ({len(train_indices)} train, {len(val_indices)} val)")
+    print(f"Samples: {num_samples} (all used for training — overfit mode)")
     print(f"Muscles: {num_muscles}, Input dim: {input_dim}, PCA k: {pca_k}")
 
-    # Build datasets
-    train_ds = DofGridDataset(input_dofs, pca_targets, train_indices, muscle_names)
-    val_ds = DofGridDataset(input_dofs, pca_targets, val_indices, muscle_names)
+    # Use ALL samples for training (overfit to deterministic mapping)
+    all_indices = torch.arange(num_samples)
+    train_ds = DofGridDataset(input_dofs, pca_targets, all_indices, muscle_names)
     train_loader = DataLoader(
         train_ds, batch_size=BATCH_SIZE, shuffle=True,
-        collate_fn=collate_fn, num_workers=4, pin_memory=True,
-    )
-    val_loader = DataLoader(
-        val_ds, batch_size=BATCH_SIZE, shuffle=False,
         collate_fn=collate_fn, num_workers=4, pin_memory=True,
     )
 
@@ -137,9 +132,9 @@ def train():
     os.makedirs(CHECKPOINT_DIR, exist_ok=True)
     run_name = datetime.now().strftime("%Y%m%d_%H%M%S")
     writer = SummaryWriter(os.path.join(LOG_DIR, run_name))
-    best_val_loss = float("inf")
+    best_loss = float("inf")
 
-    def compute_loss(preds, targets, B):
+    def compute_loss(preds, targets):
         """MSE loss across all muscles."""
         loss = 0.0
         for m_idx in range(num_muscles):
@@ -152,19 +147,18 @@ def train():
     for epoch in range(1, EPOCHS + 1):
         t0 = time.time()
 
-        # Train
+        # Train on all data (overfit mode)
         model.train()
         train_loss_sum = 0.0
         train_batches = 0
         for x, targets in train_loader:
-            B = x.shape[0]
             x = x.to(device)
             if INPUT_NOISE_STD > 0:
                 x = x + INPUT_NOISE_STD * torch.randn_like(x)
             targets = {k: v.to(device) for k, v in targets.items()}
 
             preds = model(x, muscle_indices)
-            loss = compute_loss(preds, targets, B)
+            loss = compute_loss(preds, targets)
 
             optimizer.zero_grad()
             loss.backward()
@@ -175,50 +169,25 @@ def train():
 
         train_loss = train_loss_sum / train_batches
 
-        # Validate
-        model.eval()
-        val_loss_sum = 0.0
-        val_batches = 0
-        per_muscle_val = {name: 0.0 for name in muscle_names}
-        with torch.no_grad():
-            for x, targets in val_loader:
-                B = x.shape[0]
-                x = x.to(device)
-                targets = {k: v.to(device) for k, v in targets.items()}
-                preds = model(x, muscle_indices)
-                loss = compute_loss(preds, targets, B)
-                val_loss_sum += loss.item()
-
-                for m_idx in range(num_muscles):
-                    name = idx_to_name[m_idx]
-                    per_muscle_val[name] += ((preds[m_idx] - targets[name]) ** 2).mean().item()
-
-                val_batches += 1
-
-        val_loss = val_loss_sum / val_batches
-        for name in muscle_names:
-            per_muscle_val[name] /= val_batches
-
         scheduler.step()
         elapsed = time.time() - t0
         lr = optimizer.param_groups[0]["lr"]
-        print(f"Epoch {epoch:4d}/{EPOCHS} | Train: {train_loss:.6f} | Val: {val_loss:.6f} | "
+        print(f"Epoch {epoch:4d}/{EPOCHS} | Loss: {train_loss:.6f} | "
               f"LR: {lr:.2e} | {elapsed:.1f}s")
 
         # TensorBoard
         writer.add_scalar("loss/train", train_loss, epoch)
-        writer.add_scalar("loss/val", val_loss, epoch)
         writer.add_scalar("lr", lr, epoch)
-        for name in muscle_names:
-            writer.add_scalar(f"val_muscle/{name}", per_muscle_val[name], epoch)
 
-        # Vertex-space RMSE every 20 epochs
+        # Vertex-space RMSE every 20 epochs (evaluated on full training set)
         if epoch % 20 == 0:
+            model.eval()
             vertex_se = {name: 0.0 for name in muscle_names}
             vertex_count = {name: 0 for name in muscle_names}
+            per_muscle_loss = {name: 0.0 for name in muscle_names}
+            eval_batches = 0
             with torch.no_grad():
-                for x, targets in val_loader:
-                    B = x.shape[0]
+                for x, targets in train_loader:
                     x = x.to(device)
                     preds = model(x, muscle_indices)
                     targets_dev = {k: v.to(device) for k, v in targets.items()}
@@ -226,12 +195,14 @@ def train():
                         name = idx_to_name[m_idx]
                         pred_norm = preds[m_idx]
                         gt_norm = targets_dev[name]
+                        per_muscle_loss[name] += ((pred_norm - gt_norm) ** 2).mean().item()
                         stds = pca_stds[name].to(device)
                         comps = pca_components[name].to(device)
                         pred_disp = (pred_norm * stds) @ comps
                         gt_disp = (gt_norm * stds) @ comps
                         vertex_se[name] += ((pred_disp - gt_disp) ** 2).sum().item()
                         vertex_count[name] += gt_disp.numel()
+                    eval_batches += 1
 
             print("  Per-muscle vertex RMSE (mm):")
             total_se, total_count = 0.0, 0
@@ -239,18 +210,20 @@ def train():
                 rmse_mm = math.sqrt(vertex_se[name] / max(vertex_count[name], 1)) * 1000
                 total_se += vertex_se[name]
                 total_count += vertex_count[name]
-                writer.add_scalar(f"val_vertex_rmse_mm/{name}", rmse_mm, epoch)
-                if rmse_mm > 1.0:  # only print muscles with >1mm error
+                pml = per_muscle_loss[name] / eval_batches
+                writer.add_scalar(f"muscle_rmse_mm/{name}", rmse_mm, epoch)
+                writer.add_scalar(f"muscle_loss/{name}", pml, epoch)
+                if rmse_mm > 1.0:
                     print(f"    {name}: {rmse_mm:.2f} mm")
             avg_rmse_mm = math.sqrt(total_se / max(total_count, 1)) * 1000
             print(f"  Avg vertex RMSE: {avg_rmse_mm:.2f} mm")
-            writer.add_scalar("val_vertex_rmse_mm/avg", avg_rmse_mm, epoch)
+            writer.add_scalar("vertex_rmse_mm/avg", avg_rmse_mm, epoch)
 
         # Checkpoint
         ckpt_base = {
             "model_version": "v3_dof",
             "model_state_dict": model.state_dict(),
-            "val_loss": val_loss,
+            "train_loss": train_loss,
             "epoch": epoch,
             "input_dim": input_dim,
             "hidden_dim": HIDDEN_DIM,
@@ -270,17 +243,17 @@ def train():
             "dof_indices": data.get("dof_indices"),
         }
 
-        if val_loss < best_val_loss:
-            best_val_loss = val_loss
+        if train_loss < best_loss:
+            best_loss = train_loss
             torch.save(ckpt_base, os.path.join(CHECKPOINT_DIR, "best.pt"))
-            print(f"  -> Saved best (val_loss={val_loss:.6f})")
+            print(f"  -> Saved best (loss={train_loss:.6f})")
 
         if epoch % 50 == 0:
             ckpt_base["optimizer_state_dict"] = optimizer.state_dict()
             torch.save(ckpt_base, os.path.join(CHECKPOINT_DIR, "latest.pt"))
 
     writer.close()
-    print(f"\nTraining complete. Best val loss: {best_val_loss:.6f}")
+    print(f"\nTraining complete. Best loss: {best_loss:.6f}")
 
 
 if __name__ == "__main__":
