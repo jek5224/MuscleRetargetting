@@ -44,7 +44,7 @@ HIDDEN_DIM = 1024
 NUM_ENCODER_RES = 6
 NUM_DECODER_RES = 4
 EMBED_DIM = 128
-NUM_FREQS = 16
+NUM_FREQS = 6
 
 
 class DofGridDataset(Dataset):
