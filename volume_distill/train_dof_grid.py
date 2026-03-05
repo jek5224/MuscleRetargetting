@@ -26,21 +26,23 @@ CHECKPOINT_DIR = "volume_distill/dof_grid_checkpoints"
 LOG_DIR = "volume_distill/dof_grid_runs"
 
 # Training hyperparameters — overfit-friendly
-EPOCHS = 1000
-BATCH_SIZE = 1024
-LR = 5e-4
-WEIGHT_DECAY = 1e-5
-COSINE_T_MAX = 1000
+EPOCHS = 2000
+BATCH_SIZE = 256
+LR = 1e-3
+WEIGHT_DECAY = 0.0       # no regularization — we want to memorize
 PCA_K = 64
 INPUT_NOISE_STD = 0.0    # no noise — overfit to deterministic mapping
 DROPOUT = 0.0            # no dropout — we want to memorize
+
+# Cosine warm restarts: LR resets every T_0 epochs
+COSINE_T0 = 200
 
 # Model — larger than V2 to handle 37 muscles
 HIDDEN_DIM = 1024
 NUM_ENCODER_RES = 6
 NUM_DECODER_RES = 4
 EMBED_DIM = 128
-NUM_FREQS = 8
+NUM_FREQS = 16
 
 
 class DofGridDataset(Dataset):
@@ -125,7 +127,7 @@ def train():
           f"dec_res={NUM_DECODER_RES}, embed={EMBED_DIM}, freqs={NUM_FREQS})")
 
     optimizer = torch.optim.Adam(model.parameters(), lr=LR, weight_decay=WEIGHT_DECAY)
-    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=COSINE_T_MAX)
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(optimizer, T_0=COSINE_T0)
 
     muscle_indices = torch.arange(num_muscles, device=device)
 
