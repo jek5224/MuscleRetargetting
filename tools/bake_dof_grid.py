@@ -74,18 +74,19 @@ L_DOF_MAP = {
     "L_Ankle_z": 12,
 }
 
-# Anatomical ROM in radians
+# DOF ranges in radians — derived from observed BVH data + 10% margin.
+# BallJoints use exponential map (rotation vector) which can span wide ranges.
 DOF_RANGES = {
     # Hip (BallJoint exponential map components)
-    "L_Femur_x":  (np.radians(-30),  np.radians(120)),   # extension(-) / flexion(+)
-    "L_Femur_y":  (np.radians(-45),  np.radians(45)),    # int/ext rotation
-    "L_Femur_z":  (np.radians(-45),  np.radians(30)),    # abduction(-) / adduction(+)
+    "L_Femur_x":  (np.radians(-195), np.radians(195)),
+    "L_Femur_y":  (np.radians(-216), np.radians(216)),
+    "L_Femur_z":  (np.radians(-130), np.radians(140)),
     # Knee (RevoluteJoint)
-    "L_Knee":     (np.radians(0),    np.radians(140)),   # 0=extended, positive=flexion
+    "L_Knee":     (np.radians(-20),  np.radians(190)),
     # Ankle (BallJoint exponential map components)
-    "L_Ankle_x":  (np.radians(-20),  np.radians(20)),    # inversion/eversion component
-    "L_Ankle_y":  (np.radians(-30),  np.radians(30)),    # inversion/eversion component
-    "L_Ankle_z":  (np.radians(-20),  np.radians(50)),    # dorsiflexion(-) / plantarflexion(+)
+    "L_Ankle_x":  (np.radians(-60),  np.radians(65)),
+    "L_Ankle_y":  (np.radians(-105), np.radians(80)),
+    "L_Ankle_z":  (np.radians(-70),  np.radians(155)),
 }
 
 REGION_MUSCLES = {
