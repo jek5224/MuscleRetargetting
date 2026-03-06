@@ -346,6 +346,10 @@ def main():
         "--start", type=int, default=0,
         help="Start sample index in traversal order (for resuming, default: 0)",
     )
+    parser.add_argument(
+        "--end", type=int, default=None,
+        help="End sample index (exclusive). If not set, bakes to the end.",
+    )
     args = parser.parse_args()
 
     output_base = args.output_dir or os.path.join("data", "motion_cache", "dof_grid")
@@ -374,10 +378,11 @@ def main():
     )
     print(f"Grid saved to {grid_path}")
 
-    # Slice for resuming
-    samples_to_bake = ordered_samples[args.start:]
-    if args.start > 0:
-        print(f"Resuming from traversal step {args.start}, {len(samples_to_bake)} remaining")
+    # Slice for start/end range
+    end = args.end if args.end is not None else len(ordered_samples)
+    samples_to_bake = ordered_samples[args.start:end]
+    if args.start > 0 or args.end is not None:
+        print(f"Baking samples [{args.start}:{end}), {len(samples_to_bake)} samples")
 
     if len(samples_to_bake) == 0:
         print("No samples to bake.")
