@@ -105,20 +105,22 @@ def predict_frame(model, dofs, rest_positions, device=None):
     if is_v2:
         # preds: {muscle_idx: (1, K)} — reconstruct from PCA
         idx_to_name = {v: k for k, v in model._muscle_name_to_idx.items()}
+        # Cache PCA tensors on model device for fast reconstruction
+        if not hasattr(model, '_pca_comps_dev'):
+            model._pca_comps_dev = {n: model._pca_components[n].to(device) for n in model._pca_components}
+            model._pca_means_dev = {n: model._pca_means[n].to(device) for n in model._pca_means}
+            model._pca_stds_dev = {n: model._pca_stds[n].to(device) for n in model._pca_stds} if model._pca_stds else None
+            model._rest_pos_dev = {n: (v.to(device) if isinstance(v, torch.Tensor) else torch.tensor(v, dtype=torch.float32, device=device)) for n, v in rest_positions.items()}
+
         for m_idx, coeffs in preds.items():
             name = idx_to_name[m_idx]
-            coeffs_np = coeffs[0].cpu().numpy()                       # (K,)
-            # Denormalize z-scored coefficients if pca_stds available
-            if model._pca_stds is not None and name in model._pca_stds:
-                coeffs_np = coeffs_np * model._pca_stds[name].numpy() # (K,)
-            components = model._pca_components[name].numpy()           # (K, V*3)
-            mean = model._pca_means[name].numpy()                     # (V*3,)
-            disp_flat = coeffs_np @ components + mean                  # (V*3,)
-            disp = disp_flat.reshape(-1, 3)                            # (V, 3)
-            rest = rest_positions[name]
-            if isinstance(rest, torch.Tensor):
-                rest = rest.cpu().numpy()
-            result[name] = rest + disp
+            c = coeffs[0]  # (K,) on device
+            if model._pca_stds_dev is not None and name in model._pca_stds_dev:
+                c = c * model._pca_stds_dev[name]
+            disp_flat = c @ model._pca_comps_dev[name] + model._pca_means_dev[name]  # (V*3,)
+            disp = disp_flat.reshape(-1, 3)
+            pos = model._rest_pos_dev[name] + disp
+            result[name] = pos.cpu().numpy()
     else:
         # V1: preds = {name: (1, V*3)}
         for name, disp_flat in preds.items():

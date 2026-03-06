@@ -6997,7 +6997,9 @@ def _motion_load_nn_checkpoint(v):
     try:
         import torch
         from volume_distill.dance.evaluate import load_model
-        model, metadata = load_model(ckpt_path, device='cpu')
+        import torch as _torch
+        _nn_device = 'cuda' if _torch.cuda.is_available() else 'cpu'
+        model, metadata = load_model(ckpt_path, device=_nn_device)
         rest_positions = metadata.get("rest_positions")
         if rest_positions is None:
             preproc_path = 'data/motion_cache/locomotion/preprocessed.pt'
