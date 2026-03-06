@@ -171,7 +171,7 @@ def preprocess(pca_k=PCA_K, val_fraction=0.15):
     muscle_names = sorted(all_muscle_data.keys())
     rest_positions = {}
     displacements = {}
-    anchor_vertices = {}
+    fixed_vertices = {}
 
     for mname in muscle_names:
         positions = all_muscle_data[mname]  # (N, V, 3) world frame
@@ -182,34 +182,74 @@ def preprocess(pca_k=PCA_K, val_fraction=0.15):
         R_inv = np.transpose(pelvis_R, (0, 2, 1))  # (N, 3, 3)
         local_pos = np.einsum("nij,nvj->nvi", R_inv, centered)  # (N, V, 3)
 
-        # Rest = DOFs=0 in pelvis-local frame
-        # Use the first sample's rest position from the tet mesh directly
-        # For consistency, compute rest from skeleton rest pose
-        # Load rest tet positions
+        # Load tet data for rest positions and fixed vertices
         tet_path = os.path.join(TET_DIR, f"{mname}_tet.npz")
         if os.path.exists(tet_path):
             import pickle
             with open(tet_path, 'rb') as f:
                 tet_data = pickle.load(f)
             rest_world = tet_data['vertices'].astype(np.float64)  # (V, 3)
-            # Transform to pelvis-local at rest pose
             rest_local = (rest_R.T @ (rest_world - rest_t).T).T  # (V, 3)
             rest = rest_local.astype(np.float32)
 
-            anchors = list(tet_data.get('anchor_vertices', []))
+            # Compute all fixed vertices (matches muscle_mesh.py init_soft_body)
+            fixed_set = set()
+
+            # 1. Cap face vertices
+            faces = tet_data['faces']
+            for fi in tet_data.get('cap_face_indices', []):
+                if fi < len(faces):
+                    for vi in faces[fi]:
+                        fixed_set.add(int(vi))
+
+            # 2. Anchor vertices
+            for vi in tet_data.get('anchor_vertices', []):
+                fixed_set.add(int(vi))
+
+            # 3. Contour origin/insertion vertices
+            contours = tet_data.get('contours', [])
+            contour_positions = []
+            for stream_contours in contours:
+                nl = len(stream_contours)
+                if nl < 2:
+                    continue
+                origin_center = np.mean(stream_contours[0], axis=0)
+                insertion_center = np.mean(stream_contours[-1], axis=0)
+                for level_idx, contour in enumerate(stream_contours):
+                    if level_idx == 0 or level_idx == nl - 1:
+                        for pos in contour:
+                            contour_positions.append(np.array(pos))
+                    else:
+                        cc = np.mean(contour, axis=0)
+                        d_o = np.linalg.norm(cc - origin_center)
+                        d_i = np.linalg.norm(cc - insertion_center)
+                        if d_o < 0.003 and d_o <= d_i:
+                            for pos in contour:
+                                contour_positions.append(np.array(pos))
+                        elif d_i < 0.003 and d_i < d_o:
+                            for pos in contour:
+                                contour_positions.append(np.array(pos))
+
+            if contour_positions:
+                contour_positions = np.array(contour_positions)
+                for vi in range(len(rest_world)):
+                    dists = np.linalg.norm(contour_positions - rest_world[vi], axis=1)
+                    if dists.min() < 1e-4:
+                        fixed_set.add(vi)
+
+            fixed_list = sorted(fixed_set)
         else:
-            # Fallback: use sample 0 (which should be near rest)
             rest = local_pos[0].astype(np.float32)
-            anchors = []
+            fixed_list = []
 
         disp = (local_pos - rest[None, :, :]).astype(np.float32)  # (N, V, 3)
 
         rest_positions[mname] = torch.from_numpy(rest)
         displacements[mname] = torch.from_numpy(disp)
-        anchor_vertices[mname] = torch.tensor(anchors, dtype=torch.long)
+        fixed_vertices[mname] = torch.tensor(fixed_list, dtype=torch.long)
 
         disp_norm = np.linalg.norm(disp, axis=-1)
-        print(f"  {mname}: {num_verts} verts, {len(anchors)} anchors, "
+        print(f"  {mname}: {num_verts} verts, {len(fixed_list)} fixed, "
               f"disp [{disp_norm.min():.4f}, {disp_norm.max():.4f}]m")
 
     # Input DOFs — just the raw 7 DOF values (no derivatives for deterministic mapping)
@@ -261,7 +301,7 @@ def preprocess(pca_k=PCA_K, val_fraction=0.15):
         "muscle_names": muscle_names,
         "rest_positions": rest_positions,
         "displacements": displacements,
-        "anchor_vertices": anchor_vertices,
+        "fixed_vertices": fixed_vertices,
         "pca_components": pca_components,
         "pca_means": pca_means,
         "pca_stds": pca_stds,
