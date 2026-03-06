@@ -3127,13 +3127,20 @@ class FiberArchitectureMixin:
         if not hasattr(self, 'tet_tetrahedra') or self.tet_tetrahedra is None:
             return
 
-        tet_verts = np.asarray(self.tet_vertices, dtype=np.float64)
+        # Use rest positions for embedding so barycentric coords match
+        # the rest-pose waypoints (tet_vertices may already be deformed by NN).
+        if hasattr(self, 'soft_body') and self.soft_body is not None:
+            tet_verts = np.asarray(self.soft_body.rest_positions, dtype=np.float64)
+        else:
+            tet_verts = np.asarray(self.tet_vertices, dtype=np.float64)
         tetrahedra = np.asarray(self.tet_tetrahedra)
 
         # Flatten all waypoints + record structure for scatter-back
+        # Use original (rest-pose) waypoints for embedding so they match rest tet_verts
+        wp_source = self.waypoints_original if hasattr(self, 'waypoints_original') and self.waypoints_original is not None else self.waypoints
         all_points = []
         wp_structure = []  # (stream_idx, level_idx, num_fibers)
-        for stream_idx, stream in enumerate(self.waypoints):
+        for stream_idx, stream in enumerate(wp_source):
             for level_idx, level_wps in enumerate(stream):
                 wps = np.asarray(level_wps, dtype=np.float64)
                 if wps.ndim == 1:
