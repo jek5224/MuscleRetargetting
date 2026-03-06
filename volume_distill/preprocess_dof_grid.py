@@ -284,6 +284,31 @@ def preprocess(pca_k=PCA_K, val_fraction=0.15):
         pca_stds[mname] = torch.from_numpy(coeff_std.astype(np.float32))  # (k,)
         pca_targets[mname] = torch.from_numpy(coeffs_norm.astype(np.float32))  # (N, k)
 
+    # Inter-muscle constraints from rest positions
+    print(f"\nFinding inter-muscle constraints (threshold=15mm)...")
+    from scipy.spatial import cKDTree
+    constraint_threshold = 0.015  # 15mm, matches baking default
+    inter_muscle_constraints = []  # [(name_a, vert_a, name_b, vert_b, rest_dist), ...]
+
+    for i in range(len(muscle_names)):
+        name_a = muscle_names[i]
+        verts_a = rest_positions[name_a].numpy()  # (V_a, 3) pelvis-local
+        fixed_a = set(fixed_vertices[name_a].tolist())
+        for j in range(i + 1, len(muscle_names)):
+            name_b = muscle_names[j]
+            verts_b = rest_positions[name_b].numpy()  # (V_b, 3) pelvis-local
+            fixed_b = set(fixed_vertices[name_b].tolist())
+            tree_b = cKDTree(verts_b)
+            for va_idx, va_pos in enumerate(verts_a):
+                nearby = tree_b.query_ball_point(va_pos, constraint_threshold)
+                for vb_idx in nearby:
+                    dist = float(np.linalg.norm(va_pos - verts_b[vb_idx]))
+                    inter_muscle_constraints.append((
+                        name_a, va_idx, name_b, vb_idx, dist
+                    ))
+
+    print(f"  Found {len(inter_muscle_constraints)} inter-muscle constraints")
+
     # Train/val split — random since samples are independent (no temporal structure)
     N = num_samples
     n_val = max(1, int(N * val_fraction))
@@ -302,6 +327,7 @@ def preprocess(pca_k=PCA_K, val_fraction=0.15):
         "rest_positions": rest_positions,
         "displacements": displacements,
         "fixed_vertices": fixed_vertices,
+        "inter_muscle_constraints": inter_muscle_constraints,
         "pca_components": pca_components,
         "pca_means": pca_means,
         "pca_stds": pca_stds,

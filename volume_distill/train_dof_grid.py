@@ -35,6 +35,10 @@ INPUT_NOISE_STD = 0.0    # no noise — overfit to deterministic mapping
 DROPOUT = 0.0            # no dropout — we want to memorize
 GRAD_CLIP = 1.0          # gradient norm clipping
 
+# Constraint loss weights
+LAMBDA_FIXED = 10.0      # fixed vertex displacement penalty (hard constraint)
+LAMBDA_INTER = 1.0       # inter-muscle distance penalty (soft constraint)
+
 # Cosine warm restarts: LR resets every T_0 epochs, cycle doubles each time
 COSINE_T0 = 300
 COSINE_T_MULT = 2
@@ -89,6 +93,8 @@ def train():
     pca_means = data["pca_means"]
     pca_stds = data["pca_stds"]
     rest_positions = data["rest_positions"]
+    fixed_vertices_data = data.get("fixed_vertices", {})
+    inter_muscle_constraints = data.get("inter_muscle_constraints", [])
 
     num_muscles = len(muscle_names)
     num_samples = len(input_dofs)
@@ -97,6 +103,8 @@ def train():
 
     print(f"Samples: {num_samples} (all used for training — overfit mode)")
     print(f"Muscles: {num_muscles}, Input dim: {input_dim}, PCA k: {pca_k}")
+    print(f"Fixed vertices: {sum(len(v) for v in fixed_vertices_data.values())} total")
+    print(f"Inter-muscle constraints: {len(inter_muscle_constraints)}")
 
     # Use ALL samples for training (overfit to deterministic mapping)
     all_indices = torch.arange(num_samples)
@@ -135,20 +143,104 @@ def train():
 
     muscle_indices = torch.arange(num_muscles, device=device)
 
+    # Precompute constraint data on GPU
+    # PCA reconstruction: disp_flat = (coeffs_norm * stds) @ components  (no mean — displacements)
+    pca_comps_gpu = {name: pca_components[name].to(device) for name in muscle_names}  # (K, V*3)
+    pca_stds_gpu = {name: pca_stds[name].to(device) for name in muscle_names}  # (K,)
+    rest_pos_gpu = {name: rest_positions[name].to(device) for name in muscle_names}  # (V, 3)
+
+    # Fixed vertex indices per muscle (for anchor constraint)
+    fixed_verts_gpu = {}
+    for name in muscle_names:
+        fv = fixed_vertices_data.get(name, torch.tensor([], dtype=torch.long))
+        if len(fv) > 0:
+            fixed_verts_gpu[name] = fv.to(device)
+
+    # Inter-muscle constraints: group by (muscle_a, muscle_b) pair for batched computation
+    inter_constraint_pairs = {}  # (name_a, name_b) -> (verts_a[], verts_b[], rest_dists[])
+    for name_a, va_idx, name_b, vb_idx, rest_dist in inter_muscle_constraints:
+        key = (name_a, name_b)
+        if key not in inter_constraint_pairs:
+            inter_constraint_pairs[key] = ([], [], [])
+        inter_constraint_pairs[key][0].append(va_idx)
+        inter_constraint_pairs[key][1].append(vb_idx)
+        inter_constraint_pairs[key][2].append(rest_dist)
+
+    # Convert to tensors
+    inter_constraints_gpu = {}
+    for (name_a, name_b), (va_list, vb_list, dist_list) in inter_constraint_pairs.items():
+        inter_constraints_gpu[(name_a, name_b)] = (
+            torch.tensor(va_list, dtype=torch.long, device=device),
+            torch.tensor(vb_list, dtype=torch.long, device=device),
+            torch.tensor(dist_list, dtype=torch.float32, device=device),
+        )
+    print(f"Inter-muscle constraint pairs: {len(inter_constraints_gpu)} muscle pairs")
+
+    # Muscles that need position reconstruction (involved in any constraint)
+    muscles_needing_positions = set()
+    for name in fixed_verts_gpu:
+        muscles_needing_positions.add(name)
+    for name_a, name_b in inter_constraints_gpu:
+        muscles_needing_positions.add(name_a)
+        muscles_needing_positions.add(name_b)
+    print(f"Muscles needing position reconstruction: {len(muscles_needing_positions)}/{num_muscles}")
+
     os.makedirs(CHECKPOINT_DIR, exist_ok=True)
     run_name = datetime.now().strftime("%Y%m%d_%H%M%S")
     writer = SummaryWriter(os.path.join(LOG_DIR, run_name))
     best_loss = float("inf")
 
+    def reconstruct_positions(pred_norm, name):
+        """PCA coefficients → world positions (B, V, 3)."""
+        disp_flat = (pred_norm * pca_stds_gpu[name]) @ pca_comps_gpu[name]  # (B, V*3)
+        V = rest_pos_gpu[name].shape[0]
+        disp = disp_flat.reshape(-1, V, 3)  # (B, V, 3)
+        return rest_pos_gpu[name].unsqueeze(0) + disp  # (B, V, 3)
+
     def compute_loss(preds, targets):
-        """MSE loss across all muscles."""
-        loss = 0.0
+        """MSE + fixed vertex constraint + inter-muscle constraint."""
+        mse_loss = 0.0
+        fixed_loss = 0.0
+        positions = {}  # cache reconstructed positions for inter-muscle loss
+
         for m_idx in range(num_muscles):
             name = idx_to_name[m_idx]
             pred = preds[m_idx]    # (B, K)
             gt = targets[name]     # (B, K)
-            loss += ((pred - gt) ** 2).mean()
-        return loss / num_muscles
+            mse_loss += ((pred - gt) ** 2).mean()
+
+            # Reconstruct positions for constraint losses
+            if name in muscles_needing_positions:
+                pos = reconstruct_positions(pred, name)  # (B, V, 3)
+                positions[name] = pos
+
+                # Fixed vertex loss: displacement from rest should be zero
+                if name in fixed_verts_gpu:
+                    fv = fixed_verts_gpu[name]
+                    rest = rest_pos_gpu[name]
+                    fixed_disp = pos[:, fv, :] - rest[fv, :].unsqueeze(0)  # (B, F, 3)
+                    fixed_loss += fixed_disp.pow(2).mean()
+
+        mse_loss = mse_loss / num_muscles
+
+        # Inter-muscle distance constraint
+        inter_loss = 0.0
+        n_inter_pairs = 0
+        for (name_a, name_b), (va_idx, vb_idx, rest_dists) in inter_constraints_gpu.items():
+            if name_a not in positions or name_b not in positions:
+                continue
+            pos_a = positions[name_a][:, va_idx, :]  # (B, C, 3)
+            pos_b = positions[name_b][:, vb_idx, :]  # (B, C, 3)
+            dists = (pos_a - pos_b).norm(dim=-1)     # (B, C)
+            deviation = dists - rest_dists.unsqueeze(0)  # (B, C)
+            inter_loss += deviation.pow(2).mean()
+            n_inter_pairs += 1
+
+        if n_inter_pairs > 0:
+            inter_loss = inter_loss / n_inter_pairs
+
+        total = mse_loss + LAMBDA_FIXED * fixed_loss + LAMBDA_INTER * inter_loss
+        return total, mse_loss.item(), fixed_loss.item() if isinstance(fixed_loss, torch.Tensor) else 0.0, inter_loss.item() if isinstance(inter_loss, torch.Tensor) else 0.0
 
     for epoch in range(1, EPOCHS + 1):
         t0 = time.time()
@@ -156,6 +248,9 @@ def train():
         # Train on all data (overfit mode)
         model.train()
         train_loss_sum = 0.0
+        mse_sum = 0.0
+        fixed_sum = 0.0
+        inter_sum = 0.0
         train_batches = 0
         for x, targets in train_loader:
             x = x.to(device)
@@ -164,7 +259,7 @@ def train():
             targets = {k: v.to(device) for k, v in targets.items()}
 
             preds = model(x, muscle_indices)
-            loss = compute_loss(preds, targets)
+            loss, mse_val, fixed_val, inter_val = compute_loss(preds, targets)
 
             optimizer.zero_grad()
             loss.backward()
@@ -172,18 +267,28 @@ def train():
             optimizer.step()
 
             train_loss_sum += loss.item()
+            mse_sum += mse_val
+            fixed_sum += fixed_val
+            inter_sum += inter_val
             train_batches += 1
 
         train_loss = train_loss_sum / train_batches
+        mse_avg = mse_sum / train_batches
+        fixed_avg = fixed_sum / train_batches
+        inter_avg = inter_sum / train_batches
 
         scheduler.step()
         elapsed = time.time() - t0
         lr = optimizer.param_groups[0]["lr"]
-        print(f"Epoch {epoch:4d}/{EPOCHS} | Loss: {train_loss:.6f} | "
+        print(f"Epoch {epoch:4d}/{EPOCHS} | Loss: {train_loss:.6f} "
+              f"(mse={mse_avg:.6f} fix={fixed_avg:.6f} inter={inter_avg:.6f}) | "
               f"LR: {lr:.2e} | {elapsed:.1f}s")
 
         # TensorBoard
         writer.add_scalar("loss/train", train_loss, epoch)
+        writer.add_scalar("loss/mse", mse_avg, epoch)
+        writer.add_scalar("loss/fixed", fixed_avg, epoch)
+        writer.add_scalar("loss/inter", inter_avg, epoch)
         writer.add_scalar("lr", lr, epoch)
 
         # Vertex-space RMSE every 20 epochs (evaluated on full training set)
