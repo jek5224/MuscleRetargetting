@@ -147,6 +147,7 @@ def train():
     # PCA reconstruction: disp_flat = (coeffs_norm * stds) @ components  (no mean — displacements)
     pca_comps_gpu = {name: pca_components[name].to(device) for name in muscle_names}  # (K, V*3)
     pca_stds_gpu = {name: pca_stds[name].to(device) for name in muscle_names}  # (K,)
+    pca_means_gpu = {name: pca_means[name].to(device) for name in muscle_names}  # (V*3,)
     rest_pos_gpu = {name: rest_positions[name].to(device) for name in muscle_names}  # (V, 3)
 
     # Fixed vertex indices per muscle (for anchor constraint)
@@ -191,8 +192,8 @@ def train():
     best_loss = float("inf")
 
     def reconstruct_positions(pred_norm, name):
-        """PCA coefficients → world positions (B, V, 3)."""
-        disp_flat = (pred_norm * pca_stds_gpu[name]) @ pca_comps_gpu[name]  # (B, V*3)
+        """PCA coefficients → pelvis-local positions (B, V, 3)."""
+        disp_flat = (pred_norm * pca_stds_gpu[name]) @ pca_comps_gpu[name] + pca_means_gpu[name]  # (B, V*3)
         V = rest_pos_gpu[name].shape[0]
         disp = disp_flat.reshape(-1, V, 3)  # (B, V, 3)
         return rest_pos_gpu[name].unsqueeze(0) + disp  # (B, V, 3)
