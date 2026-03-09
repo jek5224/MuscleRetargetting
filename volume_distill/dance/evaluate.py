@@ -71,12 +71,14 @@ def load_model(checkpoint_path, device=None):
         ).to(device)
         model.load_state_dict(ckpt["model_state_dict"])
         model.eval()
+        model._input_dim = input_dim  # store for inference format detection
         metadata = {
             "muscle_vertex_counts": muscle_vertex_counts,
             "model_version": "v1",
             "rest_positions": ckpt.get("rest_positions"),
             "epoch": ckpt.get("epoch", "?"),
             "val_loss": ckpt.get("val_loss"),
+            "mirror_trained": ckpt.get("mirror_trained", False),
         }
         return model, metadata
 
