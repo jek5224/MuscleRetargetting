@@ -64,6 +64,69 @@ def mirror_skeleton_names(names_list):
     return mirrored
 
 
+def _mirror_body_name(name):
+    """Remap a single L_ body name to R_."""
+    mapped = SKELETON_NAME_MAP.get(name.replace("0", ""), name)
+    if mapped == name and name.startswith("L_"):
+        mapped = "R_" + name[2:]
+    elif not name.startswith("L_"):
+        mapped = name  # non-L names stay as-is
+    else:
+        # Re-add suffix (e.g. "0") if present in original
+        suffix = ""
+        for i in range(len(name) - 1, -1, -1):
+            if name[i].isdigit():
+                suffix = name[i] + suffix
+            else:
+                break
+        if suffix and not mapped.endswith(suffix):
+            mapped = mapped + suffix
+    return mapped
+
+
+def _mirror_bary_coords(bary_coords):
+    """Mirror waypoint barycentric coordinates.
+
+    - ('skeleton', body_name, local_pos) → remap name L→R, negate local_pos X
+    - ('tet', tet_idx, bary, was_inside) → swap bary weights [0],[1] (tet verts swapped)
+    """
+    mirrored = []
+    for stream in bary_coords:
+        if stream is None:
+            mirrored.append(None)
+            continue
+        stream_m = []
+        for contour in stream:
+            if contour is None:
+                stream_m.append(None)
+                continue
+            contour_m = []
+            for fiber in contour:
+                if fiber is None:
+                    contour_m.append(None)
+                    continue
+                if fiber[0] == 'skeleton':
+                    _, body_name, local_pos = fiber
+                    new_pos = local_pos.copy()
+                    new_pos[0] *= -1  # negate X
+                    contour_m.append(('skeleton', _mirror_body_name(body_name), new_pos))
+                elif fiber[0] == 'tet':
+                    if len(fiber) >= 4:
+                        _, tet_idx, bary, was_inside = fiber
+                    else:
+                        _, tet_idx, bary = fiber
+                        was_inside = True
+                    # Swap bary weights 0,1 to match swapped tet vertex indices
+                    new_bary = bary.copy()
+                    new_bary[0], new_bary[1] = bary[1], bary[0]
+                    contour_m.append(('tet', tet_idx, new_bary, was_inside))
+                else:
+                    contour_m.append(fiber)
+            stream_m.append(contour_m)
+        mirrored.append(stream_m)
+    return mirrored
+
+
 def mirror_tet_file(src_path, dst_path, dry_run=False):
     """Mirror a single L tet file to R. Files are pickle despite .npz extension."""
     with open(src_path, 'rb') as f:
@@ -110,9 +173,13 @@ def mirror_tet_file(src_path, dst_path, dry_run=False):
         mirrored["attach_skeleton_names"] = mirror_skeleton_names(data["attach_skeleton_names"])
 
     # Skeleton attachment indices: index into skeleton_meshes list.
-    # R meshes are at L index + 13 in the skeleton mesh list.
+    # R meshes are at L index + 12 in the skeleton mesh list.
     if data.get("attach_skeletons") is not None:
         mirrored["attach_skeletons"] = mirror_skeleton_indices(data["attach_skeletons"])
+
+    # Waypoint barycentric coords: mirror skeleton refs and swap tet bary weights 0,1
+    if data.get("waypoint_bary_coords") is not None:
+        mirrored["waypoint_bary_coords"] = _mirror_bary_coords(data["waypoint_bary_coords"])
 
     if dry_run:
         print(f"  [DRY RUN] Would write {dst_path}")
