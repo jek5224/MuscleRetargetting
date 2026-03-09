@@ -6996,13 +6996,16 @@ def _motion_load_nn_checkpoint(v):
     v.motion_nn_rest_positions = None
     v.motion_nn_checkpoint_path = None
     v._motion_nn_model_version = "v1"
-    # Check for per-motion checkpoint first: mirror > regular > global
+    # Check for per-motion checkpoint first: V2 mirror > V1 mirror > regular > global
     ckpt_path = None
     if v.motion_bvh is not None and hasattr(v, 'motion_selected_idx'):
         bvh_stem = os.path.splitext(os.path.basename(v.motion_bvh_files[v.motion_selected_idx]))[0]
+        per_motion_mirror_v2 = f'volume_distill/{bvh_stem}_mirror_checkpoints/best_v2.pt'
         per_motion_mirror = f'volume_distill/{bvh_stem}_mirror_checkpoints/best.pt'
         per_motion = f'volume_distill/{bvh_stem}_checkpoints/best.pt'
-        if os.path.exists(per_motion_mirror):
+        if os.path.exists(per_motion_mirror_v2):
+            ckpt_path = per_motion_mirror_v2
+        elif os.path.exists(per_motion_mirror):
             ckpt_path = per_motion_mirror
         elif os.path.exists(per_motion):
             ckpt_path = per_motion
@@ -7024,16 +7027,10 @@ def _motion_load_nn_checkpoint(v):
             preproc_path = 'data/motion_cache/locomotion/preprocessed.pt'
             data = torch.load(preproc_path, map_location='cpu', weights_only=False)
             rest_positions = data["rest_positions"]
-        # Optimize for inference: fp16 + torch.compile
-        if _nn_device == 'cuda':
-            model = model.half()
-            try:
-                model = _torch.compile(model, mode="reduce-overhead")
-                print(f"[Motion] Model compiled with reduce-overhead mode")
-            except Exception as e:
-                print(f"[Motion] torch.compile not available: {e}")
+        # TODO: torch.compile causes issues with dict-output models, re-enable later
         v.motion_nn_model = model
         v.motion_nn_rest_positions = rest_positions
+        v.motion_nn_r_rest_positions = metadata.get("r_rest_positions")
         v.motion_nn_checkpoint_path = ckpt_path
         v._motion_nn_epoch = metadata.get("epoch", "?")
         v._motion_nn_val_loss = metadata.get("val_loss")
@@ -7047,28 +7044,69 @@ def _motion_load_nn_checkpoint(v):
         v.motion_nn_model = None
 
 
-def _predict_frame_batched(model, l_dofs, r_dofs, rest_positions, device=None):
-    """Batch L+R DOFs into single forward pass. Returns (l_preds, r_preds) dicts."""
+def _predict_frame_batched(model, l_dofs, r_dofs, rest_positions, r_rest_positions=None, device=None):
+    """Batch L+R DOFs into single forward pass. Returns (l_preds, r_preds) dicts.
+    Uses L rest for L output and R rest for R output (they differ due to body asymmetry).
+    Supports both V1 (direct displacement) and V2 (PCA reconstruction)."""
     import torch as _torch
+    from volume_distill.model import DistillNetV2
     if device is None:
         device = next(model.parameters()).device
+    if r_rest_positions is None:
+        r_rest_positions = rest_positions
     x = _torch.tensor(
         np.stack([l_dofs, r_dofs]), dtype=_torch.float32
     ).to(device)
-    if next(model.parameters()).dtype == _torch.float16:
-        x = x.half()
+
+    is_v2 = isinstance(model, DistillNetV2)
+
     with _torch.no_grad():
-        preds = model(x)  # {name: (2, V*3)}
+        preds = model(x)
+
     l_result = {}
     r_result = {}
-    for name, disp_flat in preds.items():
-        rest = rest_positions[name]
-        if isinstance(rest, _torch.Tensor):
-            rest = rest.cpu()
-        l_disp = disp_flat[0].cpu().reshape(-1, 3)
-        r_disp = disp_flat[1].cpu().reshape(-1, 3)
-        l_result[name] = (rest + l_disp).numpy()
-        r_result[name] = (rest + r_disp).numpy()
+
+    if is_v2:
+        # V2: preds = {muscle_idx: (2, K)} — PCA reconstruction
+        idx_to_name = {v: k for k, v in model._muscle_name_to_idx.items()}
+        if not hasattr(model, '_pca_comps_dev'):
+            model._pca_comps_dev = {n: model._pca_components[n].to(device) for n in model._pca_components}
+            model._pca_means_dev = {n: model._pca_means[n].to(device) for n in model._pca_means}
+            model._pca_stds_dev = {n: model._pca_stds[n].to(device) for n in model._pca_stds} if model._pca_stds else None
+        for m_idx, coeffs in preds.items():
+            name = idx_to_name[m_idx]
+            l_rest = rest_positions[name]
+            r_rest = r_rest_positions.get(name, l_rest) if r_rest_positions else l_rest
+            if isinstance(l_rest, _torch.Tensor):
+                l_rest = l_rest.cpu()
+            if isinstance(r_rest, _torch.Tensor):
+                r_rest = r_rest.cpu()
+            # Denormalize PCA coefficients
+            l_c = coeffs[0]  # (K,)
+            r_c = coeffs[1]  # (K,)
+            if model._pca_stds_dev is not None and name in model._pca_stds_dev:
+                stds = model._pca_stds_dev[name]
+                l_c = l_c * stds
+                r_c = r_c * stds
+            comps = model._pca_comps_dev[name]
+            means = model._pca_means_dev[name]
+            l_disp = (l_c @ comps + means).reshape(-1, 3).cpu()
+            r_disp = (r_c @ comps + means).reshape(-1, 3).cpu()
+            l_result[name] = (l_rest + l_disp).numpy()
+            r_result[name] = (r_rest + r_disp).numpy()
+    else:
+        # V1: preds = {name: (2, V*3)}
+        for name, disp_flat in preds.items():
+            l_rest = rest_positions[name]
+            r_rest = r_rest_positions.get(name, l_rest) if r_rest_positions else l_rest
+            if isinstance(l_rest, _torch.Tensor):
+                l_rest = l_rest.cpu()
+            if isinstance(r_rest, _torch.Tensor):
+                r_rest = r_rest.cpu()
+            l_disp = disp_flat[0].cpu().reshape(-1, 3)
+            r_disp = disp_flat[1].cpu().reshape(-1, 3)
+            l_result[name] = (l_rest + l_disp).numpy()
+            r_result[name] = (r_rest + r_disp).numpy()
     return l_result, r_result
 
 
@@ -7118,17 +7156,32 @@ def _motion_apply_nn_deformation(v, frame):
         # Batched L+R prediction in a single forward pass
         mirror_active = getattr(v, '_motion_nn_mirror_trained', False)
         if mirror_active:
-            v1_input_dim = getattr(v.motion_nn_model, '_input_dim', None)
-            if v1_input_dim == 4:
+            if v._motion_nn_model_version == "v2":
+                # V2 mirror: build 20D derivative features for R side
                 r_dof_indices = [18, 19, 20, 21]
-            elif v1_input_dim == 7:
-                r_dof_indices = [18, 19, 20, 21, 22, 23, 24]
+                r_q_t = v.motion_bvh.mocap_refs[frame, r_dof_indices].copy()
+                r_q_t[0] *= -1  # mirror hip X
+                r_q_prev1 = v.motion_bvh.mocap_refs[max(0, frame - 1), r_dof_indices].copy()
+                r_q_prev1[0] *= -1
+                r_q_prev2 = v.motion_bvh.mocap_refs[max(0, frame - 2), r_dof_indices].copy()
+                r_q_prev2[0] *= -1
+                r_dq = r_q_t - r_q_prev1
+                r_ddq = r_q_t - 2 * r_q_prev1 + r_q_prev2
+                r_dofs = np.concatenate([r_q_t, r_dq, r_ddq, r_q_prev1, r_q_prev2]).astype(np.float32)
             else:
-                r_dof_indices = [18, 19, 20, 21]
-            r_dofs = v.motion_bvh.mocap_refs[frame, r_dof_indices].astype(np.float32)
-            r_dofs[0] *= -1
+                # V1 mirror: raw DOFs
+                v1_input_dim = getattr(v.motion_nn_model, '_input_dim', None)
+                if v1_input_dim == 4:
+                    r_dof_indices = [18, 19, 20, 21]
+                elif v1_input_dim == 7:
+                    r_dof_indices = [18, 19, 20, 21, 22, 23, 24]
+                else:
+                    r_dof_indices = [18, 19, 20, 21]
+                r_dofs = v.motion_bvh.mocap_refs[frame, r_dof_indices].astype(np.float32)
+                r_dofs[0] *= -1
             predictions, r_preds = _predict_frame_batched(
-                v.motion_nn_model, dofs, r_dofs, v.motion_nn_rest_positions)
+                v.motion_nn_model, dofs, r_dofs, v.motion_nn_rest_positions,
+                r_rest_positions=getattr(v, 'motion_nn_r_rest_positions', None))
         else:
             predictions = predict_frame(v.motion_nn_model, dofs, v.motion_nn_rest_positions)
             r_preds = None

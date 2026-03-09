@@ -53,6 +53,8 @@ def load_model(checkpoint_path, device=None):
             "pca_stds": ckpt.get("pca_stds"),
             "model_version": version,
             "rest_positions": ckpt.get("rest_positions"),
+            "r_rest_positions": ckpt.get("r_rest_positions"),
+            "mirror_trained": ckpt.get("mirror_trained", False),
             "epoch": ckpt.get("epoch", "?"),
             "val_loss": ckpt.get("val_loss"),
             "dof_names": ckpt.get("dof_names"),
@@ -79,6 +81,7 @@ def load_model(checkpoint_path, device=None):
             "epoch": ckpt.get("epoch", "?"),
             "val_loss": ckpt.get("val_loss"),
             "mirror_trained": ckpt.get("mirror_trained", False),
+            "r_rest_positions": ckpt.get("r_rest_positions"),
         }
         return model, metadata
 
@@ -97,8 +100,6 @@ def predict_frame(model, dofs, rest_positions, device=None):
     x = torch.tensor(
         dofs, dtype=torch.float32,
     ).unsqueeze(0).to(device)
-    if next(model.parameters()).dtype == torch.float16:
-        x = x.half()
 
     is_v2 = isinstance(model, DistillNetV2)
 
