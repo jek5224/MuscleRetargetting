@@ -29,12 +29,24 @@ SKELETON_NAME_MAP = {
     "L_Toe5": "R_Toe5",
 }
 
+# Skeleton mesh list offset: R meshes = L meshes + 12
+# (Saccrum_Coccyx0 at index 0, L starts at 1, R starts at 13)
+L_TO_R_SKEL_MESH_OFFSET = 12
+
 
 def mirror_x(arr):
     """Negate X component of Nx3 array."""
     out = arr.copy()
     out[..., 0] *= -1
     return out
+
+
+def mirror_skeleton_indices(skel_list):
+    """Remap L body node indices to R by adding offset."""
+    mirrored = []
+    for group in skel_list:
+        mirrored.append([idx + L_TO_R_SKEL_MESH_OFFSET for idx in group])
+    return mirrored
 
 
 def mirror_skeleton_names(names_list):
@@ -96,6 +108,11 @@ def mirror_tet_file(src_path, dst_path, dry_run=False):
     # Skeleton attachment names: L_ → R_
     if data.get("attach_skeleton_names") is not None:
         mirrored["attach_skeleton_names"] = mirror_skeleton_names(data["attach_skeleton_names"])
+
+    # Skeleton attachment indices: index into skeleton_meshes list.
+    # R meshes are at L index + 13 in the skeleton mesh list.
+    if data.get("attach_skeletons") is not None:
+        mirrored["attach_skeletons"] = mirror_skeleton_indices(data["attach_skeletons"])
 
     if dry_run:
         print(f"  [DRY RUN] Would write {dst_path}")
