@@ -1962,19 +1962,27 @@ def _draw_motion_browser_ui(v):
         # --- Neural Network ---
         imgui.separator()
         imgui.text("--- Neural Network ---")
-        nn_available = v.motion_nn_model is not None
-        if not nn_available:
-            imgui.push_style_var(imgui.STYLE_ALPHA, 0.5)
         changed_nn, v.motion_use_nn = imgui.checkbox("Use NN Checkpoint##motion_nn", v.motion_use_nn)
-        if not nn_available:
-            imgui.pop_style_var()
-            if changed_nn:
-                v.motion_use_nn = False  # Revert — no model loaded
+        if changed_nn and v.motion_use_nn:
+            # Reload checkpoint from disk (picks up training updates)
+            _motion_load_nn_checkpoint(v)
+            if v.motion_nn_model is None:
+                v.motion_use_nn = False
+            else:
+                # Apply NN to current frame immediately
+                _motion_apply_nn_deformation(v, v.motion_current_frame)
+        nn_available = v.motion_nn_model is not None
+        if not nn_available and not v.motion_use_nn:
             imgui.text("No checkpoint found")
-        else:
+        elif nn_available:
             val_str = f", val={v._motion_nn_val_loss:.6f}" if v._motion_nn_val_loss is not None else ""
             ver_str = f" [{v._motion_nn_model_version}]" if hasattr(v, '_motion_nn_model_version') else ""
             imgui.text(f"best.pt (epoch {v._motion_nn_epoch}{val_str}){ver_str}")
+            imgui.same_line()
+            if imgui.button("Reload##nn_reload"):
+                _motion_load_nn_checkpoint(v)
+                if v.motion_nn_model is not None and v.motion_use_nn:
+                    _motion_apply_nn_deformation(v, v.motion_current_frame)
 
 
 def _render_inspect_2d_windows(v):
@@ -6988,12 +6996,21 @@ def _motion_load_nn_checkpoint(v):
     v.motion_nn_rest_positions = None
     v.motion_nn_checkpoint_path = None
     v._motion_nn_model_version = "v1"
-    # Prefer v3_dof checkpoint if available, fall back to v2
-    ckpt_path = 'volume_distill/dof_grid_checkpoints/best.pt'
+    # Check for per-motion checkpoint first (e.g. walk → dance/checkpoints)
+    # Then fall back to global v3_dof → v2
+    ckpt_path = None
+    if v.motion_bvh is not None and hasattr(v, 'motion_selected_idx'):
+        bvh_stem = os.path.splitext(os.path.basename(v.motion_bvh_files[v.motion_selected_idx]))[0]
+        per_motion = f'volume_distill/{bvh_stem}_checkpoints/best.pt'
+        if os.path.exists(per_motion):
+            ckpt_path = per_motion
+    if ckpt_path is None:
+        ckpt_path = 'volume_distill/dof_grid_checkpoints/best.pt'
     if not os.path.exists(ckpt_path):
         ckpt_path = 'volume_distill/checkpoints/best.pt'
     if not os.path.exists(ckpt_path):
         return
+    print(f"[Motion] Loading NN checkpoint: {ckpt_path}")
     try:
         import torch
         from volume_distill.dance.evaluate import load_model
@@ -7041,14 +7058,25 @@ def _motion_apply_nn_deformation(v, frame):
             ddq = q_t - 2 * q_prev1 + q_prev2
             dofs = np.concatenate([q_t, dq, ddq, q_prev1, q_prev2]).astype(np.float32)  # (20,)
         else:
-            # V1: current DOFs + velocity
-            cur_dofs = v.motion_bvh.mocap_refs[frame, dof_indices]
-            if frame > 0:
-                prev_dofs = v.motion_bvh.mocap_refs[frame - 1, dof_indices]
+            # V1: infer DOF indices from input_dim stored in checkpoint
+            v1_input_dim = getattr(v.motion_nn_model, '_input_dim', None)
+            if v1_input_dim is not None and v1_input_dim == 7:
+                # 7 DOFs: hip(3) + knee(1) + ankle(3)
+                dof_indices = [6, 7, 8, 9, 10, 11, 12]
+                dofs = v.motion_bvh.mocap_refs[frame, dof_indices].astype(np.float32)
+            elif v1_input_dim is not None and v1_input_dim == 4:
+                # 4 DOFs: hip(3) + knee(1)
+                dof_indices = [6, 7, 8, 9]
+                dofs = v.motion_bvh.mocap_refs[frame, dof_indices].astype(np.float32)
             else:
-                prev_dofs = cur_dofs
-            dof_vel = cur_dofs - prev_dofs
-            dofs = np.concatenate([cur_dofs, dof_vel])
+                # Legacy 8-dim: DOFs + velocity
+                dof_indices = [6, 7, 8, 9]
+                cur_dofs = v.motion_bvh.mocap_refs[frame, dof_indices].astype(np.float32)
+                if frame > 0:
+                    prev_dofs = v.motion_bvh.mocap_refs[frame - 1, dof_indices].astype(np.float32)
+                else:
+                    prev_dofs = cur_dofs
+                dofs = np.concatenate([cur_dofs, cur_dofs - prev_dofs])
 
         predictions = predict_frame(v.motion_nn_model, dofs, v.motion_nn_rest_positions)
         # Get pelvis world transform (must match the reference bone used in preprocessing)

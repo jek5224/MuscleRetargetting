@@ -1,6 +1,7 @@
 """Preprocess dance.bvh cache + train V1 model to overfit.
 
-7829 frames × 25 muscles (8 chunks). Input: 4 raw DOFs only (deterministic mapping).
+7829 frames × 25 muscles (8 chunks). Input: 7 raw DOFs — left hip (3), knee (1),
+ankle (3). Output: all left lower body muscles (upper + lower leg).
 No constraint losses — in pelvis-local frame, fixed vertices move with bones
 so penalizing their displacement is incorrect.
 
@@ -37,7 +38,7 @@ GRAD_CLIP = 1.0
 HIDDEN_DIM = 512
 NUM_ENCODER_RES = 3
 NUM_DECODER_RES = 2
-INPUT_DOF_INDICES = [6, 7, 8, 9]
+INPUT_DOF_INDICES = [6, 7, 8, 9, 10, 11, 12]  # L hip(3) + knee(1) + ankle(3)
 
 
 class SimpleDataset(Dataset):
