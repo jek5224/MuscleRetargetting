@@ -135,11 +135,18 @@ def mirror_tet_file(src_path, dst_path, dry_run=False):
     # Start with a copy, stripping contour/anim data (not valid after mirror)
     STRIP_KEYS = {
         'contours', 'fiber_architecture', 'bounding_planes',
-        'draw_contour_stream', 'contour_to_tet_mapping',
+        'contour_to_tet_mapping',
         'mvc_weights', '_stream_endpoints',
         'stream_contours', 'stream_bounding_planes', 'stream_groups',
     }
     mirrored = {k: v for k, v in data.items() if k not in STRIP_KEYS}
+
+    # Generate draw_contour_stream from waypoints (all levels visible)
+    if data.get("waypoints") is not None:
+        dcs = []
+        for stream in data["waypoints"]:
+            dcs.append([True] * len(stream))
+        mirrored["draw_contour_stream"] = dcs
 
     # Vertices: negate X
     mirrored["vertices"] = mirror_x(data["vertices"])
