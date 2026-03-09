@@ -184,6 +184,12 @@ def mirror_tet_file(src_path, dst_path, dry_run=False):
     if data.get("attach_skeletons") is not None:
         mirrored["attach_skeletons"] = mirror_skeleton_indices(data["attach_skeletons"])
 
+    # Cap attachments: mirror skeleton mesh index (column 3)
+    if data.get("cap_attachments") is not None and len(data["cap_attachments"]) > 0:
+        cap_att = data["cap_attachments"].copy()
+        cap_att[:, 3] += L_TO_R_SKEL_MESH_OFFSET
+        mirrored["cap_attachments"] = cap_att
+
     # Waypoint barycentric coords: mirror skeleton refs and swap tet bary weights 0,1
     if data.get("waypoint_bary_coords") is not None:
         mirrored["waypoint_bary_coords"] = _mirror_bary_coords(data["waypoint_bary_coords"])
