@@ -129,6 +129,102 @@ class DistillNet(nn.Module):
         return {name: decoder(combined) for name, decoder in self.decoders.items()}
 
 
+class DistillNetV1PCA(nn.Module):
+    """V1 architecture with PCA output and batched decoders via bmm.
+
+    All M decoders share the same architecture (input_proj → ResBlocks → output_proj)
+    and identical dimensions (since PCA output is fixed K). Their weights are stored as
+    stacked 3D tensors and executed in parallel with torch.bmm.
+    """
+    def __init__(self, muscle_names, input_dim=4, hidden_dim=512,
+                 num_encoder_res=3, num_decoder_res=2, pca_k=64, num_freqs=6):
+        super().__init__()
+        self.muscle_names = list(muscle_names)
+        self.M = len(self.muscle_names)
+        self.pca_k = pca_k
+        self.hidden_dim = hidden_dim
+
+        # Shared encoder (same as V1)
+        self.encoder = SharedEncoder(
+            input_dim=input_dim, hidden_dim=hidden_dim, latent_dim=hidden_dim,
+            num_res_blocks=num_encoder_res, num_freqs=num_freqs,
+        )
+        pe_dim = self.encoder.pe.output_dim
+        decoder_input = hidden_dim + pe_dim
+
+        # Batched decoder weights: M copies stored as 3D tensors
+        # input_proj: (M, decoder_input, hidden_dim) + bias (M, hidden_dim)
+        self.dec_inp_w = nn.Parameter(torch.empty(self.M, decoder_input, hidden_dim))
+        self.dec_inp_b = nn.Parameter(torch.zeros(self.M, 1, hidden_dim))
+
+        # ResBlocks: 2 linear layers each
+        self.num_decoder_res = num_decoder_res
+        self.dec_res_w1 = nn.ParameterList([
+            nn.Parameter(torch.empty(self.M, hidden_dim, hidden_dim))
+            for _ in range(num_decoder_res)
+        ])
+        self.dec_res_b1 = nn.ParameterList([
+            nn.Parameter(torch.zeros(self.M, 1, hidden_dim))
+            for _ in range(num_decoder_res)
+        ])
+        self.dec_res_w2 = nn.ParameterList([
+            nn.Parameter(torch.empty(self.M, hidden_dim, hidden_dim))
+            for _ in range(num_decoder_res)
+        ])
+        self.dec_res_b2 = nn.ParameterList([
+            nn.Parameter(torch.zeros(self.M, 1, hidden_dim))
+            for _ in range(num_decoder_res)
+        ])
+
+        # output_proj: (M, hidden_dim, pca_k)
+        self.dec_out_w = nn.Parameter(torch.empty(self.M, hidden_dim, pca_k))
+        self.dec_out_b = nn.Parameter(torch.zeros(self.M, 1, pca_k))
+
+        self._init_decoder_weights()
+
+    def _init_decoder_weights(self):
+        """Xavier init each muscle slice independently."""
+        for m in range(self.M):
+            nn.init.xavier_uniform_(self.dec_inp_w[m])
+            nn.init.xavier_uniform_(self.dec_out_w[m])
+            for r in range(self.num_decoder_res):
+                nn.init.xavier_uniform_(self.dec_res_w1[r][m])
+                nn.init.xavier_uniform_(self.dec_res_w2[r][m])
+
+    def forward(self, x):
+        """Forward pass.
+
+        Args:
+            x: (B, input_dim) DOF values
+
+        Returns:
+            dict {muscle_name: (B, pca_k)} PCA coefficients
+        """
+        pe_x = self.encoder.pe(x)
+        latent = self.encoder(x)
+        combined = torch.cat([latent, pe_x], dim=-1)  # (B, decoder_input)
+
+        act = torch.nn.functional.leaky_relu
+
+        # Expand to (M, B, decoder_input) for bmm
+        h = combined.unsqueeze(0).expand(self.M, -1, -1)
+
+        # input_proj: bmm + bias + LeakyReLU
+        h = act(torch.bmm(h, self.dec_inp_w) + self.dec_inp_b, negative_slope=0.2)
+
+        # ResBlocks
+        for r in range(self.num_decoder_res):
+            residual = h
+            h2 = act(torch.bmm(h, self.dec_res_w1[r]) + self.dec_res_b1[r], negative_slope=0.2)
+            h2 = act(torch.bmm(h2, self.dec_res_w2[r]) + self.dec_res_b2[r], negative_slope=0.2)
+            h = residual + h2
+
+        # output_proj
+        out = torch.bmm(h, self.dec_out_w) + self.dec_out_b  # (M, B, pca_k)
+
+        return {name: out[i] for i, name in enumerate(self.muscle_names)}
+
+
 class DistillNetV2(nn.Module):
     """V2: single decoder conditioned on muscle embedding, PCA output, linear baseline + residual."""
     def __init__(self, num_muscles, muscle_name_to_idx, input_dim=20,

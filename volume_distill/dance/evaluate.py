@@ -8,7 +8,7 @@ Usage:
 import numpy as np
 import torch
 
-from volume_distill.model import DistillNet, DistillNetV2
+from volume_distill.model import DistillNet, DistillNetV1PCA, DistillNetV2
 
 
 def load_model(checkpoint_path, device=None):
@@ -25,6 +25,36 @@ def load_model(checkpoint_path, device=None):
     ckpt = torch.load(checkpoint_path, map_location=device, weights_only=False)
 
     version = ckpt.get("model_version", "v1")
+
+    if version == "v1_pca":
+        model = DistillNetV1PCA(
+            muscle_names=ckpt.get("muscle_names", list(ckpt["muscle_name_to_idx"].keys())),
+            input_dim=ckpt.get("input_dim", 4),
+            hidden_dim=ckpt.get("hidden_dim", 512),
+            num_encoder_res=ckpt.get("num_encoder_res", 3),
+            num_decoder_res=ckpt.get("num_decoder_res", 2),
+            pca_k=ckpt.get("pca_k", 64),
+        ).to(device)
+        model.load_state_dict(ckpt["model_state_dict"])
+        model.eval()
+        # Attach PCA data for inference (same convention as V2)
+        model._pca_components = ckpt["pca_components"]
+        model._pca_means = ckpt["pca_means"]
+        model._pca_stds = ckpt.get("pca_stds")
+        model._muscle_name_to_idx = ckpt["muscle_name_to_idx"]
+        metadata = {
+            "muscle_name_to_idx": ckpt["muscle_name_to_idx"],
+            "pca_components": ckpt["pca_components"],
+            "pca_means": ckpt["pca_means"],
+            "pca_stds": ckpt.get("pca_stds"),
+            "model_version": "v1_pca",
+            "rest_positions": ckpt.get("rest_positions"),
+            "r_rest_positions": ckpt.get("r_rest_positions"),
+            "mirror_trained": ckpt.get("mirror_trained", False),
+            "epoch": ckpt.get("epoch", "?"),
+            "val_loss": ckpt.get("val_loss"),
+        }
+        return model, metadata
 
     if version in ("v2", "v3_dof"):
         model = DistillNetV2(
@@ -102,6 +132,7 @@ def predict_frame(model, dofs, rest_positions, device=None):
     ).unsqueeze(0).to(device)
 
     is_v2 = isinstance(model, DistillNetV2)
+    has_pca = hasattr(model, '_pca_components')
 
     with torch.no_grad():
         preds = model(x)
@@ -123,6 +154,22 @@ def predict_frame(model, dofs, rest_positions, device=None):
             if model._pca_stds_dev is not None and name in model._pca_stds_dev:
                 c = c * model._pca_stds_dev[name]
             disp_flat = c @ model._pca_comps_dev[name] + model._pca_means_dev[name]  # (V*3,)
+            disp = disp_flat.reshape(-1, 3)
+            pos = model._rest_pos_dev[name] + disp
+            result[name] = pos.cpu().numpy()
+    elif has_pca:
+        # V1PCA: preds = {name: (1, K)} — PCA reconstruction
+        if not hasattr(model, '_pca_comps_dev'):
+            model._pca_comps_dev = {n: model._pca_components[n].to(device) for n in model._pca_components}
+            model._pca_means_dev = {n: model._pca_means[n].to(device) for n in model._pca_means}
+            model._pca_stds_dev = {n: model._pca_stds[n].to(device) for n in model._pca_stds} if model._pca_stds else None
+            model._rest_pos_dev = {n: (v.to(device) if isinstance(v, torch.Tensor) else torch.tensor(v, dtype=torch.float32, device=device)) for n, v in rest_positions.items()}
+
+        for name, coeffs in preds.items():
+            c = coeffs[0]  # (K,) on device
+            if model._pca_stds_dev is not None and name in model._pca_stds_dev:
+                c = c * model._pca_stds_dev[name]
+            disp_flat = c @ model._pca_comps_dev[name] + model._pca_means_dev[name]
             disp = disp_flat.reshape(-1, 3)
             pos = model._rest_pos_dev[name] + disp
             result[name] = pos.cpu().numpy()

@@ -1,7 +1,7 @@
-"""Train V2 DistillNetV2 on walk.bvh with L+R UpLeg data (mirrored to L-canonical).
+"""Train V1PCA DistillNetV1PCA on walk.bvh with L+R UpLeg data (mirrored to L-canonical).
 
-V2 uses PCA output basis, muscle embedding + single shared decoder, and
-linear baseline + residual.  Same 4-DOF input as V1.
+V1PCA uses PCA output basis with 25 batched decoders (bmm) for parallel execution.
+Same 4-DOF input as V1, V1 encoder architecture (512 hidden, 3 ResBlocks).
 
 L side: used directly. R side: DOFs mirrored (negate hip X), displacements relative to own rest.
 This doubles the training data and produces a network in L-canonical space.
@@ -22,7 +22,7 @@ from sklearn.decomposition import PCA
 
 from core.dartHelper import saveSkeletonInfo, buildFromInfo
 from core.bvhparser import MyBVH
-from volume_distill.model import DistillNetV2
+from volume_distill.model import DistillNetV1PCA
 
 
 # === Paths ===
@@ -39,10 +39,9 @@ BATCH_SIZE = 32
 LR = 1e-3
 WEIGHT_DECAY = 1e-4
 GRAD_CLIP = 1.0
-HIDDEN_DIM = 768
-NUM_ENCODER_RES = 5
-NUM_DECODER_RES = 3
-EMBED_DIM = 64
+HIDDEN_DIM = 512
+NUM_ENCODER_RES = 3
+NUM_DECODER_RES = 2
 PCA_K = 64
 
 # L hip (3 DOFs) + L knee (1 DOF)
@@ -240,14 +239,12 @@ def train():
     loader = DataLoader(ds, batch_size=BATCH_SIZE, shuffle=True, collate_fn=collate_fn)
     print(f"\nTrain: {len(ds)} samples, {num_muscles} muscles, input_dim={input_dim}")
 
-    model = DistillNetV2(
-        num_muscles=num_muscles,
-        muscle_name_to_idx=muscle_name_to_idx,
+    model = DistillNetV1PCA(
+        muscle_names=muscle_names,
         input_dim=input_dim,
         hidden_dim=HIDDEN_DIM,
         num_encoder_res=NUM_ENCODER_RES,
         num_decoder_res=NUM_DECODER_RES,
-        embed_dim=EMBED_DIM,
         pca_k=PCA_K,
     ).to(device)
     total_params = sum(p.numel() for p in model.parameters())
@@ -255,12 +252,12 @@ def train():
 
     optimizer = torch.optim.Adam(model.parameters(), lr=LR, weight_decay=WEIGHT_DECAY)
 
-    # Resume from best.pt if it exists and is V2
+    # Resume from best.pt if it exists and is v1_pca
     start_epoch = 0
-    best_path = os.path.join(CHECKPOINT_DIR, "best_v2.pt")
+    best_path = os.path.join(CHECKPOINT_DIR, "best_v1_pca.pt")
     if os.path.exists(best_path):
         ckpt = torch.load(best_path, map_location=device, weights_only=False)
-        if ckpt.get("model_version") == "v2":
+        if ckpt.get("model_version") == "v1_pca":
             model.load_state_dict(ckpt["model_state_dict"])
             start_epoch = ckpt.get("epoch", 0)
             print(f"Resumed from {best_path} (epoch {start_epoch}, loss {ckpt.get('val_loss', '?'):.2e})")
@@ -269,11 +266,8 @@ def train():
         optimizer, T_0=500, T_mult=2,
     )
 
-    muscle_indices = torch.arange(num_muscles, device=device)
-    idx_to_name = {v: k for k, v in muscle_name_to_idx.items()}
-
     os.makedirs(CHECKPOINT_DIR, exist_ok=True)
-    run_name = "walk_mirror_v2_" + datetime.now().strftime("%Y%m%d_%H%M%S")
+    run_name = "walk_mirror_v1pca_" + datetime.now().strftime("%Y%m%d_%H%M%S")
     writer = SummaryWriter(os.path.join(LOG_DIR, run_name))
     best_loss = float("inf")
 
@@ -289,12 +283,11 @@ def train():
             x = x.to(device)
             targets = {k: v.to(device) for k, v in targets.items()}
 
-            preds = model(x, muscle_indices)
+            preds = model(x)
 
             loss = 0.0
-            for m_idx in range(num_muscles):
-                name = idx_to_name[m_idx]
-                loss += ((preds[m_idx] - targets[name]) ** 2).mean()
+            for name in muscle_names:
+                loss += ((preds[name] - targets[name]) ** 2).mean()
             loss /= num_muscles
 
             optimizer.zero_grad()
@@ -322,26 +315,26 @@ def train():
                 "epoch": epoch,
                 "model_state_dict": model.state_dict(),
                 "val_loss": avg_loss,
-                "model_version": "v2",
+                "model_version": "v1_pca",
                 "mirror_trained": True,
                 "input_dim": input_dim,
                 "hidden_dim": HIDDEN_DIM,
                 "num_encoder_res": NUM_ENCODER_RES,
                 "num_decoder_res": NUM_DECODER_RES,
-                "embed_dim": EMBED_DIM,
                 "pca_k": PCA_K,
                 "num_muscles": num_muscles,
+                "muscle_names": muscle_names,
                 "muscle_name_to_idx": muscle_name_to_idx,
                 "pca_components": pca_components,
                 "pca_means": pca_means,
                 "pca_stds": pca_stds,
                 "rest_positions": rest_positions,
                 "r_rest_positions": r_rest_positions,
-            }, os.path.join(CHECKPOINT_DIR, "best_v2.pt"))
+            }, os.path.join(CHECKPOINT_DIR, "best_v1_pca.pt"))
 
     writer.close()
     print(f"\nDone. Best total loss: {best_loss:.2e}")
-    print(f"Checkpoint: {CHECKPOINT_DIR}/best_v2.pt")
+    print(f"Checkpoint: {CHECKPOINT_DIR}/best_v1_pca.pt")
 
 
 if __name__ == "__main__":

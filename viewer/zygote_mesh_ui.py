@@ -7047,7 +7047,7 @@ def _motion_load_nn_checkpoint(v):
 def _predict_frame_batched(model, l_dofs, r_dofs, rest_positions, r_rest_positions=None, device=None):
     """Batch L+R DOFs into single forward pass. Returns (l_preds, r_preds) dicts.
     Uses L rest for L output and R rest for R output (they differ due to body asymmetry).
-    Supports both V1 (direct displacement) and V2 (PCA reconstruction)."""
+    Supports V1 (direct displacement), V1PCA (batched decoders + PCA), and V2 (PCA reconstruction)."""
     import torch as _torch
     from volume_distill.model import DistillNetV2
     if device is None:
@@ -7059,6 +7059,7 @@ def _predict_frame_batched(model, l_dofs, r_dofs, rest_positions, r_rest_positio
     ).to(device)
 
     is_v2 = isinstance(model, DistillNetV2)
+    has_pca = hasattr(model, '_pca_components')
 
     with _torch.no_grad():
         preds = model(x)
@@ -7082,6 +7083,31 @@ def _predict_frame_batched(model, l_dofs, r_dofs, rest_positions, r_rest_positio
             if isinstance(r_rest, _torch.Tensor):
                 r_rest = r_rest.cpu()
             # Denormalize PCA coefficients
+            l_c = coeffs[0]  # (K,)
+            r_c = coeffs[1]  # (K,)
+            if model._pca_stds_dev is not None and name in model._pca_stds_dev:
+                stds = model._pca_stds_dev[name]
+                l_c = l_c * stds
+                r_c = r_c * stds
+            comps = model._pca_comps_dev[name]
+            means = model._pca_means_dev[name]
+            l_disp = (l_c @ comps + means).reshape(-1, 3).cpu()
+            r_disp = (r_c @ comps + means).reshape(-1, 3).cpu()
+            l_result[name] = (l_rest + l_disp).numpy()
+            r_result[name] = (r_rest + r_disp).numpy()
+    elif has_pca:
+        # V1PCA: preds = {name: (2, K)} — PCA reconstruction
+        if not hasattr(model, '_pca_comps_dev'):
+            model._pca_comps_dev = {n: model._pca_components[n].to(device) for n in model._pca_components}
+            model._pca_means_dev = {n: model._pca_means[n].to(device) for n in model._pca_means}
+            model._pca_stds_dev = {n: model._pca_stds[n].to(device) for n in model._pca_stds} if model._pca_stds else None
+        for name, coeffs in preds.items():
+            l_rest = rest_positions[name]
+            r_rest = r_rest_positions.get(name, l_rest) if r_rest_positions else l_rest
+            if isinstance(l_rest, _torch.Tensor):
+                l_rest = l_rest.cpu()
+            if isinstance(r_rest, _torch.Tensor):
+                r_rest = r_rest.cpu()
             l_c = coeffs[0]  # (K,)
             r_c = coeffs[1]  # (K,)
             if model._pca_stds_dev is not None and name in model._pca_stds_dev:
@@ -7123,8 +7149,8 @@ def _motion_apply_nn_deformation(v, frame):
             # V3 DOF: raw 7 DOFs (hip 3, knee 1, ankle 3)
             dof_indices = [6, 7, 8, 9, 10, 11, 12]
             dofs = v.motion_bvh.mocap_refs[frame, dof_indices].astype(np.float32)  # (7,)
-        elif v._motion_nn_model_version == "v2":
-            # V2: raw 4 DOFs (hip 3 + knee 1), same as V1
+        elif v._motion_nn_model_version in ("v2", "v1_pca"):
+            # V2/V1PCA: raw 4 DOFs (hip 3 + knee 1)
             dof_indices = [6, 7, 8, 9]
             dofs = v.motion_bvh.mocap_refs[frame, dof_indices].astype(np.float32)  # (4,)
         else:
@@ -7152,7 +7178,7 @@ def _motion_apply_nn_deformation(v, frame):
         mirror_active = getattr(v, '_motion_nn_mirror_trained', False)
         if mirror_active:
             v1_input_dim = getattr(v.motion_nn_model, '_input_dim', None)
-            if v1_input_dim == 4 or v._motion_nn_model_version == "v2":
+            if v1_input_dim == 4 or v._motion_nn_model_version in ("v2", "v1_pca"):
                 r_dof_indices = [18, 19, 20, 21]
             elif v1_input_dim == 7:
                 r_dof_indices = [18, 19, 20, 21, 22, 23, 24]
