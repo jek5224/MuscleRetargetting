@@ -7024,6 +7024,14 @@ def _motion_load_nn_checkpoint(v):
             preproc_path = 'data/motion_cache/locomotion/preprocessed.pt'
             data = torch.load(preproc_path, map_location='cpu', weights_only=False)
             rest_positions = data["rest_positions"]
+        # Optimize for inference: fp16 + torch.compile
+        if _nn_device == 'cuda':
+            model = model.half()
+            try:
+                model = _torch.compile(model, mode="reduce-overhead")
+                print(f"[Motion] Model compiled with reduce-overhead mode")
+            except Exception as e:
+                print(f"[Motion] torch.compile not available: {e}")
         v.motion_nn_model = model
         v.motion_nn_rest_positions = rest_positions
         v.motion_nn_checkpoint_path = ckpt_path
@@ -7037,6 +7045,31 @@ def _motion_load_nn_checkpoint(v):
     except Exception as e:
         print(f"[Motion] Failed to load NN checkpoint: {e}")
         v.motion_nn_model = None
+
+
+def _predict_frame_batched(model, l_dofs, r_dofs, rest_positions, device=None):
+    """Batch L+R DOFs into single forward pass. Returns (l_preds, r_preds) dicts."""
+    import torch as _torch
+    if device is None:
+        device = next(model.parameters()).device
+    x = _torch.tensor(
+        np.stack([l_dofs, r_dofs]), dtype=_torch.float32
+    ).to(device)
+    if next(model.parameters()).dtype == _torch.float16:
+        x = x.half()
+    with _torch.no_grad():
+        preds = model(x)  # {name: (2, V*3)}
+    l_result = {}
+    r_result = {}
+    for name, disp_flat in preds.items():
+        rest = rest_positions[name]
+        if isinstance(rest, _torch.Tensor):
+            rest = rest.cpu()
+        l_disp = disp_flat[0].cpu().reshape(-1, 3)
+        r_disp = disp_flat[1].cpu().reshape(-1, 3)
+        l_result[name] = (rest + l_disp).numpy()
+        r_result[name] = (rest + r_disp).numpy()
+    return l_result, r_result
 
 
 def _motion_apply_nn_deformation(v, frame):
@@ -7082,31 +7115,25 @@ def _motion_apply_nn_deformation(v, frame):
                     prev_dofs = cur_dofs
                 dofs = np.concatenate([cur_dofs, cur_dofs - prev_dofs])
 
-        # L-side prediction (direct)
-        predictions = predict_frame(v.motion_nn_model, dofs, v.motion_nn_rest_positions)
-
-        # R-side prediction via mirroring (if mirror-trained)
-        r_predictions = {}
-        if getattr(v, '_motion_nn_mirror_trained', False):
+        # Batched L+R prediction in a single forward pass
+        mirror_active = getattr(v, '_motion_nn_mirror_trained', False)
+        if mirror_active:
             v1_input_dim = getattr(v.motion_nn_model, '_input_dim', None)
             if v1_input_dim == 4:
-                r_dof_indices = [18, 19, 20, 21]  # R hip(3) + knee(1)
+                r_dof_indices = [18, 19, 20, 21]
             elif v1_input_dim == 7:
-                r_dof_indices = [18, 19, 20, 21, 22, 23, 24]  # R hip(3) + knee(1) + ankle(3)
+                r_dof_indices = [18, 19, 20, 21, 22, 23, 24]
             else:
                 r_dof_indices = [18, 19, 20, 21]
             r_dofs = v.motion_bvh.mocap_refs[frame, r_dof_indices].astype(np.float32)
-            # Mirror R DOFs to L-canonical: negate hip X (index 0)
             r_dofs[0] *= -1
-            r_preds = predict_frame(v.motion_nn_model, r_dofs, v.motion_nn_rest_positions)
-            # Mirror output back: negate X, map L_ name → R_ name
-            for lname, local_pos in r_preds.items():
-                rname = "R_" + lname[2:] if lname.startswith("L_") else lname
-                mirrored_pos = local_pos.copy()
-                mirrored_pos[:, 0] *= -1
-                r_predictions[rname] = mirrored_pos
+            predictions, r_preds = _predict_frame_batched(
+                v.motion_nn_model, dofs, r_dofs, v.motion_nn_rest_positions)
+        else:
+            predictions = predict_frame(v.motion_nn_model, dofs, v.motion_nn_rest_positions)
+            r_preds = None
 
-        # Get pelvis world transform (must match the reference bone used in preprocessing)
+        # Get pelvis world transform
         T = v.env.skel.getBodyNode("Saccrum_Coccyx0").getWorldTransform().matrix()
         R = T[:3, :3]
         t = T[:3, 3]
@@ -7129,20 +7156,24 @@ def _motion_apply_nn_deformation(v, frame):
             any_applied = True
 
         # Apply R predictions (mirrored)
-        for mname, local_pos in r_predictions.items():
-            if mname not in v.zygote_muscle_meshes:
-                continue
-            mobj = v.zygote_muscle_meshes[mname]
-            if mobj.tet_vertices is None:
-                continue
-            world_pos = (R @ local_pos.T).T + t
-            if mobj.soft_body is not None:
-                mobj.soft_body.positions = world_pos.astype(np.float64)
-            mobj.tet_vertices = world_pos.astype(np.float32).copy()
-            mobj._update_tet_draw_positions()
-            if hasattr(mobj, 'update_waypoints_fast'):
-                mobj.update_waypoints_fast()
-            any_applied = True
+        if r_preds is not None:
+            for lname, local_pos in r_preds.items():
+                rname = "R_" + lname[2:] if lname.startswith("L_") else lname
+                if rname not in v.zygote_muscle_meshes:
+                    continue
+                mobj = v.zygote_muscle_meshes[rname]
+                if mobj.tet_vertices is None:
+                    continue
+                mirrored_pos = local_pos.copy()
+                mirrored_pos[:, 0] *= -1
+                world_pos = (R @ mirrored_pos.T).T + t
+                if mobj.soft_body is not None:
+                    mobj.soft_body.positions = world_pos.astype(np.float64)
+                mobj.tet_vertices = world_pos.astype(np.float32).copy()
+                mobj._update_tet_draw_positions()
+                if hasattr(mobj, 'update_waypoints_fast'):
+                    mobj.update_waypoints_fast()
+                any_applied = True
 
         return any_applied
     except Exception as e:

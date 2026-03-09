@@ -97,6 +97,8 @@ def predict_frame(model, dofs, rest_positions, device=None):
     x = torch.tensor(
         dofs, dtype=torch.float32,
     ).unsqueeze(0).to(device)
+    if next(model.parameters()).dtype == torch.float16:
+        x = x.half()
 
     is_v2 = isinstance(model, DistillNetV2)
 
