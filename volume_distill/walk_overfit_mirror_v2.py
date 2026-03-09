@@ -1,7 +1,7 @@
 """Train V2 DistillNetV2 on walk.bvh with L+R UpLeg data (mirrored to L-canonical).
 
-V2 uses PCA output basis, temporal consistency loss, 20D derivative features,
-muscle embedding + single shared decoder, and linear baseline + residual.
+V2 uses PCA output basis, muscle embedding + single shared decoder, and
+linear baseline + residual.  Same 4-DOF input as V1.
 
 L side: used directly. R side: DOFs mirrored (negate hip X), displacements relative to own rest.
 This doubles the training data and produces a network in L-canonical space.
@@ -44,7 +44,6 @@ NUM_ENCODER_RES = 5
 NUM_DECODER_RES = 3
 EMBED_DIM = 64
 PCA_K = 64
-TEMPORAL_LOSS_WEIGHT = 0.5
 
 # L hip (3 DOFs) + L knee (1 DOF)
 L_DOF_INDICES = [6, 7, 8, 9]
@@ -64,32 +63,9 @@ def mirror_dofs_r_to_l(dofs):
     return mirrored
 
 
-def build_derivative_features(dofs):
-    """Build 20D features: [q_t, dq_t, ddq_t, q_{t-1}, q_{t-2}] from (N, 4) DOFs.
-
-    Returns (N, 20) feature array.
-    """
-    N = dofs.shape[0]
-    q_t = dofs                                              # (N, 4)
-    q_prev1 = np.zeros_like(dofs)
-    q_prev1[1:] = dofs[:-1]
-    q_prev1[0] = dofs[0]
-    q_prev2 = np.zeros_like(dofs)
-    q_prev2[2:] = dofs[:-2]
-    q_prev2[1] = dofs[0]
-    q_prev2[0] = dofs[0]
-
-    dq = q_t - q_prev1                                     # (N, 4)
-    ddq = q_t - 2 * q_prev1 + q_prev2                      # (N, 4)
-
-    return np.concatenate([q_t, dq, ddq, q_prev1, q_prev2], axis=1)  # (N, 20)
-
-
-class TemporalDataset(Dataset):
-    """Dataset returning frame pairs (t, prev) for temporal consistency loss."""
-    def __init__(self, input_dofs, prev_frame_idx, pca_targets, muscle_names, indices):
+class SimpleDataset(Dataset):
+    def __init__(self, input_dofs, pca_targets, muscle_names, indices):
         self.input_dofs = input_dofs
-        self.prev_frame_idx = prev_frame_idx
         self.pca_targets = pca_targets
         self.muscle_names = muscle_names
         self.indices = indices
@@ -98,24 +74,18 @@ class TemporalDataset(Dataset):
         return len(self.indices)
 
     def __getitem__(self, idx):
-        frame_t = self.indices[idx]
-        frame_prev = self.prev_frame_idx[frame_t]
-        x_t = self.input_dofs[frame_t]
-        x_prev = self.input_dofs[frame_prev]
-        targets_t = {name: self.pca_targets[name][frame_t] for name in self.muscle_names}
-        targets_prev = {name: self.pca_targets[name][frame_prev] for name in self.muscle_names}
-        return x_t, x_prev, targets_t, targets_prev
+        i = self.indices[idx]
+        x = self.input_dofs[i]
+        targets = {name: self.pca_targets[name][i] for name in self.muscle_names}
+        return x, targets
 
 
-def temporal_collate_fn(batch):
-    x_ts, x_prevs, tgt_ts, tgt_prevs = zip(*batch)
-    x_t = torch.stack(x_ts)
-    x_prev = torch.stack(x_prevs)
-    x_combined = torch.cat([x_t, x_prev], dim=0)
-    names = list(tgt_ts[0].keys())
-    targets_t = {name: torch.stack([t[name] for t in tgt_ts]) for name in names}
-    targets_prev = {name: torch.stack([t[name] for t in tgt_prevs]) for name in names}
-    return x_combined, targets_t, targets_prev
+def collate_fn(batch):
+    xs, tds = zip(*batch)
+    x = torch.stack(xs)
+    names = list(tds[0].keys())
+    targets = {name: torch.stack([t[name] for t in tds]) for name in names}
+    return x, targets
 
 
 def load_side(cache_dir, prefix, mocap, ref_R, ref_t, N):
@@ -202,25 +172,16 @@ def preprocess():
             r_rest_positions[mname] = l_rest[mname]
             all_disps[mname] = l_disp[mname]
 
-    # Build 20D derivative features for L and R
+    # Raw 4 DOFs: L direct + R mirrored
     l_dofs = mocap[:, L_DOF_INDICES].astype(np.float32)  # (N, 4)
     r_dofs = mocap[:, R_DOF_INDICES].astype(np.float32)  # (N, 4)
     r_dofs_mirrored = mirror_dofs_r_to_l(r_dofs)
 
-    l_features = build_derivative_features(l_dofs)    # (N, 20)
-    r_features = build_derivative_features(r_dofs_mirrored)  # (N, 20)
     input_dofs = torch.from_numpy(
-        np.concatenate([l_features, r_features], axis=0).astype(np.float32)
-    )  # (2N, 20)
+        np.concatenate([l_dofs, r_dofs_mirrored], axis=0)
+    )  # (2N, 4)
 
     total = input_dofs.shape[0]
-
-    # prev_frame_idx: frame t-1 for temporal loss (boundary → self)
-    prev_frame_idx = torch.arange(total)
-    prev_frame_idx[1:N] = torch.arange(N - 1)       # L side: frame i → frame i-1
-    prev_frame_idx[0] = 0                             # L boundary
-    prev_frame_idx[N + 1:] = torch.arange(N, 2 * N - 1)  # R side: frame i → frame i-1
-    prev_frame_idx[N] = N                             # R boundary
 
     # Compute PCA per muscle
     print("\n--- Computing PCA ---")
@@ -261,7 +222,7 @@ def preprocess():
     print(f"  Input: {input_dofs.shape}")
 
     all_idx = torch.arange(total)
-    return (input_dofs, prev_frame_idx, pca_targets, pca_components, pca_means, pca_stds,
+    return (input_dofs, pca_targets, pca_components, pca_means, pca_stds,
             muscle_names, muscle_name_to_idx, rest_positions, r_rest_positions, all_idx)
 
 
@@ -269,14 +230,14 @@ def train():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Device: {device}")
 
-    (input_dofs, prev_frame_idx, pca_targets, pca_components, pca_means, pca_stds,
+    (input_dofs, pca_targets, pca_components, pca_means, pca_stds,
      muscle_names, muscle_name_to_idx, rest_positions, r_rest_positions, indices) = preprocess()
 
     num_muscles = len(muscle_names)
     input_dim = input_dofs.shape[1]
 
-    ds = TemporalDataset(input_dofs, prev_frame_idx, pca_targets, muscle_names, indices)
-    loader = DataLoader(ds, batch_size=BATCH_SIZE, shuffle=True, collate_fn=temporal_collate_fn)
+    ds = SimpleDataset(input_dofs, pca_targets, muscle_names, indices)
+    loader = DataLoader(ds, batch_size=BATCH_SIZE, shuffle=True, collate_fn=collate_fn)
     print(f"\nTrain: {len(ds)} samples, {num_muscles} muscles, input_dim={input_dim}")
 
     model = DistillNetV2(
@@ -321,61 +282,39 @@ def train():
     for epoch in range(start_epoch + 1, end_epoch + 1):
         t0 = time.time()
         model.train()
-        epoch_recon = 0.0
-        epoch_temporal = 0.0
+        epoch_loss = 0.0
         n_batches = 0
 
-        for x_combined, targets_t, targets_prev in loader:
-            B = targets_t[muscle_names[0]].shape[0]
-            x_combined = x_combined.to(device)
-            targets_t = {k: v.to(device) for k, v in targets_t.items()}
-            targets_prev = {k: v.to(device) for k, v in targets_prev.items()}
+        for x, targets in loader:
+            x = x.to(device)
+            targets = {k: v.to(device) for k, v in targets.items()}
 
-            preds = model(x_combined, muscle_indices)
+            preds = model(x, muscle_indices)
 
-            recon_loss = 0.0
-            temporal_loss = 0.0
+            loss = 0.0
             for m_idx in range(num_muscles):
                 name = idx_to_name[m_idx]
-                pred_combined = preds[m_idx]     # (2B, K)
-                pred_t = pred_combined[:B]
-                pred_prev = pred_combined[B:]
-                gt_t = targets_t[name]
-                gt_prev = targets_prev[name]
-
-                recon_loss += ((pred_t - gt_t) ** 2).mean()
-                pred_delta = pred_t - pred_prev
-                gt_delta = gt_t - gt_prev
-                temporal_loss += ((pred_delta - gt_delta) ** 2).mean()
-
-            recon_loss /= num_muscles
-            temporal_loss /= num_muscles
-            loss = recon_loss + TEMPORAL_LOSS_WEIGHT * temporal_loss
+                loss += ((preds[m_idx] - targets[name]) ** 2).mean()
+            loss /= num_muscles
 
             optimizer.zero_grad()
             loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), GRAD_CLIP)
             optimizer.step()
 
-            epoch_recon += recon_loss.item()
-            epoch_temporal += temporal_loss.item()
+            epoch_loss += loss.item()
             n_batches += 1
 
         scheduler.step()
-        avg_recon = epoch_recon / n_batches
-        avg_temporal = epoch_temporal / n_batches
-        avg_loss = avg_recon + TEMPORAL_LOSS_WEIGHT * avg_temporal
+        avg_loss = epoch_loss / n_batches
         lr = optimizer.param_groups[0]["lr"]
         elapsed = time.time() - t0
 
-        writer.add_scalar("loss/recon", avg_recon, epoch)
-        writer.add_scalar("loss/temporal", avg_temporal, epoch)
-        writer.add_scalar("loss/total", avg_loss, epoch)
+        writer.add_scalar("loss/train", avg_loss, epoch)
         writer.add_scalar("lr", lr, epoch)
 
         if epoch % 100 == 0 or epoch <= start_epoch + 5:
-            print(f"Epoch {epoch:5d}/{end_epoch} | Recon: {avg_recon:.2e} | Temp: {avg_temporal:.2e} | "
-                  f"Total: {avg_loss:.2e} | LR: {lr:.2e} | {elapsed:.1f}s")
+            print(f"Epoch {epoch:5d}/{end_epoch} | MSE: {avg_loss:.2e} | LR: {lr:.2e} | {elapsed:.1f}s")
 
         if avg_loss < best_loss:
             best_loss = avg_loss

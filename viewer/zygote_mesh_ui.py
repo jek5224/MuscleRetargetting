@@ -7124,14 +7124,9 @@ def _motion_apply_nn_deformation(v, frame):
             dof_indices = [6, 7, 8, 9, 10, 11, 12]
             dofs = v.motion_bvh.mocap_refs[frame, dof_indices].astype(np.float32)  # (7,)
         elif v._motion_nn_model_version == "v2":
-            # V2: derivative features [q_t, dq_t, ddq_t, q_{t-1}, q_{t-2}]
+            # V2: raw 4 DOFs (hip 3 + knee 1), same as V1
             dof_indices = [6, 7, 8, 9]
-            q_t = v.motion_bvh.mocap_refs[frame, dof_indices]
-            q_prev1 = v.motion_bvh.mocap_refs[max(0, frame - 1), dof_indices]
-            q_prev2 = v.motion_bvh.mocap_refs[max(0, frame - 2), dof_indices]
-            dq = q_t - q_prev1
-            ddq = q_t - 2 * q_prev1 + q_prev2
-            dofs = np.concatenate([q_t, dq, ddq, q_prev1, q_prev2]).astype(np.float32)  # (20,)
+            dofs = v.motion_bvh.mocap_refs[frame, dof_indices].astype(np.float32)  # (4,)
         else:
             # V1: infer DOF indices from input_dim stored in checkpoint
             v1_input_dim = getattr(v.motion_nn_model, '_input_dim', None)
@@ -7156,29 +7151,15 @@ def _motion_apply_nn_deformation(v, frame):
         # Batched L+R prediction in a single forward pass
         mirror_active = getattr(v, '_motion_nn_mirror_trained', False)
         if mirror_active:
-            if v._motion_nn_model_version == "v2":
-                # V2 mirror: build 20D derivative features for R side
+            v1_input_dim = getattr(v.motion_nn_model, '_input_dim', None)
+            if v1_input_dim == 4 or v._motion_nn_model_version == "v2":
                 r_dof_indices = [18, 19, 20, 21]
-                r_q_t = v.motion_bvh.mocap_refs[frame, r_dof_indices].copy()
-                r_q_t[0] *= -1  # mirror hip X
-                r_q_prev1 = v.motion_bvh.mocap_refs[max(0, frame - 1), r_dof_indices].copy()
-                r_q_prev1[0] *= -1
-                r_q_prev2 = v.motion_bvh.mocap_refs[max(0, frame - 2), r_dof_indices].copy()
-                r_q_prev2[0] *= -1
-                r_dq = r_q_t - r_q_prev1
-                r_ddq = r_q_t - 2 * r_q_prev1 + r_q_prev2
-                r_dofs = np.concatenate([r_q_t, r_dq, r_ddq, r_q_prev1, r_q_prev2]).astype(np.float32)
+            elif v1_input_dim == 7:
+                r_dof_indices = [18, 19, 20, 21, 22, 23, 24]
             else:
-                # V1 mirror: raw DOFs
-                v1_input_dim = getattr(v.motion_nn_model, '_input_dim', None)
-                if v1_input_dim == 4:
-                    r_dof_indices = [18, 19, 20, 21]
-                elif v1_input_dim == 7:
-                    r_dof_indices = [18, 19, 20, 21, 22, 23, 24]
-                else:
-                    r_dof_indices = [18, 19, 20, 21]
-                r_dofs = v.motion_bvh.mocap_refs[frame, r_dof_indices].astype(np.float32)
-                r_dofs[0] *= -1
+                r_dof_indices = [18, 19, 20, 21]
+            r_dofs = v.motion_bvh.mocap_refs[frame, r_dof_indices].astype(np.float32)
+            r_dofs[0] *= -1
             predictions, r_preds = _predict_frame_batched(
                 v.motion_nn_model, dofs, r_dofs, v.motion_nn_rest_positions,
                 r_rest_positions=getattr(v, 'motion_nn_r_rest_positions', None))
