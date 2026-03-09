@@ -6996,13 +6996,15 @@ def _motion_load_nn_checkpoint(v):
     v.motion_nn_rest_positions = None
     v.motion_nn_checkpoint_path = None
     v._motion_nn_model_version = "v1"
-    # Check for per-motion checkpoint first (e.g. walk → dance/checkpoints)
-    # Then fall back to global v3_dof → v2
+    # Check for per-motion checkpoint first: mirror > regular > global
     ckpt_path = None
     if v.motion_bvh is not None and hasattr(v, 'motion_selected_idx'):
         bvh_stem = os.path.splitext(os.path.basename(v.motion_bvh_files[v.motion_selected_idx]))[0]
+        per_motion_mirror = f'volume_distill/{bvh_stem}_mirror_checkpoints/best.pt'
         per_motion = f'volume_distill/{bvh_stem}_checkpoints/best.pt'
-        if os.path.exists(per_motion):
+        if os.path.exists(per_motion_mirror):
+            ckpt_path = per_motion_mirror
+        elif os.path.exists(per_motion):
             ckpt_path = per_motion
     if ckpt_path is None:
         ckpt_path = 'volume_distill/dof_grid_checkpoints/best.pt'
@@ -7028,8 +7030,10 @@ def _motion_load_nn_checkpoint(v):
         v._motion_nn_epoch = metadata.get("epoch", "?")
         v._motion_nn_val_loss = metadata.get("val_loss")
         v._motion_nn_model_version = metadata.get("model_version", "v1")
+        v._motion_nn_mirror_trained = metadata.get("mirror_trained", False)
         print(f"[Motion] Loaded NN checkpoint: {ckpt_path} "
-              f"(epoch {v._motion_nn_epoch}, version={v._motion_nn_model_version})")
+              f"(epoch {v._motion_nn_epoch}, version={v._motion_nn_model_version}"
+              f"{', mirror' if v._motion_nn_mirror_trained else ''})")
     except Exception as e:
         print(f"[Motion] Failed to load NN checkpoint: {e}")
         v.motion_nn_model = None
@@ -7078,28 +7082,68 @@ def _motion_apply_nn_deformation(v, frame):
                     prev_dofs = cur_dofs
                 dofs = np.concatenate([cur_dofs, cur_dofs - prev_dofs])
 
+        # L-side prediction (direct)
         predictions = predict_frame(v.motion_nn_model, dofs, v.motion_nn_rest_positions)
+
+        # R-side prediction via mirroring (if mirror-trained)
+        r_predictions = {}
+        if getattr(v, '_motion_nn_mirror_trained', False):
+            v1_input_dim = getattr(v.motion_nn_model, '_input_dim', None)
+            if v1_input_dim == 4:
+                r_dof_indices = [18, 19, 20, 21]  # R hip(3) + knee(1)
+            elif v1_input_dim == 7:
+                r_dof_indices = [18, 19, 20, 21, 22, 23, 24]  # R hip(3) + knee(1) + ankle(3)
+            else:
+                r_dof_indices = [18, 19, 20, 21]
+            r_dofs = v.motion_bvh.mocap_refs[frame, r_dof_indices].astype(np.float32)
+            # Mirror R DOFs to L-canonical: negate hip X (index 0)
+            r_dofs[0] *= -1
+            r_preds = predict_frame(v.motion_nn_model, r_dofs, v.motion_nn_rest_positions)
+            # Mirror output back: negate X, map L_ name → R_ name
+            for lname, local_pos in r_preds.items():
+                rname = "R_" + lname[2:] if lname.startswith("L_") else lname
+                mirrored_pos = local_pos.copy()
+                mirrored_pos[:, 0] *= -1
+                r_predictions[rname] = mirrored_pos
+
         # Get pelvis world transform (must match the reference bone used in preprocessing)
         T = v.env.skel.getBodyNode("Saccrum_Coccyx0").getWorldTransform().matrix()
         R = T[:3, :3]
         t = T[:3, 3]
         any_applied = False
+
+        # Apply L predictions
         for mname, local_pos in predictions.items():
             if mname not in v.zygote_muscle_meshes:
                 continue
             mobj = v.zygote_muscle_meshes[mname]
             if mobj.tet_vertices is None:
                 continue
-            # Transform pelvis-local → world
             world_pos = (R @ local_pos.T).T + t
             if mobj.soft_body is not None:
                 mobj.soft_body.positions = world_pos.astype(np.float64)
             mobj.tet_vertices = world_pos.astype(np.float32).copy()
             mobj._update_tet_draw_positions()
-            # Fast waypoint update using cached MVC weights
             if hasattr(mobj, 'update_waypoints_fast'):
                 mobj.update_waypoints_fast()
             any_applied = True
+
+        # Apply R predictions (mirrored)
+        for mname, local_pos in r_predictions.items():
+            if mname not in v.zygote_muscle_meshes:
+                continue
+            mobj = v.zygote_muscle_meshes[mname]
+            if mobj.tet_vertices is None:
+                continue
+            world_pos = (R @ local_pos.T).T + t
+            if mobj.soft_body is not None:
+                mobj.soft_body.positions = world_pos.astype(np.float64)
+            mobj.tet_vertices = world_pos.astype(np.float32).copy()
+            mobj._update_tet_draw_positions()
+            if hasattr(mobj, 'update_waypoints_fast'):
+                mobj.update_waypoints_fast()
+            any_applied = True
+
         return any_applied
     except Exception as e:
         print(f"[Motion] NN inference error: {e}")
