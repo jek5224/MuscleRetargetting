@@ -121,6 +121,14 @@ class MyBVH():
                 print(f"[BVH] Auto-remapped {len(changed)} joint names: {changed}")
                 self.bvh_info = remapped
 
+        # Auto-detect BVH unit scale from root offset magnitude.
+        # Hip height ~100 → centimeters (scale 0.01), ~1.0 → meters (scale 1.0)
+        root_name = self.joint_names[0]
+        root_offset_mag = np.linalg.norm(self.joint_offsets[root_name])
+        self._pos_scale = 0.01 if root_offset_mag > 10.0 else 1.0
+        if self._pos_scale != 0.01:
+            print(f"[BVH] Detected meter-scale BVH (root offset magnitude={root_offset_mag:.4f})")
+
         ## Loading Finish
         self.bvh2rot()
 
@@ -146,7 +154,7 @@ class MyBVH():
                 pos_idx = self.joint_names_to_index_in_frames[jn_name] + np.array([xpos, ypos, zpos])
                 rot_idx = self.joint_names_to_index_in_frames[jn_name] + np.array(rots)
                 
-                pos = self.frames_raw[:, pos_idx] * 0.01
+                pos = self.frames_raw[:, pos_idx] * self._pos_scale
                 rot = self.frames_raw[:, rot_idx]
                 
                 ## Using
