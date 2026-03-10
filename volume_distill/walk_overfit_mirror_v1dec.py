@@ -1,7 +1,7 @@
-"""Train V1Dec DistillNetV1Dec on walk.bvh with L+R UpLeg data (mirrored to L-canonical).
+"""Train V1Dec DistillNetV1Dec on walk.bvh with L+R UpLeg+LowLeg data (mirrored to L-canonical).
 
 V1Dec uses batched decoders (bmm) for parallel execution, same raw V×3 displacement
-output as V1. Same 4-DOF input, same V1 encoder (512 hidden, 3 ResBlocks).
+output as V1. 7-DOF input (hip 3 + knee 1 + ankle 3), V1 encoder (512 hidden, 3 ResBlocks).
 
 Usage: python -m volume_distill.walk_overfit_mirror_v1dec
 """
@@ -23,8 +23,14 @@ from volume_distill.model import DistillNetV1Dec
 # === Paths ===
 SKEL_XML = "data/zygote_skel.xml"
 BVH_PATH = "data/motion/walk.bvh"
-L_CACHE_DIR = "data/motion_cache/walk/L_UpLeg"
-R_CACHE_DIR = "data/motion_cache/walk/R_UpLeg"
+L_CACHE_DIRS = [
+    ("data/motion_cache/walk/L_UpLeg", "L"),
+    ("data/motion_cache/walk/L_LowLeg", "L"),
+]
+R_CACHE_DIRS = [
+    ("data/motion_cache/walk/R_UpLeg", "R"),
+    ("data/motion_cache/walk/R_LowLeg", "R"),
+]
 CHECKPOINT_DIR = "volume_distill/walk_mirror_checkpoints"
 LOG_DIR = "volume_distill/walk_mirror_runs"
 
@@ -38,10 +44,10 @@ HIDDEN_DIM = 512
 NUM_ENCODER_RES = 3
 NUM_DECODER_RES = 2
 
-# L hip (3 DOFs) + L knee (1 DOF)
-L_DOF_INDICES = [6, 7, 8, 9]
-# R hip (3 DOFs) + R knee (1 DOF)
-R_DOF_INDICES = [18, 19, 20, 21]
+# L hip (3 DOFs) + L knee (1 DOF) + L ankle (3 DOFs)
+L_DOF_INDICES = [6, 7, 8, 9, 10, 11, 12]
+# R hip (3 DOFs) + R knee (1 DOF) + R ankle (3 DOFs)
+R_DOF_INDICES = [18, 19, 20, 21, 22, 23, 24]
 
 
 def mirror_dofs_r_to_l(dofs):
@@ -114,7 +120,7 @@ def load_side(cache_dir, prefix, mocap, ref_R, ref_t, N):
 
 
 def preprocess():
-    print("=== Preprocessing walk.bvh (L+R mirrored, V1Dec) ===")
+    print("=== Preprocessing walk.bvh (L+R mirrored, UpLeg+LowLeg, V1Dec) ===")
     skel_info, root_name, bvh_info, *_ = saveSkeletonInfo(SKEL_XML)
     skel = buildFromInfo(skel_info, root_name)
     bvh = MyBVH(BVH_PATH, bvh_info, skel)
@@ -131,26 +137,44 @@ def preprocess():
         ref_R[i] = T[:3, :3]
         ref_t[i] = T[:3, 3]
 
-    print("\n--- L side ---")
-    l_names, l_rest, l_disp = load_side(L_CACHE_DIR, "L", mocap, ref_R, ref_t, N)
+    # Load all L-side regions
+    l_rest_all = {}
+    l_disp_all = {}
+    l_names_all = []
+    for cache_dir, prefix in L_CACHE_DIRS:
+        print(f"\n--- L side: {cache_dir} ---")
+        names, rest, disp = load_side(cache_dir, prefix, mocap, ref_R, ref_t, N)
+        for n in names:
+            if n not in l_rest_all:
+                l_names_all.append(n)
+                l_rest_all[n] = rest[n]
+                l_disp_all[n] = disp[n]
 
-    print("\n--- R side (mirrored to L-canonical) ---")
-    r_names, r_rest, r_disp = load_side(R_CACHE_DIR, "R", mocap, ref_R, ref_t, N)
+    # Load all R-side regions
+    r_rest_all = {}
+    r_disp_all = {}
+    for cache_dir, prefix in R_CACHE_DIRS:
+        print(f"\n--- R side (mirrored to L-canonical): {cache_dir} ---")
+        names, rest, disp = load_side(cache_dir, prefix, mocap, ref_R, ref_t, N)
+        for n in names:
+            if n not in r_rest_all:
+                r_rest_all[n] = rest[n]
+                r_disp_all[n] = disp[n]
 
-    muscle_names = l_names
+    muscle_names = l_names_all
     rest_positions = {}
     r_rest_positions = {}
     displacements = {}
 
     for mname in muscle_names:
-        if mname in l_disp and mname in r_disp:
-            rest_positions[mname] = l_rest[mname]
-            r_rest_positions[mname] = r_rest[mname]
-            displacements[mname] = torch.cat([l_disp[mname], r_disp[mname]], dim=0)
-        elif mname in l_disp:
-            rest_positions[mname] = l_rest[mname]
-            r_rest_positions[mname] = l_rest[mname]
-            displacements[mname] = l_disp[mname]
+        if mname in l_disp_all and mname in r_disp_all:
+            rest_positions[mname] = l_rest_all[mname]
+            r_rest_positions[mname] = r_rest_all[mname]
+            displacements[mname] = torch.cat([l_disp_all[mname], r_disp_all[mname]], dim=0)
+        elif mname in l_disp_all:
+            rest_positions[mname] = l_rest_all[mname]
+            r_rest_positions[mname] = l_rest_all[mname]
+            displacements[mname] = l_disp_all[mname]
 
     l_dofs = mocap[:, L_DOF_INDICES].astype(np.float32)
     r_dofs = mocap[:, R_DOF_INDICES].astype(np.float32)
@@ -193,12 +217,17 @@ def train():
     best_path = os.path.join(CHECKPOINT_DIR, "best_v1dec.pt")
     if os.path.exists(best_path):
         ckpt = torch.load(best_path, map_location=device, weights_only=False)
-        if ckpt.get("model_version") == "v1dec":
+        if (ckpt.get("model_version") == "v1dec"
+                and ckpt.get("input_dim") == input_dim
+                and set(ckpt.get("muscle_vertex_counts", {}).keys()) == set(muscle_names)):
             model.load_state_dict(ckpt["model_state_dict"])
             start_epoch = ckpt.get("epoch", 0)
             best_loss = ckpt.get("val_loss", float("inf"))
             run_name = ckpt.get("run_name")
             print(f"Resumed from {best_path} (epoch {start_epoch}, loss {best_loss:.2e})")
+        else:
+            print(f"Checkpoint incompatible (input_dim={ckpt.get('input_dim')} vs {input_dim}, "
+                  f"muscles={len(ckpt.get('muscle_vertex_counts', {}))} vs {len(muscle_names)}), training from scratch")
 
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
         optimizer, T_max=EPOCHS, eta_min=1e-6,

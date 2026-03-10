@@ -7171,14 +7171,17 @@ def _motion_apply_nn_deformation(v, frame):
     try:
         from volume_distill.dance.evaluate import predict_frame
 
+        v1_input_dim = getattr(v.motion_nn_model, '_input_dim', None)
         if v._motion_nn_model_version == "v3_dof":
             dof_indices = [6, 7, 8, 9, 10, 11, 12]
             dofs = v.motion_bvh.mocap_refs[frame, dof_indices].astype(np.float32)
         elif v._motion_nn_model_version in ("v2", "v1_pca", "v1dec"):
-            dof_indices = [6, 7, 8, 9]
+            if v1_input_dim is not None and v1_input_dim == 7:
+                dof_indices = [6, 7, 8, 9, 10, 11, 12]
+            else:
+                dof_indices = [6, 7, 8, 9]
             dofs = v.motion_bvh.mocap_refs[frame, dof_indices].astype(np.float32)
         else:
-            v1_input_dim = getattr(v.motion_nn_model, '_input_dim', None)
             if v1_input_dim is not None and v1_input_dim == 7:
                 dof_indices = [6, 7, 8, 9, 10, 11, 12]
                 dofs = v.motion_bvh.mocap_refs[frame, dof_indices].astype(np.float32)
@@ -7197,10 +7200,7 @@ def _motion_apply_nn_deformation(v, frame):
         # Batched L+R prediction in a single forward pass
         mirror_active = getattr(v, '_motion_nn_mirror_trained', False)
         if mirror_active:
-            v1_input_dim = getattr(v.motion_nn_model, '_input_dim', None)
-            if v1_input_dim == 4 or v._motion_nn_model_version in ("v2", "v1_pca", "v1dec"):
-                r_dof_indices = [18, 19, 20, 21]
-            elif v1_input_dim == 7:
+            if v1_input_dim is not None and v1_input_dim == 7:
                 r_dof_indices = [18, 19, 20, 21, 22, 23, 24]
             else:
                 r_dof_indices = [18, 19, 20, 21]
