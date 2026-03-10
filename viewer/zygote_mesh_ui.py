@@ -69,7 +69,18 @@ def draw_zygote_muscle_ui(v):
                 if obj.vertex_colors is not None:
                     obj.vertex_colors[:, 3] = obj.transparency
 
+        changed, v.is_draw_zygote_muscle_tet = imgui.checkbox("##draw_tet", v.is_draw_zygote_muscle_tet)
+        if changed:
+            for name, obj in v.zygote_muscle_meshes.items():
+                obj.is_draw_tet_mesh = v.is_draw_zygote_muscle_tet
+        imgui.same_line()
         _, v.zygote_tet_transparency = imgui.slider_float("Tet Mesh Transparency", v.zygote_tet_transparency, 0.0, 1.0)
+
+        changed, v.is_draw_zygote_muscle_fibers = imgui.checkbox("##draw_fibers", v.is_draw_zygote_muscle_fibers)
+        if changed:
+            for name, obj in v.zygote_muscle_meshes.items():
+                obj.is_draw_fiber_architecture = v.is_draw_zygote_muscle_fibers
+        imgui.same_line()
         _, v.zygote_fiber_transparency = imgui.slider_float("Fiber Transparency", v.zygote_fiber_transparency, 0.0, 1.0)
 
         # Muscle Add/Remove UI
