@@ -7328,9 +7328,9 @@ def _motion_update_nn_error_heatmap(v, frame):
         alpha = mobj.contour_mesh_transparency
         n = len(t)
         colors = np.empty((n, 4), dtype=np.float32)
-        colors[:, 0] = t        # R
-        colors[:, 1] = 0.0      # G
-        colors[:, 2] = 1.0 - t  # B
+        colors[:, 0] = 1.0          # R (always 1)
+        colors[:, 1] = 1.0 - t      # G (white→red)
+        colors[:, 2] = 1.0 - t      # B (white→red)
         colors[:, 3] = alpha     # A
         # Map vertex colors to surface triangle vertices
         vidx = getattr(mobj, '_tet_surface_vidx', None)
