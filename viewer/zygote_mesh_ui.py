@@ -1860,7 +1860,12 @@ def _draw_motion_browser_ui(v):
             _motion_apply_pose(v, new_frame)
             if v.motion_use_nn and v.motion_nn_model is not None:
                 _motion_apply_nn_deformation(v, new_frame)
+                if v.motion_nn_error_heatmap:
+                    _motion_update_nn_error_heatmap(v, new_frame)
+                else:
+                    _motion_clear_heatmap(v)
             else:
+                _motion_clear_heatmap(v)
                 _motion_apply_cached_deformation(v, new_frame)
 
         # Transport buttons
@@ -1983,6 +1988,8 @@ def _draw_motion_browser_ui(v):
                 _motion_load_nn_checkpoint(v)
                 if v.motion_nn_model is not None and v.motion_use_nn:
                     _motion_apply_nn_deformation(v, v.motion_current_frame)
+            _, v.motion_nn_error_heatmap = imgui.checkbox(
+                "Error Heatmap (NN vs GT)##motion_heatmap", v.motion_nn_error_heatmap)
 
 
 def _render_inspect_2d_windows(v):
@@ -6982,7 +6989,12 @@ def _motion_step_forward(v, count=1, run_tet=False):
         _motion_apply_pose(v, target_frame)
         if v.motion_use_nn and v.motion_nn_model is not None:
             _motion_apply_nn_deformation(v, target_frame)
+            if v.motion_nn_error_heatmap:
+                _motion_update_nn_error_heatmap(v, target_frame)
+            else:
+                _motion_clear_heatmap(v)
         else:
+            _motion_clear_heatmap(v)
             _motion_apply_cached_deformation(v, target_frame)
 
 
@@ -7259,6 +7271,73 @@ def _motion_apply_nn_deformation(v, frame):
     except Exception as e:
         print(f"[Motion] NN inference error: {e}")
         return False
+
+
+def _motion_clear_heatmap(v):
+    """Remove heatmap colors from all muscles."""
+    for mobj in v.zygote_muscle_meshes.values():
+        if getattr(mobj, '_tet_surface_colors', None) is not None:
+            mobj._tet_surface_colors = None
+
+
+def _motion_update_nn_error_heatmap(v, frame):
+    """Color muscles by per-vertex ||NN - GT|| error. Requires cache data for the frame."""
+    if not v.motion_deform_cache:
+        return
+    # Compute fix_offset / fix_rot for cache positions (same logic as _motion_apply_cached_deformation)
+    fix_offset = np.zeros(3, dtype=np.float32)
+    if hasattr(v, 'motion_root_translation') and v.motion_root_translation is not None:
+        bvh_trans = v.motion_bvh.mocap_refs[frame, 3:6]
+        rest_trans = v.motion_root_translation
+        if v.motion_fix_x:
+            fix_offset[0] = rest_trans[0] - bvh_trans[0]
+        if v.motion_fix_y:
+            fix_offset[1] = rest_trans[1] - bvh_trans[1]
+        if v.motion_fix_z:
+            fix_offset[2] = rest_trans[2] - bvh_trans[2]
+    fix_rot_mat = None
+    fix_dest = None
+    pivot = None
+    if v.motion_fix_rotation and hasattr(v, 'motion_root_rotation') and v.motion_root_rotation is not None:
+        root_bn = v.env.skel.getJoint(0).getChildBodyNode()
+        T_cur = root_bn.getWorldTransform().matrix()
+        T_rest = np.eye(4)
+        T_rest[:3, :3] = v.motion_root_rotation
+        T_rest[:3, 3] = v.motion_root_translation if v.motion_root_translation is not None else T_cur[:3, 3]
+        R_delta = T_rest[:3, :3] @ T_cur[:3, :3].T
+        fix_rot_mat = R_delta.astype(np.float32)
+        pivot = T_cur[:3, 3].astype(np.float32)
+        fix_dest = T_rest[:3, 3].astype(np.float32)
+
+    HEATMAP_SCALE = 0.01  # 1 cm = full red
+    for mname, mobj in v.zygote_muscle_meshes.items():
+        if mobj.tet_vertices is None:
+            continue
+        if mname not in v.motion_deform_cache or frame not in v.motion_deform_cache[mname]:
+            mobj._tet_surface_colors = None
+            continue
+        cached = v.motion_deform_cache[mname][frame]
+        if fix_rot_mat is not None:
+            gt_pos = (fix_rot_mat @ (cached['positions'] - pivot).T).T + fix_dest
+        else:
+            gt_pos = cached['positions'] + fix_offset
+        gt_pos = gt_pos.astype(np.float32)
+        nn_pos = mobj.tet_vertices
+        error = np.linalg.norm(nn_pos - gt_pos, axis=1)  # per vertex
+        t = np.clip(error / HEATMAP_SCALE, 0.0, 1.0)
+        alpha = mobj.contour_mesh_transparency
+        n = len(t)
+        colors = np.empty((n, 4), dtype=np.float32)
+        colors[:, 0] = t        # R
+        colors[:, 1] = 0.0      # G
+        colors[:, 2] = 1.0 - t  # B
+        colors[:, 3] = alpha     # A
+        # Map vertex colors to surface triangle vertices
+        vidx = getattr(mobj, '_tet_surface_vidx', None)
+        if vidx is not None:
+            mobj._tet_surface_colors = colors[vidx]
+        else:
+            mobj._tet_surface_colors = None
 
 
 def _motion_save_current_frame(v):
@@ -7730,9 +7809,12 @@ def _motion_reset(v):
         if hasattr(v, '_skel_dofs'):
             v._skel_dofs = np.zeros(v.env.skel.getNumDofs())
     # Reset soft bodies — use NN, cached deformation, or reset from skeleton
+    _motion_clear_heatmap(v)
     nn_applied = False
     if v.motion_use_nn and v.motion_nn_model is not None:
         nn_applied = _motion_apply_nn_deformation(v, 0)
+        if nn_applied and v.motion_nn_error_heatmap:
+            _motion_update_nn_error_heatmap(v, 0)
     if not nn_applied and not _motion_apply_cached_deformation(v, 0):
         for mname, mobj in v.zygote_muscle_meshes.items():
             if mobj.soft_body is not None:

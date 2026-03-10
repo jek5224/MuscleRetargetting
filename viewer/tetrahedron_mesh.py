@@ -1017,10 +1017,17 @@ class TetrahedronMeshMixin:
 
         # Draw surface faces
         if self._tet_surface_verts is not None and len(self._tet_surface_verts) > 0:
-            glColor4f(color[0], color[1], color[2], alpha)
+            heatmap_colors = getattr(self, '_tet_surface_colors', None)
+            if heatmap_colors is not None and len(heatmap_colors) == len(self._tet_surface_verts):
+                glEnableClientState(GL_COLOR_ARRAY)
+                glColorPointer(4, GL_FLOAT, 0, heatmap_colors)
+            else:
+                glColor4f(color[0], color[1], color[2], alpha)
             glVertexPointer(3, GL_FLOAT, 0, self._tet_surface_verts)
             glNormalPointer(GL_FLOAT, 0, self._tet_surface_normals)
             glDrawArrays(GL_TRIANGLES, 0, len(self._tet_surface_verts))
+            if heatmap_colors is not None and len(heatmap_colors) == len(self._tet_surface_verts):
+                glDisableClientState(GL_COLOR_ARRAY)
 
         # Draw cap faces in green
         if draw_caps and self._tet_cap_verts is not None and len(self._tet_cap_verts) > 0:
