@@ -7045,9 +7045,159 @@ def _motion_load_nn_checkpoint(v):
         print(f"[Motion] Loaded NN checkpoint: {ckpt_path} "
               f"(epoch {v._motion_nn_epoch}, version={v._motion_nn_model_version}"
               f"{', mirror' if v._motion_nn_mirror_trained else ''})")
+        # Pre-compute all frames
+        _motion_precompute_nn(v)
     except Exception as e:
         print(f"[Motion] Failed to load NN checkpoint: {e}")
         v.motion_nn_model = None
+
+
+def _motion_precompute_nn(v):
+    """Pre-compute NN predictions for all frames and cache as numpy arrays.
+
+    Stores v._motion_nn_cache: list of (l_preds, r_preds) per frame,
+    where each is {muscle_name: ndarray[V, 3]} in pelvis-local space.
+    """
+    if v.motion_nn_model is None or v.motion_bvh is None:
+        return
+    import time as _time
+    import torch as _torch
+    t0 = _time.time()
+    model = v.motion_nn_model
+    N = v.motion_total_frames
+    mirror = getattr(v, '_motion_nn_mirror_trained', False)
+    ver = v._motion_nn_model_version
+
+    # Determine DOF indices
+    v1_input_dim = getattr(model, '_input_dim', None)
+    if ver == "v3_dof":
+        l_dof_indices = [6, 7, 8, 9, 10, 11, 12]
+        r_dof_indices = [18, 19, 20, 21, 22, 23, 24]
+    elif ver in ("v2", "v1_pca", "v1dec") or v1_input_dim == 4:
+        l_dof_indices = [6, 7, 8, 9]
+        r_dof_indices = [18, 19, 20, 21]
+    elif v1_input_dim == 7:
+        l_dof_indices = [6, 7, 8, 9, 10, 11, 12]
+        r_dof_indices = [18, 19, 20, 21, 22, 23, 24]
+    else:
+        # Legacy 8-dim — can't batch easily, skip precompute
+        v._motion_nn_cache = None
+        print("[Motion] Skipping precompute for legacy input format")
+        return
+
+    mocap = v.motion_bvh.mocap_refs
+    l_all = mocap[:, l_dof_indices].astype(np.float32)  # (N, D)
+
+    if mirror:
+        r_all = mocap[:, r_dof_indices].astype(np.float32)  # (N, D)
+        r_all[:, 0] *= -1  # mirror hip X
+        # Interleave L and R: (2N, D), then run model once
+        all_dofs = np.empty((2 * N, l_all.shape[1]), dtype=np.float32)
+        all_dofs[0::2] = l_all
+        all_dofs[1::2] = r_all
+    else:
+        all_dofs = l_all
+
+    device = next(model.parameters()).device
+    x = _torch.tensor(all_dofs, dtype=_torch.float32).to(device)
+
+    from volume_distill.model import DistillNetV2
+    is_v2 = isinstance(model, DistillNetV2)
+    has_pca = hasattr(model, '_pca_components')
+
+    with _torch.no_grad():
+        if is_v2:
+            preds = model(x)
+        else:
+            preds = model(x)
+
+    # Reconstruct positions per frame
+    rest = v.motion_nn_rest_positions
+    r_rest = getattr(v, 'motion_nn_r_rest_positions', None) or rest
+
+    # Cache PCA data on device if needed
+    if (is_v2 or has_pca) and not hasattr(model, '_pca_comps_dev'):
+        model._pca_comps_dev = {n: model._pca_components[n].to(device) for n in model._pca_components}
+        model._pca_means_dev = {n: model._pca_means[n].to(device) for n in model._pca_means}
+        model._pca_stds_dev = {n: model._pca_stds[n].to(device) for n in model._pca_stds} if model._pca_stds else None
+
+    cache = [None] * N
+
+    if is_v2:
+        # preds = {muscle_idx: (2N or N, K)}
+        idx_to_name = {v_: k for k, v_ in model._muscle_name_to_idx.items()}
+        for f in range(N):
+            l_result = {}
+            r_result = {}
+            for m_idx, coeffs in preds.items():
+                name = idx_to_name[m_idx]
+                if mirror:
+                    l_c = coeffs[f * 2]
+                    r_c = coeffs[f * 2 + 1]
+                else:
+                    l_c = coeffs[f]
+                if model._pca_stds_dev is not None and name in model._pca_stds_dev:
+                    stds = model._pca_stds_dev[name]
+                    l_c = l_c * stds
+                    if mirror:
+                        r_c = r_c * stds
+                comps = model._pca_comps_dev[name]
+                means = model._pca_means_dev[name]
+                l_disp = (l_c @ comps + means).reshape(-1, 3).cpu().numpy()
+                l_r = rest[name].numpy() if isinstance(rest[name], _torch.Tensor) else rest[name]
+                l_result[name] = l_r + l_disp
+                if mirror:
+                    r_disp = (r_c @ comps + means).reshape(-1, 3).cpu().numpy()
+                    r_r = r_rest[name].numpy() if isinstance(r_rest[name], _torch.Tensor) else r_rest[name]
+                    r_result[name] = r_r + r_disp
+            cache[f] = (l_result, r_result if mirror else None)
+    elif has_pca:
+        # V1PCA: preds = {name: (2N or N, K)}
+        for f in range(N):
+            l_result = {}
+            r_result = {}
+            for name, coeffs in preds.items():
+                if mirror:
+                    l_c = coeffs[f * 2]
+                    r_c = coeffs[f * 2 + 1]
+                else:
+                    l_c = coeffs[f]
+                if model._pca_stds_dev is not None and name in model._pca_stds_dev:
+                    stds = model._pca_stds_dev[name]
+                    l_c = l_c * stds
+                    if mirror:
+                        r_c = r_c * stds
+                comps = model._pca_comps_dev[name]
+                means = model._pca_means_dev[name]
+                l_disp = (l_c @ comps + means).reshape(-1, 3).cpu().numpy()
+                l_r = rest[name].numpy() if isinstance(rest[name], _torch.Tensor) else rest[name]
+                l_result[name] = l_r + l_disp
+                if mirror:
+                    r_disp = (r_c @ comps + means).reshape(-1, 3).cpu().numpy()
+                    r_r = r_rest[name].numpy() if isinstance(r_rest[name], _torch.Tensor) else r_rest[name]
+                    r_result[name] = r_r + r_disp
+            cache[f] = (l_result, r_result if mirror else None)
+    else:
+        # V1/V1Dec: preds = {name: (2N or N, V*3)}
+        for f in range(N):
+            l_result = {}
+            r_result = {}
+            for name, disp_flat in preds.items():
+                l_r = rest[name].numpy() if isinstance(rest[name], _torch.Tensor) else rest[name]
+                if mirror:
+                    l_disp = disp_flat[f * 2].cpu().reshape(-1, 3).numpy()
+                    r_disp = disp_flat[f * 2 + 1].cpu().reshape(-1, 3).numpy()
+                    r_r = r_rest[name].numpy() if isinstance(r_rest[name], _torch.Tensor) else r_rest[name]
+                    l_result[name] = l_r + l_disp
+                    r_result[name] = r_r + r_disp
+                else:
+                    l_disp = disp_flat[f].cpu().reshape(-1, 3).numpy()
+                    l_result[name] = l_r + l_disp
+            cache[f] = (l_result, r_result if mirror else None)
+
+    v._motion_nn_cache = cache
+    elapsed = _time.time() - t0
+    print(f"[Motion] Pre-computed {N} frames in {elapsed*1000:.0f}ms")
 
 
 def _predict_frame_batched(model, l_dofs, r_dofs, rest_positions, r_rest_positions=None, device=None):
@@ -7149,55 +7299,53 @@ def _motion_apply_nn_deformation(v, frame):
     if v.motion_bvh is None or frame >= v.motion_total_frames:
         return False
     try:
-        from volume_distill.dance.evaluate import predict_frame
-
-        if v._motion_nn_model_version == "v3_dof":
-            # V3 DOF: raw 7 DOFs (hip 3, knee 1, ankle 3)
-            dof_indices = [6, 7, 8, 9, 10, 11, 12]
-            dofs = v.motion_bvh.mocap_refs[frame, dof_indices].astype(np.float32)  # (7,)
-        elif v._motion_nn_model_version in ("v2", "v1_pca", "v1dec"):
-            # V2/V1PCA/V1Dec: raw 4 DOFs (hip 3 + knee 1)
-            dof_indices = [6, 7, 8, 9]
-            dofs = v.motion_bvh.mocap_refs[frame, dof_indices].astype(np.float32)  # (4,)
+        # Use pre-computed cache if available
+        nn_cache = getattr(v, '_motion_nn_cache', None)
+        if nn_cache is not None and frame < len(nn_cache):
+            predictions, r_preds = nn_cache[frame]
         else:
-            # V1: infer DOF indices from input_dim stored in checkpoint
-            v1_input_dim = getattr(v.motion_nn_model, '_input_dim', None)
-            if v1_input_dim is not None and v1_input_dim == 7:
-                # 7 DOFs: hip(3) + knee(1) + ankle(3)
+            from volume_distill.dance.evaluate import predict_frame
+
+            if v._motion_nn_model_version == "v3_dof":
                 dof_indices = [6, 7, 8, 9, 10, 11, 12]
                 dofs = v.motion_bvh.mocap_refs[frame, dof_indices].astype(np.float32)
-            elif v1_input_dim is not None and v1_input_dim == 4:
-                # 4 DOFs: hip(3) + knee(1)
+            elif v._motion_nn_model_version in ("v2", "v1_pca", "v1dec"):
                 dof_indices = [6, 7, 8, 9]
                 dofs = v.motion_bvh.mocap_refs[frame, dof_indices].astype(np.float32)
             else:
-                # Legacy 8-dim: DOFs + velocity
-                dof_indices = [6, 7, 8, 9]
-                cur_dofs = v.motion_bvh.mocap_refs[frame, dof_indices].astype(np.float32)
-                if frame > 0:
-                    prev_dofs = v.motion_bvh.mocap_refs[frame - 1, dof_indices].astype(np.float32)
+                v1_input_dim = getattr(v.motion_nn_model, '_input_dim', None)
+                if v1_input_dim is not None and v1_input_dim == 7:
+                    dof_indices = [6, 7, 8, 9, 10, 11, 12]
+                    dofs = v.motion_bvh.mocap_refs[frame, dof_indices].astype(np.float32)
+                elif v1_input_dim is not None and v1_input_dim == 4:
+                    dof_indices = [6, 7, 8, 9]
+                    dofs = v.motion_bvh.mocap_refs[frame, dof_indices].astype(np.float32)
                 else:
-                    prev_dofs = cur_dofs
-                dofs = np.concatenate([cur_dofs, cur_dofs - prev_dofs])
+                    dof_indices = [6, 7, 8, 9]
+                    cur_dofs = v.motion_bvh.mocap_refs[frame, dof_indices].astype(np.float32)
+                    if frame > 0:
+                        prev_dofs = v.motion_bvh.mocap_refs[frame - 1, dof_indices].astype(np.float32)
+                    else:
+                        prev_dofs = cur_dofs
+                    dofs = np.concatenate([cur_dofs, cur_dofs - prev_dofs])
 
-        # Batched L+R prediction in a single forward pass
-        mirror_active = getattr(v, '_motion_nn_mirror_trained', False)
-        if mirror_active:
-            v1_input_dim = getattr(v.motion_nn_model, '_input_dim', None)
-            if v1_input_dim == 4 or v._motion_nn_model_version in ("v2", "v1_pca", "v1dec"):
-                r_dof_indices = [18, 19, 20, 21]
-            elif v1_input_dim == 7:
-                r_dof_indices = [18, 19, 20, 21, 22, 23, 24]
+            mirror_active = getattr(v, '_motion_nn_mirror_trained', False)
+            if mirror_active:
+                v1_input_dim = getattr(v.motion_nn_model, '_input_dim', None)
+                if v1_input_dim == 4 or v._motion_nn_model_version in ("v2", "v1_pca", "v1dec"):
+                    r_dof_indices = [18, 19, 20, 21]
+                elif v1_input_dim == 7:
+                    r_dof_indices = [18, 19, 20, 21, 22, 23, 24]
+                else:
+                    r_dof_indices = [18, 19, 20, 21]
+                r_dofs = v.motion_bvh.mocap_refs[frame, r_dof_indices].astype(np.float32)
+                r_dofs[0] *= -1
+                predictions, r_preds = _predict_frame_batched(
+                    v.motion_nn_model, dofs, r_dofs, v.motion_nn_rest_positions,
+                    r_rest_positions=getattr(v, 'motion_nn_r_rest_positions', None))
             else:
-                r_dof_indices = [18, 19, 20, 21]
-            r_dofs = v.motion_bvh.mocap_refs[frame, r_dof_indices].astype(np.float32)
-            r_dofs[0] *= -1
-            predictions, r_preds = _predict_frame_batched(
-                v.motion_nn_model, dofs, r_dofs, v.motion_nn_rest_positions,
-                r_rest_positions=getattr(v, 'motion_nn_r_rest_positions', None))
-        else:
-            predictions = predict_frame(v.motion_nn_model, dofs, v.motion_nn_rest_positions)
-            r_preds = None
+                predictions = predict_frame(v.motion_nn_model, dofs, v.motion_nn_rest_positions)
+                r_preds = None
 
         # Get pelvis world transform
         T = v.env.skel.getBodyNode("Saccrum_Coccyx0").getWorldTransform().matrix()
