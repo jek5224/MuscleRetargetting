@@ -7700,6 +7700,7 @@ def _motion_apply_cached_deformation(v, frame):
                                 else:
                                     stream[fi] = stream[fi] + fix_offset
                     mobj.waypoints = wp
+                    mobj._fiber_draw_dirty = True
             any_applied = True
     return any_applied
 
