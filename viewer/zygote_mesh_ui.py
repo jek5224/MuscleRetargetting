@@ -7152,26 +7152,20 @@ def _motion_apply_nn_deformation(v, frame):
         from volume_distill.dance.evaluate import predict_frame
 
         if v._motion_nn_model_version == "v3_dof":
-            # V3 DOF: raw 7 DOFs (hip 3, knee 1, ankle 3)
             dof_indices = [6, 7, 8, 9, 10, 11, 12]
-            dofs = v.motion_bvh.mocap_refs[frame, dof_indices].astype(np.float32)  # (7,)
+            dofs = v.motion_bvh.mocap_refs[frame, dof_indices].astype(np.float32)
         elif v._motion_nn_model_version in ("v2", "v1_pca", "v1dec"):
-            # V2/V1PCA/V1Dec: raw 4 DOFs (hip 3 + knee 1)
             dof_indices = [6, 7, 8, 9]
-            dofs = v.motion_bvh.mocap_refs[frame, dof_indices].astype(np.float32)  # (4,)
+            dofs = v.motion_bvh.mocap_refs[frame, dof_indices].astype(np.float32)
         else:
-            # V1: infer DOF indices from input_dim stored in checkpoint
             v1_input_dim = getattr(v.motion_nn_model, '_input_dim', None)
             if v1_input_dim is not None and v1_input_dim == 7:
-                # 7 DOFs: hip(3) + knee(1) + ankle(3)
                 dof_indices = [6, 7, 8, 9, 10, 11, 12]
                 dofs = v.motion_bvh.mocap_refs[frame, dof_indices].astype(np.float32)
             elif v1_input_dim is not None and v1_input_dim == 4:
-                # 4 DOFs: hip(3) + knee(1)
                 dof_indices = [6, 7, 8, 9]
                 dofs = v.motion_bvh.mocap_refs[frame, dof_indices].astype(np.float32)
             else:
-                # Legacy 8-dim: DOFs + velocity
                 dof_indices = [6, 7, 8, 9]
                 cur_dofs = v.motion_bvh.mocap_refs[frame, dof_indices].astype(np.float32)
                 if frame > 0:
@@ -7216,7 +7210,7 @@ def _motion_apply_nn_deformation(v, frame):
             if mobj.soft_body is not None:
                 mobj.soft_body.positions = world_pos.astype(np.float64)
             mobj.tet_vertices = world_pos.astype(np.float32).copy()
-            mobj._update_tet_draw_positions()
+            mobj._update_tet_draw_positions(skip_normals=True)
             if hasattr(mobj, 'update_waypoints_fast'):
                 mobj.update_waypoints_fast()
             any_applied = True
@@ -7236,9 +7230,14 @@ def _motion_apply_nn_deformation(v, frame):
                 if mobj.soft_body is not None:
                     mobj.soft_body.positions = world_pos.astype(np.float64)
                 mobj.tet_vertices = world_pos.astype(np.float32).copy()
-                mobj._update_tet_draw_positions()
+                _tu0 = _time.perf_counter()
+                mobj._update_tet_draw_positions(skip_normals=True)
+                _tu1 = _time.perf_counter()
                 if hasattr(mobj, 'update_waypoints_fast'):
                     mobj.update_waypoints_fast()
+                _tu2 = _time.perf_counter()
+                _t_update += _tu1 - _tu0
+                _t_waypoints += _tu2 - _tu1
                 any_applied = True
 
         return any_applied

@@ -860,9 +860,10 @@ class TetrahedronMeshMixin:
         self._tet_edge_verts = np.array(edge_verts, dtype=np.float32) if edge_verts else None
         self._tet_edge_vidx = np.array(edge_vidx, dtype=np.int32) if edge_vidx else None
 
-    def _update_tet_draw_positions(self):
+    def _update_tet_draw_positions(self, skip_normals=False):
         """Fast path: update draw arrays from tet_vertices using precomputed index arrays.
-        Call this instead of _prepare_tet_draw_arrays when only positions changed (not topology)."""
+        Call this instead of _prepare_tet_draw_arrays when only positions changed (not topology).
+        If skip_normals=True, only update vertex positions (normals stay from previous frame)."""
         if not hasattr(self, '_tet_surface_vidx') or self._tet_surface_vidx is None:
             self._prepare_tet_draw_arrays()
             return
@@ -870,23 +871,25 @@ class TetrahedronMeshMixin:
         # Update surface verts + normals
         if self._tet_surface_vidx is not None and self._tet_surface_verts is not None:
             self._tet_surface_verts[:] = verts[self._tet_surface_vidx]
-            # Recompute normals vectorized: every 3 verts is a triangle
-            v = self._tet_surface_verts.reshape(-1, 3, 3)
-            normals = np.cross(v[:, 1] - v[:, 0], v[:, 2] - v[:, 0])
-            norms = np.linalg.norm(normals, axis=1, keepdims=True)
-            norms[norms < 1e-10] = 1.0
-            normals /= norms
-            # Broadcast per-face normal to 3 vertices
-            self._tet_surface_normals[:] = np.repeat(normals, 3, axis=0)
+            if not skip_normals:
+                # Recompute normals vectorized: every 3 verts is a triangle
+                v = self._tet_surface_verts.reshape(-1, 3, 3)
+                normals = np.cross(v[:, 1] - v[:, 0], v[:, 2] - v[:, 0])
+                norms = np.linalg.norm(normals, axis=1, keepdims=True)
+                norms[norms < 1e-10] = 1.0
+                normals /= norms
+                # Broadcast per-face normal to 3 vertices
+                self._tet_surface_normals[:] = np.repeat(normals, 3, axis=0)
         # Update cap verts + normals
         if self._tet_cap_vidx is not None and self._tet_cap_verts is not None:
             self._tet_cap_verts[:] = verts[self._tet_cap_vidx]
-            v = self._tet_cap_verts.reshape(-1, 3, 3)
-            normals = np.cross(v[:, 1] - v[:, 0], v[:, 2] - v[:, 0])
-            norms = np.linalg.norm(normals, axis=1, keepdims=True)
-            norms[norms < 1e-10] = 1.0
-            normals /= norms
-            self._tet_cap_normals[:] = np.repeat(normals, 3, axis=0)
+            if not skip_normals:
+                v = self._tet_cap_verts.reshape(-1, 3, 3)
+                normals = np.cross(v[:, 1] - v[:, 0], v[:, 2] - v[:, 0])
+                norms = np.linalg.norm(normals, axis=1, keepdims=True)
+                norms[norms < 1e-10] = 1.0
+                normals /= norms
+                self._tet_cap_normals[:] = np.repeat(normals, 3, axis=0)
         # Update edge verts
         if self._tet_edge_vidx is not None and self._tet_edge_verts is not None:
             self._tet_edge_verts[:] = verts[self._tet_edge_vidx]
