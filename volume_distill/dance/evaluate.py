@@ -8,7 +8,7 @@ Usage:
 import numpy as np
 import torch
 
-from volume_distill.model import DistillNet, DistillNetV1PCA, DistillNetV2
+from volume_distill.model import DistillNet, DistillNetV1Dec, DistillNetV1PCA, DistillNetV2
 
 
 def load_model(checkpoint_path, device=None):
@@ -25,6 +25,29 @@ def load_model(checkpoint_path, device=None):
     ckpt = torch.load(checkpoint_path, map_location=device, weights_only=False)
 
     version = ckpt.get("model_version", "v1")
+
+    if version == "v1dec":
+        muscle_vertex_counts = ckpt["muscle_vertex_counts"]
+        input_dim = ckpt.get("input_dim", 4)
+        model = DistillNetV1Dec(
+            muscle_vertex_counts, input_dim=input_dim,
+            hidden_dim=ckpt.get("hidden_dim", 512),
+            num_encoder_res=ckpt.get("num_encoder_res", 3),
+            num_decoder_res=ckpt.get("num_decoder_res", 2),
+        ).to(device)
+        model.load_state_dict(ckpt["model_state_dict"])
+        model.eval()
+        model._input_dim = input_dim
+        metadata = {
+            "muscle_vertex_counts": muscle_vertex_counts,
+            "model_version": "v1dec",
+            "rest_positions": ckpt.get("rest_positions"),
+            "r_rest_positions": ckpt.get("r_rest_positions"),
+            "mirror_trained": ckpt.get("mirror_trained", False),
+            "epoch": ckpt.get("epoch", "?"),
+            "val_loss": ckpt.get("val_loss"),
+        }
+        return model, metadata
 
     if version == "v1_pca":
         model = DistillNetV1PCA(

@@ -129,6 +129,98 @@ class DistillNet(nn.Module):
         return {name: decoder(combined) for name, decoder in self.decoders.items()}
 
 
+class DistillNetV1Dec(nn.Module):
+    """V1 architecture with batched decoders via bmm, outputting raw V×3 displacements.
+
+    Each muscle has a different vertex count, so output_proj is padded to max(V×3).
+    Results are sliced back to actual size per muscle.
+    Hidden layers are uniform across all muscles, enabling bmm.
+    """
+    def __init__(self, muscle_vertex_counts, input_dim=4, hidden_dim=512,
+                 num_encoder_res=3, num_decoder_res=2, num_freqs=6):
+        super().__init__()
+        self.muscle_names = list(muscle_vertex_counts.keys())
+        self.muscle_vertex_counts = muscle_vertex_counts
+        self.M = len(self.muscle_names)
+        self.hidden_dim = hidden_dim
+
+        # Per-muscle output sizes
+        self.output_dims = [muscle_vertex_counts[n] * 3 for n in self.muscle_names]
+        self.max_output_dim = max(self.output_dims)
+
+        # Shared encoder (same as V1)
+        self.encoder = SharedEncoder(
+            input_dim=input_dim, hidden_dim=hidden_dim, latent_dim=hidden_dim,
+            num_res_blocks=num_encoder_res, num_freqs=num_freqs,
+        )
+        pe_dim = self.encoder.pe.output_dim
+        decoder_input = hidden_dim + pe_dim
+
+        # Batched decoder weights
+        self.dec_inp_w = nn.Parameter(torch.empty(self.M, decoder_input, hidden_dim))
+        self.dec_inp_b = nn.Parameter(torch.zeros(self.M, 1, hidden_dim))
+
+        self.num_decoder_res = num_decoder_res
+        self.dec_res_w1 = nn.ParameterList([
+            nn.Parameter(torch.empty(self.M, hidden_dim, hidden_dim))
+            for _ in range(num_decoder_res)
+        ])
+        self.dec_res_b1 = nn.ParameterList([
+            nn.Parameter(torch.zeros(self.M, 1, hidden_dim))
+            for _ in range(num_decoder_res)
+        ])
+        self.dec_res_w2 = nn.ParameterList([
+            nn.Parameter(torch.empty(self.M, hidden_dim, hidden_dim))
+            for _ in range(num_decoder_res)
+        ])
+        self.dec_res_b2 = nn.ParameterList([
+            nn.Parameter(torch.zeros(self.M, 1, hidden_dim))
+            for _ in range(num_decoder_res)
+        ])
+
+        # Output proj: padded to max_output_dim
+        self.dec_out_w = nn.Parameter(torch.empty(self.M, hidden_dim, self.max_output_dim))
+        self.dec_out_b = nn.Parameter(torch.zeros(self.M, 1, self.max_output_dim))
+
+        self._init_decoder_weights()
+
+    def _init_decoder_weights(self):
+        """Xavier init each muscle slice independently."""
+        for m in range(self.M):
+            nn.init.xavier_uniform_(self.dec_inp_w[m])
+            # Only init the valid output columns, zero the padding
+            nn.init.xavier_uniform_(self.dec_out_w[m, :, :self.output_dims[m]])
+            if self.output_dims[m] < self.max_output_dim:
+                self.dec_out_w.data[m, :, self.output_dims[m]:] = 0
+                self.dec_out_b.data[m, :, self.output_dims[m]:] = 0
+            for r in range(self.num_decoder_res):
+                nn.init.xavier_uniform_(self.dec_res_w1[r][m])
+                nn.init.xavier_uniform_(self.dec_res_w2[r][m])
+
+    def forward(self, x):
+        pe_x = self.encoder.pe(x)
+        latent = self.encoder(x)
+        combined = torch.cat([latent, pe_x], dim=-1)  # (B, decoder_input)
+
+        act = torch.nn.functional.leaky_relu
+
+        h = combined.unsqueeze(0).expand(self.M, -1, -1)  # (M, B, decoder_input)
+
+        h = act(torch.bmm(h, self.dec_inp_w) + self.dec_inp_b, negative_slope=0.2)
+
+        for r in range(self.num_decoder_res):
+            residual = h
+            h2 = act(torch.bmm(h, self.dec_res_w1[r]) + self.dec_res_b1[r], negative_slope=0.2)
+            h2 = act(torch.bmm(h2, self.dec_res_w2[r]) + self.dec_res_b2[r], negative_slope=0.2)
+            h = residual + h2
+
+        out = torch.bmm(h, self.dec_out_w) + self.dec_out_b  # (M, B, max_output_dim)
+
+        # Slice each muscle to its actual output size
+        return {name: out[i, :, :self.output_dims[i]]
+                for i, name in enumerate(self.muscle_names)}
+
+
 class DistillNetV1PCA(nn.Module):
     """V1 architecture with PCA output and batched decoders via bmm.
 

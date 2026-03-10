@@ -7000,10 +7000,16 @@ def _motion_load_nn_checkpoint(v):
     ckpt_path = None
     if v.motion_bvh is not None and hasattr(v, 'motion_selected_idx'):
         bvh_stem = os.path.splitext(os.path.basename(v.motion_bvh_files[v.motion_selected_idx]))[0]
+        per_motion_v1dec = f'volume_distill/{bvh_stem}_mirror_checkpoints/best_v1dec.pt'
+        per_motion_v1_pca = f'volume_distill/{bvh_stem}_mirror_checkpoints/best_v1_pca.pt'
         per_motion_mirror_v2 = f'volume_distill/{bvh_stem}_mirror_checkpoints/best_v2.pt'
         per_motion_mirror = f'volume_distill/{bvh_stem}_mirror_checkpoints/best.pt'
         per_motion = f'volume_distill/{bvh_stem}_checkpoints/best.pt'
-        if os.path.exists(per_motion_mirror_v2):
+        if os.path.exists(per_motion_v1dec):
+            ckpt_path = per_motion_v1dec
+        elif os.path.exists(per_motion_v1_pca):
+            ckpt_path = per_motion_v1_pca
+        elif os.path.exists(per_motion_mirror_v2):
             ckpt_path = per_motion_mirror_v2
         elif os.path.exists(per_motion_mirror):
             ckpt_path = per_motion_mirror
@@ -7149,8 +7155,8 @@ def _motion_apply_nn_deformation(v, frame):
             # V3 DOF: raw 7 DOFs (hip 3, knee 1, ankle 3)
             dof_indices = [6, 7, 8, 9, 10, 11, 12]
             dofs = v.motion_bvh.mocap_refs[frame, dof_indices].astype(np.float32)  # (7,)
-        elif v._motion_nn_model_version in ("v2", "v1_pca"):
-            # V2/V1PCA: raw 4 DOFs (hip 3 + knee 1)
+        elif v._motion_nn_model_version in ("v2", "v1_pca", "v1dec"):
+            # V2/V1PCA/V1Dec: raw 4 DOFs (hip 3 + knee 1)
             dof_indices = [6, 7, 8, 9]
             dofs = v.motion_bvh.mocap_refs[frame, dof_indices].astype(np.float32)  # (4,)
         else:
@@ -7178,7 +7184,7 @@ def _motion_apply_nn_deformation(v, frame):
         mirror_active = getattr(v, '_motion_nn_mirror_trained', False)
         if mirror_active:
             v1_input_dim = getattr(v.motion_nn_model, '_input_dim', None)
-            if v1_input_dim == 4 or v._motion_nn_model_version in ("v2", "v1_pca"):
+            if v1_input_dim == 4 or v._motion_nn_model_version in ("v2", "v1_pca", "v1dec"):
                 r_dof_indices = [18, 19, 20, 21]
             elif v1_input_dim == 7:
                 r_dof_indices = [18, 19, 20, 21, 22, 23, 24]
