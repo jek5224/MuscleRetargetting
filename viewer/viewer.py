@@ -405,8 +405,8 @@ class GLFWApp():
         self.zygote_tet_transparency = DEFAULT_OBJ_TRANSPARENCY
         self.zygote_fiber_transparency = 1.0
         self.is_draw_zygote_muscle = True
-        self.is_draw_zygote_muscle_tet = False
-        self.is_draw_zygote_muscle_fibers = False
+        self.is_draw_zygote_muscle_tet = True
+        self.is_draw_zygote_muscle_fibers = True
         self.is_draw_zygote_muscle_open_edges = False
         self.is_draw_one_zygote_muscle = False
         self.zygote_muscle_dir = 'Zygote_Meshes_251229/Muscle/'
