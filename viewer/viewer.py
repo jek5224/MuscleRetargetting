@@ -89,6 +89,139 @@ light_pos = [    np.array([1.0, 0.0, 0.0, 0.0], dtype=np.float32),
                 np.array([-1.0, 0.0, 0.0, 0.0], dtype=np.float32),
                 np.array([0.0, 3.0, 0.0, 0.0], dtype=np.float32)]
 
+def _draw_tet_meshes_batched(app):
+    """Batch all visible tet mesh surfaces into minimal GL draw calls."""
+    surface_arrays = []
+    normal_arrays = []
+    color_arrays = []
+    cap_arrays = []
+    cap_normal_arrays = []
+    cap_color_arrays = []
+    edge_muscles = []
+
+    for name, obj in app.zygote_muscle_meshes.items():
+        viper_only = obj.viper_sim is not None and obj.viper_only_mode
+        if viper_only:
+            continue
+        if not (obj.is_draw_tet_mesh or getattr(obj, '_tet_anim_active', False)):
+            continue
+
+        # Skip phase 0 (tet not visible yet)
+        if getattr(obj, '_tet_anim_active', False) and obj._tet_anim_phase == 0:
+            continue
+
+        # Ensure arrays are prepared
+        if not hasattr(obj, '_tet_surface_verts') or obj._tet_surface_verts is None:
+            if not hasattr(obj, 'tet_vertices') or obj.tet_vertices is None:
+                continue
+            obj._prepare_tet_draw_arrays()
+
+        # Determine alpha
+        if not getattr(obj, '_tet_anim_active', False):
+            alpha = app.zygote_tet_transparency
+        else:
+            alpha = obj.contour_mesh_transparency
+            if obj._tet_anim_phase == 1:
+                alpha = getattr(obj, '_tet_anim_tet_alpha', alpha)
+
+        color = obj.contour_mesh_color
+
+        # Surface faces
+        if obj._tet_surface_verts is not None and len(obj._tet_surface_verts) > 0:
+            surface_arrays.append(obj._tet_surface_verts)
+            normal_arrays.append(obj._tet_surface_normals)
+
+            heatmap_colors = getattr(obj, '_tet_surface_colors', None)
+            if heatmap_colors is not None and len(heatmap_colors) == len(obj._tet_surface_verts):
+                color_arrays.append(heatmap_colors)
+            else:
+                n = len(obj._tet_surface_verts)
+                flat = np.empty((n, 4), dtype=np.float32)
+                flat[:, 0] = color[0]
+                flat[:, 1] = color[1]
+                flat[:, 2] = color[2]
+                flat[:, 3] = alpha
+                color_arrays.append(flat)
+
+        # Cap faces
+        if obj._tet_cap_verts is not None and len(obj._tet_cap_verts) > 0:
+            cap_arrays.append(obj._tet_cap_verts)
+            cap_normal_arrays.append(obj._tet_cap_normals)
+            n = len(obj._tet_cap_verts)
+            cap_col = np.empty((n, 4), dtype=np.float32)
+            cap_col[:, 0] = 0.2
+            cap_col[:, 1] = 0.6
+            cap_col[:, 2] = 0.2
+            cap_col[:, 3] = alpha
+            cap_color_arrays.append(cap_col)
+
+        # Edges (rare, keep per-muscle)
+        if obj.is_draw_tet_edges:
+            edge_muscles.append(obj)
+
+    # Batched surface draw
+    if surface_arrays:
+        all_verts = np.concatenate(surface_arrays)
+        all_normals = np.concatenate(normal_arrays)
+        all_colors = np.concatenate(color_arrays)
+
+        glPushMatrix()
+        glEnable(GL_LIGHTING)
+        glEnable(GL_COLOR_MATERIAL)
+        glColorMaterial(GL_FRONT_AND_BACK, GL_AMBIENT_AND_DIFFUSE)
+        glEnableClientState(GL_VERTEX_ARRAY)
+        glEnableClientState(GL_NORMAL_ARRAY)
+        glEnableClientState(GL_COLOR_ARRAY)
+
+        glVertexPointer(3, GL_FLOAT, 0, all_verts)
+        glNormalPointer(GL_FLOAT, 0, all_normals)
+        glColorPointer(4, GL_FLOAT, 0, all_colors)
+        glDrawArrays(GL_TRIANGLES, 0, len(all_verts))
+
+        glDisableClientState(GL_COLOR_ARRAY)
+        glDisableClientState(GL_NORMAL_ARRAY)
+        glDisableClientState(GL_VERTEX_ARRAY)
+        glPopMatrix()
+
+    # Batched cap draw
+    if cap_arrays:
+        all_cap_verts = np.concatenate(cap_arrays)
+        all_cap_normals = np.concatenate(cap_normal_arrays)
+        all_cap_colors = np.concatenate(cap_color_arrays)
+
+        glPushMatrix()
+        glEnable(GL_LIGHTING)
+        glEnable(GL_COLOR_MATERIAL)
+        glColorMaterial(GL_FRONT_AND_BACK, GL_AMBIENT_AND_DIFFUSE)
+        glEnableClientState(GL_VERTEX_ARRAY)
+        glEnableClientState(GL_NORMAL_ARRAY)
+        glEnableClientState(GL_COLOR_ARRAY)
+
+        glVertexPointer(3, GL_FLOAT, 0, all_cap_verts)
+        glNormalPointer(GL_FLOAT, 0, all_cap_normals)
+        glColorPointer(4, GL_FLOAT, 0, all_cap_colors)
+        glDrawArrays(GL_TRIANGLES, 0, len(all_cap_verts))
+
+        glDisableClientState(GL_COLOR_ARRAY)
+        glDisableClientState(GL_NORMAL_ARRAY)
+        glDisableClientState(GL_VERTEX_ARRAY)
+        glPopMatrix()
+
+    # Edge drawing fallback (per-muscle, rarely enabled)
+    for obj in edge_muscles:
+        if obj._tet_edge_verts is not None and len(obj._tet_edge_verts) > 0:
+            glPushMatrix()
+            glDisable(GL_LIGHTING)
+            glEnableClientState(GL_VERTEX_ARRAY)
+            glColor4f(0.5, 0.5, 0.5, 0.3)
+            glLineWidth(1.0)
+            glVertexPointer(3, GL_FLOAT, 0, obj._tet_edge_verts)
+            glDrawArrays(GL_LINES, 0, len(obj._tet_edge_verts))
+            glDisableClientState(GL_VERTEX_ARRAY)
+            glEnable(GL_LIGHTING)
+            glPopMatrix()
+
+
 def initGL():
     glClearColor(1.0, 1.0, 1.0, 1.0)
     # glClearColor(0.0, 0.0, 0.0, 1.0)
@@ -708,12 +841,7 @@ class GLFWApp():
                 obj.draw_fiber_architecture()
 
         # Draw tet mesh (before contour mesh so contour mesh fades on top during animation)
-        for name, obj in self.zygote_muscle_meshes.items():
-            viper_only = obj.viper_sim is not None and obj.viper_only_mode
-            if not viper_only and (obj.is_draw_tet_mesh or getattr(obj, '_tet_anim_active', False)):
-                if not getattr(obj, '_tet_anim_active', False):
-                    obj.contour_mesh_transparency = self.zygote_tet_transparency
-                obj.draw_tetrahedron_mesh(draw_tets=obj.is_draw_tet_edges)
+        _draw_tet_meshes_batched(self)
 
         # Draw contour mesh (after fibers and tet so it fades cleanly on top)
         for name, obj in self.zygote_muscle_meshes.items():
