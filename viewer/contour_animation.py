@@ -1388,6 +1388,7 @@ class ContourAnimationMixin:
             [[np.array(wp).copy() for wp in level] for level in stream]
             for stream in self._fiber_anim_waypoints
         ]
+        self._fiber_draw_dirty = True
 
         # Set contours/BPs to selected data (same as what build_fibers used)
         src = getattr(self, '_selected_stream_contours', None) or \
@@ -2094,6 +2095,7 @@ class ContourAnimationMixin:
         self._fiber_anim_waypoints = state.get('_fiber_anim_waypoints')
         self._fiber_anim_stream_endpoints = state.get('_fiber_anim_stream_endpoints')
         self.waypoints = state.get('waypoints')
+        self._fiber_draw_dirty = True
         self._stream_endpoints = state.get('_stream_endpoints')
         if state.get('fiber_architecture') is not None:
             self.fiber_architecture = state['fiber_architecture']

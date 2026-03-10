@@ -695,6 +695,7 @@ class TetrahedronMeshMixin:
             # Load waypoints
             if 'waypoints' in data and data['waypoints'] is not None:
                 self.waypoints = data['waypoints']
+                self._fiber_draw_dirty = True
                 self.waypoints_from_tet_sim = True
                 print(f"  Loaded {len(self.waypoints)} waypoint streams")
 

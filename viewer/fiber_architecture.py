@@ -1853,90 +1853,88 @@ class FiberArchitectureMixin:
 
         return muscle_contour, result
 
+    def _rebuild_fiber_draw_arrays(self):
+        """Rebuild cached GL arrays for fiber/waypoint drawing (vectorized)."""
+        if not hasattr(self, 'waypoints') or not self.waypoints:
+            self._fiber_draw_pts = None
+            self._fiber_draw_lines = None
+            return
+
+        # Collect all visible waypoint arrays
+        all_pts = []
+        line_pairs = []
+        for stream_idx, waypoint_group in enumerate(self.waypoints):
+            if self.draw_contour_stream is not None and stream_idx < len(self.draw_contour_stream) and self.draw_contour_stream[stream_idx]:
+                for level_idx, wps in enumerate(waypoint_group):
+                    arr = np.asarray(wps, dtype=np.float32)
+                    if arr.ndim != 2 or arr.shape[1] != 3 or len(arr) == 0:
+                        continue
+                    # Filter non-finite
+                    valid = np.all(np.isfinite(arr), axis=1)
+                    arr = arr[valid]
+                    if len(arr) > 0:
+                        all_pts.append(arr)
+                    # Fiber lines: connect this level to next
+                    if level_idx + 1 < len(waypoint_group):
+                        nxt = np.asarray(waypoint_group[level_idx + 1], dtype=np.float32)
+                        if nxt.ndim == 2 and nxt.shape[1] == 3:
+                            n = min(len(arr), len(nxt))
+                            if n > 0:
+                                c = arr[:n]
+                                nx = nxt[:n]
+                                valid_both = np.all(np.isfinite(c), axis=1) & np.all(np.isfinite(nx), axis=1)
+                                c = c[valid_both]
+                                nx = nx[valid_both]
+                                if len(c) > 0:
+                                    # Interleave: [c0, n0, c1, n1, ...]
+                                    pairs = np.empty((len(c) * 2, 3), dtype=np.float32)
+                                    pairs[0::2] = c
+                                    pairs[1::2] = nx
+                                    line_pairs.append(pairs)
+
+        self._fiber_draw_pts = np.concatenate(all_pts, dtype=np.float32) if all_pts else None
+        self._fiber_draw_lines = np.concatenate(line_pairs, dtype=np.float32) if line_pairs else None
+
+    def invalidate_fiber_draw_cache(self):
+        """Mark fiber draw arrays as needing rebuild."""
+        self._fiber_draw_dirty = True
+
     def draw_fiber_architecture(self):
         """Draw fiber architecture visualization."""
         if self.fiber_architecture is None:
             return
 
-        # Get inspector highlight state
-        highlight_stream = getattr(self, 'inspector_highlight_stream', None)
-        highlight_level = getattr(self, 'inspector_highlight_level', None)
-
         # Get fiber transparency (default to 1.0 if not set)
         alpha = getattr(self, 'fiber_transparency', 1.0)
+
+        # Animation growth progress — fall back to slow path for partial growth
+        level_prog = getattr(self, '_fiber_anim_level_progress', None)
+        highlight_stream = getattr(self, 'inspector_highlight_stream', None)
+        if level_prog is not None or highlight_stream is not None:
+            self._draw_fiber_architecture_slow(alpha, level_prog, highlight_stream)
+            return
+
+        # Rebuild cached arrays if dirty
+        if getattr(self, '_fiber_draw_dirty', True):
+            self._rebuild_fiber_draw_arrays()
+            self._fiber_draw_dirty = False
 
         glDisable(GL_LIGHTING)
         glEnableClientState(GL_VERTEX_ARRAY)
 
-        # Animation growth progress (None = no animation, draw everything)
-        level_prog = getattr(self, '_fiber_anim_level_progress', None)
-
-        # Collect waypoints by highlight status
-        normal_pts = []
-        highlight_pts = []
-
-        def _wp_valid(w):
-            """Check waypoint is finite and not extreme."""
-            return np.all(np.isfinite(w))
-
-        for stream_idx, waypoint_group in enumerate(self.waypoints):
-            if self.draw_contour_stream is not None and stream_idx < len(self.draw_contour_stream) and self.draw_contour_stream[stream_idx]:
-                for level_idx, waypoints in enumerate(waypoint_group):
-                    # Skip waypoints beyond current growth progress
-                    if level_prog is not None and level_idx > level_prog:
-                        continue
-                    is_highlighted = (highlight_stream == stream_idx and highlight_level == level_idx)
-                    for fi, wp in enumerate(waypoints):
-                        if not _wp_valid(wp):
-                            continue
-                        if is_highlighted:
-                            highlight_pts.append(wp)
-                        else:
-                            normal_pts.append(wp)
-
-        # Draw normal waypoints (orange-yellow, larger than fiber lines)
-        if len(normal_pts) > 0:
+        # Draw waypoints (orange)
+        if self._fiber_draw_pts is not None and len(self._fiber_draw_pts) > 0:
             glPointSize(5)
             glColor4f(1.0, 0.6, 0.0, alpha)
-            pts = np.array(normal_pts, dtype=np.float32)
-            glVertexPointer(3, GL_FLOAT, 0, pts)
-            glDrawArrays(GL_POINTS, 0, len(pts))
+            glVertexPointer(3, GL_FLOAT, 0, self._fiber_draw_pts)
+            glDrawArrays(GL_POINTS, 0, len(self._fiber_draw_pts))
 
-        # Draw highlighted waypoints (blue)
-        if len(highlight_pts) > 0:
-            glPointSize(7)
-            glColor4f(0.3, 0.6, 0.9, alpha)
-            pts = np.array(highlight_pts, dtype=np.float32)
-            glVertexPointer(3, GL_FLOAT, 0, pts)
-            glDrawArrays(GL_POINTS, 0, len(pts))
-
-        # Collect fiber lines
-        fiber_lines = []
-        glLineWidth(2)
-        glColor4f(0.75, 0, 0, alpha)  # Dark red
-        for stream_idx, waypoint_group in enumerate(self.waypoints):
-            if self.draw_contour_stream is not None and stream_idx < len(self.draw_contour_stream) and self.draw_contour_stream[stream_idx]:
-                for contour_idx in range(len(waypoint_group) - 1):
-                    # Growth clipping
-                    if level_prog is not None and contour_idx >= level_prog:
-                        continue
-                    wps_curr = waypoint_group[contour_idx]
-                    wps_next = waypoint_group[contour_idx + 1]
-                    is_partial = level_prog is not None and contour_idx + 1 > level_prog
-                    frac = level_prog - contour_idx if is_partial else 1.0
-                    for fi in range(min(len(wps_curr), len(wps_next))):
-                        if not _wp_valid(wps_curr[fi]) or not _wp_valid(wps_next[fi]):
-                            continue
-                        if is_partial:
-                            interp = wps_curr[fi] + (wps_next[fi] - wps_curr[fi]) * frac
-                            fiber_lines.extend([wps_curr[fi], interp])
-                        else:
-                            fiber_lines.extend([wps_curr[fi], wps_next[fi]])
-
-        if len(fiber_lines) > 0:
-            lines = np.array(fiber_lines, dtype=np.float32)
-            glVertexPointer(3, GL_FLOAT, 0, lines)
-            glDrawArrays(GL_LINES, 0, len(lines))
+        # Draw fiber lines (dark red)
+        if self._fiber_draw_lines is not None and len(self._fiber_draw_lines) > 0:
+            glLineWidth(2)
+            glColor4f(0.75, 0, 0, alpha)
+            glVertexPointer(3, GL_FLOAT, 0, self._fiber_draw_lines)
+            glDrawArrays(GL_LINES, 0, len(self._fiber_draw_lines))
 
         # Draw test fiber (blue) if available
         test_waypoints = getattr(self, 'test_fiber_waypoints', None)
@@ -1945,18 +1943,93 @@ class FiberArchitectureMixin:
             if self.draw_contour_stream is not None and test_stream_idx < len(self.draw_contour_stream) and self.draw_contour_stream[test_stream_idx]:
                 valid_waypoints = [w for w in test_waypoints if w is not None]
                 if len(valid_waypoints) > 0:
-                    # Draw test waypoints (blue, larger)
                     glPointSize(5)
                     glColor4f(0.2, 0.4, 1.0, alpha)
                     pts = np.array(valid_waypoints, dtype=np.float32)
                     glVertexPointer(3, GL_FLOAT, 0, pts)
                     glDrawArrays(GL_POINTS, 0, len(pts))
-
-                    # Draw test fiber lines (blue)
                     if len(valid_waypoints) >= 2:
                         glLineWidth(3)
                         glVertexPointer(3, GL_FLOAT, 0, pts)
                         glDrawArrays(GL_LINE_STRIP, 0, len(pts))
+
+        glDisableClientState(GL_VERTEX_ARRAY)
+        glEnable(GL_LIGHTING)
+
+    def _draw_fiber_architecture_slow(self, alpha, level_prog, highlight_stream):
+        """Original per-element draw path for animation/highlight modes."""
+        highlight_level = getattr(self, 'inspector_highlight_level', None)
+
+        glDisable(GL_LIGHTING)
+        glEnableClientState(GL_VERTEX_ARRAY)
+
+        normal_pts = []
+        highlight_pts = []
+
+        for stream_idx, waypoint_group in enumerate(self.waypoints):
+            if self.draw_contour_stream is not None and stream_idx < len(self.draw_contour_stream) and self.draw_contour_stream[stream_idx]:
+                for level_idx, waypoints in enumerate(waypoint_group):
+                    if level_prog is not None and level_idx > level_prog:
+                        continue
+                    is_highlighted = (highlight_stream == stream_idx and highlight_level == level_idx)
+                    arr = np.asarray(waypoints, dtype=np.float32)
+                    if arr.ndim == 2 and arr.shape[1] == 3:
+                        valid = np.all(np.isfinite(arr), axis=1)
+                        arr = arr[valid]
+                        if len(arr) > 0:
+                            if is_highlighted:
+                                highlight_pts.append(arr)
+                            else:
+                                normal_pts.append(arr)
+
+        if normal_pts:
+            glPointSize(5)
+            glColor4f(1.0, 0.6, 0.0, alpha)
+            pts = np.concatenate(normal_pts)
+            glVertexPointer(3, GL_FLOAT, 0, pts)
+            glDrawArrays(GL_POINTS, 0, len(pts))
+
+        if highlight_pts:
+            glPointSize(7)
+            glColor4f(0.3, 0.6, 0.9, alpha)
+            pts = np.concatenate(highlight_pts)
+            glVertexPointer(3, GL_FLOAT, 0, pts)
+            glDrawArrays(GL_POINTS, 0, len(pts))
+
+        # Fiber lines
+        line_pairs = []
+        for stream_idx, waypoint_group in enumerate(self.waypoints):
+            if self.draw_contour_stream is not None and stream_idx < len(self.draw_contour_stream) and self.draw_contour_stream[stream_idx]:
+                for contour_idx in range(len(waypoint_group) - 1):
+                    if level_prog is not None and contour_idx >= level_prog:
+                        continue
+                    wps_curr = np.asarray(waypoint_group[contour_idx], dtype=np.float32)
+                    wps_next = np.asarray(waypoint_group[contour_idx + 1], dtype=np.float32)
+                    if wps_curr.ndim != 2 or wps_next.ndim != 2:
+                        continue
+                    n = min(len(wps_curr), len(wps_next))
+                    if n == 0:
+                        continue
+                    c, nx = wps_curr[:n], wps_next[:n]
+                    valid = np.all(np.isfinite(c), axis=1) & np.all(np.isfinite(nx), axis=1)
+                    c, nx = c[valid], nx[valid]
+                    if len(c) == 0:
+                        continue
+                    is_partial = level_prog is not None and contour_idx + 1 > level_prog
+                    if is_partial:
+                        frac = level_prog - contour_idx
+                        nx = c + (nx - c) * frac
+                    pairs = np.empty((len(c) * 2, 3), dtype=np.float32)
+                    pairs[0::2] = c
+                    pairs[1::2] = nx
+                    line_pairs.append(pairs)
+
+        if line_pairs:
+            glLineWidth(2)
+            glColor4f(0.75, 0, 0, alpha)
+            lines = np.concatenate(line_pairs)
+            glVertexPointer(3, GL_FLOAT, 0, lines)
+            glDrawArrays(GL_LINES, 0, len(lines))
 
         glDisableClientState(GL_VERTEX_ARRAY)
         glEnable(GL_LIGHTING)
@@ -2643,6 +2716,7 @@ class FiberArchitectureMixin:
                 # Update the waypoints array
                 self.waypoints[stream_idx][contour_idx] = contour_wps
 
+        self._fiber_draw_dirty = True
         if verbose and tet_count + skel_count > 0:
             msg = f"  Updated waypoints: {tet_count} from tetrahedra, {skel_count} from skeleton"
             if skipped_count > 0:
@@ -3112,6 +3186,7 @@ class FiberArchitectureMixin:
                 except Exception as e:
                     print(f"  Warning: Failed to recompute waypoints for stream {stream_idx} level {level_idx}: {e}")
 
+        self._fiber_draw_dirty = True
         print(f"Recomputed {total_recomputed} waypoints from deformed contours using MVC")
 
     def _build_waypoint_nn_embedding(self):
@@ -3245,4 +3320,5 @@ class FiberArchitectureMixin:
             self.waypoints[stream_idx][level_idx] = new_pos[offset:offset + n_fibers]
             offset += n_fibers
 
+        self._fiber_draw_dirty = True
         return True
