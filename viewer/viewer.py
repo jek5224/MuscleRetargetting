@@ -133,6 +133,9 @@ def _draw_tet_meshes_batched(app):
 
             heatmap_colors = getattr(obj, '_tet_surface_colors', None)
             if heatmap_colors is not None and len(heatmap_colors) == len(obj._tet_surface_verts):
+                # Override baked alpha with current slider value
+                if heatmap_colors[0, 3] != alpha:
+                    heatmap_colors[:, 3] = alpha
                 color_arrays.append(heatmap_colors)
             else:
                 n = len(obj._tet_surface_verts)
