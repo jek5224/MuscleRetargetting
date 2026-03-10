@@ -5964,10 +5964,29 @@ def save_loaded_muscles(v):
         print(f"Failed to save muscle list: {e}")
 
 
+def _load_muscle_data(name, path, color, transparency, is_draw):
+    """Load a single muscle's mesh data (I/O-heavy, no viewer state touched).
+
+    Returns (name, MeshLoader) on success, or (name, None) on failure.
+    """
+    try:
+        mesh = MeshLoader()
+        mesh.load(path)
+        mesh.color = np.array(color)
+        mesh.transparency = transparency
+        mesh.is_draw = is_draw
+        muscle_trimesh = trimesh.load_mesh(path)
+        muscle_trimesh.vertices *= 0.01  # MESH_SCALE
+        mesh.trimesh = muscle_trimesh
+        return (name, mesh)
+    except Exception as e:
+        print(f"  Failed to load muscle {name}: {e}")
+        return (name, None)
+
+
 def load_previous_muscles(v):
-    """Load muscles that were previously saved."""
-    import json
-    import os
+    """Load muscles that were previously saved (parallel I/O)."""
+    from concurrent.futures import ThreadPoolExecutor
     if not os.path.exists(v.last_muscles_file):
         print(f"No previous muscle list found at {v.last_muscles_file}")
         return 0
@@ -5976,17 +5995,55 @@ def load_previous_muscles(v):
         with open(v.last_muscles_file, 'r') as f:
             muscle_list = json.load(f)
 
-        loaded_count = 0
+        # Collect work items, skipping already-loaded and missing files
+        pairs = []
         for entry in muscle_list:
             name = entry['name']
             path = entry['path']
-            if name not in v.zygote_muscle_meshes:
-                if os.path.exists(path):
-                    add_muscle_mesh(v, name, path)
-                    loaded_count += 1
-                else:
-                    print(f"  Muscle file not found: {path}")
-        print(f"Loaded {loaded_count} muscles from previous session")
+            if name in v.zygote_muscle_meshes:
+                continue
+            if not os.path.exists(path):
+                print(f"  Muscle file not found: {path}")
+                continue
+            pairs.append((name, path))
+
+        if not pairs:
+            print("No new muscles to load")
+            return 0
+
+        # Snapshot viewer state for thread-safe reads
+        color = list(v.zygote_muscle_color)
+        transparency = v.zygote_muscle_transparency
+        is_draw = v.is_draw_zygote_muscle
+
+        # Parallel I/O phase
+        t0 = time.time()
+        workers = min(len(pairs), os.cpu_count() or 4)
+        results = []
+        with ThreadPoolExecutor(max_workers=workers) as executor:
+            futures = [
+                executor.submit(_load_muscle_data, name, path, color, transparency, is_draw)
+                for name, path in pairs
+            ]
+            for fut in futures:
+                results.append(fut.result())
+
+        # Sequential integration phase
+        loaded_count = 0
+        for name, mesh in results:
+            if mesh is not None:
+                v.zygote_muscle_meshes[name] = mesh
+                loaded_count += 1
+
+        if loaded_count > 0:
+            v.zygote_muscle_meshes = dict(sorted(v.zygote_muscle_meshes.items()))
+            update_available_muscles(v)
+            save_loaded_muscles(v)
+            if hasattr(v, 'motion_bvh') and v.motion_bvh is not None:
+                _motion_load_cache(v)
+
+        elapsed = time.time() - t0
+        print(f"Loaded {loaded_count} muscles from previous session ({elapsed:.2f}s, {workers} workers)")
         return loaded_count
     except Exception as e:
         print(f"Failed to load previous muscles: {e}")
