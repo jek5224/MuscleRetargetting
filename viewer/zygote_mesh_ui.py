@@ -6949,27 +6949,41 @@ def _motion_apply_pose(v, frame):
 
 
 def _motion_step_forward(v, count=1, run_tet=False):
-    """Advance count frames sequentially, applying pose and optionally running tet sim each step.
+    """Advance count frames, applying pose+deformation only on the final frame.
 
     run_tet: if True, run tet sim for frames not in cache (used by Step+1 button and baking).
-             Play mode always passes False — it only uses cached deformation.
+             When run_tet is True, we must step sequentially (each frame needs sim).
+             Play mode always passes False — skip to final frame directly.
     """
     if v.motion_bvh is None:
         return
-    for _ in range(count):
-        next_frame = v.motion_current_frame + 1
-        if next_frame >= v.motion_total_frames:
-            if v.motion_repeat:
-                next_frame = 0
-            else:
-                v.motion_is_playing = False
-                return
-        _motion_apply_pose(v, next_frame)
-        if v.motion_use_nn and v.motion_nn_model is not None:
-            _motion_apply_nn_deformation(v, next_frame)
-        elif not _motion_apply_cached_deformation(v, next_frame):
-            if run_tet:
+    if run_tet:
+        # Sequential mode: must apply each frame for tet sim
+        for _ in range(count):
+            next_frame = v.motion_current_frame + 1
+            if next_frame >= v.motion_total_frames:
+                if v.motion_repeat:
+                    next_frame = 0
+                else:
+                    v.motion_is_playing = False
+                    return
+            _motion_apply_pose(v, next_frame)
+            if not _motion_apply_cached_deformation(v, next_frame):
                 _motion_run_tet_settle(v)
+    else:
+        # Skip mode: jump directly to final frame, apply pose+deformation once
+        target_frame = v.motion_current_frame + count
+        if target_frame >= v.motion_total_frames:
+            if v.motion_repeat:
+                target_frame = target_frame % v.motion_total_frames
+            else:
+                target_frame = v.motion_total_frames - 1
+                v.motion_is_playing = False
+        _motion_apply_pose(v, target_frame)
+        if v.motion_use_nn and v.motion_nn_model is not None:
+            _motion_apply_nn_deformation(v, target_frame)
+        else:
+            _motion_apply_cached_deformation(v, target_frame)
 
 
 def _motion_run_tet_settle(v):
@@ -7127,18 +7141,24 @@ def _predict_frame_batched(model, l_dofs, r_dofs, rest_positions, r_rest_positio
             l_result[name] = (l_rest + l_disp).numpy()
             r_result[name] = (r_rest + r_disp).numpy()
     else:
-        # V1: preds = {name: (2, V*3)}
+        # V1/V1Dec: preds = {name: (2, V*3)}
+        # Cache rest positions on GPU for fast add
+        if not hasattr(model, '_rest_dev'):
+            model._rest_dev = {}
+            model._r_rest_dev = {}
+            for n in rest_positions:
+                r = rest_positions[n]
+                model._rest_dev[n] = (r.to(device) if isinstance(r, _torch.Tensor)
+                                      else _torch.tensor(r, dtype=_torch.float32, device=device))
+                rr = r_rest_positions.get(n, r) if r_rest_positions else r
+                model._r_rest_dev[n] = (rr.to(device) if isinstance(rr, _torch.Tensor)
+                                        else _torch.tensor(rr, dtype=_torch.float32, device=device))
+        # Add rest + disp on GPU, then single bulk transfer
         for name, disp_flat in preds.items():
-            l_rest = rest_positions[name]
-            r_rest = r_rest_positions.get(name, l_rest) if r_rest_positions else l_rest
-            if isinstance(l_rest, _torch.Tensor):
-                l_rest = l_rest.cpu()
-            if isinstance(r_rest, _torch.Tensor):
-                r_rest = r_rest.cpu()
-            l_disp = disp_flat[0].cpu().reshape(-1, 3)
-            r_disp = disp_flat[1].cpu().reshape(-1, 3)
-            l_result[name] = (l_rest + l_disp).numpy()
-            r_result[name] = (r_rest + r_disp).numpy()
+            l_pos = model._rest_dev[name] + disp_flat[0].reshape(-1, 3)
+            r_pos = model._r_rest_dev[name] + disp_flat[1].reshape(-1, 3)
+            l_result[name] = l_pos.cpu().numpy()
+            r_result[name] = r_pos.cpu().numpy()
     return l_result, r_result
 
 
@@ -7195,8 +7215,8 @@ def _motion_apply_nn_deformation(v, frame):
 
         # Get pelvis world transform
         T = v.env.skel.getBodyNode("Saccrum_Coccyx0").getWorldTransform().matrix()
-        R = T[:3, :3]
-        t = T[:3, 3]
+        R = T[:3, :3].astype(np.float32)
+        t = T[:3, 3].astype(np.float32)
         any_applied = False
 
         # Apply L predictions
@@ -7206,10 +7226,10 @@ def _motion_apply_nn_deformation(v, frame):
             mobj = v.zygote_muscle_meshes[mname]
             if mobj.tet_vertices is None:
                 continue
-            world_pos = (R @ local_pos.T).T + t
+            world_pos = local_pos @ R.T + t
             if mobj.soft_body is not None:
                 mobj.soft_body.positions = world_pos.astype(np.float64)
-            mobj.tet_vertices = world_pos.astype(np.float32).copy()
+            mobj.tet_vertices = world_pos
             mobj._update_tet_draw_positions(skip_normals=True)
             if hasattr(mobj, 'update_waypoints_fast'):
                 mobj.update_waypoints_fast()
@@ -7226,18 +7246,13 @@ def _motion_apply_nn_deformation(v, frame):
                     continue
                 mirrored_pos = local_pos.copy()
                 mirrored_pos[:, 0] *= -1
-                world_pos = (R @ mirrored_pos.T).T + t
+                world_pos = mirrored_pos @ R.T + t
                 if mobj.soft_body is not None:
                     mobj.soft_body.positions = world_pos.astype(np.float64)
-                mobj.tet_vertices = world_pos.astype(np.float32).copy()
-                _tu0 = _time.perf_counter()
+                mobj.tet_vertices = world_pos
                 mobj._update_tet_draw_positions(skip_normals=True)
-                _tu1 = _time.perf_counter()
                 if hasattr(mobj, 'update_waypoints_fast'):
                     mobj.update_waypoints_fast()
-                _tu2 = _time.perf_counter()
-                _t_update += _tu1 - _tu0
-                _t_waypoints += _tu2 - _tu1
                 any_applied = True
 
         return any_applied

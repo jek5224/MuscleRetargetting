@@ -1014,9 +1014,11 @@ class GLFWApp():
                     dt = 1.0 / 30.0
                 self.motion_play_accumulator += dt * self.motion_play_speed
                 frame_time = self.motion_bvh.frame_time
-                while self.motion_play_accumulator >= frame_time and self.motion_is_playing:
-                    _motion_step_forward(self, 1)
-                    self.motion_play_accumulator -= frame_time
+                if self.motion_play_accumulator >= frame_time:
+                    # Skip to final frame directly — only apply pose+deformation once
+                    frames_to_skip = int(self.motion_play_accumulator / frame_time)
+                    self.motion_play_accumulator -= frames_to_skip * frame_time
+                    _motion_step_forward(self, frames_to_skip)
             self._motion_last_time = start_time
 
             # Motion Browser: bake one frame per render loop
