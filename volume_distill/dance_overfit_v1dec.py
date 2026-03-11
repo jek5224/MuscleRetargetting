@@ -36,11 +36,11 @@ LOG_DIR = "volume_distill/dance_v1dec_runs"
 
 # === Training ===
 EPOCHS = 10000
-BATCH_SIZE = 8
+BATCH_SIZE = 512
 LR = 1e-3
 WEIGHT_DECAY = 0.0
-GRAD_CLIP = 1.0
-HIDDEN_DIM = 512
+GRAD_CLIP = 0.1
+HIDDEN_DIM = 768
 NUM_ENCODER_RES = 3
 NUM_DECODER_RES = 2
 
@@ -184,30 +184,49 @@ def preprocess():
                 r_rest_all[n] = rest[n]
                 r_disp_all[n] = disp[n]
 
-    muscle_names = l_names_all
+    has_l = len(l_disp_all) > 0
+    has_r = len(r_disp_all) > 0
+
+    # Build canonical muscle name list from whichever side(s) are available
+    if has_l:
+        muscle_names = l_names_all
+    elif has_r:
+        muscle_names = list(r_disp_all.keys())
+    else:
+        raise RuntimeError("No L or R data found — nothing to train on")
+
     rest_positions = {}
     r_rest_positions = {}
     displacements = {}
-    has_r = len(r_disp_all) > 0
 
     for mname in muscle_names:
-        if has_r and mname in l_disp_all and mname in r_disp_all:
+        has_l_m = mname in l_disp_all
+        has_r_m = mname in r_disp_all
+        if has_l_m and has_r_m:
             rest_positions[mname] = l_rest_all[mname]
             r_rest_positions[mname] = r_rest_all[mname]
             displacements[mname] = torch.cat([l_disp_all[mname], r_disp_all[mname]], dim=0)
-        elif mname in l_disp_all:
+        elif has_l_m:
             rest_positions[mname] = l_rest_all[mname]
             r_rest_positions[mname] = l_rest_all[mname]
             displacements[mname] = l_disp_all[mname]
+        elif has_r_m:
+            rest_positions[mname] = r_rest_all[mname]
+            r_rest_positions[mname] = r_rest_all[mname]
+            displacements[mname] = r_disp_all[mname]
 
     l_dofs = mocap[:, L_DOF_INDICES].astype(np.float32)
+    r_dofs = mocap[:, R_DOF_INDICES].astype(np.float32)
+    r_dofs_mirrored = mirror_dofs_r_to_l(r_dofs)
 
-    if has_r:
-        r_dofs = mocap[:, R_DOF_INDICES].astype(np.float32)
-        r_dofs_mirrored = mirror_dofs_r_to_l(r_dofs)
+    if has_l and has_r:
         input_dofs = torch.from_numpy(np.concatenate([l_dofs, r_dofs_mirrored], axis=0))
         total = input_dofs.shape[0]
         print(f"\n  Combined: {total} samples ({N} L + {N} R), {len(muscle_names)} muscles")
+    elif has_r:
+        input_dofs = torch.from_numpy(r_dofs_mirrored)
+        total = input_dofs.shape[0]
+        print(f"\n  R-only (mirrored): {total} samples, {len(muscle_names)} muscles (L not baked yet)")
     else:
         input_dofs = torch.from_numpy(l_dofs)
         total = input_dofs.shape[0]
