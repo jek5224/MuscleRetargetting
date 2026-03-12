@@ -254,22 +254,28 @@ def train():
 
     # Resume from best.pt if it exists and is v1_pca
     start_epoch = 0
+    best_loss = float("inf")
+    run_name = None
     best_path = os.path.join(CHECKPOINT_DIR, "best_v1_pca.pt")
     if os.path.exists(best_path):
         ckpt = torch.load(best_path, map_location=device, weights_only=False)
         if ckpt.get("model_version") == "v1_pca":
             model.load_state_dict(ckpt["model_state_dict"])
+            if "optimizer_state_dict" in ckpt:
+                optimizer.load_state_dict(ckpt["optimizer_state_dict"])
             start_epoch = ckpt.get("epoch", 0)
-            print(f"Resumed from {best_path} (epoch {start_epoch}, loss {ckpt.get('val_loss', '?'):.2e})")
+            best_loss = ckpt.get("val_loss", float("inf"))
+            run_name = ckpt.get("run_name")
+            print(f"Resumed from {best_path} (epoch {start_epoch}, loss {best_loss:.2e})")
 
-    scheduler = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(
-        optimizer, T_0=500, T_mult=2,
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+        optimizer, T_max=EPOCHS, eta_min=1e-6, last_epoch=start_epoch if start_epoch > 0 else -1,
     )
 
     os.makedirs(CHECKPOINT_DIR, exist_ok=True)
-    run_name = "walk_mirror_v1pca_" + datetime.now().strftime("%Y%m%d_%H%M%S")
+    if not run_name:
+        run_name = "walk_mirror_v1pca_" + datetime.now().strftime("%Y%m%d_%H%M%S")
     writer = SummaryWriter(os.path.join(LOG_DIR, run_name))
-    best_loss = float("inf")
 
     end_epoch = start_epoch + EPOCHS
     print(f"\n=== Training epochs {start_epoch+1} → {end_epoch} ===")
@@ -314,6 +320,7 @@ def train():
             torch.save({
                 "epoch": epoch,
                 "model_state_dict": model.state_dict(),
+                "optimizer_state_dict": optimizer.state_dict(),
                 "val_loss": avg_loss,
                 "model_version": "v1_pca",
                 "mirror_trained": True,
@@ -322,6 +329,7 @@ def train():
                 "num_encoder_res": NUM_ENCODER_RES,
                 "num_decoder_res": NUM_DECODER_RES,
                 "pca_k": PCA_K,
+                "run_name": run_name,
                 "num_muscles": num_muscles,
                 "muscle_names": muscle_names,
                 "muscle_name_to_idx": muscle_name_to_idx,

@@ -74,8 +74,27 @@ def train():
     print(f"Model params: {total_params:,} (input_dim={input_dim})")
 
     optimizer = torch.optim.Adam(model.parameters(), lr=LR, weight_decay=WEIGHT_DECAY)
+
+    start_epoch = 0
+    best_val_loss = float("inf")
+    run_name = None
+    os.makedirs(CHECKPOINT_DIR, exist_ok=True)
+    latest_path = os.path.join(CHECKPOINT_DIR, "latest.pt")
+    if os.path.exists(latest_path):
+        ckpt = torch.load(latest_path, map_location=device, weights_only=False)
+        if ckpt.get("model_version") == "v2":
+            model.load_state_dict(ckpt["model_state_dict"])
+            if "optimizer_state_dict" in ckpt:
+                optimizer.load_state_dict(ckpt["optimizer_state_dict"])
+            start_epoch = ckpt.get("epoch", 0)
+            best_val_loss = ckpt.get("val_loss", float("inf"))
+            run_name = ckpt.get("run_name")
+            print(f"Resumed from {latest_path} (epoch {start_epoch}, val_loss {best_val_loss:.6f})")
+        else:
+            print(f"Checkpoint incompatible, training from scratch")
+
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
-        optimizer, T_max=COSINE_T_MAX,
+        optimizer, T_max=COSINE_T_MAX, last_epoch=start_epoch if start_epoch > 0 else -1,
     )
 
     # Pre-compute muscle index tensor
@@ -83,10 +102,9 @@ def train():
     # Map name → index for loss computation
     idx_to_name = {v: k for k, v in muscle_name_to_idx.items()}
 
-    os.makedirs(CHECKPOINT_DIR, exist_ok=True)
-    run_name = datetime.now().strftime("%Y%m%d_%H%M%S")
+    if not run_name:
+        run_name = datetime.now().strftime("%Y%m%d_%H%M%S")
     writer = SummaryWriter(os.path.join(LOG_DIR, run_name))
-    best_val_loss = float("inf")
 
     def compute_loss(preds, targets_t, targets_prev, B):
         """Compute reconstruction + temporal consistency loss.
@@ -117,7 +135,9 @@ def train():
         temporal_loss /= num_muscles
         return recon_loss, temporal_loss
 
-    for epoch in range(1, EPOCHS + 1):
+    end_epoch = start_epoch + EPOCHS
+    print(f"\n=== Training epochs {start_epoch+1} → {end_epoch} ===")
+    for epoch in range(start_epoch + 1, end_epoch + 1):
         t0 = time.time()
 
         # Train
@@ -185,7 +205,7 @@ def train():
         scheduler.step()
         elapsed = time.time() - t0
         lr = optimizer.param_groups[0]["lr"]
-        print(f"Epoch {epoch:3d}/{EPOCHS} | Recon: {val_recon:.6f} | Temporal: {val_temporal:.6f} | Total: {val_loss:.6f} | LR: {lr:.2e} | {elapsed:.1f}s")
+        print(f"Epoch {epoch:3d}/{end_epoch} | Recon: {val_recon:.6f} | Temporal: {val_temporal:.6f} | Total: {val_loss:.6f} | LR: {lr:.2e} | {elapsed:.1f}s")
 
         # TensorBoard
         writer.add_scalar("loss/train_total", train_loss, epoch)
@@ -236,8 +256,10 @@ def train():
         ckpt_base = {
             "model_version": "v2",
             "model_state_dict": model.state_dict(),
+            "optimizer_state_dict": optimizer.state_dict(),
             "val_loss": val_loss,
             "epoch": epoch,
+            "run_name": run_name,
             "input_dim": input_dim,
             "hidden_dim": hidden_dim,
             "num_encoder_res": num_encoder_res,
@@ -259,9 +281,7 @@ def train():
             print(f"  -> Saved best model (val_loss={val_loss:.6f})")
 
         if epoch % 10 == 0:
-            ckpt_path = os.path.join(CHECKPOINT_DIR, "latest.pt")
-            ckpt_base["optimizer_state_dict"] = optimizer.state_dict()
-            torch.save(ckpt_base, ckpt_path)
+            torch.save(ckpt_base, os.path.join(CHECKPOINT_DIR, "latest.pt"))
 
     writer.close()
     print(f"Training complete. Best val MSE: {best_val_loss:.6f}")
