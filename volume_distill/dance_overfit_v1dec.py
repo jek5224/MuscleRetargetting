@@ -270,6 +270,8 @@ def train():
                 and ckpt.get("input_dim") == input_dim
                 and set(ckpt.get("muscle_vertex_counts", {}).keys()) == set(muscle_names)):
             model.load_state_dict(ckpt["model_state_dict"])
+            if "optimizer_state_dict" in ckpt:
+                optimizer.load_state_dict(ckpt["optimizer_state_dict"])
             start_epoch = ckpt.get("epoch", 0)
             best_loss = ckpt.get("val_loss", float("inf"))
             run_name = ckpt.get("run_name")
@@ -278,7 +280,7 @@ def train():
             print(f"Checkpoint incompatible, training from scratch")
 
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
-        optimizer, T_max=EPOCHS, eta_min=1e-6,
+        optimizer, T_max=EPOCHS, eta_min=1e-6, last_epoch=start_epoch if start_epoch > 0 else -1,
     )
 
     os.makedirs(CHECKPOINT_DIR, exist_ok=True)
@@ -327,6 +329,7 @@ def train():
             torch.save({
                 "epoch": epoch,
                 "model_state_dict": model.state_dict(),
+                "optimizer_state_dict": optimizer.state_dict(),
                 "val_loss": avg_loss,
                 "muscle_vertex_counts": muscle_vertex_counts,
                 "input_dim": input_dim,
