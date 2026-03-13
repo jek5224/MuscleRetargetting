@@ -35,7 +35,7 @@ CHECKPOINT_DIR = "volume_distill/walk_mirror_checkpoints"
 LOG_DIR = "volume_distill/walk_mirror_runs"
 
 # === Training ===
-EPOCHS = 10000
+EPOCHS = 1000
 BATCH_SIZE = 32
 LR = 1e-3
 WEIGHT_DECAY = 0.0
@@ -168,13 +168,22 @@ def preprocess():
 
     for mname in muscle_names:
         if mname in l_disp_all and mname in r_disp_all:
-            rest_positions[mname] = l_rest_all[mname]
-            r_rest_positions[mname] = r_rest_all[mname]
-            displacements[mname] = torch.cat([l_disp_all[mname], r_disp_all[mname]], dim=0)
+            l_verts = l_disp_all[mname].shape[1]
+            r_verts = r_disp_all[mname].shape[1]
+            if l_verts == r_verts:
+                rest_positions[mname] = l_rest_all[mname]
+                r_rest_positions[mname] = r_rest_all[mname]
+                displacements[mname] = torch.cat([l_disp_all[mname], r_disp_all[mname]], dim=0)
+            else:
+                print(f"  WARNING: {mname} L/R vertex mismatch ({l_verts} vs {r_verts}), using L only (duplicated)")
+                rest_positions[mname] = l_rest_all[mname]
+                r_rest_positions[mname] = l_rest_all[mname]
+                # Duplicate L data so it has 2N samples to match combined DOF array
+                displacements[mname] = torch.cat([l_disp_all[mname], l_disp_all[mname]], dim=0)
         elif mname in l_disp_all:
             rest_positions[mname] = l_rest_all[mname]
             r_rest_positions[mname] = l_rest_all[mname]
-            displacements[mname] = l_disp_all[mname]
+            displacements[mname] = torch.cat([l_disp_all[mname], l_disp_all[mname]], dim=0)
 
     l_dofs = mocap[:, L_DOF_INDICES].astype(np.float32)
     r_dofs = mocap[:, R_DOF_INDICES].astype(np.float32)
