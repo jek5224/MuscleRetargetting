@@ -7094,12 +7094,15 @@ def _motion_load_nn_checkpoint(v):
     ckpt_path = None
     if v.motion_bvh is not None and hasattr(v, 'motion_selected_idx'):
         bvh_stem = os.path.splitext(os.path.basename(v.motion_bvh_files[v.motion_selected_idx]))[0]
+        per_motion_v1dec_alt = f'volume_distill/{bvh_stem}_v1dec_checkpoints/best_v1dec.pt'
         per_motion_v1dec = f'volume_distill/{bvh_stem}_mirror_checkpoints/best_v1dec.pt'
         per_motion_v1_pca = f'volume_distill/{bvh_stem}_mirror_checkpoints/best_v1_pca.pt'
         per_motion_mirror_v2 = f'volume_distill/{bvh_stem}_mirror_checkpoints/best_v2.pt'
         per_motion_mirror = f'volume_distill/{bvh_stem}_mirror_checkpoints/best.pt'
         per_motion = f'volume_distill/{bvh_stem}_checkpoints/best.pt'
-        if os.path.exists(per_motion_v1dec):
+        if os.path.exists(per_motion_v1dec_alt):
+            ckpt_path = per_motion_v1dec_alt
+        elif os.path.exists(per_motion_v1dec):
             ckpt_path = per_motion_v1dec
         elif os.path.exists(per_motion_v1_pca):
             ckpt_path = per_motion_v1_pca
@@ -7114,6 +7117,7 @@ def _motion_load_nn_checkpoint(v):
     if not os.path.exists(ckpt_path):
         ckpt_path = 'volume_distill/checkpoints/best.pt'
     if not os.path.exists(ckpt_path):
+        print(f"[Motion] No checkpoint found (last tried: {ckpt_path})")
         return
     print(f"[Motion] Loading NN checkpoint: {ckpt_path}")
     try:
@@ -7368,14 +7372,20 @@ def _motion_update_nn_error_heatmap(v, frame):
     pivot = None
     if v.motion_fix_rotation and hasattr(v, 'motion_root_rotation') and v.motion_root_rotation is not None:
         root_bn = v.env.skel.getJoint(0).getChildBodyNode()
-        T_cur = root_bn.getWorldTransform().matrix()
-        T_rest = np.eye(4)
-        T_rest[:3, :3] = v.motion_root_rotation
-        T_rest[:3, 3] = v.motion_root_translation if v.motion_root_translation is not None else T_cur[:3, 3]
-        R_delta = T_rest[:3, :3] @ T_cur[:3, :3].T
-        fix_rot_mat = R_delta.astype(np.float32)
-        pivot = T_cur[:3, 3].astype(np.float32)
-        fix_dest = T_rest[:3, 3].astype(np.float32)
+        # Current (fixed) root body transform
+        T_now = root_bn.getWorldTransform().matrix()
+        R_now = T_now[:3, :3]
+        t_now = T_now[:3, 3]
+        # Baked root body transform — temporarily set to original frame pose
+        saved_pos = v.env.skel.getPositions().copy()
+        v.env.skel.setPositions(v.motion_bvh.mocap_refs[frame])
+        T_baked = root_bn.getWorldTransform().matrix()
+        R_baked = T_baked[:3, :3]
+        t_baked = T_baked[:3, 3]
+        v.env.skel.setPositions(saved_pos)
+        fix_rot_mat = (R_now @ R_baked.T).astype(np.float32)
+        pivot = t_baked.astype(np.float32)
+        fix_dest = t_now.astype(np.float32)
 
     HEATMAP_SCALE = 0.01  # 1 cm = full red
     for mname, mobj in v.zygote_muscle_meshes.items():
