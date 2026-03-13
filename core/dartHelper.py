@@ -575,7 +575,9 @@ def exportSkeleton(skel_info, root_name, filename):
             file.write("\t")
         file.write(string + "\n")
 
-    f = open(f"data/{filename}", 'w')
+    import tempfile, shutil
+    tmp_fd, tmp_path = tempfile.mkstemp(suffix='.xml', dir='data')
+    f = os.fdopen(tmp_fd, 'w')
     tw(f, "<Skeleton name=\"%s\">" % (root_name), 0)
 
     for name, info in skel_info.items():
@@ -652,6 +654,7 @@ def exportSkeleton(skel_info, root_name, filename):
         tw(f, "</Node>", 1)
     tw(f, "</Skeleton>", 0)
     f.close()
+    shutil.move(tmp_path, f"data/{filename}")
 
 def exportBoundingBoxes(skeleton_meshes, root_name='Skeleton', filename='zygote_skel.xml'):
     def tw(file, string, tabnum):
