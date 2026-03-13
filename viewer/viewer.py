@@ -970,8 +970,6 @@ class GLFWApp():
             self.drawBone(self.env.skel.getPositions())
         if self.draw_joint:
             self.drawJoint(self.env.skel.getPositions())
-        if self.joint_edit_mode:
-            self._draw_joint_editor_overlay()
         if self.draw_obj:
             self.drawObj(self.env.skel.getPositions())
         if self.draw_muscle:
@@ -987,6 +985,12 @@ class GLFWApp():
                 obj.draw_corners()
             if obj.is_draw_edges:
                 obj.draw_edges()
+
+        # Draw joint editor overlay on top of skeleton (disable depth test so joints show through)
+        if self.joint_edit_mode:
+            glDisable(GL_DEPTH_TEST)
+            self._draw_joint_editor_overlay()
+            glEnable(GL_DEPTH_TEST)
 
         # Draw fiber structure
         for name, obj in self.zygote_muscle_meshes.items():
