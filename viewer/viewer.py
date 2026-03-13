@@ -1045,8 +1045,9 @@ class GLFWApp():
         self.env.target_skel = self.env.skel.clone()
         self.env.world.addSkeleton(self.env.skel)
 
-        self.env.loading_muscle_info(self.env.new_muscle_info)
-        self.env.loading_test_muscle_info(self.env.new_muscle_info)
+        if self.env.new_muscle_info is not None:
+            self.env.loading_muscle_info(self.env.new_muscle_info)
+            self.env.loading_test_muscle_info(self.env.new_muscle_info)
 
         self.motion_skel = self.env.skel.clone()
         # self.motion_skel.setPositions(current_pos)
