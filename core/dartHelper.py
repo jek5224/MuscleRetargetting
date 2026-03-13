@@ -588,7 +588,7 @@ def exportSkeleton(skel_info, root_name, filename):
             "On" if info['contact'] else "Off", 
             " ".join(info['color'].astype(str)), 
             info['obj'],
-            " ".join([str(i) for i in info['stretches']]),
+            " ".join([str(i) for i in info.get('stretches', [0, 0, 0])]),
             ), 
             2)
         
