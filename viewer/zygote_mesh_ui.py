@@ -1825,6 +1825,60 @@ def draw_zygote_skeleton_ui(v):
                     v.env.num_action = len(v.env.get_zero_action()) * (3 if v.env.learning_gain else 1)
                     v.motion_skel = v.env.skel.clone()
 
+        # --- Joint Position Editor ---
+        if hasattr(v.env, 'new_skel_info') and v.env.new_skel_info is not None:
+            imgui.separator()
+            _, v.joint_edit_mode = imgui.checkbox("Edit Joint Positions", v.joint_edit_mode)
+            if v.joint_edit_mode:
+                _, v.joint_edit_symmetry = imgui.checkbox("Symmetry (L<>R)", v.joint_edit_symmetry)
+
+                # Joint name list for combo
+                joint_names = list(v.env.new_skel_info.keys())
+                current_idx = joint_names.index(v.joint_edit_selected) if v.joint_edit_selected in joint_names else -1
+
+                imgui.push_item_width(180)
+                changed, new_idx = imgui.combo("Joint##jed", current_idx, joint_names)
+                imgui.pop_item_width()
+                if changed and new_idx >= 0:
+                    v.joint_edit_selected = joint_names[new_idx]
+
+                # XYZ input for selected joint
+                if v.joint_edit_selected and v.joint_edit_selected in v.env.new_skel_info:
+                    info = v.env.new_skel_info[v.joint_edit_selected]
+                    jt = info['joint_t'].astype(np.float64)
+                    any_changed = False
+                    imgui.push_item_width(120)
+                    c, jt[0] = imgui.input_float("X##jed", jt[0], 0.001, 0.01, "%.5f")
+                    any_changed = any_changed or c
+                    c, jt[1] = imgui.input_float("Y##jed", jt[1], 0.001, 0.01, "%.5f")
+                    any_changed = any_changed or c
+                    c, jt[2] = imgui.input_float("Z##jed", jt[2], 0.001, 0.01, "%.5f")
+                    any_changed = any_changed or c
+                    imgui.pop_item_width()
+
+                    if any_changed:
+                        info['joint_t'] = jt
+                        # Mirror
+                        if v.joint_edit_symmetry:
+                            mirror = v._get_mirror_name(v.joint_edit_selected)
+                            if mirror and mirror in v.env.new_skel_info:
+                                mt = jt.copy()
+                                mt[0] = -mt[0]
+                                v.env.new_skel_info[mirror]['joint_t'] = mt
+                        v.newSkeleton()
+
+                # Save / Reset buttons
+                if imgui.button("Save XML##jed", width=100):
+                    from core.dartHelper import exportSkeleton
+                    exportSkeleton(v.env.new_skel_info, v.env.root_name, 'zygote_skel.xml')
+                    print("Saved joint positions to data/zygote_skel.xml")
+                imgui.same_line()
+                if imgui.button("Reset All##jed", width=100):
+                    from copy import deepcopy
+                    v.env.new_skel_info = deepcopy(v.env.skel_info)
+                    v.joint_edit_selected = None
+                    v.newSkeleton()
+
         imgui.tree_pop()
 
 

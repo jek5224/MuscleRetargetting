@@ -370,6 +370,13 @@ class GLFWApp():
         self.draw_bone = False
         self.draw_joint = False
         self.draw_shadow = False
+
+        # Joint position editor
+        self.joint_edit_mode = False
+        self.joint_edit_selected = None   # name of selected joint's body node
+        self.joint_edit_symmetry = True
+        self.joint_edit_dragging = False
+        self.joint_edit_drag_depth = 0.0  # depth of dragged joint for screen-parallel plane
         
         self.reset_value = 0
 
@@ -581,11 +588,132 @@ class GLFWApp():
         #     self.setEnv(Env(env_str))   
         self.env.muscle_nn = mus_nn
 
+    def get_ray_from_cursor(self):
+        projection_matrix = glGetDoublev(GL_PROJECTION_MATRIX)
+        modelview_matrix = glGetDoublev(GL_MODELVIEW_MATRIX)
+        viewport = glGetIntegerv(GL_VIEWPORT)
+        x = self.mouse_x
+        y = self.height - self.mouse_y
+        near = gluUnProject(x, y, 0.0, modelview_matrix, projection_matrix, viewport)
+        far = gluUnProject(x, y, 1.0, modelview_matrix, projection_matrix, viewport)
+        ray_origin = np.array(near)
+        ray_direction = np.array(far) - ray_origin
+        ray_direction /= np.linalg.norm(ray_direction)
+        return ray_origin, ray_direction
+
+    def _get_joint_world_positions(self):
+        """Return dict of {body_node_name: world_pos} for all joints."""
+        skel = self.env.skel
+        positions = {}
+        for i in range(skel.getNumBodyNodes()):
+            bn = skel.getBodyNode(i)
+            j = bn.getParentJoint()
+            transform = bn.getWorldTransform().matrix() @ j.getTransformFromChildBodyNode().matrix()
+            positions[bn.getName()] = transform[:3, 3]
+        return positions
+
+    def pick_joint(self, ray_origin, ray_direction, threshold=0.02):
+        """Find closest joint to ray. Returns body node name or None."""
+        joint_positions = self._get_joint_world_positions()
+        best_name = None
+        best_dist = threshold
+        for name, pos in joint_positions.items():
+            # Point-to-ray distance
+            v = pos - ray_origin
+            t = np.dot(v, ray_direction)
+            if t < 0:
+                continue
+            closest = ray_origin + t * ray_direction
+            dist = np.linalg.norm(pos - closest)
+            if dist < best_dist:
+                best_dist = dist
+                best_name = name
+        return best_name
+
+    @staticmethod
+    def _get_mirror_name(name):
+        """Return L/R mirror counterpart name, or None."""
+        if name.startswith("L_"):
+            mirror = "R_" + name[2:]
+        elif name.startswith("R_"):
+            mirror = "L_" + name[2:]
+        else:
+            return None
+        return mirror
+
+    def _drag_joint(self, dx, dy):
+        """Move selected joint on a screen-parallel plane based on mouse delta."""
+        name = self.joint_edit_selected
+        info = self.env.new_skel_info.get(name)
+        if info is None:
+            return
+
+        # Convert pixel delta to world-space delta at the joint's depth
+        # Use the inverse projection to get world units per pixel
+        projection = glGetDoublev(GL_PROJECTION_MATRIX)
+        modelview = glGetDoublev(GL_MODELVIEW_MATRIX)
+
+        # Unproject two points at the joint depth to get scale
+        viewport = glGetIntegerv(GL_VIEWPORT)
+        depth_z = self.joint_edit_drag_depth
+        # Map depth to window z: get approximate ndc
+        # Use gluUnProject at two nearby screen positions
+        sx, sy = self.mouse_x, self.height - self.mouse_y
+        p1 = np.array(gluUnProject(sx, sy, 0.5, modelview, projection, viewport))
+        p2 = np.array(gluUnProject(sx + 1, sy, 0.5, modelview, projection, viewport))
+        p3 = np.array(gluUnProject(sx, sy + 1, 0.5, modelview, projection, viewport))
+
+        # Get right and up vectors in world space
+        right = p2 - p1
+        up = p3 - p1
+
+        # Scale by depth ratio (further = larger movement)
+        # The 0.5 z is mid-frustum; scale by actual depth
+        proj_near = 0.1
+        proj_far = 100.0
+        mid_depth = (proj_near + proj_far) / 2.0
+        actual_depth = abs(depth_z)
+        if mid_depth > 0:
+            scale = actual_depth / mid_depth
+        else:
+            scale = 1.0
+
+        delta = right * dx * scale + up * dy * scale
+        info['joint_t'] = info['joint_t'].astype(np.float64) + delta
+
+        # Mirror if symmetry enabled
+        if self.joint_edit_symmetry:
+            mirror_name = self._get_mirror_name(name)
+            if mirror_name and mirror_name in self.env.new_skel_info:
+                mirror_info = self.env.new_skel_info[mirror_name]
+                mirror_info['joint_t'] = info['joint_t'].copy()
+                mirror_info['joint_t'][0] = -mirror_info['joint_t'][0]
+
+        self.newSkeleton()
+
     ## mousce button callback function
     def mousePress(self, button, action, mods):
         if action == glfw.PRESS:
             self.mouse_down = True
             if button == glfw.MOUSE_BUTTON_LEFT:
+                # Joint editor: pick instead of rotate
+                if self.joint_edit_mode and hasattr(self.env, 'new_skel_info'):
+                    ray_origin, ray_direction = self.get_ray_from_cursor()
+                    hit = self.pick_joint(ray_origin, ray_direction)
+                    if hit is not None:
+                        self.joint_edit_selected = hit
+                        self.joint_edit_dragging = True
+                        # Store depth for screen-parallel dragging
+                        joint_positions = self._get_joint_world_positions()
+                        joint_pos = joint_positions[hit]
+                        # Project joint position to get depth
+                        modelview = glGetDoublev(GL_MODELVIEW_MATRIX)
+                        # depth = dot(modelview * joint_pos)
+                        p = modelview @ np.append(joint_pos, 1.0)
+                        self.joint_edit_drag_depth = p[2]
+                        return
+                    else:
+                        self.joint_edit_selected = None
                 if self.auto_rotate:
                     self._auto_rotate_paused = True
                 self.rotate = True
@@ -595,6 +723,7 @@ class GLFWApp():
         elif action == glfw.RELEASE:
             self.mouse_down = False
             if button == glfw.MOUSE_BUTTON_LEFT:
+                self.joint_edit_dragging = False
                 if self.auto_rotate:
                     self._auto_rotate_paused = False
                 self.rotate = False
@@ -608,6 +737,11 @@ class GLFWApp():
 
         self.mouse_x = xpos
         self.mouse_y = ypos
+
+        # Joint editor dragging
+        if self.joint_edit_dragging and self.joint_edit_selected is not None:
+            self._drag_joint(dx, dy)
+            return
 
         if self.rotate:
             if dx != 0 or dy != 0:
@@ -760,6 +894,20 @@ class GLFWApp():
 
             glPopMatrix()
 
+    def _draw_joint_editor_overlay(self):
+        """Draw larger colored spheres for all joints in edit mode."""
+        joint_positions = self._get_joint_world_positions()
+        for name, pos in joint_positions.items():
+            glPushMatrix()
+            glTranslatef(pos[0], pos[1], pos[2])
+            if name == self.joint_edit_selected:
+                glColor4d(0.0, 1.0, 0.0, 0.9)  # green = selected
+                mygl.draw_sphere(0.014, 12, 12)
+            else:
+                glColor4d(1.0, 0.9, 0.0, 0.7)  # yellow = default
+                mygl.draw_sphere(0.010, 10, 10)
+            glPopMatrix()
+
     def drawSimFrame(self):
         initGL()
         
@@ -822,6 +970,8 @@ class GLFWApp():
             self.drawBone(self.env.skel.getPositions())
         if self.draw_joint:
             self.drawJoint(self.env.skel.getPositions())
+        if self.joint_edit_mode:
+            self._draw_joint_editor_overlay()
         if self.draw_obj:
             self.drawObj(self.env.skel.getPositions())
         if self.draw_muscle:
