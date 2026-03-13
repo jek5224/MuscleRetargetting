@@ -7100,6 +7100,10 @@ def _motion_load_nn_checkpoint(v):
         per_motion_mirror_v2 = f'volume_distill/{bvh_stem}_mirror_checkpoints/best_v2.pt'
         per_motion_mirror = f'volume_distill/{bvh_stem}_mirror_checkpoints/best.pt'
         per_motion = f'volume_distill/{bvh_stem}_checkpoints/best.pt'
+        # Also try base motion name (e.g. "dance1_subject1" → "dance")
+        import re
+        base_stem = re.sub(r'\d+(_subject\d+)?$', '', bvh_stem)
+        base_v1dec_alt = f'volume_distill/{base_stem}_v1dec_checkpoints/best_v1dec.pt' if base_stem != bvh_stem else None
         if os.path.exists(per_motion_v1dec_alt):
             ckpt_path = per_motion_v1dec_alt
         elif os.path.exists(per_motion_v1dec):
@@ -7112,6 +7116,8 @@ def _motion_load_nn_checkpoint(v):
             ckpt_path = per_motion_mirror
         elif os.path.exists(per_motion):
             ckpt_path = per_motion
+        elif base_v1dec_alt and os.path.exists(base_v1dec_alt):
+            ckpt_path = base_v1dec_alt
     if ckpt_path is None:
         ckpt_path = 'volume_distill/dof_grid_checkpoints/best.pt'
     if not os.path.exists(ckpt_path):
