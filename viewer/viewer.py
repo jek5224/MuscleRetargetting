@@ -902,10 +902,10 @@ class GLFWApp():
             glTranslatef(pos[0], pos[1], pos[2])
             if name == self.joint_edit_selected:
                 glColor4d(0.0, 1.0, 0.0, 0.9)  # green = selected
-                mygl.draw_sphere(0.014, 12, 12)
+                mygl.draw_sphere(0.015, 12, 12)
             else:
-                glColor4d(1.0, 0.9, 0.0, 0.7)  # yellow = default
-                mygl.draw_sphere(0.010, 10, 10)
+                glColor4d(0.0, 0.5, 1.0, 0.7)  # blue = default (matches existing joint style)
+                mygl.draw_sphere(0.012, 10, 10)
             glPopMatrix()
 
     def drawSimFrame(self):
