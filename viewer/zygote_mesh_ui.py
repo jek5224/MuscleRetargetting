@@ -1841,6 +1841,8 @@ def draw_zygote_skeleton_ui(v):
                 imgui.pop_item_width()
                 if changed and new_idx >= 0:
                     v.joint_edit_selected = joint_names[new_idx]
+                    mirror = v._get_mirror_name(joint_names[new_idx])
+                    v.joint_edit_symmetry = mirror is not None and mirror in v.env.new_skel_info
 
                 # XYZ input for selected joint
                 if v.joint_edit_selected and v.joint_edit_selected in v.env.new_skel_info:

@@ -702,6 +702,8 @@ class GLFWApp():
                     hit = self.pick_joint(ray_origin, ray_direction)
                     if hit is not None:
                         self.joint_edit_selected = hit
+                        mirror = self._get_mirror_name(hit)
+                        self.joint_edit_symmetry = mirror is not None and mirror in self.env.new_skel_info
                         self.joint_edit_dragging = True
                         # Store depth for screen-parallel dragging
                         joint_positions = self._get_joint_world_positions()
