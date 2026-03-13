@@ -602,47 +602,28 @@ def exportSkeleton(skel_info, root_name, filename):
 
         tw(f, "</Body>", 2)
 
-        if info['joint_type'] == "Free":
-            if 'bvh' in info:
-                tw(f, "<Joint type=\"Free\" bvh=\"%s\" smpl_jidx=\"%s\">" % 
-                   (info['bvh'], info['smpl_jidx']), 2)
+        # Build Joint tag with optional attributes
+        jtype = info['joint_type']
+        attrs = 'type="%s"' % jtype
+        if 'bvh' in info:
+            attrs += ' bvh="%s"' % info['bvh']
+        if jtype == "Revolute" and 'axis' in info:
+            attrs += ' axis="%s"' % " ".join(np.asarray(info['axis']).astype(str))
+        if 'lower' in info:
+            lower = info['lower']
+            if hasattr(lower, '__iter__'):
+                attrs += ' lower="%s"' % " ".join(np.asarray(lower).astype(str))
             else:
-                tw(f, "<Joint type=\"Free\" smpl_jidx=\"%s\">" % 
-                   (info['smpl_jidx']), 2)
-        elif info['joint_type'] == "Ball":
-            if 'bvh' in info:
-                tw(f, "<Joint type=\"Ball\" bvh=\"%s\" lower=\"%s\" upper=\"%s\" smpl_jidx=\"%s\">" %
-                (info['bvh'],
-                    " ".join(info['lower'].astype(str)),
-                    " ".join(info['upper'].astype(str)),
-                    info['smpl_jidx']
-                    ),
-                    2)
+                attrs += ' lower="%s"' % str(lower)
+        if 'upper' in info:
+            upper = info['upper']
+            if hasattr(upper, '__iter__'):
+                attrs += ' upper="%s"' % " ".join(np.asarray(upper).astype(str))
             else:
-                tw(f, "<Joint type=\"Ball\" lower=\"%s\" upper=\"%s\" smpl_jidx=\"%s\">" %
-                (" ".join(info['lower'].astype(str)),
-                    " ".join(info['upper'].astype(str)),
-                    info['smpl_jidx']
-                    ),
-                    2)
-        elif info['joint_type'] == "Revolute":
-            if 'bvh' in info:
-                tw(f, "<Joint type=\"Revolute\" bvh=\"%s\" axis=\"%s\" lower=\"%s\" upper=\"%s\" smpl_jidx=\"%s\">" %
-                (info['bvh'],
-                    " ".join(info['axis'].astype(str)),
-                    info['lower'],
-                    info['upper'],
-                    info['smpl_jidx']
-                    ),
-                    2)
-            else:
-                tw(f, "<Joint type=\"Revolute\" axis=\"%s\" lower=\"%s\" upper=\"%s\" smpl_jidx=\"%s\">" %
-                (" ".join(info['axis'].astype(str)),
-                    info['lower'],
-                    info['upper'],
-                    info['smpl_jidx']
-                    ),
-                    2)
+                attrs += ' upper="%s"' % str(upper)
+        if 'smpl_jidx' in info:
+            attrs += ' smpl_jidx="%s"' % info['smpl_jidx']
+        tw(f, "<Joint %s>" % attrs, 2)
         
         tw(f, "<Transformation linear=\"%s\" translation=\"%s\"/>" %
                 (" ".join(info['joint_r'].astype(str).flatten()),
