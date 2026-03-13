@@ -1814,9 +1814,13 @@ def draw_zygote_skeleton_ui(v):
 
                     from core.dartHelper import saveSkeletonInfo
                     from core.dartHelper import buildFromInfo
+                    from copy import deepcopy
                     skel_info, root_name, _, _, _, _ = saveSkeletonInfo("data/zygote_skel.xml")
                     v.env.skel_info = skel_info
-                    v.env.skel = buildFromInfo(skel_info, "zygote")
+                    v.env.new_skel_info = deepcopy(skel_info)
+                    v.env.root_name = root_name
+                    v.env.skel = buildFromInfo(skel_info, root_name)
+                    v.env.target_skel = v.env.skel.clone()
                     v.env.world.addSkeleton(v.env.skel)
                     v.env.kp = 300.0 * np.ones(v.env.skel.getNumDofs())
                     v.env.kv = 20.0 * np.ones(v.env.skel.getNumDofs())
