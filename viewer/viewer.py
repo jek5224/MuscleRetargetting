@@ -462,6 +462,14 @@ class GLFWApp():
         self.taichi_available = check_taichi_available()
         self.arap_backend = None  # Will be created when needed
 
+        # FEM simulation settings
+        self.use_fem_sim = False  # Use FEM instead of ARAP
+        self.fem_youngs_modulus = 5000.0  # Young's modulus (Pa)
+        self.fem_poisson_ratio = 0.49  # Poisson's ratio
+        self.fem_collision_kappa = 1e4  # Collision penalty stiffness
+        self.fem_contact_threshold = 0.015  # Inter-muscle contact distance (m)
+        self.fem_outer_iterations = 3  # Outer iterations for inter-muscle convergence
+
         imgui.create_context()
         self.window = impl_glfw_init(self.name, self.width, self.height)
         self.impl = GlfwRenderer(self.window)

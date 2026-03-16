@@ -142,6 +142,10 @@ def build_context(skel, muscle_meshes, skeleton_meshes, mesh_info, args):
     use_gpu = backend == "gpu"
     print(f"ARAP backend: {backend.upper()}")
 
+    use_fem = getattr(args, 'sim_method', 'arap') == 'fem'
+    if use_fem:
+        print("Simulation method: FEM (Neo-Hookean)")
+
     ctx = SimpleNamespace(
         env=SimpleNamespace(skel=skel, mesh_info=mesh_info),
         zygote_muscle_meshes=muscle_meshes,
@@ -152,6 +156,12 @@ def build_context(skel, muscle_meshes, skeleton_meshes, mesh_info, args):
         use_gpu_arap=use_gpu,
         use_taichi_arap=use_taichi,
         use_muscle_aware_arap=True,
+        use_fem_sim=use_fem,
+        fem_youngs_modulus=5000.0,
+        fem_poisson_ratio=0.49,
+        fem_collision_kappa=1e4,
+        fem_contact_threshold=args.constraint_threshold,
+        fem_outer_iterations=3,
         motion_settle_iters=args.settle_iters,
         _unified_arap_backend=None,
         _unified_sim_cache=None,
@@ -299,6 +309,12 @@ def main():
         help="ARAP solver backend (default: auto — picks taichi > gpu > cpu)",
     )
     parser.add_argument(
+        "--sim-method",
+        choices=["arap", "fem"],
+        default="arap",
+        help="Simulation method: arap (default) or fem (Neo-Hookean FEM)",
+    )
+    parser.add_argument(
         "--start-frame", type=int, default=0, help="First frame to bake (default: 0)"
     )
     parser.add_argument(
@@ -404,9 +420,14 @@ def main():
             mobj._baking_mode = True
 
         # Run simulation
-        run_all_tet_sim_with_constraints(
-            ctx, max_iterations=args.settle_iters, tolerance=1e-4
-        )
+        if ctx.use_fem_sim:
+            from viewer.fem_sim import run_all_fem_sim
+            run_all_fem_sim(ctx, max_iterations=10, tolerance=1e-4,
+                            verbose=(frame == start_frame))
+        else:
+            run_all_tet_sim_with_constraints(
+                ctx, max_iterations=args.settle_iters, tolerance=1e-4
+            )
 
         # Capture positions
         for mname, mobj in active_muscles.items():

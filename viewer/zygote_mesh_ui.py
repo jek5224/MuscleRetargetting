@@ -414,39 +414,72 @@ def draw_zygote_muscle_ui(v):
             imgui.same_line()
             _, v.use_muscle_aware_arap = imgui.checkbox("Muscle-Aware", v.use_muscle_aware_arap)
 
-        # Backend selection (radio-button style with checkboxes)
-        imgui.text("Backend:")
+        # Simulation method selector
+        imgui.text("Sim Method:")
         imgui.same_line()
+        changed_arap, checked_arap = imgui.checkbox("ARAP", not v.use_fem_sim)
+        if changed_arap and checked_arap:
+            v.use_fem_sim = False
+        imgui.same_line()
+        changed_fem, checked_fem = imgui.checkbox("FEM", v.use_fem_sim)
+        if changed_fem and checked_fem:
+            v.use_fem_sim = True
 
-        # CPU (always available, default)
-        use_cpu = not v.use_gpu_arap and not v.use_taichi_arap
-        if imgui.checkbox("CPU", use_cpu)[1] and not use_cpu:
-            v.use_gpu_arap = False
-            v.use_taichi_arap = False
-
-        # GPU (PyTorch)
-        if v.gpu_available:
+        if v.use_fem_sim:
+            # FEM material parameter sliders
+            imgui.push_item_width(120)
+            _, v.fem_youngs_modulus = imgui.slider_float(
+                "Young's (Pa)", v.fem_youngs_modulus, 1000.0, 50000.0, "%.0f"
+            )
+            _, v.fem_poisson_ratio = imgui.slider_float(
+                "Poisson", v.fem_poisson_ratio, 0.3, 0.499, "%.3f"
+            )
+            _, log_kappa = imgui.slider_float(
+                "log10(kappa)", np.log10(v.fem_collision_kappa), 2.0, 6.0, "%.1f"
+            )
+            v.fem_collision_kappa = 10.0 ** log_kappa
+            _, v.fem_outer_iterations = imgui.slider_int(
+                "Outer Iters", v.fem_outer_iterations, 1, 10
+            )
+            imgui.pop_item_width()
+        else:
+            # Backend selection (radio-button style with checkboxes)
+            imgui.text("Backend:")
             imgui.same_line()
-            changed, checked = imgui.checkbox("GPU", v.use_gpu_arap)
-            if changed and checked:
-                v.use_gpu_arap = True
-                v.use_taichi_arap = False
-            elif changed and not checked:
-                v.use_gpu_arap = False
 
-        # Taichi
-        if v.taichi_available:
-            imgui.same_line()
-            changed, checked = imgui.checkbox("Taichi", v.use_taichi_arap)
-            if changed and checked:
-                v.use_taichi_arap = True
+            # CPU (always available, default)
+            use_cpu = not v.use_gpu_arap and not v.use_taichi_arap
+            if imgui.checkbox("CPU", use_cpu)[1] and not use_cpu:
                 v.use_gpu_arap = False
-            elif changed and not checked:
                 v.use_taichi_arap = False
+
+            # GPU (PyTorch)
+            if v.gpu_available:
+                imgui.same_line()
+                changed, checked = imgui.checkbox("GPU", v.use_gpu_arap)
+                if changed and checked:
+                    v.use_gpu_arap = True
+                    v.use_taichi_arap = False
+                elif changed and not checked:
+                    v.use_gpu_arap = False
+
+            # Taichi
+            if v.taichi_available:
+                imgui.same_line()
+                changed, checked = imgui.checkbox("Taichi", v.use_taichi_arap)
+                if changed and checked:
+                    v.use_taichi_arap = True
+                    v.use_gpu_arap = False
+                elif changed and not checked:
+                    v.use_taichi_arap = False
 
         # Run coupled simulation button
         if imgui.button("Run Coupled Tet Sim", width=wide_button_width):
-            run_all_tet_sim_with_constraints(v)
+            if v.use_fem_sim:
+                from viewer.fem_sim import run_all_fem_sim
+                run_all_fem_sim(v, max_iterations=10, tolerance=1e-4)
+            else:
+                run_all_tet_sim_with_constraints(v)
 
         imgui.separator()
 
@@ -7132,10 +7165,14 @@ def _motion_step_forward(v, count=1, run_tet=False):
 
 def _motion_run_tet_settle(v):
     """Run coupled tet sim for all active soft bodies at current pose."""
-    run_all_tet_sim_with_constraints(v, 
-        max_iterations=v.motion_settle_iters,
-        tolerance=1e-4
-    )
+    if getattr(v, 'use_fem_sim', False):
+        from viewer.fem_sim import run_all_fem_sim
+        run_all_fem_sim(v, max_iterations=10, tolerance=1e-4)
+    else:
+        run_all_tet_sim_with_constraints(v,
+            max_iterations=v.motion_settle_iters,
+            tolerance=1e-4
+        )
 
 
 def _motion_cache_dir(v):
