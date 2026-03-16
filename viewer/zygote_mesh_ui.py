@@ -7056,6 +7056,7 @@ def _load_motion_bvh(v, idx):
         print(f"Loaded motion: {os.path.basename(bvh_path)} ({v.motion_total_frames} frames, {1.0/v.motion_bvh.frame_time:.0f} FPS)")
     except Exception as e:
         print(f"Error loading BVH: {e}")
+        traceback.print_exc()
         v.motion_bvh = None
         v.motion_total_frames = 0
         v.motion_current_frame = 0
