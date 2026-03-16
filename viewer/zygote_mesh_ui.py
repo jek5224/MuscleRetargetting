@@ -434,12 +434,8 @@ def draw_zygote_muscle_ui(v):
             _, v.fem_poisson_ratio = imgui.slider_float(
                 "Poisson", v.fem_poisson_ratio, 0.3, 0.499, "%.3f"
             )
-            _, log_kappa = imgui.slider_float(
-                "log10(kappa)", np.log10(v.fem_collision_kappa), 2.0, 6.0, "%.1f"
-            )
-            v.fem_collision_kappa = 10.0 ** log_kappa
-            _, v.fem_outer_iterations = imgui.slider_int(
-                "Outer Iters", v.fem_outer_iterations, 1, 10
+            _, v.fem_volume_penalty = imgui.slider_float(
+                "Vol Penalty", v.fem_volume_penalty, 0.0, 1000.0, "%.0f"
             )
             imgui.pop_item_width()
         else:

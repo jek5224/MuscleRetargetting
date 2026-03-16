@@ -160,6 +160,7 @@ def build_context(skel, muscle_meshes, skeleton_meshes, mesh_info, args):
         fem_youngs_modulus=5000.0,
         fem_poisson_ratio=0.49,
         fem_collision_kappa=1e4,
+        fem_volume_penalty=100.0,
         fem_contact_threshold=args.constraint_threshold,
         fem_outer_iterations=3,
         motion_settle_iters=args.settle_iters,

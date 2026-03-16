@@ -1,10 +1,18 @@
 """
-FEM-based muscle simulation with Neo-Hookean material model.
+FEM-based muscle simulation with Neo-Hookean material model + volume preservation.
 
 Self-contained module using Taichi for GPU acceleration.
-Handles muscle-bone collisions (penalty-based) and inter-muscle contacts.
+Handles muscle-bone collisions (direct projection) and elastic relaxation.
+
+Architecture:
+- Unified batched solver: all muscles concatenated into one global system
+- L-BFGS optimizer (~10-20 iters vs 100+ for gradient descent)
+- Merged bone collision mesh for single BVH query
+- Degenerate tet filtering
+- Quasistatic: deterministic given same boundary conditions
 """
 
+import time
 import numpy as np
 
 try:
@@ -20,10 +28,6 @@ except ImportError:
     TRIMESH_AVAILABLE = False
 
 
-# ---------------------------------------------------------------------------
-# Taichi kernels (module-level, lazily initialized)
-# ---------------------------------------------------------------------------
-
 _ti_initialized = False
 
 
@@ -33,7 +37,6 @@ def _ensure_ti_init():
         return
     if not TAICHI_AVAILABLE:
         raise RuntimeError("Taichi is required for FEM simulation")
-    # Only init if not already initialized by another module
     try:
         ti.init(arch=ti.gpu, default_fp=ti.f64)
     except RuntimeError:
@@ -42,646 +45,19 @@ def _ensure_ti_init():
 
 
 # ---------------------------------------------------------------------------
-# FEMSimulation
-# ---------------------------------------------------------------------------
-
-
-class FEMSimulation:
-    """Neo-Hookean FEM simulation with Newton-CG solver on Taichi GPU."""
-
-    def __init__(self, youngs_modulus=5000.0, poisson_ratio=0.49,
-                 collision_kappa=1e4, contact_threshold=0.015):
-        self.E = youngs_modulus
-        self.nu = poisson_ratio
-        self.kappa = collision_kappa
-        self.contact_threshold = contact_threshold
-
-        # Lamé parameters
-        self.mu = self.E / (2.0 * (1.0 + self.nu))
-        self.lam = self.E * self.nu / ((1.0 + self.nu) * (1.0 - 2.0 * self.nu))
-
-        # State
-        self._built = False
-        self._n_verts = 0
-        self._n_tets = 0
-
-        # Collision data
-        self._bone_meshes = None
-        self._bone_margin = 0.002
-        self._collision_verts = None  # indices of surface verts near bones
-        self._collision_targets = None  # push-out target positions
-        self._collision_depths = None  # penetration depths
-
-        # Inter-muscle contact
-        self._contact_pairs = None  # (K, 2) int array of vertex index pairs
-        self._contact_rest_dists = None  # (K,) float array
-
-        # Taichi fields (allocated in build)
-        self._fields_allocated = False
-
-    def build(self, vertices, tetrahedra, fixed_mask, surface_faces=None):
-        """
-        Initialize the FEM simulation with mesh data.
-
-        Args:
-            vertices: (N, 3) float64 rest positions
-            tetrahedra: (M, 4) int32 tet vertex indices
-            fixed_mask: (N,) bool array — True for fixed (Dirichlet) vertices
-            surface_faces: (F, 3) int32 optional surface triangle indices for collision
-        """
-        _ensure_ti_init()
-
-        self._n_verts = len(vertices)
-        self._n_tets = len(tetrahedra)
-
-        # Store numpy arrays
-        self.rest_positions = vertices.astype(np.float64).copy()
-        self.positions = vertices.astype(np.float64).copy()
-        self.tetrahedra = tetrahedra.astype(np.int32)
-        self.fixed_mask = fixed_mask.astype(bool)
-        self.free_mask = ~self.fixed_mask
-        self.fixed_indices = np.where(self.fixed_mask)[0]
-        self.free_indices = np.where(self.free_mask)[0]
-        self.fixed_targets = self.positions[self.fixed_indices].copy()
-
-        if surface_faces is not None:
-            self.surface_faces = surface_faces.astype(np.int32)
-            # Surface vertex indices (unique)
-            self.surface_verts = np.unique(surface_faces.ravel())
-        else:
-            self.surface_faces = None
-            self.surface_verts = np.arange(self._n_verts)
-
-        # Precompute rest-state edge matrix inverse and volume per tet
-        self._precompute_rest_state()
-
-        # Allocate Taichi fields
-        self._allocate_fields()
-
-        # Upload data to GPU
-        self._upload_data()
-
-        self._built = True
-
-    def _precompute_rest_state(self):
-        """Compute Dm_inv (rest edge matrix inverse) and rest_volume per tet."""
-        N = self._n_verts
-        M = self._n_tets
-        tets = self.tetrahedra
-        X = self.rest_positions
-
-        # Edge matrix: Dm = [x1-x0, x2-x0, x3-x0] (3x3 per tet)
-        v0 = X[tets[:, 0]]  # (M, 3)
-        v1 = X[tets[:, 1]]
-        v2 = X[tets[:, 2]]
-        v3 = X[tets[:, 3]]
-
-        # Dm columns: e1, e2, e3
-        e1 = v1 - v0  # (M, 3)
-        e2 = v2 - v0
-        e3 = v3 - v0
-
-        # Dm as (M, 3, 3)
-        Dm = np.stack([e1, e2, e3], axis=-1)  # (M, 3, 3) — columns are edges
-
-        # Dm_inv per tet
-        self.Dm_inv = np.linalg.inv(Dm)  # (M, 3, 3)
-
-        # Rest volume = |det(Dm)| / 6
-        self.rest_volume = np.abs(np.linalg.det(Dm)) / 6.0  # (M,)
-
-        # Check for degenerate tets
-        degenerate = self.rest_volume < 1e-15
-        if np.any(degenerate):
-            n_deg = np.sum(degenerate)
-            print(f"  FEM: Warning: {n_deg} degenerate tetrahedra (zero volume)")
-            self.rest_volume[degenerate] = 1e-15
-
-    def _allocate_fields(self):
-        """Allocate Taichi fields for GPU computation."""
-        N = self._n_verts
-        M = self._n_tets
-
-        # Vertex fields
-        self.ti_positions = ti.Vector.field(3, dtype=ti.f64, shape=N)
-        self.ti_gradient = ti.Vector.field(3, dtype=ti.f64, shape=N)
-        self.ti_dx = ti.Vector.field(3, dtype=ti.f64, shape=N)  # search direction
-        self.ti_Hdx = ti.Vector.field(3, dtype=ti.f64, shape=N)  # Hessian-vector product
-        self.ti_r = ti.Vector.field(3, dtype=ti.f64, shape=N)   # CG residual
-        self.ti_p = ti.Vector.field(3, dtype=ti.f64, shape=N)   # CG direction
-        self.ti_Hp = ti.Vector.field(3, dtype=ti.f64, shape=N)  # H * p
-        self.ti_positions_tmp = ti.Vector.field(3, dtype=ti.f64, shape=N)  # temp for FD
-        self.ti_grad_tmp = ti.Vector.field(3, dtype=ti.f64, shape=N)  # temp gradient
-
-        # Fixed vertex data
-        self.ti_fixed_mask = ti.field(dtype=ti.i32, shape=N)
-        self.ti_fixed_targets = ti.Vector.field(3, dtype=ti.f64, shape=N)
-
-        # Tet fields
-        self.ti_tets = ti.Vector.field(4, dtype=ti.i32, shape=M)
-        self.ti_Dm_inv = ti.Matrix.field(3, 3, dtype=ti.f64, shape=M)
-        self.ti_rest_volume = ti.field(dtype=ti.f64, shape=M)
-
-        # Material params
-        self.ti_mu = ti.field(dtype=ti.f64, shape=())
-        self.ti_lam = ti.field(dtype=ti.f64, shape=())
-
-        # Collision fields (allocated dynamically)
-        self._n_collision_verts = 0
-        self.ti_collision_indices = None
-        self.ti_collision_targets = None
-        self.ti_collision_depths = None
-        self.ti_kappa = ti.field(dtype=ti.f64, shape=())
-
-        # Contact fields (allocated dynamically)
-        self._n_contacts = 0
-        self.ti_contact_pairs = None
-        self.ti_contact_rest_dists = None
-
-        # Scalar reduction fields
-        self.ti_energy = ti.field(dtype=ti.f64, shape=())
-        self.ti_dot_result = ti.field(dtype=ti.f64, shape=())
-
-        self._fields_allocated = True
-
-    def _upload_data(self):
-        """Upload mesh data to Taichi fields."""
-        self.ti_positions.from_numpy(self.positions)
-        self.ti_tets.from_numpy(self.tetrahedra)
-        self.ti_Dm_inv.from_numpy(self.Dm_inv)
-        self.ti_rest_volume.from_numpy(self.rest_volume)
-
-        fixed_mask_int = self.fixed_mask.astype(np.int32)
-        self.ti_fixed_mask.from_numpy(fixed_mask_int)
-
-        # Upload fixed targets (full array, only fixed indices matter)
-        targets_full = np.zeros((self._n_verts, 3), dtype=np.float64)
-        targets_full[self.fixed_indices] = self.fixed_targets
-        self.ti_fixed_targets.from_numpy(targets_full)
-
-        self.ti_mu[None] = self.mu
-        self.ti_lam[None] = self.lam
-        self.ti_kappa[None] = self.kappa
-
-    def set_fixed_targets(self, targets):
-        """
-        Update fixed vertex target positions.
-
-        Args:
-            targets: (F, 3) float64 array matching fixed_indices ordering
-        """
-        self.fixed_targets = targets.astype(np.float64).copy()
-        targets_full = np.zeros((self._n_verts, 3), dtype=np.float64)
-        targets_full[self.fixed_indices] = self.fixed_targets
-        self.ti_fixed_targets.from_numpy(targets_full)
-
-        # Also snap positions
-        self.positions[self.fixed_indices] = self.fixed_targets
-        self.ti_positions.from_numpy(self.positions)
-
-    def set_bone_collisions(self, bone_trimeshes, margin=0.002):
-        """
-        Set bone trimeshes for collision detection.
-
-        Args:
-            bone_trimeshes: list of trimesh.Trimesh objects
-            margin: push-out margin in meters
-        """
-        self._bone_meshes = bone_trimeshes
-        self._bone_margin = margin
-
-    def set_inter_muscle_contacts(self, contact_pairs, rest_distances):
-        """
-        Set inter-muscle contact vertex pairs.
-
-        Args:
-            contact_pairs: (K, 2) int array — pairs of vertex indices
-            rest_distances: (K,) float array — rest distances
-        """
-        self._contact_pairs = contact_pairs.astype(np.int32)
-        self._contact_rest_dists = rest_distances.astype(np.float64)
-        self._n_contacts = len(contact_pairs)
-
-        if self._n_contacts > 0:
-            self.ti_contact_pairs = ti.Vector.field(2, dtype=ti.i32, shape=self._n_contacts)
-            self.ti_contact_rest_dists = ti.field(dtype=ti.f64, shape=self._n_contacts)
-            self.ti_contact_pairs.from_numpy(self._contact_pairs)
-            self.ti_contact_rest_dists.from_numpy(self._contact_rest_dists)
-
-    def _detect_bone_collisions(self):
-        """CPU: detect surface vertices penetrating bone meshes."""
-        if self._bone_meshes is None or len(self._bone_meshes) == 0:
-            self._n_collision_verts = 0
-            return
-
-        # Query surface vertices only
-        surf_positions = self.positions[self.surface_verts]
-        n_surf = len(surf_positions)
-
-        min_dist = np.full(n_surf, np.inf)
-        closest_pts = np.zeros_like(surf_positions)
-        closest_normals = np.zeros_like(surf_positions)
-
-        for mesh in self._bone_meshes:
-            if mesh is None:
-                continue
-            try:
-                cp, dists, face_ids = mesh.nearest.on_surface(surf_positions)
-                normals = mesh.face_normals[face_ids]
-                closer = dists < min_dist
-                min_dist[closer] = dists[closer]
-                closest_pts[closer] = cp[closer]
-                closest_normals[closer] = normals[closer]
-            except Exception:
-                continue
-
-        # Penetration check: inside if dot(vertex - surface_pt, normal) < 0
-        to_vertex = surf_positions - closest_pts
-        dots = np.einsum('ij,ij->i', to_vertex, closest_normals)
-        penetrating = (min_dist < self._bone_margin) & (dots < 0)
-
-        pen_indices = np.where(penetrating)[0]
-        if len(pen_indices) == 0:
-            self._n_collision_verts = 0
-            return
-
-        # Map back to global vertex indices
-        global_indices = self.surface_verts[pen_indices]
-        # Filter out fixed vertices
-        is_free = self.free_mask[global_indices]
-        pen_indices = pen_indices[is_free]
-        global_indices = global_indices[is_free]
-
-        if len(global_indices) == 0:
-            self._n_collision_verts = 0
-            return
-
-        # Compute push-out targets
-        targets = closest_pts[pen_indices] + closest_normals[pen_indices] * self._bone_margin
-        depths = self._bone_margin - min_dist[pen_indices]
-
-        self._n_collision_verts = len(global_indices)
-        self._collision_verts = global_indices
-        self._collision_targets = targets
-        self._collision_depths = depths
-
-        # Upload to Taichi
-        if self.ti_collision_indices is None or self.ti_collision_indices.shape[0] < self._n_collision_verts:
-            self.ti_collision_indices = ti.field(dtype=ti.i32, shape=self._n_collision_verts)
-            self.ti_collision_targets = ti.Vector.field(3, dtype=ti.f64, shape=self._n_collision_verts)
-            self.ti_collision_depths = ti.field(dtype=ti.f64, shape=self._n_collision_verts)
-
-        self.ti_collision_indices.from_numpy(global_indices.astype(np.int32))
-        self.ti_collision_targets.from_numpy(targets)
-        self.ti_collision_depths.from_numpy(depths)
-
-    def solve(self, max_newton_iters=10, cg_max_iters=50, cg_tol=1e-6,
-              newton_tol=1e-4, verbose=False):
-        """
-        Run Newton-CG solver for one frame.
-
-        Returns:
-            (iterations, residual) tuple
-        """
-        if not self._built:
-            raise RuntimeError("Must call build() before solve()")
-
-        for newton_iter in range(max_newton_iters):
-            # 1. Zero gradient
-            _zero_field(self.ti_gradient, self._n_verts)
-
-            # 2. Compute elastic energy gradient
-            _compute_elastic_gradient(
-                self.ti_positions, self.ti_tets, self.ti_Dm_inv,
-                self.ti_rest_volume, self.ti_gradient,
-                self.ti_mu, self.ti_lam, self._n_tets
-            )
-
-            # 3. Bone collision detection (CPU) and penalty gradient (GPU)
-            self._detect_bone_collisions()
-            if self._n_collision_verts > 0:
-                _add_collision_gradient(
-                    self.ti_positions, self.ti_gradient,
-                    self.ti_collision_indices, self.ti_collision_targets,
-                    self.ti_kappa, self._n_collision_verts
-                )
-
-            # 4. Inter-muscle contact gradient
-            if self._n_contacts > 0:
-                _add_contact_gradient(
-                    self.ti_positions, self.ti_gradient,
-                    self.ti_contact_pairs, self.ti_contact_rest_dists,
-                    self.ti_kappa, self._n_contacts
-                )
-
-            # 5. Enforce Dirichlet BCs
-            _enforce_dirichlet(
-                self.ti_gradient, self.ti_positions, self.ti_fixed_targets,
-                self.ti_fixed_mask, self._n_verts
-            )
-
-            # 6. Check convergence (gradient norm of free vertices)
-            _dot_product(self.ti_gradient, self.ti_gradient, self.ti_dot_result,
-                         self.ti_fixed_mask, self._n_verts)
-            grad_norm = np.sqrt(self.ti_dot_result[None])
-
-            if verbose:
-                print(f"  Newton iter {newton_iter}: |grad| = {grad_norm:.6e}"
-                      f" collisions={self._n_collision_verts}")
-
-            if grad_norm < newton_tol:
-                if verbose:
-                    print(f"  Newton converged at iter {newton_iter}")
-                break
-
-            # 7. CG solve: H @ dx = -grad
-            cg_iters = self._cg_solve(cg_max_iters, cg_tol)
-
-            # 8. Backtracking line search
-            alpha = self._line_search()
-
-            # 9. Update positions: x += alpha * dx
-            _update_positions(self.ti_positions, self.ti_dx, alpha, self._n_verts)
-
-            # 10. Snap fixed vertices
-            _snap_fixed(self.ti_positions, self.ti_fixed_targets,
-                        self.ti_fixed_mask, self._n_verts)
-
-        # Download final positions
-        self.positions = self.ti_positions.to_numpy()
-
-        return newton_iter + 1, grad_norm
-
-    def _cg_solve(self, max_iters, tol):
-        """CG solve for Newton direction: H @ dx = -grad, using finite-diff Hv."""
-        N = self._n_verts
-
-        # dx = 0
-        _zero_field(self.ti_dx, N)
-
-        # r = -grad (residual)
-        _copy_neg(self.ti_r, self.ti_gradient, N)
-
-        # p = r
-        _copy_field(self.ti_p, self.ti_r, N)
-
-        # rr = r · r (free vertices only)
-        _dot_product(self.ti_r, self.ti_r, self.ti_dot_result,
-                     self.ti_fixed_mask, N)
-        rr = self.ti_dot_result[None]
-
-        if rr < tol * tol:
-            return 0
-
-        for cg_iter in range(max_iters):
-            # Hp = Hessian-vector product via finite difference
-            self._hessian_vector_product()
-
-            # Enforce Dirichlet on Hp
-            _zero_fixed(self.ti_Hp, self.ti_fixed_mask, N)
-
-            # pHp = p · Hp
-            _dot_product(self.ti_p, self.ti_Hp, self.ti_dot_result,
-                         self.ti_fixed_mask, N)
-            pHp = self.ti_dot_result[None]
-
-            if abs(pHp) < 1e-30:
-                break
-
-            alpha = rr / pHp
-
-            # dx += alpha * p
-            _axpy(self.ti_dx, self.ti_p, alpha, N)
-
-            # r -= alpha * Hp
-            _axpy(self.ti_r, self.ti_Hp, -alpha, N)
-
-            # new rr
-            _dot_product(self.ti_r, self.ti_r, self.ti_dot_result,
-                         self.ti_fixed_mask, N)
-            rr_new = self.ti_dot_result[None]
-
-            if rr_new < tol * tol:
-                return cg_iter + 1
-
-            beta = rr_new / rr
-            rr = rr_new
-
-            # p = r + beta * p
-            _update_cg_direction(self.ti_p, self.ti_r, beta, N)
-
-        return max_iters
-
-    def _hessian_vector_product(self):
-        """Compute H @ p via finite difference: (grad(x + eps*p) - grad(x)) / eps."""
-        eps = 1e-6
-        N = self._n_verts
-        M = self._n_tets
-
-        # Save x_tmp = x + eps * p
-        _perturb(self.ti_positions_tmp, self.ti_positions, self.ti_p, eps, N)
-
-        # Compute gradient at perturbed position
-        _zero_field(self.ti_grad_tmp, N)
-        _compute_elastic_gradient(
-            self.ti_positions_tmp, self.ti_tets, self.ti_Dm_inv,
-            self.ti_rest_volume, self.ti_grad_tmp,
-            self.ti_mu, self.ti_lam, M
-        )
-
-        # Add collision gradient at perturbed position
-        if self._n_collision_verts > 0:
-            _add_collision_gradient(
-                self.ti_positions_tmp, self.ti_grad_tmp,
-                self.ti_collision_indices, self.ti_collision_targets,
-                self.ti_kappa, self._n_collision_verts
-            )
-
-        # Add contact gradient at perturbed position
-        if self._n_contacts > 0:
-            _add_contact_gradient(
-                self.ti_positions_tmp, self.ti_grad_tmp,
-                self.ti_contact_pairs, self.ti_contact_rest_dists,
-                self.ti_kappa, self._n_contacts
-            )
-
-        # Hp = (grad_tmp - gradient) / eps
-        _finite_diff(self.ti_Hp, self.ti_grad_tmp, self.ti_gradient, eps, N)
-
-    def _line_search(self, max_ls_iters=8):
-        """Backtracking line search along dx."""
-        alpha = 1.0
-        N = self._n_verts
-        M = self._n_tets
-
-        # Current energy
-        _compute_total_energy(
-            self.ti_positions, self.ti_tets, self.ti_Dm_inv,
-            self.ti_rest_volume, self.ti_energy,
-            self.ti_mu, self.ti_lam, M
-        )
-        E0 = self.ti_energy[None]
-
-        # Directional derivative: grad · dx
-        _dot_product(self.ti_gradient, self.ti_dx, self.ti_dot_result,
-                     self.ti_fixed_mask, N)
-        dir_deriv = self.ti_dot_result[None]
-
-        c = 1e-4  # Armijo condition parameter
-
-        for _ in range(max_ls_iters):
-            # Trial position: x_tmp = x + alpha * dx
-            _perturb(self.ti_positions_tmp, self.ti_positions, self.ti_dx, alpha, N)
-
-            # Snap fixed
-            _snap_fixed(self.ti_positions_tmp, self.ti_fixed_targets,
-                        self.ti_fixed_mask, N)
-
-            # Energy at trial
-            _compute_total_energy(
-                self.ti_positions_tmp, self.ti_tets, self.ti_Dm_inv,
-                self.ti_rest_volume, self.ti_energy,
-                self.ti_mu, self.ti_lam, M
-            )
-            E_trial = self.ti_energy[None]
-
-            if E_trial <= E0 + c * alpha * dir_deriv:
-                return alpha
-
-            alpha *= 0.5
-
-        return alpha
-
-    def get_positions(self):
-        """Return current vertex positions as numpy array."""
-        return self.positions.copy()
-
-    def update_material(self, youngs_modulus=None, poisson_ratio=None,
-                        collision_kappa=None):
-        """Update material parameters (can be called between frames)."""
-        if youngs_modulus is not None:
-            self.E = youngs_modulus
-        if poisson_ratio is not None:
-            self.nu = poisson_ratio
-        if collision_kappa is not None:
-            self.kappa = collision_kappa
-
-        self.mu = self.E / (2.0 * (1.0 + self.nu))
-        self.lam = self.E * self.nu / ((1.0 + self.nu) * (1.0 - 2.0 * self.nu))
-
-        if self._fields_allocated:
-            self.ti_mu[None] = self.mu
-            self.ti_lam[None] = self.lam
-            self.ti_kappa[None] = self.kappa
-
-
-# ---------------------------------------------------------------------------
 # Taichi kernels
 # ---------------------------------------------------------------------------
 
 @ti.kernel
-def _zero_field(field: ti.template(), n: ti.i32):
-    for i in range(n):
-        field[i] = ti.Vector([0.0, 0.0, 0.0], dt=ti.f64)
-
-
-@ti.kernel
-def _copy_field(dst: ti.template(), src: ti.template(), n: ti.i32):
-    for i in range(n):
-        dst[i] = src[i]
-
-
-@ti.kernel
-def _copy_neg(dst: ti.template(), src: ti.template(), n: ti.i32):
-    for i in range(n):
-        dst[i] = -src[i]
-
-
-@ti.kernel
-def _axpy(y: ti.template(), x: ti.template(), alpha: ti.f64, n: ti.i32):
-    """y += alpha * x"""
-    for i in range(n):
-        y[i] += alpha * x[i]
-
-
-@ti.kernel
-def _update_cg_direction(p: ti.template(), r: ti.template(),
-                         beta: ti.f64, n: ti.i32):
-    """p = r + beta * p"""
-    for i in range(n):
-        p[i] = r[i] + beta * p[i]
-
-
-@ti.kernel
-def _perturb(dst: ti.template(), x: ti.template(), d: ti.template(),
-             eps: ti.f64, n: ti.i32):
-    """dst = x + eps * d"""
-    for i in range(n):
-        dst[i] = x[i] + eps * d[i]
-
-
-@ti.kernel
-def _finite_diff(result: ti.template(), g1: ti.template(), g0: ti.template(),
-                 eps: ti.f64, n: ti.i32):
-    """result = (g1 - g0) / eps"""
-    for i in range(n):
-        result[i] = (g1[i] - g0[i]) / eps
-
-
-@ti.kernel
-def _dot_product(a: ti.template(), b: ti.template(), result: ti.template(),
-                 fixed_mask: ti.template(), n: ti.i32):
-    """Dot product of a and b over free vertices only."""
-    result[None] = 0.0
-    for i in range(n):
-        if fixed_mask[i] == 0:
-            result[None] += a[i].dot(b[i])
-
-
-@ti.kernel
-def _update_positions(positions: ti.template(), dx: ti.template(),
-                      alpha: ti.f64, n: ti.i32):
-    for i in range(n):
-        positions[i] += alpha * dx[i]
-
-
-@ti.kernel
-def _zero_fixed(field: ti.template(), fixed_mask: ti.template(), n: ti.i32):
-    for i in range(n):
-        if fixed_mask[i] == 1:
-            field[i] = ti.Vector([0.0, 0.0, 0.0], dt=ti.f64)
-
-
-@ti.kernel
-def _snap_fixed(positions: ti.template(), targets: ti.template(),
-                fixed_mask: ti.template(), n: ti.i32):
-    for i in range(n):
-        if fixed_mask[i] == 1:
-            positions[i] = targets[i]
-
-
-@ti.kernel
-def _enforce_dirichlet(gradient: ti.template(), positions: ti.template(),
-                       targets: ti.template(), fixed_mask: ti.template(),
-                       n: ti.i32):
-    """Zero gradient at fixed vertices and snap their positions."""
-    for i in range(n):
-        if fixed_mask[i] == 1:
-            gradient[i] = ti.Vector([0.0, 0.0, 0.0], dt=ti.f64)
-            positions[i] = targets[i]
-
-
-@ti.kernel
-def _compute_elastic_gradient(
+def _compute_gradient_and_energy(
     positions: ti.template(), tets: ti.template(),
     Dm_inv: ti.template(), rest_volume: ti.template(),
-    gradient: ti.template(), mu: ti.template(), lam: ti.template(),
-    n_tets: ti.i32
+    gradient: ti.template(), energy: ti.template(),
+    mu: ti.f64, lam: ti.f64, vol_penalty: ti.f64, n_tets: ti.i32
 ):
     """
-    Compute Neo-Hookean energy gradient and distribute to vertices.
-    W = mu/2 * (I1 - 3) - mu * log(J) + lam/2 * (log(J))^2
-    P = mu * (F - F^{-T}) + lam * log(J) * F^{-T}
+    Fused Neo-Hookean gradient + energy + volume preservation in one pass.
+    Volume penalty: vol_penalty * (J - 1)^2 per tet (additional to Neo-Hookean).
     """
     for t in range(n_tets):
         i0 = tets[t][0]
@@ -690,32 +66,30 @@ def _compute_elastic_gradient(
         i3 = tets[t][3]
 
         x0 = positions[i0]
-        x1 = positions[i1]
-        x2 = positions[i2]
-        x3 = positions[i3]
-
-        # Deformed edge matrix Ds
-        e1 = x1 - x0
-        e2 = x2 - x0
-        e3 = x3 - x0
+        e1 = positions[i1] - x0
+        e2 = positions[i2] - x0
+        e3 = positions[i3] - x0
         Ds = ti.Matrix([
             [e1[0], e2[0], e3[0]],
             [e1[1], e2[1], e3[1]],
             [e1[2], e2[2], e3[2]]
         ], dt=ti.f64)
 
-        # Deformation gradient F = Ds @ Dm_inv
         F = Ds @ Dm_inv[t]
-
-        # J = det(F), clamped to avoid log(0)
         J = F.determinant()
         J_safe = ti.max(J, 1e-6)
         logJ = ti.log(J_safe)
 
-        # F^{-T} = cofactor(F) / J  (use adjugate / J)
-        # For 3x3: F_inv_T = (1/J) * cofactor(F)^T
-        # More robust: compute F_inv_T directly
-        # cofactor matrix
+        # --- Energy ---
+        I1 = (F.transpose() @ F).trace()
+        # Neo-Hookean
+        W = mu / 2.0 * (I1 - 3.0) - mu * logJ + lam / 2.0 * logJ * logJ
+        # Volume preservation penalty
+        W += vol_penalty * (J_safe - 1.0) * (J_safe - 1.0)
+        ti.atomic_add(energy[None], rest_volume[t] * W)
+
+        # --- Gradient (Piola-Kirchhoff stress) ---
+        # Cofactor matrix for F^{-T}
         cof = ti.Matrix.zero(ti.f64, 3, 3)
         cof[0, 0] = F[1, 1] * F[2, 2] - F[1, 2] * F[2, 1]
         cof[0, 1] = F[1, 2] * F[2, 0] - F[1, 0] * F[2, 2]
@@ -726,19 +100,14 @@ def _compute_elastic_gradient(
         cof[2, 0] = F[0, 1] * F[1, 2] - F[0, 2] * F[1, 1]
         cof[2, 1] = F[0, 2] * F[1, 0] - F[0, 0] * F[1, 2]
         cof[2, 2] = F[0, 0] * F[1, 1] - F[0, 1] * F[1, 0]
-
         F_inv_T = cof / J_safe
 
-        # First Piola-Kirchhoff stress: P = mu*(F - F^{-T}) + lam*log(J)*F^{-T}
-        P = mu[None] * (F - F_inv_T) + lam[None] * logJ * F_inv_T
+        # P = mu*(F - F^{-T}) + lam*log(J)*F^{-T} + 2*vol_penalty*(J-1)*cofactor(F)
+        P = mu * (F - F_inv_T) + lam * logJ * F_inv_T
+        P += 2.0 * vol_penalty * (J_safe - 1.0) * cof
 
-        # Force = -V * P @ Dm_inv^T
-        # grad_Ds = V * P @ Dm_inv^T  (energy gradient w.r.t. Ds)
         H = rest_volume[t] * P @ Dm_inv[t].transpose()
 
-        # Distribute to vertices
-        # grad(x1) += H[:, 0], grad(x2) += H[:, 1], grad(x3) += H[:, 2]
-        # grad(x0) -= H[:, 0] + H[:, 1] + H[:, 2]
         h0 = ti.Vector([H[0, 0], H[1, 0], H[2, 0]], dt=ti.f64)
         h1 = ti.Vector([H[0, 1], H[1, 1], H[2, 1]], dt=ti.f64)
         h2 = ti.Vector([H[0, 2], H[1, 2], H[2, 2]], dt=ti.f64)
@@ -750,102 +119,499 @@ def _compute_elastic_gradient(
 
 
 @ti.kernel
-def _compute_total_energy(
+def _compute_energy_only(
     positions: ti.template(), tets: ti.template(),
     Dm_inv: ti.template(), rest_volume: ti.template(),
-    energy: ti.template(), mu: ti.template(), lam: ti.template(),
-    n_tets: ti.i32
+    energy: ti.template(), mu: ti.f64, lam: ti.f64,
+    vol_penalty: ti.f64, n_tets: ti.i32
 ):
-    """Compute total Neo-Hookean elastic energy."""
-    energy[None] = 0.0
+    """Energy only for line search (no gradient)."""
     for t in range(n_tets):
         i0 = tets[t][0]
-        i1 = tets[t][1]
-        i2 = tets[t][2]
-        i3 = tets[t][3]
-
         x0 = positions[i0]
-        x1 = positions[i1]
-        x2 = positions[i2]
-        x3 = positions[i3]
-
-        e1 = x1 - x0
-        e2 = x2 - x0
-        e3 = x3 - x0
+        e1 = positions[tets[t][1]] - x0
+        e2 = positions[tets[t][2]] - x0
+        e3 = positions[tets[t][3]] - x0
         Ds = ti.Matrix([
             [e1[0], e2[0], e3[0]],
             [e1[1], e2[1], e3[1]],
             [e1[2], e2[2], e3[2]]
         ], dt=ti.f64)
-
         F = Ds @ Dm_inv[t]
         J = F.determinant()
         J_safe = ti.max(J, 1e-6)
         logJ = ti.log(J_safe)
-
-        # I1 = tr(F^T F)
         I1 = (F.transpose() @ F).trace()
-
-        # W = mu/2 * (I1 - 3) - mu * log(J) + lam/2 * (log(J))^2
-        W = mu[None] / 2.0 * (I1 - 3.0) - mu[None] * logJ + lam[None] / 2.0 * logJ * logJ
-
-        energy[None] += rest_volume[t] * W
+        W = mu / 2.0 * (I1 - 3.0) - mu * logJ + lam / 2.0 * logJ * logJ
+        W += vol_penalty * (J_safe - 1.0) * (J_safe - 1.0)
+        ti.atomic_add(energy[None], rest_volume[t] * W)
 
 
 @ti.kernel
-def _add_collision_gradient(
-    positions: ti.template(), gradient: ti.template(),
-    collision_indices: ti.template(), collision_targets: ti.template(),
-    kappa: ti.template(), n_collisions: ti.i32
+def _zero_grad_snap_fixed(
+    gradient: ti.template(), positions: ti.template(),
+    targets: ti.template(), fixed_mask: ti.template(), n: ti.i32
 ):
-    """Add penalty gradient for bone-penetrating vertices."""
-    for k in range(n_collisions):
-        idx = collision_indices[k]
-        target = collision_targets[k]
-        x = positions[idx]
-        # Penalty: E = kappa/2 * ||x - target||^2 when penetrating
-        # grad = kappa * (x - target)
-        grad = kappa[None] * (x - target)
-        ti.atomic_add(gradient[idx], grad)
+    for i in range(n):
+        if fixed_mask[i] == 1:
+            gradient[i] = ti.Vector([0.0, 0.0, 0.0], dt=ti.f64)
+            positions[i] = targets[i]
 
 
 @ti.kernel
-def _add_contact_gradient(
-    positions: ti.template(), gradient: ti.template(),
-    contact_pairs: ti.template(), rest_dists: ti.template(),
-    kappa: ti.template(), n_contacts: ti.i32
+def _apply_step(
+    positions: ti.template(), direction: ti.template(),
+    fixed_mask: ti.template(), alpha: ti.f64, n: ti.i32
 ):
-    """Add penalty gradient for inter-muscle contact pairs."""
-    for k in range(n_contacts):
-        i = contact_pairs[k][0]
-        j = contact_pairs[k][1]
-        xi = positions[i]
-        xj = positions[j]
-        diff = xi - xj
-        dist = diff.norm()
-        if dist < rest_dists[k] and dist > 1e-10:
-            # Penalty: E = kappa/2 * (dist - rest_dist)^2 when dist < rest_dist
-            # grad_i = kappa * (dist - rest_dist) * (xi - xj) / dist
-            scale = kappa[None] * (dist - rest_dists[k]) / dist
-            gi = scale * diff
-            ti.atomic_add(gradient[i], gi)
-            ti.atomic_add(gradient[j], -gi)
+    """x += alpha * direction for free vertices only."""
+    for i in range(n):
+        if fixed_mask[i] == 0:
+            positions[i] += alpha * direction[i]
+
+
+@ti.kernel
+def _set_positions_from_numpy_offset(
+    positions: ti.template(), data: ti.types.ndarray(), offset: ti.i32, count: ti.i32
+):
+    """Upload positions from numpy to a slice of the field."""
+    for i in range(count):
+        for d in ti.static(range(3)):
+            positions[offset + i][d] = data[i, d]
+
+
+@ti.kernel
+def _zero_field(field: ti.template(), n: ti.i32):
+    for i in range(n):
+        field[i] = ti.Vector([0.0, 0.0, 0.0], dt=ti.f64)
+
+
+# ---------------------------------------------------------------------------
+# L-BFGS Optimizer (CPU, operating on flat numpy vectors)
+# ---------------------------------------------------------------------------
+
+class LBFGS:
+    """Limited-memory BFGS for large-scale unconstrained optimization.
+
+    Operates on the free-vertex DOFs only (3 * n_free floats).
+    Stores m correction pairs for the inverse Hessian approximation.
+    """
+
+    def __init__(self, n_free, m=10):
+        self.n = n_free * 3  # total DOFs
+        self.m = m
+        self.s_list = []  # position differences
+        self.y_list = []  # gradient differences
+        self.rho_list = []  # 1 / (y^T s)
+        self.prev_x = None
+        self.prev_g = None
+
+    def reset(self):
+        self.s_list.clear()
+        self.y_list.clear()
+        self.rho_list.clear()
+        self.prev_x = None
+        self.prev_g = None
+
+    def update(self, x, g):
+        """Store a new correction pair from (x_k, g_k)."""
+        if self.prev_x is not None:
+            s = x - self.prev_x
+            y = g - self.prev_g
+            sy = s.dot(y)
+            if sy > 1e-20:
+                if len(self.s_list) >= self.m:
+                    self.s_list.pop(0)
+                    self.y_list.pop(0)
+                    self.rho_list.pop(0)
+                self.s_list.append(s.copy())
+                self.y_list.append(y.copy())
+                self.rho_list.append(1.0 / sy)
+        self.prev_x = x.copy()
+        self.prev_g = g.copy()
+
+    def direction(self, g):
+        """Compute search direction d = -H_k * g via two-loop recursion."""
+        q = g.copy()
+        k = len(self.s_list)
+        if k == 0:
+            # No history yet — use scaled steepest descent
+            return -q
+
+        alpha_list = np.zeros(k)
+
+        # Backward pass
+        for i in range(k - 1, -1, -1):
+            alpha_list[i] = self.rho_list[i] * self.s_list[i].dot(q)
+            q -= alpha_list[i] * self.y_list[i]
+
+        # Initial Hessian approximation: H0 = (s^T y) / (y^T y) * I
+        sy = self.s_list[-1].dot(self.y_list[-1])
+        yy = self.y_list[-1].dot(self.y_list[-1])
+        gamma = sy / max(yy, 1e-20)
+        r = gamma * q
+
+        # Forward pass
+        for i in range(k):
+            beta = self.rho_list[i] * self.y_list[i].dot(r)
+            r += (alpha_list[i] - beta) * self.s_list[i]
+
+        return -r
+
+
+# ---------------------------------------------------------------------------
+# Unified Batched FEM Solver
+# ---------------------------------------------------------------------------
+
+class UnifiedFEMSolver:
+    """
+    Batched FEM solver: all muscles in one global system.
+    L-BFGS optimizer. Direct collision projection.
+    Quasistatic: deterministic output for same boundary conditions.
+    """
+
+    def __init__(self):
+        self._built = False
+        self._n_verts = 0
+        self._n_tets = 0
+        self._muscle_ranges = {}
+        self._merged_bone_mesh = None
+
+    def build(self, muscles_data):
+        """
+        Build unified system from multiple muscles.
+
+        Args:
+            muscles_data: dict of name -> {
+                'rest_positions': (N,3) float64,
+                'tetrahedra': (M,4) int32,
+                'fixed_mask': (N,) bool,
+                'surface_faces': (F,3) int32 or None,
+            }
+        """
+        _ensure_ti_init()
+
+        all_verts = []
+        all_tets = []
+        all_fixed = []
+        all_surface_verts = []
+        vert_offset = 0
+        tet_offset = 0
+
+        for name, data in muscles_data.items():
+            n_v = len(data['rest_positions'])
+            n_t = len(data['tetrahedra'])
+
+            all_verts.append(data['rest_positions'].astype(np.float64))
+            all_tets.append(data['tetrahedra'].astype(np.int32) + vert_offset)
+            all_fixed.append(data['fixed_mask'].astype(bool))
+
+            if data.get('surface_faces') is not None:
+                surf_v = np.unique(data['surface_faces'].ravel()) + vert_offset
+            else:
+                surf_v = np.arange(vert_offset, vert_offset + n_v)
+            all_surface_verts.append(surf_v)
+
+            self._muscle_ranges[name] = (vert_offset, vert_offset + n_v,
+                                         tet_offset, tet_offset + n_t)
+            vert_offset += n_v
+            tet_offset += n_t
+
+        self._n_verts = vert_offset
+
+        self.rest_positions = np.concatenate(all_verts, axis=0)
+        self.positions = self.rest_positions.copy()
+        all_tets_np = np.concatenate(all_tets, axis=0)
+        self.fixed_mask = np.concatenate(all_fixed, axis=0)
+        self.surface_verts = np.concatenate(all_surface_verts, axis=0)
+
+        self.fixed_indices = np.where(self.fixed_mask)[0]
+        self.free_mask = ~self.fixed_mask
+        self.free_indices = np.where(self.free_mask)[0]
+        self.fixed_targets = self.positions[self.fixed_indices].copy()
+
+        # Free surface verts (for collision detection)
+        self.free_surface_verts = self.surface_verts[self.free_mask[self.surface_verts]]
+
+        # --- Filter degenerate tets ---
+        self.tetrahedra, self._n_tets = self._filter_degenerate_tets(all_tets_np)
+
+        # Precompute rest state
+        self._precompute_rest_state()
+
+        # Allocate Taichi fields
+        self._allocate_fields()
+        self._upload_static_data()
+
+        # L-BFGS optimizer (operates on free DOFs only)
+        self._lbfgs = LBFGS(len(self.free_indices), m=10)
+
+        self._built = True
+        print(f"  FEM unified: {self._n_verts} verts, {self._n_tets} tets, "
+              f"{len(muscles_data)} muscles, {len(self.free_indices)} free DOFs")
+
+    def _filter_degenerate_tets(self, tets):
+        """Remove tets with near-zero rest volume."""
+        X = self.rest_positions
+        v0 = X[tets[:, 0]]
+        e1 = X[tets[:, 1]] - v0
+        e2 = X[tets[:, 2]] - v0
+        e3 = X[tets[:, 3]] - v0
+
+        Dm = np.stack([e1, e2, e3], axis=-1)
+        vol = np.abs(np.linalg.det(Dm)) / 6.0
+
+        # Keep tets with reasonable volume (> 1e-12 m^3)
+        good = vol > 1e-12
+        n_removed = np.sum(~good)
+        if n_removed > 0:
+            print(f"  FEM: Removed {n_removed} degenerate tets "
+                  f"(of {len(tets)}, kept {np.sum(good)})")
+
+        return tets[good].copy(), int(np.sum(good))
+
+    def _precompute_rest_state(self):
+        tets = self.tetrahedra
+        X = self.rest_positions
+
+        v0 = X[tets[:, 0]]
+        e1 = X[tets[:, 1]] - v0
+        e2 = X[tets[:, 2]] - v0
+        e3 = X[tets[:, 3]] - v0
+
+        Dm = np.stack([e1, e2, e3], axis=-1)
+        self.Dm_inv = np.linalg.inv(Dm)
+        self.rest_volume = np.abs(np.linalg.det(Dm)) / 6.0
+
+    def _allocate_fields(self):
+        N = self._n_verts
+        M = self._n_tets
+
+        self.ti_positions = ti.Vector.field(3, dtype=ti.f64, shape=N)
+        self.ti_gradient = ti.Vector.field(3, dtype=ti.f64, shape=N)
+        self.ti_direction = ti.Vector.field(3, dtype=ti.f64, shape=N)
+        self.ti_fixed_mask = ti.field(dtype=ti.i32, shape=N)
+        self.ti_fixed_targets = ti.Vector.field(3, dtype=ti.f64, shape=N)
+        self.ti_tets = ti.Vector.field(4, dtype=ti.i32, shape=M)
+        self.ti_Dm_inv = ti.Matrix.field(3, 3, dtype=ti.f64, shape=M)
+        self.ti_rest_volume = ti.field(dtype=ti.f64, shape=M)
+        self.ti_energy = ti.field(dtype=ti.f64, shape=())
+
+    def _upload_static_data(self):
+        self.ti_tets.from_numpy(self.tetrahedra)
+        self.ti_Dm_inv.from_numpy(self.Dm_inv)
+        self.ti_rest_volume.from_numpy(self.rest_volume)
+        self.ti_fixed_mask.from_numpy(self.fixed_mask.astype(np.int32))
+
+    def update_targets_and_positions(self, muscles_data):
+        """Upload current positions and fixed targets for all muscles."""
+        for name, data in muscles_data.items():
+            vs, ve, _, _ = self._muscle_ranges[name]
+            if 'positions' in data:
+                self.positions[vs:ve] = data['positions']
+            if 'fixed_targets' in data:
+                fi = np.where(self.fixed_mask[vs:ve])[0]
+                self.positions[vs + fi] = data['fixed_targets']
+                global_fi = fi + vs
+                for i, gfi in enumerate(global_fi):
+                    idx_in_fixed = np.searchsorted(self.fixed_indices, gfi)
+                    if idx_in_fixed < len(self.fixed_indices) and self.fixed_indices[idx_in_fixed] == gfi:
+                        self.fixed_targets[idx_in_fixed] = data['fixed_targets'][i]
+
+        targets_full = np.zeros((self._n_verts, 3), dtype=np.float64)
+        targets_full[self.fixed_indices] = self.fixed_targets
+        self.ti_fixed_targets.from_numpy(targets_full)
+        self.ti_positions.from_numpy(self.positions)
+
+    def _build_merged_bone_mesh(self, bone_meshes):
+        """Merge all bone trimeshes into one for fast single-query BVH."""
+        if not bone_meshes:
+            self._merged_bone_mesh = None
+            return
+        valid = [m for m in bone_meshes if m is not None]
+        if not valid:
+            self._merged_bone_mesh = None
+            return
+        self._merged_bone_mesh = trimesh.util.concatenate(valid)
+
+    def resolve_collisions(self, margin=0.002, max_rounds=5):
+        """
+        Direct projection: push penetrating vertices outside bone surface.
+        Modifies self.positions in-place (CPU). Returns number pushed.
+        """
+        if self._merged_bone_mesh is None:
+            return 0
+
+        free_surf = self.free_surface_verts
+        if len(free_surf) == 0:
+            return 0
+
+        mesh = self._merged_bone_mesh
+        total_pushed = 0
+
+        for _ in range(max_rounds):
+            surf_pos = self.positions[free_surf]
+            try:
+                closest_pts, dists, face_ids = mesh.nearest.on_surface(surf_pos)
+                normals = mesh.face_normals[face_ids]
+            except Exception:
+                break
+
+            to_vertex = surf_pos - closest_pts
+            dots = np.einsum('ij,ij->i', to_vertex, normals)
+            penetrating = (dists < margin) & (dots < 0)
+            n_pen = np.sum(penetrating)
+
+            if n_pen == 0:
+                break
+
+            pen_idx = np.where(penetrating)[0]
+            self.positions[free_surf[pen_idx]] = (
+                closest_pts[pen_idx] + normals[pen_idx] * margin
+            )
+            total_pushed += n_pen
+
+        return total_pushed
+
+    def _eval_energy(self, mu, lam, vol_penalty):
+        """Compute energy at current ti_positions."""
+        self.ti_energy[None] = 0.0
+        _compute_energy_only(
+            self.ti_positions, self.ti_tets, self.ti_Dm_inv,
+            self.ti_rest_volume, self.ti_energy, mu, lam,
+            vol_penalty, self._n_tets
+        )
+        return self.ti_energy[None]
+
+    def _eval_gradient_and_energy(self, mu, lam, vol_penalty):
+        """Compute gradient + energy at current ti_positions. Returns (grad_free, energy)."""
+        N = self._n_verts
+        _zero_field(self.ti_gradient, N)
+        self.ti_energy[None] = 0.0
+        _compute_gradient_and_energy(
+            self.ti_positions, self.ti_tets, self.ti_Dm_inv,
+            self.ti_rest_volume, self.ti_gradient, self.ti_energy,
+            mu, lam, vol_penalty, self._n_tets
+        )
+        _zero_grad_snap_fixed(
+            self.ti_gradient, self.ti_positions,
+            self.ti_fixed_targets, self.ti_fixed_mask, N
+        )
+
+        # Download gradient for free vertices only
+        grad_full = self.ti_gradient.to_numpy()  # (N, 3)
+        grad_free = grad_full[self.free_indices].ravel()  # (n_free * 3,)
+        energy = self.ti_energy[None]
+        return grad_free, energy
+
+    def _get_free_positions(self):
+        """Download free vertex positions as flat vector."""
+        pos = self.ti_positions.to_numpy()
+        return pos[self.free_indices].ravel()
+
+    def _set_free_positions(self, x_flat):
+        """Upload free vertex positions from flat vector."""
+        x = x_flat.reshape(-1, 3)
+        self.positions[self.free_indices] = x
+        self.ti_positions.from_numpy(self.positions)
+
+    def solve(self, mu, lam, vol_penalty=100.0, max_iters=30, tol=1e-4,
+              bone_meshes=None, bone_margin=0.002, verbose=False):
+        """
+        Solve sequence per frame:
+        1. Direct collision projection (CPU, merged mesh)
+        2. L-BFGS elastic minimization (GPU gradient, CPU optimizer)
+        3. Post-solve collision re-check
+        """
+        N = self._n_verts
+        M = self._n_tets
+
+        # Phase 1: merge bone meshes (once) and resolve collisions
+        if bone_meshes is not None:
+            self._build_merged_bone_mesh(bone_meshes)
+        n_pushed = self.resolve_collisions(bone_margin)
+        if verbose and n_pushed > 0:
+            print(f"    Collision: projected {n_pushed} vertices")
+
+        # Upload post-collision positions
+        self.ti_positions.from_numpy(self.positions)
+
+        # Phase 2: L-BFGS elastic minimization
+        self._lbfgs.reset()
+        grad_norm = 0.0
+        x_free = self._get_free_positions()
+
+        for it in range(max_iters):
+            # Evaluate gradient and energy
+            g_free, energy = self._eval_gradient_and_energy(mu, lam, vol_penalty)
+            grad_norm = np.linalg.norm(g_free)
+
+            if verbose and (it < 3 or it % 5 == 0 or grad_norm < tol):
+                print(f"    iter {it}: |grad|={grad_norm:.4e} E={energy:.6e}")
+
+            if grad_norm < tol:
+                break
+
+            # L-BFGS: update history and compute search direction
+            self._lbfgs.update(x_free, g_free)
+            d_free = self._lbfgs.direction(g_free)
+
+            # Check descent direction
+            dg = d_free.dot(g_free)
+            if dg >= 0:
+                # Not a descent direction — fall back to negative gradient
+                d_free = -g_free
+                dg = -grad_norm * grad_norm
+                self._lbfgs.reset()
+
+            # Backtracking line search (Armijo condition)
+            alpha = 1.0
+            c_armijo = 1e-4
+            target_decrease = c_armijo * dg  # negative number
+
+            for ls in range(12):
+                # Trial: x_trial = x_free + alpha * d_free
+                x_trial = x_free + alpha * d_free
+                self._set_free_positions(x_trial)
+
+                E_trial = self._eval_energy(mu, lam, vol_penalty)
+
+                if E_trial <= energy + alpha * target_decrease:
+                    break
+                alpha *= 0.5
+            else:
+                # Line search failed — accept smallest step
+                x_trial = x_free + alpha * d_free
+                self._set_free_positions(x_trial)
+
+            x_free = x_trial
+
+        # Download final positions
+        self.positions = self.ti_positions.to_numpy()
+
+        # Phase 3: post-solve collision check
+        if self._merged_bone_mesh is not None:
+            n_pushed2 = self.resolve_collisions(bone_margin)
+            if verbose and n_pushed2 > 0:
+                print(f"    Post-solve: projected {n_pushed2} more vertices")
+
+        return it + 1, grad_norm
+
+    def get_muscle_positions(self, name):
+        """Extract positions for a single muscle."""
+        vs, ve, _, _ = self._muscle_ranges[name]
+        return self.positions[vs:ve].copy()
 
 
 # ---------------------------------------------------------------------------
 # Orchestrator
 # ---------------------------------------------------------------------------
 
-def run_all_fem_sim(v, max_iterations=10, tolerance=1e-4, verbose=True):
+def run_all_fem_sim(v, max_iterations=30, tolerance=1e-4, verbose=True):
     """
-    Run FEM simulation for all muscles, with bone collision and inter-muscle contacts.
+    Run unified FEM simulation for all muscles in one batched solve.
+    """
+    t0 = time.time()
 
-    Args:
-        v: Viewer context (or SimpleNamespace for headless baking)
-        max_iterations: Max Newton iterations per muscle per outer iteration
-        tolerance: Newton convergence tolerance
-        verbose: Print progress
-    """
     active_muscles = {
         name: mobj for name, mobj in v.zygote_muscle_meshes.items()
         if hasattr(mobj, 'soft_body') and mobj.soft_body is not None
@@ -858,70 +624,66 @@ def run_all_fem_sim(v, max_iterations=10, tolerance=1e-4, verbose=True):
 
     skel = v.env.skel if hasattr(v, 'env') else None
 
-    # Material parameters from viewer state
+    # Material parameters
     youngs = getattr(v, 'fem_youngs_modulus', 5000.0)
     poisson = getattr(v, 'fem_poisson_ratio', 0.49)
-    kappa = getattr(v, 'fem_collision_kappa', 1e4)
-    contact_thresh = getattr(v, 'fem_contact_threshold', 0.015)
+    vol_penalty = getattr(v, 'fem_volume_penalty', 100.0)
+    mu = youngs / (2.0 * (1.0 + poisson))
+    lam = youngs * poisson / ((1.0 + poisson) * (1.0 - 2.0 * poisson))
 
-    # Build bone collision meshes
-    bone_trimeshes = _build_bone_trimeshes(v, active_muscles, skel, verbose)
-
-    # Outer iterations for inter-muscle convergence
-    outer_iters = getattr(v, 'fem_outer_iterations', 3)
-
-    for outer in range(outer_iters):
-        if verbose and outer_iters > 1:
-            print(f"FEM outer iteration {outer + 1}/{outer_iters}")
-
+    # Get or build unified solver
+    solver = getattr(v, '_fem_unified_solver', None)
+    if solver is None or set(solver._muscle_ranges.keys()) != set(active_muscles.keys()):
+        solver = UnifiedFEMSolver()
+        muscles_data = {}
         for name, mobj in active_muscles.items():
             sb = mobj.soft_body
+            muscles_data[name] = {
+                'rest_positions': sb.rest_positions,
+                'tetrahedra': sb.tetrahedra if hasattr(sb, 'tetrahedra') else mobj.tet_tetrahedra,
+                'fixed_mask': sb.fixed_mask,
+                'surface_faces': getattr(mobj, 'tet_faces', None),
+            }
+        solver.build(muscles_data)
+        v._fem_unified_solver = solver
 
-            # Initialize or get FEM sim
-            fem = getattr(mobj, '_fem_sim', None)
-            if fem is None:
-                fem = FEMSimulation(
-                    youngs_modulus=youngs,
-                    poisson_ratio=poisson,
-                    collision_kappa=kappa,
-                    contact_threshold=contact_thresh
-                )
-                fem.build(
-                    sb.rest_positions,
-                    sb.tetrahedra if hasattr(sb, 'tetrahedra') else mobj.tet_tetrahedra,
-                    sb.fixed_mask,
-                    surface_faces=getattr(mobj, 'tet_faces', None)
-                )
-                mobj._fem_sim = fem
-            else:
-                fem.update_material(youngs, poisson, kappa)
+    # Update current positions + fixed targets
+    muscles_update = {}
+    for name, mobj in active_muscles.items():
+        sb = mobj.soft_body
+        muscles_update[name] = {
+            'positions': sb.positions,
+            'fixed_targets': sb.fixed_targets,
+        }
+    solver.update_targets_and_positions(muscles_update)
 
-            # Update fixed targets from skeleton pose
-            if hasattr(sb, 'fixed_indices') and hasattr(sb, 'fixed_targets'):
-                fem.set_fixed_targets(sb.fixed_targets)
+    # Build bone collision meshes
+    bone_meshes = _build_bone_trimeshes(v, active_muscles, skel, verbose=False)
 
-            # Set bone collisions
-            if bone_trimeshes:
-                fem.set_bone_collisions(bone_trimeshes, margin=0.002)
+    t_setup = time.time()
 
-            # Set inter-muscle contacts
-            _setup_inter_muscle_contacts(v, fem, name, mobj, active_muscles)
+    # Solve
+    iters, residual = solver.solve(
+        mu=mu, lam=lam, vol_penalty=vol_penalty,
+        max_iters=max_iterations, tol=tolerance,
+        bone_meshes=bone_meshes, bone_margin=0.002,
+        verbose=verbose
+    )
 
-            # Solve
-            iters, residual = fem.solve(
-                max_newton_iters=max_iterations,
-                newton_tol=tolerance,
-                verbose=verbose
-            )
+    t_solve = time.time()
 
-            # Write back positions
-            new_pos = fem.get_positions()
-            sb.positions[:] = new_pos
-            if hasattr(mobj, 'tet_vertices'):
-                mobj.tet_vertices[:] = new_pos.astype(mobj.tet_vertices.dtype)
+    # Write back positions to each muscle
+    for name, mobj in active_muscles.items():
+        sb = mobj.soft_body
+        new_pos = solver.get_muscle_positions(name)
+        sb.positions[:] = new_pos
+        if hasattr(mobj, 'tet_vertices'):
+            mobj.tet_vertices[:] = new_pos.astype(mobj.tet_vertices.dtype)
 
-            if verbose:
-                print(f"  {name}: {iters} Newton iters, residual={residual:.6e}")
+    if verbose:
+        total = time.time() - t0
+        print(f"  FEM: {iters} iters, |grad|={residual:.4e}, "
+              f"setup={t_setup-t0:.2f}s solve={t_solve-t_setup:.2f}s total={total:.2f}s")
 
 
 def _build_bone_trimeshes(v, active_muscles, skel, verbose=False):
@@ -937,7 +699,6 @@ def _build_bone_trimeshes(v, active_muscles, skel, verbose=False):
     for mesh_name, mesh_obj in skeleton_meshes.items():
         try:
             if hasattr(mesh_obj, 'trimesh') and mesh_obj.trimesh is not None:
-                # Get current transform from skeleton
                 verts = mesh_obj.trimesh.vertices.copy()
                 faces = mesh_obj.trimesh.faces.copy()
                 tm = trimesh.Trimesh(vertices=verts, faces=faces, process=False)
@@ -952,56 +713,4 @@ def _build_bone_trimeshes(v, active_muscles, skel, verbose=False):
         except Exception:
             continue
 
-    if verbose and bone_meshes:
-        print(f"FEM: {len(bone_meshes)} bone collision meshes")
-
     return bone_meshes
-
-
-def _setup_inter_muscle_contacts(v, fem, muscle_name, mobj, active_muscles):
-    """Set up inter-muscle contact pairs for a specific muscle."""
-    constraints = getattr(v, 'inter_muscle_constraints', [])
-    if not constraints:
-        return
-
-    pairs = []
-    rest_dists = []
-
-    for c in constraints:
-        name1, v1_idx, v1_fixed, name2, v2_idx, v2_fixed, rest_dist = c
-
-        if name1 == muscle_name:
-            # This muscle's vertex v1_idx interacts with another muscle's vertex
-            # We need the other muscle's current position
-            other = active_muscles.get(name2)
-            if other is None:
-                continue
-            other_pos = other.soft_body.positions[v2_idx]
-            # For now, store as contact between local vertex and a target position
-            # This is handled differently - we add a spring to the other muscle's vertex
-            pairs.append([v1_idx, v1_idx])  # placeholder
-            rest_dists.append(rest_dist)
-
-        elif name2 == muscle_name:
-            other = active_muscles.get(name1)
-            if other is None:
-                continue
-            pairs.append([v2_idx, v2_idx])
-            rest_dists.append(rest_dist)
-
-    # For inter-muscle contacts, we use a simpler approach:
-    # add penalty forces based on positions from the previous outer iteration
-    # This avoids needing a global index space
-    if pairs:
-        # Actually, inter-muscle contacts in the per-muscle solve are better
-        # handled as additional collision targets
-        pass
-
-
-# ---------------------------------------------------------------------------
-# Convenience: get_fem_sim for a muscle object
-# ---------------------------------------------------------------------------
-
-def get_fem_sim(mobj):
-    """Get or None the FEM simulation attached to a muscle object."""
-    return getattr(mobj, '_fem_sim', None)

@@ -467,6 +467,7 @@ class GLFWApp():
         self.fem_youngs_modulus = 5000.0  # Young's modulus (Pa)
         self.fem_poisson_ratio = 0.49  # Poisson's ratio
         self.fem_collision_kappa = 1e4  # Collision penalty stiffness
+        self.fem_volume_penalty = 100.0  # Volume preservation penalty
         self.fem_contact_threshold = 0.015  # Inter-muscle contact distance (m)
         self.fem_outer_iterations = 3  # Outer iterations for inter-muscle convergence
 
