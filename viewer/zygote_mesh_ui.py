@@ -7467,6 +7467,9 @@ def _motion_update_nn_error_heatmap(v, frame):
             gt_pos = cached['positions'] + fix_offset
         gt_pos = gt_pos.astype(np.float32)
         nn_pos = mobj.tet_vertices
+        if nn_pos.shape[0] != gt_pos.shape[0]:
+            mobj._tet_surface_colors = None
+            continue
         error = np.linalg.norm(nn_pos - gt_pos, axis=1)  # per vertex
         t = np.clip(error / HEATMAP_SCALE, 0.0, 1.0)
         alpha = mobj.contour_mesh_transparency
