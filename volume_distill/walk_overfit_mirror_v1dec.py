@@ -175,17 +175,14 @@ def preprocess():
                 r_rest_positions[mname] = r_rest_all[mname]
                 displacements[mname] = torch.cat([l_disp_all[mname], r_disp_all[mname]], dim=0)
             else:
-                print(f"  WARNING: {mname} L/R vertex mismatch ({l_verts} vs {r_verts}), L-only + zeros for R half")
+                print(f"  WARNING: {mname} L/R vertex mismatch ({l_verts} vs {r_verts}), duplicating L for R half")
                 rest_positions[mname] = l_rest_all[mname]
                 r_rest_positions[mname] = l_rest_all[mname]
-                # L data for first N samples, zeros for R half (don't train wrong pairings)
-                zeros_r = torch.zeros_like(l_disp_all[mname])
-                displacements[mname] = torch.cat([l_disp_all[mname], zeros_r], dim=0)
+                displacements[mname] = torch.cat([l_disp_all[mname], l_disp_all[mname]], dim=0)
         elif mname in l_disp_all:
             rest_positions[mname] = l_rest_all[mname]
             r_rest_positions[mname] = l_rest_all[mname]
-            zeros_r = torch.zeros_like(l_disp_all[mname])
-            displacements[mname] = torch.cat([l_disp_all[mname], zeros_r], dim=0)
+            displacements[mname] = torch.cat([l_disp_all[mname], l_disp_all[mname]], dim=0)
 
     l_dofs = mocap[:, L_DOF_INDICES].astype(np.float32)
     r_dofs = mocap[:, R_DOF_INDICES].astype(np.float32)
