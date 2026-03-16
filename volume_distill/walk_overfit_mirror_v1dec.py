@@ -40,7 +40,7 @@ BATCH_SIZE = 32
 LR = 1e-3
 WEIGHT_DECAY = 0.0
 GRAD_CLIP = 1.0
-HIDDEN_DIM = 512
+HIDDEN_DIM = 256
 NUM_ENCODER_RES = 3
 NUM_DECODER_RES = 2
 
@@ -175,15 +175,17 @@ def preprocess():
                 r_rest_positions[mname] = r_rest_all[mname]
                 displacements[mname] = torch.cat([l_disp_all[mname], r_disp_all[mname]], dim=0)
             else:
-                print(f"  WARNING: {mname} L/R vertex mismatch ({l_verts} vs {r_verts}), using L only (duplicated)")
+                print(f"  WARNING: {mname} L/R vertex mismatch ({l_verts} vs {r_verts}), L-only + zeros for R half")
                 rest_positions[mname] = l_rest_all[mname]
                 r_rest_positions[mname] = l_rest_all[mname]
-                # Duplicate L data so it has 2N samples to match combined DOF array
-                displacements[mname] = torch.cat([l_disp_all[mname], l_disp_all[mname]], dim=0)
+                # L data for first N samples, zeros for R half (don't train wrong pairings)
+                zeros_r = torch.zeros_like(l_disp_all[mname])
+                displacements[mname] = torch.cat([l_disp_all[mname], zeros_r], dim=0)
         elif mname in l_disp_all:
             rest_positions[mname] = l_rest_all[mname]
             r_rest_positions[mname] = l_rest_all[mname]
-            displacements[mname] = torch.cat([l_disp_all[mname], l_disp_all[mname]], dim=0)
+            zeros_r = torch.zeros_like(l_disp_all[mname])
+            displacements[mname] = torch.cat([l_disp_all[mname], zeros_r], dim=0)
 
     l_dofs = mocap[:, L_DOF_INDICES].astype(np.float32)
     r_dofs = mocap[:, R_DOF_INDICES].astype(np.float32)
