@@ -156,13 +156,18 @@ def _apply_collision_projection(
     invm: ti.template(),
     coll_vert_idx: ti.template(),
     coll_targets: ti.template(),
+    coll_stiffness: ti.f64,
     n_coll: ti.i32,
 ):
-    """Project penetrating vertices onto bone surface (position-level)."""
+    """Move penetrating vertices toward bone surface targets.
+
+    Uses stiffness blending: x = (1-s)*x + s*target, where s is clamped stiffness.
+    This lets collision and elastic forces find equilibrium instead of hard snapping.
+    """
     for c in range(n_coll):
         vi = coll_vert_idx[c]
         if invm[vi] > 0.0:
-            positions[vi] = coll_targets[c]
+            positions[vi] = (1.0 - coll_stiffness) * positions[vi] + coll_stiffness * coll_targets[c]
 
 
 @ti.kernel
@@ -631,67 +636,72 @@ class UnifiedFEMSolver:
             self.ti_dist_alpha.from_numpy(alpha_dist_np)
             self.ti_dist_lambda.fill(0.0)
 
-        # Collision detection (CPU, once before solve)
-        coll_idx_np, coll_tgt_np = self._compute_collision_targets(margin, verbose=verbose)
-        n_coll = len(coll_idx_np)
-        if n_coll > 0:
-            if n_coll > self._max_coll:
-                self._max_coll = max(n_coll, 1000)
-                self.ti_coll_idx = ti.field(dtype=ti.i32, shape=self._max_coll)
-                self.ti_coll_targets = ti.Vector.field(3, dtype=ti.f64, shape=self._max_coll)
-            # Pad to field size
-            idx_padded = np.zeros(self._max_coll, dtype=np.int32)
-            tgt_padded = np.zeros((self._max_coll, 3), dtype=np.float64)
-            idx_padded[:n_coll] = coll_idx_np
-            tgt_padded[:n_coll] = coll_tgt_np
-            self.ti_coll_idx.from_numpy(idx_padded)
-            self.ti_coll_targets.from_numpy(tgt_padded)
-
         # Save positions before solve for total convergence metric
         initial_pos = self.ti_positions.to_numpy().copy()
 
-        # XPBD iteration loop (Jacobi: single kernel for all tets)
-        omega = 1.0  # valence-weighted Jacobi (per-vertex valence handles over-counting)
-        for it in range(n_iters):
-            if verbose and it < 10:
-                _copy_positions(self.ti_pos_prev, self.ti_positions, N)
+        # Outer loop: alternate elastic XPBD iterations with collision resolution.
+        # Each outer pass: run elastic iters, then detect+project collisions,
+        # then run more elastic iters to relax around collision targets.
+        n_coll = 0
+        n_outer = 3  # collision re-detection passes
+        iters_per_outer = max(n_iters // n_outer, 10)
+        omega = 1.0
 
-            _xpbd_project_jacobi(
-                self.ti_positions, self.ti_invm, self.ti_valence,
-                self.ti_tets, self.ti_Bm_inv, self.ti_rest_volume,
-                self.ti_lambda_H, self.ti_lambda_D,
-                self.ti_alpha_H, self.ti_alpha_D,
-                omega, M,
-            )
+        for outer in range(n_outer):
+            # Elastic XPBD iterations
+            for it in range(iters_per_outer):
+                global_it = outer * iters_per_outer + it
+                if verbose and global_it < 10:
+                    _copy_positions(self.ti_pos_prev, self.ti_positions, N)
 
-            # Inter-muscle distance constraints (every 5 iterations to amortize cost)
-            if K > 0 and it % 5 == 4:
-                _xpbd_project_distance_jacobi(
-                    self.ti_positions, self.ti_invm, self.ti_dist_valence,
-                    self.ti_dist_pair_i, self.ti_dist_pair_j,
-                    self.ti_dist_rest, self.ti_dist_lambda, self.ti_dist_alpha,
-                    omega, K,
+                _xpbd_project_jacobi(
+                    self.ti_positions, self.ti_invm, self.ti_valence,
+                    self.ti_tets, self.ti_Bm_inv, self.ti_rest_volume,
+                    self.ti_lambda_H, self.ti_lambda_D,
+                    self.ti_alpha_H, self.ti_alpha_D,
+                    omega, M,
                 )
 
-            _snap_fixed(self.ti_positions, self.ti_targets, self.ti_invm, N)
+                # Inter-muscle distance constraints (every 5 iterations)
+                if K > 0 and it % 5 == 4:
+                    _xpbd_project_distance_jacobi(
+                        self.ti_positions, self.ti_invm, self.ti_dist_valence,
+                        self.ti_dist_pair_i, self.ti_dist_pair_j,
+                        self.ti_dist_rest, self.ti_dist_lambda, self.ti_dist_alpha,
+                        omega, K,
+                    )
 
-            if n_coll > 0 and it % 5 == 4:
-                _apply_collision_projection(
-                    self.ti_positions, self.ti_invm,
-                    self.ti_coll_idx, self.ti_coll_targets, n_coll,
-                )
+                _snap_fixed(self.ti_positions, self.ti_targets, self.ti_invm, N)
 
-            if verbose and it < 10:
-                delta = _compute_position_delta(
-                    self.ti_positions, self.ti_pos_prev, self.ti_invm, N)
-                print(f"      iter {it}: ||dx||={delta**0.5:.6e}")
+                if verbose and global_it < 10:
+                    delta = _compute_position_delta(
+                        self.ti_positions, self.ti_pos_prev, self.ti_invm, N)
+                    print(f"      iter {global_it}: ||dx||={delta**0.5:.6e}")
 
-        # Final collision projection
-        if n_coll > 0:
-            _apply_collision_projection(
-                self.ti_positions, self.ti_invm,
-                self.ti_coll_idx, self.ti_coll_targets, n_coll,
-            )
+            # Collision detection + hard projection between elastic passes
+            if self._merged_bone_mesh is not None:
+                self.positions = self.ti_positions.to_numpy()
+                coll_idx_np, coll_tgt_np = self._compute_collision_targets(
+                    margin, verbose=(verbose and outer == 0))
+                n_coll = len(coll_idx_np)
+                if n_coll > 0:
+                    if n_coll > self._max_coll:
+                        self._max_coll = max(n_coll, 1000)
+                        self.ti_coll_idx = ti.field(dtype=ti.i32, shape=self._max_coll)
+                        self.ti_coll_targets = ti.Vector.field(3, dtype=ti.f64, shape=self._max_coll)
+                    idx_padded = np.zeros(self._max_coll, dtype=np.int32)
+                    tgt_padded = np.zeros((self._max_coll, 3), dtype=np.float64)
+                    idx_padded[:n_coll] = coll_idx_np
+                    tgt_padded[:n_coll] = coll_tgt_np
+                    self.ti_coll_idx.from_numpy(idx_padded)
+                    self.ti_coll_targets.from_numpy(tgt_padded)
+                    _apply_collision_projection(
+                        self.ti_positions, self.ti_invm,
+                        self.ti_coll_idx, self.ti_coll_targets,
+                        1.0, n_coll,
+                    )
+                    if verbose:
+                        print(f"    outer {outer}: {n_coll} collisions resolved")
 
         # Download positions
         self.positions = self.ti_positions.to_numpy()
