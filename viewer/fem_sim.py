@@ -814,14 +814,30 @@ def run_all_fem_sim(v, max_iterations=100, tolerance=1e-4, verbose=True):
 def _build_bone_trimeshes(v, active_muscles, skel, verbose=False):
     """Build bone trimeshes transformed to current skeleton pose (world coords).
 
-    Handles name mismatch: mesh names like 'L_Femur' vs body node names like 'L_Femur0'.
-    For multi-body bones (e.g. L_Os_Coxae0, L_Os_Coxae1), uses the first body node (suffix 0).
+    Bone mesh vertices (after MESH_SCALE) are in REST-POSE world coordinates,
+    not body-local. To get posed world coords:
+        local = R_rest^T @ (mesh_verts - t_rest)
+        posed = R_posed @ local + t_posed
+
+    Rest transforms are cached on first call and reused.
     """
     if not TRIMESH_AVAILABLE:
         return []
     skeleton_meshes = getattr(v, 'zygote_skeleton_meshes', None)
     if skeleton_meshes is None or skel is None:
         return []
+
+    # Cache rest transforms (computed once at rest pose)
+    if not hasattr(v, '_bone_rest_transforms') or v._bone_rest_transforms is None:
+        saved_pos = skel.getPositions().copy()
+        skel.setPositions(np.zeros(skel.getNumDofs()))
+        v._bone_rest_transforms = {}
+        for i in range(skel.getNumBodyNodes()):
+            bn = skel.getBodyNode(i)
+            wt = bn.getWorldTransform()
+            v._bone_rest_transforms[bn.getName()] = (wt.rotation().copy(), wt.translation().copy())
+        skel.setPositions(saved_pos)
+
     bone_meshes = []
     n_matched = 0
     for mesh_name, mesh_obj in skeleton_meshes.items():
@@ -829,24 +845,30 @@ def _build_bone_trimeshes(v, active_muscles, skel, verbose=False):
             if not (hasattr(mesh_obj, 'trimesh') and mesh_obj.trimesh is not None):
                 continue
             body_node = None
-            # Try exact name first, then with suffix '0'
+            body_name = None
             for candidate in [mesh_name, mesh_name + '0']:
                 try:
                     body_node = skel.getBodyNode(candidate)
                     if body_node is not None:
+                        body_name = candidate
                         break
                 except Exception:
                     continue
             if body_node is None:
-                if verbose:
-                    print(f"    Bone mesh '{mesh_name}': no matching body node")
                 continue
+
+            # Get rest and posed transforms
+            R_rest, t_rest = v._bone_rest_transforms.get(body_name, (np.eye(3), np.zeros(3)))
             wt = body_node.getWorldTransform()
-            R = wt.rotation()
-            t = wt.translation()
+            R_posed = wt.rotation()
+            t_posed = wt.translation()
+
+            # Transform: rest-world → body-local → posed-world
             verts = mesh_obj.trimesh.vertices.copy()
-            transformed_verts = (R @ verts.T).T + t
-            tm = trimesh.Trimesh(vertices=transformed_verts,
+            local_verts = (R_rest.T @ (verts - t_rest).T).T
+            posed_verts = (R_posed @ local_verts.T).T + t_posed
+
+            tm = trimesh.Trimesh(vertices=posed_verts,
                                  faces=mesh_obj.trimesh.faces.copy(), process=False)
             bone_meshes.append(tm)
             n_matched += 1
