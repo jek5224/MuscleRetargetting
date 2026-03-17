@@ -166,6 +166,60 @@ def _apply_collision_projection(
 
 
 @ti.kernel
+def _xpbd_project_distance_jacobi(
+    positions: ti.template(),
+    invm: ti.template(),
+    valence_dist: ti.template(),
+    pair_i: ti.template(),
+    pair_j: ti.template(),
+    rest_dist: ti.template(),
+    lambda_dist: ti.template(),
+    alpha_dist: ti.template(),
+    omega: ti.f64,
+    n_pairs: ti.i32,
+):
+    """XPBD distance constraint projection for inter-muscle contacts.
+
+    C = ||x_i - x_j|| - d_rest
+    grad_i = n, grad_j = -n  where n = (x_i - x_j) / ||x_i - x_j||
+    """
+    for k in range(n_pairs):
+        i = pair_i[k]
+        j = pair_j[k]
+        xi = positions[i]
+        xj = positions[j]
+        wi = invm[i]
+        wj = invm[j]
+
+        diff = xi - xj
+        d = diff.norm()
+        if d < 1e-12:
+            continue
+
+        n = diff / d
+        C = d - rest_dist[k]
+
+        # Only enforce when muscles are pushing into each other (compression)
+        if C >= 0.0:
+            continue
+
+        w_sum = wi + wj
+        a = alpha_dist[k]
+        denom = w_sum + a
+        if denom < 1e-30:
+            continue
+
+        dl = -(C + a * lambda_dist[k]) / denom
+
+        si = omega / valence_dist[i]
+        sj = omega / valence_dist[j]
+
+        ti.atomic_add(positions[i], si * wi * dl * n)
+        ti.atomic_add(positions[j], -sj * wj * dl * n)
+        lambda_dist[k] += dl
+
+
+@ti.kernel
 def _compute_max_displacement(
     positions: ti.template(), rest_positions: ti.template(),
     invm: ti.template(), n: ti.i32,
@@ -217,6 +271,11 @@ class UnifiedFEMSolver:
         self._muscle_ranges = {}
         self._merged_bone_mesh = None
         self._orig_fixed_mask = None
+        # Inter-muscle distance constraints
+        self._n_dist_constraints = 0
+        self._dist_pair_i = None
+        self._dist_pair_j = None
+        self._dist_rest = None
 
     def build(self, muscles_data):
         _ensure_ti_init()
@@ -363,6 +422,64 @@ class UnifiedFEMSolver:
         valence = np.maximum(self._vertex_valence.astype(np.float64), 1.0)
         self.ti_valence.from_numpy(valence)
 
+    def set_inter_muscle_constraints(self, constraints):
+        """Convert inter-muscle constraints from local to global indices.
+
+        Args:
+            constraints: list of (name1, v1_local, is_fixed1, name2, v2_local, is_fixed2, rest_dist)
+        """
+        if not constraints:
+            self._n_dist_constraints = 0
+            return
+
+        pair_i = []
+        pair_j = []
+        rest_d = []
+        skipped = 0
+        for name1, v1, fixed1, name2, v2, fixed2, d in constraints:
+            if name1 not in self._muscle_ranges or name2 not in self._muscle_ranges:
+                skipped += 1
+                continue
+            # Skip if both vertices are fixed (no DOFs to move)
+            if fixed1 and fixed2:
+                skipped += 1
+                continue
+            gi = self._muscle_ranges[name1][0] + v1
+            gj = self._muscle_ranges[name2][0] + v2
+            pair_i.append(gi)
+            pair_j.append(gj)
+            rest_d.append(d)
+
+        self._n_dist_constraints = len(pair_i)
+        if self._n_dist_constraints == 0:
+            return
+
+        self._dist_pair_i = np.array(pair_i, dtype=np.int32)
+        self._dist_pair_j = np.array(pair_j, dtype=np.int32)
+        self._dist_rest = np.array(rest_d, dtype=np.float64)
+
+        # Compute distance-constraint valence (how many distance constraints per vertex)
+        self._dist_valence = np.ones(self._n_verts, dtype=np.float64)
+        for k in range(self._n_dist_constraints):
+            self._dist_valence[self._dist_pair_i[k]] += 1.0
+            self._dist_valence[self._dist_pair_j[k]] += 1.0
+
+        # Allocate Taichi fields for distance constraints
+        K = self._n_dist_constraints
+        self.ti_dist_pair_i = ti.field(dtype=ti.i32, shape=K)
+        self.ti_dist_pair_j = ti.field(dtype=ti.i32, shape=K)
+        self.ti_dist_rest = ti.field(dtype=ti.f64, shape=K)
+        self.ti_dist_lambda = ti.field(dtype=ti.f64, shape=K)
+        self.ti_dist_alpha = ti.field(dtype=ti.f64, shape=K)
+        self.ti_dist_valence = ti.field(dtype=ti.f64, shape=self._n_verts)
+
+        self.ti_dist_pair_i.from_numpy(self._dist_pair_i)
+        self.ti_dist_pair_j.from_numpy(self._dist_pair_j)
+        self.ti_dist_rest.from_numpy(self._dist_rest)
+        self.ti_dist_valence.from_numpy(self._dist_valence)
+
+        print(f"  Inter-muscle constraints: {K} active ({skipped} skipped)")
+
     def update_targets_and_positions(self, muscles_data, use_lbs_init=False):
         """Update fixed targets from skeleton. Free verts keep previous solution."""
         for name, data in muscles_data.items():
@@ -387,9 +504,14 @@ class UnifiedFEMSolver:
             self._merged_bone_mesh = None
             return
         self._merged_bone_mesh = trimesh.util.concatenate(valid)
+        self._bone_kdtree = None  # invalidate pre-filter cache
 
-    def _compute_collision_targets(self, margin=0.002):
+    def _compute_collision_targets(self, margin=0.002, verbose=False):
         """Compute collision projection targets for penetrating surface vertices.
+
+        Two-phase approach for performance:
+        1. KD-tree pre-filter: only keep vertices within proximity_radius of bone vertices
+        2. Trimesh nearest-point query only on nearby vertices
 
         Returns (global_vert_indices, target_positions) as numpy arrays.
         """
@@ -401,26 +523,56 @@ class UnifiedFEMSolver:
             return np.array([], dtype=np.int32), np.zeros((0, 3))
 
         surf_pos = self.positions[free_surf]
-        try:
-            closest_pts, dists, face_ids = self._merged_bone_mesh.nearest.on_surface(surf_pos)
-            normals = self._merged_bone_mesh.face_normals[face_ids]
-        except Exception:
+
+        # Phase 1: KD-tree pre-filter — only query vertices near bone surface
+        from scipy.spatial import cKDTree
+        proximity_radius = 0.02  # 2cm — only verts this close to bone vertices get queried
+        if not hasattr(self, '_bone_kdtree') or self._bone_kdtree is None:
+            self._bone_kdtree = cKDTree(self._merged_bone_mesh.vertices)
+
+        # Find muscle verts within proximity of any bone vertex
+        nearby_mask = np.zeros(len(free_surf), dtype=bool)
+        muscle_tree = cKDTree(surf_pos)
+        pairs = muscle_tree.query_ball_tree(self._bone_kdtree, proximity_radius)
+        for i, matches in enumerate(pairs):
+            if matches:
+                nearby_mask[i] = True
+
+        n_nearby = int(np.sum(nearby_mask))
+        if n_nearby == 0:
+            if verbose:
+                print(f"    Collision: {len(free_surf)} surf verts, 0 near bones")
             return np.array([], dtype=np.int32), np.zeros((0, 3))
 
-        to_vertex = surf_pos - closest_pts
+        # Phase 2: precise trimesh query only on nearby vertices
+        nearby_pos = surf_pos[nearby_mask]
+        nearby_free_surf = free_surf[nearby_mask]
+
+        try:
+            closest_pts, dists, face_ids = self._merged_bone_mesh.nearest.on_surface(nearby_pos)
+            normals = self._merged_bone_mesh.face_normals[face_ids]
+        except Exception as e:
+            if verbose:
+                print(f"    Collision query failed: {e}")
+            return np.array([], dtype=np.int32), np.zeros((0, 3))
+
+        to_vertex = nearby_pos - closest_pts
         dots = np.einsum('ij,ij->i', to_vertex, normals)
 
-        # Penetrating = inside bone (dot < 0), excluding rest-pose penetrations
-        pen_mask = dots < 0
-        if hasattr(self, '_rest_inside') and len(self._rest_inside) == len(dots):
-            pen_mask = pen_mask & ~self._rest_inside
+        # Penetrating = inside bone (dot < 0) AND close to surface
+        pen_mask = (dots < 0) & (dists < margin * 10)
+
+        if verbose:
+            n_inside = int(np.sum(dots < 0))
+            print(f"    Collision: {len(free_surf)} surf verts, {n_nearby} near bones, "
+                  f"{n_inside} inside, {int(np.sum(pen_mask))} penetrating")
 
         if not np.any(pen_mask):
             return np.array([], dtype=np.int32), np.zeros((0, 3))
 
         # Target = surface point + margin * outward normal
         targets = closest_pts[pen_mask] + normals[pen_mask] * margin
-        global_idx = free_surf[pen_mask].astype(np.int32)
+        global_idx = nearby_free_surf[pen_mask].astype(np.int32)
 
         return global_idx, targets
 
@@ -440,20 +592,6 @@ class UnifiedFEMSolver:
         """
         if bone_meshes is not None:
             self._build_merged_bone_mesh(bone_meshes)
-
-        # Detect rest-pose penetrations to exclude
-        if self._merged_bone_mesh is not None and len(self._free_surf_global) > 0:
-            rest_pos = self.rest_positions[self._free_surf_global]
-            try:
-                cp, d, fi = self._merged_bone_mesh.nearest.on_surface(rest_pos)
-                normals = self._merged_bone_mesh.face_normals[fi]
-                tv = rest_pos - cp
-                dots = np.einsum('ij,ij->i', tv, normals)
-                self._rest_inside = dots < 0
-            except Exception:
-                self._rest_inside = np.zeros(len(self._free_surf_global), dtype=bool)
-        else:
-            self._rest_inside = np.zeros(0, dtype=bool)
 
         N = self._n_verts
         M = self._n_tets
@@ -483,16 +621,31 @@ class UnifiedFEMSolver:
         self.ti_lambda_H.fill(0.0)
         self.ti_lambda_D.fill(0.0)
 
+        # Inter-muscle distance constraint setup
+        K = self._n_dist_constraints
+        if K > 0:
+            # Compliance: alpha = 1 / (stiffness * rest_dist)
+            # Use vol_penalty as stiffness scale for inter-muscle separation
+            dist_stiffness = effective_lam * 0.1  # softer than volume constraints
+            alpha_dist_np = 1.0 / (dist_stiffness * self._dist_rest + 1e-30)
+            self.ti_dist_alpha.from_numpy(alpha_dist_np)
+            self.ti_dist_lambda.fill(0.0)
+
         # Collision detection (CPU, once before solve)
-        coll_idx_np, coll_tgt_np = self._compute_collision_targets(margin)
+        coll_idx_np, coll_tgt_np = self._compute_collision_targets(margin, verbose=verbose)
         n_coll = len(coll_idx_np)
         if n_coll > 0:
             if n_coll > self._max_coll:
                 self._max_coll = max(n_coll, 1000)
                 self.ti_coll_idx = ti.field(dtype=ti.i32, shape=self._max_coll)
                 self.ti_coll_targets = ti.Vector.field(3, dtype=ti.f64, shape=self._max_coll)
-            self.ti_coll_idx.from_numpy(coll_idx_np)
-            self.ti_coll_targets.from_numpy(coll_tgt_np)
+            # Pad to field size
+            idx_padded = np.zeros(self._max_coll, dtype=np.int32)
+            tgt_padded = np.zeros((self._max_coll, 3), dtype=np.float64)
+            idx_padded[:n_coll] = coll_idx_np
+            tgt_padded[:n_coll] = coll_tgt_np
+            self.ti_coll_idx.from_numpy(idx_padded)
+            self.ti_coll_targets.from_numpy(tgt_padded)
 
         # Save positions before solve for total convergence metric
         initial_pos = self.ti_positions.to_numpy().copy()
@@ -510,6 +663,15 @@ class UnifiedFEMSolver:
                 self.ti_alpha_H, self.ti_alpha_D,
                 omega, M,
             )
+
+            # Inter-muscle distance constraints (every 5 iterations to amortize cost)
+            if K > 0 and it % 5 == 4:
+                _xpbd_project_distance_jacobi(
+                    self.ti_positions, self.ti_invm, self.ti_dist_valence,
+                    self.ti_dist_pair_i, self.ti_dist_pair_j,
+                    self.ti_dist_rest, self.ti_dist_lambda, self.ti_dist_alpha,
+                    omega, K,
+                )
 
             _snap_fixed(self.ti_positions, self.ti_targets, self.ti_invm, N)
 
@@ -548,7 +710,7 @@ class UnifiedFEMSolver:
             Js = np.linalg.det(Ds @ self.Bm_inv)
             n_inv = int(np.sum(Js <= 0))
             print(f"    final: iters={n_iters} ||dx||={residual:.4e} "
-                  f"inv={n_inv}/{M} coll={n_coll} "
+                  f"inv={n_inv}/{M} coll={n_coll} dist={K} "
                   f"J=[{np.min(Js):.3f},{np.max(Js):.3f}]")
 
         return n_iters, residual
@@ -595,6 +757,9 @@ def run_all_fem_sim(v, max_iterations=100, tolerance=1e-4, verbose=True):
                 'surface_faces': getattr(mobj, 'tet_faces', None),
             }
         solver.build(muscles_data)
+        # Set inter-muscle constraints if available
+        if hasattr(v, 'inter_muscle_constraints') and v.inter_muscle_constraints:
+            solver.set_inter_muscle_constraints(v.inter_muscle_constraints)
         v._fem_unified_solver = solver
 
     # Update each muscle's positions and fixed targets from current skeleton pose
@@ -647,32 +812,34 @@ def run_all_fem_sim(v, max_iterations=100, tolerance=1e-4, verbose=True):
 
 
 def _build_bone_trimeshes(v, active_muscles, skel, verbose=False):
-    """Build bone trimeshes transformed to current skeleton pose (world coords)."""
+    """Build bone trimeshes transformed to current skeleton pose (world coords).
+
+    Handles name mismatch: mesh names like 'L_Femur' vs body node names like 'L_Femur0'.
+    For multi-body bones (e.g. L_Os_Coxae0, L_Os_Coxae1), uses the first body node (suffix 0).
+    """
     if not TRIMESH_AVAILABLE:
         return []
     skeleton_meshes = getattr(v, 'zygote_skeleton_meshes', None)
     if skeleton_meshes is None or skel is None:
         return []
     bone_meshes = []
+    n_matched = 0
     for mesh_name, mesh_obj in skeleton_meshes.items():
         try:
             if not (hasattr(mesh_obj, 'trimesh') and mesh_obj.trimesh is not None):
                 continue
             body_node = None
-            try:
-                body_node = skel.getBodyNode(mesh_name)
-            except Exception:
-                pass
+            # Try exact name first, then with suffix '0'
+            for candidate in [mesh_name, mesh_name + '0']:
+                try:
+                    body_node = skel.getBodyNode(candidate)
+                    if body_node is not None:
+                        break
+                except Exception:
+                    continue
             if body_node is None:
-                for variant in [mesh_name.replace('_L', '_l').replace('_R', '_r'),
-                                mesh_name.replace('_l', '_L').replace('_r', '_R')]:
-                    try:
-                        body_node = skel.getBodyNode(variant)
-                        if body_node is not None:
-                            break
-                    except Exception:
-                        continue
-            if body_node is None:
+                if verbose:
+                    print(f"    Bone mesh '{mesh_name}': no matching body node")
                 continue
             wt = body_node.getWorldTransform()
             R = wt.rotation()
@@ -682,6 +849,9 @@ def _build_bone_trimeshes(v, active_muscles, skel, verbose=False):
             tm = trimesh.Trimesh(vertices=transformed_verts,
                                  faces=mesh_obj.trimesh.faces.copy(), process=False)
             bone_meshes.append(tm)
+            n_matched += 1
         except Exception:
             continue
+    if verbose:
+        print(f"    Bone meshes: {n_matched}/{len(skeleton_meshes)} matched")
     return bone_meshes
