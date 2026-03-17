@@ -184,19 +184,120 @@ def _xpbd_project_color_group(
         rhs_D = -(C_D + a_D * lambda_D[k])
 
         det = A00 * A11 - A01 * A01
+        dl_H = 0.0
+        dl_D = 0.0
         if ti.abs(det) > 1e-30:
             dl_H = (A11 * rhs_H - A01 * rhs_D) / det
             dl_D = (A00 * rhs_D - A01 * rhs_H) / det
         else:
             # Fallback: solve decoupled
-            dl_H = rhs_H / (A00 + 1e-20) if A00 > 1e-20 else 0.0
-            dl_D = rhs_D / (A11 + 1e-20) if A11 > 1e-20 else 0.0
+            if A00 > 1e-20:
+                dl_H = rhs_H / A00
+            if A11 > 1e-20:
+                dl_D = rhs_D / A11
 
         # Apply position corrections
         positions[i0] += w0 * (g_H_0 * dl_H + g_D_0 * dl_D)
         positions[i1] += w1 * (g_H_1 * dl_H + g_D_1 * dl_D)
         positions[i2] += w2 * (g_H_2 * dl_H + g_D_2 * dl_D)
         positions[i3] += w3 * (g_H_3 * dl_H + g_D_3 * dl_D)
+
+        lambda_H[k] += dl_H
+        lambda_D[k] += dl_D
+
+
+@ti.kernel
+def _xpbd_project_jacobi(
+    positions: ti.template(),
+    invm: ti.template(),
+    valence: ti.template(),
+    tets: ti.template(),
+    Bm_inv: ti.template(),
+    rest_volume: ti.template(),
+    lambda_H: ti.template(),
+    lambda_D: ti.template(),
+    alpha_H: ti.template(),
+    alpha_D: ti.template(),
+    omega: ti.f64,
+    n_tets: ti.i32,
+):
+    """Jacobi-style XPBD: all tets in parallel with atomic_add.
+
+    Each vertex correction is divided by its valence (number of incident tets)
+    to compensate for multiple atomic_adds. omega provides additional tuning.
+    """
+    for k in range(n_tets):
+        i0 = tets[k][0]
+        i1 = tets[k][1]
+        i2 = tets[k][2]
+        i3 = tets[k][3]
+
+        x0 = positions[i0]; x1 = positions[i1]
+        x2 = positions[i2]; x3 = positions[i3]
+        w0 = invm[i0]; w1 = invm[i1]
+        w2 = invm[i2]; w3 = invm[i3]
+
+        Ds = ti.Matrix.cols([x0 - x3, x1 - x3, x2 - x3])
+        B = Bm_inv[k]
+        F = Ds @ B
+
+        f0 = ti.Vector([F[0, 0], F[1, 0], F[2, 0]], dt=ti.f64)
+        f1 = ti.Vector([F[0, 1], F[1, 1], F[2, 1]], dt=ti.f64)
+        f2 = ti.Vector([F[0, 2], F[1, 2], F[2, 2]], dt=ti.f64)
+
+        C_H = F.determinant() - 1.0
+        cof = ti.Matrix.cols([f1.cross(f2), f2.cross(f0), f0.cross(f1)])
+        CH_H = cof @ B.transpose()
+        g_H_0 = ti.Vector([CH_H[0, 0], CH_H[1, 0], CH_H[2, 0]], dt=ti.f64)
+        g_H_1 = ti.Vector([CH_H[0, 1], CH_H[1, 1], CH_H[2, 1]], dt=ti.f64)
+        g_H_2 = ti.Vector([CH_H[0, 2], CH_H[1, 2], CH_H[2, 2]], dt=ti.f64)
+        g_H_3 = -g_H_0 - g_H_1 - g_H_2
+
+        C_D = F.norm_sqr() - 3.0
+        CD_H = 2.0 * F @ B.transpose()
+        g_D_0 = ti.Vector([CD_H[0, 0], CD_H[1, 0], CD_H[2, 0]], dt=ti.f64)
+        g_D_1 = ti.Vector([CD_H[0, 1], CD_H[1, 1], CD_H[2, 1]], dt=ti.f64)
+        g_D_2 = ti.Vector([CD_H[0, 2], CD_H[1, 2], CD_H[2, 2]], dt=ti.f64)
+        g_D_3 = -g_D_0 - g_D_1 - g_D_2
+
+        s_HH = (w0 * g_H_0.norm_sqr() + w1 * g_H_1.norm_sqr() +
+                 w2 * g_H_2.norm_sqr() + w3 * g_H_3.norm_sqr())
+        s_DD = (w0 * g_D_0.norm_sqr() + w1 * g_D_1.norm_sqr() +
+                 w2 * g_D_2.norm_sqr() + w3 * g_D_3.norm_sqr())
+        s_HD = (w0 * g_H_0.dot(g_D_0) + w1 * g_H_1.dot(g_D_1) +
+                 w2 * g_H_2.dot(g_D_2) + w3 * g_H_3.dot(g_D_3))
+
+        a_H = alpha_H[k]
+        a_D = alpha_D[k]
+
+        A00 = s_HH + a_H
+        A01 = s_HD
+        A11 = s_DD + a_D
+        rhs_H = -(C_H + a_H * lambda_H[k])
+        rhs_D = -(C_D + a_D * lambda_D[k])
+
+        det = A00 * A11 - A01 * A01
+        dl_H = 0.0
+        dl_D = 0.0
+        if ti.abs(det) > 1e-30:
+            dl_H = (A11 * rhs_H - A01 * rhs_D) / det
+            dl_D = (A00 * rhs_D - A01 * rhs_H) / det
+        else:
+            if A00 > 1e-20:
+                dl_H = rhs_H / A00
+            if A11 > 1e-20:
+                dl_D = rhs_D / A11
+
+        # Per-vertex valence-weighted atomic updates
+        s0 = omega / valence[i0]
+        s1 = omega / valence[i1]
+        s2 = omega / valence[i2]
+        s3 = omega / valence[i3]
+
+        ti.atomic_add(positions[i0], s0 * w0 * (g_H_0 * dl_H + g_D_0 * dl_D))
+        ti.atomic_add(positions[i1], s1 * w1 * (g_H_1 * dl_H + g_D_1 * dl_D))
+        ti.atomic_add(positions[i2], s2 * w2 * (g_H_2 * dl_H + g_D_2 * dl_D))
+        ti.atomic_add(positions[i3], s3 * w3 * (g_H_3 * dl_H + g_D_3 * dl_D))
 
         lambda_H[k] += dl_H
         lambda_D[k] += dl_D
@@ -332,16 +433,14 @@ class UnifiedFEMSolver:
         self._filter_degenerate_tets()
         self._precompute_rest_state()
 
-        # Graph coloring for parallel Gauss-Seidel
-        t_color = time.time()
-        self._sorted_order, self._color_groups = _greedy_graph_color(
-            self._n_tets, self.tetrahedra, self._n_verts)
-        # Reorder tetrahedra by color
-        self.tetrahedra = self.tetrahedra[self._sorted_order].copy()
-        self.Bm_inv = self.Bm_inv[self._sorted_order].copy()
-        self.rest_volume = self.rest_volume[self._sorted_order].copy()
-        dt_color = time.time() - t_color
-        print(f"  Graph coloring: {len(self._color_groups)} colors, {dt_color:.2f}s")
+        # Compute vertex valence (number of incident tets) for Jacobi relaxation
+        self._vertex_valence = np.zeros(self._n_verts, dtype=np.int32)
+        for t in range(self._n_tets):
+            for j in range(4):
+                self._vertex_valence[self.tetrahedra[t, j]] += 1
+        max_val = int(self._vertex_valence.max())
+        avg_val = float(self._vertex_valence[self._vertex_valence > 0].mean())
+        print(f"  Vertex valence: avg={avg_val:.1f}, max={max_val}")
 
         # Allocate Taichi fields
         self._allocate_fields()
@@ -397,6 +496,7 @@ class UnifiedFEMSolver:
         self.ti_lambda_D = ti.field(dtype=ti.f64, shape=M)
         self.ti_alpha_H = ti.field(dtype=ti.f64, shape=M)
         self.ti_alpha_D = ti.field(dtype=ti.f64, shape=M)
+        self.ti_valence = ti.field(dtype=ti.f64, shape=N)  # vertex valence for Jacobi
 
         # Collision fields (allocated on first use)
         self._max_coll = 0
@@ -409,10 +509,22 @@ class UnifiedFEMSolver:
         self.ti_rest_volume.from_numpy(self.rest_volume)
         self.ti_rest_positions.from_numpy(self.rest_positions)
 
-        # Inverse mass: uniform 1.0 for free, 0.0 for fixed
-        invm = np.ones(self._n_verts, dtype=np.float64)
+        # Per-vertex inverse mass from tet volumes (rho=1060 kg/m^3 for muscle)
+        rho = 1060.0
+        vertex_mass = np.zeros(self._n_verts, dtype=np.float64)
+        for t in range(self._n_tets):
+            m = rho * self.rest_volume[t] / 4.0
+            for j in range(4):
+                vertex_mass[self.tetrahedra[t, j]] += m
+        invm = np.zeros(self._n_verts, dtype=np.float64)
+        free_mask = vertex_mass > 0
+        invm[free_mask] = 1.0 / vertex_mass[free_mask]
         invm[self.fixed_indices] = 0.0
+        self._tet_mass = rho * self.rest_volume  # per-tet mass for compliance scaling
         self.ti_invm.from_numpy(invm)
+        # Upload vertex valence
+        valence = np.maximum(self._vertex_valence.astype(np.float64), 1.0)
+        self.ti_valence.from_numpy(valence)
 
     def update_targets_and_positions(self, muscles_data, use_lbs_init=False):
         """Update fixed targets from skeleton. Free verts keep previous solution."""
@@ -510,12 +622,16 @@ class UnifiedFEMSolver:
         M = self._n_tets
         n_iters = max_lbfgs_iters
 
-        # Compute per-tet compliance from material params
-        # alpha_H = 1 / ((lam + vol_penalty) * V_e)
-        # alpha_D = 1 / (mu * V_e)
+        # XPBD compliance: alpha_tilde = alpha / (dt^2 * tet_mass)
+        # For quasistatic, use pseudo-timestep h to control stiffness.
+        # h^2 * tet_mass scales the compliance down, making constraints stiffer.
+        # With h=1, alpha_tilde = alpha / tet_mass = 1/(k*V_e*rho*V_e)
         effective_lam = lam + vol_penalty
-        alpha_H_np = 1.0 / (effective_lam * self.rest_volume + 1e-30)
-        alpha_D_np = 1.0 / (mu * self.rest_volume + 1e-30)
+        alpha_H_raw = 1.0 / (effective_lam * self.rest_volume + 1e-30)
+        alpha_D_raw = 1.0 / (mu * self.rest_volume + 1e-30)
+        # Use h=1, proper tet mass for physically correct material response
+        alpha_H_np = alpha_H_raw / (self._tet_mass + 1e-30)
+        alpha_D_np = alpha_D_raw / (self._tet_mass + 1e-30)
         self.ti_alpha_H.from_numpy(alpha_H_np)
         self.ti_alpha_D.from_numpy(alpha_D_np)
 
@@ -541,30 +657,35 @@ class UnifiedFEMSolver:
             self.ti_coll_idx.from_numpy(coll_idx_np)
             self.ti_coll_targets.from_numpy(coll_tgt_np)
 
-        # Save positions before solve for convergence check
-        _copy_positions(self.ti_pos_prev, self.ti_positions, N)
+        # Save positions before solve for total convergence metric
+        initial_pos = self.ti_positions.to_numpy().copy()
 
-        # XPBD iteration loop
+        # XPBD iteration loop (Jacobi: single kernel for all tets)
+        omega = 1.0  # valence-weighted Jacobi (per-vertex valence handles over-counting)
         for it in range(n_iters):
-            # Project constraints by color group (parallel Gauss-Seidel)
-            for (start, end) in self._color_groups:
-                _xpbd_project_color_group(
-                    self.ti_positions, self.ti_invm,
-                    self.ti_tets, self.ti_Bm_inv, self.ti_rest_volume,
-                    self.ti_lambda_H, self.ti_lambda_D,
-                    self.ti_alpha_H, self.ti_alpha_D,
-                    start, end,
-                )
+            if verbose and it < 10:
+                _copy_positions(self.ti_pos_prev, self.ti_positions, N)
 
-            # Snap fixed vertices
+            _xpbd_project_jacobi(
+                self.ti_positions, self.ti_invm, self.ti_valence,
+                self.ti_tets, self.ti_Bm_inv, self.ti_rest_volume,
+                self.ti_lambda_H, self.ti_lambda_D,
+                self.ti_alpha_H, self.ti_alpha_D,
+                omega, M,
+            )
+
             _snap_fixed(self.ti_positions, self.ti_targets, self.ti_invm, N)
 
-            # Collision projection (every few iterations to amortize CPU cost)
             if n_coll > 0 and it % 5 == 4:
                 _apply_collision_projection(
                     self.ti_positions, self.ti_invm,
                     self.ti_coll_idx, self.ti_coll_targets, n_coll,
                 )
+
+            if verbose and it < 10:
+                delta = _compute_position_delta(
+                    self.ti_positions, self.ti_pos_prev, self.ti_invm, N)
+                print(f"      iter {it}: ||dx||={delta**0.5:.6e}")
 
         # Final collision projection
         if n_coll > 0:
@@ -576,10 +697,10 @@ class UnifiedFEMSolver:
         # Download positions
         self.positions = self.ti_positions.to_numpy()
 
-        # Convergence metric: position change
-        delta_sq = _compute_position_delta(
-            self.ti_positions, self.ti_pos_prev, self.ti_invm, N)
-        residual = float(delta_sq ** 0.5)
+        # Convergence metric: total position change from frame start
+        free = self.free_indices
+        diff = self.positions[free] - initial_pos[free]
+        residual = float(np.sqrt(np.sum(diff ** 2)))
 
         if verbose:
             # Count inverted tets
@@ -661,7 +782,7 @@ def run_all_fem_sim(v, max_iterations=100, tolerance=1e-4, verbose=True):
                 max_ft_disp = d
     if verbose and max_ft_disp > 0:
         print(f"  Max fixed target displacement from rest: {max_ft_disp:.6f}m")
-    solver.update_targets_and_positions(muscles_update)
+    solver.update_targets_and_positions(muscles_update, use_lbs_init=True)
 
     bone_meshes = _build_bone_trimeshes(v, active_muscles, skel, verbose=False)
     t_setup = time.time()
