@@ -7680,17 +7680,17 @@ def _motion_load_cache(v):
     if cache_dir is None:
         return
     for mname in v.zygote_muscle_meshes:
-        # Collect all files for this muscle: top-level + region subdirs
-        npz_files = sorted(glob.glob(os.path.join(cache_dir, f'{mname}_chunk_*.npz')))
-        legacy = os.path.join(cache_dir, f'{mname}.npz')
-        if os.path.exists(legacy):
-            npz_files.append(legacy)
-        # Also search region subdirectories (e.g. L_UpLeg/, R_UpLeg/)
+        # Collect files: region subdirs first, then top-level last (top-level wins on overlap)
+        npz_files = []
         for subdir in sorted(glob.glob(os.path.join(cache_dir, '*/'))):
             npz_files.extend(sorted(glob.glob(os.path.join(subdir, f'{mname}_chunk_*.npz'))))
             sub_legacy = os.path.join(subdir, f'{mname}.npz')
             if os.path.exists(sub_legacy):
                 npz_files.append(sub_legacy)
+        npz_files.extend(sorted(glob.glob(os.path.join(cache_dir, f'{mname}_chunk_*.npz'))))
+        legacy = os.path.join(cache_dir, f'{mname}.npz')
+        if os.path.exists(legacy):
+            npz_files.append(legacy)
         if not npz_files:
             continue
         cache = {}
