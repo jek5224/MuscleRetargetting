@@ -1133,6 +1133,7 @@ class UnifiedFEMSolver:
 @ti.kernel
 def _vbd_solve_color(
     positions: ti.template(),
+    x_tilde: ti.template(),
     Bm_inv: ti.template(),
     rest_volume: ti.template(),
     vert_tet_data: ti.template(),
@@ -1141,24 +1142,35 @@ def _vbd_solve_color(
     tets: ti.template(),
     invm: ti.template(),
     color_verts: ti.template(),
+    # Distance constraint CSR for per-vertex accumulation
+    dist_pair_other: ti.template(),     # the OTHER vertex in each constraint
+    dist_pair_rest: ti.template(),      # rest distance
+    dist_vert_offset: ti.template(),    # CSR offsets per vertex
+    dist_stiffness: ti.f64,
+    n_dist: ti.i32,
+    # Material parameters
     mu: ti.f64,
     lam: ti.f64,
     eps: ti.f64,
+    mass_over_h2: ti.f64,
     n_color_verts: ti.i32,
 ):
     """VBD per-vertex Newton step for one graph color.
 
     For each vertex in the color (in parallel), accumulate gradient g (3-vec)
-    and Hessian H (3x3) from incident tets using Stable Neo-Hookean energy,
-    then solve x_i -= H^{-1} g.
+    and Hessian H (3x3) from incident tets using Stable Neo-Hookean energy
+    plus inertia term m/h² * ||x - x̃||², then solve x_i -= H^{-1} g.
     """
     for ci in range(n_color_verts):
         vi = color_verts[ci]
         if invm[vi] == 0.0:
             continue
 
-        g = ti.Vector([0.0, 0.0, 0.0])
-        H = ti.Matrix.zero(ti.f64, 3, 3)
+        # Inertia term: E_inertia = m/(2h²) * ||x - x̃||²
+        # g_inertia = m/h² * (x - x̃),  H_inertia = m/h² * I
+        m_h2 = mass_over_h2 / (invm[vi] + 1e-30)  # m/h² where m = 1/invm
+        g = m_h2 * (positions[vi] - x_tilde[vi])
+        H = m_h2 * ti.Matrix.identity(ti.f64, 3)
 
         start = vert_tet_offset[vi]
         end = vert_tet_offset[vi + 1]
@@ -1183,45 +1195,15 @@ def _vbd_solve_color(
             F = Ds @ B
             V0 = rest_volume[tet_idx]
 
-            # First Piola-Kirchhoff stress (Stable Neo-Hookean):
-            # P = mu * F + lam * (J - 1) * cofactor(F)
+            # First Piola-Kirchhoff stress (Stable Neo-Hookean, Smith 2018):
+            # Ψ = μ/2(||F||² - 3) + λ/2(J - 1)²
+            # P = μF + λ(J - 1)·cof(F)
             f0 = ti.Vector([F[0, 0], F[1, 0], F[2, 0]], dt=ti.f64)
             f1 = ti.Vector([F[0, 1], F[1, 1], F[2, 1]], dt=ti.f64)
             f2 = ti.Vector([F[0, 2], F[1, 2], F[2, 2]], dt=ti.f64)
 
             J = F.determinant()
             cof = ti.Matrix.cols([f1.cross(f2), f2.cross(f0), f0.cross(f1)])
-            P = mu * F + lam * (J - 1.0) * cof
-
-            # Force on vertex i: f_i = -V0 * P @ Bm_inv^T, projected to vertex i
-            # ∂F/∂x_i: depends on local_idx
-            # For local 0,1,2: column local_idx of Bm_inv^T = row local_idx of Bm_inv
-            # For local 3: negative sum of all three columns
-            PBt = P @ B.transpose()
-
-            # Gradient contribution: g_i = V0 * PBt column for local_idx
-            gi = ti.Vector([0.0, 0.0, 0.0])
-            if local_idx == 0:
-                gi = ti.Vector([PBt[0, 0], PBt[1, 0], PBt[2, 0]], dt=ti.f64)
-            elif local_idx == 1:
-                gi = ti.Vector([PBt[0, 1], PBt[1, 1], PBt[2, 1]], dt=ti.f64)
-            elif local_idx == 2:
-                gi = ti.Vector([PBt[0, 2], PBt[1, 2], PBt[2, 2]], dt=ti.f64)
-            else:  # local_idx == 3
-                gi = -(ti.Vector([PBt[0, 0], PBt[1, 0], PBt[2, 0]], dt=ti.f64)
-                       + ti.Vector([PBt[0, 1], PBt[1, 1], PBt[2, 1]], dt=ti.f64)
-                       + ti.Vector([PBt[0, 2], PBt[1, 2], PBt[2, 2]], dt=ti.f64))
-
-            g += V0 * gi
-
-            # Per-vertex 3x3 Hessian block:
-            # H_i = V0 * (∂P/∂F contracted with ∂F/∂x_i on both sides)
-            #
-            # For Stable Neo-Hookean: ∂P/∂F has two terms:
-            # 1) mu * I_9x9 (identity on F-space) → contributes mu * (b·b) * I_3x3
-            # 2) lam * cofactor terms → contributes lam * various outer products
-            #
-            # where b = Bm_inv row for the vertex (or neg sum for vertex 3)
 
             # Get the "b" vector (Bm_inv contribution for this vertex)
             b = ti.Vector([0.0, 0.0, 0.0])
@@ -1236,47 +1218,117 @@ def _vbd_solve_color(
                       + ti.Vector([B[1, 0], B[1, 1], B[1, 2]], dt=ti.f64)
                       + ti.Vector([B[2, 0], B[2, 1], B[2, 2]], dt=ti.f64))
 
-            # Term 1: mu * (b·b) * I
             bb = b.dot(b)
-            Hi = mu * bb * ti.Matrix.identity(ti.f64, 3)
 
-            # Term 2: lam * d(cofactor)/dF contracted terms
-            # Full derivation:
-            # ∂(J * cof)/∂F contracted to 3x3 for vertex i gives:
-            # lam * [(J-1) * (∂cof/∂F) + cof ⊗ cof] contracted with b
-            #
-            # Simplified for the 3x3 per-vertex block:
-            # H_lam = lam * [ (J-1)*H_cof_block + (cof @ b) ⊗ (cof @ b) / ... ]
-            #
-            # For robustness, use the Gauss-Newton approximation:
-            # H ≈ mu*(b·b)*I + lam*(cof@Bt col)⊗(cof@Bt col)
-            # This is SPD when J > 0 and provides good convergence.
-            cof_Bt = cof @ B.transpose()
-            ci_vec = ti.Vector([0.0, 0.0, 0.0])
-            if local_idx == 0:
-                ci_vec = ti.Vector([cof_Bt[0, 0], cof_Bt[1, 0], cof_Bt[2, 0]], dt=ti.f64)
-            elif local_idx == 1:
-                ci_vec = ti.Vector([cof_Bt[0, 1], cof_Bt[1, 1], cof_Bt[2, 1]], dt=ti.f64)
-            elif local_idx == 2:
-                ci_vec = ti.Vector([cof_Bt[0, 2], cof_Bt[1, 2], cof_Bt[2, 2]], dt=ti.f64)
+            # For severely distorted tets (J < 0.2 or J > 5), use a simplified
+            # ARAP-like energy that just penalizes deviation from identity:
+            # E = mu * V0 * ||F - I||^2 → P = 2*mu*(F - I), H = 2*mu*(b·b)*I
+            # This avoids the catastrophic cofactor terms.
+            is_distorted = (J < 0.2) or (J > 5.0) or (F.norm_sqr() > 50.0)
+
+            gi = ti.Vector([0.0, 0.0, 0.0])
+            Hi = ti.Matrix.zero(ti.f64, 3, 3)
+
+            if is_distorted:
+                # ARAP fallback: P = 2*mu*(F - I)
+                P_arap = 2.0 * mu * (F - ti.Matrix.identity(ti.f64, 3))
+                PBt = P_arap @ B.transpose()
+                if local_idx == 0:
+                    gi = ti.Vector([PBt[0, 0], PBt[1, 0], PBt[2, 0]], dt=ti.f64)
+                elif local_idx == 1:
+                    gi = ti.Vector([PBt[0, 1], PBt[1, 1], PBt[2, 1]], dt=ti.f64)
+                elif local_idx == 2:
+                    gi = ti.Vector([PBt[0, 2], PBt[1, 2], PBt[2, 2]], dt=ti.f64)
+                else:
+                    gi = -(ti.Vector([PBt[0, 0], PBt[1, 0], PBt[2, 0]], dt=ti.f64)
+                           + ti.Vector([PBt[0, 1], PBt[1, 1], PBt[2, 1]], dt=ti.f64)
+                           + ti.Vector([PBt[0, 2], PBt[1, 2], PBt[2, 2]], dt=ti.f64))
+                Hi = 2.0 * mu * bb * ti.Matrix.identity(ti.f64, 3)
             else:
-                ci_vec = -(ti.Vector([cof_Bt[0, 0], cof_Bt[1, 0], cof_Bt[2, 0]], dt=ti.f64)
-                           + ti.Vector([cof_Bt[0, 1], cof_Bt[1, 1], cof_Bt[2, 1]], dt=ti.f64)
-                           + ti.Vector([cof_Bt[0, 2], cof_Bt[1, 2], cof_Bt[2, 2]], dt=ti.f64))
+                # Standard Neo-Hookean
+                P = mu * F + lam * (J - 1.0) * cof
+                PBt = P @ B.transpose()
+                if local_idx == 0:
+                    gi = ti.Vector([PBt[0, 0], PBt[1, 0], PBt[2, 0]], dt=ti.f64)
+                elif local_idx == 1:
+                    gi = ti.Vector([PBt[0, 1], PBt[1, 1], PBt[2, 1]], dt=ti.f64)
+                elif local_idx == 2:
+                    gi = ti.Vector([PBt[0, 2], PBt[1, 2], PBt[2, 2]], dt=ti.f64)
+                else:
+                    gi = -(ti.Vector([PBt[0, 0], PBt[1, 0], PBt[2, 0]], dt=ti.f64)
+                           + ti.Vector([PBt[0, 1], PBt[1, 1], PBt[2, 1]], dt=ti.f64)
+                           + ti.Vector([PBt[0, 2], PBt[1, 2], PBt[2, 2]], dt=ti.f64))
 
-            # Gauss-Newton Hessian for the hydrostatic term
-            Hi += lam * ci_vec.outer_product(ci_vec)
+                # Hessian: mu*(b·b)*I + lam*(cof_col ⊗ cof_col)
+                Hi = mu * bb * ti.Matrix.identity(ti.f64, 3)
+                cof_Bt = cof @ B.transpose()
+                ci_vec = ti.Vector([0.0, 0.0, 0.0])
+                if local_idx == 0:
+                    ci_vec = ti.Vector([cof_Bt[0, 0], cof_Bt[1, 0], cof_Bt[2, 0]], dt=ti.f64)
+                elif local_idx == 1:
+                    ci_vec = ti.Vector([cof_Bt[0, 1], cof_Bt[1, 1], cof_Bt[2, 1]], dt=ti.f64)
+                elif local_idx == 2:
+                    ci_vec = ti.Vector([cof_Bt[0, 2], cof_Bt[1, 2], cof_Bt[2, 2]], dt=ti.f64)
+                else:
+                    ci_vec = -(ti.Vector([cof_Bt[0, 0], cof_Bt[1, 0], cof_Bt[2, 0]], dt=ti.f64)
+                               + ti.Vector([cof_Bt[0, 1], cof_Bt[1, 1], cof_Bt[2, 1]], dt=ti.f64)
+                               + ti.Vector([cof_Bt[0, 2], cof_Bt[1, 2], cof_Bt[2, 2]], dt=ti.f64))
+                Hi += lam * ci_vec.outer_product(ci_vec)
 
+            g += V0 * gi
             H += V0 * Hi
 
+        # Accumulate distance constraint gradient/Hessian for this vertex
+        if n_dist > 0:
+            d_start = dist_vert_offset[vi]
+            d_end = dist_vert_offset[vi + 1]
+            for dk in range(d_start, d_end):
+                vj = dist_pair_other[dk]
+                d0 = dist_pair_rest[dk]
+
+                diff = positions[vi] - positions[vj]
+                d = diff.norm()
+                if d < 1e-12:
+                    continue
+
+                C = d - d0
+                # Dead zone
+                if ti.abs(C) < 0.002:
+                    continue
+
+                # Asymmetric stiffness
+                kk = dist_stiffness
+                if C > 0.0:
+                    kk = dist_stiffness * 0.1
+
+                n_dir = diff / d
+                g += kk * C * n_dir
+
+                # Hessian
+                nn = n_dir.outer_product(n_dir)
+                ratio = d0 / d
+                if ratio > 1.0:
+                    ratio = 1.0
+                H += kk * nn + kk * (1.0 - ratio) * (ti.Matrix.identity(ti.f64, 3) - nn)
+
         # Regularization: ensure H is positive-definite
-        H += eps * ti.Matrix.identity(ti.f64, 3)
+        # Use diagonal-proportional regularization for better conditioning
+        diag_avg = (H[0, 0] + H[1, 1] + H[2, 2]) / 3.0
+        reg = eps
+        if diag_avg > eps:
+            reg = diag_avg * 1e-3  # 0.1% of diagonal average
+        H += reg * ti.Matrix.identity(ti.f64, 3)
 
         # Solve 3x3: dx = -H^{-1} g  (analytical inverse)
         det = H.determinant()
         if ti.abs(det) > 1e-30:
             H_inv = H.inverse()
             dx = -H_inv @ g
+            # Clamp step size to prevent divergence on ill-conditioned tets
+            dx_norm = dx.norm()
+            max_step = 0.0005  # 0.5mm max displacement per iteration
+            if dx_norm > max_step:
+                dx = dx * (max_step / dx_norm)
             positions[vi] += dx
 
 
@@ -1616,6 +1668,7 @@ class VBDSolver:
         self.ti_tets = ti.Vector.field(4, dtype=ti.i32, shape=M)
         self.ti_Bm_inv = ti.Matrix.field(3, 3, dtype=ti.f64, shape=M)
         self.ti_rest_volume = ti.field(dtype=ti.f64, shape=M)
+        self.ti_x_tilde = ti.Vector.field(3, dtype=ti.f64, shape=N)  # inertia target
 
         # Vertex-tet incidence (CSR)
         total_inc = len(self._vert_tet_data)
@@ -1624,8 +1677,14 @@ class VBDSolver:
         self.ti_vert_local_idx = ti.field(dtype=ti.i32, shape=max(total_inc, 1))
 
         # Per-color vertex lists
-        max_color_size = max(len(cv) for cv in self._color_verts) if self._color_verts else 1
-        self.ti_color_verts = ti.field(dtype=ti.i32, shape=max_color_size)
+        self._max_color_size = max(len(cv) for cv in self._color_verts) if self._color_verts else 1
+        self.ti_color_verts = ti.field(dtype=ti.i32, shape=self._max_color_size)
+
+        # Distance constraint CSR (empty by default, populated by set_inter_muscle_constraints)
+        self.ti_dist_pair_other = ti.field(dtype=ti.i32, shape=1)
+        self.ti_dist_pair_rest_csr = ti.field(dtype=ti.f64, shape=1)
+        self.ti_dist_vert_offset = ti.field(dtype=ti.i32, shape=N + 1)
+        self.ti_dist_vert_offset.fill(0)
 
         # Collision fields
         self._max_coll = 0
@@ -1705,15 +1764,49 @@ class VBDSolver:
         self._dist_pair_j = np.array(pair_j, dtype=np.int32)
         self._dist_rest = np.array(rest_d, dtype=np.float64)
 
-        # Allocate Taichi fields
         K = self._n_dist_constraints
+        N = self._n_verts
+
+        # Build vertex-to-distance-constraint CSR incidence
+        # Each constraint (i,j,d0) contributes to BOTH vertex i and vertex j
+        # For vertex vi, store (other_vertex, rest_dist) pairs
+        from collections import defaultdict
+        dist_adj = defaultdict(list)  # vertex -> [(other_vert, rest_dist), ...]
+        for k in range(K):
+            dist_adj[self._dist_pair_i[k]].append((self._dist_pair_j[k], self._dist_rest[k]))
+            dist_adj[self._dist_pair_j[k]].append((self._dist_pair_i[k], self._dist_rest[k]))
+
+        # Build CSR arrays
+        dist_vert_offset = np.zeros(N + 1, dtype=np.int32)
+        for v in range(N):
+            dist_vert_offset[v + 1] = dist_vert_offset[v] + len(dist_adj[v])
+
+        total_entries = int(dist_vert_offset[N])
+        dist_pair_other = np.zeros(max(total_entries, 1), dtype=np.int32)
+        dist_pair_rest_csr = np.zeros(max(total_entries, 1), dtype=np.float64)
+
+        pos = 0
+        for v in range(N):
+            for other, rd in dist_adj[v]:
+                dist_pair_other[pos] = other
+                dist_pair_rest_csr[pos] = rd
+                pos += 1
+
+        # Allocate Taichi fields
         self.ti_dist_pair_i = ti.field(dtype=ti.i32, shape=K)
         self.ti_dist_pair_j = ti.field(dtype=ti.i32, shape=K)
         self.ti_dist_rest = ti.field(dtype=ti.f64, shape=K)
+        self.ti_dist_pair_other = ti.field(dtype=ti.i32, shape=max(total_entries, 1))
+        self.ti_dist_pair_rest_csr = ti.field(dtype=ti.f64, shape=max(total_entries, 1))
+        self.ti_dist_vert_offset = ti.field(dtype=ti.i32, shape=N + 1)
 
         self.ti_dist_pair_i.from_numpy(self._dist_pair_i)
         self.ti_dist_pair_j.from_numpy(self._dist_pair_j)
         self.ti_dist_rest.from_numpy(self._dist_rest)
+        if total_entries > 0:
+            self.ti_dist_pair_other.from_numpy(dist_pair_other)
+            self.ti_dist_pair_rest_csr.from_numpy(dist_pair_rest_csr)
+        self.ti_dist_vert_offset.from_numpy(dist_vert_offset)
 
         print(f"  Inter-muscle constraints: {K} active ({skipped} skipped)")
 
@@ -1903,7 +1996,7 @@ class VBDSolver:
         effective_mu = mu
 
         # Hessian regularization epsilon (scales with material stiffness)
-        eps = max(effective_mu, effective_lam) * 1e-6
+        eps = max(effective_mu, effective_lam) * 1e-4
 
         # Upload current positions and targets
         targets_full = self.positions.copy()
@@ -1912,54 +2005,90 @@ class VBDSolver:
         self.ti_positions.from_numpy(self.positions)
         _snap_fixed(self.ti_positions, self.ti_targets, self.ti_invm, N)
 
+        # x_tilde = initial positions (inertia target for VBD regularization)
+        _copy_positions(self.ti_x_tilde, self.ti_positions, N)
+
         # Save positions before solve for convergence metric
         initial_pos = self.ti_positions.to_numpy().copy()
 
         # Distance constraint stiffness
         dist_stiffness = effective_lam if K > 0 else 0.0
 
-        # VBD iterations
-        for it in range(n_iters):
-            if verbose and it < 5:
-                _copy_positions(self.ti_pos_prev, self.ti_positions, N)
+        # Diagnostic: check initial state inversions
+        if verbose:
+            X0 = self.ti_positions.to_numpy()
+            T = self.tetrahedra
+            x3 = X0[T[:, 3]]
+            Ds0 = np.stack([X0[T[:, 0]] - x3, X0[T[:, 1]] - x3, X0[T[:, 2]] - x3], axis=-1)
+            Js0 = np.linalg.det(Ds0 @ self.Bm_inv)
+            n_inv0 = int(np.sum(Js0 <= 0))
+            print(f"    initial: inv={n_inv0}/{M} J=[{np.min(Js0):.3f},{np.max(Js0):.3f}]")
 
-            # Per-color parallel vertex updates
-            for c in range(self._n_colors):
-                cv = self._color_verts[c]
-                n_cv = len(cv)
-                if n_cv == 0:
-                    continue
-                self.ti_color_verts.from_numpy(cv)
-                _vbd_solve_color(
-                    self.ti_positions,
-                    self.ti_Bm_inv,
-                    self.ti_rest_volume,
-                    self.ti_vert_tet_data,
-                    self.ti_vert_tet_offset,
-                    self.ti_vert_local_idx,
-                    self.ti_tets,
-                    self.ti_invm,
-                    self.ti_color_verts,
-                    effective_mu,
-                    effective_lam,
-                    eps,
-                    n_cv,
-                )
+        # Pre-upload all color vertex arrays (padded to max size)
+        color_arrays = []
+        for c in range(self._n_colors):
+            cv = self._color_verts[c]
+            padded = np.zeros(self._max_color_size, dtype=np.int32)
+            padded[:len(cv)] = cv
+            color_arrays.append((padded, len(cv)))
 
-            # Distance constraints (per-pair Newton step)
-            if K > 0:
-                _vbd_project_distance(
-                    self.ti_positions, self.ti_invm,
-                    self.ti_dist_pair_i, self.ti_dist_pair_j,
-                    self.ti_dist_rest, dist_stiffness, eps, K,
-                )
+        # VBD iterations with pseudo-time stepping.
+        # Use sub-steps with small h (strong damping) that ramp up.
+        # Each sub-step: x_tilde = current x, then iterate with m/h².
+        # This gives the solver time to untangle inversions gradually.
+        n_substeps = 5
+        iters_per_substep = max(n_iters // n_substeps, 1)
+        h_values = [0.005, 0.01, 0.02, 0.05, 0.1]  # ramp up h
+        if n_substeps > len(h_values):
+            h_values = h_values + [h_values[-1]] * (n_substeps - len(h_values))
 
-            _snap_fixed(self.ti_positions, self.ti_targets, self.ti_invm, N)
+        global_it = 0
+        for sub in range(n_substeps):
+            h = h_values[sub]
+            mass_over_h2 = 1.0 / (h * h)
+            # Update x_tilde to current positions (inertia anchors to sub-step start)
+            _copy_positions(self.ti_x_tilde, self.ti_positions, N)
 
-            if verbose and it < 5:
-                delta = _compute_position_delta(
-                    self.ti_positions, self.ti_pos_prev, self.ti_invm, N)
-                print(f"      iter {it}: ||dx||={delta**0.5:.6e}")
+            for it in range(iters_per_substep):
+                if verbose and global_it < 5:
+                    _copy_positions(self.ti_pos_prev, self.ti_positions, N)
+
+                # Per-color parallel vertex updates
+                for c in range(self._n_colors):
+                    padded, n_cv = color_arrays[c]
+                    if n_cv == 0:
+                        continue
+                    self.ti_color_verts.from_numpy(padded)
+                    _vbd_solve_color(
+                        self.ti_positions,
+                        self.ti_x_tilde,
+                        self.ti_Bm_inv,
+                        self.ti_rest_volume,
+                        self.ti_vert_tet_data,
+                        self.ti_vert_tet_offset,
+                        self.ti_vert_local_idx,
+                        self.ti_tets,
+                        self.ti_invm,
+                        self.ti_color_verts,
+                        self.ti_dist_pair_other,
+                        self.ti_dist_pair_rest_csr,
+                        self.ti_dist_vert_offset,
+                        dist_stiffness,
+                        K,
+                        effective_mu,
+                        effective_lam,
+                        eps,
+                        mass_over_h2,
+                        n_cv,
+                    )
+
+                _snap_fixed(self.ti_positions, self.ti_targets, self.ti_invm, N)
+
+                if verbose and global_it < 5:
+                    delta = _compute_position_delta(
+                        self.ti_positions, self.ti_pos_prev, self.ti_invm, N)
+                    print(f"      iter {global_it} (h={h:.3f}): ||dx||={delta**0.5:.6e}")
+                global_it += 1
 
         # Taubin smoothing
         if self._n_surf_verts > 0:
