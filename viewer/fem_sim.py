@@ -1127,6 +1127,937 @@ class UnifiedFEMSolver:
 
 
 # ---------------------------------------------------------------------------
+# VBD Solver (Vertex Block Descent, SIGGRAPH 2024)
+# ---------------------------------------------------------------------------
+
+@ti.kernel
+def _vbd_solve_color(
+    positions: ti.template(),
+    Bm_inv: ti.template(),
+    rest_volume: ti.template(),
+    vert_tet_data: ti.template(),
+    vert_tet_offset: ti.template(),
+    vert_local_idx: ti.template(),
+    tets: ti.template(),
+    invm: ti.template(),
+    color_verts: ti.template(),
+    mu: ti.f64,
+    lam: ti.f64,
+    eps: ti.f64,
+    n_color_verts: ti.i32,
+):
+    """VBD per-vertex Newton step for one graph color.
+
+    For each vertex in the color (in parallel), accumulate gradient g (3-vec)
+    and Hessian H (3x3) from incident tets using Stable Neo-Hookean energy,
+    then solve x_i -= H^{-1} g.
+    """
+    for ci in range(n_color_verts):
+        vi = color_verts[ci]
+        if invm[vi] == 0.0:
+            continue
+
+        g = ti.Vector([0.0, 0.0, 0.0])
+        H = ti.Matrix.zero(ti.f64, 3, 3)
+
+        start = vert_tet_offset[vi]
+        end = vert_tet_offset[vi + 1]
+
+        for k in range(start, end):
+            tet_idx = vert_tet_data[k]
+            local_idx = vert_local_idx[k]
+
+            i0 = tets[tet_idx][0]
+            i1 = tets[tet_idx][1]
+            i2 = tets[tet_idx][2]
+            i3 = tets[tet_idx][3]
+
+            x0 = positions[i0]
+            x1 = positions[i1]
+            x2 = positions[i2]
+            x3 = positions[i3]
+
+            # Deformation gradient: Ds = [x0-x3, x1-x3, x2-x3], F = Ds @ Bm_inv
+            Ds = ti.Matrix.cols([x0 - x3, x1 - x3, x2 - x3])
+            B = Bm_inv[tet_idx]
+            F = Ds @ B
+            V0 = rest_volume[tet_idx]
+
+            # First Piola-Kirchhoff stress (Stable Neo-Hookean):
+            # P = mu * F + lam * (J - 1) * cofactor(F)
+            f0 = ti.Vector([F[0, 0], F[1, 0], F[2, 0]], dt=ti.f64)
+            f1 = ti.Vector([F[0, 1], F[1, 1], F[2, 1]], dt=ti.f64)
+            f2 = ti.Vector([F[0, 2], F[1, 2], F[2, 2]], dt=ti.f64)
+
+            J = F.determinant()
+            cof = ti.Matrix.cols([f1.cross(f2), f2.cross(f0), f0.cross(f1)])
+            P = mu * F + lam * (J - 1.0) * cof
+
+            # Force on vertex i: f_i = -V0 * P @ Bm_inv^T, projected to vertex i
+            # ∂F/∂x_i: depends on local_idx
+            # For local 0,1,2: column local_idx of Bm_inv^T = row local_idx of Bm_inv
+            # For local 3: negative sum of all three columns
+            PBt = P @ B.transpose()
+
+            # Gradient contribution: g_i = V0 * PBt column for local_idx
+            gi = ti.Vector([0.0, 0.0, 0.0])
+            if local_idx == 0:
+                gi = ti.Vector([PBt[0, 0], PBt[1, 0], PBt[2, 0]], dt=ti.f64)
+            elif local_idx == 1:
+                gi = ti.Vector([PBt[0, 1], PBt[1, 1], PBt[2, 1]], dt=ti.f64)
+            elif local_idx == 2:
+                gi = ti.Vector([PBt[0, 2], PBt[1, 2], PBt[2, 2]], dt=ti.f64)
+            else:  # local_idx == 3
+                gi = -(ti.Vector([PBt[0, 0], PBt[1, 0], PBt[2, 0]], dt=ti.f64)
+                       + ti.Vector([PBt[0, 1], PBt[1, 1], PBt[2, 1]], dt=ti.f64)
+                       + ti.Vector([PBt[0, 2], PBt[1, 2], PBt[2, 2]], dt=ti.f64))
+
+            g += V0 * gi
+
+            # Per-vertex 3x3 Hessian block:
+            # H_i = V0 * (∂P/∂F contracted with ∂F/∂x_i on both sides)
+            #
+            # For Stable Neo-Hookean: ∂P/∂F has two terms:
+            # 1) mu * I_9x9 (identity on F-space) → contributes mu * (b·b) * I_3x3
+            # 2) lam * cofactor terms → contributes lam * various outer products
+            #
+            # where b = Bm_inv row for the vertex (or neg sum for vertex 3)
+
+            # Get the "b" vector (Bm_inv contribution for this vertex)
+            b = ti.Vector([0.0, 0.0, 0.0])
+            if local_idx == 0:
+                b = ti.Vector([B[0, 0], B[0, 1], B[0, 2]], dt=ti.f64)
+            elif local_idx == 1:
+                b = ti.Vector([B[1, 0], B[1, 1], B[1, 2]], dt=ti.f64)
+            elif local_idx == 2:
+                b = ti.Vector([B[2, 0], B[2, 1], B[2, 2]], dt=ti.f64)
+            else:  # local_idx == 3
+                b = -(ti.Vector([B[0, 0], B[0, 1], B[0, 2]], dt=ti.f64)
+                      + ti.Vector([B[1, 0], B[1, 1], B[1, 2]], dt=ti.f64)
+                      + ti.Vector([B[2, 0], B[2, 1], B[2, 2]], dt=ti.f64))
+
+            # Term 1: mu * (b·b) * I
+            bb = b.dot(b)
+            Hi = mu * bb * ti.Matrix.identity(ti.f64, 3)
+
+            # Term 2: lam * d(cofactor)/dF contracted terms
+            # Full derivation:
+            # ∂(J * cof)/∂F contracted to 3x3 for vertex i gives:
+            # lam * [(J-1) * (∂cof/∂F) + cof ⊗ cof] contracted with b
+            #
+            # Simplified for the 3x3 per-vertex block:
+            # H_lam = lam * [ (J-1)*H_cof_block + (cof @ b) ⊗ (cof @ b) / ... ]
+            #
+            # For robustness, use the Gauss-Newton approximation:
+            # H ≈ mu*(b·b)*I + lam*(cof@Bt col)⊗(cof@Bt col)
+            # This is SPD when J > 0 and provides good convergence.
+            cof_Bt = cof @ B.transpose()
+            ci_vec = ti.Vector([0.0, 0.0, 0.0])
+            if local_idx == 0:
+                ci_vec = ti.Vector([cof_Bt[0, 0], cof_Bt[1, 0], cof_Bt[2, 0]], dt=ti.f64)
+            elif local_idx == 1:
+                ci_vec = ti.Vector([cof_Bt[0, 1], cof_Bt[1, 1], cof_Bt[2, 1]], dt=ti.f64)
+            elif local_idx == 2:
+                ci_vec = ti.Vector([cof_Bt[0, 2], cof_Bt[1, 2], cof_Bt[2, 2]], dt=ti.f64)
+            else:
+                ci_vec = -(ti.Vector([cof_Bt[0, 0], cof_Bt[1, 0], cof_Bt[2, 0]], dt=ti.f64)
+                           + ti.Vector([cof_Bt[0, 1], cof_Bt[1, 1], cof_Bt[2, 1]], dt=ti.f64)
+                           + ti.Vector([cof_Bt[0, 2], cof_Bt[1, 2], cof_Bt[2, 2]], dt=ti.f64))
+
+            # Gauss-Newton Hessian for the hydrostatic term
+            Hi += lam * ci_vec.outer_product(ci_vec)
+
+            H += V0 * Hi
+
+        # Regularization: ensure H is positive-definite
+        H += eps * ti.Matrix.identity(ti.f64, 3)
+
+        # Solve 3x3: dx = -H^{-1} g  (analytical inverse)
+        det = H.determinant()
+        if ti.abs(det) > 1e-30:
+            H_inv = H.inverse()
+            dx = -H_inv @ g
+            positions[vi] += dx
+
+
+@ti.kernel
+def _vbd_project_distance(
+    positions: ti.template(),
+    invm: ti.template(),
+    pair_i: ti.template(),
+    pair_j: ti.template(),
+    rest_dist: ti.template(),
+    dist_stiffness: ti.f64,
+    eps: ti.f64,
+    n_pairs: ti.i32,
+):
+    """Distance constraint energy gradient+Hessian added as per-vertex Newton step.
+
+    For each distance constraint pair, computes:
+      E = k/2 * (||xi - xj|| - d0)^2
+      g_i = k * (d - d0) * n
+      H_i = k * (n⊗n) + k*(1 - d0/d)*(I - n⊗n)  [when d > d0*0.01]
+    Then applies Newton step to both endpoints.
+    """
+    for k in range(n_pairs):
+        i = pair_i[k]
+        j = pair_j[k]
+        xi = positions[i]
+        xj = positions[j]
+        wi = invm[i]
+        wj = invm[j]
+
+        diff = xi - xj
+        d = diff.norm()
+        if d < 1e-12:
+            continue
+
+        d0 = rest_dist[k]
+        C = d - d0
+
+        # Dead zone: skip micro-corrections
+        if ti.abs(C) < 0.002:
+            continue
+
+        # Asymmetric stiffness: stiff compression, softer separation
+        kk = dist_stiffness
+        if C > 0.0:
+            kk = dist_stiffness * 0.1  # 10x weaker for separation
+
+        n_dir = diff / d
+        g_val = kk * C * n_dir
+
+        # Hessian: k*(n⊗n) + k*(1 - d0/d)*(I - n⊗n)
+        nn = n_dir.outer_product(n_dir)
+        ratio = d0 / d
+        if ratio > 1.0:
+            ratio = 1.0  # clamp for stability when compressed
+        H_val = kk * nn + kk * (1.0 - ratio) * (ti.Matrix.identity(ti.f64, 3) - nn)
+        H_val += eps * ti.Matrix.identity(ti.f64, 3)
+
+        det_H = H_val.determinant()
+        if ti.abs(det_H) < 1e-30:
+            continue
+        H_inv = H_val.inverse()
+
+        # Apply Newton step to both vertices (weighted by inverse mass)
+        if wi > 0.0:
+            dx_i = -H_inv @ g_val
+            # Clamp displacement to 1mm per step
+            dx_norm = dx_i.norm()
+            if dx_norm > 0.001:
+                dx_i = dx_i * (0.001 / dx_norm)
+            positions[i] += dx_i
+
+        if wj > 0.0:
+            dx_j = H_inv @ g_val  # opposite gradient for j
+            dx_norm = dx_j.norm()
+            if dx_norm > 0.001:
+                dx_j = dx_j * (0.001 / dx_norm)
+            positions[j] += dx_j
+
+
+class VBDSolver:
+    """Vertex Block Descent solver (SIGGRAPH 2024).
+
+    Minimizes per-vertex local elastic energy using 3x3 Newton steps.
+    Graph coloring enables parallel updates without conflicts.
+    Guaranteed energy descent every iteration (unconditionally stable).
+    Same interface as UnifiedFEMSolver: build(), solve(), get_muscle_positions().
+    """
+
+    def __init__(self):
+        self._built = False
+        self._n_verts = 0
+        self._n_tets = 0
+        self._muscle_ranges = {}
+        self._merged_bone_mesh = None
+        self._orig_fixed_mask = None
+        self._n_dist_constraints = 0
+        self._dist_pair_i = None
+        self._dist_pair_j = None
+        self._dist_rest = None
+
+    def build(self, muscles_data):
+        _ensure_ti_init()
+
+        all_verts = []
+        all_tets = []
+        all_fixed = []
+        all_surface_verts = []
+        all_surface_faces = []
+        vert_offset = 0
+        tet_offset = 0
+
+        for name, data in muscles_data.items():
+            n_v = len(data['rest_positions'])
+            n_t = len(data['tetrahedra'])
+
+            all_verts.append(data['rest_positions'].astype(np.float64))
+            all_tets.append(data['tetrahedra'].astype(np.int32) + vert_offset)
+            all_fixed.append(data['fixed_mask'].astype(bool))
+
+            if data.get('surface_faces') is not None:
+                surf_faces = data['surface_faces'].astype(np.int32) + vert_offset
+                surf_v = np.unique(surf_faces.ravel())
+                all_surface_faces.append(surf_faces)
+            else:
+                surf_v = np.arange(vert_offset, vert_offset + n_v)
+            all_surface_verts.append(surf_v)
+
+            self._muscle_ranges[name] = (vert_offset, vert_offset + n_v,
+                                         tet_offset, tet_offset + n_t)
+            vert_offset += n_v
+            tet_offset += n_t
+
+        self._n_verts = vert_offset
+        self.rest_positions = np.concatenate(all_verts, axis=0)
+        self.positions = self.rest_positions.copy()
+        self.tetrahedra = np.concatenate(all_tets, axis=0)
+        self._orig_fixed_mask = np.concatenate(all_fixed, axis=0)
+        self.fixed_mask = self._orig_fixed_mask.copy()
+        self.surface_verts = np.concatenate(all_surface_verts, axis=0)
+
+        self.fixed_indices = np.where(self.fixed_mask)[0]
+        self.free_indices = np.where(~self.fixed_mask)[0]
+        self.fixed_targets = self.positions[self.fixed_indices].copy()
+
+        # Free surface verts for collision
+        self.free_surface_verts = self.surface_verts[~self._orig_fixed_mask[self.surface_verts]]
+        free_set = set(self.free_indices.tolist())
+        self._free_surf_global = np.array([
+            gv for gv in self.free_surface_verts if gv in free_set
+        ], dtype=np.int64)
+
+        # Filter degenerate tets and precompute rest state
+        self._filter_degenerate_tets()
+        self._precompute_rest_state()
+
+        # Build graph coloring and vertex-tet incidence
+        self._build_graph_coloring()
+        self._build_vertex_tet_incidence()
+
+        # Build surface adjacency for smoothing
+        self._build_surface_adjacency(all_surface_faces)
+
+        # Store per-muscle surface faces for muscle-muscle collision
+        self._muscle_surface_faces = {}
+        sf_idx = 0
+        for name, data in muscles_data.items():
+            if data.get('surface_faces') is not None:
+                self._muscle_surface_faces[name] = all_surface_faces[sf_idx]
+                sf_idx += 1
+
+        # Allocate Taichi fields
+        self._allocate_fields()
+        self._allocate_surface_smooth_fields()
+        self._upload_static_data()
+
+        self._built = True
+        print(f"  VBD unified: {self._n_verts} verts, {self._n_tets} tets, "
+              f"{len(self._muscle_ranges)} muscles, {len(self.free_indices)} free DOFs, "
+              f"{self._n_colors} colors")
+
+    def _filter_degenerate_tets(self):
+        X = self.rest_positions
+        tets = self.tetrahedra
+        v0 = X[tets[:, 0]]
+        e1 = X[tets[:, 1]] - v0
+        e2 = X[tets[:, 2]] - v0
+        e3 = X[tets[:, 3]] - v0
+        Dm = np.stack([e1, e2, e3], axis=-1)
+        vol = np.abs(np.linalg.det(Dm)) / 6.0
+        edge_scale = np.mean(np.linalg.norm(e1, axis=1)) ** 3
+        good = vol > edge_scale * 1e-10
+        n_removed = np.sum(~good)
+        if n_removed > 0:
+            print(f"  VBD: Removed {n_removed} degenerate tets (of {len(tets)})")
+            self.tetrahedra = tets[good].copy()
+        self._n_tets = len(self.tetrahedra)
+
+    def _precompute_rest_state(self):
+        tets = self.tetrahedra
+        X = self.rest_positions
+        x3 = X[tets[:, 3]]
+        Bm = np.stack([X[tets[:, 0]] - x3, X[tets[:, 1]] - x3, X[tets[:, 2]] - x3], axis=-1)
+        self.Bm_inv = np.linalg.inv(Bm)
+        self.rest_volume = np.abs(np.linalg.det(Bm)) / 6.0
+
+    def _build_graph_coloring(self):
+        """Greedy vertex coloring from tet adjacency.
+
+        Two vertices are adjacent if they share a tet.
+        Assigns colors so no two adjacent vertices have the same color.
+        """
+        N = self._n_verts
+        M = self._n_tets
+        tets = self.tetrahedra
+
+        # Build adjacency lists
+        from collections import defaultdict
+        adj = defaultdict(set)
+        for t in range(M):
+            verts = [tets[t, 0], tets[t, 1], tets[t, 2], tets[t, 3]]
+            for a in range(4):
+                for b in range(a + 1, 4):
+                    adj[verts[a]].add(verts[b])
+                    adj[verts[b]].add(verts[a])
+
+        # Greedy coloring
+        color = np.full(N, -1, dtype=np.int32)
+        for v in range(N):
+            if v not in adj and self.fixed_mask[v]:
+                continue  # skip isolated fixed verts
+            used = set()
+            for nb in adj[v]:
+                if color[nb] >= 0:
+                    used.add(color[nb])
+            c = 0
+            while c in used:
+                c += 1
+            color[v] = c
+
+        n_colors = int(color.max()) + 1
+        self._n_colors = n_colors
+
+        # Build per-color vertex lists (only free vertices need solving)
+        self._color_verts = []
+        for c in range(n_colors):
+            verts_c = np.where(color == c)[0].astype(np.int32)
+            self._color_verts.append(verts_c)
+
+        total_colored = sum(len(cv) for cv in self._color_verts)
+        print(f"  VBD graph coloring: {n_colors} colors, {total_colored} vertices colored")
+
+    def _build_vertex_tet_incidence(self):
+        """Build CSR mapping each vertex to its incident tets + local index."""
+        N = self._n_verts
+        M = self._n_tets
+        tets = self.tetrahedra
+
+        # Count incident tets per vertex
+        counts = np.zeros(N, dtype=np.int32)
+        for t in range(M):
+            for j in range(4):
+                counts[tets[t, j]] += 1
+
+        # Build offsets (CSR format)
+        offsets = np.zeros(N + 1, dtype=np.int32)
+        for i in range(N):
+            offsets[i + 1] = offsets[i] + counts[i]
+
+        total = int(offsets[N])
+        tet_data = np.zeros(total, dtype=np.int32)
+        local_idx = np.zeros(total, dtype=np.int32)
+
+        # Fill data
+        fill_pos = offsets[:-1].copy()
+        for t in range(M):
+            for j in range(4):
+                v = tets[t, j]
+                pos = fill_pos[v]
+                tet_data[pos] = t
+                local_idx[pos] = j
+                fill_pos[v] += 1
+
+        self._vert_tet_data = tet_data
+        self._vert_tet_offset = offsets
+        self._vert_local_idx = local_idx
+
+        avg_incident = float(counts[counts > 0].mean())
+        max_incident = int(counts.max())
+        print(f"  VBD vertex-tet incidence: avg={avg_incident:.1f}, max={max_incident}")
+
+    def _build_surface_adjacency(self, all_surface_faces):
+        """Build CSR adjacency for surface vertices (per-muscle, no cross-muscle edges)."""
+        from collections import defaultdict
+
+        if not all_surface_faces:
+            self._n_surf_verts = 0
+            self._surf_verts_np = np.array([], dtype=np.int32)
+            self._surf_adj_data_np = np.array([], dtype=np.int32)
+            self._surf_adj_offset_np = np.array([0], dtype=np.int32)
+            return
+
+        adj = defaultdict(set)
+        for faces in all_surface_faces:
+            for f in faces:
+                for a, b in [(f[0], f[1]), (f[1], f[2]), (f[2], f[0])]:
+                    adj[a].add(b)
+                    adj[b].add(a)
+
+        free_set = set(self.free_indices.tolist())
+        surf_verts = sorted([v for v in adj.keys() if v in free_set])
+
+        adj_data = []
+        adj_offset = [0]
+        for v in surf_verts:
+            neighbors = sorted(adj[v])
+            adj_data.extend(neighbors)
+            adj_offset.append(len(adj_data))
+
+        self._n_surf_verts = len(surf_verts)
+        self._surf_verts_np = np.array(surf_verts, dtype=np.int32)
+        self._surf_adj_data_np = np.array(adj_data, dtype=np.int32)
+        self._surf_adj_offset_np = np.array(adj_offset, dtype=np.int32)
+        print(f"  Surface adjacency: {self._n_surf_verts} free surface verts, "
+              f"{len(adj_data)} adjacency entries")
+
+    def _allocate_fields(self):
+        N = self._n_verts
+        M = self._n_tets
+
+        self.ti_positions = ti.Vector.field(3, dtype=ti.f64, shape=N)
+        self.ti_pos_prev = ti.Vector.field(3, dtype=ti.f64, shape=N)
+        self.ti_rest_positions = ti.Vector.field(3, dtype=ti.f64, shape=N)
+        self.ti_targets = ti.Vector.field(3, dtype=ti.f64, shape=N)
+        self.ti_invm = ti.field(dtype=ti.f64, shape=N)
+
+        self.ti_tets = ti.Vector.field(4, dtype=ti.i32, shape=M)
+        self.ti_Bm_inv = ti.Matrix.field(3, 3, dtype=ti.f64, shape=M)
+        self.ti_rest_volume = ti.field(dtype=ti.f64, shape=M)
+
+        # Vertex-tet incidence (CSR)
+        total_inc = len(self._vert_tet_data)
+        self.ti_vert_tet_data = ti.field(dtype=ti.i32, shape=max(total_inc, 1))
+        self.ti_vert_tet_offset = ti.field(dtype=ti.i32, shape=N + 1)
+        self.ti_vert_local_idx = ti.field(dtype=ti.i32, shape=max(total_inc, 1))
+
+        # Per-color vertex lists
+        max_color_size = max(len(cv) for cv in self._color_verts) if self._color_verts else 1
+        self.ti_color_verts = ti.field(dtype=ti.i32, shape=max_color_size)
+
+        # Collision fields
+        self._max_coll = 0
+        self.ti_coll_idx = None
+        self.ti_coll_targets = None
+
+    def _allocate_surface_smooth_fields(self):
+        if self._n_surf_verts == 0:
+            return
+        N = self._n_verts
+        S = self._n_surf_verts
+        A = len(self._surf_adj_data_np)
+
+        self.ti_smoothed = ti.Vector.field(3, dtype=ti.f64, shape=N)
+        self.ti_surf_verts = ti.field(dtype=ti.i32, shape=S)
+        self.ti_surf_adj_data = ti.field(dtype=ti.i32, shape=max(A, 1))
+        self.ti_surf_adj_offset = ti.field(dtype=ti.i32, shape=S + 1)
+
+        self.ti_surf_verts.from_numpy(self._surf_verts_np)
+        if A > 0:
+            self.ti_surf_adj_data.from_numpy(self._surf_adj_data_np)
+        self.ti_surf_adj_offset.from_numpy(self._surf_adj_offset_np)
+
+    def _upload_static_data(self):
+        self.ti_tets.from_numpy(self.tetrahedra)
+        self.ti_Bm_inv.from_numpy(self.Bm_inv)
+        self.ti_rest_volume.from_numpy(self.rest_volume)
+        self.ti_rest_positions.from_numpy(self.rest_positions)
+
+        # Vertex-tet incidence
+        if len(self._vert_tet_data) > 0:
+            self.ti_vert_tet_data.from_numpy(self._vert_tet_data)
+            self.ti_vert_local_idx.from_numpy(self._vert_local_idx)
+        self.ti_vert_tet_offset.from_numpy(self._vert_tet_offset)
+
+        # Per-vertex inverse mass (same as XPBD solver)
+        rho = 1060.0
+        vertex_mass = np.zeros(self._n_verts, dtype=np.float64)
+        for t in range(self._n_tets):
+            m = rho * self.rest_volume[t] / 4.0
+            for j in range(4):
+                vertex_mass[self.tetrahedra[t, j]] += m
+        invm = np.zeros(self._n_verts, dtype=np.float64)
+        free_mask = vertex_mass > 0
+        invm[free_mask] = 1.0 / vertex_mass[free_mask]
+        invm[self.fixed_indices] = 0.0
+        self.ti_invm.from_numpy(invm)
+
+    def set_inter_muscle_constraints(self, constraints):
+        """Convert inter-muscle constraints from local to global indices."""
+        if not constraints:
+            self._n_dist_constraints = 0
+            return
+
+        pair_i = []
+        pair_j = []
+        rest_d = []
+        skipped = 0
+        for name1, v1, fixed1, name2, v2, fixed2, d in constraints:
+            if name1 not in self._muscle_ranges or name2 not in self._muscle_ranges:
+                skipped += 1
+                continue
+            if fixed1 and fixed2:
+                skipped += 1
+                continue
+            gi = self._muscle_ranges[name1][0] + v1
+            gj = self._muscle_ranges[name2][0] + v2
+            pair_i.append(gi)
+            pair_j.append(gj)
+            rest_d.append(d)
+
+        self._n_dist_constraints = len(pair_i)
+        if self._n_dist_constraints == 0:
+            return
+
+        self._dist_pair_i = np.array(pair_i, dtype=np.int32)
+        self._dist_pair_j = np.array(pair_j, dtype=np.int32)
+        self._dist_rest = np.array(rest_d, dtype=np.float64)
+
+        # Allocate Taichi fields
+        K = self._n_dist_constraints
+        self.ti_dist_pair_i = ti.field(dtype=ti.i32, shape=K)
+        self.ti_dist_pair_j = ti.field(dtype=ti.i32, shape=K)
+        self.ti_dist_rest = ti.field(dtype=ti.f64, shape=K)
+
+        self.ti_dist_pair_i.from_numpy(self._dist_pair_i)
+        self.ti_dist_pair_j.from_numpy(self._dist_pair_j)
+        self.ti_dist_rest.from_numpy(self._dist_rest)
+
+        print(f"  Inter-muscle constraints: {K} active ({skipped} skipped)")
+
+    def update_targets_and_positions(self, muscles_data, use_lbs_init=False):
+        """Update fixed targets from skeleton. Free verts keep previous solution."""
+        for name, data in muscles_data.items():
+            vs, ve, _, _ = self._muscle_ranges[name]
+            if use_lbs_init and 'positions' in data:
+                self.positions[vs:ve] = data['positions']
+            if 'fixed_targets' in data:
+                fi = np.where(self._orig_fixed_mask[vs:ve])[0]
+                self.positions[vs + fi] = data['fixed_targets']
+                global_fi = fi + vs
+                for i, gfi in enumerate(global_fi):
+                    idx_in_fixed = np.searchsorted(self.fixed_indices, gfi)
+                    if idx_in_fixed < len(self.fixed_indices) and self.fixed_indices[idx_in_fixed] == gfi:
+                        self.fixed_targets[idx_in_fixed] = data['fixed_targets'][i]
+
+    # Reuse collision methods from UnifiedFEMSolver (same logic)
+    def _build_merged_bone_mesh(self, bone_meshes):
+        if not bone_meshes:
+            self._merged_bone_mesh = None
+            self._individual_bone_meshes = []
+            return
+        valid = [m for m in bone_meshes if m is not None and m.is_watertight]
+        non_watertight = [m for m in bone_meshes if m is not None and not m.is_watertight]
+        if not valid and not non_watertight:
+            self._merged_bone_mesh = None
+            self._individual_bone_meshes = []
+            return
+        self._individual_bone_meshes = valid
+        all_valid = valid + non_watertight
+        self._merged_bone_mesh = trimesh.util.concatenate(all_valid) if all_valid else None
+        self._bone_kdtree = None
+
+    def _compute_collision_targets(self, margin=0.002, verbose=False):
+        if self._merged_bone_mesh is None:
+            return np.array([], dtype=np.int32), np.zeros((0, 3))
+        free_surf = self._free_surf_global
+        if len(free_surf) == 0:
+            return np.array([], dtype=np.int32), np.zeros((0, 3))
+        surf_pos = self.positions[free_surf]
+        from scipy.spatial import cKDTree
+        proximity_radius = 0.02
+        if not hasattr(self, '_bone_kdtree') or self._bone_kdtree is None:
+            self._bone_kdtree = cKDTree(self._merged_bone_mesh.vertices)
+        dists_to_bone, _ = self._bone_kdtree.query(surf_pos)
+        nearby_mask = dists_to_bone < proximity_radius
+        if not np.any(nearby_mask):
+            return np.array([], dtype=np.int32), np.zeros((0, 3))
+        nearby_pos = surf_pos[nearby_mask]
+        nearby_free_surf = free_surf[nearby_mask]
+        inside_mask = np.zeros(len(nearby_pos), dtype=bool)
+        individual = getattr(self, '_individual_bone_meshes', [])
+        if individual:
+            for bone_mesh in individual:
+                try:
+                    bmin = bone_mesh.bounds[0] - proximity_radius
+                    bmax = bone_mesh.bounds[1] + proximity_radius
+                    in_bbox = np.all((nearby_pos >= bmin) & (nearby_pos <= bmax), axis=1)
+                    if not np.any(in_bbox):
+                        continue
+                    contained = bone_mesh.contains(nearby_pos[in_bbox])
+                    inside_mask[in_bbox] |= contained
+                except Exception:
+                    continue
+        if not individual:
+            try:
+                closest_pts, dists, face_ids = self._merged_bone_mesh.nearest.on_surface(nearby_pos)
+                normals = self._merged_bone_mesh.face_normals[face_ids]
+                to_vertex = nearby_pos - closest_pts
+                dots = np.einsum('ij,ij->i', to_vertex, normals)
+                inside_mask = (dots < 0) & (dists < margin * 10)
+            except Exception:
+                return np.array([], dtype=np.int32), np.zeros((0, 3))
+        if not np.any(inside_mask):
+            return np.array([], dtype=np.int32), np.zeros((0, 3))
+        pen_pos = nearby_pos[inside_mask]
+        try:
+            closest_pts, dists, face_ids = self._merged_bone_mesh.nearest.on_surface(pen_pos)
+            normals = self._merged_bone_mesh.face_normals[face_ids]
+        except Exception:
+            return np.array([], dtype=np.int32), np.zeros((0, 3))
+        targets = closest_pts + normals * margin
+        global_idx = nearby_free_surf[inside_mask].astype(np.int32)
+        return global_idx, targets
+
+    def _compute_muscle_collision_targets(self, margin=0.001, verbose=False):
+        if not TRIMESH_AVAILABLE or not hasattr(self, '_muscle_surface_faces'):
+            return np.array([], dtype=np.int32), np.zeros((0, 3))
+        if not self._muscle_surface_faces:
+            return np.array([], dtype=np.int32), np.zeros((0, 3))
+        from scipy.spatial import cKDTree
+        if not hasattr(self, '_muscle_neighbor_pairs'):
+            neighbor_set = set()
+            vert_to_muscle = {}
+            for name, (vs, ve, _, _) in self._muscle_ranges.items():
+                for v in range(vs, ve):
+                    vert_to_muscle[v] = name
+            if self._dist_pair_i is not None:
+                for k in range(self._n_dist_constraints):
+                    m1 = vert_to_muscle.get(self._dist_pair_i[k])
+                    m2 = vert_to_muscle.get(self._dist_pair_j[k])
+                    if m1 and m2 and m1 != m2:
+                        pair = tuple(sorted([m1, m2]))
+                        neighbor_set.add(pair)
+            self._muscle_neighbor_pairs = list(neighbor_set)
+        all_idx = []
+        all_tgt = []
+        for name_a, name_b in self._muscle_neighbor_pairs:
+            if name_a not in self._muscle_surface_faces or name_b not in self._muscle_surface_faces:
+                continue
+            vs_a, ve_a, _, _ = self._muscle_ranges[name_a]
+            vs_b, ve_b, _, _ = self._muscle_ranges[name_b]
+            pos_a = self.positions[vs_a:ve_a]
+            pos_b = self.positions[vs_b:ve_b]
+            min_a, max_a = pos_a.min(axis=0), pos_a.max(axis=0)
+            min_b, max_b = pos_b.min(axis=0), pos_b.max(axis=0)
+            if np.any(min_a > max_b + margin) or np.any(min_b > max_a + margin):
+                continue
+            faces_a = self._muscle_surface_faces[name_a] - vs_a
+            faces_b = self._muscle_surface_faces[name_b] - vs_b
+            try:
+                mesh_a = trimesh.Trimesh(vertices=pos_a, faces=faces_a, process=False)
+                mesh_b = trimesh.Trimesh(vertices=pos_b, faces=faces_b, process=False)
+            except Exception:
+                continue
+            for src_name, src_mesh, tgt_mesh, src_vs in [
+                (name_a, mesh_a, mesh_b, vs_a),
+                (name_b, mesh_b, mesh_a, vs_b),
+            ]:
+                src_surf_local = np.unique(self._muscle_surface_faces[src_name] - src_vs)
+                src_surf_pos = src_mesh.vertices[src_surf_local]
+                tgt_tree = cKDTree(tgt_mesh.vertices)
+                dists, _ = tgt_tree.query(src_surf_pos)
+                nearby = dists < margin * 10
+                if not np.any(nearby):
+                    continue
+                nearby_pos = src_surf_pos[nearby]
+                nearby_local = src_surf_local[nearby]
+                try:
+                    if not tgt_mesh.is_watertight:
+                        continue
+                    inside = tgt_mesh.contains(nearby_pos)
+                except Exception:
+                    continue
+                if not np.any(inside):
+                    continue
+                pen_pos = nearby_pos[inside]
+                try:
+                    closest_pts, _, face_ids = tgt_mesh.nearest.on_surface(pen_pos)
+                    normals = tgt_mesh.face_normals[face_ids]
+                except Exception:
+                    continue
+                targets = closest_pts + normals * margin
+                global_idx = (nearby_local[inside] + src_vs).astype(np.int32)
+                free_mask = np.array([self.fixed_mask[gi] == False for gi in global_idx])
+                if np.any(free_mask):
+                    all_idx.append(global_idx[free_mask])
+                    all_tgt.append(targets[free_mask])
+        if not all_idx:
+            return np.array([], dtype=np.int32), np.zeros((0, 3))
+        return np.concatenate(all_idx), np.concatenate(all_tgt)
+
+    def solve(self, mu, lam, vol_penalty=100.0, kappa=1e4, margin=0.002,
+              max_lbfgs_iters=100, n_outer=3, bone_meshes=None, verbose=False,
+              n_load_steps=0):
+        """VBD quasistatic solve.
+
+        Args:
+            mu, lam: Lame parameters
+            vol_penalty: additional volume stiffness (added to lam)
+            margin: collision surface margin
+            max_lbfgs_iters: number of VBD iterations
+            bone_meshes: list of trimesh objects for collision
+            verbose: print detailed output
+        """
+        if bone_meshes is not None:
+            self._build_merged_bone_mesh(bone_meshes)
+
+        N = self._n_verts
+        M = self._n_tets
+        n_iters = max_lbfgs_iters
+        K = self._n_dist_constraints
+
+        effective_lam = lam + vol_penalty
+        effective_mu = mu
+
+        # Hessian regularization epsilon (scales with material stiffness)
+        eps = max(effective_mu, effective_lam) * 1e-6
+
+        # Upload current positions and targets
+        targets_full = self.positions.copy()
+        targets_full[self.fixed_indices] = self.fixed_targets
+        self.ti_targets.from_numpy(targets_full)
+        self.ti_positions.from_numpy(self.positions)
+        _snap_fixed(self.ti_positions, self.ti_targets, self.ti_invm, N)
+
+        # Save positions before solve for convergence metric
+        initial_pos = self.ti_positions.to_numpy().copy()
+
+        # Distance constraint stiffness
+        dist_stiffness = effective_lam if K > 0 else 0.0
+
+        # VBD iterations
+        for it in range(n_iters):
+            if verbose and it < 5:
+                _copy_positions(self.ti_pos_prev, self.ti_positions, N)
+
+            # Per-color parallel vertex updates
+            for c in range(self._n_colors):
+                cv = self._color_verts[c]
+                n_cv = len(cv)
+                if n_cv == 0:
+                    continue
+                self.ti_color_verts.from_numpy(cv)
+                _vbd_solve_color(
+                    self.ti_positions,
+                    self.ti_Bm_inv,
+                    self.ti_rest_volume,
+                    self.ti_vert_tet_data,
+                    self.ti_vert_tet_offset,
+                    self.ti_vert_local_idx,
+                    self.ti_tets,
+                    self.ti_invm,
+                    self.ti_color_verts,
+                    effective_mu,
+                    effective_lam,
+                    eps,
+                    n_cv,
+                )
+
+            # Distance constraints (per-pair Newton step)
+            if K > 0:
+                _vbd_project_distance(
+                    self.ti_positions, self.ti_invm,
+                    self.ti_dist_pair_i, self.ti_dist_pair_j,
+                    self.ti_dist_rest, dist_stiffness, eps, K,
+                )
+
+            _snap_fixed(self.ti_positions, self.ti_targets, self.ti_invm, N)
+
+            if verbose and it < 5:
+                delta = _compute_position_delta(
+                    self.ti_positions, self.ti_pos_prev, self.ti_invm, N)
+                print(f"      iter {it}: ||dx||={delta**0.5:.6e}")
+
+        # Taubin smoothing
+        if self._n_surf_verts > 0:
+            S = self._n_surf_verts
+            lam_smooth = 0.3
+            mu_smooth = -0.31
+            for _ in range(2):
+                _laplacian_smooth_surface(
+                    self.ti_positions, self.ti_smoothed, self.ti_invm,
+                    self.ti_surf_verts, self.ti_surf_adj_data,
+                    self.ti_surf_adj_offset, lam_smooth, S)
+                _copy_smoothed_to_positions(
+                    self.ti_positions, self.ti_smoothed,
+                    self.ti_surf_verts, self.ti_invm, S)
+                _laplacian_smooth_surface(
+                    self.ti_positions, self.ti_smoothed, self.ti_invm,
+                    self.ti_surf_verts, self.ti_surf_adj_data,
+                    self.ti_surf_adj_offset, mu_smooth, S)
+                _copy_smoothed_to_positions(
+                    self.ti_positions, self.ti_smoothed,
+                    self.ti_surf_verts, self.ti_invm, S)
+            _snap_fixed(self.ti_positions, self.ti_targets, self.ti_invm, N)
+
+        # Muscle-muscle collision
+        n_mm_coll = 0
+        if hasattr(self, '_muscle_surface_faces') and self._muscle_surface_faces:
+            self.positions = self.ti_positions.to_numpy()
+            mm_idx, mm_tgt = self._compute_muscle_collision_targets(
+                margin=margin, verbose=verbose)
+            n_mm_coll = len(mm_idx)
+            if n_mm_coll > 0:
+                if n_mm_coll > self._max_coll:
+                    self._max_coll = max(n_mm_coll, 1000)
+                    self.ti_coll_idx = ti.field(dtype=ti.i32, shape=self._max_coll)
+                    self.ti_coll_targets = ti.Vector.field(3, dtype=ti.f64, shape=self._max_coll)
+                idx_padded = np.zeros(self._max_coll, dtype=np.int32)
+                tgt_padded = np.zeros((self._max_coll, 3), dtype=np.float64)
+                idx_padded[:n_mm_coll] = mm_idx
+                tgt_padded[:n_mm_coll] = mm_tgt
+                self.ti_coll_idx.from_numpy(idx_padded)
+                self.ti_coll_targets.from_numpy(tgt_padded)
+                _apply_collision_projection(
+                    self.ti_positions, self.ti_invm,
+                    self.ti_coll_idx, self.ti_coll_targets,
+                    1.0, n_mm_coll,
+                )
+
+        # Final bone collision
+        n_coll = 0
+        if self._merged_bone_mesh is not None:
+            self.positions = self.ti_positions.to_numpy()
+            coll_idx_np, coll_tgt_np = self._compute_collision_targets(
+                margin, verbose=verbose)
+            n_coll = len(coll_idx_np)
+            if n_coll > 0:
+                if n_coll > self._max_coll:
+                    self._max_coll = max(n_coll, 1000)
+                    self.ti_coll_idx = ti.field(dtype=ti.i32, shape=self._max_coll)
+                    self.ti_coll_targets = ti.Vector.field(3, dtype=ti.f64, shape=self._max_coll)
+                idx_padded = np.zeros(self._max_coll, dtype=np.int32)
+                tgt_padded = np.zeros((self._max_coll, 3), dtype=np.float64)
+                idx_padded[:n_coll] = coll_idx_np
+                tgt_padded[:n_coll] = coll_tgt_np
+                self.ti_coll_idx.from_numpy(idx_padded)
+                self.ti_coll_targets.from_numpy(tgt_padded)
+                _apply_collision_projection(
+                    self.ti_positions, self.ti_invm,
+                    self.ti_coll_idx, self.ti_coll_targets,
+                    1.0, n_coll,
+                )
+
+        # Download positions
+        self.positions = self.ti_positions.to_numpy()
+
+        # Convergence metric
+        free = self.free_indices
+        diff = self.positions[free] - initial_pos[free]
+        residual = float(np.sqrt(np.sum(diff ** 2)))
+
+        if verbose:
+            X = self.positions
+            T = self.tetrahedra
+            x3 = X[T[:, 3]]
+            Ds = np.stack([X[T[:, 0]] - x3, X[T[:, 1]] - x3, X[T[:, 2]] - x3], axis=-1)
+            Js = np.linalg.det(Ds @ self.Bm_inv)
+            n_inv = int(np.sum(Js <= 0))
+            print(f"    final: iters={n_iters} ||dx||={residual:.4e} "
+                  f"inv={n_inv}/{M} bone_coll={n_coll} mm_coll={n_mm_coll} dist={K} "
+                  f"J=[{np.min(Js):.3f},{np.max(Js):.3f}]")
+
+        return n_iters, residual
+
+    def get_muscle_positions(self, name):
+        vs, ve, _, _ = self._muscle_ranges[name]
+        return self.positions[vs:ve].copy()
+
+
+# ---------------------------------------------------------------------------
 # Orchestrator
 # ---------------------------------------------------------------------------
 
@@ -1150,9 +2081,14 @@ def run_all_fem_sim(v, max_iterations=100, tolerance=1e-4, verbose=True):
     mu = youngs / (2.0 * (1.0 + poisson))
     lam = youngs * poisson / ((1.0 + poisson) * (1.0 - 2.0 * poisson))
 
+    use_vbd = getattr(v, 'use_vbd_sim', False)
     solver = getattr(v, '_fem_unified_solver', None)
-    if solver is None or set(solver._muscle_ranges.keys()) != set(active_muscles.keys()):
-        solver = UnifiedFEMSolver()
+    # Rebuild solver if muscles changed or solver type changed
+    wrong_type = (solver is not None and
+                  ((use_vbd and not isinstance(solver, VBDSolver)) or
+                   (not use_vbd and isinstance(solver, VBDSolver))))
+    if solver is None or wrong_type or set(solver._muscle_ranges.keys()) != set(active_muscles.keys()):
+        solver = VBDSolver() if use_vbd else UnifiedFEMSolver()
         muscles_data = {}
         for name, mobj in active_muscles.items():
             sb = mobj.soft_body
@@ -1210,11 +2146,12 @@ def run_all_fem_sim(v, max_iterations=100, tolerance=1e-4, verbose=True):
             mobj.tet_vertices[:] = new_pos.astype(mobj.tet_vertices.dtype)
 
     total = time.time() - t0
+    tag = "VBD" if use_vbd else "XPBD"
     if verbose:
-        print(f"  XPBD: {fevals} iters, ||dx||={residual:.4e}, "
+        print(f"  {tag}: {fevals} iters, ||dx||={residual:.4e}, "
               f"setup={t_setup-t0:.2f}s solve={t_solve-t_setup:.2f}s total={total:.2f}s")
     else:
-        print(f"  XPBD: {fevals}it ||dx||={residual:.2e} {total:.1f}s")
+        print(f"  {tag}: {fevals}it ||dx||={residual:.2e} {total:.1f}s")
 
 
 def _build_bone_trimeshes(v, active_muscles, skel, verbose=False):

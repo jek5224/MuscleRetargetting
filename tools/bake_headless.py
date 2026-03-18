@@ -142,9 +142,13 @@ def build_context(skel, muscle_meshes, skeleton_meshes, mesh_info, args):
     use_gpu = backend == "gpu"
     print(f"ARAP backend: {backend.upper()}")
 
-    use_fem = getattr(args, 'sim_method', 'arap') == 'fem'
-    if use_fem:
-        print("Simulation method: FEM (Neo-Hookean)")
+    sim_method = getattr(args, 'sim_method', 'arap')
+    use_fem = sim_method in ('fem', 'vbd')
+    use_vbd = sim_method == 'vbd'
+    if use_vbd:
+        print("Simulation method: VBD (Vertex Block Descent)")
+    elif use_fem:
+        print("Simulation method: FEM (Neo-Hookean XPBD)")
 
     ctx = SimpleNamespace(
         env=SimpleNamespace(skel=skel, mesh_info=mesh_info),
@@ -157,6 +161,7 @@ def build_context(skel, muscle_meshes, skeleton_meshes, mesh_info, args):
         use_taichi_arap=use_taichi,
         use_muscle_aware_arap=True,
         use_fem_sim=use_fem,
+        use_vbd_sim=use_vbd,
         fem_youngs_modulus=500.0,
         fem_poisson_ratio=0.40,
         fem_collision_kappa=1e4,
@@ -311,9 +316,9 @@ def main():
     )
     parser.add_argument(
         "--sim-method",
-        choices=["arap", "fem"],
+        choices=["arap", "fem", "vbd"],
         default="arap",
-        help="Simulation method: arap (default) or fem (Neo-Hookean FEM)",
+        help="Simulation method: arap (default), fem (XPBD Neo-Hookean), or vbd (Vertex Block Descent)",
     )
     parser.add_argument(
         "--start-frame", type=int, default=0, help="First frame to bake (default: 0)"
