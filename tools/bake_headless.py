@@ -157,10 +157,10 @@ def build_context(skel, muscle_meshes, skeleton_meshes, mesh_info, args):
         use_taichi_arap=use_taichi,
         use_muscle_aware_arap=True,
         use_fem_sim=use_fem,
-        fem_youngs_modulus=5000.0,
-        fem_poisson_ratio=0.49,
+        fem_youngs_modulus=500.0,
+        fem_poisson_ratio=0.40,
         fem_collision_kappa=1e4,
-        fem_volume_penalty=100.0,
+        fem_volume_penalty=5000.0,
         fem_contact_threshold=args.constraint_threshold,
         fem_outer_iterations=3,
         motion_settle_iters=args.settle_iters,
@@ -294,8 +294,8 @@ def main():
     parser.add_argument(
         "--settle-iters",
         type=int,
-        default=50,
-        help="Simulation iterations per frame (default: 50)",
+        default=150,
+        help="Simulation iterations per frame (default: 150)",
     )
     parser.add_argument(
         "--constraint-threshold",
@@ -423,7 +423,7 @@ def main():
         # Run simulation
         if ctx.use_fem_sim:
             from viewer.fem_sim import run_all_fem_sim
-            run_all_fem_sim(ctx, max_iterations=10, tolerance=1e-4,
+            run_all_fem_sim(ctx, max_iterations=args.settle_iters, tolerance=1e-4,
                             verbose=(frame == start_frame))
         else:
             run_all_tet_sim_with_constraints(
