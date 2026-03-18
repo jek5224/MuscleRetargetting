@@ -603,17 +603,11 @@ class UnifiedFEMSolver:
             return np.array([], dtype=np.int32), np.zeros((0, 3))
 
         # Target = surface point + margin * outward normal
-        # For vertices inside bone, normal should point away from bone center
-        # Recompute direction: push vertex away from closest surface point
-        push_dir = pen_pos - closest_pts
-        push_norm = np.linalg.norm(push_dir, axis=1, keepdims=True)
-        push_norm = np.maximum(push_norm, 1e-10)
-        push_dir = push_dir / push_norm
-        # Use face normal direction but ensure it points away from bone interior
-        # If dot(push_dir, normal) < 0, flip normal
-        dot_check = np.einsum('ij,ij->i', push_dir, normals)
-        normals[dot_check < 0] *= -1
-
+        # Face normals on bone surface point OUTWARD from bone interior.
+        # For vertices INSIDE the bone, we want to push them to:
+        #   closest_surface_point + outward_normal * margin
+        # The face normals from trimesh already point outward (process=True),
+        # so we use them directly — do NOT flip based on vertex direction.
         targets = closest_pts + normals * margin
         global_idx = nearby_free_surf[inside_mask].astype(np.int32)
 
