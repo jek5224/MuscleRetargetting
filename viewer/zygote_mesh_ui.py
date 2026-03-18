@@ -1936,7 +1936,7 @@ def _draw_motion_browser_ui(v):
         for i, bname in enumerate(bvh_names):
             is_selected = (i == v.motion_selected_idx)
             clicked, _ = imgui.selectable(bname, is_selected)
-            if clicked and i != v.motion_selected_idx:
+            if clicked:
                 _load_motion_bvh(v, i)
             if is_selected:
                 imgui.set_item_default_focus()
