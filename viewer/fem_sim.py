@@ -677,17 +677,12 @@ class UnifiedFEMSolver:
         # Save positions before solve for total convergence metric
         initial_pos = self.ti_positions.to_numpy().copy()
 
-        # Solve strategy:
-        # 1. Initial elastic pass (1/3 iters) to settle shape
-        # 2. Detect bone collisions
-        # 3. Main solve (2/3 iters) with collision enforced every iteration
-        n_coll = 0
-        n_init = max(n_iters // 3, 5)
-        n_main = n_iters - n_init
+        # Solve: all elastic + distance iterations, then final collision projection.
+        # Collision is the LAST step — no elastic after, guarantees no penetration.
         omega = 1.0
 
-        # Phase 1: Initial elastic settle
-        for it in range(n_init):
+        # All elastic + inter-muscle distance iterations
+        for it in range(n_iters):
             if verbose and it < 5:
                 _copy_positions(self.ti_pos_prev, self.ti_positions, N)
 
@@ -712,7 +707,9 @@ class UnifiedFEMSolver:
                     self.ti_positions, self.ti_pos_prev, self.ti_invm, N)
                 print(f"      iter {it}: ||dx||={delta**0.5:.6e}")
 
-        # Phase 2: Detect bone collisions
+        # Final bone collision: detect and project as the VERY LAST step.
+        # No elastic iterations after this — output is guaranteed penetration-free.
+        n_coll = 0
         if self._merged_bone_mesh is not None:
             self.positions = self.ti_positions.to_numpy()
             coll_idx_np, coll_tgt_np = self._compute_collision_targets(
@@ -729,33 +726,13 @@ class UnifiedFEMSolver:
                 tgt_padded[:n_coll] = coll_tgt_np
                 self.ti_coll_idx.from_numpy(idx_padded)
                 self.ti_coll_targets.from_numpy(tgt_padded)
-                if verbose:
-                    print(f"    bone collision: {n_coll} vertices detected")
-
-        # Phase 3: Main solve with collision enforced every iteration
-        for it in range(n_main):
-            _xpbd_project_jacobi(
-                self.ti_positions, self.ti_invm, self.ti_valence,
-                self.ti_tets, self.ti_Bm_inv, self.ti_rest_volume,
-                self.ti_lambda_H, self.ti_lambda_D,
-                self.ti_alpha_H, self.ti_alpha_D,
-                omega, M,
-            )
-            if K > 0:
-                _xpbd_project_distance_jacobi(
-                    self.ti_positions, self.ti_invm, self.ti_dist_valence,
-                    self.ti_dist_pair_i, self.ti_dist_pair_j,
-                    self.ti_dist_rest, self.ti_dist_lambda, self.ti_dist_alpha,
-                    omega, K,
-                )
-            _snap_fixed(self.ti_positions, self.ti_targets, self.ti_invm, N)
-            # Enforce collision targets every iteration — prevents elastic undo
-            if n_coll > 0:
                 _apply_collision_projection(
                     self.ti_positions, self.ti_invm,
                     self.ti_coll_idx, self.ti_coll_targets,
                     1.0, n_coll,
                 )
+                if verbose:
+                    print(f"    bone collision: {n_coll} vertices projected (final)")
 
         # Download positions
         self.positions = self.ti_positions.to_numpy()
