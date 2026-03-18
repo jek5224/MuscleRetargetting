@@ -1687,18 +1687,20 @@ class SkeletonMeshMixin:
         tet_verts = np.array(self.tet_vertices)
         n_verts = len(tet_verts)
 
-        # Get origin and insertion bone names from attach_skeletons
+        # Get origin and insertion bone names — prefer attach_skeleton_names (robust)
+        # over attach_skeletons indices (fragile, depends on dict ordering)
         skeleton_names = list(skeleton_meshes.keys())
-        # Use first stream's attachments (they should all share same bones)
-        origin_idx = self.attach_skeletons[0][0]
-        insertion_idx = self.attach_skeletons[0][1]
-
-        if origin_idx >= len(skeleton_names) or insertion_idx >= len(skeleton_names):
-            print("  Skeleton bindings: invalid attach_skeletons indices")
-            return
-
-        origin_mesh_name = skeleton_names[origin_idx]
-        insertion_mesh_name = skeleton_names[insertion_idx]
+        if hasattr(self, 'attach_skeleton_names') and self.attach_skeleton_names and len(self.attach_skeleton_names) > 0:
+            origin_mesh_name = self.attach_skeleton_names[0][0]
+            insertion_mesh_name = self.attach_skeleton_names[0][1]
+        else:
+            origin_idx = self.attach_skeletons[0][0]
+            insertion_idx = self.attach_skeletons[0][1]
+            if origin_idx >= len(skeleton_names) or insertion_idx >= len(skeleton_names):
+                print("  Skeleton bindings: invalid attach_skeletons indices")
+                return
+            origin_mesh_name = skeleton_names[origin_idx]
+            insertion_mesh_name = skeleton_names[insertion_idx]
 
         # Find DART body nodes using robust matching
         def find_body_node(mesh_name):
