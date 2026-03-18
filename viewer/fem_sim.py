@@ -211,10 +211,9 @@ def _xpbd_project_distance_jacobi(
 
         w_sum = wi + wj
         # Asymmetric stiffness: stiff compression, softer separation
+        a = alpha_dist[k]
         if C > 0.0:
             a = alpha_dist[k] * 10.0  # 10x weaker for separation
-        else:
-            a = alpha_dist[k]          # full stiffness for compression
         denom = w_sum + a
         if denom < 1e-30:
             continue
