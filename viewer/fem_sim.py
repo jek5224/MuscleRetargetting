@@ -204,13 +204,17 @@ def _xpbd_project_distance_jacobi(
         n = diff / d
         C = d - rest_dist[k]
 
-        # Bilateral: enforce both compression (C<0) and separation (C>0)
-        # This keeps muscles together as a cohesive group
-        if C == 0.0:
+        # Dead zone: skip micro-corrections that cause jaggedness
+        tolerance = 0.002  # 2mm
+        if ti.abs(C) < tolerance:
             continue
 
         w_sum = wi + wj
-        a = alpha_dist[k]
+        # Asymmetric stiffness: stiff compression, softer separation
+        if C > 0.0:
+            a = alpha_dist[k] * 10.0  # 10x weaker for separation
+        else:
+            a = alpha_dist[k]          # full stiffness for compression
         denom = w_sum + a
         if denom < 1e-30:
             continue
