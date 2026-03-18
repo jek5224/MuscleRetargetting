@@ -503,20 +503,28 @@ class UnifiedFEMSolver:
     def _build_merged_bone_mesh(self, bone_meshes):
         if not bone_meshes:
             self._merged_bone_mesh = None
+            self._individual_bone_meshes = []
             return
-        valid = [m for m in bone_meshes if m is not None]
-        if not valid:
+        valid = [m for m in bone_meshes if m is not None and m.is_watertight]
+        non_watertight = [m for m in bone_meshes if m is not None and not m.is_watertight]
+        if not valid and not non_watertight:
             self._merged_bone_mesh = None
+            self._individual_bone_meshes = []
             return
-        self._merged_bone_mesh = trimesh.util.concatenate(valid)
+        # Keep individual watertight meshes for contains() queries
+        self._individual_bone_meshes = valid
+        # Merged mesh still used for nearest-point queries (projection targets)
+        all_valid = valid + non_watertight
+        self._merged_bone_mesh = trimesh.util.concatenate(all_valid) if all_valid else None
         self._bone_kdtree = None  # invalidate pre-filter cache
 
     def _compute_collision_targets(self, margin=0.002, verbose=False):
         """Compute collision projection targets for penetrating surface vertices.
 
-        Two-phase approach for performance:
+        Three-phase approach:
         1. KD-tree pre-filter: only keep vertices within proximity_radius of bone vertices
-        2. Trimesh nearest-point query only on nearby vertices
+        2. Per-bone contains() query (ray-casting) for reliable inside/outside detection
+        3. Merged mesh nearest-point query for projection targets
 
         Returns (global_vert_indices, target_positions) as numpy arrays.
         """
@@ -531,17 +539,13 @@ class UnifiedFEMSolver:
 
         # Phase 1: KD-tree pre-filter — only query vertices near bone surface
         from scipy.spatial import cKDTree
-        proximity_radius = 0.02  # 2cm — only verts this close to bone vertices get queried
+        proximity_radius = 0.02  # 2cm
         if not hasattr(self, '_bone_kdtree') or self._bone_kdtree is None:
             self._bone_kdtree = cKDTree(self._merged_bone_mesh.vertices)
 
-        # Find muscle verts within proximity of any bone vertex
-        nearby_mask = np.zeros(len(free_surf), dtype=bool)
-        muscle_tree = cKDTree(surf_pos)
-        pairs = muscle_tree.query_ball_tree(self._bone_kdtree, proximity_radius)
-        for i, matches in enumerate(pairs):
-            if matches:
-                nearby_mask[i] = True
+        # Fast: query each muscle vert's distance to nearest bone vert
+        dists_to_bone, _ = self._bone_kdtree.query(surf_pos)
+        nearby_mask = dists_to_bone < proximity_radius
 
         n_nearby = int(np.sum(nearby_mask))
         if n_nearby == 0:
@@ -549,35 +553,69 @@ class UnifiedFEMSolver:
                 print(f"    Collision: {len(free_surf)} surf verts, 0 near bones")
             return np.array([], dtype=np.int32), np.zeros((0, 3))
 
-        # Phase 2: precise trimesh query only on nearby vertices
         nearby_pos = surf_pos[nearby_mask]
         nearby_free_surf = free_surf[nearby_mask]
 
-        try:
-            closest_pts, dists, face_ids = self._merged_bone_mesh.nearest.on_surface(nearby_pos)
-            normals = self._merged_bone_mesh.face_normals[face_ids]
-        except Exception as e:
-            if verbose:
-                print(f"    Collision query failed: {e}")
-            return np.array([], dtype=np.int32), np.zeros((0, 3))
+        # Phase 2: Per-bone contains() for reliable inside detection
+        # Ray-casting is much more reliable than dot-product with normals
+        inside_mask = np.zeros(len(nearby_pos), dtype=bool)
+        individual = getattr(self, '_individual_bone_meshes', [])
+        if individual:
+            for bone_mesh in individual:
+                try:
+                    # Bounding box pre-filter (fast reject)
+                    bmin = bone_mesh.bounds[0] - proximity_radius
+                    bmax = bone_mesh.bounds[1] + proximity_radius
+                    in_bbox = np.all((nearby_pos >= bmin) & (nearby_pos <= bmax), axis=1)
+                    if not np.any(in_bbox):
+                        continue
+                    # contains() uses ray-casting — reliable for watertight meshes
+                    contained = bone_mesh.contains(nearby_pos[in_bbox])
+                    inside_mask[in_bbox] |= contained
+                except Exception:
+                    continue
 
-        to_vertex = nearby_pos - closest_pts
-        dots = np.einsum('ij,ij->i', to_vertex, normals)
-
-        # Penetrating = inside bone (dot < 0) AND close to surface
-        pen_mask = (dots < 0) & (dists < margin * 10)
+        # Fallback: dot-product test on merged mesh for non-watertight bones
+        if not individual:
+            try:
+                closest_pts, dists, face_ids = self._merged_bone_mesh.nearest.on_surface(nearby_pos)
+                normals = self._merged_bone_mesh.face_normals[face_ids]
+                to_vertex = nearby_pos - closest_pts
+                dots = np.einsum('ij,ij->i', to_vertex, normals)
+                inside_mask = (dots < 0) & (dists < margin * 10)
+            except Exception:
+                return np.array([], dtype=np.int32), np.zeros((0, 3))
 
         if verbose:
-            n_inside = int(np.sum(dots < 0))
+            n_inside = int(np.sum(inside_mask))
             print(f"    Collision: {len(free_surf)} surf verts, {n_nearby} near bones, "
-                  f"{n_inside} inside, {int(np.sum(pen_mask))} penetrating")
+                  f"{n_inside} inside ({len(individual)} watertight bones)")
 
-        if not np.any(pen_mask):
+        if not np.any(inside_mask):
+            return np.array([], dtype=np.int32), np.zeros((0, 3))
+
+        # Phase 3: Project penetrating vertices to bone surface + margin
+        pen_pos = nearby_pos[inside_mask]
+        try:
+            closest_pts, dists, face_ids = self._merged_bone_mesh.nearest.on_surface(pen_pos)
+            normals = self._merged_bone_mesh.face_normals[face_ids]
+        except Exception:
             return np.array([], dtype=np.int32), np.zeros((0, 3))
 
         # Target = surface point + margin * outward normal
-        targets = closest_pts[pen_mask] + normals[pen_mask] * margin
-        global_idx = nearby_free_surf[pen_mask].astype(np.int32)
+        # For vertices inside bone, normal should point away from bone center
+        # Recompute direction: push vertex away from closest surface point
+        push_dir = pen_pos - closest_pts
+        push_norm = np.linalg.norm(push_dir, axis=1, keepdims=True)
+        push_norm = np.maximum(push_norm, 1e-10)
+        push_dir = push_dir / push_norm
+        # Use face normal direction but ensure it points away from bone interior
+        # If dot(push_dir, normal) < 0, flip normal
+        dot_check = np.einsum('ij,ij->i', push_dir, normals)
+        normals[dot_check < 0] *= -1
+
+        targets = closest_pts + normals * margin
+        global_idx = nearby_free_surf[inside_mask].astype(np.int32)
 
         return global_idx, targets
 
@@ -639,69 +677,88 @@ class UnifiedFEMSolver:
         # Save positions before solve for total convergence metric
         initial_pos = self.ti_positions.to_numpy().copy()
 
-        # Outer loop: alternate elastic XPBD iterations with collision resolution.
-        # Each outer pass: run elastic iters, then detect+project collisions,
-        # then run more elastic iters to relax around collision targets.
+        # Two-phase solve: elastic iterations, then collision detect+project+relax.
         n_coll = 0
-        n_outer = 3  # collision re-detection passes
-        iters_per_outer = max(n_iters // n_outer, 10)
+        n_elastic = max(n_iters * 2 // 3, 10)  # 2/3 of iterations for elastic
+        n_relax = n_iters - n_elastic            # 1/3 for post-collision relaxation
         omega = 1.0
 
-        for outer in range(n_outer):
-            # Elastic XPBD iterations
-            for it in range(iters_per_outer):
-                global_it = outer * iters_per_outer + it
-                if verbose and global_it < 10:
-                    _copy_positions(self.ti_pos_prev, self.ti_positions, N)
+        # Phase 1: Elastic XPBD iterations
+        for it in range(n_elastic):
+            if verbose and it < 10:
+                _copy_positions(self.ti_pos_prev, self.ti_positions, N)
 
-                _xpbd_project_jacobi(
-                    self.ti_positions, self.ti_invm, self.ti_valence,
-                    self.ti_tets, self.ti_Bm_inv, self.ti_rest_volume,
-                    self.ti_lambda_H, self.ti_lambda_D,
-                    self.ti_alpha_H, self.ti_alpha_D,
-                    omega, M,
+            _xpbd_project_jacobi(
+                self.ti_positions, self.ti_invm, self.ti_valence,
+                self.ti_tets, self.ti_Bm_inv, self.ti_rest_volume,
+                self.ti_lambda_H, self.ti_lambda_D,
+                self.ti_alpha_H, self.ti_alpha_D,
+                omega, M,
+            )
+
+            if K > 0 and it % 5 == 4:
+                _xpbd_project_distance_jacobi(
+                    self.ti_positions, self.ti_invm, self.ti_dist_valence,
+                    self.ti_dist_pair_i, self.ti_dist_pair_j,
+                    self.ti_dist_rest, self.ti_dist_lambda, self.ti_dist_alpha,
+                    omega, K,
                 )
 
-                # Inter-muscle distance constraints (every 5 iterations)
-                if K > 0 and it % 5 == 4:
-                    _xpbd_project_distance_jacobi(
-                        self.ti_positions, self.ti_invm, self.ti_dist_valence,
-                        self.ti_dist_pair_i, self.ti_dist_pair_j,
-                        self.ti_dist_rest, self.ti_dist_lambda, self.ti_dist_alpha,
-                        omega, K,
+            _snap_fixed(self.ti_positions, self.ti_targets, self.ti_invm, N)
+
+            if verbose and it < 10:
+                delta = _compute_position_delta(
+                    self.ti_positions, self.ti_pos_prev, self.ti_invm, N)
+                print(f"      iter {it}: ||dx||={delta**0.5:.6e}")
+
+        # Phase 2: Collision detection + projection + relaxation
+        if self._merged_bone_mesh is not None:
+            self.positions = self.ti_positions.to_numpy()
+            coll_idx_np, coll_tgt_np = self._compute_collision_targets(
+                margin, verbose=verbose)
+            n_coll = len(coll_idx_np)
+            if n_coll > 0:
+                if n_coll > self._max_coll:
+                    self._max_coll = max(n_coll, 1000)
+                    self.ti_coll_idx = ti.field(dtype=ti.i32, shape=self._max_coll)
+                    self.ti_coll_targets = ti.Vector.field(3, dtype=ti.f64, shape=self._max_coll)
+                idx_padded = np.zeros(self._max_coll, dtype=np.int32)
+                tgt_padded = np.zeros((self._max_coll, 3), dtype=np.float64)
+                idx_padded[:n_coll] = coll_idx_np
+                tgt_padded[:n_coll] = coll_tgt_np
+                self.ti_coll_idx.from_numpy(idx_padded)
+                self.ti_coll_targets.from_numpy(tgt_padded)
+                _apply_collision_projection(
+                    self.ti_positions, self.ti_invm,
+                    self.ti_coll_idx, self.ti_coll_targets,
+                    1.0, n_coll,
+                )
+                if verbose:
+                    print(f"    collision: {n_coll} vertices projected")
+
+                # Relaxation iterations to smooth around collision targets
+                for it in range(n_relax):
+                    _xpbd_project_jacobi(
+                        self.ti_positions, self.ti_invm, self.ti_valence,
+                        self.ti_tets, self.ti_Bm_inv, self.ti_rest_volume,
+                        self.ti_lambda_H, self.ti_lambda_D,
+                        self.ti_alpha_H, self.ti_alpha_D,
+                        omega, M,
                     )
-
-                _snap_fixed(self.ti_positions, self.ti_targets, self.ti_invm, N)
-
-                if verbose and global_it < 10:
-                    delta = _compute_position_delta(
-                        self.ti_positions, self.ti_pos_prev, self.ti_invm, N)
-                    print(f"      iter {global_it}: ||dx||={delta**0.5:.6e}")
-
-            # Collision detection + hard projection between elastic passes
-            if self._merged_bone_mesh is not None:
-                self.positions = self.ti_positions.to_numpy()
-                coll_idx_np, coll_tgt_np = self._compute_collision_targets(
-                    margin, verbose=(verbose and outer == 0))
-                n_coll = len(coll_idx_np)
-                if n_coll > 0:
-                    if n_coll > self._max_coll:
-                        self._max_coll = max(n_coll, 1000)
-                        self.ti_coll_idx = ti.field(dtype=ti.i32, shape=self._max_coll)
-                        self.ti_coll_targets = ti.Vector.field(3, dtype=ti.f64, shape=self._max_coll)
-                    idx_padded = np.zeros(self._max_coll, dtype=np.int32)
-                    tgt_padded = np.zeros((self._max_coll, 3), dtype=np.float64)
-                    idx_padded[:n_coll] = coll_idx_np
-                    tgt_padded[:n_coll] = coll_tgt_np
-                    self.ti_coll_idx.from_numpy(idx_padded)
-                    self.ti_coll_targets.from_numpy(tgt_padded)
+                    if K > 0 and it % 5 == 4:
+                        _xpbd_project_distance_jacobi(
+                            self.ti_positions, self.ti_invm, self.ti_dist_valence,
+                            self.ti_dist_pair_i, self.ti_dist_pair_j,
+                            self.ti_dist_rest, self.ti_dist_lambda, self.ti_dist_alpha,
+                            omega, K,
+                        )
+                    _snap_fixed(self.ti_positions, self.ti_targets, self.ti_invm, N)
+                    # Re-enforce collision targets every iteration during relax
                     _apply_collision_projection(
                         self.ti_positions, self.ti_invm,
                         self.ti_coll_idx, self.ti_coll_targets,
                         1.0, n_coll,
                     )
-                    if verbose:
-                        print(f"    outer {outer}: {n_coll} collisions resolved")
 
         # Download positions
         self.positions = self.ti_positions.to_numpy()
@@ -879,7 +936,7 @@ def _build_bone_trimeshes(v, active_muscles, skel, verbose=False):
             posed_verts = (R_posed @ local_verts.T).T + t_posed
 
             tm = trimesh.Trimesh(vertices=posed_verts,
-                                 faces=mesh_obj.trimesh.faces.copy(), process=False)
+                                 faces=mesh_obj.trimesh.faces.copy(), process=True)
             bone_meshes.append(tm)
             n_matched += 1
         except Exception:
