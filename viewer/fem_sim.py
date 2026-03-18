@@ -204,8 +204,9 @@ def _xpbd_project_distance_jacobi(
         n = diff / d
         C = d - rest_dist[k]
 
-        # Only enforce when muscles are pushing into each other (compression)
-        if C >= 0.0:
+        # Bilateral: enforce both compression (C<0) and separation (C>0)
+        # This keeps muscles together as a cohesive group
+        if C == 0.0:
             continue
 
         w_sum = wi + wj
