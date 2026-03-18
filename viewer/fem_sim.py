@@ -229,6 +229,126 @@ def _xpbd_project_distance_jacobi(
 
 
 @ti.kernel
+def _xpbd_project_distance_jacobi_buffered(
+    dist_correction: ti.template(),
+    invm: ti.template(),
+    valence_dist: ti.template(),
+    pair_i: ti.template(),
+    pair_j: ti.template(),
+    rest_dist: ti.template(),
+    lambda_dist: ti.template(),
+    alpha_dist: ti.template(),
+    positions: ti.template(),
+    omega: ti.f64,
+    n_pairs: ti.i32,
+):
+    """Like _xpbd_project_distance_jacobi but writes to a correction buffer."""
+    for k in range(n_pairs):
+        i = pair_i[k]
+        j = pair_j[k]
+        xi = positions[i]
+        xj = positions[j]
+        wi = invm[i]
+        wj = invm[j]
+
+        diff = xi - xj
+        d = diff.norm()
+        if d < 1e-12:
+            continue
+
+        n = diff / d
+        C = d - rest_dist[k]
+
+        # Dead zone: skip micro-corrections that cause jaggedness
+        tolerance = 0.002  # 2mm
+        if ti.abs(C) < tolerance:
+            continue
+
+        w_sum = wi + wj
+        # Asymmetric stiffness: stiff compression, softer separation
+        a = alpha_dist[k]
+        if C > 0.0:
+            a = alpha_dist[k] * 10.0  # 10x weaker for separation
+        denom = w_sum + a
+        if denom < 1e-30:
+            continue
+
+        dl = -(C + a * lambda_dist[k]) / denom
+
+        si = omega / valence_dist[i]
+        sj = omega / valence_dist[j]
+
+        ti.atomic_add(dist_correction[i], si * wi * dl * n)
+        ti.atomic_add(dist_correction[j], -sj * wj * dl * n)
+        lambda_dist[k] += dl
+
+
+@ti.kernel
+def _apply_clamped_corrections(
+    positions: ti.template(),
+    dist_correction: ti.template(),
+    invm: ti.template(),
+    max_disp: ti.f64,
+    n: ti.i32,
+):
+    """Apply buffered distance corrections with per-vertex displacement clamping."""
+    for i in range(n):
+        if invm[i] > 0.0:
+            dx = dist_correction[i]
+            d = dx.norm()
+            if d > max_disp:
+                dx = dx * (max_disp / d)
+            positions[i] += dx
+            dist_correction[i] = ti.Vector([0.0, 0.0, 0.0])
+
+
+@ti.kernel
+def _laplacian_smooth_surface(
+    positions: ti.template(),
+    smoothed: ti.template(),
+    invm: ti.template(),
+    surf_verts: ti.template(),
+    adj_data: ti.template(),
+    adj_offset: ti.template(),
+    factor: ti.f64,
+    n_surf: ti.i32,
+):
+    """Laplacian smooth for surface vertices only."""
+    for s in range(n_surf):
+        vi = surf_verts[s]
+        if invm[vi] == 0.0:
+            smoothed[vi] = positions[vi]
+            continue
+        start = adj_offset[s]
+        end = adj_offset[s + 1]
+        avg = ti.Vector([0.0, 0.0, 0.0])
+        count = 0
+        for k in range(start, end):
+            avg += positions[adj_data[k]]
+            count += 1
+        if count > 0:
+            avg /= float(count)
+            smoothed[vi] = positions[vi] + factor * (avg - positions[vi])
+        else:
+            smoothed[vi] = positions[vi]
+
+
+@ti.kernel
+def _copy_smoothed_to_positions(
+    positions: ti.template(),
+    smoothed: ti.template(),
+    surf_verts: ti.template(),
+    invm: ti.template(),
+    n_surf: ti.i32,
+):
+    """Copy smoothed values back to positions for surface vertices only."""
+    for s in range(n_surf):
+        vi = surf_verts[s]
+        if invm[vi] > 0.0:
+            positions[vi] = smoothed[vi]
+
+
+@ti.kernel
 def _compute_max_displacement(
     positions: ti.template(), rest_positions: ti.template(),
     invm: ti.template(), n: ti.i32,
@@ -293,6 +413,7 @@ class UnifiedFEMSolver:
         all_tets = []
         all_fixed = []
         all_surface_verts = []
+        all_surface_faces = []  # global-indexed surface faces per muscle
         vert_offset = 0
         tet_offset = 0
 
@@ -305,7 +426,9 @@ class UnifiedFEMSolver:
             all_fixed.append(data['fixed_mask'].astype(bool))
 
             if data.get('surface_faces') is not None:
-                surf_v = np.unique(data['surface_faces'].ravel()) + vert_offset
+                surf_faces = data['surface_faces'].astype(np.int32) + vert_offset
+                surf_v = np.unique(surf_faces.ravel())
+                all_surface_faces.append(surf_faces)
             else:
                 surf_v = np.arange(vert_offset, vert_offset + n_v)
             all_surface_verts.append(surf_v)
@@ -347,8 +470,20 @@ class UnifiedFEMSolver:
         avg_val = float(self._vertex_valence[self._vertex_valence > 0].mean())
         print(f"  Vertex valence: avg={avg_val:.1f}, max={max_val}")
 
+        # Build surface adjacency for Laplacian smoothing (per-muscle, no cross-muscle edges)
+        self._build_surface_adjacency(all_surface_faces)
+
+        # Store per-muscle surface faces for muscle-muscle collision
+        self._muscle_surface_faces = {}
+        sf_idx = 0
+        for name, data in muscles_data.items():
+            if data.get('surface_faces') is not None:
+                self._muscle_surface_faces[name] = all_surface_faces[sf_idx]
+                sf_idx += 1
+
         # Allocate Taichi fields
         self._allocate_fields()
+        self._allocate_surface_smooth_fields()
         self._upload_static_data()
 
         self._built = True
@@ -403,6 +538,9 @@ class UnifiedFEMSolver:
         self.ti_alpha_D = ti.field(dtype=ti.f64, shape=M)
         self.ti_valence = ti.field(dtype=ti.f64, shape=N)  # vertex valence for Jacobi
 
+        # Buffered distance corrections for clamping
+        self.ti_dist_correction = ti.Vector.field(3, dtype=ti.f64, shape=N)
+
         # Collision fields (allocated on first use)
         self._max_coll = 0
         self.ti_coll_idx = None
@@ -430,6 +568,62 @@ class UnifiedFEMSolver:
         # Upload vertex valence
         valence = np.maximum(self._vertex_valence.astype(np.float64), 1.0)
         self.ti_valence.from_numpy(valence)
+
+    def _build_surface_adjacency(self, all_surface_faces):
+        """Build CSR adjacency for surface vertices (per-muscle, no cross-muscle edges)."""
+        from collections import defaultdict
+
+        if not all_surface_faces:
+            self._n_surf_verts = 0
+            self._surf_verts_np = np.array([], dtype=np.int32)
+            self._surf_adj_data_np = np.array([], dtype=np.int32)
+            self._surf_adj_offset_np = np.array([0], dtype=np.int32)
+            return
+
+        # Build adjacency per vertex from surface faces
+        adj = defaultdict(set)
+        for faces in all_surface_faces:
+            for f in faces:
+                for a, b in [(f[0], f[1]), (f[1], f[2]), (f[2], f[0])]:
+                    adj[a].add(b)
+                    adj[b].add(a)
+
+        # Only keep free surface vertices
+        free_set = set(self.free_indices.tolist())
+        surf_verts = sorted([v for v in adj.keys() if v in free_set])
+
+        # Build CSR
+        adj_data = []
+        adj_offset = [0]
+        for v in surf_verts:
+            neighbors = sorted(adj[v])
+            adj_data.extend(neighbors)
+            adj_offset.append(len(adj_data))
+
+        self._n_surf_verts = len(surf_verts)
+        self._surf_verts_np = np.array(surf_verts, dtype=np.int32)
+        self._surf_adj_data_np = np.array(adj_data, dtype=np.int32)
+        self._surf_adj_offset_np = np.array(adj_offset, dtype=np.int32)
+        print(f"  Surface adjacency: {self._n_surf_verts} free surface verts, "
+              f"{len(adj_data)} adjacency entries")
+
+    def _allocate_surface_smooth_fields(self):
+        """Allocate Taichi fields for surface Laplacian smoothing."""
+        if self._n_surf_verts == 0:
+            return
+        N = self._n_verts
+        S = self._n_surf_verts
+        A = len(self._surf_adj_data_np)
+
+        self.ti_smoothed = ti.Vector.field(3, dtype=ti.f64, shape=N)
+        self.ti_surf_verts = ti.field(dtype=ti.i32, shape=S)
+        self.ti_surf_adj_data = ti.field(dtype=ti.i32, shape=max(A, 1))
+        self.ti_surf_adj_offset = ti.field(dtype=ti.i32, shape=S + 1)
+
+        self.ti_surf_verts.from_numpy(self._surf_verts_np)
+        if A > 0:
+            self.ti_surf_adj_data.from_numpy(self._surf_adj_data_np)
+        self.ti_surf_adj_offset.from_numpy(self._surf_adj_offset_np)
 
     def set_inter_muscle_constraints(self, constraints):
         """Convert inter-muscle constraints from local to global indices.
@@ -617,6 +811,124 @@ class UnifiedFEMSolver:
 
         return global_idx, targets
 
+    def _compute_muscle_collision_targets(self, margin=0.001, verbose=False):
+        """Detect muscle-muscle surface penetrations and compute projection targets.
+
+        For each neighboring muscle pair, check if surface vertices of one
+        muscle penetrate the other. Project penetrating vertices to the
+        other muscle's surface + margin.
+
+        Returns (global_vert_indices, target_positions) as numpy arrays.
+        """
+        if not TRIMESH_AVAILABLE or not hasattr(self, '_muscle_surface_faces'):
+            return np.array([], dtype=np.int32), np.zeros((0, 3))
+
+        if not self._muscle_surface_faces:
+            return np.array([], dtype=np.int32), np.zeros((0, 3))
+
+        from scipy.spatial import cKDTree
+
+        # Determine neighbor pairs from distance constraints
+        if not hasattr(self, '_muscle_neighbor_pairs'):
+            neighbor_set = set()
+            names = list(self._muscle_ranges.keys())
+            # Build muscle index lookup: global vertex -> muscle name
+            vert_to_muscle = {}
+            for name, (vs, ve, _, _) in self._muscle_ranges.items():
+                for v in range(vs, ve):
+                    vert_to_muscle[v] = name
+            # From distance constraint pairs, find which muscles are connected
+            if self._dist_pair_i is not None:
+                for k in range(self._n_dist_constraints):
+                    m1 = vert_to_muscle.get(self._dist_pair_i[k])
+                    m2 = vert_to_muscle.get(self._dist_pair_j[k])
+                    if m1 and m2 and m1 != m2:
+                        pair = tuple(sorted([m1, m2]))
+                        neighbor_set.add(pair)
+            self._muscle_neighbor_pairs = list(neighbor_set)
+            if verbose:
+                print(f"    Muscle neighbor pairs: {len(self._muscle_neighbor_pairs)}")
+
+        all_idx = []
+        all_tgt = []
+
+        for name_a, name_b in self._muscle_neighbor_pairs:
+            if name_a not in self._muscle_surface_faces or name_b not in self._muscle_surface_faces:
+                continue
+
+            # Get ranges
+            vs_a, ve_a, _, _ = self._muscle_ranges[name_a]
+            vs_b, ve_b, _, _ = self._muscle_ranges[name_b]
+
+            pos_a = self.positions[vs_a:ve_a]
+            pos_b = self.positions[vs_b:ve_b]
+
+            # AABB overlap check (fast reject)
+            min_a, max_a = pos_a.min(axis=0), pos_a.max(axis=0)
+            min_b, max_b = pos_b.min(axis=0), pos_b.max(axis=0)
+            if np.any(min_a > max_b + margin) or np.any(min_b > max_a + margin):
+                continue
+
+            # Build trimeshes with current positions
+            faces_a = self._muscle_surface_faces[name_a] - vs_a
+            faces_b = self._muscle_surface_faces[name_b] - vs_b
+
+            try:
+                mesh_a = trimesh.Trimesh(vertices=pos_a, faces=faces_a, process=False)
+                mesh_b = trimesh.Trimesh(vertices=pos_b, faces=faces_b, process=False)
+            except Exception:
+                continue
+
+            # Check A's surface verts inside B, and B's surface verts inside A
+            for src_name, src_mesh, tgt_mesh, src_vs in [
+                (name_a, mesh_a, mesh_b, vs_a),
+                (name_b, mesh_b, mesh_a, vs_b),
+            ]:
+                src_surf_local = np.unique(self._muscle_surface_faces[src_name] - src_vs)
+                src_surf_pos = src_mesh.vertices[src_surf_local]
+
+                # KD-tree pre-filter: only check vertices near the target mesh
+                tgt_tree = cKDTree(tgt_mesh.vertices)
+                dists, _ = tgt_tree.query(src_surf_pos)
+                nearby = dists < margin * 10  # 10x margin for pre-filter
+                if not np.any(nearby):
+                    continue
+
+                nearby_pos = src_surf_pos[nearby]
+                nearby_local = src_surf_local[nearby]
+
+                try:
+                    if not tgt_mesh.is_watertight:
+                        continue
+                    inside = tgt_mesh.contains(nearby_pos)
+                except Exception:
+                    continue
+
+                if not np.any(inside):
+                    continue
+
+                # Project to target surface + margin
+                pen_pos = nearby_pos[inside]
+                try:
+                    closest_pts, _, face_ids = tgt_mesh.nearest.on_surface(pen_pos)
+                    normals = tgt_mesh.face_normals[face_ids]
+                except Exception:
+                    continue
+
+                targets = closest_pts + normals * margin
+                global_idx = (nearby_local[inside] + src_vs).astype(np.int32)
+
+                # Only project free vertices
+                free_mask = np.array([self.fixed_mask[gi] == False for gi in global_idx])
+                if np.any(free_mask):
+                    all_idx.append(global_idx[free_mask])
+                    all_tgt.append(targets[free_mask])
+
+        if not all_idx:
+            return np.array([], dtype=np.int32), np.zeros((0, 3))
+
+        return np.concatenate(all_idx), np.concatenate(all_tgt)
+
     def solve(self, mu, lam, vol_penalty=100.0, kappa=1e4, margin=0.002,
               max_lbfgs_iters=100, n_outer=3, bone_meshes=None, verbose=False,
               n_load_steps=0):
@@ -692,11 +1004,16 @@ class UnifiedFEMSolver:
                 omega, M,
             )
             if K > 0:
-                _xpbd_project_distance_jacobi(
-                    self.ti_positions, self.ti_invm, self.ti_dist_valence,
+                self.ti_dist_correction.fill(0.0)
+                _xpbd_project_distance_jacobi_buffered(
+                    self.ti_dist_correction, self.ti_invm, self.ti_dist_valence,
                     self.ti_dist_pair_i, self.ti_dist_pair_j,
                     self.ti_dist_rest, self.ti_dist_lambda, self.ti_dist_alpha,
-                    omega, K,
+                    self.ti_positions, omega, K,
+                )
+                _apply_clamped_corrections(
+                    self.ti_positions, self.ti_dist_correction, self.ti_invm,
+                    0.001, N,  # max_disp = 1mm per iteration
                 )
             _snap_fixed(self.ti_positions, self.ti_targets, self.ti_invm, N)
 
@@ -704,6 +1021,56 @@ class UnifiedFEMSolver:
                 delta = _compute_position_delta(
                     self.ti_positions, self.ti_pos_prev, self.ti_invm, N)
                 print(f"      iter {it}: ||dx||={delta**0.5:.6e}")
+
+        # Taubin smoothing: smooth surface jaggedness without shrinkage
+        if self._n_surf_verts > 0:
+            S = self._n_surf_verts
+            lam_smooth = 0.3
+            mu_smooth = -0.31  # slightly larger magnitude to prevent shrinkage
+            for _ in range(2):  # 2 Taubin passes
+                # Smooth pass (shrink)
+                _laplacian_smooth_surface(
+                    self.ti_positions, self.ti_smoothed, self.ti_invm,
+                    self.ti_surf_verts, self.ti_surf_adj_data,
+                    self.ti_surf_adj_offset, lam_smooth, S)
+                _copy_smoothed_to_positions(
+                    self.ti_positions, self.ti_smoothed,
+                    self.ti_surf_verts, self.ti_invm, S)
+                # Inflate pass (unshrink)
+                _laplacian_smooth_surface(
+                    self.ti_positions, self.ti_smoothed, self.ti_invm,
+                    self.ti_surf_verts, self.ti_surf_adj_data,
+                    self.ti_surf_adj_offset, mu_smooth, S)
+                _copy_smoothed_to_positions(
+                    self.ti_positions, self.ti_smoothed,
+                    self.ti_surf_verts, self.ti_invm, S)
+            _snap_fixed(self.ti_positions, self.ti_targets, self.ti_invm, N)
+
+        # Muscle-muscle collision: detect and project penetrating vertices
+        n_mm_coll = 0
+        if hasattr(self, '_muscle_surface_faces') and self._muscle_surface_faces:
+            self.positions = self.ti_positions.to_numpy()
+            mm_idx, mm_tgt = self._compute_muscle_collision_targets(
+                margin=margin, verbose=verbose)
+            n_mm_coll = len(mm_idx)
+            if n_mm_coll > 0:
+                if n_mm_coll > self._max_coll:
+                    self._max_coll = max(n_mm_coll, 1000)
+                    self.ti_coll_idx = ti.field(dtype=ti.i32, shape=self._max_coll)
+                    self.ti_coll_targets = ti.Vector.field(3, dtype=ti.f64, shape=self._max_coll)
+                idx_padded = np.zeros(self._max_coll, dtype=np.int32)
+                tgt_padded = np.zeros((self._max_coll, 3), dtype=np.float64)
+                idx_padded[:n_mm_coll] = mm_idx
+                tgt_padded[:n_mm_coll] = mm_tgt
+                self.ti_coll_idx.from_numpy(idx_padded)
+                self.ti_coll_targets.from_numpy(tgt_padded)
+                _apply_collision_projection(
+                    self.ti_positions, self.ti_invm,
+                    self.ti_coll_idx, self.ti_coll_targets,
+                    1.0, n_mm_coll,
+                )
+                if verbose:
+                    print(f"    muscle-muscle collision: {n_mm_coll} vertices projected")
 
         # Final bone collision: detect and project as the VERY LAST step.
         # No elastic iterations after this — output is guaranteed penetration-free.
@@ -749,7 +1116,7 @@ class UnifiedFEMSolver:
             Js = np.linalg.det(Ds @ self.Bm_inv)
             n_inv = int(np.sum(Js <= 0))
             print(f"    final: iters={n_iters} ||dx||={residual:.4e} "
-                  f"inv={n_inv}/{M} coll={n_coll} dist={K} "
+                  f"inv={n_inv}/{M} bone_coll={n_coll} mm_coll={n_mm_coll} dist={K} "
                   f"J=[{np.min(Js):.3f},{np.max(Js):.3f}]")
 
         return n_iters, residual
