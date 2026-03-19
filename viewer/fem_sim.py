@@ -2035,12 +2035,19 @@ class VBDSolver:
         # VBD iterations with pseudo-time stepping.
         # Use sub-steps with small h (strong damping) that ramp up.
         # Each sub-step: x_tilde = current x, then iterate with m/h².
-        # This gives the solver time to untangle inversions gradually.
+        # Sub-step with collision interleaving.
+        # Each sub-step: VBD iterations → collision detect+project → next sub-step.
+        # Collision between sub-steps ensures elastic solve respects bone boundaries.
         n_substeps = 5
         iters_per_substep = max(n_iters // n_substeps, 1)
         h_values = [0.005, 0.01, 0.02, 0.05, 0.1]  # ramp up h
         if n_substeps > len(h_values):
             h_values = h_values + [h_values[-1]] * (n_substeps - len(h_values))
+
+        has_bone_coll = self._merged_bone_mesh is not None
+        has_mm_coll = hasattr(self, '_muscle_surface_faces') and bool(self._muscle_surface_faces)
+        n_coll = 0
+        n_mm_coll = 0
 
         global_it = 0
         for sub in range(n_substeps):
@@ -2090,7 +2097,65 @@ class VBDSolver:
                     print(f"      iter {global_it} (h={h:.3f}): ||dx||={delta**0.5:.6e}")
                 global_it += 1
 
-        # Taubin smoothing
+            # Collision detection + projection between sub-steps.
+            # Run mid-solve collision in the last 2 sub-steps before final pass.
+            if sub < n_substeps - 2:
+                continue
+
+            # Download positions for CPU-side trimesh queries.
+            self.positions = self.ti_positions.to_numpy()
+
+            # Muscle-muscle collision
+            if has_mm_coll:
+                mm_idx, mm_tgt = self._compute_muscle_collision_targets(
+                    margin=margin, verbose=False)
+                n_mm_coll_sub = len(mm_idx)
+                if n_mm_coll_sub > 0:
+                    n_mm_coll = n_mm_coll_sub
+                    if n_mm_coll_sub > self._max_coll:
+                        self._max_coll = max(n_mm_coll_sub, 1000)
+                        self.ti_coll_idx = ti.field(dtype=ti.i32, shape=self._max_coll)
+                        self.ti_coll_targets = ti.Vector.field(3, dtype=ti.f64, shape=self._max_coll)
+                    idx_padded = np.zeros(self._max_coll, dtype=np.int32)
+                    tgt_padded = np.zeros((self._max_coll, 3), dtype=np.float64)
+                    idx_padded[:n_mm_coll_sub] = mm_idx
+                    tgt_padded[:n_mm_coll_sub] = mm_tgt
+                    self.ti_coll_idx.from_numpy(idx_padded)
+                    self.ti_coll_targets.from_numpy(tgt_padded)
+                    _apply_collision_projection(
+                        self.ti_positions, self.ti_invm,
+                        self.ti_coll_idx, self.ti_coll_targets,
+                        1.0, n_mm_coll_sub,
+                    )
+
+            # Bone collision
+            if has_bone_coll:
+                self.positions = self.ti_positions.to_numpy()
+                coll_idx_np, coll_tgt_np = self._compute_collision_targets(
+                    margin, verbose=False)
+                n_coll_sub = len(coll_idx_np)
+                if n_coll_sub > 0:
+                    n_coll = n_coll_sub
+                    if n_coll_sub > self._max_coll:
+                        self._max_coll = max(n_coll_sub, 1000)
+                        self.ti_coll_idx = ti.field(dtype=ti.i32, shape=self._max_coll)
+                        self.ti_coll_targets = ti.Vector.field(3, dtype=ti.f64, shape=self._max_coll)
+                    idx_padded = np.zeros(self._max_coll, dtype=np.int32)
+                    tgt_padded = np.zeros((self._max_coll, 3), dtype=np.float64)
+                    idx_padded[:n_coll_sub] = coll_idx_np
+                    tgt_padded[:n_coll_sub] = coll_tgt_np
+                    self.ti_coll_idx.from_numpy(idx_padded)
+                    self.ti_coll_targets.from_numpy(tgt_padded)
+                    _apply_collision_projection(
+                        self.ti_positions, self.ti_invm,
+                        self.ti_coll_idx, self.ti_coll_targets,
+                        1.0, n_coll_sub,
+                    )
+
+            if verbose and sub < n_substeps - 1:
+                print(f"    sub-step {sub} (h={h:.3f}): bone_coll={n_coll} mm_coll={n_mm_coll}")
+
+        # Taubin smoothing after all sub-steps
         if self._n_surf_verts > 0:
             S = self._n_surf_verts
             lam_smooth = 0.3
@@ -2112,9 +2177,8 @@ class VBDSolver:
                     self.ti_surf_verts, self.ti_invm, S)
             _snap_fixed(self.ti_positions, self.ti_targets, self.ti_invm, N)
 
-        # Muscle-muscle collision
-        n_mm_coll = 0
-        if hasattr(self, '_muscle_surface_faces') and self._muscle_surface_faces:
+        # Final collision pass (after smoothing, guarantees output is clean)
+        if has_mm_coll:
             self.positions = self.ti_positions.to_numpy()
             mm_idx, mm_tgt = self._compute_muscle_collision_targets(
                 margin=margin, verbose=verbose)
@@ -2136,9 +2200,7 @@ class VBDSolver:
                     1.0, n_mm_coll,
                 )
 
-        # Final bone collision
-        n_coll = 0
-        if self._merged_bone_mesh is not None:
+        if has_bone_coll:
             self.positions = self.ti_positions.to_numpy()
             coll_idx_np, coll_tgt_np = self._compute_collision_targets(
                 margin, verbose=verbose)
