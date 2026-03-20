@@ -171,6 +171,28 @@ def _apply_collision_projection(
 
 
 @ti.kernel
+def _freeze_collision_vertices(
+    invm: ti.template(),
+    targets: ti.template(),
+    positions: ti.template(),
+    coll_vert_idx: ti.template(),
+    coll_targets: ti.template(),
+    n_coll: ti.i32,
+):
+    """Freeze colliding vertices: set invm=0 and snap to collision target.
+
+    After mid-solve collision projection, this prevents subsequent VBD
+    elastic iterations from pushing vertices back into bone.
+    """
+    for c in range(n_coll):
+        vi = coll_vert_idx[c]
+        if invm[vi] > 0.0:
+            invm[vi] = 0.0
+            targets[vi] = coll_targets[c]
+            positions[vi] = coll_targets[c]
+
+
+@ti.kernel
 def _xpbd_project_distance_jacobi(
     positions: ti.template(),
     invm: ti.template(),
@@ -1429,6 +1451,7 @@ class VBDSolver:
         self._dist_pair_i = None
         self._dist_pair_j = None
         self._dist_rest = None
+        self._has_previous_solution = False
 
     def build(self, muscles_data):
         _ensure_ti_init()
@@ -1812,9 +1835,11 @@ class VBDSolver:
 
     def update_targets_and_positions(self, muscles_data, use_lbs_init=False):
         """Update fixed targets from skeleton. Free verts keep previous solution."""
+        skip_free_lbs = use_lbs_init and self._has_previous_solution
         for name, data in muscles_data.items():
             vs, ve, _, _ = self._muscle_ranges[name]
-            if use_lbs_init and 'positions' in data:
+            if use_lbs_init and 'positions' in data and not skip_free_lbs:
+                # First frame: init all vertices from LBS
                 self.positions[vs:ve] = data['positions']
             if 'fixed_targets' in data:
                 fi = np.where(self._orig_fixed_mask[vs:ve])[0]
@@ -2033,21 +2058,24 @@ class VBDSolver:
             color_arrays.append((padded, len(cv)))
 
         # VBD iterations with pseudo-time stepping.
-        # Use sub-steps with small h (strong damping) that ramp up.
-        # Each sub-step: x_tilde = current x, then iterate with m/h².
         # Sub-step with collision interleaving.
-        # Each sub-step: VBD iterations → collision detect+project → next sub-step.
-        # Collision between sub-steps ensures elastic solve respects bone boundaries.
-        n_substeps = 5
+        # First frame (LBS init far from equilibrium): 5 sub-steps, slow h ramp.
+        # Subsequent frames (temporal coherence): 3 sub-steps, higher h (already near solution).
+        if self._has_previous_solution:
+            n_substeps = 3
+            h_values = [0.05, 0.1, 0.1]
+        else:
+            n_substeps = 5
+            h_values = [0.005, 0.01, 0.02, 0.05, 0.1]
         iters_per_substep = max(n_iters // n_substeps, 1)
-        h_values = [0.005, 0.01, 0.02, 0.05, 0.1]  # ramp up h
-        if n_substeps > len(h_values):
-            h_values = h_values + [h_values[-1]] * (n_substeps - len(h_values))
 
         has_bone_coll = self._merged_bone_mesh is not None
         has_mm_coll = hasattr(self, '_muscle_surface_faces') and bool(self._muscle_surface_faces)
         n_coll = 0
         n_mm_coll = 0
+
+        # Backup invm so we can freeze colliding vertices mid-solve and restore after
+        invm_backup = self.ti_invm.to_numpy().copy()
 
         global_it = 0
         for sub in range(n_substeps):
@@ -2098,9 +2126,6 @@ class VBDSolver:
                 global_it += 1
 
             # Collision detection + projection between sub-steps.
-            # Run mid-solve collision in the last 2 sub-steps before final pass.
-            if sub < n_substeps - 2:
-                continue
 
             # Download positions for CPU-side trimesh queries.
             self.positions = self.ti_positions.to_numpy()
@@ -2151,9 +2176,19 @@ class VBDSolver:
                         self.ti_coll_idx, self.ti_coll_targets,
                         1.0, n_coll_sub,
                     )
+                    # Freeze colliding vertices so subsequent VBD iters can't undo projection
+                    if sub < n_substeps - 1:
+                        _freeze_collision_vertices(
+                            self.ti_invm, self.ti_targets, self.ti_positions,
+                            self.ti_coll_idx, self.ti_coll_targets,
+                            n_coll_sub,
+                        )
 
             if verbose and sub < n_substeps - 1:
                 print(f"    sub-step {sub} (h={h:.3f}): bone_coll={n_coll} mm_coll={n_mm_coll}")
+
+        # Restore original invm (unfreeze collision vertices)
+        self.ti_invm.from_numpy(invm_backup)
 
         # Taubin smoothing after all sub-steps
         if self._n_surf_verts > 0:
@@ -2241,6 +2276,7 @@ class VBDSolver:
                   f"inv={n_inv}/{M} bone_coll={n_coll} mm_coll={n_mm_coll} dist={K} "
                   f"J=[{np.min(Js):.3f},{np.max(Js):.3f}]")
 
+        self._has_previous_solution = True
         return n_iters, residual
 
     def get_muscle_positions(self, name):
