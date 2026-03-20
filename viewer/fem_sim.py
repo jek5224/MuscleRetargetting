@@ -1834,13 +1834,18 @@ class VBDSolver:
         print(f"  Inter-muscle constraints: {K} active ({skipped} skipped)")
 
     def update_targets_and_positions(self, muscles_data, use_lbs_init=False):
-        """Update fixed targets from skeleton. Free verts keep previous solution."""
-        skip_free_lbs = use_lbs_init and self._has_previous_solution
+        """Update fixed targets from skeleton. Free verts keep previous solution.
+
+        On first frame (no previous solution): free vertices stay at rest positions,
+        fixed targets are set to skeleton-driven positions. The solver uses incremental
+        loading to gradually deform from rest to target without inversions.
+
+        On subsequent frames: free vertices keep previous solve result (temporal
+        coherence), only fixed targets are updated.
+        """
         for name, data in muscles_data.items():
             vs, ve, _, _ = self._muscle_ranges[name]
-            if use_lbs_init and 'positions' in data and not skip_free_lbs:
-                # First frame: init all vertices from LBS
-                self.positions[vs:ve] = data['positions']
+            # Never overwrite free vertices with LBS — rest or previous solution is better
             if 'fixed_targets' in data:
                 fi = np.where(self._orig_fixed_mask[vs:ve])[0]
                 self.positions[vs + fi] = data['fixed_targets']
@@ -2008,6 +2013,7 @@ class VBDSolver:
             max_lbfgs_iters: number of VBD iterations
             bone_meshes: list of trimesh objects for collision
             verbose: print detailed output
+            n_load_steps: incremental loading steps (0 = auto: 10 for first frame, 1 for subsequent)
         """
         if bone_meshes is not None:
             self._build_merged_bone_mesh(bone_meshes)
@@ -2023,31 +2029,17 @@ class VBDSolver:
         # Hessian regularization epsilon (scales with material stiffness)
         eps = max(effective_mu, effective_lam) * 1e-4
 
-        # Upload current positions and targets
-        targets_full = self.positions.copy()
-        targets_full[self.fixed_indices] = self.fixed_targets
-        self.ti_targets.from_numpy(targets_full)
-        self.ti_positions.from_numpy(self.positions)
-        _snap_fixed(self.ti_positions, self.ti_targets, self.ti_invm, N)
-
-        # x_tilde = initial positions (inertia target for VBD regularization)
-        _copy_positions(self.ti_x_tilde, self.ti_positions, N)
-
-        # Save positions before solve for convergence metric
-        initial_pos = self.ti_positions.to_numpy().copy()
-
         # Distance constraint stiffness
         dist_stiffness = effective_lam if K > 0 else 0.0
 
-        # Diagnostic: check initial state inversions
-        if verbose:
-            X0 = self.ti_positions.to_numpy()
-            T = self.tetrahedra
-            x3 = X0[T[:, 3]]
-            Ds0 = np.stack([X0[T[:, 0]] - x3, X0[T[:, 1]] - x3, X0[T[:, 2]] - x3], axis=-1)
-            Js0 = np.linalg.det(Ds0 @ self.Bm_inv)
-            n_inv0 = int(np.sum(Js0 <= 0))
-            print(f"    initial: inv={n_inv0}/{M} J=[{np.min(Js0):.3f},{np.max(Js0):.3f}]")
+        # Incremental loading: on first frame, gradually move fixed targets
+        # from rest to final over N load steps to avoid inversions.
+        if n_load_steps <= 0:
+            n_load_steps = 10 if not self._has_previous_solution else 1
+
+        # Rest-pose fixed targets (starting point for interpolation)
+        rest_fixed_targets = self.rest_positions[self.fixed_indices].copy()
+        final_fixed_targets = self.fixed_targets.copy()
 
         # Pre-upload all color vertex arrays (padded to max size)
         color_arrays = []
@@ -2057,138 +2049,174 @@ class VBDSolver:
             padded[:len(cv)] = cv
             color_arrays.append((padded, len(cv)))
 
-        # VBD iterations with pseudo-time stepping.
-        # Sub-step with collision interleaving.
-        # First frame (LBS init far from equilibrium): 5 sub-steps, slow h ramp.
-        # Subsequent frames (temporal coherence): 3 sub-steps, higher h (already near solution).
-        if self._has_previous_solution:
-            n_substeps = 3
-            h_values = [0.05, 0.1, 0.1]
-        else:
-            n_substeps = 5
-            h_values = [0.005, 0.01, 0.02, 0.05, 0.1]
-        iters_per_substep = max(n_iters // n_substeps, 1)
-
         has_bone_coll = self._merged_bone_mesh is not None
         has_mm_coll = hasattr(self, '_muscle_surface_faces') and bool(self._muscle_surface_faces)
         n_coll = 0
         n_mm_coll = 0
 
+        # Sub-stepping config per load step
+        if self._has_previous_solution:
+            n_substeps = 3
+            h_values = [0.05, 0.1, 0.1]
+        else:
+            n_substeps = 3
+            h_values = [0.05, 0.1, 0.1]
+        iters_per_substep = max(n_iters // n_substeps, 1)
+
+        # Upload positions (rest for first frame, previous solution for subsequent)
+        self.ti_positions.from_numpy(self.positions)
+
+        # Save positions before solve for convergence metric
+        initial_pos = self.positions.copy()
+
         # Backup invm so we can freeze colliding vertices mid-solve and restore after
         invm_backup = self.ti_invm.to_numpy().copy()
 
         global_it = 0
-        for sub in range(n_substeps):
-            h = h_values[sub]
-            mass_over_h2 = 1.0 / (h * h)
-            # Update x_tilde to current positions (inertia anchors to sub-step start)
-            _copy_positions(self.ti_x_tilde, self.ti_positions, N)
+        for load_step in range(n_load_steps):
+            alpha = (load_step + 1) / n_load_steps
+            # Interpolate fixed targets: rest → final
+            interp_targets = rest_fixed_targets + alpha * (final_fixed_targets - rest_fixed_targets)
+            self.fixed_targets[:] = interp_targets
 
-            for it in range(iters_per_substep):
-                if verbose and global_it < 5:
-                    _copy_positions(self.ti_pos_prev, self.ti_positions, N)
+            # Build full target array and upload
+            targets_full = self.ti_positions.to_numpy()
+            targets_full[self.fixed_indices] = interp_targets
+            self.ti_targets.from_numpy(targets_full)
+            _snap_fixed(self.ti_positions, self.ti_targets, self.ti_invm, N)
 
-                # Per-color parallel vertex updates
-                for c in range(self._n_colors):
-                    padded, n_cv = color_arrays[c]
-                    if n_cv == 0:
-                        continue
-                    self.ti_color_verts.from_numpy(padded)
-                    _vbd_solve_color(
-                        self.ti_positions,
-                        self.ti_x_tilde,
-                        self.ti_Bm_inv,
-                        self.ti_rest_volume,
-                        self.ti_vert_tet_data,
-                        self.ti_vert_tet_offset,
-                        self.ti_vert_local_idx,
-                        self.ti_tets,
-                        self.ti_invm,
-                        self.ti_color_verts,
-                        self.ti_dist_pair_other,
-                        self.ti_dist_pair_rest_csr,
-                        self.ti_dist_vert_offset,
-                        dist_stiffness,
-                        K,
-                        effective_mu,
-                        effective_lam,
-                        eps,
-                        mass_over_h2,
-                        n_cv,
-                    )
+            if verbose and load_step == 0:
+                X0 = self.ti_positions.to_numpy()
+                T = self.tetrahedra
+                x3 = X0[T[:, 3]]
+                Ds0 = np.stack([X0[T[:, 0]] - x3, X0[T[:, 1]] - x3, X0[T[:, 2]] - x3], axis=-1)
+                Js0 = np.linalg.det(Ds0 @ self.Bm_inv)
+                n_inv0 = int(np.sum(Js0 <= 0))
+                print(f"    initial: inv={n_inv0}/{M} J=[{np.min(Js0):.3f},{np.max(Js0):.3f}]")
 
-                _snap_fixed(self.ti_positions, self.ti_targets, self.ti_invm, N)
+            # Restore invm at start of each load step (unfreeze from previous step)
+            self.ti_invm.from_numpy(invm_backup)
 
-                if verbose and global_it < 5:
-                    delta = _compute_position_delta(
-                        self.ti_positions, self.ti_pos_prev, self.ti_invm, N)
-                    print(f"      iter {global_it} (h={h:.3f}): ||dx||={delta**0.5:.6e}")
-                global_it += 1
+            for sub in range(n_substeps):
+                h = h_values[sub]
+                mass_over_h2 = 1.0 / (h * h)
+                # Update x_tilde to current positions (inertia anchors to sub-step start)
+                _copy_positions(self.ti_x_tilde, self.ti_positions, N)
 
-            # Collision detection + projection between sub-steps.
+                for it in range(iters_per_substep):
+                    if verbose and global_it < 5:
+                        _copy_positions(self.ti_pos_prev, self.ti_positions, N)
 
-            # Download positions for CPU-side trimesh queries.
-            self.positions = self.ti_positions.to_numpy()
-
-            # Muscle-muscle collision
-            if has_mm_coll:
-                mm_idx, mm_tgt = self._compute_muscle_collision_targets(
-                    margin=margin, verbose=False)
-                n_mm_coll_sub = len(mm_idx)
-                if n_mm_coll_sub > 0:
-                    n_mm_coll = n_mm_coll_sub
-                    if n_mm_coll_sub > self._max_coll:
-                        self._max_coll = max(n_mm_coll_sub, 1000)
-                        self.ti_coll_idx = ti.field(dtype=ti.i32, shape=self._max_coll)
-                        self.ti_coll_targets = ti.Vector.field(3, dtype=ti.f64, shape=self._max_coll)
-                    idx_padded = np.zeros(self._max_coll, dtype=np.int32)
-                    tgt_padded = np.zeros((self._max_coll, 3), dtype=np.float64)
-                    idx_padded[:n_mm_coll_sub] = mm_idx
-                    tgt_padded[:n_mm_coll_sub] = mm_tgt
-                    self.ti_coll_idx.from_numpy(idx_padded)
-                    self.ti_coll_targets.from_numpy(tgt_padded)
-                    _apply_collision_projection(
-                        self.ti_positions, self.ti_invm,
-                        self.ti_coll_idx, self.ti_coll_targets,
-                        1.0, n_mm_coll_sub,
-                    )
-
-            # Bone collision
-            if has_bone_coll:
-                self.positions = self.ti_positions.to_numpy()
-                coll_idx_np, coll_tgt_np = self._compute_collision_targets(
-                    margin, verbose=False)
-                n_coll_sub = len(coll_idx_np)
-                if n_coll_sub > 0:
-                    n_coll = n_coll_sub
-                    if n_coll_sub > self._max_coll:
-                        self._max_coll = max(n_coll_sub, 1000)
-                        self.ti_coll_idx = ti.field(dtype=ti.i32, shape=self._max_coll)
-                        self.ti_coll_targets = ti.Vector.field(3, dtype=ti.f64, shape=self._max_coll)
-                    idx_padded = np.zeros(self._max_coll, dtype=np.int32)
-                    tgt_padded = np.zeros((self._max_coll, 3), dtype=np.float64)
-                    idx_padded[:n_coll_sub] = coll_idx_np
-                    tgt_padded[:n_coll_sub] = coll_tgt_np
-                    self.ti_coll_idx.from_numpy(idx_padded)
-                    self.ti_coll_targets.from_numpy(tgt_padded)
-                    _apply_collision_projection(
-                        self.ti_positions, self.ti_invm,
-                        self.ti_coll_idx, self.ti_coll_targets,
-                        1.0, n_coll_sub,
-                    )
-                    # Freeze colliding vertices so subsequent VBD iters can't undo projection
-                    if sub < n_substeps - 1:
-                        _freeze_collision_vertices(
-                            self.ti_invm, self.ti_targets, self.ti_positions,
-                            self.ti_coll_idx, self.ti_coll_targets,
-                            n_coll_sub,
+                    # Per-color parallel vertex updates
+                    for c in range(self._n_colors):
+                        padded, n_cv = color_arrays[c]
+                        if n_cv == 0:
+                            continue
+                        self.ti_color_verts.from_numpy(padded)
+                        _vbd_solve_color(
+                            self.ti_positions,
+                            self.ti_x_tilde,
+                            self.ti_Bm_inv,
+                            self.ti_rest_volume,
+                            self.ti_vert_tet_data,
+                            self.ti_vert_tet_offset,
+                            self.ti_vert_local_idx,
+                            self.ti_tets,
+                            self.ti_invm,
+                            self.ti_color_verts,
+                            self.ti_dist_pair_other,
+                            self.ti_dist_pair_rest_csr,
+                            self.ti_dist_vert_offset,
+                            dist_stiffness,
+                            K,
+                            effective_mu,
+                            effective_lam,
+                            eps,
+                            mass_over_h2,
+                            n_cv,
                         )
 
-            if verbose and sub < n_substeps - 1:
-                print(f"    sub-step {sub} (h={h:.3f}): bone_coll={n_coll} mm_coll={n_mm_coll}")
+                    _snap_fixed(self.ti_positions, self.ti_targets, self.ti_invm, N)
 
-        # Restore original invm (unfreeze collision vertices)
+                    if verbose and global_it < 5:
+                        delta = _compute_position_delta(
+                            self.ti_positions, self.ti_pos_prev, self.ti_invm, N)
+                        print(f"      iter {global_it} (h={h:.3f}): ||dx||={delta**0.5:.6e}")
+                    global_it += 1
+
+                # Collision detection + projection after each sub-step.
+                # Download positions for CPU-side trimesh queries.
+                self.positions = self.ti_positions.to_numpy()
+
+                # Muscle-muscle collision
+                if has_mm_coll:
+                    mm_idx, mm_tgt = self._compute_muscle_collision_targets(
+                        margin=margin, verbose=False)
+                    n_mm_coll_sub = len(mm_idx)
+                    if n_mm_coll_sub > 0:
+                        n_mm_coll = n_mm_coll_sub
+                        if n_mm_coll_sub > self._max_coll:
+                            self._max_coll = max(n_mm_coll_sub, 1000)
+                            self.ti_coll_idx = ti.field(dtype=ti.i32, shape=self._max_coll)
+                            self.ti_coll_targets = ti.Vector.field(3, dtype=ti.f64, shape=self._max_coll)
+                        idx_padded = np.zeros(self._max_coll, dtype=np.int32)
+                        tgt_padded = np.zeros((self._max_coll, 3), dtype=np.float64)
+                        idx_padded[:n_mm_coll_sub] = mm_idx
+                        tgt_padded[:n_mm_coll_sub] = mm_tgt
+                        self.ti_coll_idx.from_numpy(idx_padded)
+                        self.ti_coll_targets.from_numpy(tgt_padded)
+                        _apply_collision_projection(
+                            self.ti_positions, self.ti_invm,
+                            self.ti_coll_idx, self.ti_coll_targets,
+                            1.0, n_mm_coll_sub,
+                        )
+
+                # Bone collision
+                if has_bone_coll:
+                    self.positions = self.ti_positions.to_numpy()
+                    coll_idx_np, coll_tgt_np = self._compute_collision_targets(
+                        margin, verbose=False)
+                    n_coll_sub = len(coll_idx_np)
+                    if n_coll_sub > 0:
+                        n_coll = n_coll_sub
+                        if n_coll_sub > self._max_coll:
+                            self._max_coll = max(n_coll_sub, 1000)
+                            self.ti_coll_idx = ti.field(dtype=ti.i32, shape=self._max_coll)
+                            self.ti_coll_targets = ti.Vector.field(3, dtype=ti.f64, shape=self._max_coll)
+                        idx_padded = np.zeros(self._max_coll, dtype=np.int32)
+                        tgt_padded = np.zeros((self._max_coll, 3), dtype=np.float64)
+                        idx_padded[:n_coll_sub] = coll_idx_np
+                        tgt_padded[:n_coll_sub] = coll_tgt_np
+                        self.ti_coll_idx.from_numpy(idx_padded)
+                        self.ti_coll_targets.from_numpy(tgt_padded)
+                        _apply_collision_projection(
+                            self.ti_positions, self.ti_invm,
+                            self.ti_coll_idx, self.ti_coll_targets,
+                            1.0, n_coll_sub,
+                        )
+                        # Freeze colliding vertices so subsequent VBD iters can't undo projection
+                        if sub < n_substeps - 1:
+                            _freeze_collision_vertices(
+                                self.ti_invm, self.ti_targets, self.ti_positions,
+                                self.ti_coll_idx, self.ti_coll_targets,
+                                n_coll_sub,
+                            )
+
+                if verbose and sub < n_substeps - 1:
+                    print(f"    load {load_step}/{n_load_steps} sub {sub} (h={h:.3f}): bone_coll={n_coll} mm_coll={n_mm_coll}")
+
+            if verbose:
+                X_ls = self.ti_positions.to_numpy()
+                T = self.tetrahedra
+                x3 = X_ls[T[:, 3]]
+                Ds_ls = np.stack([X_ls[T[:, 0]] - x3, X_ls[T[:, 1]] - x3, X_ls[T[:, 2]] - x3], axis=-1)
+                Js_ls = np.linalg.det(Ds_ls @ self.Bm_inv)
+                n_inv_ls = int(np.sum(Js_ls <= 0))
+                print(f"    load step {load_step+1}/{n_load_steps} (alpha={alpha:.2f}): inv={n_inv_ls}/{M} bone_coll={n_coll} mm_coll={n_mm_coll}")
+
+        # Restore original invm (unfreeze collision vertices) and final targets
         self.ti_invm.from_numpy(invm_backup)
+        self.fixed_targets[:] = final_fixed_targets
 
         # Taubin smoothing after all sub-steps
         if self._n_surf_verts > 0:
@@ -2353,7 +2381,7 @@ def run_all_fem_sim(v, max_iterations=100, tolerance=1e-4, verbose=True):
                 max_ft_disp = d
     if verbose and max_ft_disp > 0:
         print(f"  Max fixed target displacement from rest: {max_ft_disp:.6f}m")
-    solver.update_targets_and_positions(muscles_update, use_lbs_init=True)
+    solver.update_targets_and_positions(muscles_update)
 
     bone_meshes = _build_bone_trimeshes(v, active_muscles, skel, verbose=False)
     t_setup = time.time()
