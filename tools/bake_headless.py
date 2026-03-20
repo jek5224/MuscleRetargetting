@@ -39,7 +39,7 @@ from viewer.arap_backends import check_taichi_available, check_gpu_available
 SKEL_XML = "data/zygote_skel.xml"
 ZYGOTE_DIR = "Zygote_Meshes_251229/"
 MESH_SCALE = 0.01
-FLUSH_INTERVAL = 1000  # frames between disk flushes
+FLUSH_INTERVAL = 20  # frames between disk flushes
 
 
 def load_skeleton():
@@ -449,6 +449,7 @@ def main():
         if n_accumulated >= FLUSH_INTERVAL * len(active_muscles):
             print(f"  Flushing chunk {flush_count} to disk...")
             flush_count = flush_bake_data(bake_data, cache_dir, flush_count)
+            gc.collect()
 
         # Progress reporting
         frames_done = frame - start_frame + 1
