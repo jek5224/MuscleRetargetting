@@ -960,7 +960,7 @@ class UnifiedFEMSolver:
 
     def solve(self, mu, lam, vol_penalty=100.0, kappa=1e4, margin=0.002,
               max_lbfgs_iters=100, n_outer=3, bone_meshes=None, verbose=False,
-              n_load_steps=0):
+              n_load_steps=0, bone_mesh_callback=None):
         """XPBD quasistatic solve.
 
         Args:
@@ -2013,12 +2013,15 @@ class VBDSolver:
 
     def solve(self, mu, lam, vol_penalty=100.0, kappa=1e4, margin=0.002,
               max_lbfgs_iters=100, n_outer=3, bone_meshes=None, verbose=False,
-              n_load_steps=0):
-        """VBD quasistatic solve with h=1.0 and collision.
+              n_load_steps=0, bone_mesh_callback=None):
+        """VBD quasistatic solve with internal load stepping and collision.
 
-        Uses h=1.0 (quasistatic) so inertia is negligible and all iterations
-        go to elastic energy minimization. Incremental pose loading (handled
-        by the orchestrator) ensures each call sees only small deformation.
+        Internal load stepping interpolates fixed targets from rest to final
+        over N steps, running full iterations per step. This keeps the mesh
+        near equilibrium throughout, preventing inversion accumulation.
+
+        bone_mesh_callback(alpha) rebuilds bone collision meshes at
+        interpolated skeleton poses during load stepping.
         """
         if bone_meshes is not None:
             self._build_merged_bone_mesh(bone_meshes)
@@ -2125,6 +2128,57 @@ class VBDSolver:
                 _snap_fixed(self.ti_positions, self.ti_targets, self.ti_invm, N)
                 global_it += 1
 
+            # Collision at each load step — keeps muscles on correct side
+            # Rebuild bone meshes at interpolated pose if callback provided
+            if bone_mesh_callback is not None:
+                step_bone_meshes = bone_mesh_callback(alpha)
+                if step_bone_meshes is not None:
+                    self._build_merged_bone_mesh(step_bone_meshes)
+
+            self.positions = self.ti_positions.to_numpy()
+            if has_bone_coll and self._merged_bone_mesh is not None:
+                coll_idx_np, coll_tgt_np = self._compute_collision_targets(
+                    margin, verbose=False)
+                if len(coll_idx_np) > 0:
+                    n_coll = len(coll_idx_np)
+                    if n_coll > self._max_coll:
+                        self._max_coll = max(n_coll, 1000)
+                        self.ti_coll_idx = ti.field(dtype=ti.i32, shape=self._max_coll)
+                        self.ti_coll_targets = ti.Vector.field(3, dtype=ti.f64, shape=self._max_coll)
+                    idx_padded = np.zeros(self._max_coll, dtype=np.int32)
+                    tgt_padded = np.zeros((self._max_coll, 3), dtype=np.float64)
+                    idx_padded[:n_coll] = coll_idx_np
+                    tgt_padded[:n_coll] = coll_tgt_np
+                    self.ti_coll_idx.from_numpy(idx_padded)
+                    self.ti_coll_targets.from_numpy(tgt_padded)
+                    _apply_collision_projection(
+                        self.ti_positions, self.ti_invm,
+                        self.ti_coll_idx, self.ti_coll_targets,
+                        1.0, n_coll,
+                    )
+
+            if has_mm_coll:
+                self.positions = self.ti_positions.to_numpy()
+                mm_idx, mm_tgt = self._compute_muscle_collision_targets(
+                    margin=margin, verbose=False)
+                if len(mm_idx) > 0:
+                    n_mm_coll = len(mm_idx)
+                    if n_mm_coll > self._max_coll:
+                        self._max_coll = max(n_mm_coll, 1000)
+                        self.ti_coll_idx = ti.field(dtype=ti.i32, shape=self._max_coll)
+                        self.ti_coll_targets = ti.Vector.field(3, dtype=ti.f64, shape=self._max_coll)
+                    idx_padded = np.zeros(self._max_coll, dtype=np.int32)
+                    tgt_padded = np.zeros((self._max_coll, 3), dtype=np.float64)
+                    idx_padded[:n_mm_coll] = mm_idx
+                    tgt_padded[:n_mm_coll] = mm_tgt
+                    self.ti_coll_idx.from_numpy(idx_padded)
+                    self.ti_coll_targets.from_numpy(tgt_padded)
+                    _apply_collision_projection(
+                        self.ti_positions, self.ti_invm,
+                        self.ti_coll_idx, self.ti_coll_targets,
+                        1.0, n_mm_coll,
+                    )
+
         # Restore final fixed targets
         self.fixed_targets[:] = final_fixed_targets
 
@@ -2150,7 +2204,7 @@ class VBDSolver:
                     self.ti_surf_verts, self.ti_invm, S)
             _snap_fixed(self.ti_positions, self.ti_targets, self.ti_invm, N)
 
-        # Muscle-muscle collision
+        # Final collision pass after smoothing (guarantees clean output)
         if has_mm_coll:
             self.positions = self.ti_positions.to_numpy()
             mm_idx, mm_tgt = self._compute_muscle_collision_targets(
@@ -2296,34 +2350,44 @@ def run_all_fem_sim(v, max_iterations=100, tolerance=1e-4, verbose=True):
                 'surface_faces': getattr(mobj, 'tet_faces', None),
             }
         solver.build(muscles_data)
-        # Set inter-muscle constraints if available
         if hasattr(v, 'inter_muscle_constraints') and v.inter_muscle_constraints:
             solver.set_inter_muscle_constraints(v.inter_muscle_constraints)
         v._fem_unified_solver = solver
 
+    # Update muscles from current skeleton pose
     skeleton_meshes = getattr(v, 'zygote_skeleton_meshes', None)
+    _update_muscles_from_skeleton(v, active_muscles, skel, skeleton_meshes)
+    muscles_update = _collect_muscles_update(active_muscles)
+    solver.update_targets_and_positions(muscles_update)
+
+    # Build bone collision meshes at current pose
+    bone_meshes = _build_bone_trimeshes(v, active_muscles, skel, verbose=False)
+
+    # For first frame: build a bone mesh callback that rebuilds bone collision
+    # geometry at interpolated skeleton poses during internal load stepping.
+    # This ensures muscles collide against correctly-posed bones at each step.
     n_load_steps = getattr(v, 'fem_load_steps', 10)
+    bone_mesh_callback = None
+    if not solver._has_previous_solution and skel is not None and n_load_steps > 1:
+        target_pose = skel.getPositions().copy()
+        rest_pose = np.zeros_like(target_pose)
 
-    # First frame without previous solution: incremental pose loading
-    needs_incremental = (not solver._has_previous_solution and
-                         skel is not None and n_load_steps > 1)
+        def bone_mesh_callback(alpha):
+            interp_pose = (1.0 - alpha) * rest_pose + alpha * target_pose
+            skel.setPositions(interp_pose)
+            meshes = _build_bone_trimeshes(v, active_muscles, skel, verbose=False)
+            # Restore target pose after building meshes
+            if alpha >= 1.0:
+                skel.setPositions(target_pose)
+            return meshes
 
-    if needs_incremental:
-        fevals, residual = _run_incremental_loading(
-            v, solver, active_muscles, skel, skeleton_meshes,
-            mu, lam, vol_penalty, kappa, max_iterations, n_load_steps,
-            verbose)
-    else:
-        # Standard path: update from current pose, solve once
-        _update_muscles_from_skeleton(v, active_muscles, skel, skeleton_meshes)
-        muscles_update = _collect_muscles_update(active_muscles)
-        solver.update_targets_and_positions(muscles_update)
-        bone_meshes = _build_bone_trimeshes(v, active_muscles, skel, verbose=False)
-        fevals, residual = solver.solve(
-            mu=mu, lam=lam, vol_penalty=vol_penalty, kappa=kappa,
-            max_lbfgs_iters=max_iterations,
-            bone_meshes=bone_meshes, verbose=verbose
-        )
+    # Single solve call — solver handles internal load stepping + collision
+    fevals, residual = solver.solve(
+        mu=mu, lam=lam, vol_penalty=vol_penalty, kappa=kappa,
+        max_lbfgs_iters=max_iterations,
+        bone_meshes=bone_meshes, verbose=verbose,
+        bone_mesh_callback=bone_mesh_callback,
+    )
 
     _write_back_positions(solver, active_muscles)
 
@@ -2333,78 +2397,6 @@ def run_all_fem_sim(v, max_iterations=100, tolerance=1e-4, verbose=True):
         print(f"  {tag}: {fevals} iters, ||dx||={residual:.4e}, total={total:.2f}s")
     else:
         print(f"  {tag}: {fevals}it ||dx||={residual:.2e} {total:.1f}s")
-
-
-def _run_incremental_loading(v, solver, active_muscles, skel, skeleton_meshes,
-                             mu, lam, vol_penalty, kappa, max_iterations,
-                             n_load_steps, verbose):
-    """Incrementally load skeleton pose from rest to target with collision at each step.
-
-    Prevents muscles from crossing through bones by taking small pose steps.
-    At each intermediate pose:
-      1. Set skeleton to interpolated pose
-      2. Update muscle fixed targets and LBS positions from that pose
-      3. Build bone collision meshes at that pose
-      4. Run solver with limited iterations + collision
-
-    Muscles start at rest positions (correct anatomical side) and slide along
-    bone surfaces as the pose progresses, never teleporting through geometry.
-    """
-    # Save the target pose, we'll interpolate toward it
-    target_pose = skel.getPositions().copy()
-    rest_pose = np.zeros_like(target_pose)
-
-    if verbose:
-        print(f"  Incremental loading: {n_load_steps} steps, "
-              f"{max_iterations} iters/step, h=1.0 quasistatic")
-
-    fevals_total = 0
-    residual = 0.0
-
-    for step in range(n_load_steps):
-        alpha = (step + 1) / n_load_steps
-        is_final = (step == n_load_steps - 1)
-
-        # Interpolate skeleton pose
-        interp_pose = (1.0 - alpha) * rest_pose + alpha * target_pose
-        skel.setPositions(interp_pose)
-
-        # Update muscle positions and targets from interpolated pose
-        _update_muscles_from_skeleton(v, active_muscles, skel, skeleton_meshes)
-        muscles_update = _collect_muscles_update(active_muscles)
-
-        # On first step: use LBS positions as init (rest → small deformation).
-        # On subsequent steps: solver already has previous step's solution, keep it.
-        solver.update_targets_and_positions(muscles_update)
-
-        # Build bone meshes at the interpolated pose
-        bone_meshes = _build_bone_trimeshes(v, active_muscles, skel, verbose=False)
-
-        # Solve with this intermediate target.
-        # n_load_steps=1: orchestrator handles pose stepping, solver just solves.
-        fevals, residual = solver.solve(
-            mu=mu, lam=lam, vol_penalty=vol_penalty, kappa=kappa,
-            max_lbfgs_iters=max_iterations,
-            bone_meshes=bone_meshes,
-            verbose=(verbose and is_final),
-            n_load_steps=1,
-        )
-        fevals_total += fevals
-
-        # Write back so next step's _update_tet_positions_from_skeleton sees
-        # current solved positions (for the "any_bone_moved" check and as
-        # starting point for the next LBS pass)
-        _write_back_positions(solver, active_muscles)
-
-        if verbose and not is_final:
-            print(f"    load step {step+1}/{n_load_steps} (alpha={alpha:.2f}): "
-                  f"{fevals}it ||dx||={residual:.2e}")
-
-    # Restore skeleton to target pose (incremental loading left it there on
-    # the last step, but be explicit)
-    skel.setPositions(target_pose)
-
-    return fevals_total, residual
 
 
 def _build_bone_trimeshes(v, active_muscles, skel, verbose=False):

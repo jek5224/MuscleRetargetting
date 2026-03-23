@@ -11,6 +11,7 @@
 - Before `git checkout`, `git reset`, or `git stash`: check for uncommitted changes and commit them first
 - Warn the user if there are uncommitted changes that could be lost
 - Never use `git revert`. Instead, manually undo the changes with edits.
+- **NEVER use git to roll back code** — no `git stash`, `git checkout -- <file>`, `git restore`, `git reset`, or any git command that discards or reverts changes. Always fix forward by editing the code directly.
 
 ## Code Change Thoroughness
 - When modifying code, trace through the ENTIRE code flow to find related changes needed
@@ -18,6 +19,15 @@
 - Look for similar patterns elsewhere in the codebase that may need the same fix
 - Don't assume a fix works in isolation - verify data flows correctly through all code paths
 - Before declaring a fix complete, search for other usages of the same variable/function
+
+## Journal
+- After completing a meaningful task (feature, fix, etc.), log progress to the research journal MCP
+- Append to the same day's entry if there are multiple tasks in one day
+- Keep entries concise: what was done, key decisions, and any open issues
+
+## A6000 Server
+- Always use **slurm** (`sbatch`) to submit jobs on the A6000 server — never run GPU tasks directly
+- No `--mem` flag (slurm RealMemory=1, memory requests fail)
 
 ## No Unsolicited Fallbacks
 - Do NOT add fallback logic or edge case handling unless explicitly asked
