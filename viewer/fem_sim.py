@@ -1016,8 +1016,6 @@ class UnifiedFEMSolver:
         # Save positions before solve for total convergence metric
         initial_pos = self.ti_positions.to_numpy().copy()
 
-        # Solve: all elastic + distance iterations, then final collision projection.
-        # Collision is the LAST step — no elastic after, guarantees no penetration.
         omega = 1.0
 
         # All elastic + inter-muscle distance iterations
@@ -1042,7 +1040,7 @@ class UnifiedFEMSolver:
                 )
                 _apply_clamped_corrections(
                     self.ti_positions, self.ti_dist_correction, self.ti_invm,
-                    0.001, N,  # max_disp = 1mm per iteration
+                    0.001, N,
                 )
             _snap_fixed(self.ti_positions, self.ti_targets, self.ti_invm, N)
 
@@ -1253,43 +1251,57 @@ def _vbd_solve_color(
             gi = ti.Vector([0.0, 0.0, 0.0])
             Hi = ti.Matrix.zero(ti.f64, 3, 3)
 
-            # For severely distorted tets (J < 0.2 or J > 5), use a simplified
-            # ARAP-like energy that just penalizes deviation from identity:
-            # E = mu * V0 * ||F - I||^2 → P = 2*mu*(F - I), H = 2*mu*(b·b)*I
-            is_distorted = (J < 0.2) or (J > 5.0) or (F.norm_sqr() > 50.0)
+            # Blend between Neo-Hookean (well-conditioned tets) and ARAP fallback
+            # (distorted tets). ARAP uses full stiffness mu+lam.
+            # Smooth blending avoids oscillation at the threshold.
+            w_nh = 1.0  # 1.0 = full Neo-Hookean, 0.0 = full ARAP
+            if J < 0.5:
+                w_nh = ti.max(0.0, (J - 0.1) / 0.4)  # ramp 0.1→0.5
+            elif J > 3.0:
+                w_nh = ti.max(0.0, (6.0 - J) / 3.0)  # ramp 3.0→6.0
+            if F.norm_sqr() > 30.0:
+                w_f = ti.max(0.0, (50.0 - F.norm_sqr()) / 20.0)
+                w_nh = ti.min(w_nh, w_f)
 
-            if is_distorted:
-                # ARAP fallback: P = 2*mu*(F - I)
-                P_arap = 2.0 * mu * (F - ti.Matrix.identity(ti.f64, 3))
-                PBt = P_arap @ B.transpose()
-                if local_idx == 0:
-                    gi = ti.Vector([PBt[0, 0], PBt[1, 0], PBt[2, 0]], dt=ti.f64)
-                elif local_idx == 1:
-                    gi = ti.Vector([PBt[0, 1], PBt[1, 1], PBt[2, 1]], dt=ti.f64)
-                elif local_idx == 2:
-                    gi = ti.Vector([PBt[0, 2], PBt[1, 2], PBt[2, 2]], dt=ti.f64)
-                else:
-                    gi = -(ti.Vector([PBt[0, 0], PBt[1, 0], PBt[2, 0]], dt=ti.f64)
-                           + ti.Vector([PBt[0, 1], PBt[1, 1], PBt[2, 1]], dt=ti.f64)
-                           + ti.Vector([PBt[0, 2], PBt[1, 2], PBt[2, 2]], dt=ti.f64))
-                Hi = 2.0 * mu * bb * ti.Matrix.identity(ti.f64, 3)
+            # ARAP contribution (always computed for blending)
+            k_arap = mu + lam
+            P_arap = k_arap * (F - ti.Matrix.identity(ti.f64, 3))
+            PBt_arap = P_arap @ B.transpose()
+            gi_arap = ti.Vector([0.0, 0.0, 0.0])
+            if local_idx == 0:
+                gi_arap = ti.Vector([PBt_arap[0, 0], PBt_arap[1, 0], PBt_arap[2, 0]], dt=ti.f64)
+            elif local_idx == 1:
+                gi_arap = ti.Vector([PBt_arap[0, 1], PBt_arap[1, 1], PBt_arap[2, 1]], dt=ti.f64)
+            elif local_idx == 2:
+                gi_arap = ti.Vector([PBt_arap[0, 2], PBt_arap[1, 2], PBt_arap[2, 2]], dt=ti.f64)
             else:
-                # Standard Neo-Hookean
+                gi_arap = -(ti.Vector([PBt_arap[0, 0], PBt_arap[1, 0], PBt_arap[2, 0]], dt=ti.f64)
+                            + ti.Vector([PBt_arap[0, 1], PBt_arap[1, 1], PBt_arap[2, 1]], dt=ti.f64)
+                            + ti.Vector([PBt_arap[0, 2], PBt_arap[1, 2], PBt_arap[2, 2]], dt=ti.f64))
+            Hi_arap = k_arap * bb * ti.Matrix.identity(ti.f64, 3)
+
+            if w_nh < 1e-6:
+                # Fully ARAP
+                gi = gi_arap
+                Hi = Hi_arap
+            else:
+                # Neo-Hookean gradient
                 P = mu * F + lam * (J - 1.0) * cof
                 PBt = P @ B.transpose()
+                gi_nh = ti.Vector([0.0, 0.0, 0.0])
                 if local_idx == 0:
-                    gi = ti.Vector([PBt[0, 0], PBt[1, 0], PBt[2, 0]], dt=ti.f64)
+                    gi_nh = ti.Vector([PBt[0, 0], PBt[1, 0], PBt[2, 0]], dt=ti.f64)
                 elif local_idx == 1:
-                    gi = ti.Vector([PBt[0, 1], PBt[1, 1], PBt[2, 1]], dt=ti.f64)
+                    gi_nh = ti.Vector([PBt[0, 1], PBt[1, 1], PBt[2, 1]], dt=ti.f64)
                 elif local_idx == 2:
-                    gi = ti.Vector([PBt[0, 2], PBt[1, 2], PBt[2, 2]], dt=ti.f64)
+                    gi_nh = ti.Vector([PBt[0, 2], PBt[1, 2], PBt[2, 2]], dt=ti.f64)
                 else:
-                    gi = -(ti.Vector([PBt[0, 0], PBt[1, 0], PBt[2, 0]], dt=ti.f64)
-                           + ti.Vector([PBt[0, 1], PBt[1, 1], PBt[2, 1]], dt=ti.f64)
-                           + ti.Vector([PBt[0, 2], PBt[1, 2], PBt[2, 2]], dt=ti.f64))
+                    gi_nh = -(ti.Vector([PBt[0, 0], PBt[1, 0], PBt[2, 0]], dt=ti.f64)
+                              + ti.Vector([PBt[0, 1], PBt[1, 1], PBt[2, 1]], dt=ti.f64)
+                              + ti.Vector([PBt[0, 2], PBt[1, 2], PBt[2, 2]], dt=ti.f64))
 
-                # Hessian: mu*(b·b)*I + lam*(cof_col ⊗ cof_col)
-                Hi = mu * bb * ti.Matrix.identity(ti.f64, 3)
+                # Neo-Hookean Hessian: mu*(b·b)*I + lam*(cof_col ⊗ cof_col)
+                Hi_nh = mu * bb * ti.Matrix.identity(ti.f64, 3)
                 cof_Bt = cof @ B.transpose()
                 ci_vec = ti.Vector([0.0, 0.0, 0.0])
                 if local_idx == 0:
@@ -1302,7 +1314,11 @@ def _vbd_solve_color(
                     ci_vec = -(ti.Vector([cof_Bt[0, 0], cof_Bt[1, 0], cof_Bt[2, 0]], dt=ti.f64)
                                + ti.Vector([cof_Bt[0, 1], cof_Bt[1, 1], cof_Bt[2, 1]], dt=ti.f64)
                                + ti.Vector([cof_Bt[0, 2], cof_Bt[1, 2], cof_Bt[2, 2]], dt=ti.f64))
-                Hi += lam * ci_vec.outer_product(ci_vec)
+                Hi_nh += lam * ci_vec.outer_product(ci_vec)
+
+                # Blend Neo-Hookean and ARAP
+                gi = w_nh * gi_nh + (1.0 - w_nh) * gi_arap
+                Hi = w_nh * Hi_nh + (1.0 - w_nh) * Hi_arap
 
             g += V0 * gi
             H += V0 * Hi
@@ -1355,7 +1371,7 @@ def _vbd_solve_color(
             dx = -H_inv @ g
             # Clamp step size to prevent divergence on ill-conditioned tets
             dx_norm = dx.norm()
-            max_step = 0.0005  # 0.5mm max displacement per iteration
+            max_step = 0.001  # 1mm max displacement per iteration
             if dx_norm > max_step:
                 dx = dx * (max_step / dx_norm)
             positions[vi] += dx
@@ -2062,7 +2078,7 @@ class VBDSolver:
         rest_fixed_targets = self.rest_positions[self.fixed_indices].copy()
         final_fixed_targets = self.fixed_targets.copy()
 
-        # h=1.0: moderate inertia regularization prevents divergence
+        # h=1.0: inertia regularization prevents divergence from large Newton steps.
         h = 1.0
         mass_over_h2 = 1.0 / (h * h)
 
