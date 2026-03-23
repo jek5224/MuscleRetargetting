@@ -422,6 +422,7 @@ class UnifiedFEMSolver:
         self._muscle_ranges = {}
         self._merged_bone_mesh = None
         self._orig_fixed_mask = None
+        self._has_previous_solution = False
         # Inter-muscle distance constraints
         self._n_dist_constraints = 0
         self._dist_pair_i = None
@@ -706,14 +707,20 @@ class UnifiedFEMSolver:
         print(f"  Inter-muscle constraints: {K} active ({skipped} skipped)")
 
     def update_targets_and_positions(self, muscles_data, use_lbs_init=False):
-        """Update fixed targets from skeleton. Free verts keep previous solution."""
+        """Update targets and positions from skeleton.
+
+        First call (no previous solution): uses LBS positions as initial guess.
+        Subsequent calls: keeps previous solution for free vertices, only updates fixed targets.
+        """
         for name, data in muscles_data.items():
             vs, ve, _, _ = self._muscle_ranges[name]
-            if use_lbs_init and 'positions' in data:
-                self.positions[vs:ve] = data['positions']
+            if not self._has_previous_solution:
+                if 'positions' in data:
+                    self.positions[vs:ve] = data['positions']
             if 'fixed_targets' in data:
                 fi = np.where(self._orig_fixed_mask[vs:ve])[0]
-                self.positions[vs + fi] = data['fixed_targets']
+                if not self._has_previous_solution:
+                    self.positions[vs + fi] = data['fixed_targets']
                 global_fi = fi + vs
                 for i, gfi in enumerate(global_fi):
                     idx_in_fixed = np.searchsorted(self.fixed_indices, gfi)
@@ -1141,6 +1148,7 @@ class UnifiedFEMSolver:
                   f"inv={n_inv}/{M} bone_coll={n_coll} mm_coll={n_mm_coll} dist={K} "
                   f"J=[{np.min(Js):.3f},{np.max(Js):.3f}]")
 
+        self._has_previous_solution = True
         return n_iters, residual
 
     def get_muscle_positions(self, name):
@@ -1242,14 +1250,13 @@ def _vbd_solve_color(
 
             bb = b.dot(b)
 
+            gi = ti.Vector([0.0, 0.0, 0.0])
+            Hi = ti.Matrix.zero(ti.f64, 3, 3)
+
             # For severely distorted tets (J < 0.2 or J > 5), use a simplified
             # ARAP-like energy that just penalizes deviation from identity:
             # E = mu * V0 * ||F - I||^2 → P = 2*mu*(F - I), H = 2*mu*(b·b)*I
-            # This avoids the catastrophic cofactor terms.
             is_distorted = (J < 0.2) or (J > 5.0) or (F.norm_sqr() > 50.0)
-
-            gi = ti.Vector([0.0, 0.0, 0.0])
-            Hi = ti.Matrix.zero(ti.f64, 3, 3)
 
             if is_distorted:
                 # ARAP fallback: P = 2*mu*(F - I)
@@ -1834,21 +1841,24 @@ class VBDSolver:
         print(f"  Inter-muscle constraints: {K} active ({skipped} skipped)")
 
     def update_targets_and_positions(self, muscles_data, use_lbs_init=False):
-        """Update fixed targets from skeleton. Free verts keep previous solution.
+        """Update targets and positions from skeleton.
 
-        On first frame (no previous solution): free vertices stay at rest positions,
-        fixed targets are set to skeleton-driven positions. The solver uses incremental
-        loading to gradually deform from rest to target without inversions.
-
-        On subsequent frames: free vertices keep previous solve result (temporal
-        coherence), only fixed targets are updated.
+        First frame: uses LBS positions for ALL vertices (free + fixed) as initial guess.
+        Subsequent frames: keeps previous solution for free vertices, only updates fixed targets.
         """
         for name, data in muscles_data.items():
             vs, ve, _, _ = self._muscle_ranges[name]
-            # Never overwrite free vertices with LBS — rest or previous solution is better
+
+            if not self._has_previous_solution:
+                # First frame: use LBS positions for everything (better starting point)
+                if 'positions' in data:
+                    self.positions[vs:ve] = data['positions']
+            # Always update fixed targets
             if 'fixed_targets' in data:
                 fi = np.where(self._orig_fixed_mask[vs:ve])[0]
-                self.positions[vs + fi] = data['fixed_targets']
+                if not self._has_previous_solution:
+                    # First frame: also snap fixed verts to exact targets
+                    self.positions[vs + fi] = data['fixed_targets']
                 global_fi = fi + vs
                 for i, gfi in enumerate(global_fi):
                     idx_in_fixed = np.searchsorted(self.fixed_indices, gfi)
@@ -2004,16 +2014,11 @@ class VBDSolver:
     def solve(self, mu, lam, vol_penalty=100.0, kappa=1e4, margin=0.002,
               max_lbfgs_iters=100, n_outer=3, bone_meshes=None, verbose=False,
               n_load_steps=0):
-        """VBD quasistatic solve.
+        """VBD solve with sub-stepping, collision, and temporal coherence.
 
-        Args:
-            mu, lam: Lame parameters
-            vol_penalty: additional volume stiffness (added to lam)
-            margin: collision surface margin
-            max_lbfgs_iters: number of VBD iterations
-            bone_meshes: list of trimesh objects for collision
-            verbose: print detailed output
-            n_load_steps: incremental loading steps (0 = auto: 10 for first frame, 1 for subsequent)
+        First frame: LBS init + 5 sub-steps with h-ramp for stability.
+        Subsequent frames: previous solution + 3 sub-steps for speed.
+        Collision at every sub-step with vertex freezing to prevent undo.
         """
         if bone_meshes is not None:
             self._build_merged_bone_mesh(bone_meshes)
@@ -2032,15 +2037,6 @@ class VBDSolver:
         # Distance constraint stiffness
         dist_stiffness = effective_lam if K > 0 else 0.0
 
-        # Incremental loading: on first frame, gradually move fixed targets
-        # from rest to final over N load steps to avoid inversions.
-        if n_load_steps <= 0:
-            n_load_steps = 10 if not self._has_previous_solution else 1
-
-        # Rest-pose fixed targets (starting point for interpolation)
-        rest_fixed_targets = self.rest_positions[self.fixed_indices].copy()
-        final_fixed_targets = self.fixed_targets.copy()
-
         # Pre-upload all color vertex arrays (padded to max size)
         color_arrays = []
         for c in range(self._n_colors):
@@ -2054,49 +2050,49 @@ class VBDSolver:
         n_coll = 0
         n_mm_coll = 0
 
-        # Quasistatic: h=1.0 makes inertia negligible, elastic forces dominate.
-        h = 1.0
-        mass_over_h2 = 1.0 / (h * h)  # = 1.0
+        # Sub-stepping with h-ramp: start with stiff inertia (small h), gradually relax.
+        # First frame (LBS init): 5 sub-steps, ramped h for stability
+        # Subsequent frames (temporal coherence): 3 sub-steps, mild h
+        if self._has_previous_solution:
+            h_values = [0.05, 0.1, 0.1]
+        else:
+            h_values = [0.005, 0.01, 0.02, 0.05, 0.1]
+        n_substeps = len(h_values)
+        iters_per_sub = max(1, n_iters // n_substeps)
 
-        # Upload positions (rest for first frame, previous solution for subsequent)
+        # Upload positions and set targets
         self.ti_positions.from_numpy(self.positions)
+        targets_full = self.positions.copy()
+        targets_full[self.fixed_indices] = self.fixed_targets
+        self.ti_targets.from_numpy(targets_full)
+        _snap_fixed(self.ti_positions, self.ti_targets, self.ti_invm, N)
 
         # Save positions before solve for convergence metric
         initial_pos = self.positions.copy()
 
-        # Backup invm so we can freeze colliding vertices and restore after
+        if verbose:
+            X0 = self.ti_positions.to_numpy()
+            T = self.tetrahedra
+            x3 = X0[T[:, 3]]
+            Ds0 = np.stack([X0[T[:, 0]] - x3, X0[T[:, 1]] - x3, X0[T[:, 2]] - x3], axis=-1)
+            Js0 = np.linalg.det(Ds0 @ self.Bm_inv)
+            n_inv0 = int(np.sum(Js0 <= 0))
+            print(f"    initial: inv={n_inv0}/{M} J=[{np.min(Js0):.3f},{np.max(Js0):.3f}]")
+
+        # Backup invm for collision freeze/restore
         invm_backup = self.ti_invm.to_numpy().copy()
 
         global_it = 0
-        for load_step in range(n_load_steps):
-            alpha = (load_step + 1) / n_load_steps
-            # Interpolate fixed targets: rest → final
-            interp_targets = rest_fixed_targets + alpha * (final_fixed_targets - rest_fixed_targets)
-            self.fixed_targets[:] = interp_targets
+        n_coll = 0
+        n_mm_coll = 0
+        for sub in range(n_substeps):
+            h = h_values[sub]
+            mass_over_h2 = 1.0 / (h * h)
 
-            # Build full target array and upload
-            targets_full = self.ti_positions.to_numpy()
-            targets_full[self.fixed_indices] = interp_targets
-            self.ti_targets.from_numpy(targets_full)
-            _snap_fixed(self.ti_positions, self.ti_targets, self.ti_invm, N)
-
-            if verbose and load_step == 0:
-                X0 = self.ti_positions.to_numpy()
-                T = self.tetrahedra
-                x3 = X0[T[:, 3]]
-                Ds0 = np.stack([X0[T[:, 0]] - x3, X0[T[:, 1]] - x3, X0[T[:, 2]] - x3], axis=-1)
-                Js0 = np.linalg.det(Ds0 @ self.Bm_inv)
-                n_inv0 = int(np.sum(Js0 <= 0))
-                print(f"    initial: inv={n_inv0}/{M} J=[{np.min(Js0):.3f},{np.max(Js0):.3f}]")
-
-            # Restore invm at start of each load step (unfreeze from previous step)
-            self.ti_invm.from_numpy(invm_backup)
-
-            # Anchor inertia to current positions for this load step
+            # Anchor inertia to current positions for this sub-step
             _copy_positions(self.ti_x_tilde, self.ti_positions, N)
 
-            # Full n_iters VBD iterations per load step
-            for it in range(n_iters):
+            for it in range(iters_per_sub):
                 for c in range(self._n_colors):
                     padded, n_cv = color_arrays[c]
                     if n_cv == 0:
@@ -2127,7 +2123,7 @@ class VBDSolver:
                 _snap_fixed(self.ti_positions, self.ti_targets, self.ti_invm, N)
                 global_it += 1
 
-            # Collision detection + projection after iterations
+            # Collision at every sub-step
             self.positions = self.ti_positions.to_numpy()
 
             if has_mm_coll:
@@ -2174,26 +2170,16 @@ class VBDSolver:
                         self.ti_coll_idx, self.ti_coll_targets,
                         1.0, n_coll_sub,
                     )
-                    # Freeze colliding vertices for next load step
-                    if load_step < n_load_steps - 1:
+                    # Freeze colliding vertices so later sub-steps can't undo collision fix
+                    if sub < n_substeps - 1:
                         _freeze_collision_vertices(
                             self.ti_invm, self.ti_targets, self.ti_positions,
                             self.ti_coll_idx, self.ti_coll_targets,
                             n_coll_sub,
                         )
 
-            if verbose:
-                X_ls = self.ti_positions.to_numpy()
-                T = self.tetrahedra
-                x3 = X_ls[T[:, 3]]
-                Ds_ls = np.stack([X_ls[T[:, 0]] - x3, X_ls[T[:, 1]] - x3, X_ls[T[:, 2]] - x3], axis=-1)
-                Js_ls = np.linalg.det(Ds_ls @ self.Bm_inv)
-                n_inv_ls = int(np.sum(Js_ls <= 0))
-                print(f"    load step {load_step+1}/{n_load_steps} (alpha={alpha:.2f}): inv={n_inv_ls}/{M} bone_coll={n_coll} mm_coll={n_mm_coll}")
-
-        # Restore original invm (unfreeze collision vertices) and final targets
+        # Restore original invm (unfreeze collision vertices)
         self.ti_invm.from_numpy(invm_backup)
-        self.fixed_targets[:] = final_fixed_targets
 
         # Taubin smoothing after all sub-steps
         if self._n_surf_verts > 0:
@@ -2293,6 +2279,37 @@ class VBDSolver:
 # Orchestrator
 # ---------------------------------------------------------------------------
 
+def _update_muscles_from_skeleton(v, active_muscles, skel, skeleton_meshes):
+    """Update muscle LBS positions and fixed targets from current skeleton pose."""
+    for name, mobj in active_muscles.items():
+        if hasattr(mobj, '_update_tet_positions_from_skeleton') and skel is not None:
+            mobj._update_tet_positions_from_skeleton(skel)
+        if hasattr(mobj, '_update_fixed_targets_from_skeleton') and skel is not None:
+            mobj._update_fixed_targets_from_skeleton(skeleton_meshes, skel)
+
+
+def _collect_muscles_update(active_muscles):
+    """Collect current positions and fixed targets into solver update dict."""
+    muscles_update = {}
+    for name, mobj in active_muscles.items():
+        sb = mobj.soft_body
+        muscles_update[name] = {
+            'positions': sb.positions,
+            'fixed_targets': sb.fixed_targets,
+        }
+    return muscles_update
+
+
+def _write_back_positions(solver, active_muscles):
+    """Write solver results back to muscle objects."""
+    for name, mobj in active_muscles.items():
+        sb = mobj.soft_body
+        new_pos = solver.get_muscle_positions(name)
+        sb.positions[:] = new_pos
+        if hasattr(mobj, 'tet_vertices'):
+            mobj.tet_vertices[:] = new_pos.astype(mobj.tet_vertices.dtype)
+
+
 def run_all_fem_sim(v, max_iterations=100, tolerance=1e-4, verbose=True):
     t0 = time.time()
 
@@ -2336,54 +2353,118 @@ def run_all_fem_sim(v, max_iterations=100, tolerance=1e-4, verbose=True):
             solver.set_inter_muscle_constraints(v.inter_muscle_constraints)
         v._fem_unified_solver = solver
 
-    # Update each muscle's positions and fixed targets from current skeleton pose
     skeleton_meshes = getattr(v, 'zygote_skeleton_meshes', None)
-    for name, mobj in active_muscles.items():
-        if hasattr(mobj, '_update_tet_positions_from_skeleton') and skel is not None:
-            mobj._update_tet_positions_from_skeleton(skel)
-        if hasattr(mobj, '_update_fixed_targets_from_skeleton') and skel is not None:
-            mobj._update_fixed_targets_from_skeleton(skeleton_meshes, skel)
+    n_load_steps = getattr(v, 'fem_load_steps', 10)
 
-    muscles_update = {}
-    max_ft_disp = 0.0
-    for name, mobj in active_muscles.items():
-        sb = mobj.soft_body
-        muscles_update[name] = {
-            'positions': sb.positions,
-            'fixed_targets': sb.fixed_targets,
-        }
-        if sb.fixed_targets is not None and sb.initial_fixed_targets is not None:
-            d = np.max(np.linalg.norm(sb.fixed_targets - sb.initial_fixed_targets, axis=1))
-            if d > max_ft_disp:
-                max_ft_disp = d
-    if verbose and max_ft_disp > 0:
-        print(f"  Max fixed target displacement from rest: {max_ft_disp:.6f}m")
-    solver.update_targets_and_positions(muscles_update)
+    # First frame without previous solution: incremental pose loading
+    needs_incremental = (not solver._has_previous_solution and
+                         skel is not None and n_load_steps > 1)
 
-    bone_meshes = _build_bone_trimeshes(v, active_muscles, skel, verbose=False)
-    t_setup = time.time()
+    if needs_incremental:
+        fevals, residual = _run_incremental_loading(
+            v, solver, active_muscles, skel, skeleton_meshes,
+            mu, lam, vol_penalty, kappa, max_iterations, n_load_steps,
+            verbose)
+    else:
+        # Standard path: update from current pose, solve once
+        _update_muscles_from_skeleton(v, active_muscles, skel, skeleton_meshes)
+        muscles_update = _collect_muscles_update(active_muscles)
+        solver.update_targets_and_positions(muscles_update)
+        bone_meshes = _build_bone_trimeshes(v, active_muscles, skel, verbose=False)
+        fevals, residual = solver.solve(
+            mu=mu, lam=lam, vol_penalty=vol_penalty, kappa=kappa,
+            max_lbfgs_iters=max_iterations,
+            bone_meshes=bone_meshes, verbose=verbose
+        )
 
-    fevals, residual = solver.solve(
-        mu=mu, lam=lam, vol_penalty=vol_penalty, kappa=kappa,
-        max_lbfgs_iters=max_iterations,
-        bone_meshes=bone_meshes, verbose=verbose
-    )
-
-    t_solve = time.time()
-    for name, mobj in active_muscles.items():
-        sb = mobj.soft_body
-        new_pos = solver.get_muscle_positions(name)
-        sb.positions[:] = new_pos
-        if hasattr(mobj, 'tet_vertices'):
-            mobj.tet_vertices[:] = new_pos.astype(mobj.tet_vertices.dtype)
+    _write_back_positions(solver, active_muscles)
 
     total = time.time() - t0
     tag = "VBD" if use_vbd else "XPBD"
     if verbose:
-        print(f"  {tag}: {fevals} iters, ||dx||={residual:.4e}, "
-              f"setup={t_setup-t0:.2f}s solve={t_solve-t_setup:.2f}s total={total:.2f}s")
+        print(f"  {tag}: {fevals} iters, ||dx||={residual:.4e}, total={total:.2f}s")
     else:
         print(f"  {tag}: {fevals}it ||dx||={residual:.2e} {total:.1f}s")
+
+
+def _run_incremental_loading(v, solver, active_muscles, skel, skeleton_meshes,
+                             mu, lam, vol_penalty, kappa, max_iterations,
+                             n_load_steps, verbose):
+    """Incrementally load skeleton pose from rest to target with collision at each step.
+
+    Prevents muscles from crossing through bones by taking small pose steps.
+    At each intermediate pose:
+      1. Set skeleton to interpolated pose
+      2. Update muscle fixed targets and LBS positions from that pose
+      3. Build bone collision meshes at that pose
+      4. Run solver with limited iterations + collision
+
+    Muscles start at rest positions (correct anatomical side) and slide along
+    bone surfaces as the pose progresses, never teleporting through geometry.
+    """
+    # Save the target pose, we'll interpolate toward it
+    target_pose = skel.getPositions().copy()
+    rest_pose = np.zeros_like(target_pose)
+
+    # Distribute iterations: more iters for later steps (larger deformation)
+    # First 80% of steps get 1/3 of iters, last 20% get 2/3
+    total_iters = max_iterations
+    early_steps = max(1, int(n_load_steps * 0.8))
+    late_steps = n_load_steps - early_steps
+    early_iters_each = max(2, total_iters // (3 * early_steps)) if early_steps > 0 else 0
+    late_iters_each = max(2, (total_iters - early_iters_each * early_steps) // max(late_steps, 1))
+
+    if verbose:
+        print(f"  Incremental loading: {n_load_steps} steps, "
+              f"{early_iters_each} iters/early, {late_iters_each} iters/late")
+
+    fevals_total = 0
+    residual = 0.0
+
+    for step in range(n_load_steps):
+        alpha = (step + 1) / n_load_steps
+        is_final = (step == n_load_steps - 1)
+        is_late = (step >= early_steps)
+        step_iters = late_iters_each if is_late else early_iters_each
+
+        # Interpolate skeleton pose
+        interp_pose = (1.0 - alpha) * rest_pose + alpha * target_pose
+        skel.setPositions(interp_pose)
+
+        # Update muscle positions and targets from interpolated pose
+        _update_muscles_from_skeleton(v, active_muscles, skel, skeleton_meshes)
+        muscles_update = _collect_muscles_update(active_muscles)
+
+        # On first step: use LBS positions as init (rest → small deformation).
+        # On subsequent steps: solver already has previous step's solution, keep it.
+        solver.update_targets_and_positions(muscles_update)
+
+        # Build bone meshes at the interpolated pose
+        bone_meshes = _build_bone_trimeshes(v, active_muscles, skel, verbose=False)
+
+        # Solve with this intermediate target
+        fevals, residual = solver.solve(
+            mu=mu, lam=lam, vol_penalty=vol_penalty, kappa=kappa,
+            max_lbfgs_iters=step_iters,
+            bone_meshes=bone_meshes,
+            verbose=(verbose and is_final),
+        )
+        fevals_total += fevals
+
+        # Write back so next step's _update_tet_positions_from_skeleton sees
+        # current solved positions (for the "any_bone_moved" check and as
+        # starting point for the next LBS pass)
+        _write_back_positions(solver, active_muscles)
+
+        if verbose and not is_final:
+            print(f"    load step {step+1}/{n_load_steps} (alpha={alpha:.2f}): "
+                  f"{fevals}it ||dx||={residual:.2e}")
+
+    # Restore skeleton to target pose (incremental loading left it there on
+    # the last step, but be explicit)
+    skel.setPositions(target_pose)
+
+    return fevals_total, residual
 
 
 def _build_bone_trimeshes(v, active_muscles, skel, verbose=False):

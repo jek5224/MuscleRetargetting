@@ -168,6 +168,7 @@ def build_context(skel, muscle_meshes, skeleton_meshes, mesh_info, args):
         fem_volume_penalty=5000.0,
         fem_contact_threshold=args.constraint_threshold,
         fem_outer_iterations=3,
+        fem_load_steps=getattr(args, 'load_steps', 10),
         motion_settle_iters=args.settle_iters,
         _unified_arap_backend=None,
         _unified_sim_cache=None,
@@ -328,6 +329,13 @@ def main():
         type=int,
         default=None,
         help="Last frame to bake (default: all frames)",
+    )
+    parser.add_argument(
+        "--load-steps",
+        type=int,
+        default=10,
+        help="Incremental pose loading steps for first frame (default: 10). "
+             "Prevents muscles crossing through bones during initialization.",
     )
     parser.add_argument(
         "--region-tag",
