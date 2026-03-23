@@ -2014,11 +2014,11 @@ class VBDSolver:
     def solve(self, mu, lam, vol_penalty=100.0, kappa=1e4, margin=0.002,
               max_lbfgs_iters=100, n_outer=3, bone_meshes=None, verbose=False,
               n_load_steps=0):
-        """VBD solve with sub-stepping, collision, and temporal coherence.
+        """VBD quasistatic solve with h=1.0 and collision.
 
-        First frame: LBS init + 5 sub-steps with h-ramp for stability.
-        Subsequent frames: previous solution + 3 sub-steps for speed.
-        Collision at every sub-step with vertex freezing to prevent undo.
+        Uses h=1.0 (quasistatic) so inertia is negligible and all iterations
+        go to elastic energy minimization. Incremental pose loading (handled
+        by the orchestrator) ensures each call sees only small deformation.
         """
         if bone_meshes is not None:
             self._build_merged_bone_mesh(bone_meshes)
@@ -2050,22 +2050,21 @@ class VBDSolver:
         n_coll = 0
         n_mm_coll = 0
 
-        # Sub-stepping with h-ramp: start with stiff inertia (small h), gradually relax.
-        # First frame (LBS init): 5 sub-steps, ramped h for stability
-        # Subsequent frames (temporal coherence): 3 sub-steps, mild h
-        if self._has_previous_solution:
-            h_values = [0.05, 0.1, 0.1]
-        else:
-            h_values = [0.005, 0.01, 0.02, 0.05, 0.1]
-        n_substeps = len(h_values)
-        iters_per_sub = max(1, n_iters // n_substeps)
+        # Internal load stepping: interpolate fixed targets from rest to final
+        # over N steps, with full iterations per step. This keeps vertices near
+        # equilibrium throughout, preventing inversion accumulation.
+        if n_load_steps <= 0:
+            n_load_steps = 10 if not self._has_previous_solution else 1
 
-        # Upload positions and set targets
+        rest_fixed_targets = self.rest_positions[self.fixed_indices].copy()
+        final_fixed_targets = self.fixed_targets.copy()
+
+        # h=1.0: moderate inertia regularization prevents divergence
+        h = 1.0
+        mass_over_h2 = 1.0 / (h * h)
+
+        # Upload positions
         self.ti_positions.from_numpy(self.positions)
-        targets_full = self.positions.copy()
-        targets_full[self.fixed_indices] = self.fixed_targets
-        self.ti_targets.from_numpy(targets_full)
-        _snap_fixed(self.ti_positions, self.ti_targets, self.ti_invm, N)
 
         # Save positions before solve for convergence metric
         initial_pos = self.positions.copy()
@@ -2079,20 +2078,23 @@ class VBDSolver:
             n_inv0 = int(np.sum(Js0 <= 0))
             print(f"    initial: inv={n_inv0}/{M} J=[{np.min(Js0):.3f},{np.max(Js0):.3f}]")
 
-        # Backup invm for collision freeze/restore
-        invm_backup = self.ti_invm.to_numpy().copy()
-
         global_it = 0
-        n_coll = 0
-        n_mm_coll = 0
-        for sub in range(n_substeps):
-            h = h_values[sub]
-            mass_over_h2 = 1.0 / (h * h)
+        for load_step in range(n_load_steps):
+            alpha = (load_step + 1) / n_load_steps
 
-            # Anchor inertia to current positions for this sub-step
+            # Interpolate fixed targets: rest → final
+            interp_targets = rest_fixed_targets + alpha * (final_fixed_targets - rest_fixed_targets)
+            self.fixed_targets[:] = interp_targets
+
+            targets_full = self.ti_positions.to_numpy()
+            targets_full[self.fixed_indices] = interp_targets
+            self.ti_targets.from_numpy(targets_full)
+            _snap_fixed(self.ti_positions, self.ti_targets, self.ti_invm, N)
+
+            # Re-anchor inertia at start of each load step
             _copy_positions(self.ti_x_tilde, self.ti_positions, N)
 
-            for it in range(iters_per_sub):
+            for it in range(n_iters):
                 for c in range(self._n_colors):
                     padded, n_cv = color_arrays[c]
                     if n_cv == 0:
@@ -2123,65 +2125,10 @@ class VBDSolver:
                 _snap_fixed(self.ti_positions, self.ti_targets, self.ti_invm, N)
                 global_it += 1
 
-            # Collision at every sub-step
-            self.positions = self.ti_positions.to_numpy()
+        # Restore final fixed targets
+        self.fixed_targets[:] = final_fixed_targets
 
-            if has_mm_coll:
-                mm_idx, mm_tgt = self._compute_muscle_collision_targets(
-                    margin=margin, verbose=False)
-                n_mm_coll_sub = len(mm_idx)
-                if n_mm_coll_sub > 0:
-                    n_mm_coll = n_mm_coll_sub
-                    if n_mm_coll_sub > self._max_coll:
-                        self._max_coll = max(n_mm_coll_sub, 1000)
-                        self.ti_coll_idx = ti.field(dtype=ti.i32, shape=self._max_coll)
-                        self.ti_coll_targets = ti.Vector.field(3, dtype=ti.f64, shape=self._max_coll)
-                    idx_padded = np.zeros(self._max_coll, dtype=np.int32)
-                    tgt_padded = np.zeros((self._max_coll, 3), dtype=np.float64)
-                    idx_padded[:n_mm_coll_sub] = mm_idx
-                    tgt_padded[:n_mm_coll_sub] = mm_tgt
-                    self.ti_coll_idx.from_numpy(idx_padded)
-                    self.ti_coll_targets.from_numpy(tgt_padded)
-                    _apply_collision_projection(
-                        self.ti_positions, self.ti_invm,
-                        self.ti_coll_idx, self.ti_coll_targets,
-                        1.0, n_mm_coll_sub,
-                    )
-
-            if has_bone_coll:
-                self.positions = self.ti_positions.to_numpy()
-                coll_idx_np, coll_tgt_np = self._compute_collision_targets(
-                    margin, verbose=False)
-                n_coll_sub = len(coll_idx_np)
-                if n_coll_sub > 0:
-                    n_coll = n_coll_sub
-                    if n_coll_sub > self._max_coll:
-                        self._max_coll = max(n_coll_sub, 1000)
-                        self.ti_coll_idx = ti.field(dtype=ti.i32, shape=self._max_coll)
-                        self.ti_coll_targets = ti.Vector.field(3, dtype=ti.f64, shape=self._max_coll)
-                    idx_padded = np.zeros(self._max_coll, dtype=np.int32)
-                    tgt_padded = np.zeros((self._max_coll, 3), dtype=np.float64)
-                    idx_padded[:n_coll_sub] = coll_idx_np
-                    tgt_padded[:n_coll_sub] = coll_tgt_np
-                    self.ti_coll_idx.from_numpy(idx_padded)
-                    self.ti_coll_targets.from_numpy(tgt_padded)
-                    _apply_collision_projection(
-                        self.ti_positions, self.ti_invm,
-                        self.ti_coll_idx, self.ti_coll_targets,
-                        1.0, n_coll_sub,
-                    )
-                    # Freeze colliding vertices so later sub-steps can't undo collision fix
-                    if sub < n_substeps - 1:
-                        _freeze_collision_vertices(
-                            self.ti_invm, self.ti_targets, self.ti_positions,
-                            self.ti_coll_idx, self.ti_coll_targets,
-                            n_coll_sub,
-                        )
-
-        # Restore original invm (unfreeze collision vertices)
-        self.ti_invm.from_numpy(invm_backup)
-
-        # Taubin smoothing after all sub-steps
+        # Taubin smoothing
         if self._n_surf_verts > 0:
             S = self._n_surf_verts
             lam_smooth = 0.3
@@ -2203,7 +2150,7 @@ class VBDSolver:
                     self.ti_surf_verts, self.ti_invm, S)
             _snap_fixed(self.ti_positions, self.ti_targets, self.ti_invm, N)
 
-        # Final collision pass (after smoothing, guarantees output is clean)
+        # Muscle-muscle collision
         if has_mm_coll:
             self.positions = self.ti_positions.to_numpy()
             mm_idx, mm_tgt = self._compute_muscle_collision_targets(
@@ -2226,6 +2173,7 @@ class VBDSolver:
                     1.0, n_mm_coll,
                 )
 
+        # Bone collision (last — guarantees output is penetration-free)
         if has_bone_coll:
             self.positions = self.ti_positions.to_numpy()
             coll_idx_np, coll_tgt_np = self._compute_collision_targets(
@@ -2406,17 +2354,9 @@ def _run_incremental_loading(v, solver, active_muscles, skel, skeleton_meshes,
     target_pose = skel.getPositions().copy()
     rest_pose = np.zeros_like(target_pose)
 
-    # Distribute iterations: more iters for later steps (larger deformation)
-    # First 80% of steps get 1/3 of iters, last 20% get 2/3
-    total_iters = max_iterations
-    early_steps = max(1, int(n_load_steps * 0.8))
-    late_steps = n_load_steps - early_steps
-    early_iters_each = max(2, total_iters // (3 * early_steps)) if early_steps > 0 else 0
-    late_iters_each = max(2, (total_iters - early_iters_each * early_steps) // max(late_steps, 1))
-
     if verbose:
         print(f"  Incremental loading: {n_load_steps} steps, "
-              f"{early_iters_each} iters/early, {late_iters_each} iters/late")
+              f"{max_iterations} iters/step, h=1.0 quasistatic")
 
     fevals_total = 0
     residual = 0.0
@@ -2424,8 +2364,6 @@ def _run_incremental_loading(v, solver, active_muscles, skel, skeleton_meshes,
     for step in range(n_load_steps):
         alpha = (step + 1) / n_load_steps
         is_final = (step == n_load_steps - 1)
-        is_late = (step >= early_steps)
-        step_iters = late_iters_each if is_late else early_iters_each
 
         # Interpolate skeleton pose
         interp_pose = (1.0 - alpha) * rest_pose + alpha * target_pose
@@ -2442,12 +2380,14 @@ def _run_incremental_loading(v, solver, active_muscles, skel, skeleton_meshes,
         # Build bone meshes at the interpolated pose
         bone_meshes = _build_bone_trimeshes(v, active_muscles, skel, verbose=False)
 
-        # Solve with this intermediate target
+        # Solve with this intermediate target.
+        # n_load_steps=1: orchestrator handles pose stepping, solver just solves.
         fevals, residual = solver.solve(
             mu=mu, lam=lam, vol_penalty=vol_penalty, kappa=kappa,
-            max_lbfgs_iters=step_iters,
+            max_lbfgs_iters=max_iterations,
             bone_meshes=bone_meshes,
             verbose=(verbose and is_final),
+            n_load_steps=1,
         )
         fevals_total += fevals
 
