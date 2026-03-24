@@ -230,19 +230,50 @@ def _xpbd_project_gauss_seidel(
             if A11 > 1e-20:
                 dl_D = rhs_D / A11
 
-        # Clamp multiplier updates
-        max_dl = 2.0
-        dl_H = ti.min(ti.max(dl_H, -max_dl), max_dl)
-        dl_D = ti.min(ti.max(dl_D, -max_dl), max_dl)
+        # Compute correction vectors
+        dx0 = w0 * (g_H_0 * dl_H + g_D_0 * dl_D)
+        dx1 = w1 * (g_H_1 * dl_H + g_D_1 * dl_D)
+        dx2 = w2 * (g_H_2 * dl_H + g_D_2 * dl_D)
+        dx3 = w3 * (g_H_3 * dl_H + g_D_3 * dl_D)
 
-        # Direct update — no atomic_add, no valence division
-        positions[i0] += w0 * (g_H_0 * dl_H + g_D_0 * dl_D)
-        positions[i1] += w1 * (g_H_1 * dl_H + g_D_1 * dl_D)
-        positions[i2] += w2 * (g_H_2 * dl_H + g_D_2 * dl_D)
-        positions[i3] += w3 * (g_H_3 * dl_H + g_D_3 * dl_D)
+        # Inversion-safe line search: check if correction would make J < threshold.
+        # If so, scale correction back to keep J >= threshold.
+        J_threshold = 0.01
+        # Tentative new positions
+        x0_new = x0 + dx0; x1_new = x1 + dx1
+        x2_new = x2 + dx2; x3_new = x3 + dx3
+        Ds_new = ti.Matrix.cols([x0_new - x3_new, x1_new - x3_new, x2_new - x3_new])
+        J_new = (Ds_new @ B).determinant()
 
-        lambda_H[k] += dl_H
-        lambda_D[k] += dl_D
+        t = 1.0  # scale factor for correction
+        if J_new < J_threshold and J_val > J_threshold:
+            # J would cross threshold. Binary search for safe scale.
+            t_lo = 0.0
+            t_hi = 1.0
+            for _ in range(6):  # 6 bisection steps → 1/64 precision
+                t_mid = (t_lo + t_hi) * 0.5
+                xm0 = x0 + t_mid * dx0; xm1 = x1 + t_mid * dx1
+                xm2 = x2 + t_mid * dx2; xm3 = x3 + t_mid * dx3
+                Ds_mid = ti.Matrix.cols([xm0 - xm3, xm1 - xm3, xm2 - xm3])
+                J_mid = (Ds_mid @ B).determinant()
+                if J_mid >= J_threshold:
+                    t_lo = t_mid
+                else:
+                    t_hi = t_mid
+            t = t_lo * 0.9  # safety margin
+        elif J_val <= J_threshold:
+            # Already inverted — allow full correction to try recovery.
+            # The GS coloring ensures no conflicts with neighbors.
+            t = 1.0
+
+        # Apply scaled correction
+        positions[i0] += t * dx0
+        positions[i1] += t * dx1
+        positions[i2] += t * dx2
+        positions[i3] += t * dx3
+
+        lambda_H[k] += t * dl_H
+        lambda_D[k] += t * dl_D
 
 
 @ti.kernel
@@ -1092,8 +1123,8 @@ class UnifiedFEMSolver:
     def update_targets_and_positions(self, muscles_data, use_lbs_init=False):
         """Update targets and positions from skeleton.
 
-        First call (no previous solution): uses LBS positions as initial guess.
-        Subsequent calls: keeps previous solution for free vertices, only updates fixed targets.
+        First call: uses LBS positions as initial guess.
+        Subsequent calls: keeps previous solution, only updates fixed targets.
         """
         for name, data in muscles_data.items():
             vs, ve, _, _ = self._muscle_ranges[name]
@@ -1102,8 +1133,6 @@ class UnifiedFEMSolver:
                     self.positions[vs:ve] = data['positions']
             if 'fixed_targets' in data:
                 fi = np.where(self._orig_fixed_mask[vs:ve])[0]
-                if not self._has_previous_solution:
-                    self.positions[vs + fi] = data['fixed_targets']
                 global_fi = fi + vs
                 for i, gfi in enumerate(global_fi):
                     idx_in_fixed = np.searchsorted(self.fixed_indices, gfi)
@@ -1496,23 +1525,7 @@ class UnifiedFEMSolver:
                 self.ti_coll_idx, self.ti_coll_targets, stiffness, nc)
             return nc
 
-        # Pre-conditioning: 5 soft iterations to regularize LBS inversions.
-        # Uses 100x higher compliance (softer) — just smooths distortions
-        # without changing the overall shape.
-        if not self._has_previous_solution:
-            # Temporarily increase compliance (softer)
-            self.ti_alpha_H.from_numpy(alpha_H_np * 100.0)
-            self.ti_alpha_D.from_numpy(alpha_D_np * 100.0)
-            self.ti_lambda_H.fill(0.0)
-            self.ti_lambda_D.fill(0.0)
-            _run_xpbd_iters(5)
-            # Restore normal compliance
-            self.ti_alpha_H.from_numpy(alpha_H_np)
-            self.ti_alpha_D.from_numpy(alpha_D_np)
-            self.ti_lambda_H.fill(0.0)
-            self.ti_lambda_D.fill(0.0)
-
-        # All elastic iterations
+        # All elastic iterations (LBS init for first frame, warm-start for subsequent)
         _run_xpbd_iters(n_iters, verbose_iters=verbose)
 
         # Taubin smoothing: smooth surface jaggedness without shrinkage
