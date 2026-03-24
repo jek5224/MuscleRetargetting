@@ -205,6 +205,12 @@ def _xpbd_project_gauss_seidel(
         a_H = alpha_H[k]
         a_D = alpha_D[k]
 
+        # Volume barrier: for inverted tets (J < 0), make hydrostatic
+        # constraint 10x stiffer to actively push J back positive.
+        J_val = F.determinant()
+        if J_val < 0.0:
+            a_H = a_H * 0.1  # 10x stiffer
+
         A00 = s_HH + a_H
         A01 = s_HD
         A11 = s_DD + a_D
@@ -223,6 +229,13 @@ def _xpbd_project_gauss_seidel(
             if A11 > 1e-20:
                 dl_D = rhs_D / A11
 
+        # Clamp multiplier updates to prevent overshooting on inverted tets.
+        # Without clamping, severely inverted tets (J << 0) produce huge
+        # corrections that overshoot and create new inversions.
+        max_dl = 2.0
+        dl_H = ti.min(ti.max(dl_H, -max_dl), max_dl)
+        dl_D = ti.min(ti.max(dl_D, -max_dl), max_dl)
+
         # Direct update — no atomic_add, no valence division
         positions[i0] += w0 * (g_H_0 * dl_H + g_D_0 * dl_D)
         positions[i1] += w1 * (g_H_1 * dl_H + g_D_1 * dl_D)
@@ -231,6 +244,84 @@ def _xpbd_project_gauss_seidel(
 
         lambda_H[k] += dl_H
         lambda_D[k] += dl_D
+
+
+@ti.kernel
+def _recover_inversions(
+    positions: ti.template(),
+    invm: ti.template(),
+    tets: ti.template(),
+    Bm_inv: ti.template(),
+    n_tets: ti.i32,
+):
+    """Fix inverted tets by moving free vertices toward tet centroid.
+
+    For each tet with J < 0.01, move each free vertex toward the tet's
+    centroid. This geometrically "uncrushs" the tet. Stronger correction
+    for more severely inverted tets.
+    """
+    for k in range(n_tets):
+        i0 = tets[k][0]; i1 = tets[k][1]
+        i2 = tets[k][2]; i3 = tets[k][3]
+        x0 = positions[i0]; x1 = positions[i1]
+        x2 = positions[i2]; x3 = positions[i3]
+
+        Ds = ti.Matrix.cols([x0 - x3, x1 - x3, x2 - x3])
+        F = Ds @ Bm_inv[k]
+        J = F.determinant()
+
+        if J < 0.01:
+            centroid = (x0 + x1 + x2 + x3) * 0.25
+            # Correction strength: stronger for more inverted
+            strength = ti.min(0.3, 0.1 * (0.01 - J))
+            if strength < 0.001:
+                continue
+            if invm[i0] > 0.0:
+                positions[i0] += strength * (centroid - x0)
+            if invm[i1] > 0.0:
+                positions[i1] += strength * (centroid - x1)
+            if invm[i2] > 0.0:
+                positions[i2] += strength * (centroid - x2)
+            if invm[i3] > 0.0:
+                positions[i3] += strength * (centroid - x3)
+
+
+@ti.kernel
+def _recover_inversions_color(
+    positions: ti.template(),
+    invm: ti.template(),
+    color_tets: ti.template(),
+    tets: ti.template(),
+    Bm_inv: ti.template(),
+    n_color_tets: ti.i32,
+):
+    """Fix inverted tets in one color by moving free vertices toward centroid.
+
+    Same-color tets share no vertices, so parallel is safe.
+    """
+    for ck in range(n_color_tets):
+        k = color_tets[ck]
+        i0 = tets[k][0]; i1 = tets[k][1]
+        i2 = tets[k][2]; i3 = tets[k][3]
+        x0 = positions[i0]; x1 = positions[i1]
+        x2 = positions[i2]; x3 = positions[i3]
+
+        Ds = ti.Matrix.cols([x0 - x3, x1 - x3, x2 - x3])
+        F = Ds @ Bm_inv[k]
+        J = F.determinant()
+
+        if J < 0.01:
+            centroid = (x0 + x1 + x2 + x3) * 0.25
+            strength = ti.min(0.3, 0.05 * ti.max(0.01 - J, 0.0))
+            if strength > 0.001:
+                if invm[i0] > 0.0:
+                    positions[i0] += strength * (centroid - x0)
+                if invm[i1] > 0.0:
+                    positions[i1] += strength * (centroid - x1)
+                if invm[i2] > 0.0:
+                    positions[i2] += strength * (centroid - x2)
+                if invm[i3] > 0.0:
+                    positions[i3] += strength * (centroid - x3)
 
 
 @ti.kernel
@@ -1261,6 +1352,7 @@ class UnifiedFEMSolver:
                         0.001, N,
                     )
                 _snap_fixed(self.ti_positions, self.ti_targets, self.ti_invm, N)
+
                 if verbose_iters and it < 3:
                     delta = _compute_position_delta(
                         self.ti_positions, self.ti_pos_prev, self.ti_invm, N)
