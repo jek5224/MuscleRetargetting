@@ -1059,9 +1059,7 @@ class UnifiedFEMSolver:
         # Inter-muscle distance constraint setup
         K = self._n_dist_constraints
         if K > 0:
-            # Compliance: alpha = 1 / (stiffness * rest_dist)
-            # Use vol_penalty as stiffness scale for inter-muscle separation
-            dist_stiffness = effective_lam  # same stiffness as volume constraints
+            dist_stiffness = effective_lam
             alpha_dist_np = 1.0 / (dist_stiffness * self._dist_rest + 1e-30)
             self.ti_dist_alpha.from_numpy(alpha_dist_np)
             self.ti_dist_lambda.fill(0.0)
@@ -1069,7 +1067,9 @@ class UnifiedFEMSolver:
         # Save positions before solve for total convergence metric
         initial_pos = self.ti_positions.to_numpy().copy()
 
-        omega = 1.0
+        # SOR relaxation: omega > 1.0 accelerates Jacobi convergence.
+        # omega=1.5 is typical for XPBD on tet meshes.
+        omega = 1.7
 
         # All elastic + inter-muscle distance iterations
         for it in range(n_iters):
