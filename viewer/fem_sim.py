@@ -1525,7 +1525,24 @@ class UnifiedFEMSolver:
                 self.ti_coll_idx, self.ti_coll_targets, stiffness, nc)
             return nc
 
-        # All elastic iterations (LBS init for first frame, warm-start for subsequent)
+        # First frame: Jacobi pre-solve to smooth LBS inversions, then GS.
+        # Jacobi handles far-from-equilibrium better (no GS oscillation).
+        if not self._has_previous_solution:
+            self.ti_lambda_H.fill(0.0)
+            self.ti_lambda_D.fill(0.0)
+            for pre_it in range(5):
+                _xpbd_project_jacobi(
+                    self.ti_positions, self.ti_invm, self.ti_valence,
+                    self.ti_tets, self.ti_Bm_inv, self.ti_rest_volume,
+                    self.ti_lambda_H, self.ti_lambda_D,
+                    self.ti_alpha_H, self.ti_alpha_D,
+                    omega, M,
+                )
+                _snap_fixed(self.ti_positions, self.ti_targets, self.ti_invm, N)
+            self.ti_lambda_H.fill(0.0)
+            self.ti_lambda_D.fill(0.0)
+
+        # GS elastic iterations
         _run_xpbd_iters(n_iters, verbose_iters=verbose)
 
         # Taubin smoothing: smooth surface jaggedness without shrinkage
