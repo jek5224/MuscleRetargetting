@@ -153,6 +153,7 @@ def _xpbd_project_gauss_seidel(
     lambda_D: ti.template(),
     alpha_H: ti.template(),
     alpha_D: ti.template(),
+    target_J: ti.template(),
     n_color_tets: ti.i32,
 ):
     """Gauss-Seidel XPBD: one color's tets in parallel, direct updates.
@@ -879,6 +880,22 @@ class UnifiedFEMSolver:
         self.ti_alpha_H = ti.field(dtype=ti.f64, shape=M)
         self.ti_alpha_D = ti.field(dtype=ti.f64, shape=M)
         self.ti_valence = ti.field(dtype=ti.f64, shape=N)  # vertex valence for Jacobi
+        self.ti_target_J = ti.field(dtype=ti.f64, shape=M)  # per-tet volume target
+
+        # Compute per-tet target J: tets with fixed vertices accept more compression.
+        # Count fixed vertices per tet: 0 = free (target J=1), 1-3 = near-attach (lower target)
+        target_J_np = np.ones(M, dtype=np.float64)
+        for t in range(M):
+            n_fixed = sum(1 for j in range(4) if self._orig_fixed_mask[self.tetrahedra[t, j]])
+            if n_fixed >= 3:
+                target_J_np[t] = 0.1  # heavily constrained: accept large compression
+            elif n_fixed >= 2:
+                target_J_np[t] = 0.3
+            elif n_fixed >= 1:
+                target_J_np[t] = 0.5
+        self.ti_target_J.from_numpy(target_J_np)
+        n_relaxed = int(np.sum(target_J_np < 1.0))
+        print(f"  Relaxed volume target: {n_relaxed} tets near attachments")
 
         # Per-color tet arrays for Gauss-Seidel
         max_color_tets = max(len(ca) for ca in self._tet_color_arrays)
@@ -1390,8 +1407,6 @@ class UnifiedFEMSolver:
         # Save positions before solve for total convergence metric
         initial_pos = self.ti_positions.to_numpy().copy()
 
-        # SOR relaxation: omega > 1.0 accelerates Jacobi convergence.
-        # omega=1.5 is typical for XPBD on tet meshes.
         omega = 1.7
 
         # Pre-upload per-color tet arrays (padded to max size)
@@ -1420,6 +1435,7 @@ class UnifiedFEMSolver:
                         self.ti_Bm_inv, self.ti_rest_volume,
                         self.ti_lambda_H, self.ti_lambda_D,
                         self.ti_alpha_H, self.ti_alpha_D,
+                        self.ti_target_J,
                         n_ct,
                     )
 
@@ -1479,6 +1495,22 @@ class UnifiedFEMSolver:
                 self.ti_positions, self.ti_invm,
                 self.ti_coll_idx, self.ti_coll_targets, stiffness, nc)
             return nc
+
+        # Pre-conditioning: 5 soft iterations to regularize LBS inversions.
+        # Uses 100x higher compliance (softer) — just smooths distortions
+        # without changing the overall shape.
+        if not self._has_previous_solution:
+            # Temporarily increase compliance (softer)
+            self.ti_alpha_H.from_numpy(alpha_H_np * 100.0)
+            self.ti_alpha_D.from_numpy(alpha_D_np * 100.0)
+            self.ti_lambda_H.fill(0.0)
+            self.ti_lambda_D.fill(0.0)
+            _run_xpbd_iters(5)
+            # Restore normal compliance
+            self.ti_alpha_H.from_numpy(alpha_H_np)
+            self.ti_alpha_D.from_numpy(alpha_D_np)
+            self.ti_lambda_H.fill(0.0)
+            self.ti_lambda_D.fill(0.0)
 
         # All elastic iterations
         _run_xpbd_iters(n_iters, verbose_iters=verbose)
