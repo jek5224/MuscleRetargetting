@@ -1052,9 +1052,11 @@ class UnifiedFEMSolver:
         self.ti_positions.from_numpy(self.positions)
         _snap_fixed(self.ti_positions, self.ti_targets, self.ti_invm, N)
 
-        # Reset Lagrange multipliers
-        self.ti_lambda_H.fill(0.0)
-        self.ti_lambda_D.fill(0.0)
+        # Warm-start: keep Lagrange multipliers from previous frame for faster
+        # convergence. Reset only on first frame or when solver is rebuilt.
+        if not self._has_previous_solution:
+            self.ti_lambda_H.fill(0.0)
+            self.ti_lambda_D.fill(0.0)
 
         # Inter-muscle distance constraint setup
         K = self._n_dist_constraints
@@ -1062,7 +1064,8 @@ class UnifiedFEMSolver:
             dist_stiffness = effective_lam
             alpha_dist_np = 1.0 / (dist_stiffness * self._dist_rest + 1e-30)
             self.ti_dist_alpha.from_numpy(alpha_dist_np)
-            self.ti_dist_lambda.fill(0.0)
+            if not self._has_previous_solution:
+                self.ti_dist_lambda.fill(0.0)
 
         # Save positions before solve for total convergence metric
         initial_pos = self.ti_positions.to_numpy().copy()
@@ -1071,36 +1074,76 @@ class UnifiedFEMSolver:
         # omega=1.5 is typical for XPBD on tet meshes.
         omega = 1.7
 
-        # All elastic + inter-muscle distance iterations
-        for it in range(n_iters):
-            if verbose and it < 5:
-                _copy_positions(self.ti_pos_prev, self.ti_positions, N)
-
-            _xpbd_project_jacobi(
-                self.ti_positions, self.ti_invm, self.ti_valence,
-                self.ti_tets, self.ti_Bm_inv, self.ti_rest_volume,
-                self.ti_lambda_H, self.ti_lambda_D,
-                self.ti_alpha_H, self.ti_alpha_D,
-                omega, M,
-            )
-            if K > 0:
-                self.ti_dist_correction.fill(0.0)
-                _xpbd_project_distance_jacobi_buffered(
-                    self.ti_dist_correction, self.ti_invm, self.ti_dist_valence,
-                    self.ti_dist_pair_i, self.ti_dist_pair_j,
-                    self.ti_dist_rest, self.ti_dist_lambda, self.ti_dist_alpha,
-                    self.ti_positions, omega, K,
+        # Helper: run n XPBD iterations
+        def _run_xpbd_iters(n, verbose_iters=False):
+            for it in range(n):
+                if verbose_iters and it < 3:
+                    _copy_positions(self.ti_pos_prev, self.ti_positions, N)
+                _xpbd_project_jacobi(
+                    self.ti_positions, self.ti_invm, self.ti_valence,
+                    self.ti_tets, self.ti_Bm_inv, self.ti_rest_volume,
+                    self.ti_lambda_H, self.ti_lambda_D,
+                    self.ti_alpha_H, self.ti_alpha_D,
+                    omega, M,
                 )
-                _apply_clamped_corrections(
-                    self.ti_positions, self.ti_dist_correction, self.ti_invm,
-                    0.001, N,
-                )
-            _snap_fixed(self.ti_positions, self.ti_targets, self.ti_invm, N)
+                if K > 0:
+                    self.ti_dist_correction.fill(0.0)
+                    _xpbd_project_distance_jacobi_buffered(
+                        self.ti_dist_correction, self.ti_invm, self.ti_dist_valence,
+                        self.ti_dist_pair_i, self.ti_dist_pair_j,
+                        self.ti_dist_rest, self.ti_dist_lambda, self.ti_dist_alpha,
+                        self.ti_positions, omega, K,
+                    )
+                    _apply_clamped_corrections(
+                        self.ti_positions, self.ti_dist_correction, self.ti_invm,
+                        0.001, N,
+                    )
+                _snap_fixed(self.ti_positions, self.ti_targets, self.ti_invm, N)
+                if verbose_iters and it < 3:
+                    delta = _compute_position_delta(
+                        self.ti_positions, self.ti_pos_prev, self.ti_invm, N)
+                    print(f"      iter {it}: ||dx||={delta**0.5:.6e}")
 
-            if verbose and it < 5:
-                delta = _compute_position_delta(
-                    self.ti_positions, self.ti_pos_prev, self.ti_invm, N)
-                print(f"      iter {it}: ||dx||={delta**0.5:.6e}")
+        # Helper: detect and project collisions, return merged targets
+        def _detect_and_project_collisions(verbose_coll=False):
+            all_ci = []
+            all_ct = []
+            if hasattr(self, '_muscle_surface_faces') and self._muscle_surface_faces:
+                self.positions = self.ti_positions.to_numpy()
+                mi, mt = self._compute_muscle_collision_targets(
+                    margin=margin, verbose=verbose_coll)
+                if len(mi) > 0:
+                    all_ci.append(mi); all_ct.append(mt)
+            if self._merged_bone_mesh is not None:
+                self.positions = self.ti_positions.to_numpy()
+                bi, bt = self._compute_collision_targets(
+                    margin, verbose=verbose_coll)
+                if len(bi) > 0:
+                    all_ci.append(bi); all_ct.append(bt)
+            if not all_ci:
+                return np.array([], dtype=np.int32), np.zeros((0, 3))
+            return np.concatenate(all_ci), np.concatenate(all_ct)
+
+        def _upload_and_project(idx, tgt, stiffness=1.0):
+            nc = len(idx)
+            if nc == 0:
+                return
+            if nc > self._max_coll:
+                self._max_coll = max(nc, 1000)
+                self.ti_coll_idx = ti.field(dtype=ti.i32, shape=self._max_coll)
+                self.ti_coll_targets = ti.Vector.field(3, dtype=ti.f64, shape=self._max_coll)
+            ip = np.zeros(self._max_coll, dtype=np.int32)
+            tp = np.zeros((self._max_coll, 3), dtype=np.float64)
+            ip[:nc] = idx; tp[:nc] = tgt
+            self.ti_coll_idx.from_numpy(ip)
+            self.ti_coll_targets.from_numpy(tp)
+            _apply_collision_projection(
+                self.ti_positions, self.ti_invm,
+                self.ti_coll_idx, self.ti_coll_targets, stiffness, nc)
+            return nc
+
+        # All elastic iterations
+        _run_xpbd_iters(n_iters, verbose_iters=verbose)
 
         # Taubin smoothing: smooth surface jaggedness without shrinkage
         if self._n_surf_verts > 0:
@@ -1124,80 +1167,16 @@ class UnifiedFEMSolver:
                     self.ti_surf_verts, self.ti_invm, S)
             _snap_fixed(self.ti_positions, self.ti_targets, self.ti_invm, N)
 
-        # Collision-relaxation cycles: detect collisions, project, relax with
-        # XPBD iterations while re-enforcing collision. Multiple cycles let
-        # the solver gradually integrate collision constraints.
-        has_mm_coll = hasattr(self, '_muscle_surface_faces') and bool(self._muscle_surface_faces)
-        has_bone_coll = self._merged_bone_mesh is not None
-        n_coll = 0
-        n_mm_coll = 0
-        n_coll_cycles = 2
-        n_relax_iters = 15
-
-        for cycle in range(n_coll_cycles):
-            all_coll_idx = []
-            all_coll_tgt = []
-
-            # Muscle-muscle collision
-            if has_mm_coll:
-                self.positions = self.ti_positions.to_numpy()
-                mm_idx, mm_tgt = self._compute_muscle_collision_targets(
-                    margin=margin, verbose=(verbose and cycle == 0))
-                n_mm_coll = len(mm_idx)
-                if n_mm_coll > 0:
-                    all_coll_idx.append(mm_idx)
-                    all_coll_tgt.append(mm_tgt)
-
-            # Bone collision
-            if has_bone_coll:
-                self.positions = self.ti_positions.to_numpy()
-                coll_idx_np, coll_tgt_np = self._compute_collision_targets(
-                    margin, verbose=(verbose and cycle == 0))
-                n_coll = len(coll_idx_np)
-                if n_coll > 0:
-                    all_coll_idx.append(coll_idx_np)
-                    all_coll_tgt.append(coll_tgt_np)
-
-            if not all_coll_idx:
-                break
-
-            merged_idx = np.concatenate(all_coll_idx)
-            merged_tgt = np.concatenate(all_coll_tgt)
-            n_merged = len(merged_idx)
-            if n_merged > self._max_coll:
-                self._max_coll = max(n_merged, 1000)
-                self.ti_coll_idx = ti.field(dtype=ti.i32, shape=self._max_coll)
-                self.ti_coll_targets = ti.Vector.field(3, dtype=ti.f64, shape=self._max_coll)
-            idx_padded = np.zeros(self._max_coll, dtype=np.int32)
-            tgt_padded = np.zeros((self._max_coll, 3), dtype=np.float64)
-            idx_padded[:n_merged] = merged_idx
-            tgt_padded[:n_merged] = merged_tgt
-            self.ti_coll_idx.from_numpy(idx_padded)
-            self.ti_coll_targets.from_numpy(tgt_padded)
-
-            # Project then relax
-            _apply_collision_projection(
-                self.ti_positions, self.ti_invm,
-                self.ti_coll_idx, self.ti_coll_targets, 1.0, n_merged)
-
-            for relax_it in range(n_relax_iters):
-                _xpbd_project_jacobi(
-                    self.ti_positions, self.ti_invm, self.ti_valence,
-                    self.ti_tets, self.ti_Bm_inv, self.ti_rest_volume,
-                    self.ti_lambda_H, self.ti_lambda_D,
-                    self.ti_alpha_H, self.ti_alpha_D,
-                    omega, M,
-                )
-                _snap_fixed(self.ti_positions, self.ti_targets, self.ti_invm, N)
-                _apply_collision_projection(
-                    self.ti_positions, self.ti_invm,
-                    self.ti_coll_idx, self.ti_coll_targets,
-                    0.5, n_merged,
-                )
-
-        if verbose and (n_coll > 0 or n_mm_coll > 0):
-            print(f"    collision: {n_coll} bone + {n_mm_coll} mm "
-                  f"({n_coll_cycles} cycles x {n_relax_iters} relax)")
+        # Final collision: detect and project + relax
+        final_idx, final_tgt = _detect_and_project_collisions(verbose_coll=verbose)
+        n_coll_total = len(final_idx)
+        if n_coll_total > 0:
+            _upload_and_project(final_idx, final_tgt, stiffness=1.0)
+            for _ in range(15):
+                _run_xpbd_iters(1)
+                _upload_and_project(final_idx, final_tgt, stiffness=0.5)
+            if verbose:
+                print(f"    final collision: {n_coll_total} vertices projected + 15 relax")
 
         # Download positions
         self.positions = self.ti_positions.to_numpy()
@@ -1216,7 +1195,7 @@ class UnifiedFEMSolver:
             Js = np.linalg.det(Ds @ self.Bm_inv)
             n_inv = int(np.sum(Js <= 0))
             print(f"    final: iters={n_iters} ||dx||={residual:.4e} "
-                  f"inv={n_inv}/{M} bone_coll={n_coll} mm_coll={n_mm_coll} dist={K} "
+                  f"inv={n_inv}/{M} dist={K} "
                   f"J=[{np.min(Js):.3f},{np.max(Js):.3f}]")
 
         self._has_previous_solution = True
@@ -2359,7 +2338,7 @@ class VBDSolver:
             Js = np.linalg.det(Ds @ self.Bm_inv)
             n_inv = int(np.sum(Js <= 0))
             print(f"    final: iters={n_iters} ||dx||={residual:.4e} "
-                  f"inv={n_inv}/{M} bone_coll={n_coll} mm_coll={n_mm_coll} dist={K} "
+                  f"inv={n_inv}/{M} dist={K} "
                   f"J=[{np.min(Js):.3f},{np.max(Js):.3f}]")
 
         self._has_previous_solution = True
