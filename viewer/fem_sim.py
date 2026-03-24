@@ -142,6 +142,98 @@ def _xpbd_project_jacobi(
 
 
 @ti.kernel
+def _xpbd_project_gauss_seidel(
+    positions: ti.template(),
+    invm: ti.template(),
+    color_tets: ti.template(),
+    tets: ti.template(),
+    Bm_inv: ti.template(),
+    rest_volume: ti.template(),
+    lambda_H: ti.template(),
+    lambda_D: ti.template(),
+    alpha_H: ti.template(),
+    alpha_D: ti.template(),
+    n_color_tets: ti.i32,
+):
+    """Gauss-Seidel XPBD: one color's tets in parallel, direct updates.
+
+    Within a color, no two tets share vertices, so corrections are independent.
+    No atomic_add needed, no valence division — exact corrections.
+    """
+    for ck in range(n_color_tets):
+        k = color_tets[ck]
+        i0 = tets[k][0]
+        i1 = tets[k][1]
+        i2 = tets[k][2]
+        i3 = tets[k][3]
+
+        x0 = positions[i0]; x1 = positions[i1]
+        x2 = positions[i2]; x3 = positions[i3]
+        w0 = invm[i0]; w1 = invm[i1]
+        w2 = invm[i2]; w3 = invm[i3]
+
+        Ds = ti.Matrix.cols([x0 - x3, x1 - x3, x2 - x3])
+        B = Bm_inv[k]
+        F = Ds @ B
+
+        f0 = ti.Vector([F[0, 0], F[1, 0], F[2, 0]], dt=ti.f64)
+        f1 = ti.Vector([F[0, 1], F[1, 1], F[2, 1]], dt=ti.f64)
+        f2 = ti.Vector([F[0, 2], F[1, 2], F[2, 2]], dt=ti.f64)
+
+        C_H = F.determinant() - 1.0
+        cof = ti.Matrix.cols([f1.cross(f2), f2.cross(f0), f0.cross(f1)])
+        CH_H = cof @ B.transpose()
+        g_H_0 = ti.Vector([CH_H[0, 0], CH_H[1, 0], CH_H[2, 0]], dt=ti.f64)
+        g_H_1 = ti.Vector([CH_H[0, 1], CH_H[1, 1], CH_H[2, 1]], dt=ti.f64)
+        g_H_2 = ti.Vector([CH_H[0, 2], CH_H[1, 2], CH_H[2, 2]], dt=ti.f64)
+        g_H_3 = -g_H_0 - g_H_1 - g_H_2
+
+        C_D = F.norm_sqr() - 3.0
+        CD_H = 2.0 * F @ B.transpose()
+        g_D_0 = ti.Vector([CD_H[0, 0], CD_H[1, 0], CD_H[2, 0]], dt=ti.f64)
+        g_D_1 = ti.Vector([CD_H[0, 1], CD_H[1, 1], CD_H[2, 1]], dt=ti.f64)
+        g_D_2 = ti.Vector([CD_H[0, 2], CD_H[1, 2], CD_H[2, 2]], dt=ti.f64)
+        g_D_3 = -g_D_0 - g_D_1 - g_D_2
+
+        s_HH = (w0 * g_H_0.norm_sqr() + w1 * g_H_1.norm_sqr() +
+                 w2 * g_H_2.norm_sqr() + w3 * g_H_3.norm_sqr())
+        s_DD = (w0 * g_D_0.norm_sqr() + w1 * g_D_1.norm_sqr() +
+                 w2 * g_D_2.norm_sqr() + w3 * g_D_3.norm_sqr())
+        s_HD = (w0 * g_H_0.dot(g_D_0) + w1 * g_H_1.dot(g_D_1) +
+                 w2 * g_H_2.dot(g_D_2) + w3 * g_H_3.dot(g_D_3))
+
+        a_H = alpha_H[k]
+        a_D = alpha_D[k]
+
+        A00 = s_HH + a_H
+        A01 = s_HD
+        A11 = s_DD + a_D
+        rhs_H = -(C_H + a_H * lambda_H[k])
+        rhs_D = -(C_D + a_D * lambda_D[k])
+
+        det = A00 * A11 - A01 * A01
+        dl_H = 0.0
+        dl_D = 0.0
+        if ti.abs(det) > 1e-30:
+            dl_H = (A11 * rhs_H - A01 * rhs_D) / det
+            dl_D = (A00 * rhs_D - A01 * rhs_H) / det
+        else:
+            if A00 > 1e-20:
+                dl_H = rhs_H / A00
+            if A11 > 1e-20:
+                dl_D = rhs_D / A11
+
+        # Direct update — no atomic_add, no valence division
+        positions[i0] += w0 * (g_H_0 * dl_H + g_D_0 * dl_D)
+        positions[i1] += w1 * (g_H_1 * dl_H + g_D_1 * dl_D)
+        positions[i2] += w2 * (g_H_2 * dl_H + g_D_2 * dl_D)
+        positions[i3] += w3 * (g_H_3 * dl_H + g_D_3 * dl_D)
+
+        lambda_H[k] += dl_H
+        lambda_D[k] += dl_D
+
+
+@ti.kernel
 def _snap_fixed(positions: ti.template(), targets: ti.template(),
                 invm: ti.template(), n: ti.i32):
     """Snap fixed vertices (invm=0) to their targets."""
@@ -493,6 +585,9 @@ class UnifiedFEMSolver:
         avg_val = float(self._vertex_valence[self._vertex_valence > 0].mean())
         print(f"  Vertex valence: avg={avg_val:.1f}, max={max_val}")
 
+        # Tet graph coloring for Gauss-Seidel XPBD
+        self._build_tet_coloring()
+
         # Build surface adjacency for Laplacian smoothing (per-muscle, no cross-muscle edges)
         self._build_surface_adjacency(all_surface_faces)
 
@@ -546,6 +641,51 @@ class UnifiedFEMSolver:
         self.Bm_inv = np.linalg.inv(Bm)
         self.rest_volume = np.abs(np.linalg.det(Bm)) / 6.0
 
+    def _build_tet_coloring(self):
+        """Color tets so no two tets in the same color share a vertex.
+
+        Enables Gauss-Seidel XPBD: within a color, all tet corrections
+        are independent, so parallel execution is exact (no atomic_add).
+        """
+        from collections import defaultdict
+
+        M = self._n_tets
+        tets = self.tetrahedra
+
+        # Build tet adjacency: two tets are adjacent if they share any vertex
+        vert_to_tets = defaultdict(list)
+        for t in range(M):
+            for j in range(4):
+                vert_to_tets[tets[t, j]].append(t)
+
+        tet_adj = defaultdict(set)
+        for v_tets in vert_to_tets.values():
+            for i in range(len(v_tets)):
+                for j in range(i + 1, len(v_tets)):
+                    tet_adj[v_tets[i]].add(v_tets[j])
+                    tet_adj[v_tets[j]].add(v_tets[i])
+
+        # Greedy coloring
+        color = np.full(M, -1, dtype=np.int32)
+        for t in range(M):
+            used = set()
+            for nb in tet_adj[t]:
+                if color[nb] >= 0:
+                    used.add(color[nb])
+            c = 0
+            while c in used:
+                c += 1
+            color[t] = c
+
+        n_colors = int(color.max()) + 1
+        self._tet_n_colors = n_colors
+        self._tet_color_arrays = []
+        for c in range(n_colors):
+            tets_c = np.where(color == c)[0].astype(np.int32)
+            self._tet_color_arrays.append(tets_c)
+
+        print(f"  Tet graph coloring: {n_colors} colors")
+
     def _allocate_fields(self):
         N = self._n_verts
         M = self._n_tets
@@ -564,6 +704,11 @@ class UnifiedFEMSolver:
         self.ti_alpha_H = ti.field(dtype=ti.f64, shape=M)
         self.ti_alpha_D = ti.field(dtype=ti.f64, shape=M)
         self.ti_valence = ti.field(dtype=ti.f64, shape=N)  # vertex valence for Jacobi
+
+        # Per-color tet arrays for Gauss-Seidel
+        max_color_tets = max(len(ca) for ca in self._tet_color_arrays)
+        self.ti_color_tets = ti.field(dtype=ti.i32, shape=max_color_tets)
+        self._max_color_tets = max_color_tets
 
         # Buffered distance corrections for clamping
         self.ti_dist_correction = ti.Vector.field(3, dtype=ti.f64, shape=N)
@@ -1074,18 +1219,35 @@ class UnifiedFEMSolver:
         # omega=1.5 is typical for XPBD on tet meshes.
         omega = 1.7
 
-        # Helper: run n XPBD iterations
+        # Pre-upload per-color tet arrays (padded to max size)
+        color_tet_arrays = []
+        for c in range(self._tet_n_colors):
+            ca = self._tet_color_arrays[c]
+            padded = np.zeros(self._max_color_tets, dtype=np.int32)
+            padded[:len(ca)] = ca
+            color_tet_arrays.append((padded, len(ca)))
+
+        # Helper: run n XPBD iterations using Gauss-Seidel coloring
         def _run_xpbd_iters(n, verbose_iters=False):
             for it in range(n):
                 if verbose_iters and it < 3:
                     _copy_positions(self.ti_pos_prev, self.ti_positions, N)
-                _xpbd_project_jacobi(
-                    self.ti_positions, self.ti_invm, self.ti_valence,
-                    self.ti_tets, self.ti_Bm_inv, self.ti_rest_volume,
-                    self.ti_lambda_H, self.ti_lambda_D,
-                    self.ti_alpha_H, self.ti_alpha_D,
-                    omega, M,
-                )
+
+                # Gauss-Seidel: process one color at a time
+                for c in range(self._tet_n_colors):
+                    padded, n_ct = color_tet_arrays[c]
+                    if n_ct == 0:
+                        continue
+                    self.ti_color_tets.from_numpy(padded)
+                    _xpbd_project_gauss_seidel(
+                        self.ti_positions, self.ti_invm,
+                        self.ti_color_tets, self.ti_tets,
+                        self.ti_Bm_inv, self.ti_rest_volume,
+                        self.ti_lambda_H, self.ti_lambda_D,
+                        self.ti_alpha_H, self.ti_alpha_D,
+                        n_ct,
+                    )
+
                 if K > 0:
                     self.ti_dist_correction.fill(0.0)
                     _xpbd_project_distance_jacobi_buffered(
