@@ -1106,9 +1106,8 @@ class UnifiedFEMSolver:
         if self._n_surf_verts > 0:
             S = self._n_surf_verts
             lam_smooth = 0.3
-            mu_smooth = -0.31  # slightly larger magnitude to prevent shrinkage
-            for _ in range(2):  # 2 Taubin passes
-                # Smooth pass (shrink)
+            mu_smooth = -0.31
+            for _ in range(2):
                 _laplacian_smooth_surface(
                     self.ti_positions, self.ti_smoothed, self.ti_invm,
                     self.ti_surf_verts, self.ti_surf_adj_data,
@@ -1116,7 +1115,6 @@ class UnifiedFEMSolver:
                 _copy_smoothed_to_positions(
                     self.ti_positions, self.ti_smoothed,
                     self.ti_surf_verts, self.ti_invm, S)
-                # Inflate pass (unshrink)
                 _laplacian_smooth_surface(
                     self.ti_positions, self.ti_smoothed, self.ti_invm,
                     self.ti_surf_verts, self.ti_surf_adj_data,
@@ -1126,74 +1124,43 @@ class UnifiedFEMSolver:
                     self.ti_surf_verts, self.ti_invm, S)
             _snap_fixed(self.ti_positions, self.ti_targets, self.ti_invm, N)
 
-        # Muscle-muscle collision: detect and project penetrating vertices
-        n_mm_coll = 0
-        if hasattr(self, '_muscle_surface_faces') and self._muscle_surface_faces:
-            self.positions = self.ti_positions.to_numpy()
-            mm_idx, mm_tgt = self._compute_muscle_collision_targets(
-                margin=margin, verbose=verbose)
-            n_mm_coll = len(mm_idx)
-            if n_mm_coll > 0:
-                if n_mm_coll > self._max_coll:
-                    self._max_coll = max(n_mm_coll, 1000)
-                    self.ti_coll_idx = ti.field(dtype=ti.i32, shape=self._max_coll)
-                    self.ti_coll_targets = ti.Vector.field(3, dtype=ti.f64, shape=self._max_coll)
-                idx_padded = np.zeros(self._max_coll, dtype=np.int32)
-                tgt_padded = np.zeros((self._max_coll, 3), dtype=np.float64)
-                idx_padded[:n_mm_coll] = mm_idx
-                tgt_padded[:n_mm_coll] = mm_tgt
-                self.ti_coll_idx.from_numpy(idx_padded)
-                self.ti_coll_targets.from_numpy(tgt_padded)
-                _apply_collision_projection(
-                    self.ti_positions, self.ti_invm,
-                    self.ti_coll_idx, self.ti_coll_targets,
-                    1.0, n_mm_coll,
-                )
-                if verbose:
-                    print(f"    muscle-muscle collision: {n_mm_coll} vertices projected")
-
-        # Final bone collision: detect and project as the VERY LAST step.
-        # No elastic iterations after this — output is guaranteed penetration-free.
+        # Collision-relaxation cycles: detect collisions, project, relax with
+        # XPBD iterations while re-enforcing collision. Multiple cycles let
+        # the solver gradually integrate collision constraints.
+        has_mm_coll = hasattr(self, '_muscle_surface_faces') and bool(self._muscle_surface_faces)
+        has_bone_coll = self._merged_bone_mesh is not None
         n_coll = 0
-        if self._merged_bone_mesh is not None:
-            self.positions = self.ti_positions.to_numpy()
-            coll_idx_np, coll_tgt_np = self._compute_collision_targets(
-                margin, verbose=verbose)
-            n_coll = len(coll_idx_np)
-            if n_coll > 0:
-                if n_coll > self._max_coll:
-                    self._max_coll = max(n_coll, 1000)
-                    self.ti_coll_idx = ti.field(dtype=ti.i32, shape=self._max_coll)
-                    self.ti_coll_targets = ti.Vector.field(3, dtype=ti.f64, shape=self._max_coll)
-                idx_padded = np.zeros(self._max_coll, dtype=np.int32)
-                tgt_padded = np.zeros((self._max_coll, 3), dtype=np.float64)
-                idx_padded[:n_coll] = coll_idx_np
-                tgt_padded[:n_coll] = coll_tgt_np
-                self.ti_coll_idx.from_numpy(idx_padded)
-                self.ti_coll_targets.from_numpy(tgt_padded)
-                _apply_collision_projection(
-                    self.ti_positions, self.ti_invm,
-                    self.ti_coll_idx, self.ti_coll_targets,
-                    1.0, n_coll,
-                )
-                if verbose:
-                    print(f"    bone collision: {n_coll} vertices projected")
+        n_mm_coll = 0
+        n_coll_cycles = 2
+        n_relax_iters = 15
 
-        # Post-collision relaxation: run a few XPBD iterations to smooth
-        # the discontinuity from hard collision projection, re-enforcing
-        # collision targets each iteration so vertices don't spring back.
-        n_relax = 10
-        has_any_coll = n_coll > 0 or n_mm_coll > 0
-        if has_any_coll:
-            # Collect all collision targets (bone + muscle-muscle)
+        for cycle in range(n_coll_cycles):
             all_coll_idx = []
             all_coll_tgt = []
-            if n_coll > 0:
-                all_coll_idx.append(coll_idx_np)
-                all_coll_tgt.append(coll_tgt_np)
-            if n_mm_coll > 0:
-                all_coll_idx.append(mm_idx)
-                all_coll_tgt.append(mm_tgt)
+
+            # Muscle-muscle collision
+            if has_mm_coll:
+                self.positions = self.ti_positions.to_numpy()
+                mm_idx, mm_tgt = self._compute_muscle_collision_targets(
+                    margin=margin, verbose=(verbose and cycle == 0))
+                n_mm_coll = len(mm_idx)
+                if n_mm_coll > 0:
+                    all_coll_idx.append(mm_idx)
+                    all_coll_tgt.append(mm_tgt)
+
+            # Bone collision
+            if has_bone_coll:
+                self.positions = self.ti_positions.to_numpy()
+                coll_idx_np, coll_tgt_np = self._compute_collision_targets(
+                    margin, verbose=(verbose and cycle == 0))
+                n_coll = len(coll_idx_np)
+                if n_coll > 0:
+                    all_coll_idx.append(coll_idx_np)
+                    all_coll_tgt.append(coll_tgt_np)
+
+            if not all_coll_idx:
+                break
+
             merged_idx = np.concatenate(all_coll_idx)
             merged_tgt = np.concatenate(all_coll_tgt)
             n_merged = len(merged_idx)
@@ -1208,7 +1175,12 @@ class UnifiedFEMSolver:
             self.ti_coll_idx.from_numpy(idx_padded)
             self.ti_coll_targets.from_numpy(tgt_padded)
 
-            for relax_it in range(n_relax):
+            # Project then relax
+            _apply_collision_projection(
+                self.ti_positions, self.ti_invm,
+                self.ti_coll_idx, self.ti_coll_targets, 1.0, n_merged)
+
+            for relax_it in range(n_relax_iters):
                 _xpbd_project_jacobi(
                     self.ti_positions, self.ti_invm, self.ti_valence,
                     self.ti_tets, self.ti_Bm_inv, self.ti_rest_volume,
@@ -1217,12 +1189,15 @@ class UnifiedFEMSolver:
                     omega, M,
                 )
                 _snap_fixed(self.ti_positions, self.ti_targets, self.ti_invm, N)
-                # Re-enforce collision targets
                 _apply_collision_projection(
                     self.ti_positions, self.ti_invm,
                     self.ti_coll_idx, self.ti_coll_targets,
-                    0.5, n_merged,  # softer stiffness during relaxation
+                    0.5, n_merged,
                 )
+
+        if verbose and (n_coll > 0 or n_mm_coll > 0):
+            print(f"    collision: {n_coll} bone + {n_mm_coll} mm "
+                  f"({n_coll_cycles} cycles x {n_relax_iters} relax)")
 
         # Download positions
         self.positions = self.ti_positions.to_numpy()
