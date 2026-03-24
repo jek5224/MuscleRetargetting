@@ -229,9 +229,7 @@ def _xpbd_project_gauss_seidel(
             if A11 > 1e-20:
                 dl_D = rhs_D / A11
 
-        # Clamp multiplier updates to prevent overshooting on inverted tets.
-        # Without clamping, severely inverted tets (J << 0) produce huge
-        # corrections that overshoot and create new inversions.
+        # Clamp multiplier updates
         max_dl = 2.0
         dl_H = ti.min(ti.max(dl_H, -max_dl), max_dl)
         dl_D = ti.min(ti.max(dl_D, -max_dl), max_dl)
@@ -284,6 +282,92 @@ def _recover_inversions(
                 positions[i2] += strength * (centroid - x2)
             if invm[i3] > 0.0:
                 positions[i3] += strength * (centroid - x3)
+
+
+@ti.kernel
+def _svd_recover_inversions_color(
+    positions: ti.template(),
+    invm: ti.template(),
+    color_tets: ti.template(),
+    tets: ti.template(),
+    Bm_inv: ti.template(),
+    rest_volume: ti.template(),
+    blend: ti.f64,
+    n_color_tets: ti.i32,
+):
+    """SVD-based inversion recovery for one color's tets.
+
+    For each inverted tet (J < 0.01):
+    1. Decompose F = U Σ V^T
+    2. Clamp negative singular values to ε (fix reflection)
+    3. Reconstruct target deformation gradient F_fixed
+    4. Compute target vertex positions from F_fixed
+    5. Blend current positions toward target (blend factor)
+
+    Same-color tets share no vertices → parallel-safe.
+    """
+    for ck in range(n_color_tets):
+        k = color_tets[ck]
+        i0 = tets[k][0]; i1 = tets[k][1]
+        i2 = tets[k][2]; i3 = tets[k][3]
+        x0 = positions[i0]; x1 = positions[i1]
+        x2 = positions[i2]; x3 = positions[i3]
+
+        Ds = ti.Matrix.cols([x0 - x3, x1 - x3, x2 - x3])
+        B = Bm_inv[k]
+        F = Ds @ B
+        J = F.determinant()
+
+        if J >= 0.01:
+            continue
+
+        # SVD: F = U @ diag(sig) @ V^T
+        U, sig, V = ti.svd(F, ti.f64)
+
+        # Clamp singular values: flip negative (inverted) to positive
+        eps_sv = 0.01
+        sig_fixed = ti.Matrix.zero(ti.f64, 3, 3)
+        sig_fixed[0, 0] = ti.max(sig[0, 0], eps_sv)
+        sig_fixed[1, 1] = ti.max(sig[1, 1], eps_sv)
+        sig_fixed[2, 2] = ti.max(sig[2, 2], eps_sv)
+
+        # Ensure positive determinant (proper rotation, not reflection)
+        det_UV = (U @ V.transpose()).determinant()
+        if det_UV < 0.0:
+            # Flip smallest singular value to fix reflection
+            if sig_fixed[0, 0] <= sig_fixed[1, 1] and sig_fixed[0, 0] <= sig_fixed[2, 2]:
+                sig_fixed[0, 0] = -sig_fixed[0, 0]
+            elif sig_fixed[1, 1] <= sig_fixed[2, 2]:
+                sig_fixed[1, 1] = -sig_fixed[1, 1]
+            else:
+                sig_fixed[2, 2] = -sig_fixed[2, 2]
+
+        # Reconstruct fixed F and target Ds
+        F_fixed = U @ sig_fixed @ V.transpose()
+
+        # Ds_target = F_fixed @ Bm  where Bm = Bm_inv^{-1}
+        # Since Ds = [x0-x3, x1-x3, x2-x3] and F = Ds @ Bm_inv,
+        # Ds_target = F_fixed @ Bm_inv^{-1}
+        # But we can compute target edge vectors directly:
+        # Ds_target[:,j] = F_fixed @ Bm^{-1}[:,j] ... that's circular.
+        # Instead: Ds_target = F_fixed @ Bm where Bm = inv(Bm_inv)
+        Bm = B.inverse()
+        Ds_target = F_fixed @ Bm
+
+        # Target positions: x0_t = x3 + Ds_target[:,0], etc.
+        t0 = x3 + ti.Vector([Ds_target[0, 0], Ds_target[1, 0], Ds_target[2, 0]])
+        t1 = x3 + ti.Vector([Ds_target[0, 1], Ds_target[1, 1], Ds_target[2, 1]])
+        t2 = x3 + ti.Vector([Ds_target[0, 2], Ds_target[1, 2], Ds_target[2, 2]])
+        # x3 stays (it's the reference vertex)
+
+        # Blend toward target
+        if invm[i0] > 0.0:
+            positions[i0] += blend * (t0 - x0)
+        if invm[i1] > 0.0:
+            positions[i1] += blend * (t1 - x1)
+        if invm[i2] > 0.0:
+            positions[i2] += blend * (t2 - x2)
+        # Don't move i3 — it's the reference for Ds convention
 
 
 @ti.kernel
