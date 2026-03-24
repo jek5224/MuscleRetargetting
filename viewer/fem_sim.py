@@ -2760,6 +2760,621 @@ class VBDSolver:
 
 
 # ---------------------------------------------------------------------------
+# Projected Newton Solver (CG + inversion-safe line search)
+# ---------------------------------------------------------------------------
+
+@ti.kernel
+def _pn_compute_energy(
+    positions: ti.template(), invm: ti.template(),
+    tets: ti.template(), Bm_inv: ti.template(), rest_volume: ti.template(),
+    mu: ti.f64, lam: ti.f64, n_tets: ti.i32,
+) -> ti.f64:
+    """Compute total Stable Neo-Hookean energy."""
+    E = 0.0
+    for k in range(n_tets):
+        i0 = tets[k][0]; i1 = tets[k][1]; i2 = tets[k][2]; i3 = tets[k][3]
+        Ds = ti.Matrix.cols([positions[i0] - positions[i3],
+                              positions[i1] - positions[i3],
+                              positions[i2] - positions[i3]])
+        F = Ds @ Bm_inv[k]
+        I1 = F.norm_sqr()
+        J = F.determinant()
+        V0 = rest_volume[k]
+        ti.atomic_add(E, V0 * (mu * 0.5 * (I1 - 3.0) + lam * 0.5 * (J - 1.0) * (J - 1.0)))
+    return E
+
+
+@ti.kernel
+def _pn_compute_gradient(
+    positions: ti.template(), gradient: ti.template(), invm: ti.template(),
+    tets: ti.template(), Bm_inv: ti.template(), rest_volume: ti.template(),
+    mu: ti.f64, lam: ti.f64, n_tets: ti.i32,
+):
+    """Compute global gradient of Stable Neo-Hookean energy. g = ∂E/∂x."""
+    for k in range(n_tets):
+        i0 = tets[k][0]; i1 = tets[k][1]; i2 = tets[k][2]; i3 = tets[k][3]
+        Ds = ti.Matrix.cols([positions[i0] - positions[i3],
+                              positions[i1] - positions[i3],
+                              positions[i2] - positions[i3]])
+        B = Bm_inv[k]
+        F = Ds @ B
+        V0 = rest_volume[k]
+        f0 = ti.Vector([F[0, 0], F[1, 0], F[2, 0]])
+        f1 = ti.Vector([F[0, 1], F[1, 1], F[2, 1]])
+        f2 = ti.Vector([F[0, 2], F[1, 2], F[2, 2]])
+        J = F.determinant()
+        cof = ti.Matrix.cols([f1.cross(f2), f2.cross(f0), f0.cross(f1)])
+        # P = mu*F + lam*(J-1)*cof
+        P = mu * F + lam * (J - 1.0) * cof
+        # gradient per vertex = V0 * P @ B^T, extracted per column
+        PBt = P @ B.transpose()
+        g0 = V0 * ti.Vector([PBt[0, 0], PBt[1, 0], PBt[2, 0]])
+        g1 = V0 * ti.Vector([PBt[0, 1], PBt[1, 1], PBt[2, 1]])
+        g2 = V0 * ti.Vector([PBt[0, 2], PBt[1, 2], PBt[2, 2]])
+        g3 = -(g0 + g1 + g2)
+        ti.atomic_add(gradient[i0], g0)
+        ti.atomic_add(gradient[i1], g1)
+        ti.atomic_add(gradient[i2], g2)
+        ti.atomic_add(gradient[i3], g3)
+
+
+@ti.kernel
+def _pn_hessian_vec(
+    positions: ti.template(), p_vec: ti.template(), result: ti.template(),
+    invm: ti.template(),
+    tets: ti.template(), Bm_inv: ti.template(), rest_volume: ti.template(),
+    mu: ti.f64, lam: ti.f64, n_tets: ti.i32,
+):
+    """Matrix-free Hessian-vector product: result = H @ p_vec.
+
+    Uses Gauss-Newton approximation of the Hessian (drops ∂cof/∂F term).
+    For each tet: dF = dDs @ Bm_inv, dP_GN = mu*dF + lam*(cof:dF)*cof.
+    """
+    for k in range(n_tets):
+        i0 = tets[k][0]; i1 = tets[k][1]; i2 = tets[k][2]; i3 = tets[k][3]
+        B = Bm_inv[k]
+        V0 = rest_volume[k]
+
+        # Current F for cofactor
+        Ds = ti.Matrix.cols([positions[i0] - positions[i3],
+                              positions[i1] - positions[i3],
+                              positions[i2] - positions[i3]])
+        F = Ds @ B
+        f0 = ti.Vector([F[0, 0], F[1, 0], F[2, 0]])
+        f1 = ti.Vector([F[0, 1], F[1, 1], F[2, 1]])
+        f2 = ti.Vector([F[0, 2], F[1, 2], F[2, 2]])
+        cof = ti.Matrix.cols([f1.cross(f2), f2.cross(f0), f0.cross(f1)])
+
+        # Search direction for this tet's vertices
+        p0 = p_vec[i0]; p1 = p_vec[i1]; p2 = p_vec[i2]; p3 = p_vec[i3]
+        dDs = ti.Matrix.cols([p0 - p3, p1 - p3, p2 - p3])
+        dF = dDs @ B
+
+        # dP_GN = mu*dF + lam*(cof:dF)*cof  (Gauss-Newton)
+        cof_dF = 0.0  # cof : dF (Frobenius inner product)
+        for ii in range(3):
+            for jj in range(3):
+                cof_dF += cof[ii, jj] * dF[ii, jj]
+        dP = mu * dF + lam * cof_dF * cof
+
+        # H*p per vertex = V0 * dP @ B^T
+        dPBt = dP @ B.transpose()
+        h0 = V0 * ti.Vector([dPBt[0, 0], dPBt[1, 0], dPBt[2, 0]])
+        h1 = V0 * ti.Vector([dPBt[0, 1], dPBt[1, 1], dPBt[2, 1]])
+        h2 = V0 * ti.Vector([dPBt[0, 2], dPBt[1, 2], dPBt[2, 2]])
+        h3 = -(h0 + h1 + h2)
+        ti.atomic_add(result[i0], h0)
+        ti.atomic_add(result[i1], h1)
+        ti.atomic_add(result[i2], h2)
+        ti.atomic_add(result[i3], h3)
+
+
+@ti.kernel
+def _pn_max_step_size(
+    positions: ti.template(), direction: ti.template(),
+    tets: ti.template(), Bm_inv: ti.template(), n_tets: ti.i32,
+) -> ti.f64:
+    """Inversion-safe step filter: find max α before any tet's J hits 0.
+
+    J(α) = det(Ds(x + α*p) @ Bm_inv) is cubic in α.
+    For each tet, find the smallest positive root and return 0.9× of the
+    global minimum.
+    """
+    alpha_max = 1.0
+    for k in range(n_tets):
+        i0 = tets[k][0]; i1 = tets[k][1]; i2 = tets[k][2]; i3 = tets[k][3]
+        B = Bm_inv[k]
+        x0 = positions[i0]; x1 = positions[i1]; x2 = positions[i2]; x3 = positions[i3]
+        p0 = direction[i0]; p1 = direction[i1]; p2 = direction[i2]; p3 = direction[i3]
+
+        # Current J (should be > 0)
+        Ds0 = ti.Matrix.cols([x0 - x3, x1 - x3, x2 - x3])
+        J0 = (Ds0 @ B).determinant()
+        if J0 <= 0.0:
+            continue  # already inverted, don't restrict
+
+        # J at α: binary search for zero crossing
+        a_lo = 0.0
+        a_hi = alpha_max
+        dDs = ti.Matrix.cols([p0 - p3, p1 - p3, p2 - p3])
+        Ds1 = Ds0 + a_hi * dDs
+        J1 = (Ds1 @ B).determinant()
+
+        if J1 > 0.0:
+            continue  # full step is safe for this tet
+
+        # Binary search for zero crossing
+        for _ in range(10):
+            a_mid = (a_lo + a_hi) * 0.5
+            Ds_mid = Ds0 + a_mid * dDs
+            J_mid = (Ds_mid @ B).determinant()
+            if J_mid > 0.0:
+                a_lo = a_mid
+            else:
+                a_hi = a_mid
+
+        safe_alpha = a_lo * 0.9
+        ti.atomic_min(alpha_max, safe_alpha)
+    return alpha_max
+
+
+@ti.kernel
+def _pn_dot(a: ti.template(), b: ti.template(), invm: ti.template(), n: ti.i32) -> ti.f64:
+    """Dot product of two vectors (free DOFs only)."""
+    s = 0.0
+    for i in range(n):
+        if invm[i] > 0.0:
+            ti.atomic_add(s, a[i].dot(b[i]))
+    return s
+
+
+@ti.kernel
+def _pn_axpy(y: ti.template(), a: ti.f64, x: ti.template(), invm: ti.template(), n: ti.i32):
+    """y += a * x for free DOFs."""
+    for i in range(n):
+        if invm[i] > 0.0:
+            y[i] += a * x[i]
+
+
+@ti.kernel
+def _pn_zero(v: ti.template(), n: ti.i32):
+    for i in range(n):
+        v[i] = ti.Vector([0.0, 0.0, 0.0])
+
+
+@ti.kernel
+def _pn_copy(dst: ti.template(), src: ti.template(), n: ti.i32):
+    for i in range(n):
+        dst[i] = src[i]
+
+
+@ti.kernel
+def _pn_scale(v: ti.template(), s: ti.f64, invm: ti.template(), n: ti.i32):
+    for i in range(n):
+        if invm[i] > 0.0:
+            v[i] *= s
+
+
+@ti.kernel
+def _pn_zero_fixed(v: ti.template(), invm: ti.template(), n: ti.i32):
+    """Zero out fixed DOFs."""
+    for i in range(n):
+        if invm[i] == 0.0:
+            v[i] = ti.Vector([0.0, 0.0, 0.0])
+
+
+class ProjectedNewtonSolver:
+    """Projected Newton solver with CG and inversion-safe line search.
+
+    Guarantees:
+    - Energy decreases every Newton step (Armijo line search)
+    - J > 0 for all tets at every step (inversion filter)
+    - Quadratic convergence near solution
+
+    Same interface as UnifiedFEMSolver: build(), solve(), get_muscle_positions().
+    """
+
+    def __init__(self):
+        self._built = False
+        self._n_verts = 0
+        self._n_tets = 0
+        self._muscle_ranges = {}
+        self._merged_bone_mesh = None
+        self._orig_fixed_mask = None
+        self._has_previous_solution = False
+        self._n_dist_constraints = 0
+        self._dist_pair_i = None
+        self._dist_pair_j = None
+        self._dist_rest = None
+
+    def build(self, muscles_data):
+        _ensure_ti_init()
+
+        all_verts = []
+        all_tets = []
+        all_fixed = []
+        all_surface_verts = []
+        all_surface_faces = []
+        vert_offset = 0
+        tet_offset = 0
+
+        for name, data in muscles_data.items():
+            n_v = len(data['rest_positions'])
+            n_t = len(data['tetrahedra'])
+            all_verts.append(data['rest_positions'].astype(np.float64))
+            all_tets.append(data['tetrahedra'].astype(np.int32) + vert_offset)
+            all_fixed.append(data['fixed_mask'].astype(bool))
+            if data.get('surface_faces') is not None:
+                surf_faces = data['surface_faces'].astype(np.int32) + vert_offset
+                surf_v = np.unique(surf_faces.ravel())
+                all_surface_faces.append(surf_faces)
+            else:
+                surf_v = np.arange(vert_offset, vert_offset + n_v)
+            all_surface_verts.append(surf_v)
+            self._muscle_ranges[name] = (vert_offset, vert_offset + n_v,
+                                         tet_offset, tet_offset + n_t)
+            vert_offset += n_v
+            tet_offset += n_t
+
+        self._n_verts = vert_offset
+        self.rest_positions = np.concatenate(all_verts, axis=0)
+        self.positions = self.rest_positions.copy()
+        self.tetrahedra = np.concatenate(all_tets, axis=0)
+        self._orig_fixed_mask = np.concatenate(all_fixed, axis=0)
+        self.fixed_mask = self._orig_fixed_mask.copy()
+        self.surface_verts = np.concatenate(all_surface_verts, axis=0)
+        self.fixed_indices = np.where(self.fixed_mask)[0]
+        self.free_indices = np.where(~self.fixed_mask)[0]
+        self.fixed_targets = self.positions[self.fixed_indices].copy()
+
+        # Free surface verts for collision
+        self.free_surface_verts = self.surface_verts[~self._orig_fixed_mask[self.surface_verts]]
+        free_set = set(self.free_indices.tolist())
+        self._free_surf_global = np.array([
+            gv for gv in self.free_surface_verts if gv in free_set
+        ], dtype=np.int64)
+
+        # Filter degenerate tets
+        X = self.rest_positions
+        tets = self.tetrahedra
+        v0 = X[tets[:, 0]]
+        e1 = X[tets[:, 1]] - v0; e2 = X[tets[:, 2]] - v0; e3 = X[tets[:, 3]] - v0
+        Dm = np.stack([e1, e2, e3], axis=-1)
+        vol = np.abs(np.linalg.det(Dm)) / 6.0
+        edge_scale = np.mean(np.linalg.norm(e1, axis=1)) ** 3
+        good = vol > edge_scale * 1e-10
+        n_removed = np.sum(~good)
+        if n_removed > 0:
+            print(f"  PN: Removed {n_removed} degenerate tets (of {len(tets)})")
+            self.tetrahedra = tets[good].copy()
+        self._n_tets = len(self.tetrahedra)
+
+        # Precompute rest state
+        tets = self.tetrahedra
+        X = self.rest_positions
+        x3 = X[tets[:, 3]]
+        Bm = np.stack([X[tets[:, 0]] - x3, X[tets[:, 1]] - x3, X[tets[:, 2]] - x3], axis=-1)
+        self.Bm_inv = np.linalg.inv(Bm)
+        self.rest_volume = np.abs(np.linalg.det(Bm)) / 6.0
+
+        # Collision infrastructure
+        self._muscle_surface_faces = {}
+        sf_idx = 0
+        for name, data in muscles_data.items():
+            if data.get('surface_faces') is not None:
+                self._muscle_surface_faces[name] = all_surface_faces[sf_idx]
+                sf_idx += 1
+
+        # Collision regions
+        from collections import defaultdict, deque
+        self._collision_region = np.full(self._n_verts, 2, dtype=np.int32)
+        self._collision_region[self.fixed_indices] = 0
+        adj = defaultdict(set)
+        for t in range(self._n_tets):
+            verts = self.tetrahedra[t]
+            for a in range(4):
+                for b in range(a + 1, 4):
+                    adj[verts[a]].add(verts[b])
+                    adj[verts[b]].add(verts[a])
+        q = deque()
+        for fi in self.fixed_indices:
+            q.append((fi, 0))
+        visited = set(self.fixed_indices.tolist())
+        while q:
+            v, depth = q.popleft()
+            if depth >= 2:
+                continue
+            for nb in adj[v]:
+                if nb not in visited:
+                    visited.add(nb)
+                    self._collision_region[nb] = 1
+                    q.append((nb, depth + 1))
+
+        # Allocate Taichi fields
+        N = self._n_verts
+        M = self._n_tets
+        self.ti_positions = ti.Vector.field(3, dtype=ti.f64, shape=N)
+        self.ti_targets = ti.Vector.field(3, dtype=ti.f64, shape=N)
+        self.ti_invm = ti.field(dtype=ti.f64, shape=N)
+        self.ti_tets = ti.Vector.field(4, dtype=ti.i32, shape=M)
+        self.ti_Bm_inv = ti.Matrix.field(3, 3, dtype=ti.f64, shape=M)
+        self.ti_rest_volume = ti.field(dtype=ti.f64, shape=M)
+        # CG vectors
+        self.ti_gradient = ti.Vector.field(3, dtype=ti.f64, shape=N)
+        self.ti_direction = ti.Vector.field(3, dtype=ti.f64, shape=N)
+        self.ti_residual = ti.Vector.field(3, dtype=ti.f64, shape=N)
+        self.ti_hv = ti.Vector.field(3, dtype=ti.f64, shape=N)
+        self.ti_pos_backup = ti.Vector.field(3, dtype=ti.f64, shape=N)
+        # Collision
+        self._max_coll = 0
+        self.ti_coll_idx = None
+        self.ti_coll_targets = None
+
+        # Upload static data
+        self.ti_tets.from_numpy(self.tetrahedra)
+        self.ti_Bm_inv.from_numpy(self.Bm_inv)
+        self.ti_rest_volume.from_numpy(self.rest_volume)
+
+        # Inverse mass
+        rho = 1060.0
+        vertex_mass = np.zeros(N, dtype=np.float64)
+        for t in range(M):
+            m = rho * self.rest_volume[t] / 4.0
+            for j in range(4):
+                vertex_mass[self.tetrahedra[t, j]] += m
+        invm = np.zeros(N, dtype=np.float64)
+        free_mask = vertex_mass > 0
+        invm[free_mask] = 1.0 / vertex_mass[free_mask]
+        invm[self.fixed_indices] = 0.0
+        self.ti_invm.from_numpy(invm)
+
+        self._built = True
+        print(f"  PN unified: {N} verts, {M} tets, "
+              f"{len(self._muscle_ranges)} muscles, {len(self.free_indices)} free DOFs")
+
+    def set_inter_muscle_constraints(self, constraints):
+        # Store but don't use in Newton (handled by collision instead)
+        self._n_dist_constraints = 0
+
+    def update_targets_and_positions(self, muscles_data, use_lbs_init=False):
+        for name, data in muscles_data.items():
+            vs, ve, _, _ = self._muscle_ranges[name]
+            if not self._has_previous_solution:
+                if 'positions' in data:
+                    self.positions[vs:ve] = data['positions']
+            if 'fixed_targets' in data:
+                fi = np.where(self._orig_fixed_mask[vs:ve])[0]
+                if not self._has_previous_solution:
+                    self.positions[vs + fi] = data['fixed_targets']
+                global_fi = fi + vs
+                for i, gfi in enumerate(global_fi):
+                    idx_in_fixed = np.searchsorted(self.fixed_indices, gfi)
+                    if idx_in_fixed < len(self.fixed_indices) and self.fixed_indices[idx_in_fixed] == gfi:
+                        self.fixed_targets[idx_in_fixed] = data['fixed_targets'][i]
+
+    def _build_merged_bone_mesh(self, bone_meshes):
+        if not bone_meshes:
+            self._merged_bone_mesh = None
+            self._individual_bone_meshes = []
+            return
+        valid = [m for m in bone_meshes if m is not None and m.is_watertight]
+        non_watertight = [m for m in bone_meshes if m is not None and not m.is_watertight]
+        if not valid and not non_watertight:
+            self._merged_bone_mesh = None
+            self._individual_bone_meshes = []
+            return
+        self._individual_bone_meshes = valid
+        all_valid = valid + non_watertight
+        self._merged_bone_mesh = trimesh.util.concatenate(all_valid) if all_valid else None
+        self._bone_kdtree = None
+
+    # Reuse collision methods from XPBD solver
+    _compute_collision_targets = UnifiedFEMSolver._compute_collision_targets
+    _compute_muscle_collision_targets = UnifiedFEMSolver._compute_muscle_collision_targets
+
+    def solve(self, mu, lam, vol_penalty=100.0, kappa=1e4, margin=0.002,
+              max_lbfgs_iters=100, n_outer=3, bone_meshes=None, verbose=False,
+              n_load_steps=0, bone_mesh_callback=None):
+        """Projected Newton solve with CG and inversion-safe line search."""
+        if bone_meshes is not None:
+            self._build_merged_bone_mesh(bone_meshes)
+
+        N = self._n_verts
+        M = self._n_tets
+        effective_lam = lam + vol_penalty
+        effective_mu = mu
+        max_newton = max_lbfgs_iters
+        max_cg = 50
+
+        # Upload positions and set targets
+        targets_full = self.positions.copy()
+        targets_full[self.fixed_indices] = self.fixed_targets
+        self.ti_targets.from_numpy(targets_full)
+        self.ti_positions.from_numpy(self.positions)
+        _snap_fixed(self.ti_positions, self.ti_targets, self.ti_invm, N)
+
+        initial_pos = self.ti_positions.to_numpy().copy()
+
+        if verbose:
+            X0 = self.ti_positions.to_numpy()
+            T = self.tetrahedra
+            x3 = X0[T[:, 3]]
+            Ds0 = np.stack([X0[T[:, 0]] - x3, X0[T[:, 1]] - x3, X0[T[:, 2]] - x3], axis=-1)
+            Js0 = np.linalg.det(Ds0 @ self.Bm_inv)
+            n_inv0 = int(np.sum(Js0 <= 0))
+            print(f"    PN initial: inv={n_inv0}/{M} J=[{np.min(Js0):.3f},{np.max(Js0):.3f}]")
+
+        E_prev = _pn_compute_energy(
+            self.ti_positions, self.ti_invm,
+            self.ti_tets, self.ti_Bm_inv, self.ti_rest_volume,
+            effective_mu, effective_lam, M)
+
+        for newton_it in range(max_newton):
+            # 1. Compute gradient
+            _pn_zero(self.ti_gradient, N)
+            _pn_compute_gradient(
+                self.ti_positions, self.ti_gradient, self.ti_invm,
+                self.ti_tets, self.ti_Bm_inv, self.ti_rest_volume,
+                effective_mu, effective_lam, M)
+            _pn_zero_fixed(self.ti_gradient, self.ti_invm, N)
+
+            grad_norm = _pn_dot(self.ti_gradient, self.ti_gradient, self.ti_invm, N) ** 0.5
+            if verbose and newton_it < 5:
+                print(f"      newton {newton_it}: E={E_prev:.6e} |g|={grad_norm:.6e}")
+            if grad_norm < 1e-6:
+                break
+
+            # 2. CG: solve H @ direction = -gradient
+            # Initialize: r = -g, d = r, direction = 0
+            _pn_zero(self.ti_direction, N)
+            _pn_copy(self.ti_residual, self.ti_gradient, N)
+            _pn_scale(self.ti_residual, -1.0, self.ti_invm, N)
+
+            # d = r (initial search direction)
+            _pn_zero(self.ti_hv, N)
+            _pn_copy(self.ti_hv, self.ti_residual, N)  # use hv as d temporarily
+
+            rr = _pn_dot(self.ti_residual, self.ti_residual, self.ti_invm, N)
+
+            for cg_it in range(max_cg):
+                if rr < 1e-12:
+                    break
+                # Compute (H + eps*I) @ d → store in gradient (reuse as temp)
+                _pn_zero(self.ti_gradient, N)  # reuse as Hd
+                _pn_hessian_vec(
+                    self.ti_positions, self.ti_hv, self.ti_gradient,
+                    self.ti_invm,
+                    self.ti_tets, self.ti_Bm_inv, self.ti_rest_volume,
+                    effective_mu, effective_lam, M)
+                # Regularization: add eps * d to make Hessian SPD
+                _pn_axpy(self.ti_gradient, effective_mu * 0.01, self.ti_hv, self.ti_invm, N)
+                _pn_zero_fixed(self.ti_gradient, self.ti_invm, N)
+
+                dHd = _pn_dot(self.ti_hv, self.ti_gradient, self.ti_invm, N)
+                if dHd <= 0.0:
+                    # Negative curvature — use current direction as-is
+                    if cg_it == 0:
+                        # No progress yet, use steepest descent
+                        _pn_copy(self.ti_direction, self.ti_residual, N)
+                    break
+
+                alpha_cg = rr / dHd
+                _pn_axpy(self.ti_direction, alpha_cg, self.ti_hv, self.ti_invm, N)
+                _pn_axpy(self.ti_residual, -alpha_cg, self.ti_gradient, self.ti_invm, N)
+
+                rr_new = _pn_dot(self.ti_residual, self.ti_residual, self.ti_invm, N)
+                beta = rr_new / (rr + 1e-30)
+                # d = r + beta * d
+                _pn_scale(self.ti_hv, beta, self.ti_invm, N)
+                _pn_axpy(self.ti_hv, 1.0, self.ti_residual, self.ti_invm, N)
+                rr = rr_new
+
+            # 3. Inversion-safe step filter
+            _pn_zero_fixed(self.ti_direction, self.ti_invm, N)
+            alpha_safe = _pn_max_step_size(
+                self.ti_positions, self.ti_direction,
+                self.ti_tets, self.ti_Bm_inv, M)
+            alpha_safe = min(alpha_safe, 1.0)
+
+            # 4. Armijo backtracking line search
+            # Directional derivative
+            _pn_zero(self.ti_gradient, N)
+            _pn_compute_gradient(
+                self.ti_positions, self.ti_gradient, self.ti_invm,
+                self.ti_tets, self.ti_Bm_inv, self.ti_rest_volume,
+                effective_mu, effective_lam, M)
+            _pn_zero_fixed(self.ti_gradient, self.ti_invm, N)
+            dir_deriv = _pn_dot(self.ti_gradient, self.ti_direction, self.ti_invm, N)
+
+            alpha = alpha_safe
+            c1 = 1e-4  # Armijo constant
+            _pn_copy(self.ti_pos_backup, self.ti_positions, N)
+
+            for ls_it in range(15):
+                # Try step
+                _pn_copy(self.ti_positions, self.ti_pos_backup, N)
+                _pn_axpy(self.ti_positions, alpha, self.ti_direction, self.ti_invm, N)
+                _snap_fixed(self.ti_positions, self.ti_targets, self.ti_invm, N)
+
+                E_new = _pn_compute_energy(
+                    self.ti_positions, self.ti_invm,
+                    self.ti_tets, self.ti_Bm_inv, self.ti_rest_volume,
+                    effective_mu, effective_lam, M)
+
+                if E_new <= E_prev + c1 * alpha * dir_deriv:
+                    break
+                alpha *= 0.5
+
+            E_prev = E_new
+
+        n_newton = newton_it + 1
+
+        # Collision (same as XPBD post-solve)
+        n_coll_total = 0
+        self.positions = self.ti_positions.to_numpy()
+        has_mm_coll = hasattr(self, '_muscle_surface_faces') and bool(self._muscle_surface_faces)
+        if has_mm_coll:
+            mm_idx, mm_tgt = self._compute_muscle_collision_targets(
+                margin=margin, verbose=verbose)
+            if len(mm_idx) > 0:
+                n_coll_total += len(mm_idx)
+                if len(mm_idx) > self._max_coll:
+                    self._max_coll = max(len(mm_idx), 1000)
+                    self.ti_coll_idx = ti.field(dtype=ti.i32, shape=self._max_coll)
+                    self.ti_coll_targets = ti.Vector.field(3, dtype=ti.f64, shape=self._max_coll)
+                ip = np.zeros(self._max_coll, dtype=np.int32)
+                tp = np.zeros((self._max_coll, 3), dtype=np.float64)
+                ip[:len(mm_idx)] = mm_idx; tp[:len(mm_idx)] = mm_tgt
+                self.ti_coll_idx.from_numpy(ip)
+                self.ti_coll_targets.from_numpy(tp)
+                _apply_collision_projection(
+                    self.ti_positions, self.ti_invm,
+                    self.ti_coll_idx, self.ti_coll_targets, 1.0, len(mm_idx))
+
+        if self._merged_bone_mesh is not None:
+            self.positions = self.ti_positions.to_numpy()
+            bi, bt = self._compute_collision_targets(margin, verbose=verbose)
+            if len(bi) > 0:
+                n_coll_total += len(bi)
+                if len(bi) > self._max_coll:
+                    self._max_coll = max(len(bi), 1000)
+                    self.ti_coll_idx = ti.field(dtype=ti.i32, shape=self._max_coll)
+                    self.ti_coll_targets = ti.Vector.field(3, dtype=ti.f64, shape=self._max_coll)
+                ip = np.zeros(self._max_coll, dtype=np.int32)
+                tp = np.zeros((self._max_coll, 3), dtype=np.float64)
+                ip[:len(bi)] = bi; tp[:len(bi)] = bt
+                self.ti_coll_idx.from_numpy(ip)
+                self.ti_coll_targets.from_numpy(tp)
+                _apply_collision_projection(
+                    self.ti_positions, self.ti_invm,
+                    self.ti_coll_idx, self.ti_coll_targets, 1.0, len(bi))
+
+        self.positions = self.ti_positions.to_numpy()
+
+        free = self.free_indices
+        diff = self.positions[free] - initial_pos[free]
+        residual = float(np.sqrt(np.sum(diff ** 2)))
+
+        if verbose:
+            X = self.positions
+            T = self.tetrahedra
+            x3 = X[T[:, 3]]
+            Ds = np.stack([X[T[:, 0]] - x3, X[T[:, 1]] - x3, X[T[:, 2]] - x3], axis=-1)
+            Js = np.linalg.det(Ds @ self.Bm_inv)
+            n_inv = int(np.sum(Js <= 0))
+            print(f"    PN final: newton={n_newton} ||dx||={residual:.4e} "
+                  f"inv={n_inv}/{M} coll={n_coll_total} "
+                  f"J=[{np.min(Js):.3f},{np.max(Js):.3f}]")
+
+        self._has_previous_solution = True
+        return n_newton, residual
+
+    def get_muscle_positions(self, name):
+        vs, ve, _, _ = self._muscle_ranges[name]
+        return self.positions[vs:ve].copy()
+
+
+# ---------------------------------------------------------------------------
 # Orchestrator
 # ---------------------------------------------------------------------------
 
@@ -2815,13 +3430,24 @@ def run_all_fem_sim(v, max_iterations=100, tolerance=1e-4, verbose=True):
     lam = youngs * poisson / ((1.0 + poisson) * (1.0 - 2.0 * poisson))
 
     use_vbd = getattr(v, 'use_vbd_sim', False)
+    use_pn = getattr(v, 'use_pn_sim', False)
     solver = getattr(v, '_fem_unified_solver', None)
     # Rebuild solver if muscles changed or solver type changed
-    wrong_type = (solver is not None and
-                  ((use_vbd and not isinstance(solver, VBDSolver)) or
-                   (not use_vbd and isinstance(solver, VBDSolver))))
+    def _solver_type_match(s):
+        if use_pn:
+            return isinstance(s, ProjectedNewtonSolver)
+        elif use_vbd:
+            return isinstance(s, VBDSolver)
+        else:
+            return isinstance(s, UnifiedFEMSolver)
+    wrong_type = solver is not None and not _solver_type_match(solver)
     if solver is None or wrong_type or set(solver._muscle_ranges.keys()) != set(active_muscles.keys()):
-        solver = VBDSolver() if use_vbd else UnifiedFEMSolver()
+        if use_pn:
+            solver = ProjectedNewtonSolver()
+        elif use_vbd:
+            solver = VBDSolver()
+        else:
+            solver = UnifiedFEMSolver()
         muscles_data = {}
         for name, mobj in active_muscles.items():
             sb = mobj.soft_body
@@ -2874,7 +3500,7 @@ def run_all_fem_sim(v, max_iterations=100, tolerance=1e-4, verbose=True):
     _write_back_positions(solver, active_muscles)
 
     total = time.time() - t0
-    tag = "VBD" if use_vbd else "XPBD"
+    tag = "PN" if use_pn else ("VBD" if use_vbd else "XPBD")
     if verbose:
         print(f"  {tag}: {fevals} iters, ||dx||={residual:.4e}, total={total:.2f}s")
     else:

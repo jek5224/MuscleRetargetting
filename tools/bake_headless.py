@@ -143,9 +143,12 @@ def build_context(skel, muscle_meshes, skeleton_meshes, mesh_info, args):
     print(f"ARAP backend: {backend.upper()}")
 
     sim_method = getattr(args, 'sim_method', 'arap')
-    use_fem = sim_method in ('fem', 'vbd')
+    use_fem = sim_method in ('fem', 'vbd', 'pn')
     use_vbd = sim_method == 'vbd'
-    if use_vbd:
+    use_pn = sim_method == 'pn'
+    if use_pn:
+        print("Simulation method: Projected Newton (CG + inversion-safe line search)")
+    elif use_vbd:
         print("Simulation method: VBD (Vertex Block Descent)")
     elif use_fem:
         print("Simulation method: FEM (Neo-Hookean XPBD)")
@@ -162,6 +165,7 @@ def build_context(skel, muscle_meshes, skeleton_meshes, mesh_info, args):
         use_muscle_aware_arap=True,
         use_fem_sim=use_fem,
         use_vbd_sim=use_vbd,
+        use_pn_sim=use_pn,
         fem_youngs_modulus=500.0,
         fem_poisson_ratio=0.40,
         fem_collision_kappa=1e4,
@@ -317,9 +321,9 @@ def main():
     )
     parser.add_argument(
         "--sim-method",
-        choices=["arap", "fem", "vbd"],
+        choices=["arap", "fem", "vbd", "pn"],
         default="arap",
-        help="Simulation method: arap (default), fem (XPBD Neo-Hookean), or vbd (Vertex Block Descent)",
+        help="Simulation method: arap, fem (XPBD), vbd (VBD), or pn (Projected Newton)",
     )
     parser.add_argument(
         "--start-frame", type=int, default=0, help="First frame to bake (default: 0)"
