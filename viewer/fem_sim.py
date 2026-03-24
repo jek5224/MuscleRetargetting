@@ -1451,6 +1451,16 @@ class UnifiedFEMSolver:
             print(f"    final: iters={n_iters} ||dx||={residual:.4e} "
                   f"inv={n_inv}/{M} dist={K} "
                   f"J=[{np.min(Js):.3f},{np.max(Js):.3f}]")
+            # Per-muscle breakdown (top offenders)
+            muscle_inv = []
+            for mname, (vs, ve, ts, te) in self._muscle_ranges.items():
+                Jm = Js[ts:te]
+                ni = int(np.sum(Jm <= 0))
+                if ni > 0:
+                    muscle_inv.append((ni, te - ts, mname, float(Jm.min())))
+            muscle_inv.sort(reverse=True)
+            for ni, nt, mname, jmin in muscle_inv[:10]:
+                print(f"      {mname}: {ni}/{nt} ({100*ni/nt:.0f}%) Jmin={jmin:.0f}")
 
         self._has_previous_solution = True
         return n_iters, residual
