@@ -24,21 +24,10 @@ v0 = verts[tets[:, 0]]
 cross = np.cross(verts[tets[:, 1]] - v0, verts[tets[:, 2]] - v0)
 vol = np.einsum("ij,ij->i", cross, verts[tets[:, 3]] - v0) / 6.0
 
-# Remove degenerate (volume < 0.001 mm³)
-good = vol > 0.001
-removed = int(np.sum(~good))
-tets = tets[good]
-
-# Compact: remove unused vertices
-used_verts = np.unique(tets.ravel())
-vert_map = np.full(len(verts), -1, dtype=np.int32)
-vert_map[used_verts] = np.arange(len(used_verts), dtype=np.int32)
-verts = verts[used_verts]
-tets = vert_map[tets]
-# Remap anchors
-anchors = np.array([vert_map[a] for a in anchors if vert_map[a] >= 0])
-print(f"{len(tets)} tets, {len(verts)} verts, removed {removed} degenerate, "
-      f"{len(anchors)} anchors", flush=True)
+# Keep ALL tets (no removal). Preserves vertex indices for downstream data.
+print(f"{len(tets)} tets, {len(verts)} verts, {len(anchors)} anchors", flush=True)
+print(f"  vol range: [{vol.min():.4e}, {vol.max():.4e}] mm^3, "
+      f"near-zero (<0.001): {int(np.sum(vol < 0.001))}", flush=True)
 
 mesh = tetmesh(verts, tets)
 label_surface(mesh)

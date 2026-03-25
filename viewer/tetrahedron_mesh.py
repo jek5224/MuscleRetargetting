@@ -384,71 +384,92 @@ class TetrahedronMeshMixin:
                         end_name = "origin" if end_type == 0 else "insertion"
                         print(f"  Anchor {anchor_idx} -> stream {stream_idx} {end_name}, skeleton {skel_idx}")
 
-        # Step 4: Constrained tetrahedralization using TetGen.
-        # TetGen respects the surface boundary and produces quality tets.
-        # Falls back to Delaunay if TetGen fails.
-        print("Performing constrained tetrahedralization (TetGen)...")
+        # Step 4: Delaunay tetrahedralization.
+        # NOTE: Contour vertices are nearly coplanar, which produces degenerate
+        # tets. For pyuipc (IPC solver), these need to be fixed by either:
+        # 1. Making the surface manifold so TetGen can add Steiner points, or
+        # 2. Perturbing coplanar vertices off-plane in the contour mesh builder.
+        print("Performing Delaunay tetrahedralization...")
         try:
-            import tetgen
-            import pyvista as pv
+            delaunay = Delaunay(closed_vertices)
+            tetrahedra = delaunay.simplices
 
-            # Create PyVista surface mesh for TetGen
-            pv_faces = np.hstack([np.full((len(closed_faces), 1), 3, dtype=np.int32),
-                                   closed_faces]).ravel()
-            surface = pv.PolyData(closed_vertices.astype(np.float64), pv_faces)
+            # Filter: keep only tets whose centroids are inside the surface
+            tet_centroids = np.mean(closed_vertices[tetrahedra], axis=1)
+            mesh = trimesh.Trimesh(vertices=closed_vertices, faces=closed_faces)
+            mesh.fix_normals()
+            if not mesh.is_watertight:
+                print(f"  Warning: mesh is not watertight, contains() may be inaccurate")
 
-            # TetGen: 'p' = tetrahedralize PLC, 'q' = quality mesh,
-            # 'a' = max volume, 'Y' = preserve surface
-            tgen = tetgen.TetGen(surface)
-            # q1.4 = minimum radius-edge ratio 1.4 (quality), Y = preserve surface
-            tgen.tetrahedralize(order=1, mindihedral=10, minratio=1.2,
-                                nobisect=True, verbose=0)
-            grid = tgen.grid
+            inside_mask = mesh.contains(tet_centroids)
+            interior_tetrahedra = tetrahedra[inside_mask]
 
-            interior_tetrahedra = grid.cells_dict[10]  # VTK_TETRA = 10
-            tet_verts = np.array(grid.points, dtype=np.float32)
+            if len(interior_tetrahedra) == 0:
+                print("  Warning: No interior tetrahedra found, using all tetrahedra")
+                interior_tetrahedra = tetrahedra
 
-            # TetGen may add Steiner points. If so, update vertex array.
-            if len(tet_verts) > len(closed_vertices):
-                n_steiner = len(tet_verts) - len(closed_vertices)
-                print(f"  TetGen added {n_steiner} Steiner points")
-                closed_vertices = tet_verts
-                # Update cap anchors (they're at the end of original vertices)
-                # Steiner points are appended after original vertices
+            print(f"  Delaunay: {len(tetrahedra)} total, {len(interior_tetrahedra)} interior")
 
-            print(f"  TetGen: {len(interior_tetrahedra)} tets, "
-                  f"{len(closed_vertices)} verts")
+            # Ensure all original vertices are included
+            n_verts = len(closed_vertices)
+            used_vertices = set(interior_tetrahedra.flatten())
+            unused_count = n_verts - len(used_vertices)
 
-            # Verify quality: check min volume
+            if unused_count > 0:
+                print(f"  {unused_count} vertices unused, adding connecting tets...")
+                interior_set = set(map(tuple, interior_tetrahedra.tolist()))
+                vertex_to_tets = {i: [] for i in range(n_verts)}
+                for tet_idx, tet in enumerate(tetrahedra):
+                    for v in tet:
+                        vertex_to_tets[v].append(tet_idx)
+
+                added = 0
+                for _ in range(100):
+                    progress = False
+                    for vi in range(n_verts):
+                        if vi in used_vertices:
+                            continue
+                        best_idx, best_cnt = None, 0
+                        for ti in vertex_to_tets[vi]:
+                            t = tetrahedra[ti]
+                            if tuple(t) in interior_set:
+                                continue
+                            cnt = sum(1 for v in t if v in used_vertices)
+                            if cnt > best_cnt:
+                                best_cnt = cnt
+                                best_idx = ti
+                        if best_idx is not None and best_cnt >= 1:
+                            t = tetrahedra[best_idx]
+                            interior_tetrahedra = np.vstack([interior_tetrahedra, t])
+                            interior_set.add(tuple(t))
+                            for v in t:
+                                used_vertices.add(v)
+                            added += 1
+                            progress = True
+                    if not progress:
+                        break
+
+                if added > 0:
+                    print(f"  Added {added} connecting tets")
+                still_unused = n_verts - len(used_vertices)
+                if still_unused > 0:
+                    print(f"  Warning: {still_unused} vertices still unused")
+
+            # Check quality
             v0 = closed_vertices[interior_tetrahedra[:, 0]]
             cross = np.cross(
                 closed_vertices[interior_tetrahedra[:, 1]] - v0,
                 closed_vertices[interior_tetrahedra[:, 2]] - v0)
             vol = np.abs(np.einsum('ij,ij->i', cross,
                          closed_vertices[interior_tetrahedra[:, 3]] - v0)) / 6.0
-            # Remove near-degenerate tets (volume < threshold)
-            # These come from nearly-coplanar contour vertices
-            vol_threshold = vol.max() * 1e-6  # relative threshold
-            good_tets = vol > vol_threshold
-            n_degen = int(np.sum(~good_tets))
-            if n_degen > 0:
-                interior_tetrahedra = interior_tetrahedra[good_tets]
-                print(f"  Removed {n_degen} degenerate tets (vol < {vol_threshold:.2e})")
-            print(f"  Final: {len(interior_tetrahedra)} tets, "
-                  f"vol range: [{vol[good_tets].min():.2e}, {vol[good_tets].max():.2e}]")
+            n_degen = int(np.sum(vol < 1e-15))
+            print(f"  Volume range: [{vol.min():.2e}, {vol.max():.2e}], "
+                  f"near-zero: {n_degen}")
 
         except Exception as e:
-            print(f"TetGen failed ({e}), falling back to Delaunay...")
-            delaunay = Delaunay(closed_vertices)
-            tetrahedra = delaunay.simplices
-            tet_centroids = np.mean(closed_vertices[tetrahedra], axis=1)
-            mesh = trimesh.Trimesh(vertices=closed_vertices, faces=closed_faces)
-            mesh.fix_normals()
-            inside_mask = mesh.contains(tet_centroids)
-            interior_tetrahedra = tetrahedra[inside_mask]
-            if len(interior_tetrahedra) == 0:
-                interior_tetrahedra = tetrahedra
-            print(f"  Delaunay fallback: {len(interior_tetrahedra)} tets")
+            print(f"Tetrahedralization failed: {e}")
+            import traceback
+            traceback.print_exc()
             return False
 
         # Step 5: Extract tet boundary faces (faces shared by exactly 1 tetrahedron)
