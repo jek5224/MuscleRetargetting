@@ -3139,8 +3139,9 @@ class ProjectedNewtonSolver:
     def update_targets_and_positions(self, muscles_data, use_lbs_init=False):
         for name, data in muscles_data.items():
             vs, ve, _, _ = self._muscle_ranges[name]
-            # First frame: DON'T use LBS — solver starts from rest with load stepping.
-            # Subsequent frames: keep previous solution.
+            if not self._has_previous_solution:
+                if 'positions' in data:
+                    self.positions[vs:ve] = data['positions']
             if 'fixed_targets' in data:
                 fi = np.where(self._orig_fixed_mask[vs:ve])[0]
                 global_fi = fi + vs
@@ -3209,164 +3210,14 @@ class ProjectedNewtonSolver:
         collision_kappa = 0.0
         n_penalty = 0
 
-        if not self._has_previous_solution:
-            # Start from rest positions (0 inversions)
-            self.ti_positions.from_numpy(self.rest_positions)
-            rest_fixed = self.rest_positions[self.fixed_indices].copy()
-            final_fixed = self.fixed_targets.copy()
-            n_load_steps = 10
-            iters_per_step = max(2, max_newton // n_load_steps)
-
-            if verbose:
-                # Verify 0 initial inversions
-                X0 = self.rest_positions
-                T = self.tetrahedra
-                x3_0 = X0[T[:, 3]]
-                Ds0 = np.stack([X0[T[:, 0]] - x3_0, X0[T[:, 1]] - x3_0, X0[T[:, 2]] - x3_0], axis=-1)
-                Js0 = np.linalg.det(Ds0 @ self.Bm_inv)
-                print(f"    rest init: inv={int(np.sum(Js0 <= 0))}/{M}, "
-                      f"{n_load_steps} load steps x {iters_per_step} Newton iters")
-
-            # Make fixed vertices FREE but with very stiff penalty toward targets.
-            # This lets the line search control their movement, keeping J > 0.
-            # Store original invm and temporarily make all vertices free.
-            invm_backup = self.ti_invm.to_numpy().copy()
-            invm_soft = invm_backup.copy()
-            # Give fixed verts a small inverse mass (they'll move via penalty)
-            fixed_invm = 1.0 / (1060.0 * 1e-6)  # tiny mass = moves easily
-            invm_soft[self.fixed_indices] = fixed_invm
-            self.ti_invm.from_numpy(invm_soft)
-
-            attachment_kappa = effective_lam * 100.0  # very stiff attachment penalty
-
-            for load_step in range(n_load_steps):
-                alpha_load = (load_step + 1) / n_load_steps
-                interp_targets = rest_fixed + alpha_load * (final_fixed - rest_fixed)
-
-                # Set targets but DON'T snap — Newton with penalty will move them
-                tgt = self.ti_positions.to_numpy()
-                tgt[self.fixed_indices] = interp_targets
-                self.ti_targets.from_numpy(tgt)
-
-                # Energy = elastic + attachment penalty for fixed verts
-                E_prev = _pn_compute_energy(
-                    self.ti_positions, self.ti_invm,
-                    self.ti_tets, self.ti_Bm_inv, self.ti_rest_volume,
-                    effective_mu, effective_lam, M)
-                pos_np = self.ti_positions.to_numpy()
-                for fi_idx, fi_vi in enumerate(self.fixed_indices):
-                    d = pos_np[fi_vi] - interp_targets[fi_idx]
-                    E_prev += 0.5 * attachment_kappa * np.dot(d, d)
-
-                for newton_it in range(iters_per_step):
-                    _pn_zero(self.ti_gradient, N)
-                    _pn_compute_gradient(
-                        self.ti_positions, self.ti_gradient, self.ti_invm,
-                        self.ti_tets, self.ti_Bm_inv, self.ti_rest_volume,
-                        effective_mu, effective_lam, M)
-                    # Add attachment penalty gradient for fixed verts
-                    grad_np = self.ti_gradient.to_numpy()
-                    pos_np = self.ti_positions.to_numpy()
-                    for fi_idx, fi_vi in enumerate(self.fixed_indices):
-                        grad_np[fi_vi] += attachment_kappa * (pos_np[fi_vi] - interp_targets[fi_idx])
-                    self.ti_gradient.from_numpy(grad_np)
-
-                    grad_norm = _pn_dot(self.ti_gradient, self.ti_gradient, self.ti_invm, N) ** 0.5
-                    if grad_norm < 1e-6:
-                        break
-
-                    # CG for Newton direction
-                    _pn_zero(self.ti_direction, N)
-                    _pn_copy(self.ti_residual, self.ti_gradient, N)
-                    _pn_scale(self.ti_residual, -1.0, self.ti_invm, N)
-                    _pn_zero(self.ti_hv, N)
-                    _pn_copy(self.ti_hv, self.ti_residual, N)
-                    rr = _pn_dot(self.ti_residual, self.ti_residual, self.ti_invm, N)
-
-                    for cg_it in range(max_cg):
-                        if rr < 1e-12:
-                            break
-                        _pn_zero(self.ti_gradient, N)
-                        _pn_hessian_vec(
-                            self.ti_positions, self.ti_hv, self.ti_gradient,
-                            self.ti_invm,
-                            self.ti_tets, self.ti_Bm_inv, self.ti_rest_volume,
-                            effective_mu, effective_lam, M)
-                        _pn_axpy(self.ti_gradient, effective_lam * 0.1, self.ti_hv, self.ti_invm, N)
-                        # Add attachment penalty Hessian: kappa * d for fixed verts
-                        hv_np = self.ti_gradient.to_numpy()
-                        d_np = self.ti_hv.to_numpy()
-                        for fi_vi in self.fixed_indices:
-                            hv_np[fi_vi] += attachment_kappa * d_np[fi_vi]
-                        self.ti_gradient.from_numpy(hv_np)
-                        dHd = _pn_dot(self.ti_hv, self.ti_gradient, self.ti_invm, N)
-                        if dHd <= 0.0:
-                            if cg_it == 0:
-                                _pn_copy(self.ti_direction, self.ti_residual, N)
-                            break
-                        alpha_cg = rr / dHd
-                        _pn_axpy(self.ti_direction, alpha_cg, self.ti_hv, self.ti_invm, N)
-                        _pn_axpy(self.ti_residual, -alpha_cg, self.ti_gradient, self.ti_invm, N)
-                        rr_new = _pn_dot(self.ti_residual, self.ti_residual, self.ti_invm, N)
-                        beta = rr_new / (rr + 1e-30)
-                        _pn_scale(self.ti_hv, beta, self.ti_invm, N)
-                        _pn_axpy(self.ti_hv, 1.0, self.ti_residual, self.ti_invm, N)
-                        rr = rr_new
-
-                    _pn_zero_fixed(self.ti_direction, self.ti_invm, N)
-                    alpha_safe = _pn_max_step_size(
-                        self.ti_positions, self.ti_direction,
-                        self.ti_tets, self.ti_Bm_inv, M)
-                    alpha_safe = min(alpha_safe, 1.0)
-
-                    # Recompute gradient for Armijo (CG clobbered it)
-                    _pn_zero(self.ti_gradient, N)
-                    _pn_compute_gradient(
-                        self.ti_positions, self.ti_gradient, self.ti_invm,
-                        self.ti_tets, self.ti_Bm_inv, self.ti_rest_volume,
-                        effective_mu, effective_lam, M)
-                    _pn_zero_fixed(self.ti_gradient, self.ti_invm, N)
-                    dir_deriv = _pn_dot(self.ti_gradient, self.ti_direction, self.ti_invm, N)
-
-                    aa = alpha_safe
-                    _pn_copy(self.ti_pos_backup, self.ti_positions, N)
-                    for ls_it in range(15):
-                        _pn_copy(self.ti_positions, self.ti_pos_backup, N)
-                        _pn_axpy(self.ti_positions, aa, self.ti_direction, self.ti_invm, N)
-                        E_new = _pn_compute_energy(
-                            self.ti_positions, self.ti_invm,
-                            self.ti_tets, self.ti_Bm_inv, self.ti_rest_volume,
-                            effective_mu, effective_lam, M)
-                        # Add attachment penalty energy
-                        p_np = self.ti_positions.to_numpy()
-                        for fi_idx, fi_vi in enumerate(self.fixed_indices):
-                            dd = p_np[fi_vi] - interp_targets[fi_idx]
-                            E_new += 0.5 * attachment_kappa * np.dot(dd, dd)
-                        if E_new <= E_prev + 1e-4 * aa * dir_deriv:
-                            break
-                        aa *= 0.5
-                    E_prev = E_new
-
-                if verbose:
-                    Xls = self.ti_positions.to_numpy()
-                    x3ls = Xls[T[:, 3]]
-                    Dsls = np.stack([Xls[T[:, 0]] - x3ls, Xls[T[:, 1]] - x3ls, Xls[T[:, 2]] - x3ls], axis=-1)
-                    Jsls = np.linalg.det(Dsls @ self.Bm_inv)
-                    print(f"      load {load_step+1}/{n_load_steps} (α={alpha_load:.1f}): "
-                          f"inv={int(np.sum(Jsls <= 0))} E={E_prev:.4f}")
-
-            # Keep soft-fixed for final phase too — restoring hard snap
-            # would create inversions. Fixed verts are already within
-            # ~1e-6 of targets thanks to the stiff penalty.
-            self.fixed_targets[:] = final_fixed
-            # Restore invm for collision detection (but keep soft for solve)
-            self._invm_backup = invm_backup
-        else:
-            # Subsequent frames: Newton from previous solution
-            E_prev = _pn_compute_energy(
-                self.ti_positions, self.ti_invm,
-                self.ti_tets, self.ti_Bm_inv, self.ti_rest_volume,
-                effective_mu, effective_lam, M)
+        # Use LBS init + hard attachments.
+        # The PN solver with inversion-safe line search preserves LBS inversions
+        # (~2,235) but doesn't create new ones. Penalty collision avoids the
+        # 5,600+ inversions that post-hoc projection was creating.
+        E_prev = _pn_compute_energy(
+            self.ti_positions, self.ti_invm,
+            self.ti_tets, self.ti_Bm_inv, self.ti_rest_volume,
+            effective_mu, effective_lam, M)
 
         # Final Newton iterations at target pose
         for newton_it in range(max_newton):
@@ -3594,9 +3445,15 @@ class ProjectedNewtonSolver:
             Ds = np.stack([X[T[:, 0]] - x3, X[T[:, 1]] - x3, X[T[:, 2]] - x3], axis=-1)
             Js = np.linalg.det(Ds @ self.Bm_inv)
             n_inv = int(np.sum(Js <= 0))
+            # Measure attachment error: how far are fixed verts from targets
+            fixed_pos = X[self.fixed_indices]
+            attach_err = np.linalg.norm(fixed_pos - self.fixed_targets, axis=1)
             print(f"    PN final: newton={n_newton} ||dx||={residual:.4e} "
                   f"inv={n_inv}/{M} penalty={n_penalty} "
                   f"J=[{np.min(Js):.3f},{np.max(Js):.3f}]")
+            print(f"    attachment error: max={attach_err.max()*1000:.3f}mm "
+                  f"mean={attach_err.mean()*1000:.3f}mm "
+                  f"({int(np.sum(attach_err > 0.001))} verts >1mm)")
 
         self._has_previous_solution = True
         return n_newton, residual
