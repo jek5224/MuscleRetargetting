@@ -384,87 +384,133 @@ class TetrahedronMeshMixin:
                         end_name = "origin" if end_type == 0 else "insertion"
                         print(f"  Anchor {anchor_idx} -> stream {stream_idx} {end_name}, skeleton {skel_idx}")
 
-        # Step 4: Delaunay tetrahedralization.
-        # NOTE: Contour vertices are nearly coplanar, which produces degenerate
-        # tets. For pyuipc (IPC solver), these need to be fixed by either:
-        # 1. Making the surface manifold so TetGen can add Steiner points, or
-        # 2. Perturbing coplanar vertices off-plane in the contour mesh builder.
-        print("Performing Delaunay tetrahedralization...")
+        # Step 4: Contour-guided tetrahedralization.
+        # Instead of blind Delaunay (which creates flat tets from coplanar
+        # contour vertices), use the contour structure: add a center vertex
+        # at each contour level centroid, then connect each surface face to
+        # the center vertex of the adjacent level. Every tet spans 2 levels
+        # so no tet is flat.
+        print("Performing contour-guided tetrahedralization...")
         try:
-            delaunay = Delaunay(closed_vertices)
-            tetrahedra = delaunay.simplices
+            # Build vertex-to-level mapping
+            vertex_level = getattr(self, 'vertex_contour_level', None)
+            if vertex_level is None or len(vertex_level) != len(closed_vertices):
+                # Fallback: guess level from cap faces
+                print("  Warning: no vertex_contour_level, falling back to Delaunay")
+                vertex_level = None
 
-            # Filter: keep only tets whose centroids are inside the surface
-            tet_centroids = np.mean(closed_vertices[tetrahedra], axis=1)
-            mesh = trimesh.Trimesh(vertices=closed_vertices, faces=closed_faces)
-            mesh.fix_normals()
-            if not mesh.is_watertight:
-                print(f"  Warning: mesh is not watertight, contains() may be inaccurate")
+            if vertex_level is not None:
+                n_original = len(closed_vertices)
+                num_levels = int(vertex_level.max()) + 1
+                new_verts = list(closed_vertices)
+                interior_tetrahedra = []
 
-            inside_mask = mesh.contains(tet_centroids)
-            interior_tetrahedra = tetrahedra[inside_mask]
+                # Add center vertex at centroid of each level
+                level_centers = {}
+                for lev in range(num_levels):
+                    lev_verts = np.where(vertex_level == lev)[0]
+                    if len(lev_verts) == 0:
+                        continue
+                    centroid = closed_vertices[lev_verts].mean(axis=0)
+                    center_idx = len(new_verts)
+                    new_verts.append(centroid)
+                    level_centers[lev] = center_idx
 
-            if len(interior_tetrahedra) == 0:
-                print("  Warning: No interior tetrahedra found, using all tetrahedra")
-                interior_tetrahedra = tetrahedra
+                print(f"  {len(level_centers)} level centers added")
 
-            print(f"  Delaunay: {len(tetrahedra)} total, {len(interior_tetrahedra)} interior")
+                # For each surface face, determine which levels it spans.
+                # Connect it to the center of the adjacent level to form a tet.
+                for face in closed_faces:
+                    v0, v1, v2 = int(face[0]), int(face[1]), int(face[2])
+                    l0 = int(vertex_level[v0]) if v0 < len(vertex_level) else -1
+                    l1 = int(vertex_level[v1]) if v1 < len(vertex_level) else -1
+                    l2 = int(vertex_level[v2]) if v2 < len(vertex_level) else -1
 
-            # Ensure all original vertices are included
-            n_verts = len(closed_vertices)
-            used_vertices = set(interior_tetrahedra.flatten())
-            unused_count = n_verts - len(used_vertices)
+                    levels_in_face = set([l0, l1, l2]) - {-1}
+                    if len(levels_in_face) == 0:
+                        continue
 
-            if unused_count > 0:
-                print(f"  {unused_count} vertices unused, adding connecting tets...")
-                interior_set = set(map(tuple, interior_tetrahedra.tolist()))
-                vertex_to_tets = {i: [] for i in range(n_verts)}
-                for tet_idx, tet in enumerate(tetrahedra):
-                    for v in tet:
-                        vertex_to_tets[v].append(tet_idx)
+                    if len(levels_in_face) == 2:
+                        # Inter-level face: connect to center of BOTH levels
+                        levs = sorted(levels_in_face)
+                        for lev in levs:
+                            if lev in level_centers:
+                                ci = level_centers[lev]
+                                # Only use center of the level where MINORITY
+                                # of this face's vertices are
+                                n_on_lev = sum(1 for l in [l0,l1,l2] if l == lev)
+                                if n_on_lev <= 1:
+                                    interior_tetrahedra.append([v0, v1, v2, ci])
+                    elif len(levels_in_face) == 1:
+                        # Same-level face (cap or intra-level):
+                        # Connect to centers of adjacent levels
+                        lev = list(levels_in_face)[0]
+                        for adj_lev in [lev - 1, lev + 1]:
+                            if adj_lev in level_centers:
+                                ci = level_centers[adj_lev]
+                                interior_tetrahedra.append([v0, v1, v2, ci])
+                                break  # one tet per face is enough
 
-                added = 0
-                for _ in range(100):
-                    progress = False
-                    for vi in range(n_verts):
-                        if vi in used_vertices:
-                            continue
-                        best_idx, best_cnt = None, 0
-                        for ti in vertex_to_tets[vi]:
-                            t = tetrahedra[ti]
-                            if tuple(t) in interior_set:
-                                continue
-                            cnt = sum(1 for v in t if v in used_vertices)
-                            if cnt > best_cnt:
-                                best_cnt = cnt
-                                best_idx = ti
-                        if best_idx is not None and best_cnt >= 1:
-                            t = tetrahedra[best_idx]
-                            interior_tetrahedra = np.vstack([interior_tetrahedra, t])
-                            interior_set.add(tuple(t))
-                            for v in t:
-                                used_vertices.add(v)
-                            added += 1
-                            progress = True
-                    if not progress:
-                        break
+                closed_vertices = np.array(new_verts, dtype=np.float32)
+                interior_tetrahedra = np.array(interior_tetrahedra, dtype=np.int32)
 
-                if added > 0:
-                    print(f"  Added {added} connecting tets")
-                still_unused = n_verts - len(used_vertices)
-                if still_unused > 0:
-                    print(f"  Warning: {still_unused} vertices still unused")
+                # Remove zero-volume tets (face vertices + center are coplanar
+                # only if the center is exactly on the face plane — rare)
+                if len(interior_tetrahedra) > 0:
+                    v0 = closed_vertices[interior_tetrahedra[:, 0]]
+                    cr = np.cross(
+                        closed_vertices[interior_tetrahedra[:, 1]] - v0,
+                        closed_vertices[interior_tetrahedra[:, 2]] - v0)
+                    vol = np.abs(np.einsum('ij,ij->i', cr,
+                                 closed_vertices[interior_tetrahedra[:, 3]] - v0)) / 6.0
+                    good = vol > 1e-20
+                    n_zero = int(np.sum(~good))
+                    if n_zero > 0:
+                        interior_tetrahedra = interior_tetrahedra[good]
+                        print(f"  Removed {n_zero} zero-volume tets")
 
-            # Check quality
-            v0 = closed_vertices[interior_tetrahedra[:, 0]]
-            cross = np.cross(
-                closed_vertices[interior_tetrahedra[:, 1]] - v0,
-                closed_vertices[interior_tetrahedra[:, 2]] - v0)
-            vol = np.abs(np.einsum('ij,ij->i', cross,
-                         closed_vertices[interior_tetrahedra[:, 3]] - v0)) / 6.0
-            n_degen = int(np.sum(vol < 1e-15))
-            print(f"  Volume range: [{vol.min():.2e}, {vol.max():.2e}], "
-                  f"near-zero: {n_degen}")
+                # Check vertex coverage
+                used = set(interior_tetrahedra.ravel()) if len(interior_tetrahedra) > 0 else set()
+                unused = [i for i in range(n_original) if i not in used]
+                if unused:
+                    print(f"  {len(unused)} original vertices unused, adding via Delaunay...")
+                    # For unused vertices, use local Delaunay to connect them
+                    delaunay = Delaunay(closed_vertices[:n_original])
+                    all_tets = delaunay.simplices
+                    for tet in all_tets:
+                        if any(v in unused for v in tet) and any(v in used for v in tet):
+                            interior_tetrahedra = np.vstack([interior_tetrahedra, tet])
+                            for v in tet:
+                                if v in unused:
+                                    unused.remove(v)
+                    if unused:
+                        print(f"  Warning: {len(unused)} vertices still unused")
+
+                print(f"  Contour-guided: {len(interior_tetrahedra)} tets, "
+                      f"{len(closed_vertices)} verts "
+                      f"(+{len(closed_vertices) - n_original} centers)")
+
+                # Quality check
+                v0 = closed_vertices[interior_tetrahedra[:, 0]]
+                cr = np.cross(
+                    closed_vertices[interior_tetrahedra[:, 1]] - v0,
+                    closed_vertices[interior_tetrahedra[:, 2]] - v0)
+                vol = np.abs(np.einsum('ij,ij->i', cr,
+                             closed_vertices[interior_tetrahedra[:, 3]] - v0)) / 6.0
+                n_degen = int(np.sum(vol < 1e-15))
+                print(f"  Volume range: [{vol.min():.2e}, {vol.max():.2e}], "
+                      f"near-zero: {n_degen}")
+            else:
+                # Fallback: Delaunay
+                delaunay = Delaunay(closed_vertices)
+                tetrahedra = delaunay.simplices
+                mesh = trimesh.Trimesh(vertices=closed_vertices, faces=closed_faces)
+                mesh.fix_normals()
+                inside_mask = mesh.contains(np.mean(closed_vertices[tetrahedra], axis=1))
+                interior_tetrahedra = tetrahedra[inside_mask]
+                if len(interior_tetrahedra) == 0:
+                    interior_tetrahedra = tetrahedra
+                print(f"  Delaunay fallback: {len(interior_tetrahedra)} tets")
 
         except Exception as e:
             print(f"Tetrahedralization failed: {e}")
@@ -625,6 +671,7 @@ class TetrahedronMeshMixin:
                 'stream_contours': getattr(self, 'stream_contours', None),
                 'stream_bounding_planes': getattr(self, 'stream_bounding_planes', None),
                 'stream_groups': getattr(self, 'stream_groups', None),
+                'vertex_contour_level': getattr(self, 'vertex_contour_level', None),
             }
 
             with open(filepath, 'wb') as f:
@@ -730,6 +777,10 @@ class TetrahedronMeshMixin:
             # Load fiber sampling seed
             if 'fiber_sampling_seed' in data:
                 self.fiber_sampling_seed = data['fiber_sampling_seed']
+
+            # Load vertex contour level (for contour-guided tetrahedralization)
+            if 'vertex_contour_level' in data and data['vertex_contour_level'] is not None:
+                self.vertex_contour_level = data['vertex_contour_level']
 
             # Load MVC weights (for deforming waypoints with tet sim)
             if 'mvc_weights' in data and data['mvc_weights'] is not None:
