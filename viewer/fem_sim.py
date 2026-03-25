@@ -3204,18 +3204,44 @@ class ProjectedNewtonSolver:
             n_inv0 = int(np.sum(Js0 <= 0))
             print(f"    PN initial: inv={n_inv0}/{M} J=[{np.min(Js0):.3f},{np.max(Js0):.3f}]")
 
+        # Two-phase solve:
+        # Phase 1: elastic-only Newton (deform mesh freely)
+        # Phase 2: detect collisions, then elastic+penalty Newton (resolve penetrations)
+        coll_penalty_idx = np.array([], dtype=np.int32)
+        coll_penalty_tgt = np.zeros((0, 3), dtype=np.float64)
+        collision_kappa = 0.0
+        n_penalty = 0
+
         E_prev = _pn_compute_energy(
             self.ti_positions, self.ti_invm,
             self.ti_tets, self.ti_Bm_inv, self.ti_rest_volume,
             effective_mu, effective_lam, M)
+        # Add penalty energy
+        if n_penalty > 0:
+            pos_np = self.ti_positions.to_numpy()
+            for pi in range(n_penalty):
+                vi = coll_penalty_idx[pi]
+                diff = pos_np[vi] - coll_penalty_tgt[pi]
+                E_prev += 0.5 * collision_kappa * np.dot(diff, diff)
 
         for newton_it in range(max_newton):
-            # 1. Compute gradient
+            # 1. Compute gradient (elastic + collision penalty)
             _pn_zero(self.ti_gradient, N)
             _pn_compute_gradient(
                 self.ti_positions, self.ti_gradient, self.ti_invm,
                 self.ti_tets, self.ti_Bm_inv, self.ti_rest_volume,
                 effective_mu, effective_lam, M)
+            # Add collision penalty gradient: kappa * (x_i - target_i)
+            if n_penalty > 0:
+                pos_np = self.ti_positions.to_numpy()
+                penalty_grad = np.zeros((N, 3), dtype=np.float64)
+                for pi in range(n_penalty):
+                    vi = coll_penalty_idx[pi]
+                    penalty_grad[vi] += collision_kappa * (pos_np[vi] - coll_penalty_tgt[pi])
+                # Upload penalty gradient to ti_gradient
+                grad_np = self.ti_gradient.to_numpy()
+                grad_np += penalty_grad
+                self.ti_gradient.from_numpy(grad_np)
             _pn_zero_fixed(self.ti_gradient, self.ti_invm, N)
 
             grad_norm = _pn_dot(self.ti_gradient, self.ti_gradient, self.ti_invm, N) ** 0.5
@@ -3246,8 +3272,17 @@ class ProjectedNewtonSolver:
                     self.ti_invm,
                     self.ti_tets, self.ti_Bm_inv, self.ti_rest_volume,
                     effective_mu, effective_lam, M)
-                # Regularization: add eps * d to make Hessian SPD
-                _pn_axpy(self.ti_gradient, effective_mu * 0.01, self.ti_hv, self.ti_invm, N)
+                # Regularization: add eps * d to make Hessian SPD.
+                # Must be large enough to overcome negative curvature from inverted tets.
+                _pn_axpy(self.ti_gradient, effective_lam * 0.1, self.ti_hv, self.ti_invm, N)
+                # Add collision penalty Hessian: kappa * d_i for penalty vertices
+                if n_penalty > 0:
+                    hv_np = self.ti_gradient.to_numpy()
+                    d_np = self.ti_hv.to_numpy()
+                    for pi in range(n_penalty):
+                        vi = coll_penalty_idx[pi]
+                        hv_np[vi] += collision_kappa * d_np[vi]
+                    self.ti_gradient.from_numpy(hv_np)
                 _pn_zero_fixed(self.ti_gradient, self.ti_invm, N)
 
                 dHd = _pn_dot(self.ti_hv, self.ti_gradient, self.ti_invm, N)
@@ -3276,22 +3311,14 @@ class ProjectedNewtonSolver:
                 self.ti_tets, self.ti_Bm_inv, M)
             alpha_safe = min(alpha_safe, 1.0)
 
-            # 4. Armijo backtracking line search
-            # Directional derivative
-            _pn_zero(self.ti_gradient, N)
-            _pn_compute_gradient(
-                self.ti_positions, self.ti_gradient, self.ti_invm,
-                self.ti_tets, self.ti_Bm_inv, self.ti_rest_volume,
-                effective_mu, effective_lam, M)
-            _pn_zero_fixed(self.ti_gradient, self.ti_invm, N)
+            # 4. Armijo backtracking line search (elastic + penalty energy)
             dir_deriv = _pn_dot(self.ti_gradient, self.ti_direction, self.ti_invm, N)
 
             alpha = alpha_safe
-            c1 = 1e-4  # Armijo constant
+            c1 = 1e-4
             _pn_copy(self.ti_pos_backup, self.ti_positions, N)
 
             for ls_it in range(15):
-                # Try step
                 _pn_copy(self.ti_positions, self.ti_pos_backup, N)
                 _pn_axpy(self.ti_positions, alpha, self.ti_direction, self.ti_invm, N)
                 _snap_fixed(self.ti_positions, self.ti_targets, self.ti_invm, N)
@@ -3300,6 +3327,13 @@ class ProjectedNewtonSolver:
                     self.ti_positions, self.ti_invm,
                     self.ti_tets, self.ti_Bm_inv, self.ti_rest_volume,
                     effective_mu, effective_lam, M)
+                # Add penalty energy
+                if n_penalty > 0:
+                    pos_ls = self.ti_positions.to_numpy()
+                    for pi in range(n_penalty):
+                        vi = coll_penalty_idx[pi]
+                        d = pos_ls[vi] - coll_penalty_tgt[pi]
+                        E_new += 0.5 * collision_kappa * np.dot(d, d)
 
                 if E_new <= E_prev + c1 * alpha * dir_deriv:
                     break
@@ -3309,45 +3343,98 @@ class ProjectedNewtonSolver:
 
         n_newton = newton_it + 1
 
-        # Collision (same as XPBD post-solve)
-        n_coll_total = 0
+        # Count inversions before collision
+        # Phase 2: detect collisions on deformed mesh, then Newton with penalty
         self.positions = self.ti_positions.to_numpy()
         has_mm_coll = hasattr(self, '_muscle_surface_faces') and bool(self._muscle_surface_faces)
-        if has_mm_coll:
-            mm_idx, mm_tgt = self._compute_muscle_collision_targets(
-                margin=margin, verbose=verbose)
-            if len(mm_idx) > 0:
-                n_coll_total += len(mm_idx)
-                if len(mm_idx) > self._max_coll:
-                    self._max_coll = max(len(mm_idx), 1000)
-                    self.ti_coll_idx = ti.field(dtype=ti.i32, shape=self._max_coll)
-                    self.ti_coll_targets = ti.Vector.field(3, dtype=ti.f64, shape=self._max_coll)
-                ip = np.zeros(self._max_coll, dtype=np.int32)
-                tp = np.zeros((self._max_coll, 3), dtype=np.float64)
-                ip[:len(mm_idx)] = mm_idx; tp[:len(mm_idx)] = mm_tgt
-                self.ti_coll_idx.from_numpy(ip)
-                self.ti_coll_targets.from_numpy(tp)
-                _apply_collision_projection(
-                    self.ti_positions, self.ti_invm,
-                    self.ti_coll_idx, self.ti_coll_targets, 1.0, len(mm_idx))
-
         if self._merged_bone_mesh is not None:
-            self.positions = self.ti_positions.to_numpy()
             bi, bt = self._compute_collision_targets(margin, verbose=verbose)
             if len(bi) > 0:
-                n_coll_total += len(bi)
-                if len(bi) > self._max_coll:
-                    self._max_coll = max(len(bi), 1000)
-                    self.ti_coll_idx = ti.field(dtype=ti.i32, shape=self._max_coll)
-                    self.ti_coll_targets = ti.Vector.field(3, dtype=ti.f64, shape=self._max_coll)
-                ip = np.zeros(self._max_coll, dtype=np.int32)
-                tp = np.zeros((self._max_coll, 3), dtype=np.float64)
-                ip[:len(bi)] = bi; tp[:len(bi)] = bt
-                self.ti_coll_idx.from_numpy(ip)
-                self.ti_coll_targets.from_numpy(tp)
-                _apply_collision_projection(
-                    self.ti_positions, self.ti_invm,
-                    self.ti_coll_idx, self.ti_coll_targets, 1.0, len(bi))
+                coll_penalty_idx = np.concatenate([coll_penalty_idx, bi])
+                coll_penalty_tgt = np.concatenate([coll_penalty_tgt, bt])
+        if has_mm_coll:
+            self.positions = self.ti_positions.to_numpy()
+            mi, mt = self._compute_muscle_collision_targets(margin=margin, verbose=verbose)
+            if len(mi) > 0:
+                coll_penalty_idx = np.concatenate([coll_penalty_idx, mi])
+                coll_penalty_tgt = np.concatenate([coll_penalty_tgt, mt])
+
+        n_penalty = len(coll_penalty_idx)
+        if n_penalty > 0:
+            collision_kappa = effective_lam  # strong: match volume stiffness
+            if n_penalty > self._max_coll:
+                self._max_coll = max(n_penalty, 1000)
+                self.ti_coll_idx = ti.field(dtype=ti.i32, shape=self._max_coll)
+                self.ti_coll_targets = ti.Vector.field(3, dtype=ti.f64, shape=self._max_coll)
+            ip = np.zeros(self._max_coll, dtype=np.int32)
+            tp = np.zeros((self._max_coll, 3), dtype=np.float64)
+            ip[:n_penalty] = coll_penalty_idx
+            tp[:n_penalty] = coll_penalty_tgt
+            self.ti_coll_idx.from_numpy(ip)
+            self.ti_coll_targets.from_numpy(tp)
+
+            if verbose:
+                print(f"    Phase 2: {n_penalty} collision penalty, kappa={collision_kappa:.0f}")
+
+            # Re-run Newton with penalty for 5 more iterations
+            E_prev = _pn_compute_energy(
+                self.ti_positions, self.ti_invm,
+                self.ti_tets, self.ti_Bm_inv, self.ti_rest_volume,
+                effective_mu, effective_lam, M)
+            pos_np = self.ti_positions.to_numpy()
+            for pi in range(n_penalty):
+                vi = coll_penalty_idx[pi]
+                d = pos_np[vi] - coll_penalty_tgt[pi]
+                E_prev += 0.5 * collision_kappa * np.dot(d, d)
+
+            for newton_it in range(5):
+                _pn_zero(self.ti_gradient, N)
+                _pn_compute_gradient(
+                    self.ti_positions, self.ti_gradient, self.ti_invm,
+                    self.ti_tets, self.ti_Bm_inv, self.ti_rest_volume,
+                    effective_mu, effective_lam, M)
+                # Add penalty gradient
+                pos_np = self.ti_positions.to_numpy()
+                penalty_grad = np.zeros((N, 3), dtype=np.float64)
+                for pi in range(n_penalty):
+                    vi = coll_penalty_idx[pi]
+                    penalty_grad[vi] += collision_kappa * (pos_np[vi] - coll_penalty_tgt[pi])
+                grad_np = self.ti_gradient.to_numpy()
+                grad_np += penalty_grad
+                self.ti_gradient.from_numpy(grad_np)
+                _pn_zero_fixed(self.ti_gradient, self.ti_invm, N)
+
+                # Steepest descent with line search (fast for penalty-dominated)
+                _pn_zero(self.ti_direction, N)
+                _pn_copy(self.ti_direction, self.ti_gradient, N)
+                _pn_scale(self.ti_direction, -1.0, self.ti_invm, N)
+                _pn_zero_fixed(self.ti_direction, self.ti_invm, N)
+
+                alpha_safe = _pn_max_step_size(
+                    self.ti_positions, self.ti_direction,
+                    self.ti_tets, self.ti_Bm_inv, M)
+                alpha_safe = min(alpha_safe, 1.0)
+
+                dir_deriv = _pn_dot(self.ti_gradient, self.ti_direction, self.ti_invm, N)
+                alpha = alpha_safe
+                _pn_copy(self.ti_pos_backup, self.ti_positions, N)
+                for ls_it in range(15):
+                    _pn_copy(self.ti_positions, self.ti_pos_backup, N)
+                    _pn_axpy(self.ti_positions, alpha, self.ti_direction, self.ti_invm, N)
+                    _snap_fixed(self.ti_positions, self.ti_targets, self.ti_invm, N)
+                    E_new = _pn_compute_energy(
+                        self.ti_positions, self.ti_invm,
+                        self.ti_tets, self.ti_Bm_inv, self.ti_rest_volume,
+                        effective_mu, effective_lam, M)
+                    pos_ls = self.ti_positions.to_numpy()
+                    for ppi in range(n_penalty):
+                        vi = coll_penalty_idx[ppi]
+                        dd = pos_ls[vi] - coll_penalty_tgt[ppi]
+                        E_new += 0.5 * collision_kappa * np.dot(dd, dd)
+                    if E_new <= E_prev + 1e-4 * alpha * dir_deriv:
+                        break
+                    alpha *= 0.5
+                E_prev = E_new
 
         self.positions = self.ti_positions.to_numpy()
 
@@ -3363,7 +3450,7 @@ class ProjectedNewtonSolver:
             Js = np.linalg.det(Ds @ self.Bm_inv)
             n_inv = int(np.sum(Js <= 0))
             print(f"    PN final: newton={n_newton} ||dx||={residual:.4e} "
-                  f"inv={n_inv}/{M} coll={n_coll_total} "
+                  f"inv={n_inv}/{M} penalty={n_penalty} "
                   f"J=[{np.min(Js):.3f},{np.max(Js):.3f}]")
 
         self._has_previous_solution = True
