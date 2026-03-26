@@ -7198,6 +7198,7 @@ class ContourMeshMixin(ContourAnimationMixin):
             dedup_map = list(range(n))
 
             # Find duplicates across different streams
+            n_merged_level = 0
             for stream_i in range(num_streams):
                 start_i, end_i = level_stream_ranges[stream_i]
                 for stream_j in range(stream_i + 1, num_streams):
@@ -7207,6 +7208,9 @@ class ContourMeshMixin(ContourAnimationMixin):
                             if np.linalg.norm(level_vertices[i] - level_vertices[j]) < eps:
                                 # j is a duplicate of i, map j to i's final index
                                 dedup_map[j] = dedup_map[i]
+                                n_merged_level += 1
+            if n_merged_level > 0 and (level_idx < 3 or level_idx >= num_levels - 3 or level_idx == 46):
+                print(f"  Level {level_idx}: merged {n_merged_level} shared vertices")
 
             # Build deduplicated vertex list and create final index mapping
             final_indices = {}  # original index -> final vertex index (global)
