@@ -1586,7 +1586,7 @@ class FiberArchitectureMixin:
         self.fiber_architecture = None  # Will be set by main class
         self.is_draw_fiber_architecture = False
         self.is_one_fiber = False
-        self.sampling_method = 'sobol_unit_square'  # 'sobol_unit_square' or 'sobol_min_contour'
+        self.sampling_method = 'grid'  # 'grid', 'sobol_unit_square', or 'sobol_min_contour'
         self.cutting_method = 'bp'  # 'bp', 'area_based', 'voronoi', 'angular', 'gradient', 'ratio', 'cumulative_area', or 'projected_area'
 
         # Waypoints
@@ -2030,6 +2030,40 @@ class FiberArchitectureMixin:
             lines = np.concatenate(line_pairs)
             glVertexPointer(3, GL_FLOAT, 0, lines)
             glDrawArrays(GL_LINES, 0, len(lines))
+
+        # Draw inspector-highlighted vertex (from 2D inspect window hover/selection)
+        highlight_vtx = getattr(self, 'inspector_highlight_vertex_3d', None)
+        if highlight_vtx is not None:
+            pt = np.array([highlight_vtx], dtype=np.float32)
+            glPointSize(14)
+            glColor4f(1.0, 1.0, 0.0, 1.0)
+            glVertexPointer(3, GL_FLOAT, 0, pt)
+            glDrawArrays(GL_POINTS, 0, 1)
+            glPointSize(10)
+            glColor4f(1.0, 0.3, 0.0, 1.0)
+            glVertexPointer(3, GL_FLOAT, 0, pt)
+            glDrawArrays(GL_POINTS, 0, 1)
+
+        # Draw inspector-highlighted fiber (whole line in blue)
+        highlight_fiber = getattr(self, 'inspector_highlight_fiber_idx', None)
+        if highlight_fiber is not None and hasattr(self, 'waypoints') and self.waypoints is not None:
+            h_stream, h_fiber = highlight_fiber
+            if h_stream < len(self.waypoints):
+                fiber_pts = []
+                for level_wps in self.waypoints[h_stream]:
+                    if level_wps is not None and h_fiber < len(level_wps):
+                        wp = np.array(level_wps[h_fiber])
+                        if np.all(np.isfinite(wp)):
+                            fiber_pts.append(wp)
+                if len(fiber_pts) >= 2:
+                    pts = np.array(fiber_pts, dtype=np.float32)
+                    glLineWidth(4)
+                    glColor4f(0.2, 0.4, 1.0, 1.0)
+                    glVertexPointer(3, GL_FLOAT, 0, pts)
+                    glDrawArrays(GL_LINE_STRIP, 0, len(pts))
+                    glPointSize(8)
+                    glVertexPointer(3, GL_FLOAT, 0, pts)
+                    glDrawArrays(GL_POINTS, 0, len(pts))
 
         glDisableClientState(GL_VERTEX_ARRAY)
         glEnable(GL_LIGHTING)
@@ -2514,7 +2548,7 @@ class FiberArchitectureMixin:
         failed_count = total_count - embedded_count - skeleton_count
         msg = f"  Waypoints: {embedded_count} in tetrahedra"
         if clamped_count > 0:
-            msg += f" ({clamped_count} clamped/outside)"
+            msg += f" ({clamped_count} outside, using nearest tet with extrapolated bary coords)"
         msg += f", {skeleton_count} attached to skeleton, {total_count} total"
         if failed_count > 0:
             msg += f", {failed_count} FAILED"
@@ -2550,8 +2584,8 @@ class FiberArchitectureMixin:
     def _find_containing_tet(self, point, tet_verts, tetrahedra):
         """
         Find the tetrahedron containing a point and compute barycentric coordinates.
-        For points outside the mesh, finds the closest tetrahedron and uses clamped
-        barycentric coordinates to preserve the original waypoint positions.
+        For points outside the mesh, finds the closest tetrahedron and uses unclamped
+        (negative) barycentric coordinates for natural extrapolation during deformation.
 
         Returns:
             (tet_idx, barycentric_coords, was_inside) - was_inside=True if point was truly inside
@@ -2722,7 +2756,7 @@ class FiberArchitectureMixin:
             if skipped_count > 0:
                 msg += f", {skipped_count} SKIPPED (not embedded!)"
             if clamped_count > 0:
-                msg += f", {clamped_count} clamped (outside mesh)"
+                msg += f", {clamped_count} outside mesh (extrapolated)"
             print(msg)
 
     def update_waypoints_from_viper(self):
