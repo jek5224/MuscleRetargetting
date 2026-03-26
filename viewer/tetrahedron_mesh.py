@@ -490,18 +490,25 @@ class TetrahedronMeshMixin:
                       f"{len(closed_vertices)} verts "
                       f"(+{len(closed_vertices) - n_original} centers)")
 
-                # Quality check
-                v0 = closed_vertices[interior_tetrahedra[:, 0]]
+                # Quality check: detailed volume distribution
+                v0 = closed_vertices[interior_tetrahedra[:, 0]].astype(np.float64)
                 cr = np.cross(
-                    closed_vertices[interior_tetrahedra[:, 1]] - v0,
-                    closed_vertices[interior_tetrahedra[:, 2]] - v0)
+                    closed_vertices[interior_tetrahedra[:, 1]].astype(np.float64) - v0,
+                    closed_vertices[interior_tetrahedra[:, 2]].astype(np.float64) - v0)
                 vol = np.abs(np.einsum('ij,ij->i', cr,
-                             closed_vertices[interior_tetrahedra[:, 3]] - v0)) / 6.0
-                n_degen = int(np.sum(vol < 1e-15))
-                print(f"  Volume range: [{vol.min():.2e}, {vol.max():.2e}], "
-                      f"near-zero: {n_degen}")
+                             closed_vertices[interior_tetrahedra[:, 3]].astype(np.float64) - v0)) / 6.0
+                n_total = len(vol)
+                print(f"  Tet quality ({n_total} tets):")
+                print(f"    Volume range: [{vol.min():.2e}, {vol.max():.2e}]")
+                for threshold in [1e-15, 1e-12, 1e-10, 1e-8]:
+                    n = int(np.sum(vol < threshold))
+                    if n > 0:
+                        print(f"    vol < {threshold:.0e}: {n} ({100*n/n_total:.1f}%)")
+                n_good = int(np.sum(vol >= 1e-12))
+                print(f"    Good tets (vol >= 1e-12): {n_good} ({100*n_good/n_total:.1f}%)")
             else:
-                # Fallback: Delaunay
+                # Fallback: Delaunay (no vertex_contour_level available)
+                print("  Falling back to Delaunay (no vertex_contour_level)")
                 delaunay = Delaunay(closed_vertices)
                 tetrahedra = delaunay.simplices
                 mesh = trimesh.Trimesh(vertices=closed_vertices, faces=closed_faces)
@@ -510,6 +517,23 @@ class TetrahedronMeshMixin:
                 interior_tetrahedra = tetrahedra[inside_mask]
                 if len(interior_tetrahedra) == 0:
                     interior_tetrahedra = tetrahedra
+                # Quality check for Delaunay fallback
+                v0 = closed_vertices[interior_tetrahedra[:, 0]].astype(np.float64)
+                cr = np.cross(
+                    closed_vertices[interior_tetrahedra[:, 1]].astype(np.float64) - v0,
+                    closed_vertices[interior_tetrahedra[:, 2]].astype(np.float64) - v0)
+                vol = np.abs(np.einsum('ij,ij->i', cr,
+                             closed_vertices[interior_tetrahedra[:, 3]].astype(np.float64) - v0)) / 6.0
+                n_total = len(vol)
+                print(f"  Delaunay fallback: {n_total} tets")
+                print(f"  Tet quality ({n_total} tets):")
+                print(f"    Volume range: [{vol.min():.2e}, {vol.max():.2e}]")
+                for threshold in [1e-15, 1e-12, 1e-10, 1e-8]:
+                    n = int(np.sum(vol < threshold))
+                    if n > 0:
+                        print(f"    vol < {threshold:.0e}: {n} ({100*n/n_total:.1f}%)")
+                n_good = int(np.sum(vol >= 1e-12))
+                print(f"    Good tets (vol >= 1e-12): {n_good} ({100*n_good/n_total:.1f}%)")
                 print(f"  Delaunay fallback: {len(interior_tetrahedra)} tets")
 
         except Exception as e:
