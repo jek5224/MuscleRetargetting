@@ -500,6 +500,8 @@ class ContourMeshMixin(ContourAnimationMixin):
         # Inspector highlight (set by viewer when 2D inspector is open)
         self.inspector_highlight_stream = None  # Stream index to highlight
         self.inspector_highlight_level = None   # Level index to highlight
+        self.inspector_highlight_vertex_3d = None  # 3D position of hovered vertex
+        self.inspector_highlight_fiber_idx = None  # (stream_idx, fiber_idx) of hovered fiber
 
         # Manual cutting state
         self._manual_cut_pending = False  # True when waiting for user to draw cutting line
@@ -1471,6 +1473,7 @@ class ContourMeshMixin(ContourAnimationMixin):
                     'basis_z': bp['basis_z'].copy(),
                     'bounding_plane': np.array(bp['bounding_plane']).copy() if bp.get('bounding_plane') is not None else None,
                     'square_like': bp.get('square_like', False),
+                    'contour_match': [(np.array(p).copy(), np.array(q).copy()) for p, q in bp['contour_match']] if bp.get('contour_match') is not None else None,
                 })
             snapshot.append(level_snap)
         return snapshot
@@ -2972,11 +2975,19 @@ class ContourMeshMixin(ContourAnimationMixin):
                             has_gap = True
                     spacing = max_min_dist
                 else:
-                    # Diverging/merging point - use centroid-to-centroid distance
-                    # This is more lenient to avoid over-refinement at topology changes
+                    # Diverging/merging - axial distance only
+                    # Lateral fan-out is inherent to topology changes, not a gap.
+                    # Per-stream Euclidean distance captures this fan-out and never
+                    # converges, causing runaway insertion. Project onto basis_z
+                    # (bounding plane normal = muscle axis) to measure only the
+                    # axial component.
                     centroid_curr = np.mean(curr_means, axis=0)
                     centroid_next = np.mean(next_means, axis=0)
-                    spacing = np.linalg.norm(centroid_next - centroid_curr)
+                    basis_z = current_planes[0].get('basis_z', None)
+                    if basis_z is not None:
+                        spacing = abs(np.dot(centroid_next - centroid_curr, basis_z))
+                    else:
+                        spacing = np.linalg.norm(centroid_next - centroid_curr)
                     has_gap = spacing > max_spacing_threshold
 
                 # Skip if this range already failed
@@ -7159,8 +7170,11 @@ class ContourMeshMixin(ContourAnimationMixin):
         # stream_level_indices[stream_idx][level_idx] = list of vertex indices for that contour
         stream_level_indices = [[[] for _ in range(num_levels)] for _ in range(num_streams)]
 
-        # Epsilon for detecting exact duplicates
-        eps = 1e-6
+        # Epsilon for merging duplicate vertices at shared cut boundaries.
+        # Shared boundary vertices should be exactly identical (same coordinates),
+        # but resampling can introduce small differences. Use 1e-4 to ensure
+        # all shared boundary vertices merge.
+        eps = 1e-4
 
         for level_idx in range(num_levels):
             level_vertices = []  # All vertices at this level (before dedup)
@@ -8515,36 +8529,41 @@ class ContourMeshMixin(ContourAnimationMixin):
             self.contours = [[self.contours[0][0], self.contours[0][triplet_num], self.contours[0][triplet_num * 2], self.contours[0][-1]]]
             self.bounding_planes = [[self.bounding_planes[0][0], self.bounding_planes[0][triplet_num], self.bounding_planes[0][triplet_num * 2], self.bounding_planes[0][-1]]]
         else:
-            fiber_nums = []
-            for bounding_plane_stream in self.bounding_planes:
-                max_area = 0
-                min_area = np.inf
-                for bounding_plane in bounding_plane_stream:
-                    if bounding_plane['area'] > max_area:
-                        max_area = bounding_plane['area']
-                    if bounding_plane['area'] < min_area:
-                        min_area = bounding_plane['area']
-
-                # Choose area based on sampling method
-                if self.sampling_method == 'sobol_min_contour':
-                    # Use min_area to ensure samples fit in smallest contour
-                    fiber_num = int(np.sqrt(min_area * 10 / (scale * scale)))
-                else:
-                    # Use max_area (original behavior)
-                    fiber_num = int(np.sqrt(max_area * 10 / (scale * scale)))
-                fiber_num = max(int(fiber_num), 1)
-                fiber_nums.append(fiber_num)
-
-            # Generate fiber architecture based on sampling method
-            if self.sampling_method == 'sobol_min_contour':
-                # Sample inside smallest contour of each stream
-                self.fiber_architecture = [
-                    self.sobol_sampling_min_contour(bounding_plane_stream, fiber_num)
-                    for bounding_plane_stream, fiber_num in zip(self.bounding_planes, fiber_nums)
-                ]
+            if self.sampling_method == 'grid':
+                # Fixed 10×10 grid (100 points) in unit square — same for all streams
+                grid_samples = self.grid_sampling_unit_square()
+                self.fiber_architecture = [grid_samples for _ in self.bounding_planes]
             else:
-                # Original: Sobol sampling on unit square
-                self.fiber_architecture = [self.sobol_sampling_barycentric(fiber_num) for fiber_num in fiber_nums]
+                fiber_nums = []
+                for bounding_plane_stream in self.bounding_planes:
+                    max_area = 0
+                    min_area = np.inf
+                    for bounding_plane in bounding_plane_stream:
+                        if bounding_plane['area'] > max_area:
+                            max_area = bounding_plane['area']
+                        if bounding_plane['area'] < min_area:
+                            min_area = bounding_plane['area']
+
+                    # Choose area based on sampling method
+                    if self.sampling_method == 'sobol_min_contour':
+                        # Use min_area to ensure samples fit in smallest contour
+                        fiber_num = int(np.sqrt(min_area * 10 / (scale * scale)))
+                    else:
+                        # Use max_area (original behavior)
+                        fiber_num = int(np.sqrt(max_area * 10 / (scale * scale)))
+                    fiber_num = max(int(fiber_num), 1)
+                    fiber_nums.append(fiber_num)
+
+                # Generate fiber architecture based on sampling method
+                if self.sampling_method == 'sobol_min_contour':
+                    # Sample inside smallest contour of each stream
+                    self.fiber_architecture = [
+                        self.sobol_sampling_min_contour(bounding_plane_stream, fiber_num)
+                        for bounding_plane_stream, fiber_num in zip(self.bounding_planes, fiber_nums)
+                    ]
+                else:
+                    # Original: Sobol sampling on unit square
+                    self.fiber_architecture = [self.sobol_sampling_barycentric(fiber_num) for fiber_num in fiber_nums]
 
         self.normalized_Qs = [[] for _ in range(len(self.bounding_planes))]
         self.waypoints = [[] for _ in range(len(self.bounding_planes))]
@@ -12446,6 +12465,13 @@ class ContourMeshMixin(ContourAnimationMixin):
         self.stream_bounding_planes = stream_bounding_planes
         self.stream_groups = stream_groups
 
+    @staticmethod
+    def _inertia_tensor_3D(points):
+        """3x3 inertia tensor from 3D points. Captures shape, size, orientation, curvature."""
+        pts = np.asarray(points)
+        centered = pts - pts.mean(axis=0)
+        return (centered.T @ centered) / len(pts)
+
     def select_levels(self, error_threshold=None):
         """
         Step 2: Error-based level selection for cut streams.
@@ -12471,8 +12497,8 @@ class ContourMeshMixin(ContourAnimationMixin):
         muscle_length = np.linalg.norm(last_mean - first_mean)
 
         if error_threshold is None:
-            error_threshold = getattr(self, 'level_select_error_threshold', 0.005) * muscle_length
-        print(f"Error threshold: {error_threshold:.6f} ({error_threshold/muscle_length*100:.1f}% of muscle length)")
+            error_threshold = getattr(self, 'level_select_error_threshold', 0.05)  # 5% relative Frobenius
+        print(f"Error threshold: {error_threshold:.6f} (relative Frobenius norm)")
 
         # Minimum distance between selected levels (percentage of muscle length)
         min_spacing_ratio = getattr(self, 'level_select_min_spacing', 0.05)  # 5% default
@@ -12521,15 +12547,21 @@ class ContourMeshMixin(ContourAnimationMixin):
 
         # Helper: compute interpolation error for a stream at a level
         def compute_stream_error(stream_i, level_i, prev_level, next_level):
-            bp_actual = self.stream_bounding_planes[stream_i][level_i]
+            # Get contour points
+            contour_actual = np.asarray(self.stream_contours[stream_i][level_i])
+            contour_prev = np.asarray(self.stream_contours[stream_i][prev_level])
+            contour_next = np.asarray(self.stream_contours[stream_i][next_level])
+
+            # Compute 3D inertia tensors
+            I_actual = self._inertia_tensor_3D(contour_actual)
+            I_prev = self._inertia_tensor_3D(contour_prev)
+            I_next = self._inertia_tensor_3D(contour_next)
+
+            # Interpolation parameter from scalar values
             bp_prev = self.stream_bounding_planes[stream_i][prev_level]
             bp_next = self.stream_bounding_planes[stream_i][next_level]
+            bp_actual = self.stream_bounding_planes[stream_i][level_i]
 
-            actual_mean = bp_actual['mean']
-            prev_mean = bp_prev['mean']
-            next_mean = bp_next['mean']
-
-            # Interpolation parameter
             prev_scalar = bp_prev.get('scalar_value', prev_level)
             next_scalar = bp_next.get('scalar_value', next_level)
             actual_scalar = bp_actual.get('scalar_value', level_i)
@@ -12540,8 +12572,12 @@ class ContourMeshMixin(ContourAnimationMixin):
                 t = 0.5
             t = np.clip(t, 0, 1)
 
-            interpolated = (1 - t) * prev_mean + t * next_mean
-            return np.linalg.norm(actual_mean - interpolated)
+            # Interpolated tensor and relative error
+            I_interp = (1 - t) * I_prev + t * I_next
+            I_norm = np.linalg.norm(I_actual, 'fro')
+            if I_norm < 1e-15:
+                return 0.0
+            return np.linalg.norm(I_actual - I_interp, 'fro') / I_norm
 
         # Helper: check if a level is too close to any already-selected level
         def is_too_close(level_i, selected_levels, stream_i=0, verbose=False):
@@ -12806,6 +12842,8 @@ class ContourMeshMixin(ContourAnimationMixin):
                         bp['basis_z'] = snap['basis_z'].copy()
                         if snap['bounding_plane'] is not None:
                             bp['bounding_plane'] = snap['bounding_plane'].copy()
+                        if snap.get('contour_match') is not None:
+                            bp['contour_match'] = [(np.array(p).copy(), np.array(q).copy()) for p, q in snap['contour_match']]
 
         max_stream_count = self.max_stream_count
         level_counts = [len(src_contours[s]) for s in range(max_stream_count)]
