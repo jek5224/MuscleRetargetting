@@ -2854,11 +2854,49 @@ def _render_inspect_2d_windows(v):
         # Set 3D highlights based on hover
         if hovered_type == 'vertex' and hovered_idx >= 0 and contour_match is not None and hovered_idx < len(contour_match):
             obj.inspector_highlight_vertex_3d = np.array(contour_match[hovered_idx][0])
+            obj.inspector_highlight_corner_vertices_3d = None
+        elif hovered_type == 'corner' and hovered_idx >= 0:
+            # Highlight this corner's corresponding vertex at EVERY contour level
+            corner_idx = hovered_idx
+            corner_pts = []
+            if is_post_stream and hasattr(obj, 'bounding_planes') and obj.bounding_planes is not None:
+                if stream_idx < len(obj.bounding_planes):
+                    for lev_idx, bp_lev in enumerate(obj.bounding_planes[stream_idx]):
+                        if bp_lev is None:
+                            continue
+                        cm = bp_lev.get('contour_match', None)
+                        ci = bp_lev.get('corner_indices', None)
+                        bp_c = bp_lev.get('bounding_plane', None)
+                        if cm is None or bp_c is None:
+                            continue
+                        # Find corner vertex for this level
+                        if ci is not None and corner_idx < len(ci):
+                            vi = ci[corner_idx]
+                        else:
+                            # Fallback: find by Q proximity
+                            bp_corner = np.array(bp_c[corner_idx])
+                            vi = 0
+                            min_d = float('inf')
+                            for vvi, (p, q) in enumerate(cm):
+                                d = np.linalg.norm(np.array(q) - bp_corner)
+                                if d < min_d:
+                                    min_d = d
+                                    vi = vvi
+                        if vi < len(cm):
+                            corner_pts.append(np.array(cm[vi][0]))
+            # Current level vertex highlighted in main color
+            if contour_match is not None and len(q_based_corner_indices) > corner_idx:
+                vi = q_based_corner_indices[corner_idx]
+                if vi < len(contour_match):
+                    obj.inspector_highlight_vertex_3d = np.array(contour_match[vi][0])
+            obj.inspector_highlight_corner_vertices_3d = corner_pts if corner_pts else None
         elif hovered_type == 'waypoint' and hovered_idx >= 0:
             obj.inspector_highlight_fiber_idx = (stream_idx, hovered_idx)
+            obj.inspector_highlight_corner_vertices_3d = None
         else:
             obj.inspector_highlight_vertex_3d = None
             obj.inspector_highlight_fiber_idx = None
+            obj.inspector_highlight_corner_vertices_3d = None
 
         # Show tooltip
         if hovered_idx >= 0:
@@ -3154,6 +3192,7 @@ def _render_inspect_2d_windows(v):
             obj.inspector_highlight_level = None
             obj.inspector_highlight_vertex_3d = None
             obj.inspector_highlight_fiber_idx = None
+            obj.inspector_highlight_corner_vertices_3d = None
 
             # Rebuild 3D fiber draw arrays to reflect correspondence changes
             if hasattr(obj, '_rebuild_fiber_draw_arrays'):

@@ -2044,6 +2044,22 @@ class FiberArchitectureMixin:
             glVertexPointer(3, GL_FLOAT, 0, pt)
             glDrawArrays(GL_POINTS, 0, 1)
 
+        # Draw inspector-highlighted corner vertices across all levels (cyan)
+        highlight_corner_pts = getattr(self, 'inspector_highlight_corner_vertices_3d', None)
+        if highlight_corner_pts is not None and len(highlight_corner_pts) > 0:
+            pts = np.array(highlight_corner_pts, dtype=np.float32)
+            # Draw as line strip connecting levels
+            if len(pts) >= 2:
+                glLineWidth(3)
+                glColor4f(0.0, 0.9, 0.9, 0.8)
+                glVertexPointer(3, GL_FLOAT, 0, pts)
+                glDrawArrays(GL_LINE_STRIP, 0, len(pts))
+            # Draw points
+            glPointSize(10)
+            glColor4f(0.0, 0.9, 0.9, 1.0)
+            glVertexPointer(3, GL_FLOAT, 0, pts)
+            glDrawArrays(GL_POINTS, 0, len(pts))
+
         # Draw inspector-highlighted fiber (whole line in blue)
         highlight_fiber = getattr(self, 'inspector_highlight_fiber_idx', None)
         if highlight_fiber is not None and hasattr(self, 'waypoints') and self.waypoints is not None:
