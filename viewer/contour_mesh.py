@@ -7170,11 +7170,8 @@ class ContourMeshMixin(ContourAnimationMixin):
         # stream_level_indices[stream_idx][level_idx] = list of vertex indices for that contour
         stream_level_indices = [[[] for _ in range(num_levels)] for _ in range(num_streams)]
 
-        # Epsilon for merging duplicate vertices at shared cut boundaries.
-        # Shared boundary vertices should be exactly identical (same coordinates),
-        # but resampling can introduce small differences. Use 1e-4 to ensure
-        # all shared boundary vertices merge.
-        eps = 1e-4
+        # Epsilon for detecting exact duplicates (shared cut boundary vertices)
+        eps = 1e-6
 
         for level_idx in range(num_levels):
             level_vertices = []  # All vertices at this level (before dedup)
@@ -7366,62 +7363,6 @@ class ContourMeshMixin(ContourAnimationMixin):
                         curr_indices, next_indices, all_vertices, processed_quads
                     )
                     all_faces.extend(faces)
-
-        # Stitch faces between adjacent streams along shared cut edges.
-        # After cutting, adjacent streams share boundary vertices but have no
-        # connecting faces along the cut line. This creates visible gaps.
-        n_stitch = 0
-        for stream_i in range(num_streams):
-            for stream_j in range(stream_i + 1, num_streams):
-                for level_idx in range(num_levels):
-                    idx_i = stream_level_indices[stream_i][level_idx]
-                    idx_j = stream_level_indices[stream_j][level_idx]
-                    if len(idx_i) == 0 or len(idx_j) == 0:
-                        continue
-
-                    # Find shared vertex indices (same global index after dedup)
-                    shared = sorted(set(idx_i) & set(idx_j))
-                    if level_idx == 0:
-                        # Debug: check how close the boundary vertices are
-                        min_dist = float('inf')
-                        for vi in idx_i:
-                            for vj in idx_j:
-                                d = np.linalg.norm(all_vertices[vi] - all_vertices[vj])
-                                if d < min_dist:
-                                    min_dist = d
-                        print(f"  Stitch debug: stream {stream_i} vs {stream_j}, level {level_idx}: "
-                              f"{len(idx_i)} vs {len(idx_j)} verts, {len(shared)} shared, "
-                              f"min_dist={min_dist:.6f}")
-                    if len(shared) < 2:
-                        continue
-
-                    # Connect shared boundary between consecutive levels
-                    if level_idx + 1 < num_levels:
-                        idx_i_next = stream_level_indices[stream_i][level_idx + 1]
-                        idx_j_next = stream_level_indices[stream_j][level_idx + 1]
-                        shared_next = sorted(set(idx_i_next) & set(idx_j_next))
-
-                        if len(shared_next) >= 2:
-                            # Create faces along the shared edge between levels
-                            n_edge = min(len(shared), len(shared_next))
-                            for k in range(n_edge - 1):
-                                v0 = shared[k]
-                                v1 = shared[k + 1]
-                                v2 = shared_next[k + 1]
-                                v3 = shared_next[k]
-
-                                quad_key = frozenset([v0, v1, v2, v3])
-                                if quad_key in processed_quads:
-                                    continue
-                                processed_quads.add(quad_key)
-
-                                # Split quad into 2 triangles
-                                all_faces.append([v0, v1, v2])
-                                all_faces.append([v0, v2, v3])
-                                n_stitch += 2
-
-        if n_stitch > 0:
-            print(f"  Added {n_stitch} stitching faces between streams")
 
         if len(all_faces) == 0:
             print("No faces generated.")
