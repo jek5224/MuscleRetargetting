@@ -394,10 +394,14 @@ class TetrahedronMeshMixin:
         try:
             # Build vertex-to-level mapping
             vertex_level = getattr(self, 'vertex_contour_level', None)
-            if vertex_level is None or len(vertex_level) != len(closed_vertices):
-                # Fallback: guess level from cap faces
+            if vertex_level is not None:
+                # Extend to cover cap anchor vertices (added after contour mesh)
+                if len(vertex_level) < len(closed_vertices):
+                    extended = np.full(len(closed_vertices), -1, dtype=np.int32)
+                    extended[:len(vertex_level)] = vertex_level
+                    vertex_level = extended
+            if vertex_level is None:
                 print("  Warning: no vertex_contour_level, falling back to Delaunay")
-                vertex_level = None
 
             if vertex_level is not None:
                 n_original = len(closed_vertices)
