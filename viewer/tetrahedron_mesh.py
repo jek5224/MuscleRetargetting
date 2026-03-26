@@ -510,6 +510,54 @@ class TetrahedronMeshMixin:
                         print(f"    vol < {threshold:.0e}: {n} ({100*n/n_total:.1f}%)")
                 n_good = int(np.sum(vol >= 1e-12))
                 print(f"    Good tets (vol >= 1e-12): {n_good} ({100*n_good/n_total:.1f}%)")
+
+                # --- Diagnostic checks ---
+
+                # [1] Unused vertices
+                all_tet_verts = set(interior_tetrahedra.ravel())
+                n_unused_orig = sum(1 for i in range(n_original) if i not in all_tet_verts)
+                if n_unused_orig > 0:
+                    print(f"  [!] UNUSED VERTICES: {n_unused_orig}/{n_original} original verts not in any tet")
+                else:
+                    print(f"  [OK] All {n_original} original vertices used in tets")
+
+                # [2] Waypoint info
+                if hasattr(self, 'waypoints') and self.waypoints is not None and len(self.waypoints) > 0:
+                    n_wp = sum(len(wp) for stream in self.waypoints
+                               for wp in stream if hasattr(wp, '__len__'))
+                    print(f"  [INFO] Waypoints: {n_wp} (embedding checked at runtime, "
+                          f"watch for 'clamped/outside' warnings)")
+                else:
+                    print(f"  [INFO] No waypoints stored")
+
+                # [3] Tet count vs surface faces
+                n_faces = len(closed_faces)
+                print(f"  [INFO] Tet density: {n_total} tets from {n_faces} faces "
+                      f"(ratio {n_total/max(n_faces,1):.2f}x)")
+
+                # [4] Steiner center vertices
+                n_centers = len(closed_vertices) - n_original
+                print(f"  [INFO] Steiner centers: {n_centers} level centroids added")
+
+                # [5] Internal connectivity
+                from collections import Counter as _Counter
+                _fc = _Counter()
+                for tet in interior_tetrahedra:
+                    for f in [(tet[0],tet[1],tet[2]), (tet[0],tet[1],tet[3]),
+                              (tet[0],tet[2],tet[3]), (tet[1],tet[2],tet[3])]:
+                        _fc[tuple(sorted(f))] += 1
+                n_shared = sum(1 for c in _fc.values() if c >= 2)
+                n_boundary = sum(1 for c in _fc.values() if c == 1)
+                pct = 100 * n_shared / max(len(_fc), 1)
+                print(f"  [INFO] Connectivity: {n_shared} shared / {n_boundary} boundary faces "
+                      f"({pct:.0f}% internal)")
+
+                # [6] Stream info
+                if hasattr(self, 'contours') and self.contours is not None:
+                    n_streams = len(self.contours)
+                    stream_lvls = [len(s) for s in self.contours]
+                    print(f"  [INFO] Streams: {n_streams}, levels: {stream_lvls}")
+
             else:
                 # Fallback: Delaunay (no vertex_contour_level available)
                 print("  Falling back to Delaunay (no vertex_contour_level)")
