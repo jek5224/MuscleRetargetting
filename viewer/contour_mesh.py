@@ -7367,6 +7367,51 @@ class ContourMeshMixin(ContourAnimationMixin):
                     )
                     all_faces.extend(faces)
 
+        # Stitch faces between adjacent streams along shared cut edges.
+        # After cutting, adjacent streams share boundary vertices but have no
+        # connecting faces along the cut line. This creates visible gaps.
+        n_stitch = 0
+        for stream_i in range(num_streams):
+            for stream_j in range(stream_i + 1, num_streams):
+                for level_idx in range(num_levels):
+                    idx_i = stream_level_indices[stream_i][level_idx]
+                    idx_j = stream_level_indices[stream_j][level_idx]
+                    if len(idx_i) == 0 or len(idx_j) == 0:
+                        continue
+
+                    # Find shared vertex indices (same global index after dedup)
+                    shared = sorted(set(idx_i) & set(idx_j))
+                    if len(shared) < 2:
+                        continue
+
+                    # Connect shared boundary between consecutive levels
+                    if level_idx + 1 < num_levels:
+                        idx_i_next = stream_level_indices[stream_i][level_idx + 1]
+                        idx_j_next = stream_level_indices[stream_j][level_idx + 1]
+                        shared_next = sorted(set(idx_i_next) & set(idx_j_next))
+
+                        if len(shared_next) >= 2:
+                            # Create faces along the shared edge between levels
+                            n_edge = min(len(shared), len(shared_next))
+                            for k in range(n_edge - 1):
+                                v0 = shared[k]
+                                v1 = shared[k + 1]
+                                v2 = shared_next[k + 1]
+                                v3 = shared_next[k]
+
+                                quad_key = frozenset([v0, v1, v2, v3])
+                                if quad_key in processed_quads:
+                                    continue
+                                processed_quads.add(quad_key)
+
+                                # Split quad into 2 triangles
+                                all_faces.append([v0, v1, v2])
+                                all_faces.append([v0, v2, v3])
+                                n_stitch += 2
+
+        if n_stitch > 0:
+            print(f"  Added {n_stitch} stitching faces between streams")
+
         if len(all_faces) == 0:
             print("No faces generated.")
             return
