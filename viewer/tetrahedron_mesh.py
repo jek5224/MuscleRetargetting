@@ -413,21 +413,78 @@ class TetrahedronMeshMixin:
                 new_verts = list(closed_vertices)
                 interior_tetrahedra = []
 
-                # Add center vertex at centroid of each level
-                level_centers = {}
+                # Build per-stream vertex sets for per-stream level centers.
+                # After cutting, each stream occupies different spatial regions,
+                # so level centers must be per-stream (not global average).
+                stream_level_verts = {}  # (stream_idx, level) -> [vertex indices]
+                if hasattr(self, 'contours') and self.contours is not None:
+                    n_streams = len(self.contours)
+                else:
+                    n_streams = 1
+
+                # Assign each vertex to a stream based on face connectivity
+                vertex_stream = np.full(len(closed_vertices), -1, dtype=np.int32)
+                if hasattr(self, 'contour_mesh_faces') and self.contour_mesh_faces is not None:
+                    # Use the face-to-stream mapping from build_contour_mesh
+                    # For now, cluster vertices by spatial proximity per level
+                    pass
+
+                # Build per-stream level centers using connected components per level
+                from scipy.spatial import cKDTree
+                level_centers = {}  # (stream_guess, level) -> center_idx
                 for lev in range(num_levels):
                     lev_verts = np.where(vertex_level == lev)[0]
                     if len(lev_verts) == 0:
                         continue
-                    centroid = closed_vertices[lev_verts].mean(axis=0)
-                    center_idx = len(new_verts)
-                    new_verts.append(centroid)
-                    level_centers[lev] = center_idx
+                    lev_positions = closed_vertices[lev_verts]
 
-                print(f"  {len(level_centers)} level centers added")
+                    if n_streams > 1 and len(lev_verts) > 6:
+                        # Split into clusters using connected components on edges
+                        # Two vertices are connected if they share a face
+                        from collections import defaultdict as _dd
+                        adj = _dd(set)
+                        for face in closed_faces:
+                            fv = [int(face[0]), int(face[1]), int(face[2])]
+                            lev_set = set(lev_verts)
+                            fv_on_lev = [v for v in fv if v in lev_set]
+                            for a in fv_on_lev:
+                                for b in fv_on_lev:
+                                    if a != b:
+                                        adj[a].add(b)
 
-                # For each surface face, determine which levels it spans.
-                # Connect it to the center of the adjacent level to form a tet.
+                        # BFS to find connected components
+                        visited = set()
+                        clusters = []
+                        for start in lev_verts:
+                            if start in visited:
+                                continue
+                            cluster = []
+                            queue = [start]
+                            visited.add(start)
+                            while queue:
+                                v = queue.pop()
+                                cluster.append(v)
+                                for nb in adj[v]:
+                                    if nb not in visited:
+                                        visited.add(nb)
+                                        queue.append(nb)
+                            clusters.append(cluster)
+                    else:
+                        clusters = [list(lev_verts)]
+
+                    for ci_idx, cluster in enumerate(clusters):
+                        centroid = closed_vertices[cluster].mean(axis=0)
+                        center_idx = len(new_verts)
+                        new_verts.append(centroid)
+                        level_centers[(ci_idx, lev)] = center_idx
+                        # Tag cluster vertices with this center
+                        for vi in cluster:
+                            vertex_stream[vi] = ci_idx
+
+                print(f"  {len(level_centers)} level centers added "
+                      f"({n_streams} streams, {num_levels} levels)")
+
+                # For each surface face, connect to the nearest level center
                 for face in closed_faces:
                     v0, v1, v2 = int(face[0]), int(face[1]), int(face[2])
                     l0 = int(vertex_level[v0]) if v0 < len(vertex_level) else -1
@@ -438,26 +495,34 @@ class TetrahedronMeshMixin:
                     if len(levels_in_face) == 0:
                         continue
 
+                    # Determine which stream cluster this face belongs to
+                    face_streams = set([vertex_stream[v0], vertex_stream[v1], vertex_stream[v2]]) - {-1}
+                    face_stream = min(face_streams) if face_streams else 0
+
                     if len(levels_in_face) == 2:
-                        # Inter-level face: connect to center of BOTH levels
                         levs = sorted(levels_in_face)
                         for lev in levs:
-                            if lev in level_centers:
-                                ci = level_centers[lev]
-                                # Only use center of the level where MINORITY
-                                # of this face's vertices are
-                                n_on_lev = sum(1 for l in [l0,l1,l2] if l == lev)
+                            key = (face_stream, lev)
+                            if key not in level_centers:
+                                # Try any stream at this level
+                                key = next(((s, lev) for s in range(n_streams + len(level_centers))
+                                           if (s, lev) in level_centers), None)
+                            if key is not None and key in level_centers:
+                                ci = level_centers[key]
+                                n_on_lev = sum(1 for l in [l0, l1, l2] if l == lev)
                                 if n_on_lev <= 1:
                                     interior_tetrahedra.append([v0, v1, v2, ci])
                     elif len(levels_in_face) == 1:
-                        # Same-level face (cap or intra-level):
-                        # Connect to centers of adjacent levels
                         lev = list(levels_in_face)[0]
                         for adj_lev in [lev - 1, lev + 1]:
-                            if adj_lev in level_centers:
-                                ci = level_centers[adj_lev]
+                            key = (face_stream, adj_lev)
+                            if key not in level_centers:
+                                key = next(((s, adj_lev) for s in range(n_streams + len(level_centers))
+                                           if (s, adj_lev) in level_centers), None)
+                            if key is not None and key in level_centers:
+                                ci = level_centers[key]
                                 interior_tetrahedra.append([v0, v1, v2, ci])
-                                break  # one tet per face is enough
+                                break
 
                 closed_vertices = np.array(new_verts, dtype=np.float32)
                 interior_tetrahedra = np.array(interior_tetrahedra, dtype=np.int32)
