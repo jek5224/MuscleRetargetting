@@ -1175,7 +1175,7 @@ def draw_zygote_muscle_ui(v):
                     f"Err Thresh##{name}", obj.level_select_error_threshold, 0.001, 0.05, "%.3f")
 
                 # Sampling method selector
-                sampling_methods = ['sobol_unit_square', 'sobol_min_contour']
+                sampling_methods = ['grid', 'sobol_unit_square', 'sobol_min_contour']
                 current_idx = sampling_methods.index(obj.sampling_method) if obj.sampling_method in sampling_methods else 0
                 changed, new_idx = imgui.combo(f"Sampling##{name}", current_idx, sampling_methods)
                 if changed:
@@ -2382,6 +2382,11 @@ def _render_inspect_2d_windows(v):
 
             # Get contour data first (needed for both columns)
             contour_match = None
+            plane_info = None
+            mean = None
+            basis_x = None
+            basis_y = None
+            bp = None
             p_screen_points = []
             q_screen_points = []
             fiber_screen_points = []
@@ -2426,6 +2431,14 @@ def _render_inspect_2d_windows(v):
                     basis_y = plane_info['basis_y']
                     bp = plane_info.get('bounding_plane', None)
 
+            # Display rotation helper for unit-square coords
+            _display_rot = v.inspect_2d_display_rot.get((name, level_idx), 0)
+            def _rot_uv(u, v):
+                """Rotate (u,v) in unit square by _display_rot * 90° CCW."""
+                for _ in range(_display_rot % 4):
+                    u, v = v, 1 - u  # CCW 90°
+                return u, v
+
             # Left column: Unit square with Q points
             imgui.text("Unit Square (Q points)")
             cursor_pos_left = imgui.get_cursor_screen_pos()
@@ -2443,8 +2456,9 @@ def _render_inspect_2d_windows(v):
                 fiber_samples = obj.fiber_architecture[stream_idx]
                 for i, sample in enumerate(fiber_samples):
                     if len(sample) >= 2:
-                        sx = left_x0 + sample[0] * canvas_size
-                        sy = left_y0 + (1 - sample[1]) * canvas_size
+                        _fu, _fv = _rot_uv(sample[0], sample[1])
+                        sx = left_x0 + _fu * canvas_size
+                        sy = left_y0 + (1 - _fv) * canvas_size
                         fiber_screen_points.append((sx, sy))
                         draw_list.add_circle_filled(sx, sy, 4, imgui.get_color_u32_rgba(0.2, 0.8, 0.2, 1.0))
                         # Check hover on fiber samples
@@ -2455,27 +2469,32 @@ def _render_inspect_2d_windows(v):
 
             # Compute and draw Q points from contour_match (cyan) - draw immediately so they're not covered
             # Use bounding plane parametric coordinates to match MVC computation in find_waypoints()
+            _best_q_dist = hover_radius
             if contour_match is not None and bp is not None and len(bp) >= 4:
                 for i, (p, q) in enumerate(contour_match):
                     p = np.array(p)
                     q = np.array(q)
                     # Compute Q's position on unit square using bounding plane parametric coords
                     q_norm = point_to_unit_square_2d(q, mean, basis_x, basis_y, bp)
-                    qx = left_x0 + q_norm[0] * canvas_size
-                    qy = left_y0 + (1 - q_norm[1]) * canvas_size
+                    _qu, _qv = _rot_uv(q_norm[0], q_norm[1])
+                    qx = left_x0 + _qu * canvas_size
+                    qy = left_y0 + (1 - _qv) * canvas_size
                     q_screen_points.append((qx, qy))
                     # Draw Q point immediately (cyan)
                     draw_list.add_circle_filled(qx, qy, 3, imgui.get_color_u32_rgba(0.0, 0.8, 0.8, 1.0))
 
-                    # Check hover on Q points
+                    # Check hover on Q points (pick closest, not first)
                     dist = np.sqrt((mouse_pos[0] - qx)**2 + (mouse_pos[1] - qy)**2)
-                    if dist < hover_radius and hovered_idx < 0:
-                        hovered_idx = i
-                        hovered_type = 'vertex'
+                    if dist < hover_radius:
+                        if hovered_idx < 0 or dist < _best_q_dist:
+                            _best_q_dist = dist
+                            hovered_idx = i
+                            hovered_type = 'vertex'
 
                 # Draw bounding plane corners on unit square (corners are at (0,0), (1,0), (1,1), (0,1))
-                corner_uv = [(0, 0), (1, 0), (1, 1), (0, 1)]  # Unit square corners
+                corner_uv = [(0, 0), (1, 0), (1, 1), (0, 1)]
                 for ci, (cu, cv) in enumerate(corner_uv):
+                    cu, cv = _rot_uv(cu, cv)
                     cx = left_x0 + cu * canvas_size
                     cy = left_y0 + (1 - cv) * canvas_size
                     corner_screen_points_left.append((cx, cy))
@@ -2493,6 +2512,22 @@ def _render_inspect_2d_windows(v):
 
             # Right column: Contour with P points
             imgui.next_column()
+
+            # Rotate display CW/CCW buttons (visual only) + Reset correspondence
+            _rot_key = (name, level_idx)
+            _display_rot = v.inspect_2d_display_rot.get(_rot_key, 0)
+            if imgui.button(f"CCW##{name}_{level_idx}_{stream_idx}"):
+                v.inspect_2d_display_rot[_rot_key] = (_display_rot + 1) % 4
+            imgui.same_line()
+            if imgui.button(f"CW##{name}_{level_idx}_{stream_idx}"):
+                v.inspect_2d_display_rot[_rot_key] = (_display_rot - 1) % 4
+            imgui.same_line()
+            if imgui.button(f"Reset##{name}_{level_idx}_{stream_idx}"):
+                _reset_corner_correspondence(obj, stream_idx, level_idx, is_post_stream)
+            if _display_rot != 0:
+                imgui.same_line()
+                imgui.text(f"(rot {_display_rot * 90})")
+
             imgui.text(f"Level {level_idx} (P points)")
             cursor_pos_right = imgui.get_cursor_screen_pos()
 
@@ -2504,31 +2539,35 @@ def _render_inspect_2d_windows(v):
 
             # Draw contour and P points
             if contour_match is not None and 'basis_x' in plane_info:
-                # Project P points to 2D
+                # Apply display rotation to basis (visual only, data unchanged)
+                _display_rot = v.inspect_2d_display_rot.get((name, level_idx), 0)
+                _dbx, _dby = basis_x, basis_y
+                for _ in range(_display_rot % 4):
+                    _dbx, _dby = _dby, -_dbx  # CCW 90°
+
+                # Project P points to 2D using display-rotated basis
                 p_2d_list = []
                 for p, q in contour_match:
                     p = np.array(p)
-                    p_2d = np.array([np.dot(p - mean, basis_x), np.dot(p - mean, basis_y)])
+                    p_2d = np.array([np.dot(p - mean, _dbx), np.dot(p - mean, _dby)])
                     p_2d_list.append(p_2d)
                 p_2d_arr = np.array(p_2d_list)
 
-                # Normalization (preserve aspect ratio)
+                # Per-axis normalization (unit-square ratio)
                 min_xy = p_2d_arr.min(axis=0)
                 max_xy = p_2d_arr.max(axis=0)
                 range_xy = max_xy - min_xy
                 range_xy[range_xy < 1e-10] = 1.0
-                max_range = max(range_xy[0], range_xy[1])
-                margin = 0.1
-                scale = (1 - 2 * margin) / max_range
+                margin = 0.02
+                scale_xy = (1 - 2 * margin) / range_xy
                 center_xy = (min_xy + max_xy) / 2
 
-                # Compute screen points for contour
-                p_screen_points = []
-                for p_2d in p_2d_list:
-                    p_norm = (p_2d - center_xy) * scale + 0.5
-                    px = right_x0 + p_norm[0] * canvas_size
-                    py = right_y0 + (1 - p_norm[1]) * canvas_size
-                    p_screen_points.append((px, py))
+                def _p2d_to_screen(pt):
+                    nx = (pt[0] - center_xy[0]) * scale_xy[0] + 0.5
+                    ny = (pt[1] - center_xy[1]) * scale_xy[1] + 0.5
+                    return (right_x0 + nx * canvas_size, right_y0 + (1 - ny) * canvas_size)
+
+                p_screen_points = [_p2d_to_screen(p_2d) for p_2d in p_2d_list]
 
                 # Draw contour lines (yellow)
                 for i in range(len(p_screen_points)):
@@ -2537,24 +2576,27 @@ def _render_inspect_2d_windows(v):
                     draw_list.add_line(p1[0], p1[1], p2[0], p2[1],
                                       imgui.get_color_u32_rgba(0.8, 0.8, 0.2, 1.0), thickness=2.0)
 
-                # Check hover on P points
-                for i, (px, py) in enumerate(p_screen_points):
-                    dist = np.sqrt((mouse_pos[0] - px)**2 + (mouse_pos[1] - py)**2)
-                    if dist < hover_radius and hovered_idx < 0:
-                        hovered_idx = i
+                # Check hover on P points (pick closest, only if mouse is in right canvas)
+                if (right_x0 - hover_radius <= mouse_pos[0] <= right_x1 + hover_radius and
+                    right_y0 - hover_radius <= mouse_pos[1] <= right_y1 + hover_radius):
+                    _best_p_dist = float('inf')
+                    _best_p_idx = -1
+                    for i, (px, py) in enumerate(p_screen_points):
+                        dist = np.sqrt((mouse_pos[0] - px)**2 + (mouse_pos[1] - py)**2)
+                        if dist < _best_p_dist:
+                            _best_p_dist = dist
+                            _best_p_idx = i
+                    if _best_p_idx >= 0 and _best_p_dist < hover_radius:
+                        hovered_idx = _best_p_idx
                         hovered_type = 'vertex'
 
-                # Draw actual bounding plane (blue) - project 3D bounding plane corners to 2D
+                # Draw bounding plane (blue)
                 if bp is not None and len(bp) >= 4:
                     bp_screen = []
                     for corner_3d in bp[:4]:
                         corner_3d = np.array(corner_3d)
-                        corner_2d = np.array([np.dot(corner_3d - mean, basis_x), np.dot(corner_3d - mean, basis_y)])
-                        corner_norm = (corner_2d - center_xy) * scale + 0.5
-                        cx = right_x0 + corner_norm[0] * canvas_size
-                        cy = right_y0 + (1 - corner_norm[1]) * canvas_size
-                        bp_screen.append((cx, cy))
-                    # Draw bounding plane edges
+                        corner_2d = np.array([np.dot(corner_3d - mean, _dbx), np.dot(corner_3d - mean, _dby)])
+                        bp_screen.append(_p2d_to_screen(corner_2d))
                     for i in range(4):
                         p1 = bp_screen[i]
                         p2 = bp_screen[(i + 1) % 4]
@@ -2579,13 +2621,10 @@ def _render_inspect_2d_windows(v):
                                 closest_vi = vi
                         q_based_corner_indices.append(closest_vi)
 
-                    # Project actual bounding plane corners to 2D
                     for ci, corner_3d in enumerate(bp[:4]):
                         corner_3d = np.array(corner_3d)
-                        corner_2d = np.array([np.dot(corner_3d - mean, basis_x), np.dot(corner_3d - mean, basis_y)])
-                        corner_norm = (corner_2d - center_xy) * scale + 0.5
-                        cx = right_x0 + corner_norm[0] * canvas_size
-                        cy = right_y0 + (1 - corner_norm[1]) * canvas_size
+                        corner_2d = np.array([np.dot(corner_3d - mean, _dbx), np.dot(corner_3d - mean, _dby)])
+                        cx, cy = _p2d_to_screen(corner_2d)
                         corner_screen_points_right.append((cx, cy))
 
                         # Use Q-based corner correspondence (reflects actual fiber computation)
@@ -2602,12 +2641,17 @@ def _render_inspect_2d_windows(v):
                         # Draw corner (purple/magenta diamond)
                         draw_list.add_quad_filled(cx, cy - 5, cx + 5, cy, cx, cy + 5, cx - 5, cy,
                                                  imgui.get_color_u32_rgba(0.8, 0.2, 0.8, 1.0))
+                        # Corner index label
+                        draw_list.add_text(cx + 7, cy - 7, imgui.get_color_u32_rgba(0.8, 0.2, 0.8, 1.0), str(ci))
 
                         # Check hover on corners (right side)
                         dist = np.sqrt((mouse_pos[0] - cx)**2 + (mouse_pos[1] - cy)**2)
                         if dist < hover_radius and hovered_idx < 0:
                             hovered_idx = ci
                             hovered_type = 'corner'
+
+                    # Show corner-vertex mapping as text
+                    imgui.text(f"Corners: {q_based_corner_indices}")
 
                 # Draw waypoints (red) and check hover
                 if (hasattr(obj, 'waypoints') and obj.waypoints is not None and
@@ -2616,10 +2660,8 @@ def _render_inspect_2d_windows(v):
                     if waypoints_3d is not None and len(waypoints_3d) > 0:
                         for wi, wp in enumerate(waypoints_3d):
                             wp = np.array(wp)
-                            wp_2d = np.array([np.dot(wp - mean, basis_x), np.dot(wp - mean, basis_y)])
-                            wp_norm = (wp_2d - center_xy) * scale + 0.5
-                            wpx = right_x0 + wp_norm[0] * canvas_size
-                            wpy = right_y0 + (1 - wp_norm[1]) * canvas_size
+                            wp_2d = np.array([np.dot(wp - mean, _dbx), np.dot(wp - mean, _dby)])
+                            wpx, wpy = _p2d_to_screen(wp_2d)
                             waypoint_screen_points.append((wpx, wpy))
                             draw_list.add_circle_filled(wpx, wpy, 5, imgui.get_color_u32_rgba(0.9, 0.3, 0.3, 1.0))
                             # Check hover on waypoints
@@ -2644,11 +2686,8 @@ def _render_inspect_2d_windows(v):
                     resampled_screen = []
                     for rv in resampled:
                         rv = np.array(rv)
-                        rv_2d = np.array([np.dot(rv - mean, basis_x), np.dot(rv - mean, basis_y)])
-                        rv_norm = (rv_2d - center_xy) * scale + 0.5
-                        rvx = right_x0 + rv_norm[0] * canvas_size
-                        rvy = right_y0 + (1 - rv_norm[1]) * canvas_size
-                        resampled_screen.append((rvx, rvy))
+                        rv_2d = np.array([np.dot(rv - mean, _dbx), np.dot(rv - mean, _dby)])
+                        resampled_screen.append(_p2d_to_screen(rv_2d))
                     # Draw resampled contour edges (cyan)
                     for i in range(len(resampled_screen)):
                         p1 = resampled_screen[i]
@@ -2812,6 +2851,15 @@ def _render_inspect_2d_windows(v):
                         draw_list.add_circle(qx, qy, 9, imgui.get_color_u32_rgba(1.0, 1.0, 1.0, 1.0), thickness=2.5)
                     break
 
+        # Set 3D highlights based on hover
+        if hovered_type == 'vertex' and hovered_idx >= 0 and contour_match is not None and hovered_idx < len(contour_match):
+            obj.inspector_highlight_vertex_3d = np.array(contour_match[hovered_idx][0])
+        elif hovered_type == 'waypoint' and hovered_idx >= 0:
+            obj.inspector_highlight_fiber_idx = (stream_idx, hovered_idx)
+        else:
+            obj.inspector_highlight_vertex_3d = None
+            obj.inspector_highlight_fiber_idx = None
+
         # Show tooltip
         if hovered_idx >= 0:
             if hovered_type == 'vertex':
@@ -2839,17 +2887,40 @@ def _render_inspect_2d_windows(v):
         mouse_clicked = imgui.is_mouse_clicked(0)  # Left click
         if mouse_clicked and hovered_idx >= 0:
             if hovered_type == 'corner':
-                # Clicking corner enters/updates correspondence mode
+                # Clicking corner enters correspondence mode — save backup for hover preview
                 v.inspect_2d_corr_mode[name] = True
                 v.inspect_2d_corr_corner[name] = hovered_idx
-                v.inspect_2d_corr_vertex[name] = -1  # Reset vertex selection
+                v.inspect_2d_corr_vertex[name] = -1
                 corr_mode = True
                 corr_corner = hovered_idx
                 corr_vertex = -1
+                # Save original contour_match + corner_indices + waypoints for hover restore
+                if contour_match is not None:
+                    _bp_ref = obj.bounding_planes[stream_idx][level_idx] if is_post_stream else obj.bounding_planes[level_idx][stream_idx]
+                    v.inspect_2d_corr_backup_cm[name] = [((np.array(p).copy(), np.array(q).copy())) for p, q in contour_match]
+                    v.inspect_2d_corr_backup_ci = _bp_ref.get('corner_indices')  # may be None
+                    v.inspect_2d_corr_preview_active[name] = False
+                    # Backup waypoints/mvc for this level
+                    if hasattr(obj, 'waypoints') and obj.waypoints is not None:
+                        if is_post_stream and stream_idx < len(obj.waypoints) and level_idx < len(obj.waypoints[stream_idx]):
+                            wp = obj.waypoints[stream_idx][level_idx]
+                            v.inspect_2d_corr_backup_wp[name] = [np.array(w).copy() for w in wp] if wp is not None else None
+                    if hasattr(obj, 'mvc_weights') and obj.mvc_weights is not None:
+                        if is_post_stream and stream_idx < len(obj.mvc_weights) and level_idx < len(obj.mvc_weights[stream_idx]):
+                            v.inspect_2d_corr_backup_mvc[name] = obj.mvc_weights[stream_idx][level_idx]
             elif hovered_type == 'vertex' and corr_mode and corr_corner >= 0:
-                # Clicking vertex when in correspondence mode with corner selected
-                v.inspect_2d_corr_vertex[name] = hovered_idx
-                corr_vertex = hovered_idx
+                # Clicking vertex confirms — apply permanently, clear backup
+                _apply_corner_correspondence(v, name, obj, stream_idx, level_idx,
+                                             corr_corner, hovered_idx, is_post_stream)
+                v.inspect_2d_corr_mode[name] = False
+                v.inspect_2d_corr_corner[name] = -1
+                v.inspect_2d_corr_vertex[name] = -1
+                v.inspect_2d_corr_backup_cm.pop(name, None)
+                v.inspect_2d_corr_backup_wp.pop(name, None)
+                v.inspect_2d_corr_backup_mvc.pop(name, None)
+                v.inspect_2d_corr_preview_active.pop(name, None)
+                corr_mode = False
+                corr_corner = -1
             elif hovered_type == 'fiber' and edit_fiber_mode:
                 # Clicking on existing fiber in edit mode - select it
                 v.inspect_2d_edit_fiber_selected[name] = hovered_idx
@@ -2878,6 +2949,35 @@ def _render_inspect_2d_windows(v):
                 edit_fiber_preview = (ucoord, vcoord)
                 edit_fiber_selected = -1
                 edit_fiber_test = None
+
+        # Hover preview for correspondence mode — temporarily apply when hovering vertex
+        if corr_mode and corr_corner >= 0 and name in v.inspect_2d_corr_backup_cm:
+            if is_post_stream:
+                bp_info_ref = obj.bounding_planes[stream_idx][level_idx]
+            else:
+                bp_info_ref = obj.bounding_planes[level_idx][stream_idx]
+            backup_cm = v.inspect_2d_corr_backup_cm[name]
+            backup_ci = getattr(v, 'inspect_2d_corr_backup_ci', None)
+
+            if hovered_type == 'vertex' and hovered_idx >= 0:
+                # Restore backup first, then apply preview
+                bp_info_ref['contour_match'] = [(np.array(p).copy(), np.array(q).copy()) for p, q in backup_cm]
+                if backup_ci is not None:
+                    bp_info_ref['corner_indices'] = list(backup_ci)
+                else:
+                    bp_info_ref.pop('corner_indices', None)
+                # Apply preview correspondence
+                _apply_corner_correspondence(v, name, obj, stream_idx, level_idx,
+                                             corr_corner, hovered_idx, is_post_stream)
+                v.inspect_2d_corr_preview_active[name] = True
+            elif v.inspect_2d_corr_preview_active.get(name, False):
+                # Not hovering vertex — restore backup
+                bp_info_ref['contour_match'] = [(np.array(p).copy(), np.array(q).copy()) for p, q in backup_cm]
+                if backup_ci is not None:
+                    bp_info_ref['corner_indices'] = list(backup_ci)
+                else:
+                    bp_info_ref.pop('corner_indices', None)
+                v.inspect_2d_corr_preview_active[name] = False
 
         # Draw correspondence mode visual feedback
         if corr_mode and corr_corner >= 0:
@@ -2930,38 +3030,41 @@ def _render_inspect_2d_windows(v):
                 draw_list.add_line(px - 12, py, px + 12, py, imgui.get_color_u32_rgba(0.0, 1.0, 1.0, 0.5), 1.5)
                 draw_list.add_line(px, py - 12, px, py + 12, imgui.get_color_u32_rgba(0.0, 1.0, 1.0, 0.5), 1.5)
 
-        # Correspondence mode UI (Cancel/Confirm buttons)
+        # Correspondence mode UI
         if corr_mode:
             imgui.separator()
             corner_names = ['Bottom-Left', 'Bottom-Right', 'Top-Right', 'Top-Left']
             corner_name = corner_names[corr_corner] if 0 <= corr_corner < 4 else f"Corner {corr_corner}"
-            if corr_vertex >= 0:
-                imgui.text(f"Set {corner_name} -> Vertex {corr_vertex}")
+            if hovered_type == 'vertex' and hovered_idx >= 0:
+                imgui.text(f"{corner_name} -> Vertex {hovered_idx} (click to apply)")
             else:
-                imgui.text(f"Selected {corner_name}, click a contour vertex")
+                imgui.text(f"Selected {corner_name}, hover vertex to preview")
 
-            # Cancel button - always enabled
             if imgui.button(f"Cancel##{name}_corr"):
+                # Restore backup contour_match + waypoints and exit corr mode
+                backup_cm = v.inspect_2d_corr_backup_cm.get(name)
+                if backup_cm is not None:
+                    if is_post_stream:
+                        bp_info_ref = obj.bounding_planes[stream_idx][level_idx]
+                    else:
+                        bp_info_ref = obj.bounding_planes[level_idx][stream_idx]
+                    bp_info_ref['contour_match'] = [(np.array(p).copy(), np.array(q).copy()) for p, q in backup_cm]
+                # Restore waypoints
+                backup_wp = v.inspect_2d_corr_backup_wp.get(name)
+                if backup_wp is not None and hasattr(obj, 'waypoints') and obj.waypoints is not None:
+                    if is_post_stream and stream_idx < len(obj.waypoints) and level_idx < len(obj.waypoints[stream_idx]):
+                        obj.waypoints[stream_idx][level_idx] = backup_wp
+                backup_mvc = v.inspect_2d_corr_backup_mvc.get(name)
+                if backup_mvc is not None and hasattr(obj, 'mvc_weights') and obj.mvc_weights is not None:
+                    if is_post_stream and stream_idx < len(obj.mvc_weights) and level_idx < len(obj.mvc_weights[stream_idx]):
+                        obj.mvc_weights[stream_idx][level_idx] = backup_mvc
                 v.inspect_2d_corr_mode[name] = False
                 v.inspect_2d_corr_corner[name] = -1
                 v.inspect_2d_corr_vertex[name] = -1
-
-            imgui.same_line()
-
-            # Confirm button - only enabled when vertex is selected
-            if corr_vertex < 0:
-                imgui.push_style_var(imgui.STYLE_ALPHA, 0.5)
-                imgui.button(f"Confirm##{name}_corr")
-                imgui.pop_style_var()
-            else:
-                if imgui.button(f"Confirm##{name}_corr"):
-                    # Apply the correspondence change
-                    _apply_corner_correspondence(v, name, obj, stream_idx, level_idx,
-                                                      corr_corner, corr_vertex, is_post_stream)
-                    # Reset correspondence mode
-                    v.inspect_2d_corr_mode[name] = False
-                    v.inspect_2d_corr_corner[name] = -1
-                    v.inspect_2d_corr_vertex[name] = -1
+                v.inspect_2d_corr_backup_cm.pop(name, None)
+                v.inspect_2d_corr_backup_wp.pop(name, None)
+                v.inspect_2d_corr_backup_mvc.pop(name, None)
+                v.inspect_2d_corr_preview_active.pop(name, None)
 
         # Edit Fiber mode UI (only available when not in "Show All" mode)
         if has_fiber and not corr_mode and not show_all:
@@ -3046,8 +3149,73 @@ def _render_inspect_2d_windows(v):
         v.inspect_2d_open[name] = False
         # Clear inspector highlight when window closes
         if name in v.zygote_muscle_meshes:
-            v.zygote_muscle_meshes[name].inspector_highlight_stream = None
-            v.zygote_muscle_meshes[name].inspector_highlight_level = None
+            obj = v.zygote_muscle_meshes[name]
+            obj.inspector_highlight_stream = None
+            obj.inspector_highlight_level = None
+            obj.inspector_highlight_vertex_3d = None
+            obj.inspector_highlight_fiber_idx = None
+
+            # Rebuild 3D fiber draw arrays to reflect correspondence changes
+            if hasattr(obj, '_rebuild_fiber_draw_arrays'):
+                obj._rebuild_fiber_draw_arrays()
+
+
+def _reset_corner_correspondence(obj, stream_idx, level_idx, is_post_stream):
+    """Reset corner correspondence using ray-based method (find_contour_match)."""
+    if is_post_stream:
+        bp_info = obj.bounding_planes[stream_idx][level_idx]
+    else:
+        bp_info = obj.bounding_planes[level_idx][stream_idx]
+
+    bp_corners = bp_info.get('bounding_plane')
+    if bp_corners is None:
+        return
+
+    # Get contour vertices
+    contour_vertices = None
+    if is_post_stream:
+        if stream_idx < len(obj.contours) and level_idx < len(obj.contours[stream_idx]):
+            contour_vertices = obj.contours[stream_idx][level_idx]
+    else:
+        if level_idx < len(obj.contours) and stream_idx < len(obj.contours[level_idx]):
+            contour_vertices = obj.contours[level_idx][stream_idx]
+
+    if contour_vertices is None:
+        cm = bp_info.get('contour_match')
+        if cm:
+            contour_vertices = np.array([np.array(p) for p, q in cm])
+
+    if contour_vertices is None:
+        return
+
+    preserve = getattr(obj, '_contours_normalized', False)
+    new_contour, contour_match = obj.find_contour_match(
+        np.array(contour_vertices), np.array(bp_corners), preserve_order=preserve)
+    bp_info['contour_match'] = contour_match
+    bp_info.pop('corner_indices', None)  # Clear stored indices so they're re-detected
+
+    if is_post_stream:
+        if stream_idx < len(obj.contours) and level_idx < len(obj.contours[stream_idx]):
+            obj.contours[stream_idx][level_idx] = new_contour
+    else:
+        if level_idx < len(obj.contours) and stream_idx < len(obj.contours[level_idx]):
+            obj.contours[level_idx][stream_idx] = new_contour
+
+    # Recompute waypoints if fiber architecture exists
+    if hasattr(obj, 'fiber_architecture') and obj.fiber_architecture is not None:
+        if is_post_stream and stream_idx < len(obj.fiber_architecture):
+            fiber_samples = obj.fiber_architecture[stream_idx]
+            if fiber_samples is not None and len(fiber_samples) > 0:
+                _, waypoints_3d, mvc_weights = obj.find_waypoints(bp_info, fiber_samples)
+                if hasattr(obj, 'waypoints') and obj.waypoints is not None:
+                    if stream_idx < len(obj.waypoints) and level_idx < len(obj.waypoints[stream_idx]):
+                        obj.waypoints[stream_idx][level_idx] = waypoints_3d
+                if hasattr(obj, 'mvc_weights') and obj.mvc_weights is not None:
+                    if stream_idx < len(obj.mvc_weights) and level_idx < len(obj.mvc_weights[stream_idx]):
+                        obj.mvc_weights[stream_idx][level_idx] = mvc_weights
+                obj._save_fiber_anim_data()
+
+    print(f"[Reset] Corner correspondence reset at stream={stream_idx} level={level_idx}")
 
 
 def _apply_corner_correspondence(v, name, obj, stream_idx, level_idx, corner_idx, vertex_idx, is_post_stream):
@@ -3082,101 +3250,73 @@ def _apply_corner_correspondence(v, name, obj, stream_idx, level_idx, corner_idx
         print("  Error: No bounding plane or contour_match found")
         return
 
-    # Extract P vertices from contour_match
     P_vertices = [np.array(p) for p, q in contour_match]
     n = len(P_vertices)
+    bp_corners_3d = [np.array(c) for c in bp_corners[:4]]
 
-    # Get current corner-to-vertex mapping using Q-based method (reads from saved contour_match)
-    # This preserves any previous manual corner changes
-    bp_corners_3d = np.array(bp_corners[:4])
-    current_corner_indices = []
-    for ci, corner_3d in enumerate(bp_corners_3d):
-        min_dist = float('inf')
-        closest_vi = 0
-        for vi, (p, q) in enumerate(contour_match):
-            q_arr = np.array(q)
-            dist = np.linalg.norm(q_arr - corner_3d)
-            if dist < min_dist:
-                min_dist = dist
-                closest_vi = vi
-        current_corner_indices.append(closest_vi)
+    # Use stored corner indices if available, otherwise detect from Q
+    current_corner_indices = bp_info.get('corner_indices', None)
+    if current_corner_indices is None:
+        current_corner_indices = []
+        for ci, corner_3d in enumerate(bp_corners_3d):
+            min_dist = float('inf')
+            closest_vi = 0
+            for vi, (p, q) in enumerate(contour_match):
+                dist = np.linalg.norm(np.array(q) - corner_3d)
+                if dist < min_dist:
+                    min_dist = dist
+                    closest_vi = vi
+            current_corner_indices.append(closest_vi)
+    else:
+        current_corner_indices = list(current_corner_indices)
 
-    print(f"  Current corner indices (Q-based): {current_corner_indices}")
-
-    # Update corner assignment
+    # Only change the one corner being edited
     new_corner_indices = current_corner_indices.copy()
     new_corner_indices[corner_idx] = vertex_idx
 
-    print(f"  New corner indices: {new_corner_indices}")
+    # Recompute Q for each P vertex in-place (same order as existing contour_match)
+    # For each vertex, determine which BP edge segment it belongs to, then interpolate Q
+    new_contour_match = [None] * n
 
-    # Recompute Q positions based on arc-length interpolation between new corner vertices
-    # BP corners: 0 (bottom-left), 1 (bottom-right), 2 (top-right), 3 (top-left)
-    bp_corners_3d = [np.array(c) for c in bp_corners[:4]]
-
-    new_contour_match = []
-
-    # For each edge between consecutive corners, interpolate Q positions
     for edge_idx in range(4):
         corner_start = edge_idx
         corner_end = (edge_idx + 1) % 4
 
-        vertex_start = new_corner_indices[corner_start]
-        vertex_end = new_corner_indices[corner_end]
+        vs = new_corner_indices[corner_start]
+        ve = new_corner_indices[corner_end]
 
         q_start = bp_corners_3d[corner_start]
         q_end = bp_corners_3d[corner_end]
 
-        # Get vertices between corner_start and corner_end (inclusive of start, exclusive of end)
-        if vertex_end > vertex_start:
-            vertex_list = list(range(vertex_start, vertex_end))
-        elif vertex_end < vertex_start:
-            # Wrap around
-            vertex_list = list(range(vertex_start, n)) + list(range(0, vertex_end))
+        # Collect vertex indices in this segment (vs inclusive, ve exclusive)
+        if ve > vs:
+            seg_indices = list(range(vs, ve))
+        elif ve < vs:
+            seg_indices = list(range(vs, n)) + list(range(0, ve))
         else:
-            # Same vertex (shouldn't happen normally)
-            vertex_list = [vertex_start]
+            seg_indices = [vs]
 
-        if len(vertex_list) == 0:
+        if len(seg_indices) == 0:
             continue
 
-        # Compute arc-length along this segment
+        # Arc-length parameterization
         arc_lengths = [0.0]
-        for i in range(1, len(vertex_list)):
-            prev_v = P_vertices[vertex_list[i - 1]]
-            curr_v = P_vertices[vertex_list[i]]
-            arc_lengths.append(arc_lengths[-1] + np.linalg.norm(curr_v - prev_v))
+        for i in range(1, len(seg_indices)):
+            arc_lengths.append(arc_lengths[-1] +
+                np.linalg.norm(P_vertices[seg_indices[i]] - P_vertices[seg_indices[i - 1]]))
+        total_arc = arc_lengths[-1] if arc_lengths[-1] > 1e-10 else 1.0
 
-        total_arc = arc_lengths[-1]
-        if total_arc < 1e-10:
-            total_arc = 1.0
-
-        # Assign Q positions based on arc-length interpolation
-        for i, vi in enumerate(vertex_list):
+        for i, vi in enumerate(seg_indices):
             t = arc_lengths[i] / total_arc
-            q_interp = (1 - t) * q_start + t * q_end
-            new_contour_match.append((P_vertices[vi], q_interp))
+            new_contour_match[vi] = (P_vertices[vi], (1 - t) * q_start + t * q_end)
 
-    # Update bounding plane info with new contour_match
+    # Fill any None entries (shouldn't happen, but safety)
+    for i in range(n):
+        if new_contour_match[i] is None:
+            new_contour_match[i] = (P_vertices[i], np.array(contour_match[i][1]))
+
     bp_info['contour_match'] = new_contour_match
-
-    print(f"  Updated contour_match with {len(new_contour_match)} pairs (was {n})")
-
-    # Debug: verify the change
-    if len(new_contour_match) > 0:
-        # Check Q at the new corner vertex
-        for ci in range(4):
-            vi = new_corner_indices[ci]
-            # Find which entry in new_contour_match has this vertex
-            for idx, (p, q) in enumerate(new_contour_match):
-                if np.allclose(p, P_vertices[vi]):
-                    q_arr = np.array(q)
-                    corner_arr = np.array(bp_corners[ci])
-                    dist = np.linalg.norm(q_arr - corner_arr)
-                    print(f"    Corner {ci} -> vertex {vi}: Q dist to corner = {dist:.6f}")
-                    break
-
-    # Verify bp_info is modified
-    print(f"  bp_info id: {id(bp_info)}, contour_match id: {id(bp_info.get('contour_match'))}")
+    bp_info['corner_indices'] = new_corner_indices
 
     # Recompute fiber structure if available
     if hasattr(obj, 'fiber_architecture') and obj.fiber_architecture is not None:
