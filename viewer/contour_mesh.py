@@ -7381,6 +7381,17 @@ class ContourMeshMixin(ContourAnimationMixin):
 
                     # Find shared vertex indices (same global index after dedup)
                     shared = sorted(set(idx_i) & set(idx_j))
+                    if level_idx == 0:
+                        # Debug: check how close the boundary vertices are
+                        min_dist = float('inf')
+                        for vi in idx_i:
+                            for vj in idx_j:
+                                d = np.linalg.norm(all_vertices[vi] - all_vertices[vj])
+                                if d < min_dist:
+                                    min_dist = d
+                        print(f"  Stitch debug: stream {stream_i} vs {stream_j}, level {level_idx}: "
+                              f"{len(idx_i)} vs {len(idx_j)} verts, {len(shared)} shared, "
+                              f"min_dist={min_dist:.6f}")
                     if len(shared) < 2:
                         continue
 
