@@ -5563,6 +5563,34 @@ class ContourMeshMixin(ContourAnimationMixin):
         self.contours_resampled_fixed = resampled_fixed
         self.contours_resampled_types = resampled_types
 
+        # Snap shared boundary vertices: after resampling, boundary vertices
+        # between cut streams may have drifted apart. Force them to be identical
+        # so build_contour_mesh can merge them.
+        n_snapped = 0
+        if len(resampled_contours) >= 2:
+            eps_snap = 1e-3  # 1mm — find nearby boundary vertices across streams
+            for level_idx in range(max(len(s) for s in resampled_contours)):
+                for si in range(len(resampled_contours)):
+                    for sj in range(si + 1, len(resampled_contours)):
+                        if level_idx >= len(resampled_contours[si]) or level_idx >= len(resampled_contours[sj]):
+                            continue
+                        ci = np.array(resampled_contours[si][level_idx])
+                        cj = np.array(resampled_contours[sj][level_idx])
+                        if len(ci) == 0 or len(cj) == 0:
+                            continue
+                        # For each vertex in ci, find closest in cj
+                        for vi in range(len(ci)):
+                            dists = np.linalg.norm(cj - ci[vi], axis=1)
+                            min_idx = np.argmin(dists)
+                            if dists[min_idx] < eps_snap:
+                                # Snap to average position
+                                avg = (ci[vi] + cj[min_idx]) / 2.0
+                                resampled_contours[si][level_idx][vi] = avg
+                                resampled_contours[sj][level_idx][min_idx] = avg
+                                n_snapped += 1
+        if n_snapped > 0:
+            print(f"  Snapped {n_snapped} shared boundary vertices across streams")
+
         print(f"Resampling complete: {len(self.contours_resampled)} streams stored in contours_resampled")
         print(f"  Parameters and fixed indices stored for mesh building")
         print(f"  Original contours and bounding_planes preserved for fiber/MVC")
