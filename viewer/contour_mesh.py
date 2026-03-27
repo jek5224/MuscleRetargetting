@@ -7237,7 +7237,7 @@ class ContourMeshMixin(ContourAnimationMixin):
                                 # j is a duplicate of i, map j to i's final index
                                 dedup_map[j] = dedup_map[i]
                                 n_merged_level += 1
-            if n_merged_level > 0 and (level_idx < 3 or level_idx >= num_levels - 3 or level_idx == 46):
+            if n_merged_level > 0:
                 print(f"  Level {level_idx}: merged {n_merged_level} shared vertices")
 
             # Build deduplicated vertex list and create final index mapping
@@ -12308,6 +12308,41 @@ class ContourMeshMixin(ContourAnimationMixin):
         self.max_stream_count = max_stream_count
 
         print(f"Created {max_stream_count} streams, each with {len(stream_contours[0])} levels")
+
+        # Snap shared boundary vertices across streams so they are bitwise-identical.
+        # Cut pieces share boundary vertices (same computation), but list→array conversions
+        # can introduce subtle float differences. Force-snap within 1e-4 (0.1mm) so that
+        # the tight eps=1e-6 dedup in build_contour_mesh always merges them.
+        # Only snap cross-stream pairs at CUT levels (where streams have different contours).
+        n_total_snapped = 0
+        num_levels_snap = len(stream_contours[0]) if max_stream_count > 0 else 0
+        for level_idx in range(num_levels_snap):
+            for si in range(max_stream_count):
+                for sj in range(si + 1, max_stream_count):
+                    if level_idx >= len(stream_contours[si]) or level_idx >= len(stream_contours[sj]):
+                        continue
+                    ci = stream_contours[si][level_idx]
+                    cj = stream_contours[sj][level_idx]
+                    if len(ci) == 0 or len(cj) == 0:
+                        continue
+                    ci_arr = np.asarray(ci)
+                    cj_arr = np.asarray(cj)
+                    # Skip merged levels where ALL vertices are identical (same contour)
+                    if ci_arr.shape == cj_arr.shape and np.allclose(ci_arr, cj_arr, atol=1e-10):
+                        continue
+                    # At cut levels, find near-identical boundary vertices across streams
+                    for vi in range(len(ci_arr)):
+                        dists = np.linalg.norm(cj_arr - ci_arr[vi], axis=1)
+                        min_idx = np.argmin(dists)
+                        if dists[min_idx] < 1e-4 and dists[min_idx] > 0:
+                            # Snap: copy ci's vertex position to cj (bitwise identical)
+                            cj_arr[min_idx] = ci_arr[vi].copy()
+                            n_total_snapped += 1
+                    # Write back if cj was modified (cj_arr may be a view)
+                    if isinstance(cj, np.ndarray):
+                        stream_contours[sj][level_idx] = cj_arr
+        if n_total_snapped > 0:
+            print(f"  Snapped {n_total_snapped} boundary vertices across streams (post-cut)")
 
         # Re-order streams at each level to ensure consistent correspondence
         # This fixes the issue where stream 0 at level N might correspond to stream 1 at level N+1
