@@ -9771,7 +9771,8 @@ class ContourMeshMixin(ContourAnimationMixin):
         n_edge_verts = round(original_n_verts * edge_length / original_perimeter)
 
         # Number of intermediate vertices (excluding the two endpoints)
-        n_intermediate = max(0, n_edge_verts - 2)
+        # Always at least 2 so the cut line is explicit geometry in both pieces
+        n_intermediate = max(2, n_edge_verts - 2)
 
         print(f"  Shared edge: length={edge_length:.4f}, perimeter={original_perimeter:.4f}")
         print(f"  Edge vertices: {n_edge_verts} total, {n_intermediate} intermediate")
@@ -9794,15 +9795,6 @@ class ContourMeshMixin(ContourAnimationMixin):
         # For piece1: 0 (cut2), orig_len1-1 (cut1), orig_len1, ..., orig_len1+n_intermediate-1
         boundary_indices_piece0 = [0, orig_len0 - 1] + list(range(orig_len0, orig_len0 + n_intermediate))
         boundary_indices_piece1 = [0, orig_len1 - 1] + list(range(orig_len1, orig_len1 + n_intermediate))
-
-        if n_intermediate == 0:
-            # No intermediate vertices needed, but still mark the two endpoints as boundaries
-            boundary_indices = {
-                'piece0': boundary_indices_piece0,  # [0, orig_len0-1]
-                'piece1': boundary_indices_piece1,  # [0, orig_len1-1]
-            }
-            print(f"  Boundary indices (no intermediates): piece0={boundary_indices_piece0}, piece1={boundary_indices_piece1}")
-            return piece0, piece1, [], boundary_indices
 
         # Generate intermediate vertices evenly spaced from cut1 to cut2
         intermediate_verts = []
@@ -9859,8 +9851,9 @@ class ContourMeshMixin(ContourAnimationMixin):
         edge_length = np.linalg.norm(cut2_3d - cut1_3d)
 
         # Calculate number of vertices on shared edge
+        # Always at least 2 so the cut line is explicit geometry in both pieces
         n_edge_verts = round(original_n_verts * edge_length / original_perimeter)
-        n_intermediate = max(0, n_edge_verts - 2)
+        n_intermediate = max(2, n_edge_verts - 2)
 
         print(f"  Shared edge: length={edge_length:.4f}, perimeter={original_perimeter:.4f}")
         print(f"  Edge vertices: {n_edge_verts} total, {n_intermediate} intermediate")
@@ -9870,15 +9863,6 @@ class ContourMeshMixin(ContourAnimationMixin):
         orig_len1 = len(piece1_3d)
         boundary_indices_piece0 = [0, orig_len0 - 1] + list(range(orig_len0, orig_len0 + n_intermediate))
         boundary_indices_piece1 = [0, orig_len1 - 1] + list(range(orig_len1, orig_len1 + n_intermediate))
-        boundary_indices = {
-            'piece0': boundary_indices_piece0,
-            'piece1': boundary_indices_piece1,
-        }
-
-        if n_intermediate == 0:
-            print(f"  Boundary indices (no intermediates): piece0={boundary_indices_piece0}, piece1={boundary_indices_piece1}")
-            return (np.array(piece0_2d), np.array(piece0_3d),
-                    np.array(piece1_2d), np.array(piece1_3d), [], boundary_indices)
 
         # Generate intermediate vertices
         intermediate_verts_2d = []
@@ -14836,6 +14820,18 @@ class ContourMeshMixin(ContourAnimationMixin):
                     v = (v + 1) % n_verts
                 piece1.append(pt3d_1)
 
+                # Add intermediate vertices along the cut line so it's explicit
+                # geometry in both pieces (not just the GL_LINE_LOOP closure)
+                perimeter = sum(np.linalg.norm(target_contour[(i+1) % n_verts] - target_contour[i])
+                                for i in range(n_verts))
+                piece0 = np.array(piece0)
+                piece1 = np.array(piece1)
+                piece0, piece1, cut_intermediates, _ = self._add_shared_edge_vertices(
+                    piece0, piece1, pt3d_1, pt3d_2, n_verts, perimeter
+                )
+                piece0 = list(piece0)
+                piece1 = list(piece1)
+
                 # Match to sources by centroid
                 c0_2d = np.mean(piece0_2d, axis=0)
                 if np.linalg.norm(c0_2d - centroids[0]) < np.linalg.norm(c0_2d - centroids[1]):
@@ -16000,20 +15996,19 @@ class ContourMeshMixin(ContourAnimationMixin):
                 # Estimate vertex density from original contour
                 perimeter = sum(np.linalg.norm(contour[(i+1) % len(contour)] - contour[i])
                                 for i in range(len(contour)))
-                n_intermediate = max(0, round(len(contour) * edge_length / perimeter) - 2)
+                n_intermediate = max(2, round(len(contour) * edge_length / perimeter) - 2)
 
-                if n_intermediate > 0:
-                    intermediates = []
-                    for k in range(1, n_intermediate + 1):
-                        t = k / (n_intermediate + 1)
-                        intermediates.append(bp1 + t * (bp2 - bp1))
+                intermediates = []
+                for k in range(1, n_intermediate + 1):
+                    t = k / (n_intermediate + 1)
+                    intermediates.append(bp1 + t * (bp2 - bp1))
 
-                    # Add to both pieces: piece0 gets reversed, piece1 gets forward
-                    # (matching the winding direction of each piece's closing edge)
-                    for v in reversed(intermediates):
-                        new_contours[0].append(v.copy())
-                    for v in intermediates:
-                        new_contours[1].append(v.copy())
+                # Add to both pieces: piece0 gets reversed, piece1 gets forward
+                # (matching the winding direction of each piece's closing edge)
+                for v in reversed(intermediates):
+                    new_contours[0].append(v.copy())
+                for v in intermediates:
+                    new_contours[1].append(v.copy())
 
         # Ensure each piece has at least some vertices and convert to proper numpy arrays
         for i in range(n_pieces):
