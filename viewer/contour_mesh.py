@@ -15946,15 +15946,39 @@ class ContourMeshMixin(ContourAnimationMixin):
             new_contours[prev_piece].append(boundary_pt.copy())
             new_contours[curr_piece].append(boundary_pt.copy())
 
-        # Debug: show boundary sharing
-        if n_pieces == 2:
-            shared_count = 0
+        # Add intermediate vertices along the cut boundary between pieces.
+        # Each piece has boundary points where the assignment crosses. The
+        # "closing edge" between these points needs intermediate vertices
+        # so the mesh has faces along the cut line (not just a straight gap).
+        if n_pieces == 2 and len(new_contours[0]) >= 2 and len(new_contours[1]) >= 2:
+            # Find the shared boundary points
+            boundary_pts = []
             for v0 in new_contours[0]:
                 for v1 in new_contours[1]:
                     if np.linalg.norm(np.array(v0) - np.array(v1)) < 1e-10:
-                        shared_count += 1
-            print(f"  [Voronoi Cut] Pieces share {shared_count} boundary vertices "
-                  f"(piece0: {len(new_contours[0])}, piece1: {len(new_contours[1])})")
+                        boundary_pts.append(np.array(v0).copy())
+                        break
+
+            if len(boundary_pts) >= 2:
+                bp1, bp2 = boundary_pts[0], boundary_pts[1]
+                edge_length = np.linalg.norm(bp2 - bp1)
+                # Estimate vertex density from original contour
+                perimeter = sum(np.linalg.norm(contour[(i+1) % len(contour)] - contour[i])
+                                for i in range(len(contour)))
+                n_intermediate = max(0, round(len(contour) * edge_length / perimeter) - 2)
+
+                if n_intermediate > 0:
+                    intermediates = []
+                    for k in range(1, n_intermediate + 1):
+                        t = k / (n_intermediate + 1)
+                        intermediates.append(bp1 + t * (bp2 - bp1))
+
+                    # Add to both pieces: piece0 gets reversed, piece1 gets forward
+                    # (matching the winding direction of each piece's closing edge)
+                    for v in reversed(intermediates):
+                        new_contours[0].append(v.copy())
+                    for v in intermediates:
+                        new_contours[1].append(v.copy())
 
         # Ensure each piece has at least some vertices and convert to proper numpy arrays
         for i in range(n_pieces):
