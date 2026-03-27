@@ -15943,8 +15943,18 @@ class ContourMeshMixin(ContourAnimationMixin):
             prev_piece = assignments[-1]
             curr_piece = assignments[0]
             boundary_pt = 0.5 * (contour[-1] + contour[0])
-            new_contours[prev_piece].append(boundary_pt)
-            new_contours[curr_piece].append(boundary_pt)
+            new_contours[prev_piece].append(boundary_pt.copy())
+            new_contours[curr_piece].append(boundary_pt.copy())
+
+        # Debug: show boundary sharing
+        if n_pieces == 2:
+            shared_count = 0
+            for v0 in new_contours[0]:
+                for v1 in new_contours[1]:
+                    if np.linalg.norm(np.array(v0) - np.array(v1)) < 1e-10:
+                        shared_count += 1
+            print(f"  [Voronoi Cut] Pieces share {shared_count} boundary vertices "
+                  f"(piece0: {len(new_contours[0])}, piece1: {len(new_contours[1])})")
 
         # Ensure each piece has at least some vertices and convert to proper numpy arrays
         for i in range(n_pieces):
