@@ -12361,20 +12361,26 @@ class ContourMeshMixin(ContourAnimationMixin):
                     contours_at_level.append((si, np.asarray(stream_contours[si][level_idx])))
             if len(contours_at_level) < 2:
                 continue
-            # Check if streams have same contour (merged level) vs different (cut level)
             c0 = contours_at_level[0][1]
             c1 = contours_at_level[1][1]
             if c0.shape == c1.shape and np.allclose(c0, c1, atol=1e-10):
                 continue  # Merged level, skip
-            # Cut level: check shared vertices
+            # Check stream_groups to see if these came from the same original contour
+            groups = stream_groups[level_idx] if level_idx < len(stream_groups) else []
+            from_same = any(0 in g and 1 in g for g in groups)
+            origin = "CUT" if from_same else "SEPARATE"
+            # Check shared vertices
             shared = 0
+            min_dist = float('inf')
             for vi in range(len(c0)):
                 dists = np.linalg.norm(c1 - c0[vi], axis=1)
-                if np.min(dists) < 1e-4:
+                d = np.min(dists)
+                if d < 1e-4:
                     shared += 1
-            print(f"  Level {level_idx}: stream0={len(c0)}v, stream1={len(c1)}v, shared={shared}")
-            if shared == 0:
-                print(f"    *** NO SHARED VERTICES — cut line missing! ***")
+                if d < min_dist:
+                    min_dist = d
+            status = f"shared={shared}" if shared > 0 else f"NO SHARED (closest={min_dist:.6f})"
+            print(f"  Level {level_idx} [{origin}]: s0={len(c0)}v, s1={len(c1)}v, {status}")
         print("=== End Diagnostic ===\n")
 
         # Clean up manual cut tracking data
