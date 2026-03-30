@@ -2917,9 +2917,10 @@ def _render_inspect_2d_windows(v):
             obj.inspector_highlight_corner_vertices_3d = None
 
         # When in corner edit mode, show other streams' contour correspondences
-        # Use stream_bounding_planes/stream_contours (full multi-stream data),
-        # not bounding_planes/contours (which may be aliased to a single stream view)
         if corr_corner >= 0 and is_post_stream:
+            _sbp = getattr(obj, 'stream_bounding_planes', None)
+            _sc = getattr(obj, 'stream_contours', None)
+            print(f"[DBG] corr={corr_corner} stream={stream_idx} lev={level_idx} sbp={len(_sbp) if _sbp else 0} sc={len(_sc) if _sc else 0}")
             all_bps = getattr(obj, 'stream_bounding_planes', None)
             all_contours = getattr(obj, 'stream_contours', None)
             if all_bps is not None and all_contours is not None and len(all_bps) > 1:
