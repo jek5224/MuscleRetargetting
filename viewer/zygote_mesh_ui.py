@@ -2859,6 +2859,7 @@ def _render_inspect_2d_windows(v):
             # Highlight this corner's corresponding vertex at EVERY contour level
             corner_idx = hovered_idx
             corner_pts = []
+            other_stream_corner_pts = []  # Same corner on OTHER streams at same level
             if is_post_stream and hasattr(obj, 'bounding_planes') and obj.bounding_planes is not None:
                 if stream_idx < len(obj.bounding_planes):
                     for lev_idx, bp_lev in enumerate(obj.bounding_planes[stream_idx]):
@@ -2884,17 +2885,67 @@ def _render_inspect_2d_windows(v):
                                     vi = vvi
                         if vi < len(cm):
                             corner_pts.append(np.array(cm[vi][0]))
+
+                # Collect same corner from ALL OTHER streams at the current level
+                for other_s in range(len(obj.bounding_planes)):
+                    if other_s == stream_idx:
+                        continue
+                    if level_idx >= len(obj.bounding_planes[other_s]):
+                        continue
+                    bp_other = obj.bounding_planes[other_s][level_idx]
+                    if bp_other is None:
+                        continue
+                    cm_other = bp_other.get('contour_match', None)
+                    ci_other = bp_other.get('corner_indices', None)
+                    bp_c_other = bp_other.get('bounding_plane', None)
+                    if cm_other is None or bp_c_other is None:
+                        continue
+                    if ci_other is not None and corner_idx < len(ci_other):
+                        vi_other = ci_other[corner_idx]
+                    else:
+                        bp_corner_other = np.array(bp_c_other[corner_idx])
+                        vi_other = 0
+                        min_d = float('inf')
+                        for vvi, (p, q) in enumerate(cm_other):
+                            d = np.linalg.norm(np.array(q) - bp_corner_other)
+                            if d < min_d:
+                                min_d = d
+                                vi_other = vvi
+                    if vi_other < len(cm_other):
+                        other_stream_corner_pts.append(np.array(cm_other[vi_other][0]))
+                    # Also collect ALL corner positions for this other stream at this level
+                    # so user can see the full correspondence
+                    for ci_idx in range(4):
+                        if ci_other is not None and ci_idx < len(ci_other):
+                            vi_c = ci_other[ci_idx]
+                        else:
+                            if bp_c_other is None or ci_idx >= len(bp_c_other):
+                                continue
+                            bp_corner_c = np.array(bp_c_other[ci_idx])
+                            vi_c = 0
+                            min_d = float('inf')
+                            for vvi, (p, q) in enumerate(cm_other):
+                                d = np.linalg.norm(np.array(q) - bp_corner_c)
+                                if d < min_d:
+                                    min_d = d
+                                    vi_c = vvi
+                        if vi_c < len(cm_other):
+                            other_stream_corner_pts.append(np.array(cm_other[vi_c][0]))
+
             # Current level vertex highlighted in main color
             if contour_match is not None and len(q_based_corner_indices) > corner_idx:
                 vi = q_based_corner_indices[corner_idx]
                 if vi < len(contour_match):
                     obj.inspector_highlight_vertex_3d = np.array(contour_match[vi][0])
             obj.inspector_highlight_corner_vertices_3d = corner_pts if corner_pts else None
+            obj.inspector_highlight_other_stream_corners_3d = other_stream_corner_pts if other_stream_corner_pts else None
         elif hovered_type == 'waypoint' and hovered_idx >= 0:
             obj.inspector_highlight_fiber_idx = (stream_idx, hovered_idx)
             obj.inspector_highlight_corner_vertices_3d = None
+            obj.inspector_highlight_other_stream_corners_3d = None
         else:
             obj.inspector_highlight_vertex_3d = None
+            obj.inspector_highlight_other_stream_corners_3d = None
             obj.inspector_highlight_fiber_idx = None
             obj.inspector_highlight_corner_vertices_3d = None
 
@@ -3193,6 +3244,7 @@ def _render_inspect_2d_windows(v):
             obj.inspector_highlight_vertex_3d = None
             obj.inspector_highlight_fiber_idx = None
             obj.inspector_highlight_corner_vertices_3d = None
+            obj.inspector_highlight_other_stream_corners_3d = None
 
             # Rebuild 3D fiber draw arrays to reflect correspondence changes
             if hasattr(obj, '_rebuild_fiber_draw_arrays'):
