@@ -1854,64 +1854,26 @@ class FiberArchitectureMixin:
         return muscle_contour, result
 
     def _rebuild_fiber_draw_arrays(self):
-        """Rebuild cached GL arrays for fiber/waypoint drawing (vectorized).
-
-        Assigns per-fiber colors using HSV hue so each fiber is visually distinct.
-        Colors are stored per-vertex in _fiber_draw_line_colors (RGB, no alpha —
-        alpha is computed per-frame from depth in draw_fiber_architecture).
-        """
+        """Rebuild cached GL arrays for fiber/waypoint drawing (vectorized)."""
         if not hasattr(self, 'waypoints') or not self.waypoints:
             self._fiber_draw_pts = None
             self._fiber_draw_lines = None
-            self._fiber_draw_pt_colors = None
-            self._fiber_draw_line_colors = None
             return
 
-        import colorsys
-
-        # Count total fibers for hue assignment
-        total_fibers = 0
-        for stream_idx, waypoint_group in enumerate(self.waypoints):
-            if self.draw_contour_stream is not None and stream_idx < len(self.draw_contour_stream) and self.draw_contour_stream[stream_idx]:
-                if len(waypoint_group) > 0:
-                    first_level = None
-                    for wps in waypoint_group:
-                        arr = np.asarray(wps)
-                        if arr.ndim == 2 and arr.shape[1] == 3 and len(arr) > 0:
-                            first_level = arr
-                            break
-                    if first_level is not None:
-                        total_fibers += len(first_level)
-        if total_fibers == 0:
-            total_fibers = 1
-
-        # Collect all visible waypoint arrays with per-fiber colors
+        # Collect all visible waypoint arrays
         all_pts = []
-        all_pt_colors = []
         line_pairs = []
-        line_colors = []
-        fiber_counter = 0
-
         for stream_idx, waypoint_group in enumerate(self.waypoints):
             if self.draw_contour_stream is not None and stream_idx < len(self.draw_contour_stream) and self.draw_contour_stream[stream_idx]:
                 for level_idx, wps in enumerate(waypoint_group):
                     arr = np.asarray(wps, dtype=np.float32)
                     if arr.ndim != 2 or arr.shape[1] != 3 or len(arr) == 0:
                         continue
+                    # Filter non-finite
                     valid = np.all(np.isfinite(arr), axis=1)
                     arr = arr[valid]
                     if len(arr) > 0:
                         all_pts.append(arr)
-                        # Per-fiber hue color for each waypoint
-                        n_fibers_here = len(arr)
-                        colors = np.empty((n_fibers_here, 3), dtype=np.float32)
-                        for fi in range(n_fibers_here):
-                            global_fi = fiber_counter + fi
-                            hue = (global_fi / total_fibers) % 1.0
-                            r, g, b = colorsys.hsv_to_rgb(hue, 0.8, 0.9)
-                            colors[fi] = [r, g, b]
-                        all_pt_colors.append(colors)
-
                     # Fiber lines: connect this level to next
                     if level_idx + 1 < len(waypoint_group):
                         nxt = np.asarray(waypoint_group[level_idx + 1], dtype=np.float32)
@@ -1924,55 +1886,37 @@ class FiberArchitectureMixin:
                                 c = c[valid_both]
                                 nx = nx[valid_both]
                                 if len(c) > 0:
+                                    # Interleave: [c0, n0, c1, n1, ...]
                                     pairs = np.empty((len(c) * 2, 3), dtype=np.float32)
                                     pairs[0::2] = c
                                     pairs[1::2] = nx
                                     line_pairs.append(pairs)
-                                    # Per-fiber colors for line segments (same color for both endpoints)
-                                    lc = np.empty((len(c) * 2, 3), dtype=np.float32)
-                                    for fi in range(len(c)):
-                                        global_fi = fiber_counter + fi
-                                        hue = (global_fi / total_fibers) % 1.0
-                                        r, g, b = colorsys.hsv_to_rgb(hue, 0.8, 0.9)
-                                        lc[fi * 2] = [r, g, b]
-                                        lc[fi * 2 + 1] = [r, g, b]
-                                    line_colors.append(lc)
-
-                # Update fiber counter after processing all levels of this stream
-                if len(waypoint_group) > 0:
-                    for wps in waypoint_group:
-                        arr = np.asarray(wps)
-                        if arr.ndim == 2 and arr.shape[1] == 3:
-                            fiber_counter += len(arr)
-                            break
 
         self._fiber_draw_pts = np.concatenate(all_pts, dtype=np.float32) if all_pts else None
         self._fiber_draw_lines = np.concatenate(line_pairs, dtype=np.float32) if line_pairs else None
-        self._fiber_draw_pt_colors = np.concatenate(all_pt_colors, dtype=np.float32) if all_pt_colors else None
-        self._fiber_draw_line_colors = np.concatenate(line_colors, dtype=np.float32) if line_colors else None
 
     def invalidate_fiber_draw_cache(self):
         """Mark fiber draw arrays as needing rebuild."""
         self._fiber_draw_dirty = True
 
     def draw_fiber_architecture(self):
-        """Draw fiber architecture with per-fiber colors and depth-based transparency.
+        """Draw fiber architecture with depth-based transparency.
 
-        Each fiber gets a unique hue. Alpha fades with distance from camera so
-        near fibers are opaque and far fibers are transparent.
+        Alpha fades with distance from camera so near fibers are opaque
+        and far fibers are transparent. Uses original colors (orange points,
+        dark red lines). Controlled by fiber_depth_fade attribute.
         """
         if self.fiber_architecture is None:
             return
 
-        # Get fiber transparency (user slider, default 1.0)
-        base_alpha = getattr(self, 'fiber_transparency', 1.0)
+        alpha = getattr(self, 'fiber_transparency', 1.0)
         use_depth_fade = getattr(self, 'fiber_depth_fade', True)
 
-        # Animation growth progress — fall back to slow path for partial growth
+        # Animation growth progress — fall back to slow path
         level_prog = getattr(self, '_fiber_anim_level_progress', None)
         highlight_stream = getattr(self, 'inspector_highlight_stream', None)
         if level_prog is not None or highlight_stream is not None:
-            self._draw_fiber_architecture_slow(base_alpha, level_prog, highlight_stream)
+            self._draw_fiber_architecture_slow(alpha, level_prog, highlight_stream)
             return
 
         # Rebuild cached arrays if dirty
@@ -1980,74 +1924,84 @@ class FiberArchitectureMixin:
             self._rebuild_fiber_draw_arrays()
             self._fiber_draw_dirty = False
 
-        glDisable(GL_LIGHTING)
-        glEnable(GL_BLEND)
-        glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
-        glEnableClientState(GL_VERTEX_ARRAY)
-        glEnableClientState(GL_COLOR_ARRAY)
+        if not use_depth_fade:
+            # Original fast path — uniform color, no per-vertex alpha
+            glDisable(GL_LIGHTING)
+            glEnableClientState(GL_VERTEX_ARRAY)
 
-        # Compute depth-based alpha for line vertices
-        line_rgba = None
-        if self._fiber_draw_lines is not None and len(self._fiber_draw_lines) > 0 and self._fiber_draw_line_colors is not None:
-            rgb = self._fiber_draw_line_colors
-            n_verts = len(rgb)
+            if self._fiber_draw_pts is not None and len(self._fiber_draw_pts) > 0:
+                glPointSize(5)
+                glColor4f(1.0, 0.6, 0.0, alpha)
+                glVertexPointer(3, GL_FLOAT, 0, self._fiber_draw_pts)
+                glDrawArrays(GL_POINTS, 0, len(self._fiber_draw_pts))
 
-            if use_depth_fade and n_verts > 0:
-                # Get modelview matrix to compute eye-space depth
-                mv = np.array(glGetDoublev(GL_MODELVIEW_MATRIX), dtype=np.float64).T  # column-major → row-major
-                # Transform line vertices to eye space (z component = depth)
-                verts = self._fiber_draw_lines
-                ones = np.ones((n_verts, 1), dtype=np.float64)
-                verts_h = np.hstack([verts.astype(np.float64), ones])  # (N, 4)
-                eye = (mv @ verts_h.T).T  # (N, 4)
-                depths = -eye[:, 2]  # Positive depth (eye looks down -Z)
+            if self._fiber_draw_lines is not None and len(self._fiber_draw_lines) > 0:
+                glLineWidth(2)
+                glColor4f(0.75, 0, 0, alpha)
+                glVertexPointer(3, GL_FLOAT, 0, self._fiber_draw_lines)
+                glDrawArrays(GL_LINES, 0, len(self._fiber_draw_lines))
+        else:
+            # Depth fade path — per-vertex alpha from eye-space depth
+            glDisable(GL_LIGHTING)
+            glEnable(GL_BLEND)
+            glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
+            glEnableClientState(GL_VERTEX_ARRAY)
+            glEnableClientState(GL_COLOR_ARRAY)
 
-                # Map depth to alpha: near=base_alpha, far=0.05
-                d_min = depths.min()
-                d_max = depths.max()
+            # Get modelview matrix once for depth computation
+            mv = np.array(glGetDoublev(GL_MODELVIEW_MATRIX), dtype=np.float64).T
+
+            def compute_depth_alphas(verts, base_a):
+                """Compute per-vertex alpha from eye-space depth."""
+                n = len(verts)
+                ones = np.ones((n, 1), dtype=np.float64)
+                eye = (mv @ np.hstack([verts.astype(np.float64), ones]).T).T
+                depths = -eye[:, 2]
+                d_min, d_max = depths.min(), depths.max()
                 d_range = d_max - d_min
                 if d_range > 1e-6:
-                    t = (depths - d_min) / d_range  # 0=near, 1=far
-                    alphas = base_alpha * (1.0 - 0.9 * t)  # near=base_alpha, far=0.1*base_alpha
-                else:
-                    alphas = np.full(n_verts, base_alpha)
-                alphas = alphas.astype(np.float32)
-            else:
-                alphas = np.full(n_verts, base_alpha, dtype=np.float32)
+                    t = (depths - d_min) / d_range
+                    return (base_a * (1.0 - 0.85 * t)).astype(np.float32)
+                return np.full(n, base_a, dtype=np.float32)
 
-            # Build RGBA array
-            line_rgba = np.empty((n_verts, 4), dtype=np.float32)
-            line_rgba[:, :3] = rgb
-            line_rgba[:, 3] = alphas
+            # Draw waypoints (orange + depth alpha)
+            if self._fiber_draw_pts is not None and len(self._fiber_draw_pts) > 0:
+                glPointSize(5)
+                n_pts = len(self._fiber_draw_pts)
+                pt_rgba = np.empty((n_pts, 4), dtype=np.float32)
+                pt_rgba[:, 0] = 1.0
+                pt_rgba[:, 1] = 0.6
+                pt_rgba[:, 2] = 0.0
+                pt_rgba[:, 3] = compute_depth_alphas(self._fiber_draw_pts, alpha)
+                glVertexPointer(3, GL_FLOAT, 0, self._fiber_draw_pts)
+                glColorPointer(4, GL_FLOAT, 0, pt_rgba)
+                glDrawArrays(GL_POINTS, 0, n_pts)
 
-        # Draw waypoints with per-fiber color
-        if self._fiber_draw_pts is not None and len(self._fiber_draw_pts) > 0 and self._fiber_draw_pt_colors is not None:
-            glPointSize(4)
-            n_pts = len(self._fiber_draw_pt_colors)
-            pt_rgba = np.empty((n_pts, 4), dtype=np.float32)
-            pt_rgba[:, :3] = self._fiber_draw_pt_colors
-            pt_rgba[:, 3] = base_alpha
-            glVertexPointer(3, GL_FLOAT, 0, self._fiber_draw_pts)
-            glColorPointer(4, GL_FLOAT, 0, pt_rgba)
-            glDrawArrays(GL_POINTS, 0, len(self._fiber_draw_pts))
+            # Draw fiber lines (dark red + depth alpha)
+            if self._fiber_draw_lines is not None and len(self._fiber_draw_lines) > 0:
+                glLineWidth(2)
+                n_lines = len(self._fiber_draw_lines)
+                line_rgba = np.empty((n_lines, 4), dtype=np.float32)
+                line_rgba[:, 0] = 0.75
+                line_rgba[:, 1] = 0.0
+                line_rgba[:, 2] = 0.0
+                line_rgba[:, 3] = compute_depth_alphas(self._fiber_draw_lines, alpha)
+                glVertexPointer(3, GL_FLOAT, 0, self._fiber_draw_lines)
+                glColorPointer(4, GL_FLOAT, 0, line_rgba)
+                glDrawArrays(GL_LINES, 0, n_lines)
 
-        # Draw fiber lines with per-fiber color + depth fade
-        if line_rgba is not None:
-            glLineWidth(2)
-            glVertexPointer(3, GL_FLOAT, 0, self._fiber_draw_lines)
-            glColorPointer(4, GL_FLOAT, 0, line_rgba)
-            glDrawArrays(GL_LINES, 0, len(self._fiber_draw_lines))
+            glDisableClientState(GL_COLOR_ARRAY)
+            glDisable(GL_BLEND)
 
-        # Draw test fiber (blue, no depth fade) if available
+        # Draw test fiber (blue) if available
         test_waypoints = getattr(self, 'test_fiber_waypoints', None)
         test_stream_idx = getattr(self, 'test_fiber_stream_idx', None)
         if test_waypoints is not None and test_stream_idx is not None:
             if self.draw_contour_stream is not None and test_stream_idx < len(self.draw_contour_stream) and self.draw_contour_stream[test_stream_idx]:
                 valid_waypoints = [w for w in test_waypoints if w is not None]
                 if len(valid_waypoints) > 0:
-                    glDisableClientState(GL_COLOR_ARRAY)
                     glPointSize(5)
-                    glColor4f(0.2, 0.4, 1.0, base_alpha)
+                    glColor4f(0.2, 0.4, 1.0, alpha)
                     pts = np.array(valid_waypoints, dtype=np.float32)
                     glVertexPointer(3, GL_FLOAT, 0, pts)
                     glDrawArrays(GL_POINTS, 0, len(pts))
@@ -2055,11 +2009,8 @@ class FiberArchitectureMixin:
                         glLineWidth(3)
                         glVertexPointer(3, GL_FLOAT, 0, pts)
                         glDrawArrays(GL_LINE_STRIP, 0, len(pts))
-                    glEnableClientState(GL_COLOR_ARRAY)
 
-        glDisableClientState(GL_COLOR_ARRAY)
         glDisableClientState(GL_VERTEX_ARRAY)
-        glDisable(GL_BLEND)
         glEnable(GL_LIGHTING)
 
     def _draw_fiber_architecture_slow(self, alpha, level_prog, highlight_stream):
