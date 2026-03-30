@@ -1821,7 +1821,7 @@ class ContourAnimationMixin:
             self.is_draw_bounding_box = False
             self.is_draw_contour_mesh = False
             self.is_draw_tet_mesh = True
-            self.contour_mesh_transparency = 0.0  # Mesh is off, keep at 0
+            self.contour_mesh_transparency = self._tet_anim_target_alpha  # Viewer reads this for slider
             self._tet_anim_tet_alpha = self._tet_anim_target_alpha  # Keep at phase 1 end value
             self._tet_anim_scaffold_alpha = 0.0  # Scaffolding is off, keep faded
             self._contour_anim_bp_scale = {}
