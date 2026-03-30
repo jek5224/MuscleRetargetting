@@ -12303,7 +12303,8 @@ class ContourMeshMixin(ContourAnimationMixin):
 
         print(f"Created {max_stream_count} streams, each with {len(stream_contours[0])} levels")
 
-        # TODO: fix the cut code itself to preserve shared boundary vertices
+        # Shared boundary vertices are now created in _cut_contour_bp_transform's
+        # vertex assignment fallback (boundary interpolation at assignment crossings)
 
         # Re-order streams at each level to ensure consistent correspondence
         # This fixes the issue where stream 0 at level N might correspond to stream 1 at level N+1
@@ -15109,12 +15110,32 @@ class ContourMeshMixin(ContourAnimationMixin):
             else:
                 print(f"  [BP Transform] WARNING: No crossings found! Using vertex assignment fallback.")
 
-            # Use the assignments computed earlier (which uses spread centroids for duplicates)
+            # Use vertex assignment with boundary interpolation.
+            # At each boundary crossing (where assignment changes), create a shared
+            # midpoint vertex and add it to BOTH pieces — exactly 2 new vertices for
+            # a 2-piece cut, placed where the cutting line meets the contour.
             if len(assignments) == len(target_contour):
+                piece_lists = [[] for _ in range(n_pieces)]
+                prev_piece = assignments[-1]
+                for v_idx in range(n_verts):
+                    curr_piece = assignments[v_idx]
+                    if prev_piece != curr_piece and v_idx > 0:
+                        # Boundary crossing: create shared vertex at midpoint
+                        boundary_pt = 0.5 * (target_contour[v_idx - 1] + target_contour[v_idx])
+                        piece_lists[prev_piece].append(boundary_pt.copy())
+                        piece_lists[curr_piece].append(boundary_pt.copy())
+                        shared_boundary_points.append(boundary_pt)
+                    piece_lists[curr_piece].append(target_contour[v_idx])
+                    prev_piece = curr_piece
+                # Handle wrap-around boundary
+                if assignments[-1] != assignments[0]:
+                    boundary_pt = 0.5 * (target_contour[-1] + target_contour[0])
+                    piece_lists[assignments[-1]].append(boundary_pt.copy())
+                    piece_lists[assignments[0]].append(boundary_pt.copy())
+                    shared_boundary_points.append(boundary_pt)
                 for piece_idx in range(n_pieces):
-                    src_verts_3d = [target_contour[v] for v in range(len(assignments)) if assignments[v] == piece_idx]
-                    new_contours[piece_idx] = src_verts_3d
-                    print(f"  [BP Transform] Piece {piece_idx}: {len(src_verts_3d)} verts from vertex assignment")
+                    new_contours[piece_idx] = piece_lists[piece_idx]
+                    print(f"  [BP Transform] Piece {piece_idx}: {len(piece_lists[piece_idx])} verts from vertex assignment (with shared boundary)")
             else:
                 # Fallback: equal division if assignments don't match
                 print(f"  [BP Transform] WARNING: Assignment length mismatch, using equal division")
