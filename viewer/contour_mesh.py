@@ -15110,67 +15110,99 @@ class ContourMeshMixin(ContourAnimationMixin):
             else:
                 print(f"  [BP Transform] WARNING: No crossings found! Using vertex assignment fallback.")
 
-            # Use vertex assignment with boundary interpolation.
-            # At each boundary crossing (where assignment changes), create a shared
-            # midpoint vertex and add it to BOTH pieces — exactly 2 new vertices for
-            # a 2-piece cut, placed where the cutting line meets the contour.
+            # Use the cutting line from optimization (_shared_cut_edges_2d) to find
+            # where it intersects the target contour edges. Create 2 new vertices
+            # at those intersection points and add them to both pieces.
             if len(assignments) == len(target_contour):
-                # Compute centroids per piece for Voronoi boundary intersection
-                piece_centroids_3d = {}
-                for v_idx, piece_id in enumerate(assignments):
-                    if piece_id not in piece_centroids_3d:
-                        piece_centroids_3d[piece_id] = []
-                    piece_centroids_3d[piece_id].append(target_contour[v_idx])
-                for pid in piece_centroids_3d:
-                    piece_centroids_3d[pid] = np.mean(piece_centroids_3d[pid], axis=0)
+                # Get the cutting line from optimization (2D)
+                cut_line_2d = None
+                if hasattr(self, '_shared_cut_edges_2d') and self._shared_cut_edges_2d:
+                    _, shared_pts = self._shared_cut_edges_2d[0]
+                    if len(shared_pts) >= 2:
+                        cut_line_2d = (shared_pts[0], shared_pts[-1])
+                # Fallback: use the neck line if available
+                if cut_line_2d is None and n_pieces == 2:
+                    # Use perpendicular bisector of piece centroids as cutting line
+                    c0_2d = np.mean(target_2d[np.array(assignments) == 0], axis=0)
+                    c1_2d = np.mean(target_2d[np.array(assignments) == 1], axis=0)
+                    mid = (c0_2d + c1_2d) / 2.0
+                    d = c1_2d - c0_2d
+                    perp = np.array([-d[1], d[0]])  # perpendicular
+                    cut_line_2d = (mid - perp * 10, mid + perp * 10)
 
+                # Find where cutting line intersects target contour edges (in 2D)
+                crossings_2d = []  # (edge_idx, t, pt_2d)
+                if cut_line_2d is not None:
+                    lp = np.array(cut_line_2d[0])
+                    ld = np.array(cut_line_2d[1]) - lp
+                    # Normal to cutting line
+                    ln = np.array([-ld[1], ld[0]])
+                    ln_len = np.linalg.norm(ln)
+                    if ln_len > 1e-12:
+                        ln = ln / ln_len
+                    for e_idx in range(n_verts):
+                        pa = target_2d[e_idx]
+                        pb = target_2d[(e_idx + 1) % n_verts]
+                        da = np.dot(pa - lp, ln)
+                        db = np.dot(pb - lp, ln)
+                        if da * db < 0:  # edge crosses cutting line
+                            t = da / (da - db)
+                            pt_2d = pa + t * (pb - pa)
+                            crossings_2d.append((e_idx, t, pt_2d))
+
+                # Build pieces with shared boundary vertices
                 piece_lists = [[] for _ in range(n_pieces)]
-                prev_piece = assignments[-1]
-                for v_idx in range(n_verts):
-                    curr_piece = assignments[v_idx]
-                    if prev_piece != curr_piece:
-                        # Boundary crossing: find exact intersection of Voronoi
-                        # boundary (perpendicular bisector of the two centroids)
-                        # with this contour edge.
-                        prev_v_idx = (v_idx - 1) % n_verts
-                        va = target_contour[prev_v_idx]
-                        vb = target_contour[v_idx]
-                        c0 = piece_centroids_3d[prev_piece]
-                        c1 = piece_centroids_3d[curr_piece]
-                        mid_c = (c0 + c1) / 2.0
-                        d = c1 - c0
-                        edge = vb - va
-                        denom = np.dot(edge, d)
-                        if abs(denom) > 1e-12:
-                            t = np.dot(mid_c - va, d) / denom
-                            t = np.clip(t, 0.0, 1.0)
-                        else:
-                            t = 0.5
-                        boundary_pt = va + t * edge
-                        piece_lists[prev_piece].append(boundary_pt.copy())
-                        piece_lists[curr_piece].append(boundary_pt.copy())
-                        shared_boundary_points.append(boundary_pt)
-                    piece_lists[curr_piece].append(target_contour[v_idx])
-                    prev_piece = curr_piece
-                # Handle wrap-around boundary
-                if assignments[-1] != assignments[0]:
-                    va = target_contour[-1]
-                    vb = target_contour[0]
-                    c0 = piece_centroids_3d[assignments[-1]]
-                    c1 = piece_centroids_3d[assignments[0]]
-                    mid_c = (c0 + c1) / 2.0
-                    d = c1 - c0
-                    edge = vb - va
-                    denom = np.dot(edge, d)
-                    if abs(denom) > 1e-12:
-                        t = np.dot(mid_c - va, d) / denom
-                        t = np.clip(t, 0.0, 1.0)
+                if len(crossings_2d) >= 2:
+                    # Use cutting line crossings — proper intersection vertices
+                    crossings_2d.sort(key=lambda x: (x[0], x[1]))
+                    c1_edge, c1_t, _ = crossings_2d[0]
+                    c2_edge, c2_t, _ = crossings_2d[1]
+                    # Create 3D intersection points by interpolating on contour edges
+                    pt1 = target_contour[c1_edge] + c1_t * (target_contour[(c1_edge + 1) % n_verts] - target_contour[c1_edge])
+                    pt2 = target_contour[c2_edge] + c2_t * (target_contour[(c2_edge + 1) % n_verts] - target_contour[c2_edge])
+                    # Piece A: pt1 → verts c1+1..c2 → pt2
+                    piece_a = [pt1.copy()]
+                    v = (c1_edge + 1) % n_verts
+                    while v != (c2_edge + 1) % n_verts:
+                        piece_a.append(target_contour[v])
+                        v = (v + 1) % n_verts
+                    piece_a.append(pt2.copy())
+                    # Piece B: pt2 → verts c2+1..c1 → pt1
+                    piece_b = [pt2.copy()]
+                    v = (c2_edge + 1) % n_verts
+                    while v != (c1_edge + 1) % n_verts:
+                        piece_b.append(target_contour[v])
+                        v = (v + 1) % n_verts
+                    piece_b.append(pt1.copy())
+                    # Match to assignments by overlap
+                    a_assign = [assignments[i] for i in range((c1_edge + 1) % n_verts, c2_edge + 1) if i < n_verts]
+                    if len(a_assign) > 0 and sum(1 for a in a_assign if a == 0) > len(a_assign) // 2:
+                        piece_lists[0] = piece_a
+                        piece_lists[1] = piece_b
                     else:
-                        t = 0.5
-                    boundary_pt = va + t * edge
-                    piece_lists[assignments[-1]].append(boundary_pt.copy())
-                    piece_lists[assignments[0]].append(boundary_pt.copy())
-                    shared_boundary_points.append(boundary_pt)
+                        piece_lists[0] = piece_b
+                        piece_lists[1] = piece_a
+                    shared_boundary_points.extend([pt1, pt2])
+                    print(f"  [BP Transform] Cut line intersects contour: 2 shared vertices created")
+                else:
+                    # Last resort: vertex assignment with boundary midpoints
+                    print(f"  [BP Transform] WARNING: cutting line doesn't cross contour, using boundary midpoints")
+                    prev_piece = assignments[-1]
+                    for v_idx in range(n_verts):
+                        curr_piece = assignments[v_idx]
+                        if prev_piece != curr_piece:
+                            prev_v_idx = (v_idx - 1) % n_verts
+                            boundary_pt = 0.5 * (target_contour[prev_v_idx] + target_contour[v_idx])
+                            piece_lists[prev_piece].append(boundary_pt.copy())
+                            piece_lists[curr_piece].append(boundary_pt.copy())
+                            shared_boundary_points.append(boundary_pt)
+                        piece_lists[curr_piece].append(target_contour[v_idx])
+                        prev_piece = curr_piece
+                    if assignments[-1] != assignments[0]:
+                        boundary_pt = 0.5 * (target_contour[-1] + target_contour[0])
+                        piece_lists[assignments[-1]].append(boundary_pt.copy())
+                        piece_lists[assignments[0]].append(boundary_pt.copy())
+                        shared_boundary_points.append(boundary_pt)
                 for piece_idx in range(n_pieces):
                     new_contours[piece_idx] = piece_lists[piece_idx]
                     print(f"  [BP Transform] Piece {piece_idx}: {len(piece_lists[piece_idx])} verts from vertex assignment (with shared boundary)")
