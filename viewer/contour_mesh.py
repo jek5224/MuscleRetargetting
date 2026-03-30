@@ -12293,10 +12293,10 @@ class ContourMeshMixin(ContourAnimationMixin):
 
         print(f"Created {max_stream_count} streams, each with {len(stream_contours[0])} levels")
 
-        # Insert shared cut-line vertices at CUT levels.
-        # Each piece is an open arc missing the cut line. Find the 2 points where
-        # the arcs nearly meet, create identical shared vertices there, and add
-        # intermediate vertices along the cut line between them.
+        # Create shared cut-line vertices at CUT levels.
+        # Each piece is an open arc. Find where the cutting line geometrically
+        # intersects each contour's edges, insert new vertices at those points,
+        # and add shared intermediate vertices along the cut line.
         n_levels_fixed = 0
         num_levels_fix = len(stream_contours[0]) if max_stream_count > 0 else 0
         for level_idx in range(num_levels_fix):
@@ -12311,32 +12311,64 @@ class ContourMeshMixin(ContourAnimationMixin):
             if len(c0) < 3 or len(c1) < 3:
                 continue
 
-            # Find the 2 boundary points: closest pairs between the two arcs
-            # Build full distance matrix
-            dist_mat = np.linalg.norm(c0[:, None, :] - c1[None, :, :], axis=2)  # (n0, n1)
-            # First boundary: global minimum
+            # Find the 2 boundary regions: closest vertex pairs between arcs
+            dist_mat = np.linalg.norm(c0[:, None, :] - c1[None, :, :], axis=2)
             flat_idx = np.argmin(dist_mat)
-            bp1_i, bp1_j = np.unravel_index(flat_idx, dist_mat.shape)
-            # Second boundary: minimum that's far from first on BOTH contours
-            min_arc_c0 = max(3, len(c0) // 4)
-            min_arc_c1 = max(3, len(c1) // 4)
-            bp2_i, bp2_j = bp1_i, bp1_j  # fallback
-            best_dist = float('inf')
+            bp1_i0, bp1_i1 = np.unravel_index(flat_idx, dist_mat.shape)
+            # Second boundary: far from first on both contours
+            min_arc0 = max(3, len(c0) // 4)
+            min_arc1 = max(3, len(c1) // 4)
+            bp2_i0, bp2_i1 = bp1_i0, bp1_i1
+            best_d = float('inf')
             for i2 in range(len(c0)):
-                arc0 = min(abs(i2 - bp1_i), len(c0) - abs(i2 - bp1_i))
-                if arc0 < min_arc_c0:
+                a0 = min(abs(i2 - bp1_i0), len(c0) - abs(i2 - bp1_i0))
+                if a0 < min_arc0:
                     continue
                 j2 = np.argmin(dist_mat[i2])
-                arc1 = min(abs(j2 - bp1_j), len(c1) - abs(j2 - bp1_j))
-                if arc1 < min_arc_c1:
+                a1 = min(abs(j2 - bp1_i1), len(c1) - abs(j2 - bp1_i1))
+                if a1 < min_arc1:
                     continue
-                if dist_mat[i2, j2] < best_dist:
-                    best_dist = dist_mat[i2, j2]
-                    bp2_i, bp2_j = i2, j2
+                if dist_mat[i2, j2] < best_d:
+                    best_d = dist_mat[i2, j2]
+                    bp2_i0, bp2_i1 = i2, j2
 
-            # Shared boundary points: midpoint of closest pairs
-            shared1 = (c0[bp1_i] + c1[bp1_j]) / 2.0
-            shared2 = (c0[bp2_i] + c1[bp2_j]) / 2.0
+            # For each boundary pair, find the exact intersection point:
+            # Project the other piece's boundary vertex onto this piece's closest edge
+            def find_closest_point_on_contour(contour, target_pt):
+                """Find the closest point on contour's perimeter to target_pt.
+                Returns (point_3d, edge_idx, t) where point is at contour[edge_idx] + t*(contour[edge_idx+1]-contour[edge_idx])."""
+                n = len(contour)
+                best_pt = contour[0]
+                best_edge = 0
+                best_t = 0.0
+                best_dist_sq = float('inf')
+                for e in range(n):
+                    a = contour[e]
+                    b = contour[(e + 1) % n]
+                    ab = b - a
+                    ab_sq = np.dot(ab, ab)
+                    if ab_sq < 1e-20:
+                        continue
+                    t = np.clip(np.dot(target_pt - a, ab) / ab_sq, 0.0, 1.0)
+                    pt = a + t * ab
+                    d_sq = np.sum((pt - target_pt) ** 2)
+                    if d_sq < best_dist_sq:
+                        best_dist_sq = d_sq
+                        best_pt = pt
+                        best_edge = e
+                        best_t = t
+                return best_pt, best_edge, best_t
+
+            # Boundary 1: project c1's bp onto c0, and c0's bp onto c1
+            pt1_on_c0, edge1_c0, t1_c0 = find_closest_point_on_contour(c0, c1[bp1_i1])
+            pt1_on_c1, edge1_c1, t1_c1 = find_closest_point_on_contour(c1, c0[bp1_i0])
+            # Shared vertex = midpoint of the two projections
+            shared1 = (pt1_on_c0 + pt1_on_c1) / 2.0
+
+            # Boundary 2: same for second pair
+            pt2_on_c0, edge2_c0, t2_c0 = find_closest_point_on_contour(c0, c1[bp2_i1])
+            pt2_on_c1, edge2_c1, t2_c1 = find_closest_point_on_contour(c1, c0[bp2_i0])
+            shared2 = (pt2_on_c0 + pt2_on_c1) / 2.0
 
             # Intermediate vertices along the cut line
             cut_len = np.linalg.norm(shared2 - shared1)
@@ -12348,36 +12380,51 @@ class ContourMeshMixin(ContourAnimationMixin):
                 cut_verts.append(shared1 + t * (shared2 - shared1))
             cut_verts.append(shared2.copy())
 
-            # Insert into c0: after the boundary point closest to bp2,
-            # so the cut line connects the two endpoints
-            # Ensure bp1 comes before bp2 in the insertion
-            idx_lo_0, idx_hi_0 = sorted([bp1_i, bp2_i])
-            idx_lo_1, idx_hi_1 = sorted([bp1_j, bp2_j])
-            # Insert after idx_hi in c0
+            # Insert into c0: split the two edges at the intersection points,
+            # then insert cut line vertices between them
+            # Ensure edge1 < edge2 for consistent insertion
+            ins_pairs_c0 = sorted([(edge1_c0, t1_c0, 0), (edge2_c0, t2_c0, 1)], key=lambda x: (x[0], x[1]))
             c0_list = list(c0)
-            # Determine insertion order: shared1→shared2 or reversed
-            if bp1_i <= bp2_i:
-                verts_to_insert_0 = cut_verts
-            else:
-                verts_to_insert_0 = list(reversed(cut_verts))
-            for k, v in enumerate(verts_to_insert_0):
-                c0_list.insert(idx_hi_0 + 1 + k, v)
+            offset = 0
+            ins_indices_c0 = []
+            for edge_idx, t_val, bp_id in ins_pairs_c0:
+                pos = edge_idx + 1 + offset
+                c0_list.insert(pos, shared1 if bp_id == 0 else shared2)
+                ins_indices_c0.append((pos, bp_id))
+                offset += 1
+            # Now insert cut line intermediates between the two shared vertices
+            idx_s1 = ins_indices_c0[0][0] if ins_indices_c0[0][1] == 0 else ins_indices_c0[1][0]
+            idx_s2 = ins_indices_c0[1][0] if ins_indices_c0[1][1] == 1 else ins_indices_c0[0][0]
+            if idx_s1 > idx_s2:
+                idx_s1, idx_s2 = idx_s2, idx_s1
+            # Insert intermediates after the first shared vertex (between shared1 and shared2)
+            for k, v in enumerate(cut_verts[1:-1]):  # skip endpoints (already inserted)
+                c0_list.insert(idx_s1 + 1 + k, v)
 
-            # Insert into c1: same shared verts in reversed winding
+            # Same for c1
+            ins_pairs_c1 = sorted([(edge1_c1, t1_c1, 0), (edge2_c1, t2_c1, 1)], key=lambda x: (x[0], x[1]))
             c1_list = list(c1)
-            if bp1_j <= bp2_j:
-                verts_to_insert_1 = list(reversed(cut_verts))
-            else:
-                verts_to_insert_1 = cut_verts
-            for k, v in enumerate(verts_to_insert_1):
-                c1_list.insert(idx_hi_1 + 1 + k, v)
+            offset = 0
+            ins_indices_c1 = []
+            for edge_idx, t_val, bp_id in ins_pairs_c1:
+                pos = edge_idx + 1 + offset
+                c1_list.insert(pos, shared1 if bp_id == 0 else shared2)
+                ins_indices_c1.append((pos, bp_id))
+                offset += 1
+            idx_s1_c1 = ins_indices_c1[0][0] if ins_indices_c1[0][1] == 0 else ins_indices_c1[1][0]
+            idx_s2_c1 = ins_indices_c1[1][0] if ins_indices_c1[1][1] == 1 else ins_indices_c1[0][0]
+            if idx_s1_c1 > idx_s2_c1:
+                idx_s1_c1, idx_s2_c1 = idx_s2_c1, idx_s1_c1
+            # Insert reversed intermediates (opposite winding)
+            for k, v in enumerate(reversed(cut_verts[1:-1])):
+                c1_list.insert(idx_s1_c1 + 1 + k, v)
 
             stream_contours[0][level_idx] = np.array(c0_list)
             stream_contours[1][level_idx] = np.array(c1_list)
             n_levels_fixed += 1
 
         if n_levels_fixed > 0:
-            print(f"  Inserted shared cut-line vertices at {n_levels_fixed} CUT levels")
+            print(f"  Created shared cut-line vertices at {n_levels_fixed} CUT levels")
 
         # Re-order streams at each level to ensure consistent correspondence
         # This fixes the issue where stream 0 at level N might correspond to stream 1 at level N+1
