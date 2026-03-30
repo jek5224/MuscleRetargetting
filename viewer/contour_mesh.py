@@ -12275,8 +12275,18 @@ class ContourMeshMixin(ContourAnimationMixin):
                             new_bp['is_cut'] = True
 
                             # Store original cut_contour (not modified by find_contour_match)
-                            stream_contours[stream_i].append(np.array(cut_contour))
+                            cut_contour_copy = np.array(cut_contour)
+                            stream_contours[stream_i].append(cut_contour_copy)
                             stream_bounding_planes[stream_i].append(new_bp)
+
+                            # TRACE: check if this piece shares vertices with its siblings
+                            if len(streams_for_contour) == 2:
+                                other_stream = [s for s in streams_for_contour if s != stream_i]
+                                if other_stream and len(stream_contours[other_stream[0]]) == len(stream_contours[stream_i]):
+                                    other_c = np.asarray(stream_contours[other_stream[0]][-1])
+                                    this_c = cut_contour_copy
+                                    shared = sum(1 for v in this_c if np.min(np.linalg.norm(other_c - v, axis=1)) < 1e-4)
+                                    print(f"  [TRACE] Level {level_i} stream {stream_i}: {len(this_c)}v, shared with stream {other_stream[0]}: {shared}")
 
         # If we processed in reverse order, reverse the results
         if origin_count < insertion_count:
@@ -12293,148 +12303,7 @@ class ContourMeshMixin(ContourAnimationMixin):
 
         print(f"Created {max_stream_count} streams, each with {len(stream_contours[0])} levels")
 
-        # Create shared cut-line vertices at CUT levels.
-        # One cutting line crosses one contour → exactly 2 new vertices.
-        # Reconstruct the original contour from the two arcs, find the cutting
-        # line from the gap between them, intersect it with contour edges to
-        # get the 2 crossing points, then re-split with those vertices shared.
-        n_levels_fixed = 0
-        num_levels_fix = len(stream_contours[0]) if max_stream_count > 0 else 0
-        for level_idx in range(num_levels_fix):
-            groups = stream_groups[level_idx] if level_idx < len(stream_groups) else []
-            is_cut = any(0 in g and 1 in g for g in groups)
-            if not is_cut or max_stream_count < 2:
-                continue
-            if level_idx >= len(stream_contours[0]) or level_idx >= len(stream_contours[1]):
-                continue
-            c0 = np.asarray(stream_contours[0][level_idx])
-            c1 = np.asarray(stream_contours[1][level_idx])
-            if len(c0) < 3 or len(c1) < 3:
-                continue
-
-            # Reconstruct the original contour: join c0 and c1 end-to-end.
-            # Find the best joining: c0's endpoint closest to c1's endpoint.
-            # c0 and c1 are closed arcs drawn as GL_LINE_LOOP.
-            # The "gap" between them is where c0's start/end meets c1's start/end.
-            joins = [
-                (np.linalg.norm(c0[0] - c1[0]),   0, 0, False, False),
-                (np.linalg.norm(c0[0] - c1[-1]),   0, -1, False, True),
-                (np.linalg.norm(c0[-1] - c1[0]),  -1, 0, True, False),
-                (np.linalg.norm(c0[-1] - c1[-1]), -1, -1, True, True),
-            ]
-            joins.sort(key=lambda x: x[0])
-            _, _, _, flip0, flip1 = joins[0]
-            arc0 = c0[::-1] if flip0 else c0
-            arc1 = c1[::-1] if flip1 else c1
-            # Concatenate: arc0 then arc1, forming the original closed contour
-            original = np.concatenate([arc0, arc1], axis=0)
-            n_orig = len(original)
-
-            # The cutting line direction: from the gap at the join of arc0→arc1
-            # to the gap at the join of arc1→arc0 (the two seams).
-            # Seam 1: between arc0[-1] and arc1[0] (at index len(arc0)-1 to len(arc0))
-            # Seam 2: between arc1[-1] and arc0[0] (the GL_LINE_LOOP closure)
-            gap1_center = (arc0[-1] + arc1[0]) / 2.0
-            gap2_center = (arc1[-1] + arc0[0]) / 2.0
-            cut_dir = gap2_center - gap1_center
-            cut_dir_len = np.linalg.norm(cut_dir)
-            if cut_dir_len < 1e-12:
-                continue
-            cut_dir = cut_dir / cut_dir_len
-
-            # Intersect the cutting line with the original contour edges.
-            # Line defined by point=gap1_center, direction=cut_dir.
-            # For each edge, find intersection using 3D line-segment closest approach
-            # projected onto the BP plane. Use the contour's own plane.
-            # Simpler: project everything to the cutting line's perpendicular plane.
-            # Actually simplest: use the line parameterically. For each edge A→B,
-            # find where it crosses the plane through gap1_center with normal = perpendicular to cut_dir in the contour plane.
-            # Use the contour's best-fit normal to define the "in-plane perpendicular."
-            contour_center = np.mean(original, axis=0)
-            # Approximate contour normal via Newell method
-            nrm = np.zeros(3)
-            for k in range(n_orig):
-                v_curr = original[k]
-                v_next = original[(k + 1) % n_orig]
-                nrm[0] += (v_curr[1] - v_next[1]) * (v_curr[2] + v_next[2])
-                nrm[1] += (v_curr[2] - v_next[2]) * (v_curr[0] + v_next[0])
-                nrm[2] += (v_curr[0] - v_next[0]) * (v_curr[1] + v_next[1])
-            nrm_len = np.linalg.norm(nrm)
-            if nrm_len < 1e-12:
-                continue
-            nrm = nrm / nrm_len
-            # In-plane perpendicular to cut_dir
-            cut_normal = np.cross(cut_dir, nrm)
-            cn_len = np.linalg.norm(cut_normal)
-            if cn_len < 1e-12:
-                continue
-            cut_normal = cut_normal / cn_len
-
-            # Find where each edge crosses the cutting plane (through gap1_center, normal=cut_normal)
-            crossings = []  # (edge_idx, t, point_3d)
-            for k in range(n_orig):
-                a = original[k]
-                b = original[(k + 1) % n_orig]
-                da = np.dot(a - gap1_center, cut_normal)
-                db = np.dot(b - gap1_center, cut_normal)
-                if da * db < 0:  # opposite sides of cutting plane
-                    t = da / (da - db)
-                    pt = a + t * (b - a)
-                    crossings.append((k, t, pt))
-
-            if len(crossings) < 2:
-                continue
-
-            # Take the 2 crossings closest to the gap centers
-            crossings.sort(key=lambda x: min(
-                np.linalg.norm(x[2] - gap1_center),
-                np.linalg.norm(x[2] - gap2_center)
-            ))
-            cross1 = crossings[0]
-            cross2 = crossings[1]
-
-            # The 2 shared vertices
-            pt1 = cross1[2].copy()
-            pt2 = cross2[2].copy()
-
-            # Re-split original contour at these 2 crossing points into 2 pieces,
-            # each including both crossing points.
-            e1, t1 = cross1[0], cross1[1]
-            e2, t2 = cross2[0], cross2[1]
-            if e1 > e2 or (e1 == e2 and t1 > t2):
-                e1, t1, pt1, e2, t2, pt2 = e2, t2, pt2, e1, t1, pt1
-
-            # Piece A: pt1 → vertices e1+1..e2 → pt2
-            piece_a = [pt1]
-            for k in range(e1 + 1, e2 + 1):
-                piece_a.append(original[k])
-            piece_a.append(pt2)
-
-            # Piece B: pt2 → vertices e2+1..end, 0..e1 → pt1
-            piece_b = [pt2]
-            for k in range(e2 + 1, n_orig):
-                piece_b.append(original[k])
-            for k in range(0, e1 + 1):
-                piece_b.append(original[k])
-            piece_b.append(pt1)
-
-            piece_a = np.array(piece_a)
-            piece_b = np.array(piece_b)
-
-            # Match pieces to streams by centroid distance
-            ca = np.mean(piece_a, axis=0)
-            cb = np.mean(piece_b, axis=0)
-            c0_center = np.mean(c0, axis=0)
-            if np.linalg.norm(ca - c0_center) < np.linalg.norm(cb - c0_center):
-                stream_contours[0][level_idx] = piece_a
-                stream_contours[1][level_idx] = piece_b
-            else:
-                stream_contours[0][level_idx] = piece_b
-                stream_contours[1][level_idx] = piece_a
-            n_levels_fixed += 1
-
-        if n_levels_fixed > 0:
-            print(f"  Re-split contours with shared cut-line vertices at {n_levels_fixed} CUT levels")
+        # TODO: fix the cut code itself to preserve shared boundary vertices
 
         # Re-order streams at each level to ensure consistent correspondence
         # This fixes the issue where stream 0 at level N might correspond to stream 1 at level N+1
