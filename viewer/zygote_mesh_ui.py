@@ -3140,6 +3140,8 @@ def _render_inspect_2d_windows(v):
                     if vi is not None and vi < len(cm):
                         corner_pts_all.append(np.array(cm[vi][0]))
                 obj.inspector_highlight_corner_vertices_3d = corner_pts_all if corner_pts_all else None
+                if corner_pts_all and level_idx < len(corner_pts_all):
+                    print(f"[DBG2] lev={level_idx} corner_pos={corner_pts_all[level_idx][:2]} n_pts={len(corner_pts_all)} hover={hovered_type}:{hovered_idx}")
 
         # Draw correspondence mode visual feedback
         if corr_mode and corr_corner >= 0:
