@@ -2167,17 +2167,8 @@ class FiberArchitectureMixin:
             glVertexPointer(3, GL_FLOAT, 0, pts)
             glDrawArrays(GL_POINTS, 0, len(pts))
 
-        # Draw other levels' contour outlines (edit mode) — same color as hover
-        other_levels = getattr(self, 'inspector_highlight_other_level_contours', None)
-        if other_levels is not None and len(other_levels) > 0:
-            for contour_verts, corner_pos in other_levels:
-                pts = np.asarray(contour_verts, dtype=np.float32)
-                if pts.ndim == 2 and pts.shape[1] >= 3 and len(pts) >= 3:
-                    pts = pts[:, :3].copy()
-                    glLineWidth(3)
-                    glColor4f(0.0, 0.9, 0.9, 0.8)
-                    glVertexPointer(3, GL_FLOAT, 0, pts)
-                    glDrawArrays(GL_LINE_LOOP, 0, len(pts))
+        # (Contour outlines at other levels intentionally not drawn —
+        #  the cyan line strip + points above is sufficient)
 
         # Draw inspector-highlighted fiber (whole line in blue)
         highlight_fiber = getattr(self, 'inspector_highlight_fiber_idx', None)
