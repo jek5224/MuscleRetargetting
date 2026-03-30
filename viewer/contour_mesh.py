@@ -5467,6 +5467,38 @@ class ContourMeshMixin(ContourAnimationMixin):
                 if bi:
                     print(f"    Boundary levels: {sorted(bi.keys())}")
 
+        # Step 2.5: Pre-compute shared boundary vertex count per CUT level.
+        # Both streams must use the SAME count so the shared edge has identical vertices.
+        # Compute from boundary_length and average vertex spacing across both pieces.
+        shared_boundary_verts_by_level = {}  # level_idx -> int
+        if num_streams >= 2:
+            for level_idx in range(max(len(cg) for cg in self.contours)):
+                # Check if this level is CUT for at least 2 streams
+                has_boundary = []
+                for s_idx in range(min(num_streams, 2)):
+                    if s_idx < len(stream_boundary_info) and level_idx in stream_boundary_info[s_idx]:
+                        has_boundary.append(s_idx)
+                if len(has_boundary) < 2:
+                    continue
+                # Get intersection points (same for both streams)
+                b0 = stream_boundary_info[has_boundary[0]][level_idx][0]
+                ip1, ip2 = np.array(b0[2]), np.array(b0[3])
+                boundary_length = np.linalg.norm(ip2 - ip1)
+                # Sum surface lengths across both pieces for total perimeter estimate
+                total_surface = 0
+                for s_idx in has_boundary:
+                    contour = np.array(self.contours[s_idx][level_idx])
+                    total_surface += sum(np.linalg.norm(contour[(k+1) % len(contour)] - contour[k])
+                                         for k in range(len(contour)))
+                total_perimeter = total_surface + boundary_length  # boundary counted once
+                num_samples_here = stream_vertex_counts[has_boundary[0]]
+                avg_edge = total_perimeter / num_samples_here if num_samples_here > 0 else boundary_length
+                bv = max(0, int(round(boundary_length / avg_edge)) - 1)
+                bv = min(bv, num_samples_here - 3)  # Leave at least 1 for surface + 2 fixed
+                shared_boundary_verts_by_level[level_idx] = bv
+            if shared_boundary_verts_by_level:
+                print(f"  Shared boundary verts: {dict(list(shared_boundary_verts_by_level.items())[:5])}...")
+
         # Step 3: Resample each contour (store separately, don't modify originals)
         # Also store parameters and metadata for mesh building
         resampled_contours = []
@@ -5523,8 +5555,10 @@ class ContourMeshMixin(ContourAnimationMixin):
                     else:
                         ref_point = corner_ref
 
+                    sbv = shared_boundary_verts_by_level.get(level_idx, None)
                     resampled, params, fixed_indices, vertex_types = self._resample_cut_contour(
-                        contour, boundaries, num_samples, base_samples, ref_point
+                        contour, boundaries, num_samples, base_samples, ref_point,
+                        shared_boundary_verts=sbv
                     )
 
                     # Store the first intersection point from this cut contour
@@ -5583,10 +5617,8 @@ class ContourMeshMixin(ContourAnimationMixin):
                             dists = np.linalg.norm(cj - ci[vi], axis=1)
                             min_idx = np.argmin(dists)
                             if dists[min_idx] < eps_snap:
-                                # Snap to average position
-                                avg = (ci[vi] + cj[min_idx]) / 2.0
-                                resampled_contours[si][level_idx][vi] = avg
-                                resampled_contours[sj][level_idx][min_idx] = avg
+                                # Snap to identical position (use ci as reference)
+                                resampled_contours[sj][level_idx][min_idx] = ci[vi].copy()
                                 n_snapped += 1
         if n_snapped > 0:
             print(f"  Snapped {n_snapped} shared boundary vertices across streams")
@@ -5750,7 +5782,7 @@ class ContourMeshMixin(ContourAnimationMixin):
 
         return result
 
-    def _resample_cut_contour(self, contour, boundaries, num_samples, base_samples, corner_ref=None):
+    def _resample_cut_contour(self, contour, boundaries, num_samples, base_samples, corner_ref=None, shared_boundary_verts=None):
         """
         Resample a contour with cut boundaries.
 
@@ -5846,11 +5878,14 @@ class ContourMeshMixin(ContourAnimationMixin):
 
             # Distribute vertices (excluding 2 fixed intersection points)
             distributable = num_samples - 2
-            surface_ratio = surface_length / total_length
-            boundary_ratio = boundary_length / total_length
 
-            surface_verts = max(1, int(round(distributable * surface_ratio)))
-            boundary_verts = distributable - surface_verts
+            # Use shared_boundary_verts if provided (ensures both streams use same count)
+            if shared_boundary_verts is not None:
+                boundary_verts = min(shared_boundary_verts, distributable - 1)
+            else:
+                surface_ratio = surface_length / total_length
+                boundary_verts = distributable - max(1, int(round(distributable * surface_ratio)))
+            surface_verts = distributable - boundary_verts
 
             print(f"      Lengths: surface={surface_length:.4f}, boundary={boundary_length:.4f}")
             print(f"      Distribution: surface={surface_verts}, boundary={boundary_verts}, fixed=2")
