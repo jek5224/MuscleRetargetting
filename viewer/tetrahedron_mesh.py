@@ -484,7 +484,26 @@ class TetrahedronMeshMixin:
                 print(f"  {len(level_centers)} level centers added "
                       f"({n_streams} streams, {num_levels} levels)")
 
-                # For each surface face, connect to the nearest level center
+                # For each surface face, connect to the nearest level center.
+                # Check tet volume BEFORE creation to prevent degenerate tets.
+                min_tet_volume = 1e-12  # Minimum acceptable tet volume
+                n_skipped_thin = 0
+
+                def compute_tet_volume(p0, p1, p2, p3):
+                    """Signed volume of tetrahedron (p0,p1,p2,p3)."""
+                    return abs(np.dot(np.cross(p1 - p0, p2 - p0), p3 - p0)) / 6.0
+
+                def find_center(stream, lev):
+                    """Find level center for (stream, level), trying other streams if needed."""
+                    key = (stream, lev)
+                    if key in level_centers:
+                        return level_centers[key]
+                    # Try any stream at this level
+                    for s in range(n_streams + len(level_centers)):
+                        if (s, lev) in level_centers:
+                            return level_centers[(s, lev)]
+                    return None
+
                 for face in closed_faces:
                     v0, v1, v2 = int(face[0]), int(face[1]), int(face[2])
                     l0 = int(vertex_level[v0]) if v0 < len(vertex_level) else -1
@@ -495,40 +514,44 @@ class TetrahedronMeshMixin:
                     if len(levels_in_face) == 0:
                         continue
 
-                    # Determine which stream cluster this face belongs to
                     face_streams = set([vertex_stream[v0], vertex_stream[v1], vertex_stream[v2]]) - {-1}
                     face_stream = min(face_streams) if face_streams else 0
+                    p0, p1, p2 = new_verts[v0], new_verts[v1], new_verts[v2]
 
-                    if len(levels_in_face) == 2:
-                        levs = sorted(levels_in_face)
-                        for lev in levs:
-                            key = (face_stream, lev)
-                            if key not in level_centers:
-                                # Try any stream at this level
-                                key = next(((s, lev) for s in range(n_streams + len(level_centers))
-                                           if (s, lev) in level_centers), None)
-                            if key is not None and key in level_centers:
-                                ci = level_centers[key]
-                                n_on_lev = sum(1 for l in [l0, l1, l2] if l == lev)
-                                if n_on_lev <= 1:
-                                    interior_tetrahedra.append([v0, v1, v2, ci])
-                    elif len(levels_in_face) == 1:
-                        lev = list(levels_in_face)[0]
-                        for adj_lev in [lev - 1, lev + 1]:
-                            key = (face_stream, adj_lev)
-                            if key not in level_centers:
-                                key = next(((s, adj_lev) for s in range(n_streams + len(level_centers))
-                                           if (s, adj_lev) in level_centers), None)
-                            if key is not None and key in level_centers:
-                                ci = level_centers[key]
-                                interior_tetrahedra.append([v0, v1, v2, ci])
-                                break
+                    # Collect candidate centers (both adjacent levels, both streams)
+                    candidate_levels = set()
+                    for lev in levels_in_face:
+                        candidate_levels.update([lev - 1, lev, lev + 1])
+                    candidate_levels -= {-1}
+
+                    best_ci = None
+                    best_vol = 0
+                    for lev in sorted(candidate_levels):
+                        ci = find_center(face_stream, lev)
+                        if ci is None:
+                            continue
+                        # Skip if center is at same level as majority of face vertices
+                        n_on_lev = sum(1 for l in [l0, l1, l2] if l == lev)
+                        if n_on_lev >= 2:
+                            continue
+                        vol = compute_tet_volume(p0, p1, p2, new_verts[ci])
+                        if vol > best_vol:
+                            best_vol = vol
+                            best_ci = ci
+
+                    if best_ci is not None and best_vol >= min_tet_volume:
+                        interior_tetrahedra.append([v0, v1, v2, best_ci])
+                    else:
+                        n_skipped_thin += 1
+
+                if n_skipped_thin > 0:
+                    print(f"  Skipped {n_skipped_thin} faces (would create degenerate tets)")
 
                 closed_vertices = np.array(new_verts, dtype=np.float32)
                 interior_tetrahedra = np.array(interior_tetrahedra, dtype=np.int32)
 
-                # Remove zero-volume tets (face vertices + center are coplanar
-                # only if the center is exactly on the face plane — rare)
+                # Safety check: remove any remaining degenerate tets (should be rare
+                # since we check volume before creation)
                 if len(interior_tetrahedra) > 0:
                     v0 = closed_vertices[interior_tetrahedra[:, 0]]
                     cr = np.cross(
@@ -536,11 +559,11 @@ class TetrahedronMeshMixin:
                         closed_vertices[interior_tetrahedra[:, 2]] - v0)
                     vol = np.abs(np.einsum('ij,ij->i', cr,
                                  closed_vertices[interior_tetrahedra[:, 3]] - v0)) / 6.0
-                    good = vol > 1e-20
-                    n_zero = int(np.sum(~good))
-                    if n_zero > 0:
+                    good = vol >= min_tet_volume
+                    n_bad = int(np.sum(~good))
+                    if n_bad > 0:
                         interior_tetrahedra = interior_tetrahedra[good]
-                        print(f"  Removed {n_zero} zero-volume tets")
+                        print(f"  Removed {n_bad} remaining degenerate tets (vol < {min_tet_volume})")
 
                 # Check vertex coverage
                 used = set(interior_tetrahedra.ravel()) if len(interior_tetrahedra) > 0 else set()
