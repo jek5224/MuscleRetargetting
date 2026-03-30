@@ -2980,6 +2980,15 @@ def _render_inspect_2d_windows(v):
                         if contour_verts is not None and len(contour_verts) >= 3:
                             other_level_data.append((contour_verts, corner_pos))
             obj.inspector_highlight_other_level_contours = other_level_data if other_level_data else None
+            # Also set the cyan corner line strip (same as hover) so it persists in edit mode
+            if other_level_data:
+                corner_pts_edit = [data[1] for data in other_level_data]
+                # Add current level's corner position too
+                if contour_match is not None and len(q_based_corner_indices) > corr_corner:
+                    vi_cur = q_based_corner_indices[corr_corner]
+                    if vi_cur < len(contour_match):
+                        corner_pts_edit.insert(0, np.array(contour_match[vi_cur][0]))
+                obj.inspector_highlight_corner_vertices_3d = corner_pts_edit
 
         # Show tooltip
         if hovered_idx >= 0:

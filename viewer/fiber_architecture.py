@@ -2167,26 +2167,18 @@ class FiberArchitectureMixin:
             glVertexPointer(3, GL_FLOAT, 0, pts)
             glDrawArrays(GL_POINTS, 0, len(pts))
 
-        # Draw other levels' contour outlines + corner positions (edit mode)
+        # Draw other levels' contour outlines (edit mode)
+        # Corner positions are drawn by the cyan line strip above
         other_levels = getattr(self, 'inspector_highlight_other_level_contours', None)
         if other_levels is not None and len(other_levels) > 0:
             for contour_verts, corner_pos in other_levels:
                 pts = np.asarray(contour_verts, dtype=np.float32)
                 if pts.ndim == 2 and pts.shape[1] >= 3 and len(pts) >= 3:
                     pts = pts[:, :3].copy()
-                    # Contour outline (dim orange)
                     glLineWidth(1)
                     glColor4f(1.0, 0.6, 0.2, 0.3)
                     glVertexPointer(3, GL_FLOAT, 0, pts)
                     glDrawArrays(GL_LINE_LOOP, 0, len(pts))
-                # Corner position on this level (bright orange dot)
-                cp = np.array([corner_pos], dtype=np.float32)
-                if cp.shape[1] >= 3:
-                    cp = cp[:, :3].copy()
-                    glPointSize(8)
-                    glColor4f(1.0, 0.5, 0.0, 0.9)
-                    glVertexPointer(3, GL_FLOAT, 0, cp)
-                    glDrawArrays(GL_POINTS, 0, 1)
 
         # Draw inspector-highlighted fiber (whole line in blue)
         highlight_fiber = getattr(self, 'inspector_highlight_fiber_idx', None)
