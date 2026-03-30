@@ -622,6 +622,9 @@ class ContourMeshMixin(ContourAnimationMixin):
                 is_anim_highlighted = anim_highlight_fade > 0.01
 
                 # Highlighted contours drawn with immediate mode (rare)
+                # Get scaffold alpha for consistent fade during tet animation
+                s_alpha = getattr(self, '_tet_anim_scaffold_alpha', 1.0)
+
                 if is_highlighted or is_anim_highlighted:
                     if is_anim_highlighted and len(contour) >= 2:
                         # Pulse line width: 1 → 6 → 1
@@ -629,7 +632,8 @@ class ContourMeshMixin(ContourAnimationMixin):
                         pulse = 1.0 - abs(2.0 * anim_highlight_fade - 1.0)
                         lw = 1.0 + 5.0 * pulse
                         glLineWidth(lw)
-                        glColor3fv(color * ls_s if ls_mean is not None else color)
+                        c_rgb = color * ls_s if ls_mean is not None else color
+                        glColor4f(c_rgb[0], c_rgb[1], c_rgb[2], s_alpha)
                         glBegin(GL_LINE_LOOP)
                         for v in contour:
                             v_arr = np.asarray(v).flatten()
@@ -657,7 +661,7 @@ class ContourMeshMixin(ContourAnimationMixin):
                             glDisable(GL_BLEND)
 
                         glLineWidth(2.0)
-                        glColor3f(0.3, 0.6, 0.9)
+                        glColor4f(0.3, 0.6, 0.9, s_alpha)
                         glBegin(GL_LINE_LOOP)
                         for v in contour:
                             v_arr = np.asarray(v).flatten()
@@ -701,12 +705,12 @@ class ContourMeshMixin(ContourAnimationMixin):
                             continue
                         if is_highlighted:
                             if k == 0:
-                                glColor3f(0.2, 0.8, 0.4)
+                                glColor4f(0.2, 0.8, 0.4, s_alpha)
                             else:
-                                glColor3f(0.3, 0.6, 0.9)
+                                glColor4f(0.3, 0.6, 0.9, s_alpha)
                         else:
                             t = k / max(n_verts - 1, 1)
-                            glColor3f(1 - t, 0, 0)
+                            glColor4f(1 - t, 0, 0, s_alpha)
                         v_pos = ls_mean + (v_arr[:3] - ls_mean) * ls_s if ls_mean is not None else v_arr[:3]
                         glVertex3fv(v_pos)
                     glEnd()
@@ -735,17 +739,17 @@ class ContourMeshMixin(ContourAnimationMixin):
                             bp_s *= ls_s
 
                         glLineWidth(2.0)
-                        glColor3f(1.0, 0.0, 0.0)
+                        glColor4f(1.0, 0.0, 0.0, s_alpha)
                         glBegin(GL_LINES)
                         glVertex3fv(origin)
                         glVertex3fv(origin + axis_length * basis_x * bp_s)
                         glEnd()
-                        glColor3f(0.0, 1.0, 0.0)
+                        glColor4f(0.0, 1.0, 0.0, s_alpha)
                         glBegin(GL_LINES)
                         glVertex3fv(origin)
                         glVertex3fv(origin + axis_length * basis_y * bp_s)
                         glEnd()
-                        glColor3f(0.0, 0.0, 1.0)
+                        glColor4f(0.0, 0.0, 1.0, s_alpha)
                         glBegin(GL_LINES)
                         glVertex3fv(origin)
                         glVertex3fv(origin + axis_length * basis_z * bp_s)

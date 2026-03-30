@@ -85,7 +85,7 @@ class MeshLoader(ContourMeshMixin, TetrahedronMeshMixin, FiberArchitectureMixin,
         self.fiber_architecture = [self.sobol_sampling_barycentric(16)]
         self.is_draw_fiber_architecture = False
         self.is_one_fiber = False
-        self.sampling_method = 'sobol_unit_square'  # 'sobol_unit_square' or 'sobol_min_contour'
+        self.sampling_method = 'grid'  # 'grid', 'sobol_unit_square', or 'sobol_min_contour'
         self.cutting_method = 'bp'  # 'bp', 'area_based', 'voronoi', 'angular', or 'gradient'
 
         self.waypoints = []
@@ -685,19 +685,19 @@ class MeshLoader(ContourMeshMixin, TetrahedronMeshMixin, FiberArchitectureMixin,
                 glEnd()
                 glPopMatrix()
 
-                glColor3f(1, 0, 0)
+                glColor4f(1, 0, 0, bp_alpha)
                 glBegin(GL_LINES)
                 glVertex3fv(mean)
                 glVertex3fv(mean + plane_info['basis_x'] * scale * 0.1 * bp_s)
                 glEnd()
 
-                glColor3f(0, 1, 0)
+                glColor4f(0, 1, 0, bp_alpha)
                 glBegin(GL_LINES)
                 glVertex3fv(mean)
                 glVertex3fv(mean + plane_info['basis_y'] * scale * 0.1 * bp_s)
                 glEnd()
 
-                glColor3f(0, 0, 1)
+                glColor4f(0, 0, 1, bp_alpha)
                 glBegin(GL_LINES)
                 glVertex3fv(mean)
                 glVertex3fv(mean + plane_info['basis_z'] * scale * 0.1 * bp_s)

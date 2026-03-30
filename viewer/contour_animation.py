@@ -1451,14 +1451,14 @@ class ContourAnimationMixin:
             t = t * t * (3.0 - 2.0 * t)
             self.transparency = 0.5 * (1.0 - t)
             if self.vertex_colors is not None and self.is_draw_scalar_field:
-                self.vertex_colors[:, 3] = self.transparency
+                self.vertex_colors[:, 3] = np.float32(self.transparency)
             self._fiber_anim_level_progress = 0.0
         else:
             # Phase 2: lines grow level by level
             self.transparency = 0.0
             self.is_draw = False
             if self.vertex_colors is not None and self.is_draw_scalar_field:
-                self.vertex_colors[:, 3] = 0.0
+                self.vertex_colors[:, 3] = np.float32(0.0)
             grow_t = (self._fiber_anim_progress - fade_dur) / grow_dur
             self._fiber_anim_level_progress = grow_t * max(num_levels - 1, 1)
 
@@ -1821,9 +1821,9 @@ class ContourAnimationMixin:
             self.is_draw_bounding_box = False
             self.is_draw_contour_mesh = False
             self.is_draw_tet_mesh = True
-            self.contour_mesh_transparency = 0.8
-            self._tet_anim_tet_alpha = 0.0
-            self._tet_anim_scaffold_alpha = 1.0
+            self.contour_mesh_transparency = 0.0  # Mesh is off, keep at 0
+            self._tet_anim_tet_alpha = self._tet_anim_target_alpha  # Keep at phase 1 end value
+            self._tet_anim_scaffold_alpha = 0.0  # Scaffolding is off, keep faded
             self._contour_anim_bp_scale = {}
             self._level_select_anim_scales = None
             self._tetrahedralize_replayed = True
