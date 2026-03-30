@@ -2014,11 +2014,37 @@ class FiberArchitectureMixin:
         glEnable(GL_LIGHTING)
 
     def _draw_fiber_architecture_slow(self, alpha, level_prog, highlight_stream):
-        """Original per-element draw path for animation/highlight modes."""
+        """Per-element draw path for animation/highlight modes.
+
+        Applies the same depth fade as the fast path so there's no visual
+        jump when the animation finishes and the fast path takes over.
+        """
         highlight_level = getattr(self, 'inspector_highlight_level', None)
+        use_depth_fade = getattr(self, 'fiber_depth_fade', True)
 
         glDisable(GL_LIGHTING)
+        glEnable(GL_BLEND)
+        glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
         glEnableClientState(GL_VERTEX_ARRAY)
+
+        # Get modelview matrix for depth fade
+        mv = None
+        if use_depth_fade:
+            mv = np.array(glGetDoublev(GL_MODELVIEW_MATRIX), dtype=np.float64).T
+
+        def compute_depth_alphas(verts, base_a):
+            if mv is None or len(verts) == 0:
+                return np.full(len(verts), base_a, dtype=np.float32)
+            n = len(verts)
+            ones = np.ones((n, 1), dtype=np.float64)
+            eye = (mv @ np.hstack([verts.astype(np.float64), ones]).T).T
+            depths = -eye[:, 2]
+            d_min, d_max = depths.min(), depths.max()
+            d_range = d_max - d_min
+            if d_range > 1e-6:
+                t = (depths - d_min) / d_range
+                return (base_a * (1.0 - 0.85 * t)).astype(np.float32)
+            return np.full(n, base_a, dtype=np.float32)
 
         normal_pts = []
         highlight_pts = []
@@ -2041,10 +2067,21 @@ class FiberArchitectureMixin:
 
         if normal_pts:
             glPointSize(5)
-            glColor4f(1.0, 0.6, 0.0, alpha)
             pts = np.concatenate(normal_pts)
-            glVertexPointer(3, GL_FLOAT, 0, pts)
-            glDrawArrays(GL_POINTS, 0, len(pts))
+            if use_depth_fade:
+                glEnableClientState(GL_COLOR_ARRAY)
+                n = len(pts)
+                rgba = np.empty((n, 4), dtype=np.float32)
+                rgba[:, 0] = 1.0; rgba[:, 1] = 0.6; rgba[:, 2] = 0.0
+                rgba[:, 3] = compute_depth_alphas(pts, alpha)
+                glVertexPointer(3, GL_FLOAT, 0, pts)
+                glColorPointer(4, GL_FLOAT, 0, rgba)
+                glDrawArrays(GL_POINTS, 0, n)
+                glDisableClientState(GL_COLOR_ARRAY)
+            else:
+                glColor4f(1.0, 0.6, 0.0, alpha)
+                glVertexPointer(3, GL_FLOAT, 0, pts)
+                glDrawArrays(GL_POINTS, 0, len(pts))
 
         if highlight_pts:
             glPointSize(7)
@@ -2083,10 +2120,23 @@ class FiberArchitectureMixin:
 
         if line_pairs:
             glLineWidth(2)
-            glColor4f(0.75, 0, 0, alpha)
             lines = np.concatenate(line_pairs)
-            glVertexPointer(3, GL_FLOAT, 0, lines)
-            glDrawArrays(GL_LINES, 0, len(lines))
+            if use_depth_fade:
+                glEnableClientState(GL_COLOR_ARRAY)
+                n = len(lines)
+                rgba = np.empty((n, 4), dtype=np.float32)
+                rgba[:, 0] = 0.75; rgba[:, 1] = 0.0; rgba[:, 2] = 0.0
+                rgba[:, 3] = compute_depth_alphas(lines, alpha)
+                glVertexPointer(3, GL_FLOAT, 0, lines)
+                glColorPointer(4, GL_FLOAT, 0, rgba)
+                glDrawArrays(GL_LINES, 0, n)
+                glDisableClientState(GL_COLOR_ARRAY)
+            else:
+                glColor4f(0.75, 0, 0, alpha)
+                glVertexPointer(3, GL_FLOAT, 0, lines)
+                glDrawArrays(GL_LINES, 0, len(lines))
+
+        glDisable(GL_BLEND)
 
         # Draw inspector-highlighted vertex (from 2D inspect window hover/selection)
         highlight_vtx = getattr(self, 'inspector_highlight_vertex_3d', None)
