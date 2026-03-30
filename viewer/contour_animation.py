@@ -1857,13 +1857,17 @@ class ContourAnimationMixin:
             self.is_draw_contour_mesh = False
             self.is_draw_contours = False
             self.is_draw_bounding_box = False
-            self._tet_anim_scaffold_alpha = 1.0
+            self._tet_anim_scaffold_alpha = 0.0  # Scaffolding faded out in phase 0
             self._contour_anim_bp_scale = {}
             self._level_select_anim_scales = None
             self.is_draw_tet_mesh = True
         self._tet_anim_phase = 1
         t = (self._tet_anim_progress - fadeout_dur) / tet_in_dur
-        self._tet_anim_tet_alpha = 0.8 * smoothstep(t)
+        t = min(t, 1.0)
+        self._tet_anim_tet_alpha = self._tet_anim_target_alpha * smoothstep(t)
+        # Clamp to exact target on last frame to avoid smoothstep rounding
+        if t >= 1.0:
+            self._tet_anim_tet_alpha = self._tet_anim_target_alpha
 
         return True
 
