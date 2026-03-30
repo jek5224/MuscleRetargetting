@@ -2950,8 +2950,8 @@ def _render_inspect_2d_windows(v):
             obj.inspector_highlight_corner_vertices_3d = None
 
         # When in corner edit mode, show other streams' contour correspondences
-        # Also show the CURRENT stream's corner vertices at the same level
         if corr_corner >= 0 and is_post_stream:
+            print(f"[DEBUG] corr_corner={corr_corner}, stream={stream_idx}, level={level_idx}")
             bps = getattr(obj, 'bounding_planes', None)
             contours = getattr(obj, 'contours', None)
             if bps is not None and contours is not None:
@@ -2978,6 +2978,7 @@ def _render_inspect_2d_windows(v):
                                 if ci_idx < len(cm_o):
                                     other_pts.append(np.array(cm_o[ci_idx][0]))
                 obj.inspector_highlight_other_stream_corners_3d = other_pts if other_pts else None
+                print(f"[DEBUG] other_pts={len(other_pts) if other_pts else 0}, bps={len(bps)}, contours={len(contours) if contours else 0}")
 
         # Show tooltip
         if hovered_idx >= 0:
