@@ -3102,26 +3102,44 @@ def _render_inspect_2d_windows(v):
 
         # Update cyan corner line strip AFTER preview has modified contour_match,
         # so the current level's corner position reflects the hovered vertex.
+        # Re-read ALL levels' corner positions (including current, which may be preview-modified).
         if corr_corner >= 0:
-            other_level_data = getattr(obj, 'inspector_highlight_other_level_contours', None)
-            if other_level_data:
-                corner_pts_edit = [data[1] for data in other_level_data]
-            else:
-                corner_pts_edit = []
-            # Read current level's corner position (may be preview-modified)
-            if is_post_stream:
-                bp_cur = obj.bounding_planes[stream_idx][level_idx]
-            else:
-                bp_cur = obj.bounding_planes[level_idx][stream_idx]
-            cm_cur = bp_cur.get('contour_match') if bp_cur else None
-            ci_cur = bp_cur.get('corner_indices') if bp_cur else None
-            if cm_cur is not None:
-                vi_cur = None
-                if ci_cur is not None and corr_corner < len(ci_cur):
-                    vi_cur = ci_cur[corr_corner]
-                if vi_cur is not None and vi_cur < len(cm_cur):
-                    corner_pts_edit.insert(level_idx, np.array(cm_cur[vi_cur][0]))
-            obj.inspector_highlight_corner_vertices_3d = corner_pts_edit if corner_pts_edit else None
+            bps_src = obj.bounding_planes
+            if bps_src is not None:
+                if is_post_stream and stream_idx < len(bps_src):
+                    bp_list_all = bps_src[stream_idx]
+                else:
+                    bp_list_all = bps_src
+                corner_pts_all = []
+                for lev_i in range(len(bp_list_all)):
+                    bp_lev = bp_list_all[lev_i]
+                    if bp_lev is None:
+                        continue
+                    if isinstance(bp_lev, list):
+                        if stream_idx < len(bp_lev):
+                            bp_lev = bp_lev[stream_idx]
+                        else:
+                            continue
+                    cm = bp_lev.get('contour_match')
+                    ci = bp_lev.get('corner_indices')
+                    bp_c = bp_lev.get('bounding_plane')
+                    if cm is None:
+                        continue
+                    vi = None
+                    if ci is not None and corr_corner < len(ci):
+                        vi = ci[corr_corner]
+                    elif bp_c is not None and corr_corner < len(bp_c):
+                        bp_corner = np.array(bp_c[corr_corner])
+                        vi = 0
+                        min_d = float('inf')
+                        for vvi, (p, q) in enumerate(cm):
+                            d = np.linalg.norm(np.array(q) - bp_corner)
+                            if d < min_d:
+                                min_d = d
+                                vi = vvi
+                    if vi is not None and vi < len(cm):
+                        corner_pts_all.append(np.array(cm[vi][0]))
+                obj.inspector_highlight_corner_vertices_3d = corner_pts_all if corner_pts_all else None
 
         # Draw correspondence mode visual feedback
         if corr_mode and corr_corner >= 0:
