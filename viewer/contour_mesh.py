@@ -12351,6 +12351,32 @@ class ContourMeshMixin(ContourAnimationMixin):
         while len(self.attach_skeletons_sub) < max_stream_count:
             self.attach_skeletons_sub.append([0, 0])
 
+        # Diagnostic: verify cut pieces share boundary vertices
+        print("\n=== Cut Boundary Diagnostic ===")
+        num_levels_diag = len(stream_contours[0]) if max_stream_count > 0 else 0
+        for level_idx in range(num_levels_diag):
+            contours_at_level = []
+            for si in range(max_stream_count):
+                if level_idx < len(stream_contours[si]):
+                    contours_at_level.append((si, np.asarray(stream_contours[si][level_idx])))
+            if len(contours_at_level) < 2:
+                continue
+            # Check if streams have same contour (merged level) vs different (cut level)
+            c0 = contours_at_level[0][1]
+            c1 = contours_at_level[1][1]
+            if c0.shape == c1.shape and np.allclose(c0, c1, atol=1e-10):
+                continue  # Merged level, skip
+            # Cut level: check shared vertices
+            shared = 0
+            for vi in range(len(c0)):
+                dists = np.linalg.norm(c1 - c0[vi], axis=1)
+                if np.min(dists) < 1e-4:
+                    shared += 1
+            print(f"  Level {level_idx}: stream0={len(c0)}v, stream1={len(c1)}v, shared={shared}")
+            if shared == 0:
+                print(f"    *** NO SHARED VERTICES — cut line missing! ***")
+        print("=== End Diagnostic ===\n")
+
         # Clean up manual cut tracking data
         if hasattr(self, '_pending_manual_cuts'):
             self._pending_manual_cuts = None
