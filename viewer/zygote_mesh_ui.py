@@ -2910,32 +2910,76 @@ def _render_inspect_2d_windows(v):
             obj.inspector_highlight_fiber_idx = (stream_idx, hovered_idx)
             obj.inspector_highlight_corner_vertices_3d = None
             obj.inspector_highlight_other_stream_corners_3d = None
+            if corr_corner < 0:
+                obj.inspector_highlight_other_level_contours = None
         else:
             obj.inspector_highlight_vertex_3d = None
             obj.inspector_highlight_other_stream_corners_3d = None
             obj.inspector_highlight_fiber_idx = None
             obj.inspector_highlight_corner_vertices_3d = None
 
-        # When in corner edit mode, show other streams' contour correspondences
-        if corr_corner >= 0 and is_post_stream:
-            _sbp = getattr(obj, 'stream_bounding_planes', None)
-            _sc = getattr(obj, 'stream_contours', None)
-            print(f"[DBG] corr={corr_corner} stream={stream_idx} lev={level_idx} sbp={len(_sbp) if _sbp else 0} sc={len(_sc) if _sc else 0}")
-            all_bps = getattr(obj, 'stream_bounding_planes', None)
-            all_contours = getattr(obj, 'stream_contours', None)
-            if all_bps is not None and all_contours is not None and len(all_bps) > 1:
-                other_pts = []
-                for other_s in range(len(all_bps)):
-                    if other_s == stream_idx:
+        # When in corner edit mode, show the same corner's correspondence on
+        # ALL OTHER contour levels in the 3D viewer. This shows the contour
+        # outlines at every level with the corner position marked, so the user
+        # can see how the correspondence at the current level relates to others.
+        if corr_corner >= 0:
+            other_level_data = []  # [(contour_verts, corner_3d_pos), ...]
+            bps_src = obj.bounding_planes
+            contours_src = obj.contours
+            if bps_src is not None and contours_src is not None:
+                if is_post_stream and stream_idx < len(bps_src):
+                    bp_list = bps_src[stream_idx]
+                    c_list = contours_src[stream_idx]
+                else:
+                    bp_list = bps_src
+                    c_list = contours_src
+                for lev_i in range(len(bp_list)):
+                    if lev_i == level_idx:
                         continue
-                    if level_idx >= len(all_contours[other_s]):
+                    bp_lev = bp_list[lev_i]
+                    if bp_lev is None:
                         continue
-                    # Add contour vertices from other stream at same level
-                    c = np.asarray(all_contours[other_s][level_idx])
-                    if len(c) > 0:
-                        for v_pt in c:
-                            other_pts.append(np.array(v_pt))
-                obj.inspector_highlight_other_stream_corners_3d = other_pts if other_pts else None
+                    # Handle pre-stream: bp_lev might be a list of BPs
+                    if isinstance(bp_lev, list):
+                        if stream_idx < len(bp_lev):
+                            bp_lev = bp_lev[stream_idx]
+                        else:
+                            continue
+                    cm = bp_lev.get('contour_match')
+                    ci = bp_lev.get('corner_indices')
+                    bp_c = bp_lev.get('bounding_plane')
+                    if cm is None:
+                        continue
+                    # Find the corner vertex index
+                    vi = None
+                    if ci is not None and corr_corner < len(ci):
+                        vi = ci[corr_corner]
+                    elif bp_c is not None and corr_corner < len(bp_c):
+                        bp_corner = np.array(bp_c[corr_corner])
+                        vi = 0
+                        min_d = float('inf')
+                        for vvi, (p, q) in enumerate(cm):
+                            d = np.linalg.norm(np.array(q) - bp_corner)
+                            if d < min_d:
+                                min_d = d
+                                vi = vvi
+                    if vi is not None and vi < len(cm):
+                        corner_pos = np.array(cm[vi][0])
+                        # Get contour vertices
+                        c_lev = c_list[lev_i]
+                        if isinstance(c_lev, list) and len(c_lev) > 0 and isinstance(c_lev[0], (list, np.ndarray)) and np.asarray(c_lev[0]).ndim == 1:
+                            # c_lev is a list of 3D points (single contour)
+                            contour_verts = np.asarray(c_lev)
+                        elif isinstance(c_lev, np.ndarray) and c_lev.ndim == 2:
+                            contour_verts = c_lev
+                        elif isinstance(c_lev, list) and stream_idx < len(c_lev):
+                            # Pre-stream: c_lev is list of contours
+                            contour_verts = np.asarray(c_lev[stream_idx])
+                        else:
+                            contour_verts = None
+                        if contour_verts is not None and len(contour_verts) >= 3:
+                            other_level_data.append((contour_verts, corner_pos))
+            obj.inspector_highlight_other_level_contours = other_level_data if other_level_data else None
 
         # Show tooltip
         if hovered_idx >= 0:
@@ -3233,6 +3277,7 @@ def _render_inspect_2d_windows(v):
             obj.inspector_highlight_fiber_idx = None
             obj.inspector_highlight_corner_vertices_3d = None
             obj.inspector_highlight_other_stream_corners_3d = None
+            obj.inspector_highlight_other_level_contours = None
 
             # Rebuild 3D fiber draw arrays to reflect correspondence changes
             if hasattr(obj, '_rebuild_fiber_draw_arrays'):
