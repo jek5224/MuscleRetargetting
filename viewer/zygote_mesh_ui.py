@@ -2949,6 +2949,42 @@ def _render_inspect_2d_windows(v):
             obj.inspector_highlight_fiber_idx = None
             obj.inspector_highlight_corner_vertices_3d = None
 
+        # When in corner edit mode (corr_corner selected), keep cross-stream
+        # highlights visible regardless of hover state
+        if corr_corner >= 0 and is_post_stream and hasattr(obj, 'bounding_planes') and obj.bounding_planes is not None:
+            other_stream_pts = []
+            for other_s in range(len(obj.bounding_planes)):
+                if other_s == stream_idx:
+                    continue
+                if level_idx >= len(obj.bounding_planes[other_s]):
+                    continue
+                bp_other = obj.bounding_planes[other_s][level_idx]
+                if bp_other is None:
+                    continue
+                cm_other = bp_other.get('contour_match', None)
+                ci_other = bp_other.get('corner_indices', None)
+                bp_c_other = bp_other.get('bounding_plane', None)
+                if cm_other is None or bp_c_other is None:
+                    continue
+                # Show all 4 corner correspondences for each other stream
+                for ci_idx in range(4):
+                    if ci_other is not None and ci_idx < len(ci_other):
+                        vi_c = ci_other[ci_idx]
+                    else:
+                        if bp_c_other is None or ci_idx >= len(bp_c_other):
+                            continue
+                        bp_corner_c = np.array(bp_c_other[ci_idx])
+                        vi_c = 0
+                        min_d = float('inf')
+                        for vvi, (p, q) in enumerate(cm_other):
+                            d = np.linalg.norm(np.array(q) - bp_corner_c)
+                            if d < min_d:
+                                min_d = d
+                                vi_c = vvi
+                    if vi_c < len(cm_other):
+                        other_stream_pts.append(np.array(cm_other[vi_c][0]))
+            obj.inspector_highlight_other_stream_corners_3d = other_stream_pts if other_stream_pts else None
+
         # Show tooltip
         if hovered_idx >= 0:
             if hovered_type == 'vertex':
