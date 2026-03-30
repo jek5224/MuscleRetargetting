@@ -1991,7 +1991,7 @@ class FiberArchitectureMixin:
                 glDrawArrays(GL_LINES, 0, n_lines)
 
             glDisableClientState(GL_COLOR_ARRAY)
-            glDisable(GL_BLEND)
+            # Don't disable GL_BLEND — viewer expects it globally enabled
 
         # Draw test fiber (blue) if available
         test_waypoints = getattr(self, 'test_fiber_waypoints', None)
@@ -2136,7 +2136,7 @@ class FiberArchitectureMixin:
                 glVertexPointer(3, GL_FLOAT, 0, lines)
                 glDrawArrays(GL_LINES, 0, len(lines))
 
-        glDisable(GL_BLEND)
+        # Don't disable GL_BLEND — viewer expects it globally enabled
 
         # Draw inspector-highlighted vertex (from 2D inspect window hover/selection)
         highlight_vtx = getattr(self, 'inspector_highlight_vertex_3d', None)
