@@ -9893,6 +9893,10 @@ class ContourMeshMixin(ContourAnimationMixin):
         print(f"  Added {n_intermediate} intermediate vertices to shared edge")
         print(f"  Boundary indices: piece0={boundary_indices_piece0}, piece1={boundary_indices_piece1}")
 
+        boundary_indices = {
+            'piece0': boundary_indices_piece0,
+            'piece1': boundary_indices_piece1,
+        }
         return (np.array(piece0_2d_list), np.array(piece0_3d_list),
                 np.array(piece1_2d_list), np.array(piece1_3d_list), intermediate_verts_3d, boundary_indices)
 
