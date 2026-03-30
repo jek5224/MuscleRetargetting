@@ -12293,40 +12293,81 @@ class ContourMeshMixin(ContourAnimationMixin):
 
         print(f"Created {max_stream_count} streams, each with {len(stream_contours[0])} levels")
 
-        # Snap shared boundary vertices across streams so they are bitwise-identical.
-        # Cut pieces share boundary vertices (same computation), but list→array conversions
-        # can introduce subtle float differences. Force-snap within 1e-4 (0.1mm) so that
-        # the tight eps=1e-6 dedup in build_contour_mesh always merges them.
-        # Only snap cross-stream pairs at CUT levels (where streams have different contours).
-        n_total_snapped = 0
-        num_levels_snap = len(stream_contours[0]) if max_stream_count > 0 else 0
-        for level_idx in range(num_levels_snap):
-            for si in range(max_stream_count):
-                for sj in range(si + 1, max_stream_count):
-                    if level_idx >= len(stream_contours[si]) or level_idx >= len(stream_contours[sj]):
-                        continue
-                    ci = stream_contours[si][level_idx]
-                    cj = stream_contours[sj][level_idx]
-                    if len(ci) == 0 or len(cj) == 0:
-                        continue
-                    ci_arr = np.asarray(ci)
-                    cj_arr = np.asarray(cj)
-                    # Skip merged levels where ALL vertices are identical (same contour)
-                    if ci_arr.shape == cj_arr.shape and np.allclose(ci_arr, cj_arr, atol=1e-10):
-                        continue
-                    # At cut levels, find near-identical boundary vertices across streams
-                    for vi in range(len(ci_arr)):
-                        dists = np.linalg.norm(cj_arr - ci_arr[vi], axis=1)
-                        min_idx = np.argmin(dists)
-                        if dists[min_idx] < 1e-4 and dists[min_idx] > 0:
-                            # Snap: copy ci's vertex position to cj (bitwise identical)
-                            cj_arr[min_idx] = ci_arr[vi].copy()
-                            n_total_snapped += 1
-                    # Write back if cj was modified (cj_arr may be a view)
-                    if isinstance(cj, np.ndarray):
-                        stream_contours[sj][level_idx] = cj_arr
-        if n_total_snapped > 0:
-            print(f"  Snapped {n_total_snapped} boundary vertices across streams (post-cut)")
+        # Insert shared cut-line vertices at CUT levels.
+        # After cutting, each piece is an open arc of the original contour. The cut line
+        # (boundary between the pieces) must be added as explicit shared vertices in both
+        # pieces so they form proper closed shapes with a shared edge.
+        # For each CUT level: find the 2 closest vertex pairs between streams (the boundary
+        # points), compute the midpoint, insert it + intermediates into both contours.
+        n_levels_fixed = 0
+        num_levels_fix = len(stream_contours[0]) if max_stream_count > 0 else 0
+        for level_idx in range(num_levels_fix):
+            groups = stream_groups[level_idx] if level_idx < len(stream_groups) else []
+            # Only process CUT levels (streams 0 and 1 came from same original contour)
+            is_cut = any(0 in g and 1 in g for g in groups)
+            if not is_cut or max_stream_count < 2:
+                continue
+            if level_idx >= len(stream_contours[0]) or level_idx >= len(stream_contours[1]):
+                continue
+            ci = np.asarray(stream_contours[0][level_idx])
+            cj = np.asarray(stream_contours[1][level_idx])
+            if len(ci) < 3 or len(cj) < 3:
+                continue
+            # Already has shared vertices? Skip.
+            all_dists = np.array([np.min(np.linalg.norm(cj - ci[vi], axis=1)) for vi in range(len(ci))])
+            if np.any(all_dists < 1e-6):
+                continue
+            # Find 2 closest vertex pairs (the boundary endpoints)
+            # For each ci vertex, find closest cj vertex
+            ci_to_cj_dist = np.array([np.min(np.linalg.norm(cj - ci[vi], axis=1)) for vi in range(len(ci))])
+            ci_to_cj_idx = np.array([np.argmin(np.linalg.norm(cj - ci[vi], axis=1)) for vi in range(len(ci))])
+            # Find the two ci vertices closest to cj (these are the boundary points)
+            sorted_ci = np.argsort(ci_to_cj_dist)
+            bp1_ci = sorted_ci[0]
+            bp1_cj = ci_to_cj_idx[bp1_ci]
+            # Second boundary: must be far from first (at least 1/4 of contour apart)
+            bp2_ci = None
+            min_arc_dist = len(ci) // 4
+            for k in sorted_ci[1:]:
+                arc_dist = min(abs(k - bp1_ci), len(ci) - abs(k - bp1_ci))
+                if arc_dist >= min_arc_dist:
+                    bp2_ci = k
+                    break
+            if bp2_ci is None:
+                bp2_ci = sorted_ci[1] if len(sorted_ci) > 1 else sorted_ci[0]
+            bp2_cj = ci_to_cj_idx[bp2_ci]
+            # Compute shared boundary points (average of closest pairs)
+            shared_pt1 = (ci[bp1_ci] + cj[bp1_cj]) / 2.0
+            shared_pt2 = (ci[bp2_ci] + cj[bp2_cj]) / 2.0
+            # Generate intermediates along the cut line
+            cut_length = np.linalg.norm(shared_pt2 - shared_pt1)
+            perimeter_ci = sum(np.linalg.norm(ci[(k+1) % len(ci)] - ci[k]) for k in range(len(ci)))
+            n_inter = max(2, round(len(ci) * cut_length / perimeter_ci) - 2)
+            intermediates = [shared_pt1 + (k / (n_inter + 1)) * (shared_pt2 - shared_pt1) for k in range(1, n_inter + 1)]
+            shared_verts = [shared_pt1] + intermediates + [shared_pt2]
+            # Insert shared vertices into ci after bp1_ci position
+            # Order: bp1 → intermediates → bp2 (or reversed depending on contour winding)
+            # Insert between the two boundary indices
+            if bp1_ci < bp2_ci:
+                insert_pos_ci = bp2_ci + 1
+            else:
+                insert_pos_ci = bp1_ci + 1
+            ci_list = list(ci)
+            for k, sv in enumerate(shared_verts):
+                ci_list.insert(insert_pos_ci + k, sv)
+            # Insert shared vertices into cj (reversed order for opposite winding)
+            if bp1_cj < bp2_cj:
+                insert_pos_cj = bp2_cj + 1
+            else:
+                insert_pos_cj = bp1_cj + 1
+            cj_list = list(cj)
+            for k, sv in enumerate(reversed(shared_verts)):
+                cj_list.insert(insert_pos_cj + k, sv)
+            stream_contours[0][level_idx] = np.array(ci_list)
+            stream_contours[1][level_idx] = np.array(cj_list)
+            n_levels_fixed += 1
+        if n_levels_fixed > 0:
+            print(f"  Inserted shared cut-line vertices at {n_levels_fixed} CUT levels")
 
         # Re-order streams at each level to ensure consistent correspondence
         # This fixes the issue where stream 0 at level N might correspond to stream 1 at level N+1
