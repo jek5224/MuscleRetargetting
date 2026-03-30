@@ -15115,13 +15115,38 @@ class ContourMeshMixin(ContourAnimationMixin):
             # midpoint vertex and add it to BOTH pieces — exactly 2 new vertices for
             # a 2-piece cut, placed where the cutting line meets the contour.
             if len(assignments) == len(target_contour):
+                # Compute centroids per piece for Voronoi boundary intersection
+                piece_centroids_3d = {}
+                for v_idx, piece_id in enumerate(assignments):
+                    if piece_id not in piece_centroids_3d:
+                        piece_centroids_3d[piece_id] = []
+                    piece_centroids_3d[piece_id].append(target_contour[v_idx])
+                for pid in piece_centroids_3d:
+                    piece_centroids_3d[pid] = np.mean(piece_centroids_3d[pid], axis=0)
+
                 piece_lists = [[] for _ in range(n_pieces)]
                 prev_piece = assignments[-1]
                 for v_idx in range(n_verts):
                     curr_piece = assignments[v_idx]
-                    if prev_piece != curr_piece and v_idx > 0:
-                        # Boundary crossing: create shared vertex at midpoint
-                        boundary_pt = 0.5 * (target_contour[v_idx - 1] + target_contour[v_idx])
+                    if prev_piece != curr_piece:
+                        # Boundary crossing: find exact intersection of Voronoi
+                        # boundary (perpendicular bisector of the two centroids)
+                        # with this contour edge.
+                        prev_v_idx = (v_idx - 1) % n_verts
+                        va = target_contour[prev_v_idx]
+                        vb = target_contour[v_idx]
+                        c0 = piece_centroids_3d[prev_piece]
+                        c1 = piece_centroids_3d[curr_piece]
+                        mid_c = (c0 + c1) / 2.0
+                        d = c1 - c0
+                        edge = vb - va
+                        denom = np.dot(edge, d)
+                        if abs(denom) > 1e-12:
+                            t = np.dot(mid_c - va, d) / denom
+                            t = np.clip(t, 0.0, 1.0)
+                        else:
+                            t = 0.5
+                        boundary_pt = va + t * edge
                         piece_lists[prev_piece].append(boundary_pt.copy())
                         piece_lists[curr_piece].append(boundary_pt.copy())
                         shared_boundary_points.append(boundary_pt)
@@ -15129,7 +15154,20 @@ class ContourMeshMixin(ContourAnimationMixin):
                     prev_piece = curr_piece
                 # Handle wrap-around boundary
                 if assignments[-1] != assignments[0]:
-                    boundary_pt = 0.5 * (target_contour[-1] + target_contour[0])
+                    va = target_contour[-1]
+                    vb = target_contour[0]
+                    c0 = piece_centroids_3d[assignments[-1]]
+                    c1 = piece_centroids_3d[assignments[0]]
+                    mid_c = (c0 + c1) / 2.0
+                    d = c1 - c0
+                    edge = vb - va
+                    denom = np.dot(edge, d)
+                    if abs(denom) > 1e-12:
+                        t = np.dot(mid_c - va, d) / denom
+                        t = np.clip(t, 0.0, 1.0)
+                    else:
+                        t = 0.5
+                    boundary_pt = va + t * edge
                     piece_lists[assignments[-1]].append(boundary_pt.copy())
                     piece_lists[assignments[0]].append(boundary_pt.copy())
                     shared_boundary_points.append(boundary_pt)
