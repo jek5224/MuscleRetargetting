@@ -2980,15 +2980,6 @@ def _render_inspect_2d_windows(v):
                         if contour_verts is not None and len(contour_verts) >= 3:
                             other_level_data.append((contour_verts, corner_pos))
             obj.inspector_highlight_other_level_contours = other_level_data if other_level_data else None
-            # Also set the cyan corner line strip (same as hover) so it persists in edit mode
-            if other_level_data:
-                corner_pts_edit = [data[1] for data in other_level_data]
-                # Add current level's corner position too
-                if contour_match is not None and len(q_based_corner_indices) > corr_corner:
-                    vi_cur = q_based_corner_indices[corr_corner]
-                    if vi_cur < len(contour_match):
-                        corner_pts_edit.insert(0, np.array(contour_match[vi_cur][0]))
-                obj.inspector_highlight_corner_vertices_3d = corner_pts_edit
 
         # Show tooltip
         if hovered_idx >= 0:
@@ -3108,6 +3099,29 @@ def _render_inspect_2d_windows(v):
                 else:
                     bp_info_ref.pop('corner_indices', None)
                 v.inspect_2d_corr_preview_active[name] = False
+
+        # Update cyan corner line strip AFTER preview has modified contour_match,
+        # so the current level's corner position reflects the hovered vertex.
+        if corr_corner >= 0:
+            other_level_data = getattr(obj, 'inspector_highlight_other_level_contours', None)
+            if other_level_data:
+                corner_pts_edit = [data[1] for data in other_level_data]
+            else:
+                corner_pts_edit = []
+            # Read current level's corner position (may be preview-modified)
+            if is_post_stream:
+                bp_cur = obj.bounding_planes[stream_idx][level_idx]
+            else:
+                bp_cur = obj.bounding_planes[level_idx][stream_idx]
+            cm_cur = bp_cur.get('contour_match') if bp_cur else None
+            ci_cur = bp_cur.get('corner_indices') if bp_cur else None
+            if cm_cur is not None:
+                vi_cur = None
+                if ci_cur is not None and corr_corner < len(ci_cur):
+                    vi_cur = ci_cur[corr_corner]
+                if vi_cur is not None and vi_cur < len(cm_cur):
+                    corner_pts_edit.insert(level_idx, np.array(cm_cur[vi_cur][0]))
+            obj.inspector_highlight_corner_vertices_3d = corner_pts_edit if corner_pts_edit else None
 
         # Draw correspondence mode visual feedback
         if corr_mode and corr_corner >= 0:
