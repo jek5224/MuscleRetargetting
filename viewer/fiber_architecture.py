@@ -2167,14 +2167,23 @@ class FiberArchitectureMixin:
             glVertexPointer(3, GL_FLOAT, 0, pts)
             glDrawArrays(GL_POINTS, 0, len(pts))
 
-        # Draw other streams' corner correspondences at same level (orange/yellow)
+        # Draw other streams' contour correspondences at same level (orange)
         other_corners = getattr(self, 'inspector_highlight_other_stream_corners_3d', None)
         if other_corners is not None and len(other_corners) > 0:
             pts = np.array(other_corners, dtype=np.float32)
-            glPointSize(8)
-            glColor4f(1.0, 0.7, 0.0, 0.9)
-            glVertexPointer(3, GL_FLOAT, 0, pts)
-            glDrawArrays(GL_POINTS, 0, len(pts))
+            if pts.ndim == 2 and pts.shape[1] >= 3:
+                pts = pts[:, :3].copy()
+                # Draw contour outline
+                if len(pts) >= 2:
+                    glLineWidth(2)
+                    glColor4f(1.0, 0.5, 0.0, 0.8)
+                    glVertexPointer(3, GL_FLOAT, 0, pts)
+                    glDrawArrays(GL_LINE_LOOP, 0, len(pts))
+                # Draw corner vertices larger
+                glPointSize(10)
+                glColor4f(1.0, 0.7, 0.0, 1.0)
+                glVertexPointer(3, GL_FLOAT, 0, pts)
+                glDrawArrays(GL_POINTS, 0, len(pts))
 
         # Draw inspector-highlighted fiber (whole line in blue)
         highlight_fiber = getattr(self, 'inspector_highlight_fiber_idx', None)

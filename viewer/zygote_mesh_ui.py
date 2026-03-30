@@ -2949,25 +2949,34 @@ def _render_inspect_2d_windows(v):
             obj.inspector_highlight_fiber_idx = None
             obj.inspector_highlight_corner_vertices_3d = None
 
-        # When in corner edit mode, show other streams' corner correspondences
+        # When in corner edit mode, show other streams' contour correspondences
+        # Also show the CURRENT stream's corner vertices at the same level
         if corr_corner >= 0 and is_post_stream:
             bps = getattr(obj, 'bounding_planes', None)
-            if bps is not None and len(bps) > 1:
+            contours = getattr(obj, 'contours', None)
+            if bps is not None and contours is not None:
                 other_pts = []
+                # Collect contour vertices from ALL OTHER streams at the same level
                 for other_s in range(len(bps)):
                     if other_s == stream_idx:
                         continue
                     if level_idx >= len(bps[other_s]):
                         continue
+                    # Use the contour vertices directly (simpler, always available)
+                    if other_s < len(contours) and level_idx < len(contours[other_s]):
+                        c = np.asarray(contours[other_s][level_idx])
+                        if len(c) > 0:
+                            for v in c:
+                                other_pts.append(np.array(v))
+                    # Also add corner correspondence points if available
                     bp_o = bps[other_s][level_idx]
-                    if bp_o is None:
-                        continue
-                    cm_o = bp_o.get('contour_match')
-                    if cm_o is None or len(cm_o) == 0:
-                        continue
-                    # Add all P vertices from this stream's contour_match
-                    for p, q in cm_o:
-                        other_pts.append(np.array(p))
+                    if bp_o is not None:
+                        ci_o = bp_o.get('corner_indices')
+                        cm_o = bp_o.get('contour_match')
+                        if ci_o is not None and cm_o is not None:
+                            for ci_idx in ci_o:
+                                if ci_idx < len(cm_o):
+                                    other_pts.append(np.array(cm_o[ci_idx][0]))
                 obj.inspector_highlight_other_stream_corners_3d = other_pts if other_pts else None
 
         # Show tooltip
