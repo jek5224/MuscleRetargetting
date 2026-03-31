@@ -8973,7 +8973,9 @@ class ContourMeshMixin(ContourAnimationMixin):
         if total_modified > 0:
             print(f"  [Waypoint opt] Modified {total_modified} levels via chain propagation")
 
-        # Local refinement: reduce remaining bending energy with ±5 vertex shifts
+        # Local refinement: minimize angular twist of fiber pattern between adjacent levels.
+        # For each level transition, compute mean angular shift of fiber positions
+        # relative to the contour center. A twist rotates fiber positions around the center.
         total_refined = 0
         for stream_i in range(n_streams):
             wp_stream = self.waypoints[stream_i]
@@ -8984,21 +8986,59 @@ class ContourMeshMixin(ContourAnimationMixin):
             if n_levels < 3:
                 continue
 
-            for iteration in range(n_levels):  # up to one pass per level
-                # Compute bending energy per level
-                level_energy = np.zeros(n_levels)
-                for lev in range(1, n_levels - 1):
-                    wp_prev = np.array(wp_stream[lev - 1])
-                    wp_curr = np.array(wp_stream[lev])
-                    wp_next = np.array(wp_stream[lev + 1])
-                    if len(wp_prev) != len(wp_curr) or len(wp_curr) != len(wp_next):
-                        continue
-                    d = wp_prev + wp_next - 2 * wp_curr
-                    level_energy[lev] = np.sum(np.linalg.norm(d, axis=1) ** 2)
+            n_fibers = len(wp_stream[0])
 
-                worst_lev = int(np.argmax(level_energy))
-                worst_energy = level_energy[worst_lev]
-                if worst_energy < 1e-12:
+            def compute_twist_at_level(lev, wp_at_lev):
+                """Mean angular twist of fiber positions between adjacent levels.
+                Projects to 2D using lev's basis, computes per-fiber angle shift,
+                returns sum of absolute angle shifts with both neighbors."""
+                bp_lev = bp_stream[lev]
+                bx = bp_lev['basis_x']
+                by = bp_lev['basis_y']
+                center = bp_lev['mean']
+
+                wp_curr = np.array(wp_at_lev)
+                if len(wp_curr) != n_fibers:
+                    return 1e6
+
+                curr_2d = np.array([[np.dot(w - center, bx), np.dot(w - center, by)]
+                                    for w in wp_curr])
+                curr_angles = np.arctan2(curr_2d[:, 1], curr_2d[:, 0])
+
+                twist = 0.0
+
+                if lev > 0:
+                    wp_prev = np.array(wp_stream[lev - 1])
+                    if len(wp_prev) == n_fibers:
+                        prev_2d = np.array([[np.dot(w - center, bx), np.dot(w - center, by)]
+                                            for w in wp_prev])
+                        prev_angles = np.arctan2(prev_2d[:, 1], prev_2d[:, 0])
+                        diffs = curr_angles - prev_angles
+                        # Wrap to [-pi, pi]
+                        diffs = (diffs + np.pi) % (2 * np.pi) - np.pi
+                        twist += np.sum(diffs ** 2)
+
+                if lev < n_levels - 1:
+                    wp_next = np.array(wp_stream[lev + 1])
+                    if len(wp_next) == n_fibers:
+                        next_2d = np.array([[np.dot(w - center, bx), np.dot(w - center, by)]
+                                            for w in wp_next])
+                        next_angles = np.arctan2(next_2d[:, 1], next_2d[:, 0])
+                        diffs = curr_angles - next_angles
+                        diffs = (diffs + np.pi) % (2 * np.pi) - np.pi
+                        twist += np.sum(diffs ** 2)
+
+                return twist
+
+            for iteration in range(n_levels):
+                # Find level with worst twist
+                level_twist = np.zeros(n_levels)
+                for lev in range(1, n_levels - 1):
+                    level_twist[lev] = compute_twist_at_level(lev, wp_stream[lev])
+
+                worst_lev = int(np.argmax(level_twist))
+                worst_twist = level_twist[worst_lev]
+                if worst_twist < 1e-12:
                     break
 
                 bp = bp_stream[worst_lev]
@@ -9013,14 +9053,11 @@ class ContourMeshMixin(ContourAnimationMixin):
                 if current_ci is None:
                     break
 
-                best_energy = worst_energy
+                best_twist = worst_twist
                 best_ci = list(current_ci)
                 search_range = min(n_verts // 4, 10)
 
-                wp_prev = np.array(wp_stream[worst_lev - 1])
-                wp_next = np.array(wp_stream[worst_lev + 1])
-
-                # Greedy per-corner: optimize each corner sequentially
+                # Greedy per-corner
                 for corner_idx in range(4):
                     for delta in range(-search_range, search_range + 1):
                         if delta == 0:
@@ -9038,17 +9075,12 @@ class ContourMeshMixin(ContourAnimationMixin):
                         if len(trial_wp) == 0:
                             continue
 
-                        trial_wp_arr = np.array(trial_wp)
-                        if len(wp_prev) != len(trial_wp_arr) or len(trial_wp_arr) != len(wp_next):
-                            continue
-
-                        d = wp_prev + wp_next - 2 * trial_wp_arr
-                        trial_energy = np.sum(np.linalg.norm(d, axis=1) ** 2)
-                        if trial_energy < best_energy:
-                            best_energy = trial_energy
+                        trial_twist = compute_twist_at_level(worst_lev, trial_wp)
+                        if trial_twist < best_twist:
+                            best_twist = trial_twist
                             best_ci = list(trial_ci)
 
-                if best_energy < worst_energy:
+                if best_twist < worst_twist:
                     new_match = self._recompute_contour_match(
                         P_verts, bp_corners_3d, best_ci, n_verts)
                     bp['contour_match'] = new_match
@@ -9057,37 +9089,48 @@ class ContourMeshMixin(ContourAnimationMixin):
                     self.waypoints[stream_i][worst_lev] = new_wp
                     self.mvc_weights[stream_i][worst_lev] = new_mvc
                     total_refined += 1
-                    improvement = (worst_energy - best_energy) / worst_energy * 100
-                    print(f"    L{worst_lev}: {worst_energy:.2e} -> {best_energy:.2e} ({improvement:.0f}%) ci={best_ci}")
+                    improvement = (worst_twist - best_twist) / worst_twist * 100
+                    print(f"    L{worst_lev}: twist {worst_twist:.2e} -> {best_twist:.2e} ({improvement:.0f}%)")
                 else:
                     break
 
         if total_refined > 0:
-            print(f"  [Waypoint opt] Refined {total_refined} levels via local search")
+            print(f"  [Waypoint opt] Refined {total_refined} levels via twist reduction")
 
-        # Print final smoothness report
+        # Print final report
         print(f"  [Waypoint smoothness]")
         for stream_i in range(n_streams):
             wp_stream = self.waypoints[stream_i]
+            bp_stream_ref = self.bounding_planes[stream_i]
             n_levels = len(wp_stream)
             if n_levels < 3:
                 continue
-            energies = []
-            for lev in range(1, n_levels - 1):
+            n_fibers = len(wp_stream[0])
+            total_twist = 0
+            max_twist = 0
+            max_twist_lev = 0
+            for lev in range(1, n_levels):
+                bp_lev = bp_stream_ref[lev]
+                bx = bp_lev['basis_x']
+                by = bp_lev['basis_y']
+                center = bp_lev['mean']
                 wp_prev = np.array(wp_stream[lev - 1])
                 wp_curr = np.array(wp_stream[lev])
-                wp_next = np.array(wp_stream[lev + 1])
-                if len(wp_prev) != len(wp_curr) or len(wp_curr) != len(wp_next):
+                if len(wp_prev) != n_fibers or len(wp_curr) != n_fibers:
                     continue
-                d = wp_prev + wp_next - 2 * wp_curr
-                energies.append(np.sum(np.linalg.norm(d, axis=1) ** 2))
-            if energies:
-                total_e = sum(energies)
-                max_e = max(energies)
-                max_lev = energies.index(max_e) + 1  # offset by 1 since we start at lev=1
-                mean_e = total_e / len(energies)
-                print(f"    Stream {stream_i}: total={total_e:.2e}, mean={mean_e:.2e}, "
-                      f"max={max_e:.2e} (L{max_lev}), levels={n_levels}")
+                prev_2d = np.array([[np.dot(w - center, bx), np.dot(w - center, by)] for w in wp_prev])
+                curr_2d = np.array([[np.dot(w - center, bx), np.dot(w - center, by)] for w in wp_curr])
+                prev_ang = np.arctan2(prev_2d[:, 1], prev_2d[:, 0])
+                curr_ang = np.arctan2(curr_2d[:, 1], curr_2d[:, 0])
+                diffs = (curr_ang - prev_ang + np.pi) % (2 * np.pi) - np.pi
+                lev_twist = np.sum(diffs ** 2)
+                total_twist += lev_twist
+                if lev_twist > max_twist:
+                    max_twist = lev_twist
+                    max_twist_lev = lev
+            mean_twist = total_twist / max(n_levels - 1, 1)
+            print(f"    Stream {stream_i}: total_twist={total_twist:.2e}, mean={mean_twist:.2e}, "
+                  f"max={max_twist:.2e} (L{max_twist_lev}), levels={n_levels}")
 
     @staticmethod
     def _recompute_contour_match(P_vertices, bp_corners_3d, corner_indices, n_verts):

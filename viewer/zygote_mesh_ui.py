@@ -3081,15 +3081,15 @@ def _render_inspect_2d_windows(v):
             backup_ci = getattr(v, 'inspect_2d_corr_backup_ci', None)
 
             if hovered_type == 'vertex' and hovered_idx >= 0:
-                # Restore backup first, then apply preview
+                # Restore backup first, then apply preview (contour_match only, no waypoints)
                 bp_info_ref['contour_match'] = [(np.array(p).copy(), np.array(q).copy()) for p, q in backup_cm]
                 if backup_ci is not None:
                     bp_info_ref['corner_indices'] = list(backup_ci)
                 else:
                     bp_info_ref.pop('corner_indices', None)
-                # Apply preview correspondence
-                _apply_corner_correspondence(v, name, obj, stream_idx, level_idx,
-                                             corr_corner, hovered_idx, is_post_stream)
+                # Apply preview: only update contour_match and corner_indices, skip waypoints
+                _apply_corner_correspondence_lightweight(obj, stream_idx, level_idx,
+                                                         corr_corner, hovered_idx, is_post_stream)
                 v.inspect_2d_corr_preview_active[name] = True
             elif v.inspect_2d_corr_preview_active.get(name, False):
                 # Not hovering vertex — restore backup
@@ -3381,6 +3381,70 @@ def _reset_corner_correspondence(obj, stream_idx, level_idx, is_post_stream):
                 obj._save_fiber_anim_data()
 
     print(f"[Reset] Corner correspondence reset at stream={stream_idx} level={level_idx}")
+
+
+def _apply_corner_correspondence_lightweight(obj, stream_idx, level_idx, corner_idx, vertex_idx, is_post_stream):
+    """Update contour_match and corner_indices only, without recomputing waypoints.
+    Used for hover preview to avoid expensive MVC computation on every mouse move."""
+    if is_post_stream:
+        bp_info = obj.bounding_planes[stream_idx][level_idx]
+    else:
+        bp_info = obj.bounding_planes[level_idx][stream_idx]
+
+    bp_corners = bp_info.get('bounding_plane', None)
+    contour_match = bp_info.get('contour_match', None)
+    if bp_corners is None or contour_match is None:
+        return
+
+    P_vertices = [np.array(p) for p, q in contour_match]
+    n = len(P_vertices)
+    bp_corners_3d = [np.array(c) for c in bp_corners[:4]]
+
+    current_corner_indices = bp_info.get('corner_indices', None)
+    if current_corner_indices is None:
+        current_corner_indices = []
+        for ci, corner_3d in enumerate(bp_corners_3d):
+            dists = [np.linalg.norm(np.array(q) - corner_3d) for _, q in contour_match]
+            current_corner_indices.append(int(np.argmin(dists)))
+    else:
+        current_corner_indices = list(current_corner_indices)
+
+    new_corner_indices = current_corner_indices.copy()
+    new_corner_indices[corner_idx] = vertex_idx
+
+    new_contour_match = [None] * n
+    for edge_idx in range(4):
+        vs = new_corner_indices[edge_idx]
+        ve = new_corner_indices[(edge_idx + 1) % 4]
+        q_start = bp_corners_3d[edge_idx]
+        q_end = bp_corners_3d[(edge_idx + 1) % 4]
+
+        if ve > vs:
+            seg_indices = list(range(vs, ve))
+        elif ve < vs:
+            seg_indices = list(range(vs, n)) + list(range(0, ve))
+        else:
+            seg_indices = [vs]
+
+        if len(seg_indices) == 0:
+            continue
+
+        arc_lengths = [0.0]
+        for i in range(1, len(seg_indices)):
+            arc_lengths.append(arc_lengths[-1] +
+                np.linalg.norm(P_vertices[seg_indices[i]] - P_vertices[seg_indices[i - 1]]))
+        total_arc = arc_lengths[-1] if arc_lengths[-1] > 1e-10 else 1.0
+
+        for i, vi in enumerate(seg_indices):
+            t = arc_lengths[i] / total_arc
+            new_contour_match[vi] = (P_vertices[vi], (1 - t) * q_start + t * q_end)
+
+    for i in range(n):
+        if new_contour_match[i] is None:
+            new_contour_match[i] = (P_vertices[i], np.array(contour_match[i][1]))
+
+    bp_info['contour_match'] = new_contour_match
+    bp_info['corner_indices'] = new_corner_indices
 
 
 def _apply_corner_correspondence(v, name, obj, stream_idx, level_idx, corner_idx, vertex_idx, is_post_stream):
