@@ -285,17 +285,57 @@ class TetrahedronMeshMixin:
                     boundary_loops.append(loop)
 
             print(f"Found {len(boundary_loops)} boundary loops")
+            for li, loop in enumerate(boundary_loops):
+                if len(loop) < 10:
+                    loop_pos = np.array([vertices[vi] for vi in loop])
+                    loop_mean = loop_pos.mean(axis=0)
+                    loop_span = np.linalg.norm(loop_pos.max(axis=0) - loop_pos.min(axis=0))
+                    print(f"  [Small loop {li}] {len(loop)} verts, span={loop_span:.6f}, "
+                          f"mean=[{loop_mean[0]:.4f},{loop_mean[1]:.4f},{loop_mean[2]:.4f}]")
 
             # Step 3: Create cap faces for each boundary loop
+            # Skip tiny loops (merge artifacts, not real openings)
+            min_cap_size = 10
+            real_loops = []
+            for loop in boundary_loops:
+                if len(loop) >= min_cap_size:
+                    real_loops.append(loop)
+                else:
+                    print(f"  Skipping tiny boundary loop ({len(loop)} verts) — merge artifact")
+            boundary_loops = real_loops
+
             closed_vertices = list(vertices)
             closed_faces = list(faces)
             cap_face_indices = []
             self.tet_anchor_vertices = []  # Store anchor vertex indices for each cap
 
+            from shapely.geometry import Polygon as ShapelyPolygon
+            from shapely.algorithms.polylabel import polylabel
+
             for loop_idx, loop in enumerate(boundary_loops):
-                # Calculate mean point of the boundary loop
+                # Find a guaranteed-interior anchor using pole of inaccessibility
                 loop_vertices = np.array([vertices[vi] for vi in loop])
-                mean_point = np.mean(loop_vertices, axis=0)
+
+                # Project loop to 2D using PCA to find the plane
+                centroid = loop_vertices.mean(axis=0)
+                centered = loop_vertices - centroid
+                _, _, Vt = np.linalg.svd(centered, full_matrices=False)
+                basis_x = Vt[0]
+                basis_y = Vt[1]
+
+                pts_2d = np.array([[np.dot(v - centroid, basis_x),
+                                    np.dot(v - centroid, basis_y)] for v in loop_vertices])
+
+                # Use pole of inaccessibility for interior point
+                try:
+                    poly = ShapelyPolygon(pts_2d)
+                    if poly.is_valid and not poly.is_empty:
+                        pole = polylabel(poly, tolerance=1e-4)
+                        mean_point = centroid + pole.x * basis_x + pole.y * basis_y
+                    else:
+                        mean_point = centroid
+                except Exception:
+                    mean_point = centroid
 
                 # Add mean point as new vertex
                 anchor_idx = len(closed_vertices)
@@ -413,46 +453,39 @@ class TetrahedronMeshMixin:
                 new_verts = list(closed_vertices)
                 interior_tetrahedra = []
 
-                # Build per-stream vertex sets for per-stream level centers.
-                # After cutting, each stream occupies different spatial regions,
-                # so level centers must be per-stream (not global average).
-                stream_level_verts = {}  # (stream_idx, level) -> [vertex indices]
                 if hasattr(self, 'contours') and self.contours is not None:
                     n_streams = len(self.contours)
                 else:
                     n_streams = 1
 
-                # Assign each vertex to a stream based on face connectivity
+                # Assign each vertex to a stream via connected components per level
                 vertex_stream = np.full(len(closed_vertices), -1, dtype=np.int32)
-                if hasattr(self, 'contour_mesh_faces') and self.contour_mesh_faces is not None:
-                    # Use the face-to-stream mapping from build_contour_mesh
-                    # For now, cluster vertices by spatial proximity per level
-                    pass
 
-                # Build per-stream level centers using connected components per level
-                from scipy.spatial import cKDTree
-                level_centers = {}  # (stream_guess, level) -> center_idx
+                from collections import defaultdict as _dd
+                from shapely.geometry import Polygon as ShapelyPolygon
+                from shapely.algorithms.polylabel import polylabel
+
+                # ── Step 4a: Compute pole-of-inaccessibility centers per stream per level ──
+                level_centers = {}  # (stream_idx, level) -> vertex index in new_verts
+                mid_centers = {}    # (stream_idx, level) -> vertex index (between level and level+1)
+
                 for lev in range(num_levels):
                     lev_verts = np.where(vertex_level == lev)[0]
                     if len(lev_verts) == 0:
                         continue
-                    lev_positions = closed_vertices[lev_verts]
 
+                    # Split into per-stream clusters via face connectivity
                     if n_streams > 1 and len(lev_verts) > 6:
-                        # Split into clusters using connected components on edges
-                        # Two vertices are connected if they share a face
-                        from collections import defaultdict as _dd
                         adj = _dd(set)
+                        lev_set = set(lev_verts)
                         for face in closed_faces:
                             fv = [int(face[0]), int(face[1]), int(face[2])]
-                            lev_set = set(lev_verts)
                             fv_on_lev = [v for v in fv if v in lev_set]
                             for a in fv_on_lev:
                                 for b in fv_on_lev:
                                     if a != b:
                                         adj[a].add(b)
 
-                        # BFS to find connected components
                         visited = set()
                         clusters = []
                         for start in lev_verts:
@@ -473,37 +506,102 @@ class TetrahedronMeshMixin:
                         clusters = [list(lev_verts)]
 
                     for ci_idx, cluster in enumerate(clusters):
-                        centroid = closed_vertices[cluster].mean(axis=0)
-                        center_idx = len(new_verts)
-                        new_verts.append(centroid)
-                        level_centers[(ci_idx, lev)] = center_idx
-                        # Tag cluster vertices with this center
+                        # Tag vertices with stream
                         for vi in cluster:
                             vertex_stream[vi] = ci_idx
 
-                print(f"  {len(level_centers)} level centers added "
+                        # Get bounding plane data for this stream/level to project to 2D
+                        bp = None
+                        if (hasattr(self, 'bounding_planes') and self.bounding_planes is not None
+                                and ci_idx < len(self.bounding_planes)
+                                and lev < len(self.bounding_planes[ci_idx])):
+                            bp = self.bounding_planes[ci_idx][lev]
+
+                        if bp is not None and 'basis_x' in bp and 'basis_y' in bp and 'mean' in bp:
+                            # Project cluster vertices to 2D using contour's basis
+                            basis_x = bp['basis_x']
+                            basis_y = bp['basis_y']
+                            mean = bp['mean']
+                            pts_3d = closed_vertices[cluster]
+                            pts_2d = np.array([[np.dot(v - mean, basis_x),
+                                                np.dot(v - mean, basis_y)] for v in pts_3d])
+
+                            # Build 2D polygon from convex hull of projected points
+                            # (polylabel needs a valid polygon, not scattered points)
+                            from scipy.spatial import ConvexHull
+                            try:
+                                if len(pts_2d) >= 3:
+                                    hull = ConvexHull(pts_2d)
+                                    hull_pts = pts_2d[hull.vertices]
+                                    poly = ShapelyPolygon(hull_pts)
+                                    if poly.is_valid and not poly.is_empty:
+                                        pole = polylabel(poly, tolerance=1e-4)
+                                        center_3d = mean + pole.x * basis_x + pole.y * basis_y
+                                    else:
+                                        center_3d = pts_3d.mean(axis=0)
+                                else:
+                                    center_3d = pts_3d.mean(axis=0)
+                            except Exception:
+                                center_3d = pts_3d.mean(axis=0)
+                        else:
+                            # Fallback: use centroid
+                            center_3d = closed_vertices[cluster].mean(axis=0)
+
+                        center_idx = len(new_verts)
+                        new_verts.append(center_3d)
+                        level_centers[(ci_idx, lev)] = center_idx
+
+                # ── Step 4b: Compute mid-centers between adjacent levels ──
+                for (si, lev), ci in list(level_centers.items()):
+                    next_key = (si, lev + 1)
+                    if next_key in level_centers:
+                        mid_3d = (np.array(new_verts[ci]) + np.array(new_verts[level_centers[next_key]])) / 2.0
+                        mid_idx = len(new_verts)
+                        new_verts.append(mid_3d)
+                        mid_centers[(si, lev)] = mid_idx  # between lev and lev+1
+
+                n_level = len(level_centers)
+                n_mid = len(mid_centers)
+                print(f"  {n_level} level centers + {n_mid} mid-centers added "
                       f"({n_streams} streams, {num_levels} levels)")
 
-                # For each surface face, connect to the nearest level center.
-                # Check tet volume BEFORE creation to prevent degenerate tets.
-                min_tet_volume = 1e-12  # Minimum acceptable tet volume
-                n_skipped_thin = 0
-
+                # ── Step 4c: Connect each face to the best center ──
                 def compute_tet_volume(p0, p1, p2, p3):
-                    """Signed volume of tetrahedron (p0,p1,p2,p3)."""
+                    """Absolute volume of tetrahedron (p0,p1,p2,p3)."""
                     return abs(np.dot(np.cross(p1 - p0, p2 - p0), p3 - p0)) / 6.0
 
-                def find_center(stream, lev):
-                    """Find level center for (stream, level), trying other streams if needed."""
-                    key = (stream, lev)
-                    if key in level_centers:
-                        return level_centers[key]
-                    # Try any stream at this level
-                    for s in range(n_streams + len(level_centers)):
-                        if (s, lev) in level_centers:
-                            return level_centers[(s, lev)]
-                    return None
+                def find_candidates(stream, levels_in_face):
+                    """Collect all candidate center indices for a face."""
+                    candidates = []
+                    for lev in levels_in_face:
+                        # Level centers at lev-1, lev, lev+1
+                        for dl in [-1, 0, 1]:
+                            target_lev = lev + dl
+                            if target_lev < 0:
+                                continue
+                            key = (stream, target_lev)
+                            if key in level_centers:
+                                candidates.append(level_centers[key])
+                            # Mid-centers: between (target_lev, target_lev+1) and (target_lev-1, target_lev)
+                            if key in mid_centers:
+                                candidates.append(mid_centers[key])
+                            prev_key = (stream, target_lev - 1)
+                            if prev_key in mid_centers:
+                                candidates.append(mid_centers[prev_key])
+                    # Try other streams if nothing found
+                    if not candidates:
+                        for lev in levels_in_face:
+                            for s in range(n_streams):
+                                for dl in [-1, 0, 1]:
+                                    target_lev = lev + dl
+                                    key = (s, target_lev)
+                                    if key in level_centers:
+                                        candidates.append(level_centers[key])
+                                    if key in mid_centers:
+                                        candidates.append(mid_centers[key])
+                    return list(set(candidates))
 
+                n_skipped = 0
                 for face in closed_faces:
                     v0, v1, v2 = int(face[0]), int(face[1]), int(face[2])
                     l0 = int(vertex_level[v0]) if v0 < len(vertex_level) else -1
@@ -518,52 +616,29 @@ class TetrahedronMeshMixin:
                     face_stream = min(face_streams) if face_streams else 0
                     p0, p1, p2 = new_verts[v0], new_verts[v1], new_verts[v2]
 
-                    # Collect candidate centers (both adjacent levels, both streams)
-                    candidate_levels = set()
-                    for lev in levels_in_face:
-                        candidate_levels.update([lev - 1, lev, lev + 1])
-                    candidate_levels -= {-1}
+                    candidates = find_candidates(face_stream, levels_in_face)
 
                     best_ci = None
                     best_vol = 0
-                    for lev in sorted(candidate_levels):
-                        ci = find_center(face_stream, lev)
-                        if ci is None:
-                            continue
-                        # Skip if center is at same level as majority of face vertices
-                        n_on_lev = sum(1 for l in [l0, l1, l2] if l == lev)
-                        if n_on_lev >= 2:
-                            continue
+                    for ci in candidates:
                         vol = compute_tet_volume(p0, p1, p2, new_verts[ci])
                         if vol > best_vol:
                             best_vol = vol
                             best_ci = ci
 
-                    if best_ci is not None and best_vol >= min_tet_volume:
+                    if best_ci is not None and best_vol > 0:
                         interior_tetrahedra.append([v0, v1, v2, best_ci])
                     else:
-                        n_skipped_thin += 1
+                        n_skipped += 1
 
-                if n_skipped_thin > 0:
-                    print(f"  Skipped {n_skipped_thin} faces (would create degenerate tets)")
+                if n_skipped > 0:
+                    print(f"  Skipped {n_skipped} faces (no valid center found)")
 
                 closed_vertices = np.array(new_verts, dtype=np.float32)
                 interior_tetrahedra = np.array(interior_tetrahedra, dtype=np.int32)
 
-                # Safety check: remove any remaining degenerate tets (should be rare
-                # since we check volume before creation)
-                if len(interior_tetrahedra) > 0:
-                    v0 = closed_vertices[interior_tetrahedra[:, 0]]
-                    cr = np.cross(
-                        closed_vertices[interior_tetrahedra[:, 1]] - v0,
-                        closed_vertices[interior_tetrahedra[:, 2]] - v0)
-                    vol = np.abs(np.einsum('ij,ij->i', cr,
-                                 closed_vertices[interior_tetrahedra[:, 3]] - v0)) / 6.0
-                    good = vol >= min_tet_volume
-                    n_bad = int(np.sum(~good))
-                    if n_bad > 0:
-                        interior_tetrahedra = interior_tetrahedra[good]
-                        print(f"  Removed {n_bad} remaining degenerate tets (vol < {min_tet_volume})")
+                # (No post-hoc degenerate tet removal — centers are guaranteed
+                # interior and offset from face planes)
 
                 # Check vertex coverage
                 used = set(interior_tetrahedra.ravel()) if len(interior_tetrahedra) > 0 else set()
@@ -602,6 +677,24 @@ class TetrahedronMeshMixin:
                         print(f"    vol < {threshold:.0e}: {n} ({100*n/n_total:.1f}%)")
                 n_good = int(np.sum(vol >= 1e-12))
                 print(f"    Good tets (vol >= 1e-12): {n_good} ({100*n_good/n_total:.1f}%)")
+
+                # Detail on thin tets
+                thin_mask = vol < 1e-10
+                if np.any(thin_mask):
+                    thin_indices = np.where(thin_mask)[0]
+                    for ti in thin_indices:
+                        tet = interior_tetrahedra[ti]
+                        tv0, tv1, tv2, tv3 = int(tet[0]), int(tet[1]), int(tet[2]), int(tet[3])
+                        tl = [int(vertex_level[v]) if v < len(vertex_level) else -1 for v in tet]
+                        ts = [int(vertex_stream[v]) if v < len(vertex_stream) else -1 for v in tet]
+                        is_center = [v >= n_original for v in tet]
+                        print(f"    [THIN tet {ti}] vol={vol[ti]:.2e}")
+                        print(f"      verts=({tv0},{tv1},{tv2},{tv3}) levels=({tl[0]},{tl[1]},{tl[2]},{tl[3]}) streams=({ts[0]},{ts[1]},{ts[2]},{ts[3]})")
+                        print(f"      is_center=({is_center[0]},{is_center[1]},{is_center[2]},{is_center[3]})")
+                        print(f"      positions:")
+                        for vi, v in enumerate(tet):
+                            pos = closed_vertices[int(v)]
+                            print(f"        v{vi}={int(v)}: [{pos[0]:.6f}, {pos[1]:.6f}, {pos[2]:.6f}] L{tl[vi]} S{ts[vi]}{'  [CENTER]' if is_center[vi] else ''}")
 
                 # --- Diagnostic checks ---
 

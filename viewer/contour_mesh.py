@@ -4196,17 +4196,46 @@ class ContourMeshMixin(ContourAnimationMixin):
 
         print("  X-axis smoothening complete")
 
+    @staticmethod
+    def _best_4rotation(curr_x, curr_y, curr_z, ref_x, ref_y, ref_z):
+        """Pick the 0/90/180/270° rotation of (curr_x, curr_y) around curr_z
+        that minimizes the full 3D rotation angle to the reference frame (ref_x, ref_y, ref_z).
+
+        Returns (best_x, best_y, best_angle_deg, best_rot_angle_rad).
+        """
+        candidates = [
+            (curr_x, curr_y, 0),
+            (curr_y, -curr_x, 90),
+            (-curr_x, -curr_y, 180),
+            (-curr_y, curr_x, 270),
+        ]
+
+        best_rot_angle = np.inf
+        best_x, best_y, best_angle = curr_x, curr_y, 0
+        for cand_x, cand_y, angle in candidates:
+            # Rotation matrix: columns = basis vectors
+            # R_rel = R_ref @ R_cand^T
+            # trace(R_rel) = sum of dot products of corresponding columns
+            trace_val = (np.dot(cand_x, ref_x) +
+                         np.dot(cand_y, ref_y) +
+                         np.dot(curr_z, ref_z))
+            # angle = arccos((trace - 1) / 2)
+            rot_angle = np.arccos(np.clip((trace_val - 1.0) / 2.0, -1.0, 1.0))
+            if rot_angle < best_rot_angle:
+                best_rot_angle = rot_angle
+                best_x, best_y, best_angle = cand_x, cand_y, angle
+
+        return best_x, best_y, best_angle, best_rot_angle
+
     def _smoothen_contours_x_stream_mode(self):
         """
         Align x-axes for stream mode (after cutting).
 
-        In stream mode: bounding_planes[stream][level]
-        For each stream:
-        1. First contour: sign flip x to align with (1,0,0) projected onto plane
-        2. Forward pass: find closest non-square-like reference, rotate by 0/90/180/270 around z
-           - If no non-square-like reference, fallback to previous level with sign flip
+        Simple chain propagation from origin:
+        1. Level 0: pick 4-rotation closest to (1,0,0) using full frame comparison
+        2. Level 1..end: pick 4-rotation closest to previous level
 
-        NOTE: Bounding plane corners are NOT recomputed here - that happens in bp smoothening.
+        BP smoothening handles square-like interpolation afterward.
         """
         num_streams = len(self.stream_bounding_planes)
         print(f"  Processing {num_streams} streams...")
@@ -4219,93 +4248,48 @@ class ContourMeshMixin(ContourAnimationMixin):
             if stream_len < 1:
                 continue
 
-            # First contour: rotate by 0/90/180/270 to align with (1,0,0)
+            # Level 0: align with (1,0,0)
             first_bp = bp_stream[0]
             first_x = first_bp['basis_x']
             first_y = first_bp['basis_y']
+            first_z = first_bp['basis_z']
 
+            # Build reference frame from (1,0,0) in current z-plane
             ref_x = np.array([1.0, 0.0, 0.0])
+            ref_y = np.cross(first_z, ref_x)
+            ref_y_norm = np.linalg.norm(ref_y)
+            if ref_y_norm > 1e-10:
+                ref_y = ref_y / ref_y_norm
+                ref_x = np.cross(ref_y, first_z)
+            else:
+                ref_x = first_x
+                ref_y = first_y
 
-            # Try 4 rotations: 0, 90, 180, 270 degrees around z
-            candidates = [
-                (first_x, first_y, 0),
-                (first_y, -first_x, 90),
-                (-first_x, -first_y, 180),
-                (-first_y, first_x, 270),
-            ]
+            best_x, best_y, best_angle, best_rot = self._best_4rotation(
+                first_x, first_y, first_z, ref_x, ref_y, first_z)
 
-            best_dot = -2.0
-            best_x, best_y, best_angle = first_x, first_y, 0
-            for cand_x, cand_y, angle in candidates:
-                dot_val = np.dot(cand_x, ref_x)
-                if dot_val > best_dot:
-                    best_dot = dot_val
-                    best_x, best_y, best_angle = cand_x, cand_y, angle
-
-            print(f"    Level 0: ref=(1,0,0), best_rot={best_angle}°, dot={best_dot:.4f}")
+            print(f"    Level 0: ref=(1,0,0), best_rot={best_angle}°, diff={np.degrees(best_rot):.1f}°")
 
             if best_angle != 0:
                 first_bp['basis_x'] = best_x
                 first_bp['basis_y'] = best_y
 
-            # Forward pass: find closest previous non-square-like reference, rotate by 0/90/180/270
+            # Level 1..end: chain from previous level
             for level in range(1, stream_len):
                 curr_bp = bp_stream[level]
-                curr_x = curr_bp['basis_x']
-                curr_y = curr_bp['basis_y']
-                curr_z = curr_bp['basis_z']
+                prev_bp = bp_stream[level - 1]
 
-                # Find closest previous (lower level) non-square-like contour
-                ref_bp = None
-                ref_level = None
-                for check_level in range(level - 1, -1, -1):
-                    check_bp = bp_stream[check_level]
-                    if not check_bp.get('square_like', False):
-                        ref_bp = check_bp
-                        ref_level = check_level
-                        break
+                best_x, best_y, best_angle, best_rot = self._best_4rotation(
+                    curr_bp['basis_x'], curr_bp['basis_y'], curr_bp['basis_z'],
+                    prev_bp['basis_x'], prev_bp['basis_y'], prev_bp['basis_z'])
 
-                if ref_bp is not None:
-                    # Found non-square-like reference - rotate by 0/90/180/270
-                    ref_x_axis = ref_bp['basis_x']
+                print(f"    Level {level}: ref=L{level-1}, best_rot={best_angle}°, diff={np.degrees(best_rot):.1f}°")
 
-                    # Try 4 rotations: 0, 90, 180, 270 degrees around z
-                    # 0°: curr_x, 90°: curr_y, 180°: -curr_x, 270°: -curr_y
-                    candidates = [
-                        (curr_x, curr_y, 0),
-                        (curr_y, -curr_x, 90),
-                        (-curr_x, -curr_y, 180),
-                        (-curr_y, curr_x, 270),
-                    ]
+                if best_angle != 0:
+                    curr_bp['basis_x'] = best_x
+                    curr_bp['basis_y'] = best_y
 
-                    best_dot = -2.0
-                    best_x, best_y, best_angle = curr_x, curr_y, 0
-                    for cand_x, cand_y, angle in candidates:
-                        dot_val = np.dot(cand_x, ref_x_axis)
-                        if dot_val > best_dot:
-                            best_dot = dot_val
-                            best_x, best_y, best_angle = cand_x, cand_y, angle
-
-                    print(f"    Level {level}: ref=L{ref_level}, best_rot={best_angle}°, dot={best_dot:.4f}")
-
-                    if best_angle != 0:
-                        curr_bp['basis_x'] = best_x
-                        curr_bp['basis_y'] = best_y
-                else:
-                    # No non-square-like reference - fallback to previous level with sign flip
-                    prev_bp = bp_stream[level - 1]
-                    prev_x = prev_bp['basis_x']
-
-                    dot_x = np.dot(curr_x, prev_x)
-                    print(f"    Level {level}: no ref, prev dot={dot_x:.4f}")
-
-                    # Sign flip only if dot product is negative
-                    if dot_x < 0:
-                        curr_bp['basis_x'] = -curr_x
-                        curr_bp['basis_y'] = np.cross(curr_z, -curr_x)
-                        print(f"    Level {level}: FLIPPED x")
-
-        # Update self.bounding_planes to reflect changes (contours unchanged, bp corners updated in bp smooth)
+        # Update self.bounding_planes to reflect changes
         self.bounding_planes = self.stream_bounding_planes
 
         print("  X-axis smoothening (stream mode) complete")
@@ -7590,18 +7574,20 @@ class ContourMeshMixin(ContourAnimationMixin):
 
         # Find loops to close:
         # 1. Internal loops (not at origin/insertion)
-        # 2. Extra loops at same position (keep largest, close smaller ones)
+        # 2. Small loops at origin/insertion (merge artifacts, not real openings)
+        #    Real openings have ~20+ vertices matching the contour; tiny loops are gaps.
+        min_opening_size = 10  # Loops smaller than this at origin/insertion are artifacts
         loops_to_close = []
 
-        # Check for internal loops
         for info in loop_info:
             if not info['is_origin'] and not info['is_insertion']:
+                # Internal loop — always close
                 loops_to_close.append(info['loop'])
-
-        # NOTE: Duplicate origin/insertion loop detection is disabled.
-        # The correct fix for overlapping boundaries at origin/insertion is to
-        # MERGE the boundary loop vertices during mesh building, not close them.
-        # Closing them removes valid openings that should be capped during tet meshing.
+            elif info['size'] < min_opening_size:
+                # Small loop at origin/insertion — merge artifact, close it
+                print(f"    Closing small boundary artifact: {info['size']} verts at "
+                      f"levels {info['min_level']}-{info['max_level']}")
+                loops_to_close.append(info['loop'])
 
         # Remove duplicates
         loops_to_close = list({tuple(l): l for l in loops_to_close}.values())
@@ -15814,16 +15800,15 @@ class ContourMeshMixin(ContourAnimationMixin):
         muscle_dir = f'bp_viz/{obj_name}'
         os.makedirs(muscle_dir, exist_ok=True)
 
-        if not hasattr(self, '_bp_viz_counter'):
-            self._bp_viz_counter = 0
-        self._bp_viz_counter += 1
-
-        # Include level info in filename for clarity
-        level_str = ""
+        # Use deterministic filename based on level info (replaces on re-run)
         if target_level is not None and source_level is not None:
-            level_str = f"_cut{target_level}_using{source_level}"
+            filepath = f'{muscle_dir}/cut{target_level}_using{source_level}.png'
+        else:
+            if not hasattr(self, '_bp_viz_counter'):
+                self._bp_viz_counter = 0
+            self._bp_viz_counter += 1
+            filepath = f'{muscle_dir}/bp_transform_{self._bp_viz_counter:03d}.png'
 
-        filepath = f'{muscle_dir}/bp_transform_{self._bp_viz_counter:03d}{level_str}.png'
         print(f"  [BP Viz] Saving to {filepath}")
         plt.savefig(filepath, dpi=100)
         plt.close(fig)
@@ -15917,15 +15902,15 @@ class ContourMeshMixin(ContourAnimationMixin):
         muscle_dir = f'bp_viz/{obj_name}'
         os.makedirs(muscle_dir, exist_ok=True)
 
-        if not hasattr(self, '_bp_viz_counter'):
-            self._bp_viz_counter = 0
-        self._bp_viz_counter += 1
-
-        level_str = ""
+        # Use deterministic filename based on level info (replaces on re-run)
         if target_level is not None and source_level is not None:
-            level_str = f"_accept{target_level}_using{source_level}"
+            filepath = f'{muscle_dir}/accept{target_level}_using{source_level}.png'
+        else:
+            if not hasattr(self, '_bp_viz_counter'):
+                self._bp_viz_counter = 0
+            self._bp_viz_counter += 1
+            filepath = f'{muscle_dir}/bp_transform_{self._bp_viz_counter:03d}.png'
 
-        filepath = f'{muscle_dir}/bp_transform_{self._bp_viz_counter:03d}{level_str}.png'
         print(f"  [BP Viz Accept] Saving to {filepath}")
         plt.savefig(filepath, dpi=100)
         plt.close(fig)

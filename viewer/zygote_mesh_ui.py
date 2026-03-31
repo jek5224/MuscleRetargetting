@@ -3893,6 +3893,92 @@ def _render_neck_viz_windows(v):
         v.neck_viz_open[name] = False
 
 
+def _resume_pipeline_after_cut(v, obj, name):
+    """Resume pipeline from _pipeline_paused_at after manual cut completes.
+
+    Returns True if pipeline paused again (e.g. for level selection), False otherwise.
+    """
+    max_step = obj._process_step if hasattr(obj, '_process_step') else 12
+    start_step = obj._pipeline_paused_at
+    if start_step > max_step:
+        obj._pipeline_paused_at = None
+        return False
+
+    print(f"[{name}] Auto-resuming pipeline from step {start_step} to {max_step}...")
+    try:
+        _defer = getattr(obj, 'animate_process', False)
+        # Step 7: Stream Smooth (z, x, bp - after cut)
+        if start_step <= 7 <= max_step and hasattr(obj, 'stream_contours') and obj.stream_contours is not None:
+            print(f"  [7/{max_step}] Stream Smoothening (z, x, bp)...")
+            _t0 = time.time()
+            obj.stream_smoothen_all(defer=_defer)
+            print(f"  [7/{max_step}] Done in {time.time()-_t0:.3f}s")
+
+        # Step 8: Contour Select
+        if start_step <= 8 <= max_step and hasattr(obj, 'stream_contours') and obj.stream_contours is not None:
+            print(f"  [8/{max_step}] Selecting contours...")
+            _t0 = time.time()
+            obj.select_levels()
+            print(f"  [8/{max_step}] Done in {time.time()-_t0:.3f}s")
+            # Check if waiting for manual level selection
+            if hasattr(obj, '_level_select_window_open') and obj._level_select_window_open:
+                obj._pipeline_paused_at = 9  # Resume from step 9 after selection
+                print(f"  [8/{max_step}] Waiting for level selection - pipeline paused")
+                return True
+
+        # Step 9: Build Fiber
+        if start_step <= 9 <= max_step and hasattr(obj, 'stream_contours') and obj.stream_contours is not None:
+            print(f"  [9/{max_step}] Building fibers...")
+            _t0 = time.time()
+            obj.build_fibers(skeleton_meshes=v.zygote_skeleton_meshes, defer=_defer)
+            print(f"  [9/{max_step}] Done in {time.time()-_t0:.3f}s")
+            if _defer:
+                obj._level_select_replayed = False
+
+        # Step 10: Resample Contours
+        if start_step <= 10 <= max_step and obj.contours is not None and len(obj.contours) > 0 and obj.bounding_planes is not None:
+            print(f"  [10/{max_step}] Resampling Contours...")
+            _t0 = time.time()
+            obj.resample_contours(base_samples=32, defer=_defer)
+            print(f"  [10/{max_step}] Done in {time.time()-_t0:.3f}s")
+            if _defer:
+                obj._build_fibers_replayed = False
+
+        # Step 11: Build Contour Mesh
+        if start_step <= 11 <= max_step and obj.contours is not None and len(obj.contours) > 0 and obj.draw_contour_stream is not None:
+            print(f"  [11/{max_step}] Building Contour Mesh...")
+            _t0 = time.time()
+            obj.build_contour_mesh(defer=_defer)
+            print(f"  [11/{max_step}] Done in {time.time()-_t0:.3f}s")
+            if _defer:
+                obj._resample_replayed = False
+
+        # Step 12: Tetrahedralize
+        if start_step <= 12 <= max_step and obj.contour_mesh_vertices is not None:
+            print(f"  [12/{max_step}] Tetrahedralizing...")
+            _t0 = time.time()
+            obj.soft_body = None
+            obj.tetrahedralize_contour_mesh()
+            print(f"  [12/{max_step}] Done in {time.time()-_t0:.3f}s")
+            if obj.tet_vertices is not None:
+                if _defer:
+                    obj._extract_internal_tet_edges()
+                    obj._classify_tet_faces_into_bands()
+                    obj._tetrahedralize_replayed = False
+                else:
+                    obj.is_draw_contours = False
+                    obj.is_draw_tet_mesh = True
+                    obj._tetrahedralize_replayed = True
+
+        print(f"[{name}] Pipeline complete (steps {start_step}-{max_step})!")
+    except Exception as e:
+        print(f"[{name}] Pipeline error: {e}")
+        import traceback
+        traceback.print_exc()
+    obj._pipeline_paused_at = None
+    return False
+
+
 def _render_manual_cut_windows(v):
     """Render manual cutting windows for muscles that need user input."""
     for name, obj in v.zygote_muscle_meshes.items():
@@ -5428,84 +5514,10 @@ def _render_manual_cut_windows(v):
 
                             # Auto-resume pipeline if it was paused waiting for manual cut
                             if hasattr(obj, '_pipeline_paused_at') and obj._pipeline_paused_at is not None:
-                                max_step = obj._process_step if hasattr(obj, '_process_step') else 12
-                                start_step = obj._pipeline_paused_at
-                                if start_step <= max_step:
-                                    print(f"[{name}] Auto-resuming pipeline from step {start_step} to {max_step}...")
-                                    try:
-                                        # Step 7: Stream Smooth (z, x, bp - after cut)
-                                        if start_step <= 7 <= max_step and hasattr(obj, 'stream_contours') and obj.stream_contours is not None:
-                                            print(f"  [7/{max_step}] Stream Smoothening (z, x, bp)...")
-                                            _t0 = time.time()
-                                            obj.smoothen_contours_z()
-                                            obj.smoothen_contours_x()
-                                            obj.smoothen_contours_bp()
-                                            print(f"  [7/{max_step}] Done in {time.time()-_t0:.3f}s")
-
-                                        # Step 8: Contour Select
-                                        if start_step <= 8 <= max_step and hasattr(obj, 'stream_contours') and obj.stream_contours is not None:
-                                            print(f"  [8/{max_step}] Selecting contours...")
-                                            _t0 = time.time()
-                                            obj.select_levels()
-                                            print(f"  [8/{max_step}] Done in {time.time()-_t0:.3f}s")
-                                            # Check if waiting for manual level selection
-                                            if hasattr(obj, '_level_select_window_open') and obj._level_select_window_open:
-                                                obj._pipeline_paused_at = 9  # Resume from step 9 after selection
-                                                print(f"  [8/{max_step}] Waiting for level selection - pipeline paused")
-                                                imgui.end()
-                                                continue
-
-                                        # Step 9: Build Fiber
-                                        if start_step <= 9 <= max_step and hasattr(obj, 'stream_contours') and obj.stream_contours is not None:
-                                            print(f"  [9/{max_step}] Building fibers...")
-                                            _t0 = time.time()
-                                            _defer = getattr(obj, 'animate_process', False)
-                                            obj.build_fibers(skeleton_meshes=v.zygote_skeleton_meshes, defer=_defer)
-                                            print(f"  [9/{max_step}] Done in {time.time()-_t0:.3f}s")
-                                            if _defer:
-                                                obj._level_select_replayed = False
-
-                                        # Step 10: Resample Contours
-                                        if start_step <= 10 <= max_step and obj.contours is not None and len(obj.contours) > 0 and obj.bounding_planes is not None:
-                                            print(f"  [10/{max_step}] Resampling Contours...")
-                                            _t0 = time.time()
-                                            obj.resample_contours(base_samples=32, defer=_defer)
-                                            print(f"  [10/{max_step}] Done in {time.time()-_t0:.3f}s")
-                                            if _defer:
-                                                obj._build_fibers_replayed = False
-
-                                        # Step 11: Build Contour Mesh
-                                        if start_step <= 11 <= max_step and obj.contours is not None and len(obj.contours) > 0 and obj.draw_contour_stream is not None:
-                                            print(f"  [11/{max_step}] Building Contour Mesh...")
-                                            _t0 = time.time()
-                                            obj.build_contour_mesh(defer=_defer)
-                                            print(f"  [11/{max_step}] Done in {time.time()-_t0:.3f}s")
-                                            if _defer:
-                                                obj._resample_replayed = False
-
-                                        # Step 12: Tetrahedralize
-                                        if start_step <= 12 <= max_step and obj.contour_mesh_vertices is not None:
-                                            print(f"  [12/{max_step}] Tetrahedralizing...")
-                                            _t0 = time.time()
-                                            obj.soft_body = None
-                                            obj.tetrahedralize_contour_mesh()
-                                            print(f"  [12/{max_step}] Done in {time.time()-_t0:.3f}s")
-                                            if obj.tet_vertices is not None:
-                                                if _defer:
-                                                    obj._extract_internal_tet_edges()
-                                                    obj._classify_tet_faces_into_bands()
-                                                    obj._tetrahedralize_replayed = False
-                                                else:
-                                                    obj.is_draw_contours = False
-                                                    obj.is_draw_tet_mesh = True
-                                                    obj._tetrahedralize_replayed = True
-
-                                        print(f"[{name}] Pipeline complete (steps {start_step}-{max_step})!")
-                                    except Exception as e:
-                                        print(f"[{name}] Pipeline error: {e}")
-                                        import traceback
-                                        traceback.print_exc()
-                                obj._pipeline_paused_at = None
+                                paused_for_select = _resume_pipeline_after_cut(v, obj, name)
+                                if paused_for_select:
+                                    imgui.end()
+                                    continue
 
                             imgui.end()
                             continue
@@ -5623,6 +5635,11 @@ def _render_manual_cut_windows(v):
                         obj._auto_optimize_all = False
                     if name in v._manual_cut_mouse:
                         del v._manual_cut_mouse[name]
+
+                    # Auto-resume pipeline if it was paused waiting for manual cut
+                    if hasattr(obj, '_pipeline_paused_at') and obj._pipeline_paused_at is not None:
+                        _resume_pipeline_after_cut(v, obj, name)
+
                     imgui.end()
                     continue
                 # cut_streams returned early for another manual cut - don't close window
@@ -5775,6 +5792,11 @@ def _render_manual_cut_windows(v):
                                     obj._auto_optimize_all = False
                                 if name in v._manual_cut_mouse:
                                     del v._manual_cut_mouse[name]
+
+                                # Auto-resume pipeline if it was paused waiting for manual cut
+                                if hasattr(obj, '_pipeline_paused_at') and obj._pipeline_paused_at is not None:
+                                    _resume_pipeline_after_cut(v, obj, name)
+
                                 imgui.end()
                                 continue
                             # cut_streams returned early for another manual cut - don't close window
