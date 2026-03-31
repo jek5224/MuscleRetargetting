@@ -8813,7 +8813,7 @@ class ContourMeshMixin(ContourAnimationMixin):
                 self.waypoints[i].append(waypoints)
                 self.mvc_weights[i].append(mvc_weights)
 
-        # Optimize corner correspondences to minimize fiber kinks
+        # Optimize corner correspondences to minimize fiber bending energy
         self._optimize_waypoint_smoothness()
 
         # Populate stream endpoints for bounding box visualization
@@ -8839,11 +8839,11 @@ class ContourMeshMixin(ContourAnimationMixin):
             print(f"[_find_contour_stream_post_process] Skipping auto_detect_attachments: skeleton_meshes={skeleton_meshes is not None}, len={len(skeleton_meshes) if skeleton_meshes else 0}")
 
     def _optimize_waypoint_smoothness(self, max_iterations=5):
-        """Optimize corner correspondences to minimize fiber kinks.
+        """Optimize corner correspondences to minimize fiber bending energy.
 
-        For each stream, computes discrete curvature (second derivative) at each
-        interior level. The level with the worst total kink gets its corner
-        correspondences adjusted by trying nearby vertex shifts.
+        For each stream, computes discrete Laplacian (second-order finite difference)
+        at each interior level. The level with the worst total bending energy gets
+        its corner correspondences adjusted by trying nearby vertex shifts.
 
         Modifies bounding_planes[stream][level]['contour_match'] and 'corner_indices',
         and updates self.waypoints and self.mvc_weights in-place.
@@ -8865,8 +8865,8 @@ class ContourMeshMixin(ContourAnimationMixin):
             fiber_samples = self.fiber_architecture[stream_i]
 
             for iteration in range(max_iterations):
-                # Compute kink (||w[L-1] + w[L+1] - 2*w[L]||²) per level, summed over all fibers
-                level_kinks = np.zeros(n_levels)
+                # Compute bending energy (||w[L-1] + w[L+1] - 2*w[L]||²) per level, summed over all fibers
+                level_bendings = np.zeros(n_levels)
                 for lev in range(1, n_levels - 1):
                     wp_prev = np.array(wp_stream[lev - 1])
                     wp_curr = np.array(wp_stream[lev])
@@ -8875,14 +8875,14 @@ class ContourMeshMixin(ContourAnimationMixin):
                     if len(wp_prev) != len(wp_curr) or len(wp_curr) != len(wp_next):
                         continue
 
-                    kinks = wp_prev + wp_next - 2 * wp_curr  # (n_fibers, 3)
-                    level_kinks[lev] = np.sum(np.linalg.norm(kinks, axis=1) ** 2)
+                    bendings = wp_prev + wp_next - 2 * wp_curr  # (n_fibers, 3)
+                    level_bendings[lev] = np.sum(np.linalg.norm(bendings, axis=1) ** 2)
 
                 # Find worst level
-                worst_lev = np.argmax(level_kinks)
-                worst_kink = level_kinks[worst_lev]
+                worst_lev = np.argmax(level_bendings)
+                worst_bending = level_bendings[worst_lev]
 
-                if worst_kink < 1e-12:
+                if worst_bending < 1e-12:
                     break  # All smooth enough
 
                 # Get current corner indices for this level
@@ -8904,7 +8904,7 @@ class ContourMeshMixin(ContourAnimationMixin):
                         current_ci.append(int(np.argmin(dists)))
 
                 # Try shifting each corner by ±1, ±2, ±3 vertices
-                best_kink = worst_kink
+                best_bending = worst_bending
                 best_ci = list(current_ci)
                 search_range = 3
 
@@ -8939,7 +8939,7 @@ class ContourMeshMixin(ContourAnimationMixin):
                         if len(trial_wp) == 0:
                             continue
 
-                        # Compute kink with trial waypoints
+                        # Compute bending with trial waypoints
                         wp_prev = np.array(wp_stream[worst_lev - 1])
                         wp_next = np.array(wp_stream[worst_lev + 1])
                         trial_wp_arr = np.array(trial_wp)
@@ -8947,15 +8947,15 @@ class ContourMeshMixin(ContourAnimationMixin):
                         if len(wp_prev) != len(trial_wp_arr) or len(trial_wp_arr) != len(wp_next):
                             continue
 
-                        kinks = wp_prev + wp_next - 2 * trial_wp_arr
-                        trial_kink = np.sum(np.linalg.norm(kinks, axis=1) ** 2)
+                        bendings = wp_prev + wp_next - 2 * trial_wp_arr
+                        trial_bending = np.sum(np.linalg.norm(bendings, axis=1) ** 2)
 
-                        if trial_kink < best_kink:
-                            best_kink = trial_kink
+                        if trial_bending < best_bending:
+                            best_bending = trial_bending
                             best_ci = trial_ci
 
                 # Apply best if improved
-                if best_kink < worst_kink:
+                if best_bending < worst_bending:
                     new_match = self._recompute_contour_match(
                         P_vertices, bp_corners_3d, best_ci, n_verts)
                     bp['contour_match'] = new_match
@@ -8965,10 +8965,10 @@ class ContourMeshMixin(ContourAnimationMixin):
                     self.waypoints[stream_i][worst_lev] = new_wp
                     self.mvc_weights[stream_i][worst_lev] = new_mvc
 
-                    improvement = (worst_kink - best_kink) / worst_kink * 100
+                    improvement = (worst_bending - best_bending) / worst_bending * 100
                     total_improved += 1
                     print(f"  [Waypoint opt] Stream {stream_i}, Level {worst_lev}: "
-                          f"kink {worst_kink:.2e} -> {best_kink:.2e} ({improvement:.0f}% better)")
+                          f"bending {worst_bending:.2e} -> {best_bending:.2e} ({improvement:.0f}% better)")
                 else:
                     break  # No improvement found, stop for this stream
 
