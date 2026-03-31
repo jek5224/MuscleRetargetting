@@ -8973,9 +8973,8 @@ class ContourMeshMixin(ContourAnimationMixin):
         if total_modified > 0:
             print(f"  [Waypoint opt] Modified {total_modified} levels via chain propagation")
 
-        # Local refinement: minimize angular twist of fiber pattern between adjacent levels.
-        # For each level transition, compute mean angular shift of fiber positions
-        # relative to the contour center. A twist rotates fiber positions around the center.
+        # Local refinement: minimize fiber crossings between adjacent levels.
+        # Project waypoints to 2D, count fiber pairs that swap relative position.
         total_refined = 0
         for stream_i in range(n_streams):
             wp_stream = self.waypoints[stream_i]
@@ -8988,10 +8987,9 @@ class ContourMeshMixin(ContourAnimationMixin):
 
             n_fibers = len(wp_stream[0])
 
-            def compute_twist_at_level(lev, wp_at_lev):
-                """Mean angular twist of fiber positions between adjacent levels.
-                Projects to 2D using lev's basis, computes per-fiber angle shift,
-                returns sum of absolute angle shifts with both neighbors."""
+            def count_crossings_at_level(lev, wp_at_lev):
+                """Count fiber pair crossings between this level and its neighbors.
+                Project to 2D using lev's BP basis, check relative position swaps."""
                 bp_lev = bp_stream[lev]
                 bx = bp_lev['basis_x']
                 by = bp_lev['basis_y']
@@ -9003,42 +9001,38 @@ class ContourMeshMixin(ContourAnimationMixin):
 
                 curr_2d = np.array([[np.dot(w - center, bx), np.dot(w - center, by)]
                                     for w in wp_curr])
-                curr_angles = np.arctan2(curr_2d[:, 1], curr_2d[:, 0])
 
-                twist = 0.0
+                crossings = 0
+                n_sample = min(n_fibers, 20)
 
-                if lev > 0:
-                    wp_prev = np.array(wp_stream[lev - 1])
-                    if len(wp_prev) == n_fibers:
-                        prev_2d = np.array([[np.dot(w - center, bx), np.dot(w - center, by)]
-                                            for w in wp_prev])
-                        prev_angles = np.arctan2(prev_2d[:, 1], prev_2d[:, 0])
-                        diffs = curr_angles - prev_angles
-                        # Wrap to [-pi, pi]
-                        diffs = (diffs + np.pi) % (2 * np.pi) - np.pi
-                        twist += np.sum(diffs ** 2)
+                for neighbor_lev in [lev - 1, lev + 1]:
+                    if neighbor_lev < 0 or neighbor_lev >= n_levels:
+                        continue
+                    wp_nb = np.array(wp_stream[neighbor_lev])
+                    if len(wp_nb) != n_fibers:
+                        continue
+                    nb_2d = np.array([[np.dot(w - center, bx), np.dot(w - center, by)]
+                                      for w in wp_nb])
 
-                if lev < n_levels - 1:
-                    wp_next = np.array(wp_stream[lev + 1])
-                    if len(wp_next) == n_fibers:
-                        next_2d = np.array([[np.dot(w - center, bx), np.dot(w - center, by)]
-                                            for w in wp_next])
-                        next_angles = np.arctan2(next_2d[:, 1], next_2d[:, 0])
-                        diffs = curr_angles - next_angles
-                        diffs = (diffs + np.pi) % (2 * np.pi) - np.pi
-                        twist += np.sum(diffs ** 2)
+                    for i in range(n_sample):
+                        for j in range(i + 1, n_sample):
+                            dx_c = curr_2d[i, 0] - curr_2d[j, 0]
+                            dx_n = nb_2d[i, 0] - nb_2d[j, 0]
+                            dy_c = curr_2d[i, 1] - curr_2d[j, 1]
+                            dy_n = nb_2d[i, 1] - nb_2d[j, 1]
+                            if dx_c * dx_n < 0 and dy_c * dy_n < 0:
+                                crossings += 1
 
-                return twist
+                return crossings
 
             for iteration in range(n_levels):
-                # Find level with worst twist
-                level_twist = np.zeros(n_levels)
+                level_crossings = np.zeros(n_levels)
                 for lev in range(1, n_levels - 1):
-                    level_twist[lev] = compute_twist_at_level(lev, wp_stream[lev])
+                    level_crossings[lev] = count_crossings_at_level(lev, wp_stream[lev])
 
-                worst_lev = int(np.argmax(level_twist))
-                worst_twist = level_twist[worst_lev]
-                if worst_twist < 1e-12:
+                worst_lev = int(np.argmax(level_crossings))
+                worst_cross = level_crossings[worst_lev]
+                if worst_cross == 0:
                     break
 
                 bp = bp_stream[worst_lev]
@@ -9053,11 +9047,10 @@ class ContourMeshMixin(ContourAnimationMixin):
                 if current_ci is None:
                     break
 
-                best_twist = worst_twist
+                best_cross = worst_cross
                 best_ci = list(current_ci)
                 search_range = min(n_verts // 4, 10)
 
-                # Greedy per-corner
                 for corner_idx in range(4):
                     for delta in range(-search_range, search_range + 1):
                         if delta == 0:
@@ -9075,12 +9068,12 @@ class ContourMeshMixin(ContourAnimationMixin):
                         if len(trial_wp) == 0:
                             continue
 
-                        trial_twist = compute_twist_at_level(worst_lev, trial_wp)
-                        if trial_twist < best_twist:
-                            best_twist = trial_twist
+                        trial_cross = count_crossings_at_level(worst_lev, trial_wp)
+                        if trial_cross < best_cross:
+                            best_cross = trial_cross
                             best_ci = list(trial_ci)
 
-                if best_twist < worst_twist:
+                if best_cross < worst_cross:
                     new_match = self._recompute_contour_match(
                         P_verts, bp_corners_3d, best_ci, n_verts)
                     bp['contour_match'] = new_match
@@ -9089,13 +9082,12 @@ class ContourMeshMixin(ContourAnimationMixin):
                     self.waypoints[stream_i][worst_lev] = new_wp
                     self.mvc_weights[stream_i][worst_lev] = new_mvc
                     total_refined += 1
-                    improvement = (worst_twist - best_twist) / worst_twist * 100
-                    print(f"    L{worst_lev}: twist {worst_twist:.2e} -> {best_twist:.2e} ({improvement:.0f}%)")
+                    print(f"    L{worst_lev}: crossings {int(worst_cross)} -> {int(best_cross)}")
                 else:
                     break
 
         if total_refined > 0:
-            print(f"  [Waypoint opt] Refined {total_refined} levels via twist reduction")
+            print(f"  [Waypoint opt] Refined {total_refined} levels via crossing reduction")
 
         # Print final report
         print(f"  [Waypoint smoothness]")
@@ -9106,9 +9098,7 @@ class ContourMeshMixin(ContourAnimationMixin):
             if n_levels < 3:
                 continue
             n_fibers = len(wp_stream[0])
-            total_twist = 0
-            max_twist = 0
-            max_twist_lev = 0
+            total_crossings = 0
             for lev in range(1, n_levels):
                 bp_lev = bp_stream_ref[lev]
                 bx = bp_lev['basis_x']
@@ -9120,17 +9110,16 @@ class ContourMeshMixin(ContourAnimationMixin):
                     continue
                 prev_2d = np.array([[np.dot(w - center, bx), np.dot(w - center, by)] for w in wp_prev])
                 curr_2d = np.array([[np.dot(w - center, bx), np.dot(w - center, by)] for w in wp_curr])
-                prev_ang = np.arctan2(prev_2d[:, 1], prev_2d[:, 0])
-                curr_ang = np.arctan2(curr_2d[:, 1], curr_2d[:, 0])
-                diffs = (curr_ang - prev_ang + np.pi) % (2 * np.pi) - np.pi
-                lev_twist = np.sum(diffs ** 2)
-                total_twist += lev_twist
-                if lev_twist > max_twist:
-                    max_twist = lev_twist
-                    max_twist_lev = lev
-            mean_twist = total_twist / max(n_levels - 1, 1)
-            print(f"    Stream {stream_i}: total_twist={total_twist:.2e}, mean={mean_twist:.2e}, "
-                  f"max={max_twist:.2e} (L{max_twist_lev}), levels={n_levels}")
+                n_sample = min(n_fibers, 20)
+                for i in range(n_sample):
+                    for j in range(i + 1, n_sample):
+                        dx_p = prev_2d[i, 0] - prev_2d[j, 0]
+                        dx_c = curr_2d[i, 0] - curr_2d[j, 0]
+                        dy_p = prev_2d[i, 1] - prev_2d[j, 1]
+                        dy_c = curr_2d[i, 1] - curr_2d[j, 1]
+                        if dx_p * dx_c < 0 and dy_p * dy_c < 0:
+                            total_crossings += 1
+            print(f"    Stream {stream_i}: {total_crossings} total fiber crossings, {n_levels} levels")
 
     @staticmethod
     def _recompute_contour_match(P_vertices, bp_corners_3d, corner_indices, n_verts):

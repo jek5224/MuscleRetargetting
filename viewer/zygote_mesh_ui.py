@@ -2158,13 +2158,16 @@ def _render_inspect_2d_windows(v):
 
         # Helper functions to access data in correct format
         def get_num_levels():
-            """Get number of levels."""
+            """Get number of levels for the current stream."""
             if is_pre_stream:
                 return len(obj.contours)
             else:
-                # Post-stream: levels are the inner index
-                if len(obj.contours) > 0:
-                    return len(obj.contours[0])
+                # Post-stream: use current stream's level count (streams may differ)
+                s = v.inspect_2d_stream_idx.get(name, 0)
+                if s < len(obj.contours):
+                    return len(obj.contours[s])
+                elif len(obj.contours) > 0:
+                    return max(len(stream) for stream in obj.contours)
                 return 0
 
         def get_max_contours_at_level():
