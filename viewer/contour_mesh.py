@@ -8838,142 +8838,256 @@ class ContourMeshMixin(ContourAnimationMixin):
         else:
             print(f"[_find_contour_stream_post_process] Skipping auto_detect_attachments: skeleton_meshes={skeleton_meshes is not None}, len={len(skeleton_meshes) if skeleton_meshes else 0}")
 
-    def _optimize_waypoint_smoothness(self, max_iterations=5):
-        """Optimize corner correspondences to minimize fiber bending energy.
+    def _optimize_waypoint_smoothness(self):
+        """Optimize corner correspondences by chain-propagating from a reference level.
 
-        For each stream, computes discrete Laplacian (second-order finite difference)
-        at each interior level. The level with the worst total bending energy gets
-        its corner correspondences adjusted by trying nearby vertex shifts.
+        For each stream:
+        1. Find reference level: the most non-square-like (highest aspect ratio)
+        2. Forward pass (ref+1 → end): for each corner, find the nearest contour
+           vertex on the current level to the previous level's corner 3D position
+        3. Backward pass (ref-1 → 0): same, propagating from ref toward origin
+        4. Recompute contour_match and waypoints for all modified levels
 
-        Modifies bounding_planes[stream][level]['contour_match'] and 'corner_indices',
-        and updates self.waypoints and self.mvc_weights in-place.
+        This transfers the topological corner positions from the reference
+        (where ray-based detection is most reliable) to all other levels.
         """
         if self.waypoints is None or self.bounding_planes is None:
             return
 
         n_streams = len(self.waypoints)
-        total_improved = 0
+        total_modified = 0
 
         for stream_i in range(n_streams):
-            wp_stream = self.waypoints[stream_i]
             bp_stream = self.bounding_planes[stream_i]
-            n_levels = len(wp_stream)
+            n_levels = len(bp_stream)
+            fiber_samples = self.fiber_architecture[stream_i]
 
             if n_levels < 3:
                 continue
 
+            # Find reference level: highest aspect ratio (most non-square-like)
+            best_ref = 0
+            best_ratio = 0
+            for lev in range(n_levels):
+                bp = bp_stream[lev]
+                corners = bp.get('bounding_plane')
+                if corners is None or len(corners) < 4:
+                    continue
+                w = np.linalg.norm(corners[1] - corners[0])
+                h = np.linalg.norm(corners[3] - corners[0])
+                if min(w, h) > 1e-10:
+                    ratio = max(w, h) / min(w, h)
+                    if ratio > best_ratio:
+                        best_ratio = ratio
+                        best_ref = lev
+
+            # Get reference level's corner positions (3D)
+            ref_bp = bp_stream[best_ref]
+            ref_match = ref_bp.get('contour_match')
+            if ref_match is None:
+                continue
+
+            ref_ci = ref_bp.get('corner_indices')
+            if ref_ci is None:
+                # Detect from Q positions
+                bp_corners = [np.array(c) for c in ref_bp['bounding_plane'][:4]]
+                ref_ci = []
+                for corner_3d in bp_corners:
+                    dists = [np.linalg.norm(np.array(q) - corner_3d) for _, q in ref_match]
+                    ref_ci.append(int(np.argmin(dists)))
+                ref_bp['corner_indices'] = ref_ci
+
+            print(f"  [Waypoint opt] Stream {stream_i}: ref=L{best_ref} (ratio={best_ratio:.2f}), {n_levels} levels")
+
+            # Propagate: forward from ref, backward from ref
+            for direction, levels in [('fwd', range(best_ref + 1, n_levels)),
+                                       ('bwd', range(best_ref - 1, -1, -1))]:
+                for lev in levels:
+                    bp = bp_stream[lev]
+                    match = bp.get('contour_match')
+                    if match is None:
+                        continue
+
+                    P_verts = [np.array(p) for p, q in match]
+                    n_verts = len(P_verts)
+                    bp_corners_3d = [np.array(c) for c in bp['bounding_plane'][:4]]
+
+                    if n_verts < 4:
+                        continue
+
+                    # For each corner, transfer by arc-length fraction.
+                    # Compute cumulative arc length on both contours, normalize to [0,1].
+                    # Find the vertex on the current contour at the same arc-length fraction.
+                    prev_bp = bp_stream[lev - 1] if direction == 'fwd' else bp_stream[lev + 1]
+                    prev_match = prev_bp.get('contour_match')
+                    if prev_match is None:
+                        continue
+                    prev_P = [np.array(p) for p, q in prev_match]
+                    prev_ci = prev_bp.get('corner_indices', ref_ci)
+
+                    # Arc-length parameterization for previous contour
+                    prev_n = len(prev_P)
+                    prev_arc = np.zeros(prev_n)
+                    for vi in range(1, prev_n):
+                        prev_arc[vi] = prev_arc[vi - 1] + np.linalg.norm(prev_P[vi] - prev_P[vi - 1])
+                    # Add closing edge
+                    prev_total = prev_arc[-1] + np.linalg.norm(prev_P[0] - prev_P[-1]) if prev_n > 1 else 1.0
+                    prev_arc_frac = prev_arc / prev_total if prev_total > 1e-10 else np.linspace(0, 1, prev_n)
+
+                    # Arc-length parameterization for current contour
+                    curr_arc = np.zeros(n_verts)
+                    for vi in range(1, n_verts):
+                        curr_arc[vi] = curr_arc[vi - 1] + np.linalg.norm(P_verts[vi] - P_verts[vi - 1])
+                    curr_total = curr_arc[-1] + np.linalg.norm(P_verts[0] - P_verts[-1]) if n_verts > 1 else 1.0
+                    curr_arc_frac = curr_arc / curr_total if curr_total > 1e-10 else np.linspace(0, 1, n_verts)
+
+                    new_ci = []
+                    for ci_idx in range(4):
+                        # Arc-length fraction of this corner on previous contour
+                        target_frac = prev_arc_frac[prev_ci[ci_idx]]
+                        # Find vertex on current contour with closest arc-length fraction
+                        diffs = np.abs(curr_arc_frac - target_frac)
+                        new_ci.append(int(np.argmin(diffs)))
+
+                    # Check corners are distinct and in order
+                    if len(set(new_ci)) < 4:
+                        continue
+
+                    # Compare with current corner indices
+                    old_ci = bp.get('corner_indices')
+                    if old_ci is not None and list(old_ci) == new_ci:
+                        continue
+
+                    # Recompute contour_match and waypoints
+                    new_match = self._recompute_contour_match(
+                        P_verts, bp_corners_3d, new_ci, n_verts)
+                    bp['contour_match'] = new_match
+                    bp['corner_indices'] = new_ci
+
+                    _, new_wp, new_mvc = self.find_waypoints(bp, fiber_samples)
+                    self.waypoints[stream_i][lev] = new_wp
+                    self.mvc_weights[stream_i][lev] = new_mvc
+
+                    total_modified += 1
+
+        if total_modified > 0:
+            print(f"  [Waypoint opt] Modified {total_modified} levels via chain propagation")
+
+        # Local refinement: reduce remaining bending energy with ±5 vertex shifts
+        total_refined = 0
+        for stream_i in range(n_streams):
+            wp_stream = self.waypoints[stream_i]
+            bp_stream = self.bounding_planes[stream_i]
+            n_levels = len(wp_stream)
             fiber_samples = self.fiber_architecture[stream_i]
 
-            for iteration in range(max_iterations):
-                # Compute bending energy (||w[L-1] + w[L+1] - 2*w[L]||²) per level, summed over all fibers
-                level_bendings = np.zeros(n_levels)
+            if n_levels < 3:
+                continue
+
+            for iteration in range(n_levels):  # up to one pass per level
+                # Compute bending energy per level
+                level_energy = np.zeros(n_levels)
                 for lev in range(1, n_levels - 1):
                     wp_prev = np.array(wp_stream[lev - 1])
                     wp_curr = np.array(wp_stream[lev])
                     wp_next = np.array(wp_stream[lev + 1])
-
                     if len(wp_prev) != len(wp_curr) or len(wp_curr) != len(wp_next):
                         continue
+                    d = wp_prev + wp_next - 2 * wp_curr
+                    level_energy[lev] = np.sum(np.linalg.norm(d, axis=1) ** 2)
 
-                    bendings = wp_prev + wp_next - 2 * wp_curr  # (n_fibers, 3)
-                    level_bendings[lev] = np.sum(np.linalg.norm(bendings, axis=1) ** 2)
-
-                # Find worst level
-                worst_lev = np.argmax(level_bendings)
-                worst_bending = level_bendings[worst_lev]
-
-                if worst_bending < 1e-12:
-                    break  # All smooth enough
-
-                # Get current corner indices for this level
-                bp = bp_stream[worst_lev]
-                contour_match = bp.get('contour_match')
-                if contour_match is None:
+                worst_lev = int(np.argmax(level_energy))
+                worst_energy = level_energy[worst_lev]
+                if worst_energy < 1e-12:
                     break
 
-                P_vertices = [np.array(p) for p, q in contour_match]
-                n_verts = len(P_vertices)
+                bp = bp_stream[worst_lev]
+                match = bp.get('contour_match')
+                if match is None:
+                    break
+
+                P_verts = [np.array(p) for p, q in match]
+                n_verts = len(P_verts)
                 bp_corners_3d = [np.array(c) for c in bp['bounding_plane'][:4]]
-
-                current_ci = bp.get('corner_indices', None)
+                current_ci = bp.get('corner_indices')
                 if current_ci is None:
-                    # Detect current corner indices from Q positions
-                    current_ci = []
-                    for ci_idx, corner_3d in enumerate(bp_corners_3d):
-                        dists = [np.linalg.norm(np.array(q) - corner_3d) for _, q in contour_match]
-                        current_ci.append(int(np.argmin(dists)))
+                    break
 
-                # Try shifting each corner by ±1, ±2, ±3 vertices
-                best_bending = worst_bending
+                best_energy = worst_energy
                 best_ci = list(current_ci)
-                search_range = 3
+                search_range = min(n_verts // 4, 10)
 
+                wp_prev = np.array(wp_stream[worst_lev - 1])
+                wp_next = np.array(wp_stream[worst_lev + 1])
+
+                # Greedy per-corner: optimize each corner sequentially
                 for corner_idx in range(4):
                     for delta in range(-search_range, search_range + 1):
                         if delta == 0:
                             continue
-
                         trial_ci = list(best_ci)
                         trial_ci[corner_idx] = (trial_ci[corner_idx] + delta) % n_verts
-
-                        # Check ordering: corners must be in increasing order around contour
-                        # (with wrap-around)
-                        ordered = True
-                        for k in range(4):
-                            k_next = (k + 1) % 4
-                            if trial_ci[k] == trial_ci[k_next]:
-                                ordered = False
-                                break
-                        if not ordered:
+                        if len(set(trial_ci)) < 4:
                             continue
 
-                        # Recompute contour_match with trial corner indices
                         trial_match = self._recompute_contour_match(
-                            P_vertices, bp_corners_3d, trial_ci, n_verts)
-
-                        # Recompute waypoints
+                            P_verts, bp_corners_3d, trial_ci, n_verts)
                         trial_bp = dict(bp)
                         trial_bp['contour_match'] = trial_match
                         _, trial_wp, _ = self.find_waypoints(trial_bp, fiber_samples)
-
                         if len(trial_wp) == 0:
                             continue
 
-                        # Compute bending with trial waypoints
-                        wp_prev = np.array(wp_stream[worst_lev - 1])
-                        wp_next = np.array(wp_stream[worst_lev + 1])
                         trial_wp_arr = np.array(trial_wp)
-
                         if len(wp_prev) != len(trial_wp_arr) or len(trial_wp_arr) != len(wp_next):
                             continue
 
-                        bendings = wp_prev + wp_next - 2 * trial_wp_arr
-                        trial_bending = np.sum(np.linalg.norm(bendings, axis=1) ** 2)
+                        d = wp_prev + wp_next - 2 * trial_wp_arr
+                        trial_energy = np.sum(np.linalg.norm(d, axis=1) ** 2)
+                        if trial_energy < best_energy:
+                            best_energy = trial_energy
+                            best_ci = list(trial_ci)
 
-                        if trial_bending < best_bending:
-                            best_bending = trial_bending
-                            best_ci = trial_ci
-
-                # Apply best if improved
-                if best_bending < worst_bending:
+                if best_energy < worst_energy:
                     new_match = self._recompute_contour_match(
-                        P_vertices, bp_corners_3d, best_ci, n_verts)
+                        P_verts, bp_corners_3d, best_ci, n_verts)
                     bp['contour_match'] = new_match
                     bp['corner_indices'] = best_ci
-
                     _, new_wp, new_mvc = self.find_waypoints(bp, fiber_samples)
                     self.waypoints[stream_i][worst_lev] = new_wp
                     self.mvc_weights[stream_i][worst_lev] = new_mvc
-
-                    improvement = (worst_bending - best_bending) / worst_bending * 100
-                    total_improved += 1
-                    print(f"  [Waypoint opt] Stream {stream_i}, Level {worst_lev}: "
-                          f"bending {worst_bending:.2e} -> {best_bending:.2e} ({improvement:.0f}% better)")
+                    total_refined += 1
+                    improvement = (worst_energy - best_energy) / worst_energy * 100
+                    print(f"    L{worst_lev}: {worst_energy:.2e} -> {best_energy:.2e} ({improvement:.0f}%) ci={best_ci}")
                 else:
-                    break  # No improvement found, stop for this stream
+                    break
 
-        if total_improved > 0:
-            print(f"  [Waypoint opt] Improved {total_improved} levels")
+        if total_refined > 0:
+            print(f"  [Waypoint opt] Refined {total_refined} levels via local search")
+
+        # Print final smoothness report
+        print(f"  [Waypoint smoothness]")
+        for stream_i in range(n_streams):
+            wp_stream = self.waypoints[stream_i]
+            n_levels = len(wp_stream)
+            if n_levels < 3:
+                continue
+            energies = []
+            for lev in range(1, n_levels - 1):
+                wp_prev = np.array(wp_stream[lev - 1])
+                wp_curr = np.array(wp_stream[lev])
+                wp_next = np.array(wp_stream[lev + 1])
+                if len(wp_prev) != len(wp_curr) or len(wp_curr) != len(wp_next):
+                    continue
+                d = wp_prev + wp_next - 2 * wp_curr
+                energies.append(np.sum(np.linalg.norm(d, axis=1) ** 2))
+            if energies:
+                total_e = sum(energies)
+                max_e = max(energies)
+                max_lev = energies.index(max_e) + 1  # offset by 1 since we start at lev=1
+                mean_e = total_e / len(energies)
+                print(f"    Stream {stream_i}: total={total_e:.2e}, mean={mean_e:.2e}, "
+                      f"max={max_e:.2e} (L{max_lev}), levels={n_levels}")
 
     @staticmethod
     def _recompute_contour_match(P_vertices, bp_corners_3d, corner_indices, n_verts):
