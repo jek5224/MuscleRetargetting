@@ -1482,6 +1482,17 @@ class ContourMeshMixin(ContourAnimationMixin):
             snapshot.append(level_snap)
         return snapshot
 
+    @staticmethod
+    def _normalize_twist_directions(twist_data):
+        """Ensure all twist angles are positive (counterclockwise around z).
+        If negative, add 2π so the animation always rotates in the positive direction.
+        """
+        for i in range(len(twist_data)):
+            for j in range(len(twist_data[i])):
+                a = twist_data[i][j]
+                if a is not None and a < 0:
+                    twist_data[i][j] = a + 2 * np.pi
+
     def smoothen_all(self, defer=False):
         """Run z, x, bp smoothing with optional animation support.
         If defer=True, saves before/after snapshots and restores initial state for replay."""
@@ -1563,6 +1574,10 @@ class ContourMeshMixin(ContourAnimationMixin):
                     twist_level.append(None)
             smooth_swing_data.append(swing_level)
             smooth_twist_data.append(twist_level)
+
+        # Normalize twist angles: pick consistent direction across all levels.
+        # Collect non-zero twists, find majority sign, flip outliers to shorter equivalent.
+        self._normalize_twist_directions(smooth_twist_data)
 
         self._smooth_bp_before = bp_before
         self._smooth_bp_after = bp_after
@@ -1668,6 +1683,9 @@ class ContourMeshMixin(ContourAnimationMixin):
                     twist_level.append(None)
             smooth_swing_data.append(swing_level)
             smooth_twist_data.append(twist_level)
+
+        # Normalize twist angles: consistent rotation direction across all levels
+        self._normalize_twist_directions(smooth_twist_data)
 
         self._stream_smooth_bp_before = bp_before
         self._stream_smooth_bp_after = bp_after
@@ -8795,6 +8813,9 @@ class ContourMeshMixin(ContourAnimationMixin):
                 self.waypoints[i].append(waypoints)
                 self.mvc_weights[i].append(mvc_weights)
 
+        # Optimize corner correspondences to minimize fiber kinks
+        self._optimize_waypoint_smoothness()
+
         # Populate stream endpoints for bounding box visualization
         self._stream_endpoints = []
         for stream_i, bp_stream in enumerate(self.bounding_planes):
@@ -8816,6 +8837,190 @@ class ContourMeshMixin(ContourAnimationMixin):
             print(f"  auto_detect_attachments returned: {result}")
         else:
             print(f"[_find_contour_stream_post_process] Skipping auto_detect_attachments: skeleton_meshes={skeleton_meshes is not None}, len={len(skeleton_meshes) if skeleton_meshes else 0}")
+
+    def _optimize_waypoint_smoothness(self, max_iterations=5):
+        """Optimize corner correspondences to minimize fiber kinks.
+
+        For each stream, computes discrete curvature (second derivative) at each
+        interior level. The level with the worst total kink gets its corner
+        correspondences adjusted by trying nearby vertex shifts.
+
+        Modifies bounding_planes[stream][level]['contour_match'] and 'corner_indices',
+        and updates self.waypoints and self.mvc_weights in-place.
+        """
+        if self.waypoints is None or self.bounding_planes is None:
+            return
+
+        n_streams = len(self.waypoints)
+        total_improved = 0
+
+        for stream_i in range(n_streams):
+            wp_stream = self.waypoints[stream_i]
+            bp_stream = self.bounding_planes[stream_i]
+            n_levels = len(wp_stream)
+
+            if n_levels < 3:
+                continue
+
+            fiber_samples = self.fiber_architecture[stream_i]
+
+            for iteration in range(max_iterations):
+                # Compute kink (||w[L-1] + w[L+1] - 2*w[L]||²) per level, summed over all fibers
+                level_kinks = np.zeros(n_levels)
+                for lev in range(1, n_levels - 1):
+                    wp_prev = np.array(wp_stream[lev - 1])
+                    wp_curr = np.array(wp_stream[lev])
+                    wp_next = np.array(wp_stream[lev + 1])
+
+                    if len(wp_prev) != len(wp_curr) or len(wp_curr) != len(wp_next):
+                        continue
+
+                    kinks = wp_prev + wp_next - 2 * wp_curr  # (n_fibers, 3)
+                    level_kinks[lev] = np.sum(np.linalg.norm(kinks, axis=1) ** 2)
+
+                # Find worst level
+                worst_lev = np.argmax(level_kinks)
+                worst_kink = level_kinks[worst_lev]
+
+                if worst_kink < 1e-12:
+                    break  # All smooth enough
+
+                # Get current corner indices for this level
+                bp = bp_stream[worst_lev]
+                contour_match = bp.get('contour_match')
+                if contour_match is None:
+                    break
+
+                P_vertices = [np.array(p) for p, q in contour_match]
+                n_verts = len(P_vertices)
+                bp_corners_3d = [np.array(c) for c in bp['bounding_plane'][:4]]
+
+                current_ci = bp.get('corner_indices', None)
+                if current_ci is None:
+                    # Detect current corner indices from Q positions
+                    current_ci = []
+                    for ci_idx, corner_3d in enumerate(bp_corners_3d):
+                        dists = [np.linalg.norm(np.array(q) - corner_3d) for _, q in contour_match]
+                        current_ci.append(int(np.argmin(dists)))
+
+                # Try shifting each corner by ±1, ±2, ±3 vertices
+                best_kink = worst_kink
+                best_ci = list(current_ci)
+                search_range = 3
+
+                for corner_idx in range(4):
+                    for delta in range(-search_range, search_range + 1):
+                        if delta == 0:
+                            continue
+
+                        trial_ci = list(best_ci)
+                        trial_ci[corner_idx] = (trial_ci[corner_idx] + delta) % n_verts
+
+                        # Check ordering: corners must be in increasing order around contour
+                        # (with wrap-around)
+                        ordered = True
+                        for k in range(4):
+                            k_next = (k + 1) % 4
+                            if trial_ci[k] == trial_ci[k_next]:
+                                ordered = False
+                                break
+                        if not ordered:
+                            continue
+
+                        # Recompute contour_match with trial corner indices
+                        trial_match = self._recompute_contour_match(
+                            P_vertices, bp_corners_3d, trial_ci, n_verts)
+
+                        # Recompute waypoints
+                        trial_bp = dict(bp)
+                        trial_bp['contour_match'] = trial_match
+                        _, trial_wp, _ = self.find_waypoints(trial_bp, fiber_samples)
+
+                        if len(trial_wp) == 0:
+                            continue
+
+                        # Compute kink with trial waypoints
+                        wp_prev = np.array(wp_stream[worst_lev - 1])
+                        wp_next = np.array(wp_stream[worst_lev + 1])
+                        trial_wp_arr = np.array(trial_wp)
+
+                        if len(wp_prev) != len(trial_wp_arr) or len(trial_wp_arr) != len(wp_next):
+                            continue
+
+                        kinks = wp_prev + wp_next - 2 * trial_wp_arr
+                        trial_kink = np.sum(np.linalg.norm(kinks, axis=1) ** 2)
+
+                        if trial_kink < best_kink:
+                            best_kink = trial_kink
+                            best_ci = trial_ci
+
+                # Apply best if improved
+                if best_kink < worst_kink:
+                    new_match = self._recompute_contour_match(
+                        P_vertices, bp_corners_3d, best_ci, n_verts)
+                    bp['contour_match'] = new_match
+                    bp['corner_indices'] = best_ci
+
+                    _, new_wp, new_mvc = self.find_waypoints(bp, fiber_samples)
+                    self.waypoints[stream_i][worst_lev] = new_wp
+                    self.mvc_weights[stream_i][worst_lev] = new_mvc
+
+                    improvement = (worst_kink - best_kink) / worst_kink * 100
+                    total_improved += 1
+                    print(f"  [Waypoint opt] Stream {stream_i}, Level {worst_lev}: "
+                          f"kink {worst_kink:.2e} -> {best_kink:.2e} ({improvement:.0f}% better)")
+                else:
+                    break  # No improvement found, stop for this stream
+
+        if total_improved > 0:
+            print(f"  [Waypoint opt] Improved {total_improved} levels")
+
+    @staticmethod
+    def _recompute_contour_match(P_vertices, bp_corners_3d, corner_indices, n_verts):
+        """Recompute contour_match given new corner indices.
+
+        Same logic as _apply_correspondence in zygote_mesh_ui.py:
+        for each edge between adjacent corners, interpolate Q positions
+        along the BP edge using arc-length parameterization.
+        """
+        new_match = [None] * n_verts
+
+        for edge_idx in range(4):
+            corner_start = edge_idx
+            corner_end = (edge_idx + 1) % 4
+
+            vs = corner_indices[corner_start]
+            ve = corner_indices[corner_end]
+
+            q_start = bp_corners_3d[corner_start]
+            q_end = bp_corners_3d[corner_end]
+
+            if ve > vs:
+                seg_indices = list(range(vs, ve))
+            elif ve < vs:
+                seg_indices = list(range(vs, n_verts)) + list(range(0, ve))
+            else:
+                seg_indices = [vs]
+
+            if len(seg_indices) == 0:
+                continue
+
+            arc_lengths = [0.0]
+            for i in range(1, len(seg_indices)):
+                arc_lengths.append(arc_lengths[-1] +
+                    np.linalg.norm(P_vertices[seg_indices[i]] - P_vertices[seg_indices[i - 1]]))
+            total_arc = arc_lengths[-1] if arc_lengths[-1] > 1e-10 else 1.0
+
+            for i, vi in enumerate(seg_indices):
+                t = arc_lengths[i] / total_arc
+                new_match[vi] = (P_vertices[vi], (1 - t) * q_start + t * q_end)
+
+        # Fill any None entries
+        for i in range(n_verts):
+            if new_match[i] is None:
+                new_match[i] = (P_vertices[i], bp_corners_3d[0].copy())
+
+        return new_match
 
     def select_stream_levels(self, error_threshold=None):
         """

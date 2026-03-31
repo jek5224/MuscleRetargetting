@@ -3140,8 +3140,6 @@ def _render_inspect_2d_windows(v):
                     if vi is not None and vi < len(cm):
                         corner_pts_all.append(np.array(cm[vi][0]))
                 obj.inspector_highlight_corner_vertices_3d = corner_pts_all if corner_pts_all else None
-                if corner_pts_all and level_idx < len(corner_pts_all):
-                    print(f"[DBG2] lev={level_idx} corner_pos={corner_pts_all[level_idx][:2]} n_pts={len(corner_pts_all)} hover={hovered_type}:{hovered_idx}")
 
         # Draw correspondence mode visual feedback
         if corr_mode and corr_corner >= 0:
@@ -3401,8 +3399,8 @@ def _apply_corner_correspondence(v, name, obj, stream_idx, level_idx, corner_idx
         vertex_idx: Selected vertex index
         is_post_stream: Whether data is in post-stream format
     """
-    print(f"Applying correspondence: Corner {corner_idx} -> Vertex {vertex_idx}")
-    print(f"  Stream: {stream_idx}, Level: {level_idx}, Post-stream: {is_post_stream}")
+    # print(f"Applying correspondence: Corner {corner_idx} -> Vertex {vertex_idx}")
+    # print(f"  Stream: {stream_idx}, Level: {level_idx}, Post-stream: {is_post_stream}")
 
     # Get current bounding plane info
     if is_post_stream:
@@ -3490,8 +3488,6 @@ def _apply_corner_correspondence(v, name, obj, stream_idx, level_idx, corner_idx
         if is_post_stream and stream_idx < len(obj.fiber_architecture):
             fiber_samples = obj.fiber_architecture[stream_idx]
             if fiber_samples is not None and len(fiber_samples) > 0:
-                print(f"  Recomputing waypoints for {len(fiber_samples)} fiber samples")
-
                 # Recompute waypoints and MVC weights for this level
                 # find_waypoints returns (Qs_normalized_2d, waypoints_3d, mvc_weights)
                 _, waypoints_3d, mvc_weights = obj.find_waypoints(bp_info, fiber_samples)
@@ -3500,18 +3496,14 @@ def _apply_corner_correspondence(v, name, obj, stream_idx, level_idx, corner_idx
                 if hasattr(obj, 'waypoints') and obj.waypoints is not None:
                     if stream_idx < len(obj.waypoints) and level_idx < len(obj.waypoints[stream_idx]):
                         obj.waypoints[stream_idx][level_idx] = waypoints_3d
-                        print(f"  Updated waypoints: {len(waypoints_3d)} points")
 
                 # Update MVC weights
                 if hasattr(obj, 'mvc_weights') and obj.mvc_weights is not None:
                     if stream_idx < len(obj.mvc_weights) and level_idx < len(obj.mvc_weights[stream_idx]):
                         obj.mvc_weights[stream_idx][level_idx] = mvc_weights
-                        print(f"  Updated MVC weights")
 
                 # Resave animation data so replay uses updated waypoints
                 obj._save_fiber_anim_data()
-
-    print("  Correspondence applied successfully")
 
 
 def _delete_fiber(v, name, obj, stream_idx, fiber_idx, is_post_stream):
