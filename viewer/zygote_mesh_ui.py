@@ -3422,19 +3422,18 @@ def _find_correspondence_all_levels(v, name, obj, stream_idx, level_idx, corner_
     if corner_idx >= len(ci):
         return
 
-    # Get the corner's corresponding vertex position in unit square
+    # Get the corner's corresponding vertex P position, project to unit square
     corner_vi = ci[corner_idx]
     if corner_vi >= len(contour_match):
         return
-    _, corner_q = contour_match[corner_vi]
-    corner_q = np.array(corner_q)
+    corner_p = np.array(contour_match[corner_vi][0])  # Use P (3D contour vertex), not Q
 
-    # Convert to unit square coordinates
+    # Project P onto bounding plane to get unit square coordinates
     bp_c = [np.array(c) for c in bp_corners[:4]]
     edge_x = bp_c[1] - bp_c[0]
     edge_y = bp_c[3] - bp_c[0]
     A = np.column_stack([edge_x, edge_y])
-    rel = corner_q - bp_c[0]
+    rel = corner_p - bp_c[0]
     result, _, _, _ = np.linalg.lstsq(A, rel, rcond=None)
     target_u, target_v = float(result[0]), float(result[1])
 
@@ -3477,16 +3476,16 @@ def _find_correspondence_all_levels(v, name, obj, stream_idx, level_idx, corner_
         n_verts = len(P_verts)
         bp_c_lev = [np.array(c) for c in bp_corners_lev[:4]]
 
-        # Compute unit square coords for all vertices
+        # Project P vertices (actual contour positions) to unit square
         edge_x_lev = bp_c_lev[1] - bp_c_lev[0]
         edge_y_lev = bp_c_lev[3] - bp_c_lev[0]
         A_lev = np.column_stack([edge_x_lev, edge_y_lev])
 
         vert_uv = np.zeros((n_verts, 2))
         for vi in range(n_verts):
-            _, q = match_lev[vi]
-            rel_q = np.array(q) - bp_c_lev[0]
-            res, _, _, _ = np.linalg.lstsq(A_lev, rel_q, rcond=None)
+            p, _ = match_lev[vi]
+            rel_p = np.array(p) - bp_c_lev[0]
+            res, _, _, _ = np.linalg.lstsq(A_lev, rel_p, rcond=None)
             vert_uv[vi] = [res[0], res[1]]
 
         # Find vertex closest to target ratio on the matching axis
