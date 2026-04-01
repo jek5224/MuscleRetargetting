@@ -4006,25 +4006,35 @@ class ContourMeshMixin(ContourAnimationMixin):
                     best_idx = i
             return best_idx
 
-        # Compute global origin-to-insertion direction
+        # Pass 1: chain propagation — level 0 stays, each next level aligns z with previous
+        # This preserves the original PCA z direction for the majority of levels.
+        for level_idx in range(1, num_levels):
+            for contour_idx in range(contour_counts[level_idx]):
+                curr_bp = self.bounding_planes[level_idx][contour_idx]
+                prev_idx = find_closest_contour(curr_bp, level_idx - 1)
+                prev_z = self.bounding_planes[level_idx - 1][prev_idx]['basis_z']
+                if np.dot(curr_bp['basis_z'], prev_z) < 0:
+                    print(f"    Level {level_idx}, contour {contour_idx}: flipping z (chain)")
+                    curr_bp['basis_z'] = -curr_bp['basis_z']
+
+        # Pass 2: check overall direction — if majority points away from insertion, flip all
         origin_mean = self.bounding_planes[0][0]['mean']
         insertion_mean = self.bounding_planes[-1][0]['mean']
         global_dir = insertion_mean - origin_mean
         global_dir_norm = np.linalg.norm(global_dir)
         if global_dir_norm > 1e-10:
             global_dir = global_dir / global_dir_norm
-        else:
-            global_dir = np.array([0.0, 1.0, 0.0])
+            pos_count = sum(1 for lvl in self.bounding_planes
+                           for bp in lvl if np.dot(bp['basis_z'], global_dir) > 0)
+            neg_count = sum(1 for lvl in self.bounding_planes
+                           for bp in lvl if np.dot(bp['basis_z'], global_dir) <= 0)
+            if neg_count > pos_count:
+                print(f"    Flipping all z (majority pointed away from insertion)")
+                for lvl in self.bounding_planes:
+                    for bp in lvl:
+                        bp['basis_z'] = -bp['basis_z']
 
-        # Pass 1: flip z to align with origin-to-insertion direction
-        for level_idx in range(num_levels):
-            for contour_idx in range(contour_counts[level_idx]):
-                curr_bp = self.bounding_planes[level_idx][contour_idx]
-                if np.dot(curr_bp['basis_z'], global_dir) < 0:
-                    print(f"    Level {level_idx}, contour {contour_idx}: flipping z (global)")
-                    curr_bp['basis_z'] = -curr_bp['basis_z']
-
-        # Pass 2: fix outsiders — if a level's z disagrees with both neighbors, flip it
+        # Pass 3: fix outsiders — if a level's z disagrees with both neighbors, flip it
         for level_idx in range(1, num_levels - 1):
             for contour_idx in range(contour_counts[level_idx]):
                 curr_bp = self.bounding_planes[level_idx][contour_idx]
@@ -4033,10 +4043,7 @@ class ContourMeshMixin(ContourAnimationMixin):
                 prev_z = self.bounding_planes[level_idx - 1][prev_idx]['basis_z']
                 next_z = self.bounding_planes[level_idx + 1][next_idx]['basis_z']
 
-                dot_prev = np.dot(curr_bp['basis_z'], prev_z)
-                dot_next = np.dot(curr_bp['basis_z'], next_z)
-
-                if dot_prev < 0 and dot_next < 0:
+                if np.dot(curr_bp['basis_z'], prev_z) < 0 and np.dot(curr_bp['basis_z'], next_z) < 0:
                     print(f"    Level {level_idx}, contour {contour_idx}: flipping z (outsider)")
                     curr_bp['basis_z'] = -curr_bp['basis_z']
 
