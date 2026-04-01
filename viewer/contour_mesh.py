@@ -4160,52 +4160,88 @@ class ContourMeshMixin(ContourAnimationMixin):
                     best_idx = i
             return best_idx
 
-        # Starting level keeps its PCA axes as-is (no (1,0,0) alignment).
-        # Forward and backward passes chain from start_level using _best_4rotation.
+        # Same approach as stream x-smooth: anchor-first, then square-like chain.
+        # Pre-cut data is [level][contour] — for single-contour levels, treat each level as one entry.
 
-        # ========== FORWARD PASS: start_level+1 → insertion ==========
-        print("  Forward pass...")
+        # Build flat list of (level_idx, contour_idx) for single-stream processing
+        # For multi-contour levels, bp-smooth handles grouping into streams.
+        # Here we process the first contour at each level as the "stream".
 
-        for level_idx in range(start_level + 1, num_levels):
-            prev_level = level_idx - 1
-            curr_count = contour_counts[level_idx]
+        # Find non-square-like levels
+        non_sq_levels = []
+        for level_idx in range(num_levels):
+            for contour_idx in range(contour_counts[level_idx]):
+                bp = self.bounding_planes[level_idx][contour_idx]
+                if not bp.get('square_like', False):
+                    non_sq_levels.append((level_idx, contour_idx))
 
-            for contour_idx in range(curr_count):
-                curr_bp = self.bounding_planes[level_idx][contour_idx]
-                prev_idx = find_closest_contour(curr_bp, prev_level)
-                prev_bp = self.bounding_planes[prev_level][prev_idx]
-
-                best_x, best_y, best_angle, best_rot = self._best_4rotation(
-                    curr_bp['basis_x'], curr_bp['basis_y'], curr_bp['basis_z'],
-                    prev_bp['basis_x'], prev_bp['basis_y'], prev_bp['basis_z'])
-
-                if best_angle != 0:
-                    print(f"    Level {level_idx}, contour {contour_idx}: rot {best_angle}° (diff={np.degrees(best_rot):.1f}°)")
-                    curr_bp['basis_x'] = best_x
-                    curr_bp['basis_y'] = best_y
-                    # Don't recompute bounding plane — bp-smooth handles it
-
-        # ========== BACKWARD PASS: start_level-1 → origin ==========
-        print("  Backward pass...")
-
-        for level_idx in range(start_level - 1, -1, -1):
-            next_level = level_idx + 1
-            curr_count = contour_counts[level_idx]
-
-            for contour_idx in range(curr_count):
-                curr_bp = self.bounding_planes[level_idx][contour_idx]
-                next_idx = find_closest_contour(curr_bp, next_level)
-                next_bp = self.bounding_planes[next_level][next_idx]
-
+        if len(non_sq_levels) >= 2:
+            # Chain non-square-like levels to each other
+            first_lev, first_ci = non_sq_levels[0]
+            for idx in range(1, len(non_sq_levels)):
+                lev, ci = non_sq_levels[idx]
+                ref_lev, ref_ci = non_sq_levels[idx - 1]
+                curr_bp = self.bounding_planes[lev][ci]
+                ref_bp = self.bounding_planes[ref_lev][ref_ci]
                 best_x, best_y, best_angle, _ = self._best_4rotation(
                     curr_bp['basis_x'], curr_bp['basis_y'], curr_bp['basis_z'],
-                    next_bp['basis_x'], next_bp['basis_y'], next_bp['basis_z'])
-
+                    ref_bp['basis_x'], ref_bp['basis_y'], ref_bp['basis_z'])
                 if best_angle != 0:
-                    print(f"    Level {level_idx}, contour {contour_idx}: rot {best_angle}°")
                     curr_bp['basis_x'] = best_x
                     curr_bp['basis_y'] = best_y
-                    # Don't recompute bounding plane — bp-smooth handles it
+                    print(f"    Level {lev}, contour {ci}: rot {best_angle}° (anchor)")
+
+        # Chain square-like levels from nearest non-square-like
+        # Forward sweep
+        processed = set((lev, ci) for lev, ci in non_sq_levels)
+        for level_idx in range(num_levels):
+            for contour_idx in range(contour_counts[level_idx]):
+                if (level_idx, contour_idx) in processed:
+                    continue
+                # Find previous processed level
+                ref_bp = None
+                for pl in range(level_idx - 1, -1, -1):
+                    for pc in range(contour_counts[pl]):
+                        if (pl, pc) in processed:
+                            ref_bp = self.bounding_planes[pl][pc]
+                            break
+                    if ref_bp is not None:
+                        break
+                if ref_bp is None:
+                    continue
+                curr_bp = self.bounding_planes[level_idx][contour_idx]
+                best_x, best_y, best_angle, _ = self._best_4rotation(
+                    curr_bp['basis_x'], curr_bp['basis_y'], curr_bp['basis_z'],
+                    ref_bp['basis_x'], ref_bp['basis_y'], ref_bp['basis_z'])
+                if best_angle != 0:
+                    curr_bp['basis_x'] = best_x
+                    curr_bp['basis_y'] = best_y
+                processed.add((level_idx, contour_idx))
+
+        # Backward sweep for levels before first non-square-like
+        for level_idx in range(num_levels - 2, -1, -1):
+            for contour_idx in range(contour_counts[level_idx]):
+                if (level_idx, contour_idx) in processed:
+                    continue
+                curr_bp = self.bounding_planes[level_idx][contour_idx]
+                # Use next level
+                ref_bp = None
+                for nl in range(level_idx + 1, num_levels):
+                    for nc in range(contour_counts[nl]):
+                        if (nl, nc) in processed:
+                            ref_bp = self.bounding_planes[nl][nc]
+                            break
+                    if ref_bp is not None:
+                        break
+                if ref_bp is None:
+                    continue
+                best_x, best_y, best_angle, _ = self._best_4rotation(
+                    curr_bp['basis_x'], curr_bp['basis_y'], curr_bp['basis_z'],
+                    ref_bp['basis_x'], ref_bp['basis_y'], ref_bp['basis_z'])
+                if best_angle != 0:
+                    curr_bp['basis_x'] = best_x
+                    curr_bp['basis_y'] = best_y
+                processed.add((level_idx, contour_idx))
 
         print("  X-axis smoothening complete")
 
