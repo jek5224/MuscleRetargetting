@@ -1144,9 +1144,11 @@ class ContourAnimationMixin:
             return
 
         # Restore ALL levels visible (from original) so we can animate the shrink
-        self.contours = [list(sc) for sc in orig['stream_contours']]
-        self.bounding_planes = [list(bp) for bp in orig['stream_bounding_planes']]
-        self.draw_contour_stream = [[True] * len(orig['stream_contours'][s]) for s in range(max_stream_count)]
+        # Use anim_bps which has smooth-applied axes (not orig which has pre-smooth)
+        anim_orig = self._level_select_anim_original
+        self.contours = [list(sc) for sc in anim_orig['stream_contours']]
+        self.bounding_planes = [copy.deepcopy(bp_list) for bp_list in anim_orig['stream_bounding_planes']]
+        self.draw_contour_stream = [[True] * len(anim_orig['stream_contours'][s]) for s in range(max_stream_count)]
         # Also update the stream aliases so draw_bounding_box sees them
         self.stream_contours = self.contours
         self.stream_bounding_planes = self.bounding_planes
