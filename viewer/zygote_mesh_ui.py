@@ -3439,13 +3439,14 @@ def _find_correspondence_all_levels(v, name, obj, stream_idx, level_idx, corner_
 
     print(f"  [Find cor ({axis})] Corner {corner_idx} at ({target_u:.3f}, {target_v:.3f})")
 
-    # Determine which side the corner is on (for disambiguation)
+    # Determine which side the corner is on using BP corner index directly
+    # Corners: 0=bottom-left, 1=bottom-right, 2=top-right, 3=top-left
     if axis == 'x':
         target_ratio = target_u
-        side_above = target_v > 0.5  # upper or lower
+        side_above = corner_idx in (2, 3)  # top corners pick uppermost
     else:
         target_ratio = target_v
-        side_above = target_u > 0.5  # right or left
+        side_above = corner_idx in (1, 2)  # right corners pick rightmost
 
     # Apply to all levels in this stream
     if is_post_stream:
