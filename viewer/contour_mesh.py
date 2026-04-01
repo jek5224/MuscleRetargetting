@@ -4307,6 +4307,64 @@ class ContourMeshMixin(ContourAnimationMixin):
                     curr_bp['basis_x'] = best_x
                     curr_bp['basis_y'] = best_y
 
+            # Anchor correction: re-align non-square-like levels to nearest non-square-like neighbor,
+            # then re-align square-like levels to nearest non-square-like neighbor.
+            # This prevents twist drift through square-like sections.
+            non_sq = [lev for lev in range(stream_len) if not bp_stream[lev].get('square_like', False)]
+
+            if len(non_sq) >= 2:
+                # Pass 1: align each non-square-like to its nearest non-square-like neighbor
+                for idx, lev in enumerate(non_sq):
+                    # Find nearest non-square-like neighbor (prefer previous in chain order)
+                    ref_lev = None
+                    if idx > 0:
+                        ref_lev = non_sq[idx - 1]
+                    elif idx < len(non_sq) - 1:
+                        ref_lev = non_sq[idx + 1]
+
+                    if ref_lev is None:
+                        continue
+
+                    curr_bp = bp_stream[lev]
+                    ref_bp = bp_stream[ref_lev]
+
+                    best_x, best_y, best_angle, best_rot = self._best_4rotation(
+                        curr_bp['basis_x'], curr_bp['basis_y'], curr_bp['basis_z'],
+                        ref_bp['basis_x'], ref_bp['basis_y'], ref_bp['basis_z'])
+
+                    if best_angle != 0:
+                        curr_bp['basis_x'] = best_x
+                        curr_bp['basis_y'] = best_y
+                        print(f"    Level {lev} (anchor): ref=L{ref_lev}, rot={best_angle}°")
+
+                # Pass 2: align each square-like to nearest non-square-like neighbor
+                for lev in range(stream_len):
+                    if not bp_stream[lev].get('square_like', False):
+                        continue
+
+                    # Find nearest non-square-like
+                    ref_lev = None
+                    best_dist = float('inf')
+                    for ns_lev in non_sq:
+                        d = abs(lev - ns_lev)
+                        if d < best_dist:
+                            best_dist = d
+                            ref_lev = ns_lev
+
+                    if ref_lev is None:
+                        continue
+
+                    curr_bp = bp_stream[lev]
+                    ref_bp = bp_stream[ref_lev]
+
+                    best_x, best_y, best_angle, best_rot = self._best_4rotation(
+                        curr_bp['basis_x'], curr_bp['basis_y'], curr_bp['basis_z'],
+                        ref_bp['basis_x'], ref_bp['basis_y'], ref_bp['basis_z'])
+
+                    if best_angle != 0:
+                        curr_bp['basis_x'] = best_x
+                        curr_bp['basis_y'] = best_y
+
         # Update self.bounding_planes to reflect changes
         self.bounding_planes = self.stream_bounding_planes
 

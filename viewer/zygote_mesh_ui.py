@@ -3205,6 +3205,16 @@ def _render_inspect_2d_windows(v):
             else:
                 imgui.text(f"Selected {corner_name}, hover vertex to preview")
 
+            # "Find cor" buttons: apply this corner's unit-square ratio to all levels
+            imgui.same_line()
+            if imgui.button(f"Find cor (x)##{name}"):
+                _find_correspondence_all_levels(v, name, obj, stream_idx, level_idx,
+                                                 corr_corner, is_post_stream, axis='x')
+            imgui.same_line()
+            if imgui.button(f"Find cor (y)##{name}"):
+                _find_correspondence_all_levels(v, name, obj, stream_idx, level_idx,
+                                                 corr_corner, is_post_stream, axis='y')
+
             if imgui.button(f"Cancel##{name}_corr"):
                 # Restore backup contour_match + waypoints and exit corr mode
                 backup_cm = v.inspect_2d_corr_backup_cm.get(name)
@@ -3384,6 +3394,179 @@ def _reset_corner_correspondence(obj, stream_idx, level_idx, is_post_stream):
                 obj._save_fiber_anim_data()
 
     print(f"[Reset] Corner correspondence reset at stream={stream_idx} level={level_idx}")
+
+
+def _find_correspondence_all_levels(v, name, obj, stream_idx, level_idx, corner_idx, is_post_stream, axis='x'):
+    """Find corner correspondence across ALL levels by matching unit-square coordinate.
+
+    Takes the selected corner's (u, v) position on the current level's unit square,
+    then for each other level, finds the contour vertex at the same x (or y) ratio.
+    When two candidates exist at the same ratio (upper/lower for x, left/right for y),
+    picks the one on the same side as the current corner.
+
+    Args:
+        axis: 'x' matches u-coordinate, 'y' matches v-coordinate
+    """
+    # Get current level's corner position in unit square
+    if is_post_stream:
+        bp_curr = obj.bounding_planes[stream_idx][level_idx]
+    else:
+        bp_curr = obj.bounding_planes[level_idx][stream_idx]
+
+    contour_match = bp_curr.get('contour_match')
+    bp_corners = bp_curr.get('bounding_plane')
+    ci = bp_curr.get('corner_indices')
+    if contour_match is None or bp_corners is None or ci is None:
+        print("  [Find cor] No contour_match or corner_indices at current level")
+        return
+    if corner_idx >= len(ci):
+        return
+
+    # Get the corner's corresponding vertex position in unit square
+    corner_vi = ci[corner_idx]
+    if corner_vi >= len(contour_match):
+        return
+    _, corner_q = contour_match[corner_vi]
+    corner_q = np.array(corner_q)
+
+    # Convert to unit square coordinates
+    bp_c = [np.array(c) for c in bp_corners[:4]]
+    edge_x = bp_c[1] - bp_c[0]
+    edge_y = bp_c[3] - bp_c[0]
+    A = np.column_stack([edge_x, edge_y])
+    rel = corner_q - bp_c[0]
+    result, _, _, _ = np.linalg.lstsq(A, rel, rcond=None)
+    target_u, target_v = float(result[0]), float(result[1])
+
+    print(f"  [Find cor ({axis})] Corner {corner_idx} at ({target_u:.3f}, {target_v:.3f})")
+
+    # Determine which side the corner is on (for disambiguation)
+    if axis == 'x':
+        target_ratio = target_u
+        side_above = target_v > 0.5  # upper or lower
+    else:
+        target_ratio = target_v
+        side_above = target_u > 0.5  # right or left
+
+    # Apply to all levels in this stream
+    if is_post_stream:
+        bp_list = obj.bounding_planes[stream_idx]
+    else:
+        bp_list = obj.bounding_planes
+
+    n_modified = 0
+    fiber_samples = None
+    if hasattr(obj, 'fiber_architecture') and obj.fiber_architecture is not None:
+        if is_post_stream and stream_idx < len(obj.fiber_architecture):
+            fiber_samples = obj.fiber_architecture[stream_idx]
+
+    for lev in range(len(bp_list)):
+        bp_lev = bp_list[lev] if is_post_stream else bp_list[lev]
+        if isinstance(bp_lev, list):
+            if stream_idx < len(bp_lev):
+                bp_lev = bp_lev[stream_idx]
+            else:
+                continue
+
+        match_lev = bp_lev.get('contour_match')
+        bp_corners_lev = bp_lev.get('bounding_plane')
+        if match_lev is None or bp_corners_lev is None:
+            continue
+
+        P_verts = [np.array(p) for p, q in match_lev]
+        n_verts = len(P_verts)
+        bp_c_lev = [np.array(c) for c in bp_corners_lev[:4]]
+
+        # Compute unit square coords for all vertices
+        edge_x_lev = bp_c_lev[1] - bp_c_lev[0]
+        edge_y_lev = bp_c_lev[3] - bp_c_lev[0]
+        A_lev = np.column_stack([edge_x_lev, edge_y_lev])
+
+        vert_uv = np.zeros((n_verts, 2))
+        for vi in range(n_verts):
+            _, q = match_lev[vi]
+            rel_q = np.array(q) - bp_c_lev[0]
+            res, _, _, _ = np.linalg.lstsq(A_lev, rel_q, rcond=None)
+            vert_uv[vi] = [res[0], res[1]]
+
+        # Find vertex closest to target ratio on the matching axis
+        if axis == 'x':
+            diffs = np.abs(vert_uv[:, 0] - target_ratio)
+        else:
+            diffs = np.abs(vert_uv[:, 1] - target_ratio)
+
+        # Get top candidates (within 2x of best diff)
+        best_diff = np.min(diffs)
+        candidates = np.where(diffs < max(best_diff * 2, 0.05))[0]
+
+        if len(candidates) == 0:
+            continue
+
+        # Disambiguate: pick candidate on the correct side
+        if axis == 'x':
+            # Among candidates at similar x, pick by y side
+            if side_above:
+                best_vi = candidates[np.argmax(vert_uv[candidates, 1])]
+            else:
+                best_vi = candidates[np.argmin(vert_uv[candidates, 1])]
+        else:
+            # Among candidates at similar y, pick by x side
+            if side_above:
+                best_vi = candidates[np.argmax(vert_uv[candidates, 0])]
+            else:
+                best_vi = candidates[np.argmin(vert_uv[candidates, 0])]
+
+        # Apply this corner correspondence
+        ci_lev = bp_lev.get('corner_indices')
+        if ci_lev is None:
+            ci_lev = []
+            for c_idx, c_3d in enumerate(bp_c_lev):
+                d = [np.linalg.norm(np.array(q) - c_3d) for _, q in match_lev]
+                ci_lev.append(int(np.argmin(d)))
+
+        new_ci = list(ci_lev)
+        old_vi = new_ci[corner_idx]
+        new_ci[corner_idx] = int(best_vi)
+
+        if len(set(new_ci)) < 4:
+            continue
+
+        if new_ci[corner_idx] == old_vi:
+            continue
+
+        # Recompute contour_match
+        from viewer.contour_mesh import ContourMeshMixin
+        new_match = ContourMeshMixin._recompute_contour_match(
+            P_verts, bp_c_lev, new_ci, n_verts)
+        bp_lev['contour_match'] = new_match
+        bp_lev['corner_indices'] = new_ci
+
+        # Recompute waypoints
+        if fiber_samples is not None and len(fiber_samples) > 0:
+            _, new_wp, new_mvc = obj.find_waypoints(bp_lev, fiber_samples)
+            if hasattr(obj, 'waypoints') and obj.waypoints is not None:
+                if is_post_stream and stream_idx < len(obj.waypoints) and lev < len(obj.waypoints[stream_idx]):
+                    obj.waypoints[stream_idx][lev] = new_wp
+            if hasattr(obj, 'mvc_weights') and obj.mvc_weights is not None:
+                if is_post_stream and stream_idx < len(obj.mvc_weights) and lev < len(obj.mvc_weights[stream_idx]):
+                    obj.mvc_weights[stream_idx][lev] = new_mvc
+
+        n_modified += 1
+
+    if n_modified > 0:
+        # Resave animation data
+        if hasattr(obj, '_save_fiber_anim_data'):
+            obj._save_fiber_anim_data()
+        print(f"  [Find cor ({axis})] Modified {n_modified} levels for corner {corner_idx}")
+
+    # Exit corr mode
+    v.inspect_2d_corr_mode[name] = False
+    v.inspect_2d_corr_corner[name] = -1
+    v.inspect_2d_corr_vertex[name] = -1
+    v.inspect_2d_corr_backup_cm.pop(name, None)
+    v.inspect_2d_corr_backup_wp.pop(name, None)
+    v.inspect_2d_corr_backup_mvc.pop(name, None)
+    v.inspect_2d_corr_preview_active.pop(name, None)
 
 
 def _apply_corner_correspondence_lightweight(obj, stream_idx, level_idx, corner_idx, vertex_idx, is_post_stream):
