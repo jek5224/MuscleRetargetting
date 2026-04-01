@@ -4033,7 +4033,11 @@ class ContourMeshMixin(ContourAnimationMixin):
                         print(f"    Level {level_idx}, contour {contour_idx}: flipping z")
                         curr_bp['basis_z'] = -curr_bp['basis_z']
                         curr_bp['basis_y'] = -curr_bp['basis_y']
-                        # x unchanged, y flipped to maintain cross(z,x)=y
+                        # Recompute bounding plane with new z (x unchanged, y flipped)
+                        new_contour = self._recompute_bounding_plane_after_axis_change(
+                            curr_bp, self.contours[level_idx][contour_idx]
+                        )
+                        self.contours[level_idx][contour_idx] = new_contour
 
         print("  Z-axis smoothening complete")
 
