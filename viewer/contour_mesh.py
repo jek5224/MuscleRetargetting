@@ -4230,13 +4230,11 @@ class ContourMeshMixin(ContourAnimationMixin):
         best_rot_angle = np.inf
         best_x, best_y, best_angle = curr_x, curr_y, 0
         for cand_x, cand_y, angle in candidates:
-            # Rotation matrix: columns = basis vectors
-            # R_rel = R_ref @ R_cand^T
-            # trace(R_rel) = sum of dot products of corresponding columns
+            # Compare only x and y alignment (z is already aligned by z-smooth).
+            # Using trace with z forced to 1.0 so z differences don't affect ranking.
             trace_val = (np.dot(cand_x, ref_x) +
                          np.dot(cand_y, ref_y) +
-                         np.dot(curr_z, ref_z))
-            # angle = arccos((trace - 1) / 2)
+                         1.0)  # z contribution = 1.0 (assume aligned)
             rot_angle = np.arccos(np.clip((trace_val - 1.0) / 2.0, -1.0, 1.0))
             if rot_angle < best_rot_angle:
                 best_rot_angle = rot_angle
