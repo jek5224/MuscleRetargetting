@@ -4190,10 +4190,7 @@ class ContourMeshMixin(ContourAnimationMixin):
                     print(f"    Level {level_idx}, contour {contour_idx}: rot {best_angle}° (diff={np.degrees(best_rot):.1f}°)")
                     curr_bp['basis_x'] = best_x
                     curr_bp['basis_y'] = best_y
-                    new_contour = self._recompute_bounding_plane_after_axis_change(
-                        curr_bp, self.contours[level_idx][contour_idx]
-                    )
-                    self.contours[level_idx][contour_idx] = new_contour
+                    # Don't recompute bounding plane — bp-smooth handles it
 
         # ========== BACKWARD PASS: start_level-1 → origin ==========
         print("  Backward pass...")
@@ -4215,10 +4212,7 @@ class ContourMeshMixin(ContourAnimationMixin):
                     print(f"    Level {level_idx}, contour {contour_idx}: rot {best_angle}°")
                     curr_bp['basis_x'] = best_x
                     curr_bp['basis_y'] = best_y
-                    new_contour = self._recompute_bounding_plane_after_axis_change(
-                        curr_bp, self.contours[level_idx][contour_idx]
-                    )
-                    self.contours[level_idx][contour_idx] = new_contour
+                    # Don't recompute bounding plane — bp-smooth handles it
 
         print("  X-axis smoothening complete")
 
