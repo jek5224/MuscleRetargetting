@@ -4006,28 +4006,38 @@ class ContourMeshMixin(ContourAnimationMixin):
                     best_idx = i
             return best_idx
 
-        # Level 0: flip z to point toward level 1 (toward insertion)
-        for contour_idx in range(contour_counts[0]):
-            curr_bp = self.bounding_planes[0][contour_idx]
-            next_idx = find_closest_contour(curr_bp, 1)
-            next_mean = self.bounding_planes[1][next_idx]['mean']
-            direction = next_mean - curr_bp['mean']
-            direction_norm = np.linalg.norm(direction)
-            if direction_norm > 1e-10:
-                direction = direction / direction_norm
-                if np.dot(curr_bp['basis_z'], direction) < 0:
-                    print(f"    Level 0, contour {contour_idx}: flipping z")
+        # Compute global origin-to-insertion direction
+        origin_mean = self.bounding_planes[0][0]['mean']
+        insertion_mean = self.bounding_planes[-1][0]['mean']
+        global_dir = insertion_mean - origin_mean
+        global_dir_norm = np.linalg.norm(global_dir)
+        if global_dir_norm > 1e-10:
+            global_dir = global_dir / global_dir_norm
+        else:
+            global_dir = np.array([0.0, 1.0, 0.0])
+
+        # Pass 1: flip z to align with origin-to-insertion direction
+        for level_idx in range(num_levels):
+            for contour_idx in range(contour_counts[level_idx]):
+                curr_bp = self.bounding_planes[level_idx][contour_idx]
+                if np.dot(curr_bp['basis_z'], global_dir) < 0:
+                    print(f"    Level {level_idx}, contour {contour_idx}: flipping z (global)")
                     curr_bp['basis_z'] = -curr_bp['basis_z']
 
-        # Chain: levels 1..end align z with previous level's z
-        for level_idx in range(1, num_levels):
+        # Pass 2: fix outsiders — if a level's z disagrees with both neighbors, flip it
+        for level_idx in range(1, num_levels - 1):
             for contour_idx in range(contour_counts[level_idx]):
                 curr_bp = self.bounding_planes[level_idx][contour_idx]
                 prev_idx = find_closest_contour(curr_bp, level_idx - 1)
+                next_idx = find_closest_contour(curr_bp, level_idx + 1)
                 prev_z = self.bounding_planes[level_idx - 1][prev_idx]['basis_z']
+                next_z = self.bounding_planes[level_idx + 1][next_idx]['basis_z']
 
-                if np.dot(curr_bp['basis_z'], prev_z) < 0:
-                    print(f"    Level {level_idx}, contour {contour_idx}: flipping z")
+                dot_prev = np.dot(curr_bp['basis_z'], prev_z)
+                dot_next = np.dot(curr_bp['basis_z'], next_z)
+
+                if dot_prev < 0 and dot_next < 0:
+                    print(f"    Level {level_idx}, contour {contour_idx}: flipping z (outsider)")
                     curr_bp['basis_z'] = -curr_bp['basis_z']
 
         print("  Z-axis smoothening complete")
