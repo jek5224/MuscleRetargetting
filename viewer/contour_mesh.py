@@ -4148,15 +4148,30 @@ class ContourMeshMixin(ContourAnimationMixin):
         # Reference vector for initial alignment
         ref_x = np.array([1.0, 0.0, 0.0])
 
-        # ========== STARTING LEVEL: compare with (1,0,0) ==========
+        # ========== STARTING LEVEL: 4-rotation to align with (1,0,0) ==========
         for contour_idx in range(contour_counts[start_level]):
             curr_bp = self.bounding_planes[start_level][contour_idx]
             curr_x = curr_bp['basis_x']
+            curr_y = curr_bp['basis_y']
+            curr_z = curr_bp['basis_z']
 
-            if np.dot(curr_x, ref_x) < 0:
-                print(f"    Level {start_level}, contour {contour_idx}: flipping x and y (initial)")
-                curr_bp['basis_x'] = -curr_bp['basis_x']
-                # Recompute bounding plane and contour match
+            # Build reference frame from (1,0,0) in current z-plane
+            ref_y = np.cross(curr_z, ref_x)
+            ref_y_norm = np.linalg.norm(ref_y)
+            if ref_y_norm > 1e-10:
+                ref_y = ref_y / ref_y_norm
+                ref_x_proj = np.cross(ref_y, curr_z)
+            else:
+                ref_x_proj = curr_x
+                ref_y = curr_y
+
+            best_x, best_y, best_angle, _ = self._best_4rotation(
+                curr_x, curr_y, curr_z, ref_x_proj, ref_y, curr_z)
+
+            if best_angle != 0:
+                print(f"    Level {start_level}, contour {contour_idx}: rot {best_angle}° (initial)")
+                curr_bp['basis_x'] = best_x
+                curr_bp['basis_y'] = best_y
                 new_contour = self._recompute_bounding_plane_after_axis_change(
                     curr_bp, self.contours[start_level][contour_idx]
                 )
@@ -4171,17 +4186,19 @@ class ContourMeshMixin(ContourAnimationMixin):
 
             for contour_idx in range(curr_count):
                 curr_bp = self.bounding_planes[level_idx][contour_idx]
-                curr_x = curr_bp['basis_x']
 
                 # Find corresponding previous contour (always use distance-based matching)
                 prev_idx = find_closest_contour(curr_bp, prev_level)
+                prev_bp = self.bounding_planes[prev_level][prev_idx]
 
-                prev_x = self.bounding_planes[prev_level][prev_idx]['basis_x']
+                best_x, best_y, best_angle, _ = self._best_4rotation(
+                    curr_bp['basis_x'], curr_bp['basis_y'], curr_bp['basis_z'],
+                    prev_bp['basis_x'], prev_bp['basis_y'], prev_bp['basis_z'])
 
-                if np.dot(curr_x, prev_x) < 0:
-                    print(f"    Level {level_idx}, contour {contour_idx}: flipping x and y")
-                    curr_bp['basis_x'] = -curr_bp['basis_x']
-                    # Recompute bounding plane and contour match
+                if best_angle != 0:
+                    print(f"    Level {level_idx}, contour {contour_idx}: rot {best_angle}°")
+                    curr_bp['basis_x'] = best_x
+                    curr_bp['basis_y'] = best_y
                     new_contour = self._recompute_bounding_plane_after_axis_change(
                         curr_bp, self.contours[level_idx][contour_idx]
                     )
@@ -4196,17 +4213,19 @@ class ContourMeshMixin(ContourAnimationMixin):
 
             for contour_idx in range(curr_count):
                 curr_bp = self.bounding_planes[level_idx][contour_idx]
-                curr_x = curr_bp['basis_x']
 
                 # Find corresponding next contour (always use distance-based matching)
                 next_idx = find_closest_contour(curr_bp, next_level)
+                next_bp = self.bounding_planes[next_level][next_idx]
 
-                next_x = self.bounding_planes[next_level][next_idx]['basis_x']
+                best_x, best_y, best_angle, _ = self._best_4rotation(
+                    curr_bp['basis_x'], curr_bp['basis_y'], curr_bp['basis_z'],
+                    next_bp['basis_x'], next_bp['basis_y'], next_bp['basis_z'])
 
-                if np.dot(curr_x, next_x) < 0:
-                    print(f"    Level {level_idx}, contour {contour_idx}: flipping x and y")
-                    curr_bp['basis_x'] = -curr_bp['basis_x']
-                    # Recompute bounding plane and contour match
+                if best_angle != 0:
+                    print(f"    Level {level_idx}, contour {contour_idx}: rot {best_angle}°")
+                    curr_bp['basis_x'] = best_x
+                    curr_bp['basis_y'] = best_y
                     new_contour = self._recompute_bounding_plane_after_axis_change(
                         curr_bp, self.contours[level_idx][contour_idx]
                     )
