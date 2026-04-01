@@ -8871,8 +8871,9 @@ class ContourMeshMixin(ContourAnimationMixin):
                 self.waypoints[i].append(waypoints)
                 self.mvc_weights[i].append(mvc_weights)
 
-        # Optimize corner correspondences to minimize fiber bending energy
-        self._optimize_waypoint_smoothness()
+        # Chain-propagate corner correspondences from reference level (arc-length fraction)
+        # Disabled: too slow with find_waypoints per level. Use Find cor (x)/(y) for manual tuning.
+        # self._optimize_waypoint_smoothness()
 
         # Populate stream endpoints for bounding box visualization
         self._stream_endpoints = []
