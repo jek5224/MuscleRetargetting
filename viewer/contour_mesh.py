@@ -4006,41 +4006,29 @@ class ContourMeshMixin(ContourAnimationMixin):
                     best_idx = i
             return best_idx
 
-        # For each level, flip z to point toward insertion
-        for level_idx in range(num_levels):
+        # Level 0: flip z to point toward level 1 (toward insertion)
+        for contour_idx in range(contour_counts[0]):
+            curr_bp = self.bounding_planes[0][contour_idx]
+            next_idx = find_closest_contour(curr_bp, 1)
+            next_mean = self.bounding_planes[1][next_idx]['mean']
+            direction = next_mean - curr_bp['mean']
+            direction_norm = np.linalg.norm(direction)
+            if direction_norm > 1e-10:
+                direction = direction / direction_norm
+                if np.dot(curr_bp['basis_z'], direction) < 0:
+                    print(f"    Level 0, contour {contour_idx}: flipping z")
+                    curr_bp['basis_z'] = -curr_bp['basis_z']
+
+        # Chain: levels 1..end align z with previous level's z
+        for level_idx in range(1, num_levels):
             for contour_idx in range(contour_counts[level_idx]):
                 curr_bp = self.bounding_planes[level_idx][contour_idx]
-                curr_mean = curr_bp['mean']
-                curr_z = curr_bp['basis_z']
+                prev_idx = find_closest_contour(curr_bp, level_idx - 1)
+                prev_z = self.bounding_planes[level_idx - 1][prev_idx]['basis_z']
 
-                # Compute direction toward insertion
-                if level_idx < num_levels - 1:
-                    # Use direction toward next level (toward insertion)
-                    next_idx = find_closest_contour(curr_bp, level_idx + 1)
-                    next_mean = self.bounding_planes[level_idx + 1][next_idx]['mean']
-                    direction = next_mean - curr_mean
-                else:
-                    # Last level: use direction from previous level toward here
-                    prev_idx = find_closest_contour(curr_bp, level_idx - 1)
-                    prev_mean = self.bounding_planes[level_idx - 1][prev_idx]['mean']
-                    direction = curr_mean - prev_mean
-
-                direction_norm = np.linalg.norm(direction)
-                if direction_norm > 1e-10:
-                    direction = direction / direction_norm
-
-                    if np.dot(curr_z, direction) < 0:
-                        print(f"    Level {level_idx}, contour {contour_idx}: flipping z")
-                        curr_bp['basis_z'] = -curr_bp['basis_z']
-                        # Only update basis vectors, don't recompute bounding plane
-                        # bp-smooth will recompute everything
-                        old_x = curr_bp['basis_x'].copy()
-                        new_z = curr_bp['basis_z']
-                        new_x = old_x - np.dot(old_x, new_z) * new_z
-                        new_x_norm = np.linalg.norm(new_x)
-                        if new_x_norm > 1e-10:
-                            curr_bp['basis_x'] = new_x / new_x_norm
-                        curr_bp['basis_y'] = np.cross(new_z, curr_bp['basis_x'])
+                if np.dot(curr_bp['basis_z'], prev_z) < 0:
+                    print(f"    Level {level_idx}, contour {contour_idx}: flipping z")
+                    curr_bp['basis_z'] = -curr_bp['basis_z']
 
         print("  Z-axis smoothening complete")
 
