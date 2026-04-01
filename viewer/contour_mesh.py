@@ -4032,23 +4032,15 @@ class ContourMeshMixin(ContourAnimationMixin):
                     if np.dot(curr_z, direction) < 0:
                         print(f"    Level {level_idx}, contour {contour_idx}: flipping z")
                         curr_bp['basis_z'] = -curr_bp['basis_z']
-                        # Recompute x, y, bounding plane from new z via PCA-like reproject
-                        # Keep x direction closest to original x
+                        # Only update basis vectors, don't recompute bounding plane
+                        # bp-smooth will recompute everything
                         old_x = curr_bp['basis_x'].copy()
                         new_z = curr_bp['basis_z']
-                        # Project old x onto new plane (perp to new z)
                         new_x = old_x - np.dot(old_x, new_z) * new_z
                         new_x_norm = np.linalg.norm(new_x)
                         if new_x_norm > 1e-10:
-                            new_x = new_x / new_x_norm
-                        else:
-                            new_x = old_x
-                        curr_bp['basis_x'] = new_x
-                        curr_bp['basis_y'] = np.cross(new_z, new_x)
-                        new_contour = self._recompute_bounding_plane_after_axis_change(
-                            curr_bp, self.contours[level_idx][contour_idx]
-                        )
-                        self.contours[level_idx][contour_idx] = new_contour
+                            curr_bp['basis_x'] = new_x / new_x_norm
+                        curr_bp['basis_y'] = np.cross(new_z, curr_bp['basis_x'])
 
         print("  Z-axis smoothening complete")
 
