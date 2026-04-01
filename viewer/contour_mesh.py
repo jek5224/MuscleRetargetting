@@ -4346,6 +4346,35 @@ class ContourMeshMixin(ContourAnimationMixin):
                     bp['basis_x'] = best_x
                     bp['basis_y'] = best_y
 
+            else:
+                # All square-like: align level 0 to (1,0,0), chain forward
+                bp0 = bp_stream[0]
+                bz = bp0['basis_z']
+                ref_x = np.array([1.0, 0.0, 0.0])
+                ref_y = np.cross(bz, ref_x)
+                rn = np.linalg.norm(ref_y)
+                if rn > 1e-10:
+                    ref_y /= rn
+                    ref_x = np.cross(ref_y, bz)
+                else:
+                    ref_x, ref_y = bp0['basis_x'], bp0['basis_y']
+                best_x, best_y, best_angle, _ = self._best_4rotation(
+                    bp0['basis_x'], bp0['basis_y'], bz, ref_x, ref_y, bz)
+                if best_angle != 0:
+                    bp0['basis_x'] = best_x
+                    bp0['basis_y'] = best_y
+                # Chain the rest
+                for lev in range(1, stream_len):
+                    curr_bp = bp_stream[lev]
+                    prev_bp = bp_stream[lev - 1]
+                    best_x, best_y, best_angle, _ = self._best_4rotation(
+                        curr_bp['basis_x'], curr_bp['basis_y'], curr_bp['basis_z'],
+                        prev_bp['basis_x'], prev_bp['basis_y'], prev_bp['basis_z'])
+                    if best_angle != 0:
+                        curr_bp['basis_x'] = best_x
+                        curr_bp['basis_y'] = best_y
+                non_sq = list(range(stream_len))  # treat all as processed
+
             # Step 2: Chain square-like levels from adjacent non-square-like anchors
             # Forward sweep: each square-like inherits from its previous already-processed level
             processed = set(non_sq)
