@@ -4285,97 +4285,37 @@ class ContourMeshMixin(ContourAnimationMixin):
             if stream_len < 1:
                 continue
 
-            # Level 0: align with (1,0,0)
-            first_bp = bp_stream[0]
-            first_x = first_bp['basis_x']
-            first_y = first_bp['basis_y']
-            first_z = first_bp['basis_z']
-
-            ref_x = np.array([1.0, 0.0, 0.0])
-            ref_y = np.cross(first_z, ref_x)
-            ref_y_norm = np.linalg.norm(ref_y)
-            if ref_y_norm > 1e-10:
-                ref_y = ref_y / ref_y_norm
-                ref_x = np.cross(ref_y, first_z)
-            else:
-                ref_x = first_x
-                ref_y = first_y
-
-            best_x, best_y, best_angle, best_rot = self._best_4rotation(
-                first_x, first_y, first_z, ref_x, ref_y, first_z)
-
-            print(f"    Level 0: ref=(1,0,0), best_rot={best_angle}°, diff={np.degrees(best_rot):.1f}°")
-
-            if best_angle != 0:
-                first_bp['basis_x'] = best_x
-                first_bp['basis_y'] = best_y
-
-            # Level 1..end: chain from previous level
-            for level in range(1, stream_len):
-                curr_bp = bp_stream[level]
-                prev_bp = bp_stream[level - 1]
-
-                best_x, best_y, best_angle, best_rot = self._best_4rotation(
-                    curr_bp['basis_x'], curr_bp['basis_y'], curr_bp['basis_z'],
-                    prev_bp['basis_x'], prev_bp['basis_y'], prev_bp['basis_z'])
-
-                print(f"    Level {level}: ref=L{level-1}, best_rot={best_angle}°, diff={np.degrees(best_rot):.1f}°")
-
-                if best_angle != 0:
-                    curr_bp['basis_x'] = best_x
-                    curr_bp['basis_y'] = best_y
-
-            # Anchor correction: re-align non-square-like levels to nearest non-square-like neighbor,
-            # then re-align square-like levels to nearest non-square-like neighbor.
-            # This prevents twist drift through square-like sections.
+            # Step 1: Chain non-square-like levels to each other
             non_sq = [lev for lev in range(stream_len) if not bp_stream[lev].get('square_like', False)]
 
             if len(non_sq) >= 2:
-                # Pass 1: align each non-square-like to its nearest non-square-like neighbor
-                for idx, lev in enumerate(non_sq):
-                    # Find nearest non-square-like neighbor (prefer previous in chain order)
-                    ref_lev = None
-                    if idx > 0:
-                        ref_lev = non_sq[idx - 1]
-                    elif idx < len(non_sq) - 1:
-                        ref_lev = non_sq[idx + 1]
+                # Align first non-square-like to (1,0,0)
+                first_ns = non_sq[0]
+                first_bp = bp_stream[first_ns]
+                first_z = first_bp['basis_z']
 
-                    if ref_lev is None:
-                        continue
+                ref_x = np.array([1.0, 0.0, 0.0])
+                ref_y = np.cross(first_z, ref_x)
+                ref_y_norm = np.linalg.norm(ref_y)
+                if ref_y_norm > 1e-10:
+                    ref_y = ref_y / ref_y_norm
+                    ref_x = np.cross(ref_y, first_z)
+                else:
+                    ref_x = first_bp['basis_x']
+                    ref_y = first_bp['basis_y']
 
-                    curr_bp = bp_stream[lev]
-                    ref_bp = bp_stream[ref_lev]
+                best_x, best_y, best_angle, _ = self._best_4rotation(
+                    first_bp['basis_x'], first_bp['basis_y'], first_z,
+                    ref_x, ref_y, first_z)
+                if best_angle != 0:
+                    first_bp['basis_x'] = best_x
+                    first_bp['basis_y'] = best_y
+                print(f"    L{first_ns} (1st anchor): ref=(1,0,0), rot={best_angle}°")
 
-                    best_x, best_y, best_angle, best_rot = self._best_4rotation(
-                        curr_bp['basis_x'], curr_bp['basis_y'], curr_bp['basis_z'],
-                        ref_bp['basis_x'], ref_bp['basis_y'], ref_bp['basis_z'])
-
-                    if best_angle != 0:
-                        curr_bp['basis_x'] = best_x
-                        curr_bp['basis_y'] = best_y
-                        print(f"    Level {lev} (anchor): ref=L{ref_lev}, rot={best_angle}°")
-
-                # Pass 2: chain-propagate square-like levels from non-square-like anchors
-                # Forward: from each non-square-like, propagate to following square-like levels
-                # Backward: from each non-square-like, propagate to preceding square-like levels
-                # This chains through adjacent levels instead of jumping to a distant anchor.
-                processed = set(non_sq)
-                # Forward sweep
-                for lev in range(stream_len):
-                    if lev in processed:
-                        continue
-                    if not bp_stream[lev].get('square_like', False):
-                        processed.add(lev)
-                        continue
-                    # Find previous processed level
-                    ref_lev = None
-                    for pl in range(lev - 1, -1, -1):
-                        if pl in processed:
-                            ref_lev = pl
-                            break
-                    if ref_lev is None:
-                        continue
-
+                # Chain remaining non-square-like levels
+                for idx in range(1, len(non_sq)):
+                    lev = non_sq[idx]
+                    ref_lev = non_sq[idx - 1]
                     curr_bp = bp_stream[lev]
                     ref_bp = bp_stream[ref_lev]
                     best_x, best_y, best_angle, _ = self._best_4rotation(
@@ -4384,21 +4324,66 @@ class ContourMeshMixin(ContourAnimationMixin):
                     if best_angle != 0:
                         curr_bp['basis_x'] = best_x
                         curr_bp['basis_y'] = best_y
-                    processed.add(lev)
-
-                # Backward sweep: chain from adjacent level+1 (already processed)
-                for lev in range(stream_len - 2, -1, -1):
-                    if not bp_stream[lev].get('square_like', False):
-                        continue
-
-                    curr_bp = bp_stream[lev]
-                    ref_bp = bp_stream[lev + 1]
-                    best_x, best_y, best_angle, _ = self._best_4rotation(
-                        curr_bp['basis_x'], curr_bp['basis_y'], curr_bp['basis_z'],
-                        ref_bp['basis_x'], ref_bp['basis_y'], ref_bp['basis_z'])
                     if best_angle != 0:
-                        curr_bp['basis_x'] = best_x
-                        curr_bp['basis_y'] = best_y
+                        print(f"    L{lev} (anchor): ref=L{ref_lev}, rot={best_angle}°")
+
+            elif len(non_sq) == 1:
+                # Only one non-square-like: align to (1,0,0)
+                lev = non_sq[0]
+                bp = bp_stream[lev]
+                bz = bp['basis_z']
+                ref_x = np.array([1.0, 0.0, 0.0])
+                ref_y = np.cross(bz, ref_x)
+                rn = np.linalg.norm(ref_y)
+                if rn > 1e-10:
+                    ref_y /= rn
+                    ref_x = np.cross(ref_y, bz)
+                else:
+                    ref_x, ref_y = bp['basis_x'], bp['basis_y']
+                best_x, best_y, best_angle, _ = self._best_4rotation(
+                    bp['basis_x'], bp['basis_y'], bz, ref_x, ref_y, bz)
+                if best_angle != 0:
+                    bp['basis_x'] = best_x
+                    bp['basis_y'] = best_y
+
+            # Step 2: Chain square-like levels from adjacent non-square-like anchors
+            # Forward sweep: each square-like inherits from its previous already-processed level
+            processed = set(non_sq)
+            for lev in range(stream_len):
+                if lev in processed:
+                    continue
+                ref_lev = None
+                for pl in range(lev - 1, -1, -1):
+                    if pl in processed:
+                        ref_lev = pl
+                        break
+                if ref_lev is None:
+                    continue
+                curr_bp = bp_stream[lev]
+                ref_bp = bp_stream[ref_lev]
+                best_x, best_y, best_angle, _ = self._best_4rotation(
+                    curr_bp['basis_x'], curr_bp['basis_y'], curr_bp['basis_z'],
+                    ref_bp['basis_x'], ref_bp['basis_y'], ref_bp['basis_z'])
+                if best_angle != 0:
+                    curr_bp['basis_x'] = best_x
+                    curr_bp['basis_y'] = best_y
+                processed.add(lev)
+
+            # Backward sweep: square-like levels before first non-square-like
+            for lev in range(stream_len - 2, -1, -1):
+                if not bp_stream[lev].get('square_like', False):
+                    continue
+                if lev in processed:
+                    continue
+                curr_bp = bp_stream[lev]
+                ref_bp = bp_stream[lev + 1]
+                best_x, best_y, best_angle, _ = self._best_4rotation(
+                    curr_bp['basis_x'], curr_bp['basis_y'], curr_bp['basis_z'],
+                    ref_bp['basis_x'], ref_bp['basis_y'], ref_bp['basis_z'])
+                if best_angle != 0:
+                    curr_bp['basis_x'] = best_x
+                    curr_bp['basis_y'] = best_y
+                processed.add(lev)
 
         # Update self.bounding_planes to reflect changes
         self.bounding_planes = self.stream_bounding_planes
