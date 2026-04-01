@@ -4030,9 +4030,10 @@ class ContourMeshMixin(ContourAnimationMixin):
                     direction = direction / direction_norm
 
                     if np.dot(curr_z, direction) < 0:
-                        print(f"    Level {level_idx}, contour {contour_idx}: flipping z and x")
+                        print(f"    Level {level_idx}, contour {contour_idx}: flipping z")
                         curr_bp['basis_z'] = -curr_bp['basis_z']
-                        curr_bp['basis_x'] = -curr_bp['basis_x']
+                        # Recompute y to maintain right-handedness, keep x unchanged
+                        curr_bp['basis_y'] = np.cross(curr_bp['basis_z'], curr_bp['basis_x'])
                         new_contour = self._recompute_bounding_plane_after_axis_change(
                             curr_bp, self.contours[level_idx][contour_idx]
                         )
@@ -4072,7 +4073,7 @@ class ContourMeshMixin(ContourAnimationMixin):
                 print(f"    Level 0: dot(z, forward)={dot_z_forward:.4f}")
                 if dot_z_forward < 0:
                     bp_stream[0]['basis_z'] = -bp_stream[0]['basis_z']
-                    bp_stream[0]['basis_x'] = -bp_stream[0]['basis_x']
+                    bp_stream[0]['basis_y'] = np.cross(bp_stream[0]['basis_z'], bp_stream[0]['basis_x'])
                     print(f"    Level 0: FLIPPED z toward insertion")
 
             # Forward pass: align z with previous level (flip if needed)
@@ -4084,7 +4085,7 @@ class ContourMeshMixin(ContourAnimationMixin):
 
                 if dot_z < 0:
                     bp_stream[level]['basis_z'] = -bp_stream[level]['basis_z']
-                    bp_stream[level]['basis_x'] = -bp_stream[level]['basis_x']
+                    bp_stream[level]['basis_y'] = np.cross(bp_stream[level]['basis_z'], bp_stream[level]['basis_x'])
                     print(f"    Level {level}: FLIPPED z (dot was {dot_z:.4f})")
 
         # Update self.bounding_planes to reflect changes (bp corners updated in bp smooth)
