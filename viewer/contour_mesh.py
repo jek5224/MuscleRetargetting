@@ -4167,34 +4167,8 @@ class ContourMeshMixin(ContourAnimationMixin):
                     best_idx = i
             return best_idx
 
-        # Reference vector for initial alignment
-        ref_x = np.array([1.0, 0.0, 0.0])
-
-        # ========== STARTING LEVEL: 4-rotation to align with (1,0,0) ==========
-        for contour_idx in range(contour_counts[start_level]):
-            curr_bp = self.bounding_planes[start_level][contour_idx]
-            curr_z = curr_bp['basis_z']
-            # Build (1,0,0) reference frame in current z-plane
-            ref_y = np.cross(curr_z, ref_x)
-            rn = np.linalg.norm(ref_y)
-            if rn > 1e-10:
-                ref_y /= rn
-                ref_x_loc = np.cross(ref_y, curr_z)
-            else:
-                ref_x_loc = curr_bp['basis_x']
-                ref_y = curr_bp['basis_y']
-            best_x, best_y, best_angle, _ = self._best_4rotation(
-                curr_bp['basis_x'], curr_bp['basis_y'], curr_z,
-                ref_x_loc, ref_y, curr_z)
-
-            if best_angle != 0:
-                print(f"    Level {start_level}, contour {contour_idx}: rot {best_angle}° (initial)")
-                curr_bp['basis_x'] = best_x
-                curr_bp['basis_y'] = best_y
-                new_contour = self._recompute_bounding_plane_after_axis_change(
-                    curr_bp, self.contours[start_level][contour_idx]
-                )
-                self.contours[start_level][contour_idx] = new_contour
+        # Starting level keeps its PCA axes as-is (no (1,0,0) alignment).
+        # Forward and backward passes chain from start_level using _best_4rotation.
 
         # ========== FORWARD PASS: start_level+1 → insertion ==========
         print("  Forward pass...")
