@@ -3415,10 +3415,20 @@ def _find_correspondence_all_levels(v, name, obj, stream_idx, level_idx, corner_
 
     contour_match = bp_curr.get('contour_match')
     bp_corners = bp_curr.get('bounding_plane')
-    ci = bp_curr.get('corner_indices')
-    if contour_match is None or bp_corners is None or ci is None:
-        print("  [Find cor] No contour_match or corner_indices at current level")
+    if contour_match is None or bp_corners is None:
+        print("  [Find cor] No contour_match or bounding_plane at current level")
         return
+
+    ci = bp_curr.get('corner_indices')
+    if ci is None:
+        # Detect corner indices from Q positions
+        bp_c = [np.array(c) for c in bp_corners[:4]]
+        ci = []
+        for corner_3d in bp_c:
+            dists = [np.linalg.norm(np.array(q) - corner_3d) for _, q in contour_match]
+            ci.append(int(np.argmin(dists)))
+        bp_curr['corner_indices'] = ci
+
     if corner_idx >= len(ci):
         return
 
