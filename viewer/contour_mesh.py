@@ -4285,44 +4285,32 @@ class ContourMeshMixin(ContourAnimationMixin):
             if stream_len < 1:
                 continue
 
-            # Chain from end toward origin first (backward), then forward.
-            # This ensures level 0 is aligned to level 1, not to (1,0,0) which
-            # can pick wrong quadrant when planes differ.
-
-            # Backward chain: last level → level 0
-            # Last level: align with (1,0,0) as initial seed
-            last_bp = bp_stream[stream_len - 1]
-            last_x = last_bp['basis_x']
-            last_y = last_bp['basis_y']
-            last_z = last_bp['basis_z']
+            # Level 0: align with (1,0,0)
+            first_bp = bp_stream[0]
+            first_x = first_bp['basis_x']
+            first_y = first_bp['basis_y']
+            first_z = first_bp['basis_z']
 
             ref_x = np.array([1.0, 0.0, 0.0])
-            ref_y = np.cross(last_z, ref_x)
+            ref_y = np.cross(first_z, ref_x)
             ref_y_norm = np.linalg.norm(ref_y)
             if ref_y_norm > 1e-10:
                 ref_y = ref_y / ref_y_norm
-                ref_x = np.cross(ref_y, last_z)
+                ref_x = np.cross(ref_y, first_z)
             else:
-                ref_x = last_x
-                ref_y = last_y
+                ref_x = first_x
+                ref_y = first_y
 
             best_x, best_y, best_angle, best_rot = self._best_4rotation(
-                last_x, last_y, last_z, ref_x, ref_y, last_z)
+                first_x, first_y, first_z, ref_x, ref_y, first_z)
+
+            print(f"    Level 0: ref=(1,0,0), best_rot={best_angle}°, diff={np.degrees(best_rot):.1f}°")
+
             if best_angle != 0:
-                last_bp['basis_x'] = best_x
-                last_bp['basis_y'] = best_y
+                first_bp['basis_x'] = best_x
+                first_bp['basis_y'] = best_y
 
-            for level in range(stream_len - 2, -1, -1):
-                curr_bp = bp_stream[level]
-                next_bp = bp_stream[level + 1]
-                best_x, best_y, best_angle, _ = self._best_4rotation(
-                    curr_bp['basis_x'], curr_bp['basis_y'], curr_bp['basis_z'],
-                    next_bp['basis_x'], next_bp['basis_y'], next_bp['basis_z'])
-                if best_angle != 0:
-                    curr_bp['basis_x'] = best_x
-                    curr_bp['basis_y'] = best_y
-
-            # Forward chain: level 0 → end (refine with forward neighbor consistency)
+            # Level 1..end: chain from previous level
             for level in range(1, stream_len):
                 curr_bp = bp_stream[level]
                 prev_bp = bp_stream[level - 1]
@@ -4405,31 +4393,9 @@ class ContourMeshMixin(ContourAnimationMixin):
 
                     curr_bp = bp_stream[lev]
                     ref_bp = bp_stream[lev + 1]
-
-                    # Project ref x onto current plane, pick 4-rotation with best dot
-                    ref_x = ref_bp['basis_x']
-                    curr_z = curr_bp['basis_z']
-                    ref_x_proj = ref_x - np.dot(ref_x, curr_z) * curr_z
-                    ref_x_proj_norm = np.linalg.norm(ref_x_proj)
-                    if ref_x_proj_norm > 1e-10:
-                        ref_x_proj = ref_x_proj / ref_x_proj_norm
-                    else:
-                        continue
-
-                    candidates = [
-                        (curr_bp['basis_x'], curr_bp['basis_y'], 0),
-                        (curr_bp['basis_y'], -curr_bp['basis_x'], 90),
-                        (-curr_bp['basis_x'], -curr_bp['basis_y'], 180),
-                        (-curr_bp['basis_y'], curr_bp['basis_x'], 270),
-                    ]
-                    best_dot = -2.0
-                    best_x, best_y, best_angle = curr_bp['basis_x'], curr_bp['basis_y'], 0
-                    for cand_x, cand_y, angle in candidates:
-                        d = np.dot(cand_x, ref_x_proj)
-                        if d > best_dot:
-                            best_dot = d
-                            best_x, best_y, best_angle = cand_x, cand_y, angle
-
+                    best_x, best_y, best_angle, _ = self._best_4rotation(
+                        curr_bp['basis_x'], curr_bp['basis_y'], curr_bp['basis_z'],
+                        ref_bp['basis_x'], ref_bp['basis_y'], ref_bp['basis_z'])
                     if best_angle != 0:
                         curr_bp['basis_x'] = best_x
                         curr_bp['basis_y'] = best_y
