@@ -3253,7 +3253,7 @@ def _render_inspect_2d_windows(v):
                 v.inspect_2d_corr_backup_mvc.pop(name, None)
                 v.inspect_2d_corr_preview_active.pop(name, None)
 
-        # 3D MVC button: compute MVC using 3D contour positions directly (for saddle-shaped contours)
+        # 3D MVC button for saddle-shaped contours
         if not corr_mode and not show_all and is_post_stream and contour_match is not None:
             if imgui.button(f"3D MVC##{name}"):
                 _apply_3d_mvc(obj, stream_idx, level_idx, is_post_stream)
@@ -3680,6 +3680,7 @@ def _apply_3d_mvc(obj, stream_idx, level_idx, is_post_stream):
                 obj._save_fiber_anim_data()
 
     print(f"  [3D MVC] Applied at stream={stream_idx} level={level_idx}")
+
 
 
 def _apply_corner_correspondence_lightweight(obj, stream_idx, level_idx, corner_idx, vertex_idx, is_post_stream):
