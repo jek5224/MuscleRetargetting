@@ -3626,28 +3626,35 @@ def _apply_3d_mvc(obj, stream_idx, level_idx, is_post_stream):
     Ps = np.array(P_verts)
     bp_c = [np.array(c) for c in bp_corners[:4]]
 
-    # Use ci exactly as user set it. Segments: ci[0]→ci[1], ci[1]→ci[2], ci[2]→ci[3], ci[3]→ci[0]
-    # Each segment maps to one unit-square edge: 0→1 bottom, 1→2 right, 2→3 top, 3→0 left
-    uv_edges = [np.array([0.0, 0.0]), np.array([1.0, 0.0]),
-                np.array([1.0, 1.0]), np.array([0.0, 1.0])]
+    # Sort corners by contour index for proper segmentation (no overlap, full coverage)
+    # Map each sorted corner back to its BP corner for UV assignment
+    uv_bp = [np.array([0.0, 0.0]), np.array([1.0, 0.0]),
+             np.array([1.0, 1.0]), np.array([0.0, 1.0])]
+
+    # (bp_corner_idx, contour_vertex_idx) sorted by contour vertex
+    sorted_pairs = sorted(enumerate(ci), key=lambda x: x[1])
+    sorted_bp = [p[0] for p in sorted_pairs]
+    sorted_vi = [p[1] for p in sorted_pairs]
 
     def _build_qs_direct():
         qs = np.zeros((n_verts, 2))
         nm = [None] * n_verts
-        for edge_idx in range(4):
-            vs = ci[edge_idx]
-            ve = ci[(edge_idx + 1) % 4]
-            uv_s = uv_edges[edge_idx]
-            uv_e = uv_edges[(edge_idx + 1) % 4]
-            q_s = bp_c[edge_idx]
-            q_e = bp_c[(edge_idx + 1) % 4]
-            # Always go forward (consistent direction for all segments)
-            if vs == ve:
-                seg = [vs]
-            elif ve > vs:
+        for seg_idx in range(4):
+            vs = sorted_vi[seg_idx]
+            ve = sorted_vi[(seg_idx + 1) % 4]
+            bp_s = sorted_bp[seg_idx]
+            bp_e = sorted_bp[(seg_idx + 1) % 4]
+            uv_s = uv_bp[bp_s]
+            uv_e = uv_bp[bp_e]
+            q_s = bp_c[bp_s]
+            q_e = bp_c[bp_e]
+            # Always forward (sorted order guarantees short arcs except last which wraps)
+            if ve > vs:
                 seg = list(range(vs, ve))
-            else:
+            elif ve < vs:
                 seg = list(range(vs, n_verts)) + list(range(0, ve))
+            else:
+                seg = [vs]
             if not seg:
                 continue
             arc = [0.0]
@@ -3716,39 +3723,20 @@ def _apply_3d_mvc(obj, stream_idx, level_idx, is_post_stream):
     bp_info['contour_match'] = new_match
     waypoints = _compute_waypoints(Qs_normalized)
 
-    # Debug: full segment info
-    print(f"  [3D MVC] ci={list(ci)}, n_verts={n_verts}")
-    assigned = set()
-    for edge_idx in range(4):
-        vs = ci[edge_idx]
-        ve = ci[(edge_idx + 1) % 4]
-        uv_s = uv_edges[edge_idx]
-        uv_e = uv_edges[(edge_idx + 1) % 4]
-        if vs == ve:
-            seg_len = 1
-        else:
-            if ve > vs:
-                fwd_len = ve - vs
-            else:
-                fwd_len = n_verts - vs + ve
-            if vs > ve:
-                bwd_len = vs - ve
-            else:
-                bwd_len = vs + n_verts - ve
-            seg_len = min(fwd_len, bwd_len)
-            used_fwd = fwd_len <= bwd_len
-        print(f"  [3D MVC] Edge {edge_idx}: {vs}→{ve}, uv ({uv_s[0]:.0f},{uv_s[1]:.0f})→({uv_e[0]:.0f},{uv_e[1]:.0f}), seg_len={seg_len}, dir={'fwd' if used_fwd else 'bwd'}")
-    # Check None entries
+    # Debug
+    print(f"  [3D MVC] ci={list(ci)}, sorted_vi={sorted_vi}, sorted_bp={sorted_bp}, n_verts={n_verts}")
+    total_seg = 0
+    for seg_idx in range(4):
+        vs = sorted_vi[seg_idx]
+        ve = sorted_vi[(seg_idx + 1) % 4]
+        bp_s = sorted_bp[seg_idx]
+        bp_e = sorted_bp[(seg_idx + 1) % 4]
+        seg_len = (ve - vs) if ve > vs else (n_verts - vs + ve)
+        total_seg += seg_len
+        print(f"  [3D MVC] Seg {seg_idx}: {vs}→{ve} ({seg_len} verts), BP {bp_s}→{bp_e}, uv ({uv_bp[bp_s][0]:.0f},{uv_bp[bp_s][1]:.0f})→({uv_bp[bp_e][0]:.0f},{uv_bp[bp_e][1]:.0f})")
+    print(f"  [3D MVC] Total seg verts: {total_seg} (should be {n_verts})")
     n_none = sum(1 for m in new_match if m is None)
-    n_assigned = sum(1 for q in Qs_normalized if q[0] != 0 or q[1] != 0)
-    # Count per-edge
-    on_bottom = sum(1 for q in Qs_normalized if abs(q[1]) < 0.01 and 0 <= q[0] <= 1)
-    on_right = sum(1 for q in Qs_normalized if abs(q[0] - 1) < 0.01 and 0 <= q[1] <= 1)
-    on_top = sum(1 for q in Qs_normalized if abs(q[1] - 1) < 0.01 and 0 <= q[0] <= 1)
-    on_left = sum(1 for q in Qs_normalized if abs(q[0]) < 0.01 and 0 <= q[1] <= 1)
-    interior = n_verts - on_bottom - on_right - on_top - on_left
-    print(f"  [3D MVC] Per-edge: bottom={on_bottom}, right={on_right}, top={on_top}, left={on_left}, interior/overlap={interior}")
-    print(f"  [3D MVC] None matches: {n_none}, Qs at (0,0): {sum(1 for q in Qs_normalized if q[0]==0 and q[1]==0)}")
+    print(f"  [3D MVC] None: {n_none}, Qs at (0,0): {sum(1 for q in Qs_normalized if q[0]==0 and q[1]==0)}")
     print(f"  [3D MVC] Qs range: x=[{Qs_normalized[:,0].min():.3f},{Qs_normalized[:,0].max():.3f}] y=[{Qs_normalized[:,1].min():.3f},{Qs_normalized[:,1].max():.3f}]")
 
     # Clamp extreme waypoints
