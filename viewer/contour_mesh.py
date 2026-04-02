@@ -12957,6 +12957,17 @@ class ContourMeshMixin(ContourAnimationMixin):
 
         print(f"\n=== Select Levels ===")
         print(f"Streams: {max_stream_count}, Levels: {num_levels}")
+        # Debug: verify stream data integrity
+        sbp_counts = [len(self.stream_bounding_planes[s]) for s in range(max_stream_count)]
+        sc_counts = [len(self.stream_contours[s]) for s in range(max_stream_count)]
+        bp_counts = [len(self.bounding_planes[s]) for s in range(len(self.bounding_planes))] if self.bounding_planes else []
+        ct_counts = [len(self.contours[s]) for s in range(len(self.contours))] if self.contours else []
+        print(f"  stream_bounding_planes: {sbp_counts}")
+        print(f"  stream_contours: {sc_counts}")
+        print(f"  bounding_planes: {bp_counts}")
+        print(f"  contours: {ct_counts}")
+        print(f"  stream_bps is bounding_planes: {self.stream_bounding_planes is self.bounding_planes}")
+        print(f"  _selected_stream_bps: {'set' if getattr(self, '_selected_stream_bounding_planes', None) is not None else 'None'}")
 
         # Compute muscle length for error threshold
         first_mean = self.stream_bounding_planes[0][0]['mean']
