@@ -3626,33 +3626,21 @@ def _apply_3d_mvc(obj, stream_idx, level_idx, is_post_stream):
     Ps = np.array(P_verts)
     bp_c = [np.array(c) for c in bp_corners[:4]]
 
-    # Sort corners by contour index to get 4 arcs going the short way
-    # Then try all 4 rotations of mapping arcs to unit-square edges
+    # Use ci exactly as user set it. Segments: ci[0]→ci[1], ci[1]→ci[2], ci[2]→ci[3], ci[3]→ci[0]
+    # Each segment maps to one unit-square edge: 0→1 bottom, 1→2 right, 2→3 top, 3→0 left
     uv_edges = [np.array([0.0, 0.0]), np.array([1.0, 0.0]),
                 np.array([1.0, 1.0]), np.array([0.0, 1.0])]
 
-    # sorted_pairs: [(bp_corner_idx, contour_vertex_idx)] sorted by contour index
-    sorted_pairs = sorted(enumerate(ci), key=lambda x: x[1])
-    sorted_bp_idx = [p[0] for p in sorted_pairs]  # which BP corner
-    sorted_vi = [p[1] for p in sorted_pairs]       # contour vertex index (ascending)
-
-    def _build_qs(rotation):
-        """Build Qs with a given rotation offset mapping sorted arcs to uv edges."""
+    def _build_qs_direct():
         qs = np.zeros((n_verts, 2))
         nm = [None] * n_verts
-        for arc_idx in range(4):
-            vs = sorted_vi[arc_idx]
-            ve = sorted_vi[(arc_idx + 1) % 4]
-            # BP corners for this arc's endpoints
-            bp_s = sorted_bp_idx[arc_idx]
-            bp_e = sorted_bp_idx[(arc_idx + 1) % 4]
-            # UV: map this arc to unit-square edge (rotation + arc_idx)
-            uv_idx = (arc_idx + rotation) % 4
-            uv_s = uv_edges[uv_idx]
-            uv_e = uv_edges[(uv_idx + 1) % 4]
-            q_s = bp_c[bp_s]
-            q_e = bp_c[bp_e]
-            # Forward from vs to ve (always short way since sorted)
+        for edge_idx in range(4):
+            vs = ci[edge_idx]
+            ve = ci[(edge_idx + 1) % 4]
+            uv_s = uv_edges[edge_idx]
+            uv_e = uv_edges[(edge_idx + 1) % 4]
+            q_s = bp_c[edge_idx]
+            q_e = bp_c[(edge_idx + 1) % 4]
             if ve > vs:
                 seg = list(range(vs, ve))
             elif ve < vs:
@@ -3723,39 +3711,10 @@ def _apply_3d_mvc(obj, stream_idx, level_idx, is_post_stream):
         fiber_samples = fiber_samples[:, :2]
 
     # Try both windings
-    # Try all 4 rotations, pick the one closest to adjacent level's waypoints
-    adj_lev = level_idx - 1 if level_idx > 0 else level_idx + 1
-    adj_wp = None
-    if hasattr(obj, 'waypoints') and obj.waypoints is not None:
-        if stream_idx < len(obj.waypoints) and adj_lev < len(obj.waypoints[stream_idx]):
-            adj_wp = np.array(obj.waypoints[stream_idx][adj_lev])
-
-    best_err = float('inf')
-    best_rot = 0
-    best_wp = None
-    best_qs = None
-    best_nm = None
-
-    for rot in range(4):
-        qs, nm = _build_qs(rot)
-        wp = _compute_waypoints(qs)
-        if adj_wp is not None and len(adj_wp) == len(wp):
-            err = np.sum(np.linalg.norm(wp - adj_wp, axis=1))
-        else:
-            err = 0
-        if err < best_err:
-            best_err = err
-            best_rot = rot
-            best_wp = wp
-            best_qs = qs
-            best_nm = nm
-
-    waypoints = best_wp
-    Qs_normalized = best_qs
-    bp_info['contour_match'] = best_nm
-    # Update corner_indices to match sorted order
-    bp_info['corner_indices'] = sorted_vi
-    print(f"  [3D MVC] Best rotation={best_rot}, err={best_err:.4f}")
+    Qs_normalized, new_match = _build_qs_direct()
+    bp_info['contour_match'] = new_match
+    waypoints = _compute_waypoints(Qs_normalized)
+    print(f"  [3D MVC] Qs range: x=[{Qs_normalized[:,0].min():.3f},{Qs_normalized[:,0].max():.3f}] y=[{Qs_normalized[:,1].min():.3f},{Qs_normalized[:,1].max():.3f}]")
 
     # Clamp extreme waypoints
     centroid = np.mean(Ps, axis=0)
@@ -3766,7 +3725,7 @@ def _apply_3d_mvc(obj, stream_idx, level_idx, is_post_stream):
             waypoints[i] = centroid
 
     # Compute MVC weights for storage
-    qs_used = best_qs
+    qs_used = Qs_normalized
     fs_list = []
     for v in fiber_samples:
         s_v = [Q - v for Q in qs_used]
