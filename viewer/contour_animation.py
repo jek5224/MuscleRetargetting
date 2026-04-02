@@ -1282,22 +1282,17 @@ class ContourAnimationMixin:
         for s in range(max_stream_count):
             print(f"  Stream {s}: {self.stream_selected_levels[s]}")
 
-        # Get original data — prefer anim_original which has smooth-applied BPs
-        anim_orig = getattr(self, '_level_select_anim_original', None)
+        # Use stream_bounding_planes directly (current live data, guaranteed correct)
+        # instead of orig/anim_orig which may have stale references
         orig = self._level_select_original
         orig_stream_contours = orig['stream_contours']
-        if anim_orig is not None:
-            orig_stream_bounding_planes = anim_orig['stream_bounding_planes']
-        else:
-            orig_stream_bounding_planes = orig['stream_bounding_planes']
         orig_stream_groups = orig['stream_groups']
 
-        # Apply selection to stream_contours and stream_bounding_planes
+        # Apply selection
         new_stream_contours = [[] for _ in range(max_stream_count)]
         new_stream_bounding_planes = [[] for _ in range(max_stream_count)]
         new_stream_groups = []
 
-        # Build new stream_groups (only for selected levels)
         all_selected = set()
         for s in range(max_stream_count):
             all_selected.update(self.stream_selected_levels[s])
@@ -1311,7 +1306,9 @@ class ContourAnimationMixin:
             for level_i in self.stream_selected_levels[stream_i]:
                 if level_i < len(orig_stream_contours[stream_i]):
                     new_stream_contours[stream_i].append(orig_stream_contours[stream_i][level_i])
-                    new_stream_bounding_planes[stream_i].append(orig_stream_bounding_planes[stream_i][level_i])
+                if level_i < len(self.stream_bounding_planes[stream_i]):
+                    new_stream_bounding_planes[stream_i].append(
+                        copy.deepcopy(self.stream_bounding_planes[stream_i][level_i]))
 
         # Store filtered results separately — stream_contours stays unfiltered for replays
         self._selected_stream_contours = new_stream_contours
