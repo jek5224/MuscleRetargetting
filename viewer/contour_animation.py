@@ -1280,10 +1280,14 @@ class ContourAnimationMixin:
         for s in range(max_stream_count):
             print(f"  Stream {s}: {self.stream_selected_levels[s]}")
 
-        # Get original data
+        # Get original data — prefer anim_original which has smooth-applied BPs
+        anim_orig = getattr(self, '_level_select_anim_original', None)
         orig = self._level_select_original
         orig_stream_contours = orig['stream_contours']
-        orig_stream_bounding_planes = orig['stream_bounding_planes']
+        if anim_orig is not None:
+            orig_stream_bounding_planes = anim_orig['stream_bounding_planes']
+        else:
+            orig_stream_bounding_planes = orig['stream_bounding_planes']
         orig_stream_groups = orig['stream_groups']
 
         # Apply selection to stream_contours and stream_bounding_planes
