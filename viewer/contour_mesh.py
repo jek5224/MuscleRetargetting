@@ -12968,7 +12968,7 @@ class ContourMeshMixin(ContourAnimationMixin):
         print(f"Error threshold: {error_threshold:.6f} (relative Frobenius norm)")
 
         # Minimum absolute distance between selected levels
-        min_spacing = getattr(self, 'level_select_min_spacing', 0.005)  # 5mm default
+        min_spacing = getattr(self, 'level_select_min_spacing', 0.01)  # 10mm default
         print(f"Minimum spacing: {min_spacing:.6f} (absolute)")
 
         # Identify original contour counts per level
