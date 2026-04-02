@@ -3253,13 +3253,10 @@ def _render_inspect_2d_windows(v):
                 v.inspect_2d_corr_backup_mvc.pop(name, None)
                 v.inspect_2d_corr_preview_active.pop(name, None)
 
-        # 3D correspondence button: transfer corners from adjacent level by 3D proximity
+        # 3D MVC button: compute MVC using 3D contour positions directly (for saddle-shaped contours)
         if not corr_mode and not show_all and is_post_stream and contour_match is not None:
-            if imgui.button(f"3D cor (prev)##{name}"):
-                _apply_3d_correspondence_from_neighbor(obj, stream_idx, level_idx, is_post_stream, use_prev=True)
-            imgui.same_line()
-            if imgui.button(f"3D cor (next)##{name}"):
-                _apply_3d_correspondence_from_neighbor(obj, stream_idx, level_idx, is_post_stream, use_prev=False)
+            if imgui.button(f"3D MVC##{name}"):
+                _apply_3d_mvc(obj, stream_idx, level_idx, is_post_stream)
 
         # Edit Fiber mode UI (only available when not in "Show All" mode)
         if has_fiber and not corr_mode and not show_all:
@@ -3602,78 +3599,78 @@ def _find_correspondence_all_levels(v, name, obj, stream_idx, level_idx, corner_
     v.inspect_2d_corr_preview_active.pop(name, None)
 
 
-def _apply_3d_correspondence_from_neighbor(obj, stream_idx, level_idx, is_post_stream, use_prev=True):
-    """Transfer corner correspondences from adjacent level using 3D nearest vertex.
+def _apply_3d_mvc(obj, stream_idx, level_idx, is_post_stream):
+    """Compute waypoints using 3D MVC for saddle-shaped contours.
 
-    For each corner on the neighbor level, find the nearest vertex on the current
-    level's contour by 3D Euclidean distance. Set those as the current level's corners.
+    Instead of projecting to 2D bounding plane (which self-intersects for saddles),
+    compute MVC weights directly from 3D contour vertex positions.
+
+    Uses the current corner_indices to define 4 segments. Each segment's vertices
+    get unit-square Q positions by 3D arc-length interpolation along the segment.
+    Then MVC is computed from these Q positions (which form a proper unit-square polygon
+    even though the 3D contour folds).
     """
     if is_post_stream:
-        bp_list = obj.bounding_planes[stream_idx]
+        bp_info = obj.bounding_planes[stream_idx][level_idx]
     else:
-        bp_list = obj.bounding_planes
+        bp_info = obj.bounding_planes[level_idx][stream_idx]
 
-    n_levels = len(bp_list)
-    if use_prev:
-        neighbor_idx = level_idx - 1
-    else:
-        neighbor_idx = level_idx + 1
-
-    if neighbor_idx < 0 or neighbor_idx >= n_levels:
-        print(f"  [3D cor] No {'prev' if use_prev else 'next'} level")
+    contour_match = bp_info.get('contour_match')
+    bp_corners = bp_info.get('bounding_plane')
+    ci = bp_info.get('corner_indices')
+    if contour_match is None or bp_corners is None or ci is None:
+        print("  [3D MVC] No contour_match or corner_indices")
         return
 
-    # Get neighbor's corner positions in 3D
-    nb_bp = bp_list[neighbor_idx]
-    nb_match = nb_bp.get('contour_match')
-    nb_ci = nb_bp.get('corner_indices')
-    if nb_match is None or nb_ci is None:
-        print(f"  [3D cor] Neighbor level {neighbor_idx} has no corner_indices")
-        return
-
-    nb_corner_positions = []
-    for ci_idx in range(4):
-        vi = nb_ci[ci_idx]
-        if vi < len(nb_match):
-            nb_corner_positions.append(np.array(nb_match[vi][0]))
-        else:
-            print(f"  [3D cor] Neighbor corner {ci_idx} index {vi} out of range")
-            return
-
-    # Get current level's contour vertices
-    curr_bp = bp_list[level_idx]
-    curr_match = curr_bp.get('contour_match')
-    if curr_match is None:
-        print(f"  [3D cor] Current level has no contour_match")
-        return
-
-    P_verts = [np.array(p) for p, q in curr_match]
+    P_verts = [np.array(p) for p, q in contour_match]
     n_verts = len(P_verts)
-    P_arr = np.array(P_verts)
-    bp_corners_3d = [np.array(c) for c in curr_bp['bounding_plane'][:4]]
+    bp_c = [np.array(c) for c in bp_corners[:4]]
 
-    # For each neighbor corner, find nearest vertex on current contour
-    new_ci = []
-    for ci_idx in range(4):
-        dists = np.linalg.norm(P_arr - nb_corner_positions[ci_idx], axis=1)
-        new_ci.append(int(np.argmin(dists)))
+    # Build Q positions using 3D arc-length within each segment
+    # Same as _recompute_contour_match but uses 3D P distances for parameterization
+    # The Q positions map to the bounding plane edges, forming a proper unit-square polygon
+    new_match = [None] * n_verts
 
-    if len(set(new_ci)) < 4:
-        print(f"  [3D cor] Degenerate: corners not distinct ({new_ci})")
-        return
+    for edge_idx in range(4):
+        vs = ci[edge_idx]
+        ve = ci[(edge_idx + 1) % 4]
+        q_start = bp_c[edge_idx]
+        q_end = bp_c[(edge_idx + 1) % 4]
 
-    # Recompute contour_match and waypoints
-    from viewer.contour_mesh import ContourMeshMixin
-    new_match = ContourMeshMixin._recompute_contour_match(P_verts, bp_corners_3d, new_ci, n_verts)
-    curr_bp['contour_match'] = new_match
-    curr_bp['corner_indices'] = new_ci
+        if ve > vs:
+            seg_indices = list(range(vs, ve))
+        elif ve < vs:
+            seg_indices = list(range(vs, n_verts)) + list(range(0, ve))
+        else:
+            seg_indices = [vs]
 
-    # Recompute waypoints
+        if len(seg_indices) == 0:
+            continue
+
+        # 3D arc-length parameterization
+        arc_lengths = [0.0]
+        for i in range(1, len(seg_indices)):
+            arc_lengths.append(arc_lengths[-1] +
+                np.linalg.norm(P_verts[seg_indices[i]] - P_verts[seg_indices[i - 1]]))
+        total_arc = arc_lengths[-1] if arc_lengths[-1] > 1e-10 else 1.0
+
+        for i, vi in enumerate(seg_indices):
+            t = arc_lengths[i] / total_arc
+            new_match[vi] = (P_verts[vi], (1 - t) * q_start + t * q_end)
+
+    # Fill any None entries
+    for i in range(n_verts):
+        if new_match[i] is None:
+            new_match[i] = (P_verts[i], bp_c[0].copy())
+
+    bp_info['contour_match'] = new_match
+
+    # Recompute waypoints using standard MVC (now Q positions form a proper polygon)
     if hasattr(obj, 'fiber_architecture') and obj.fiber_architecture is not None:
         if is_post_stream and stream_idx < len(obj.fiber_architecture):
             fiber_samples = obj.fiber_architecture[stream_idx]
             if fiber_samples is not None and len(fiber_samples) > 0:
-                _, new_wp, new_mvc = obj.find_waypoints(curr_bp, fiber_samples)
+                _, new_wp, new_mvc = obj.find_waypoints(bp_info, fiber_samples)
                 if hasattr(obj, 'waypoints') and obj.waypoints is not None:
                     if stream_idx < len(obj.waypoints) and level_idx < len(obj.waypoints[stream_idx]):
                         obj.waypoints[stream_idx][level_idx] = new_wp
@@ -3682,7 +3679,7 @@ def _apply_3d_correspondence_from_neighbor(obj, stream_idx, level_idx, is_post_s
                         obj.mvc_weights[stream_idx][level_idx] = new_mvc
                 obj._save_fiber_anim_data()
 
-    print(f"  [3D cor] L{level_idx} corners from L{neighbor_idx}: {new_ci}")
+    print(f"  [3D MVC] Applied at stream={stream_idx} level={level_idx}")
 
 
 def _apply_corner_correspondence_lightweight(obj, stream_idx, level_idx, corner_idx, vertex_idx, is_post_stream):
