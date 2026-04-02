@@ -1890,14 +1890,21 @@ class ContourMeshMixin(ContourAnimationMixin):
             if hasattr(self, '_precut_draw_contour_stream') and self._precut_draw_contour_stream is not None:
                 self.draw_contour_stream = list(self._precut_draw_contour_stream)
             # Restore level-mode smooth data for pre-cut animation replay
+            # Only restore pre-smooth if smooth hasn't been replayed yet
+            # (step-by-step: smooth already played, don't undo it)
+            smooth_replayed = getattr(self, '_smooth_replayed', False)
             if self._smooth_bp_before_level is not None:
                 self._smooth_bp_before = self._smooth_bp_before_level
                 self._smooth_bp_after = self._smooth_bp_after_level
                 self._smooth_swing_data = self._smooth_swing_data_level
                 self._smooth_twist_data = self._smooth_twist_data_level
                 self._smooth_num_levels = self._smooth_num_levels_level
-                # Apply pre-smooth BPs to level-mode bounding_planes
-                self._apply_bp_snapshot(self._smooth_bp_before_level)
+                if not smooth_replayed:
+                    # Apply pre-smooth BPs to level-mode bounding_planes
+                    self._apply_bp_snapshot(self._smooth_bp_before_level)
+                else:
+                    # Smooth already played — keep post-smooth BPs
+                    self._apply_bp_snapshot(self._smooth_bp_after_level)
             # No color override needed — level-mode coloring is correct
             self._cut_anim_contour_colors = None
         else:
