@@ -3253,6 +3253,14 @@ def _render_inspect_2d_windows(v):
                 v.inspect_2d_corr_backup_mvc.pop(name, None)
                 v.inspect_2d_corr_preview_active.pop(name, None)
 
+        # 3D correspondence button: transfer corners from adjacent level by 3D proximity
+        if not corr_mode and not show_all and is_post_stream and contour_match is not None:
+            if imgui.button(f"3D cor (prev)##{name}"):
+                _apply_3d_correspondence_from_neighbor(obj, stream_idx, level_idx, is_post_stream, use_prev=True)
+            imgui.same_line()
+            if imgui.button(f"3D cor (next)##{name}"):
+                _apply_3d_correspondence_from_neighbor(obj, stream_idx, level_idx, is_post_stream, use_prev=False)
+
         # Edit Fiber mode UI (only available when not in "Show All" mode)
         if has_fiber and not corr_mode and not show_all:
             imgui.separator()
@@ -3592,6 +3600,89 @@ def _find_correspondence_all_levels(v, name, obj, stream_idx, level_idx, corner_
     v.inspect_2d_corr_backup_wp.pop(name, None)
     v.inspect_2d_corr_backup_mvc.pop(name, None)
     v.inspect_2d_corr_preview_active.pop(name, None)
+
+
+def _apply_3d_correspondence_from_neighbor(obj, stream_idx, level_idx, is_post_stream, use_prev=True):
+    """Transfer corner correspondences from adjacent level using 3D nearest vertex.
+
+    For each corner on the neighbor level, find the nearest vertex on the current
+    level's contour by 3D Euclidean distance. Set those as the current level's corners.
+    """
+    if is_post_stream:
+        bp_list = obj.bounding_planes[stream_idx]
+    else:
+        bp_list = obj.bounding_planes
+
+    n_levels = len(bp_list)
+    if use_prev:
+        neighbor_idx = level_idx - 1
+    else:
+        neighbor_idx = level_idx + 1
+
+    if neighbor_idx < 0 or neighbor_idx >= n_levels:
+        print(f"  [3D cor] No {'prev' if use_prev else 'next'} level")
+        return
+
+    # Get neighbor's corner positions in 3D
+    nb_bp = bp_list[neighbor_idx]
+    nb_match = nb_bp.get('contour_match')
+    nb_ci = nb_bp.get('corner_indices')
+    if nb_match is None or nb_ci is None:
+        print(f"  [3D cor] Neighbor level {neighbor_idx} has no corner_indices")
+        return
+
+    nb_corner_positions = []
+    for ci_idx in range(4):
+        vi = nb_ci[ci_idx]
+        if vi < len(nb_match):
+            nb_corner_positions.append(np.array(nb_match[vi][0]))
+        else:
+            print(f"  [3D cor] Neighbor corner {ci_idx} index {vi} out of range")
+            return
+
+    # Get current level's contour vertices
+    curr_bp = bp_list[level_idx]
+    curr_match = curr_bp.get('contour_match')
+    if curr_match is None:
+        print(f"  [3D cor] Current level has no contour_match")
+        return
+
+    P_verts = [np.array(p) for p, q in curr_match]
+    n_verts = len(P_verts)
+    P_arr = np.array(P_verts)
+    bp_corners_3d = [np.array(c) for c in curr_bp['bounding_plane'][:4]]
+
+    # For each neighbor corner, find nearest vertex on current contour
+    new_ci = []
+    for ci_idx in range(4):
+        dists = np.linalg.norm(P_arr - nb_corner_positions[ci_idx], axis=1)
+        new_ci.append(int(np.argmin(dists)))
+
+    if len(set(new_ci)) < 4:
+        print(f"  [3D cor] Degenerate: corners not distinct ({new_ci})")
+        return
+
+    # Recompute contour_match and waypoints
+    from viewer.contour_mesh import ContourMeshMixin
+    new_match = ContourMeshMixin._recompute_contour_match(P_verts, bp_corners_3d, new_ci, n_verts)
+    curr_bp['contour_match'] = new_match
+    curr_bp['corner_indices'] = new_ci
+
+    # Recompute waypoints
+    if hasattr(obj, 'fiber_architecture') and obj.fiber_architecture is not None:
+        if is_post_stream and stream_idx < len(obj.fiber_architecture):
+            fiber_samples = obj.fiber_architecture[stream_idx]
+            if fiber_samples is not None and len(fiber_samples) > 0:
+                _, new_wp, new_mvc = obj.find_waypoints(curr_bp, fiber_samples)
+                if hasattr(obj, 'waypoints') and obj.waypoints is not None:
+                    if stream_idx < len(obj.waypoints) and level_idx < len(obj.waypoints[stream_idx]):
+                        obj.waypoints[stream_idx][level_idx] = new_wp
+                if hasattr(obj, 'mvc_weights') and obj.mvc_weights is not None:
+                    if stream_idx < len(obj.mvc_weights) and level_idx < len(obj.mvc_weights[stream_idx]):
+                        obj.mvc_weights[stream_idx][level_idx] = new_mvc
+                obj._save_fiber_anim_data()
+
+    print(f"  [3D cor] L{level_idx} corners from L{neighbor_idx}: {new_ci}")
 
 
 def _apply_corner_correspondence_lightweight(obj, stream_idx, level_idx, corner_idx, vertex_idx, is_post_stream):
