@@ -2654,9 +2654,9 @@ def _render_inspect_2d_windows(v):
                         # Corner index label
                         draw_list.add_text(cx + 7, cy - 7, imgui.get_color_u32_rgba(0.8, 0.2, 0.8, 1.0), str(ci))
 
-                        # Check hover on corners (right side)
+                        # Check hover on corners (right side) — corners take priority over vertices
                         dist = np.sqrt((mouse_pos[0] - cx)**2 + (mouse_pos[1] - cy)**2)
-                        if dist < hover_radius and hovered_idx < 0:
+                        if dist < hover_radius:
                             hovered_idx = ci
                             hovered_type = 'corner'
 
