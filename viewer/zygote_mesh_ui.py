@@ -3631,16 +3631,21 @@ def _apply_3d_mvc(obj, stream_idx, level_idx, is_post_stream):
     uv_corners = [np.array([0.0, 0.0]), np.array([1.0, 0.0]),
                    np.array([1.0, 1.0]), np.array([0.0, 1.0])]
 
-    def _build_qs(use_ci):
+    def _build_qs(use_ci, use_uv):
         qs = np.zeros((n_verts, 2))
         nm = [None] * n_verts
         for edge_idx in range(4):
             vs = use_ci[edge_idx]
             ve = use_ci[(edge_idx + 1) % 4]
-            uv_s = uv_corners[edge_idx]
-            uv_e = uv_corners[(edge_idx + 1) % 4]
-            q_s = bp_c[edge_idx]
-            q_e = bp_c[(edge_idx + 1) % 4]
+            uv_s = use_uv[edge_idx]
+            uv_e = use_uv[(edge_idx + 1) % 4]
+            # Q 3D: find which BP corner each contour corner corresponds to
+            # use_ci[edge_idx] is the contour vertex for this corner
+            # Find its BP corner index from original ci
+            bp_idx_s = ci.index(vs) if vs in ci else edge_idx
+            bp_idx_e = ci.index(ve) if ve in ci else (edge_idx + 1) % 4
+            q_s = bp_c[bp_idx_s]
+            q_e = bp_c[bp_idx_e]
             # Always go forward (vs → ve), wrapping if needed
             if ve > vs:
                 seg = list(range(vs, ve))
@@ -3712,10 +3717,11 @@ def _apply_3d_mvc(obj, stream_idx, level_idx, is_post_stream):
         fiber_samples = fiber_samples[:, :2]
 
     # Try both windings
-    # Forward: ci as-is. Reverse: ci reversed (different winding).
-    ci_rev = [ci[0], ci[3], ci[2], ci[1]]
-    qs_fwd, nm_fwd = _build_qs(list(ci))
-    qs_rev, nm_rev = _build_qs(ci_rev)
+    # Forward: ci order with standard uv. Reverse: same ci but reversed uv winding.
+    uv_rev = [np.array([0.0, 0.0]), np.array([0.0, 1.0]),
+              np.array([1.0, 1.0]), np.array([1.0, 0.0])]
+    qs_fwd, nm_fwd = _build_qs(list(ci), uv_corners)
+    qs_rev, nm_rev = _build_qs(list(ci), uv_rev)
     wp_fwd = _compute_waypoints(qs_fwd)
     wp_rev = _compute_waypoints(qs_rev)
 
