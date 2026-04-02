@@ -3602,13 +3602,12 @@ def _find_correspondence_all_levels(v, name, obj, stream_idx, level_idx, corner_
 def _apply_3d_mvc(obj, stream_idx, level_idx, is_post_stream):
     """Compute waypoints using 3D MVC for saddle-shaped contours.
 
-    Instead of projecting to 2D bounding plane (which self-intersects for saddles),
-    compute MVC weights directly from 3D contour vertex positions.
+    Instead of projecting Q to bounding plane (which collapses for saddles),
+    compute unit-square Q positions directly from 3D arc-length along segments.
+    Then run MVC inline with these proper 2D Q coordinates.
 
-    Uses the current corner_indices to define 4 segments. Each segment's vertices
-    get unit-square Q positions by 3D arc-length interpolation along the segment.
-    Then MVC is computed from these Q positions (which form a proper unit-square polygon
-    even though the 3D contour folds).
+    Unit-square corner mapping:
+      corner 0 → (0,0), corner 1 → (1,0), corner 2 → (1,1), corner 3 → (0,1)
     """
     if is_post_stream:
         bp_info = obj.bounding_planes[stream_idx][level_idx]
@@ -3624,18 +3623,24 @@ def _apply_3d_mvc(obj, stream_idx, level_idx, is_post_stream):
 
     P_verts = [np.array(p) for p, q in contour_match]
     n_verts = len(P_verts)
+    Ps = np.array(P_verts)
     bp_c = [np.array(c) for c in bp_corners[:4]]
 
-    # Build Q positions using 3D arc-length within each segment
-    # Same as _recompute_contour_match but uses 3D P distances for parameterization
-    # The Q positions map to the bounding plane edges, forming a proper unit-square polygon
+    # Unit-square corners: 0→(0,0), 1→(1,0), 2→(1,1), 3→(0,1)
+    uv_corners = [np.array([0.0, 0.0]), np.array([1.0, 0.0]),
+                   np.array([1.0, 1.0]), np.array([0.0, 1.0])]
+
+    # Build Qs_normalized directly from 3D arc-length
+    Qs_normalized = np.zeros((n_verts, 2))
     new_match = [None] * n_verts
 
     for edge_idx in range(4):
         vs = ci[edge_idx]
         ve = ci[(edge_idx + 1) % 4]
-        q_start = bp_c[edge_idx]
-        q_end = bp_c[(edge_idx + 1) % 4]
+        uv_start = uv_corners[edge_idx]
+        uv_end = uv_corners[(edge_idx + 1) % 4]
+        q_start_3d = bp_c[edge_idx]
+        q_end_3d = bp_c[(edge_idx + 1) % 4]
 
         if ve > vs:
             seg_indices = list(range(vs, ve))
@@ -3656,30 +3661,121 @@ def _apply_3d_mvc(obj, stream_idx, level_idx, is_post_stream):
 
         for i, vi in enumerate(seg_indices):
             t = arc_lengths[i] / total_arc
-            new_match[vi] = (P_verts[vi], (1 - t) * q_start + t * q_end)
+            Qs_normalized[vi] = (1 - t) * uv_start + t * uv_end
+            # Also update contour_match Q (3D) for visualization
+            new_match[vi] = (P_verts[vi], (1 - t) * q_start_3d + t * q_end_3d)
 
-    # Fill any None entries
     for i in range(n_verts):
         if new_match[i] is None:
             new_match[i] = (P_verts[i], bp_c[0].copy())
+            Qs_normalized[i] = [0.0, 0.0]
 
     bp_info['contour_match'] = new_match
 
-    # Recompute waypoints using standard MVC (now Q positions form a proper polygon)
+    # Compute MVC inline using Qs_normalized as the 2D polygon
+    fiber_samples_raw = None
     if hasattr(obj, 'fiber_architecture') and obj.fiber_architecture is not None:
         if is_post_stream and stream_idx < len(obj.fiber_architecture):
-            fiber_samples = obj.fiber_architecture[stream_idx]
-            if fiber_samples is not None and len(fiber_samples) > 0:
-                _, new_wp, new_mvc = obj.find_waypoints(bp_info, fiber_samples)
-                if hasattr(obj, 'waypoints') and obj.waypoints is not None:
-                    if stream_idx < len(obj.waypoints) and level_idx < len(obj.waypoints[stream_idx]):
-                        obj.waypoints[stream_idx][level_idx] = new_wp
-                if hasattr(obj, 'mvc_weights') and obj.mvc_weights is not None:
-                    if stream_idx < len(obj.mvc_weights) and level_idx < len(obj.mvc_weights[stream_idx]):
-                        obj.mvc_weights[stream_idx][level_idx] = new_mvc
-                obj._save_fiber_anim_data()
+            fiber_samples_raw = obj.fiber_architecture[stream_idx]
 
-    print(f"  [3D MVC] Applied at stream={stream_idx} level={level_idx}")
+    if fiber_samples_raw is None or len(fiber_samples_raw) == 0:
+        print("  [3D MVC] No fiber samples")
+        return
+
+    fiber_samples = np.array(fiber_samples_raw)
+    if fiber_samples.ndim == 2 and fiber_samples.shape[1] > 2:
+        fiber_samples = fiber_samples[:, :2]
+
+    EPS = 1e-10
+    mvc_polygon = Qs_normalized
+
+    fs = []
+    for v in fiber_samples:
+        f_found = False
+        s_v = [Q - v for Q in mvc_polygon]
+
+        for i in range(n_verts):
+            i_plus = (i + 1) % n_verts
+            r_i = np.linalg.norm(s_v[i])
+            A_i = np.linalg.det(np.array([s_v[i], s_v[i_plus]])) / 2
+            D_i = np.dot(s_v[i], s_v[i_plus])
+
+            if r_i < EPS:
+                f = np.zeros(n_verts)
+                f[i] = 1
+                fs.append(f)
+                f_found = True
+                break
+
+            if abs(A_i) < EPS and D_i < 0:
+                r_i_plus = np.linalg.norm(s_v[i_plus])
+                f_i = np.zeros(n_verts)
+                f_i[i] = 1
+                f_i_plus = np.zeros(n_verts)
+                f_i_plus[i_plus] = 1
+                denom = r_i + r_i_plus
+                if denom < EPS:
+                    fs.append((f_i + f_i_plus) / 2)
+                else:
+                    fs.append((r_i_plus * f_i + r_i * f_i_plus) / denom)
+                f_found = True
+                break
+
+        if f_found:
+            continue
+
+        f = np.zeros(n_verts)
+        W = 0
+        for i in range(n_verts):
+            i_plus = (i + 1) % n_verts
+            i_minus = (i - 1) % n_verts
+            r_i = np.linalg.norm(s_v[i])
+            w = 0
+            if r_i < EPS:
+                continue
+
+            A_i_minus = np.linalg.det(np.array([s_v[i_minus], s_v[i]])) / 2
+            if abs(A_i_minus) > EPS:
+                r_i_minus = np.linalg.norm(s_v[i_minus])
+                D_i_minus = np.dot(s_v[i_minus], s_v[i])
+                w += (r_i_minus - D_i_minus / r_i) / A_i_minus
+
+            A_i = np.linalg.det(np.array([s_v[i], s_v[i_plus]])) / 2
+            if abs(A_i) > EPS:
+                r_i_plus = np.linalg.norm(s_v[i_plus])
+                D_i = np.dot(s_v[i], s_v[i_plus])
+                w += (r_i_plus - D_i / r_i) / A_i
+
+            f[i] = w
+            W += w
+
+        if abs(W) < EPS:
+            fs.append(np.ones(n_verts) / n_verts)
+        else:
+            fs.append(f / W)
+
+    fs = np.array(fs)
+    waypoints = np.dot(fs, Ps)
+
+    # Clamp extreme waypoints
+    centroid = np.mean(Ps, axis=0)
+    max_dist_sq = max(np.sum((p - centroid) ** 2) for p in Ps)
+    threshold_sq = max_dist_sq * 4.0
+    for i in range(len(waypoints)):
+        if np.sum((waypoints[i] - centroid) ** 2) > threshold_sq or not np.all(np.isfinite(waypoints[i])):
+            waypoints[i] = centroid
+
+    # Update waypoints and MVC weights
+    if hasattr(obj, 'waypoints') and obj.waypoints is not None:
+        if stream_idx < len(obj.waypoints) and level_idx < len(obj.waypoints[stream_idx]):
+            obj.waypoints[stream_idx][level_idx] = waypoints
+    if hasattr(obj, 'mvc_weights') and obj.mvc_weights is not None:
+        if stream_idx < len(obj.mvc_weights) and level_idx < len(obj.mvc_weights[stream_idx]):
+            obj.mvc_weights[stream_idx][level_idx] = fs
+    if hasattr(obj, '_save_fiber_anim_data'):
+        obj._save_fiber_anim_data()
+
+    print(f"  [3D MVC] Applied at stream={stream_idx} level={level_idx}, {len(waypoints)} waypoints")
 
 
 
