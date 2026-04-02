@@ -1139,9 +1139,10 @@ class ContourAnimationMixin:
             self._apply_level_selection()
             self._save_level_select_post_state()
             self._level_select_anim_pending_resume = True
-            self._level_select_replayed = False
-            self._bp_after_select = id(self.bounding_planes)
-            print(f"Level select deferred: bp_id={id(self.bounding_planes)}, lens={[len(s) for s in self.bounding_planes]}")
+            # Don't auto-replay — selection is already applied visually.
+            # User can click replay button to see the animation.
+            self._level_select_replayed = True
+            print(f"Level select deferred: {len(unselected)} unselected contours")
             return
 
         # Restore ALL levels visible (from original) so we can animate the shrink
@@ -1196,18 +1197,7 @@ class ContourAnimationMixin:
                 self._apply_level_selection()
                 self._save_level_select_post_state()
                 self._level_select_anim_pending_resume = True
-            # Verify BPs match selected levels
-            n_bp = [len(s) for s in self.bounding_planes]
-            n_ct = [len(s) for s in self.contours]
-            sel = getattr(self, 'stream_selected_levels', None)
-            print(f"Level select animation complete: bp_counts={n_bp}, contour_counts={n_ct}, selected={sel}")
-            if sel is not None and n_bp:
-                for si in range(len(n_bp)):
-                    if si < len(sel) and n_bp[si] != len(sel[si]):
-                        print(f"  [WARNING] Stream {si}: bp count {n_bp[si]} != selected count {len(sel[si])}")
-                    if n_bp[si] > 0 and si < len(self.bounding_planes):
-                        bp0 = self.bounding_planes[si][0]
-                        print(f"  Stream {si} first BP mean: {bp0['mean'][:3]}")
+            print("Level select animation complete")
 
         return True
 
@@ -1338,19 +1328,6 @@ class ContourAnimationMixin:
 
         level_counts = [len(self._selected_stream_contours[s]) for s in range(max_stream_count)]
         print(f"Levels updated: {level_counts} per stream")
-
-        # Debug: verify selected BPs match expected levels
-        for s in range(max_stream_count):
-            if s < len(new_stream_bounding_planes) and len(new_stream_bounding_planes[s]) > 0:
-                means = [np.linalg.norm(bp['mean']) for bp in new_stream_bounding_planes[s]]
-                orig_means = [np.linalg.norm(bp['mean']) for bp in orig_stream_bounding_planes[s]]
-                sel = self.stream_selected_levels[s]
-                expected = [orig_means[li] for li in sel if li < len(orig_means)]
-                match = all(abs(a - b) < 1e-6 for a, b in zip(means, expected))
-                print(f"  Stream {s}: selected BP means match orig: {match}")
-                if not match:
-                    print(f"    Selected means: {means[:5]}...")
-                    print(f"    Expected means: {expected[:5]}...")
 
         # Close window and clean up
         self._level_select_window_open = False
