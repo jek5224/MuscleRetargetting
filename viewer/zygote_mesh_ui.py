@@ -3793,7 +3793,7 @@ def _apply_3d_mvc(obj, stream_idx, level_idx, is_post_stream):
         total_seg += seg_len
         print(f"  [3D MVC] Seg {seg_idx}: {vs}→{ve} ({seg_len} verts), BP {bp_s}→{bp_e}, uv ({uv_bp[bp_s][0]:.0f},{uv_bp[bp_s][1]:.0f})→({uv_bp[bp_e][0]:.0f},{uv_bp[bp_e][1]:.0f})")
     print(f"  [3D MVC] Total seg verts: {total_seg} (should be {n_verts})")
-    n_none = sum(1 for m in new_match if m is None)
+    n_none = sum(1 for m in nm_direct if m is None)
     print(f"  [3D MVC] None: {n_none}, Qs at (0,0): {sum(1 for q in Qs_normalized if q[0]==0 and q[1]==0)}")
     print(f"  [3D MVC] Qs range: x=[{Qs_normalized[:,0].min():.3f},{Qs_normalized[:,0].max():.3f}] y=[{Qs_normalized[:,1].min():.3f},{Qs_normalized[:,1].max():.3f}]")
 
