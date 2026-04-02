@@ -3471,6 +3471,9 @@ def _find_correspondence_all_levels(v, name, obj, stream_idx, level_idx, corner_
             fiber_samples = obj.fiber_architecture[stream_idx]
 
     for lev in range(len(bp_list)):
+        # Skip the current level — it's the reference
+        if lev == level_idx:
+            continue
         bp_lev = bp_list[lev] if is_post_stream else bp_list[lev]
         if isinstance(bp_lev, list):
             if stream_idx < len(bp_lev):
