@@ -3621,10 +3621,27 @@ def _apply_3d_mvc(obj, stream_idx, level_idx, is_post_stream):
         print("  [3D MVC] No contour_match or corner_indices")
         return
 
-    P_verts = [np.array(p) for p, q in contour_match]
+    # Use raw 3D contour vertices, not contour_match ordering
+    if is_post_stream:
+        raw_contour = obj.contours[stream_idx][level_idx]
+    else:
+        raw_contour = obj.contours[level_idx][stream_idx]
+    P_verts = [np.array(v) for v in raw_contour]
     n_verts = len(P_verts)
     Ps = np.array(P_verts)
     bp_c = [np.array(c) for c in bp_corners[:4]]
+
+    # Corner indices are into contour_match; find corresponding raw contour indices
+    # by matching 3D positions
+    raw_ci = []
+    for c_idx in ci:
+        if c_idx < len(contour_match):
+            corner_pos = np.array(contour_match[c_idx][0])
+            dists = np.linalg.norm(Ps - corner_pos, axis=1)
+            raw_ci.append(int(np.argmin(dists)))
+        else:
+            raw_ci.append(c_idx % n_verts)
+    ci = raw_ci
 
     # Sort corners by contour index for proper segmentation (no overlap, full coverage)
     # Map each sorted corner back to its BP corner for UV assignment
