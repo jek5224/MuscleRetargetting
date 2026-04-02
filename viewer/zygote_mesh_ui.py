@@ -3645,8 +3645,8 @@ def _apply_3d_mvc(obj, stream_idx, level_idx, is_post_stream):
     e1 = uv1 - uv0
     e2 = uv2 - uv1
     cross = e1[0] * e2[1] - e1[1] * e2[0]
-    if cross > 0:
-        # CCW — reverse to make CW
+    if cross < 0:
+        # Reverse winding to match standard BP direction
         sorted_pairs.reverse()
         sorted_bp = [p[0] for p in sorted_pairs]
         sorted_vi = [p[1] for p in sorted_pairs]
