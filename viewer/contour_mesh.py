@@ -12967,10 +12967,9 @@ class ContourMeshMixin(ContourAnimationMixin):
             error_threshold = getattr(self, 'level_select_error_threshold', 0.05)  # 5% relative Frobenius
         print(f"Error threshold: {error_threshold:.6f} (relative Frobenius norm)")
 
-        # Minimum distance between selected levels (percentage of muscle length)
-        min_spacing_ratio = getattr(self, 'level_select_min_spacing', 0.05)  # 5% default
-        min_spacing = min_spacing_ratio * muscle_length
-        print(f"Minimum spacing: {min_spacing:.6f} ({min_spacing_ratio*100:.1f}% of muscle length)")
+        # Minimum absolute distance between selected levels
+        min_spacing = getattr(self, 'level_select_min_spacing', 0.005)  # 5mm default
+        print(f"Minimum spacing: {min_spacing:.6f} (absolute)")
 
         # Identify original contour counts per level
         original_counts = []
@@ -13192,11 +13191,29 @@ class ContourMeshMixin(ContourAnimationMixin):
                 stream_selected[s].add(first_dividing_level)
             print(f"  Enforced first dividing level {first_dividing_level} in all streams")
 
-        # No equalization - each stream keeps its own selected levels
-        # Originally-separate regions: independent selection per stream
-        # Originally-merged regions: same levels for all streams
+        # Ensure minimum 3 levels per stream (origin + at least 1 middle + insertion)
+        for s in range(max_stream_count):
+            if len(stream_selected[s]) < 3 and num_levels >= 3:
+                # Add the level with highest error (most important to keep)
+                selected_sorted = sorted(stream_selected[s])
+                best_level = None
+                best_error = -1
+                for level_i in range(1, num_levels - 1):
+                    if level_i in stream_selected[s]:
+                        continue
+                    # Find surrounding selected levels
+                    prev_sel = max(l for l in selected_sorted if l < level_i) if any(l < level_i for l in selected_sorted) else 0
+                    next_sel = min(l for l in selected_sorted if l > level_i) if any(l > level_i for l in selected_sorted) else num_levels - 1
+                    error = compute_stream_error(s, level_i, prev_sel, next_sel)
+                    if error > best_error:
+                        best_error = error
+                        best_level = level_i
+                if best_level is not None:
+                    stream_selected[s].add(best_level)
+                    print(f"  Stream {s}: added level {best_level} to meet minimum 3 levels (error={best_error:.6f})")
+
         counts = [len(s) for s in stream_selected]
-        print(f"Level counts per stream: {counts} (no equalization)")
+        print(f"Level counts per stream: {counts}")
 
         # Store results (initial automatic selection)
         self.stream_selected_levels = [sorted(s) for s in stream_selected]
