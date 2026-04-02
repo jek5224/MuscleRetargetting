@@ -3627,135 +3627,117 @@ def _apply_3d_mvc(obj, stream_idx, level_idx, is_post_stream):
     bp_c = [np.array(c) for c in bp_corners[:4]]
 
     # Sort corners by contour order, map sequentially to unit square
+    # Try both winding directions, pick the one matching adjacent level
     sorted_ci = sorted(ci)
-    uv_seq = [np.array([0.0, 0.0]), np.array([1.0, 0.0]),
-              np.array([1.0, 1.0]), np.array([0.0, 1.0])]
+    uv_seq_fwd = [np.array([0.0, 0.0]), np.array([1.0, 0.0]),
+                   np.array([1.0, 1.0]), np.array([0.0, 1.0])]
+    uv_seq_rev = [np.array([0.0, 0.0]), np.array([0.0, 1.0]),
+                   np.array([1.0, 1.0]), np.array([1.0, 0.0])]
 
-    Qs_normalized = np.zeros((n_verts, 2))
-    new_match = [None] * n_verts
+    def _build_qs(uv_seq):
+        qs = np.zeros((n_verts, 2))
+        nm = [None] * n_verts
+        for edge_idx in range(4):
+            vs = sorted_ci[edge_idx]
+            ve = sorted_ci[(edge_idx + 1) % 4]
+            uv_s = uv_seq[edge_idx]
+            uv_e = uv_seq[(edge_idx + 1) % 4]
+            q_s = bp_c[edge_idx]
+            q_e = bp_c[(edge_idx + 1) % 4]
+            if ve > vs:
+                seg = list(range(vs, ve))
+            elif ve < vs:
+                seg = list(range(vs, n_verts)) + list(range(0, ve))
+            else:
+                seg = [vs]
+            if not seg:
+                continue
+            arc = [0.0]
+            for i in range(1, len(seg)):
+                arc.append(arc[-1] + np.linalg.norm(P_verts[seg[i]] - P_verts[seg[i-1]]))
+            total = arc[-1] if arc[-1] > 1e-10 else 1.0
+            for i, vi in enumerate(seg):
+                t = arc[i] / total
+                qs[vi] = (1 - t) * uv_s + t * uv_e
+                nm[vi] = (P_verts[vi], (1 - t) * q_s + t * q_e)
+        for i in range(n_verts):
+            if nm[i] is None:
+                nm[i] = (P_verts[i], bp_c[0].copy())
+        return qs, nm
 
-    for edge_idx in range(4):
-        vs = sorted_ci[edge_idx]
-        ve = sorted_ci[(edge_idx + 1) % 4]
-        uv_start = uv_seq[edge_idx]
-        uv_end = uv_seq[(edge_idx + 1) % 4]
-        q_start_3d = bp_c[edge_idx]
-        q_end_3d = bp_c[(edge_idx + 1) % 4]
+    def _compute_waypoints(qs_norm):
+        fs_list = []
+        for v in fiber_samples:
+            s_v = [Q - v for Q in qs_norm]
+            f_found = False
+            for i in range(n_verts):
+                ip = (i + 1) % n_verts
+                r_i = np.linalg.norm(s_v[i])
+                if r_i < 1e-10:
+                    f = np.zeros(n_verts); f[i] = 1; fs_list.append(f); f_found = True; break
+                A_i = np.linalg.det(np.array([s_v[i], s_v[ip]])) / 2
+                D_i = np.dot(s_v[i], s_v[ip])
+                if abs(A_i) < 1e-10 and D_i < 0:
+                    rip = np.linalg.norm(s_v[ip])
+                    fi = np.zeros(n_verts); fi[i] = 1
+                    fip = np.zeros(n_verts); fip[ip] = 1
+                    d = r_i + rip
+                    fs_list.append((rip * fi + r_i * fip) / d if d > 1e-10 else (fi + fip) / 2)
+                    f_found = True; break
+            if f_found:
+                continue
+            f = np.zeros(n_verts); W = 0
+            for i in range(n_verts):
+                ip = (i + 1) % n_verts; im = (i - 1) % n_verts
+                r_i = np.linalg.norm(s_v[i])
+                if r_i < 1e-10: continue
+                w = 0
+                Aim = np.linalg.det(np.array([s_v[im], s_v[i]])) / 2
+                if abs(Aim) > 1e-10:
+                    w += (np.linalg.norm(s_v[im]) - np.dot(s_v[im], s_v[i]) / r_i) / Aim
+                Ai = np.linalg.det(np.array([s_v[i], s_v[ip]])) / 2
+                if abs(Ai) > 1e-10:
+                    w += (np.linalg.norm(s_v[ip]) - np.dot(s_v[i], s_v[ip]) / r_i) / Ai
+                f[i] = w; W += w
+            fs_list.append(f / W if abs(W) > 1e-10 else np.ones(n_verts) / n_verts)
+        return np.dot(np.array(fs_list), Ps)
 
-        if ve > vs:
-            seg_indices = list(range(vs, ve))
-        elif ve < vs:
-            seg_indices = list(range(vs, n_verts)) + list(range(0, ve))
-        else:
-            seg_indices = [vs]
-
-        if len(seg_indices) == 0:
-            continue
-
-        # 3D arc-length parameterization
-        arc_lengths = [0.0]
-        for i in range(1, len(seg_indices)):
-            arc_lengths.append(arc_lengths[-1] +
-                np.linalg.norm(P_verts[seg_indices[i]] - P_verts[seg_indices[i - 1]]))
-        total_arc = arc_lengths[-1] if arc_lengths[-1] > 1e-10 else 1.0
-
-        for i, vi in enumerate(seg_indices):
-            t = arc_lengths[i] / total_arc
-            Qs_normalized[vi] = (1 - t) * uv_start + t * uv_end
-            # Also update contour_match Q (3D) for visualization
-            new_match[vi] = (P_verts[vi], (1 - t) * q_start_3d + t * q_end_3d)
-
-    for i in range(n_verts):
-        if new_match[i] is None:
-            new_match[i] = (P_verts[i], bp_c[0].copy())
-            Qs_normalized[i] = [0.0, 0.0]
-
-    bp_info['contour_match'] = new_match
-
-    # Compute MVC inline using Qs_normalized as the 2D polygon
+    # Get fiber samples
     fiber_samples_raw = None
     if hasattr(obj, 'fiber_architecture') and obj.fiber_architecture is not None:
         if is_post_stream and stream_idx < len(obj.fiber_architecture):
             fiber_samples_raw = obj.fiber_architecture[stream_idx]
-
     if fiber_samples_raw is None or len(fiber_samples_raw) == 0:
-        print("  [3D MVC] No fiber samples")
-        return
-
+        print("  [3D MVC] No fiber samples"); return
     fiber_samples = np.array(fiber_samples_raw)
     if fiber_samples.ndim == 2 and fiber_samples.shape[1] > 2:
         fiber_samples = fiber_samples[:, :2]
 
-    EPS = 1e-10
-    mvc_polygon = Qs_normalized
+    # Try both windings
+    qs_fwd, nm_fwd = _build_qs(uv_seq_fwd)
+    qs_rev, nm_rev = _build_qs(uv_seq_rev)
+    wp_fwd = _compute_waypoints(qs_fwd)
+    wp_rev = _compute_waypoints(qs_rev)
 
-    fs = []
-    for v in fiber_samples:
-        f_found = False
-        s_v = [Q - v for Q in mvc_polygon]
+    # Pick winding closer to adjacent level's waypoints
+    adj_lev = level_idx - 1 if level_idx > 0 else level_idx + 1
+    adj_wp = None
+    if hasattr(obj, 'waypoints') and obj.waypoints is not None:
+        if stream_idx < len(obj.waypoints) and adj_lev < len(obj.waypoints[stream_idx]):
+            adj_wp = np.array(obj.waypoints[stream_idx][adj_lev])
 
-        for i in range(n_verts):
-            i_plus = (i + 1) % n_verts
-            r_i = np.linalg.norm(s_v[i])
-            A_i = np.linalg.det(np.array([s_v[i], s_v[i_plus]])) / 2
-            D_i = np.dot(s_v[i], s_v[i_plus])
+    if adj_wp is not None and len(adj_wp) == len(wp_fwd):
+        err_fwd = np.sum(np.linalg.norm(wp_fwd - adj_wp, axis=1))
+        err_rev = np.sum(np.linalg.norm(wp_rev - adj_wp, axis=1))
+        use_rev = err_rev < err_fwd
+        print(f"  [3D MVC] fwd_err={err_fwd:.4f}, rev_err={err_rev:.4f}, using={'rev' if use_rev else 'fwd'}")
+    else:
+        use_rev = False
 
-            if r_i < EPS:
-                f = np.zeros(n_verts)
-                f[i] = 1
-                fs.append(f)
-                f_found = True
-                break
-
-            if abs(A_i) < EPS and D_i < 0:
-                r_i_plus = np.linalg.norm(s_v[i_plus])
-                f_i = np.zeros(n_verts)
-                f_i[i] = 1
-                f_i_plus = np.zeros(n_verts)
-                f_i_plus[i_plus] = 1
-                denom = r_i + r_i_plus
-                if denom < EPS:
-                    fs.append((f_i + f_i_plus) / 2)
-                else:
-                    fs.append((r_i_plus * f_i + r_i * f_i_plus) / denom)
-                f_found = True
-                break
-
-        if f_found:
-            continue
-
-        f = np.zeros(n_verts)
-        W = 0
-        for i in range(n_verts):
-            i_plus = (i + 1) % n_verts
-            i_minus = (i - 1) % n_verts
-            r_i = np.linalg.norm(s_v[i])
-            w = 0
-            if r_i < EPS:
-                continue
-
-            A_i_minus = np.linalg.det(np.array([s_v[i_minus], s_v[i]])) / 2
-            if abs(A_i_minus) > EPS:
-                r_i_minus = np.linalg.norm(s_v[i_minus])
-                D_i_minus = np.dot(s_v[i_minus], s_v[i])
-                w += (r_i_minus - D_i_minus / r_i) / A_i_minus
-
-            A_i = np.linalg.det(np.array([s_v[i], s_v[i_plus]])) / 2
-            if abs(A_i) > EPS:
-                r_i_plus = np.linalg.norm(s_v[i_plus])
-                D_i = np.dot(s_v[i], s_v[i_plus])
-                w += (r_i_plus - D_i / r_i) / A_i
-
-            f[i] = w
-            W += w
-
-        if abs(W) < EPS:
-            fs.append(np.ones(n_verts) / n_verts)
-        else:
-            fs.append(f / W)
-
-    fs = np.array(fs)
-    waypoints = np.dot(fs, Ps)
+    waypoints = wp_rev if use_rev else wp_fwd
+    Qs_normalized = qs_rev if use_rev else qs_fwd
+    new_match = nm_rev if use_rev else nm_fwd
+    bp_info['contour_match'] = new_match
 
     # Clamp extreme waypoints
     centroid = np.mean(Ps, axis=0)
@@ -3765,14 +3747,45 @@ def _apply_3d_mvc(obj, stream_idx, level_idx, is_post_stream):
         if np.sum((waypoints[i] - centroid) ** 2) > threshold_sq or not np.all(np.isfinite(waypoints[i])):
             waypoints[i] = centroid
 
-    # Debug
-    print(f"  [3D MVC] Qs_normalized range: x=[{Qs_normalized[:,0].min():.3f},{Qs_normalized[:,0].max():.3f}] y=[{Qs_normalized[:,1].min():.3f},{Qs_normalized[:,1].max():.3f}]")
-    print(f"  [3D MVC] Corner indices: {list(ci)}, n_verts={n_verts}")
-    # Check what find_waypoints would give
-    _, old_wp_check, _ = obj.find_waypoints(bp_info, fiber_samples_raw)
-    old_wp_arr = np.array(old_wp_check)
-    diff = np.max(np.abs(waypoints - old_wp_arr)) if len(old_wp_arr) == len(waypoints) else -1
-    print(f"  [3D MVC] Diff from find_waypoints: {diff:.6f}")
+    # Compute MVC weights for storage
+    fs = _compute_waypoints.__code__  # Can't easily extract fs, recompute
+    qs_used = qs_rev if use_rev else qs_fwd
+    fs_list = []
+    for v in fiber_samples:
+        s_v = [Q - v for Q in qs_used]
+        f_found = False
+        for i in range(n_verts):
+            ip = (i + 1) % n_verts
+            r_i = np.linalg.norm(s_v[i])
+            if r_i < 1e-10:
+                f = np.zeros(n_verts); f[i] = 1; fs_list.append(f); f_found = True; break
+            A_i = np.linalg.det(np.array([s_v[i], s_v[ip]])) / 2
+            D_i = np.dot(s_v[i], s_v[ip])
+            if abs(A_i) < 1e-10 and D_i < 0:
+                rip = np.linalg.norm(s_v[ip])
+                fi = np.zeros(n_verts); fi[i] = 1
+                fip = np.zeros(n_verts); fip[ip] = 1
+                d = r_i + rip
+                fs_list.append((rip * fi + r_i * fip) / d if d > 1e-10 else (fi + fip) / 2)
+                f_found = True; break
+        if f_found: continue
+        f = np.zeros(n_verts); W = 0
+        for i in range(n_verts):
+            ip = (i + 1) % n_verts; im = (i - 1) % n_verts
+            r_i = np.linalg.norm(s_v[i])
+            if r_i < 1e-10: continue
+            w = 0
+            Aim = np.linalg.det(np.array([s_v[im], s_v[i]])) / 2
+            if abs(Aim) > 1e-10:
+                w += (np.linalg.norm(s_v[im]) - np.dot(s_v[im], s_v[i]) / r_i) / Aim
+            Ai = np.linalg.det(np.array([s_v[i], s_v[ip]])) / 2
+            if abs(Ai) > 1e-10:
+                w += (np.linalg.norm(s_v[ip]) - np.dot(s_v[i], s_v[ip]) / r_i) / Ai
+            f[i] = w; W += w
+        fs_list.append(f / W if abs(W) > 1e-10 else np.ones(n_verts) / n_verts)
+    fs = np.array(fs_list)
+
+    print(f"  [3D MVC] Qs range: x=[{qs_used[:,0].min():.3f},{qs_used[:,0].max():.3f}] y=[{qs_used[:,1].min():.3f},{qs_used[:,1].max():.3f}]")
 
     # Update waypoints and MVC weights
     if hasattr(obj, 'waypoints') and obj.waypoints is not None:
