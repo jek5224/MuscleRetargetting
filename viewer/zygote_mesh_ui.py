@@ -3765,6 +3765,17 @@ def _apply_3d_mvc(obj, stream_idx, level_idx, is_post_stream):
         if np.sum((waypoints[i] - centroid) ** 2) > threshold_sq or not np.all(np.isfinite(waypoints[i])):
             waypoints[i] = centroid
 
+    # Debug: check if waypoints actually differ
+    old_wp = None
+    if hasattr(obj, 'waypoints') and obj.waypoints is not None:
+        if stream_idx < len(obj.waypoints) and level_idx < len(obj.waypoints[stream_idx]):
+            old_wp = np.array(obj.waypoints[stream_idx][level_idx])
+    if old_wp is not None and len(old_wp) == len(waypoints):
+        diff = np.max(np.abs(waypoints - old_wp))
+        print(f"  [3D MVC] Max waypoint change: {diff:.6f}")
+    else:
+        print(f"  [3D MVC] Old waypoints: {old_wp is not None}, new: {len(waypoints)}")
+
     # Update waypoints and MVC weights
     if hasattr(obj, 'waypoints') and obj.waypoints is not None:
         if stream_idx < len(obj.waypoints) and level_idx < len(obj.waypoints[stream_idx]):
