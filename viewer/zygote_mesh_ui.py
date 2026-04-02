@@ -3626,21 +3626,37 @@ def _apply_3d_mvc(obj, stream_idx, level_idx, is_post_stream):
     Ps = np.array(P_verts)
     bp_c = [np.array(c) for c in bp_corners[:4]]
 
-    # Unit-square corners: 0→(0,0), 1→(1,0), 2→(1,1), 3→(0,1)
-    uv_corners = [np.array([0.0, 0.0]), np.array([1.0, 0.0]),
-                   np.array([1.0, 1.0]), np.array([0.0, 1.0])]
+    # Sort corners to be sequential around the contour.
+    # ci = [c0, c1, c2, c3] may not be in contour order.
+    # Find the order that makes segments go the SHORT way around.
+    ci_with_bp = list(enumerate(ci))  # [(bp_corner_idx, contour_vertex_idx), ...]
+    ci_with_bp.sort(key=lambda x: x[1])  # sort by contour vertex index
+
+    # Map sorted contour-order to unit-square corners
+    # sorted_ci[i] = (original_bp_corner_idx, contour_vertex_idx)
+    # Unit-square positions follow the sorted contour order
+    uv_all = [np.array([0.0, 0.0]), np.array([1.0, 0.0]),
+              np.array([1.0, 1.0]), np.array([0.0, 1.0])]
+
+    # Assign unit-square positions to sorted corners
+    sorted_ci = [x[1] for x in ci_with_bp]  # contour indices in order
+    sorted_bp = [x[0] for x in ci_with_bp]  # which BP corner each is
+    # Map: sorted position i gets uv from BP corner sorted_bp[i]
+    sorted_uv = [uv_all[sorted_bp[i]] for i in range(4)]
 
     # Build Qs_normalized directly from 3D arc-length
     Qs_normalized = np.zeros((n_verts, 2))
     new_match = [None] * n_verts
 
     for edge_idx in range(4):
-        vs = ci[edge_idx]
-        ve = ci[(edge_idx + 1) % 4]
-        uv_start = uv_corners[edge_idx]
-        uv_end = uv_corners[(edge_idx + 1) % 4]
-        q_start_3d = bp_c[edge_idx]
-        q_end_3d = bp_c[(edge_idx + 1) % 4]
+        vs = sorted_ci[edge_idx]
+        ve = sorted_ci[(edge_idx + 1) % 4]
+        uv_start = sorted_uv[edge_idx]
+        uv_end = sorted_uv[(edge_idx + 1) % 4]
+        bp_idx_s = sorted_bp[edge_idx]
+        bp_idx_e = sorted_bp[(edge_idx + 1) % 4]
+        q_start_3d = bp_c[bp_idx_s]
+        q_end_3d = bp_c[bp_idx_e]
 
         if ve > vs:
             seg_indices = list(range(vs, ve))
