@@ -3636,6 +3636,21 @@ def _apply_3d_mvc(obj, stream_idx, level_idx, is_post_stream):
     sorted_bp = [p[0] for p in sorted_pairs]
     sorted_vi = [p[1] for p in sorted_pairs]
 
+    # Check winding: if sorted BP order goes CCW around unit square, reverse
+    # Standard BP winding is CW: 0→1→2→3 = (0,0)→(1,0)→(1,1)→(0,1)
+    # Check if sorted_bp follows CW by checking cross product of first two UV edges
+    uv0 = uv_bp[sorted_bp[0]]
+    uv1 = uv_bp[sorted_bp[1]]
+    uv2 = uv_bp[sorted_bp[2]]
+    e1 = uv1 - uv0
+    e2 = uv2 - uv1
+    cross = e1[0] * e2[1] - e1[1] * e2[0]
+    if cross > 0:
+        # CCW — reverse to make CW
+        sorted_pairs.reverse()
+        sorted_bp = [p[0] for p in sorted_pairs]
+        sorted_vi = [p[1] for p in sorted_pairs]
+
     def _build_qs_direct():
         qs = np.zeros((n_verts, 2))
         nm = [None] * n_verts
