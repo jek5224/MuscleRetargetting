@@ -6450,11 +6450,10 @@ def _render_level_select_windows(v):
 
         imgui.same_line()
         if imgui.button("Finish Select", button_width, 30):
+            # Always defer — apply selection immediately, replay animation later if needed
+            obj._start_level_select_animation(defer=True)
             animate = getattr(obj, 'animate_process', False)
-            if animate:
-                obj._start_level_select_animation(defer=False)
-            else:
-                obj._start_level_select_animation(defer=True)
+            if not animate:
                 obj._level_select_replayed = True
 
         imgui.end()
