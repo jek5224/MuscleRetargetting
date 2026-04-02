@@ -2630,9 +2630,16 @@ def _render_inspect_2d_windows(v):
                         cx, cy = _p2d_to_screen(corner_2d)
                         corner_screen_points_right.append((cx, cy))
 
-                        # Use Q-based corner correspondence (reflects actual fiber computation)
-                        if len(p_screen_points) > 0 and ci < len(q_based_corner_indices):
+                        # Use stored corner_indices if available, else Q-based fallback
+                        stored_ci = plane_info.get('corner_indices') if plane_info else None
+                        if stored_ci is not None and ci < len(stored_ci):
+                            closest_vi = stored_ci[ci]
+                        elif ci < len(q_based_corner_indices):
                             closest_vi = q_based_corner_indices[ci]
+                        else:
+                            closest_vi = -1
+
+                        if closest_vi >= 0 and len(p_screen_points) > 0:
                             corner_to_closest_vertex.append((ci, closest_vi))
 
                             # Draw line from corner to corresponding vertex (purple, thin)
@@ -2903,10 +2910,15 @@ def _render_inspect_2d_windows(v):
                             other_stream_corner_pts.append(np.array(v_pt))
 
             # Current level vertex highlighted in main color
-            if contour_match is not None and len(q_based_corner_indices) > corner_idx:
+            stored_ci_curr = plane_info.get('corner_indices') if plane_info else None
+            if contour_match is not None and stored_ci_curr is not None and corner_idx < len(stored_ci_curr):
+                vi = stored_ci_curr[corner_idx]
+            elif contour_match is not None and len(q_based_corner_indices) > corner_idx:
                 vi = q_based_corner_indices[corner_idx]
-                if vi < len(contour_match):
-                    obj.inspector_highlight_vertex_3d = np.array(contour_match[vi][0])
+            else:
+                vi = -1
+            if vi >= 0 and vi < len(contour_match):
+                obj.inspector_highlight_vertex_3d = np.array(contour_match[vi][0])
             obj.inspector_highlight_corner_vertices_3d = corner_pts if corner_pts else None
             obj.inspector_highlight_other_stream_corners_3d = other_stream_corner_pts if other_stream_corner_pts else None
         elif hovered_type == 'waypoint' and hovered_idx >= 0:
