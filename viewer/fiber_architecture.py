@@ -1836,7 +1836,7 @@ class FiberArchitectureMixin:
                 # Wrap around: go from muscle_start to end, then from 0 to muscle_end
                 muscle_list = list(range(muscle_start, len(muscle_contour))) + list(range(0, muscle_end + 1))
 
-            segment_t = []
+            segment_t = [0.0]  # start vertex (corner) at t=0
             t_sum = 0
             for j in range(1, len(muscle_list)):
                 t = np.linalg.norm(muscle_contour[muscle_list[j]] - muscle_contour[muscle_list[j - 1]])
@@ -1846,10 +1846,11 @@ class FiberArchitectureMixin:
             if t_sum > 0:
                 segment_t = [t / t_sum for t in segment_t]
 
-            for j in range(len(segment_t)):
+            # Include start vertex (corner), exclude end vertex (next corner — added by next segment)
+            for j in range(len(segment_t) - 1):
                 t = segment_t[j]
                 template_pos = (1 - t) * template_start_pos + t * template_end_pos
-                result.append((muscle_contour[muscle_list[j + 1]], template_pos))
+                result.append((muscle_contour[muscle_list[j]], template_pos))
 
         return muscle_contour, result
 
