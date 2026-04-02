@@ -645,6 +645,10 @@ class MeshLoader(ContourMeshMixin, TetrahedronMeshMixin, FiberArchitectureMixin,
         glDisable(GL_LIGHTING)
         glEnable(GL_BLEND)
         glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
+        _bp_after = getattr(self, '_bp_after_select', None)
+        if _bp_after is not None and id(self.bounding_planes) != _bp_after:
+            print(f"[BP OVERWRITTEN] expected id={_bp_after}, got id={id(self.bounding_planes)}, lens={[len(s) for s in self.bounding_planes]}")
+            self._bp_after_select = None  # Only warn once
         for i, bounding_planes in enumerate(self.bounding_planes):
             for j, plane_info in enumerate(bounding_planes):
                 # Check visibility based on draw_contour_stream structure

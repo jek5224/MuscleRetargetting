@@ -1140,7 +1140,8 @@ class ContourAnimationMixin:
             self._save_level_select_post_state()
             self._level_select_anim_pending_resume = True
             self._level_select_replayed = False
-            print(f"Level select animation deferred: {len(unselected)} unselected contours")
+            self._bp_after_select = id(self.bounding_planes)
+            print(f"Level select deferred: bp_id={id(self.bounding_planes)}, lens={[len(s) for s in self.bounding_planes]}")
             return
 
         # Restore ALL levels visible (from original) so we can animate the shrink
