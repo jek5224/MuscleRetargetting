@@ -3627,25 +3627,9 @@ def _apply_3d_mvc(obj, stream_idx, level_idx, is_post_stream):
     bp_c = [np.array(c) for c in bp_corners[:4]]
 
     # Use original ci order (matches BP corners 0,1,2,3 as user set them)
-    # For each edge, use the SHORTER arc between corners
+    # All segments go the same direction (forward) around the contour
     uv_corners = [np.array([0.0, 0.0]), np.array([1.0, 0.0]),
                    np.array([1.0, 1.0]), np.array([0.0, 1.0])]
-
-    def _shorter_arc(vs, ve, n):
-        """Return segment indices taking the shorter path around the contour."""
-        if vs == ve:
-            return [vs]
-        # Forward: vs → ve
-        if ve > vs:
-            fwd = list(range(vs, ve))
-        else:
-            fwd = list(range(vs, n)) + list(range(0, ve))
-        # Backward: vs → ve going the other way
-        if vs > ve:
-            bwd = list(range(vs, ve, -1))
-        else:
-            bwd = list(range(vs, -1, -1)) + list(range(n - 1, ve, -1))
-        return fwd if len(fwd) <= len(bwd) else bwd
 
     def _build_qs(use_ci):
         qs = np.zeros((n_verts, 2))
@@ -3657,7 +3641,13 @@ def _apply_3d_mvc(obj, stream_idx, level_idx, is_post_stream):
             uv_e = uv_corners[(edge_idx + 1) % 4]
             q_s = bp_c[edge_idx]
             q_e = bp_c[(edge_idx + 1) % 4]
-            seg = _shorter_arc(vs, ve, n_verts)
+            # Always go forward (vs → ve), wrapping if needed
+            if ve > vs:
+                seg = list(range(vs, ve))
+            elif ve < vs:
+                seg = list(range(vs, n_verts)) + list(range(0, ve))
+            else:
+                seg = [vs]
             if not seg:
                 continue
             arc = [0.0]
