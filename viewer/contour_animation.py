@@ -1335,6 +1335,19 @@ class ContourAnimationMixin:
         level_counts = [len(self._selected_stream_contours[s]) for s in range(max_stream_count)]
         print(f"Levels updated: {level_counts} per stream")
 
+        # Debug: verify selected BPs match expected levels
+        for s in range(max_stream_count):
+            if s < len(new_stream_bounding_planes) and len(new_stream_bounding_planes[s]) > 0:
+                means = [np.linalg.norm(bp['mean']) for bp in new_stream_bounding_planes[s]]
+                orig_means = [np.linalg.norm(bp['mean']) for bp in orig_stream_bounding_planes[s]]
+                sel = self.stream_selected_levels[s]
+                expected = [orig_means[li] for li in sel if li < len(orig_means)]
+                match = all(abs(a - b) < 1e-6 for a, b in zip(means, expected))
+                print(f"  Stream {s}: selected BP means match orig: {match}")
+                if not match:
+                    print(f"    Selected means: {means[:5]}...")
+                    print(f"    Expected means: {expected[:5]}...")
+
         # Close window and clean up
         self._level_select_window_open = False
         self._level_select_checkboxes = None
