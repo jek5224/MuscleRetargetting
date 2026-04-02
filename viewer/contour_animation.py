@@ -1327,10 +1327,13 @@ class ContourAnimationMixin:
         self._selected_stream_bounding_planes = new_stream_bounding_planes
         self._selected_stream_groups = new_stream_groups
 
-        # Update visualization from selected data
-        self.contours = self._selected_stream_contours
-        self.bounding_planes = self._selected_stream_bounding_planes
+        # Update visualization from selected data (deep copy to break any stale references)
+        self.contours = [list(sc) for sc in self._selected_stream_contours]
+        self.bounding_planes = [[copy.deepcopy(bp) for bp in stream_bps]
+                                for stream_bps in self._selected_stream_bounding_planes]
         self.draw_contour_stream = [[True] * len(self._selected_stream_contours[s]) for s in range(max_stream_count)]
+        # Also update _selected refs to the deep copies
+        self._selected_stream_bounding_planes = self.bounding_planes
 
         level_counts = [len(self._selected_stream_contours[s]) for s in range(max_stream_count)]
         print(f"Levels updated: {level_counts} per stream")
