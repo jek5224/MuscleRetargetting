@@ -1195,7 +1195,18 @@ class ContourAnimationMixin:
                 self._apply_level_selection()
                 self._save_level_select_post_state()
                 self._level_select_anim_pending_resume = True
-            print("Level select animation complete")
+            # Verify BPs match selected levels
+            n_bp = [len(s) for s in self.bounding_planes]
+            n_ct = [len(s) for s in self.contours]
+            sel = getattr(self, 'stream_selected_levels', None)
+            print(f"Level select animation complete: bp_counts={n_bp}, contour_counts={n_ct}, selected={sel}")
+            if sel is not None and n_bp:
+                for si in range(len(n_bp)):
+                    if si < len(sel) and n_bp[si] != len(sel[si]):
+                        print(f"  [WARNING] Stream {si}: bp count {n_bp[si]} != selected count {len(sel[si])}")
+                    if n_bp[si] > 0 and si < len(self.bounding_planes):
+                        bp0 = self.bounding_planes[si][0]
+                        print(f"  Stream {si} first BP mean: {bp0['mean'][:3]}")
 
         return True
 
