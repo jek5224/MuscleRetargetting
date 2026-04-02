@@ -3626,27 +3626,33 @@ def _apply_3d_mvc(obj, stream_idx, level_idx, is_post_stream):
     Ps = np.array(P_verts)
     bp_c = [np.array(c) for c in bp_corners[:4]]
 
-    # Use original ci order (matches BP corners 0,1,2,3 as user set them)
-    # All segments go the same direction (forward) around the contour
-    uv_corners = [np.array([0.0, 0.0]), np.array([1.0, 0.0]),
-                   np.array([1.0, 1.0]), np.array([0.0, 1.0])]
+    # Sort corners by contour index to get 4 arcs going the short way
+    # Then try all 4 rotations of mapping arcs to unit-square edges
+    uv_edges = [np.array([0.0, 0.0]), np.array([1.0, 0.0]),
+                np.array([1.0, 1.0]), np.array([0.0, 1.0])]
 
-    def _build_qs(use_ci, use_uv):
+    # sorted_pairs: [(bp_corner_idx, contour_vertex_idx)] sorted by contour index
+    sorted_pairs = sorted(enumerate(ci), key=lambda x: x[1])
+    sorted_bp_idx = [p[0] for p in sorted_pairs]  # which BP corner
+    sorted_vi = [p[1] for p in sorted_pairs]       # contour vertex index (ascending)
+
+    def _build_qs(rotation):
+        """Build Qs with a given rotation offset mapping sorted arcs to uv edges."""
         qs = np.zeros((n_verts, 2))
         nm = [None] * n_verts
-        for edge_idx in range(4):
-            vs = use_ci[edge_idx]
-            ve = use_ci[(edge_idx + 1) % 4]
-            uv_s = use_uv[edge_idx]
-            uv_e = use_uv[(edge_idx + 1) % 4]
-            # Q 3D: find which BP corner each contour corner corresponds to
-            # use_ci[edge_idx] is the contour vertex for this corner
-            # Find its BP corner index from original ci
-            bp_idx_s = ci.index(vs) if vs in ci else edge_idx
-            bp_idx_e = ci.index(ve) if ve in ci else (edge_idx + 1) % 4
-            q_s = bp_c[bp_idx_s]
-            q_e = bp_c[bp_idx_e]
-            # Always go forward (vs → ve), wrapping if needed
+        for arc_idx in range(4):
+            vs = sorted_vi[arc_idx]
+            ve = sorted_vi[(arc_idx + 1) % 4]
+            # BP corners for this arc's endpoints
+            bp_s = sorted_bp_idx[arc_idx]
+            bp_e = sorted_bp_idx[(arc_idx + 1) % 4]
+            # UV: map this arc to unit-square edge (rotation + arc_idx)
+            uv_idx = (arc_idx + rotation) % 4
+            uv_s = uv_edges[uv_idx]
+            uv_e = uv_edges[(uv_idx + 1) % 4]
+            q_s = bp_c[bp_s]
+            q_e = bp_c[bp_e]
+            # Forward from vs to ve (always short way since sorted)
             if ve > vs:
                 seg = list(range(vs, ve))
             elif ve < vs:
@@ -3717,33 +3723,39 @@ def _apply_3d_mvc(obj, stream_idx, level_idx, is_post_stream):
         fiber_samples = fiber_samples[:, :2]
 
     # Try both windings
-    # Forward: ci order with standard uv. Reverse: same ci but reversed uv winding.
-    uv_rev = [np.array([0.0, 0.0]), np.array([0.0, 1.0]),
-              np.array([1.0, 1.0]), np.array([1.0, 0.0])]
-    qs_fwd, nm_fwd = _build_qs(list(ci), uv_corners)
-    qs_rev, nm_rev = _build_qs(list(ci), uv_rev)
-    wp_fwd = _compute_waypoints(qs_fwd)
-    wp_rev = _compute_waypoints(qs_rev)
-
-    # Pick winding closer to adjacent level's waypoints
+    # Try all 4 rotations, pick the one closest to adjacent level's waypoints
     adj_lev = level_idx - 1 if level_idx > 0 else level_idx + 1
     adj_wp = None
     if hasattr(obj, 'waypoints') and obj.waypoints is not None:
         if stream_idx < len(obj.waypoints) and adj_lev < len(obj.waypoints[stream_idx]):
             adj_wp = np.array(obj.waypoints[stream_idx][adj_lev])
 
-    if adj_wp is not None and len(adj_wp) == len(wp_fwd):
-        err_fwd = np.sum(np.linalg.norm(wp_fwd - adj_wp, axis=1))
-        err_rev = np.sum(np.linalg.norm(wp_rev - adj_wp, axis=1))
-        use_rev = err_rev < err_fwd
-        print(f"  [3D MVC] fwd_err={err_fwd:.4f}, rev_err={err_rev:.4f}, using={'rev' if use_rev else 'fwd'}")
-    else:
-        use_rev = False
+    best_err = float('inf')
+    best_rot = 0
+    best_wp = None
+    best_qs = None
+    best_nm = None
 
-    waypoints = wp_rev if use_rev else wp_fwd
-    Qs_normalized = qs_rev if use_rev else qs_fwd
-    new_match = nm_rev if use_rev else nm_fwd
-    bp_info['contour_match'] = new_match
+    for rot in range(4):
+        qs, nm = _build_qs(rot)
+        wp = _compute_waypoints(qs)
+        if adj_wp is not None and len(adj_wp) == len(wp):
+            err = np.sum(np.linalg.norm(wp - adj_wp, axis=1))
+        else:
+            err = 0
+        if err < best_err:
+            best_err = err
+            best_rot = rot
+            best_wp = wp
+            best_qs = qs
+            best_nm = nm
+
+    waypoints = best_wp
+    Qs_normalized = best_qs
+    bp_info['contour_match'] = best_nm
+    # Update corner_indices to match sorted order
+    bp_info['corner_indices'] = sorted_vi
+    print(f"  [3D MVC] Best rotation={best_rot}, err={best_err:.4f}")
 
     # Clamp extreme waypoints
     centroid = np.mean(Ps, axis=0)
