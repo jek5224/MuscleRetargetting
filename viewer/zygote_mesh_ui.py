@@ -3774,6 +3774,7 @@ def _apply_3d_mvc(obj, stream_idx, level_idx, is_post_stream):
             obj.mvc_weights[stream_idx][level_idx] = fs
     if hasattr(obj, '_save_fiber_anim_data'):
         obj._save_fiber_anim_data()
+    obj._fiber_draw_dirty = True
 
     print(f"  [3D MVC] Applied at stream={stream_idx} level={level_idx}, {len(waypoints)} waypoints")
 
