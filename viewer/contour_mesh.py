@@ -8965,9 +8965,8 @@ class ContourMeshMixin(ContourAnimationMixin):
                 self.waypoints[i].append(waypoints)
                 self.mvc_weights[i].append(mvc_weights)
 
-        # Chain-propagate corner correspondences from reference level (arc-length fraction)
-        # Disabled: too slow with find_waypoints per level. Use Find cor (x)/(y) for manual tuning.
-        # self._optimize_waypoint_smoothness()
+        # Propagate corner correspondences from most non-square-like reference level
+        self._propagate_corner_correspondences()
 
         # Populate stream endpoints for bounding box visualization
         self._stream_endpoints = []
@@ -8991,34 +8990,29 @@ class ContourMeshMixin(ContourAnimationMixin):
         else:
             print(f"[_find_contour_stream_post_process] Skipping auto_detect_attachments: skeleton_meshes={skeleton_meshes is not None}, len={len(skeleton_meshes) if skeleton_meshes else 0}")
 
-    def _optimize_waypoint_smoothness(self):
-        """Optimize corner correspondences by chain-propagating from a reference level.
+    def _propagate_corner_correspondences(self):
+        """Propagate corner correspondences from reference level using Find cor logic.
 
         For each stream:
-        1. Find reference level: the most non-square-like (highest aspect ratio)
-        2. Forward pass (ref+1 → end): for each corner, find the nearest contour
-           vertex on the current level to the previous level's corner 3D position
-        3. Backward pass (ref-1 → 0): same, propagating from ref toward origin
-        4. Recompute contour_match and waypoints for all modified levels
-
-        This transfers the topological corner positions from the reference
-        (where ray-based detection is most reliable) to all other levels.
+        1. Find the most non-square-like contour (highest aspect ratio) as reference
+        2. Its diagonal-based corner correspondences are kept as-is
+        3. Determine axis: if reference is wider than tall → use x, else → use y
+        4. Apply Find cor (x or y) from reference to all other levels
         """
         if self.waypoints is None or self.bounding_planes is None:
             return
 
         n_streams = len(self.waypoints)
-        total_modified = 0
 
         for stream_i in range(n_streams):
             bp_stream = self.bounding_planes[stream_i]
             n_levels = len(bp_stream)
             fiber_samples = self.fiber_architecture[stream_i]
 
-            if n_levels < 3:
+            if n_levels < 2:
                 continue
 
-            # Find reference level: highest aspect ratio (most non-square-like)
+            # Find reference: most non-square-like (highest aspect ratio)
             best_ref = 0
             best_ratio = 0
             for lev in range(n_levels):
@@ -9034,97 +9028,126 @@ class ContourMeshMixin(ContourAnimationMixin):
                         best_ratio = ratio
                         best_ref = lev
 
-            # Get reference level's corner positions (3D)
             ref_bp = bp_stream[best_ref]
             ref_match = ref_bp.get('contour_match')
-            if ref_match is None:
+            ref_corners = ref_bp.get('bounding_plane')
+            if ref_match is None or ref_corners is None:
                 continue
 
+            # Get/detect corner indices for reference
             ref_ci = ref_bp.get('corner_indices')
             if ref_ci is None:
-                # Detect from Q positions
-                bp_corners = [np.array(c) for c in ref_bp['bounding_plane'][:4]]
+                bp_c = [np.array(c) for c in ref_corners[:4]]
                 ref_ci = []
-                for corner_3d in bp_corners:
+                for corner_3d in bp_c:
                     dists = [np.linalg.norm(np.array(q) - corner_3d) for _, q in ref_match]
                     ref_ci.append(int(np.argmin(dists)))
                 ref_bp['corner_indices'] = ref_ci
 
-            print(f"  [Waypoint opt] Stream {stream_i}: ref=L{best_ref} (ratio={best_ratio:.2f}), {n_levels} levels")
+            # Determine axis: wider → x, taller → y
+            ref_w = np.linalg.norm(ref_corners[1] - ref_corners[0])
+            ref_h = np.linalg.norm(ref_corners[3] - ref_corners[0])
+            axis = 'x' if ref_w >= ref_h else 'y'
 
-            # Propagate: forward from ref, backward from ref
-            for direction, levels in [('fwd', range(best_ref + 1, n_levels)),
-                                       ('bwd', range(best_ref - 1, -1, -1))]:
-                for lev in levels:
-                    bp = bp_stream[lev]
-                    match = bp.get('contour_match')
-                    if match is None:
+            # Get reference corner's unit-square position (project P onto BP)
+            bp_c = [np.array(c) for c in ref_corners[:4]]
+            edge_x = bp_c[1] - bp_c[0]
+            edge_y = bp_c[3] - bp_c[0]
+            A_ref = np.column_stack([edge_x, edge_y])
+
+            # For each corner, compute target ratio and side
+            corner_targets = []  # (target_ratio, side_above) per corner
+            for ci_idx in range(4):
+                corner_vi = ref_ci[ci_idx]
+                if corner_vi >= len(ref_match):
+                    corner_targets.append((0.5, True))
+                    continue
+                corner_p = np.array(ref_match[corner_vi][0])
+                rel = corner_p - bp_c[0]
+                result, _, _, _ = np.linalg.lstsq(A_ref, rel, rcond=None)
+                u, v = float(result[0]), float(result[1])
+
+                if axis == 'x':
+                    corner_targets.append((u, ci_idx in (2, 3)))  # top corners pick upper
+                else:
+                    corner_targets.append((v, ci_idx in (1, 2)))  # right corners pick right
+
+            print(f"  [Corner prop] Stream {stream_i}: ref=L{best_ref} (ratio={best_ratio:.2f}), axis={axis}")
+
+            # Apply to all other levels
+            n_modified = 0
+            for lev in range(n_levels):
+                if lev == best_ref:
+                    continue
+
+                bp_lev = bp_stream[lev]
+                match_lev = bp_lev.get('contour_match')
+                bp_corners_lev = bp_lev.get('bounding_plane')
+                if match_lev is None or bp_corners_lev is None:
+                    continue
+
+                P_verts = [np.array(p) for p, q in match_lev]
+                n_verts = len(P_verts)
+                if n_verts < 4:
+                    continue
+                bp_c_lev = [np.array(c) for c in bp_corners_lev[:4]]
+
+                # Project P vertices to unit square
+                edge_x_lev = bp_c_lev[1] - bp_c_lev[0]
+                edge_y_lev = bp_c_lev[3] - bp_c_lev[0]
+                A_lev = np.column_stack([edge_x_lev, edge_y_lev])
+
+                vert_uv = np.zeros((n_verts, 2))
+                for vi in range(n_verts):
+                    p, _ = match_lev[vi]
+                    rel_p = np.array(p) - bp_c_lev[0]
+                    res, _, _, _ = np.linalg.lstsq(A_lev, rel_p, rcond=None)
+                    vert_uv[vi] = [res[0], res[1]]
+
+                new_ci = []
+                for ci_idx in range(4):
+                    target_ratio, side_above = corner_targets[ci_idx]
+
+                    if axis == 'x':
+                        diffs = np.abs(vert_uv[:, 0] - target_ratio)
+                    else:
+                        diffs = np.abs(vert_uv[:, 1] - target_ratio)
+
+                    best_diff = np.min(diffs)
+                    candidates = np.where(diffs < max(best_diff * 2, 0.05))[0]
+
+                    if len(candidates) == 0:
+                        new_ci.append(0)
                         continue
 
-                    P_verts = [np.array(p) for p, q in match]
-                    n_verts = len(P_verts)
-                    bp_corners_3d = [np.array(c) for c in bp['bounding_plane'][:4]]
+                    if axis == 'x':
+                        if side_above:
+                            best_vi = candidates[np.argmax(vert_uv[candidates, 1])]
+                        else:
+                            best_vi = candidates[np.argmin(vert_uv[candidates, 1])]
+                    else:
+                        if side_above:
+                            best_vi = candidates[np.argmax(vert_uv[candidates, 0])]
+                        else:
+                            best_vi = candidates[np.argmin(vert_uv[candidates, 0])]
 
-                    if n_verts < 4:
-                        continue
+                    new_ci.append(int(best_vi))
 
-                    # For each corner, transfer by arc-length fraction.
-                    # Compute cumulative arc length on both contours, normalize to [0,1].
-                    # Find the vertex on the current contour at the same arc-length fraction.
-                    prev_bp = bp_stream[lev - 1] if direction == 'fwd' else bp_stream[lev + 1]
-                    prev_match = prev_bp.get('contour_match')
-                    if prev_match is None:
-                        continue
-                    prev_P = [np.array(p) for p, q in prev_match]
-                    prev_ci = prev_bp.get('corner_indices', ref_ci)
+                if len(set(new_ci)) < 4:
+                    continue
 
-                    # Arc-length parameterization for previous contour
-                    prev_n = len(prev_P)
-                    prev_arc = np.zeros(prev_n)
-                    for vi in range(1, prev_n):
-                        prev_arc[vi] = prev_arc[vi - 1] + np.linalg.norm(prev_P[vi] - prev_P[vi - 1])
-                    # Add closing edge
-                    prev_total = prev_arc[-1] + np.linalg.norm(prev_P[0] - prev_P[-1]) if prev_n > 1 else 1.0
-                    prev_arc_frac = prev_arc / prev_total if prev_total > 1e-10 else np.linspace(0, 1, prev_n)
+                # Recompute contour_match and waypoints
+                new_match = self._recompute_contour_match(P_verts, bp_c_lev, new_ci, n_verts)
+                bp_lev['contour_match'] = new_match
+                bp_lev['corner_indices'] = new_ci
 
-                    # Arc-length parameterization for current contour
-                    curr_arc = np.zeros(n_verts)
-                    for vi in range(1, n_verts):
-                        curr_arc[vi] = curr_arc[vi - 1] + np.linalg.norm(P_verts[vi] - P_verts[vi - 1])
-                    curr_total = curr_arc[-1] + np.linalg.norm(P_verts[0] - P_verts[-1]) if n_verts > 1 else 1.0
-                    curr_arc_frac = curr_arc / curr_total if curr_total > 1e-10 else np.linspace(0, 1, n_verts)
+                _, new_wp, new_mvc = self.find_waypoints(bp_lev, fiber_samples)
+                self.waypoints[stream_i][lev] = new_wp
+                self.mvc_weights[stream_i][lev] = new_mvc
+                n_modified += 1
 
-                    new_ci = []
-                    for ci_idx in range(4):
-                        # Arc-length fraction of this corner on previous contour
-                        target_frac = prev_arc_frac[prev_ci[ci_idx]]
-                        # Find vertex on current contour with closest arc-length fraction
-                        diffs = np.abs(curr_arc_frac - target_frac)
-                        new_ci.append(int(np.argmin(diffs)))
-
-                    # Check corners are distinct and in order
-                    if len(set(new_ci)) < 4:
-                        continue
-
-                    # Compare with current corner indices
-                    old_ci = bp.get('corner_indices')
-                    if old_ci is not None and list(old_ci) == new_ci:
-                        continue
-
-                    # Recompute contour_match and waypoints
-                    new_match = self._recompute_contour_match(
-                        P_verts, bp_corners_3d, new_ci, n_verts)
-                    bp['contour_match'] = new_match
-                    bp['corner_indices'] = new_ci
-
-                    _, new_wp, new_mvc = self.find_waypoints(bp, fiber_samples)
-                    self.waypoints[stream_i][lev] = new_wp
-                    self.mvc_weights[stream_i][lev] = new_mvc
-
-                    total_modified += 1
-
-        if total_modified > 0:
-            print(f"  [Waypoint opt] Modified {total_modified} levels via chain propagation")
+            if n_modified > 0:
+                print(f"  [Corner prop] Modified {n_modified}/{n_levels} levels")
 
 
     @staticmethod
