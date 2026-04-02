@@ -3765,16 +3765,14 @@ def _apply_3d_mvc(obj, stream_idx, level_idx, is_post_stream):
         if np.sum((waypoints[i] - centroid) ** 2) > threshold_sq or not np.all(np.isfinite(waypoints[i])):
             waypoints[i] = centroid
 
-    # Debug: check if waypoints actually differ
-    old_wp = None
-    if hasattr(obj, 'waypoints') and obj.waypoints is not None:
-        if stream_idx < len(obj.waypoints) and level_idx < len(obj.waypoints[stream_idx]):
-            old_wp = np.array(obj.waypoints[stream_idx][level_idx])
-    if old_wp is not None and len(old_wp) == len(waypoints):
-        diff = np.max(np.abs(waypoints - old_wp))
-        print(f"  [3D MVC] Max waypoint change: {diff:.6f}")
-    else:
-        print(f"  [3D MVC] Old waypoints: {old_wp is not None}, new: {len(waypoints)}")
+    # Debug
+    print(f"  [3D MVC] Qs_normalized range: x=[{Qs_normalized[:,0].min():.3f},{Qs_normalized[:,0].max():.3f}] y=[{Qs_normalized[:,1].min():.3f},{Qs_normalized[:,1].max():.3f}]")
+    print(f"  [3D MVC] Corner indices: {list(ci)}, n_verts={n_verts}")
+    # Check what find_waypoints would give
+    _, old_wp_check, _ = obj.find_waypoints(bp_info, fiber_samples_raw)
+    old_wp_arr = np.array(old_wp_check)
+    diff = np.max(np.abs(waypoints - old_wp_arr)) if len(old_wp_arr) == len(waypoints) else -1
+    print(f"  [3D MVC] Diff from find_waypoints: {diff:.6f}")
 
     # Update waypoints and MVC weights
     if hasattr(obj, 'waypoints') and obj.waypoints is not None:
