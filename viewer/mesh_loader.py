@@ -649,8 +649,11 @@ class MeshLoader(ContourMeshMixin, TetrahedronMeshMixin, FiberArchitectureMixin,
         if _dbg_draw_bp:
             self._dbg_draw_bp_once = False
             for si, sbs in enumerate(self.bounding_planes):
-                means = [f"{np.linalg.norm(bp['mean']):.4f}" for bp in sbs]
-                print(f"  [DRAW] Stream {si}: {len(sbs)} BPs, means={means[:5]}...")
+                for bi, bp in enumerate(sbs):
+                    m = bp['mean']
+                    c0 = bp.get('bounding_plane', [None])[0] if bp.get('bounding_plane') is not None else None
+                    c0s = f"[{c0[0]:.4f},{c0[1]:.4f},{c0[2]:.4f}]" if c0 is not None else "None"
+                    print(f"  [DRAW] S{si} L{bi}: mean=[{m[0]:.4f},{m[1]:.4f},{m[2]:.4f}] corner0={c0s}")
         for i, bounding_planes in enumerate(self.bounding_planes):
             for j, plane_info in enumerate(bounding_planes):
                 # Check visibility based on draw_contour_stream structure
