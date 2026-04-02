@@ -3641,21 +3641,13 @@ def _apply_3d_mvc(obj, stream_idx, level_idx, is_post_stream):
             uv_e = uv_edges[(edge_idx + 1) % 4]
             q_s = bp_c[edge_idx]
             q_e = bp_c[(edge_idx + 1) % 4]
-            # Pick shorter direction around contour
+            # Always go forward (consistent direction for all segments)
             if vs == ve:
                 seg = [vs]
+            elif ve > vs:
+                seg = list(range(vs, ve))
             else:
-                # Forward
-                if ve > vs:
-                    fwd = list(range(vs, ve))
-                else:
-                    fwd = list(range(vs, n_verts)) + list(range(0, ve))
-                # Backward
-                if vs > ve:
-                    bwd = list(range(vs, ve, -1))
-                else:
-                    bwd = list(range(vs, -1, -1)) + list(range(n_verts - 1, ve, -1))
-                seg = fwd if len(fwd) <= len(bwd) else bwd
+                seg = list(range(vs, n_verts)) + list(range(0, ve))
             if not seg:
                 continue
             arc = [0.0]
