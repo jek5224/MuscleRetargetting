@@ -3626,30 +3626,38 @@ def _apply_3d_mvc(obj, stream_idx, level_idx, is_post_stream):
     Ps = np.array(P_verts)
     bp_c = [np.array(c) for c in bp_corners[:4]]
 
-    # Sort corners by contour order, map sequentially to unit square
-    # Try both winding directions, pick the one matching adjacent level
-    sorted_ci = sorted(ci)
-    uv_seq_fwd = [np.array([0.0, 0.0]), np.array([1.0, 0.0]),
+    # Use original ci order (matches BP corners 0,1,2,3 as user set them)
+    # For each edge, use the SHORTER arc between corners
+    uv_corners = [np.array([0.0, 0.0]), np.array([1.0, 0.0]),
                    np.array([1.0, 1.0]), np.array([0.0, 1.0])]
-    uv_seq_rev = [np.array([0.0, 0.0]), np.array([0.0, 1.0]),
-                   np.array([1.0, 1.0]), np.array([1.0, 0.0])]
 
-    def _build_qs(uv_seq):
+    def _shorter_arc(vs, ve, n):
+        """Return segment indices taking the shorter path around the contour."""
+        if vs == ve:
+            return [vs]
+        # Forward: vs → ve
+        if ve > vs:
+            fwd = list(range(vs, ve))
+        else:
+            fwd = list(range(vs, n)) + list(range(0, ve))
+        # Backward: vs → ve going the other way
+        if vs > ve:
+            bwd = list(range(vs, ve, -1))
+        else:
+            bwd = list(range(vs, -1, -1)) + list(range(n - 1, ve, -1))
+        return fwd if len(fwd) <= len(bwd) else bwd
+
+    def _build_qs(use_ci):
         qs = np.zeros((n_verts, 2))
         nm = [None] * n_verts
         for edge_idx in range(4):
-            vs = sorted_ci[edge_idx]
-            ve = sorted_ci[(edge_idx + 1) % 4]
-            uv_s = uv_seq[edge_idx]
-            uv_e = uv_seq[(edge_idx + 1) % 4]
+            vs = use_ci[edge_idx]
+            ve = use_ci[(edge_idx + 1) % 4]
+            uv_s = uv_corners[edge_idx]
+            uv_e = uv_corners[(edge_idx + 1) % 4]
             q_s = bp_c[edge_idx]
             q_e = bp_c[(edge_idx + 1) % 4]
-            if ve > vs:
-                seg = list(range(vs, ve))
-            elif ve < vs:
-                seg = list(range(vs, n_verts)) + list(range(0, ve))
-            else:
-                seg = [vs]
+            seg = _shorter_arc(vs, ve, n_verts)
             if not seg:
                 continue
             arc = [0.0]
@@ -3714,8 +3722,10 @@ def _apply_3d_mvc(obj, stream_idx, level_idx, is_post_stream):
         fiber_samples = fiber_samples[:, :2]
 
     # Try both windings
-    qs_fwd, nm_fwd = _build_qs(uv_seq_fwd)
-    qs_rev, nm_rev = _build_qs(uv_seq_rev)
+    # Forward: ci as-is. Reverse: ci reversed (different winding).
+    ci_rev = [ci[0], ci[3], ci[2], ci[1]]
+    qs_fwd, nm_fwd = _build_qs(list(ci))
+    qs_rev, nm_rev = _build_qs(ci_rev)
     wp_fwd = _compute_waypoints(qs_fwd)
     wp_rev = _compute_waypoints(qs_rev)
 
