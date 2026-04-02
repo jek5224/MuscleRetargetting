@@ -3723,6 +3723,40 @@ def _apply_3d_mvc(obj, stream_idx, level_idx, is_post_stream):
     Qs_normalized, new_match = _build_qs_direct()
     bp_info['contour_match'] = new_match
     waypoints = _compute_waypoints(Qs_normalized)
+
+    # Debug: full segment info
+    print(f"  [3D MVC] ci={list(ci)}, n_verts={n_verts}")
+    assigned = set()
+    for edge_idx in range(4):
+        vs = ci[edge_idx]
+        ve = ci[(edge_idx + 1) % 4]
+        uv_s = uv_edges[edge_idx]
+        uv_e = uv_edges[(edge_idx + 1) % 4]
+        if vs == ve:
+            seg_len = 1
+        else:
+            if ve > vs:
+                fwd_len = ve - vs
+            else:
+                fwd_len = n_verts - vs + ve
+            if vs > ve:
+                bwd_len = vs - ve
+            else:
+                bwd_len = vs + n_verts - ve
+            seg_len = min(fwd_len, bwd_len)
+            used_fwd = fwd_len <= bwd_len
+        print(f"  [3D MVC] Edge {edge_idx}: {vs}→{ve}, uv ({uv_s[0]:.0f},{uv_s[1]:.0f})→({uv_e[0]:.0f},{uv_e[1]:.0f}), seg_len={seg_len}, dir={'fwd' if used_fwd else 'bwd'}")
+    # Check None entries
+    n_none = sum(1 for m in new_match if m is None)
+    n_assigned = sum(1 for q in Qs_normalized if q[0] != 0 or q[1] != 0)
+    # Count per-edge
+    on_bottom = sum(1 for q in Qs_normalized if abs(q[1]) < 0.01 and 0 <= q[0] <= 1)
+    on_right = sum(1 for q in Qs_normalized if abs(q[0] - 1) < 0.01 and 0 <= q[1] <= 1)
+    on_top = sum(1 for q in Qs_normalized if abs(q[1] - 1) < 0.01 and 0 <= q[0] <= 1)
+    on_left = sum(1 for q in Qs_normalized if abs(q[0]) < 0.01 and 0 <= q[1] <= 1)
+    interior = n_verts - on_bottom - on_right - on_top - on_left
+    print(f"  [3D MVC] Per-edge: bottom={on_bottom}, right={on_right}, top={on_top}, left={on_left}, interior/overlap={interior}")
+    print(f"  [3D MVC] None matches: {n_none}, Qs at (0,0): {sum(1 for q in Qs_normalized if q[0]==0 and q[1]==0)}")
     print(f"  [3D MVC] Qs range: x=[{Qs_normalized[:,0].min():.3f},{Qs_normalized[:,0].max():.3f}] y=[{Qs_normalized[:,1].min():.3f},{Qs_normalized[:,1].max():.3f}]")
 
     # Clamp extreme waypoints
