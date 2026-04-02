@@ -3766,8 +3766,7 @@ def _apply_3d_mvc(obj, stream_idx, level_idx, is_post_stream):
             waypoints[i] = centroid
 
     # Compute MVC weights for storage
-    fs = _compute_waypoints.__code__  # Can't easily extract fs, recompute
-    qs_used = qs_rev if use_rev else qs_fwd
+    qs_used = best_qs
     fs_list = []
     for v in fiber_samples:
         s_v = [Q - v for Q in qs_used]
