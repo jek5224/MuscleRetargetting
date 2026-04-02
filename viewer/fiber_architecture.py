@@ -1846,8 +1846,9 @@ class FiberArchitectureMixin:
             if t_sum > 0:
                 segment_t = [t / t_sum for t in segment_t]
 
-            # Include start vertex (corner), exclude end vertex (next corner — added by next segment)
-            for j in range(len(segment_t) - 1):
+            # Include start corner, exclude end corner (added by next segment)
+            n_out = len(muscle_list) - 1  # exclude last (= next corner)
+            for j in range(n_out):
                 t = segment_t[j]
                 template_pos = (1 - t) * template_start_pos + t * template_end_pos
                 result.append((muscle_contour[muscle_list[j]], template_pos))
