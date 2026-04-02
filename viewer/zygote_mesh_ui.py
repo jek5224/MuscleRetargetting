@@ -3645,11 +3645,8 @@ def _apply_3d_mvc(obj, stream_idx, level_idx, is_post_stream):
     e1 = uv1 - uv0
     e2 = uv2 - uv1
     cross = e1[0] * e2[1] - e1[1] * e2[0]
-    if cross < 0:
-        # Reverse winding to match standard BP direction
-        sorted_pairs.reverse()
-        sorted_bp = [p[0] for p in sorted_pairs]
-        sorted_vi = [p[1] for p in sorted_pairs]
+    # Don't reverse sorted order (segments must go forward).
+    # If winding is wrong, the user can adjust corners. Try both and pick best.
 
     def _build_qs_direct():
         qs = np.zeros((n_verts, 2))
@@ -3734,9 +3731,55 @@ def _apply_3d_mvc(obj, stream_idx, level_idx, is_post_stream):
         fiber_samples = fiber_samples[:, :2]
 
     # Try both windings
-    Qs_normalized, new_match = _build_qs_direct()
-    bp_info['contour_match'] = new_match
-    waypoints = _compute_waypoints(Qs_normalized)
+    Qs_direct, nm_direct = _build_qs_direct()
+    wp_direct = _compute_waypoints(Qs_direct)
+
+    # Mirror x to try opposite winding
+    Qs_mirror = Qs_direct.copy()
+    Qs_mirror[:, 0] = 1.0 - Qs_mirror[:, 0]
+    wp_mirror = _compute_waypoints(Qs_mirror)
+
+    # Also try mirror y
+    Qs_mirror_y = Qs_direct.copy()
+    Qs_mirror_y[:, 1] = 1.0 - Qs_mirror_y[:, 1]
+    wp_mirror_y = _compute_waypoints(Qs_mirror_y)
+
+    # Also try mirror both
+    Qs_mirror_xy = Qs_direct.copy()
+    Qs_mirror_xy[:, 0] = 1.0 - Qs_mirror_xy[:, 0]
+    Qs_mirror_xy[:, 1] = 1.0 - Qs_mirror_xy[:, 1]
+    wp_mirror_xy = _compute_waypoints(Qs_mirror_xy)
+
+    # Pick best match with adjacent level
+    adj_lev = level_idx - 1 if level_idx > 0 else level_idx + 1
+    adj_wp = None
+    if hasattr(obj, 'waypoints') and obj.waypoints is not None:
+        if stream_idx < len(obj.waypoints) and adj_lev < len(obj.waypoints[stream_idx]):
+            adj_wp = np.array(obj.waypoints[stream_idx][adj_lev])
+
+    candidates = [
+        ('direct', Qs_direct, wp_direct),
+        ('mirror_x', Qs_mirror, wp_mirror),
+        ('mirror_y', Qs_mirror_y, wp_mirror_y),
+        ('mirror_xy', Qs_mirror_xy, wp_mirror_xy),
+    ]
+
+    best_name = 'direct'
+    best_qs = Qs_direct
+    waypoints = wp_direct
+    if adj_wp is not None and len(adj_wp) == len(wp_direct):
+        best_err = float('inf')
+        for name_c, qs_c, wp_c in candidates:
+            err = np.sum(np.linalg.norm(wp_c - adj_wp, axis=1))
+            if err < best_err:
+                best_err = err
+                best_name = name_c
+                best_qs = qs_c
+                waypoints = wp_c
+        print(f"  [3D MVC] Best: {best_name} (err={best_err:.4f})")
+
+    Qs_normalized = best_qs
+    bp_info['contour_match'] = nm_direct
 
     # Debug
     print(f"  [3D MVC] ci={list(ci)}, sorted_vi={sorted_vi}, sorted_bp={sorted_bp}, n_verts={n_verts}")
