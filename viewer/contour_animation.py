@@ -1142,6 +1142,7 @@ class ContourAnimationMixin:
             # Don't auto-replay — selection is already applied visually.
             # User can click replay button to see the animation.
             self._level_select_replayed = True
+            self._dbg_draw_bp_once = True
             print(f"Level select deferred: {len(unselected)} unselected contours")
             return
 

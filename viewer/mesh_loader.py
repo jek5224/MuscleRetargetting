@@ -645,6 +645,12 @@ class MeshLoader(ContourMeshMixin, TetrahedronMeshMixin, FiberArchitectureMixin,
         glDisable(GL_LIGHTING)
         glEnable(GL_BLEND)
         glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
+        _dbg_draw_bp = getattr(self, '_dbg_draw_bp_once', False)
+        if _dbg_draw_bp:
+            self._dbg_draw_bp_once = False
+            for si, sbs in enumerate(self.bounding_planes):
+                means = [f"{np.linalg.norm(bp['mean']):.4f}" for bp in sbs]
+                print(f"  [DRAW] Stream {si}: {len(sbs)} BPs, means={means[:5]}...")
         for i, bounding_planes in enumerate(self.bounding_planes):
             for j, plane_info in enumerate(bounding_planes):
                 # Check visibility based on draw_contour_stream structure
