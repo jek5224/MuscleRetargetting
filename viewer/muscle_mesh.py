@@ -1519,7 +1519,7 @@ class MuscleMeshMixin:
         self.fiber_architecture = [self._sobol_sampling_barycentric_default(16)]
         self.is_draw_fiber_architecture = False
         self.is_one_fiber = False
-        self.sampling_method = 'sobol_unit_square'
+        self.sampling_method = 'grid'
         self.cutting_method = 'bp'
 
         self.waypoints = []
@@ -1580,7 +1580,6 @@ class MuscleMeshMixin:
         from scipy.spatial import cKDTree
 
         if self.contour_mesh_vertices is None or len(self.contour_mesh_vertices) == 0:
-            print("No contour mesh vertices")
             return
         if self.tet_vertices is None or len(self.tet_vertices) == 0:
             print("No tet vertices")
@@ -4081,3 +4080,17 @@ class MuscleMeshMixin:
         samples = margin + samples * (1 - 2 * margin)
 
         return samples
+
+    def grid_sampling_unit_square(self, n=10, margin=0.025):
+        """Generate an evenly spaced n×n grid in the unit square.
+
+        Args:
+            n: Grid resolution per axis (default 10 → 100 points)
+            margin: Margin from edges (default 0.025 gives [0.025, 0.975] range)
+
+        Returns:
+            (n*n, 2) array of grid points
+        """
+        coords = np.linspace(margin, 1 - margin, n)
+        gx, gy = np.meshgrid(coords, coords)
+        return np.column_stack([gx.ravel(), gy.ravel()])
