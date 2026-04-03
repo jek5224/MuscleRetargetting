@@ -3786,17 +3786,10 @@ class MuscleMeshMixin:
             skeleton: DART skeleton object (for initial body transforms)
             mesh_info: Dict mapping DART body names to OBJ paths (from env.mesh_info)
         """
-        import time as _time
-        _t_start = _time.time()
-        _timings = {}
-        def _mark(label):
-            _timings[label] = _time.time() - _t_start
-
         if self.tet_vertices is None or self.tet_tetrahedra is None:
             print("No tetrahedron mesh available. Run tetrahedralization first.")
             return False
 
-        _mark('start')
         # Get fixed vertices from cap faces (origin/insertion anchors)
         fixed_vertices = set()
         cap_face_set = set(self.tet_cap_face_indices)
@@ -3881,7 +3874,6 @@ class MuscleMeshMixin:
 
         self.soft_body_fixed_vertices = list(fixed_vertices)
 
-        _mark('fixed_verts')
         # Create quasistatic soft body simulation instance
         self.soft_body = SoftBodySimulation(
             vertices=self.tet_vertices.astype(np.float64),
@@ -3892,7 +3884,6 @@ class MuscleMeshMixin:
             volume_stiffness=self.soft_body_volume_stiffness
         )
 
-        _mark('soft_body_init')
         # Build mapping from skeleton mesh name to DART body node name
         # Multiple lookup strategies for robustness
         mesh_to_body = {}
@@ -4012,7 +4003,6 @@ class MuscleMeshMixin:
             self._assign_fixed_vertices_to_nearest_bones(skeleton, skeleton_meshes, mesh_to_body)
             print(f"  Assigned {len(self.soft_body_local_anchors)} fixed vertices to bodies")
 
-        _mark('anchor_attach')
         # Compute LBS skinning weights for ALL vertices (not just fixed)
         self._compute_skinning_weights(skeleton, mesh_to_body, list(skeleton_meshes.keys()) if skeleton_meshes else [])
 
@@ -4033,7 +4023,6 @@ class MuscleMeshMixin:
                     for stream in self.waypoints
                 ]
 
-        _mark('skinning')
         # Compute barycentric coordinates for waypoints (skip if already loaded from tet file)
         if hasattr(self, 'waypoints') and len(self.waypoints) > 0:
             if hasattr(self, 'waypoint_bary_coords') and self.waypoint_bary_coords is not None and len(self.waypoint_bary_coords) > 0:
@@ -4045,11 +4034,9 @@ class MuscleMeshMixin:
             else:
                 print(f"  Skipping waypoint embedding (waypoints are imported)")
 
-        _mark('bary_coords')
         # Compute skeleton bindings for all tet vertices
         self._compute_tet_skeleton_bindings(skeleton_meshes, skeleton)
 
-        _mark('skel_bindings')
         # Classify edges based on contour structure for muscle-like behavior
         cross_mask, intra_mask = self.compute_tet_edge_contour_types()
         if cross_mask is not None and intra_mask is not None:
@@ -4079,13 +4066,8 @@ class MuscleMeshMixin:
         if outward_dirs is not None:
             self.soft_body.set_outward_directions(outward_dirs)
 
-        _mark('edge_classify')
         # Print timing breakdown
         name = getattr(self, '_tet_name', '?')
-        prev = 0
-        for label, t in _timings.items():
-            print(f"  [{name}] {label}: {(t-prev)*1000:.0f}ms")
-            prev = t
         print(f"  [{name}] TOTAL: {(_time.time()-_t_start)*1000:.0f}ms")
         return True
 

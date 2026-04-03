@@ -323,6 +323,8 @@ def draw_zygote_muscle_ui(v):
 
         # Load all tet meshes and init soft bodies
         if imgui.button("Load All Tets", width=wide_button_width):
+            import time as _t
+            _t0 = _t.time()
             load_count = 0
             init_count = 0
             already_init_count = 0
@@ -358,7 +360,7 @@ def draw_zygote_muscle_ui(v):
                                 init_count += 1
                 except Exception as e:
                     print(f"[{mname}] Load Tet error: {e}")
-            print(f"Loaded {load_count} new tets, initialized {init_count} soft bodies ({already_init_count} already initialized)")
+            print(f"Loaded {load_count} new tets, initialized {init_count} soft bodies ({already_init_count} already initialized) in {_t.time()-_t0:.1f}s")
         # Run soft body simulation for all muscles at once
         if imgui.button("Run All Tet Sim", width=wide_button_width):
             count = 0
