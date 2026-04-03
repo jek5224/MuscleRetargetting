@@ -157,7 +157,7 @@ def main():
     print(f"    DOFs: {skel.getNumDofs()}, Bodies: {skel.getNumBodyNodes()}")
 
     print(f"[2] Loading BVH: {args.bvh}")
-    motion_bvh = MyBVH(args.bvh, bvh_info)
+    motion_bvh = MyBVH(args.bvh, bvh_info, skel=skel)
     n_frames = len(motion_bvh.mocap_refs)
     end_frame = min(end_frame, n_frames - 1)
     print(f"    Frames: {n_frames}, using {start_frame}-{end_frame}")
