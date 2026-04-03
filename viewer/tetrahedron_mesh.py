@@ -949,9 +949,14 @@ class TetrahedronMeshMixin:
         Load tetrahedron mesh from tet/.tet.npz file (pickle format with waypoints).
         """
         if filepath is None:
-            filepath = os.path.join("tet", f"{name}_tet.npz")
+            # Try stripped (fast) first, fall back to full
+            stripped = os.path.join("tet_sim", f"{name}_tet.npz")
+            full = os.path.join("tet", f"{name}_tet.npz")
+            if os.path.exists(stripped):
+                filepath = stripped
+            else:
+                filepath = full
 
-        # Check if file exists before trying to load
         if not os.path.exists(filepath):
             print(f"[{name}] Tet file not found: {filepath}")
             return False
