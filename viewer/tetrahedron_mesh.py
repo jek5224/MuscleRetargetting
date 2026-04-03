@@ -949,13 +949,7 @@ class TetrahedronMeshMixin:
         Load tetrahedron mesh from tet/.tet.npz file (pickle format with waypoints).
         """
         if filepath is None:
-            # Try stripped (fast) first, fall back to full
-            stripped = os.path.join("tet_sim", f"{name}_tet.npz")
-            full = os.path.join("tet", f"{name}_tet.npz")
-            if os.path.exists(stripped):
-                filepath = stripped
-            else:
-                filepath = full
+            filepath = os.path.join("tet", f"{name}_tet.npz")
 
         if not os.path.exists(filepath):
             print(f"[{name}] Tet file not found: {filepath}")
@@ -1066,6 +1060,10 @@ class TetrahedronMeshMixin:
                 self.stream_bounding_planes = data['stream_bounding_planes']
             if 'stream_groups' in data and data['stream_groups'] is not None:
                 self.stream_groups = data['stream_groups']
+
+            # Ensure contour_to_tet_indices exists (may be missing in stripped files)
+            if not hasattr(self, 'contour_to_tet_indices'):
+                self.contour_to_tet_indices = []
 
             print(f"[{name}] Loaded tetrahedron mesh from {filepath}")
             print(f"  Vertices: {len(self.tet_vertices)}, Render faces: {len(self.tet_render_faces)}, Sim faces: {len(self.tet_sim_faces)}, Tets: {len(self.tet_tetrahedra)}")
