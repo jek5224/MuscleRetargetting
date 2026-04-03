@@ -4066,9 +4066,6 @@ class MuscleMeshMixin:
         if outward_dirs is not None:
             self.soft_body.set_outward_directions(outward_dirs)
 
-        # Print timing breakdown
-        name = getattr(self, '_tet_name', '?')
-        print(f"  [{name}] TOTAL: {(_time.time()-_t_start)*1000:.0f}ms")
         return True
 
     def sobol_sampling_barycentric(self, num_samples):
