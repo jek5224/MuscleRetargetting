@@ -122,6 +122,91 @@ def load_muscle(tet_dir, name):
     }
 
 
+def compute_lbs_bindings(muscle, skel):
+    """Compute LBS bindings for ALL vertices (origin/insertion bone blend).
+
+    Each vertex gets a weight based on position along the muscle axis:
+    0 = origin end, 1 = insertion end. Returns list of
+    (origin_body, insertion_body, weight, R0_o, t0_o, R0_i, t0_i, rest_pos) per vertex.
+    """
+    rest_verts = muscle['rest_vertices']
+    n_verts = len(rest_verts)
+    attach_names = muscle.get('attach_skeleton_names', [])
+
+    # Get origin and insertion bone names
+    origin_body = insertion_body = None
+    if len(attach_names) >= 1 and len(attach_names[0]) >= 2:
+        origin_body = attach_names[0][0]  # first stream, origin
+        insertion_body = attach_names[0][1]  # first stream, insertion
+
+    if origin_body is None or insertion_body is None:
+        return None
+
+    # Get rest pose transforms
+    skel.setPositions(np.zeros(skel.getNumDofs()))
+    o_node = skel.getBodyNode(origin_body)
+    i_node = skel.getBodyNode(insertion_body)
+    if o_node is None or i_node is None:
+        # Try fuzzy match
+        for bi in range(skel.getNumBodyNodes()):
+            bn = skel.getBodyNode(bi)
+            name = bn.getName()
+            if origin_body.lower().replace('_','') in name.lower().replace('_',''):
+                o_node = bn
+                origin_body = name
+            if insertion_body.lower().replace('_','') in name.lower().replace('_',''):
+                i_node = bn
+                insertion_body = name
+    if o_node is None or i_node is None:
+        return None
+
+    R0_o = o_node.getWorldTransform().rotation()
+    t0_o = o_node.getWorldTransform().translation() * SCALE
+    R0_i = i_node.getWorldTransform().rotation()
+    t0_i = i_node.getWorldTransform().translation() * SCALE
+
+    # Compute muscle axis and weights
+    muscle_axis = t0_i - t0_o
+    muscle_length = np.linalg.norm(muscle_axis)
+    if muscle_length < 1e-6:
+        return None
+    axis_norm = muscle_axis / muscle_length
+
+    bindings = []
+    for vi in range(n_verts):
+        pos = rest_verts[vi]
+        t = np.dot(pos - t0_o, axis_norm) / muscle_length
+        t = np.clip(t, 0.0, 1.0)
+        bindings.append((origin_body, insertion_body, t, R0_o, t0_o, R0_i, t0_i, pos.copy()))
+
+    return bindings
+
+
+def compute_lbs_positions(bindings, skel, n_verts):
+    """Compute LBS-deformed positions for all vertices at current skeleton pose."""
+    if bindings is None:
+        return None
+
+    positions = np.zeros((n_verts, 3))
+    for vi, (o_body, i_body, w, R0_o, t0_o, R0_i, t0_i, rest_pos) in enumerate(bindings):
+        o_node = skel.getBodyNode(o_body)
+        i_node = skel.getBodyNode(i_body)
+        if o_node is None or i_node is None:
+            positions[vi] = rest_pos
+            continue
+
+        R1_o = o_node.getWorldTransform().rotation()
+        t1_o = o_node.getWorldTransform().translation() * SCALE
+        R1_i = i_node.getWorldTransform().rotation()
+        t1_i = i_node.getWorldTransform().translation() * SCALE
+
+        pos_o = R1_o @ (R0_o.T @ (rest_pos - t0_o)) + t1_o
+        pos_i = R1_i @ (R0_i.T @ (rest_pos - t0_i)) + t1_i
+        positions[vi] = (1.0 - w) * pos_o + w * pos_i
+
+    return positions
+
+
 def compute_local_anchors(muscle, skel):
     """Compute local coordinates of each fixed vertex in its nearest bone frame.
 
@@ -229,12 +314,14 @@ def main():
     total_verts = sum(len(m['vertices']) for m in muscles)
     print(f"    {len(muscles)} muscles: {total_verts} verts, {total_tets} tets")
 
-    # Compute local anchors at rest pose
-    print("[4] Computing skeleton anchors...")
+    # Compute LBS bindings and local anchors at rest pose
+    print("[4] Computing skeleton bindings...")
     for m in muscles:
+        m['lbs_bindings'] = compute_lbs_bindings(m, skel)
         m['local_anchors'] = compute_local_anchors(m, skel)
-        print(f"    {m['name']}: {len(m['local_anchors'])} anchored to skeleton")
-        # Shared target array (updated before each frame advance)
+        n_lbs = len(m['lbs_bindings']) if m['lbs_bindings'] else 0
+        print(f"    {m['name']}: {n_lbs} LBS, {len(m['local_anchors'])} anchors")
+        # Shared target array for ALL vertices (updated before each frame)
         m['aim_targets'] = m['rest_vertices'].copy()
 
     # Setup pyuipc
@@ -245,11 +332,10 @@ def main():
     config = Scene.default_config()
     config['dt'] = 0.01
     config['gravity'] = [[0.0], [0.0], [0.0]]
-    config['contact']['friction']['enable'] = False
-    config['contact']['d_hat'] = 0.1
+    config['contact'] = {'enable': False}  # IPC fights LBS targets at overlapping regions
     config['sanity_check'] = {'enable': False}
     scene = Scene(config)
-    scene.contact_tabular().default_model(0.0, 1.0 * GPa)
+    # Contact disabled — LBS targets overlap, IPC fights them
 
     snh = StableNeoHookean()
     spc = SoftPositionConstraint()
@@ -261,43 +347,40 @@ def main():
         label_surface(mesh)
         label_triangle_orient(mesh)
         snh.apply_to(mesh, moduli, mass_density=1060.0)
-        if len(m['fixed_vertices']) > 0:
-            spc.apply_to(mesh, 1e4)
+        # SPC on ALL vertices — LBS guides deformation, contact resolves overlaps
+        spc.apply_to(mesh, 1e6)  # high stiffness to follow LBS closely
 
         obj = scene.objects().create(m['name'])
         geo_slot, _ = obj.geometries().create(mesh)
         geo_slots.append(geo_slot)
 
-        # Animator: reads from m['aim_targets'] which is updated before each advance
-        fixed = m['fixed_vertices']
-        aim_targets = m['aim_targets']  # shared mutable array
-        if len(fixed) > 0:
-            def make_animate(fixed_verts, targets_ref):
-                _first_error = [True]
-                def animate(info: Animation.UpdateInfo):
-                    try:
-                        geo = info.geo_slots()[0].geometry()
-                        rest_geo = info.rest_geo_slots()[0].geometry()
-                        cv = view(geo.vertices().find(builtin.is_constrained))
-                        av = view(geo.vertices().find(builtin.aim_position))
-                        rv = rest_geo.positions().view()
-                        for idx in fixed_verts:
-                            if idx < len(cv):
-                                cv[idx] = 1
-                                # Copy target values into rv-style format
-                                t = targets_ref[idx]
-                                av[idx] = rv[idx]  # init from rest
-                                av[idx][0] = float(t[0])
-                                av[idx][1] = float(t[1])
-                                av[idx][2] = float(t[2])
-                    except Exception as e:
-                        if _first_error[0]:
-                            print(f"    Animator error: {e}", flush=True)
-                            _first_error[0] = False
-                return animate
-            scene.animator().insert(obj, make_animate(fixed, aim_targets))
+        # Animator: constrain ALL vertices to LBS targets
+        aim_targets = m['aim_targets']
+        fixed_set = set(m['fixed_vertices'])
+        n_v = len(m['vertices'])
+        def make_animate(targets_ref, fixed_s, nv):
+            _first_error = [True]
+            def animate(info: Animation.UpdateInfo):
+                try:
+                    geo = info.geo_slots()[0].geometry()
+                    rest_geo = info.rest_geo_slots()[0].geometry()
+                    cv = view(geo.vertices().find(builtin.is_constrained))
+                    av = view(geo.vertices().find(builtin.aim_position))
+                    rv = rest_geo.positions().view()
+                    for idx in range(min(nv, len(cv))):
+                        cv[idx] = 1
+                        av[idx] = rv[idx]
+                        av[idx][0] = float(targets_ref[idx][0])
+                        av[idx][1] = float(targets_ref[idx][1])
+                        av[idx][2] = float(targets_ref[idx][2])
+                except Exception as e:
+                    if _first_error[0]:
+                        print(f"    Animator error: {e}", flush=True)
+                        _first_error[0] = False
+            return animate
+        scene.animator().insert(obj, make_animate(aim_targets, fixed_set, n_v))
 
-        print(f"    {m['name']}: {len(m['vertices'])} v, {len(m['tetrahedra'])} t, {len(fixed)} fixed")
+        print(f"    {m['name']}: {len(m['vertices'])} v, {len(m['tetrahedra'])} t, {len(m['fixed_vertices'])} fixed")
 
     # Init
     print("[5] Initializing pyuipc...")
@@ -314,14 +397,18 @@ def main():
     for frame in range(start_frame, end_frame + 1):
         t0 = time.time()
 
-        # Set skeleton pose and update aim targets for all muscles
+        # Set skeleton pose and compute LBS positions for all muscles
         pose = motion_bvh.mocap_refs[frame].copy()
         skel.setPositions(pose)
 
         for m in muscles:
-            driven = compute_driven_positions(m['local_anchors'], skel, m['rest_vertices'])
-            # Update shared aim_targets in-place (animator reads this)
-            m['aim_targets'][:] = driven
+            if m['lbs_bindings'] is not None:
+                lbs_pos = compute_lbs_positions(m['lbs_bindings'], skel, len(m['vertices']))
+                m['aim_targets'][:] = lbs_pos
+            else:
+                # Fallback: drive only fixed vertices
+                driven = compute_driven_positions(m['local_anchors'], skel, m['rest_vertices'])
+                m['aim_targets'][:] = driven
 
         # Advance simulation
         world.advance()
