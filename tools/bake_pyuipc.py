@@ -122,18 +122,71 @@ def load_muscle(tet_dir, name):
     }
 
 
-def compute_driven_positions(muscle, skel, mesh_info):
-    """Compute target positions for fixed vertices based on skeleton pose.
+def compute_local_anchors(muscle, skel):
+    """Compute local coordinates of each fixed vertex in its nearest bone frame.
 
-    For each fixed vertex, find its rest position relative to the attached bone,
-    then transform by the bone's current world transform.
+    Uses rest pose skeleton transforms. Each fixed vertex is assigned to the
+    nearest bone body node. Returns dict: {vertex_idx: (body_name, local_pos)}.
     """
-    rest_verts = muscle['rest_vertices']
+    rest_verts = muscle['rest_vertices']  # in mm
     fixed = muscle['fixed_vertices']
+    if len(fixed) == 0:
+        return {}
+
+    # Get all body transforms at rest pose
+    skel.setPositions(np.zeros(skel.getNumDofs()))
+    bodies = []
+    for i in range(skel.getNumBodyNodes()):
+        bn = skel.getBodyNode(i)
+        wt = bn.getWorldTransform()
+        bodies.append({
+            'name': bn.getName(),
+            'rotation': wt.rotation(),
+            'translation': wt.translation() * SCALE,  # convert to mm
+        })
+
+    # For each fixed vertex, find nearest bone
+    local_anchors = {}
+    for vi in fixed:
+        if vi >= len(rest_verts):
+            continue
+        world_pos = rest_verts[vi]  # mm
+
+        # Find nearest bone by translation distance
+        best_dist = float('inf')
+        best_body = None
+        for body in bodies:
+            dist = np.linalg.norm(world_pos - body['translation'])
+            if dist < best_dist:
+                best_dist = dist
+                best_body = body
+
+        if best_body is not None:
+            R = best_body['rotation']
+            t = best_body['translation']
+            local_pos = R.T @ (world_pos - t)
+            local_anchors[vi] = (best_body['name'], local_pos)
+
+    return local_anchors
+
+
+def compute_driven_positions(local_anchors, skel, rest_verts):
+    """Compute target positions for fixed vertices based on current skeleton pose.
+
+    Returns array of positions (mm) for ALL vertices. Fixed vertices get
+    skeleton-driven positions, others keep rest positions.
+    """
     target = rest_verts.copy()
 
-    # For now, just return rest positions (no motion drive yet)
-    # TODO: use cap_attachments to map fixed verts to skeleton bones
+    for vi, (body_name, local_pos) in local_anchors.items():
+        bn = skel.getBodyNode(body_name)
+        if bn is None:
+            continue
+        wt = bn.getWorldTransform()
+        R = wt.rotation()
+        t = wt.translation() * SCALE  # mm
+        target[vi] = R @ local_pos + t
+
     return target
 
 
@@ -176,8 +229,16 @@ def main():
     total_verts = sum(len(m['vertices']) for m in muscles)
     print(f"    {len(muscles)} muscles: {total_verts} verts, {total_tets} tets")
 
+    # Compute local anchors at rest pose
+    print("[4] Computing skeleton anchors...")
+    for m in muscles:
+        m['local_anchors'] = compute_local_anchors(m, skel)
+        print(f"    {m['name']}: {len(m['local_anchors'])} anchored to skeleton")
+        # Shared target array (updated before each frame advance)
+        m['aim_targets'] = m['rest_vertices'].copy()
+
     # Setup pyuipc
-    print("[4] Setting up pyuipc...")
+    print("[5] Setting up pyuipc...")
     engine = Engine('cuda')
     world = World(engine)
 
@@ -207,23 +268,34 @@ def main():
         geo_slot, _ = obj.geometries().create(mesh)
         geo_slots.append(geo_slot)
 
-        # Animator
+        # Animator: reads from m['aim_targets'] which is updated before each advance
         fixed = m['fixed_vertices']
-        rest_verts = m['rest_vertices']
+        aim_targets = m['aim_targets']  # shared mutable array
         if len(fixed) > 0:
-            def make_animate(fixed_verts, rest_v):
+            def make_animate(fixed_verts, targets_ref):
+                _first_error = [True]
                 def animate(info: Animation.UpdateInfo):
-                    geo = info.geo_slots()[0].geometry()
-                    rest_geo = info.rest_geo_slots()[0].geometry()
-                    cv = view(geo.vertices().find(builtin.is_constrained))
-                    av = view(geo.vertices().find(builtin.aim_position))
-                    rv = rest_geo.positions().view()
-                    for idx in fixed_verts:
-                        if idx < len(cv):
-                            cv[idx] = 1
-                            av[idx] = rv[idx]  # TODO: drive from skeleton
+                    try:
+                        geo = info.geo_slots()[0].geometry()
+                        rest_geo = info.rest_geo_slots()[0].geometry()
+                        cv = view(geo.vertices().find(builtin.is_constrained))
+                        av = view(geo.vertices().find(builtin.aim_position))
+                        rv = rest_geo.positions().view()
+                        for idx in fixed_verts:
+                            if idx < len(cv):
+                                cv[idx] = 1
+                                # Copy target values into rv-style format
+                                t = targets_ref[idx]
+                                av[idx] = rv[idx]  # init from rest
+                                av[idx][0] = float(t[0])
+                                av[idx][1] = float(t[1])
+                                av[idx][2] = float(t[2])
+                    except Exception as e:
+                        if _first_error[0]:
+                            print(f"    Animator error: {e}", flush=True)
+                            _first_error[0] = False
                 return animate
-            scene.animator().insert(obj, make_animate(fixed, rest_verts))
+            scene.animator().insert(obj, make_animate(fixed, aim_targets))
 
         print(f"    {m['name']}: {len(m['vertices'])} v, {len(m['tetrahedra'])} t, {len(fixed)} fixed")
 
@@ -242,12 +314,14 @@ def main():
     for frame in range(start_frame, end_frame + 1):
         t0 = time.time()
 
-        # Set skeleton pose
+        # Set skeleton pose and update aim targets for all muscles
         pose = motion_bvh.mocap_refs[frame].copy()
         skel.setPositions(pose)
 
-        # TODO: update aim_positions for fixed vertices based on skeleton pose
-        # For now, fixed vertices stay at rest pose
+        for m in muscles:
+            driven = compute_driven_positions(m['local_anchors'], skel, m['rest_vertices'])
+            # Update shared aim_targets in-place (animator reads this)
+            m['aim_targets'][:] = driven
 
         # Advance simulation
         world.advance()
