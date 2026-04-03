@@ -4030,7 +4030,7 @@ class MuscleMeshMixin:
             elif getattr(self, 'waypoints_from_tet_sim', True):
                 self._compute_waypoint_barycentric_coords(skeleton_meshes, skeleton)
                 # Save bary coords back to tet file for faster future loads
-                self._save_bary_coords_to_tet(getattr(self, '_muscle_name', None) or getattr(self, 'name', None))
+                self._save_bary_coords_to_tet(getattr(self, '_tet_name', None) or getattr(self, '_muscle_name', None))
             else:
                 print(f"  Skipping waypoint embedding (waypoints are imported)")
 

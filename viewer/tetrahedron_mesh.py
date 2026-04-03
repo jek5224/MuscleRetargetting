@@ -1065,6 +1065,9 @@ class TetrahedronMeshMixin:
             if not hasattr(self, 'contour_to_tet_indices'):
                 self.contour_to_tet_indices = []
 
+            # Store name for bary coords caching
+            self._tet_name = name
+
             print(f"[{name}] Loaded tetrahedron mesh from {filepath}")
             print(f"  Vertices: {len(self.tet_vertices)}, Render faces: {len(self.tet_render_faces)}, Sim faces: {len(self.tet_sim_faces)}, Tets: {len(self.tet_tetrahedra)}")
             return True
