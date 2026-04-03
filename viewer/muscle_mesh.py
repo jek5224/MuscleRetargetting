@@ -3792,8 +3792,6 @@ class MuscleMeshMixin:
         def _mark(label):
             _timings[label] = _time.time() - _t_start
 
-        """
-        """
         if self.tet_vertices is None or self.tet_tetrahedra is None:
             print("No tetrahedron mesh available. Run tetrahedralization first.")
             return False
