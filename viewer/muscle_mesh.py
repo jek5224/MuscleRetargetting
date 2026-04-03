@@ -3857,16 +3857,17 @@ class MuscleMeshMixin:
 
                 print(f"  Stream {stream_idx}: fixing {origin_count} origin levels, {insertion_count} insertion levels")
 
-            # Match tet vertices to contour positions
+            # Match tet vertices to contour positions using KDTree
             if len(contour_info) > 0:
+                from scipy.spatial import cKDTree
                 contour_positions = np.array([info[0] for info in contour_info])
+                tree = cKDTree(contour_positions)
+                dists, indices = tree.query(self.tet_vertices)
                 matched_count = 0
-                for vi, tet_pos in enumerate(self.tet_vertices):
-                    dists = np.linalg.norm(contour_positions - tet_pos, axis=1)
-                    min_idx = np.argmin(dists)
-                    if dists[min_idx] < 1e-4:  # Very tight threshold for exact match
+                for vi in range(len(self.tet_vertices)):
+                    if dists[vi] < 1e-4:
                         fixed_vertices.add(vi)
-                        _, stream_idx, end_type = contour_info[min_idx]
+                        _, stream_idx, end_type = contour_info[indices[vi]]
                         self.contour_level_vertices[vi] = (stream_idx, end_type)
                         matched_count += 1
                 print(f"  Fixed {matched_count} vertices from contours near origin/insertion")
@@ -4022,10 +4023,14 @@ class MuscleMeshMixin:
                     for stream in self.waypoints
                 ]
 
-        # Compute barycentric coordinates for waypoints
+        # Compute barycentric coordinates for waypoints (skip if already loaded from tet file)
         if hasattr(self, 'waypoints') and len(self.waypoints) > 0:
-            if getattr(self, 'waypoints_from_tet_sim', True):
+            if hasattr(self, 'waypoint_bary_coords') and self.waypoint_bary_coords is not None and len(self.waypoint_bary_coords) > 0:
+                print(f"  Waypoint bary coords already loaded, skipping recomputation")
+            elif getattr(self, 'waypoints_from_tet_sim', True):
                 self._compute_waypoint_barycentric_coords(skeleton_meshes, skeleton)
+                # Save bary coords back to tet file for faster future loads
+                self._save_bary_coords_to_tet(getattr(self, '_muscle_name', None) or getattr(self, 'name', None))
             else:
                 print(f"  Skipping waypoint embedding (waypoints are imported)")
 
@@ -4036,6 +4041,23 @@ class MuscleMeshMixin:
         cross_mask, intra_mask = self.compute_tet_edge_contour_types()
         if cross_mask is not None and intra_mask is not None:
             self.soft_body.set_contour_edge_types(cross_mask, intra_mask)
+
+    def _save_bary_coords_to_tet(self, name):
+        """Save computed waypoint_bary_coords back to tet file for faster future loads."""
+        if name is None or not hasattr(self, 'waypoint_bary_coords'):
+            return
+        filepath = os.path.join("tet", f"{name}_tet.npz")
+        if not os.path.exists(filepath):
+            return
+        try:
+            with open(filepath, 'rb') as f:
+                data = pickle.load(f)
+            data['waypoint_bary_coords'] = self.waypoint_bary_coords
+            with open(filepath, 'wb') as f:
+                pickle.dump(data, f)
+            print(f"  Saved waypoint bary coords to {filepath}")
+        except Exception as e:
+            print(f"  Failed to save bary coords: {e}")
 
         # Compute outward directions for volume-preserving bulge
         outward_dirs = self.compute_outward_directions()
