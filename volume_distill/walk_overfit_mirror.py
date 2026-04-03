@@ -157,15 +157,16 @@ def preprocess():
     rest_positions = {}
     displacements = {}
 
+    r_rest_positions = {}
     for mname in muscle_names:
         if mname in l_disp and mname in r_disp:
             rest_positions[mname] = l_rest[mname]
-            # Rebase R displacements relative to L rest so predict_frame(L_rest + disp) works for both sides
-            r_offset = r_rest[mname] - l_rest[mname]  # difference between R-mirrored and L rest
-            r_disp_rebased = r_disp[mname] + r_offset[None, :, :]  # shift R displacements to L rest baseline
-            displacements[mname] = torch.cat([l_disp[mname], r_disp_rebased], dim=0)
+            r_rest_positions[mname] = r_rest[mname]
+            # Both L and R displacements relative to their own rest (no rebasing)
+            displacements[mname] = torch.cat([l_disp[mname], r_disp[mname]], dim=0)
         elif mname in l_disp:
             rest_positions[mname] = l_rest[mname]
+            r_rest_positions[mname] = l_rest[mname]
             displacements[mname] = l_disp[mname]
 
     # Input DOFs: L direct + R mirrored, concatenated
@@ -179,14 +180,14 @@ def preprocess():
     print(f"  Input: {input_dofs.shape}")
 
     all_idx = torch.arange(total)
-    return input_dofs, displacements, muscle_names, rest_positions, all_idx
+    return input_dofs, displacements, muscle_names, rest_positions, r_rest_positions, all_idx
 
 
 def train():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Device: {device}")
 
-    input_dofs, displacements, muscle_names, rest_positions, indices = preprocess()
+    input_dofs, displacements, muscle_names, rest_positions, r_rest_positions, indices = preprocess()
 
     ds = SimpleDataset(input_dofs, displacements, muscle_names, indices)
     loader = DataLoader(ds, batch_size=BATCH_SIZE, shuffle=True, collate_fn=collate_fn)
@@ -271,6 +272,7 @@ def train():
                 "num_encoder_res": NUM_ENCODER_RES,
                 "num_decoder_res": NUM_DECODER_RES,
                 "rest_positions": rest_positions,
+                "r_rest_positions": r_rest_positions,
                 "model_version": "v1",
                 "mirror_trained": True,
             }, os.path.join(CHECKPOINT_DIR, "best.pt"))

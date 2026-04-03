@@ -29,6 +29,12 @@
 - Always use **slurm** (`sbatch`) to submit jobs on the A6000 server — never run GPU tasks directly
 - No `--mem` flag (slurm RealMemory=1, memory requests fail)
 
+## No Guessing
+- Do NOT make claims about code behavior, APIs, or research without first reading the actual code or searching for references
+- If you don't know, say so — don't fabricate plausible-sounding explanations
+- When discussing research ideas or biomechanics, cite sources or explicitly mark speculation as such
+- Always read the relevant code before explaining how something works
+
 ## No Unsolicited Fallbacks
 - Do NOT add fallback logic or edge case handling unless explicitly asked
 - If you think a fallback is necessary, ASK the user first before implementing

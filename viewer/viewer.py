@@ -449,6 +449,15 @@ class GLFWApp():
         self.inspect_2d_corr_corner = {}  # Dict: muscle_name -> selected corner index (0-3) or -1
         self.inspect_2d_corr_vertex = {}  # Dict: muscle_name -> selected vertex index or -1
 
+        # Display rotation for Inspect 2D right side (visual only, doesn't change data)
+        self.inspect_2d_display_rot = {}  # Dict: (muscle_name, level_idx) -> int (0-3, number of 90° CCW rotations)
+
+        # Correspondence hover preview: stores original contour_match to restore when hover ends
+        self.inspect_2d_corr_backup_cm = {}  # Dict: muscle_name -> original contour_match list
+        self.inspect_2d_corr_backup_wp = {}  # Dict: muscle_name -> original waypoints for preview level
+        self.inspect_2d_corr_backup_mvc = {}  # Dict: muscle_name -> original mvc_weights for preview level
+        self.inspect_2d_corr_preview_active = {}  # Dict: muscle_name -> bool
+
         # Edit fiber mode state for Inspect 2D
         self.inspect_2d_edit_fiber_mode = {}  # Dict: muscle_name -> bool (edit fiber mode active)
         self.inspect_2d_edit_fiber_selected = {}  # Dict: muscle_name -> selected fiber index or -1

@@ -37,9 +37,10 @@ LOG_DIR = "volume_distill/dance_v1dec_runs"
 # === Training ===
 EPOCHS = 10000
 BATCH_SIZE = 512
-LR = 1e-3
+LR = 3e-4
 WEIGHT_DECAY = 0.0
-GRAD_CLIP = 0.1
+GRAD_CLIP = 1.0
+EARLY_STOP_LOSS = 1e-9
 HIDDEN_DIM = 768
 NUM_ENCODER_RES = 3
 NUM_DECODER_RES = 2
@@ -279,8 +280,8 @@ def train():
         else:
             print(f"Checkpoint incompatible, training from scratch")
 
-    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
-        optimizer, T_max=EPOCHS, eta_min=1e-6, last_epoch=start_epoch if start_epoch > 0 else -1,
+    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+        optimizer, mode="min", factor=0.5, patience=200, min_lr=1e-6,
     )
 
     os.makedirs(CHECKPOINT_DIR, exist_ok=True)
@@ -289,6 +290,8 @@ def train():
     writer = SummaryWriter(os.path.join(LOG_DIR, run_name))
 
     end_epoch = start_epoch + EPOCHS
+    prev_loss = float("inf")
+    spike_recoveries = 0
     print(f"\n=== Training epochs {start_epoch+1} → {end_epoch} ===")
     for epoch in range(start_epoch + 1, end_epoch + 1):
         t0 = time.time()
@@ -313,16 +316,35 @@ def train():
             epoch_loss += loss.item()
             n_batches += 1
 
-        scheduler.step()
         avg_loss = epoch_loss / n_batches
+        scheduler.step(avg_loss)
         lr = optimizer.param_groups[0]["lr"]
         elapsed = time.time() - t0
 
+        # Spike guard: if loss jumps >10x, revert to best checkpoint and halve LR
+        if avg_loss > prev_loss * 10 and os.path.exists(best_path):
+            spike_recoveries += 1
+            old_lr = optimizer.param_groups[0]["lr"]
+            new_lr = old_lr * 0.5
+            print(f"  *** SPIKE at epoch {epoch}: {avg_loss:.2e} > 10x prev {prev_loss:.2e} ***")
+            print(f"  *** Reverting to best checkpoint, LR {old_lr:.2e} → {new_lr:.2e} ***")
+            ckpt = torch.load(best_path, map_location=device, weights_only=False)
+            model.load_state_dict(ckpt["model_state_dict"])
+            if "optimizer_state_dict" in ckpt:
+                optimizer.load_state_dict(ckpt["optimizer_state_dict"])
+            for pg in optimizer.param_groups:
+                pg["lr"] = new_lr
+            avg_loss = ckpt.get("val_loss", avg_loss)
+            prev_loss = avg_loss
+            continue
+
+        prev_loss = avg_loss
+
         writer.add_scalar("loss/train", avg_loss, epoch)
-        writer.add_scalar("lr", lr, epoch)
+        writer.add_scalar("lr", optimizer.param_groups[0]["lr"], epoch)
 
         if epoch % 100 == 0 or epoch <= start_epoch + 5:
-            print(f"Epoch {epoch:5d}/{end_epoch} | MSE: {avg_loss:.2e} | LR: {lr:.2e} | {elapsed:.1f}s")
+            print(f"Epoch {epoch:5d}/{end_epoch} | MSE: {avg_loss:.2e} | LR: {optimizer.param_groups[0]['lr']:.2e} | {elapsed:.1f}s")
 
         if avg_loss < best_loss:
             best_loss = avg_loss
@@ -342,6 +364,10 @@ def train():
                 "mirror_trained": True,
                 "run_name": run_name,
             }, os.path.join(CHECKPOINT_DIR, "best_v1dec.pt"))
+
+        if best_loss < EARLY_STOP_LOSS:
+            print(f"\n  *** Early stop: loss {best_loss:.2e} < {EARLY_STOP_LOSS:.0e} at epoch {epoch} ***")
+            break
 
     writer.close()
     print(f"\nDone. Best MSE: {best_loss:.2e}")
