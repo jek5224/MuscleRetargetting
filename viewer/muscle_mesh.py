@@ -4058,6 +4058,7 @@ class MuscleMeshMixin:
     def _save_bary_coords_to_tet(self, name):
         """Save computed waypoint_bary_coords back to tet file for faster future loads."""
         import os as _os
+        import pickle as _pickle
         if name is None or not hasattr(self, 'waypoint_bary_coords'):
             return
         filepath = _os.path.join("tet", f"{name}_tet.npz")
@@ -4065,10 +4066,10 @@ class MuscleMeshMixin:
             return
         try:
             with open(filepath, 'rb') as f:
-                data = pickle.load(f)
+                data = _pickle.load(f)
             data['waypoint_bary_coords'] = self.waypoint_bary_coords
             with open(filepath, 'wb') as f:
-                pickle.dump(data, f)
+                _pickle.dump(data, f)
             print(f"  Saved waypoint bary coords to {filepath}")
         except Exception as e:
             print(f"  Failed to save bary coords: {e}")
