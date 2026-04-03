@@ -135,12 +135,21 @@ def main():
     config = Scene.default_config()
     config['dt'] = 0.01
     config['gravity'] = [[0.0], [0.0], [0.0]]  # quasistatic
-    config['contact'] = {'enable': False}  # disable contact for now
+    config['contact']['friction']['enable'] = False
+    config['contact']['d_hat'] = 0.1  # 0.1mm contact distance (reduce initial contacts)
     config['sanity_check'] = {'enable': False}
     scene = Scene(config)
 
-    # Material (SNH only, no SPC — SPC causes preconditioner NaN)
+    # Contact: all muscles collide with each other
+    from uipc.unit import GPa
+    scene.contact_tabular().default_model(0.0, 1.0 * GPa)
+
+    # Material
+    from uipc.constitution import SoftPositionConstraint
+    from uipc import Animation
+    import uipc.builtin as builtin
     snh = StableNeoHookean()
+    spc = SoftPositionConstraint()
     moduli = ElasticModuli.youngs_poisson(0.5 * kPa, 0.40)
 
     # Create muscle objects
@@ -153,6 +162,8 @@ def main():
         label_triangle_orient(mesh)
 
         snh.apply_to(mesh, moduli, mass_density=1060.0)
+        if len(m['fixed_vertices']) > 0:
+            spc.apply_to(mesh, 1e4)
 
         obj = scene.objects().create(m['name'])
         geo_slot, _ = obj.geometries().create(mesh)
@@ -165,7 +176,22 @@ def main():
             'geo_slot': geo_slot,
         })
 
-        # No animator for now — just elastic simulation without BCs
+        # Animator: fix anchor vertices at rest position
+        fixed = m['fixed_vertices']
+        if len(fixed) > 0:
+            def make_animate(fixed_verts):
+                def animate(info: Animation.UpdateInfo):
+                    geo = info.geo_slots()[0].geometry()
+                    rest_geo = info.rest_geo_slots()[0].geometry()
+                    cv = view(geo.vertices().find(builtin.is_constrained))
+                    av = view(geo.vertices().find(builtin.aim_position))
+                    rv = rest_geo.positions().view()
+                    for idx in fixed_verts:
+                        if idx < len(cv):
+                            cv[idx] = 1
+                            av[idx] = rv[idx]
+                return animate
+            scene.animator().insert(obj, make_animate(fixed))
 
         print(f"  {m['name']}: {m['n_verts']} verts, {m['n_tets']} tets, {len(m['fixed_vertices'])} fixed")
 
