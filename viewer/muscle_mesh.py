@@ -4057,10 +4057,11 @@ class MuscleMeshMixin:
 
     def _save_bary_coords_to_tet(self, name):
         """Save computed waypoint_bary_coords back to tet file for faster future loads."""
+        import os as _os
         if name is None or not hasattr(self, 'waypoint_bary_coords'):
             return
-        filepath = os.path.join("tet", f"{name}_tet.npz")
-        if not os.path.exists(filepath):
+        filepath = _os.path.join("tet", f"{name}_tet.npz")
+        if not _os.path.exists(filepath):
             return
         try:
             with open(filepath, 'rb') as f:
