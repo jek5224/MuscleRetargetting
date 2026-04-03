@@ -2806,6 +2806,8 @@ class FiberArchitectureMixin:
 
         tet_verts = np.array(self.tet_vertices)
         tetrahedra = np.array(self.tet_tetrahedra)
+        if len(tetrahedra) > 0 and tetrahedra.max() >= len(tet_verts):
+            return
 
         tet_count = 0
         skel_count = 0
