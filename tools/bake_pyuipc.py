@@ -144,20 +144,28 @@ def compute_lbs_bindings(muscle, skel):
 
     # Get rest pose transforms
     skel.setPositions(np.zeros(skel.getNumDofs()))
-    o_node = skel.getBodyNode(origin_body)
-    i_node = skel.getBodyNode(insertion_body)
-    if o_node is None or i_node is None:
-        # Try fuzzy match
+    def _find_body(skel, name):
+        """Find DART body node by name, trying exact match then fuzzy."""
+        bn = skel.getBodyNode(name)
+        if bn is not None:
+            return bn, name
+        # Try with "0" suffix (DART convention)
+        bn = skel.getBodyNode(name + "0")
+        if bn is not None:
+            return bn, name + "0"
+        # Fuzzy
+        norm = name.lower().replace('_', '')
         for bi in range(skel.getNumBodyNodes()):
-            bn = skel.getBodyNode(bi)
-            name = bn.getName()
-            if origin_body.lower().replace('_','') in name.lower().replace('_',''):
-                o_node = bn
-                origin_body = name
-            if insertion_body.lower().replace('_','') in name.lower().replace('_',''):
-                i_node = bn
-                insertion_body = name
+            b = skel.getBodyNode(bi)
+            bn_norm = b.getName().lower().replace('_', '')
+            if norm in bn_norm or bn_norm in norm:
+                return b, b.getName()
+        return None, name
+
+    o_node, origin_body = _find_body(skel, origin_body)
+    i_node, insertion_body = _find_body(skel, insertion_body)
     if o_node is None or i_node is None:
+        print(f"    WARNING: LBS body not found: origin={origin_body} ({o_node}), insertion={insertion_body} ({i_node})")
         return None
 
     R0_o = o_node.getWorldTransform().rotation()
@@ -324,18 +332,21 @@ def main():
         # Shared target array for ALL vertices (updated before each frame)
         m['aim_targets'] = m['rest_vertices'].copy()
 
+    # Bone mesh loading skipped — contact disabled for now
+    print("[5] Skipped bone mesh loading (contact disabled)")
+
     # Setup pyuipc
-    print("[5] Setting up pyuipc...")
+    print("[6] Setting up pyuipc...")
     engine = Engine('cuda')
     world = World(engine)
 
     config = Scene.default_config()
     config['dt'] = 0.01
     config['gravity'] = [[0.0], [0.0], [0.0]]
-    config['contact'] = {'enable': False}  # IPC fights LBS targets at overlapping regions
+    config['contact'] = {'enable': False}  # Contact post-processed separately
     config['sanity_check'] = {'enable': False}
     scene = Scene(config)
-    # Contact disabled — LBS targets overlap, IPC fights them
+    scene.contact_tabular().default_model(0.0, 1.0 * GPa)
 
     snh = StableNeoHookean()
     spc = SoftPositionConstraint()
@@ -347,8 +358,8 @@ def main():
         label_surface(mesh)
         label_triangle_orient(mesh)
         snh.apply_to(mesh, moduli, mass_density=1060.0)
-        # SPC on ALL vertices — LBS guides deformation, contact resolves overlaps
-        spc.apply_to(mesh, 1e6)  # high stiffness to follow LBS closely
+        # SPC on ALL vertices — balance between LBS guidance and contact resolution
+        spc.apply_to(mesh, 1e4)  # moderate: allows contact to push muscles apart
 
         obj = scene.objects().create(m['name'])
         geo_slot, _ = obj.geometries().create(mesh)
@@ -382,15 +393,18 @@ def main():
 
         print(f"    {m['name']}: {len(m['vertices'])} v, {len(m['tetrahedra'])} t, {len(m['fixed_vertices'])} fixed")
 
+    # TODO: Add bone meshes as rigid collision objects for muscle-skeleton collision
+    # For now, only muscle-muscle contact is enabled via IPC
+
     # Init
-    print("[5] Initializing pyuipc...")
+    print("[7] Initializing pyuipc...")
     t0 = time.time()
     world.init(scene)
     print(f"    Init: {time.time()-t0:.1f}s")
 
     # Bake
     os.makedirs(args.output_dir, exist_ok=True)
-    print(f"\n[6] Baking frames {start_frame}-{end_frame}...")
+    print(f"\n[8] Baking frames {start_frame}-{end_frame}...")
 
     all_positions = {m['name']: {} for m in muscles}
 
