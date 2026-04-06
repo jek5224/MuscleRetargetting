@@ -476,6 +476,31 @@ class TetrahedronMeshMixin:
                     if len(boundary) <= 10:
                         print(f"    Boundary edges: {boundary}")
 
+                # Pre-check: skip TetGen if mesh likely self-intersects (crashes TetGen)
+                mesh_check = trimesh.Trimesh(vertices=repair_verts, faces=repair_faces, process=False)
+                if not mesh_check.is_volume:
+                    raise RuntimeError("mesh is not a valid volume")
+                face_centers = np.mean(repair_verts[repair_faces], axis=1)
+                fn = mesh_check.face_normals
+                from scipy.spatial import cKDTree as _cKDTree
+                _fc_tree = _cKDTree(face_centers)
+                n_suspect = 0
+                n_sampled = max(1, len(face_centers) // 50)
+                for i in range(0, len(face_centers), max(1, len(face_centers) // n_sampled)):
+                    dists, idxs = _fc_tree.query(face_centers[i], k=10)
+                    for d, j in zip(dists[1:], idxs[1:]):
+                        if d < 1e-6:
+                            continue
+                        dot = np.dot(fn[i], fn[j])
+                        shared = len(set(int(x) for x in repair_faces[i]) &
+                                     set(int(x) for x in repair_faces[j]))
+                        if dot < -0.5 and d < np.mean(dists[1:4]) * 0.3 and shared == 0:
+                            n_suspect += 1
+                            break
+                if n_suspect > n_sampled * 0.3:
+                    print(f"  Thin/self-intersecting mesh detected ({n_suspect}/{n_sampled} samples), skipping TetGen")
+                    raise RuntimeError("likely self-intersecting")
+
                 tet_in = tg.TetGen(repair_verts, repair_faces)
                 # Compute a reasonable max volume from mesh bounding box
                 bbox_diag = np.linalg.norm(repair_verts.max(axis=0) - repair_verts.min(axis=0))
