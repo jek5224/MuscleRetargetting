@@ -633,7 +633,7 @@ except Exception as e:
                 import os
                 stdout_lines = result.stdout.strip().split('\n') if result.stdout else []
                 for line in stdout_lines:
-                    if line.startswith(('REPAIRED', 'QUALITY', 'NOQUALITY', 'EDGE_STATS', 'SUBDIVIDE', 'MESH_VOL', 'CAP_VERTS', 'SKIP_REPAIR', 'FIX_MANIFOLD', 'MESH_INPUT', 'FAIL')):
+                    if line.startswith(('REPAIRED', 'QUALITY', 'NOQUALITY', 'EDGE_STATS', 'SUBDIVIDE', 'MESH_VOL', 'CAP_VERTS', 'SKIP_REPAIR', 'FIX_MANIFOLD', 'MESH_INPUT', 'FAIL', 'COMP', 'MERGED', 'COMPONENTS')):
                         print(f"  {line}")
 
                 if result.returncode == 0 and os.path.exists(tmp_out_path):
