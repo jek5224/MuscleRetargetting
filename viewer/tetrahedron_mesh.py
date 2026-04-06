@@ -448,7 +448,7 @@ class TetrahedronMeshMixin:
                         for vi in closed_faces[fi]:
                             _cap_verts.add(int(vi))
 
-                # Run TetGen in a subprocess to isolate crashes
+                # Save script to file for debugging, then run as subprocess
                 import tempfile, subprocess, json, sys
                 with tempfile.NamedTemporaryFile(suffix='.npz', delete=False) as tmp_in:
                     tmp_in_path = tmp_in.name
@@ -456,6 +456,7 @@ class TetrahedronMeshMixin:
                              faces=closed_faces.astype(np.int32),
                              cap_verts=np.array(sorted(_cap_verts), dtype=np.int32))
                 tmp_out_path = tmp_in_path.replace('.npz', '_tet.npz')
+                tmp_script_path = tmp_in_path.replace('.npz', '_script.py')
 
                 script = f'''
 import numpy as np, sys
@@ -713,8 +714,10 @@ except Exception as e:
     print(f"FAIL: {{e}}")
     sys.exit(1)
 '''
+                with open(tmp_script_path, 'w') as sf:
+                    sf.write(script)
                 result = subprocess.run(
-                    [sys.executable, '-c', script],
+                    [sys.executable, tmp_script_path],
                     capture_output=True, text=True, timeout=120)
 
                 import os
@@ -793,11 +796,16 @@ except Exception as e:
                                 new_c2t.append(-1)
                         self.contour_to_tet_indices = new_c2t
                 else:
-                    stderr = result.stderr.strip()[-200:] if result.stderr else ''
-                    stdout_msg = stdout_lines[-1] if stdout_lines else ''
-                    print(f"  TetGen subprocess failed: {stdout_msg} {stderr}")
+                    stderr = result.stderr.strip()[-500:] if result.stderr else ''
+                    stdout_msg = result.stdout.strip()[-500:] if result.stdout else ''
+                    print(f"  TetGen subprocess failed (rc={result.returncode}):")
+                    if stdout_msg:
+                        print(f"    stdout: {stdout_msg}")
+                    if stderr:
+                        print(f"    stderr: {stderr}")
+                    print(f"    Script saved: {tmp_script_path}")
 
-                # Cleanup temp files
+                # Cleanup temp files (keep script for debugging)
                 for p in [tmp_in_path, tmp_out_path]:
                     try:
                         os.remove(p)
