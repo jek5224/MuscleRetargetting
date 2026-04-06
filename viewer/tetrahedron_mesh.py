@@ -435,6 +435,12 @@ class TetrahedronMeshMixin:
             try:
                 print("Performing TetGen tetrahedralization (subprocess)...")
                 n_original = len(closed_vertices)
+                # Save anchor positions before TetGen modifies vertices
+                _anchor_positions = {}
+                if hasattr(self, 'tet_anchor_vertices'):
+                    for ai in self.tet_anchor_vertices:
+                        if ai < len(closed_vertices):
+                            _anchor_positions[ai] = closed_vertices[ai].copy()
 
                 # Run TetGen in a subprocess to isolate crashes
                 import tempfile, subprocess, json, sys
@@ -1114,16 +1120,12 @@ except Exception as e:
             self.tet_render_faces = sim_faces
             # Re-identify cap faces in sim_faces (faces touching anchor vertices)
             anchor_set_final = set()
-            if hasattr(self, 'tet_anchor_vertices'):
+            if _anchor_positions:
                 from scipy.spatial import cKDTree as _cKDTree2
                 tet_tree_final = _cKDTree2(closed_vertices.astype(np.float64))
-                for ai in self.tet_anchor_vertices:
-                    if ai < n_original:
-                        # Find anchor in new vertices
-                        orig_pos = vertices_original[ai] if ai < len(vertices_original) else None
-                        if orig_pos is not None:
-                            _, ni = tet_tree_final.query(orig_pos.astype(np.float64))
-                            anchor_set_final.add(int(ni))
+                for ai, pos in _anchor_positions.items():
+                    _, ni = tet_tree_final.query(pos.astype(np.float64))
+                    anchor_set_final.add(int(ni))
             cap_face_indices = []
             for fi, f in enumerate(sim_faces):
                 if any(int(v) in anchor_set_final for v in f):
