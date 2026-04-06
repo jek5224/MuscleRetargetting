@@ -2869,6 +2869,13 @@ class FiberArchitectureMixin:
                         v2 = tet_verts[tet[2]]
                         v3 = tet_verts[tet[3]]
 
+                        # Clamp bary coords for outside points to prevent extrapolation
+                        if not was_inside:
+                            bary = np.maximum(bary, 0.0)
+                            bary_sum = bary.sum()
+                            if bary_sum > 1e-8:
+                                bary = bary / bary_sum
+
                         # Compute new position using barycentric interpolation
                         new_pos = bary[0] * v0 + bary[1] * v1 + bary[2] * v2 + bary[3] * v3
 
