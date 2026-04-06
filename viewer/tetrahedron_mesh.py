@@ -535,7 +535,7 @@ try:
                 new_cap = set()
                 for vi in range(len(local_verts)):
                     d, oi = tree_old.query(local_verts[vi])
-                    if d < 1e-3 and int(local_remap[used[oi]]) in local_cap:
+                    if d < 1.0 and int(local_remap[used[oi]]) in local_cap:
                         new_cap.add(vi)
                 print(f"COMP_DEBUG {{ci}}: pymeshfix changed verts {{n_verts_before}}->{{len(local_verts)}}, cap {{len(local_cap)}}->{{len(new_cap)}}")
                 local_cap = new_cap
