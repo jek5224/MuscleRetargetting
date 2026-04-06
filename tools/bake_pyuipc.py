@@ -220,37 +220,67 @@ def compute_multibone_lbs(muscle, skel):
             nearest_anchor = anchor_vis[idx]
             per_vertex[vi] = [(anchor_bone[nearest_anchor], 1.0)]
 
-    # Step 3: Interior vertices — distance-weighted blend of all bones
-    # Build per-bone cap vertex groups (seeds for distance computation)
-    bone_cap_verts = {}  # bone_name -> list of vertex indices
+    # Step 3: Interior vertices — heat-diffused weights on tet mesh
+    # Build adjacency from tetrahedra
+    tets = muscle['tetrahedra']
+    adj = [set() for _ in range(n_verts)]
+    for t in tets:
+        for i in range(4):
+            for j in range(i + 1, 4):
+                adj[t[i]].add(t[j])
+                adj[t[j]].add(t[i])
+
+    # Build per-bone seed sets (cap vertices assigned to each bone)
+    bone_cap_verts = {}
     for vi, bname in anchor_bone.items():
         bone_cap_verts.setdefault(bname, []).append(vi)
-    # Also add cap face vertices
     for vi in cap_face_verts:
         if vi in per_vertex and len(per_vertex[vi]) == 1:
             bname = per_vertex[vi][0][0]
             bone_cap_verts.setdefault(bname, []).append(vi)
 
-    # Build KD-trees per bone group
-    bone_trees = {}
-    for bname, vis in bone_cap_verts.items():
-        if len(vis) > 0:
-            bone_trees[bname] = cKDTree(rest_verts[vis])
+    # Fixed vertices (caps) — don't change during diffusion
+    fixed = set(per_vertex.keys())
 
+    # Heat diffusion: for each bone, init heat=1 at its caps, 0 elsewhere
+    # then iteratively average with neighbors (Jacobi iteration)
+    n_iters = 50
+    bone_heat = {}
+    for bname in bone_names:
+        if bname not in bone_cap_verts:
+            continue
+        heat = np.zeros(n_verts)
+        for vi in bone_cap_verts.get(bname, []):
+            heat[vi] = 1.0
+        # Also set cap face vertices for this bone
+        for vi in cap_face_verts:
+            if vi in per_vertex and per_vertex[vi][0][0] == bname:
+                heat[vi] = 1.0
+        bone_heat[bname] = heat
+
+    for _ in range(n_iters):
+        for bname, heat in bone_heat.items():
+            new_heat = heat.copy()
+            for vi in range(n_verts):
+                if vi in fixed or len(adj[vi]) == 0:
+                    continue
+                new_heat[vi] = np.mean([heat[ni] for ni in adj[vi]])
+            bone_heat[bname] = new_heat
+
+    # Assign normalized weights to interior vertices
     for vi in range(n_verts):
         if vi in per_vertex:
             continue
-        pos = rest_verts[vi]
         weights = []
-        for bname, tree in bone_trees.items():
-            dist, _ = tree.query(pos)
-            weights.append((bname, 1.0 / max(dist, 0.1)))  # inverse distance
+        for bname, heat in bone_heat.items():
+            if heat[vi] > 1e-8:
+                weights.append((bname, heat[vi]))
         if len(weights) == 0:
             # Fallback: nearest bone by joint center
             best_dist = float('inf')
             best_bone = bone_names[0]
             for bname in bone_names:
-                d = np.linalg.norm(pos - bone_info[bname]['t0'])
+                d = np.linalg.norm(rest_verts[vi] - bone_info[bname]['t0'])
                 if d < best_dist:
                     best_dist = d
                     best_bone = bname
@@ -296,6 +326,82 @@ def compute_lbs_positions(bindings, skel, n_verts):
         positions[vi] = pos
 
     return positions
+
+
+def extract_surface_verts(muscle):
+    """Get set of surface vertex indices from tetrahedra surface faces."""
+    tets = muscle['tetrahedra']
+    # Extract surface by finding faces that appear only once
+    from collections import Counter
+    face_count = Counter()
+    tet_faces = []
+    for ti, t in enumerate(tets):
+        faces = [(t[0],t[1],t[2]), (t[0],t[1],t[3]),
+                 (t[0],t[2],t[3]), (t[1],t[2],t[3])]
+        for f in faces:
+            key = tuple(sorted(f))
+            face_count[key] += 1
+            tet_faces.append(key)
+    surface_verts = set()
+    for face, count in face_count.items():
+        if count == 1:
+            surface_verts.update(face)
+    return sorted(surface_verts)
+
+
+def resolve_collisions(muscles, all_pos_frame, d_min=0.5, n_iters=3):
+    """Push apart overlapping surface vertices between different muscles.
+
+    For each pair of close surface vertices from different muscles,
+    push them apart along the line connecting them.
+    d_min: minimum allowed distance in mm.
+    """
+    # Build global surface vertex array
+    global_pts = []
+    global_muscle_id = []
+    global_local_idx = []  # (muscle_index, vertex_index)
+    for mi, m in enumerate(muscles):
+        pos = all_pos_frame[m['name']]
+        surf = m.get('_surface_verts')
+        if surf is None:
+            surf = extract_surface_verts(m)
+            m['_surface_verts'] = surf
+        for vi in surf:
+            if vi < len(pos):
+                global_pts.append(pos[vi])
+                global_muscle_id.append(mi)
+                global_local_idx.append((mi, vi))
+
+    if len(global_pts) == 0:
+        return
+
+    global_pts = np.array(global_pts, dtype=np.float64)
+    global_muscle_id = np.array(global_muscle_id)
+
+    for _ in range(n_iters):
+        tree = cKDTree(global_pts)
+        pairs = tree.query_pairs(r=d_min)
+        n_pushed = 0
+        for i, j in pairs:
+            if global_muscle_id[i] == global_muscle_id[j]:
+                continue  # same muscle
+            diff = global_pts[j] - global_pts[i]
+            dist = np.linalg.norm(diff)
+            if dist < 1e-8:
+                diff = np.array([0.0, 1.0, 0.0])
+                dist = 1.0
+            push = (d_min - dist) * 0.5 * diff / dist
+            global_pts[i] -= push
+            global_pts[j] += push
+            n_pushed += 1
+
+        if n_pushed == 0:
+            break
+
+    # Write back
+    for gi, (mi, vi) in enumerate(global_local_idx):
+        m = muscles[mi]
+        all_pos_frame[m['name']][vi] = global_pts[gi].astype(np.float32)
 
 
 def main():
@@ -480,11 +586,12 @@ def main():
         dt = time.time() - t0
 
         # Capture positions
+        frame_positions = {}
         total_inv = 0
         for i, m in enumerate(muscles):
             geo = geo_slots[i].geometry()
             pos = np.array(geo.positions().view()).reshape(-1, 3)
-            all_positions[m['name']][frame] = pos.astype(np.float32)
+            frame_positions[m['name']] = pos.astype(np.float32)
 
             # Check inversions
             tets = m['tetrahedra']
@@ -493,6 +600,12 @@ def main():
                 cr = np.cross(pos[tets[:, 1]] - v0, pos[tets[:, 2]] - v0)
                 vol = np.einsum('ij,ij->i', cr, pos[tets[:, 3]] - v0) / 6.0
                 total_inv += int(np.sum(vol <= 0))
+
+        # Post-process: resolve muscle-muscle collisions
+        resolve_collisions(muscles, frame_positions, d_min=0.5, n_iters=3)
+
+        for m in muscles:
+            all_positions[m['name']][frame] = frame_positions[m['name']]
 
         if dt > 5.0:
             stall_count += 1
