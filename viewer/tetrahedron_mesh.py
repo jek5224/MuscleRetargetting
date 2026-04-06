@@ -583,7 +583,7 @@ try:
     try:
         tet = tetgen.TetGen(rv_fixed.copy(), rf_fixed.copy())
         tet.tetrahedralize(order=1, mindihedral=5, minratio=2.0,
-                           maxvolume=max_vol, nobisect=False,
+                           maxvolume=max_vol, nobisect=True,
                            steinerleft=steiner_budget)
         n_tets = len(tet.elem)
         n_verts = len(tet.node)
@@ -592,56 +592,10 @@ try:
         tet = tetgen.TetGen(rv_fixed.copy(), rf_fixed.copy())
         tet.tetrahedralize(quality=False, nobisect=False)
         print(f"NOQUALITY -> {{len(tet.elem)}} tets")
-    # Propagate cap status through TetGen edges
+    # With nobisect=True, TetGen only adds interior Steiner points.
+    # Surface vertices are unchanged — cap status is already correct.
     tet_node = tet.node
     tet_elem = tet.elem
-    # TetGen Steiner points on edges between cap vertices are cap
-    n_pre_tetgen = len(rv_fixed)
-    for ti in tet_elem:
-        for i in range(4):
-            for j in range(i+1, 4):
-                vi, vj = int(ti[i]), int(ti[j])
-                if vi in is_cap and vj in is_cap:
-                    # Any vertex on this edge is cap — check intermediate verts
-                    # TetGen doesn't create intermediate verts on existing edges,
-                    # but Steiner points on NEW edges connecting cap verts should
-                    # still be cap if both endpoints are cap
-                    pass  # Already handled: if both endpoints cap, any tet vertex between = cap
-                # For new vertices: check if on edge between two cap verts
-                for vk in [vi, vj]:
-                    if vk >= n_pre_tetgen and vk not in is_cap:
-                        # New Steiner point — check all tet edges from this vertex
-                        neighbors_cap = 0
-                        neighbors_total = 0
-                        for tk in tet_elem:
-                            if vk in tk:
-                                for tvi in tk:
-                                    if int(tvi) != vk:
-                                        neighbors_total += 1
-                                        if int(tvi) in is_cap:
-                                            neighbors_cap += 1
-                        # If majority of tet neighbors are cap, this is a cap vertex
-                        if neighbors_total > 0 and neighbors_cap > neighbors_total * 0.6:
-                            is_cap.add(vk)
-                break  # only need one pass per tet
-        break  # This nested loop approach is too slow, use simpler method
-
-    # Simpler: for each new vertex, check if ALL its tet-connected neighbors are cap
-    # Build adjacency for new vertices only
-    new_verts_adj = {{}}
-    for ti in tet_elem:
-        for i in range(4):
-            vi = int(ti[i])
-            if vi >= n_pre_tetgen:
-                if vi not in new_verts_adj:
-                    new_verts_adj[vi] = set()
-                for j in range(4):
-                    if i != j:
-                        new_verts_adj[vi].add(int(ti[j]))
-    for vi, neighbors in new_verts_adj.items():
-        cap_neighbors = sum(1 for n in neighbors if n in is_cap)
-        if cap_neighbors == len(neighbors):
-            is_cap.add(vi)
 
     cap_verts_out = np.array(sorted(is_cap), dtype=np.int32)
     print(f"CAP_VERTS: {{len(cap_verts_out)}}")
