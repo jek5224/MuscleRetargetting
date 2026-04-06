@@ -435,12 +435,18 @@ class TetrahedronMeshMixin:
             try:
                 print("Performing TetGen tetrahedralization (subprocess)...")
                 n_original = len(closed_vertices)
-                # Save cap vertex positions before TetGen modifies vertices
+                # Save cap info before TetGen modifies vertices
                 _anchor_positions = {}
+                _anchor_radii = {}  # max distance from anchor to its loop vertices
                 if hasattr(self, 'tet_anchor_vertices'):
-                    for ai in self.tet_anchor_vertices:
+                    for li, ai in enumerate(self.tet_anchor_vertices):
                         if ai < len(closed_vertices):
                             _anchor_positions[ai] = closed_vertices[ai].copy()
+                            # Compute cap radius from boundary loop
+                            if li < len(boundary_loops):
+                                loop_pts = closed_vertices[boundary_loops[li]]
+                                _anchor_radii[ai] = float(np.max(np.linalg.norm(
+                                    loop_pts - closed_vertices[ai], axis=1)))
                 # Track cap vertices through subdivision
                 _cap_verts = set()
                 for fi in cap_face_indices:
@@ -1292,7 +1298,61 @@ except Exception as e:
                     near = np.where(dists < 0.02)[0]
                     n_cap = sum(1 for fi in near if fi in cap_fi_set)
                     if n_cap < 5 and len(near) > 0:
-                        print(f"  WARNING: Anchor {ai} has only {n_cap} cap faces")
+                        # Recover caps via radius-limited flood-fill from anchor
+                        cap_radius = _anchor_radii.get(ai, 0.01)
+                        anchor_faces = [fi for fi in range(len(sim_faces))
+                                        if ani in sim_faces[fi]]
+                        if anchor_faces:
+                            # Get cap normal from anchor's faces
+                            ref_normals = []
+                            for fi in anchor_faces:
+                                fv = closed_vertices[sim_faces[fi]].astype(np.float64)
+                                fn = np.cross(fv[1]-fv[0], fv[2]-fv[0])
+                                fn_len = np.linalg.norm(fn)
+                                if fn_len > 1e-12:
+                                    ref_normals.append(fn / fn_len)
+                            if ref_normals:
+                                cap_normal = np.mean(ref_normals, axis=0)
+                                cap_normal /= np.linalg.norm(cap_normal)
+                                # Build sim_face adjacency
+                                sf_edge_faces = {}
+                                for fi, f in enumerate(sim_faces):
+                                    for i in range(3):
+                                        e = (min(int(f[i]),int(f[(i+1)%3])),
+                                             max(int(f[i]),int(f[(i+1)%3])))
+                                        sf_edge_faces.setdefault(e, []).append(fi)
+                                # Flood-fill with radius + normal limit
+                                flood_vis = set()
+                                flood_q = list(anchor_faces)
+                                added = 0
+                                anchor_pos = closed_vertices[ani].astype(np.float64)
+                                while flood_q:
+                                    fi = flood_q.pop()
+                                    if fi in flood_vis: continue
+                                    flood_vis.add(fi)
+                                    fc_pos = np.mean(closed_vertices[sim_faces[fi]].astype(np.float64), axis=0)
+                                    # Radius check
+                                    if np.linalg.norm(fc_pos - anchor_pos) > cap_radius * 1.3:
+                                        continue
+                                    # Normal check
+                                    fv = closed_vertices[sim_faces[fi]].astype(np.float64)
+                                    fn = np.cross(fv[1]-fv[0], fv[2]-fv[0])
+                                    fn_len = np.linalg.norm(fn)
+                                    if fn_len > 1e-12:
+                                        fn /= fn_len
+                                        if abs(np.dot(fn, cap_normal)) < 0.3:
+                                            continue
+                                    if fi not in cap_fi_set:
+                                        cap_face_indices.append(int(fi))
+                                        cap_fi_set.add(int(fi))
+                                        added += 1
+                                    for i in range(3):
+                                        e = (min(int(sim_faces[fi][i]),int(sim_faces[fi][(i+1)%3])),
+                                             max(int(sim_faces[fi][i]),int(sim_faces[fi][(i+1)%3])))
+                                        for nfi in sf_edge_faces.get(e, []):
+                                            if nfi not in flood_vis:
+                                                flood_q.append(nfi)
+                                print(f"  Anchor {ai}: flood-fill recovered {added} cap faces (radius={cap_radius:.4f})")
             # Debug: per-anchor cap face counts
             if hasattr(self, 'tet_anchor_vertices') and _anchor_positions:
                 from scipy.spatial import cKDTree as _cKDTree3
