@@ -521,14 +521,15 @@ try:
 
         # Close holes with pymeshfix (safe on single component)
         mesh = trimesh.Trimesh(vertices=local_verts, faces=local_faces, process=False)
+        n_faces_before = len(local_faces)
+        n_verts_before = len(local_verts)
         if not mesh.is_watertight:
             fixer = pymeshfix.MeshFix(local_verts.copy(), local_faces.copy())
             fixer.repair(verbose=False)
-            n_before = len(local_verts)
             local_verts = fixer.v.astype(np.float64)
             local_faces = fixer.f.astype(np.int32)
-            # Remap cap to repaired mesh
-            if len(local_verts) != n_before:
+            # Remap existing cap vertices
+            if len(local_verts) != n_verts_before:
                 tree_old = cKDTree(rv[used])
                 new_cap = set()
                 for vi in range(len(local_verts)):
@@ -536,6 +537,17 @@ try:
                     if d < 1e-3 and int(local_remap[used[oi]]) in local_cap:
                         new_cap.add(vi)
                 local_cap = new_cap
+            # Mark NEW faces (hole-closing) as cap — all their vertices are cap
+            if len(local_faces) > n_faces_before:
+                # Find faces that weren't in the original set
+                old_face_set = set()
+                for fi in range(min(n_faces_before, len(local_faces))):
+                    old_face_set.add(tuple(sorted(local_faces[fi])))
+                for fi in range(len(local_faces)):
+                    fkey = tuple(sorted(local_faces[fi]))
+                    if fkey not in old_face_set:
+                        for vi in local_faces[fi]:
+                            local_cap.add(int(vi))
             mesh = trimesh.Trimesh(vertices=local_verts, faces=local_faces, process=False)
 
         # Subdivide long edges
@@ -600,7 +612,7 @@ try:
         except Exception:
             tet = tetgen.TetGen(local_verts.copy(), local_faces.copy())
             tet.tetrahedralize(quality=False, nobisect=True)
-        print(f"COMP {{ci}}: {{len(tet.elem)}} tets, {{len(tet.node)}} verts")
+        print(f"COMP {{ci}}: {{len(tet.elem)}} tets, {{len(tet.node)}} verts, {{len(local_cap)}} cap verts")
         # Map cap verts to global output indices
         for vi in local_cap:
             if vi < len(tet.node):
