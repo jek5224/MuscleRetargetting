@@ -600,15 +600,17 @@ except Exception as e:
                     orig_dists, _ = tet_tree.query(closed_vertices.astype(np.float64))
                     n_preserved = int(np.sum(orig_dists < 1e-6))
 
-                    # Quality stats
+                    # Quality stats — signed volume for inversion check
                     tv0 = tet_verts[tet_elems[:, 0]]
                     tcr = np.cross(tet_verts[tet_elems[:, 1]] - tv0,
                                    tet_verts[tet_elems[:, 2]] - tv0)
-                    tvol = np.abs(np.einsum('ij,ij->i', tcr,
-                                  tet_verts[tet_elems[:, 3]] - tv0)) / 6.0
+                    tvol_signed = np.einsum('ij,ij->i', tcr,
+                                  tet_verts[tet_elems[:, 3]] - tv0) / 6.0
+                    tvol = np.abs(tvol_signed)
                     n_good = int(np.sum(tvol >= 1e-12))
+                    n_inverted = int(np.sum(tvol_signed < 0))
                     print(f"  TetGen: {len(tet_elems)} tets, {len(tet_verts)} verts, "
-                          f"{n_preserved}/{n_original} original preserved, {n_good} good")
+                          f"{n_preserved}/{n_original} original preserved, {n_good} good, {n_inverted} inverted")
                     print(f"    Volume range: [{tvol.min():.2e}, {tvol.max():.2e}]")
 
                     # Build old→new vertex index mapping via nearest vertex
@@ -965,10 +967,12 @@ except Exception as e:
                 cr = np.cross(
                     closed_vertices[interior_tetrahedra[:, 1]].astype(np.float64) - v0,
                     closed_vertices[interior_tetrahedra[:, 2]].astype(np.float64) - v0)
-                vol = np.abs(np.einsum('ij,ij->i', cr,
-                             closed_vertices[interior_tetrahedra[:, 3]].astype(np.float64) - v0)) / 6.0
+                vol_signed = np.einsum('ij,ij->i', cr,
+                             closed_vertices[interior_tetrahedra[:, 3]].astype(np.float64) - v0) / 6.0
+                vol = np.abs(vol_signed)
                 n_total = len(vol)
-                print(f"  Tet quality ({n_total} tets):")
+                n_inverted = int(np.sum(vol_signed < 0))
+                print(f"  Tet quality ({n_total} tets, {n_inverted} inverted):")
                 print(f"    Volume range: [{vol.min():.2e}, {vol.max():.2e}]")
                 for threshold in [1e-15, 1e-12, 1e-10, 1e-8]:
                     n = int(np.sum(vol < threshold))
