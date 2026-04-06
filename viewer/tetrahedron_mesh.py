@@ -546,37 +546,50 @@ class TetrahedronMeshMixin:
                                     aspect = major / max(minor, 1e-8)
 
                                     if aspect > 3.0 and len(pts_2d) >= 6:
-                                        # Thin cross-section: place multiple centers
-                                        # along the major axis inside the polygon
+                                        # Thin cross-section: slice polygon along major
+                                        # axis into strips, polylabel each strip.
+                                        # Each polylabel is guaranteed inside the polygon.
                                         n_centers = min(int(aspect / 2), 5)
                                         n_centers = max(n_centers, 2)
-                                        # Major axis direction
+                                        from shapely.geometry import box as shapely_box
+                                        from shapely import affinity as shapely_affinity
+                                        # Major axis direction and angle
                                         edge0 = rect_coords[1] - rect_coords[0]
                                         edge1 = rect_coords[2] - rect_coords[1]
                                         if np.linalg.norm(edge0) > np.linalg.norm(edge1):
                                             major_dir = edge0 / np.linalg.norm(edge0)
                                         else:
                                             major_dir = edge1 / np.linalg.norm(edge1)
-                                        # Project polygon centroid and extent along major axis
-                                        centroid_2d = np.array([poly.centroid.x, poly.centroid.y])
-                                        projections = pts_2d @ major_dir
-                                        p_min, p_max = projections.min(), projections.max()
+                                        angle = np.degrees(np.arctan2(major_dir[1], major_dir[0]))
+                                        # Rotate polygon to align major axis with X
+                                        cx, cy = poly.centroid.x, poly.centroid.y
+                                        rotated = shapely_affinity.rotate(poly, -angle, origin=(cx, cy))
+                                        rx0, ry0, rx1, ry1 = rotated.bounds
                                         centers_3d = []
                                         for i in range(n_centers):
-                                            t = (i + 0.5) / n_centers
-                                            p = p_min + t * (p_max - p_min)
-                                            # Point along major axis at distance p from origin
-                                            center_proj = centroid_2d @ major_dir
-                                            pt_2d = centroid_2d + (p - center_proj) * major_dir
-                                            # Check if inside polygon, nudge if not
-                                            from shapely.geometry import Point as ShapelyPoint
-                                            sp = ShapelyPoint(pt_2d)
-                                            if not poly.contains(sp):
-                                                nearest = poly.exterior.interpolate(
-                                                    poly.exterior.project(sp))
-                                                pt_2d = (np.array([nearest.x, nearest.y]) + pt_2d) / 2
+                                            # Slice bounds along X
+                                            t0 = i / n_centers
+                                            t1 = (i + 1) / n_centers
+                                            sx0 = rx0 + t0 * (rx1 - rx0)
+                                            sx1 = rx0 + t1 * (rx1 - rx0)
+                                            clip = shapely_box(sx0, ry0 - 1, sx1, ry1 + 1)
+                                            strip = rotated.intersection(clip)
+                                            if strip.is_empty or strip.area < 1e-12:
+                                                continue
+                                            try:
+                                                pole_r = polylabel(strip, tolerance=1e-4)
+                                                # Rotate back
+                                                pole_back = shapely_affinity.rotate(
+                                                    pole_r, angle, origin=(cx, cy))
+                                                pt_2d = np.array([pole_back.x, pole_back.y])
+                                            except Exception:
+                                                continue
                                             c3d = mean + pt_2d[0] * basis_x + pt_2d[1] * basis_y
                                             centers_3d.append(c3d)
+                                        if len(centers_3d) == 0:
+                                            # Fallback to single polylabel
+                                            pole = polylabel(poly, tolerance=1e-4)
+                                            centers_3d = [mean + pole.x * basis_x + pole.y * basis_y]
                                     else:
                                         # Normal aspect — single pole center
                                         pole = polylabel(poly, tolerance=1e-4)
