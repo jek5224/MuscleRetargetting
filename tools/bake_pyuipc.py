@@ -1,13 +1,12 @@
 #!/usr/bin/env python3
 """Bake muscle deformation with pyuipc IPC contact.
 
-Loads skeleton, applies BVH motion frame by frame, drives anchor
-vertices via skeleton transforms, runs pyuipc with IPC contact.
+Loads skeleton, applies BVH motion frame by frame, drives muscle
+vertices via multi-bone LBS, runs pyuipc with IPC contact.
 Saves per-frame deformed positions to npz chunks.
 
 Usage (on A6000 server):
-    python tools/bake_pyuipc.py --bvh data/motion/walk1_subject1.bvh --frames 0-100
-    python tools/bake_pyuipc.py --bvh data/motion/dance.bvh --frames 0-200 --sides LR
+    python tools/bake_pyuipc.py --bvh data/motion/walk.bvh --frames 0-131 --sides LR
 """
 import argparse
 import gc
@@ -17,6 +16,7 @@ import sys
 import time
 
 import numpy as np
+from scipy.spatial import cKDTree
 
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if PROJECT_ROOT not in sys.path:
@@ -30,7 +30,7 @@ import uipc.builtin as builtin
 from uipc.core import Engine, World, Scene
 from uipc.geometry import tetmesh, label_surface, label_triangle_orient
 from uipc.constitution import StableNeoHookean, SoftPositionConstraint, ElasticModuli
-from uipc.unit import kPa, GPa
+from uipc.unit import kPa, GPa, MPa
 
 SKEL_XML = "data/zygote_skel.xml"
 SCALE = 1000.0  # m → mm
@@ -47,7 +47,22 @@ UPLEG_MUSCLES = [
     "Vastus_Medialis",
 ]
 
-SKELETON_MESHES_ORDER = None  # populated at runtime
+
+def _find_body(skel, name):
+    """Find DART body node by name, trying exact match then fuzzy."""
+    bn = skel.getBodyNode(name)
+    if bn is not None:
+        return bn, name
+    bn = skel.getBodyNode(name + "0")
+    if bn is not None:
+        return bn, name + "0"
+    norm = name.lower().replace('_', '')
+    for bi in range(skel.getNumBodyNodes()):
+        b = skel.getBodyNode(bi)
+        bn_norm = b.getName().lower().replace('_', '')
+        if norm in bn_norm or bn_norm in norm:
+            return b, b.getName()
+    return None, name
 
 
 def load_skeleton():
@@ -83,8 +98,7 @@ def load_muscle(tet_dir, name):
     if not np.all(good):
         tets = tets[good]
 
-    # Collect fixed vertices
-    anchors = data.get('anchor_vertices', np.array([], dtype=np.int32))
+    # Collect fixed vertices from caps
     cap_faces = data.get('cap_face_indices', [])
     fixed_verts = set()
     sim_faces = data.get('sim_faces', data.get('faces'))
@@ -93,6 +107,7 @@ def load_muscle(tet_dir, name):
             if fi < len(sim_faces):
                 for vi in sim_faces[fi]:
                     fixed_verts.add(int(vi))
+    anchors = data.get('anchor_vertices', np.array([], dtype=np.int32))
     for vi in anchors:
         fixed_verts.add(int(vi))
 
@@ -106,7 +121,7 @@ def load_muscle(tet_dir, name):
         tets = remap[tets]
         fixed_verts = {int(remap[vi]) for vi in fixed_verts if vi < len(remap) and remap[vi] >= 0}
 
-    # Get skeleton attachment info for driving fixed vertices
+    # Get skeleton attachment info
     cap_attachments = data.get('cap_attachments', [])
     attach_skel_names = data.get('attach_skeleton_names', [])
 
@@ -118,169 +133,169 @@ def load_muscle(tet_dir, name):
         'fixed_vertices': sorted(fixed_verts),
         'cap_attachments': cap_attachments,
         'attach_skeleton_names': attach_skel_names,
+        'cap_face_indices': cap_faces,
+        'sim_faces': sim_faces,
         'remap': remap,
     }
 
 
-def compute_lbs_bindings(muscle, skel):
-    """Compute LBS bindings for ALL vertices (origin/insertion bone blend).
+def compute_multibone_lbs(muscle, skel):
+    """Compute multi-bone LBS bindings using cap_attachments.
 
-    Each vertex gets a weight based on position along the muscle axis:
-    0 = origin end, 1 = insertion end. Returns list of
-    (origin_body, insertion_body, weight, R0_o, t0_o, R0_i, t0_i, rest_pos) per vertex.
+    Cap anchor vertices: rigidly follow their assigned bone.
+    Cap face vertices: follow nearest anchor's bone.
+    Interior vertices: distance-weighted blend of all muscle bones.
+
+    Returns per-vertex list of [(bone_name, weight, R0, t0, rest_pos), ...].
     """
     rest_verts = muscle['rest_vertices']
     n_verts = len(rest_verts)
     attach_names = muscle.get('attach_skeleton_names', [])
+    cap_att = muscle.get('cap_attachments', [])
+    cap_faces_idx = muscle.get('cap_face_indices', [])
+    sim_faces = muscle.get('sim_faces')
+    remap = muscle.get('remap')
 
-    # Get origin and insertion bone names
-    origin_body = insertion_body = None
-    if len(attach_names) >= 1 and len(attach_names[0]) >= 2:
-        origin_body = attach_names[0][0]  # first stream, origin
-        insertion_body = attach_names[0][1]  # first stream, insertion
-
-    if origin_body is None or insertion_body is None:
+    if len(attach_names) == 0:
         return None
 
-    # Get rest pose transforms
+    # Collect all unique bones from all streams
     skel.setPositions(np.zeros(skel.getNumDofs()))
-    def _find_body(skel, name):
-        """Find DART body node by name, trying exact match then fuzzy."""
-        bn = skel.getBodyNode(name)
-        if bn is not None:
-            return bn, name
-        # Try with "0" suffix (DART convention)
-        bn = skel.getBodyNode(name + "0")
-        if bn is not None:
-            return bn, name + "0"
-        # Fuzzy
-        norm = name.lower().replace('_', '')
-        for bi in range(skel.getNumBodyNodes()):
-            b = skel.getBodyNode(bi)
-            bn_norm = b.getName().lower().replace('_', '')
-            if norm in bn_norm or bn_norm in norm:
-                return b, b.getName()
-        return None, name
+    bone_info = {}  # bone_name -> {node, R0, t0}
+    for stream_names in attach_names:
+        for raw_name in stream_names:
+            if raw_name in bone_info:
+                continue
+            node, resolved = _find_body(skel, raw_name)
+            if node is None:
+                continue
+            R0 = node.getWorldTransform().rotation()
+            t0 = node.getWorldTransform().translation() * SCALE
+            bone_info[raw_name] = {'node_name': resolved, 'R0': R0, 't0': t0}
 
-    o_node, origin_body = _find_body(skel, origin_body)
-    i_node, insertion_body = _find_body(skel, insertion_body)
-    if o_node is None or i_node is None:
-        print(f"    WARNING: LBS body not found: origin={origin_body} ({o_node}), insertion={insertion_body} ({i_node})")
+    if len(bone_info) == 0:
         return None
 
-    R0_o = o_node.getWorldTransform().rotation()
-    t0_o = o_node.getWorldTransform().translation() * SCALE
-    R0_i = i_node.getWorldTransform().rotation()
-    t0_i = i_node.getWorldTransform().translation() * SCALE
+    bone_names = list(bone_info.keys())
 
-    # Compute muscle axis and weights
-    muscle_axis = t0_i - t0_o
-    muscle_length = np.linalg.norm(muscle_axis)
-    if muscle_length < 1e-6:
-        return None
-    axis_norm = muscle_axis / muscle_length
+    # Step 1: Assign cap anchor vertices to their bone
+    per_vertex = {}  # vi -> [(bone_name, weight)]
+    anchor_bone = {}  # vi -> bone_name (for cap face assignment)
 
+    if len(cap_att) > 0:
+        for row in cap_att:
+            orig_vi = int(row[0])
+            stream_idx = int(row[1])
+            end_idx = int(row[2])  # 0=origin, 1=insertion
+            if stream_idx < len(attach_names) and end_idx < len(attach_names[stream_idx]):
+                bone_name = attach_names[stream_idx][end_idx]
+                # Remap vertex index
+                vi = orig_vi
+                if remap is not None:
+                    vi = int(remap[orig_vi]) if orig_vi < len(remap) else -1
+                if vi >= 0 and vi < n_verts and bone_name in bone_info:
+                    per_vertex[vi] = [(bone_name, 1.0)]
+                    anchor_bone[vi] = bone_name
+
+    # Step 2: Cap face vertices -> same bone as nearest anchor
+    cap_face_verts = set()
+    if sim_faces is not None:
+        for fi in cap_faces_idx:
+            if fi < len(sim_faces):
+                for vi_orig in sim_faces[fi]:
+                    vi = int(vi_orig)
+                    if remap is not None:
+                        vi = int(remap[vi]) if vi < len(remap) else -1
+                    if vi >= 0 and vi < n_verts:
+                        cap_face_verts.add(vi)
+
+    if len(anchor_bone) > 0:
+        anchor_vis = list(anchor_bone.keys())
+        anchor_pos = rest_verts[anchor_vis]
+        anchor_tree = cKDTree(anchor_pos)
+        for vi in cap_face_verts:
+            if vi in per_vertex:
+                continue
+            _, idx = anchor_tree.query(rest_verts[vi])
+            nearest_anchor = anchor_vis[idx]
+            per_vertex[vi] = [(anchor_bone[nearest_anchor], 1.0)]
+
+    # Step 3: Interior vertices — distance-weighted blend of all bones
+    # Build per-bone cap vertex groups (seeds for distance computation)
+    bone_cap_verts = {}  # bone_name -> list of vertex indices
+    for vi, bname in anchor_bone.items():
+        bone_cap_verts.setdefault(bname, []).append(vi)
+    # Also add cap face vertices
+    for vi in cap_face_verts:
+        if vi in per_vertex and len(per_vertex[vi]) == 1:
+            bname = per_vertex[vi][0][0]
+            bone_cap_verts.setdefault(bname, []).append(vi)
+
+    # Build KD-trees per bone group
+    bone_trees = {}
+    for bname, vis in bone_cap_verts.items():
+        if len(vis) > 0:
+            bone_trees[bname] = cKDTree(rest_verts[vis])
+
+    for vi in range(n_verts):
+        if vi in per_vertex:
+            continue
+        pos = rest_verts[vi]
+        weights = []
+        for bname, tree in bone_trees.items():
+            dist, _ = tree.query(pos)
+            weights.append((bname, 1.0 / max(dist, 0.1)))  # inverse distance
+        if len(weights) == 0:
+            # Fallback: nearest bone by joint center
+            best_dist = float('inf')
+            best_bone = bone_names[0]
+            for bname in bone_names:
+                d = np.linalg.norm(pos - bone_info[bname]['t0'])
+                if d < best_dist:
+                    best_dist = d
+                    best_bone = bname
+            weights = [(best_bone, 1.0)]
+        total = sum(w for _, w in weights)
+        per_vertex[vi] = [(b, w / total) for b, w in weights]
+
+    # Build final bindings
     bindings = []
     for vi in range(n_verts):
-        pos = rest_verts[vi]
-        t = np.dot(pos - t0_o, axis_norm) / muscle_length
-        t = np.clip(t, 0.0, 1.0)
-        bindings.append((origin_body, insertion_body, t, R0_o, t0_o, R0_i, t0_i, pos.copy()))
+        if vi not in per_vertex:
+            per_vertex[vi] = [(bone_names[0], 1.0)]
+        bone_weights = []
+        for bname, w in per_vertex[vi]:
+            if bname not in bone_info:
+                continue
+            bi = bone_info[bname]
+            bone_weights.append((bi['node_name'], w, bi['R0'], bi['t0']))
+        bindings.append((rest_verts[vi].copy(), bone_weights))
 
     return bindings
 
 
 def compute_lbs_positions(bindings, skel, n_verts):
-    """Compute LBS-deformed positions for all vertices at current skeleton pose."""
+    """Compute multi-bone LBS-deformed positions at current skeleton pose."""
     if bindings is None:
         return None
 
     positions = np.zeros((n_verts, 3))
-    for vi, (o_body, i_body, w, R0_o, t0_o, R0_i, t0_i, rest_pos) in enumerate(bindings):
-        o_node = skel.getBodyNode(o_body)
-        i_node = skel.getBodyNode(i_body)
-        if o_node is None or i_node is None:
+    for vi, (rest_pos, bone_weights) in enumerate(bindings):
+        if len(bone_weights) == 0:
             positions[vi] = rest_pos
             continue
-
-        R1_o = o_node.getWorldTransform().rotation()
-        t1_o = o_node.getWorldTransform().translation() * SCALE
-        R1_i = i_node.getWorldTransform().rotation()
-        t1_i = i_node.getWorldTransform().translation() * SCALE
-
-        pos_o = R1_o @ (R0_o.T @ (rest_pos - t0_o)) + t1_o
-        pos_i = R1_i @ (R0_i.T @ (rest_pos - t0_i)) + t1_i
-        positions[vi] = (1.0 - w) * pos_o + w * pos_i
+        pos = np.zeros(3)
+        for node_name, w, R0, t0 in bone_weights:
+            node = skel.getBodyNode(node_name)
+            if node is None:
+                pos += w * rest_pos
+                continue
+            R1 = node.getWorldTransform().rotation()
+            t1 = node.getWorldTransform().translation() * SCALE
+            pos += w * (R1 @ (R0.T @ (rest_pos - t0)) + t1)
+        positions[vi] = pos
 
     return positions
-
-
-def compute_local_anchors(muscle, skel):
-    """Compute local coordinates of each fixed vertex in its nearest bone frame.
-
-    Uses rest pose skeleton transforms. Each fixed vertex is assigned to the
-    nearest bone body node. Returns dict: {vertex_idx: (body_name, local_pos)}.
-    """
-    rest_verts = muscle['rest_vertices']  # in mm
-    fixed = muscle['fixed_vertices']
-    if len(fixed) == 0:
-        return {}
-
-    # Get all body transforms at rest pose
-    skel.setPositions(np.zeros(skel.getNumDofs()))
-    bodies = []
-    for i in range(skel.getNumBodyNodes()):
-        bn = skel.getBodyNode(i)
-        wt = bn.getWorldTransform()
-        bodies.append({
-            'name': bn.getName(),
-            'rotation': wt.rotation(),
-            'translation': wt.translation() * SCALE,  # convert to mm
-        })
-
-    # For each fixed vertex, find nearest bone
-    local_anchors = {}
-    for vi in fixed:
-        if vi >= len(rest_verts):
-            continue
-        world_pos = rest_verts[vi]  # mm
-
-        # Find nearest bone by translation distance
-        best_dist = float('inf')
-        best_body = None
-        for body in bodies:
-            dist = np.linalg.norm(world_pos - body['translation'])
-            if dist < best_dist:
-                best_dist = dist
-                best_body = body
-
-        if best_body is not None:
-            R = best_body['rotation']
-            t = best_body['translation']
-            local_pos = R.T @ (world_pos - t)
-            local_anchors[vi] = (best_body['name'], local_pos)
-
-    return local_anchors
-
-
-def compute_driven_positions(local_anchors, skel, rest_verts):
-    """Compute target positions for fixed vertices based on current skeleton pose.
-
-    Returns array of positions (mm) for ALL vertices. Fixed vertices get
-    skeleton-driven positions, others keep rest positions.
-    """
-    target = rest_verts.copy()
-
-    for vi, (body_name, local_pos) in local_anchors.items():
-        bn = skel.getBodyNode(body_name)
-        if bn is None:
-            continue
-        wt = bn.getWorldTransform()
-        R = wt.rotation()
-        t = wt.translation() * SCALE  # mm
-        target[vi] = R @ local_pos + t
-
-    return target
 
 
 def main():
@@ -290,6 +305,7 @@ def main():
     parser.add_argument('--tet-dir', default='tet_sim')
     parser.add_argument('--output-dir', default='bake_pyuipc')
     parser.add_argument('--sides', default='L', help='L, R, or LR')
+    parser.add_argument('--no-contact', action='store_true', help='Disable IPC contact')
     args = parser.parse_args()
 
     # Parse frame range
@@ -322,35 +338,79 @@ def main():
     total_verts = sum(len(m['vertices']) for m in muscles)
     print(f"    {len(muscles)} muscles: {total_verts} verts, {total_tets} tets")
 
-    # Compute LBS bindings and local anchors at rest pose
-    print("[4] Computing skeleton bindings...")
+    # Compute multi-bone LBS bindings at rest pose
+    print("[4] Computing multi-bone LBS bindings...")
     for m in muscles:
-        m['lbs_bindings'] = compute_lbs_bindings(m, skel)
-        m['local_anchors'] = compute_local_anchors(m, skel)
-        n_lbs = len(m['lbs_bindings']) if m['lbs_bindings'] else 0
-        print(f"    {m['name']}: {n_lbs} LBS, {len(m['local_anchors'])} anchors")
-        # Shared target array for ALL vertices (updated before each frame)
+        m['lbs_bindings'] = compute_multibone_lbs(m, skel)
+        if m['lbs_bindings'] is not None:
+            # Count unique bones
+            bones_used = set()
+            for _, bw in m['lbs_bindings']:
+                for name, *_ in bw:
+                    bones_used.add(name)
+            print(f"    {m['name']}: {len(m['vertices'])}v, bones={bones_used}")
+        else:
+            print(f"    {m['name']}: WARNING no LBS bindings!")
         m['aim_targets'] = m['rest_vertices'].copy()
 
-    # Bone mesh loading skipped — contact disabled for now
-    print("[5] Skipped bone mesh loading (contact disabled)")
+    use_contact = not args.no_contact
+
+    if use_contact:
+        # Pre-position at frame-0 LBS so contact doesn't fight the huge
+        # rest→walk displacement.  Re-orient tets for the deformed mesh.
+        print("[5] Pre-positioning muscles at frame-0 LBS (contact mode)...")
+        pose0 = motion_bvh.mocap_refs[start_frame].copy()
+        skel.setPositions(pose0)
+        for m in muscles:
+            if m['lbs_bindings'] is not None:
+                lbs0 = compute_lbs_positions(m['lbs_bindings'], skel, len(m['vertices']))
+                m['vertices'] = lbs0
+                m['aim_targets'][:] = lbs0
+                tets = m['tetrahedra']
+                v0 = lbs0[tets[:, 0]]
+                cross = np.cross(lbs0[tets[:, 1]] - v0, lbs0[tets[:, 2]] - v0)
+                vol = np.einsum('ij,ij->i', cross, lbs0[tets[:, 3]] - v0) / 6.0
+                neg = vol < 0
+                if np.any(neg):
+                    tets[neg, 1], tets[neg, 2] = tets[neg, 2].copy(), tets[neg, 1].copy()
+                v0 = lbs0[tets[:, 0]]
+                cross = np.cross(lbs0[tets[:, 1]] - v0, lbs0[tets[:, 2]] - v0)
+                vol = np.einsum('ij,ij->i', cross, lbs0[tets[:, 3]] - v0) / 6.0
+                good = vol > 0.001
+                if not np.all(good):
+                    n_removed = int(np.sum(~good))
+                    tets = tets[good]
+                    m['tetrahedra'] = tets
+                    print(f"    {m['name']}: removed {n_removed} degenerate tets")
+        total_tets = sum(len(m['tetrahedra']) for m in muscles)
+        print(f"    Total tets after re-orient: {total_tets}")
 
     # Setup pyuipc
-    print("[6] Setting up pyuipc...")
+    print(f"[6] Setting up pyuipc (contact={'ON' if use_contact else 'OFF'})...")
     engine = Engine('cuda')
     world = World(engine)
 
     config = Scene.default_config()
     config['dt'] = 0.01
     config['gravity'] = [[0.0], [0.0], [0.0]]
-    config['contact'] = {'enable': False}  # Contact post-processed separately
+    if use_contact:
+        config['contact'] = {
+            'enable': True,
+            'friction': {'enable': False},
+            'd_hat': 0.1,  # 0.1mm — only resolve near-penetrations
+        }
+    else:
+        config['contact'] = {'enable': False}
     config['sanity_check'] = {'enable': False}
+    config['newton'] = {'max_iter': 256}
     scene = Scene(config)
-    scene.contact_tabular().default_model(0.0, 1.0 * GPa)
+    if use_contact:
+        scene.contact_tabular().default_model(0.0, 10.0 * kPa)
 
     snh = StableNeoHookean()
     spc = SoftPositionConstraint()
     moduli = ElasticModuli.youngs_poisson(0.5 * kPa, 0.40)
+    spc_stiffness = 1e4  # strong guidance to LBS targets
 
     geo_slots = []
     for m in muscles:
@@ -358,29 +418,24 @@ def main():
         label_surface(mesh)
         label_triangle_orient(mesh)
         snh.apply_to(mesh, moduli, mass_density=1060.0)
-        # SPC on ALL vertices — balance between LBS guidance and contact resolution
-        spc.apply_to(mesh, 1e4)  # moderate: allows contact to push muscles apart
+        spc.apply_to(mesh, spc_stiffness)
 
         obj = scene.objects().create(m['name'])
         geo_slot, _ = obj.geometries().create(mesh)
         geo_slots.append(geo_slot)
 
-        # Animator: constrain ALL vertices to LBS targets
+        # Animator: drive ALL vertices to LBS targets
         aim_targets = m['aim_targets']
-        fixed_set = set(m['fixed_vertices'])
         n_v = len(m['vertices'])
-        def make_animate(targets_ref, fixed_s, nv):
+        def make_animate(targets_ref, nv):
             _first_error = [True]
             def animate(info: Animation.UpdateInfo):
                 try:
                     geo = info.geo_slots()[0].geometry()
-                    rest_geo = info.rest_geo_slots()[0].geometry()
                     cv = view(geo.vertices().find(builtin.is_constrained))
                     av = view(geo.vertices().find(builtin.aim_position))
-                    rv = rest_geo.positions().view()
                     for idx in range(min(nv, len(cv))):
                         cv[idx] = 1
-                        av[idx] = rv[idx]
                         av[idx][0] = float(targets_ref[idx][0])
                         av[idx][1] = float(targets_ref[idx][1])
                         av[idx][2] = float(targets_ref[idx][2])
@@ -389,12 +444,9 @@ def main():
                         print(f"    Animator error: {e}", flush=True)
                         _first_error[0] = False
             return animate
-        scene.animator().insert(obj, make_animate(aim_targets, fixed_set, n_v))
+        scene.animator().insert(obj, make_animate(aim_targets, n_v))
 
-        print(f"    {m['name']}: {len(m['vertices'])} v, {len(m['tetrahedra'])} t, {len(m['fixed_vertices'])} fixed")
-
-    # TODO: Add bone meshes as rigid collision objects for muscle-skeleton collision
-    # For now, only muscle-muscle contact is enabled via IPC
+        print(f"    {m['name']}: {len(m['vertices'])}v, {len(m['tetrahedra'])}t, {len(m['fixed_vertices'])} fixed")
 
     # Init
     print("[7] Initializing pyuipc...")
@@ -407,6 +459,7 @@ def main():
     print(f"\n[8] Baking frames {start_frame}-{end_frame}...")
 
     all_positions = {m['name']: {} for m in muscles}
+    stall_count = 0
 
     for frame in range(start_frame, end_frame + 1):
         t0 = time.time()
@@ -419,10 +472,7 @@ def main():
             if m['lbs_bindings'] is not None:
                 lbs_pos = compute_lbs_positions(m['lbs_bindings'], skel, len(m['vertices']))
                 m['aim_targets'][:] = lbs_pos
-            else:
-                # Fallback: drive only fixed vertices
-                driven = compute_driven_positions(m['local_anchors'], skel, m['rest_vertices'])
-                m['aim_targets'][:] = driven
+            # else: aim_targets stays at rest_vertices (shouldn't happen)
 
         # Advance simulation
         world.advance()
@@ -444,7 +494,14 @@ def main():
                 vol = np.einsum('ij,ij->i', cr, pos[tets[:, 3]] - v0) / 6.0
                 total_inv += int(np.sum(vol <= 0))
 
-        print(f"  Frame {frame}: {dt:.2f}s, inv={total_inv}/{total_tets}")
+        if dt > 5.0:
+            stall_count += 1
+        print(f"  Frame {frame}: {dt:.2f}s, inv={total_inv}/{total_tets}", flush=True)
+
+        # Abort if solver consistently stalling
+        if stall_count > 5:
+            print(f"\nWARNING: Solver stalling ({stall_count} slow frames). Saving partial results.")
+            break
 
     # Save
     out_path = os.path.join(args.output_dir, f"pyuipc_{os.path.basename(args.bvh).replace('.bvh','')}_f{start_frame}-{end_frame}.npz")
@@ -452,7 +509,7 @@ def main():
         f"{name}_f{f}": pos for name, frames in all_positions.items() for f, pos in frames.items()
     })
     print(f"\nSaved to {out_path}")
-    print(f"Done. {len(muscles)} muscles, {end_frame-start_frame+1} frames.")
+    print(f"Done. {len(muscles)} muscles, {len(all_positions[muscles[0]['name']])} frames.")
 
 
 if __name__ == '__main__':
