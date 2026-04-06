@@ -57,11 +57,27 @@ def compute_remap(tet_path):
     return None, None, n_orig
 
 
+def load_arap_cache(arap_dirs, mname):
+    """Load ARAP cache for a muscle from subdirectories. Returns {frame: positions}."""
+    import glob as _glob
+    cache = {}
+    for arap_dir in arap_dirs:
+        for pattern in [f'{mname}_chunk_*.npz', f'{mname}.npz']:
+            for path in sorted(_glob.glob(os.path.join(arap_dir, pattern))):
+                data = np.load(path)
+                for i, f in enumerate(data['frames']):
+                    cache[int(f)] = data['positions'][i]
+    return cache
+
+
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument('--input', required=True, help='pyuipc bake npz file')
+    parser.add_argument('--input', required=True, help='pyuipc/IPC bake npz file')
     parser.add_argument('--tet-dir', default='tet_sim', help='Directory with tet files')
     parser.add_argument('--cache-dir', required=True, help='Output cache directory')
+    parser.add_argument('--arap-dir', nargs='*', default=None,
+                        help='ARAP cache subdirs for unmapped vertex positions '
+                             '(e.g. data/motion_cache/walk/L_UpLeg data/motion_cache/walk/R_UpLeg)')
     args = parser.parse_args()
 
     os.makedirs(args.cache_dir, exist_ok=True)
@@ -91,11 +107,17 @@ def main():
 
         remap, inv_remap, n_orig = compute_remap(tet_path)
 
-        # Load rest positions once for un-remapping
+        # Load fallback positions for unmapped vertices
         rest_mm = None
+        arap_cache = None
         if inv_remap is not None:
             with open(tet_path, 'rb') as fp:
                 rest_mm = pickle.load(fp)['vertices'].astype(np.float64) * SCALE
+            # Try ARAP cache for better unmapped vertex positions
+            if args.arap_dir:
+                arap_cache = load_arap_cache(args.arap_dir, mname)
+                if arap_cache:
+                    print(f"  {mname}: using ARAP cache for {n_orig - len(inv_remap)} unmapped verts")
 
         sorted_frames = sorted(frames.keys())
         positions_list = []
@@ -105,7 +127,11 @@ def main():
 
             if inv_remap is not None:
                 # Un-remap: expand back to original vertex count
-                full_pos = rest_mm.copy()
+                # Use ARAP positions for unmapped vertices if available
+                if arap_cache and f in arap_cache:
+                    full_pos = arap_cache[f].astype(np.float64) * SCALE
+                else:
+                    full_pos = rest_mm.copy()
                 full_pos[inv_remap] = pos_mm
                 pos_mm = full_pos
 
