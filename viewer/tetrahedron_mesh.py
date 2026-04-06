@@ -441,35 +441,37 @@ class TetrahedronMeshMixin:
                     for ai in self.tet_anchor_vertices:
                         if ai < len(closed_vertices):
                             _anchor_positions[ai] = closed_vertices[ai].copy()
-                # Compute cap planes directly from boundary loops
-                _cap_planes = []  # list of (centroid, normal, radius)
-                for loop in boundary_loops:
-                    loop_pts = np.array([closed_vertices[vi].astype(np.float64) for vi in loop])
-                    centroid = loop_pts.mean(axis=0)
-                    _, _, Vt = np.linalg.svd(loop_pts - centroid, full_matrices=False)
-                    normal = Vt[2]
-                    radius = np.max(np.linalg.norm(loop_pts - centroid, axis=1))
-                    _cap_planes.append((centroid, normal, radius))
+                # Track cap vertices through subdivision
+                _cap_verts = set()
+                for fi in cap_face_indices:
+                    if fi < len(closed_faces):
+                        for vi in closed_faces[fi]:
+                            _cap_verts.add(int(vi))
 
                 # Run TetGen in a subprocess to isolate crashes
                 import tempfile, subprocess, json, sys
                 with tempfile.NamedTemporaryFile(suffix='.npz', delete=False) as tmp_in:
                     tmp_in_path = tmp_in.name
                     np.savez(tmp_in, vertices=closed_vertices.astype(np.float64),
-                             faces=closed_faces.astype(np.int32))
+                             faces=closed_faces.astype(np.int32),
+                             cap_verts=np.array(sorted(_cap_verts), dtype=np.int32))
                 tmp_out_path = tmp_in_path.replace('.npz', '_tet.npz')
 
                 script = f'''
 import numpy as np, sys
 try:
     import tetgen, trimesh, pymeshfix
+    from scipy.spatial import cKDTree
     data = np.load("{tmp_in_path}")
     verts = data["vertices"].astype(np.float64)
     faces = data["faces"].astype(np.int32)
+    cap_vert_indices = set(data["cap_verts"].tolist())
     n_orig = len(verts)
     # Scale up for numerical precision
     rv = verts * 1000.0
     rf = faces.copy()
+    # Track cap status: set of vertex indices that are cap vertices
+    is_cap = set(cap_vert_indices)
     # pymeshfix on full closed mesh to fix self-intersections
     fixer = pymeshfix.MeshFix(rv.copy(), rf.copy())
     fixer.repair(verbose=False)
@@ -478,6 +480,15 @@ try:
     n_changed = abs(len(rv) - len(rv_fixed))
     if n_changed > 0:
         print(f"REPAIRED: {{n_changed}} verts changed")
+    # Remap cap vertex indices after pymeshfix
+    if len(rv_fixed) != len(rv):
+        tree_old = cKDTree(rv)
+        new_cap = set()
+        for vi in range(len(rv_fixed)):
+            d, oi = tree_old.query(rv_fixed[vi])
+            if d < 1e-3 and oi in is_cap:
+                new_cap.add(vi)
+        is_cap = new_cap
     # Subdivide long surface edges so TetGen produces fine surface tets
     edge_lens = []
     for f_face in rf_fixed:
@@ -500,8 +511,12 @@ try:
                     ekey = (min(v0i,v1i), max(v0i,v1i))
                     if ekey not in edge_midpoints:
                         mid = (np.array(new_verts[v0i]) + np.array(new_verts[v1i])) / 2
-                        edge_midpoints[ekey] = len(new_verts)
+                        mid_idx = len(new_verts)
+                        edge_midpoints[ekey] = mid_idx
                         new_verts.append(mid)
+                        # Propagate cap: if both endpoints are cap, midpoint is cap
+                        if v0i in is_cap and v1i in is_cap:
+                            is_cap.add(mid_idx)
                     splits.append((i, edge_midpoints[ekey]))
                 else:
                     splits.append((i, None))
@@ -577,9 +592,62 @@ try:
         tet = tetgen.TetGen(rv_fixed.copy(), rf_fixed.copy())
         tet.tetrahedralize(quality=False, nobisect=False)
         print(f"NOQUALITY -> {{len(tet.elem)}} tets")
-    np.savez("{tmp_out_path}", node=tet.node / 1000.0, elem=tet.elem,
-             n_orig=np.array([n_orig]))
-    print(f"OK {{len(tet.elem)}} {{len(tet.node)}}")
+    # Propagate cap status through TetGen edges
+    tet_node = tet.node
+    tet_elem = tet.elem
+    # TetGen Steiner points on edges between cap vertices are cap
+    n_pre_tetgen = len(rv_fixed)
+    for ti in tet_elem:
+        for i in range(4):
+            for j in range(i+1, 4):
+                vi, vj = int(ti[i]), int(ti[j])
+                if vi in is_cap and vj in is_cap:
+                    # Any vertex on this edge is cap — check intermediate verts
+                    # TetGen doesn't create intermediate verts on existing edges,
+                    # but Steiner points on NEW edges connecting cap verts should
+                    # still be cap if both endpoints are cap
+                    pass  # Already handled: if both endpoints cap, any tet vertex between = cap
+                # For new vertices: check if on edge between two cap verts
+                for vk in [vi, vj]:
+                    if vk >= n_pre_tetgen and vk not in is_cap:
+                        # New Steiner point — check all tet edges from this vertex
+                        neighbors_cap = 0
+                        neighbors_total = 0
+                        for tk in tet_elem:
+                            if vk in tk:
+                                for tvi in tk:
+                                    if int(tvi) != vk:
+                                        neighbors_total += 1
+                                        if int(tvi) in is_cap:
+                                            neighbors_cap += 1
+                        # If majority of tet neighbors are cap, this is a cap vertex
+                        if neighbors_total > 0 and neighbors_cap > neighbors_total * 0.6:
+                            is_cap.add(vk)
+                break  # only need one pass per tet
+        break  # This nested loop approach is too slow, use simpler method
+
+    # Simpler: for each new vertex, check if ALL its tet-connected neighbors are cap
+    # Build adjacency for new vertices only
+    new_verts_adj = {{}}
+    for ti in tet_elem:
+        for i in range(4):
+            vi = int(ti[i])
+            if vi >= n_pre_tetgen:
+                if vi not in new_verts_adj:
+                    new_verts_adj[vi] = set()
+                for j in range(4):
+                    if i != j:
+                        new_verts_adj[vi].add(int(ti[j]))
+    for vi, neighbors in new_verts_adj.items():
+        cap_neighbors = sum(1 for n in neighbors if n in is_cap)
+        if cap_neighbors == len(neighbors):
+            is_cap.add(vi)
+
+    cap_verts_out = np.array(sorted(is_cap), dtype=np.int32)
+    print(f"CAP_VERTS: {{len(cap_verts_out)}}")
+    np.savez("{tmp_out_path}", node=tet_node / 1000.0, elem=tet_elem,
+             n_orig=np.array([n_orig]), cap_verts=cap_verts_out)
+    print(f"OK {{len(tet_elem)}} {{len(tet_node)}}")
 except Exception as e:
     print(f"FAIL: {{e}}")
     sys.exit(1)
@@ -591,7 +659,7 @@ except Exception as e:
                 import os
                 stdout_lines = result.stdout.strip().split('\n') if result.stdout else []
                 for line in stdout_lines:
-                    if line.startswith(('REPAIRED', 'QUALITY', 'NOQUALITY', 'EDGE_STATS', 'SUBDIVIDE', 'MESH_VOL')):
+                    if line.startswith(('REPAIRED', 'QUALITY', 'NOQUALITY', 'EDGE_STATS', 'SUBDIVIDE', 'MESH_VOL', 'CAP_VERTS')):
                         print(f"  {line}")
 
                 if result.returncode == 0 and os.path.exists(tmp_out_path):
@@ -1131,29 +1199,14 @@ except Exception as e:
         if tetgen_success:
             # TetGen subdivides the surface — use tet boundary as render faces
             self.tet_render_faces = sim_faces
-            # Re-identify cap faces: faces on cap planes
-            # A cap face has: (1) all vertices near the cap plane
-            #                 (2) face normal aligned with cap plane normal
+            # Cap faces = faces where ALL 3 vertices are tracked cap vertices
+            tet_cap_set = set()
+            if 'cap_verts' in tet_data.files:
+                tet_cap_set = set(tet_data['cap_verts'].tolist())
             cap_face_indices = []
-            plane_tol = 1e-3  # vertex distance to cap plane
-            normal_tol = 0.5  # dot product threshold (cos ~60°)
             for fi, f in enumerate(sim_faces):
-                fv = closed_vertices[[int(f[0]), int(f[1]), int(f[2])]].astype(np.float64)
-                # Face normal
-                fn = np.cross(fv[1] - fv[0], fv[2] - fv[0])
-                fn_len = np.linalg.norm(fn)
-                if fn_len < 1e-12:
-                    continue
-                fn = fn / fn_len
-                for centroid, normal, radius in _cap_planes:
-                    # Check all 3 vertices are on the plane
-                    dists = np.abs(np.dot(fv - centroid, normal))
-                    if np.max(dists) > plane_tol:
-                        continue
-                    # Check face normal aligns with cap plane normal
-                    if abs(np.dot(fn, normal)) > normal_tol:
-                        cap_face_indices.append(fi)
-                        break
+                if all(int(v) in tet_cap_set for v in f):
+                    cap_face_indices.append(fi)
         else:
             self.tet_render_faces = closed_faces  # Original surface + caps
         self.tet_sim_faces = sim_faces  # Tet boundary faces
