@@ -576,8 +576,8 @@ try:
             for i in range(3):
                 edge_lens.append(np.linalg.norm(local_verts[ff[(i+1)%3]] - local_verts[ff[i]]))
         median_edge = np.median(edge_lens)
-        max_edge_len = median_edge * 0.7
-        for _si in range(3):
+        max_edge_len = median_edge * 1.2
+        for _si in range(2):
             nv = list(local_verts)
             nf = []
             emp = dict()
