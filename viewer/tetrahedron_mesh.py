@@ -463,6 +463,76 @@ try:
     n_changed = abs(len(rv) - len(rv_fixed))
     if n_changed > 0:
         print(f"REPAIRED: {{n_changed}} verts changed")
+    # Subdivide long surface edges so TetGen produces fine surface tets
+    edge_lens = []
+    for f in rf_fixed:
+        for i in range(3):
+            edge_lens.append(np.linalg.norm(rv_fixed[f[(i+1)%3]] - rv_fixed[f[i]]))
+    median_edge = np.median(edge_lens)
+    max_edge_len = median_edge * 1.5
+    for _subdiv_iter in range(3):
+        new_verts = list(rv_fixed)
+        new_faces = []
+        edge_midpoints = dict()
+        n_split = 0
+        for f in rf_fixed:
+            splits = []
+            for i in range(3):
+                v0i, v1i = int(f[i]), int(f[(i+1)%3])
+                elen = np.linalg.norm(rv_fixed[v0i] - rv_fixed[v1i]) if v0i < len(rv_fixed) and v1i < len(rv_fixed) else 0
+                if elen > max_edge_len:
+                    ekey = (min(v0i,v1i), max(v0i,v1i))
+                    if ekey not in edge_midpoints:
+                        mid = (np.array(new_verts[v0i]) + np.array(new_verts[v1i])) / 2
+                        edge_midpoints[ekey] = len(new_verts)
+                        new_verts.append(mid)
+                    splits.append((i, edge_midpoints[ekey]))
+                else:
+                    splits.append((i, None))
+            split_edges = [(i, mi) for i, mi in splits if mi is not None]
+            if len(split_edges) == 0:
+                new_faces.append(list(f))
+            elif len(split_edges) == 1:
+                ei, mi = split_edges[0]
+                v0, v1, v2 = int(f[ei]), int(f[(ei+1)%3]), int(f[(ei+2)%3])
+                new_faces.append([v0, mi, v2])
+                new_faces.append([mi, v1, v2])
+                n_split += 1
+            elif len(split_edges) == 2:
+                ei0, mi0 = split_edges[0]
+                ei1, mi1 = split_edges[1]
+                vs = [int(f[0]), int(f[1]), int(f[2])]
+                mids = {{}}
+                for ei, mi in split_edges:
+                    mids[ei] = mi
+                if 0 in mids and 1 in mids:
+                    new_faces.append([vs[0], mids[0], vs[2]])
+                    new_faces.append([mids[0], vs[1], mids[1]])
+                    new_faces.append([mids[0], mids[1], vs[2]])
+                elif 0 in mids and 2 in mids:
+                    new_faces.append([vs[0], mids[0], mids[2]])
+                    new_faces.append([mids[0], vs[1], vs[2]])
+                    new_faces.append([mids[0], vs[2], mids[2]])
+                elif 1 in mids and 2 in mids:
+                    new_faces.append([vs[0], vs[1], mids[1]])
+                    new_faces.append([vs[0], mids[1], mids[2]])
+                    new_faces.append([mids[1], vs[2], mids[2]])
+                n_split += 1
+            else:  # all 3 edges split
+                vs = [int(f[0]), int(f[1]), int(f[2])]
+                m01 = splits[0][1]
+                m12 = splits[1][1]
+                m20 = splits[2][1]
+                new_faces.append([vs[0], m01, m20])
+                new_faces.append([m01, vs[1], m12])
+                new_faces.append([m20, m12, vs[2]])
+                new_faces.append([m01, m12, m20])
+                n_split += 1
+        rv_fixed = np.array(new_verts, dtype=np.float64)
+        rf_fixed = np.array(new_faces, dtype=np.int32)
+        if n_split == 0:
+            break
+        print(f"SUBDIVIDE iter {{_subdiv_iter}}: split {{n_split}} faces, now {{len(rv_fixed)}}v {{len(rf_fixed)}}f")
     # Fix normals
     mesh = trimesh.Trimesh(vertices=rv_fixed, faces=rf_fixed, process=False)
     mesh.fix_normals()
