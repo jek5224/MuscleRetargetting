@@ -520,61 +520,49 @@ try:
                 local_cap.add(int(local_remap[vi_global]))
         print(f"COMP_DEBUG {{ci}}: initial local_cap={{len(local_cap)}}")
 
-        # Close holes with pymeshfix (safe on single component)
+        # Close holes: find boundary edges, cap with fan triangles
         mesh = trimesh.Trimesh(vertices=local_verts, faces=local_faces, process=False)
-        n_faces_before = len(local_faces)
-        n_verts_before = len(local_verts)
         if not mesh.is_watertight:
-            fixer = pymeshfix.MeshFix(local_verts.copy(), local_faces.copy())
-            fixer.repair(verbose=False)
-            local_verts = fixer.v.astype(np.float64)
-            local_faces = fixer.f.astype(np.int32)
-            # Remap existing cap vertices
-            if len(local_verts) != n_verts_before:
-                tree_old = cKDTree(rv[used])
-                new_cap = set()
-                for vi in range(len(local_verts)):
-                    d, oi = tree_old.query(local_verts[vi])
-                    if d < 1.0 and int(local_remap[used[oi]]) in local_cap:
-                        new_cap.add(vi)
-                print(f"COMP_DEBUG {{ci}}: pymeshfix changed verts {{n_verts_before}}->{{len(local_verts)}}, cap {{len(local_cap)}}->{{len(new_cap)}}")
-                local_cap = new_cap
-            else:
-                print(f"COMP_DEBUG {{ci}}: pymeshfix same vert count, cap={{len(local_cap)}}")
-            # Mark pymeshfix hole-closing faces as cap.
-            # Find boundary edges of original mesh, then find faces in repaired
-            # mesh that cover those edges (= hole-closing faces).
-            orig_edge_count = _ddict(int)
-            for f in local_remap[comp_faces]:
+            # Find boundary edges
+            local_edge_count = _ddict(int)
+            for f in local_faces:
                 for i in range(3):
                     e = tuple(sorted([int(f[i]), int(f[(i+1)%3])]))
-                    orig_edge_count[e] += 1
-            orig_boundary_edges = set(e for e, c in orig_edge_count.items() if c == 1)
-            if len(orig_boundary_edges) > 0:
-                # Map original boundary edge positions to repaired mesh
-                # For each repaired face, check if it covers a boundary edge (by position)
-                orig_edge_positions = set()
-                for e in orig_boundary_edges:
-                    v0 = tuple(np.round(rv[used[e[0]]] if e[0] < len(used) else [0,0,0], 2))
-                    v1 = tuple(np.round(rv[used[e[1]]] if e[1] < len(used) else [0,0,0], 2))
-                    orig_edge_positions.add((min(v0,v1), max(v0,v1)))
-                n_new_cap = 0
-                for fi, f in enumerate(local_faces):
-                    for i in range(3):
-                        v0p = tuple(np.round(local_verts[f[i]], 2))
-                        v1p = tuple(np.round(local_verts[f[(i+1)%3]], 2))
-                        epos = (min(v0p,v1p), max(v0p,v1p))
-                        if epos in orig_edge_positions:
-                            # This face covers a boundary edge → hole-closing face
-                            # But only if it's not an original face
-                            is_orig = fi < n_faces_before
-                            if not is_orig or len(local_faces) != n_faces_before:
-                                for vi in f:
-                                    local_cap.add(int(vi))
-                                n_new_cap += 1
-                            break
-                if n_new_cap > 0:
-                    print(f"COMP_DEBUG {{ci}}: marked {{n_new_cap}} hole-closing faces as cap (from {{len(orig_boundary_edges)}} boundary edges)")
+                    local_edge_count[e] += 1
+            boundary_edges_local = [e for e, c in local_edge_count.items() if c == 1]
+            if len(boundary_edges_local) > 0:
+                # Build boundary adjacency and find loops
+                b_adj = _ddict(list)
+                for e in boundary_edges_local:
+                    b_adj[e[0]].append(e[1])
+                    b_adj[e[1]].append(e[0])
+                b_visited = set()
+                b_loops = []
+                for start in b_adj:
+                    if start in b_visited: continue
+                    loop = []
+                    current = start
+                    prev = None
+                    while True:
+                        loop.append(current)
+                        b_visited.add(current)
+                        nbs = [n for n in b_adj[current] if n != prev and n not in b_visited]
+                        if not nbs: break
+                        prev = current
+                        current = nbs[0]
+                    if len(loop) >= 3:
+                        b_loops.append(loop)
+                new_faces_list = list(local_faces)
+                for loop in b_loops:
+                    centroid = np.mean([local_verts[vi] for vi in loop], axis=0)
+                    anchor_vi = len(local_verts)
+                    local_verts = np.vstack([local_verts, centroid.reshape(1,-1)])
+                    local_cap.add(anchor_vi)
+                    for i in range(len(loop)):
+                        new_faces_list.append([loop[i], loop[(i+1)%len(loop)], anchor_vi])
+                        local_cap.add(loop[i])
+                local_faces = np.array(new_faces_list, dtype=np.int32)
+                print(f"COMP_DEBUG {{ci}}: capped {{len(b_loops)}} boundary loops ({{len(boundary_edges_local)}} edges)")
             mesh = trimesh.Trimesh(vertices=local_verts, faces=local_faces, process=False)
 
         # Subdivide long edges
@@ -1237,62 +1225,7 @@ except Exception as e:
                     near = np.where(dists < 0.02)[0]
                     n_cap = sum(1 for fi in near if fi in cap_fi_set)
                     if n_cap < 5 and len(near) > 0:
-                        # Flood-fill from anchor through connected boundary faces
-                        # Stop when face normal diverges from cap plane
-                        # Find faces touching anchor vertex
-                        anchor_faces = [fi for fi in range(len(sim_faces))
-                                        if ani in sim_faces[fi]]
-                        if not anchor_faces:
-                            continue
-                        # Get cap plane normal from anchor's faces
-                        ref_normals = []
-                        for fi in anchor_faces:
-                            fv = closed_vertices[sim_faces[fi]].astype(np.float64)
-                            fn = np.cross(fv[1]-fv[0], fv[2]-fv[0])
-                            fn_len = np.linalg.norm(fn)
-                            if fn_len > 1e-12:
-                                ref_normals.append(fn / fn_len)
-                        if not ref_normals:
-                            continue
-                        cap_normal = np.mean(ref_normals, axis=0)
-                        cap_normal = cap_normal / np.linalg.norm(cap_normal)
-                        # Build face adjacency for sim_faces
-                        sim_edge_faces = {}
-                        for fi, f in enumerate(sim_faces):
-                            for i in range(3):
-                                e = (min(int(f[i]), int(f[(i+1)%3])),
-                                     max(int(f[i]), int(f[(i+1)%3])))
-                                sim_edge_faces.setdefault(e, []).append(fi)
-                        # Flood-fill
-                        flood_visited = set()
-                        flood_queue = list(anchor_faces)
-                        added = 0
-                        while flood_queue:
-                            fi = flood_queue.pop()
-                            if fi in flood_visited:
-                                continue
-                            flood_visited.add(fi)
-                            # Check normal alignment
-                            fv = closed_vertices[sim_faces[fi]].astype(np.float64)
-                            fn = np.cross(fv[1]-fv[0], fv[2]-fv[0])
-                            fn_len = np.linalg.norm(fn)
-                            if fn_len < 1e-12:
-                                continue
-                            fn = fn / fn_len
-                            if abs(np.dot(fn, cap_normal)) < 0.5:
-                                continue  # face not coplanar with cap
-                            if fi not in cap_fi_set:
-                                cap_face_indices.append(int(fi))
-                                cap_fi_set.add(int(fi))
-                                added += 1
-                            # Add neighbors
-                            for i in range(3):
-                                e = (min(int(sim_faces[fi][i]), int(sim_faces[fi][(i+1)%3])),
-                                     max(int(sim_faces[fi][i]), int(sim_faces[fi][(i+1)%3])))
-                                for nfi in sim_edge_faces.get(e, []):
-                                    if nfi not in flood_visited:
-                                        flood_queue.append(nfi)
-                        print(f"  Anchor {ai}: flood-fill fallback added {added} cap faces")
+                        print(f"  WARNING: Anchor {ai} has only {n_cap} cap faces")
             # Debug: per-anchor cap face counts
             if hasattr(self, 'tet_anchor_vertices') and _anchor_positions:
                 from scipy.spatial import cKDTree as _cKDTree3
