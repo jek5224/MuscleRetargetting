@@ -535,6 +535,63 @@ try:
         rv_fixed = np.array(rv_list, dtype=np.float64)
         rf_fixed = rf_new
         print(f"FIX_MANIFOLD: duplicated {{len(dup_map)}} vertices ({{len(rv)}} -> {{len(rv_fixed)}})")
+        # After duplication, cut seams become open boundaries.
+        # Cap them to close each stream into a watertight volume.
+        edge_faces2 = _ddict(list)
+        for fi, f in enumerate(rf_fixed):
+            for i in range(3):
+                e = tuple(sorted([int(f[i]), int(f[(i+1)%3])]))
+                edge_faces2[e].append(fi)
+        open_edges2 = [e for e, flist in edge_faces2.items() if len(flist) == 1]
+        if len(open_edges2) > 0:
+            print(f"FIX_MANIFOLD: {{len(open_edges2)}} new boundary edges, capping...")
+            # Find boundary loops
+            from collections import defaultdict as _dd2
+            edge_adj = _dd2(list)
+            for e in open_edges2:
+                edge_adj[e[0]].append(e[1])
+                edge_adj[e[1]].append(e[0])
+            visited2 = set()
+            loops2 = []
+            for start in edge_adj:
+                if start in visited2:
+                    continue
+                loop = []
+                current = start
+                prev = None
+                while True:
+                    loop.append(current)
+                    visited2.add(current)
+                    nbs = edge_adj[current]
+                    nxt = None
+                    for n in nbs:
+                        if n != prev and n not in visited2:
+                            nxt = n
+                            break
+                    if nxt is None:
+                        break
+                    prev = current
+                    current = nxt
+                if len(loop) >= 3:
+                    loops2.append(loop)
+            print(f"FIX_MANIFOLD: {{len(loops2)}} new boundary loops")
+            new_faces = list(rf_fixed)
+            for loop in loops2:
+                # Cap with fan from centroid
+                centroid = np.mean([rv_fixed[vi] for vi in loop], axis=0)
+                anchor_vi = len(rv_fixed)
+                rv_fixed = np.vstack([rv_fixed, centroid.reshape(1, -1)])
+                is_cap.add(anchor_vi)
+                # Determine winding from adjacent face
+                for i in range(len(loop)):
+                    vi = loop[i]
+                    vj = loop[(i + 1) % len(loop)]
+                    new_faces.append([vi, vj, anchor_vi])
+                    # Mark loop vertices as cap
+                    is_cap.add(vi)
+                    is_cap.add(vj)
+            rf_fixed = np.array(new_faces, dtype=np.int32)
+            print(f"FIX_MANIFOLD: capped, now {{len(rv_fixed)}}v {{len(rf_fixed)}}f")
     else:
         rv_fixed = rv.copy()
         rf_fixed = rf.copy()
