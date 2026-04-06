@@ -1225,6 +1225,50 @@ except Exception as e:
             for fi, f in enumerate(sim_faces):
                 if all(int(v) in tet_cap_set for v in f):
                     cap_face_indices.append(fi)
+            # Fallback: for anchors with 0 nearby cap faces, use plane detection
+            if hasattr(self, 'tet_anchor_vertices') and _anchor_positions:
+                from scipy.spatial import cKDTree as _cKDTree_fb
+                tet_tree_fb = _cKDTree_fb(closed_vertices.astype(np.float64))
+                cap_fi_set = set(cap_face_indices)
+                sim_fc = np.mean(closed_vertices[sim_faces].astype(np.float64), axis=1)
+                for ai, apos in _anchor_positions.items():
+                    _, ani = tet_tree_fb.query(apos.astype(np.float64))
+                    # Count existing cap faces near this anchor
+                    dists = np.linalg.norm(sim_fc - closed_vertices[ani].astype(np.float64), axis=1)
+                    near = np.where(dists < 0.02)[0]
+                    n_cap = sum(1 for fi in near if fi in cap_fi_set)
+                    if n_cap == 0 and len(near) > 0:
+                        # No caps detected — use plane detection for this anchor
+                        # Get cap plane from boundary loop
+                        anchor_pos = apos.astype(np.float64)
+                        near_verts = closed_vertices[sim_faces[near]].astype(np.float64)
+                        # Flat cap: compute plane normal from faces near anchor
+                        near_face_normals = []
+                        for fi in near:
+                            fv = closed_vertices[sim_faces[fi]].astype(np.float64)
+                            fn = np.cross(fv[1]-fv[0], fv[2]-fv[0])
+                            fn_len = np.linalg.norm(fn)
+                            if fn_len > 1e-12:
+                                near_face_normals.append(fn / fn_len)
+                        if near_face_normals:
+                            # Use SVD to find dominant normal
+                            _, _, Vt = np.linalg.svd(np.array(near_face_normals), full_matrices=False)
+                            cap_normal = Vt[0]
+                            # Find faces on this plane near anchor
+                            for fi in near:
+                                fv = closed_vertices[sim_faces[fi]].astype(np.float64)
+                                fn = np.cross(fv[1]-fv[0], fv[2]-fv[0])
+                                fn_len = np.linalg.norm(fn)
+                                if fn_len < 1e-12: continue
+                                fn = fn / fn_len
+                                # Check normal alignment AND planarity
+                                if abs(np.dot(fn, cap_normal)) > 0.7:
+                                    face_center = np.mean(fv, axis=0)
+                                    dist_to_plane = abs(np.dot(face_center - anchor_pos, cap_normal))
+                                    if dist_to_plane < 0.001:
+                                        cap_face_indices.append(int(fi))
+                                        cap_fi_set.add(int(fi))
+                        print(f"  Anchor {ai}: plane-based fallback, now {sum(1 for fi in near if fi in cap_fi_set)} cap faces")
             # Debug: per-anchor cap face counts
             if hasattr(self, 'tet_anchor_vertices') and _anchor_positions:
                 from scipy.spatial import cKDTree as _cKDTree3
