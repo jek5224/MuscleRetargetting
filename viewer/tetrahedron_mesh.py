@@ -472,27 +472,22 @@ try:
     target_tets = 2000
     max_vol = max(_mesh_vol / target_tets, 1e-6)
     print(f"MESH_VOL={{_mesh_vol:.1f}} MAX_VOL={{max_vol:.1f}} TARGET={{target_tets}}")
-    # TetGen — full quality with surface subdivision
-    # Control density via maxvolume, not steinerleft
-    # Try progressively smaller maxvolume until we get enough tets
-    target_tets_lo, target_tets_hi = 3000, 15000
-    for vol_divisor in [500, 1000, 2000, 4000]:
-        mv = max(_mesh_vol / vol_divisor, 1e-6)
-        try:
-            tet = tetgen.TetGen(rv_fixed.copy(), rf_fixed.copy())
-            tet.tetrahedralize(order=1, mindihedral=10, minratio=1.5,
-                               maxvolume=mv, nobisect=False)
-            n_tets = len(tet.elem)
-            n_verts = len(tet.node)
-            print(f"QUALITY: vol_div={{vol_divisor}} maxvol={{mv:.1f}} -> {{n_tets}} tets, {{n_verts}} verts")
-            if target_tets_lo <= n_tets <= target_tets_hi:
-                break
-            if n_tets > target_tets_hi:
-                break  # don't go denser
-        except Exception as ex:
-            print(f"FAILED: vol_div={{vol_divisor}}: {{ex}}")
-            continue
-    else:
+    # TetGen — quality + maxvolume, with steinerleft to cap count
+    # For thin muscles, quality constraints force many tets.
+    # Use steinerleft to limit total vertex count while allowing
+    # surface subdivision (nobisect=False).
+    target_verts = 3000
+    n_surface = len(rv_fixed)
+    steiner_budget = max(target_verts - n_surface, 500)
+    try:
+        tet = tetgen.TetGen(rv_fixed.copy(), rf_fixed.copy())
+        tet.tetrahedralize(order=1, mindihedral=5, minratio=2.0,
+                           maxvolume=max_vol, nobisect=False,
+                           steinerleft=steiner_budget)
+        n_tets = len(tet.elem)
+        n_verts = len(tet.node)
+        print(f"QUALITY: steiner_budget={{steiner_budget}} -> {{n_tets}} tets, {{n_verts}} verts")
+    except Exception:
         tet = tetgen.TetGen(rv_fixed.copy(), rf_fixed.copy())
         tet.tetrahedralize(quality=False, nobisect=False)
         print(f"NOQUALITY -> {{len(tet.elem)}} tets")
