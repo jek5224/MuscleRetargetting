@@ -636,74 +636,32 @@ try:
                 t.tetrahedralize(quality=False, nobisect=True)
                 tet = t
             except Exception:
-                # TetGen failed — try pymeshfix on PRE-SUBDIVISION mesh
-                print(f"COMP_DEBUG {{ci}}: TetGen failed, trying pymeshfix on pre-subdiv mesh...")
-                fixer = pymeshfix.MeshFix(pre_subdiv_verts.copy(), pre_subdiv_faces.copy())
-                fixer.repair(verbose=False)
-                fixed_v = fixer.v.astype(np.float64)
-                fixed_f = fixer.f.astype(np.int32)
-                print(f"COMP_DEBUG {{ci}}: pymeshfix {{len(pre_subdiv_verts)}}->{{len(fixed_v)}}v")
-                # Remap cap vertices from pre-subdivision
-                local_cap = set()
-                if len(fixed_v) != len(pre_subdiv_verts):
-                    tree_sv = cKDTree(pre_subdiv_verts)
-                    for vi in range(len(fixed_v)):
-                        d, oi = tree_sv.query(fixed_v[vi])
-                        if d < 1.0 and oi in pre_subdiv_cap:
-                            local_cap.add(vi)
-                else:
-                    local_cap = set(pre_subdiv_cap)
-                print(f"COMP_DEBUG {{ci}}: cap verts after pymeshfix remap: {{len(local_cap)}}")
-                # Re-subdivide
-                mesh2 = trimesh.Trimesh(vertices=fixed_v, faces=fixed_f, process=False)
-                mesh2.fix_normals()
-                local_verts = mesh2.vertices.astype(np.float64)
-                local_faces = mesh2.faces.astype(np.int32)
-                _mesh_vol = abs(mesh2.volume)
-                max_vol = max(_mesh_vol / 1500, 1e-6)
-                steiner_budget = max(2000 - len(local_verts), 300)
-                use_pymeshfix = True
-                # Re-subdivide edges
-                edge_lens2 = []
-                for ff in local_faces:
-                    for i in range(3):
-                        edge_lens2.append(np.linalg.norm(local_verts[ff[(i+1)%3]]-local_verts[ff[i]]))
-                med2 = np.median(edge_lens2)
-                mel2 = med2 * 0.7
-                for _si2 in range(3):
-                    nv2=list(local_verts); nf2=[]; emp2={{}}; ns2=0
-                    for ff in local_faces:
-                        sp2=[]
-                        for i in range(3):
-                            v0i,v1i=int(ff[i]),int(ff[(i+1)%3])
-                            el=np.linalg.norm(local_verts[v0i]-local_verts[v1i]) if v0i<len(local_verts) and v1i<len(local_verts) else 0
-                            if el>mel2:
-                                ek2=(min(v0i,v1i),max(v0i,v1i))
-                                if ek2 not in emp2:
-                                    mi2=len(nv2); emp2[ek2]=mi2
-                                    nv2.append((np.array(nv2[v0i])+np.array(nv2[v1i]))/2)
-                                    if v0i in local_cap and v1i in local_cap: local_cap.add(mi2)
-                                sp2.append((i,emp2[ek2]))
-                            else: sp2.append((i,None))
-                        se2=[(i,m) for i,m in sp2 if m is not None]
-                        if len(se2)==0: nf2.append(list(ff))
-                        elif len(se2)==1:
-                            ei,mi=se2[0]; nf2.append([int(ff[ei]),mi,int(ff[(ei+2)%3])]); nf2.append([mi,int(ff[(ei+1)%3]),int(ff[(ei+2)%3])]); ns2+=1
-                        else: nf2.append(list(ff)); ns2+=1
-                    local_verts=np.array(nv2,dtype=np.float64); local_faces=np.array(nf2,dtype=np.int32)
-                    if ns2==0: break
-                mesh2=trimesh.Trimesh(vertices=local_verts,faces=local_faces,process=False)
-                mesh2.fix_normals()
-                local_verts,local_faces=mesh2.vertices.astype(np.float64),mesh2.faces.astype(np.int32)
-                try:
-                    t = tetgen.TetGen(local_verts.copy(), local_faces.copy())
-                    t.tetrahedralize(order=1, mindihedral=5, minratio=2.0,
-                                     maxvolume=max_vol, nobisect=True, steinerleft=steiner_budget)
-                    tet = t
-                except Exception:
-                    t = tetgen.TetGen(local_verts.copy(), local_faces.copy())
-                    t.tetrahedralize(quality=False, nobisect=True)
-                    tet = t
+                # TetGen failed — use contour-guided for this component
+                print(f"COMP_DEBUG {{ci}}: TetGen failed, using contour-guided fallback")
+                # Connect each face to its centroid to make tets
+                centroid_3d = np.mean(local_verts[local_faces], axis=1)
+                fallback_tets = []
+                for fi, f in enumerate(local_faces):
+                    ci_v = len(local_verts)
+                    local_verts = np.vstack([local_verts, centroid_3d[fi:fi+1]])
+                    fallback_tets.append([int(f[0]), int(f[1]), int(f[2]), ci_v])
+                fallback_tets = np.array(fallback_tets, dtype=np.int32)
+                # Fix inverted tets
+                v0t = local_verts[fallback_tets[:,0]]
+                cr = np.cross(local_verts[fallback_tets[:,1]]-v0t,
+                              local_verts[fallback_tets[:,2]]-v0t)
+                vol = np.einsum('ij,ij->i', cr, local_verts[fallback_tets[:,3]]-v0t) / 6.0
+                neg = vol < 0
+                if np.any(neg):
+                    fallback_tets[neg,1], fallback_tets[neg,2] = fallback_tets[neg,2].copy(), fallback_tets[neg,1].copy()
+                n_inv = int(np.sum(neg))
+                # Create a fake tet object
+                class FakeTet:
+                    pass
+                tet = FakeTet()
+                tet.node = local_verts
+                tet.elem = fallback_tets
+                print(f"COMP_DEBUG {{ci}}: contour-guided {{len(fallback_tets)}} tets, {{n_inv}} flipped")
         if tet is None:
             print(f"COMP {{ci}}: FAILED completely")
             continue
