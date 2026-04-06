@@ -216,7 +216,7 @@ def _draw_tet_meshes_batched(app):
             glPushMatrix()
             glDisable(GL_LIGHTING)
             glEnableClientState(GL_VERTEX_ARRAY)
-            glColor4f(0.5, 0.5, 0.5, 0.3)
+            glColor4f(0.1, 0.1, 0.1, 0.8)
             glLineWidth(1.0)
             glVertexPointer(3, GL_FLOAT, 0, obj._tet_edge_verts)
             glDrawArrays(GL_LINES, 0, len(obj._tet_edge_verts))
