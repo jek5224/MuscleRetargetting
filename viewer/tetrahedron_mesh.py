@@ -472,30 +472,30 @@ try:
     target_tets = 2000
     max_vol = max(_mesh_vol / target_tets, 1e-6)
     print(f"MESH_VOL={{_mesh_vol:.1f}} MAX_VOL={{max_vol:.1f}} TARGET={{target_tets}}")
-    # TetGen — limit Steiner points to control tet count
-    # Try progressively more Steiner points until reasonable quality
-    for max_steiner in [2000, 5000, 10000]:
+    # TetGen — full quality with surface subdivision
+    # Control density via maxvolume, not steinerleft
+    # Try progressively smaller maxvolume until we get enough tets
+    target_tets_lo, target_tets_hi = 3000, 15000
+    for vol_divisor in [500, 1000, 2000, 4000]:
+        mv = max(_mesh_vol / vol_divisor, 1e-6)
         try:
             tet = tetgen.TetGen(rv_fixed.copy(), rf_fixed.copy())
-            tet.tetrahedralize(order=1, mindihedral=5, minratio=2.0,
-                               maxvolume=max_vol, nobisect=False,
-                               steinerleft=max_steiner)
+            tet.tetrahedralize(order=1, mindihedral=10, minratio=1.5,
+                               maxvolume=mv, nobisect=False)
             n_tets = len(tet.elem)
             n_verts = len(tet.node)
-            print(f"QUALITY: steiner<={{max_steiner}} -> {{n_tets}} tets, {{n_verts}} verts")
-            if n_tets < 20000:
+            print(f"QUALITY: vol_div={{vol_divisor}} maxvol={{mv:.1f}} -> {{n_tets}} tets, {{n_verts}} verts")
+            if target_tets_lo <= n_tets <= target_tets_hi:
                 break
-        except Exception:
+            if n_tets > target_tets_hi:
+                break  # don't go denser
+        except Exception as ex:
+            print(f"FAILED: vol_div={{vol_divisor}}: {{ex}}")
             continue
     else:
-        try:
-            tet = tetgen.TetGen(rv_fixed.copy(), rf_fixed.copy())
-            tet.tetrahedralize(quality=False, nobisect=True)
-            print(f"NOQUALITY -> {{len(tet.elem)}} tets")
-        except Exception:
-            tet = tetgen.TetGen(rv_fixed.copy(), rf_fixed.copy())
-            tet.tetrahedralize(quality=False, nobisect=False)
-            print(f"NOQUALITY_BISECT -> {{len(tet.elem)}} tets")
+        tet = tetgen.TetGen(rv_fixed.copy(), rf_fixed.copy())
+        tet.tetrahedralize(quality=False, nobisect=False)
+        print(f"NOQUALITY -> {{len(tet.elem)}} tets")
     np.savez("{tmp_out_path}", node=tet.node / 1000.0, elem=tet.elem,
              n_orig=np.array([n_orig]))
     print(f"OK {{len(tet.elem)}} {{len(tet.node)}}")
