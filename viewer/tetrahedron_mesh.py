@@ -1198,6 +1198,20 @@ except Exception as e:
             for fi, f in enumerate(sim_faces):
                 if all(int(v) in tet_cap_set for v in f):
                     cap_face_indices.append(fi)
+            # Debug: per-anchor cap face counts
+            if hasattr(self, 'tet_anchor_vertices') and _anchor_positions:
+                from scipy.spatial import cKDTree as _cKDTree3
+                tet_tree3 = _cKDTree3(closed_vertices.astype(np.float64))
+                cap_fi_set = set(cap_face_indices)
+                for ai, apos in _anchor_positions.items():
+                    _, ani = tet_tree3.query(apos.astype(np.float64))
+                    # Count sim_faces near this anchor (within 0.02)
+                    fc = np.mean(closed_vertices[sim_faces].astype(np.float64), axis=1)
+                    dists = np.linalg.norm(fc - closed_vertices[ani].astype(np.float64), axis=1)
+                    near = np.where(dists < 0.02)[0]
+                    n_cap = sum(1 for fi in near if fi in cap_fi_set)
+                    n_not = len(near) - n_cap
+                    print(f"  Anchor {ai} (vi={ani}): {len(near)} faces nearby, {n_cap} cap, {n_not} not cap")
         else:
             self.tet_render_faces = closed_faces  # Original surface + caps
         self.tet_sim_faces = sim_faces  # Tet boundary faces
