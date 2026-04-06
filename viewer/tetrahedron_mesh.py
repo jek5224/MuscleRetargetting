@@ -472,23 +472,8 @@ try:
     rf = faces.copy()
     # Track cap status: set of vertex indices that are cap vertices
     is_cap = set(cap_vert_indices)
-    # pymeshfix on full closed mesh to fix self-intersections
-    fixer = pymeshfix.MeshFix(rv.copy(), rf.copy())
-    fixer.repair(verbose=False)
-    rv_fixed = fixer.v.astype(np.float64)
-    rf_fixed = fixer.f.astype(np.int32)
-    n_changed = abs(len(rv) - len(rv_fixed))
-    if n_changed > 0:
-        print(f"REPAIRED: {{n_changed}} verts changed")
-    # Remap cap vertex indices after pymeshfix
-    if len(rv_fixed) != len(rv):
-        tree_old = cKDTree(rv)
-        new_cap = set()
-        for vi in range(len(rv_fixed)):
-            d, oi = tree_old.query(rv_fixed[vi])
-            if d < 1e-3 and oi in is_cap:
-                new_cap.add(vi)
-        is_cap = new_cap
+    rv_fixed = rv.copy()
+    rf_fixed = rf.copy()
     # Subdivide long surface edges so TetGen produces fine surface tets
     edge_lens = []
     for f_face in rf_fixed:
@@ -613,7 +598,7 @@ except Exception as e:
                 import os
                 stdout_lines = result.stdout.strip().split('\n') if result.stdout else []
                 for line in stdout_lines:
-                    if line.startswith(('REPAIRED', 'QUALITY', 'NOQUALITY', 'EDGE_STATS', 'SUBDIVIDE', 'MESH_VOL', 'CAP_VERTS')):
+                    if line.startswith(('REPAIRED', 'QUALITY', 'NOQUALITY', 'EDGE_STATS', 'SUBDIVIDE', 'MESH_VOL', 'CAP_VERTS', 'SKIP_REPAIR')):
                         print(f"  {line}")
 
                 if result.returncode == 0 and os.path.exists(tmp_out_path):
