@@ -8700,7 +8700,7 @@ def _motion_apply_cached_deformation(v, frame):
                 mobj.soft_body.positions = cached_pos.astype(np.float64)
             mobj.tet_vertices = cached_pos.astype(np.float32).copy()
             mobj._update_tet_draw_positions()
-            # Restore cached waypoints if available
+            # Restore cached waypoints if available, otherwise recompute from tet
             if 'waypoints_flat' in cached and 'waypoints_shape' in cached:
                 if hasattr(mobj, 'waypoints') and len(mobj.waypoints) > 0:
                     wp = _unflatten_waypoints(
@@ -8714,6 +8714,9 @@ def _motion_apply_cached_deformation(v, frame):
                                     stream[fi] = stream[fi] + fix_offset
                     mobj.waypoints = wp
                     mobj._fiber_draw_dirty = True
+            elif hasattr(mobj, 'waypoint_bary_coords') and len(getattr(mobj, 'waypoint_bary_coords', [])) > 0:
+                # No cached waypoints — recompute live from deformed tet vertices
+                mobj._update_waypoints_from_tet(v.env.skel if hasattr(v, 'env') else None, verbose=False)
             any_applied = True
     return any_applied
 
