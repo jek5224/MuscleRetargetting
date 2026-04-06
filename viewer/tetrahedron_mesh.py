@@ -482,6 +482,8 @@ try:
             e = tuple(sorted([int(f[i]), int(f[(i+1)%3])]))
             edge_faces[e].append(fi)
     non_manifold_edges = {{e: flist for e, flist in edge_faces.items() if len(flist) > 2}}
+    boundary_edges = {{e: flist for e, flist in edge_faces.items() if len(flist) == 1}}
+    print(f"FIX_MANIFOLD: {{len(non_manifold_edges)}} non-manifold, {{len(boundary_edges)}} boundary edges")
     if len(non_manifold_edges) > 0:
         print(f"FIX_MANIFOLD: {{len(non_manifold_edges)}} non-manifold edges")
         # Collect vertices that need duplication
@@ -660,7 +662,7 @@ except Exception as e:
                 import os
                 stdout_lines = result.stdout.strip().split('\n') if result.stdout else []
                 for line in stdout_lines:
-                    if line.startswith(('REPAIRED', 'QUALITY', 'NOQUALITY', 'EDGE_STATS', 'SUBDIVIDE', 'MESH_VOL', 'CAP_VERTS', 'SKIP_REPAIR')):
+                    if line.startswith(('REPAIRED', 'QUALITY', 'NOQUALITY', 'EDGE_STATS', 'SUBDIVIDE', 'MESH_VOL', 'CAP_VERTS', 'SKIP_REPAIR', 'FIX_MANIFOLD')):
                         print(f"  {line}")
 
                 if result.returncode == 0 and os.path.exists(tmp_out_path):
