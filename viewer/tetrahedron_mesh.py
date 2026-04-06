@@ -1237,17 +1237,62 @@ except Exception as e:
                     near = np.where(dists < 0.02)[0]
                     n_cap = sum(1 for fi in near if fi in cap_fi_set)
                     if n_cap < 5 and len(near) > 0:
-                        # Get original cap face count for this loop
-                        orig_n = len(boundary_loops[loop_idx]) if loop_idx < len(boundary_loops) else 32
-                        # Mark the closest orig_n faces to anchor as cap
-                        face_dists = [(dists[fi], fi) for fi in near if fi not in cap_fi_set]
-                        face_dists.sort()
+                        # Flood-fill from anchor through connected boundary faces
+                        # Stop when face normal diverges from cap plane
+                        # Find faces touching anchor vertex
+                        anchor_faces = [fi for fi in range(len(sim_faces))
+                                        if ani in sim_faces[fi]]
+                        if not anchor_faces:
+                            continue
+                        # Get cap plane normal from anchor's faces
+                        ref_normals = []
+                        for fi in anchor_faces:
+                            fv = closed_vertices[sim_faces[fi]].astype(np.float64)
+                            fn = np.cross(fv[1]-fv[0], fv[2]-fv[0])
+                            fn_len = np.linalg.norm(fn)
+                            if fn_len > 1e-12:
+                                ref_normals.append(fn / fn_len)
+                        if not ref_normals:
+                            continue
+                        cap_normal = np.mean(ref_normals, axis=0)
+                        cap_normal = cap_normal / np.linalg.norm(cap_normal)
+                        # Build face adjacency for sim_faces
+                        sim_edge_faces = {}
+                        for fi, f in enumerate(sim_faces):
+                            for i in range(3):
+                                e = (min(int(f[i]), int(f[(i+1)%3])),
+                                     max(int(f[i]), int(f[(i+1)%3])))
+                                sim_edge_faces.setdefault(e, []).append(fi)
+                        # Flood-fill
+                        flood_visited = set()
+                        flood_queue = list(anchor_faces)
                         added = 0
-                        for _, fi in face_dists[:orig_n]:
-                            cap_face_indices.append(int(fi))
-                            cap_fi_set.add(int(fi))
-                            added += 1
-                        print(f"  Anchor {ai}: proximity fallback added {added} cap faces")
+                        while flood_queue:
+                            fi = flood_queue.pop()
+                            if fi in flood_visited:
+                                continue
+                            flood_visited.add(fi)
+                            # Check normal alignment
+                            fv = closed_vertices[sim_faces[fi]].astype(np.float64)
+                            fn = np.cross(fv[1]-fv[0], fv[2]-fv[0])
+                            fn_len = np.linalg.norm(fn)
+                            if fn_len < 1e-12:
+                                continue
+                            fn = fn / fn_len
+                            if abs(np.dot(fn, cap_normal)) < 0.5:
+                                continue  # face not coplanar with cap
+                            if fi not in cap_fi_set:
+                                cap_face_indices.append(int(fi))
+                                cap_fi_set.add(int(fi))
+                                added += 1
+                            # Add neighbors
+                            for i in range(3):
+                                e = (min(int(sim_faces[fi][i]), int(sim_faces[fi][(i+1)%3])),
+                                     max(int(sim_faces[fi][i]), int(sim_faces[fi][(i+1)%3])))
+                                for nfi in sim_edge_faces.get(e, []):
+                                    if nfi not in flood_visited:
+                                        flood_queue.append(nfi)
+                        print(f"  Anchor {ai}: flood-fill fallback added {added} cap faces")
             # Debug: per-anchor cap face counts
             if hasattr(self, 'tet_anchor_vertices') and _anchor_positions:
                 from scipy.spatial import cKDTree as _cKDTree3
