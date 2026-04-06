@@ -2869,8 +2869,9 @@ class FiberArchitectureMixin:
                         v2 = tet_verts[tet[2]]
                         v3 = tet_verts[tet[3]]
 
-                        # Clamp bary coords for outside points to prevent extrapolation
-                        if not was_inside:
+                        # Always clamp negative bary coords — even small negatives
+                        # cause opposite-direction overshoot in deformed/inverted tets
+                        if np.any(bary < 0):
                             bary = np.maximum(bary, 0.0)
                             bary_sum = bary.sum()
                             if bary_sum > 1e-8:
