@@ -472,6 +472,7 @@ try:
     rf = faces.copy()
     # Track cap status: set of vertex indices that are cap vertices
     is_cap = set(cap_vert_indices)
+    print(f"MESH_INPUT: {{len(rv)}}v {{len(rf)}}f, {{len(is_cap)}} cap verts")
     # Fix non-manifold edges by duplicating shared vertices.
     # Multi-stream muscles share edges at cut boundaries (4+ faces per edge).
     # TetGen needs manifold input (max 2 faces per edge).
@@ -719,7 +720,7 @@ except Exception as e:
                 import os
                 stdout_lines = result.stdout.strip().split('\n') if result.stdout else []
                 for line in stdout_lines:
-                    if line.startswith(('REPAIRED', 'QUALITY', 'NOQUALITY', 'EDGE_STATS', 'SUBDIVIDE', 'MESH_VOL', 'CAP_VERTS', 'SKIP_REPAIR', 'FIX_MANIFOLD')):
+                    if line.startswith(('REPAIRED', 'QUALITY', 'NOQUALITY', 'EDGE_STATS', 'SUBDIVIDE', 'MESH_VOL', 'CAP_VERTS', 'SKIP_REPAIR', 'FIX_MANIFOLD', 'MESH_INPUT', 'FAIL')):
                         print(f"  {line}")
 
                 if result.returncode == 0 and os.path.exists(tmp_out_path):
