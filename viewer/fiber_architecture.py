@@ -2884,19 +2884,6 @@ class FiberArchitectureMixin:
                         if not was_inside:
                             clamped_count += 1
 
-                # Surface projection: snap deviated waypoints toward contour centroid
-                # The centroid of same-level waypoints is a robust surface reference
-                if len(contour_wps) > 2:
-                    centroid = np.mean(contour_wps, axis=0)
-                    dists_to_c = np.linalg.norm(contour_wps - centroid, axis=1)
-                    median_dist = np.median(dists_to_c)
-                    if median_dist > 1e-8:
-                        for fi in range(len(contour_wps)):
-                            if dists_to_c[fi] > median_dist * 2.5:
-                                # Pull outlier toward centroid
-                                direction = contour_wps[fi] - centroid
-                                contour_wps[fi] = centroid + direction * (median_dist * 2.0 / dists_to_c[fi])
-
                 # Update the waypoints array
                 self.waypoints[stream_idx][contour_idx] = contour_wps
 
