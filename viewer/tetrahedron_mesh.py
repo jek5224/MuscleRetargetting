@@ -518,6 +518,7 @@ try:
         for vi_global in used:
             if int(vi_global) in is_cap:
                 local_cap.add(int(local_remap[vi_global]))
+        print(f"COMP_DEBUG {{ci}}: initial local_cap={{len(local_cap)}}")
 
         # Close holes with pymeshfix (safe on single component)
         mesh = trimesh.Trimesh(vertices=local_verts, faces=local_faces, process=False)
@@ -536,7 +537,10 @@ try:
                     d, oi = tree_old.query(local_verts[vi])
                     if d < 1e-3 and int(local_remap[used[oi]]) in local_cap:
                         new_cap.add(vi)
+                print(f"COMP_DEBUG {{ci}}: pymeshfix changed verts {{n_verts_before}}->{{len(local_verts)}}, cap {{len(local_cap)}}->{{len(new_cap)}}")
                 local_cap = new_cap
+            else:
+                print(f"COMP_DEBUG {{ci}}: pymeshfix same vert count, cap={{len(local_cap)}}")
             # Mark NEW faces (hole-closing) as cap — all their vertices are cap
             if len(local_faces) > n_faces_before:
                 # Find faces that weren't in the original set
@@ -645,7 +649,7 @@ except Exception as e:
                 import os
                 stdout_lines = result.stdout.strip().split('\n') if result.stdout else []
                 for line in stdout_lines:
-                    if line.startswith(('REPAIRED', 'QUALITY', 'NOQUALITY', 'EDGE_STATS', 'SUBDIVIDE', 'MESH_VOL', 'CAP_VERTS', 'SKIP_REPAIR', 'FIX_MANIFOLD', 'MESH_INPUT', 'FAIL', 'COMP', 'MERGED', 'COMPONENTS')):
+                    if line.startswith(('REPAIRED', 'QUALITY', 'NOQUALITY', 'EDGE_STATS', 'SUBDIVIDE', 'MESH_VOL', 'CAP_VERTS', 'SKIP_REPAIR', 'FIX_MANIFOLD', 'MESH_INPUT', 'FAIL', 'COMP', 'MERGED', 'COMPONENTS', 'COMP_DEBUG')):
                         print(f"  {line}")
 
                 if result.returncode == 0 and os.path.exists(tmp_out_path):
