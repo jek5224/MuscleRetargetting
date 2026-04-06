@@ -1132,14 +1132,26 @@ except Exception as e:
             # TetGen subdivides the surface — use tet boundary as render faces
             self.tet_render_faces = sim_faces
             # Re-identify cap faces: faces on cap planes
+            # A cap face has: (1) all vertices near the cap plane
+            #                 (2) face normal aligned with cap plane normal
             cap_face_indices = []
-            plane_tol = 5e-4  # distance tolerance to cap plane
+            plane_tol = 1e-3  # vertex distance to cap plane
+            normal_tol = 0.5  # dot product threshold (cos ~60°)
             for fi, f in enumerate(sim_faces):
-                face_center = np.mean(closed_vertices[[int(f[0]), int(f[1]), int(f[2])]].astype(np.float64), axis=0)
+                fv = closed_vertices[[int(f[0]), int(f[1]), int(f[2])]].astype(np.float64)
+                # Face normal
+                fn = np.cross(fv[1] - fv[0], fv[2] - fv[0])
+                fn_len = np.linalg.norm(fn)
+                if fn_len < 1e-12:
+                    continue
+                fn = fn / fn_len
                 for centroid, normal, radius in _cap_planes:
-                    dist_to_plane = abs(np.dot(face_center - centroid, normal))
-                    dist_to_center = np.linalg.norm(face_center - centroid)
-                    if dist_to_plane < plane_tol and dist_to_center < radius * 1.2:
+                    # Check all 3 vertices are on the plane
+                    dists = np.abs(np.dot(fv - centroid, normal))
+                    if np.max(dists) > plane_tol:
+                        continue
+                    # Check face normal aligns with cap plane normal
+                    if abs(np.dot(fn, normal)) > normal_tol:
                         cap_face_indices.append(fi)
                         break
         else:
