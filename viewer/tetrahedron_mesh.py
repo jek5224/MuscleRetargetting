@@ -435,12 +435,20 @@ class TetrahedronMeshMixin:
             try:
                 print("Performing TetGen tetrahedralization (subprocess)...")
                 n_original = len(closed_vertices)
-                # Save anchor positions before TetGen modifies vertices
+                # Save cap vertex positions before TetGen modifies vertices
                 _anchor_positions = {}
                 if hasattr(self, 'tet_anchor_vertices'):
                     for ai in self.tet_anchor_vertices:
                         if ai < len(closed_vertices):
                             _anchor_positions[ai] = closed_vertices[ai].copy()
+                # Collect all original cap vertex positions (boundary loop + anchor)
+                _cap_vertex_positions = []
+                for fi in cap_face_indices:
+                    if fi < len(closed_faces):
+                        for vi in closed_faces[fi]:
+                            _cap_vertex_positions.append(closed_vertices[int(vi)].copy())
+                if _cap_vertex_positions:
+                    _cap_vertex_positions = np.array(_cap_vertex_positions, dtype=np.float64)
 
                 # Run TetGen in a subprocess to isolate crashes
                 import tempfile, subprocess, json, sys
@@ -1122,17 +1130,36 @@ except Exception as e:
         if tetgen_success:
             # TetGen subdivides the surface — use tet boundary as render faces
             self.tet_render_faces = sim_faces
-            # Re-identify cap faces in sim_faces (faces touching anchor vertices)
-            anchor_set_final = set()
-            if _anchor_positions:
+            # Re-identify cap vertices: original cap vertices + any TetGen
+            # Steiner point that lies on an edge between two cap vertices
+            cap_verts_new = set()
+            if len(_cap_vertex_positions) > 0:
                 from scipy.spatial import cKDTree as _cKDTree2
-                tet_tree_final = _cKDTree2(closed_vertices.astype(np.float64))
-                for ai, pos in _anchor_positions.items():
-                    _, ni = tet_tree_final.query(pos.astype(np.float64))
-                    anchor_set_final.add(int(ni))
+                cap_tree = _cKDTree2(_cap_vertex_positions)
+                for vi in range(len(closed_vertices)):
+                    d, _ = cap_tree.query(closed_vertices[vi].astype(np.float64))
+                    if d < 1e-5:
+                        cap_verts_new.add(vi)
+                        continue
+                    # Check if vertex lies on an edge between two cap vertices:
+                    # find 2 nearest cap vertices and check collinearity
+                    if len(_cap_vertex_positions) >= 2:
+                        dists, idxs = cap_tree.query(closed_vertices[vi].astype(np.float64), k=2)
+                        p = closed_vertices[vi].astype(np.float64)
+                        a = _cap_vertex_positions[idxs[0]]
+                        b = _cap_vertex_positions[idxs[1]]
+                        ab = b - a
+                        ab_len = np.linalg.norm(ab)
+                        if ab_len > 1e-10:
+                            t = np.dot(p - a, ab) / (ab_len * ab_len)
+                            if 0.0 <= t <= 1.0:
+                                proj = a + t * ab
+                                dist_to_edge = np.linalg.norm(p - proj)
+                                if dist_to_edge < 1e-5:
+                                    cap_verts_new.add(vi)
             cap_face_indices = []
             for fi, f in enumerate(sim_faces):
-                if any(int(v) in anchor_set_final for v in f):
+                if all(int(v) in cap_verts_new for v in f):
                     cap_face_indices.append(fi)
         else:
             self.tet_render_faces = closed_faces  # Original surface + caps
