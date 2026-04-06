@@ -563,9 +563,10 @@ try:
                 local_faces = np.array(new_faces_list, dtype=np.int32)
                 print(f"COMP_DEBUG {{ci}}: capped {{len(b_loops)}} boundary loops")
             mesh = trimesh.Trimesh(vertices=local_verts, faces=local_faces, process=False)
-        # Save cap state before potential pymeshfix
-        saved_local_cap = set(local_cap)
-        saved_local_verts = local_verts.copy()
+        # Save pre-subdivision state for pymeshfix fallback
+        pre_subdiv_verts = local_verts.copy()
+        pre_subdiv_faces = local_faces.copy()
+        pre_subdiv_cap = set(local_cap)
         use_pymeshfix = False
 
         # Subdivide long edges
@@ -635,22 +636,24 @@ try:
                 t.tetrahedralize(quality=False, nobisect=True)
                 tet = t
             except Exception:
-                # TetGen failed — try pymeshfix then TetGen
-                print(f"COMP_DEBUG {{ci}}: TetGen failed, trying pymeshfix...")
-                fixer = pymeshfix.MeshFix(local_verts.copy(), local_faces.copy())
+                # TetGen failed — try pymeshfix on PRE-SUBDIVISION mesh
+                print(f"COMP_DEBUG {{ci}}: TetGen failed, trying pymeshfix on pre-subdiv mesh...")
+                fixer = pymeshfix.MeshFix(pre_subdiv_verts.copy(), pre_subdiv_faces.copy())
                 fixer.repair(verbose=False)
                 fixed_v = fixer.v.astype(np.float64)
                 fixed_f = fixer.f.astype(np.int32)
-                print(f"COMP_DEBUG {{ci}}: pymeshfix {{len(local_verts)}}->{{len(fixed_v)}}v")
-                # Remap cap vertices
-                if len(fixed_v) != len(local_verts):
-                    tree_sv = cKDTree(saved_local_verts)
-                    new_cap = set()
+                print(f"COMP_DEBUG {{ci}}: pymeshfix {{len(pre_subdiv_verts)}}->{{len(fixed_v)}}v")
+                # Remap cap vertices from pre-subdivision
+                local_cap = set()
+                if len(fixed_v) != len(pre_subdiv_verts):
+                    tree_sv = cKDTree(pre_subdiv_verts)
                     for vi in range(len(fixed_v)):
                         d, oi = tree_sv.query(fixed_v[vi])
-                        if d < 1.0 and oi in saved_local_cap:
-                            new_cap.add(vi)
-                    local_cap = new_cap
+                        if d < 1.0 and oi in pre_subdiv_cap:
+                            local_cap.add(vi)
+                else:
+                    local_cap = set(pre_subdiv_cap)
+                print(f"COMP_DEBUG {{ci}}: cap verts after pymeshfix remap: {{len(local_cap)}}")
                 # Re-subdivide
                 mesh2 = trimesh.Trimesh(vertices=fixed_v, faces=fixed_f, process=False)
                 mesh2.fix_normals()
