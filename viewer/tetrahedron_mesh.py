@@ -434,19 +434,42 @@ class TetrahedronMeshMixin:
         if use_tetgen:
             try:
                 import tetgen as tg
+                import trimesh
                 print("Performing TetGen tetrahedralization...")
                 n_original = len(closed_vertices)
 
-                tet_in = tg.TetGen(closed_vertices.astype(np.float64),
-                                   closed_faces.astype(np.int32))
-                # p = tetrahedralize PLC
-                # q = quality (min radius-edge ratio, default 2.0; lower = stricter)
-                # a = max tet volume (controls density)
+                # Repair surface mesh for TetGen (needs watertight manifold)
+                mesh_repair = trimesh.Trimesh(
+                    vertices=closed_vertices.astype(np.float64),
+                    faces=closed_faces.astype(np.int32),
+                    process=False)
+                # Fix normals, remove degenerate faces
+                mesh_repair.fix_normals()
+                mesh_repair.remove_degenerate_faces()
+                mesh_repair.remove_duplicate_faces()
+
+                repair_verts = mesh_repair.vertices.astype(np.float64)
+                repair_faces = mesh_repair.faces.astype(np.int32)
+                n_removed = len(closed_faces) - len(repair_faces)
+                if n_removed > 0:
+                    print(f"  Mesh repair: removed {n_removed} degenerate/duplicate faces")
+
+                tet_in = tg.TetGen(repair_verts, repair_faces)
                 # Compute a reasonable max volume from mesh bounding box
-                bbox_diag = np.linalg.norm(closed_vertices.max(axis=0) - closed_vertices.min(axis=0))
+                bbox_diag = np.linalg.norm(repair_verts.max(axis=0) - repair_verts.min(axis=0))
                 max_vol = (bbox_diag / 20.0) ** 3  # target ~20 tets along diagonal
-                tet_in.tetrahedralize(order=1, mindihedral=10, minratio=1.5,
-                                      maxvolume=max_vol, nobisect=False)
+                # Try quality mesh first, relax if it fails
+                for attempt, (mindih, minrat) in enumerate([(10, 1.5), (5, 2.0), (1, 3.0)]):
+                    try:
+                        tet_in.tetrahedralize(order=1, mindihedral=mindih, minratio=minrat,
+                                              maxvolume=max_vol, nobisect=False)
+                        break
+                    except Exception:
+                        if attempt < 2:
+                            print(f"  TetGen attempt {attempt+1} failed (mindih={mindih}, minrat={minrat}), relaxing...")
+                            tet_in = tg.TetGen(repair_verts, repair_faces)
+                        else:
+                            raise
                 tet_verts = tet_in.node
                 tet_elems = tet_in.elem
 
