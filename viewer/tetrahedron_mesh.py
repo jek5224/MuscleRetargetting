@@ -520,10 +520,10 @@ try:
                 local_cap.add(int(local_remap[vi_global]))
         print(f"COMP_DEBUG {{ci}}: initial local_cap={{len(local_cap)}}")
 
-        # Close holes: find boundary edges, cap with fan triangles
+        # Close holes with manual capping first, pymeshfix as fallback
         mesh = trimesh.Trimesh(vertices=local_verts, faces=local_faces, process=False)
         if not mesh.is_watertight:
-            # Find boundary edges
+            # Find boundary edges and cap with fan triangles
             local_edge_count = _ddict(int)
             for f in local_faces:
                 for i in range(3):
@@ -531,7 +531,6 @@ try:
                     local_edge_count[e] += 1
             boundary_edges_local = [e for e, c in local_edge_count.items() if c == 1]
             if len(boundary_edges_local) > 0:
-                # Build boundary adjacency and find loops
                 b_adj = _ddict(list)
                 for e in boundary_edges_local:
                     b_adj[e[0]].append(e[1])
@@ -562,8 +561,12 @@ try:
                         new_faces_list.append([loop[i], loop[(i+1)%len(loop)], anchor_vi])
                         local_cap.add(loop[i])
                 local_faces = np.array(new_faces_list, dtype=np.int32)
-                print(f"COMP_DEBUG {{ci}}: capped {{len(b_loops)}} boundary loops ({{len(boundary_edges_local)}} edges)")
+                print(f"COMP_DEBUG {{ci}}: capped {{len(b_loops)}} boundary loops")
             mesh = trimesh.Trimesh(vertices=local_verts, faces=local_faces, process=False)
+        # Save cap state before potential pymeshfix
+        saved_local_cap = set(local_cap)
+        saved_local_verts = local_verts.copy()
+        use_pymeshfix = False
 
         # Subdivide long edges
         mesh.fix_normals()
@@ -616,17 +619,91 @@ try:
         mesh = trimesh.Trimesh(vertices=local_verts, faces=local_faces, process=False)
         mesh.fix_normals()
         local_verts, local_faces = mesh.vertices.astype(np.float64), mesh.faces.astype(np.int32)
-        # TetGen
+        # TetGen — try direct first, pymeshfix fallback
         _mesh_vol = abs(mesh.volume)
         max_vol = max(_mesh_vol / 1500, 1e-6)
         steiner_budget = max(2000 - len(local_verts), 300)
+        tet = None
         try:
-            tet = tetgen.TetGen(local_verts.copy(), local_faces.copy())
-            tet.tetrahedralize(order=1, mindihedral=5, minratio=2.0,
-                               maxvolume=max_vol, nobisect=True, steinerleft=steiner_budget)
+            t = tetgen.TetGen(local_verts.copy(), local_faces.copy())
+            t.tetrahedralize(order=1, mindihedral=5, minratio=2.0,
+                             maxvolume=max_vol, nobisect=True, steinerleft=steiner_budget)
+            tet = t
         except Exception:
-            tet = tetgen.TetGen(local_verts.copy(), local_faces.copy())
-            tet.tetrahedralize(quality=False, nobisect=True)
+            try:
+                t = tetgen.TetGen(local_verts.copy(), local_faces.copy())
+                t.tetrahedralize(quality=False, nobisect=True)
+                tet = t
+            except Exception:
+                # TetGen failed — try pymeshfix then TetGen
+                print(f"COMP_DEBUG {{ci}}: TetGen failed, trying pymeshfix...")
+                fixer = pymeshfix.MeshFix(local_verts.copy(), local_faces.copy())
+                fixer.repair(verbose=False)
+                fixed_v = fixer.v.astype(np.float64)
+                fixed_f = fixer.f.astype(np.int32)
+                print(f"COMP_DEBUG {{ci}}: pymeshfix {{len(local_verts)}}->{{len(fixed_v)}}v")
+                # Remap cap vertices
+                if len(fixed_v) != len(local_verts):
+                    tree_sv = cKDTree(saved_local_verts)
+                    new_cap = set()
+                    for vi in range(len(fixed_v)):
+                        d, oi = tree_sv.query(fixed_v[vi])
+                        if d < 1.0 and oi in saved_local_cap:
+                            new_cap.add(vi)
+                    local_cap = new_cap
+                # Re-subdivide
+                mesh2 = trimesh.Trimesh(vertices=fixed_v, faces=fixed_f, process=False)
+                mesh2.fix_normals()
+                local_verts = mesh2.vertices.astype(np.float64)
+                local_faces = mesh2.faces.astype(np.int32)
+                _mesh_vol = abs(mesh2.volume)
+                max_vol = max(_mesh_vol / 1500, 1e-6)
+                steiner_budget = max(2000 - len(local_verts), 300)
+                use_pymeshfix = True
+                # Re-subdivide edges
+                edge_lens2 = []
+                for ff in local_faces:
+                    for i in range(3):
+                        edge_lens2.append(np.linalg.norm(local_verts[ff[(i+1)%3]]-local_verts[ff[i]]))
+                med2 = np.median(edge_lens2)
+                mel2 = med2 * 0.7
+                for _si2 in range(3):
+                    nv2=list(local_verts); nf2=[]; emp2={{}}; ns2=0
+                    for ff in local_faces:
+                        sp2=[]
+                        for i in range(3):
+                            v0i,v1i=int(ff[i]),int(ff[(i+1)%3])
+                            el=np.linalg.norm(local_verts[v0i]-local_verts[v1i]) if v0i<len(local_verts) and v1i<len(local_verts) else 0
+                            if el>mel2:
+                                ek2=(min(v0i,v1i),max(v0i,v1i))
+                                if ek2 not in emp2:
+                                    mi2=len(nv2); emp2[ek2]=mi2
+                                    nv2.append((np.array(nv2[v0i])+np.array(nv2[v1i]))/2)
+                                    if v0i in local_cap and v1i in local_cap: local_cap.add(mi2)
+                                sp2.append((i,emp2[ek2]))
+                            else: sp2.append((i,None))
+                        se2=[(i,m) for i,m in sp2 if m is not None]
+                        if len(se2)==0: nf2.append(list(ff))
+                        elif len(se2)==1:
+                            ei,mi=se2[0]; nf2.append([int(ff[ei]),mi,int(ff[(ei+2)%3])]); nf2.append([mi,int(ff[(ei+1)%3]),int(ff[(ei+2)%3])]); ns2+=1
+                        else: nf2.append(list(ff)); ns2+=1
+                    local_verts=np.array(nv2,dtype=np.float64); local_faces=np.array(nf2,dtype=np.int32)
+                    if ns2==0: break
+                mesh2=trimesh.Trimesh(vertices=local_verts,faces=local_faces,process=False)
+                mesh2.fix_normals()
+                local_verts,local_faces=mesh2.vertices.astype(np.float64),mesh2.faces.astype(np.int32)
+                try:
+                    t = tetgen.TetGen(local_verts.copy(), local_faces.copy())
+                    t.tetrahedralize(order=1, mindihedral=5, minratio=2.0,
+                                     maxvolume=max_vol, nobisect=True, steinerleft=steiner_budget)
+                    tet = t
+                except Exception:
+                    t = tetgen.TetGen(local_verts.copy(), local_faces.copy())
+                    t.tetrahedralize(quality=False, nobisect=True)
+                    tet = t
+        if tet is None:
+            print(f"COMP {{ci}}: FAILED completely")
+            continue
         print(f"COMP {{ci}}: {{len(tet.elem)}} tets, {{len(tet.node)}} verts, {{len(local_cap)}} cap verts")
         # Map cap verts to global output indices
         for vi in local_cap:
