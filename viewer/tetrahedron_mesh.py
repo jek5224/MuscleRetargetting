@@ -688,11 +688,12 @@ try:
                 tet = t
             except Exception:
                 # TetGen failed — try pymeshfix to fix self-intersections
-                print(f"COMP_DEBUG {{ci}}: TetGen failed, trying pymeshfix...", flush=True)
+                print(f"COMP_DEBUG {{ci}}: TetGen failed, trying pymeshfix on pre-subdiv...", flush=True)
                 try:
-                    verts_bk = local_verts.copy()
-                    cap_bk = set(local_cap)
-                    fixer = pymeshfix.MeshFix(local_verts.copy(), local_faces.copy())
+                    verts_bk = pre_subdiv_verts.copy()
+                    cap_bk = set(pre_subdiv_cap)
+                    local_cap = set(pre_subdiv_cap)
+                    fixer = pymeshfix.MeshFix(pre_subdiv_verts.copy(), pre_subdiv_faces.copy())
                     fixer.repair(verbose=False)
                     local_verts = fixer.v.astype(np.float64)
                     local_faces = fixer.f.astype(np.int32)
