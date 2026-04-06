@@ -687,8 +687,67 @@ try:
                 t.tetrahedralize(quality=False, nobisect=True)
                 tet = t
             except Exception:
-                # TetGen failed — use contour-guided for this component
-                print(f"COMP_DEBUG {{ci}}: TetGen failed, using contour-guided fallback")
+                # TetGen failed — try pymeshfix to fix self-intersections
+                print(f"COMP_DEBUG {{ci}}: TetGen failed, trying pymeshfix...", flush=True)
+                try:
+                    verts_bk = local_verts.copy()
+                    cap_bk = set(local_cap)
+                    fixer = pymeshfix.MeshFix(local_verts.copy(), local_faces.copy())
+                    fixer.repair(verbose=False)
+                    local_verts = fixer.v.astype(np.float64)
+                    local_faces = fixer.f.astype(np.int32)
+                    # Remap caps
+                    if len(local_verts) != len(verts_bk):
+                        fix_tree = cKDTree(local_verts)
+                        new_cap = set()
+                        for vi in cap_bk:
+                            if vi < len(verts_bk):
+                                d, ni = fix_tree.query(verts_bk[vi])
+                                if d < 1.0:
+                                    new_cap.add(ni)
+                        local_cap = new_cap
+                    print(f"COMP_DEBUG {{ci}}: pymeshfix {{len(verts_bk)}}->{{len(local_verts)}}v, cap={{len(local_cap)}}", flush=True)
+                    # Re-subdivide after pymeshfix
+                    mesh_f = trimesh.Trimesh(vertices=local_verts, faces=local_faces, process=False)
+                    mesh_f.fix_normals()
+                    local_verts, local_faces = mesh_f.vertices.astype(np.float64), mesh_f.faces.astype(np.int32)
+                    el2 = [np.linalg.norm(local_verts[f[(i+1)%3]]-local_verts[f[i]]) for f in local_faces for i in range(3)]
+                    mel2 = np.median(el2) * 1.2
+                    for _s2 in range(2):
+                        nv2=list(local_verts);nf2=[];emp2={{}};ns2=0
+                        for ff in local_faces:
+                            sp2=[]
+                            for i in range(3):
+                                v0i,v1i=int(ff[i]),int(ff[(i+1)%3])
+                                el=np.linalg.norm(local_verts[v0i]-local_verts[v1i]) if v0i<len(local_verts) and v1i<len(local_verts) else 0
+                                if el>mel2:
+                                    ek=(min(v0i,v1i),max(v0i,v1i))
+                                    if ek not in emp2:
+                                        mi2=len(nv2);emp2[ek]=mi2;nv2.append((np.array(nv2[v0i])+np.array(nv2[v1i]))/2)
+                                        if v0i in local_cap and v1i in local_cap: local_cap.add(mi2)
+                                    sp2.append((i,emp2[ek]))
+                                else: sp2.append((i,None))
+                            se2=[(i,m) for i,m in sp2 if m is not None]
+                            if len(se2)==0: nf2.append(list(ff))
+                            elif len(se2)==1:
+                                ei,mi=se2[0];nf2.append([int(ff[ei]),mi,int(ff[(ei+2)%3])]);nf2.append([mi,int(ff[(ei+1)%3]),int(ff[(ei+2)%3])]);ns2+=1
+                            else: nf2.append(list(ff));ns2+=1
+                        local_verts=np.array(nv2,dtype=np.float64);local_faces=np.array(nf2,dtype=np.int32)
+                        if ns2==0: break
+                    mesh_f=trimesh.Trimesh(vertices=local_verts,faces=local_faces,process=False)
+                    mesh_f.fix_normals()
+                    local_verts,local_faces=mesh_f.vertices.astype(np.float64),mesh_f.faces.astype(np.int32)
+                    _mv2=abs(mesh_f.volume);mv2=max(_mv2/1500,1e-6);sb2=max(len(local_verts),300)
+                    t=tetgen.TetGen(local_verts.copy(),local_faces.copy())
+                    t.tetrahedralize(order=1,mindihedral=5,minratio=2.0,maxvolume=mv2,nobisect=True,steinerleft=sb2)
+                    tet=t
+                    print(f"COMP_DEBUG {{ci}}: pymeshfix+TetGen OK: {{len(tet.elem)}} tets", flush=True)
+                except Exception as e2:
+                    print(f"COMP_DEBUG {{ci}}: pymeshfix+TetGen also failed: {{e2}}", flush=True)
+                    # Restore and use contour-guided
+                    local_verts = verts_bk
+                    local_cap = cap_bk
+                    print(f"COMP_DEBUG {{ci}}: using contour-guided fallback", flush=True)
                 # Connect each face to its centroid to make tets
                 centroid_3d = np.mean(local_verts[local_faces], axis=1)
                 fallback_tets = []
