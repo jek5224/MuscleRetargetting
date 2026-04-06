@@ -472,22 +472,30 @@ try:
     target_tets = 2000
     max_vol = max(_mesh_vol / target_tets, 1e-6)
     print(f"MESH_VOL={{_mesh_vol:.1f}} MAX_VOL={{max_vol:.1f}} TARGET={{target_tets}}")
-    # TetGen — start with relaxed quality to avoid excessive subdivision
-    for mindih, minrat in [(0, 8.0), (0, 5.0), (5, 2.0), (10, 1.5)]:
+    # TetGen — limit Steiner points to control tet count
+    # Try progressively more Steiner points until reasonable quality
+    for max_steiner in [2000, 5000, 10000]:
         try:
             tet = tetgen.TetGen(rv_fixed.copy(), rf_fixed.copy())
-            tet.tetrahedralize(order=1, mindihedral=mindih, minratio=minrat,
-                               maxvolume=max_vol, nobisect=False)
+            tet.tetrahedralize(order=1, mindihedral=5, minratio=2.0,
+                               maxvolume=max_vol, nobisect=False,
+                               steinerleft=max_steiner)
             n_tets = len(tet.elem)
-            print(f"QUALITY: mindih={{mindih}} minrat={{minrat}} -> {{n_tets}} tets")
+            n_verts = len(tet.node)
+            print(f"QUALITY: steiner<={{max_steiner}} -> {{n_tets}} tets, {{n_verts}} verts")
             if n_tets < 20000:
-                break  # good enough
+                break
         except Exception:
             continue
     else:
-        tet = tetgen.TetGen(rv_fixed.copy(), rf_fixed.copy())
-        tet.tetrahedralize(quality=False, nobisect=True)
-        print(f"NOQUALITY -> {{len(tet.elem)}} tets")
+        try:
+            tet = tetgen.TetGen(rv_fixed.copy(), rf_fixed.copy())
+            tet.tetrahedralize(quality=False, nobisect=True)
+            print(f"NOQUALITY -> {{len(tet.elem)}} tets")
+        except Exception:
+            tet = tetgen.TetGen(rv_fixed.copy(), rf_fixed.copy())
+            tet.tetrahedralize(quality=False, nobisect=False)
+            print(f"NOQUALITY_BISECT -> {{len(tet.elem)}} tets")
     np.savez("{tmp_out_path}", node=tet.node / 1000.0, elem=tet.elem,
              n_orig=np.array([n_orig]))
     print(f"OK {{len(tet.elem)}} {{len(tet.node)}}")
