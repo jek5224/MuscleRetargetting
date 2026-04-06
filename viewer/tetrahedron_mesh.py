@@ -1107,11 +1107,15 @@ except Exception as e:
         self.tet_tetrahedra = interior_tetrahedra
 
         # Dual face system:
-        # - tet_render_faces: Original contour faces + caps (for rendering/collision)
+        # - tet_render_faces: Surface faces for rendering
         # - tet_sim_faces: Tet boundary faces (for simulation boundary conditions)
-        self.tet_render_faces = closed_faces  # Original surface faces + cap faces
+        if tetgen_success:
+            # TetGen subdivides the surface — use tet boundary as render faces
+            self.tet_render_faces = sim_faces
+        else:
+            self.tet_render_faces = closed_faces  # Original surface + caps
         self.tet_sim_faces = sim_faces  # Tet boundary faces
-        self.tet_faces = closed_faces  # Backwards compatibility (alias to render faces)
+        self.tet_faces = self.tet_render_faces  # Backwards compatibility
 
         self.tet_cap_face_indices = cap_face_indices  # Indices of cap faces (fixed during simulation)
         self.tet_surface_face_count = len(faces)  # Number of original surface faces
