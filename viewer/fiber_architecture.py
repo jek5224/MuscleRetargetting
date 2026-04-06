@@ -2673,10 +2673,85 @@ class FiberArchitectureMixin:
                 stream_bary.append(contour_bary)
             self.waypoint_bary_coords.append(stream_bary)
 
+        # Second pass: fix outside waypoints by interpolating from inside neighbors
+        fixed_count = 0
+        for stream_idx, stream_bary in enumerate(self.waypoint_bary_coords):
+            for contour_idx, contour_bary in enumerate(stream_bary):
+                if contour_bary is None:
+                    continue
+                n_fibers = len(contour_bary)
+                if n_fibers < 3:
+                    continue
+
+                # Find which fibers are inside vs outside
+                inside_indices = []
+                outside_indices = []
+                for fi, wp_data in enumerate(contour_bary):
+                    if wp_data is None:
+                        outside_indices.append(fi)
+                    elif wp_data[0] == 'tet' and len(wp_data) >= 4 and not wp_data[3]:
+                        outside_indices.append(fi)
+                    elif wp_data[0] == 'tet':
+                        inside_indices.append(fi)
+
+                if len(outside_indices) == 0 or len(inside_indices) < 2:
+                    continue
+
+                # Get the original waypoint positions for this contour
+                orig_wps = np.array(self.waypoints[stream_idx][contour_idx])
+                if orig_wps.ndim == 1:
+                    orig_wps = orig_wps.reshape(1, -1)
+
+                # For each outside waypoint, interpolate from nearest inside neighbors
+                # Fibers are ordered around the contour ring, so use circular neighbors
+                inside_set = set(inside_indices)
+                for fi in outside_indices:
+                    # Find nearest inside neighbors by fiber index (circular)
+                    left = right = None
+                    for offset in range(1, n_fibers):
+                        li = (fi - offset) % n_fibers
+                        if li in inside_set and left is None:
+                            left = li
+                        ri = (fi + offset) % n_fibers
+                        if ri in inside_set and right is None:
+                            right = ri
+                        if left is not None and right is not None:
+                            break
+
+                    if left is None or right is None:
+                        continue
+
+                    # Interpolate position between the two inside neighbors
+                    # Weight by circular distance
+                    d_left = min((fi - left) % n_fibers, (left - fi) % n_fibers)
+                    d_right = min((fi - right) % n_fibers, (right - fi) % n_fibers)
+                    d_total = d_left + d_right
+                    if d_total == 0:
+                        continue
+                    w_left = 1.0 - d_left / d_total
+                    w_right = 1.0 - d_right / d_total
+
+                    # Get inside neighbor positions
+                    pos_left = orig_wps[left]
+                    pos_right = orig_wps[right]
+                    interp_pos = w_left * pos_left + w_right * pos_right
+
+                    # Re-embed the interpolated position
+                    tet_idx, bary, was_inside = self._find_containing_tet(
+                        interp_pos, tet_verts, tetrahedra)
+                    if tet_idx is not None and was_inside:
+                        contour_bary[fi] = ('tet', tet_idx, bary, True)
+                        # Also update the waypoint position
+                        orig_wps[fi] = interp_pos
+                        fixed_count += 1
+
+                if fixed_count > 0:
+                    self.waypoints[stream_idx][contour_idx] = orig_wps
+
         failed_count = total_count - embedded_count - skeleton_count
         msg = f"  Waypoints: {embedded_count} in tetrahedra"
         if clamped_count > 0:
-            msg += f" ({clamped_count} outside, using nearest tet with extrapolated bary coords)"
+            msg += f" ({clamped_count} outside, {fixed_count} fixed by neighbor interpolation)"
         msg += f", {skeleton_count} attached to skeleton, {total_count} total"
         if failed_count > 0:
             msg += f", {failed_count} FAILED"
