@@ -526,41 +526,89 @@ class TetrahedronMeshMixin:
                             pts_2d = np.array([[np.dot(v - mean, basis_x),
                                                 np.dot(v - mean, basis_y)] for v in pts_3d])
 
-                            # Build 2D polygon from convex hull of projected points
-                            # (polylabel needs a valid polygon, not scattered points)
                             from scipy.spatial import ConvexHull
                             try:
                                 if len(pts_2d) >= 3:
                                     hull = ConvexHull(pts_2d)
                                     hull_pts = pts_2d[hull.vertices]
                                     poly = ShapelyPolygon(hull_pts)
-                                    if poly.is_valid and not poly.is_empty:
-                                        pole = polylabel(poly, tolerance=1e-4)
-                                        center_3d = mean + pole.x * basis_x + pole.y * basis_y
-                                    else:
-                                        center_3d = pts_3d.mean(axis=0)
-                                else:
-                                    center_3d = pts_3d.mean(axis=0)
-                            except Exception:
-                                center_3d = pts_3d.mean(axis=0)
-                        else:
-                            # Fallback: use centroid
-                            center_3d = closed_vertices[cluster].mean(axis=0)
+                                    if not poly.is_valid or poly.is_empty:
+                                        raise ValueError("invalid polygon")
 
-                        center_idx = len(new_verts)
-                        new_verts.append(center_3d)
-                        level_centers[(ci_idx, lev)] = center_idx
+                                    # Check aspect ratio — for thin cross-sections,
+                                    # add multiple centers along the major axis
+                                    min_rect = poly.minimum_rotated_rectangle
+                                    rect_coords = np.array(min_rect.exterior.coords[:-1])
+                                    edge_lens = [np.linalg.norm(rect_coords[(i+1)%4] - rect_coords[i])
+                                                 for i in range(4)]
+                                    major = max(edge_lens)
+                                    minor = min(edge_lens)
+                                    aspect = major / max(minor, 1e-8)
+
+                                    if aspect > 3.0 and len(pts_2d) >= 6:
+                                        # Thin cross-section: place multiple centers
+                                        # along the major axis inside the polygon
+                                        n_centers = min(int(aspect / 2), 5)
+                                        n_centers = max(n_centers, 2)
+                                        # Major axis direction
+                                        edge0 = rect_coords[1] - rect_coords[0]
+                                        edge1 = rect_coords[2] - rect_coords[1]
+                                        if np.linalg.norm(edge0) > np.linalg.norm(edge1):
+                                            major_dir = edge0 / np.linalg.norm(edge0)
+                                        else:
+                                            major_dir = edge1 / np.linalg.norm(edge1)
+                                        # Project polygon centroid and extent along major axis
+                                        centroid_2d = np.array([poly.centroid.x, poly.centroid.y])
+                                        projections = pts_2d @ major_dir
+                                        p_min, p_max = projections.min(), projections.max()
+                                        centers_3d = []
+                                        for i in range(n_centers):
+                                            t = (i + 0.5) / n_centers
+                                            p = p_min + t * (p_max - p_min)
+                                            # Point along major axis at distance p from origin
+                                            center_proj = centroid_2d @ major_dir
+                                            pt_2d = centroid_2d + (p - center_proj) * major_dir
+                                            # Check if inside polygon, nudge if not
+                                            from shapely.geometry import Point as ShapelyPoint
+                                            sp = ShapelyPoint(pt_2d)
+                                            if not poly.contains(sp):
+                                                nearest = poly.exterior.interpolate(
+                                                    poly.exterior.project(sp))
+                                                pt_2d = (np.array([nearest.x, nearest.y]) + pt_2d) / 2
+                                            c3d = mean + pt_2d[0] * basis_x + pt_2d[1] * basis_y
+                                            centers_3d.append(c3d)
+                                    else:
+                                        # Normal aspect — single pole center
+                                        pole = polylabel(poly, tolerance=1e-4)
+                                        centers_3d = [mean + pole.x * basis_x + pole.y * basis_y]
+                                else:
+                                    centers_3d = [pts_3d.mean(axis=0)]
+                            except Exception:
+                                centers_3d = [closed_vertices[cluster].mean(axis=0)]
+                        else:
+                            centers_3d = [closed_vertices[cluster].mean(axis=0)]
+
+                        # Store all centers for this stream/level
+                        center_indices = []
+                        for c3d in centers_3d:
+                            ci = len(new_verts)
+                            new_verts.append(c3d)
+                            center_indices.append(ci)
+                        level_centers[(ci_idx, lev)] = center_indices
 
                 # ── Step 4b: Compute mid-centers between adjacent levels ──
-                for (si, lev), ci in list(level_centers.items()):
+                for (si, lev), cis in list(level_centers.items()):
                     next_key = (si, lev + 1)
                     if next_key in level_centers:
-                        mid_3d = (np.array(new_verts[ci]) + np.array(new_verts[level_centers[next_key]])) / 2.0
+                        next_cis = level_centers[next_key]
+                        # Average all centers from both levels
+                        all_pts = [new_verts[c] for c in cis] + [new_verts[c] for c in next_cis]
+                        mid_3d = np.mean(all_pts, axis=0)
                         mid_idx = len(new_verts)
                         new_verts.append(mid_3d)
                         mid_centers[(si, lev)] = mid_idx  # between lev and lev+1
 
-                n_level = len(level_centers)
+                n_level = sum(len(v) for v in level_centers.values())
                 n_mid = len(mid_centers)
                 print(f"  {n_level} level centers + {n_mid} mid-centers added "
                       f"({n_streams} streams, {num_levels} levels)")
@@ -574,21 +622,18 @@ class TetrahedronMeshMixin:
                     """Collect all candidate center indices for a face."""
                     candidates = []
                     for lev in levels_in_face:
-                        # Level centers at lev-1, lev, lev+1
                         for dl in [-1, 0, 1]:
                             target_lev = lev + dl
                             if target_lev < 0:
                                 continue
                             key = (stream, target_lev)
                             if key in level_centers:
-                                candidates.append(level_centers[key])
-                            # Mid-centers: between (target_lev, target_lev+1) and (target_lev-1, target_lev)
+                                candidates.extend(level_centers[key])  # list of indices
                             if key in mid_centers:
                                 candidates.append(mid_centers[key])
                             prev_key = (stream, target_lev - 1)
                             if prev_key in mid_centers:
                                 candidates.append(mid_centers[prev_key])
-                    # Try other streams if nothing found
                     if not candidates:
                         for lev in levels_in_face:
                             for s in range(n_streams):
@@ -596,7 +641,7 @@ class TetrahedronMeshMixin:
                                     target_lev = lev + dl
                                     key = (s, target_lev)
                                     if key in level_centers:
-                                        candidates.append(level_centers[key])
+                                        candidates.extend(level_centers[key])
                                     if key in mid_centers:
                                         candidates.append(mid_centers[key])
                     return list(set(candidates))
