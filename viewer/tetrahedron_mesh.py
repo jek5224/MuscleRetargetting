@@ -575,24 +575,21 @@ try:
             # If still not watertight, try pymeshfix on the uncapped component
             if not mesh.is_watertight and post_bd > 0:
                 print(f"COMP_DEBUG {{ci}}: still {{post_bd}} boundary edges, using pymeshfix to close")
+                verts_before_fix = local_verts.copy()
+                cap_before_fix = set(local_cap)
                 fixer = pymeshfix.MeshFix(local_verts.copy(), local_faces.copy())
                 fixer.repair(verbose=False)
-                n_before_fix = len(local_verts)
                 local_verts = fixer.v.astype(np.float64)
                 local_faces = fixer.f.astype(np.int32)
-                # Remap caps
-                if len(local_verts) != n_before_fix:
-                    tree_fix = cKDTree(np.array(list(pre_subdiv_verts) if 'pre_subdiv_verts' in dir() else local_verts))
-                    # Just keep existing local_cap — pymeshfix preserves most vertices
-                    old_cap = set(local_cap)
-                    local_cap = set()
-                    fix_tree = cKDTree(local_verts)
-                    for vi in old_cap:
-                        if vi < n_before_fix:
-                            d, ni = fix_tree.query(np.array(list(pre_subdiv_verts) if 'pre_subdiv_verts' in dir() else local_verts)[vi] if vi < n_before_fix else [0,0,0])
-                            if d < 1.0:
-                                local_cap.add(ni)
-                print(f"COMP_DEBUG {{ci}}: pymeshfix {{n_before_fix}}->{{len(local_verts)}}v, cap={{len(local_cap)}}")
+                # Remap cap vertices: find each old cap vertex position in new mesh
+                local_cap = set()
+                fix_tree = cKDTree(local_verts)
+                for vi in cap_before_fix:
+                    if vi < len(verts_before_fix):
+                        d, ni = fix_tree.query(verts_before_fix[vi])
+                        if d < 1.0:
+                            local_cap.add(ni)
+                print(f"COMP_DEBUG {{ci}}: pymeshfix {{len(verts_before_fix)}}->{{len(local_verts)}}v, cap {{len(cap_before_fix)}}->{{len(local_cap)}}")
                 mesh = trimesh.Trimesh(vertices=local_verts, faces=local_faces, process=False)
         # Save pre-subdivision state
         pre_subdiv_verts = local_verts.copy()
