@@ -447,75 +447,101 @@ class TetrahedronMeshMixin:
                 script = f'''
 import numpy as np, sys
 try:
-    import tetgen, trimesh
+    import tetgen, trimesh, pymeshfix
     data = np.load("{tmp_in_path}")
     verts = data["vertices"].astype(np.float64)
     faces = data["faces"].astype(np.int32)
-    # Repair
-    mesh = trimesh.Trimesh(vertices=verts, faces=faces, process=False)
-    mesh.fix_normals()
-    mesh.remove_degenerate_faces()
-    mesh.remove_duplicate_faces()
-    rv, rf = mesh.vertices.astype(np.float64), mesh.faces.astype(np.int32)
+    n_orig = len(verts)
+    # Fix self-intersections with pymeshfix
+    fixer = pymeshfix.MeshFix(verts, faces)
+    fixer.repair(verbose=False)
+    rv, rf = fixer.v.astype(np.float64), fixer.f.astype(np.int32)
+    n_fixed = len(verts) - len(rv)
+    if n_fixed != 0:
+        print(f"REPAIRED: {{n_fixed}} verts removed by pymeshfix")
     # Scale up for precision
     rv = rv * 1000.0
     # Try multiple quality levels
+    bbox_diag = np.linalg.norm(rv.max(0) - rv.min(0))
+    max_vol = (bbox_diag / 20.0) ** 3
     for mindih, minrat in [(10, 1.5), (5, 2.0), (1, 3.0), (0, 5.0)]:
         try:
             tet = tetgen.TetGen(rv.copy(), rf.copy())
             tet.tetrahedralize(order=1, mindihedral=mindih, minratio=minrat,
-                               maxvolume=(np.linalg.norm(rv.max(0)-rv.min(0))/20)**3,
-                               nobisect=False)
+                               maxvolume=max_vol, nobisect=False)
+            print(f"QUALITY: mindih={{mindih}} minrat={{minrat}}")
             break
         except Exception:
             continue
     else:
-        # Last resort: no quality
         tet = tetgen.TetGen(rv.copy(), rf.copy())
         tet.tetrahedralize(quality=False, nobisect=True)
-    np.savez("{tmp_out_path}", node=tet.node / 1000.0, elem=tet.elem)
-    print("OK")
+        print("NOQUALITY")
+    np.savez("{tmp_out_path}", node=tet.node / 1000.0, elem=tet.elem,
+             n_orig=np.array([n_orig]))
+    print(f"OK {{len(tet.elem)}} {{len(tet.node)}}")
 except Exception as e:
     print(f"FAIL: {{e}}")
     sys.exit(1)
 '''
                 result = subprocess.run(
                     [sys.executable, '-c', script],
-                    capture_output=True, text=True, timeout=30)
+                    capture_output=True, text=True, timeout=120)
 
                 import os
+                stdout_lines = result.stdout.strip().split('\n') if result.stdout else []
+                for line in stdout_lines:
+                    if line.startswith(('REPAIRED', 'QUALITY', 'NOQUALITY')):
+                        print(f"  {line}")
+
                 if result.returncode == 0 and os.path.exists(tmp_out_path):
                     tet_data = np.load(tmp_out_path)
                     tet_verts = tet_data['node']
                     tet_elems = tet_data['elem'].astype(np.int32)
 
-                    # Verify original vertices preserved
-                    if len(tet_verts) >= n_original:
-                        max_drift = np.max(np.abs(
-                            tet_verts[:n_original] - closed_vertices.astype(np.float64)))
-                        if max_drift < 1e-4:
-                            n_steiner = len(tet_verts) - n_original
-                            # Quality stats
-                            tv0 = tet_verts[tet_elems[:, 0]]
-                            tcr = np.cross(tet_verts[tet_elems[:, 1]] - tv0,
-                                           tet_verts[tet_elems[:, 2]] - tv0)
-                            tvol = np.abs(np.einsum('ij,ij->i', tcr,
-                                          tet_verts[tet_elems[:, 3]] - tv0)) / 6.0
-                            n_good = int(np.sum(tvol >= 1e-12))
-                            print(f"  TetGen: {len(tet_elems)} tets, {len(tet_verts)} verts "
-                                  f"(+{n_steiner} Steiner), {n_good} good")
-                            print(f"    Volume range: [{tvol.min():.2e}, {tvol.max():.2e}]")
-                            closed_vertices = tet_verts.astype(np.float32)
-                            interior_tetrahedra = tet_elems
-                            tetgen_success = True
-                        else:
-                            print(f"  TetGen: vertices drifted (max={max_drift:.2e}), falling back")
-                    else:
-                        print(f"  TetGen: fewer vertices than input, falling back")
+                    # pymeshfix may have changed vertex count — check what
+                    # fraction of original vertices are preserved
+                    from scipy.spatial import cKDTree as _cKDTree
+                    orig_tree = _cKDTree(closed_vertices.astype(np.float64))
+                    dists, indices = orig_tree.query(tet_verts[:len(tet_verts)])
+                    # Count how many original vertices have a near match in tet output
+                    tet_tree = _cKDTree(tet_verts)
+                    orig_dists, _ = tet_tree.query(closed_vertices.astype(np.float64))
+                    n_preserved = int(np.sum(orig_dists < 1e-6))
+
+                    # Quality stats
+                    tv0 = tet_verts[tet_elems[:, 0]]
+                    tcr = np.cross(tet_verts[tet_elems[:, 1]] - tv0,
+                                   tet_verts[tet_elems[:, 2]] - tv0)
+                    tvol = np.abs(np.einsum('ij,ij->i', tcr,
+                                  tet_verts[tet_elems[:, 3]] - tv0)) / 6.0
+                    n_good = int(np.sum(tvol >= 1e-12))
+                    print(f"  TetGen: {len(tet_elems)} tets, {len(tet_verts)} verts, "
+                          f"{n_preserved}/{n_original} original preserved, {n_good} good")
+                    print(f"    Volume range: [{tvol.min():.2e}, {tvol.max():.2e}]")
+
+                    closed_vertices = tet_verts.astype(np.float32)
+                    interior_tetrahedra = tet_elems
+                    tetgen_success = True
+
+                    # Rebuild contour_to_tet mapping for preserved vertices
+                    # Original vertex i -> nearest tet vertex
+                    if hasattr(self, 'contour_to_tet_indices') and self.contour_to_tet_indices is not None:
+                        old_c2t = self.contour_to_tet_indices
+                        tet_tree2 = _cKDTree(tet_verts)
+                        new_c2t = []
+                        for ci, ti in enumerate(old_c2t):
+                            if ti >= 0 and ti < len(closed_vertices):
+                                # Find this vertex in the new tet mesh
+                                _, new_ti = tet_tree2.query(closed_vertices[ti].astype(np.float64))
+                                new_c2t.append(int(new_ti))
+                            else:
+                                new_c2t.append(-1)
+                        self.contour_to_tet_indices = new_c2t
                 else:
                     stderr = result.stderr.strip()[-200:] if result.stderr else ''
-                    stdout = result.stdout.strip()[-200:] if result.stdout else ''
-                    print(f"  TetGen subprocess failed: {stdout} {stderr}")
+                    stdout_msg = stdout_lines[-1] if stdout_lines else ''
+                    print(f"  TetGen subprocess failed: {stdout_msg} {stderr}")
 
                 # Cleanup temp files
                 for p in [tmp_in_path, tmp_out_path]:
