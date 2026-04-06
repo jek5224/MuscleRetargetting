@@ -428,125 +428,101 @@ class TetrahedronMeshMixin:
         # Try TetGen first (quality constrained Delaunay — well-shaped interior tets,
         # preserves surface shape, adds Steiner points on edges/faces/interior).
         # Falls back to contour-guided approach if TetGen fails.
-        use_tetgen = getattr(self, 'use_tetgen', False)  # opt-in: crashes on some meshes
+        use_tetgen = getattr(self, 'use_tetgen', True)
         tetgen_success = False
 
         if use_tetgen:
             try:
-                import tetgen as tg
-                import trimesh
-                print("Performing TetGen tetrahedralization...")
+                print("Performing TetGen tetrahedralization (subprocess)...")
                 n_original = len(closed_vertices)
 
-                # Repair surface mesh for TetGen (needs watertight manifold)
-                mesh_repair = trimesh.Trimesh(
-                    vertices=closed_vertices.astype(np.float64),
-                    faces=closed_faces.astype(np.int32),
-                    process=False)
-                # Fix normals, remove degenerate faces
-                mesh_repair.fix_normals()
-                mesh_repair.remove_degenerate_faces()
-                mesh_repair.remove_duplicate_faces()
+                # Run TetGen in a subprocess to isolate crashes
+                import tempfile, subprocess, json
+                with tempfile.NamedTemporaryFile(suffix='.npz', delete=False) as tmp_in:
+                    tmp_in_path = tmp_in.name
+                    np.savez(tmp_in, vertices=closed_vertices.astype(np.float64),
+                             faces=closed_faces.astype(np.int32))
+                tmp_out_path = tmp_in_path.replace('.npz', '_tet.npz')
 
-                repair_verts = mesh_repair.vertices.astype(np.float64)
-                repair_faces = mesh_repair.faces.astype(np.int32)
-                n_removed = len(closed_faces) - len(repair_faces)
-                if n_removed > 0:
-                    print(f"  Mesh repair: removed {n_removed} degenerate/duplicate faces")
+                script = f'''
+import numpy as np, sys
+try:
+    import tetgen, trimesh
+    data = np.load("{tmp_in_path}")
+    verts = data["vertices"].astype(np.float64)
+    faces = data["faces"].astype(np.int32)
+    # Repair
+    mesh = trimesh.Trimesh(vertices=verts, faces=faces, process=False)
+    mesh.fix_normals()
+    mesh.remove_degenerate_faces()
+    mesh.remove_duplicate_faces()
+    rv, rf = mesh.vertices.astype(np.float64), mesh.faces.astype(np.int32)
+    # Scale up for precision
+    rv = rv * 1000.0
+    # Try multiple quality levels
+    for mindih, minrat in [(10, 1.5), (5, 2.0), (1, 3.0), (0, 5.0)]:
+        try:
+            tet = tetgen.TetGen(rv.copy(), rf.copy())
+            tet.tetrahedralize(order=1, mindihedral=mindih, minratio=minrat,
+                               maxvolume=(np.linalg.norm(rv.max(0)-rv.min(0))/20)**3,
+                               nobisect=False)
+            break
+        except Exception:
+            continue
+    else:
+        # Last resort: no quality
+        tet = tetgen.TetGen(rv.copy(), rf.copy())
+        tet.tetrahedralize(quality=False, nobisect=True)
+    np.savez("{tmp_out_path}", node=tet.node / 1000.0, elem=tet.elem)
+    print("OK")
+except Exception as e:
+    print(f"FAIL: {{e}}")
+    sys.exit(1)
+'''
+                result = subprocess.run(
+                    [sys.executable, '-c', script],
+                    capture_output=True, text=True, timeout=30)
 
-                # Scale up for numerical precision (thin muscles have ~0.3mm gaps)
-                scale_factor = 1000.0
-                repair_verts = repair_verts * scale_factor
+                import os
+                if result.returncode == 0 and os.path.exists(tmp_out_path):
+                    tet_data = np.load(tmp_out_path)
+                    tet_verts = tet_data['node']
+                    tet_elems = tet_data['elem'].astype(np.int32)
 
-                # Diagnose manifold issues
-                from collections import Counter as _Counter
-                edge_face_count = _Counter()
-                for f in repair_faces:
-                    for i in range(3):
-                        e = tuple(sorted([int(f[i]), int(f[(i+1)%3])]))
-                        edge_face_count[e] += 1
-                non_manifold = [(e, c) for e, c in edge_face_count.items() if c > 2]
-                boundary = [(e, c) for e, c in edge_face_count.items() if c == 1]
-                print(f"  Mesh check: {len(repair_faces)} faces, {len(edge_face_count)} edges, "
-                      f"{len(non_manifold)} non-manifold, {len(boundary)} boundary")
-                if len(non_manifold) > 0:
-                    print(f"    First non-manifold edges: {non_manifold[:5]}")
-                if len(boundary) > 0:
-                    print(f"    {len(boundary)} boundary edges (mesh not watertight)")
-                    if len(boundary) <= 10:
-                        print(f"    Boundary edges: {boundary}")
-
-                # Pre-check: skip TetGen if mesh likely self-intersects (crashes TetGen)
-                mesh_check = trimesh.Trimesh(vertices=repair_verts, faces=repair_faces, process=False)
-                if not mesh_check.is_volume:
-                    raise RuntimeError("mesh is not a valid volume")
-                face_centers = np.mean(repair_verts[repair_faces], axis=1)
-                fn = mesh_check.face_normals
-                from scipy.spatial import cKDTree as _cKDTree
-                _fc_tree = _cKDTree(face_centers)
-                n_suspect = 0
-                n_sampled = max(1, len(face_centers) // 50)
-                for i in range(0, len(face_centers), max(1, len(face_centers) // n_sampled)):
-                    dists, idxs = _fc_tree.query(face_centers[i], k=10)
-                    for d, j in zip(dists[1:], idxs[1:]):
-                        if d < 1e-6:
-                            continue
-                        dot = np.dot(fn[i], fn[j])
-                        shared = len(set(int(x) for x in repair_faces[i]) &
-                                     set(int(x) for x in repair_faces[j]))
-                        if dot < -0.5 and d < np.mean(dists[1:4]) * 0.3 and shared == 0:
-                            n_suspect += 1
-                            break
-                if n_suspect > n_sampled * 0.3:
-                    print(f"  Thin/self-intersecting mesh detected ({n_suspect}/{n_sampled} samples), skipping TetGen")
-                    raise RuntimeError("likely self-intersecting")
-
-                tet_in = tg.TetGen(repair_verts, repair_faces)
-                # Compute a reasonable max volume from mesh bounding box
-                bbox_diag = np.linalg.norm(repair_verts.max(axis=0) - repair_verts.min(axis=0))
-                max_vol = (bbox_diag / 20.0) ** 3  # target ~20 tets along diagonal
-                # Try quality mesh first, relax if it fails
-                for attempt, (mindih, minrat) in enumerate([(10, 1.5), (5, 2.0), (1, 3.0)]):
-                    try:
-                        tet_in.tetrahedralize(order=1, mindihedral=mindih, minratio=minrat,
-                                              maxvolume=max_vol, nobisect=False)
-                        break
-                    except Exception:
-                        if attempt < 2:
-                            print(f"  TetGen attempt {attempt+1} failed (mindih={mindih}, minrat={minrat}), relaxing...")
-                            tet_in = tg.TetGen(repair_verts, repair_faces)
+                    # Verify original vertices preserved
+                    if len(tet_verts) >= n_original:
+                        max_drift = np.max(np.abs(
+                            tet_verts[:n_original] - closed_vertices.astype(np.float64)))
+                        if max_drift < 1e-4:
+                            n_steiner = len(tet_verts) - n_original
+                            # Quality stats
+                            tv0 = tet_verts[tet_elems[:, 0]]
+                            tcr = np.cross(tet_verts[tet_elems[:, 1]] - tv0,
+                                           tet_verts[tet_elems[:, 2]] - tv0)
+                            tvol = np.abs(np.einsum('ij,ij->i', tcr,
+                                          tet_verts[tet_elems[:, 3]] - tv0)) / 6.0
+                            n_good = int(np.sum(tvol >= 1e-12))
+                            print(f"  TetGen: {len(tet_elems)} tets, {len(tet_verts)} verts "
+                                  f"(+{n_steiner} Steiner), {n_good} good")
+                            print(f"    Volume range: [{tvol.min():.2e}, {tvol.max():.2e}]")
+                            closed_vertices = tet_verts.astype(np.float32)
+                            interior_tetrahedra = tet_elems
+                            tetgen_success = True
                         else:
-                            raise
-                tet_verts = tet_in.node / scale_factor  # scale back
-                tet_elems = tet_in.elem
-
-                # Verify original vertices are preserved (TetGen appends new ones)
-                if len(tet_verts) >= n_original:
-                    # Check first n_original match
-                    max_drift = np.max(np.abs(tet_verts[:n_original] - closed_vertices.astype(np.float64)))
-                    if max_drift < 1e-6:
-                        n_steiner = len(tet_verts) - n_original
-                        print(f"  TetGen: {len(tet_elems)} tets, {len(tet_verts)} verts "
-                              f"(+{n_steiner} Steiner points)")
-
-                        # Quality stats
-                        tv0 = tet_verts[tet_elems[:, 0]]
-                        tcr = np.cross(tet_verts[tet_elems[:, 1]] - tv0,
-                                       tet_verts[tet_elems[:, 2]] - tv0)
-                        tvol = np.abs(np.einsum('ij,ij->i', tcr,
-                                      tet_verts[tet_elems[:, 3]] - tv0)) / 6.0
-                        print(f"  Tet quality ({len(tet_elems)} tets):")
-                        print(f"    Volume range: [{tvol.min():.2e}, {tvol.max():.2e}]")
-                        n_good = int(np.sum(tvol >= 1e-12))
-                        print(f"    Good tets (vol >= 1e-12): {n_good}/{len(tet_elems)}")
-
-                        closed_vertices = tet_verts.astype(np.float32)
-                        interior_tetrahedra = tet_elems.astype(np.int32)
-                        tetgen_success = True
+                            print(f"  TetGen: vertices drifted (max={max_drift:.2e}), falling back")
                     else:
-                        print(f"  TetGen: original vertices drifted (max={max_drift:.2e}), falling back")
+                        print(f"  TetGen: fewer vertices than input, falling back")
                 else:
-                    print(f"  TetGen: fewer vertices than input, falling back")
+                    stderr = result.stderr.strip()[-200:] if result.stderr else ''
+                    stdout = result.stdout.strip()[-200:] if result.stdout else ''
+                    print(f"  TetGen subprocess failed: {stdout} {stderr}")
+
+                # Cleanup temp files
+                for p in [tmp_in_path, tmp_out_path]:
+                    try:
+                        os.remove(p)
+                    except OSError:
+                        pass
 
             except Exception as e:
                 print(f"  TetGen failed: {e}, falling back to contour-guided")
