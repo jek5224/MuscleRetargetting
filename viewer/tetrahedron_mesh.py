@@ -447,39 +447,57 @@ class TetrahedronMeshMixin:
                 script = f'''
 import numpy as np, sys
 try:
-    import tetgen, trimesh, pymeshfix
+    import tetgen, trimesh
     data = np.load("{tmp_in_path}")
     verts = data["vertices"].astype(np.float64)
     faces = data["faces"].astype(np.int32)
     n_orig = len(verts)
-    # Fix self-intersections with pymeshfix
-    fixer = pymeshfix.MeshFix(verts, faces)
-    fixer.repair(verbose=False)
-    rv, rf = fixer.v.astype(np.float64), fixer.f.astype(np.int32)
-    n_fixed = len(verts) - len(rv)
-    if n_fixed != 0:
-        print(f"REPAIRED: {{n_fixed}} verts removed by pymeshfix")
-    # Scale up for precision
-    rv = rv * 1000.0
+    # Scale up for numerical precision
+    rv = verts * 1000.0
+    rf = faces.copy()
+    # Fix normals
+    mesh = trimesh.Trimesh(vertices=rv, faces=rf, process=False)
+    mesh.fix_normals()
+    rv, rf = mesh.vertices.astype(np.float64), mesh.faces.astype(np.int32)
     # Compute max tet volume from mesh volume, targeting ~3000 tets
-    import trimesh as _tri
-    _mesh_vol = abs(_tri.Trimesh(vertices=rv, faces=rf, process=False).volume)
+    _mesh_vol = abs(mesh.volume)
     target_tets = 3000
     max_vol = max(_mesh_vol / target_tets, 1e-6)
     print(f"MESH_VOL={{_mesh_vol:.1f}} MAX_VOL={{max_vol:.1f}} TARGET={{target_tets}}")
+    # Try TetGen directly (mesh already capped with pole-of-inaccessibility)
+    success = False
     for mindih, minrat in [(10, 1.5), (5, 2.0), (1, 3.0), (0, 5.0)]:
         try:
             tet = tetgen.TetGen(rv.copy(), rf.copy())
             tet.tetrahedralize(order=1, mindihedral=mindih, minratio=minrat,
                                maxvolume=max_vol, nobisect=False)
             print(f"QUALITY: mindih={{mindih}} minrat={{minrat}}")
+            success = True
             break
         except Exception:
             continue
-    else:
-        tet = tetgen.TetGen(rv.copy(), rf.copy())
-        tet.tetrahedralize(quality=False, nobisect=True)
-        print("NOQUALITY")
+    if not success:
+        # Try without quality constraints
+        try:
+            tet = tetgen.TetGen(rv.copy(), rf.copy())
+            tet.tetrahedralize(quality=False, nobisect=True)
+            print("NOQUALITY")
+            success = True
+        except Exception:
+            pass
+    if not success:
+        # Last resort: pymeshfix repair then TetGen
+        import pymeshfix
+        fixer = pymeshfix.MeshFix(rv.copy(), rf.copy())
+        fixer.repair(verbose=False)
+        rv2, rf2 = fixer.v.astype(np.float64), fixer.f.astype(np.int32)
+        print(f"REPAIRED: {{len(rv)-len(rv2)}} verts changed by pymeshfix")
+        _mesh_vol2 = abs(trimesh.Trimesh(vertices=rv2, faces=rf2, process=False).volume)
+        max_vol2 = max(_mesh_vol2 / target_tets, 1e-6)
+        tet = tetgen.TetGen(rv2, rf2)
+        tet.tetrahedralize(order=1, mindihedral=5, minratio=2.0,
+                           maxvolume=max_vol2, nobisect=False)
+        print("REPAIRED_QUALITY")
     np.savez("{tmp_out_path}", node=tet.node / 1000.0, elem=tet.elem,
              n_orig=np.array([n_orig]))
     print(f"OK {{len(tet.elem)}} {{len(tet.node)}}")
