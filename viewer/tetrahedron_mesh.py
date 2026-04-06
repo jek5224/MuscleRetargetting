@@ -1332,15 +1332,15 @@ except Exception as e:
                                     flood_vis.add(fi)
                                     fc_pos = np.mean(closed_vertices[sim_faces[fi]].astype(np.float64), axis=0)
                                     # Radius check
-                                    if np.linalg.norm(fc_pos - anchor_pos) > cap_radius * 1.3:
+                                    if np.linalg.norm(fc_pos - anchor_pos) > cap_radius * 1.0:
                                         continue
-                                    # Normal check
+                                    # Strict normal check — cap is flat
                                     fv = closed_vertices[sim_faces[fi]].astype(np.float64)
                                     fn = np.cross(fv[1]-fv[0], fv[2]-fv[0])
                                     fn_len = np.linalg.norm(fn)
                                     if fn_len > 1e-12:
                                         fn /= fn_len
-                                        if abs(np.dot(fn, cap_normal)) < 0.3:
+                                        if abs(np.dot(fn, cap_normal)) < 0.8:
                                             continue
                                     if fi not in cap_fi_set:
                                         cap_face_indices.append(int(fi))
