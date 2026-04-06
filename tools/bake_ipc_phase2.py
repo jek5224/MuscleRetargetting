@@ -56,20 +56,13 @@ def load_muscle(name):
     verts = data['vertices'].astype(np.float64) * SCALE
     tets = data['tetrahedra'].astype(np.int32)
 
-    # Fix tet orientation
+    # Fix tet orientation (no removal — keep all tets including small-volume ones)
     v0 = verts[tets[:, 0]]
     cross = np.cross(verts[tets[:, 1]] - v0, verts[tets[:, 2]] - v0)
     vol = np.einsum('ij,ij->i', cross, verts[tets[:, 3]] - v0) / 6.0
     neg = vol < 0
     if np.any(neg):
         tets[neg, 1], tets[neg, 2] = tets[neg, 2].copy(), tets[neg, 1].copy()
-    # Remove degenerate
-    v0 = verts[tets[:, 0]]
-    cross = np.cross(verts[tets[:, 1]] - v0, verts[tets[:, 2]] - v0)
-    vol = np.einsum('ij,ij->i', cross, verts[tets[:, 3]] - v0) / 6.0
-    good = vol > 0.01
-    if not np.all(good):
-        tets = tets[good]
 
     # Cap vertices
     cap_faces = data.get('cap_face_indices', [])
