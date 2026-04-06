@@ -454,6 +454,24 @@ class TetrahedronMeshMixin:
                 if n_removed > 0:
                     print(f"  Mesh repair: removed {n_removed} degenerate/duplicate faces")
 
+                # Diagnose manifold issues
+                from collections import Counter as _Counter
+                edge_face_count = _Counter()
+                for f in repair_faces:
+                    for i in range(3):
+                        e = tuple(sorted([int(f[i]), int(f[(i+1)%3])]))
+                        edge_face_count[e] += 1
+                non_manifold = [(e, c) for e, c in edge_face_count.items() if c > 2]
+                boundary = [(e, c) for e, c in edge_face_count.items() if c == 1]
+                print(f"  Mesh check: {len(repair_faces)} faces, {len(edge_face_count)} edges, "
+                      f"{len(non_manifold)} non-manifold, {len(boundary)} boundary")
+                if len(non_manifold) > 0:
+                    print(f"    First non-manifold edges: {non_manifold[:5]}")
+                if len(boundary) > 0:
+                    print(f"    {len(boundary)} boundary edges (mesh not watertight)")
+                    if len(boundary) <= 10:
+                        print(f"    Boundary edges: {boundary}")
+
                 tet_in = tg.TetGen(repair_verts, repair_faces)
                 # Compute a reasonable max volume from mesh bounding box
                 bbox_diag = np.linalg.norm(repair_verts.max(axis=0) - repair_verts.min(axis=0))
