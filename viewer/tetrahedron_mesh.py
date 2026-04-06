@@ -472,8 +472,70 @@ try:
     rf = faces.copy()
     # Track cap status: set of vertex indices that are cap vertices
     is_cap = set(cap_vert_indices)
-    rv_fixed = rv.copy()
-    rf_fixed = rf.copy()
+    # Fix non-manifold edges by duplicating shared vertices.
+    # Multi-stream muscles share edges at cut boundaries (4+ faces per edge).
+    # TetGen needs manifold input (max 2 faces per edge).
+    from collections import Counter as _Ctr, defaultdict as _ddict
+    edge_faces = _ddict(list)
+    for fi, f in enumerate(rf):
+        for i in range(3):
+            e = tuple(sorted([int(f[i]), int(f[(i+1)%3])]))
+            edge_faces[e].append(fi)
+    non_manifold_edges = {{e: flist for e, flist in edge_faces.items() if len(flist) > 2}}
+    if len(non_manifold_edges) > 0:
+        print(f"FIX_MANIFOLD: {{len(non_manifold_edges)}} non-manifold edges")
+        # Collect vertices that need duplication
+        nm_verts = set()
+        for e in non_manifold_edges:
+            nm_verts.add(e[0])
+            nm_verts.add(e[1])
+        # Group faces into connected components (streams)
+        face_adj = _ddict(set)
+        for e, flist in edge_faces.items():
+            if len(flist) == 2:
+                face_adj[flist[0]].add(flist[1])
+                face_adj[flist[1]].add(flist[0])
+        visited = set()
+        components = []
+        for fi in range(len(rf)):
+            if fi in visited:
+                continue
+            comp = []
+            stack = [fi]
+            while stack:
+                f = stack.pop()
+                if f in visited:
+                    continue
+                visited.add(f)
+                comp.append(f)
+                for nb in face_adj[f]:
+                    if nb not in visited:
+                        stack.append(nb)
+            components.append(comp)
+        print(f"FIX_MANIFOLD: {{len(components)}} face components")
+        # For each component beyond the first, duplicate shared vertices
+        rv_list = list(rv)
+        rf_new = rf.copy()
+        dup_map = {{}}  # (component_idx, orig_vi) -> new_vi
+        for ci in range(1, len(components)):
+            for fi in components[ci]:
+                for vi_pos in range(3):
+                    vi = int(rf_new[fi][vi_pos])
+                    if vi in nm_verts:
+                        key = (ci, vi)
+                        if key not in dup_map:
+                            dup_map[key] = len(rv_list)
+                            rv_list.append(rv_list[vi].copy() if hasattr(rv_list[vi], 'copy') else np.array(rv_list[vi]))
+                            # Propagate cap status
+                            if vi in is_cap:
+                                is_cap.add(dup_map[key])
+                        rf_new[fi][vi_pos] = dup_map[key]
+        rv_fixed = np.array(rv_list, dtype=np.float64)
+        rf_fixed = rf_new
+        print(f"FIX_MANIFOLD: duplicated {{len(dup_map)}} vertices ({{len(rv)}} -> {{len(rv_fixed)}})")
+    else:
+        rv_fixed = rv.copy()
+        rf_fixed = rf.copy()
     # Subdivide long surface edges so TetGen produces fine surface tets
     edge_lens = []
     for f_face in rf_fixed:
