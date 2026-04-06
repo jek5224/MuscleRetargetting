@@ -428,7 +428,7 @@ class TetrahedronMeshMixin:
         # Try TetGen first (quality constrained Delaunay — well-shaped interior tets,
         # preserves surface shape, adds Steiner points on edges/faces/interior).
         # Falls back to contour-guided approach if TetGen fails.
-        use_tetgen = getattr(self, 'use_tetgen', True)
+        use_tetgen = getattr(self, 'use_tetgen', False)  # opt-in: crashes on some meshes
         tetgen_success = False
 
         if use_tetgen:
