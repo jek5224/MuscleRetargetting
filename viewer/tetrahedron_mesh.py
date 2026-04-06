@@ -438,10 +438,13 @@ class TetrahedronMeshMixin:
 
                 # Run TetGen in a subprocess to isolate crashes
                 import tempfile, subprocess, json, sys
+                # cap_start = index where cap faces begin in closed_faces
+                cap_start = len(closed_faces) - len(cap_face_indices)
                 with tempfile.NamedTemporaryFile(suffix='.npz', delete=False) as tmp_in:
                     tmp_in_path = tmp_in.name
                     np.savez(tmp_in, vertices=closed_vertices.astype(np.float64),
-                             faces=closed_faces.astype(np.int32))
+                             faces=closed_faces.astype(np.int32),
+                             cap_start=np.array([cap_start]))
                 tmp_out_path = tmp_in_path.replace('.npz', '_tet.npz')
 
                 script = f'''
@@ -451,18 +454,34 @@ try:
     data = np.load("{tmp_in_path}")
     verts = data["vertices"].astype(np.float64)
     faces = data["faces"].astype(np.int32)
+    cap_start = int(data["cap_start"])  # index where cap faces begin
     n_orig = len(verts)
     # Scale up for numerical precision
     rv = verts * 1000.0
-    rf = faces.copy()
-    # Always run pymeshfix first to fix self-intersections
-    # (TetGen crashes/segfaults on self-intersecting meshes)
-    fixer = pymeshfix.MeshFix(rv.copy(), rf.copy())
+    # Separate surface faces and cap faces
+    surface_faces = faces[:cap_start]
+    cap_faces = faces[cap_start:]
+    # Run pymeshfix on surface only (preserves cap geometry)
+    fixer = pymeshfix.MeshFix(rv.copy(), surface_faces.copy())
     fixer.repair(verbose=False)
-    rv_fixed, rf_fixed = fixer.v.astype(np.float64), fixer.f.astype(np.int32)
+    rv_fixed = fixer.v.astype(np.float64)
+    sf_fixed = fixer.f.astype(np.int32)
     n_changed = abs(len(rv) - len(rv_fixed))
     if n_changed > 0:
-        print(f"REPAIRED: {{n_changed}} verts changed by pymeshfix")
+        print(f"REPAIRED: {{n_changed}} verts changed (surface only)")
+    # Re-add cap faces — map cap vertex indices to nearest fixed vertex
+    from scipy.spatial import cKDTree
+    tree = cKDTree(rv_fixed)
+    cap_remap = dict()
+    for vi in np.unique(cap_faces.ravel()):
+        if vi < len(rv):
+            _, ni = tree.query(rv[vi])
+            cap_remap[vi] = ni
+    remapped_caps = np.array([[cap_remap.get(int(v), int(v)) for v in f] for f in cap_faces], dtype=np.int32)
+    # Remove degenerate cap faces (where vertices merged)
+    good_caps = [f for f in remapped_caps if len(set(f)) == 3]
+    rf_fixed = np.vstack([sf_fixed, np.array(good_caps, dtype=np.int32)]) if len(good_caps) > 0 else sf_fixed
+    print(f"CAPS: {{len(cap_faces)}} original, {{len(good_caps)}} preserved")
     # Fix normals
     mesh = trimesh.Trimesh(vertices=rv_fixed, faces=rf_fixed, process=False)
     mesh.fix_normals()
@@ -472,7 +491,7 @@ try:
     target_tets = 3000
     max_vol = max(_mesh_vol / target_tets, 1e-6)
     print(f"MESH_VOL={{_mesh_vol:.1f}} MAX_VOL={{max_vol:.1f}} TARGET={{target_tets}}")
-    # TetGen with quality fallback
+    # TetGen
     for mindih, minrat in [(10, 1.5), (5, 2.0), (1, 3.0), (0, 5.0)]:
         try:
             tet = tetgen.TetGen(rv_fixed.copy(), rf_fixed.copy())
