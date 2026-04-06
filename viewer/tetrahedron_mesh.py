@@ -454,6 +454,10 @@ class TetrahedronMeshMixin:
                 if n_removed > 0:
                     print(f"  Mesh repair: removed {n_removed} degenerate/duplicate faces")
 
+                # Scale up for numerical precision (thin muscles have ~0.3mm gaps)
+                scale_factor = 1000.0
+                repair_verts = repair_verts * scale_factor
+
                 # Diagnose manifold issues
                 from collections import Counter as _Counter
                 edge_face_count = _Counter()
@@ -488,7 +492,7 @@ class TetrahedronMeshMixin:
                             tet_in = tg.TetGen(repair_verts, repair_faces)
                         else:
                             raise
-                tet_verts = tet_in.node
+                tet_verts = tet_in.node / scale_factor  # scale back
                 tet_elems = tet_in.elem
 
                 # Verify original vertices are preserved (TetGen appends new ones)
