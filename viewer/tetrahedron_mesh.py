@@ -531,21 +531,44 @@ except Exception as e:
                           f"{n_preserved}/{n_original} original preserved, {n_good} good")
                     print(f"    Volume range: [{tvol.min():.2e}, {tvol.max():.2e}]")
 
+                    # Build old→new vertex index mapping via nearest vertex
+                    old_verts = closed_vertices.astype(np.float64)
+                    tet_tree2 = _cKDTree(tet_verts)
+                    old_to_new = np.zeros(len(old_verts), dtype=np.int32)
+                    for oi in range(len(old_verts)):
+                        _, ni = tet_tree2.query(old_verts[oi])
+                        old_to_new[oi] = ni
+
+                    # Remap render faces to new vertex indices
+                    new_render_faces = []
+                    for f in closed_faces:
+                        nf = [int(old_to_new[int(v)]) if int(v) < len(old_to_new) else 0 for v in f]
+                        if len(set(nf)) == 3:  # skip degenerate
+                            new_render_faces.append(nf)
+                    closed_faces = np.array(new_render_faces, dtype=np.int32)
+
+                    # Re-identify cap faces: faces touching anchor vertices
+                    anchor_set = set()
+                    if hasattr(self, 'tet_anchor_vertices'):
+                        for ai in self.tet_anchor_vertices:
+                            if ai < len(old_to_new):
+                                anchor_set.add(int(old_to_new[ai]))
+                    cap_face_indices = []
+                    for fi, f in enumerate(closed_faces):
+                        if any(int(v) in anchor_set for v in f):
+                            cap_face_indices.append(fi)
+
                     closed_vertices = tet_verts.astype(np.float32)
                     interior_tetrahedra = tet_elems
                     tetgen_success = True
 
-                    # Rebuild contour_to_tet mapping for preserved vertices
-                    # Original vertex i -> nearest tet vertex
+                    # Rebuild contour_to_tet mapping
                     if hasattr(self, 'contour_to_tet_indices') and self.contour_to_tet_indices is not None:
                         old_c2t = self.contour_to_tet_indices
-                        tet_tree2 = _cKDTree(tet_verts)
                         new_c2t = []
                         for ci, ti in enumerate(old_c2t):
-                            if ti >= 0 and ti < len(closed_vertices):
-                                # Find this vertex in the new tet mesh
-                                _, new_ti = tet_tree2.query(closed_vertices[ti].astype(np.float64))
-                                new_c2t.append(int(new_ti))
+                            if ti >= 0 and ti < len(old_to_new):
+                                new_c2t.append(int(old_to_new[ti]))
                             else:
                                 new_c2t.append(-1)
                         self.contour_to_tet_indices = new_c2t
