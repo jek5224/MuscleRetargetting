@@ -562,8 +562,39 @@ try:
                         local_cap.add(loop[i])
                 local_faces = np.array(new_faces_list, dtype=np.int32)
                 print(f"COMP_DEBUG {{ci}}: capped {{len(b_loops)}} boundary loops")
+            # Post-cap check
             mesh = trimesh.Trimesh(vertices=local_verts, faces=local_faces, process=False)
-        # Save pre-subdivision state for pymeshfix fallback
+            post_edge_count = _ddict(int)
+            for f in local_faces:
+                for i in range(3):
+                    e = tuple(sorted([int(f[i]), int(f[(i+1)%3])]))
+                    post_edge_count[e] += 1
+            post_nm = sum(1 for c in post_edge_count.values() if c > 2)
+            post_bd = sum(1 for c in post_edge_count.values() if c == 1)
+            print(f"COMP_DEBUG {{ci}}: after cap: {{len(local_verts)}}v {{len(local_faces)}}f, watertight={{mesh.is_watertight}}, nm={{post_nm}} bd={{post_bd}}")
+            # If still not watertight, try pymeshfix on the uncapped component
+            if not mesh.is_watertight and post_bd > 0:
+                print(f"COMP_DEBUG {{ci}}: still {{post_bd}} boundary edges, using pymeshfix to close")
+                fixer = pymeshfix.MeshFix(local_verts.copy(), local_faces.copy())
+                fixer.repair(verbose=False)
+                n_before_fix = len(local_verts)
+                local_verts = fixer.v.astype(np.float64)
+                local_faces = fixer.f.astype(np.int32)
+                # Remap caps
+                if len(local_verts) != n_before_fix:
+                    tree_fix = cKDTree(np.array(list(pre_subdiv_verts) if 'pre_subdiv_verts' in dir() else local_verts))
+                    # Just keep existing local_cap — pymeshfix preserves most vertices
+                    old_cap = set(local_cap)
+                    local_cap = set()
+                    fix_tree = cKDTree(local_verts)
+                    for vi in old_cap:
+                        if vi < n_before_fix:
+                            d, ni = fix_tree.query(np.array(list(pre_subdiv_verts) if 'pre_subdiv_verts' in dir() else local_verts)[vi] if vi < n_before_fix else [0,0,0])
+                            if d < 1.0:
+                                local_cap.add(ni)
+                print(f"COMP_DEBUG {{ci}}: pymeshfix {{n_before_fix}}->{{len(local_verts)}}v, cap={{len(local_cap)}}")
+                mesh = trimesh.Trimesh(vertices=local_verts, faces=local_faces, process=False)
+        # Save pre-subdivision state
         pre_subdiv_verts = local_verts.copy()
         pre_subdiv_faces = local_faces.copy()
         pre_subdiv_cap = set(local_cap)
