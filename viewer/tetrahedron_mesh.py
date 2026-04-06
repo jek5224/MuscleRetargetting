@@ -424,14 +424,65 @@ class TetrahedronMeshMixin:
                         end_name = "origin" if end_type == 0 else "insertion"
                         print(f"  Anchor {anchor_idx} -> stream {stream_idx} {end_name}, skeleton {skel_idx}")
 
-        # Step 4: Contour-guided tetrahedralization.
-        # Instead of blind Delaunay (which creates flat tets from coplanar
-        # contour vertices), use the contour structure: add a center vertex
-        # at each contour level centroid, then connect each surface face to
-        # the center vertex of the adjacent level. Every tet spans 2 levels
-        # so no tet is flat.
-        print("Performing contour-guided tetrahedralization...")
+        # Step 4: Tetrahedralization
+        # Try TetGen first (quality constrained Delaunay — well-shaped interior tets,
+        # preserves surface shape, adds Steiner points on edges/faces/interior).
+        # Falls back to contour-guided approach if TetGen fails.
+        use_tetgen = getattr(self, 'use_tetgen', True)
+        tetgen_success = False
+
+        if use_tetgen:
+            try:
+                import tetgen as tg
+                print("Performing TetGen tetrahedralization...")
+                n_original = len(closed_vertices)
+
+                tet_in = tg.TetGen(closed_vertices.astype(np.float64),
+                                   closed_faces.astype(np.int32))
+                # p = tetrahedralize PLC
+                # q = quality (min radius-edge ratio, default 2.0; lower = stricter)
+                # a = max tet volume (controls density)
+                # Compute a reasonable max volume from mesh bounding box
+                bbox_diag = np.linalg.norm(closed_vertices.max(axis=0) - closed_vertices.min(axis=0))
+                max_vol = (bbox_diag / 20.0) ** 3  # target ~20 tets along diagonal
+                tet_in.tetrahedralize(order=1, mindihedral=10, minratio=1.5,
+                                      maxvolume=max_vol, nobisect=False)
+                tet_verts = tet_in.node
+                tet_elems = tet_in.elem
+
+                # Verify original vertices are preserved (TetGen appends new ones)
+                if len(tet_verts) >= n_original:
+                    # Check first n_original match
+                    max_drift = np.max(np.abs(tet_verts[:n_original] - closed_vertices.astype(np.float64)))
+                    if max_drift < 1e-6:
+                        n_steiner = len(tet_verts) - n_original
+                        print(f"  TetGen: {len(tet_elems)} tets, {len(tet_verts)} verts "
+                              f"(+{n_steiner} Steiner points)")
+
+                        # Quality stats
+                        tv0 = tet_verts[tet_elems[:, 0]]
+                        tcr = np.cross(tet_verts[tet_elems[:, 1]] - tv0,
+                                       tet_verts[tet_elems[:, 2]] - tv0)
+                        tvol = np.abs(np.einsum('ij,ij->i', tcr,
+                                      tet_verts[tet_elems[:, 3]] - tv0)) / 6.0
+                        print(f"  Tet quality ({len(tet_elems)} tets):")
+                        print(f"    Volume range: [{tvol.min():.2e}, {tvol.max():.2e}]")
+                        n_good = int(np.sum(tvol >= 1e-12))
+                        print(f"    Good tets (vol >= 1e-12): {n_good}/{len(tet_elems)}")
+
+                        closed_vertices = tet_verts.astype(np.float32)
+                        interior_tetrahedra = tet_elems.astype(np.int32)
+                        tetgen_success = True
+                    else:
+                        print(f"  TetGen: original vertices drifted (max={max_drift:.2e}), falling back")
+                else:
+                    print(f"  TetGen: fewer vertices than input, falling back")
+
+            except Exception as e:
+                print(f"  TetGen failed: {e}, falling back to contour-guided")
+
         try:
+         if not tetgen_success:
             # Build vertex-to-level mapping
             vertex_level = getattr(self, 'vertex_contour_level', None)
             if vertex_level is not None:
