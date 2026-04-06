@@ -542,23 +542,39 @@ try:
             else:
                 print(f"COMP_DEBUG {{ci}}: pymeshfix same vert count, cap={{len(local_cap)}}")
             # Mark pymeshfix hole-closing faces as cap.
-            # pymeshfix may add or remove faces. Any face in the repaired mesh
-            # that's NOT close to any original face is a hole-closing face.
-            if n_verts_before != len(local_verts):
-                # Build position-based lookup of original face centers
-                orig_fc = np.mean(rv[used][local_remap[comp_faces]], axis=1) if len(comp_faces) > 0 else np.zeros((0,3))
-                if len(orig_fc) > 0:
-                    orig_fc_tree = cKDTree(orig_fc)
-                    new_fc = np.mean(local_verts[local_faces], axis=1)
-                    dists_to_orig, _ = orig_fc_tree.query(new_fc)
-                    n_new_cap = 0
-                    for fi in range(len(local_faces)):
-                        if dists_to_orig[fi] > 2.0:  # > 2mm from any original face
-                            for vi in local_faces[fi]:
-                                local_cap.add(int(vi))
-                            n_new_cap += 1
-                    if n_new_cap > 0:
-                        print(f"COMP_DEBUG {{ci}}: marked {{n_new_cap}} pymeshfix hole-closing faces as cap")
+            # Find boundary edges of original mesh, then find faces in repaired
+            # mesh that cover those edges (= hole-closing faces).
+            orig_edge_count = _ddict(int)
+            for f in local_remap[comp_faces]:
+                for i in range(3):
+                    e = tuple(sorted([int(f[i]), int(f[(i+1)%3])]))
+                    orig_edge_count[e] += 1
+            orig_boundary_edges = set(e for e, c in orig_edge_count.items() if c == 1)
+            if len(orig_boundary_edges) > 0:
+                # Map original boundary edge positions to repaired mesh
+                # For each repaired face, check if it covers a boundary edge (by position)
+                orig_edge_positions = set()
+                for e in orig_boundary_edges:
+                    v0 = tuple(np.round(rv[used[e[0]]] if e[0] < len(used) else [0,0,0], 2))
+                    v1 = tuple(np.round(rv[used[e[1]]] if e[1] < len(used) else [0,0,0], 2))
+                    orig_edge_positions.add((min(v0,v1), max(v0,v1)))
+                n_new_cap = 0
+                for fi, f in enumerate(local_faces):
+                    for i in range(3):
+                        v0p = tuple(np.round(local_verts[f[i]], 2))
+                        v1p = tuple(np.round(local_verts[f[(i+1)%3]], 2))
+                        epos = (min(v0p,v1p), max(v0p,v1p))
+                        if epos in orig_edge_positions:
+                            # This face covers a boundary edge → hole-closing face
+                            # But only if it's not an original face
+                            is_orig = fi < n_faces_before
+                            if not is_orig or len(local_faces) != n_faces_before:
+                                for vi in f:
+                                    local_cap.add(int(vi))
+                                n_new_cap += 1
+                            break
+                if n_new_cap > 0:
+                    print(f"COMP_DEBUG {{ci}}: marked {{n_new_cap}} hole-closing faces as cap (from {{len(orig_boundary_edges)}} boundary edges)")
             mesh = trimesh.Trimesh(vertices=local_verts, faces=local_faces, process=False)
 
         # Subdivide long edges
