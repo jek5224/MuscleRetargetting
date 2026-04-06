@@ -541,17 +541,24 @@ try:
                 local_cap = new_cap
             else:
                 print(f"COMP_DEBUG {{ci}}: pymeshfix same vert count, cap={{len(local_cap)}}")
-            # Mark NEW faces (hole-closing) as cap — all their vertices are cap
-            if len(local_faces) > n_faces_before:
-                # Find faces that weren't in the original set
-                old_face_set = set()
-                for fi in range(min(n_faces_before, len(local_faces))):
-                    old_face_set.add(tuple(sorted(local_faces[fi])))
-                for fi in range(len(local_faces)):
-                    fkey = tuple(sorted(local_faces[fi]))
-                    if fkey not in old_face_set:
-                        for vi in local_faces[fi]:
-                            local_cap.add(int(vi))
+            # Mark pymeshfix hole-closing faces as cap.
+            # pymeshfix may add or remove faces. Any face in the repaired mesh
+            # that's NOT close to any original face is a hole-closing face.
+            if n_verts_before != len(local_verts):
+                # Build position-based lookup of original face centers
+                orig_fc = np.mean(rv[used][local_remap[comp_faces]], axis=1) if len(comp_faces) > 0 else np.zeros((0,3))
+                if len(orig_fc) > 0:
+                    orig_fc_tree = cKDTree(orig_fc)
+                    new_fc = np.mean(local_verts[local_faces], axis=1)
+                    dists_to_orig, _ = orig_fc_tree.query(new_fc)
+                    n_new_cap = 0
+                    for fi in range(len(local_faces)):
+                        if dists_to_orig[fi] > 2.0:  # > 2mm from any original face
+                            for vi in local_faces[fi]:
+                                local_cap.add(int(vi))
+                            n_new_cap += 1
+                    if n_new_cap > 0:
+                        print(f"COMP_DEBUG {{ci}}: marked {{n_new_cap}} pymeshfix hole-closing faces as cap")
             mesh = trimesh.Trimesh(vertices=local_verts, faces=local_faces, process=False)
 
         # Subdivide long edges
