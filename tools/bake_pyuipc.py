@@ -197,30 +197,11 @@ def compute_multibone_lbs(muscle, skel):
                     per_vertex[vi] = [(bone_name, 1.0)]
                     anchor_bone[vi] = bone_name
 
-    # Step 2: Cap face vertices -> same bone as nearest anchor
-    cap_face_verts = set()
-    if sim_faces is not None:
-        for fi in cap_faces_idx:
-            if fi < len(sim_faces):
-                for vi_orig in sim_faces[fi]:
-                    vi = int(vi_orig)
-                    if remap is not None:
-                        vi = int(remap[vi]) if vi < len(remap) else -1
-                    if vi >= 0 and vi < n_verts:
-                        cap_face_verts.add(vi)
+    # Step 2: Cap face vertices — NOT rigidly assigned; they participate in
+    # heat diffusion with cap anchors as seeds.  This avoids the sharp
+    # weight discontinuity at cap boundaries that causes bumpy deformation.
 
-    if len(anchor_bone) > 0:
-        anchor_vis = list(anchor_bone.keys())
-        anchor_pos = rest_verts[anchor_vis]
-        anchor_tree = cKDTree(anchor_pos)
-        for vi in cap_face_verts:
-            if vi in per_vertex:
-                continue
-            _, idx = anchor_tree.query(rest_verts[vi])
-            nearest_anchor = anchor_vis[idx]
-            per_vertex[vi] = [(anchor_bone[nearest_anchor], 1.0)]
-
-    # Step 3: Interior vertices — heat-diffused weights on tet mesh
+    # Step 3: All non-anchor vertices — heat-diffused weights on tet mesh
     # Build adjacency from tetrahedra
     tets = muscle['tetrahedra']
     adj = [set() for _ in range(n_verts)]
@@ -230,32 +211,23 @@ def compute_multibone_lbs(muscle, skel):
                 adj[t[i]].add(t[j])
                 adj[t[j]].add(t[i])
 
-    # Build per-bone seed sets (cap vertices assigned to each bone)
+    # Build per-bone seed sets (only anchor vertices)
     bone_cap_verts = {}
     for vi, bname in anchor_bone.items():
         bone_cap_verts.setdefault(bname, []).append(vi)
-    for vi in cap_face_verts:
-        if vi in per_vertex and len(per_vertex[vi]) == 1:
-            bname = per_vertex[vi][0][0]
-            bone_cap_verts.setdefault(bname, []).append(vi)
 
-    # Fixed vertices (caps) — don't change during diffusion
-    fixed = set(per_vertex.keys())
+    # Only anchor vertices are fixed during diffusion
+    fixed = set(anchor_bone.keys())
 
-    # Heat diffusion: for each bone, init heat=1 at its caps, 0 elsewhere
-    # then iteratively average with neighbors (Jacobi iteration)
-    n_iters = 50
+    # Heat diffusion: Laplacian smoothing from anchor seeds
+    n_iters = 100  # more iterations for smoother weights
     bone_heat = {}
     for bname in bone_names:
         if bname not in bone_cap_verts:
             continue
         heat = np.zeros(n_verts)
-        for vi in bone_cap_verts.get(bname, []):
+        for vi in bone_cap_verts[bname]:
             heat[vi] = 1.0
-        # Also set cap face vertices for this bone
-        for vi in cap_face_verts:
-            if vi in per_vertex and per_vertex[vi][0][0] == bname:
-                heat[vi] = 1.0
         bone_heat[bname] = heat
 
     for _ in range(n_iters):
@@ -267,7 +239,7 @@ def compute_multibone_lbs(muscle, skel):
                 new_heat[vi] = np.mean([heat[ni] for ni in adj[vi]])
             bone_heat[bname] = new_heat
 
-    # Assign normalized weights to interior vertices
+    # Assign normalized weights
     for vi in range(n_verts):
         if vi in per_vertex:
             continue
@@ -276,7 +248,6 @@ def compute_multibone_lbs(muscle, skel):
             if heat[vi] > 1e-8:
                 weights.append((bname, heat[vi]))
         if len(weights) == 0:
-            # Fallback: nearest bone by joint center
             best_dist = float('inf')
             best_bone = bone_names[0]
             for bname in bone_names:
@@ -577,6 +548,25 @@ def main():
         for m in muscles:
             if m['lbs_bindings'] is not None:
                 lbs_pos = compute_lbs_positions(m['lbs_bindings'], skel, len(m['vertices']))
+                # Laplacian smooth LBS targets to fix candy-wrapper artifacts
+                adj = m.get('_adj')
+                if adj is None:
+                    adj = [set() for _ in range(len(m['vertices']))]
+                    for t in m['tetrahedra']:
+                        for i in range(4):
+                            for j in range(i + 1, 4):
+                                adj[t[i]].add(t[j])
+                                adj[t[j]].add(t[i])
+                    m['_adj'] = adj
+                fixed_set = set(m['fixed_vertices'])
+                for _ in range(3):
+                    smoothed = lbs_pos.copy()
+                    for vi in range(len(lbs_pos)):
+                        if vi in fixed_set or len(adj[vi]) == 0:
+                            continue
+                        smoothed[vi] = 0.5 * lbs_pos[vi] + 0.5 * np.mean(
+                            lbs_pos[list(adj[vi])], axis=0)
+                    lbs_pos = smoothed
                 m['aim_targets'][:] = lbs_pos
             # else: aim_targets stays at rest_vertices (shouldn't happen)
 
