@@ -491,7 +491,7 @@ try:
     rv = verts * 1000.0
     rf = faces.copy()
     is_cap = set(cap_vert_indices)
-    print(f"MESH_INPUT: {{len(rv)}}v {{len(rf)}}f, {{len(is_cap)}} cap verts")
+    print(f"MESH_INPUT: {{len(rv)}}v {{len(rf)}}f, {{len(is_cap)}} cap verts", flush=True)
 
     # Per-stream face grouping
     if "face_stream" in data.files:

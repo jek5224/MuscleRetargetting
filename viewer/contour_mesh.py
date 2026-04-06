@@ -7640,7 +7640,11 @@ class ContourMeshMixin(ContourAnimationMixin):
             self.is_draw_contour_mesh = True
 
         # Save per-stream face mapping for per-stream tetrahedralization
-        self._face_stream_map = np.array(face_stream_map[:len(all_faces)], dtype=np.int32) if face_stream_map else None
+        # Extend for any gap-closing faces added after mesh building
+        n_mesh_faces = len(self.contour_mesh_faces) if self.contour_mesh_faces is not None else len(all_faces)
+        while len(face_stream_map) < n_mesh_faces:
+            face_stream_map.append(0)  # assign gap-closing faces to stream 0
+        self._face_stream_map = np.array(face_stream_map[:n_mesh_faces], dtype=np.int32) if face_stream_map else None
 
         print(f"Built contour mesh: {len(self.contour_mesh_vertices)} vertices, "
               f"{len(self.contour_mesh_faces)} faces from {num_streams} streams")
