@@ -437,7 +437,7 @@ class TetrahedronMeshMixin:
                 n_original = len(closed_vertices)
 
                 # Run TetGen in a subprocess to isolate crashes
-                import tempfile, subprocess, json
+                import tempfile, subprocess, json, sys
                 with tempfile.NamedTemporaryFile(suffix='.npz', delete=False) as tmp_in:
                     tmp_in_path = tmp_in.name
                     np.savez(tmp_in, vertices=closed_vertices.astype(np.float64),
