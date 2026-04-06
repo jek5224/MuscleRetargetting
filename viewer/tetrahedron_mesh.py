@@ -469,7 +469,7 @@ try:
         for i in range(3):
             edge_lens.append(np.linalg.norm(rv_fixed[f_face[(i+1)%3]] - rv_fixed[f_face[i]]))
     median_edge = np.median(edge_lens)
-    max_edge_len = median_edge * 1.5
+    max_edge_len = median_edge * 0.7  # subdivide most edges for uniform surface
     print(f"EDGE_STATS: median={{median_edge:.2f}} threshold={{max_edge_len:.2f}} exceed={{sum(1 for e in edge_lens if e > max_edge_len)}}")
     for _subdiv_iter in range(3):
         new_verts = list(rv_fixed)
@@ -1112,13 +1112,29 @@ except Exception as e:
         if tetgen_success:
             # TetGen subdivides the surface — use tet boundary as render faces
             self.tet_render_faces = sim_faces
+            # Re-identify cap faces in sim_faces (faces touching anchor vertices)
+            anchor_set_final = set()
+            if hasattr(self, 'tet_anchor_vertices'):
+                from scipy.spatial import cKDTree as _cKDTree2
+                tet_tree_final = _cKDTree2(closed_vertices.astype(np.float64))
+                for ai in self.tet_anchor_vertices:
+                    if ai < n_original:
+                        # Find anchor in new vertices
+                        orig_pos = vertices_original[ai] if ai < len(vertices_original) else None
+                        if orig_pos is not None:
+                            _, ni = tet_tree_final.query(orig_pos.astype(np.float64))
+                            anchor_set_final.add(int(ni))
+            cap_face_indices = []
+            for fi, f in enumerate(sim_faces):
+                if any(int(v) in anchor_set_final for v in f):
+                    cap_face_indices.append(fi)
         else:
             self.tet_render_faces = closed_faces  # Original surface + caps
         self.tet_sim_faces = sim_faces  # Tet boundary faces
         self.tet_faces = self.tet_render_faces  # Backwards compatibility
 
         self.tet_cap_face_indices = cap_face_indices  # Indices of cap faces (fixed during simulation)
-        self.tet_surface_face_count = len(faces)  # Number of original surface faces
+        self.tet_surface_face_count = len(self.tet_render_faces) - len(cap_face_indices)
 
         print(f"Tetrahedralization complete:")
         print(f"  Vertices: {len(self.tet_vertices)}")
