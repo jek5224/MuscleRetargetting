@@ -441,14 +441,34 @@ class TetrahedronMeshMixin:
                     for ai in self.tet_anchor_vertices:
                         if ai < len(closed_vertices):
                             _anchor_positions[ai] = closed_vertices[ai].copy()
-                # Collect all original cap vertex positions (boundary loop + anchor)
-                _cap_vertex_positions = []
+                # Compute cap planes from boundary loop vertices
+                _cap_planes = []  # list of (centroid, normal, radius)
+                _cap_vertex_set = set()
                 for fi in cap_face_indices:
                     if fi < len(closed_faces):
                         for vi in closed_faces[fi]:
-                            _cap_vertex_positions.append(closed_vertices[int(vi)].copy())
-                if _cap_vertex_positions:
-                    _cap_vertex_positions = np.array(_cap_vertex_positions, dtype=np.float64)
+                            _cap_vertex_set.add(int(vi))
+                # Group cap vertices by anchor (each anchor = one cap)
+                for ai_pos in _anchor_positions.values():
+                    cap_pts = []
+                    for vi in _cap_vertex_set:
+                        if vi < len(closed_vertices):
+                            cap_pts.append(closed_vertices[vi].astype(np.float64))
+                    if len(cap_pts) < 3:
+                        continue
+                    cap_pts = np.array(cap_pts)
+                    # Find cap vertices closest to this anchor
+                    dists = np.linalg.norm(cap_pts - ai_pos.astype(np.float64), axis=1)
+                    near = dists < np.median(dists) + 1e-6  # this anchor's cap
+                    near_pts = cap_pts[near]
+                    if len(near_pts) < 3:
+                        continue
+                    centroid = near_pts.mean(axis=0)
+                    # Normal from SVD
+                    _, _, Vt = np.linalg.svd(near_pts - centroid, full_matrices=False)
+                    normal = Vt[2]  # smallest singular value direction
+                    radius = np.max(np.linalg.norm(near_pts - centroid, axis=1))
+                    _cap_planes.append((centroid, normal, radius))
 
                 # Run TetGen in a subprocess to isolate crashes
                 import tempfile, subprocess, json, sys
@@ -1130,37 +1150,17 @@ except Exception as e:
         if tetgen_success:
             # TetGen subdivides the surface — use tet boundary as render faces
             self.tet_render_faces = sim_faces
-            # Re-identify cap vertices: original cap vertices + any TetGen
-            # Steiner point that lies on an edge between two cap vertices
-            cap_verts_new = set()
-            if len(_cap_vertex_positions) > 0:
-                from scipy.spatial import cKDTree as _cKDTree2
-                cap_tree = _cKDTree2(_cap_vertex_positions)
-                for vi in range(len(closed_vertices)):
-                    d, _ = cap_tree.query(closed_vertices[vi].astype(np.float64))
-                    if d < 1e-5:
-                        cap_verts_new.add(vi)
-                        continue
-                    # Check if vertex lies on an edge between two cap vertices:
-                    # find 2 nearest cap vertices and check collinearity
-                    if len(_cap_vertex_positions) >= 2:
-                        dists, idxs = cap_tree.query(closed_vertices[vi].astype(np.float64), k=2)
-                        p = closed_vertices[vi].astype(np.float64)
-                        a = _cap_vertex_positions[idxs[0]]
-                        b = _cap_vertex_positions[idxs[1]]
-                        ab = b - a
-                        ab_len = np.linalg.norm(ab)
-                        if ab_len > 1e-10:
-                            t = np.dot(p - a, ab) / (ab_len * ab_len)
-                            if 0.0 <= t <= 1.0:
-                                proj = a + t * ab
-                                dist_to_edge = np.linalg.norm(p - proj)
-                                if dist_to_edge < 1e-5:
-                                    cap_verts_new.add(vi)
+            # Re-identify cap faces: faces on cap planes
             cap_face_indices = []
+            plane_tol = 1e-4  # distance tolerance to cap plane
             for fi, f in enumerate(sim_faces):
-                if all(int(v) in cap_verts_new for v in f):
-                    cap_face_indices.append(fi)
+                face_center = np.mean(closed_vertices[[int(f[0]), int(f[1]), int(f[2])]].astype(np.float64), axis=0)
+                for centroid, normal, radius in _cap_planes:
+                    dist_to_plane = abs(np.dot(face_center - centroid, normal))
+                    dist_to_center = np.linalg.norm(face_center - centroid)
+                    if dist_to_plane < plane_tol and dist_to_center < radius * 1.2:
+                        cap_face_indices.append(fi)
+                        break
         else:
             self.tet_render_faces = closed_faces  # Original surface + caps
         self.tet_sim_faces = sim_faces  # Tet boundary faces
