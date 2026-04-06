@@ -726,32 +726,30 @@ try:
                     print(f"COMP_DEBUG {{ci}}: pymeshfix+TetGen also failed: {{e2}}", flush=True)
                     # Restore and use contour-guided
                     local_verts = verts_bk
+                    local_faces = pre_subdiv_faces.copy()
                     local_cap = cap_bk
                     print(f"COMP_DEBUG {{ci}}: using contour-guided fallback", flush=True)
-                # Connect each face to its centroid to make tets
-                centroid_3d = np.mean(local_verts[local_faces], axis=1)
-                fallback_tets = []
-                for fi, f in enumerate(local_faces):
-                    ci_v = len(local_verts)
-                    local_verts = np.vstack([local_verts, centroid_3d[fi:fi+1]])
-                    fallback_tets.append([int(f[0]), int(f[1]), int(f[2]), ci_v])
-                fallback_tets = np.array(fallback_tets, dtype=np.int32)
-                # Fix inverted tets
-                v0t = local_verts[fallback_tets[:,0]]
-                cr = np.cross(local_verts[fallback_tets[:,1]]-v0t,
-                              local_verts[fallback_tets[:,2]]-v0t)
-                vol = np.einsum('ij,ij->i', cr, local_verts[fallback_tets[:,3]]-v0t) / 6.0
-                neg = vol < 0
-                if np.any(neg):
-                    fallback_tets[neg,1], fallback_tets[neg,2] = fallback_tets[neg,2].copy(), fallback_tets[neg,1].copy()
-                n_inv = int(np.sum(neg))
-                # Create a fake tet object
-                class FakeTet:
-                    pass
-                tet = FakeTet()
-                tet.node = local_verts
-                tet.elem = fallback_tets
-                print(f"COMP_DEBUG {{ci}}: contour-guided {{len(fallback_tets)}} tets, {{n_inv}} flipped")
+                    # Connect each face to its centroid to make tets
+                    centroid_3d = np.mean(local_verts[local_faces], axis=1)
+                    fallback_tets = []
+                    for fi, f in enumerate(local_faces):
+                        ci_v = len(local_verts)
+                        local_verts = np.vstack([local_verts, centroid_3d[fi:fi+1]])
+                        fallback_tets.append([int(f[0]), int(f[1]), int(f[2]), ci_v])
+                    fallback_tets = np.array(fallback_tets, dtype=np.int32)
+                    v0t = local_verts[fallback_tets[:,0]]
+                    cr = np.cross(local_verts[fallback_tets[:,1]]-v0t,
+                                  local_verts[fallback_tets[:,2]]-v0t)
+                    vol = np.einsum('ij,ij->i', cr, local_verts[fallback_tets[:,3]]-v0t) / 6.0
+                    neg = vol < 0
+                    if np.any(neg):
+                        fallback_tets[neg,1], fallback_tets[neg,2] = fallback_tets[neg,2].copy(), fallback_tets[neg,1].copy()
+                    class FakeTet:
+                        pass
+                    tet = FakeTet()
+                    tet.node = local_verts
+                    tet.elem = fallback_tets
+                    print(f"COMP_DEBUG {{ci}}: contour-guided {{len(fallback_tets)}} tets")
         if tet is None:
             print(f"COMP {{ci}}: FAILED completely")
             continue
