@@ -465,11 +465,12 @@ try:
         print(f"REPAIRED: {{n_changed}} verts changed")
     # Subdivide long surface edges so TetGen produces fine surface tets
     edge_lens = []
-    for f in rf_fixed:
+    for f_face in rf_fixed:
         for i in range(3):
-            edge_lens.append(np.linalg.norm(rv_fixed[f[(i+1)%3]] - rv_fixed[f[i]]))
+            edge_lens.append(np.linalg.norm(rv_fixed[f_face[(i+1)%3]] - rv_fixed[f_face[i]]))
     median_edge = np.median(edge_lens)
     max_edge_len = median_edge * 1.5
+    print(f"EDGE_STATS: median={{median_edge:.2f}} threshold={{max_edge_len:.2f}} exceed={{sum(1 for e in edge_lens if e > max_edge_len)}}")
     for _subdiv_iter in range(3):
         new_verts = list(rv_fixed)
         new_faces = []
@@ -575,7 +576,7 @@ except Exception as e:
                 import os
                 stdout_lines = result.stdout.strip().split('\n') if result.stdout else []
                 for line in stdout_lines:
-                    if line.startswith(('REPAIRED', 'QUALITY', 'NOQUALITY')):
+                    if line.startswith(('REPAIRED', 'QUALITY', 'NOQUALITY', 'EDGE_STATS', 'SUBDIVIDE', 'MESH_VOL')):
                         print(f"  {line}")
 
                 if result.returncode == 0 and os.path.exists(tmp_out_path):
