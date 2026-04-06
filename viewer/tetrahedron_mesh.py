@@ -463,255 +463,165 @@ import numpy as np, sys
 try:
     import tetgen, trimesh, pymeshfix
     from scipy.spatial import cKDTree
+    from collections import defaultdict as _ddict
     data = np.load("{tmp_in_path}")
     verts = data["vertices"].astype(np.float64)
     faces = data["faces"].astype(np.int32)
     cap_vert_indices = set(data["cap_verts"].tolist())
     n_orig = len(verts)
-    # Scale up for numerical precision
     rv = verts * 1000.0
     rf = faces.copy()
-    # Track cap status: set of vertex indices that are cap vertices
     is_cap = set(cap_vert_indices)
     print(f"MESH_INPUT: {{len(rv)}}v {{len(rf)}}f, {{len(is_cap)}} cap verts")
-    # Fix non-manifold edges by duplicating shared vertices.
-    # Multi-stream muscles share edges at cut boundaries (4+ faces per edge).
-    # TetGen needs manifold input (max 2 faces per edge).
-    from collections import Counter as _Ctr, defaultdict as _ddict
+
+    # Separate into face components via manifold edges
     edge_faces = _ddict(list)
     for fi, f in enumerate(rf):
         for i in range(3):
             e = tuple(sorted([int(f[i]), int(f[(i+1)%3])]))
             edge_faces[e].append(fi)
-    non_manifold_edges = {{e: flist for e, flist in edge_faces.items() if len(flist) > 2}}
-    boundary_edges = {{e: flist for e, flist in edge_faces.items() if len(flist) == 1}}
-    print(f"FIX_MANIFOLD: {{len(non_manifold_edges)}} non-manifold, {{len(boundary_edges)}} boundary edges")
-    if len(non_manifold_edges) > 0:
-        print(f"FIX_MANIFOLD: {{len(non_manifold_edges)}} non-manifold edges")
-        # Collect vertices that need duplication
-        nm_verts = set()
-        for e in non_manifold_edges:
-            nm_verts.add(e[0])
-            nm_verts.add(e[1])
-        # Group faces into connected components (streams)
-        face_adj = _ddict(set)
-        for e, flist in edge_faces.items():
-            if len(flist) == 2:
-                face_adj[flist[0]].add(flist[1])
-                face_adj[flist[1]].add(flist[0])
-        visited = set()
-        components = []
-        for fi in range(len(rf)):
-            if fi in visited:
-                continue
-            comp = []
-            stack = [fi]
-            while stack:
-                f = stack.pop()
-                if f in visited:
-                    continue
-                visited.add(f)
-                comp.append(f)
-                for nb in face_adj[f]:
-                    if nb not in visited:
-                        stack.append(nb)
-            components.append(comp)
-        print(f"FIX_MANIFOLD: {{len(components)}} face components")
-        # For each component beyond the first, duplicate shared vertices
-        rv_list = list(rv)
-        rf_new = rf.copy()
-        dup_map = {{}}  # (component_idx, orig_vi) -> new_vi
-        for ci in range(1, len(components)):
-            for fi in components[ci]:
-                for vi_pos in range(3):
-                    vi = int(rf_new[fi][vi_pos])
-                    if vi in nm_verts:
-                        key = (ci, vi)
-                        if key not in dup_map:
-                            dup_map[key] = len(rv_list)
-                            rv_list.append(rv_list[vi].copy() if hasattr(rv_list[vi], 'copy') else np.array(rv_list[vi]))
-                            # Propagate cap status
-                            if vi in is_cap:
-                                is_cap.add(dup_map[key])
-                        rf_new[fi][vi_pos] = dup_map[key]
-        rv_fixed = np.array(rv_list, dtype=np.float64)
-        rf_fixed = rf_new
-        print(f"FIX_MANIFOLD: duplicated {{len(dup_map)}} vertices ({{len(rv)}} -> {{len(rv_fixed)}})")
-        # After duplication, cut seams become open boundaries.
-        # Cap them to close each stream into a watertight volume.
-        edge_faces2 = _ddict(list)
-        for fi, f in enumerate(rf_fixed):
-            for i in range(3):
-                e = tuple(sorted([int(f[i]), int(f[(i+1)%3])]))
-                edge_faces2[e].append(fi)
-        open_edges2 = [e for e, flist in edge_faces2.items() if len(flist) == 1]
-        if len(open_edges2) > 0:
-            print(f"FIX_MANIFOLD: {{len(open_edges2)}} new boundary edges, capping...")
-            # Find boundary loops
-            from collections import defaultdict as _dd2
-            edge_adj = _dd2(list)
-            for e in open_edges2:
-                edge_adj[e[0]].append(e[1])
-                edge_adj[e[1]].append(e[0])
-            visited2 = set()
-            loops2 = []
-            for start in edge_adj:
-                if start in visited2:
-                    continue
-                loop = []
-                current = start
-                prev = None
-                while True:
-                    loop.append(current)
-                    visited2.add(current)
-                    nbs = edge_adj[current]
-                    nxt = None
-                    for n in nbs:
-                        if n != prev and n not in visited2:
-                            nxt = n
-                            break
-                    if nxt is None:
-                        break
-                    prev = current
-                    current = nxt
-                if len(loop) >= 3:
-                    loops2.append(loop)
-            print(f"FIX_MANIFOLD: {{len(loops2)}} new boundary loops")
-            new_faces = list(rf_fixed)
-            for loop in loops2:
-                # Cap with fan from centroid
-                centroid = np.mean([rv_fixed[vi] for vi in loop], axis=0)
-                anchor_vi = len(rv_fixed)
-                rv_fixed = np.vstack([rv_fixed, centroid.reshape(1, -1)])
-                is_cap.add(anchor_vi)
-                # Determine winding from adjacent face
-                for i in range(len(loop)):
-                    vi = loop[i]
-                    vj = loop[(i + 1) % len(loop)]
-                    new_faces.append([vi, vj, anchor_vi])
-                    # Mark loop vertices as cap
-                    is_cap.add(vi)
-                    is_cap.add(vj)
-            rf_fixed = np.array(new_faces, dtype=np.int32)
-            print(f"FIX_MANIFOLD: capped, now {{len(rv_fixed)}}v {{len(rf_fixed)}}f")
-    else:
-        rv_fixed = rv.copy()
-        rf_fixed = rf.copy()
-    # Subdivide long surface edges so TetGen produces fine surface tets
-    edge_lens = []
-    for f_face in rf_fixed:
-        for i in range(3):
-            edge_lens.append(np.linalg.norm(rv_fixed[f_face[(i+1)%3]] - rv_fixed[f_face[i]]))
-    median_edge = np.median(edge_lens)
-    max_edge_len = median_edge * 0.7  # subdivide most edges for uniform surface
-    print(f"EDGE_STATS: median={{median_edge:.2f}} threshold={{max_edge_len:.2f}} exceed={{sum(1 for e in edge_lens if e > max_edge_len)}}")
-    for _subdiv_iter in range(3):
-        new_verts = list(rv_fixed)
-        new_faces = []
-        edge_midpoints = dict()
-        n_split = 0
-        for f in rf_fixed:
-            splits = []
-            for i in range(3):
-                v0i, v1i = int(f[i]), int(f[(i+1)%3])
-                elen = np.linalg.norm(rv_fixed[v0i] - rv_fixed[v1i]) if v0i < len(rv_fixed) and v1i < len(rv_fixed) else 0
-                if elen > max_edge_len:
-                    ekey = (min(v0i,v1i), max(v0i,v1i))
-                    if ekey not in edge_midpoints:
-                        mid = (np.array(new_verts[v0i]) + np.array(new_verts[v1i])) / 2
-                        mid_idx = len(new_verts)
-                        edge_midpoints[ekey] = mid_idx
-                        new_verts.append(mid)
-                        # Propagate cap: if both endpoints are cap, midpoint is cap
-                        if v0i in is_cap and v1i in is_cap:
-                            is_cap.add(mid_idx)
-                    splits.append((i, edge_midpoints[ekey]))
-                else:
-                    splits.append((i, None))
-            split_edges = [(i, mi) for i, mi in splits if mi is not None]
-            if len(split_edges) == 0:
-                new_faces.append(list(f))
-            elif len(split_edges) == 1:
-                ei, mi = split_edges[0]
-                v0, v1, v2 = int(f[ei]), int(f[(ei+1)%3]), int(f[(ei+2)%3])
-                new_faces.append([v0, mi, v2])
-                new_faces.append([mi, v1, v2])
-                n_split += 1
-            elif len(split_edges) == 2:
-                ei0, mi0 = split_edges[0]
-                ei1, mi1 = split_edges[1]
-                vs = [int(f[0]), int(f[1]), int(f[2])]
-                mids = {{}}
-                for ei, mi in split_edges:
-                    mids[ei] = mi
-                if 0 in mids and 1 in mids:
-                    new_faces.append([vs[0], mids[0], vs[2]])
-                    new_faces.append([mids[0], vs[1], mids[1]])
-                    new_faces.append([mids[0], mids[1], vs[2]])
-                elif 0 in mids and 2 in mids:
-                    new_faces.append([vs[0], mids[0], mids[2]])
-                    new_faces.append([mids[0], vs[1], vs[2]])
-                    new_faces.append([mids[0], vs[2], mids[2]])
-                elif 1 in mids and 2 in mids:
-                    new_faces.append([vs[0], vs[1], mids[1]])
-                    new_faces.append([vs[0], mids[1], mids[2]])
-                    new_faces.append([mids[1], vs[2], mids[2]])
-                n_split += 1
-            else:  # all 3 edges split
-                vs = [int(f[0]), int(f[1]), int(f[2])]
-                m01 = splits[0][1]
-                m12 = splits[1][1]
-                m20 = splits[2][1]
-                new_faces.append([vs[0], m01, m20])
-                new_faces.append([m01, vs[1], m12])
-                new_faces.append([m20, m12, vs[2]])
-                new_faces.append([m01, m12, m20])
-                n_split += 1
-        rv_fixed = np.array(new_verts, dtype=np.float64)
-        rf_fixed = np.array(new_faces, dtype=np.int32)
-        if n_split == 0:
-            break
-        print(f"SUBDIVIDE iter {{_subdiv_iter}}: split {{n_split}} faces, now {{len(rv_fixed)}}v {{len(rf_fixed)}}f")
-    # Fix normals
-    mesh = trimesh.Trimesh(vertices=rv_fixed, faces=rf_fixed, process=False)
-    mesh.fix_normals()
-    rv_fixed, rf_fixed = mesh.vertices.astype(np.float64), mesh.faces.astype(np.int32)
-    # Compute max tet volume targeting ~2000 tets
-    _mesh_vol = abs(mesh.volume)
-    target_tets = 2000
-    max_vol = max(_mesh_vol / target_tets, 1e-6)
-    print(f"MESH_VOL={{_mesh_vol:.1f}} MAX_VOL={{max_vol:.1f}} TARGET={{target_tets}}")
-    # TetGen — quality + maxvolume, with steinerleft to cap count
-    # For thin muscles, quality constraints force many tets.
-    # Use steinerleft to limit total vertex count while allowing
-    # surface subdivision (nobisect=False).
-    target_verts = 3000
-    n_surface = len(rv_fixed)
-    steiner_budget = max(target_verts - n_surface, 500)
-    try:
-        tet = tetgen.TetGen(rv_fixed.copy(), rf_fixed.copy())
-        tet.tetrahedralize(order=1, mindihedral=5, minratio=2.0,
-                           maxvolume=max_vol, nobisect=True,
-                           steinerleft=steiner_budget)
-        n_tets = len(tet.elem)
-        n_verts = len(tet.node)
-        print(f"QUALITY: steiner_budget={{steiner_budget}} -> {{n_tets}} tets, {{n_verts}} verts")
-    except Exception:
-        tet = tetgen.TetGen(rv_fixed.copy(), rf_fixed.copy())
-        tet.tetrahedralize(quality=False, nobisect=False)
-        print(f"NOQUALITY -> {{len(tet.elem)}} tets")
-    # With nobisect=True, TetGen only adds interior Steiner points.
-    # Surface vertices are unchanged — cap status is already correct.
-    tet_node = tet.node
-    tet_elem = tet.elem
+    face_adj = _ddict(set)
+    for e, flist in edge_faces.items():
+        if len(flist) == 2:
+            face_adj[flist[0]].add(flist[1])
+            face_adj[flist[1]].add(flist[0])
+    visited = set()
+    components = []
+    for fi in range(len(rf)):
+        if fi in visited: continue
+        comp = []
+        stack = [fi]
+        while stack:
+            f = stack.pop()
+            if f in visited: continue
+            visited.add(f)
+            comp.append(f)
+            for nb in face_adj[f]:
+                if nb not in visited: stack.append(nb)
+        components.append(comp)
+    big_comps = [c for c in components if len(c) >= 10]
+    print(f"COMPONENTS: {{len(big_comps)}} significant (of {{len(components)}} total)")
 
-    cap_verts_out = np.array(sorted(is_cap), dtype=np.int32)
+    all_nodes = []
+    all_elems = []
+    all_cap_verts = set()
+    node_offset = 0
+
+    for ci, comp in enumerate(big_comps):
+        comp_faces = rf[comp]
+        used = np.unique(comp_faces.ravel())
+        local_remap = np.full(len(rv), -1, dtype=np.int32)
+        local_remap[used] = np.arange(len(used), dtype=np.int32)
+        local_verts = rv[used].copy()
+        local_faces = local_remap[comp_faces]
+        local_cap = set()
+        for vi_global in used:
+            if int(vi_global) in is_cap:
+                local_cap.add(int(local_remap[vi_global]))
+
+        # Close holes with pymeshfix (safe on single component)
+        mesh = trimesh.Trimesh(vertices=local_verts, faces=local_faces, process=False)
+        if not mesh.is_watertight:
+            fixer = pymeshfix.MeshFix(local_verts.copy(), local_faces.copy())
+            fixer.repair(verbose=False)
+            n_before = len(local_verts)
+            local_verts = fixer.v.astype(np.float64)
+            local_faces = fixer.f.astype(np.int32)
+            # Remap cap to repaired mesh
+            if len(local_verts) != n_before:
+                tree_old = cKDTree(rv[used])
+                new_cap = set()
+                for vi in range(len(local_verts)):
+                    d, oi = tree_old.query(local_verts[vi])
+                    if d < 1e-3 and int(local_remap[used[oi]]) in local_cap:
+                        new_cap.add(vi)
+                local_cap = new_cap
+            mesh = trimesh.Trimesh(vertices=local_verts, faces=local_faces, process=False)
+
+        # Subdivide long edges
+        mesh.fix_normals()
+        edge_lens = []
+        for ff in local_faces:
+            for i in range(3):
+                edge_lens.append(np.linalg.norm(local_verts[ff[(i+1)%3]] - local_verts[ff[i]]))
+        median_edge = np.median(edge_lens)
+        max_edge_len = median_edge * 0.7
+        for _si in range(3):
+            nv = list(local_verts)
+            nf = []
+            emp = dict()
+            ns = 0
+            for ff in local_faces:
+                splits = []
+                for i in range(3):
+                    v0i, v1i = int(ff[i]), int(ff[(i+1)%3])
+                    el = np.linalg.norm(local_verts[v0i]-local_verts[v1i]) if v0i<len(local_verts) and v1i<len(local_verts) else 0
+                    if el > max_edge_len:
+                        ek = (min(v0i,v1i),max(v0i,v1i))
+                        if ek not in emp:
+                            mi = len(nv)
+                            emp[ek] = mi
+                            nv.append((np.array(nv[v0i])+np.array(nv[v1i]))/2)
+                            if v0i in local_cap and v1i in local_cap:
+                                local_cap.add(mi)
+                        splits.append((i, emp[ek]))
+                    else:
+                        splits.append((i, None))
+                se = [(i,m) for i,m in splits if m is not None]
+                if len(se)==0:
+                    nf.append(list(ff))
+                elif len(se)==1:
+                    ei,mi=se[0]; v0,v1,v2=int(ff[ei]),int(ff[(ei+1)%3]),int(ff[(ei+2)%3])
+                    nf.append([v0,mi,v2]); nf.append([mi,v1,v2]); ns+=1
+                elif len(se)==2:
+                    vs=[int(ff[0]),int(ff[1]),int(ff[2])]; md={{}}
+                    for ei,mi in se: md[ei]=mi
+                    if 0 in md and 1 in md: nf.append([vs[0],md[0],vs[2]]); nf.append([md[0],vs[1],md[1]]); nf.append([md[0],md[1],vs[2]])
+                    elif 0 in md and 2 in md: nf.append([vs[0],md[0],md[2]]); nf.append([md[0],vs[1],vs[2]]); nf.append([md[0],vs[2],md[2]])
+                    elif 1 in md and 2 in md: nf.append([vs[0],vs[1],md[1]]); nf.append([vs[0],md[1],md[2]]); nf.append([md[1],vs[2],md[2]])
+                    ns+=1
+                else:
+                    vs=[int(ff[0]),int(ff[1]),int(ff[2])]; m01=splits[0][1]; m12=splits[1][1]; m20=splits[2][1]
+                    nf.append([vs[0],m01,m20]); nf.append([m01,vs[1],m12]); nf.append([m20,m12,vs[2]]); nf.append([m01,m12,m20]); ns+=1
+            local_verts=np.array(nv,dtype=np.float64); local_faces=np.array(nf,dtype=np.int32)
+            if ns==0: break
+        # Fix normals after subdivision
+        mesh = trimesh.Trimesh(vertices=local_verts, faces=local_faces, process=False)
+        mesh.fix_normals()
+        local_verts, local_faces = mesh.vertices.astype(np.float64), mesh.faces.astype(np.int32)
+        # TetGen
+        _mesh_vol = abs(mesh.volume)
+        max_vol = max(_mesh_vol / 1500, 1e-6)
+        steiner_budget = max(2000 - len(local_verts), 300)
+        try:
+            tet = tetgen.TetGen(local_verts.copy(), local_faces.copy())
+            tet.tetrahedralize(order=1, mindihedral=5, minratio=2.0,
+                               maxvolume=max_vol, nobisect=True, steinerleft=steiner_budget)
+        except Exception:
+            tet = tetgen.TetGen(local_verts.copy(), local_faces.copy())
+            tet.tetrahedralize(quality=False, nobisect=True)
+        print(f"COMP {{ci}}: {{len(tet.elem)}} tets, {{len(tet.node)}} verts")
+        # Map cap verts to global output indices
+        for vi in local_cap:
+            if vi < len(tet.node):
+                all_cap_verts.add(vi + node_offset)
+        all_nodes.append(tet.node / 1000.0)
+        all_elems.append(tet.elem + node_offset)
+        node_offset += len(tet.node)
+
+    if len(all_nodes) == 0:
+        raise RuntimeError("No components tetrahedralized")
+    merged_nodes = np.vstack(all_nodes)
+    merged_elems = np.vstack(all_elems).astype(np.int32)
+    cap_verts_out = np.array(sorted(all_cap_verts), dtype=np.int32)
+    print(f"MERGED: {{len(merged_elems)}} tets, {{len(merged_nodes)}} verts")
     print(f"CAP_VERTS: {{len(cap_verts_out)}}")
-    np.savez("{tmp_out_path}", node=tet_node / 1000.0, elem=tet_elem,
+    np.savez("{tmp_out_path}", node=merged_nodes, elem=merged_elems,
              n_orig=np.array([n_orig]), cap_verts=cap_verts_out)
-    print(f"OK {{len(tet_elem)}} {{len(tet_node)}}")
+    print(f"OK {{len(merged_elems)}} {{len(merged_nodes)}}")
 except Exception as e:
     print(f"FAIL: {{e}}")
+    import traceback; traceback.print_exc()
     sys.exit(1)
 '''
                 with open(tmp_script_path, 'w') as sf:
