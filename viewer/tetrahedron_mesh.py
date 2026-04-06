@@ -623,7 +623,8 @@ try:
         # TetGen — try direct first, pymeshfix fallback
         _mesh_vol = abs(mesh.volume)
         max_vol = max(_mesh_vol / 1500, 1e-6)
-        steiner_budget = max(2000 - len(local_verts), 300)
+        # Scale budget by component size — ~2x surface vertices
+        steiner_budget = max(len(local_verts), 300)
         tet = None
         try:
             t = tetgen.TetGen(local_verts.copy(), local_faces.copy())
