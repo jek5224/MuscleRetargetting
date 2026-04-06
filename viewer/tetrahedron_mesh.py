@@ -456,11 +456,23 @@ class TetrahedronMeshMixin:
 
                 # Save script to file for debugging, then run as subprocess
                 import tempfile, subprocess, json, sys
+                # Get per-stream face mapping
+                face_stream = getattr(self, '_face_stream_map', None)
+                # Map cap faces to streams: surface faces have stream assignment,
+                # cap faces are after surface faces
+                n_surface = len(faces)  # original surface face count (before caps)
+
                 with tempfile.NamedTemporaryFile(suffix='.npz', delete=False) as tmp_in:
                     tmp_in_path = tmp_in.name
-                    np.savez(tmp_in, vertices=closed_vertices.astype(np.float64),
-                             faces=closed_faces.astype(np.int32),
-                             cap_verts=np.array(sorted(_cap_verts), dtype=np.int32))
+                    save_dict = dict(
+                        vertices=closed_vertices.astype(np.float64),
+                        faces=closed_faces.astype(np.int32),
+                        cap_verts=np.array(sorted(_cap_verts), dtype=np.int32),
+                        n_surface=np.array([n_surface], dtype=np.int32),
+                    )
+                    if face_stream is not None and len(face_stream) == n_surface:
+                        save_dict['face_stream'] = face_stream
+                    np.savez(tmp_in, **save_dict)
                 tmp_out_path = tmp_in_path.replace('.npz', '_tet.npz')
                 tmp_script_path = tmp_in_path.replace('.npz', '_script.py')
 
@@ -475,38 +487,42 @@ try:
     faces = data["faces"].astype(np.int32)
     cap_vert_indices = set(data["cap_verts"].tolist())
     n_orig = len(verts)
+    n_surface = int(data["n_surface"][0])
     rv = verts * 1000.0
     rf = faces.copy()
     is_cap = set(cap_vert_indices)
     print(f"MESH_INPUT: {{len(rv)}}v {{len(rf)}}f, {{len(is_cap)}} cap verts")
 
-    # Separate into face components via manifold edges
-    edge_faces = _ddict(list)
-    for fi, f in enumerate(rf):
-        for i in range(3):
-            e = tuple(sorted([int(f[i]), int(f[(i+1)%3])]))
-            edge_faces[e].append(fi)
-    face_adj = _ddict(set)
-    for e, flist in edge_faces.items():
-        if len(flist) == 2:
-            face_adj[flist[0]].add(flist[1])
-            face_adj[flist[1]].add(flist[0])
-    visited = set()
-    components = []
-    for fi in range(len(rf)):
-        if fi in visited: continue
-        comp = []
-        stack = [fi]
-        while stack:
-            f = stack.pop()
-            if f in visited: continue
-            visited.add(f)
-            comp.append(f)
-            for nb in face_adj[f]:
-                if nb not in visited: stack.append(nb)
-        components.append(comp)
-    big_comps = [c for c in components if len(c) >= 10]
-    print(f"COMPONENTS: {{len(big_comps)}} significant (of {{len(components)}} total)")
+    # Per-stream face grouping
+    if "face_stream" in data.files:
+        face_stream = data["face_stream"]
+        stream_ids = sorted(set(face_stream.tolist()))
+        # Build per-stream face lists (surface faces + their cap faces)
+        # Cap faces (after n_surface) need to be assigned to streams via their vertices
+        stream_faces = {{si: [] for si in stream_ids}}
+        for fi in range(n_surface):
+            stream_faces[int(face_stream[fi])].append(fi)
+        # Assign cap faces to nearest stream
+        for fi in range(n_surface, len(rf)):
+            # Find which stream this cap face's vertices belong to
+            cap_f_verts = set(int(v) for v in rf[fi])
+            best_stream = stream_ids[0]
+            best_overlap = 0
+            for si in stream_ids:
+                si_verts = set()
+                for sfi in stream_faces[si]:
+                    for v in rf[sfi]:
+                        si_verts.add(int(v))
+                overlap = len(cap_f_verts & si_verts)
+                if overlap > best_overlap:
+                    best_overlap = overlap
+                    best_stream = si
+            stream_faces[best_stream].append(fi)
+        big_comps = [stream_faces[si] for si in stream_ids if len(stream_faces[si]) >= 10]
+    else:
+        # Single stream — all faces in one component
+        big_comps = [list(range(len(rf)))]
+    print(f"COMPONENTS: {{len(big_comps)}} streams")
 
     all_nodes = []
     all_elems = []

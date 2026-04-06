@@ -7461,6 +7461,7 @@ class ContourMeshMixin(ContourAnimationMixin):
 
         # Build faces
         all_faces = []
+        face_stream_map = []  # face_idx -> stream_idx
 
         # Track processed quads to avoid duplicates at shared boundaries
         processed_quads = set()
@@ -7585,16 +7586,21 @@ class ContourMeshMixin(ContourAnimationMixin):
 
                         if diag_02 <= diag_13:
                             all_faces.append([v0, v1, v2])
+                            face_stream_map.append(stream_idx)
                             all_faces.append([v0, v2, v3])
+                            face_stream_map.append(stream_idx)
                         else:
                             all_faces.append([v0, v1, v3])
+                            face_stream_map.append(stream_idx)
                             all_faces.append([v1, v2, v3])
+                            face_stream_map.append(stream_idx)
                 else:
                     # Different sizes - variable band (fallback)
                     faces = self._create_contour_band_variable_indices(
                         curr_indices, next_indices, all_vertices, processed_quads
                     )
                     all_faces.extend(faces)
+                    face_stream_map.extend([stream_idx] * len(faces))
 
         if len(all_faces) == 0:
             print("No faces generated.")
@@ -7632,6 +7638,9 @@ class ContourMeshMixin(ContourAnimationMixin):
         else:
             self._build_mesh_replayed = True
             self.is_draw_contour_mesh = True
+
+        # Save per-stream face mapping for per-stream tetrahedralization
+        self._face_stream_map = np.array(face_stream_map[:len(all_faces)], dtype=np.int32) if face_stream_map else None
 
         print(f"Built contour mesh: {len(self.contour_mesh_vertices)} vertices, "
               f"{len(self.contour_mesh_faces)} faces from {num_streams} streams")
