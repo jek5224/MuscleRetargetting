@@ -8513,6 +8513,16 @@ def _motion_patch_waypoints(v):
                 fmap[int(f)] = (entry_idx, pos_idx)
         muscle_frame_map[mname] = fmap
 
+    # Temporarily disable fix axes — cached positions were baked with original pose
+    saved_fix_x = getattr(v, 'motion_fix_x', False)
+    saved_fix_y = getattr(v, 'motion_fix_y', False)
+    saved_fix_z = getattr(v, 'motion_fix_z', False)
+    saved_fix_rot = getattr(v, 'motion_fix_rotation', False)
+    v.motion_fix_x = False
+    v.motion_fix_y = False
+    v.motion_fix_z = False
+    v.motion_fix_rotation = False
+
     # Iterate frames once, update all muscles per frame
     for frame_idx in all_frames:
         if frame_idx < v.motion_total_frames:
@@ -8546,6 +8556,12 @@ def _motion_patch_waypoints(v):
         patched += 1
         n_frames = sum(len(frames) for _, frames, _ in entries)
         print(f"  Patched {mname}: {n_frames} frames across {len(entries)} file(s)")
+
+    # Restore fix axes
+    v.motion_fix_x = saved_fix_x
+    v.motion_fix_y = saved_fix_y
+    v.motion_fix_z = saved_fix_z
+    v.motion_fix_rotation = saved_fix_rot
 
     _motion_load_cache(v)
     print(f"Waypoint patch complete: {patched} muscles updated")
