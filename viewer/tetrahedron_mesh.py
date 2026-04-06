@@ -461,9 +461,12 @@ try:
         print(f"REPAIRED: {{n_fixed}} verts removed by pymeshfix")
     # Scale up for precision
     rv = rv * 1000.0
-    # Try multiple quality levels
-    bbox_diag = np.linalg.norm(rv.max(0) - rv.min(0))
-    max_vol = (bbox_diag / 20.0) ** 3
+    # Compute max tet volume from mesh volume, targeting ~3000 tets
+    import trimesh as _tri
+    _mesh_vol = abs(_tri.Trimesh(vertices=rv, faces=rf, process=False).volume)
+    target_tets = 3000
+    max_vol = max(_mesh_vol / target_tets, 1e-6)
+    print(f"MESH_VOL={{_mesh_vol:.1f}} MAX_VOL={{max_vol:.1f}} TARGET={{target_tets}}")
     for mindih, minrat in [(10, 1.5), (5, 2.0), (1, 3.0), (0, 5.0)]:
         try:
             tet = tetgen.TetGen(rv.copy(), rf.copy())
