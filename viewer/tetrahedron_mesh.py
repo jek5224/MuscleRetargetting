@@ -551,6 +551,7 @@ class TetrahedronMeshMixin:
                                         # Each polylabel is guaranteed inside the polygon.
                                         n_centers = min(int(aspect / 2), 5)
                                         n_centers = max(n_centers, 2)
+                                        print(f"    [THIN] stream {ci_idx} level {lev}: aspect={aspect:.1f}, major={major:.4f}, minor={minor:.4f}, {n_centers} centers")
                                         from shapely.geometry import box as shapely_box
                                         from shapely import affinity as shapely_affinity
                                         # Major axis direction and angle
@@ -590,6 +591,9 @@ class TetrahedronMeshMixin:
                                             # Fallback to single polylabel
                                             pole = polylabel(poly, tolerance=1e-4)
                                             centers_3d = [mean + pole.x * basis_x + pole.y * basis_y]
+                                            print(f"      fallback to single polylabel (all strips empty)")
+                                        else:
+                                            print(f"      placed {len(centers_3d)}/{n_centers} strip centers")
                                     else:
                                         # Normal aspect — single pole center
                                         pole = polylabel(poly, tolerance=1e-4)
