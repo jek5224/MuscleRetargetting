@@ -668,43 +668,41 @@ try:
                             shared_midpoints[ci][mi] = (min(gv0,gv1), max(gv0,gv1))
                             sl[mi] = (min(gv0,gv1), max(gv0,gv1))
                 return emp[ek]
-            # Pass 1: find edges to split
-            edges_to_split = set()
-            for ff in local_faces:
-                for i in range(3):
-                    v0i, v1i = int(ff[i]), int(ff[(i+1)%3])
-                    el = np.linalg.norm(local_verts[v0i]-local_verts[v1i]) if v0i<len(local_verts) and v1i<len(local_verts) else 0
-                    if el > max_edge_len:
-                        edges_to_split.add((min(v0i,v1i),max(v0i,v1i)))
-            # Pass 2: create midpoints for edges to split
-            for e in edges_to_split:
-                get_or_create_mid(e[0], e[1])
-            # Pass 3: split faces. 4-way if all 3 edges split. Otherwise keep whole.
-            # No partial splits = no T-junctions.
+            # Split edges longer than threshold, handle partial splits properly
             nf = []
             ns = 0
             for ff in local_faces:
                 v0,v1,v2 = int(ff[0]),int(ff[1]),int(ff[2])
-                e01 = (min(v0,v1),max(v0,v1))
-                e12 = (min(v1,v2),max(v1,v2))
-                e20 = (min(v2,v0),max(v2,v0))
-                n_split_edges = (e01 in emp) + (e12 in emp) + (e20 in emp)
-                if n_split_edges == 3:
-                    m01,m12,m20 = emp[e01],emp[e12],emp[e20]
-                    nf.append([v0,m01,m20]); nf.append([m01,v1,m12])
-                    nf.append([m20,m12,v2]); nf.append([m01,m12,m20])
-                    ns += 1
-                elif n_split_edges > 0:
-                    # Force split remaining edges to avoid T-junctions
-                    if e01 not in emp: get_or_create_mid(v0,v1)
-                    if e12 not in emp: get_or_create_mid(v1,v2)
-                    if e20 not in emp: get_or_create_mid(v2,v0)
-                    m01,m12,m20 = emp[e01],emp[e12],emp[e20]
-                    nf.append([v0,m01,m20]); nf.append([m01,v1,m12])
-                    nf.append([m20,m12,v2]); nf.append([m01,m12,m20])
-                    ns += 1
-                else:
+                # Check each edge
+                for i in range(3):
+                    v0i,v1i = int(ff[i]),int(ff[(i+1)%3])
+                    el = np.linalg.norm(local_verts[v0i]-local_verts[v1i]) if v0i<len(local_verts) and v1i<len(local_verts) else 0
+                    if el > max_edge_len:
+                        get_or_create_mid(v0i,v1i)
+                e01=(min(v0,v1),max(v0,v1)); e12=(min(v1,v2),max(v1,v2)); e20=(min(v2,v0),max(v2,v0))
+                has = [e01 in emp, e12 in emp, e20 in emp]
+                n_s = sum(has)
+                if n_s == 0:
                     nf.append([v0,v1,v2])
+                elif n_s == 3:
+                    m01,m12,m20=emp[e01],emp[e12],emp[e20]
+                    nf.append([v0,m01,m20]); nf.append([m01,v1,m12])
+                    nf.append([m20,m12,v2]); nf.append([m01,m12,m20]); ns+=1
+                elif n_s == 1:
+                    if has[0]: ei=0
+                    elif has[1]: ei=1
+                    else: ei=2
+                    va,vb,vc=int(ff[ei]),int(ff[(ei+1)%3]),int(ff[(ei+2)%3])
+                    mi=emp[(min(va,vb),max(va,vb))]
+                    nf.append([va,mi,vc]); nf.append([mi,vb,vc]); ns+=1
+                else:  # n_s == 2
+                    # Find which edge is NOT split, force-split it locally
+                    if not has[0]: get_or_create_mid(v0,v1)
+                    if not has[1]: get_or_create_mid(v1,v2)
+                    if not has[2]: get_or_create_mid(v2,v0)
+                    m01,m12,m20=emp[e01],emp[e12],emp[e20]
+                    nf.append([v0,m01,m20]); nf.append([m01,v1,m12])
+                    nf.append([m20,m12,v2]); nf.append([m01,m12,m20]); ns+=1
             local_verts=np.array(nv,dtype=np.float64); local_faces=np.array(nf,dtype=np.int32)
             if ns==0: break
         # Fix normals after subdivision
