@@ -272,79 +272,36 @@ class TetrahedronMeshMixin:
             cap_face_indices = []
             self.tet_anchor_vertices = []  # No anchor vertices with ear clipping
 
-            # Ear clipping for 3D polygons
-            def _ear_clip_3d(loop_pts, loop_indices):
-                pts = np.array(loop_pts)
-                n = len(pts)
+            # Zigzag cap triangulation: connect from both ends, keeping triangles local.
+            # No center vertex, no self-intersection for non-planar contours.
+            def _zigzag_cap(loop_indices):
+                n = len(loop_indices)
                 if n < 3: return []
                 if n == 3: return [[loop_indices[0], loop_indices[1], loop_indices[2]]]
-                centroid = pts.mean(axis=0)
-                centered = pts - centroid
-                _, _, Vt = np.linalg.svd(centered, full_matrices=False)
-                pts_2d = centered @ Vt[:2].T
-                # Ensure CCW
-                area = sum(pts_2d[i][0]*pts_2d[(i+1)%n][1] - pts_2d[(i+1)%n][0]*pts_2d[i][1] for i in range(n))
-                if area < 0:
-                    pts_2d = pts_2d[::-1]
-                    loop_indices = list(reversed(loop_indices))
-                else:
-                    loop_indices = list(loop_indices)
-                def cross2(o, a, b):
-                    return (a[0]-o[0])*(b[1]-o[1]) - (a[1]-o[1])*(b[0]-o[0])
-                def pt_in_tri(p, a, b, c):
-                    d1, d2, d3 = cross2(p,a,b), cross2(p,b,c), cross2(p,c,a)
-                    return not ((d1<-1e-10 or d2<-1e-10 or d3<-1e-10) and (d1>1e-10 or d2>1e-10 or d3>1e-10))
-                remaining = list(range(n))
-                result = []
-                max_iters = n * n
-                iters = 0
-                while len(remaining) > 2 and iters < max_iters:
-                    iters += 1
-                    found = False
-                    for i in range(len(remaining)):
-                        pi = remaining[(i-1) % len(remaining)]
-                        ci = remaining[i]
-                        ni = remaining[(i+1) % len(remaining)]
-                        a, b, c = pts_2d[pi], pts_2d[ci], pts_2d[ni]
-                        if cross2(a, b, c) < -1e-10: continue
-                        is_ear = True
-                        for j in remaining:
-                            if j in (pi, ci, ni): continue
-                            if pt_in_tri(pts_2d[j], a, b, c):
-                                is_ear = False; break
-                        if is_ear:
-                            result.append([loop_indices[pi], loop_indices[ci], loop_indices[ni]])
-                            remaining.remove(ci)
-                            found = True; break
-                    if not found:
-                        # Force clip best angle
-                        best_c, best_i = -1e30, 0
-                        for i in range(len(remaining)):
-                            pi = remaining[(i-1) % len(remaining)]
-                            ci = remaining[i]
-                            ni = remaining[(i+1) % len(remaining)]
-                            cv = cross2(pts_2d[pi], pts_2d[ci], pts_2d[ni])
-                            if cv > best_c: best_c = cv; best_i = i
-                        pi = remaining[(best_i-1) % len(remaining)]
-                        ci = remaining[best_i]
-                        ni = remaining[(best_i+1) % len(remaining)]
-                        result.append([loop_indices[pi], loop_indices[ci], loop_indices[ni]])
-                        remaining.remove(ci)
-                return result
+                faces = []
+                lo, hi = 0, n - 1
+                turn = True
+                while hi - lo >= 2:
+                    if turn:
+                        faces.append([loop_indices[lo], loop_indices[lo+1], loop_indices[hi]])
+                        lo += 1
+                    else:
+                        faces.append([loop_indices[lo], loop_indices[hi], loop_indices[hi-1]])
+                        hi -= 1
+                    turn = not turn
+                return faces
 
             for loop_idx, loop in enumerate(boundary_loops):
-                loop_pts = [vertices[vi] for vi in loop]
-                ear_faces = _ear_clip_3d(loop_pts, list(loop))
-                for ef in ear_faces:
+                cap_faces = _zigzag_cap(list(loop))
+                for cf in cap_faces:
                     cap_face_idx = len(closed_faces)
-                    closed_faces.append(ef)
+                    closed_faces.append(cf)
                     cap_face_indices.append(cap_face_idx)
-                # All loop vertices are cap vertices
                 for vi in loop:
                     if vi not in self.tet_anchor_vertices:
                         self.tet_anchor_vertices.append(vi)
                 expected = len(loop) - 2
-                print(f"  Loop {loop_idx}: {len(loop)} vertices, {len(ear_faces)}/{expected} ear-clip faces")
+                print(f"  Loop {loop_idx}: {len(loop)} vertices, {len(cap_faces)}/{expected} zigzag faces")
 
             closed_vertices = np.array(closed_vertices, dtype=np.float32)
             closed_faces = np.array(closed_faces, dtype=np.int32)
