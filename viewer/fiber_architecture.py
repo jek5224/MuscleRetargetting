@@ -3162,6 +3162,121 @@ class FiberArchitectureMixin:
 
         print(f"Built contour-to-tet mapping: {total_mapped} contour vertices mapped")
 
+    def _build_mvc_waypoint_cache(self):
+        """Build cache for MVC-based waypoint update from deformed contour vertices.
+
+        For each (stream, level), stores (tet_indices, weights) where:
+        - tet_indices: contour vertex → tet vertex index mapping
+        - weights: MVC weights matrix (num_fibers, num_contour_vertices)
+
+        Endpoints (first/last contour) are handled separately via skeleton.
+        """
+        if not hasattr(self, 'contour_to_tet_mapping') or self.contour_to_tet_mapping is None:
+            self.build_contour_vertex_mapping()
+        if not hasattr(self, 'contour_to_tet_mapping') or self.contour_to_tet_mapping is None:
+            return
+        if not hasattr(self, 'mvc_weights') or self.mvc_weights is None:
+            return
+        if not hasattr(self, 'waypoints') or self.waypoints is None:
+            return
+
+        self._mvc_cache = []
+        n_cached = 0
+        for stream_idx, stream_wps in enumerate(self.waypoints):
+            stream_cache = []
+            num_contours = len(stream_wps)
+            for level_idx in range(num_contours):
+                is_endpoint = (level_idx == 0 or level_idx == num_contours - 1)
+                if is_endpoint:
+                    stream_cache.append(None)  # use skeleton for endpoints
+                    continue
+                # Get MVC weights and contour-to-tet mapping
+                if (stream_idx >= len(self.mvc_weights) or
+                    level_idx >= len(self.mvc_weights[stream_idx]) or
+                    stream_idx >= len(self.contour_to_tet_mapping) or
+                    level_idx >= len(self.contour_to_tet_mapping[stream_idx])):
+                    stream_cache.append(None)
+                    continue
+                weights = self.mvc_weights[stream_idx][level_idx]
+                tet_indices = self.contour_to_tet_mapping[stream_idx][level_idx]
+                if weights is None or len(weights) == 0 or len(tet_indices) == 0:
+                    stream_cache.append(None)
+                    continue
+                weights = np.array(weights, dtype=np.float64)
+                tet_indices = np.array(tet_indices, dtype=np.int32)
+                # Validate: weights columns must match tet_indices length
+                if weights.ndim == 2 and weights.shape[1] == len(tet_indices):
+                    stream_cache.append((tet_indices, weights))
+                    n_cached += 1
+                else:
+                    stream_cache.append(None)
+            self._mvc_cache.append(stream_cache)
+        print(f"  MVC waypoint cache: {n_cached} levels cached")
+
+    def update_waypoints_mvc(self, skeleton=None):
+        """Update waypoint positions using MVC weights applied to deformed contour vertices.
+
+        Much more coherent than tet bary coords: all waypoints at the same contour
+        level interpolate from the SAME set of contour vertices, guaranteeing they
+        stay on the deformed contour surface.
+
+        Endpoints (first/last contour) use skeleton body transforms.
+        Falls back to _update_waypoints_from_tet if MVC cache not available.
+        """
+        if not hasattr(self, '_mvc_cache') or self._mvc_cache is None:
+            self._build_mvc_waypoint_cache()
+        if not hasattr(self, '_mvc_cache') or self._mvc_cache is None:
+            # Fallback
+            self._update_waypoints_from_tet(skeleton)
+            return
+        if not hasattr(self, 'tet_vertices') or self.tet_vertices is None:
+            return
+        if not hasattr(self, 'waypoints') or self.waypoints is None:
+            return
+
+        tet_verts = np.array(self.tet_vertices)
+        n_tet = len(tet_verts)
+
+        for stream_idx, stream_cache in enumerate(self._mvc_cache):
+            if stream_idx >= len(self.waypoints):
+                continue
+            num_contours = len(self.waypoints[stream_idx])
+            for level_idx in range(num_contours):
+                is_endpoint = (level_idx == 0 or level_idx == num_contours - 1)
+
+                if is_endpoint:
+                    # Use skeleton for endpoints
+                    if skeleton is not None and hasattr(self, 'waypoint_bary_coords'):
+                        if (stream_idx < len(self.waypoint_bary_coords) and
+                            level_idx < len(self.waypoint_bary_coords[stream_idx])):
+                            contour_bary = self.waypoint_bary_coords[stream_idx][level_idx]
+                            if contour_bary is not None:
+                                contour_wps = np.array(self.waypoints[stream_idx][level_idx])
+                                if contour_wps.ndim == 1:
+                                    contour_wps = contour_wps.reshape(1, -1)
+                                for fi, bary_data in enumerate(contour_bary):
+                                    if bary_data is None or fi >= len(contour_wps):
+                                        continue
+                                    if bary_data[0] == 'skeleton':
+                                        _, body_name, local_pos = bary_data
+                                        body_node = skeleton.getBodyNode(body_name)
+                                        if body_node is not None:
+                                            wt = body_node.getWorldTransform()
+                                            contour_wps[fi] = wt.rotation() @ local_pos + wt.translation()
+                                self.waypoints[stream_idx][level_idx] = contour_wps
+                    continue
+
+                # MVC-based update for interior levels
+                if level_idx < len(stream_cache) and stream_cache[level_idx] is not None:
+                    tet_indices, weights = stream_cache[level_idx]
+                    # Bounds check
+                    if len(tet_indices) > 0 and int(tet_indices.max()) >= n_tet:
+                        continue
+                    deformed_Ps = tet_verts[tet_indices]  # (num_cv, 3)
+                    self.waypoints[stream_idx][level_idx] = weights @ deformed_Ps  # (num_fibers, 3)
+
+        self._fiber_draw_dirty = True
+
     def get_deformed_contours(self):
         """
         Get contours with positions updated from deformed tet mesh.

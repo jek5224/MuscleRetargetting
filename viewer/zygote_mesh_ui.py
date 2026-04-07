@@ -8535,7 +8535,10 @@ def _motion_patch_waypoints(v):
             positions = entries[entry_idx][2]
             mobj = v.zygote_muscle_meshes[mname]
             mobj.tet_vertices = positions[pos_idx].astype(np.float32).copy()
-            mobj._update_waypoints_from_tet(v.env.skel, verbose=False)
+            if hasattr(mobj, 'mvc_weights') and mobj.mvc_weights is not None and len(mobj.mvc_weights) > 0:
+                mobj.update_waypoints_mvc(v.env.skel)
+            else:
+                mobj._update_waypoints_from_tet(v.env.skel, verbose=False)
             wp_flat, wp_shape_str = _flatten_waypoints(mobj.waypoints)
             muscle_wp[mname][frame_idx] = wp_flat
             muscle_wp_shape[mname] = wp_shape_str
@@ -8714,8 +8717,11 @@ def _motion_apply_cached_deformation(v, frame):
                                     stream[fi] = stream[fi] + fix_offset
                     mobj.waypoints = wp
                     mobj._fiber_draw_dirty = True
+            elif hasattr(mobj, 'mvc_weights') and mobj.mvc_weights is not None and len(mobj.mvc_weights) > 0:
+                # No cached waypoints — use MVC-based update (coherent with contour surface)
+                mobj.update_waypoints_mvc(v.env.skel if hasattr(v, 'env') else None)
             elif hasattr(mobj, 'waypoint_bary_coords') and len(getattr(mobj, 'waypoint_bary_coords', [])) > 0:
-                # No cached waypoints — recompute live from deformed tet vertices
+                # Fallback: tet bary coords
                 mobj._update_waypoints_from_tet(v.env.skel if hasattr(v, 'env') else None, verbose=False)
             any_applied = True
     return any_applied
