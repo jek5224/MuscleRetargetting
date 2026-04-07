@@ -2806,7 +2806,7 @@ class FiberArchitectureMixin:
 
         tet_verts = np.array(self.tet_vertices)
         tetrahedra = np.array(self.tet_tetrahedra)
-        if len(tetrahedra) > 0 and int(tetrahedra.max()) >= len(tet_verts):
+        if len(tetrahedra) > 0 and tetrahedra.max() >= len(tet_verts):
             return
 
         tet_count = 0
@@ -2869,9 +2869,8 @@ class FiberArchitectureMixin:
                         v2 = tet_verts[tet[2]]
                         v3 = tet_verts[tet[3]]
 
-                        # Always clamp negative bary coords — even small negatives
-                        # cause opposite-direction overshoot in deformed/inverted tets
-                        if np.any(bary < 0):
+                        # Clamp bary coords for outside points to prevent extrapolation
+                        if not was_inside:
                             bary = np.maximum(bary, 0.0)
                             bary_sum = bary.sum()
                             if bary_sum > 1e-8:
