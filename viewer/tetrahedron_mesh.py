@@ -1350,47 +1350,43 @@ except Exception as e:
                     dists = np.linalg.norm(sim_fc - closed_vertices[ani].astype(np.float64), axis=1)
                     near = np.where(dists < 0.02)[0]
                     n_cap = sum(1 for fi in near if fi in cap_fi_set)
-                    # Also mark all faces touching the pole vertex as cap
-                    for fi in range(len(sim_faces)):
-                        if ani in sim_faces[fi] and fi not in cap_fi_set:
-                            cap_face_indices.append(int(fi))
-                            cap_fi_set.add(int(fi))
-                    if n_cap < 5 and len(near) > 0:
-                        # pymeshfix deleted the anchor vertex. The cap is now
-                        # flat triangles between boundary loop vertices.
-                        # Find cap verts near this anchor → compute plane →
-                        # find faces where ALL verts are cap AND on the plane.
+                    if n_cap < 5:
+                        # pymeshfix replaced the pole fan with zig-zag triangulation.
+                        # Find the cap plane from closest cap verts, then mark
+                        # ALL faces on that plane within the cap radius.
                         anchor_pos = closed_vertices[ani].astype(np.float64)
                         cap_radius = _anchor_radii.get(ai, 0.01)
-                        # Find tracked cap verts closest to THIS anchor (not other anchors)
+                        # Find cap verts closest to THIS anchor
                         cap_dists = []
                         for cvi in tet_cap_set:
                             if cvi < len(closed_vertices):
                                 d = np.linalg.norm(closed_vertices[cvi].astype(np.float64) - anchor_pos)
                                 cap_dists.append((d, cvi))
                         cap_dists.sort()
-                        # Take only the closest ones (up to original loop size)
                         orig_loop_size = len(boundary_loops[loop_idx]) if loop_idx < len(boundary_loops) else 32
                         nearby_cap_verts = [cvi for d, cvi in cap_dists[:orig_loop_size + 5]]
                         if len(nearby_cap_verts) >= 3:
-                            # Compute cap plane from nearby cap verts
                             cap_pts = closed_vertices[nearby_cap_verts].astype(np.float64)
                             centroid = cap_pts.mean(axis=0)
                             _, _, Vt = np.linalg.svd(cap_pts - centroid, full_matrices=False)
                             cap_normal = Vt[2]
-                            # Find faces near anchor with all verts on the cap plane
+                            # Search ALL sim_faces within cap_radius (not just 0.02 "near")
                             added = 0
-                            for fi in near:
+                            for fi in range(len(sim_faces)):
                                 if fi in cap_fi_set:
                                     continue
                                 fv = closed_vertices[sim_faces[fi]].astype(np.float64)
+                                fc_pos = fv.mean(axis=0)
+                                # Must be within cap radius
+                                if np.linalg.norm(fc_pos - anchor_pos) > cap_radius * 1.2:
+                                    continue
                                 # All verts must be near the cap plane
                                 plane_dists = np.abs(np.dot(fv - centroid, cap_normal))
-                                if np.max(plane_dists) < 0.002:  # within 2mm of plane
+                                if np.max(plane_dists) < 0.003:
                                     cap_face_indices.append(int(fi))
                                     cap_fi_set.add(int(fi))
                                     added += 1
-                            print(f"  Anchor {ai}: recovered {added} cap faces (plane-based, {len(nearby_cap_verts)} cap verts nearby)")
+                            print(f"  Anchor {ai}: recovered {added} cap faces (plane+radius, {len(nearby_cap_verts)} verts)")
             # Debug: check pole vertex existence
             if hasattr(self, 'tet_anchor_vertices') and _anchor_positions:
                 from scipy.spatial import cKDTree as _cKDTree4
