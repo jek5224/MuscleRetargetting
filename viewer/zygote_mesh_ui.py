@@ -8655,8 +8655,6 @@ def _motion_apply_cached_deformation(v, frame):
     # the skeleton moving freely, so subtract the root displacement on fixed axes.
     fix_offset = np.zeros(3, dtype=np.float32)
     if hasattr(v, 'motion_root_translation') and v.motion_root_translation is not None:
-        if frame >= len(v.motion_bvh.mocap_refs):
-            return False
         bvh_trans = v.motion_bvh.mocap_refs[frame, 3:6]  # x, y, z root translation
         rest_trans = v.motion_root_translation
         if v.motion_fix_x:
@@ -8700,16 +8698,8 @@ def _motion_apply_cached_deformation(v, frame):
                 cached_pos = cached['positions'] + fix_offset
             if mobj.soft_body is not None:
                 mobj.soft_body.positions = cached_pos.astype(np.float64)
-            cached_pos_f32 = cached_pos.astype(np.float32).copy()
-            if np.any(np.isnan(cached_pos_f32)) or np.any(np.isinf(cached_pos_f32)):
-                print(f"[NaN/Inf] {mname} frame {frame}, skipping")
-                continue
-            mobj.tet_vertices = cached_pos_f32
-            try:
-                mobj._update_tet_draw_positions()
-            except Exception as e:
-                print(f"[CRASH] {mname} frame {frame}: {e}")
-                mobj._prepare_tet_draw_arrays()
+            mobj.tet_vertices = cached_pos.astype(np.float32).copy()
+            mobj._update_tet_draw_positions()
             # Restore cached waypoints if available, otherwise recompute from tet
             if 'waypoints_flat' in cached and 'waypoints_shape' in cached:
                 if hasattr(mobj, 'waypoints') and len(mobj.waypoints) > 0:

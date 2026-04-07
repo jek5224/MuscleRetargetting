@@ -1665,10 +1665,7 @@ except Exception as e:
         surface_face_indices = []
         cap_face_indices = []
 
-        n_verts = len(self.tet_vertices)
         for face_idx, face in enumerate(render_faces):
-            if max(face) >= n_verts:
-                continue  # skip out-of-bounds face
             v0, v1, v2 = self.tet_vertices[face]
             normal = np.cross(v1 - v0, v2 - v0)
             norm_len = np.linalg.norm(normal)
@@ -1706,8 +1703,6 @@ except Exception as e:
         edge_verts = []
         edge_vidx = []
         for v0, v1 in edge_set:
-            if v0 >= n_verts or v1 >= n_verts:
-                continue
             edge_verts.append(self.tet_vertices[v0])
             edge_verts.append(self.tet_vertices[v1])
             edge_vidx.extend([v0, v1])
@@ -1724,12 +1719,8 @@ except Exception as e:
         verts = self.tet_vertices
         if verts is None:
             return
-        n_v = len(verts)
         # Update surface verts + normals
         if self._tet_surface_vidx is not None and self._tet_surface_verts is not None:
-            if int(self._tet_surface_vidx.max()) >= n_v:
-                self._prepare_tet_draw_arrays()  # rebuild with current verts
-                return
             self._tet_surface_verts[:] = verts[self._tet_surface_vidx]
             if not skip_normals:
                 # Recompute normals vectorized: every 3 verts is a triangle
@@ -1742,9 +1733,6 @@ except Exception as e:
                 self._tet_surface_normals[:] = np.repeat(normals, 3, axis=0)
         # Update cap verts + normals
         if self._tet_cap_vidx is not None and self._tet_cap_verts is not None:
-            if len(self._tet_cap_vidx) > 0 and int(self._tet_cap_vidx.max()) >= n_v:
-                self._prepare_tet_draw_arrays()
-                return
             self._tet_cap_verts[:] = verts[self._tet_cap_vidx]
             if not skip_normals:
                 v = self._tet_cap_verts.reshape(-1, 3, 3)
@@ -1755,10 +1743,7 @@ except Exception as e:
                 self._tet_cap_normals[:] = np.repeat(normals, 3, axis=0)
         # Update edge verts
         if self._tet_edge_vidx is not None and self._tet_edge_verts is not None:
-            if len(self._tet_edge_vidx) > 0 and int(self._tet_edge_vidx.max()) >= n_v:
-                pass  # skip — indices stale
-            else:
-                self._tet_edge_verts[:] = verts[self._tet_edge_vidx]
+            self._tet_edge_verts[:] = verts[self._tet_edge_vidx]
 
     def _draw_tet_mesh_animated(self):
         """Tet edge animation phases 1-2 (phase 3+ uses normal draw_tetrahedron_mesh).
