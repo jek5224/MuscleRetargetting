@@ -1351,14 +1351,38 @@ except Exception as e:
                     near = np.where(dists < 0.02)[0]
                     n_cap = sum(1 for fi in near if fi in cap_fi_set)
                     if n_cap < 5 and len(near) > 0:
-                        # Recover caps: mark faces directly touching anchor vertex
-                        added = 0
-                        for fi in range(len(sim_faces)):
-                            if ani in sim_faces[fi] and fi not in cap_fi_set:
-                                cap_face_indices.append(int(fi))
-                                cap_fi_set.add(int(fi))
-                                added += 1
-                        print(f"  Anchor {ai}: recovered {added} cap faces (anchor-touching)")
+                        # pymeshfix deleted the anchor vertex. The cap is now
+                        # flat triangles between boundary loop vertices.
+                        # Find cap verts near this anchor → compute plane →
+                        # find faces where ALL verts are cap AND on the plane.
+                        anchor_pos = closed_vertices[ani].astype(np.float64)
+                        cap_radius = _anchor_radii.get(ai, 0.01)
+                        # Find tracked cap verts near this anchor
+                        nearby_cap_verts = []
+                        for cvi in tet_cap_set:
+                            if cvi < len(closed_vertices):
+                                d = np.linalg.norm(closed_vertices[cvi].astype(np.float64) - anchor_pos)
+                                if d < cap_radius * 1.5:
+                                    nearby_cap_verts.append(cvi)
+                        if len(nearby_cap_verts) >= 3:
+                            # Compute cap plane from nearby cap verts
+                            cap_pts = closed_vertices[nearby_cap_verts].astype(np.float64)
+                            centroid = cap_pts.mean(axis=0)
+                            _, _, Vt = np.linalg.svd(cap_pts - centroid, full_matrices=False)
+                            cap_normal = Vt[2]
+                            # Find faces near anchor with all verts on the cap plane
+                            added = 0
+                            for fi in near:
+                                if fi in cap_fi_set:
+                                    continue
+                                fv = closed_vertices[sim_faces[fi]].astype(np.float64)
+                                # All verts must be near the cap plane
+                                plane_dists = np.abs(np.dot(fv - centroid, cap_normal))
+                                if np.max(plane_dists) < 0.002:  # within 2mm of plane
+                                    cap_face_indices.append(int(fi))
+                                    cap_fi_set.add(int(fi))
+                                    added += 1
+                            print(f"  Anchor {ai}: recovered {added} cap faces (plane-based, {len(nearby_cap_verts)} cap verts nearby)")
             # Debug: per-anchor cap face counts
             if hasattr(self, 'tet_anchor_vertices') and _anchor_positions:
                 from scipy.spatial import cKDTree as _cKDTree3
