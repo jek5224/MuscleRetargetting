@@ -528,12 +528,35 @@ try:
     all_elems = []
     all_cap_verts = set()
     node_offset = 0
+    # Identify shared global vertices (appear in 2+ components)
+    global_to_comps = _ddict(list)  # global_vi -> [(comp_idx, local_vi), ...]
+    comp_used_list = []
+    comp_remap_list = []
+    for ci, comp in enumerate(big_comps):
+        comp_faces_tmp = rf[comp]
+        used_tmp = np.unique(comp_faces_tmp.ravel())
+        remap_tmp = np.full(len(rv), -1, dtype=np.int32)
+        remap_tmp[used_tmp] = np.arange(len(used_tmp), dtype=np.int32)
+        comp_used_list.append(used_tmp)
+        comp_remap_list.append(remap_tmp)
+        for gvi in used_tmp:
+            global_to_comps[int(gvi)].append(ci)
+    shared_global = {{gvi for gvi, comps in global_to_comps.items() if len(comps) > 1}}
+    print(f"SHARED: {{len(shared_global)}} shared boundary vertices")
+    # Track: for each component, which local indices are shared and what they map to
+    # shared_local[ci] = {{local_vi: global_vi}}
+    shared_local = [{{}} for _ in range(len(big_comps))]
+    for gvi in shared_global:
+        for ci in global_to_comps[gvi]:
+            lvi = int(comp_remap_list[ci][gvi])
+            shared_local[ci][lvi] = int(gvi)
+    # Track subdivision midpoints of shared edges: shared_midpoints[ci] = {{local_mid_vi: (global_vi_a, global_vi_b)}}
+    shared_midpoints = [{{}} for _ in range(len(big_comps))]
 
     for ci, comp in enumerate(big_comps):
         comp_faces = rf[comp]
-        used = np.unique(comp_faces.ravel())
-        local_remap = np.full(len(rv), -1, dtype=np.int32)
-        local_remap[used] = np.arange(len(used), dtype=np.int32)
+        used = comp_used_list[ci]
+        local_remap = comp_remap_list[ci]
         local_verts = rv[used].copy()
         local_faces = local_remap[comp_faces]
         local_cap = set()
@@ -645,6 +668,12 @@ try:
                             nv.append((np.array(nv[v0i])+np.array(nv[v1i]))/2)
                             if v0i in local_cap and v1i in local_cap:
                                 local_cap.add(mi)
+                            # Track shared midpoints
+                            sl = shared_local[ci]
+                            if v0i in sl and v1i in sl:
+                                gv0, gv1 = sl[v0i], sl[v1i]
+                                shared_midpoints[ci][mi] = (min(gv0,gv1), max(gv0,gv1))
+                                sl[mi] = (min(gv0,gv1), max(gv0,gv1))  # tuple as key for mid
                         splits.append((i, emp[ek]))
                     else:
                         splits.append((i, None))
@@ -731,25 +760,60 @@ try:
         raise RuntimeError("No components tetrahedralized")
     merged_nodes = np.vstack(all_nodes)
     merged_elems = np.vstack(all_elems).astype(np.int32)
-    # Deduplicate shared boundary vertices (same position, different indices)
+    # Deduplicate shared boundary vertices using known correspondences
     n_before_dedup = len(merged_nodes)
     dedup_map = np.arange(n_before_dedup, dtype=np.int32)
-    tree_dedup = cKDTree(merged_nodes)
-    pairs = tree_dedup.query_pairs(r=0.0001)  # 0.1mm in viewer scale
-    for i, j in pairs:
-        # Map higher index to lower
-        lo, hi = min(i,j), max(i,j)
-        # Follow chain
-        while dedup_map[hi] != hi:
-            hi = dedup_map[hi]
-        while dedup_map[lo] != lo:
-            lo = dedup_map[lo]
-        if lo != hi:
-            dedup_map[max(lo,hi)] = min(lo,hi)
-            # Merge cap status
-            if max(lo,hi) in all_cap_verts:
-                all_cap_verts.add(min(lo,hi))
-    # Compact: build new index mapping
+    # node_offsets[ci] = starting index of component ci in merged_nodes
+    node_offsets = [0]
+    for nodes in all_nodes:
+        node_offsets.append(node_offsets[-1] + len(nodes))
+    # Build merge pairs from known shared vertices
+    # For each shared global vertex, find its merged index in each component
+    n_merged_shared = 0
+    # Original shared vertices
+    for gvi in shared_global:
+        comp_indices = []
+        for ci_s in global_to_comps[gvi]:
+            if ci_s < len(big_comps):
+                lvi = int(comp_remap_list[ci_s][gvi])
+                merged_vi = node_offsets[ci_s] + lvi
+                if merged_vi < n_before_dedup:
+                    comp_indices.append(merged_vi)
+        # Merge all to the lowest index
+        if len(comp_indices) >= 2:
+            target = min(comp_indices)
+            for vi in comp_indices:
+                if vi != target:
+                    dedup_map[vi] = target
+                    if vi in all_cap_verts:
+                        all_cap_verts.add(target)
+                    n_merged_shared += 1
+    # Shared midpoints (from subdivision of shared edges)
+    n_merged_mids = 0
+    # Group midpoints by their shared edge key across components
+    mid_by_edge = _ddict(list)  # (gv0, gv1) -> [(ci, local_mid_vi), ...]
+    for ci_s in range(len(big_comps)):
+        for mid_vi, edge_key in shared_midpoints[ci_s].items():
+            if isinstance(edge_key, tuple) and len(edge_key) == 2:
+                merged_vi = node_offsets[ci_s] + mid_vi
+                if merged_vi < n_before_dedup:
+                    mid_by_edge[edge_key].append(merged_vi)
+    for edge_key, vis in mid_by_edge.items():
+        if len(vis) >= 2:
+            target = min(vis)
+            for vi in vis:
+                if vi != target:
+                    dedup_map[vi] = target
+                    if vi in all_cap_verts:
+                        all_cap_verts.add(target)
+                    n_merged_mids += 1
+    # Compact
+    # Follow chains
+    for i in range(n_before_dedup):
+        v = i
+        while dedup_map[v] != v:
+            v = dedup_map[v]
+        dedup_map[i] = v
     unique_mask = np.array([dedup_map[i] == i for i in range(n_before_dedup)])
     new_idx = np.full(n_before_dedup, -1, dtype=np.int32)
     new_idx[unique_mask] = np.arange(int(unique_mask.sum()), dtype=np.int32)
@@ -758,11 +822,9 @@ try:
             new_idx[i] = new_idx[dedup_map[i]]
     merged_nodes = merged_nodes[unique_mask]
     merged_elems = new_idx[merged_elems]
-    # Remap cap verts
     all_cap_verts = set(int(new_idx[v]) for v in all_cap_verts if v < len(new_idx) and new_idx[v] >= 0)
     n_deduped = n_before_dedup - len(merged_nodes)
-    if n_deduped > 0:
-        print(f"DEDUP: merged {{n_deduped}} shared boundary verts ({{n_before_dedup}}->{{len(merged_nodes)}})")
+    print(f"DEDUP: {{n_merged_shared}} shared verts + {{n_merged_mids}} shared midpoints = {{n_deduped}} total ({{n_before_dedup}}->{{len(merged_nodes)}})")
     cap_verts_out = np.array(sorted(all_cap_verts), dtype=np.int32)
     print(f"MERGED: {{len(merged_elems)}} tets, {{len(merged_nodes)}} verts")
     print(f"CAP_VERTS: {{len(cap_verts_out)}}")
@@ -783,7 +845,7 @@ except Exception as e:
                 import os
                 stdout_lines = result.stdout.strip().split('\n') if result.stdout else []
                 for line in stdout_lines:
-                    if line.startswith(('REPAIRED', 'QUALITY', 'NOQUALITY', 'EDGE_STATS', 'SUBDIVIDE', 'MESH_VOL', 'CAP_VERTS', 'SKIP_REPAIR', 'FIX_MANIFOLD', 'MESH_INPUT', 'FAIL', 'COMP', 'MERGED', 'COMPONENTS', 'COMP_DEBUG')):
+                    if line.startswith(('REPAIRED', 'QUALITY', 'NOQUALITY', 'EDGE_STATS', 'SUBDIVIDE', 'MESH_VOL', 'CAP_VERTS', 'SKIP_REPAIR', 'FIX_MANIFOLD', 'MESH_INPUT', 'FAIL', 'COMP', 'MERGED', 'COMPONENTS', 'COMP_DEBUG', 'DEDUP')):
                         print(f"  {line}")
 
                 if result.returncode == 0 and os.path.exists(tmp_out_path):
