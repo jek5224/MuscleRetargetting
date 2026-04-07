@@ -104,13 +104,6 @@ def _draw_tet_meshes_batched(app):
         if viper_only:
             continue
 
-        # Collect edge-only muscles (even when tet mesh is hidden)
-        if obj.is_draw_tet_edges and not obj.is_draw_tet_mesh:
-            if not hasattr(obj, '_tet_edge_verts') or obj._tet_edge_verts is None:
-                if hasattr(obj, 'tet_vertices') and obj.tet_vertices is not None:
-                    obj._prepare_tet_draw_arrays()
-            if obj._tet_edge_verts is not None:
-                edge_muscles.append(obj)
 
         if not (obj.is_draw_tet_mesh or getattr(obj, '_tet_anim_active', False)):
             continue

@@ -1692,7 +1692,7 @@ except Exception as e:
         self._tet_surface_vidx = np.array(surface_face_indices, dtype=np.int32).reshape(-1) if surface_face_indices else None
         self._tet_cap_vidx = np.array(cap_face_indices, dtype=np.int32).reshape(-1) if cap_face_indices else None
 
-        # Prepare edge arrays from render faces (matches visible surface)
+        # Prepare surface edge arrays (from render faces for display)
         edge_set = set()
         for face in render_faces:
             for i in range(3):
