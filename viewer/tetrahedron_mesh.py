@@ -707,6 +707,61 @@ try:
                                 if d < 20.0:  # pymeshfix moves verts up to ~13mm
                                     new_cap.add(ni)
                         local_cap = new_cap
+                    # Mark new pymeshfix vertices on cap planes as cap
+                    # For each anchor in this component, find its cap plane from surviving
+                    # cap verts, then mark new verts on that plane as cap too
+                    if len(local_cap) > 0 and len(local_verts) != len(verts_bk):
+                        # Find which original anchors are in this component
+                        comp_anchor_pos = {{}}
+                        for a_idx, a_pos in enumerate(rv[used]):
+                            orig_vi = int(used[a_idx]) if a_idx < len(used) else -1
+                            if orig_vi in cap_vert_indices:
+                                for cvi in local_cap:
+                                    if cvi < len(local_verts):
+                                        pass  # just iterate
+                        # Group surviving cap verts by proximity to find cap planes
+                        cap_list = sorted(local_cap)
+                        if len(cap_list) >= 3:
+                            cap_pts = np.array([local_verts[vi] for vi in cap_list if vi < len(local_verts)])
+                            if len(cap_pts) >= 3:
+                                # Cluster cap verts into cap groups (one per cap) using distance
+                                from scipy.spatial import cKDTree as _ck
+                                cap_tree = _ck(cap_pts)
+                                cap_groups = []
+                                cap_assigned = set()
+                                for i in range(len(cap_pts)):
+                                    if i in cap_assigned: continue
+                                    group = []
+                                    queue = [i]
+                                    while queue:
+                                        ci_q = queue.pop()
+                                        if ci_q in cap_assigned: continue
+                                        cap_assigned.add(ci_q)
+                                        group.append(ci_q)
+                                        nbs = cap_tree.query_ball_point(cap_pts[ci_q], r=30.0)
+                                        for nb in nbs:
+                                            if nb not in cap_assigned:
+                                                queue.append(nb)
+                                    if len(group) >= 3:
+                                        cap_groups.append(group)
+                                n_new_cap = 0
+                                for group in cap_groups:
+                                    gpts = cap_pts[group]
+                                    gcentroid = gpts.mean(axis=0)
+                                    _, _, gVt = np.linalg.svd(gpts - gcentroid, full_matrices=False)
+                                    gnormal = gVt[2]
+                                    gradius = np.max(np.linalg.norm(gpts - gcentroid, axis=1))
+                                    # Mark new vertices on this plane as cap
+                                    for vi in range(len(local_verts)):
+                                        if vi in local_cap: continue
+                                        pt = local_verts[vi]
+                                        d_plane = abs(np.dot(pt - gcentroid, gnormal))
+                                        d_center = np.linalg.norm(pt - gcentroid)
+                                        if d_plane < 3.0 and d_center < gradius * 1.2:
+                                            local_cap.add(vi)
+                                            n_new_cap += 1
+                                if n_new_cap > 0:
+                                    print(f"COMP_DEBUG {{ci}}: marked {{n_new_cap}} pymeshfix verts on cap planes as cap", flush=True)
                     print(f"COMP_DEBUG {{ci}}: pymeshfix {{len(verts_bk)}}->{{len(local_verts)}}v, cap={{len(local_cap)}}", flush=True)
                     # Fix normals, skip subdivision (re-subdivision creates new intersections)
                     mesh_f = trimesh.Trimesh(vertices=local_verts, faces=local_faces, process=False)
