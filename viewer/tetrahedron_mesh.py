@@ -272,32 +272,54 @@ class TetrahedronMeshMixin:
             cap_face_indices = []
             self.tet_anchor_vertices = []  # No anchor vertices with ear clipping
 
-            # Constrained Delaunay cap triangulation: project boundary loop onto
-            # best-fit plane, use CDT with boundary edges as constraints.
-            # Boundary edges are preserved — no triangle can span across concave regions.
-            import triangle as tr
-
-            def _cdt_cap(loop_indices, all_vertices):
+            # Minimum-area cap triangulation in 3D via dynamic programming.
+            # No 2D projection — works directly on non-planar boundary loops.
+            # Minimizes total triangle area, keeping triangles small and local.
+            def _min_area_cap(loop_indices, all_vertices):
                 n = len(loop_indices)
                 if n < 3: return []
                 if n == 3: return [[loop_indices[0], loop_indices[1], loop_indices[2]]]
-                pts_3d = np.array([all_vertices[vi] for vi in loop_indices])
-                # Project to best-fit 2D plane
-                centroid = pts_3d.mean(axis=0)
-                centered = pts_3d - centroid
-                _, _, Vt = np.linalg.svd(centered, full_matrices=False)
-                pts_2d = centered @ Vt[:2].T
-                # Boundary segments: consecutive edges + closing edge
-                segments = np.array([[i, (i + 1) % n] for i in range(n)], dtype=np.int32)
-                # Constrained Delaunay triangulation ('p' = PSLG mode, respects segments)
-                result = tr.triangulate({'vertices': pts_2d, 'segments': segments}, 'p')
+                pts = np.array([all_vertices[vi] for vi in loop_indices])
+
+                # Precompute all triangle areas
+                area_cache = {}
+                def tri_area(i, j, k):
+                    key = (i, j, k)
+                    if key not in area_cache:
+                        v1 = pts[j] - pts[i]
+                        v2 = pts[k] - pts[i]
+                        area_cache[key] = 0.5 * np.linalg.norm(np.cross(v1, v2))
+                    return area_cache[key]
+
+                # DP: cost[i][j] = min total area to triangulate sub-polygon i..j
+                cost = [[0.0] * n for _ in range(n)]
+                split = [[0] * n for _ in range(n)]
+                for span in range(2, n):
+                    for i in range(n - span):
+                        j = i + span
+                        best_cost = float('inf')
+                        best_k = i + 1
+                        for k in range(i + 1, j):
+                            c = tri_area(i, k, j) + cost[i][k] + cost[k][j]
+                            if c < best_cost:
+                                best_cost = c
+                                best_k = k
+                        cost[i][j] = best_cost
+                        split[i][j] = best_k
+
+                # Reconstruct
                 faces = []
-                for tri_idx in result['triangles']:
-                    faces.append([loop_indices[tri_idx[0]], loop_indices[tri_idx[1]], loop_indices[tri_idx[2]]])
+                def reconstruct(i, j):
+                    if j - i < 2: return
+                    k = split[i][j]
+                    faces.append([loop_indices[i], loop_indices[k], loop_indices[j]])
+                    reconstruct(i, k)
+                    reconstruct(k, j)
+                reconstruct(0, n - 1)
                 return faces
 
             for loop_idx, loop in enumerate(boundary_loops):
-                cap_faces = _cdt_cap(list(loop), closed_vertices)
+                cap_faces = _min_area_cap(list(loop), closed_vertices)
                 for cf in cap_faces:
                     cap_face_idx = len(closed_faces)
                     closed_faces.append(cf)
@@ -306,7 +328,7 @@ class TetrahedronMeshMixin:
                     if vi not in self.tet_anchor_vertices:
                         self.tet_anchor_vertices.append(vi)
                 expected = len(loop) - 2
-                print(f"  Loop {loop_idx}: {len(loop)} vertices, {len(cap_faces)}/{expected} CDT cap faces")
+                print(f"  Loop {loop_idx}: {len(loop)} vertices, {len(cap_faces)}/{expected} min-area cap faces")
 
             closed_vertices = np.array(closed_vertices, dtype=np.float32)
             closed_faces = np.array(closed_faces, dtype=np.int32)
