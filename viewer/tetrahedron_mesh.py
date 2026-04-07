@@ -1268,8 +1268,9 @@ except Exception as e:
         # - tet_render_faces: Surface faces for rendering
         # - tet_sim_faces: Tet boundary faces (for simulation boundary conditions)
         if tetgen_success:
-            # TetGen subdivides the surface — use tet boundary as render faces
-            self.tet_render_faces = sim_faces
+            # Use original contour mesh faces (remapped) for rendering
+            # sim_faces are for simulation boundary conditions
+            self.tet_render_faces = closed_faces
             # Cap faces = faces where ALL 3 vertices are tracked cap vertices
             tet_cap_set = set()
             if 'cap_verts' in tet_data.files:
