@@ -1722,8 +1722,14 @@ except Exception as e:
             self._prepare_tet_draw_arrays()
             return
         verts = self.tet_vertices
+        if verts is None:
+            return
+        n_v = len(verts)
         # Update surface verts + normals
         if self._tet_surface_vidx is not None and self._tet_surface_verts is not None:
+            if int(self._tet_surface_vidx.max()) >= n_v:
+                self._prepare_tet_draw_arrays()  # rebuild with current verts
+                return
             self._tet_surface_verts[:] = verts[self._tet_surface_vidx]
             if not skip_normals:
                 # Recompute normals vectorized: every 3 verts is a triangle
@@ -1746,7 +1752,10 @@ except Exception as e:
                 self._tet_cap_normals[:] = np.repeat(normals, 3, axis=0)
         # Update edge verts
         if self._tet_edge_vidx is not None and self._tet_edge_verts is not None:
-            self._tet_edge_verts[:] = verts[self._tet_edge_vidx]
+            if len(self._tet_edge_vidx) > 0 and int(self._tet_edge_vidx.max()) >= n_v:
+                pass  # skip — indices stale
+            else:
+                self._tet_edge_verts[:] = verts[self._tet_edge_vidx]
 
     def _draw_tet_mesh_animated(self):
         """Tet edge animation phases 1-2 (phase 3+ uses normal draw_tetrahedron_mesh).
