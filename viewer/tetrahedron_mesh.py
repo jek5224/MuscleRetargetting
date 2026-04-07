@@ -731,6 +731,38 @@ try:
         raise RuntimeError("No components tetrahedralized")
     merged_nodes = np.vstack(all_nodes)
     merged_elems = np.vstack(all_elems).astype(np.int32)
+    # Deduplicate shared boundary vertices (same position, different indices)
+    n_before_dedup = len(merged_nodes)
+    dedup_map = np.arange(n_before_dedup, dtype=np.int32)
+    tree_dedup = cKDTree(merged_nodes)
+    pairs = tree_dedup.query_pairs(r=1e-6)  # exact position match
+    for i, j in pairs:
+        # Map higher index to lower
+        lo, hi = min(i,j), max(i,j)
+        # Follow chain
+        while dedup_map[hi] != hi:
+            hi = dedup_map[hi]
+        while dedup_map[lo] != lo:
+            lo = dedup_map[lo]
+        if lo != hi:
+            dedup_map[max(lo,hi)] = min(lo,hi)
+            # Merge cap status
+            if max(lo,hi) in all_cap_verts:
+                all_cap_verts.add(min(lo,hi))
+    # Compact: build new index mapping
+    unique_mask = np.array([dedup_map[i] == i for i in range(n_before_dedup)])
+    new_idx = np.full(n_before_dedup, -1, dtype=np.int32)
+    new_idx[unique_mask] = np.arange(int(unique_mask.sum()), dtype=np.int32)
+    for i in range(n_before_dedup):
+        if new_idx[i] < 0:
+            new_idx[i] = new_idx[dedup_map[i]]
+    merged_nodes = merged_nodes[unique_mask]
+    merged_elems = new_idx[merged_elems]
+    # Remap cap verts
+    all_cap_verts = set(int(new_idx[v]) for v in all_cap_verts if v < len(new_idx) and new_idx[v] >= 0)
+    n_deduped = n_before_dedup - len(merged_nodes)
+    if n_deduped > 0:
+        print(f"DEDUP: merged {{n_deduped}} shared boundary verts ({{n_before_dedup}}->{{len(merged_nodes)}})")
     cap_verts_out = np.array(sorted(all_cap_verts), dtype=np.int32)
     print(f"MERGED: {{len(merged_elems)}} tets, {{len(merged_nodes)}} verts")
     print(f"CAP_VERTS: {{len(cap_verts_out)}}")
