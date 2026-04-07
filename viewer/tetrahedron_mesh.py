@@ -717,11 +717,11 @@ try:
                 tet = t
             except Exception:
                 # TetGen failed — use Delaunay + inside filter (preserves all vertices & caps)
+                # Use post-subdivision mesh (same level of detail as TetGen path)
                 print(f"COMP_DEBUG {{ci}}: TetGen failed, using Delaunay+inside filter", flush=True)
                 from scipy.spatial import Delaunay as _Delaunay
-                dl_verts = pre_subdiv_verts.copy()
-                dl_faces = pre_subdiv_faces.copy()
-                local_cap = set(pre_subdiv_cap)
+                dl_verts = local_verts.copy()
+                dl_faces = local_faces.copy()
                 dl = _Delaunay(dl_verts)
                 all_dl_tets = dl.simplices
                 dl_mesh = trimesh.Trimesh(vertices=dl_verts, faces=dl_faces, process=False)
