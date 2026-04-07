@@ -687,124 +687,34 @@ try:
                 t.tetrahedralize(quality=False, nobisect=True)
                 tet = t
             except Exception:
-                # TetGen failed — try pymeshfix to fix self-intersections
-                print(f"COMP_DEBUG {{ci}}: TetGen failed, trying pymeshfix on pre-subdiv...", flush=True)
-                try:
-                    verts_bk = pre_subdiv_verts.copy()
-                    cap_bk = set(pre_subdiv_cap)
-                    local_cap = set(pre_subdiv_cap)
-                    fixer = pymeshfix.MeshFix(pre_subdiv_verts.copy(), pre_subdiv_faces.copy())
-                    fixer.repair(verbose=False)
-                    local_verts = fixer.v.astype(np.float64)
-                    local_faces = fixer.f.astype(np.int32)
-                    # Remap caps
-                    if len(local_verts) != len(verts_bk):
-                        fix_tree = cKDTree(local_verts)
-                        new_cap = set()
-                        for vi in cap_bk:
-                            if vi < len(verts_bk):
-                                d, ni = fix_tree.query(verts_bk[vi])
-                                if d < 20.0:  # pymeshfix moves verts up to ~13mm
-                                    new_cap.add(ni)
-                        local_cap = new_cap
-                    # Mark new pymeshfix vertices on cap planes as cap
-                    # For each anchor in this component, find its cap plane from surviving
-                    # cap verts, then mark new verts on that plane as cap too
-                    if len(local_cap) > 0 and len(local_verts) != len(verts_bk):
-                        # Find which original anchors are in this component
-                        comp_anchor_pos = {{}}
-                        for a_idx, a_pos in enumerate(rv[used]):
-                            orig_vi = int(used[a_idx]) if a_idx < len(used) else -1
-                            if orig_vi in cap_vert_indices:
-                                for cvi in local_cap:
-                                    if cvi < len(local_verts):
-                                        pass  # just iterate
-                        # Group surviving cap verts by proximity to find cap planes
-                        cap_list = sorted(local_cap)
-                        if len(cap_list) >= 3:
-                            cap_pts = np.array([local_verts[vi] for vi in cap_list if vi < len(local_verts)])
-                            if len(cap_pts) >= 3:
-                                # Cluster cap verts into cap groups (one per cap) using distance
-                                from scipy.spatial import cKDTree as _ck
-                                cap_tree = _ck(cap_pts)
-                                cap_groups = []
-                                cap_assigned = set()
-                                for i in range(len(cap_pts)):
-                                    if i in cap_assigned: continue
-                                    group = []
-                                    queue = [i]
-                                    while queue:
-                                        ci_q = queue.pop()
-                                        if ci_q in cap_assigned: continue
-                                        cap_assigned.add(ci_q)
-                                        group.append(ci_q)
-                                        nbs = cap_tree.query_ball_point(cap_pts[ci_q], r=30.0)
-                                        for nb in nbs:
-                                            if nb not in cap_assigned:
-                                                queue.append(nb)
-                                    if len(group) >= 3:
-                                        cap_groups.append(group)
-                                n_new_cap = 0
-                                for group in cap_groups:
-                                    gpts = cap_pts[group]
-                                    gcentroid = gpts.mean(axis=0)
-                                    _, _, gVt = np.linalg.svd(gpts - gcentroid, full_matrices=False)
-                                    gnormal = gVt[2]
-                                    gradius = np.max(np.linalg.norm(gpts - gcentroid, axis=1))
-                                    # Mark new vertices on this plane as cap
-                                    for vi in range(len(local_verts)):
-                                        if vi in local_cap: continue
-                                        pt = local_verts[vi]
-                                        d_plane = abs(np.dot(pt - gcentroid, gnormal))
-                                        d_center = np.linalg.norm(pt - gcentroid)
-                                        if d_plane < 3.0 and d_center < gradius * 1.2:
-                                            local_cap.add(vi)
-                                            n_new_cap += 1
-                                if n_new_cap > 0:
-                                    print(f"COMP_DEBUG {{ci}}: marked {{n_new_cap}} pymeshfix verts on cap planes as cap", flush=True)
-                    print(f"COMP_DEBUG {{ci}}: pymeshfix {{len(verts_bk)}}->{{len(local_verts)}}v, cap={{len(local_cap)}}", flush=True)
-                    # Fix normals, skip subdivision (re-subdivision creates new intersections)
-                    mesh_f = trimesh.Trimesh(vertices=local_verts, faces=local_faces, process=False)
-                    mesh_f.fix_normals()
-                    local_verts, local_faces = mesh_f.vertices.astype(np.float64), mesh_f.faces.astype(np.int32)
-                    _mv2=abs(mesh_f.volume);mv2=max(_mv2/1500,1e-6);sb2=max(len(local_verts),300)
-                    try:
-                        t=tetgen.TetGen(local_verts.copy(),local_faces.copy())
-                        t.tetrahedralize(order=1,mindihedral=5,minratio=2.0,maxvolume=mv2,nobisect=True,steinerleft=sb2)
-                        tet=t
-                    except Exception:
-                        t=tetgen.TetGen(local_verts.copy(),local_faces.copy())
-                        t.tetrahedralize(quality=False,nobisect=True)
-                        tet=t
-                    print(f"COMP_DEBUG {{ci}}: pymeshfix+TetGen OK: {{len(tet.elem)}} tets", flush=True)
-                except Exception as e2:
-                    print(f"COMP_DEBUG {{ci}}: pymeshfix+TetGen also failed: {{e2}}", flush=True)
-                    # Restore and use contour-guided
-                    local_verts = verts_bk
-                    local_faces = pre_subdiv_faces.copy()
-                    local_cap = cap_bk
-                    print(f"COMP_DEBUG {{ci}}: using contour-guided fallback", flush=True)
-                    # Connect each face to its centroid to make tets
-                    centroid_3d = np.mean(local_verts[local_faces], axis=1)
-                    fallback_tets = []
-                    for fi, f in enumerate(local_faces):
-                        ci_v = len(local_verts)
-                        local_verts = np.vstack([local_verts, centroid_3d[fi:fi+1]])
-                        fallback_tets.append([int(f[0]), int(f[1]), int(f[2]), ci_v])
-                    fallback_tets = np.array(fallback_tets, dtype=np.int32)
-                    v0t = local_verts[fallback_tets[:,0]]
-                    cr = np.cross(local_verts[fallback_tets[:,1]]-v0t,
-                                  local_verts[fallback_tets[:,2]]-v0t)
-                    vol = np.einsum('ij,ij->i', cr, local_verts[fallback_tets[:,3]]-v0t) / 6.0
-                    neg = vol < 0
-                    if np.any(neg):
-                        fallback_tets[neg,1], fallback_tets[neg,2] = fallback_tets[neg,2].copy(), fallback_tets[neg,1].copy()
-                    class FakeTet:
-                        pass
-                    tet = FakeTet()
-                    tet.node = local_verts
-                    tet.elem = fallback_tets
-                    print(f"COMP_DEBUG {{ci}}: contour-guided {{len(fallback_tets)}} tets")
+                # TetGen failed — use Delaunay + inside filter (preserves all vertices & caps)
+                print(f"COMP_DEBUG {{ci}}: TetGen failed, using Delaunay+inside filter", flush=True)
+                from scipy.spatial import Delaunay as _Delaunay
+                dl_verts = pre_subdiv_verts.copy()
+                dl_faces = pre_subdiv_faces.copy()
+                local_cap = set(pre_subdiv_cap)
+                dl = _Delaunay(dl_verts)
+                all_dl_tets = dl.simplices
+                dl_mesh = trimesh.Trimesh(vertices=dl_verts, faces=dl_faces, process=False)
+                dl_mesh.fix_normals()
+                tet_centers = np.mean(dl_verts[all_dl_tets], axis=1)
+                inside = dl_mesh.contains(tet_centers)
+                interior_tets = all_dl_tets[inside]
+                # Fix orientation
+                v0t = dl_verts[interior_tets[:,0]]
+                cr = np.cross(dl_verts[interior_tets[:,1]]-v0t, dl_verts[interior_tets[:,2]]-v0t)
+                vol = np.einsum('ij,ij->i', cr, dl_verts[interior_tets[:,3]]-v0t) / 6.0
+                neg = vol < 0
+                if np.any(neg):
+                    interior_tets[neg,1], interior_tets[neg,2] = interior_tets[neg,2].copy(), interior_tets[neg,1].copy()
+                class FakeTet:
+                    pass
+                tet = FakeTet()
+                tet.node = dl_verts
+                tet.elem = interior_tets.astype(np.int32)
+                local_verts = dl_verts
+                local_faces = dl_faces
+                print(f"COMP_DEBUG {{ci}}: Delaunay: {{len(interior_tets)}} interior tets from {{len(all_dl_tets)}}", flush=True)
         if tet is None:
             print(f"COMP {{ci}}: FAILED completely")
             continue
