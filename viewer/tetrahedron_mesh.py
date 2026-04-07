@@ -652,47 +652,61 @@ try:
         max_edge_len = median_edge * 1.2
         for _si in range(2):
             nv = list(local_verts)
-            nf = []
             emp = dict()
-            ns = 0
+            sl = shared_local[ci]
+            def get_or_create_mid(v0i, v1i):
+                ek = (min(v0i,v1i),max(v0i,v1i))
+                if ek not in emp:
+                    mi = len(nv)
+                    emp[ek] = mi
+                    nv.append((np.array(nv[v0i])+np.array(nv[v1i]))/2)
+                    if v0i in local_cap and v1i in local_cap:
+                        local_cap.add(mi)
+                    if v0i in sl and v1i in sl:
+                        gv0, gv1 = sl[v0i], sl[v1i]
+                        if isinstance(gv0, int) and isinstance(gv1, int):
+                            shared_midpoints[ci][mi] = (min(gv0,gv1), max(gv0,gv1))
+                            sl[mi] = (min(gv0,gv1), max(gv0,gv1))
+                return emp[ek]
+            # Pass 1: find edges to split
+            edges_to_split = set()
             for ff in local_faces:
-                splits = []
                 for i in range(3):
                     v0i, v1i = int(ff[i]), int(ff[(i+1)%3])
                     el = np.linalg.norm(local_verts[v0i]-local_verts[v1i]) if v0i<len(local_verts) and v1i<len(local_verts) else 0
                     if el > max_edge_len:
-                        ek = (min(v0i,v1i),max(v0i,v1i))
-                        if ek not in emp:
-                            mi = len(nv)
-                            emp[ek] = mi
-                            nv.append((np.array(nv[v0i])+np.array(nv[v1i]))/2)
-                            if v0i in local_cap and v1i in local_cap:
-                                local_cap.add(mi)
-                            # Track shared midpoints
-                            sl = shared_local[ci]
-                            if v0i in sl and v1i in sl:
-                                gv0, gv1 = sl[v0i], sl[v1i]
-                                shared_midpoints[ci][mi] = (min(gv0,gv1), max(gv0,gv1))
-                                sl[mi] = (min(gv0,gv1), max(gv0,gv1))  # tuple as key for mid
-                        splits.append((i, emp[ek]))
-                    else:
-                        splits.append((i, None))
-                se = [(i,m) for i,m in splits if m is not None]
-                if len(se)==0:
-                    nf.append(list(ff))
-                elif len(se)==1:
-                    ei,mi=se[0]; v0,v1,v2=int(ff[ei]),int(ff[(ei+1)%3]),int(ff[(ei+2)%3])
-                    nf.append([v0,mi,v2]); nf.append([mi,v1,v2]); ns+=1
-                elif len(se)==2:
-                    vs=[int(ff[0]),int(ff[1]),int(ff[2])]; md={{}}
-                    for ei,mi in se: md[ei]=mi
-                    if 0 in md and 1 in md: nf.append([vs[0],md[0],vs[2]]); nf.append([md[0],vs[1],md[1]]); nf.append([md[0],md[1],vs[2]])
-                    elif 0 in md and 2 in md: nf.append([vs[0],md[0],md[2]]); nf.append([md[0],vs[1],vs[2]]); nf.append([md[0],vs[2],md[2]])
-                    elif 1 in md and 2 in md: nf.append([vs[0],vs[1],md[1]]); nf.append([vs[0],md[1],md[2]]); nf.append([md[1],vs[2],md[2]])
-                    ns+=1
+                        edges_to_split.add((min(v0i,v1i),max(v0i,v1i)))
+            # Pass 2: propagate — if any edge of a face splits, split ALL its edges
+            changed = True
+            while changed:
+                changed = False
+                for ff in local_faces:
+                    face_edges = []
+                    for i in range(3):
+                        face_edges.append((min(int(ff[i]),int(ff[(i+1)%3])),max(int(ff[i]),int(ff[(i+1)%3]))))
+                    has_split = any(e in edges_to_split for e in face_edges)
+                    if has_split:
+                        for e in face_edges:
+                            if e not in edges_to_split:
+                                edges_to_split.add(e)
+                                changed = True
+            # Pass 3: create midpoints and split ALL faces uniformly (4-way)
+            for e in edges_to_split:
+                get_or_create_mid(e[0], e[1])
+            nf = []
+            ns = 0
+            for ff in local_faces:
+                v0,v1,v2 = int(ff[0]),int(ff[1]),int(ff[2])
+                e01 = (min(v0,v1),max(v0,v1))
+                e12 = (min(v1,v2),max(v1,v2))
+                e20 = (min(v2,v0),max(v2,v0))
+                if e01 in emp and e12 in emp and e20 in emp:
+                    m01,m12,m20 = emp[e01],emp[e12],emp[e20]
+                    nf.append([v0,m01,m20]); nf.append([m01,v1,m12])
+                    nf.append([m20,m12,v2]); nf.append([m01,m12,m20])
+                    ns += 1
                 else:
-                    vs=[int(ff[0]),int(ff[1]),int(ff[2])]; m01=splits[0][1]; m12=splits[1][1]; m20=splits[2][1]
-                    nf.append([vs[0],m01,m20]); nf.append([m01,vs[1],m12]); nf.append([m20,m12,vs[2]]); nf.append([m01,m12,m20]); ns+=1
+                    nf.append([v0,v1,v2])
             local_verts=np.array(nv,dtype=np.float64); local_faces=np.array(nf,dtype=np.int32)
             if ns==0: break
         # Fix normals after subdivision
