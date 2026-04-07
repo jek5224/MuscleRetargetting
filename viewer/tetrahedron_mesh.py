@@ -183,45 +183,8 @@ class TetrahedronMeshMixin:
             print("Laplacian smoothing disabled, using original contour mesh vertices")
             vertices = vertices_original.copy()
 
-        # Step 0.5: Merge duplicate vertices (shared cut edge vertices)
-        # After contour cutting, adjacent pieces have vertices at identical positions
-        # on shared boundaries. build_contour_mesh deduplicates per-level, but this
-        # step catches any remaining duplicates to ensure the tet mesh forms one
-        # connected body with shared vertices at cut boundaries.
-        merge_epsilon = 1e-6
-        n_verts_before = len(vertices)
-
-        # Build spatial hash for finding duplicates
-        vertex_map = {}  # Maps old index to new index
-        unique_vertices = []
-        merged_count = 0
-
-        for old_idx, v in enumerate(vertices):
-            # Check if this vertex is close to any existing unique vertex
-            found_match = False
-            for new_idx, uv in enumerate(unique_vertices):
-                if np.linalg.norm(v - uv) < merge_epsilon:
-                    vertex_map[old_idx] = new_idx
-                    found_match = True
-                    merged_count += 1
-                    break
-
-            if not found_match:
-                vertex_map[old_idx] = len(unique_vertices)
-                unique_vertices.append(v)
-
-        if merged_count > 0:
-            # Update faces to use new vertex indices
-            new_faces = []
-            for face in faces:
-                new_face = [vertex_map[v] for v in face]
-                # Skip degenerate faces (where vertices merged to same point)
-                if len(set(new_face)) == 3:
-                    new_faces.append(new_face)
-
-            vertices = np.array(unique_vertices)
-            faces = np.array(new_faces)
-            print(f"Merged {merged_count} duplicate vertices ({n_verts_before} -> {len(vertices)})")
+        # Step 0.5: Skip vertex merging — per-stream separation in the subprocess
+        # handles shared boundary vertices via deterministic merge after TetGen.
 
         # Step 1: Find open boundary edges (edges that belong to only one face)
         edge_count = defaultdict(list)
