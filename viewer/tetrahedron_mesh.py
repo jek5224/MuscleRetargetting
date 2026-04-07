@@ -1110,6 +1110,95 @@ except Exception as e:
                       f"{len(closed_vertices)} verts "
                       f"(+{len(closed_vertices) - n_original} centers)")
 
+                # Step 4d: Add bridge tets to fill gaps between adjacent tets
+                # Adjacent contour-guided tets share a surface edge but NOT a face
+                # (different center vertices). Bridge tets connect the shared edge
+                # to both centers, making the mesh properly connected.
+                surface_verts_set = set(int(v) for f in closed_faces for v in f)
+                center_verts_set = set(int(v) for t in interior_tetrahedra for v in t) - surface_verts_set
+
+                if len(center_verts_set) > 0:
+                    from collections import defaultdict as _dd_bridge
+                    surface_edge_tets = _dd_bridge(list)
+                    for ti, t in enumerate(interior_tetrahedra):
+                        centers = [int(v) for v in t if int(v) in center_verts_set]
+                        surfaces = [int(v) for v in t if int(v) in surface_verts_set]
+                        if len(centers) != 1 or len(surfaces) != 3:
+                            continue
+                        center = centers[0]
+                        for i in range(3):
+                            for j in range(i + 1, 3):
+                                ekey = (min(surfaces[i], surfaces[j]), max(surfaces[i], surfaces[j]))
+                                surface_edge_tets[ekey].append((ti, center))
+
+                    bridge_set = set()
+                    bridge_tets_raw = []
+                    for ekey, tet_list in surface_edge_tets.items():
+                        centers_seen = sorted(set(c for _, c in tet_list))
+                        if len(centers_seen) < 2:
+                            continue
+                        for i in range(len(centers_seen)):
+                            for j in range(i + 1, len(centers_seen)):
+                                bridge = tuple(sorted([ekey[0], ekey[1], centers_seen[i], centers_seen[j]]))
+                                if bridge in bridge_set:
+                                    continue
+                                bridge_set.add(bridge)
+                                b = [ekey[0], ekey[1], centers_seen[i], centers_seen[j]]
+                                p0 = closed_vertices[b[0]].astype(np.float64)
+                                cross_b = np.cross(
+                                    closed_vertices[b[1]].astype(np.float64) - p0,
+                                    closed_vertices[b[2]].astype(np.float64) - p0)
+                                vol_b = np.dot(cross_b, closed_vertices[b[3]].astype(np.float64) - p0) / 6.0
+                                if abs(vol_b) < 1e-12:
+                                    continue
+                                if vol_b < 0:
+                                    b[2], b[3] = b[3], b[2]
+                                    vol_b = -vol_b
+                                bridge_tets_raw.append((bridge, b, vol_b))
+
+                    # Remove bridges that would create over-shared faces
+                    orig_face_count = _dd_bridge(int)
+                    for t in interior_tetrahedra:
+                        for face in [(t[0],t[1],t[2]),(t[0],t[1],t[3]),(t[0],t[2],t[3]),(t[1],t[2],t[3])]:
+                            orig_face_count[tuple(sorted(int(v) for v in face))] += 1
+                    face_to_bridges = _dd_bridge(list)
+                    for idx, (key, b, vol_b) in enumerate(bridge_tets_raw):
+                        for face in [(b[0],b[1],b[2]),(b[0],b[1],b[3]),(b[0],b[2],b[3]),(b[1],b[2],b[3])]:
+                            face_to_bridges[tuple(sorted(face))].append((idx, vol_b))
+                    remove_set = set()
+                    for fkey, blist in face_to_bridges.items():
+                        total = orig_face_count.get(fkey, 0) + len(blist)
+                        if total > 2:
+                            blist.sort(key=lambda x: -x[1])
+                            allowed = max(0, 2 - orig_face_count.get(fkey, 0))
+                            for idx, _ in blist[allowed:]:
+                                remove_set.add(idx)
+
+                    bridge_tets_final = [b for idx, (_, b, _) in enumerate(bridge_tets_raw) if idx not in remove_set]
+
+                    if bridge_tets_final:
+                        bridge_arr = np.array(bridge_tets_final, dtype=interior_tetrahedra.dtype)
+                        interior_tetrahedra = np.vstack([interior_tetrahedra, bridge_arr])
+                        print(f"  Bridge tets: {len(bridge_tets_final)} added "
+                              f"({len(remove_set)} removed for over-sharing)")
+                    else:
+                        print(f"  Bridge tets: 0 (no gaps found)")
+                else:
+                    print(f"  Bridge tets: skipped (no center vertices found)")
+
+                # Fix inverted tets (both original and bridge)
+                v0_fix = closed_vertices[interior_tetrahedra[:, 0]].astype(np.float64)
+                cr_fix = np.cross(
+                    closed_vertices[interior_tetrahedra[:, 1]].astype(np.float64) - v0_fix,
+                    closed_vertices[interior_tetrahedra[:, 2]].astype(np.float64) - v0_fix)
+                vol_fix = np.einsum('ij,ij->i', cr_fix,
+                    closed_vertices[interior_tetrahedra[:, 3]].astype(np.float64) - v0_fix) / 6.0
+                neg_fix = vol_fix < 0
+                if np.any(neg_fix):
+                    interior_tetrahedra[neg_fix, 1], interior_tetrahedra[neg_fix, 2] = \
+                        interior_tetrahedra[neg_fix, 2].copy(), interior_tetrahedra[neg_fix, 1].copy()
+                    print(f"  Fixed {int(np.sum(neg_fix))} inverted tets")
+
                 # Quality check: detailed volume distribution
                 v0 = closed_vertices[interior_tetrahedra[:, 0]].astype(np.float64)
                 cr = np.cross(
