@@ -1692,20 +1692,13 @@ except Exception as e:
         self._tet_surface_vidx = np.array(surface_face_indices, dtype=np.int32).reshape(-1) if surface_face_indices else None
         self._tet_cap_vidx = np.array(cap_face_indices, dtype=np.int32).reshape(-1) if cap_face_indices else None
 
-        # Prepare edge arrays from tetrahedra (shows all edges including interior)
+        # Prepare edge arrays from render faces (matches visible surface)
         edge_set = set()
-        if self.tet_tetrahedra is not None and len(self.tet_tetrahedra) > 0:
-            for tet in self.tet_tetrahedra:
-                for i in range(4):
-                    for j in range(i + 1, 4):
-                        edge = (min(tet[i], tet[j]), max(tet[i], tet[j]))
-                        edge_set.add(edge)
-        else:
-            for face in render_faces:
-                for i in range(3):
-                    v0, v1 = face[i], face[(i + 1) % 3]
-                    edge = (min(v0, v1), max(v0, v1))
-                    edge_set.add(edge)
+        for face in render_faces:
+            for i in range(3):
+                v0, v1 = face[i], face[(i + 1) % 3]
+                edge = (min(v0, v1), max(v0, v1))
+                edge_set.add(edge)
 
         edge_verts = []
         edge_vidx = []
