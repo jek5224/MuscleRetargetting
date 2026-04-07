@@ -735,7 +735,7 @@ try:
     n_before_dedup = len(merged_nodes)
     dedup_map = np.arange(n_before_dedup, dtype=np.int32)
     tree_dedup = cKDTree(merged_nodes)
-    pairs = tree_dedup.query_pairs(r=1e-6)  # exact position match
+    pairs = tree_dedup.query_pairs(r=0.0001)  # 0.1mm in viewer scale
     for i, j in pairs:
         # Map higher index to lower
         lo, hi = min(i,j), max(i,j)
