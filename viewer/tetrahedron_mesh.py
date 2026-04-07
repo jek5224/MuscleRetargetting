@@ -676,23 +676,11 @@ try:
                     el = np.linalg.norm(local_verts[v0i]-local_verts[v1i]) if v0i<len(local_verts) and v1i<len(local_verts) else 0
                     if el > max_edge_len:
                         edges_to_split.add((min(v0i,v1i),max(v0i,v1i)))
-            # Pass 2: propagate — if any edge of a face splits, split ALL its edges
-            changed = True
-            while changed:
-                changed = False
-                for ff in local_faces:
-                    face_edges = []
-                    for i in range(3):
-                        face_edges.append((min(int(ff[i]),int(ff[(i+1)%3])),max(int(ff[i]),int(ff[(i+1)%3]))))
-                    has_split = any(e in edges_to_split for e in face_edges)
-                    if has_split:
-                        for e in face_edges:
-                            if e not in edges_to_split:
-                                edges_to_split.add(e)
-                                changed = True
-            # Pass 3: create midpoints and split ALL faces uniformly (4-way)
+            # Pass 2: create midpoints for edges to split
             for e in edges_to_split:
                 get_or_create_mid(e[0], e[1])
+            # Pass 3: split faces. 4-way if all 3 edges split. Otherwise keep whole.
+            # No partial splits = no T-junctions.
             nf = []
             ns = 0
             for ff in local_faces:
@@ -700,7 +688,17 @@ try:
                 e01 = (min(v0,v1),max(v0,v1))
                 e12 = (min(v1,v2),max(v1,v2))
                 e20 = (min(v2,v0),max(v2,v0))
-                if e01 in emp and e12 in emp and e20 in emp:
+                n_split_edges = (e01 in emp) + (e12 in emp) + (e20 in emp)
+                if n_split_edges == 3:
+                    m01,m12,m20 = emp[e01],emp[e12],emp[e20]
+                    nf.append([v0,m01,m20]); nf.append([m01,v1,m12])
+                    nf.append([m20,m12,v2]); nf.append([m01,m12,m20])
+                    ns += 1
+                elif n_split_edges > 0:
+                    # Force split remaining edges to avoid T-junctions
+                    if e01 not in emp: get_or_create_mid(v0,v1)
+                    if e12 not in emp: get_or_create_mid(v1,v2)
+                    if e20 not in emp: get_or_create_mid(v2,v0)
                     m01,m12,m20 = emp[e01],emp[e12],emp[e20]
                     nf.append([v0,m01,m20]); nf.append([m01,v1,m12])
                     nf.append([m20,m12,v2]); nf.append([m01,m12,m20])
