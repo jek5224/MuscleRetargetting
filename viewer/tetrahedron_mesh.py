@@ -1350,6 +1350,11 @@ except Exception as e:
                     dists = np.linalg.norm(sim_fc - closed_vertices[ani].astype(np.float64), axis=1)
                     near = np.where(dists < 0.02)[0]
                     n_cap = sum(1 for fi in near if fi in cap_fi_set)
+                    # Also mark all faces touching the pole vertex as cap
+                    for fi in range(len(sim_faces)):
+                        if ani in sim_faces[fi] and fi not in cap_fi_set:
+                            cap_face_indices.append(int(fi))
+                            cap_fi_set.add(int(fi))
                     if n_cap < 5 and len(near) > 0:
                         # pymeshfix deleted the anchor vertex. The cap is now
                         # flat triangles between boundary loop vertices.
