@@ -3963,43 +3963,51 @@ class MuscleMeshMixin:
         if skeleton is not None and skeleton_meshes is not None and hasattr(self, 'tet_cap_attachments'):
             skeleton_names = list(skeleton_meshes.keys())
 
-            for attachment in self.tet_cap_attachments:
-                anchor_idx, stream_idx, end_type, skel_mesh_idx, subpart_idx = attachment
+            # Check if attach_skeletons has valid data (non-empty, not all zeros)
+            has_valid_skel_data = (
+                hasattr(self, 'attach_skeletons') and
+                len(self.attach_skeletons) > 0 and
+                any(any(idx != 0 for idx in group) for group in self.attach_skeletons)
+            )
 
-                if skel_mesh_idx >= len(skeleton_names):
-                    continue
+            if has_valid_skel_data:
+                for attachment in self.tet_cap_attachments:
+                    anchor_idx, stream_idx, end_type, skel_mesh_idx, subpart_idx = attachment
 
-                mesh_name = skeleton_names[skel_mesh_idx]
-
-                try:
-                    # Use robust body finding
-                    body_node, body_name = find_dart_body(skeleton, mesh_name)
-
-                    if body_node is None:
-                        print(f"  Could not find DART body for mesh '{mesh_name}'")
+                    if skel_mesh_idx >= len(skeleton_names):
                         continue
 
-                    world_transform = body_node.getWorldTransform()
-                    rotation = world_transform.rotation()
-                    translation = world_transform.translation()
+                    mesh_name = skeleton_names[skel_mesh_idx]
 
-                    if body_name not in self.soft_body_initial_transforms:
-                        self.soft_body_initial_transforms[body_name] = (rotation.copy(), translation.copy())
+                    try:
+                        body_node, body_name = find_dart_body(skeleton, mesh_name)
 
-                    anchor_world_pos = self.soft_body.rest_positions[anchor_idx]
-                    local_pos = rotation.T @ (anchor_world_pos - translation)
+                        if body_node is None:
+                            print(f"  Could not find DART body for mesh '{mesh_name}'")
+                            continue
 
-                    self.soft_body_local_anchors[anchor_idx] = (body_name, local_pos.copy())
+                        world_transform = body_node.getWorldTransform()
+                        rotation = world_transform.rotation()
+                        translation = world_transform.translation()
 
-                    print(f"  Anchor {anchor_idx} -> mesh '{mesh_name}' -> body '{body_name}'")
+                        if body_name not in self.soft_body_initial_transforms:
+                            self.soft_body_initial_transforms[body_name] = (rotation.copy(), translation.copy())
 
-                except Exception as e:
-                    print(f"  Failed to attach anchor {anchor_idx}: {e}")
-                    continue
+                        anchor_world_pos = self.soft_body.rest_positions[anchor_idx]
+                        local_pos = rotation.T @ (anchor_world_pos - translation)
 
-            # Assign ALL fixed vertices to their appropriate body
-            # For muscles attaching to multiple bones (like psoas major),
-            # each fixed vertex finds its nearest bone independently
+                        self.soft_body_local_anchors[anchor_idx] = (body_name, local_pos.copy())
+
+                        print(f"  Anchor {anchor_idx} -> mesh '{mesh_name}' -> body '{body_name}'")
+
+                    except Exception as e:
+                        print(f"  Failed to attach anchor {anchor_idx}: {e}")
+                        continue
+            else:
+                print(f"  No valid attach_skeletons — cap anchors will use nearest-bone matching")
+
+            # Assign ALL fixed vertices (including cap anchors without valid skel data)
+            # to their appropriate body via nearest-bone matching
             self._assign_fixed_vertices_to_nearest_bones(skeleton, skeleton_meshes, mesh_to_body)
             print(f"  Assigned {len(self.soft_body_local_anchors)} fixed vertices to bodies")
 
