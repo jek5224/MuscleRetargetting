@@ -2727,9 +2727,8 @@ class FiberArchitectureMixin:
         best_bary = None
         best_min_coord = -float('inf')  # Track least-negative barycentric coord
 
-        # Search through tetrahedra - check more if point is far outside
-        num_to_check = min(500, len(tetrahedra))
-        for tet_idx in sorted_indices[:num_to_check]:
+        # Check all tets (contour-guided meshes have ~1000 tets — fast enough)
+        for tet_idx in sorted_indices:
             tet = tetrahedra[tet_idx]
             v0, v1, v2, v3 = tet_verts[tet[0]], tet_verts[tet[1]], tet_verts[tet[2]], tet_verts[tet[3]]
 
