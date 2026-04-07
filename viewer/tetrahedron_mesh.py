@@ -1356,15 +1356,23 @@ except Exception as e:
                         # ALL faces on that plane within the cap radius.
                         anchor_pos = closed_vertices[ani].astype(np.float64)
                         cap_radius = _anchor_radii.get(ai, 0.01)
-                        # Find cap verts closest to THIS anchor
-                        cap_dists = []
+                        # Find cap verts where THIS anchor is their NEAREST anchor
+                        all_anchor_pos = {a: closed_vertices[tet_tree_fb.query(p.astype(np.float64))[1]].astype(np.float64)
+                                          for a, p in _anchor_positions.items()}
+                        nearby_cap_verts = []
                         for cvi in tet_cap_set:
-                            if cvi < len(closed_vertices):
-                                d = np.linalg.norm(closed_vertices[cvi].astype(np.float64) - anchor_pos)
-                                cap_dists.append((d, cvi))
-                        cap_dists.sort()
-                        orig_loop_size = len(boundary_loops[loop_idx]) if loop_idx < len(boundary_loops) else 32
-                        nearby_cap_verts = [cvi for d, cvi in cap_dists[:orig_loop_size + 5]]
+                            if cvi >= len(closed_vertices): continue
+                            pt = closed_vertices[cvi].astype(np.float64)
+                            # Is this anchor the nearest?
+                            d_this = np.linalg.norm(pt - anchor_pos)
+                            is_nearest = True
+                            for other_ai, other_pos in all_anchor_pos.items():
+                                if other_ai == ai: continue
+                                if np.linalg.norm(pt - other_pos) < d_this:
+                                    is_nearest = False
+                                    break
+                            if is_nearest and d_this < cap_radius * 1.5:
+                                nearby_cap_verts.append(cvi)
                         if len(nearby_cap_verts) >= 3:
                             cap_pts = closed_vertices[nearby_cap_verts].astype(np.float64)
                             centroid = cap_pts.mean(axis=0)
