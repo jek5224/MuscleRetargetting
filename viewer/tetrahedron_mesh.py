@@ -1351,56 +1351,14 @@ except Exception as e:
                     near = np.where(dists < 0.02)[0]
                     n_cap = sum(1 for fi in near if fi in cap_fi_set)
                     if n_cap < 5 and len(near) > 0:
-                        # Recover caps: find faces touching the anchor vertex
-                        anchor_faces = [fi for fi in range(len(sim_faces))
-                                        if ani in sim_faces[fi]]
-                        # These direct-touch faces ARE cap faces
-                        for fi in anchor_faces:
-                            if fi not in cap_fi_set:
+                        # Recover caps: mark faces directly touching anchor vertex
+                        added = 0
+                        for fi in range(len(sim_faces)):
+                            if ani in sim_faces[fi] and fi not in cap_fi_set:
                                 cap_face_indices.append(int(fi))
                                 cap_fi_set.add(int(fi))
-                        # Also mark their neighbor faces (one ring)
-                        sf_edge_faces = {}
-                        for fi, f in enumerate(sim_faces):
-                            for i in range(3):
-                                e = (min(int(f[i]),int(f[(i+1)%3])),
-                                     max(int(f[i]),int(f[(i+1)%3])))
-                                sf_edge_faces.setdefault(e, []).append(fi)
-                        # Get cap normal from anchor faces
-                        ref_normals = []
-                        for fi in anchor_faces:
-                            fv = closed_vertices[sim_faces[fi]].astype(np.float64)
-                            fn = np.cross(fv[1]-fv[0], fv[2]-fv[0])
-                            fn_len = np.linalg.norm(fn)
-                            if fn_len > 1e-12:
-                                ref_normals.append(fn / fn_len)
-                        cap_normal = np.mean(ref_normals, axis=0) if ref_normals else np.array([0,0,1])
-                        cap_normal /= max(np.linalg.norm(cap_normal), 1e-12)
-                        # One-ring expansion with strict normal check
-                        ring_faces = set(anchor_faces)
-                        for _ in range(3):  # up to 3 rings
-                            next_ring = set()
-                            for fi in ring_faces:
-                                for i in range(3):
-                                    e = (min(int(sim_faces[fi][i]),int(sim_faces[fi][(i+1)%3])),
-                                         max(int(sim_faces[fi][i]),int(sim_faces[fi][(i+1)%3])))
-                                    for nfi in sf_edge_faces.get(e, []):
-                                        if nfi not in ring_faces and nfi not in cap_fi_set:
-                                            fv = closed_vertices[sim_faces[nfi]].astype(np.float64)
-                                            fn = np.cross(fv[1]-fv[0], fv[2]-fv[0])
-                                            fn_len = np.linalg.norm(fn)
-                                            if fn_len > 1e-12:
-                                                fn /= fn_len
-                                                if abs(np.dot(fn, cap_normal)) > 0.9:
-                                                    next_ring.add(nfi)
-                            if not next_ring:
-                                break
-                            for fi in next_ring:
-                                cap_face_indices.append(int(fi))
-                                cap_fi_set.add(int(fi))
-                            ring_faces = ring_faces | next_ring
-                        n_recovered = len(ring_faces) - len(anchor_faces) + len(anchor_faces)
-                        print(f"  Anchor {ai}: recovered {n_recovered} cap faces via ring expansion")
+                                added += 1
+                        print(f"  Anchor {ai}: recovered {added} cap faces (anchor-touching)")
             # Debug: per-anchor cap face counts
             if hasattr(self, 'tet_anchor_vertices') and _anchor_positions:
                 from scipy.spatial import cKDTree as _cKDTree3
