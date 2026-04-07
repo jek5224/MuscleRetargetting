@@ -1742,6 +1742,9 @@ except Exception as e:
                 self._tet_surface_normals[:] = np.repeat(normals, 3, axis=0)
         # Update cap verts + normals
         if self._tet_cap_vidx is not None and self._tet_cap_verts is not None:
+            if len(self._tet_cap_vidx) > 0 and int(self._tet_cap_vidx.max()) >= n_v:
+                self._prepare_tet_draw_arrays()
+                return
             self._tet_cap_verts[:] = verts[self._tet_cap_vidx]
             if not skip_normals:
                 v = self._tet_cap_verts.reshape(-1, 3, 3)
