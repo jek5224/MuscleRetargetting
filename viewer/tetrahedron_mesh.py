@@ -1665,7 +1665,10 @@ except Exception as e:
         surface_face_indices = []
         cap_face_indices = []
 
+        n_verts = len(self.tet_vertices)
         for face_idx, face in enumerate(render_faces):
+            if max(face) >= n_verts:
+                continue  # skip out-of-bounds face
             v0, v1, v2 = self.tet_vertices[face]
             normal = np.cross(v1 - v0, v2 - v0)
             norm_len = np.linalg.norm(normal)
@@ -1703,6 +1706,8 @@ except Exception as e:
         edge_verts = []
         edge_vidx = []
         for v0, v1 in edge_set:
+            if v0 >= n_verts or v1 >= n_verts:
+                continue
             edge_verts.append(self.tet_vertices[v0])
             edge_verts.append(self.tet_vertices[v1])
             edge_vidx.extend([v0, v1])
