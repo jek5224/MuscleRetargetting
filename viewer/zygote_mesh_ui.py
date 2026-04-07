@@ -8699,7 +8699,12 @@ def _motion_apply_cached_deformation(v, frame):
             if mobj.soft_body is not None:
                 mobj.soft_body.positions = cached_pos.astype(np.float64)
             mobj.tet_vertices = cached_pos.astype(np.float32).copy()
-            mobj._update_tet_draw_positions()
+            try:
+                mobj._update_tet_draw_positions()
+            except Exception as e:
+                print(f"[CRASH] {mname} frame {frame}: {e}")
+                import traceback; traceback.print_exc()
+                mobj._prepare_tet_draw_arrays()  # rebuild
             # Restore cached waypoints if available, otherwise recompute from tet
             if 'waypoints_flat' in cached and 'waypoints_shape' in cached:
                 if hasattr(mobj, 'waypoints') and len(mobj.waypoints) > 0:
