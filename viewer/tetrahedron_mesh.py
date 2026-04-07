@@ -237,24 +237,29 @@ class TetrahedronMeshMixin:
                     if next_vertex is None:
                         # Check if we can close the loop
                         if start_vertex in neighbors and len(loop) > 2:
+                            loop_closed = True
                             break  # Loop closed
                         else:
+                            loop_closed = False
                             break  # Dead end
 
                     prev = current
                     current = next_vertex
 
                 if len(loop) >= 3:
+                    loop_pos = np.array([vertices[vi] for vi in loop])
+                    gap = np.linalg.norm(loop_pos[0] - loop_pos[-1])
+                    loop_span = np.linalg.norm(loop_pos.max(axis=0) - loop_pos.min(axis=0))
+                    # Planarity: max distance from best-fit plane
+                    centered = loop_pos - loop_pos.mean(axis=0)
+                    _, S, _ = np.linalg.svd(centered, full_matrices=False)
+                    planarity = S[2] / S[0] if S[0] > 0 else 0
+                    status = "CLOSED" if loop_closed else f"OPEN (gap={gap:.4f})"
+                    print(f"  Loop {len(boundary_loops)}: {len(loop)} verts, span={loop_span:.4f}, "
+                          f"planarity={planarity:.4f}, {status}")
                     boundary_loops.append(loop)
 
             print(f"Found {len(boundary_loops)} boundary loops")
-            for li, loop in enumerate(boundary_loops):
-                if len(loop) < 10:
-                    loop_pos = np.array([vertices[vi] for vi in loop])
-                    loop_mean = loop_pos.mean(axis=0)
-                    loop_span = np.linalg.norm(loop_pos.max(axis=0) - loop_pos.min(axis=0))
-                    print(f"  [Small loop {li}] {len(loop)} verts, span={loop_span:.6f}, "
-                          f"mean=[{loop_mean[0]:.4f},{loop_mean[1]:.4f},{loop_mean[2]:.4f}]")
 
             # Step 3: Create cap faces for each boundary loop
             # Skip tiny loops (merge artifacts, not real openings)
@@ -270,56 +275,77 @@ class TetrahedronMeshMixin:
             closed_vertices = list(vertices)
             closed_faces = list(faces)
             cap_face_indices = []
-            self.tet_anchor_vertices = []  # No anchor vertices with ear clipping
+            self.tet_anchor_vertices = []
 
-            # Minimum-area cap triangulation in 3D via dynamic programming.
-            # No 2D projection — works directly on non-planar boundary loops.
-            # Minimizes total triangle area, keeping triangles small and local.
-            def _min_area_cap(loop_indices, all_vertices):
+            import triangle as tr
+
+            def _segments_cross(pts_2d, seg_a, seg_b):
+                """Check if two 2D segments cross (strictly, not at shared endpoints)."""
+                a, b = pts_2d[seg_a[0]], pts_2d[seg_a[1]]
+                c, d = pts_2d[seg_b[0]], pts_2d[seg_b[1]]
+                def cross2(o, p, q):
+                    return (p[0]-o[0])*(q[1]-o[1]) - (p[1]-o[1])*(q[0]-o[0])
+                d1, d2 = cross2(c,d,a), cross2(c,d,b)
+                d3, d4 = cross2(a,b,c), cross2(a,b,d)
+                if ((d1>0 and d2<0) or (d1<0 and d2>0)) and \
+                   ((d3>0 and d4<0) or (d3<0 and d4>0)):
+                    return True
+                return False
+
+            def _polygon_self_intersects(pts_2d, n):
+                """Check if closed 2D polygon has any crossing edges."""
+                for i in range(n):
+                    for j in range(i+2, n):
+                        if i == 0 and j == n-1: continue  # adjacent
+                        if _segments_cross(pts_2d, (i, (i+1)%n), (j, (j+1)%n)):
+                            return True
+                return False
+
+            def _cap_faces(loop_indices, all_vertices):
+                """Cap a boundary loop: CDT if 2D projection is clean, else centroid fan."""
                 n = len(loop_indices)
-                if n < 3: return []
-                if n == 3: return [[loop_indices[0], loop_indices[1], loop_indices[2]]]
-                pts = np.array([all_vertices[vi] for vi in loop_indices])
+                if n < 3: return [], None
+                if n == 3: return [[loop_indices[0], loop_indices[1], loop_indices[2]]], None
+                pts_3d = np.array([all_vertices[vi] for vi in loop_indices])
+                centroid = pts_3d.mean(axis=0)
+                centered = pts_3d - centroid
+                _, _, Vt = np.linalg.svd(centered, full_matrices=False)
 
-                # Precompute all triangle areas
-                area_cache = {}
-                def tri_area(i, j, k):
-                    key = (i, j, k)
-                    if key not in area_cache:
-                        v1 = pts[j] - pts[i]
-                        v2 = pts[k] - pts[i]
-                        area_cache[key] = 0.5 * np.linalg.norm(np.cross(v1, v2))
-                    return area_cache[key]
+                # Try projections: best-fit plane, then XY, XZ, YZ
+                projections = [
+                    ('best-fit', centered @ Vt[:2].T),
+                    ('XY', pts_3d[:, :2]),
+                    ('XZ', pts_3d[:, [0,2]]),
+                    ('YZ', pts_3d[:, 1:3]),
+                ]
+                for proj_name, pts_2d in projections:
+                    if _polygon_self_intersects(pts_2d, n):
+                        continue
+                    # CDT with boundary constraints
+                    segments = np.array([[i, (i+1)%n] for i in range(n)], dtype=np.int32)
+                    try:
+                        result = tr.triangulate({'vertices': pts_2d, 'segments': segments}, 'p')
+                        faces = []
+                        for tri_idx in result['triangles']:
+                            faces.append([loop_indices[tri_idx[0]], loop_indices[tri_idx[1]], loop_indices[tri_idx[2]]])
+                        if len(faces) >= n - 2:
+                            print(f"    CDT ({proj_name}): {len(faces)} faces")
+                            return faces, None
+                    except Exception as e:
+                        print(f"    CDT ({proj_name}) failed: {e}")
+                        continue
 
-                # DP: cost[i][j] = min total area to triangulate sub-polygon i..j
-                cost = [[0.0] * n for _ in range(n)]
-                split = [[0] * n for _ in range(n)]
-                for span in range(2, n):
-                    for i in range(n - span):
-                        j = i + span
-                        best_cost = float('inf')
-                        best_k = i + 1
-                        for k in range(i + 1, j):
-                            c = tri_area(i, k, j) + cost[i][k] + cost[k][j]
-                            if c < best_cost:
-                                best_cost = c
-                                best_k = k
-                        cost[i][j] = best_cost
-                        split[i][j] = best_k
-
-                # Reconstruct
+                # All projections self-intersect → centroid fan
+                center_idx = len(all_vertices)
+                all_vertices.append(centroid.tolist())
                 faces = []
-                def reconstruct(i, j):
-                    if j - i < 2: return
-                    k = split[i][j]
-                    faces.append([loop_indices[i], loop_indices[k], loop_indices[j]])
-                    reconstruct(i, k)
-                    reconstruct(k, j)
-                reconstruct(0, n - 1)
-                return faces
+                for i in range(n):
+                    faces.append([loop_indices[i], loop_indices[(i+1)%n], center_idx])
+                print(f"    Fan fallback: {len(faces)} faces (center vertex {center_idx})")
+                return faces, center_idx
 
             for loop_idx, loop in enumerate(boundary_loops):
-                cap_faces = _min_area_cap(list(loop), closed_vertices)
+                cap_faces, center_vi = _cap_faces(list(loop), closed_vertices)
                 for cf in cap_faces:
                     cap_face_idx = len(closed_faces)
                     closed_faces.append(cf)
@@ -327,8 +353,10 @@ class TetrahedronMeshMixin:
                 for vi in loop:
                     if vi not in self.tet_anchor_vertices:
                         self.tet_anchor_vertices.append(vi)
+                if center_vi is not None:
+                    self.tet_anchor_vertices.append(center_vi)
                 expected = len(loop) - 2
-                print(f"  Loop {loop_idx}: {len(loop)} vertices, {len(cap_faces)}/{expected} min-area cap faces")
+                print(f"  Loop {loop_idx}: {len(loop)} vertices, {len(cap_faces)} cap faces")
 
             closed_vertices = np.array(closed_vertices, dtype=np.float32)
             closed_faces = np.array(closed_faces, dtype=np.int32)
