@@ -7397,6 +7397,8 @@ class ContourMeshMixin(ContourAnimationMixin):
         all_vertices = []
         # stream_level_indices[stream_idx][level_idx] = list of vertex indices for that contour
         stream_level_indices = [[[] for _ in range(num_levels)] for _ in range(num_streams)]
+        # Shared vertex pairs: (global_vi_stream_A, global_vi_stream_B) — same contour point
+        shared_vertex_pairs = []
 
         # Epsilon for detecting exact duplicates (shared cut boundary vertices)
         eps = 1e-6
@@ -7425,20 +7427,8 @@ class ContourMeshMixin(ContourAnimationMixin):
             # Map from original index to deduplicated index
             dedup_map = list(range(n))
 
-            # Find duplicates across different streams
-            n_merged_level = 0
-            for stream_i in range(num_streams):
-                start_i, end_i = level_stream_ranges[stream_i]
-                for stream_j in range(stream_i + 1, num_streams):
-                    start_j, end_j = level_stream_ranges[stream_j]
-                    for i in range(start_i, end_i):
-                        for j in range(start_j, end_j):
-                            if np.linalg.norm(level_vertices[i] - level_vertices[j]) < eps:
-                                # j is a duplicate of i, map j to i's final index
-                                dedup_map[j] = dedup_map[i]
-                                n_merged_level += 1
-            if n_merged_level > 0:
-                print(f"  Level {level_idx}: merged {n_merged_level} shared vertices")
+            # No cross-stream vertex merging — each stream keeps its own vertices.
+            # Record correspondence pairs for deterministic merge after tetrahedralization.
 
             # Build deduplicated vertex list and create final index mapping
             final_indices = {}  # original index -> final vertex index (global)
@@ -7454,6 +7444,19 @@ class ContourMeshMixin(ContourAnimationMixin):
                 start, end = level_stream_ranges[stream_idx]
                 indices = [final_indices[i] for i in range(start, end)]
                 stream_level_indices[stream_idx][level_idx] = indices
+
+            # Record shared vertex pairs (same contour point across streams)
+            for stream_i in range(num_streams):
+                start_i, end_i = level_stream_ranges[stream_i]
+                for stream_j in range(stream_i + 1, num_streams):
+                    start_j, end_j = level_stream_ranges[stream_j]
+                    for i in range(start_i, end_i):
+                        for j in range(start_j, end_j):
+                            if np.linalg.norm(level_vertices[i] - level_vertices[j]) < eps:
+                                gi = final_indices[i]
+                                gj = final_indices[j]
+                                if gi != gj:  # different global indices
+                                    shared_vertex_pairs.append((gi, gj))
 
         if len(all_vertices) == 0:
             print("No vertices generated.")
@@ -7638,6 +7641,11 @@ class ContourMeshMixin(ContourAnimationMixin):
         else:
             self._build_mesh_replayed = True
             self.is_draw_contour_mesh = True
+
+        # Save shared vertex pairs for deterministic merge after tetrahedralization
+        self._shared_vertex_pairs = shared_vertex_pairs
+        if shared_vertex_pairs:
+            print(f"  {len(shared_vertex_pairs)} shared boundary vertex pairs across streams")
 
         # Save per-stream face mapping for per-stream tetrahedralization
         # Extend for any gap-closing faces added after mesh building
