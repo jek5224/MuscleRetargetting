@@ -817,8 +817,75 @@ except Exception as e:
             except Exception as e:
                 print(f"  TetGen failed: {e}, falling back to contour-guided")
 
+        delaunay_success = False
+        if not tetgen_success:
+            # Delaunay tetrahedralization with inside filtering — 100% coverage
+            try:
+                from scipy.spatial import Delaunay as _Delaunay
+                print("Performing Delaunay tetrahedralization...")
+                dl = _Delaunay(closed_vertices.astype(np.float64))
+                all_dl_tets = dl.simplices
+
+                # Filter: keep tets whose centroid is inside the surface mesh
+                mesh_dl = trimesh.Trimesh(vertices=closed_vertices.astype(np.float64),
+                                          faces=closed_faces.astype(np.int32), process=False)
+                mesh_dl.fix_normals()
+                dl_centroids = np.mean(closed_vertices[all_dl_tets].astype(np.float64), axis=1)
+                interior_mask = mesh_dl.contains(dl_centroids)
+
+                # Add tets needed for uncovered interior points
+                n_dense = min(50000, max(10000, len(closed_vertices) * 50))
+                bbox_min = closed_vertices.min(axis=0)
+                bbox_max = closed_vertices.max(axis=0)
+                dense_samples = np.random.uniform(bbox_min, bbox_max, (n_dense, 3)).astype(np.float64)
+                interior_pts = dense_samples[mesh_dl.contains(dense_samples)]
+                if len(interior_pts) > 0:
+                    simplex_ids = dl.find_simplex(interior_pts)
+                    interior_set = set(np.where(interior_mask)[0])
+                    n_added = 0
+                    for si in simplex_ids:
+                        if si >= 0 and si not in interior_set:
+                            interior_set.add(si)
+                            interior_mask[si] = True
+                            n_added += 1
+                    if n_added > 0:
+                        print(f"  Added {n_added} boundary tets for full coverage")
+
+                interior_tetrahedra = all_dl_tets[interior_mask].astype(np.int32)
+
+                # Fix orientation
+                v0_dl = closed_vertices[interior_tetrahedra[:, 0]].astype(np.float64)
+                cr_dl = np.cross(
+                    closed_vertices[interior_tetrahedra[:, 1]].astype(np.float64) - v0_dl,
+                    closed_vertices[interior_tetrahedra[:, 2]].astype(np.float64) - v0_dl)
+                vol_dl = np.einsum('ij,ij->i', cr_dl,
+                    closed_vertices[interior_tetrahedra[:, 3]].astype(np.float64) - v0_dl) / 6.0
+                neg_dl = vol_dl < 0
+                if np.any(neg_dl):
+                    interior_tetrahedra[neg_dl, 1], interior_tetrahedra[neg_dl, 2] = \
+                        interior_tetrahedra[neg_dl, 2].copy(), interior_tetrahedra[neg_dl, 1].copy()
+
+                n_inverted = int(np.sum(neg_dl))
+                n_total = len(interior_tetrahedra)
+                used_verts = set(interior_tetrahedra.ravel())
+                vol_abs = np.abs(vol_dl)
+                mesh_vol = abs(mesh_dl.volume)
+
+                print(f"  Delaunay: {n_total} tets from {len(all_dl_tets)} total")
+                print(f"    {n_inverted} orientation-fixed, 0 inverted")
+                print(f"    Volume: {vol_abs.sum():.6f} vs mesh {mesh_vol:.6f} ({vol_abs.sum()/mesh_vol*100:.1f}%)")
+                print(f"    Vertices used: {len(used_verts)}/{len(closed_vertices)}")
+                print(f"    Volume range: [{vol_abs.min():.2e}, {vol_abs.max():.2e}]")
+
+                delaunay_success = True
+
+            except Exception as e:
+                print(f"  Delaunay failed: {e}, falling back to contour-guided")
+                import traceback
+                traceback.print_exc()
+
         try:
-         if not tetgen_success:
+         if not tetgen_success and not delaunay_success:
             # Build vertex-to-level mapping
             vertex_level = getattr(self, 'vertex_contour_level', None)
             if vertex_level is not None:
