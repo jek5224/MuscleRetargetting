@@ -704,7 +704,7 @@ try:
                         for vi in cap_bk:
                             if vi < len(verts_bk):
                                 d, ni = fix_tree.query(verts_bk[vi])
-                                if d < 1.0:
+                                if d < 20.0:  # pymeshfix moves verts up to ~13mm
                                     new_cap.add(ni)
                         local_cap = new_cap
                     print(f"COMP_DEBUG {{ci}}: pymeshfix {{len(verts_bk)}}->{{len(local_verts)}}v, cap={{len(local_cap)}}", flush=True)
@@ -1357,13 +1357,16 @@ except Exception as e:
                         # find faces where ALL verts are cap AND on the plane.
                         anchor_pos = closed_vertices[ani].astype(np.float64)
                         cap_radius = _anchor_radii.get(ai, 0.01)
-                        # Find tracked cap verts near this anchor
-                        nearby_cap_verts = []
+                        # Find tracked cap verts closest to THIS anchor (not other anchors)
+                        cap_dists = []
                         for cvi in tet_cap_set:
                             if cvi < len(closed_vertices):
                                 d = np.linalg.norm(closed_vertices[cvi].astype(np.float64) - anchor_pos)
-                                if d < cap_radius * 1.5:
-                                    nearby_cap_verts.append(cvi)
+                                cap_dists.append((d, cvi))
+                        cap_dists.sort()
+                        # Take only the closest ones (up to original loop size)
+                        orig_loop_size = len(boundary_loops[loop_idx]) if loop_idx < len(boundary_loops) else 32
+                        nearby_cap_verts = [cvi for d, cvi in cap_dists[:orig_loop_size + 5]]
                         if len(nearby_cap_verts) >= 3:
                             # Compute cap plane from nearby cap verts
                             cap_pts = closed_vertices[nearby_cap_verts].astype(np.float64)
