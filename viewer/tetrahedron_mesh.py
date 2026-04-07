@@ -634,33 +634,6 @@ try:
         pre_subdiv_cap = set(local_cap)
         use_pymeshfix = False
 
-        # Subdivide long edges
-        mesh.fix_normals()
-        # Uniform subdivision: every face -> 4 sub-faces (1 iteration, no T-junctions)
-        nv = list(local_verts)
-        emp = dict()
-        def get_or_create_mid(v0i, v1i):
-            ek = (min(v0i,v1i),max(v0i,v1i))
-            if ek not in emp:
-                mi = len(nv)
-                emp[ek] = mi
-                nv.append((np.array(nv[v0i])+np.array(nv[v1i]))/2)
-                if v0i in local_cap and v1i in local_cap:
-                    local_cap.add(mi)
-            return emp[ek]
-        nf = []
-        for ff in local_faces:
-            v0,v1,v2 = int(ff[0]),int(ff[1]),int(ff[2])
-            m01 = get_or_create_mid(v0,v1)
-            m12 = get_or_create_mid(v1,v2)
-            m20 = get_or_create_mid(v2,v0)
-            nf.append([v0,m01,m20]); nf.append([m01,v1,m12])
-            nf.append([m20,m12,v2]); nf.append([m01,m12,m20])
-        local_verts = np.array(nv, dtype=np.float64)
-        local_faces = np.array(nf, dtype=np.int32)
-        print(f"COMP_DEBUG {{ci}}: uniform subdiv {{len(pre_subdiv_faces)}}->{{len(local_faces)}}f")
-        # Fix normals after subdivision
-        mesh = trimesh.Trimesh(vertices=local_verts, faces=local_faces, process=False)
         mesh.fix_normals()
         local_verts, local_faces = mesh.vertices.astype(np.float64), mesh.faces.astype(np.int32)
         # TetGen — try direct first, pymeshfix fallback
