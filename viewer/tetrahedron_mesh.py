@@ -272,27 +272,46 @@ class TetrahedronMeshMixin:
             cap_face_indices = []
             self.tet_anchor_vertices = []  # No anchor vertices with ear clipping
 
-            # Zigzag cap triangulation: connect from both ends, keeping triangles local.
-            # No center vertex, no self-intersection for non-planar contours.
-            def _zigzag_cap(loop_indices):
+            # 2D Delaunay cap triangulation: project boundary loop onto best-fit
+            # plane, Delaunay triangulate, filter triangles outside polygon.
+            # Produces well-shaped triangles for any loop shape.
+            def _point_in_polygon_2d(point, polygon):
+                """Ray casting point-in-polygon test."""
+                x, y = point
+                n = len(polygon)
+                inside = False
+                j = n - 1
+                for i in range(n):
+                    xi, yi = polygon[i]
+                    xj, yj = polygon[j]
+                    if ((yi > y) != (yj > y)) and (x < (xj - xi) * (y - yi) / (yj - yi) + xi):
+                        inside = not inside
+                    j = i
+                return inside
+
+            def _delaunay_cap(loop_indices, all_vertices):
                 n = len(loop_indices)
                 if n < 3: return []
                 if n == 3: return [[loop_indices[0], loop_indices[1], loop_indices[2]]]
+                pts_3d = np.array([all_vertices[vi] for vi in loop_indices])
+                # Project to best-fit 2D plane
+                centroid = pts_3d.mean(axis=0)
+                centered = pts_3d - centroid
+                _, _, Vt = np.linalg.svd(centered, full_matrices=False)
+                pts_2d = centered @ Vt[:2].T
+                # Delaunay in 2D
+                tri = Delaunay(pts_2d)
+                # Filter: keep triangles whose centroid is inside the boundary polygon
+                polygon_2d = pts_2d.tolist()
                 faces = []
-                lo, hi = 0, n - 1
-                turn = True
-                while hi - lo >= 2:
-                    if turn:
-                        faces.append([loop_indices[lo], loop_indices[lo+1], loop_indices[hi]])
-                        lo += 1
-                    else:
-                        faces.append([loop_indices[lo], loop_indices[hi], loop_indices[hi-1]])
-                        hi -= 1
-                    turn = not turn
+                for simplex in tri.simplices:
+                    tri_centroid = pts_2d[simplex].mean(axis=0)
+                    if _point_in_polygon_2d(tri_centroid, polygon_2d):
+                        faces.append([loop_indices[simplex[0]], loop_indices[simplex[1]], loop_indices[simplex[2]]])
                 return faces
 
             for loop_idx, loop in enumerate(boundary_loops):
-                cap_faces = _zigzag_cap(list(loop))
+                cap_faces = _delaunay_cap(list(loop), closed_vertices)
                 for cf in cap_faces:
                     cap_face_idx = len(closed_faces)
                     closed_faces.append(cf)
@@ -301,7 +320,7 @@ class TetrahedronMeshMixin:
                     if vi not in self.tet_anchor_vertices:
                         self.tet_anchor_vertices.append(vi)
                 expected = len(loop) - 2
-                print(f"  Loop {loop_idx}: {len(loop)} vertices, {len(cap_faces)}/{expected} zigzag faces")
+                print(f"  Loop {loop_idx}: {len(loop)} vertices, {len(cap_faces)}/{expected} Delaunay cap faces")
 
             closed_vertices = np.array(closed_vertices, dtype=np.float32)
             closed_faces = np.array(closed_faces, dtype=np.int32)
