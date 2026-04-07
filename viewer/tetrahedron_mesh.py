@@ -1276,15 +1276,15 @@ except Exception as e:
             if 'cap_verts' in tet_data.files:
                 tet_cap_set = set(tet_data['cap_verts'].tolist())
             cap_face_indices = []
-            for fi, f in enumerate(sim_faces):
+            for fi, f in enumerate(closed_faces):
                 if all(int(v) in tet_cap_set for v in f):
                     cap_face_indices.append(fi)
-            # Fallback: for anchors with too few nearby cap faces, mark closest faces
+            # Fallback: for anchors with too few nearby cap faces
             if hasattr(self, 'tet_anchor_vertices') and _anchor_positions:
                 from scipy.spatial import cKDTree as _cKDTree_fb
                 tet_tree_fb = _cKDTree_fb(closed_vertices.astype(np.float64))
                 cap_fi_set = set(cap_face_indices)
-                sim_fc = np.mean(closed_vertices[sim_faces].astype(np.float64), axis=1)
+                sim_fc = np.mean(closed_vertices[closed_faces].astype(np.float64), axis=1)
                 for loop_idx, (ai, apos) in enumerate(_anchor_positions.items()):
                     _, ani = tet_tree_fb.query(apos.astype(np.float64))
                     dists = np.linalg.norm(sim_fc - closed_vertices[ani].astype(np.float64), axis=1)
@@ -1323,7 +1323,7 @@ except Exception as e:
                             for fi in range(len(sim_faces)):
                                 if fi in cap_fi_set:
                                     continue
-                                fv = closed_vertices[sim_faces[fi]].astype(np.float64)
+                                fv = closed_vertices[closed_faces[fi]].astype(np.float64)
                                 fc_pos = fv.mean(axis=0)
                                 # Must be within cap radius
                                 if np.linalg.norm(fc_pos - anchor_pos) > cap_radius * 1.2:
