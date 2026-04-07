@@ -1383,6 +1383,16 @@ except Exception as e:
                                     cap_fi_set.add(int(fi))
                                     added += 1
                             print(f"  Anchor {ai}: recovered {added} cap faces (plane-based, {len(nearby_cap_verts)} cap verts nearby)")
+            # Debug: check pole vertex existence
+            if hasattr(self, 'tet_anchor_vertices') and _anchor_positions:
+                from scipy.spatial import cKDTree as _cKDTree4
+                tet_tree4 = _cKDTree4(closed_vertices.astype(np.float64))
+                for ai, apos in _anchor_positions.items():
+                    d, ni = tet_tree4.query(apos.astype(np.float64))
+                    # Count faces containing this vertex
+                    n_touching = sum(1 for f in sim_faces if ni in f)
+                    print(f"  Pole check {ai}: nearest vi={ni}, dist={d:.6f}, {n_touching} faces touch it, in_cap_set={ni in tet_cap_set}")
+
             # Debug: per-anchor cap face counts
             if hasattr(self, 'tet_anchor_vertices') and _anchor_positions:
                 from scipy.spatial import cKDTree as _cKDTree3
