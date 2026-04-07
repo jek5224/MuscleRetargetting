@@ -644,67 +644,35 @@ try:
 
         # Subdivide long edges
         mesh.fix_normals()
-        edge_lens = []
+        # Uniform subdivision: every face -> 4 sub-faces (1 iteration, no T-junctions)
+        sl = shared_local[ci]
+        nv = list(local_verts)
+        emp = dict()
+        def get_or_create_mid(v0i, v1i):
+            ek = (min(v0i,v1i),max(v0i,v1i))
+            if ek not in emp:
+                mi = len(nv)
+                emp[ek] = mi
+                nv.append((np.array(nv[v0i])+np.array(nv[v1i]))/2)
+                if v0i in local_cap and v1i in local_cap:
+                    local_cap.add(mi)
+                if v0i in sl and v1i in sl:
+                    gv0, gv1 = sl[v0i], sl[v1i]
+                    if isinstance(gv0, int) and isinstance(gv1, int):
+                        shared_midpoints[ci][mi] = (min(gv0,gv1), max(gv0,gv1))
+                        sl[mi] = (min(gv0,gv1), max(gv0,gv1))
+            return emp[ek]
+        nf = []
         for ff in local_faces:
-            for i in range(3):
-                edge_lens.append(np.linalg.norm(local_verts[ff[(i+1)%3]] - local_verts[ff[i]]))
-        median_edge = np.median(edge_lens)
-        max_edge_len = median_edge * 1.2
-        for _si in range(2):
-            nv = list(local_verts)
-            emp = dict()
-            sl = shared_local[ci]
-            def get_or_create_mid(v0i, v1i):
-                ek = (min(v0i,v1i),max(v0i,v1i))
-                if ek not in emp:
-                    mi = len(nv)
-                    emp[ek] = mi
-                    nv.append((np.array(nv[v0i])+np.array(nv[v1i]))/2)
-                    if v0i in local_cap and v1i in local_cap:
-                        local_cap.add(mi)
-                    if v0i in sl and v1i in sl:
-                        gv0, gv1 = sl[v0i], sl[v1i]
-                        if isinstance(gv0, int) and isinstance(gv1, int):
-                            shared_midpoints[ci][mi] = (min(gv0,gv1), max(gv0,gv1))
-                            sl[mi] = (min(gv0,gv1), max(gv0,gv1))
-                return emp[ek]
-            # Split edges longer than threshold, handle partial splits properly
-            nf = []
-            ns = 0
-            for ff in local_faces:
-                v0,v1,v2 = int(ff[0]),int(ff[1]),int(ff[2])
-                # Check each edge
-                for i in range(3):
-                    v0i,v1i = int(ff[i]),int(ff[(i+1)%3])
-                    el = np.linalg.norm(local_verts[v0i]-local_verts[v1i]) if v0i<len(local_verts) and v1i<len(local_verts) else 0
-                    if el > max_edge_len:
-                        get_or_create_mid(v0i,v1i)
-                e01=(min(v0,v1),max(v0,v1)); e12=(min(v1,v2),max(v1,v2)); e20=(min(v2,v0),max(v2,v0))
-                has = [e01 in emp, e12 in emp, e20 in emp]
-                n_s = sum(has)
-                if n_s == 0:
-                    nf.append([v0,v1,v2])
-                elif n_s == 3:
-                    m01,m12,m20=emp[e01],emp[e12],emp[e20]
-                    nf.append([v0,m01,m20]); nf.append([m01,v1,m12])
-                    nf.append([m20,m12,v2]); nf.append([m01,m12,m20]); ns+=1
-                elif n_s == 1:
-                    if has[0]: ei=0
-                    elif has[1]: ei=1
-                    else: ei=2
-                    va,vb,vc=int(ff[ei]),int(ff[(ei+1)%3]),int(ff[(ei+2)%3])
-                    mi=emp[(min(va,vb),max(va,vb))]
-                    nf.append([va,mi,vc]); nf.append([mi,vb,vc]); ns+=1
-                else:  # n_s == 2
-                    # Find which edge is NOT split, force-split it locally
-                    if not has[0]: get_or_create_mid(v0,v1)
-                    if not has[1]: get_or_create_mid(v1,v2)
-                    if not has[2]: get_or_create_mid(v2,v0)
-                    m01,m12,m20=emp[e01],emp[e12],emp[e20]
-                    nf.append([v0,m01,m20]); nf.append([m01,v1,m12])
-                    nf.append([m20,m12,v2]); nf.append([m01,m12,m20]); ns+=1
-            local_verts=np.array(nv,dtype=np.float64); local_faces=np.array(nf,dtype=np.int32)
-            if ns==0: break
+            v0,v1,v2 = int(ff[0]),int(ff[1]),int(ff[2])
+            m01 = get_or_create_mid(v0,v1)
+            m12 = get_or_create_mid(v1,v2)
+            m20 = get_or_create_mid(v2,v0)
+            nf.append([v0,m01,m20]); nf.append([m01,v1,m12])
+            nf.append([m20,m12,v2]); nf.append([m01,m12,m20])
+        local_verts = np.array(nv, dtype=np.float64)
+        local_faces = np.array(nf, dtype=np.int32)
+        print(f"COMP_DEBUG {{ci}}: uniform subdiv {{len(pre_subdiv_faces)}}->{{len(local_faces)}}f")
         # Fix normals after subdivision
         mesh = trimesh.Trimesh(vertices=local_verts, faces=local_faces, process=False)
         mesh.fix_normals()
