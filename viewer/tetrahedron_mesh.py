@@ -205,58 +205,111 @@ class TetrahedronMeshMixin:
             cap_face_indices = []
         else:
             # Step 2: Group open edges into boundary loops
-            # Build adjacency for open edges
-            edge_adjacency = defaultdict(list)
-            for edge in open_edges:
-                edge_adjacency[edge[0]].append(edge[1])
-                edge_adjacency[edge[1]].append(edge[0])
+            # Use face-consistent traversal: at each vertex, follow the open edge
+            # that shares a face with the current edge (handles T-junctions).
 
-            # Find connected boundary loops
-            visited_vertices = set()
+            # Build per-vertex open edge adjacency
+
+            # For each open edge, find which face(s) it belongs to
+            open_edge_sorted_set = set(open_edges)  # open_edges already (min,max) sorted
+            edge_to_face = defaultdict(list)
+            for fi, f in enumerate(faces):
+                for ei in range(3):
+                    a, b = int(f[ei]), int(f[(ei+1)%3])
+                    e_sorted = (min(a,b), max(a,b))
+                    if e_sorted in open_edge_sorted_set:
+                        edge_to_face[(a,b)].append(fi)
+                        edge_to_face[(b,a)].append(fi)
+
+            # For each vertex, group its open edges by face connectivity
+            # At a vertex V with incoming edge (U,V), the next edge (V,W) should
+            # share a face with (U,V) — i.e., face contains both edges U-V and V-W
+            vertex_open_neighbors = defaultdict(list)
+            for edge in open_edges:
+                vertex_open_neighbors[edge[0]].append(edge[1])
+                vertex_open_neighbors[edge[1]].append(edge[0])
+
+            # Report T-junctions
+            for v, nbrs in vertex_open_neighbors.items():
+                if len(nbrs) > 2:
+                    print(f"  T-junction at vertex {v}: {len(nbrs)} open-edge neighbors {nbrs}")
+
+            # Trace boundary loops using edge traversal (not vertex traversal)
+            visited_edges = set()
             boundary_loops = []
 
-            for start_vertex in edge_adjacency:
-                if start_vertex in visited_vertices:
+            for start_edge in open_edges:
+                if start_edge in visited_edges:
                     continue
 
                 loop = []
-                current = start_vertex
-                prev = None
+                # Start: follow the edge start_edge[0] -> start_edge[1]
+                prev_v = start_edge[0]
+                curr_v = start_edge[1]
+                loop.append(prev_v)
+                visited_edges.add((min(prev_v,curr_v), max(prev_v,curr_v)))
 
-                while True:
-                    loop.append(current)
-                    visited_vertices.add(current)
+                loop_closed = False
+                max_steps = len(open_edges) + 1
+                for _ in range(max_steps):
+                    loop.append(curr_v)
 
-                    neighbors = edge_adjacency[current]
-                    next_vertex = None
-                    for n in neighbors:
-                        if n != prev and n not in visited_vertices:
-                            next_vertex = n
+                    # Find next open edge from curr_v (not going back to prev_v)
+                    # Prefer the edge that shares a face with (prev_v, curr_v)
+                    incoming_faces = set(edge_to_face.get((prev_v, curr_v), []))
+                    candidates = []
+                    for nbr in vertex_open_neighbors[curr_v]:
+                        if nbr == prev_v:
+                            continue
+                        e_key = (min(curr_v,nbr), max(curr_v,nbr))
+                        if e_key in visited_edges:
+                            continue
+                        # Check if this edge shares a face with the incoming edge
+                        nbr_faces = set(edge_to_face.get((curr_v, nbr), []))
+                        shared = incoming_faces & nbr_faces
+                        candidates.append((nbr, e_key, len(shared) > 0))
+
+                    # Prefer face-consistent neighbor, then any unvisited
+                    next_v = None
+                    next_key = None
+                    for nbr, e_key, face_shared in candidates:
+                        if face_shared:
+                            next_v, next_key = nbr, e_key
                             break
+                    if next_v is None and candidates:
+                        next_v, next_key = candidates[0][0], candidates[0][1]
 
-                    if next_vertex is None:
-                        # Check if we can close the loop
-                        if start_vertex in neighbors and len(loop) > 2:
+                    if next_v is None:
+                        # Check if we can close back to start
+                        start_v = loop[0]
+                        e_close = (min(curr_v,start_v), max(curr_v,start_v))
+                        if e_close in open_edge_sorted_set and e_close not in visited_edges:
+                            visited_edges.add(e_close)
                             loop_closed = True
-                            break  # Loop closed
-                        else:
-                            loop_closed = False
-                            break  # Dead end
+                        break
 
-                    prev = current
-                    current = next_vertex
+                    visited_edges.add(next_key)
+                    prev_v = curr_v
+                    curr_v = next_v
+
+                    # Check if we closed the loop
+                    if curr_v == loop[0]:
+                        loop_closed = True
+                        break
 
                 if len(loop) >= 3:
                     loop_pos = np.array([vertices[vi] for vi in loop])
                     gap = np.linalg.norm(loop_pos[0] - loop_pos[-1])
                     loop_span = np.linalg.norm(loop_pos.max(axis=0) - loop_pos.min(axis=0))
-                    # Planarity: max distance from best-fit plane
                     centered = loop_pos - loop_pos.mean(axis=0)
                     _, S, _ = np.linalg.svd(centered, full_matrices=False)
                     planarity = S[2] / S[0] if S[0] > 0 else 0
                     status = "CLOSED" if loop_closed else f"OPEN (gap={gap:.4f})"
                     print(f"  Loop {len(boundary_loops)}: {len(loop)} verts, span={loop_span:.4f}, "
                           f"planarity={planarity:.4f}, {status}")
+                    # Remove duplicate last vertex if loop closed (start == end)
+                    if loop_closed and len(loop) > 1 and loop[-1] == loop[0]:
+                        loop = loop[:-1]
                     boundary_loops.append(loop)
 
             print(f"Found {len(boundary_loops)} boundary loops")
