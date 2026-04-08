@@ -163,6 +163,69 @@ def expand_to_full(muscle, remapped_pos):
     return full
 
 
+SKELETON_BONES = {
+    'L': ['L_Os_Coxae', 'L_Femur', 'L_Tibia_Fibula', 'L_Patella'],
+    'R': ['R_Os_Coxae', 'R_Femur', 'R_Tibia_Fibula', 'R_Patella'],
+}
+
+SKELETON_NAME_MAP = {
+    'L_Os_Coxae': 'L_Os_Coxae0', 'L_Femur': 'L_Femur0',
+    'L_Tibia_Fibula': 'L_Tibia_Fibula0', 'L_Patella': 'L_Patella0',
+    'R_Os_Coxae': 'R_Os_Coxae0', 'R_Femur': 'R_Femur0',
+    'R_Tibia_Fibula': 'R_Tibia_Fibula0', 'R_Patella': 'R_Patella0',
+    'Saccrum_Coccyx': 'Saccrum_Coccyx0',
+}
+
+
+def load_skeleton_mesh(bone_name):
+    """Load a skeleton mesh as triangle surface for collision."""
+    import trimesh
+    path = f'Zygote_Meshes_251229/Skeleton/{bone_name}.obj'
+    if not os.path.exists(path):
+        return None
+    mesh = trimesh.load(path, process=False)
+    verts = np.array(mesh.vertices, dtype=np.float64)  # already in mm
+    faces = np.array(mesh.faces, dtype=np.int32)
+    return {'name': bone_name, 'vertices': verts, 'faces': faces}
+
+
+def load_skeleton_and_bvh(bvh_path):
+    """Load DART skeleton and BVH for per-frame bone transforms."""
+    sys.path.insert(0, PROJECT_ROOT)
+    try:
+        import dartpy as dart
+        from core.dartHelper import buildFromXML
+    except ImportError:
+        print("WARNING: dartpy not available, skeleton collision disabled")
+        return None, None
+
+    skel_path = 'data/zygote_skel.xml'
+    if not os.path.exists(skel_path):
+        return None, None
+
+    skel = buildFromXML(skel_path)
+
+    # Load BVH
+    from core.bvh import BVH
+    bvh = BVH()
+    bvh.load(bvh_path)
+    return skel, bvh
+
+
+def get_bone_world_positions(skel, bvh, frame, bone_name, rest_verts):
+    """Get bone mesh vertices in world coordinates for a given frame."""
+    body_name = SKELETON_NAME_MAP.get(bone_name, bone_name + '0')
+    body_node = skel.getBodyNode(body_name)
+    if body_node is None:
+        return None
+    wt = body_node.getWorldTransform()
+    R = wt.rotation()
+    t = wt.translation()
+    # rest_verts are in mm (local frame), convert to world mm
+    world_verts = (R @ rest_verts.T).T + t * SCALE
+    return world_verts
+
+
 def reorient_tets(positions, tets):
     """Fix tet orientation for deformed positions."""
     tets = tets.copy()
@@ -250,6 +313,25 @@ def main():
         print(f"  {m['name']}: {n_frames} frames, {len(m['rest_vertices'])}v, "
               f"{len(m['fixed_vertices'])} fixed")
 
+    # Load skeleton bones for collision
+    print("[3] Loading skeleton bones...")
+    skel, bvh = load_skeleton_and_bvh(args.bvh)
+    bone_meshes = {}
+    bone_sides = set(args.sides)
+    bone_sides.add('')  # for Saccrum_Coccyx (no side prefix)
+    for side in args.sides:
+        for bone_name in SKELETON_BONES.get(side, []):
+            bm = load_skeleton_mesh(bone_name)
+            if bm is not None:
+                bone_meshes[bone_name] = bm
+                print(f"  {bone_name}: {len(bm['vertices'])} verts, {len(bm['faces'])} faces")
+    # Add sacrum (shared)
+    bm = load_skeleton_mesh('Saccrum_Coccyx')
+    if bm is not None:
+        bone_meshes['Saccrum_Coccyx'] = bm
+        print(f"  Saccrum_Coccyx: {len(bm['vertices'])} verts, {len(bm['faces'])} faces")
+    print(f"  {len(bone_meshes)} bone meshes loaded")
+
     # Process frame by frame
     os.makedirs(args.output_dir, exist_ok=True)
     all_positions = {m['name']: {} for m in muscles}
@@ -257,6 +339,10 @@ def main():
 
     for fi, frame in enumerate(all_frames):
         t_frame = time.time()
+
+        # Set skeleton to this frame's pose
+        if skel is not None and bvh is not None and frame < len(bvh.mocap_refs):
+            skel.setPositions(bvh.mocap_refs[frame])
 
         # Get ARAP positions for this frame
         frame_positions = {}
@@ -304,7 +390,6 @@ def main():
 
                 # Dirichlet BC: fix cap vertices at ARAP positions
                 is_fixed = view(mesh.vertices().find(builtin.is_fixed))
-                positions_attr = view(mesh.vertices().find(builtin.position))
                 for vi in m['fixed_vertices']:
                     if vi < len(is_fixed):
                         is_fixed[vi] = 1
@@ -317,6 +402,32 @@ def main():
             geo_slot, _ = obj.geometries().create(mesh)
             geo_slots.append(geo_slot)
             valid_muscles.append(m)
+
+        # Add skeleton bones as fixed collision obstacles
+        from uipc.geometry import trimesh as uipc_trimesh
+        for bone_name, bm in bone_meshes.items():
+            try:
+                if skel is not None:
+                    world_verts = get_bone_world_positions(
+                        skel, bvh, frame, bone_name, bm['vertices'])
+                    if world_verts is None:
+                        continue
+                else:
+                    world_verts = bm['vertices'].copy()
+
+                bone_mesh = uipc_trimesh(world_verts, bm['faces'])
+                label_surface(bone_mesh)
+                label_triangle_orient(bone_mesh)
+
+                # All bone vertices are fixed (rigid obstacle)
+                bone_is_fixed = view(bone_mesh.vertices().find(builtin.is_fixed))
+                for vi in range(len(world_verts)):
+                    bone_is_fixed[vi] = 1
+
+                bone_obj = scene.objects().create(f"bone_{bone_name}")
+                bone_obj.geometries().create(bone_mesh)
+            except Exception as e:
+                print(f"  Frame {frame}: bone {bone_name} failed: {e}")
 
         # Init and run single step (quasistatic — one step is equilibrium)
         try:
