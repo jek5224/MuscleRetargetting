@@ -4011,24 +4011,32 @@ class MuscleMeshMixin:
                             queue.append(n)
                 cap_groups[key] = list(visited)
 
-            # Add remaining fixed vertices (not in any cap group) to nearest group
+            # Add remaining fixed vertices (not in any cap group) to nearest group.
+            # Use distance to nearest GROUP VERTEX (not centroid) — handles elongated caps.
+            from scipy.spatial import cKDTree as _cKDTree
             all_cap_verts = set()
             for verts in cap_groups.values():
                 all_cap_verts.update(verts)
-            for vi in self.soft_body_fixed_vertices:
-                if vi in all_cap_verts:
-                    continue
-                vi_pos = self.soft_body.rest_positions[vi]
-                best_key = None
-                best_dist = float('inf')
+
+            remaining = [vi for vi in self.soft_body_fixed_vertices if vi not in all_cap_verts]
+            if remaining and cap_groups:
+                # Build KD-tree per group
+                group_trees = {}
                 for key, group_verts in cap_groups.items():
-                    centroid = np.mean([self.soft_body.rest_positions[v] for v in group_verts], axis=0)
-                    d = np.linalg.norm(vi_pos - centroid)
-                    if d < best_dist:
-                        best_dist = d
-                        best_key = key
-                if best_key is not None:
-                    cap_groups[best_key].append(vi)
+                    pts = np.array([self.soft_body.rest_positions[v] for v in group_verts])
+                    group_trees[key] = _cKDTree(pts)
+
+                for vi in remaining:
+                    vi_pos = self.soft_body.rest_positions[vi]
+                    best_key = None
+                    best_dist = float('inf')
+                    for key, tree in group_trees.items():
+                        d, _ = tree.query(vi_pos)
+                        if d < best_dist:
+                            best_dist = d
+                            best_key = key
+                    if best_key is not None:
+                        cap_groups[best_key].append(vi)
 
             # Assign each group to its bone from XML
             for (stream_idx, end_type), group_verts in cap_groups.items():
