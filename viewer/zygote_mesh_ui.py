@@ -8699,9 +8699,7 @@ def _motion_apply_cached_deformation(v, frame):
             # Skip soft_body.positions update during cached playback — not needed
             # for rendering, and the internal C state can cause segfaults.
             mobj.tet_vertices = cached_pos.astype(np.float32).copy()
-            import sys; print(f"  TRACE {mname} f{frame} draw_update start", flush=True)
             mobj._update_tet_draw_positions()
-            print(f"  TRACE {mname} f{frame} draw_update done", flush=True)
             # Skip waypoint restore during playback — fiber draw rebuild crashes
             # Waypoints will stay at last-known positions (visual only)
             # Skip live waypoint recompute during playback — causes segfault
