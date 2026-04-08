@@ -415,34 +415,34 @@ class TetrahedronMeshMixin:
             closed_faces = np.array(closed_faces, dtype=np.int32)
 
             # Step 3.5: Map each boundary loop to stream origin/insertion
-            # Use loop centroid position for matching (no pole anchor vertex)
+            # Use waypoint streams (not contour streams which may have different indexing)
             self.tet_cap_attachments = []
-            if hasattr(self, 'contours') and self.contours is not None and len(self.contours) > 0:
+            wp_streams = self.waypoints if hasattr(self, 'waypoints') and self.waypoints else None
+            if wp_streams is not None and len(wp_streams) > 0:
                 for loop_idx, loop in enumerate(boundary_loops):
                     loop_pts = np.array([closed_vertices[vi] for vi in loop])
                     anchor_pos = loop_pts.mean(axis=0)
-                    anchor_idx = loop[0]  # use first loop vertex as representative
+                    anchor_idx = loop[0]
                     best_match = None
                     best_dist = float('inf')
 
-                    for stream_idx, stream_contours in enumerate(self.contours):
-                        if len(stream_contours) == 0:
+                    for stream_idx, stream_wps in enumerate(wp_streams):
+                        if len(stream_wps) == 0:
                             continue
 
-                        # Origin: first contour of stream
-                        origin_contour = stream_contours[0]
-                        if len(origin_contour) > 0:
-                            origin_mean = np.mean(origin_contour, axis=0)
+                        # Origin: first contour waypoints
+                        origin_wps = np.array(stream_wps[0])
+                        if origin_wps.ndim >= 1 and len(origin_wps) > 0:
+                            origin_mean = np.mean(origin_wps.reshape(-1, 3), axis=0)
                             dist = np.linalg.norm(anchor_pos - origin_mean)
                             if dist < best_dist:
                                 best_dist = dist
-                                # end_type: 0=origin, 1=insertion
                                 best_match = (anchor_idx, stream_idx, 0)
 
-                        # Insertion: last contour of stream
-                        insertion_contour = stream_contours[-1]
-                        if len(insertion_contour) > 0:
-                            insertion_mean = np.mean(insertion_contour, axis=0)
+                        # Insertion: last contour waypoints
+                        insertion_wps = np.array(stream_wps[-1])
+                        if insertion_wps.ndim >= 1 and len(insertion_wps) > 0:
+                            insertion_mean = np.mean(insertion_wps.reshape(-1, 3), axis=0)
                             dist = np.linalg.norm(anchor_pos - insertion_mean)
                             if dist < best_dist:
                                 best_dist = dist
@@ -450,16 +450,11 @@ class TetrahedronMeshMixin:
 
                     if best_match is not None:
                         anchor_idx, stream_idx, end_type = best_match
-                        # Get skeleton attachment from attach_skeletons
-                        if stream_idx < len(self.attach_skeletons):
-                            skel_idx = self.attach_skeletons[stream_idx][end_type]
-                            subpart_idx = self.attach_skeletons_sub[stream_idx][end_type] if stream_idx < len(self.attach_skeletons_sub) else 0
-                        else:
-                            skel_idx = 0
-                            subpart_idx = 0
+                        skel_idx = 0
+                        subpart_idx = 0
                         self.tet_cap_attachments.append((anchor_idx, stream_idx, end_type, skel_idx, subpart_idx))
                         end_name = "origin" if end_type == 0 else "insertion"
-                        print(f"  Anchor {anchor_idx} -> stream {stream_idx} {end_name}, skeleton {skel_idx}")
+                        print(f"  Anchor {anchor_idx} -> stream {stream_idx} {end_name}")
 
         # Step 4: Tetrahedralization
         # Try TetGen first (quality constrained Delaunay — well-shaped interior tets,
