@@ -2610,6 +2610,7 @@ class FiberArchitectureMixin:
 
         embedded_count = 0
         skeleton_count = 0
+        surface_interp_count = 0
         total_count = 0
         clamped_count = 0
 
@@ -2669,22 +2670,29 @@ class FiberArchitectureMixin:
 
                     # For interior points not inside bones, use tetrahedra
                     tet_idx, bary, was_inside = self._find_containing_tet(point, tet_verts, tetrahedra)
-                    if tet_idx is not None:
-                        # Store whether point was truly inside (for stability during updates)
-                        contour_bary.append(('tet', tet_idx, bary, was_inside))
+                    if tet_idx is not None and was_inside:
+                        contour_bary.append(('tet', tet_idx, bary, True))
                         embedded_count += 1
-                        if not was_inside:
-                            clamped_count += 1
+                    elif tet_verts is not None and len(tet_verts) > 0:
+                        # Outside all tets — use K-nearest surface vertex interpolation
+                        # More robust than clamped bary in a distant tet
+                        K = min(8, len(tet_verts))
+                        dists = np.linalg.norm(tet_verts - point, axis=1)
+                        nearest_k = np.argsort(dists)[:K]
+                        w = 1.0 / np.maximum(dists[nearest_k]**2, 1e-20)
+                        w /= w.sum()
+                        contour_bary.append(('surface', nearest_k.tolist(), w.tolist()))
+                        surface_interp_count += 1
                     else:
                         contour_bary.append(None)
 
                 stream_bary.append(contour_bary)
             self.waypoint_bary_coords.append(stream_bary)
 
-        failed_count = total_count - embedded_count - skeleton_count
+        failed_count = total_count - embedded_count - skeleton_count - surface_interp_count
         msg = f"  Waypoints: {embedded_count} in tetrahedra"
-        if clamped_count > 0:
-            msg += f" ({clamped_count} outside, using nearest tet with clamped bary)"
+        if surface_interp_count > 0:
+            msg += f", {surface_interp_count} surface-interp (outside tets)"
         msg += f", {skeleton_count} attached to skeleton, {total_count} total"
         if failed_count > 0:
             msg += f", {failed_count} FAILED"
@@ -3030,6 +3038,16 @@ class FiberArchitectureMixin:
                         tet_count += 1
                         if not was_inside:
                             clamped_count += 1
+
+                    elif bary_data[0] == 'surface':
+                        # K-nearest surface vertex interpolation
+                        _, indices, weights = bary_data
+                        new_pos = np.zeros(3, dtype=np.float64)
+                        for vi, w in zip(indices, weights):
+                            if vi < len(tet_verts):
+                                new_pos += w * tet_verts[vi]
+                        contour_wps[fiber_idx] = new_pos
+                        tet_count += 1
 
                 # Update the waypoints array
                 self.waypoints[stream_idx][contour_idx] = contour_wps
