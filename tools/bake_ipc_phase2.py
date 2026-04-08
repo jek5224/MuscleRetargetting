@@ -417,7 +417,6 @@ def main():
 
                 bone_mesh = uipc_trimesh(world_verts, bm['faces'])
                 label_surface(bone_mesh)
-                label_triangle_orient(bone_mesh)
 
                 # All bone vertices are fixed (rigid obstacle)
                 bone_is_fixed = view(bone_mesh.vertices().find(builtin.is_fixed))
