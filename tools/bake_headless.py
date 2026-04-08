@@ -447,18 +447,6 @@ def main():
                 ctx, max_iterations=args.settle_iters, tolerance=1e-4
             )
 
-        # Snap fixed vertices to exact bone positions (ARAP uses soft constraints
-        # which can drift over time — force them to match skeleton transforms)
-        for mname, mobj in active_muscles.items():
-            if hasattr(mobj, 'soft_body_local_anchors') and mobj.soft_body is not None:
-                positions = mobj.soft_body.get_positions()
-                for vi, (body_name, local_pos) in mobj.soft_body_local_anchors.items():
-                    body_node = ctx.env.skel.getBodyNode(body_name)
-                    if body_node is not None:
-                        wt = body_node.getWorldTransform()
-                        positions[vi] = wt.rotation() @ local_pos + wt.translation()
-                mobj.soft_body.positions = positions
-
         # Capture positions
         for mname, mobj in active_muscles.items():
             bake_data[mname][frame] = mobj.soft_body.get_positions().astype(np.float32)

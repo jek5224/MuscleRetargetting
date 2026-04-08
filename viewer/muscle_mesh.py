@@ -3963,58 +3963,103 @@ class MuscleMeshMixin:
         if skeleton is not None and skeleton_meshes is not None and hasattr(self, 'tet_cap_attachments'):
             skeleton_names = list(skeleton_meshes.keys())
 
-            # Use attach_skeleton_names (from XML) for cap anchor bone assignment
-            has_skel_names = (
-                hasattr(self, 'attach_skeleton_names') and
-                len(self.attach_skeleton_names) > 0 and
-                any(any(n for n in group) for group in self.attach_skeleton_names)
-            )
+            # Group fixed vertices by cap (origin/insertion per stream)
+            # Each group attaches to ONE bone based on group centroid proximity
+            from scipy.spatial import cKDTree as _cKDTree
 
-            if has_skel_names:
-                for attachment in self.tet_cap_attachments:
-                    anchor_idx, stream_idx, end_type, skel_mesh_idx, subpart_idx = attachment
-
-                    if stream_idx >= len(self.attach_skeleton_names):
-                        continue
-                    if end_type >= len(self.attach_skeleton_names[stream_idx]):
-                        continue
-
-                    body_name = self.attach_skeleton_names[stream_idx][end_type]
-                    if not body_name:
-                        continue
-
+            # Build bone KD-trees
+            bone_trees = {}
+            for mesh_name, mesh_loader in skeleton_meshes.items():
+                if mesh_loader.vertices is None or len(mesh_loader.vertices) == 0:
+                    continue
+                body_name = mesh_to_body.get(mesh_name)
+                if body_name is None:
                     try:
-                        body_node = skeleton.getBodyNode(body_name)
-                        if body_node is None:
-                            # Try without trailing digit
-                            body_node, body_name = find_dart_body(skeleton, body_name.rstrip('0123456789'))
-                        if body_node is None:
-                            print(f"  Could not find DART body '{body_name}'")
-                            continue
-
-                        world_transform = body_node.getWorldTransform()
-                        rotation = world_transform.rotation()
-                        translation = world_transform.translation()
-
-                        if body_name not in self.soft_body_initial_transforms:
-                            self.soft_body_initial_transforms[body_name] = (rotation.copy(), translation.copy())
-
-                        anchor_world_pos = self.soft_body.rest_positions[anchor_idx]
-                        local_pos = rotation.T @ (anchor_world_pos - translation)
-
-                        self.soft_body_local_anchors[anchor_idx] = (body_name, local_pos.copy())
-
-                        print(f"  Anchor {anchor_idx} -> body '{body_name}' (from XML)")
-
-                    except Exception as e:
-                        print(f"  Failed to attach anchor {anchor_idx}: {e}")
+                        bn = skeleton.getBodyNode(mesh_name)
+                        if bn is not None:
+                            body_name = mesh_name
+                    except:
+                        pass
+                if body_name is None:
+                    continue
+                try:
+                    bn = skeleton.getBodyNode(body_name)
+                    if bn is None:
                         continue
-            else:
-                print(f"  No attach_skeleton_names — cap anchors will use nearest-bone matching")
+                except:
+                    continue
+                bone_trees[mesh_name] = (_cKDTree(mesh_loader.vertices), body_name)
 
-            # Assign ALL fixed vertices (including cap anchors without valid skel data)
-            # to their appropriate body via nearest-bone matching
-            self._assign_fixed_vertices_to_nearest_bones(skeleton, skeleton_meshes, mesh_to_body)
+            # Group cap vertices: cap_attachments has (anchor, stream, end_type, ...)
+            # Group by (stream, end_type) — all vertices in same cap group get same bone
+            cap_groups = {}  # (stream, end_type) -> list of vertex indices
+            for attachment in self.tet_cap_attachments:
+                anchor_idx, stream_idx, end_type = int(attachment[0]), int(attachment[1]), int(attachment[2])
+                key = (stream_idx, end_type)
+                if key not in cap_groups:
+                    cap_groups[key] = []
+                cap_groups[key].append(anchor_idx)
+
+            # Also add non-anchor fixed vertices to nearest cap group
+            anchor_set = set()
+            for verts in cap_groups.values():
+                anchor_set.update(verts)
+            for vi in self.soft_body_fixed_vertices:
+                if vi in anchor_set:
+                    continue
+                # Find nearest cap group by distance to group centroid
+                vi_pos = self.soft_body.rest_positions[vi]
+                best_key = None
+                best_dist = float('inf')
+                for key, group_verts in cap_groups.items():
+                    centroid = np.mean([self.soft_body.rest_positions[v] for v in group_verts], axis=0)
+                    d = np.linalg.norm(vi_pos - centroid)
+                    if d < best_dist:
+                        best_dist = d
+                        best_key = key
+                if best_key is not None:
+                    cap_groups[best_key].append(vi)
+
+            # For each group, find nearest bone by group centroid
+            for (stream_idx, end_type), group_verts in cap_groups.items():
+                group_positions = np.array([self.soft_body.rest_positions[vi] for vi in group_verts])
+                centroid = group_positions.mean(axis=0)
+
+                # Find nearest bone
+                best_body = None
+                best_dist = float('inf')
+                for mesh_name, (tree, body_name) in bone_trees.items():
+                    dist, _ = tree.query(centroid)
+                    if dist < best_dist:
+                        best_dist = dist
+                        best_body = body_name
+
+                if best_body is None:
+                    continue
+
+                # Get bone transform and attach all group vertices
+                try:
+                    body_node = skeleton.getBodyNode(best_body)
+                    if body_node is None:
+                        continue
+                    world_transform = body_node.getWorldTransform()
+                    rotation = world_transform.rotation()
+                    translation = world_transform.translation()
+
+                    if best_body not in self.soft_body_initial_transforms:
+                        self.soft_body_initial_transforms[best_body] = (rotation.copy(), translation.copy())
+
+                    for vi in group_verts:
+                        anchor_world_pos = self.soft_body.rest_positions[vi]
+                        local_pos = rotation.T @ (anchor_world_pos - translation)
+                        self.soft_body_local_anchors[vi] = (best_body, local_pos.copy())
+                except Exception as e:
+                    print(f"  Failed to attach cap group ({stream_idx},{end_type}): {e}")
+                    continue
+
+                end_name = "origin" if end_type == 0 else "insertion"
+                print(f"  Cap group stream {stream_idx} {end_name}: {len(group_verts)} verts -> {best_body}")
+
             print(f"  Assigned {len(self.soft_body_local_anchors)} fixed vertices to bodies")
 
         # Compute LBS skinning weights for ALL vertices (not just fixed)
