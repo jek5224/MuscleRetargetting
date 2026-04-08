@@ -7505,9 +7505,19 @@ def _run_unified_volume_sim(v, active_muscles, max_iterations=100, tolerance=1e-
             ratio_strs = [f"{name}={r:.3f}" for name, r in axis_ratios.items() if abs(r - 1.0) >= 0.02]
             print(f"  Muscle-aware ARAP: {', '.join(ratio_strs)}")
 
+    # Use LBS positions as ARAP rest shape so ARAP preserves the skeleton-driven
+    # configuration, not the original T-pose rest shape.
+    # Recompute rest edge vectors from LBS positions to stay consistent.
+    arap_rest = global_lbs_positions.copy()
+    lbs_rest_edges = {}
+    for i in range(total_verts):
+        lbs_rest_edges[i] = {}
+        for j in neighbors[i]:
+            lbs_rest_edges[i][j] = arap_rest[i] - arap_rest[j]
+
     start_time = time.time()
     global_positions, iterations, max_disp = backend.solve(
-        global_positions, global_rest_positions, neighbors, edge_weights, rest_edge_vectors,
+        global_positions, arap_rest, neighbors, edge_weights, lbs_rest_edges,
         global_fixed_mask, fixed_targets_array, max_iterations=max_iterations, tolerance=tolerance,
         target_edges=target_edges, verbose=True
     )
