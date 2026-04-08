@@ -7090,13 +7090,20 @@ def find_inter_muscle_constraints(v, threshold=None):
                 nearby_indices = tree2.query_ball_point(v1, threshold)
 
                 for v2_idx in nearby_indices:
+                    # Skip fixed-to-free constraints: they create tug-of-war
+                    # between rigid bone motion and elastic ARAP deformation
+                    is_fixed1 = bool(fixed1[v1_idx])
+                    is_fixed2 = bool(fixed2[v2_idx])
+                    if is_fixed1 != is_fixed2:
+                        continue
+
                     v2 = verts2[v2_idx]
                     dist = np.linalg.norm(v1 - v2)
 
                     # Store constraint with fixed status
                     v.inter_muscle_constraints.append((
-                        name1, v1_idx, bool(fixed1[v1_idx]),
-                        name2, v2_idx, bool(fixed2[v2_idx]),
+                        name1, v1_idx, is_fixed1,
+                        name2, v2_idx, is_fixed2,
                         dist  # rest distance
                     ))
 
