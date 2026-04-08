@@ -3963,27 +3963,33 @@ class MuscleMeshMixin:
         if skeleton is not None and skeleton_meshes is not None and hasattr(self, 'tet_cap_attachments'):
             skeleton_names = list(skeleton_meshes.keys())
 
-            # Check if attach_skeletons has valid data (non-empty, not all zeros)
-            has_valid_skel_data = (
-                hasattr(self, 'attach_skeletons') and
-                len(self.attach_skeletons) > 0 and
-                any(any(idx != 0 for idx in group) for group in self.attach_skeletons)
+            # Use attach_skeleton_names (from XML) for cap anchor bone assignment
+            has_skel_names = (
+                hasattr(self, 'attach_skeleton_names') and
+                len(self.attach_skeleton_names) > 0 and
+                any(any(n for n in group) for group in self.attach_skeleton_names)
             )
 
-            if has_valid_skel_data:
+            if has_skel_names:
                 for attachment in self.tet_cap_attachments:
                     anchor_idx, stream_idx, end_type, skel_mesh_idx, subpart_idx = attachment
 
-                    if skel_mesh_idx >= len(skeleton_names):
+                    if stream_idx >= len(self.attach_skeleton_names):
+                        continue
+                    if end_type >= len(self.attach_skeleton_names[stream_idx]):
                         continue
 
-                    mesh_name = skeleton_names[skel_mesh_idx]
+                    body_name = self.attach_skeleton_names[stream_idx][end_type]
+                    if not body_name:
+                        continue
 
                     try:
-                        body_node, body_name = find_dart_body(skeleton, mesh_name)
-
+                        body_node = skeleton.getBodyNode(body_name)
                         if body_node is None:
-                            print(f"  Could not find DART body for mesh '{mesh_name}'")
+                            # Try without trailing digit
+                            body_node, body_name = find_dart_body(skeleton, body_name.rstrip('0123456789'))
+                        if body_node is None:
+                            print(f"  Could not find DART body '{body_name}'")
                             continue
 
                         world_transform = body_node.getWorldTransform()
@@ -3998,13 +4004,13 @@ class MuscleMeshMixin:
 
                         self.soft_body_local_anchors[anchor_idx] = (body_name, local_pos.copy())
 
-                        print(f"  Anchor {anchor_idx} -> mesh '{mesh_name}' -> body '{body_name}'")
+                        print(f"  Anchor {anchor_idx} -> body '{body_name}' (from XML)")
 
                     except Exception as e:
                         print(f"  Failed to attach anchor {anchor_idx}: {e}")
                         continue
             else:
-                print(f"  No valid attach_skeletons — cap anchors will use nearest-bone matching")
+                print(f"  No attach_skeleton_names — cap anchors will use nearest-bone matching")
 
             # Assign ALL fixed vertices (including cap anchors without valid skel data)
             # to their appropriate body via nearest-bone matching
