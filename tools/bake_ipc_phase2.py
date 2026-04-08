@@ -1,10 +1,14 @@
 #!/usr/bin/env python3
-"""Phase 2 IPC bake: take ARAP bake as rest shape, resolve contacts per frame.
+"""Phase 2 IPC bake: quasistatic collision-aware tet sim.
 
 For each frame:
   1. Load ARAP-baked positions as rest shape
-  2. Run pyuipc with IPC contact + SPC on cap vertices only
-  3. Save contact-resolved positions
+  2. Fix cap vertices (Dirichlet BC) at ARAP positions
+  3. Run pyuipc with IPC contact — interior vertices find equilibrium
+  4. Save contact-resolved positions
+
+Uses Dirichlet BC (hard constraint) for cap vertices instead of SPC
+to avoid SPC/IPC oscillation.
 
 Usage (on A6000 server):
     python tools/bake_ipc_phase2.py --bvh data/motion/walk.bvh --sides LR
@@ -27,7 +31,7 @@ from uipc import view, Animation
 import uipc.builtin as builtin
 from uipc.core import Engine, World, Scene
 from uipc.geometry import tetmesh, label_surface, label_triangle_orient
-from uipc.constitution import StableNeoHookean, SoftPositionConstraint, ElasticModuli
+from uipc.constitution import StableNeoHookean, ElasticModuli
 from uipc.unit import kPa, MPa
 
 SCALE = 1000.0
@@ -56,7 +60,7 @@ def load_muscle(name):
     verts = data['vertices'].astype(np.float64) * SCALE
     tets = data['tetrahedra'].astype(np.int32)
 
-    # Fix tet orientation (no removal — keep all tets including small-volume ones)
+    # Fix tet orientation
     v0 = verts[tets[:, 0]]
     cross = np.cross(verts[tets[:, 1]] - v0, verts[tets[:, 2]] - v0)
     vol = np.einsum('ij,ij->i', cross, verts[tets[:, 3]] - v0) / 6.0
@@ -64,7 +68,7 @@ def load_muscle(name):
     if np.any(neg):
         tets[neg, 1], tets[neg, 2] = tets[neg, 2].copy(), tets[neg, 1].copy()
 
-    # Cap vertices
+    # Cap vertices from cap face indices + anchor vertices
     cap_faces = data.get('cap_face_indices', [])
     fixed_verts = set()
     sim_faces = data.get('sim_faces', data.get('faces'))
@@ -87,25 +91,22 @@ def load_muscle(name):
         tets = remap[tets]
         fixed_verts = {int(remap[vi]) for vi in fixed_verts if vi < len(remap) and remap[vi] >= 0}
 
-    # Precompute barycentric coords for unmapped vertices (in render faces but not tets)
+    # Precompute barycentric coords for unmapped vertices
     inv_remap = used if remap is not None else None
-    unmapped_bary = {}  # orig_vi -> (tet_idx_in_remapped, bary_coords)
+    unmapped_bary = {}
     if remap is not None:
         unmapped_vis = [vi for vi in range(len(data['vertices'])) if remap[vi] < 0]
         if len(unmapped_vis) > 0:
             all_orig_verts = data['vertices'].astype(np.float64) * SCALE
-            # Find nearest tet for each unmapped vertex
             tet_centers = np.mean(verts[tets], axis=1)
             tet_tree = cKDTree(tet_centers)
             for orig_vi in unmapped_vis:
                 pt = all_orig_verts[orig_vi]
-                # Search several nearest tets
                 dists, idxs = tet_tree.query(pt, k=min(10, len(tets)))
                 if not hasattr(idxs, '__len__'):
                     idxs = [idxs]
                 for ti in idxs:
                     t = tets[ti]
-                    # Compute barycentric coordinates
                     v0, v1, v2, v3 = verts[t[0]], verts[t[1]], verts[t[2]], verts[t[3]]
                     mat = np.column_stack([v1 - v0, v2 - v0, v3 - v0])
                     det = np.linalg.det(mat)
@@ -114,7 +115,6 @@ def load_muscle(name):
                     bary123 = np.linalg.solve(mat, pt - v0)
                     bary0 = 1.0 - bary123.sum()
                     bary = np.array([bary0, bary123[0], bary123[1], bary123[2]])
-                    # Accept if roughly inside (allow tolerance for surface verts)
                     if np.all(bary > -2.0):
                         unmapped_bary[orig_vi] = (ti, bary)
                         break
@@ -146,21 +146,15 @@ def load_arap_cache_all_frames(cache_dir, muscle_name):
 
 
 def expand_to_full(muscle, remapped_pos):
-    """Expand remapped positions to full original vertex array.
-
-    Mapped vertices get their solved positions.
-    Unmapped vertices get barycentric-interpolated positions from nearest tet.
-    """
+    """Expand remapped positions to full original vertex array."""
     remap = muscle['remap']
     if remap is None:
         return remapped_pos.copy()
 
     n_orig = muscle['n_orig']
-    full = muscle['all_orig_rest'].copy()  # fallback: rest positions
-    # Fill mapped vertices
+    full = muscle['all_orig_rest'].copy()
     inv_remap = muscle['inv_remap']
     full[inv_remap] = remapped_pos[:len(inv_remap)]
-    # Interpolate unmapped vertices
     tets = muscle['tetrahedra']
     for orig_vi, (ti, bary) in muscle['unmapped_bary'].items():
         t = tets[ti]
@@ -170,7 +164,7 @@ def expand_to_full(muscle, remapped_pos):
 
 
 def reorient_tets(positions, tets):
-    """Fix tet orientation for deformed positions. Returns cleaned tets."""
+    """Fix tet orientation for deformed positions."""
     tets = tets.copy()
     v0 = positions[tets[:, 0]]
     cross = np.cross(positions[tets[:, 1]] - v0, positions[tets[:, 2]] - v0)
@@ -191,67 +185,76 @@ def main():
     parser.add_argument('--sides', default='LR')
     parser.add_argument('--cache-base', default='data/motion_cache/walk',
                         help='Base cache dir (ARAP subdirs: L_UpLeg/, R_UpLeg/)')
-    parser.add_argument('--output-dir', default='bake_ipc_phase2')
-    parser.add_argument('--d-hat', type=float, default=0.1)
-    parser.add_argument('--elastic', type=float, default=5.0)
-    parser.add_argument('--spc-stiffness', type=float, default=1e5)
-    parser.add_argument('--n-steps', type=int, default=5,
-                        help='IPC steps per frame')
+    parser.add_argument('--output-dir', default='data/ipc_phase2')
+    parser.add_argument('--d-hat', type=float, default=0.5,
+                        help='IPC barrier distance hat (mm)')
+    parser.add_argument('--elastic', type=float, default=10.0,
+                        help='Elastic modulus (kPa)')
+    parser.add_argument('--start-frame', type=int, default=None)
+    parser.add_argument('--end-frame', type=int, default=None)
     args = parser.parse_args()
 
     # Determine frame range from ARAP cache
     sample_side = args.sides[0]
     sample_dir = os.path.join(args.cache_base, f'{sample_side}_UpLeg')
+    if not os.path.exists(sample_dir):
+        # Try flat layout
+        sample_dir = args.cache_base
     sample_files = glob.glob(os.path.join(sample_dir, '*_chunk_*.npz'))
     if not sample_files:
         print(f"ERROR: No ARAP cache in {sample_dir}")
         return
-    sample_data = np.load(sample_files[0])
-    all_frames = sorted(sample_data['frames'].tolist())
-    start_frame, end_frame = all_frames[0], all_frames[-1]
-    print(f"Frames: {start_frame}-{end_frame} ({len(all_frames)} frames)")
+    all_frames_set = set()
+    for sf in sample_files:
+        d = np.load(sf)
+        all_frames_set.update(d['frames'].tolist())
+    all_frames = sorted(all_frames_set)
+
+    if args.start_frame is not None:
+        all_frames = [f for f in all_frames if f >= args.start_frame]
+    if args.end_frame is not None:
+        all_frames = [f for f in all_frames if f <= args.end_frame]
+    print(f"Frames: {all_frames[0]}-{all_frames[-1]} ({len(all_frames)} frames)")
 
     # Load muscles
     print("[1] Loading muscles...")
     muscles = []
+    total_verts = 0
+    total_tets = 0
     for side in args.sides:
         for mname in UPLEG_MUSCLES:
             name = f"{side}_{mname}"
             m = load_muscle(name)
             if m is not None:
                 muscles.append(m)
-    print(f"    {len(muscles)} muscles loaded")
+                total_verts += len(m['rest_vertices'])
+                total_tets += len(m['tetrahedra'])
+    print(f"  {len(muscles)} muscles, {total_verts} vertices, {total_tets} tets")
 
     # Load all ARAP caches
     print("[2] Loading ARAP caches...")
     for m in muscles:
-        side = m['name'][0]  # L or R
+        side = m['name'][0]
         cache_dir = os.path.join(args.cache_base, f'{side}_UpLeg')
+        if not os.path.exists(cache_dir):
+            cache_dir = args.cache_base
         m['arap_cache'] = load_arap_cache_all_frames(cache_dir, m['name'])
 
-        # Remap: ARAP cache has n_orig vertices, we need remapped
+        # Remap if needed
         if m['remap'] is not None:
             used = np.where(m['remap'] >= 0)[0]
             for f in m['arap_cache']:
                 m['arap_cache'][f] = m['arap_cache'][f][used]
 
         n_frames = len(m['arap_cache'])
-        if n_frames == 0:
-            print(f"    WARNING: {m['name']} has no ARAP cache!")
-        else:
-            sample_f = list(m['arap_cache'].keys())[0]
-            nv_cache = len(m['arap_cache'][sample_f])
-            nv_tet = len(m['rest_vertices'])
-            if nv_cache != nv_tet:
-                print(f"    WARNING: {m['name']} vertex mismatch: cache={nv_cache}, tet={nv_tet}")
-            else:
-                print(f"    {m['name']}: {n_frames} frames, {nv_tet}v")
+        print(f"  {m['name']}: {n_frames} frames, {len(m['rest_vertices'])}v, "
+              f"{len(m['fixed_vertices'])} fixed")
 
     # Process frame by frame
     os.makedirs(args.output_dir, exist_ok=True)
     all_positions = {m['name']: {} for m in muscles}
+    total_t = time.time()
 
-    prev_engine = None
     for fi, frame in enumerate(all_frames):
         t_frame = time.time()
 
@@ -267,7 +270,7 @@ def main():
             print(f"  Frame {frame}: skipped (missing ARAP data)")
             continue
 
-        # Build pyuipc scene fresh per frame (rest shape = ARAP positions)
+        # Build pyuipc scene — rest shape = ARAP positions for this frame
         engine = Engine('cuda')
         world = World(engine)
 
@@ -285,7 +288,6 @@ def main():
         scene.contact_tabular().default_model(0.0, 1.0 * MPa)
 
         snh = StableNeoHookean()
-        spc = SoftPositionConstraint()
         moduli = ElasticModuli.youngs_poisson(args.elastic * kPa, 0.45)
 
         geo_slots = []
@@ -299,7 +301,13 @@ def main():
                 label_surface(mesh)
                 label_triangle_orient(mesh)
                 snh.apply_to(mesh, moduli, mass_density=1060.0)
-                spc.apply_to(mesh, args.spc_stiffness)
+
+                # Dirichlet BC: fix cap vertices at ARAP positions
+                is_fixed = view(mesh.vertices().find(builtin.is_fixed))
+                positions_attr = view(mesh.vertices().find(builtin.position))
+                for vi in m['fixed_vertices']:
+                    if vi < len(is_fixed):
+                        is_fixed[vi] = 1
             except Exception as e:
                 print(f"  Frame {frame}: {m['name']} setup failed: {e}")
                 all_positions[m['name']][frame] = expand_to_full(m, arap_pos).astype(np.float32)
@@ -310,77 +318,67 @@ def main():
             geo_slots.append(geo_slot)
             valid_muscles.append(m)
 
-            # SPC on cap vertices only
-            cap_set = set(m['fixed_vertices'])
-            n_v = len(arap_pos)
-
-            def make_animate(caps, pos_ref, nv):
-                def animate(info: Animation.UpdateInfo):
-                    geo = info.geo_slots()[0].geometry()
-                    cv = view(geo.vertices().find(builtin.is_constrained))
-                    av = view(geo.vertices().find(builtin.aim_position))
-                    for idx in range(min(nv, len(cv))):
-                        if idx in caps:
-                            cv[idx] = 1
-                            av[idx][0] = float(pos_ref[idx][0])
-                            av[idx][1] = float(pos_ref[idx][1])
-                            av[idx][2] = float(pos_ref[idx][2])
-                        else:
-                            cv[idx] = 0
-                return animate
-            scene.animator().insert(obj, make_animate(cap_set, arap_pos, n_v))
-
-        # Init and run
+        # Init and run single step (quasistatic — one step is equilibrium)
         try:
             world.init(scene)
-            for _ in range(args.n_steps):
-                world.advance()
-                world.retrieve()
+            world.advance()
+            world.retrieve()
         except Exception as e:
             print(f"  Frame {frame}: IPC failed: {e}")
             for m in valid_muscles:
-                all_positions[m['name']][frame] = expand_to_full(m, frame_positions[m['name']]).astype(np.float32)
+                all_positions[m['name']][frame] = expand_to_full(
+                    m, frame_positions[m['name']]).astype(np.float32)
             dt = time.time() - t_frame
             print(f"  Frame {frame}: {dt:.2f}s (FALLBACK to ARAP)")
             del world, engine
             continue
 
-        # Capture resolved positions — expand to full vertex array
+        # Capture resolved positions
         for i, m in enumerate(valid_muscles):
             geo = geo_slots[i].geometry()
             pos = np.array(geo.positions().view()).reshape(-1, 3)
             all_positions[m['name']][frame] = expand_to_full(m, pos).astype(np.float32)
 
-        # For muscles that failed setup, use ARAP directly
+        # Muscles that failed setup use ARAP directly
         for m in muscles:
             if frame not in all_positions[m['name']]:
-                all_positions[m['name']][frame] = expand_to_full(m, frame_positions[m['name']]).astype(np.float32)
+                all_positions[m['name']][frame] = expand_to_full(
+                    m, frame_positions[m['name']]).astype(np.float32)
 
         dt = time.time() - t_frame
-        if fi % 10 == 0 or fi == len(all_frames) - 1:
-            print(f"  Frame {frame}: {dt:.2f}s, {len(valid_muscles)} muscles", flush=True)
+        eta = dt * (len(all_frames) - fi - 1)
+        print(f"  Frame {frame} ({fi+1}/{len(all_frames)}): {dt:.2f}s, "
+              f"{len(valid_muscles)} muscles, ETA {eta:.0f}s", flush=True)
 
         del world, engine
 
-    # Save directly as viewer cache chunks (positions in viewer scale = mm / SCALE)
+    total_dt = time.time() - total_t
+
+    # Save as viewer cache chunks
     bvh_stem = os.path.basename(args.bvh).replace('.bvh', '')
     cache_out = os.path.join(args.output_dir, bvh_stem)
     os.makedirs(cache_out, exist_ok=True)
 
+    CHUNK_SIZE = 20
     for m in muscles:
         mframes = all_positions[m['name']]
         if not mframes:
             continue
         sorted_f = sorted(mframes.keys())
-        positions = np.array([mframes[f] / SCALE for f in sorted_f], dtype=np.float32)
-        out_path = os.path.join(cache_out, f"{m['name']}_chunk_0000.npz")
-        np.savez(out_path,
-                 frames=np.array(sorted_f, dtype=np.int32),
-                 positions=positions)
+        all_pos = np.array([mframes[f] / SCALE for f in sorted_f], dtype=np.float32)
+
+        # Split into chunks
+        for chunk_i in range(0, len(sorted_f), CHUNK_SIZE):
+            chunk_frames = sorted_f[chunk_i:chunk_i + CHUNK_SIZE]
+            chunk_pos = all_pos[chunk_i:chunk_i + CHUNK_SIZE]
+            chunk_idx = chunk_i // CHUNK_SIZE
+            out_path = os.path.join(cache_out, f"{m['name']}_chunk_{chunk_idx:04d}.npz")
+            np.savez(out_path,
+                     frames=np.array(chunk_frames, dtype=np.int32),
+                     positions=chunk_pos)
 
     print(f"\nSaved viewer cache to {cache_out}/")
-    print(f"Done. {len(muscles)} muscles, {len(all_frames)} frames.")
-    print(f"Copy to data/motion_cache/{bvh_stem}/ to use in viewer.")
+    print(f"Done in {total_dt:.1f}s. {len(muscles)} muscles, {len(all_frames)} frames.")
 
 
 if __name__ == '__main__':
