@@ -3964,8 +3964,10 @@ class MuscleMeshMixin:
             skeleton_names = list(skeleton_meshes.keys())
 
             # Group fixed vertices by cap (origin/insertion per stream)
-            # Each group attaches to ONE bone based on group centroid proximity
+            # Each group attaches to ONE bone via majority vote:
+            # check nearest bone per vertex, pick the bone with most votes
             from scipy.spatial import cKDTree as _cKDTree
+            from collections import Counter
 
             # Build bone KD-trees
             bone_trees = {}
@@ -3990,9 +3992,8 @@ class MuscleMeshMixin:
                     continue
                 bone_trees[mesh_name] = (_cKDTree(mesh_loader.vertices), body_name)
 
-            # Group cap vertices: cap_attachments has (anchor, stream, end_type, ...)
-            # Group by (stream, end_type) — all vertices in same cap group get same bone
-            cap_groups = {}  # (stream, end_type) -> list of vertex indices
+            # Group cap vertices by (stream, end_type)
+            cap_groups = {}
             for attachment in self.tet_cap_attachments:
                 anchor_idx, stream_idx, end_type = int(attachment[0]), int(attachment[1]), int(attachment[2])
                 key = (stream_idx, end_type)
@@ -4000,14 +4001,13 @@ class MuscleMeshMixin:
                     cap_groups[key] = []
                 cap_groups[key].append(anchor_idx)
 
-            # Also add non-anchor fixed vertices to nearest cap group
+            # Add non-anchor fixed vertices to nearest cap group
             anchor_set = set()
             for verts in cap_groups.values():
                 anchor_set.update(verts)
             for vi in self.soft_body_fixed_vertices:
                 if vi in anchor_set:
                     continue
-                # Find nearest cap group by distance to group centroid
                 vi_pos = self.soft_body.rest_positions[vi]
                 best_key = None
                 best_dist = float('inf')
@@ -4020,24 +4020,26 @@ class MuscleMeshMixin:
                 if best_key is not None:
                     cap_groups[best_key].append(vi)
 
-            # For each group, find nearest bone by group centroid
+            # For each group, majority vote: per-vertex nearest bone, pick most common
             for (stream_idx, end_type), group_verts in cap_groups.items():
-                group_positions = np.array([self.soft_body.rest_positions[vi] for vi in group_verts])
-                centroid = group_positions.mean(axis=0)
+                votes = Counter()
+                for vi in group_verts:
+                    vi_pos = self.soft_body.rest_positions[vi]
+                    best_bone = None
+                    best_dist = float('inf')
+                    for mesh_name, (tree, body_name) in bone_trees.items():
+                        dist, _ = tree.query(vi_pos)
+                        if dist < best_dist:
+                            best_dist = dist
+                            best_bone = body_name
+                    if best_bone:
+                        votes[best_bone] += 1
 
-                # Find nearest bone
-                best_body = None
-                best_dist = float('inf')
-                for mesh_name, (tree, body_name) in bone_trees.items():
-                    dist, _ = tree.query(centroid)
-                    if dist < best_dist:
-                        best_dist = dist
-                        best_body = body_name
-
-                if best_body is None:
+                if not votes:
                     continue
+                best_body = votes.most_common(1)[0][0]
 
-                # Get bone transform and attach all group vertices
+                # Attach all group vertices to the majority bone
                 try:
                     body_node = skeleton.getBodyNode(best_body)
                     if body_node is None:
@@ -4058,7 +4060,8 @@ class MuscleMeshMixin:
                     continue
 
                 end_name = "origin" if end_type == 0 else "insertion"
-                print(f"  Cap group stream {stream_idx} {end_name}: {len(group_verts)} verts -> {best_body}")
+                vote_str = ', '.join(f'{b}:{c}' for b, c in votes.most_common())
+                print(f"  Cap group stream {stream_idx} {end_name}: {len(group_verts)} verts -> {best_body} (votes: {vote_str})")
 
             print(f"  Assigned {len(self.soft_body_local_anchors)} fixed vertices to bodies")
 
