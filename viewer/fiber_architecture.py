@@ -2548,6 +2548,14 @@ class FiberArchitectureMixin:
             return
         if not hasattr(self, 'tet_tetrahedra') or self.tet_tetrahedra is None:
             return
+
+        # Reset skeleton to rest pose — waypoint positions are at rest,
+        # so local_pos for skeleton-attached endpoints must use rest transforms.
+        saved_skel_pos = None
+        if skeleton is not None:
+            saved_skel_pos = skeleton.getPositions().copy()
+            skeleton.resetPositions()
+            skeleton.resetVelocities()
         if not hasattr(self, 'tet_vertices') or self.tet_vertices is None:
             return
 
@@ -2681,6 +2689,10 @@ class FiberArchitectureMixin:
         if failed_count > 0:
             msg += f", {failed_count} FAILED"
         print(msg)
+
+        # Restore skeleton pose
+        if saved_skel_pos is not None:
+            skeleton.setPositions(saved_skel_pos)
 
         # Build multi-tet blending for waypoints in sliver tets
         self._build_neighbor_tet_blending(tet_verts, tetrahedra)
