@@ -3980,12 +3980,43 @@ class MuscleMeshMixin:
                     cap_groups[key] = []
                 cap_groups[key].append(anchor_idx)
 
-            # Add non-anchor fixed vertices to nearest cap group
-            anchor_set = set()
+            # Expand cap groups using cap face connectivity (BFS from anchors).
+            # This correctly assigns vertices even when they're physically closer
+            # to the other cap (e.g., VL origin vertices near the knee).
+            from collections import deque
+            cap_face_adj = {}
+            cap_face_set = set(self.tet_cap_face_indices)
+            face_arr = self.tet_faces if self.tet_faces is not None else self.tet_render_faces
+            if face_arr is not None:
+                for fi in cap_face_set:
+                    if fi < len(face_arr):
+                        f = face_arr[fi]
+                        for i in range(3):
+                            a, b = int(f[i]), int(f[(i+1)%3])
+                            cap_face_adj.setdefault(a, set()).add(b)
+                            cap_face_adj.setdefault(b, set()).add(a)
+
+            # BFS from each anchor to find all connected cap vertices
+            for key in list(cap_groups.keys()):
+                anchor_verts = list(cap_groups[key])
+                visited = set()
+                queue = deque(anchor_verts)
+                while queue:
+                    v = queue.popleft()
+                    if v in visited:
+                        continue
+                    visited.add(v)
+                    for n in cap_face_adj.get(v, []):
+                        if n not in visited:
+                            queue.append(n)
+                cap_groups[key] = list(visited)
+
+            # Add remaining fixed vertices (not in any cap group) to nearest group
+            all_cap_verts = set()
             for verts in cap_groups.values():
-                anchor_set.update(verts)
+                all_cap_verts.update(verts)
             for vi in self.soft_body_fixed_vertices:
-                if vi in anchor_set:
+                if vi in all_cap_verts:
                     continue
                 vi_pos = self.soft_body.rest_positions[vi]
                 best_key = None
