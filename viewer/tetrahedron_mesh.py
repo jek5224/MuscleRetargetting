@@ -1949,20 +1949,25 @@ except Exception as e:
         verts = self.tet_vertices
         if verts is None:
             return
+        n_verts = len(verts)
         # Update surface verts + normals
         if self._tet_surface_vidx is not None and self._tet_surface_verts is not None:
+            if self._tet_surface_vidx.max() >= n_verts:
+                self._prepare_tet_draw_arrays()
+                return
             self._tet_surface_verts[:] = verts[self._tet_surface_vidx]
             if not skip_normals:
-                # Recompute normals vectorized: every 3 verts is a triangle
                 v = self._tet_surface_verts.reshape(-1, 3, 3)
                 normals = np.cross(v[:, 1] - v[:, 0], v[:, 2] - v[:, 0])
                 norms = np.linalg.norm(normals, axis=1, keepdims=True)
                 norms[norms < 1e-10] = 1.0
                 normals /= norms
-                # Broadcast per-face normal to 3 vertices
                 self._tet_surface_normals[:] = np.repeat(normals, 3, axis=0)
         # Update cap verts + normals
         if self._tet_cap_vidx is not None and self._tet_cap_verts is not None:
+            if self._tet_cap_vidx.max() >= n_verts:
+                self._prepare_tet_draw_arrays()
+                return
             self._tet_cap_verts[:] = verts[self._tet_cap_vidx]
             if not skip_normals:
                 v = self._tet_cap_verts.reshape(-1, 3, 3)
@@ -1973,6 +1978,9 @@ except Exception as e:
                 self._tet_cap_normals[:] = np.repeat(normals, 3, axis=0)
         # Update edge verts
         if self._tet_edge_vidx is not None and self._tet_edge_verts is not None:
+            if self._tet_edge_vidx.max() >= n_verts:
+                self._prepare_tet_draw_arrays()
+                return
             self._tet_edge_verts[:] = verts[self._tet_edge_vidx]
 
     def _draw_tet_mesh_animated(self):
