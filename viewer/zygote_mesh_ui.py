@@ -8714,9 +8714,7 @@ def _motion_apply_cached_deformation(v, frame):
                                     stream[fi] = stream[fi] + fix_offset
                     mobj.waypoints = wp
                     mobj._fiber_draw_dirty = True
-            elif hasattr(mobj, 'waypoint_bary_coords') and len(getattr(mobj, 'waypoint_bary_coords', [])) > 0:
-                # No cached waypoints — recompute from tet bary coords
-                mobj._update_waypoints_from_tet(v.env.skel if hasattr(v, 'env') else None, verbose=False)
+            # Skip live waypoint recompute during playback — causes segfault
             any_applied = True
     return any_applied
 
