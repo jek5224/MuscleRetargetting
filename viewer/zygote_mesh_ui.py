@@ -7371,28 +7371,50 @@ def _run_unified_volume_sim(v, active_muscles, max_iterations=100, tolerance=1e-
             'csr_edge_j': csr_edge_j,
         }
 
-    # Collect LBS positions (skeleton-driven) as initial guess.
-    # LBS gives smooth skeleton-following for ALL vertices, then ARAP refines shape.
-    # Previous: warm-start from last frame's solution, which drifted from skeleton.
+    # Compute LBS positions from skinning weights + skeleton transforms.
+    # This gives ALL vertices skeleton-consistent positions as ARAP initial guess.
     global_lbs_positions = np.zeros((total_verts, 3))
     for name, mobj in active_muscles.items():
         offset = global_offset[name]
         n = mobj.soft_body.num_vertices
-        global_lbs_positions[offset:offset+n] = mobj.soft_body.positions  # LBS result from _update_tet_positions_from_skeleton
+        rest = mobj.soft_body.rest_positions
 
-    # Blend: use LBS as base, optionally blend with previous solution for temporal coherence
+        if hasattr(mobj, 'skinning_weights') and mobj.skinning_weights is not None and len(mobj.skinning_bones) > 0:
+            # Compute LBS: blend bone transforms weighted by skinning weights
+            lbs = np.zeros((n, 3))
+            for bone_idx, bone_name in enumerate(mobj.skinning_bones):
+                body_node = v.env.skel.getBodyNode(bone_name)
+                if body_node is None:
+                    continue
+                wt = body_node.getWorldTransform()
+                R = wt.rotation()
+                t = wt.translation()
+                # Get rest transform
+                if bone_name in mobj.soft_body_initial_transforms:
+                    R0, t0 = mobj.soft_body_initial_transforms[bone_name]
+                else:
+                    continue
+                # Deformation: p' = R_cur @ R_rest^T @ (p_rest - t_rest) + t_cur
+                w = mobj.skinning_weights[:, bone_idx:bone_idx+1]  # (n, 1)
+                local = (R0.T @ (rest - t0).T).T  # (n, 3) in rest bone frame
+                deformed = (R @ local.T).T + t     # (n, 3) in current world
+                lbs += w * deformed
+            global_lbs_positions[offset:offset+n] = lbs
+        else:
+            # No skinning weights — use current positions
+            global_lbs_positions[offset:offset+n] = mobj.soft_body.positions
+
+    # Blend LBS with warm-start for temporal coherence
     prev_solution = cache.get('prev_solution', None) if cache_valid else None
     if prev_solution is not None and prev_solution.shape[0] == total_verts:
-        # Blend LBS and warm-start: mostly LBS to stay skeleton-consistent
         lbs_weight = 0.7
         global_positions = lbs_weight * global_lbs_positions + (1 - lbs_weight) * prev_solution
-        # Fixed vertices always at LBS (bone-driven)
         fixed_idx = np.where(global_fixed_mask)[0]
         global_positions[fixed_idx] = global_lbs_positions[fixed_idx]
-        print(f"  Blended LBS({lbs_weight:.0%}) + warm-start({1-lbs_weight:.0%})")
+        print(f"  LBS({lbs_weight:.0%}) + warm({1-lbs_weight:.0%})")
     else:
         global_positions = global_lbs_positions.copy()
-        print(f"  Using LBS positions as initial guess")
+        print(f"  LBS initial guess")
 
     global_fixed_targets = {}  # global_idx -> target position
     for name, mobj in active_muscles.items():
