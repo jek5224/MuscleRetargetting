@@ -8696,8 +8696,8 @@ def _motion_apply_cached_deformation(v, frame):
                 cached_pos = (fix_rot_mat @ (cached['positions'] - pivot).T).T + fix_dest
             else:
                 cached_pos = cached['positions'] + fix_offset
-            if mobj.soft_body is not None:
-                mobj.soft_body.positions = cached_pos.astype(np.float64)
+            # Skip soft_body.positions update during cached playback — not needed
+            # for rendering, and the internal C state can cause segfaults.
             mobj.tet_vertices = cached_pos.astype(np.float32).copy()
             mobj._update_tet_draw_positions()
             # Restore cached waypoints if available, otherwise recompute from tet
