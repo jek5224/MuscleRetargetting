@@ -463,20 +463,20 @@ def main():
             flush_count = flush_bake_data(bake_data, cache_dir, flush_count)
             gc.collect()
 
-        # Progress reporting
+        # Progress reporting — every frame for monitoring
+        frame_dt = time.time() - frame_start
         frames_done = frame - start_frame + 1
-        if frames_done % 10 == 0 or frame == end_frame:
-            elapsed = time.time() - bake_start
-            avg = elapsed / frames_done
-            remaining = avg * (total_frames - frames_done)
-            print(
-                f"  Frame {frame}/{end_frame}  "
-                f"({frames_done}/{total_frames})  "
-                f"{elapsed:.1f}s elapsed  "
-                f"{avg:.2f}s/frame  "
-                f"ETA {remaining:.0f}s",
-                flush=True,
-            )
+        elapsed = time.time() - bake_start
+        avg = elapsed / frames_done
+        remaining = avg * (total_frames - frames_done)
+        print(
+            f"  Frame {frame}/{end_frame}  "
+            f"({frames_done}/{total_frames})  "
+            f"{frame_dt:.2f}s  "
+            f"avg {avg:.2f}s/frame  "
+            f"ETA {remaining:.0f}s",
+            flush=True,
+        )
 
     # Final flush
     if any(len(fd) > 0 for fd in bake_data.values()):
