@@ -2682,6 +2682,115 @@ class FiberArchitectureMixin:
             msg += f", {failed_count} FAILED"
         print(msg)
 
+        # Build multi-tet blending for waypoints in sliver tets
+        self._build_neighbor_tet_blending(tet_verts, tetrahedra)
+
+    def _tet_aspect_ratio(self, tet_verts, tetrahedra, tet_idx):
+        """Compute aspect ratio for a single tet."""
+        tet = tetrahedra[tet_idx]
+        v = tet_verts[tet]
+        edges = [v[1]-v[0], v[2]-v[0], v[3]-v[0], v[2]-v[1], v[3]-v[1], v[3]-v[2]]
+        max_edge = max(np.linalg.norm(e) for e in edges)
+        vol = abs(np.dot(v[1]-v[0], np.cross(v[2]-v[0], v[3]-v[0]))) / 6.0
+        f_areas = [
+            0.5 * np.linalg.norm(np.cross(v[2]-v[1], v[3]-v[1])),
+            0.5 * np.linalg.norm(np.cross(v[0]-v[2], v[3]-v[2])),
+            0.5 * np.linalg.norm(np.cross(v[0]-v[3], v[1]-v[3])),
+            0.5 * np.linalg.norm(np.cross(v[1]-v[0], v[2]-v[0])),
+        ]
+        sa = sum(f_areas)
+        if sa < 1e-20 or vol < 1e-20:
+            return 1e6
+        r = 3 * vol / sa
+        return max_edge / (2 * r)
+
+    def _build_neighbor_tet_blending(self, tet_verts, tetrahedra):
+        """For waypoints in sliver tets (AR>20), find neighbor tets and compute
+        blending weights based on inverse aspect ratio."""
+        from collections import defaultdict
+
+        AR_THRESHOLD = 15.0
+        MAX_NEIGHBORS = 4
+
+        self._tet_neighbor_bary = {}
+        self._tet_primary_quality = {}
+
+        if not hasattr(self, 'waypoint_bary_coords') or len(self.waypoint_bary_coords) == 0:
+            return
+
+        # Build tet adjacency: tets sharing a face
+        face_to_tet = defaultdict(list)
+        for ti, tet in enumerate(tetrahedra):
+            for face in [(tet[0],tet[1],tet[2]), (tet[0],tet[1],tet[3]),
+                         (tet[0],tet[2],tet[3]), (tet[1],tet[2],tet[3])]:
+                key = tuple(sorted(face))
+                face_to_tet[key].append(ti)
+
+        tet_adj = defaultdict(set)
+        for face_key, tet_list in face_to_tet.items():
+            for i in range(len(tet_list)):
+                for j in range(i+1, len(tet_list)):
+                    tet_adj[tet_list[i]].add(tet_list[j])
+                    tet_adj[tet_list[j]].add(tet_list[i])
+
+        blend_count = 0
+        for stream_idx, stream_bary in enumerate(self.waypoint_bary_coords):
+            if stream_bary is None:
+                continue
+            for contour_idx, contour_bary in enumerate(stream_bary):
+                if contour_bary is None:
+                    continue
+                for fiber_idx, bary_data in enumerate(contour_bary):
+                    if bary_data is None or bary_data[0] != 'tet':
+                        continue
+                    tet_idx = bary_data[1]
+                    if tet_idx >= len(tetrahedra):
+                        continue
+
+                    ar = self._tet_aspect_ratio(tet_verts, tetrahedra, tet_idx)
+                    if ar < AR_THRESHOLD:
+                        continue
+
+                    # This waypoint is in a sliver — find neighbor tets
+                    # Reconstruct waypoint position from bary coords
+                    bary = bary_data[2]
+                    tet = tetrahedra[tet_idx]
+                    wp_pos = sum(bary[k] * tet_verts[tet[k]] for k in range(4))
+
+                    # BFS for nearby tets
+                    neighbors = []
+                    visited = {tet_idx}
+                    frontier = list(tet_adj[tet_idx])
+                    for nb_ti in frontier:
+                        if nb_ti in visited or len(neighbors) >= MAX_NEIGHBORS:
+                            break
+                        visited.add(nb_ti)
+                        # Compute bary coords in this neighbor
+                        nb_tet = tetrahedra[nb_ti]
+                        nb_bary = self._compute_barycentric(
+                            wp_pos, tet_verts[nb_tet[0]], tet_verts[nb_tet[1]],
+                            tet_verts[nb_tet[2]], tet_verts[nb_tet[3]])
+                        if nb_bary is None:
+                            continue
+                        nb_ar = self._tet_aspect_ratio(tet_verts, tetrahedra, nb_ti)
+                        # Weight: inverse aspect ratio (good tets get high weight)
+                        nb_w = 1.0 / max(nb_ar, 1.0)
+                        neighbors.append((nb_ti, nb_bary, nb_w))
+                        # Expand frontier
+                        for next_ti in tet_adj[nb_ti]:
+                            if next_ti not in visited:
+                                frontier.append(next_ti)
+
+                    if neighbors:
+                        key = (stream_idx, contour_idx, fiber_idx)
+                        primary_w = 1.0 / max(ar, 1.0)
+                        self._tet_neighbor_bary[key] = neighbors
+                        self._tet_primary_quality[key] = primary_w
+                        blend_count += 1
+
+        if blend_count > 0:
+            print(f"  Multi-tet blending: {blend_count} waypoints in sliver tets blended with neighbors")
+
     def _get_endpoint_body_name(self, stream_idx, is_origin, skeleton_meshes, skeleton_names, skeleton):
         """Get the body name for an endpoint based on attach_skeletons."""
         if not hasattr(self, 'attach_skeletons') or stream_idx >= len(self.attach_skeletons):
@@ -2875,10 +2984,30 @@ class FiberArchitectureMixin:
                             if bary_sum > 1e-8:
                                 bary = bary / bary_sum
 
-                        # Compute new position using barycentric interpolation
-                        new_pos = bary[0] * v0 + bary[1] * v1 + bary[2] * v2 + bary[3] * v3
+                        # Compute position from primary tet
+                        primary_pos = bary[0] * v0 + bary[1] * v1 + bary[2] * v2 + bary[3] * v3
 
-                        contour_wps[fiber_idx] = new_pos
+                        # Multi-tet blending: for sliver tets, blend with neighbor tets
+                        # weighted by tet quality (inverse aspect ratio)
+                        if bary_data[0] == 'tet' and hasattr(self, '_tet_neighbor_bary'):
+                            nb_key = (stream_idx, contour_idx, fiber_idx)
+                            if nb_key in self._tet_neighbor_bary:
+                                total_w = self._tet_primary_quality.get(nb_key, 1.0)
+                                weighted_pos = primary_pos * total_w
+                                for nb_tet_idx, nb_bary, nb_w in self._tet_neighbor_bary[nb_key]:
+                                    if nb_tet_idx >= len(tetrahedra):
+                                        continue
+                                    nb_tet = tetrahedra[nb_tet_idx]
+                                    nb_pos = (nb_bary[0] * tet_verts[nb_tet[0]] +
+                                              nb_bary[1] * tet_verts[nb_tet[1]] +
+                                              nb_bary[2] * tet_verts[nb_tet[2]] +
+                                              nb_bary[3] * tet_verts[nb_tet[3]])
+                                    weighted_pos += nb_pos * nb_w
+                                    total_w += nb_w
+                                if total_w > 0:
+                                    primary_pos = weighted_pos / total_w
+
+                        contour_wps[fiber_idx] = primary_pos
                         tet_count += 1
                         if not was_inside:
                             clamped_count += 1
