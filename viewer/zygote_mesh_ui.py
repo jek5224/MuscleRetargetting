@@ -8703,17 +8703,22 @@ def _motion_apply_cached_deformation(v, frame):
             # Restore cached waypoints if available, otherwise recompute from tet
             if 'waypoints_flat' in cached and 'waypoints_shape' in cached:
                 if hasattr(mobj, 'waypoints') and len(mobj.waypoints) > 0:
-                    wp = _unflatten_waypoints(
-                        cached['waypoints_flat'], cached['waypoints_shape'])
-                    if fix_offset.any() or fix_rot_mat is not None:
-                        for stream in wp:
-                            for fi in range(len(stream)):
-                                if fix_rot_mat is not None:
-                                    stream[fi] = (fix_rot_mat @ (stream[fi] - pivot).T).T + fix_dest
-                                else:
-                                    stream[fi] = stream[fi] + fix_offset
-                    mobj.waypoints = wp
-                    mobj._fiber_draw_dirty = True
+                    try:
+                        wp = _unflatten_waypoints(
+                            cached['waypoints_flat'], cached['waypoints_shape'])
+                        if fix_offset.any() or fix_rot_mat is not None:
+                            for stream in wp:
+                                for fi in range(len(stream)):
+                                    if stream[fi] is None or not hasattr(stream[fi], 'shape'):
+                                        continue
+                                    if fix_rot_mat is not None:
+                                        stream[fi] = (fix_rot_mat @ (stream[fi] - pivot).T).T + fix_dest
+                                    else:
+                                        stream[fi] = stream[fi] + fix_offset
+                        mobj.waypoints = wp
+                        mobj._fiber_draw_dirty = True
+                    except Exception:
+                        pass
             # Skip live waypoint recompute during playback — causes segfault
             any_applied = True
     return any_applied
