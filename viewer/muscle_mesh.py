@@ -3963,34 +3963,13 @@ class MuscleMeshMixin:
         if skeleton is not None and skeleton_meshes is not None and hasattr(self, 'tet_cap_attachments'):
             skeleton_names = list(skeleton_meshes.keys())
 
-            # Group fixed vertices by cap (origin/insertion per stream)
-            # Each group attaches to ONE bone via majority vote:
-            # check nearest bone per vertex, pick the bone with most votes
-            from scipy.spatial import cKDTree as _cKDTree
-            from collections import Counter
-
-            # Build bone KD-trees
-            bone_trees = {}
-            for mesh_name, mesh_loader in skeleton_meshes.items():
-                if mesh_loader.vertices is None or len(mesh_loader.vertices) == 0:
-                    continue
-                body_name = mesh_to_body.get(mesh_name)
-                if body_name is None:
-                    try:
-                        bn = skeleton.getBodyNode(mesh_name)
-                        if bn is not None:
-                            body_name = mesh_name
-                    except:
-                        pass
-                if body_name is None:
-                    continue
-                try:
-                    bn = skeleton.getBodyNode(body_name)
-                    if bn is None:
-                        continue
-                except:
-                    continue
-                bone_trees[mesh_name] = (_cKDTree(mesh_loader.vertices), body_name)
+            # Use attach_skeleton_names (from XML) for bone assignment.
+            # Group fixed vertices by cap (stream, end_type), assign all to the XML bone.
+            has_skel_names = (
+                hasattr(self, 'attach_skeleton_names') and
+                len(self.attach_skeleton_names) > 0 and
+                any(any(n for n in group) for group in self.attach_skeleton_names)
+            )
 
             # Group cap vertices by (stream, end_type)
             cap_groups = {}
@@ -4020,48 +3999,43 @@ class MuscleMeshMixin:
                 if best_key is not None:
                     cap_groups[best_key].append(vi)
 
-            # For each group, majority vote: per-vertex nearest bone, pick most common
+            # Assign each group to its bone from XML
             for (stream_idx, end_type), group_verts in cap_groups.items():
-                votes = Counter()
-                for vi in group_verts:
-                    vi_pos = self.soft_body.rest_positions[vi]
-                    best_bone = None
-                    best_dist = float('inf')
-                    for mesh_name, (tree, body_name) in bone_trees.items():
-                        dist, _ = tree.query(vi_pos)
-                        if dist < best_dist:
-                            best_dist = dist
-                            best_bone = body_name
-                    if best_bone:
-                        votes[best_bone] += 1
+                body_name = None
+                if has_skel_names and stream_idx < len(self.attach_skeleton_names):
+                    names = self.attach_skeleton_names[stream_idx]
+                    if end_type < len(names):
+                        body_name = names[end_type]
 
-                if not votes:
+                if not body_name:
+                    print(f"  No bone name for stream {stream_idx} end {end_type}, skipping {len(group_verts)} verts")
                     continue
-                best_body = votes.most_common(1)[0][0]
 
-                # Attach all group vertices to the majority bone
                 try:
-                    body_node = skeleton.getBodyNode(best_body)
+                    body_node = skeleton.getBodyNode(body_name)
                     if body_node is None:
+                        body_node, body_name = find_dart_body(skeleton, body_name.rstrip('0123456789'))
+                    if body_node is None:
+                        print(f"  Could not find body '{body_name}'")
                         continue
+
                     world_transform = body_node.getWorldTransform()
                     rotation = world_transform.rotation()
                     translation = world_transform.translation()
 
-                    if best_body not in self.soft_body_initial_transforms:
-                        self.soft_body_initial_transforms[best_body] = (rotation.copy(), translation.copy())
+                    if body_name not in self.soft_body_initial_transforms:
+                        self.soft_body_initial_transforms[body_name] = (rotation.copy(), translation.copy())
 
                     for vi in group_verts:
                         anchor_world_pos = self.soft_body.rest_positions[vi]
                         local_pos = rotation.T @ (anchor_world_pos - translation)
-                        self.soft_body_local_anchors[vi] = (best_body, local_pos.copy())
+                        self.soft_body_local_anchors[vi] = (body_name, local_pos.copy())
                 except Exception as e:
                     print(f"  Failed to attach cap group ({stream_idx},{end_type}): {e}")
                     continue
 
                 end_name = "origin" if end_type == 0 else "insertion"
-                vote_str = ', '.join(f'{b}:{c}' for b, c in votes.most_common())
-                print(f"  Cap group stream {stream_idx} {end_name}: {len(group_verts)} verts -> {best_body} (votes: {vote_str})")
+                print(f"  Cap group stream {stream_idx} {end_name}: {len(group_verts)} verts -> {body_name} (from XML)")
 
             print(f"  Assigned {len(self.soft_body_local_anchors)} fixed vertices to bodies")
 
