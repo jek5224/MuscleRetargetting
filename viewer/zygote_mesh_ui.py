@@ -7364,18 +7364,28 @@ def _run_unified_volume_sim(v, active_muscles, max_iterations=100, tolerance=1e-
             'csr_edge_j': csr_edge_j,
         }
 
-    # Always collect current positions and fixed targets (these change per frame)
-    # Warm-start: use previous frame's solution as initial guess when available
+    # Collect LBS positions (skeleton-driven) as initial guess.
+    # LBS gives smooth skeleton-following for ALL vertices, then ARAP refines shape.
+    # Previous: warm-start from last frame's solution, which drifted from skeleton.
+    global_lbs_positions = np.zeros((total_verts, 3))
+    for name, mobj in active_muscles.items():
+        offset = global_offset[name]
+        n = mobj.soft_body.num_vertices
+        global_lbs_positions[offset:offset+n] = mobj.soft_body.positions  # LBS result from _update_tet_positions_from_skeleton
+
+    # Blend: use LBS as base, optionally blend with previous solution for temporal coherence
     prev_solution = cache.get('prev_solution', None) if cache_valid else None
     if prev_solution is not None and prev_solution.shape[0] == total_verts:
-        global_positions = prev_solution.copy()
-        print(f"  Warm-starting from previous frame's solution")
+        # Blend LBS and warm-start: mostly LBS to stay skeleton-consistent
+        lbs_weight = 0.7
+        global_positions = lbs_weight * global_lbs_positions + (1 - lbs_weight) * prev_solution
+        # Fixed vertices always at LBS (bone-driven)
+        fixed_idx = np.where(global_fixed_mask)[0]
+        global_positions[fixed_idx] = global_lbs_positions[fixed_idx]
+        print(f"  Blended LBS({lbs_weight:.0%}) + warm-start({1-lbs_weight:.0%})")
     else:
-        global_positions = np.zeros((total_verts, 3))
-        for name, mobj in active_muscles.items():
-            offset = global_offset[name]
-            n = mobj.soft_body.num_vertices
-            global_positions[offset:offset+n] = mobj.soft_body.positions
+        global_positions = global_lbs_positions.copy()
+        print(f"  Using LBS positions as initial guess")
 
     global_fixed_targets = {}  # global_idx -> target position
     for name, mobj in active_muscles.items():
