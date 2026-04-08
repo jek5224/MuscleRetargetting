@@ -2792,29 +2792,36 @@ class FiberArchitectureMixin:
             print(f"  Multi-tet blending: {blend_count} waypoints in sliver tets blended with neighbors")
 
     def _get_endpoint_body_name(self, stream_idx, is_origin, skeleton_meshes, skeleton_names, skeleton):
-        """Get the body name for an endpoint based on attach_skeletons."""
-        if not hasattr(self, 'attach_skeletons') or stream_idx >= len(self.attach_skeletons):
-            return None
+        """Get the body name for an endpoint based on attach_skeleton_names (preferred) or attach_skeletons."""
+        # Prefer name-based (from XML)
+        if hasattr(self, 'attach_skeleton_names') and stream_idx < len(self.attach_skeleton_names):
+            names = self.attach_skeleton_names[stream_idx]
+            body_name = names[0] if is_origin else names[1]
+            if body_name:
+                # Verify body exists in skeleton
+                body_node = skeleton.getBodyNode(body_name)
+                if body_node is not None:
+                    return body_name
+                # Try without trailing digit
+                from viewer.muscle_mesh import find_dart_body
+                body_node, found_name = find_dart_body(skeleton, body_name.rstrip('0123456789'))
+                if body_node is not None:
+                    return found_name
 
-        attachments = self.attach_skeletons[stream_idx]
-        skel_idx = attachments[0] if is_origin else attachments[1]
-
-        if skel_idx >= len(skeleton_names):
-            return None
-
-        mesh_name = skeleton_names[skel_idx]
-
-        # Try to find corresponding DART body node
-        body_node = skeleton.getBodyNode(mesh_name)
-        if body_node is not None:
-            return mesh_name
-
-        # Search by partial match
-        for i in range(skeleton.getNumBodyNodes()):
-            bn = skeleton.getBodyNode(i)
-            bn_name = bn.getName()
-            if mesh_name.lower() in bn_name.lower() or bn_name.lower() in mesh_name.lower():
-                return bn_name
+        # Fallback to index-based
+        if hasattr(self, 'attach_skeletons') and stream_idx < len(self.attach_skeletons):
+            attachments = self.attach_skeletons[stream_idx]
+            skel_idx = attachments[0] if is_origin else attachments[1]
+            if skel_idx < len(skeleton_names):
+                mesh_name = skeleton_names[skel_idx]
+                body_node = skeleton.getBodyNode(mesh_name)
+                if body_node is not None:
+                    return mesh_name
+                for i in range(skeleton.getNumBodyNodes()):
+                    bn = skeleton.getBodyNode(i)
+                    bn_name = bn.getName()
+                    if mesh_name.lower() in bn_name.lower() or bn_name.lower() in mesh_name.lower():
+                        return bn_name
 
         return None
 
