@@ -7505,27 +7505,17 @@ def _run_unified_volume_sim(v, active_muscles, max_iterations=100, tolerance=1e-
             ratio_strs = [f"{name}={r:.3f}" for name, r in axis_ratios.items() if abs(r - 1.0) >= 0.02]
             print(f"  Muscle-aware ARAP: {', '.join(ratio_strs)}")
 
-    # First frame: use LBS as rest shape to avoid T-pose shrinkage.
-    # Subsequent frames: use original rest shape (warm-start handles continuity).
-    is_first_frame = prev_solution is None
-    if is_first_frame:
-        arap_rest = global_lbs_positions.copy()
-        # Recompute rest edges from LBS
-        lbs_rest_edges = {}
-        for i in range(total_verts):
-            lbs_rest_edges[i] = {}
-            for j in neighbors[i]:
-                lbs_rest_edges[i][j] = arap_rest[i] - arap_rest[j]
-        solve_rest = arap_rest
-        solve_edges = lbs_rest_edges
-        print(f"  First frame: using LBS as ARAP rest shape")
-    else:
-        solve_rest = global_rest_positions
-        solve_edges = rest_edge_vectors
+    # Use LBS positions as ARAP rest shape every frame.
+    # ARAP preserves the skeleton-driven shape, not the T-pose.
+    lbs_rest_edges = {}
+    for i in range(total_verts):
+        lbs_rest_edges[i] = {}
+        for j in neighbors[i]:
+            lbs_rest_edges[i][j] = global_lbs_positions[i] - global_lbs_positions[j]
 
     start_time = time.time()
     global_positions, iterations, max_disp = backend.solve(
-        global_positions, solve_rest, neighbors, edge_weights, solve_edges,
+        global_positions, global_lbs_positions, neighbors, edge_weights, lbs_rest_edges,
         global_fixed_mask, fixed_targets_array, max_iterations=max_iterations, tolerance=tolerance,
         target_edges=target_edges, verbose=True
     )
