@@ -419,9 +419,7 @@ def main():
                 label_surface(bone_mesh)
 
                 # All bone vertices are fixed (rigid obstacle)
-                bone_is_fixed = view(bone_mesh.vertices().find(builtin.is_fixed))
-                for vi in range(len(world_verts)):
-                    bone_is_fixed[vi] = 1
+                bone_mesh.vertices().create(builtin.is_fixed, 1)
 
                 bone_obj = scene.objects().create(f"bone_{bone_name}")
                 bone_obj.geometries().create(bone_mesh)
