@@ -221,8 +221,10 @@ def get_bone_world_positions(skel, bvh, frame, bone_name, rest_verts):
     wt = body_node.getWorldTransform()
     R = wt.rotation()
     t = wt.translation()
-    # rest_verts are in mm (local frame), convert to world mm
-    world_verts = (R @ rest_verts.T).T + t * SCALE
+    # rest_verts are in cm (OBJ), DART translation in meters.
+    # Convert both to mm for pyuipc (SCALE=1000).
+    rest_mm = rest_verts * 10.0  # cm -> mm
+    world_verts = (R @ rest_mm.T).T + t * SCALE  # R @ local_mm + t_mm
     return world_verts
 
 
