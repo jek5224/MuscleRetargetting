@@ -7505,18 +7505,17 @@ def _run_unified_volume_sim(v, active_muscles, max_iterations=100, tolerance=1e-
             ratio_strs = [f"{name}={r:.3f}" for name, r in axis_ratios.items() if abs(r - 1.0) >= 0.02]
             print(f"  Muscle-aware ARAP: {', '.join(ratio_strs)}")
 
-    # Use LBS positions as ARAP rest shape every frame.
-    # ARAP preserves the skeleton-driven shape, not the T-pose.
-    lbs_rest_edges = {}
-    for i in range(total_verts):
-        lbs_rest_edges[i] = {}
-        for j in neighbors[i]:
-            lbs_rest_edges[i][j] = global_lbs_positions[i] - global_lbs_positions[j]
+    # First frame: more iterations to converge from large T-pose → walk displacement.
+    # Subsequent frames: normal iterations (warm-start makes convergence fast).
+    is_first_frame = prev_solution is None
+    solve_iters = max_iterations * 10 if is_first_frame else max_iterations
+    if is_first_frame:
+        print(f"  First frame: {solve_iters} iterations (10x) for convergence")
 
     start_time = time.time()
     global_positions, iterations, max_disp = backend.solve(
-        global_positions, global_lbs_positions, neighbors, edge_weights, lbs_rest_edges,
-        global_fixed_mask, fixed_targets_array, max_iterations=max_iterations, tolerance=tolerance,
+        global_positions, global_rest_positions, neighbors, edge_weights, rest_edge_vectors,
+        global_fixed_mask, fixed_targets_array, max_iterations=solve_iters, tolerance=tolerance,
         target_edges=target_edges, verbose=True
     )
     print(f"  ARAP solved in {time.time() - start_time:.3f}s ({iterations} iterations)")
