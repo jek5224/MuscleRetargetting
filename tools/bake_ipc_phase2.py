@@ -443,8 +443,9 @@ def main():
                 bone_mesh = uipc_trimesh(world_verts, bm['faces'])
                 label_surface(bone_mesh)
 
-                # All bone vertices are fixed (rigid obstacle)
-                bone_mesh.vertices().create(builtin.is_fixed, 1)
+                # Empty constitution: fixed collision surface
+                from uipc.constitution import Empty
+                Empty().apply_to(bone_mesh)
 
                 bone_obj = scene.objects().create(f"bone_{bone_name}")
                 bone_obj.geometries().create(bone_mesh)
