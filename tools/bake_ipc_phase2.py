@@ -487,22 +487,25 @@ def main():
                 arap_m = arap_pos / SCALE
                 fixed_set = set(m['fixed_vertices'])
 
-                # Get surface edges from render faces
-                if not hasattr(m, '_surface_edges'):
-                    rf = m.get('_render_faces')
-                    if rf is None:
-                        # Load render faces from tet file
-                        with open(f"tet/{m['name']}_tet.npz", 'rb') as _f:
-                            _td = pickle.load(_f)
-                        rf = _td.get('render_faces', _td.get('faces'))
-                        m['_render_faces'] = rf
-                    edges = set()
-                    if rf is not None:
-                        for face in rf:
-                            for i in range(3):
-                                a, b = int(face[i]), int(face[(i+1)%3])
-                                edges.add((min(a,b), max(a,b)))
-                    m['_surface_edges'] = np.array(list(edges), dtype=np.int32)
+                # Get SURFACE edges (edges on tet boundary faces only)
+                if '_surface_edges' not in m:
+                    tets = m['tetrahedra']
+                    from collections import Counter
+                    face_count = Counter()
+                    tet_faces_list = []
+                    for tet in tets:
+                        for f_idx in [(0,1,2),(0,1,3),(0,2,3),(1,2,3)]:
+                            face = tuple(sorted([int(tet[f_idx[0]]), int(tet[f_idx[1]]), int(tet[f_idx[2]])]))
+                            face_count[face] += 1
+                            tet_faces_list.append(face)
+                    # Surface faces: appear exactly once
+                    surf_faces = [f for f, c in face_count.items() if c == 1]
+                    edge_set = set()
+                    for f in surf_faces:
+                        for i in range(3):
+                            a, b = f[i], f[(i+1)%3]
+                            edge_set.add((min(a,b), max(a,b)))
+                    m['_surface_edges'] = np.array(list(edge_set), dtype=np.int32) if edge_set else np.zeros((0,2), dtype=np.int32)
 
                 edges = m['_surface_edges']
                 if len(edges) == 0:
