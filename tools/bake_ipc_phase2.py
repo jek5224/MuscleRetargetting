@@ -467,7 +467,103 @@ def main():
                 pushed_total += len(pen)
 
         if pushed_total > 0:
-            print(f"    Pushed {pushed_total} vertices out of bones", flush=True)
+            print(f"    Pushed {pushed_total} verts out of bones", flush=True)
+
+        # Edge-bone intersection: push endpoints of edges that cross bone surface
+        edge_pushed = 0
+        for bone_name, bm in bone_meshes.items():
+            if skel is None:
+                continue
+            wv = get_bone_world_positions(
+                skel, bvh, frame, bone_name, bm['vertices'], bone_rest_transforms)
+            if wv is None:
+                continue
+            bone_m = wv / SCALE
+            bone_surf = _trimesh.Trimesh(vertices=bone_m, faces=bm['faces'], process=False)
+            bone_tree = _cKDTree(bone_m)
+
+            for m in muscles:
+                arap_pos = frame_positions[m['name']]
+                arap_m = arap_pos / SCALE
+                fixed_set = set(m['fixed_vertices'])
+
+                # Get surface edges from render faces
+                if not hasattr(m, '_surface_edges'):
+                    rf = m.get('_render_faces')
+                    if rf is None:
+                        # Load render faces from tet file
+                        with open(f"tet/{m['name']}_tet.npz", 'rb') as _f:
+                            _td = pickle.load(_f)
+                        rf = _td.get('render_faces', _td.get('faces'))
+                        m['_render_faces'] = rf
+                    edges = set()
+                    if rf is not None:
+                        for face in rf:
+                            for i in range(3):
+                                a, b = int(face[i]), int(face[(i+1)%3])
+                                edges.add((min(a,b), max(a,b)))
+                    m['_surface_edges'] = np.array(list(edges), dtype=np.int32)
+
+                edges = m['_surface_edges']
+                if len(edges) == 0:
+                    continue
+
+                # Fast filter: only check edges where both endpoints are near bone
+                d0, _ = bone_tree.query(arap_m[edges[:, 0]])
+                d1, _ = bone_tree.query(arap_m[edges[:, 1]])
+                near = (d0 < 0.01) | (d1 < 0.01)  # either endpoint within 10mm
+                if not np.any(near):
+                    continue
+                near_edges = edges[near]
+
+                # Ray-mesh intersection: check if edge segment crosses bone
+                origins = arap_m[near_edges[:, 0]]
+                directions = arap_m[near_edges[:, 1]] - origins
+                lengths = np.linalg.norm(directions, axis=1)
+                valid = lengths > 1e-10
+                if not np.any(valid):
+                    continue
+
+                directions[valid] /= lengths[valid, None]
+                try:
+                    hits, ray_ids, _ = bone_surf.ray.intersects_location(
+                        origins[valid], directions[valid])
+                except:
+                    continue
+
+                if len(hits) == 0:
+                    continue
+
+                # Filter: only keep intersections within the edge length
+                hit_dists = np.linalg.norm(hits - origins[valid][ray_ids], axis=1)
+                valid_hits = hit_dists < lengths[valid][ray_ids]
+                if not np.any(valid_hits):
+                    continue
+
+                # Get unique edges that intersect
+                valid_edge_idx = np.where(valid)[0]
+                crossing_edge_ids = set(valid_edge_idx[ray_ids[valid_hits]])
+
+                # Push both endpoints of crossing edges outward
+                verts_to_push = set()
+                for eid in crossing_edge_ids:
+                    e = near_edges[eid]
+                    if e[0] not in fixed_set:
+                        verts_to_push.add(e[0])
+                    if e[1] not in fixed_set:
+                        verts_to_push.add(e[1])
+
+                if not verts_to_push:
+                    continue
+                push_arr = np.array(list(verts_to_push))
+                closest, _, face_ids = _trimesh.proximity.closest_point(bone_surf, arap_m[push_arr])
+                normals = bone_surf.face_normals[face_ids]
+                push_margin = args.d_hat * 3.0 / SCALE  # larger margin for edge clearance
+                arap_pos[push_arr] = (closest + normals * push_margin) * SCALE
+                edge_pushed += len(push_arr)
+
+        if edge_pushed > 0:
+            print(f"    Edge-push: {edge_pushed} verts from crossing edges", flush=True)
 
         geo_slots = []
         valid_muscles = []
