@@ -248,15 +248,16 @@ def cap_boundary_loop(loop_indices, vertices):
     return faces, centroid
 
 
-def load_and_close_mesh(obj_path, muscle_xml_data):
-    """Load OBJ, close boundary loops, return closed vertices/faces and cap info."""
+def load_and_identify_boundaries(obj_path, muscle_xml_data):
+    """Load OBJ, identify boundary vertices as origin/insertion.
+    pymeshfix will close the mesh during tetrahedralization."""
     mesh = trimesh.load(obj_path, process=False)
     vertices = np.array(mesh.vertices, dtype=np.float64) * MESH_SCALE  # cm → m
     faces = np.array(mesh.faces, dtype=np.int32)
 
     loops = find_boundary_loops(vertices, faces)
     if not loops:
-        return vertices, faces, [], {}
+        return vertices, faces, {}
 
     # Assign loops to origin/insertion using XML waypoints
     origin_pts = np.vstack([s[2] for s in muscle_xml_data]) if muscle_xml_data else np.zeros((1, 3))
@@ -264,54 +265,60 @@ def load_and_close_mesh(obj_path, muscle_xml_data):
     origin_mean = origin_pts.mean(axis=0)
     insertion_mean = insertion_pts.mean(axis=0)
 
-    closed_verts = list(vertices)
-    closed_faces = list(faces)
-    cap_vertices = {}  # vi -> 'origin' or 'insertion'
-    cap_face_indices = []
-
+    boundary_vertices = {}  # vi -> 'origin' or 'insertion'
     for loop in loops:
         if len(loop) < 10:
-            continue  # skip tiny artifact loops
+            continue
         loop_mean = np.mean([vertices[vi] for vi in loop], axis=0)
         d_origin = np.linalg.norm(loop_mean - origin_mean)
         d_insertion = np.linalg.norm(loop_mean - insertion_mean)
         end_type = 'origin' if d_origin < d_insertion else 'insertion'
-
-        cap_faces, center_pos = cap_boundary_loop(loop, closed_verts)
-        if center_pos is not None:
-            closed_verts.append(center_pos)
-        for cf in cap_faces:
-            cap_face_indices.append(len(closed_faces))
-            closed_faces.append(cf)
         for vi in loop:
-            cap_vertices[vi] = end_type
-        if center_pos is not None:
-            cap_vertices[len(closed_verts) - 1] = end_type
+            boundary_vertices[vi] = end_type
 
-    return np.array(closed_verts, dtype=np.float64), np.array(closed_faces, dtype=np.int32), \
-           cap_face_indices, cap_vertices
+    return vertices, faces, boundary_vertices
 
 
 # ---------------------------------------------------------------------------
 # Step 3: Tetrahedralize
 # ---------------------------------------------------------------------------
 def tetrahedralize_mesh(vertices, faces):
-    """pymeshfix repair + TetGen tetrahedralization."""
+    """pymeshfix repair + TetGen, with Delaunay+inside fallback."""
     import pymeshfix
-    import tetgen
 
     fixer = pymeshfix.MeshFix(vertices, faces)
-    fixer.repair(verbose=False)
+    try:
+        fixer.repair(verbose=False)
+    except TypeError:
+        fixer.repair()
     try:
         v_fixed, f_fixed = fixer.v, fixer.f
     except AttributeError:
         v_fixed, f_fixed = fixer._return_arrays()
 
-    tg = tetgen.TetGen(v_fixed, f_fixed)
-    tg.tetrahedralize(order=1, mindihedral=0, quality=False)
+    # Try TetGen first
+    tet_verts, tet_elems = None, None
+    try:
+        import tetgen
+        tg = tetgen.TetGen(v_fixed, f_fixed)
+        tg.tetrahedralize(order=1, mindihedral=0, quality=False)
+        tet_verts = np.array(tg.node, dtype=np.float64)
+        tet_elems = np.array(tg.elem, dtype=np.int32)
+    except Exception:
+        pass
 
-    tet_verts = np.array(tg.node, dtype=np.float64)
-    tet_elems = np.array(tg.elem, dtype=np.int32)
+    # Fallback: Delaunay + inside filter
+    if tet_verts is None:
+        from scipy.spatial import Delaunay
+        mesh_check = trimesh.Trimesh(vertices=v_fixed, faces=f_fixed, process=False)
+        dl = Delaunay(v_fixed)
+        centroids = v_fixed[dl.simplices].mean(axis=1)
+        try:
+            inside = mesh_check.contains(centroids)
+        except:
+            inside = np.ones(len(centroids), dtype=bool)
+        tet_elems = dl.simplices[inside]
+        tet_verts = v_fixed
 
     # Fix orientation
     v = tet_verts[tet_elems]
@@ -499,9 +506,9 @@ def main():
             xml_key = f"L_{mname}"
             mxml = xml_data.get(xml_key, [])
 
-            # Load and close
+            # Load and identify boundaries
             try:
-                verts, faces, cap_fi, cap_verts = load_and_close_mesh(obj_path, mxml)
+                verts, faces, boundary_verts = load_and_identify_boundaries(obj_path, mxml)
             except Exception as e:
                 print(f"    {full_name}: load failed: {e}")
                 continue
@@ -510,14 +517,24 @@ def main():
             if side == 'R':
                 verts = verts.copy()
                 verts[:, 0] *= -1
-                faces = faces[:, ::-1].copy()  # reverse winding
+                faces = faces[:, ::-1].copy()
 
-            # Tetrahedralize
+            # Tetrahedralize (pymeshfix closes boundaries)
             try:
                 tet_v, tet_e, surf_v, surf_f = tetrahedralize_mesh(verts, faces)
             except Exception as e:
                 print(f"    {full_name}: tetgen failed: {e}")
                 continue
+
+            # Map boundary vertices to tet mesh (pymeshfix may remap)
+            cap_verts = {}
+            if boundary_verts:
+                orig_tree = cKDTree(tet_v)
+                for orig_vi, end_type in boundary_verts.items():
+                    if orig_vi < len(verts):
+                        d, tet_vi = orig_tree.query(verts[orig_vi])
+                        if d < 0.001:
+                            cap_verts[int(tet_vi)] = end_type
 
             # Mirror bone names for R
             bone_map = None
