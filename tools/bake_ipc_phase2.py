@@ -487,49 +487,7 @@ def main():
             geo_slots.append(geo_slot)
             valid_muscles.append(m)
 
-        # Add bone tet obstacles (pre-tetrahedralized via pymeshfix+TetGen)
-        for bone_name, bm in bone_meshes.items():
-            if bm.get('tet_vertices') is None or bm.get('tet_elements') is None:
-                continue
-            try:
-                if skel is None:
-                    continue
-                # Transform tet vertices to current frame (same as surface verts)
-                wv = get_bone_world_positions(
-                    skel, bvh, frame, bone_name, bm['tet_vertices'], bone_rest_transforms)
-                if wv is None:
-                    continue
-
-                bone_tets = bm['tet_elements'].copy()
-                # Fix orientation after world transform (rotation can flip)
-                tv = wv[bone_tets]
-                vols = np.einsum('ij,ij->i', tv[:,1]-tv[:,0], np.cross(tv[:,2]-tv[:,0], tv[:,3]-tv[:,0]))
-                neg = vols < 0
-                if np.any(neg):
-                    bone_tets[neg, 1], bone_tets[neg, 2] = bone_tets[neg, 2].copy(), bone_tets[neg, 1].copy()
-                # Remove any zero-volume tets
-                tv2 = wv[bone_tets]
-                vols2 = np.einsum('ij,ij->i', tv2[:,1]-tv2[:,0], np.cross(tv2[:,2]-tv2[:,0], tv2[:,3]-tv2[:,0]))
-                good = vols2 > 0.001
-                bone_tets = bone_tets[good]
-                if len(bone_tets) == 0:
-                    continue
-                bone_mesh = tetmesh(wv, bone_tets)
-                label_surface(bone_mesh)
-                label_triangle_orient(bone_mesh)
-                snh.apply_to(bone_mesh, moduli, mass_density=1060.0)
-
-                bone_is_fixed = view(bone_mesh.vertices().find(builtin.is_fixed))
-                for bvi in range(len(wv)):
-                    bone_is_fixed[bvi] = 1
-
-                bone_obj = scene.objects().create(f"bone_{bone_name}")
-                bone_obj.geometries().create(bone_mesh)
-                if frame == 0:
-                    print(f"    Bone {bone_name}: {len(wv)} verts, {len(bone_tets)} tets, "
-                          f"y=[{wv[:,1].min()/SCALE:.3f}, {wv[:,1].max()/SCALE:.3f}]m")
-            except Exception as e:
-                print(f"  Frame {frame}: bone {bone_name} failed: {e}")
+        # Bone collision handled by pre-push (pyuipc bone tets cause vertex volume assertion)
 
         # Init and run single step (quasistatic — one step is equilibrium)
         try:
