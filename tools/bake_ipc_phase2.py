@@ -429,6 +429,7 @@ def main():
         for bone_name, bm in bone_meshes.items():
             if skel is None:
                 continue
+            body_name_v = SKELETON_NAME_MAP.get(bone_name, bone_name + '0')
             wv = get_bone_world_positions(
                 skel, bvh, frame, bone_name, bm['vertices'], bone_rest_transforms)
             if wv is None:
@@ -438,6 +439,17 @@ def main():
             bone_surf = None  # lazy init
 
             for m in muscles:
+                # Skip if muscle attaches to this bone
+                skel_names = m.get('_attach_skeleton_names')
+                if skel_names is None:
+                    with open(f"tet/{m['name']}_tet.npz", 'rb') as _f:
+                        _td = pickle.load(_f)
+                    skel_names = _td.get('attach_skeleton_names', [])
+                    m['_attach_skeleton_names'] = skel_names
+                attach_bones = set(bn for sn in skel_names for bn in sn)
+                if body_name_v in attach_bones:
+                    continue
+
                 arap_pos = frame_positions[m['name']]
                 arap_m = arap_pos / SCALE
                 # Fast: find vertices within 5mm of bone surface
@@ -527,7 +539,14 @@ def main():
                 if len(edges) == 0:
                     continue
 
-                # Fast filter: only check edges where both endpoints are near bone
+                # Skip edges with any fixed vertex (cap edges follow bone rigidly)
+                has_fixed = np.array([edges[:, 0][i] in fixed_set or edges[:, 1][i] in fixed_set
+                                      for i in range(len(edges))])
+                edges = edges[~has_fixed]
+                if len(edges) == 0:
+                    continue
+
+                # Fast filter: only check edges where either endpoint is near bone
                 d0, _ = bone_tree.query(arap_m[edges[:, 0]])
                 d1, _ = bone_tree.query(arap_m[edges[:, 1]])
                 near = (d0 < 0.01) | (d1 < 0.01)  # either endpoint within 10mm
