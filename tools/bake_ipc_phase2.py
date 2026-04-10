@@ -423,15 +423,21 @@ def main():
                     continue
                 if not np.any(inside):
                     continue
-                # Push to nearest surface point + margin along face normal
+                # Skip fixed vertices (origin/insertion — must stay on bone)
+                fixed_set = set(m['fixed_vertices'])
+                inside_idx = np.where(inside)[0]
+                free_inside = [vi for vi in inside_idx if vi not in fixed_set]
+                if not free_inside:
+                    continue
+                free_inside = np.array(free_inside)
+                # Push free vertices to nearest surface point + margin
                 closest, dists, face_ids = _trimesh.proximity.closest_point(
-                    bone_surf, arap_m[inside])
+                    bone_surf, arap_m[free_inside])
                 normals = bone_surf.face_normals[face_ids]
                 margin = args.d_hat * 1.5 / SCALE
                 new_pos = (closest + normals * margin) * SCALE
-                inside_idx = np.where(inside)[0]
-                arap_pos[inside_idx] = new_pos
-                pushed_total += len(inside_idx)
+                arap_pos[free_inside] = new_pos
+                pushed_total += len(free_inside)
 
         if pushed_total > 0 and (fi < 3 or fi % 20 == 0):
             print(f"    Pushed {pushed_total} vertices out of bones", flush=True)
