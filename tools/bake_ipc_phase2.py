@@ -178,15 +178,33 @@ SKELETON_NAME_MAP = {
 
 
 def load_skeleton_mesh(bone_name):
-    """Load a skeleton mesh as triangle surface for collision."""
+    """Load a skeleton mesh and tetrahedralize for IPC collision."""
     import trimesh
     path = f'Zygote_Meshes_251229/Skeleton/{bone_name}.obj'
     if not os.path.exists(path):
         return None
     mesh = trimesh.load(path, process=False)
-    verts = np.array(mesh.vertices, dtype=np.float64)  # already in mm
+    verts = np.array(mesh.vertices, dtype=np.float64)  # cm
     faces = np.array(mesh.faces, dtype=np.int32)
-    return {'name': bone_name, 'vertices': verts, 'faces': faces}
+
+    # Tetrahedralize via pymeshfix + TetGen (bone meshes have self-intersections)
+    try:
+        import pymeshfix, tetgen
+        fixer = pymeshfix.MeshFix(verts, faces)
+        fixer.repair()
+        v_fixed, f_fixed = fixer._return_arrays()
+        tg = tetgen.TetGen(v_fixed, f_fixed)
+        tg.tetrahedralize(order=1, mindihedral=0, quality=False)
+        return {
+            'name': bone_name,
+            'vertices': verts, 'faces': faces,  # original surface for pre-push
+            'tet_vertices': np.array(tg.node, dtype=np.float64),
+            'tet_elements': np.array(tg.elem, dtype=np.int32),
+        }
+    except Exception as e:
+        print(f"  WARNING: {bone_name} tetrahedralization failed: {e}")
+        return {'name': bone_name, 'vertices': verts, 'faces': faces,
+                'tet_vertices': None, 'tet_elements': None}
 
 
 def load_skeleton_and_bvh(bvh_path):
@@ -469,8 +487,36 @@ def main():
             geo_slots.append(geo_slot)
             valid_muscles.append(m)
 
-        # Bone collision handled by pre-push above
-        # (bone tetmesh obstacles cause inverted tet errors in pyuipc)
+        # Add bone tet obstacles (pre-tetrahedralized via pymeshfix+TetGen)
+        for bone_name, bm in bone_meshes.items():
+            if bm.get('tet_vertices') is None or bm.get('tet_elements') is None:
+                continue
+            try:
+                if skel is None:
+                    continue
+                # Transform tet vertices to current frame (same as surface verts)
+                wv = get_bone_world_positions(
+                    skel, bvh, frame, bone_name, bm['tet_vertices'], bone_rest_transforms)
+                if wv is None:
+                    continue
+
+                bone_tets = bm['tet_elements'].copy()
+                bone_mesh = tetmesh(wv, bone_tets)
+                label_surface(bone_mesh)
+                label_triangle_orient(bone_mesh)
+                snh.apply_to(bone_mesh, moduli, mass_density=1060.0)
+
+                bone_is_fixed = view(bone_mesh.vertices().find(builtin.is_fixed))
+                for bvi in range(len(wv)):
+                    bone_is_fixed[bvi] = 1
+
+                bone_obj = scene.objects().create(f"bone_{bone_name}")
+                bone_obj.geometries().create(bone_mesh)
+                if frame == 0:
+                    print(f"    Bone {bone_name}: {len(wv)} verts, {len(bone_tets)} tets, "
+                          f"y=[{wv[:,1].min()/SCALE:.3f}, {wv[:,1].max()/SCALE:.3f}]m")
+            except Exception as e:
+                print(f"  Frame {frame}: bone {bone_name} failed: {e}")
 
         # Init and run single step (quasistatic — one step is equilibrium)
         try:
