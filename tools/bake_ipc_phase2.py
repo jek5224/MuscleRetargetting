@@ -440,12 +440,19 @@ def main():
                 else:
                     world_verts = bm['vertices'].copy()
 
-                bone_mesh = uipc_trimesh(world_verts, bm['faces'])
+                # Tetrahedralize bone for IPC (needs tetmesh, not trimesh)
+                from scipy.spatial import Delaunay
+                dl = Delaunay(world_verts)
+                bone_tets = dl.simplices
+                bone_mesh = tetmesh(world_verts, bone_tets)
                 label_surface(bone_mesh)
+                label_triangle_orient(bone_mesh)
+                snh.apply_to(bone_mesh, moduli, mass_density=1060.0)
 
-                # Empty constitution: fixed collision surface
-                from uipc.constitution import Empty
-                Empty().apply_to(bone_mesh)
+                # All bone vertices fixed (rigid obstacle)
+                bone_is_fixed = view(bone_mesh.vertices().find(builtin.is_fixed))
+                for bvi in range(len(world_verts)):
+                    bone_is_fixed[bvi] = 1
 
                 bone_obj = scene.objects().create(f"bone_{bone_name}")
                 bone_obj.geometries().create(bone_mesh)
