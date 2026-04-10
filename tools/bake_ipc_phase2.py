@@ -501,6 +501,19 @@ def main():
                     continue
 
                 bone_tets = bm['tet_elements'].copy()
+                # Fix orientation after world transform (rotation can flip)
+                tv = wv[bone_tets]
+                vols = np.einsum('ij,ij->i', tv[:,1]-tv[:,0], np.cross(tv[:,2]-tv[:,0], tv[:,3]-tv[:,0]))
+                neg = vols < 0
+                if np.any(neg):
+                    bone_tets[neg, 1], bone_tets[neg, 2] = bone_tets[neg, 2].copy(), bone_tets[neg, 1].copy()
+                # Remove any zero-volume tets
+                tv2 = wv[bone_tets]
+                vols2 = np.einsum('ij,ij->i', tv2[:,1]-tv2[:,0], np.cross(tv2[:,2]-tv2[:,0], tv2[:,3]-tv2[:,0]))
+                good = vols2 > 0.001
+                bone_tets = bone_tets[good]
+                if len(bone_tets) == 0:
+                    continue
                 bone_mesh = tetmesh(wv, bone_tets)
                 label_surface(bone_mesh)
                 label_triangle_orient(bone_mesh)
