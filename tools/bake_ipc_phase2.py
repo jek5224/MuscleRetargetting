@@ -262,7 +262,7 @@ def main():
     parser.add_argument('--cache-base', default='data/motion_cache/walk',
                         help='Base cache dir (ARAP subdirs: L_UpLeg/, R_UpLeg/)')
     parser.add_argument('--output-dir', default='data/ipc_phase2')
-    parser.add_argument('--d-hat', type=float, default=0.5,
+    parser.add_argument('--d-hat', type=float, default=10.0,
                         help='IPC barrier distance hat (mm)')
     parser.add_argument('--elastic', type=float, default=10.0,
                         help='Elastic modulus (kPa)')
