@@ -401,7 +401,8 @@ def main():
         snh = StableNeoHookean()
         moduli = ElasticModuli.youngs_poisson(args.elastic * kPa, 0.45)
 
-        # Pre-process: push muscle vertices out of bones using signed distance
+        # Pre-process: push muscle vertices out of bones
+        import trimesh as _trimesh
         pushed_total = 0
         for bone_name, bm in bone_meshes.items():
             if skel is None:
@@ -411,51 +412,26 @@ def main():
             if wv is None:
                 continue
 
-            bone_verts_m = wv / SCALE  # mm -> m
-            bone_faces = bm['faces']
-
-            # Build face normals
-            v0 = bone_verts_m[bone_faces[:, 0]]
-            v1 = bone_verts_m[bone_faces[:, 1]]
-            v2 = bone_verts_m[bone_faces[:, 2]]
-            face_normals = np.cross(v1 - v0, v2 - v0)
-            norms = np.linalg.norm(face_normals, axis=1, keepdims=True)
-            norms[norms < 1e-10] = 1.0
-            face_normals /= norms
-            face_centers = (v0 + v1 + v2) / 3.0
-
-            # For each muscle, find vertices close to this bone
-            from scipy.spatial import cKDTree as _cKDTree
-            bone_tree = _cKDTree(bone_verts_m)
+            bone_surf = _trimesh.Trimesh(vertices=wv / SCALE, faces=bm['faces'], process=False)
 
             for m in muscles:
                 arap_pos = frame_positions[m['name']]
-                arap_m = arap_pos / SCALE  # mm -> m
-                dists, nearest_bone_vi = bone_tree.query(arap_m)
-
-                # Check vertices within d_hat + margin
-                margin_m = args.d_hat * 2.0 / SCALE  # mm -> m
-                close_mask = dists < margin_m
-                if not np.any(close_mask):
+                arap_m = arap_pos / SCALE
+                try:
+                    inside = bone_surf.contains(arap_m)
+                except:
                     continue
-
-                close_vis = np.where(close_mask)[0]
-                for vi in close_vis:
-                    pt = arap_m[vi]
-                    bone_pt = bone_verts_m[nearest_bone_vi[vi]]
-
-                    # Find nearest face center for normal direction
-                    face_dists = np.linalg.norm(face_centers - pt, axis=1)
-                    nearest_fi = np.argmin(face_dists)
-                    normal = face_normals[nearest_fi]
-
-                    # Check if vertex is on the inside (dot product with normal)
-                    to_pt = pt - face_centers[nearest_fi]
-                    if np.dot(to_pt, normal) < 0:  # inside
-                        # Push to surface + margin along normal
-                        push_dist = dists[vi] + args.d_hat * 1.5 / SCALE
-                        arap_pos[vi] = (bone_pt + normal * push_dist) * SCALE
-                        pushed_total += 1
+                if not np.any(inside):
+                    continue
+                # Push to nearest surface point + margin along face normal
+                closest, dists, face_ids = _trimesh.proximity.closest_point(
+                    bone_surf, arap_m[inside])
+                normals = bone_surf.face_normals[face_ids]
+                margin = args.d_hat * 1.5 / SCALE
+                new_pos = (closest + normals * margin) * SCALE
+                inside_idx = np.where(inside)[0]
+                arap_pos[inside_idx] = new_pos
+                pushed_total += len(inside_idx)
 
         if pushed_total > 0 and (fi < 3 or fi % 20 == 0):
             print(f"    Pushed {pushed_total} vertices out of bones", flush=True)
@@ -499,8 +475,7 @@ def main():
                 else:
                     world_verts = bm['vertices'].copy()
 
-                # Tetrahedralize bone for IPC (needs tetmesh, not trimesh)
-                import trimesh as _trimesh
+                # Tetrahedralize bone for IPC (needs tetmesh for contact)
                 from scipy.spatial import Delaunay as _Delaunay
                 dl = _Delaunay(world_verts)
                 bone_tets = dl.simplices.copy()
@@ -511,11 +486,14 @@ def main():
                 neg = vols < 0
                 bone_tets[neg, 1], bone_tets[neg, 2] = bone_tets[neg, 2].copy(), bone_tets[neg, 1].copy()
 
-                # Filter: keep only tets whose centroid is inside the bone surface
+                # Filter: keep only tets inside the bone surface
                 bone_surf = _trimesh.Trimesh(vertices=world_verts, faces=bm['faces'], process=False)
                 centroids = world_verts[bone_tets].mean(axis=1)
-                inside = bone_surf.contains(centroids)
-                bone_tets = bone_tets[inside]
+                try:
+                    inside = bone_surf.contains(centroids)
+                    bone_tets = bone_tets[inside]
+                except:
+                    pass  # keep all if contains fails
 
                 # Remove zero-volume tets
                 v = world_verts[bone_tets]
