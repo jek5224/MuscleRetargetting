@@ -441,9 +441,33 @@ def main():
                     world_verts = bm['vertices'].copy()
 
                 # Tetrahedralize bone for IPC (needs tetmesh, not trimesh)
-                from scipy.spatial import Delaunay
-                dl = Delaunay(world_verts)
-                bone_tets = dl.simplices
+                import trimesh as _trimesh
+                from scipy.spatial import Delaunay as _Delaunay
+                dl = _Delaunay(world_verts)
+                bone_tets = dl.simplices.copy()
+
+                # Fix orientation
+                v = world_verts[bone_tets]
+                vols = np.einsum('ij,ij->i', v[:,1]-v[:,0], np.cross(v[:,2]-v[:,0], v[:,3]-v[:,0]))
+                neg = vols < 0
+                bone_tets[neg, 1], bone_tets[neg, 2] = bone_tets[neg, 2].copy(), bone_tets[neg, 1].copy()
+
+                # Filter: keep only tets whose centroid is inside the bone surface
+                bone_surf = _trimesh.Trimesh(vertices=world_verts, faces=bm['faces'], process=False)
+                centroids = world_verts[bone_tets].mean(axis=1)
+                inside = bone_surf.contains(centroids)
+                bone_tets = bone_tets[inside]
+
+                # Remove zero-volume tets
+                v = world_verts[bone_tets]
+                vols = np.abs(np.einsum('ij,ij->i', v[:,1]-v[:,0], np.cross(v[:,2]-v[:,0], v[:,3]-v[:,0])))
+                bone_tets = bone_tets[vols > 1e-6]
+
+                if len(bone_tets) == 0:
+                    if frame == 0:
+                        print(f"    Bone {bone_name}: 0 tets after filter, skipping")
+                    continue
+
                 bone_mesh = tetmesh(world_verts, bone_tets)
                 label_surface(bone_mesh)
                 label_triangle_orient(bone_mesh)
