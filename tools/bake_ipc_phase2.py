@@ -401,36 +401,61 @@ def main():
         snh = StableNeoHookean()
         moduli = ElasticModuli.youngs_poisson(args.elastic * kPa, 0.45)
 
-        # Pre-process: push muscle vertices out of bones
-        # Compute bone world positions for this frame
-        import trimesh as _trimesh
-        bone_surfaces = []
-        for bone_name, bm in bone_meshes.items():
-            if skel is not None:
-                wv = get_bone_world_positions(
-                    skel, bvh, frame, bone_name, bm['vertices'], bone_rest_transforms)
-                if wv is not None:
-                    # Convert mm back to meters for trimesh check
-                    bone_surf = _trimesh.Trimesh(vertices=wv / SCALE, faces=bm['faces'], process=False)
-                    bone_surfaces.append(bone_surf)
-
+        # Pre-process: push muscle vertices out of bones using signed distance
         pushed_total = 0
-        for m in muscles:
-            arap_pos = frame_positions[m['name']].copy()
-            for bone_surf in bone_surfaces:
-                try:
-                    inside = bone_surf.contains(arap_pos / SCALE)  # check in meters
-                    if np.any(inside):
-                        # Push inside vertices to nearest surface point + margin
-                        closest, dists, face_ids = _trimesh.proximity.closest_point(
-                            bone_surf, arap_pos[inside] / SCALE)
-                        normals = bone_surf.face_normals[face_ids]
-                        margin = args.d_hat * 1.5  # mm, push slightly past d_hat
-                        arap_pos[inside] = (closest + normals * margin / SCALE) * SCALE
-                        pushed_total += np.sum(inside)
-                except:
-                    pass
-            frame_positions[m['name']] = arap_pos
+        for bone_name, bm in bone_meshes.items():
+            if skel is None:
+                continue
+            wv = get_bone_world_positions(
+                skel, bvh, frame, bone_name, bm['vertices'], bone_rest_transforms)
+            if wv is None:
+                continue
+
+            bone_verts_m = wv / SCALE  # mm -> m
+            bone_faces = bm['faces']
+
+            # Build face normals
+            v0 = bone_verts_m[bone_faces[:, 0]]
+            v1 = bone_verts_m[bone_faces[:, 1]]
+            v2 = bone_verts_m[bone_faces[:, 2]]
+            face_normals = np.cross(v1 - v0, v2 - v0)
+            norms = np.linalg.norm(face_normals, axis=1, keepdims=True)
+            norms[norms < 1e-10] = 1.0
+            face_normals /= norms
+            face_centers = (v0 + v1 + v2) / 3.0
+
+            # For each muscle, find vertices close to this bone
+            from scipy.spatial import cKDTree as _cKDTree
+            bone_tree = _cKDTree(bone_verts_m)
+
+            for m in muscles:
+                arap_pos = frame_positions[m['name']]
+                arap_m = arap_pos / SCALE  # mm -> m
+                dists, nearest_bone_vi = bone_tree.query(arap_m)
+
+                # Check vertices within d_hat + margin
+                margin_m = args.d_hat * 2.0 / SCALE  # mm -> m
+                close_mask = dists < margin_m
+                if not np.any(close_mask):
+                    continue
+
+                close_vis = np.where(close_mask)[0]
+                for vi in close_vis:
+                    pt = arap_m[vi]
+                    bone_pt = bone_verts_m[nearest_bone_vi[vi]]
+
+                    # Find nearest face center for normal direction
+                    face_dists = np.linalg.norm(face_centers - pt, axis=1)
+                    nearest_fi = np.argmin(face_dists)
+                    normal = face_normals[nearest_fi]
+
+                    # Check if vertex is on the inside (dot product with normal)
+                    to_pt = pt - face_centers[nearest_fi]
+                    if np.dot(to_pt, normal) < 0:  # inside
+                        # Push to surface + margin along normal
+                        push_dist = dists[vi] + args.d_hat * 1.5 / SCALE
+                        arap_pos[vi] = (bone_pt + normal * push_dist) * SCALE
+                        pushed_total += 1
 
         if pushed_total > 0 and (fi < 3 or fi % 20 == 0):
             print(f"    Pushed {pushed_total} vertices out of bones", flush=True)
