@@ -470,10 +470,13 @@ def main():
             print(f"    Pushed {pushed_total} verts out of bones", flush=True)
 
         # Edge-bone intersection: push endpoints of edges that cross bone surface
+        # Only check edges against bones the muscle is NOT attached to
+        # (muscles naturally wrap around their attachment bones)
         edge_pushed = 0
         for bone_name, bm in bone_meshes.items():
             if skel is None:
                 continue
+            body_name = SKELETON_NAME_MAP.get(bone_name, bone_name + '0')
             wv = get_bone_world_positions(
                 skel, bvh, frame, bone_name, bm['vertices'], bone_rest_transforms)
             if wv is None:
@@ -483,6 +486,19 @@ def main():
             bone_tree = _cKDTree(bone_m)
 
             for m in muscles:
+                # Skip if this bone is the muscle's attachment bone
+                skel_names = m.get('_attach_skeleton_names')
+                if skel_names is None:
+                    with open(f"tet/{m['name']}_tet.npz", 'rb') as _f:
+                        _td = pickle.load(_f)
+                    skel_names = _td.get('attach_skeleton_names', [])
+                    m['_attach_skeleton_names'] = skel_names
+                attach_bones = set()
+                for stream_names in skel_names:
+                    for bn in stream_names:
+                        attach_bones.add(bn)
+                if body_name in attach_bones:
+                    continue  # muscle attaches to this bone — don't push
                 arap_pos = frame_positions[m['name']]
                 arap_m = arap_pos / SCALE
                 fixed_set = set(m['fixed_vertices'])
