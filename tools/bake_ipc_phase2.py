@@ -193,8 +193,8 @@ def load_skeleton_and_bvh(bvh_path):
     """Load DART skeleton and BVH for per-frame bone transforms."""
     sys.path.insert(0, PROJECT_ROOT)
     try:
-        import dartpy as dart
-        from core.dartHelper import buildFromXML
+        from core.dartHelper import saveSkeletonInfo, buildFromInfo
+        from core.bvhparser import MyBVH
     except ImportError:
         print("WARNING: dartpy not available, skeleton collision disabled")
         return None, None
@@ -203,12 +203,10 @@ def load_skeleton_and_bvh(bvh_path):
     if not os.path.exists(skel_path):
         return None, None
 
-    skel = buildFromXML(skel_path)
+    skel_info, root_name, bvh_info, *_ = saveSkeletonInfo(skel_path)
+    skel = buildFromInfo(skel_info, root_name)
 
-    # Load BVH
-    from core.bvh import BVH
-    bvh = BVH()
-    bvh.load(bvh_path)
+    bvh = MyBVH(bvh_path, bvh_info, skel)
     return skel, bvh
 
 
@@ -450,6 +448,9 @@ def main():
 
                 bone_obj = scene.objects().create(f"bone_{bone_name}")
                 bone_obj.geometries().create(bone_mesh)
+                if frame == 0:
+                    print(f"    Bone {bone_name}: {len(world_verts)} verts, "
+                          f"y=[{world_verts[:,1].min()/SCALE:.3f}, {world_verts[:,1].max()/SCALE:.3f}]m")
             except Exception as e:
                 print(f"  Frame {frame}: bone {bone_name} failed: {e}")
 
