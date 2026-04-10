@@ -262,7 +262,7 @@ def main():
     parser.add_argument('--cache-base', default='data/motion_cache/walk',
                         help='Base cache dir (ARAP subdirs: L_UpLeg/, R_UpLeg/)')
     parser.add_argument('--output-dir', default='data/ipc_phase2')
-    parser.add_argument('--d-hat', type=float, default=10.0,
+    parser.add_argument('--d-hat', type=float, default=0.5,
                         help='IPC barrier distance hat (mm)')
     parser.add_argument('--elastic', type=float, default=10.0,
                         help='Elastic modulus (kPa)')
@@ -400,6 +400,40 @@ def main():
 
         snh = StableNeoHookean()
         moduli = ElasticModuli.youngs_poisson(args.elastic * kPa, 0.45)
+
+        # Pre-process: push muscle vertices out of bones
+        # Compute bone world positions for this frame
+        import trimesh as _trimesh
+        bone_surfaces = []
+        for bone_name, bm in bone_meshes.items():
+            if skel is not None:
+                wv = get_bone_world_positions(
+                    skel, bvh, frame, bone_name, bm['vertices'], bone_rest_transforms)
+                if wv is not None:
+                    # Convert mm back to meters for trimesh check
+                    bone_surf = _trimesh.Trimesh(vertices=wv / SCALE, faces=bm['faces'], process=False)
+                    bone_surfaces.append(bone_surf)
+
+        pushed_total = 0
+        for m in muscles:
+            arap_pos = frame_positions[m['name']].copy()
+            for bone_surf in bone_surfaces:
+                try:
+                    inside = bone_surf.contains(arap_pos / SCALE)  # check in meters
+                    if np.any(inside):
+                        # Push inside vertices to nearest surface point + margin
+                        closest, dists, face_ids = _trimesh.proximity.closest_point(
+                            bone_surf, arap_pos[inside] / SCALE)
+                        normals = bone_surf.face_normals[face_ids]
+                        margin = args.d_hat * 1.5  # mm, push slightly past d_hat
+                        arap_pos[inside] = (closest + normals * margin / SCALE) * SCALE
+                        pushed_total += np.sum(inside)
+                except:
+                    pass
+            frame_positions[m['name']] = arap_pos
+
+        if pushed_total > 0 and (fi < 3 or fi % 20 == 0):
+            print(f"    Pushed {pushed_total} vertices out of bones", flush=True)
 
         geo_slots = []
         valid_muscles = []
