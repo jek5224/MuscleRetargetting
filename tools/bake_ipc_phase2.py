@@ -463,65 +463,8 @@ def main():
             geo_slots.append(geo_slot)
             valid_muscles.append(m)
 
-        # Add skeleton bones as fixed collision obstacles
-        from uipc.geometry import trimesh as uipc_trimesh
-        for bone_name, bm in bone_meshes.items():
-            try:
-                if skel is not None:
-                    world_verts = get_bone_world_positions(
-                        skel, bvh, frame, bone_name, bm['vertices'], bone_rest_transforms)
-                    if world_verts is None:
-                        continue
-                else:
-                    world_verts = bm['vertices'].copy()
-
-                # Tetrahedralize bone for IPC (needs tetmesh for contact)
-                from scipy.spatial import Delaunay as _Delaunay
-                dl = _Delaunay(world_verts)
-                bone_tets = dl.simplices.copy()
-
-                # Fix orientation
-                v = world_verts[bone_tets]
-                vols = np.einsum('ij,ij->i', v[:,1]-v[:,0], np.cross(v[:,2]-v[:,0], v[:,3]-v[:,0]))
-                neg = vols < 0
-                bone_tets[neg, 1], bone_tets[neg, 2] = bone_tets[neg, 2].copy(), bone_tets[neg, 1].copy()
-
-                # Filter: keep only tets inside the bone surface
-                bone_surf = _trimesh.Trimesh(vertices=world_verts, faces=bm['faces'], process=False)
-                centroids = world_verts[bone_tets].mean(axis=1)
-                try:
-                    inside = bone_surf.contains(centroids)
-                    bone_tets = bone_tets[inside]
-                except:
-                    pass  # keep all if contains fails
-
-                # Remove zero-volume tets
-                v = world_verts[bone_tets]
-                vols = np.abs(np.einsum('ij,ij->i', v[:,1]-v[:,0], np.cross(v[:,2]-v[:,0], v[:,3]-v[:,0])))
-                bone_tets = bone_tets[vols > 1e-6]
-
-                if len(bone_tets) == 0:
-                    if frame == 0:
-                        print(f"    Bone {bone_name}: 0 tets after filter, skipping")
-                    continue
-
-                bone_mesh = tetmesh(world_verts, bone_tets)
-                label_surface(bone_mesh)
-                label_triangle_orient(bone_mesh)
-                snh.apply_to(bone_mesh, moduli, mass_density=1060.0)
-
-                # All bone vertices fixed (rigid obstacle)
-                bone_is_fixed = view(bone_mesh.vertices().find(builtin.is_fixed))
-                for bvi in range(len(world_verts)):
-                    bone_is_fixed[bvi] = 1
-
-                bone_obj = scene.objects().create(f"bone_{bone_name}")
-                bone_obj.geometries().create(bone_mesh)
-                if frame == 0:
-                    print(f"    Bone {bone_name}: {len(world_verts)} verts, "
-                          f"y=[{world_verts[:,1].min()/SCALE:.3f}, {world_verts[:,1].max()/SCALE:.3f}]m")
-            except Exception as e:
-                print(f"  Frame {frame}: bone {bone_name} failed: {e}")
+        # Bone collision handled by pre-push above
+        # (bone tetmesh obstacles cause inverted tet errors in pyuipc)
 
         # Init and run single step (quasistatic — one step is equilibrium)
         try:
