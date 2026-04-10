@@ -419,12 +419,13 @@ def main():
         snh = StableNeoHookean()
         moduli = ElasticModuli.youngs_poisson(args.elastic * kPa, 0.45)
 
-        # Pre-process: push ONLY penetrating free vertices out of bones
-        # Use cached bone surfaces (built once per frame, shared across muscles)
+        # Pre-process: push penetrating free vertices out of bones
+        # Only check nearby vertices using KDTree (fast), then trimesh.contains
+        # on the small candidate set (accurate)
         if fi == 0:
             import trimesh as _trimesh
+            from scipy.spatial import cKDTree as _cKDTree
         pushed_total = 0
-        bone_surfs_frame = []
         for bone_name, bm in bone_meshes.items():
             if skel is None:
                 continue
@@ -432,51 +433,38 @@ def main():
                 skel, bvh, frame, bone_name, bm['vertices'], bone_rest_transforms)
             if wv is None:
                 continue
-            bone_surfs_frame.append(_trimesh.Trimesh(
-                vertices=wv / SCALE, faces=bm['faces'], process=False))
+            bone_m = wv / SCALE
+            bone_tree = _cKDTree(bone_m)
+            bone_surf = None  # lazy init
 
-        if bone_surfs_frame:
             for m in muscles:
                 arap_pos = frame_positions[m['name']]
-                fixed_set = set(m['fixed_vertices'])
                 arap_m = arap_pos / SCALE
-
-                # Quick bbox check: skip muscles far from all bones
-                m_min, m_max = arap_m.min(axis=0), arap_m.max(axis=0)
-
-                for bone_surf in bone_surfs_frame:
-                    b_min, b_max = bone_surf.bounds
-                    # Skip if bboxes don't overlap
-                    if np.any(m_min > b_max) or np.any(m_max < b_min):
-                        continue
-
-                    # Only check vertices near the bone (within bbox + margin)
-                    margin_m = 0.01  # 10mm
-                    near_mask = np.all(arap_m >= b_min - margin_m, axis=1) & \
-                                np.all(arap_m <= b_max + margin_m, axis=1)
-                    if not np.any(near_mask):
-                        continue
-
-                    near_idx = np.where(near_mask)[0]
-                    try:
-                        inside = bone_surf.contains(arap_m[near_idx])
-                    except:
-                        continue
-                    if not np.any(inside):
-                        continue
-
-                    pen_idx = near_idx[inside]
-                    # Skip fixed vertices
-                    free_pen = np.array([vi for vi in pen_idx if vi not in fixed_set])
-                    if len(free_pen) == 0:
-                        continue
-
-                    closest, _, face_ids = _trimesh.proximity.closest_point(
-                        bone_surf, arap_m[free_pen])
-                    normals = bone_surf.face_normals[face_ids]
-                    push_margin = args.d_hat * 1.5 / SCALE
-                    arap_pos[free_pen] = (closest + normals * push_margin) * SCALE
-                    pushed_total += len(free_pen)
+                # Fast: find vertices within 5mm of bone surface
+                dists, _ = bone_tree.query(arap_m)
+                close_mask = dists < 0.005
+                if not np.any(close_mask):
+                    continue
+                close_idx = np.where(close_mask)[0]
+                # Skip fixed
+                fixed_set = set(m['fixed_vertices'])
+                free_close = np.array([vi for vi in close_idx if vi not in fixed_set])
+                if len(free_close) == 0:
+                    continue
+                # Accurate: trimesh.contains on small set
+                if bone_surf is None:
+                    bone_surf = _trimesh.Trimesh(vertices=bone_m, faces=bm['faces'], process=False)
+                try:
+                    inside = bone_surf.contains(arap_m[free_close])
+                except:
+                    continue
+                if not np.any(inside):
+                    continue
+                pen = free_close[inside]
+                closest, _, face_ids = _trimesh.proximity.closest_point(bone_surf, arap_m[pen])
+                normals = bone_surf.face_normals[face_ids]
+                arap_pos[pen] = (closest + normals * args.d_hat * 1.5 / SCALE) * SCALE
+                pushed_total += len(pen)
 
         if pushed_total > 0:
             print(f"    Pushed {pushed_total} vertices out of bones", flush=True)
