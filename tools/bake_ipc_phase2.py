@@ -212,20 +212,33 @@ def load_skeleton_and_bvh(bvh_path):
     return skel, bvh
 
 
-def get_bone_world_positions(skel, bvh, frame, bone_name, rest_verts):
-    """Get bone mesh vertices in world coordinates for a given frame."""
+def get_bone_world_positions(skel, bvh, frame, bone_name, rest_verts, bone_rest_transforms):
+    """Get bone mesh vertices in world coordinates for a given frame.
+
+    OBJ vertices are in world frame at rest pose. To get current frame:
+    world_current = R_cur @ R_rest^T @ (v_rest_world - t_rest) + t_cur
+    All converted to mm for pyuipc.
+    """
     body_name = SKELETON_NAME_MAP.get(bone_name, bone_name + '0')
     body_node = skel.getBodyNode(body_name)
     if body_node is None:
         return None
     wt = body_node.getWorldTransform()
-    R = wt.rotation()
-    t = wt.translation()
-    # rest_verts are in cm (OBJ), DART translation in meters.
-    # Convert both to mm for pyuipc (SCALE=1000).
-    rest_mm = rest_verts * 10.0  # cm -> mm
-    world_verts = (R @ rest_mm.T).T + t * SCALE  # R @ local_mm + t_mm
-    return world_verts
+    R_cur = wt.rotation()
+    t_cur = wt.translation()
+
+    # Get rest transform
+    if body_name not in bone_rest_transforms:
+        return None
+    R_rest, t_rest = bone_rest_transforms[body_name]
+
+    # OBJ in world-frame meters at rest: v_m = v_cm * 0.01
+    v_rest_m = rest_verts * 0.01
+    # Transform to local rest frame, then to current world frame
+    local = (R_rest.T @ (v_rest_m - t_rest).T).T
+    world_m = (R_cur @ local.T).T + t_cur
+    # Convert to mm
+    return world_m * SCALE
 
 
 def reorient_tets(positions, tets):
@@ -334,6 +347,18 @@ def main():
         print(f"  Saccrum_Coccyx: {len(bm['vertices'])} verts, {len(bm['faces'])} faces")
     print(f"  {len(bone_meshes)} bone meshes loaded")
 
+    # Compute bone rest transforms (skeleton at rest pose)
+    bone_rest_transforms = {}
+    if skel is not None:
+        skel.setPositions(np.zeros(skel.getNumDofs()))
+        for bone_name in bone_meshes:
+            body_name = SKELETON_NAME_MAP.get(bone_name, bone_name + '0')
+            body_node = skel.getBodyNode(body_name)
+            if body_node is not None:
+                wt = body_node.getWorldTransform()
+                bone_rest_transforms[body_name] = (wt.rotation().copy(), wt.translation().copy())
+        print(f"  {len(bone_rest_transforms)} bone rest transforms computed")
+
     # Process frame by frame
     os.makedirs(args.output_dir, exist_ok=True)
     all_positions = {m['name']: {} for m in muscles}
@@ -411,7 +436,7 @@ def main():
             try:
                 if skel is not None:
                     world_verts = get_bone_world_positions(
-                        skel, bvh, frame, bone_name, bm['vertices'])
+                        skel, bvh, frame, bone_name, bm['vertices'], bone_rest_transforms)
                     if world_verts is None:
                         continue
                 else:
