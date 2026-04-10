@@ -500,31 +500,44 @@ def main():
 
         del world, engine
 
-    total_dt = time.time() - total_t
+        # Progressive save: flush chunk every CHUNK_SIZE frames
+        CHUNK_SIZE = 20
+        n_accumulated = fi + 1
+        if n_accumulated % CHUNK_SIZE == 0 or fi == len(all_frames) - 1:
+            bvh_stem = os.path.basename(args.bvh).replace('.bvh', '')
+            cache_out = os.path.join(args.output_dir, bvh_stem)
+            os.makedirs(cache_out, exist_ok=True)
 
-    # Save as viewer cache chunks
+            chunk_start = (n_accumulated - 1) // CHUNK_SIZE * CHUNK_SIZE
+            if fi == len(all_frames) - 1:
+                chunk_start = n_accumulated - (n_accumulated % CHUNK_SIZE) if n_accumulated % CHUNK_SIZE != 0 else n_accumulated - CHUNK_SIZE
+            chunk_end = min(chunk_start + CHUNK_SIZE, len(all_frames))
+            chunk_frames_list = all_frames[chunk_start:chunk_end]
+            chunk_idx = chunk_start // CHUNK_SIZE
+
+            for m in muscles:
+                chunk_pos = []
+                chunk_f = []
+                for cf in chunk_frames_list:
+                    if cf in all_positions[m['name']]:
+                        chunk_pos.append(all_positions[m['name']][cf] / SCALE)
+                        chunk_f.append(cf)
+                if chunk_pos:
+                    out_path = os.path.join(cache_out, f"{m['name']}_chunk_{chunk_idx:04d}.npz")
+                    np.savez(out_path,
+                             frames=np.array(chunk_f, dtype=np.int32),
+                             positions=np.array(chunk_pos, dtype=np.float32))
+
+            # Free memory for flushed frames
+            for cf in chunk_frames_list:
+                for m in muscles:
+                    all_positions[m['name']].pop(cf, None)
+
+            print(f"  Flushed chunk {chunk_idx} (frames {chunk_frames_list[0]}-{chunk_frames_list[-1]})", flush=True)
+
+    total_dt = time.time() - total_t
     bvh_stem = os.path.basename(args.bvh).replace('.bvh', '')
     cache_out = os.path.join(args.output_dir, bvh_stem)
-    os.makedirs(cache_out, exist_ok=True)
-
-    CHUNK_SIZE = 20
-    for m in muscles:
-        mframes = all_positions[m['name']]
-        if not mframes:
-            continue
-        sorted_f = sorted(mframes.keys())
-        all_pos = np.array([mframes[f] / SCALE for f in sorted_f], dtype=np.float32)
-
-        # Split into chunks
-        for chunk_i in range(0, len(sorted_f), CHUNK_SIZE):
-            chunk_frames = sorted_f[chunk_i:chunk_i + CHUNK_SIZE]
-            chunk_pos = all_pos[chunk_i:chunk_i + CHUNK_SIZE]
-            chunk_idx = chunk_i // CHUNK_SIZE
-            out_path = os.path.join(cache_out, f"{m['name']}_chunk_{chunk_idx:04d}.npz")
-            np.savez(out_path,
-                     frames=np.array(chunk_frames, dtype=np.int32),
-                     positions=chunk_pos)
-
     print(f"\nSaved viewer cache to {cache_out}/")
     print(f"Done in {total_dt:.1f}s. {len(muscles)} muscles, {len(all_frames)} frames.")
 
