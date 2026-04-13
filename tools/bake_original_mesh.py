@@ -862,27 +862,19 @@ def main():
                         bone_surfs.append((_trimesh.Trimesh(vertices=wv, faces=bm['faces'], process=False),
                                            body_name))
 
-            # ARAP + bone collision outer loop
-            max_outer = 5 if bone_surfs else 1
-            for outer_iter in range(max_outer):
-                # ARAP solve
-                iters_this = solve_iters if outer_iter == 0 else args.settle_iters // 2
-                global_positions, iterations, max_disp = backend.solve(
-                    global_positions, global_rest, neighbors, edge_weights, rest_edge_vectors,
-                    global_fixed_mask, fixed_targets,
-                    max_iterations=iters_this, tolerance=1e-4,
-                    verbose=(fi % 20 == 0 and outer_iter == 0)
-                )
+            # ARAP solve
+            global_positions, iterations, max_disp = backend.solve(
+                global_positions, global_rest, neighbors, edge_weights, rest_edge_vectors,
+                global_fixed_mask, fixed_targets,
+                max_iterations=solve_iters, tolerance=1e-4, verbose=(fi % 20 == 0)
+            )
 
-                if not bone_surfs:
-                    break
-
-                # Push vertices out of non-attachment bones
+            # Post-ARAP: push vertices out of non-attachment bones (single pass)
+            if bone_surfs:
                 pushed_total = 0
                 for bone_surf, body_name in bone_surfs:
                     bone_tree = cKDTree(bone_surf.vertices)
                     for m in muscles:
-                        # Skip attachment bones
                         attach_bones = set()
                         for s in m.get('xml_streams', []):
                             attach_bones.add(s[0])
@@ -895,7 +887,6 @@ def main():
                         pos = global_positions[off:off + n]
                         fixed_set = set(m['fixed_vertices'])
 
-                        # Fast: KDTree filter
                         dists, _ = bone_tree.query(pos)
                         close_mask = dists < 0.005
                         if not np.any(close_mask):
@@ -905,7 +896,6 @@ def main():
                         if len(free_close) == 0:
                             continue
 
-                        # Accurate: trimesh.contains
                         try:
                             inside = bone_surf.contains(pos[free_close])
                         except:
@@ -916,23 +906,12 @@ def main():
                         pen = free_close[inside]
                         closest, _, face_ids = _trimesh.proximity.closest_point(bone_surf, pos[pen])
                         normals = bone_surf.face_normals[face_ids]
-                        margin = 0.003  # 3mm margin
-                        new_pos = closest + normals * margin
-                        global_positions[off + pen] = new_pos
-                        # Update rest positions so ARAP doesn't pull back
-                        global_rest[off + pen] = new_pos
-                        # Update rest edge vectors for affected vertices
-                        for vi in pen:
-                            gi = off + vi
-                            for gj in neighbors[gi]:
-                                rest_edge_vectors[gi][gj] = global_rest[gi] - global_rest[gj]
-                                rest_edge_vectors[gj][gi] = global_rest[gj] - global_rest[gi]
+                        margin = 0.002  # 2mm margin
+                        global_positions[off + pen] = closest + normals * margin
                         pushed_total += len(pen)
 
-                if pushed_total == 0:
-                    break
-                if fi < 3 or fi % 20 == 0:
-                    print(f"    Bone push iter {outer_iter}: {pushed_total} verts", flush=True)
+                if pushed_total > 0 and (fi < 3 or fi % 20 == 0):
+                    print(f"    Bone push: {pushed_total} verts", flush=True)
 
             # Capture
             for m in muscles:
