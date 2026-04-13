@@ -851,56 +851,20 @@ def main():
             # First frame: more iterations
             solve_iters = args.settle_iters * 10 if fi == 0 else args.settle_iters
 
-            # Build bone surfaces for this frame
+            orig_fixed_mask = global_fixed_mask.copy()
+            # Pre-detect bone collisions using LBS positions BEFORE ARAP
+            # Fix penetrating vertices upfront so ARAP smoothly deforms around them
             import trimesh as _trimesh
-            bone_surfs = []
+            bone_fixed_targets = {}  # global_vi -> target position
             if bone_meshes:
                 for bone_name, bm in bone_meshes.items():
                     body_name = BONE_NAME_TO_BODY.get(bone_name, bone_name + '0')
                     wv = get_bone_world_verts(skel, bone_name, bm['vertices'], bone_rest_transforms)
-                    if wv is not None:
-                        bone_surfs.append((_trimesh.Trimesh(vertices=wv, faces=bm['faces'], process=False),
-                                           body_name, cKDTree(wv)))
+                    if wv is None:
+                        continue
+                    bone_surf = _trimesh.Trimesh(vertices=wv, faces=bm['faces'], process=False)
+                    bone_tree = cKDTree(wv)
 
-            # ARAP + bone collision: fix penetrating vertices and re-solve
-            # Save original fixed state to restore for next frame
-            orig_fixed_mask = global_fixed_mask.copy()
-            orig_fixed_indices = np.where(orig_fixed_mask)[0]
-            orig_fixed_targets = fixed_targets.copy()
-            need_rebuild = False
-
-            for outer_iter in range(5):
-                # Solve ARAP
-                iters_this = solve_iters if outer_iter == 0 else args.settle_iters // 2
-                cur_fixed_indices = np.where(global_fixed_mask)[0]
-                cur_fixed_targets = np.zeros((len(cur_fixed_indices), 3))
-                # Fill targets: original caps from bone transforms, bone-contact from pushed positions
-                fi_map = {int(gi): idx for idx, gi in enumerate(cur_fixed_indices)}
-                for idx, gi in enumerate(orig_fixed_indices):
-                    if gi in fi_map:
-                        cur_fixed_targets[fi_map[gi]] = orig_fixed_targets[idx]
-                # Bone-contact targets already set in global_positions from previous push
-                for idx, gi in enumerate(cur_fixed_indices):
-                    if gi not in fi_map or int(gi) not in set(orig_fixed_indices):
-                        cur_fixed_targets[idx] = global_positions[gi]
-
-                if need_rebuild:
-                    backend.build_system(n_total, neighbors, edge_weights, global_fixed_mask, regularization=1e-6)
-                    need_rebuild = False
-
-                global_positions, iterations, max_disp = backend.solve(
-                    global_positions, global_rest, neighbors, edge_weights, rest_edge_vectors,
-                    global_fixed_mask, cur_fixed_targets,
-                    max_iterations=iters_this, tolerance=1e-4,
-                    verbose=(fi % 20 == 0 and outer_iter == 0)
-                )
-
-                if not bone_surfs:
-                    break
-
-                # Detect penetrating free vertices
-                new_fixed_count = 0
-                for bone_surf, body_name, bone_tree in bone_surfs:
                     for m in muscles:
                         attach_bones = set()
                         for s in m.get('xml_streams', []):
@@ -911,47 +875,66 @@ def main():
 
                         off = global_offset[m['name']]
                         n = len(m['vertices'])
-                        pos = global_positions[off:off + n]
+                        pos = global_positions[off:off + n]  # LBS positions
+                        fixed_set = set(m['fixed_vertices'])
 
-                        # Only check free vertices
-                        free_idx = np.where(~global_fixed_mask[off:off + n])[0]
-                        if len(free_idx) == 0:
+                        dists, _ = bone_tree.query(pos)
+                        close_mask = dists < 0.005
+                        if not np.any(close_mask):
                             continue
-
-                        dists_all, _ = bone_tree.query(pos[free_idx])
-                        close = dists_all < 0.005
-                        if not np.any(close):
+                        close_idx = np.where(close_mask)[0]
+                        free_close = np.array([vi for vi in close_idx if vi not in fixed_set])
+                        if len(free_close) == 0:
                             continue
-                        close_local = free_idx[close]
 
                         try:
-                            inside = bone_surf.contains(pos[close_local])
+                            inside = bone_surf.contains(pos[free_close])
                         except:
                             continue
                         if not np.any(inside):
                             continue
 
-                        pen_local = close_local[inside]
-                        closest, _, face_ids = _trimesh.proximity.closest_point(
-                            bone_surf, pos[pen_local])
+                        pen = free_close[inside]
+                        closest, _, face_ids = _trimesh.proximity.closest_point(bone_surf, pos[pen])
                         normals = bone_surf.face_normals[face_ids]
                         margin = 0.002  # 2mm
-
-                        for k, vi in enumerate(pen_local):
+                        for k, vi in enumerate(pen):
                             gi = off + vi
-                            if not global_fixed_mask[gi]:
-                                global_fixed_mask[gi] = True
-                                global_positions[gi] = closest[k] + normals[k] * margin
-                                new_fixed_count += 1
-                                need_rebuild = True
+                            bone_fixed_targets[gi] = closest[k] + normals[k] * margin
 
-                if new_fixed_count == 0:
-                    break
+            # Temporarily expand fixed set for bone-contact vertices
+            need_rebuild = len(bone_fixed_targets) > 0
+            if need_rebuild:
+                for gi, target in bone_fixed_targets.items():
+                    global_fixed_mask[gi] = True
+                    global_positions[gi] = target
+                backend.build_system(n_total, neighbors, edge_weights, global_fixed_mask, regularization=1e-6)
                 if fi < 3 or fi % 20 == 0:
-                    print(f"    Bone fix iter {outer_iter}: {new_fixed_count} new fixed verts", flush=True)
+                    print(f"    Bone fix: {len(bone_fixed_targets)} verts fixed at bone surface", flush=True)
 
-            # Restore original fixed mask for next frame
-            global_fixed_mask[:] = orig_fixed_mask
+            # Single ARAP solve with expanded fixed set
+            all_fixed_indices = np.where(global_fixed_mask)[0]
+            all_fixed_targets = np.zeros((len(all_fixed_indices), 3))
+            fi_map = {int(gi): idx for idx, gi in enumerate(all_fixed_indices)}
+            # Cap targets from bone transforms
+            for idx, gi in enumerate(np.where(orig_fixed_mask)[0]):
+                if gi in fi_map:
+                    all_fixed_targets[fi_map[gi]] = fixed_targets[idx]
+            # Bone-contact targets
+            for gi, target in bone_fixed_targets.items():
+                if gi in fi_map:
+                    all_fixed_targets[fi_map[gi]] = target
+
+            global_positions, iterations, max_disp = backend.solve(
+                global_positions, global_rest, neighbors, edge_weights, rest_edge_vectors,
+                global_fixed_mask, all_fixed_targets,
+                max_iterations=solve_iters, tolerance=1e-4, verbose=(fi % 20 == 0)
+            )
+
+            # Restore original fixed mask and rebuild system for next frame
+            if need_rebuild:
+                global_fixed_mask[:] = orig_fixed_mask
+                backend.build_system(n_total, neighbors, edge_weights, global_fixed_mask, regularization=1e-6)
 
             # Capture
             for m in muscles:
