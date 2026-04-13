@@ -434,6 +434,167 @@ def build_edges(tetrahedra):
 
 
 # ---------------------------------------------------------------------------
+# Step 7: IPC collision resolution
+# ---------------------------------------------------------------------------
+SKELETON_BONES = {
+    'L': ['L_Os_Coxae', 'L_Femur', 'L_Tibia_Fibula', 'L_Patella'],
+    'R': ['R_Os_Coxae', 'R_Femur', 'R_Tibia_Fibula', 'R_Patella'],
+}
+BONE_NAME_TO_BODY = {
+    'L_Os_Coxae': 'L_Os_Coxae0', 'L_Femur': 'L_Femur0',
+    'L_Tibia_Fibula': 'L_Tibia_Fibula0', 'L_Patella': 'L_Patella0',
+    'R_Os_Coxae': 'R_Os_Coxae0', 'R_Femur': 'R_Femur0',
+    'R_Tibia_Fibula': 'R_Tibia_Fibula0', 'R_Patella': 'R_Patella0',
+    'Saccrum_Coccyx': 'Saccrum_Coccyx0',
+}
+
+
+def get_bone_world_verts(skel, bone_name, bone_verts_cm, bone_rest_transforms):
+    """Transform bone mesh vertices to world coords (meters) for current skeleton pose."""
+    body_name = BONE_NAME_TO_BODY.get(bone_name, bone_name + '0')
+    body_node = skel.getBodyNode(body_name)
+    if body_node is None:
+        return None
+    if body_name not in bone_rest_transforms:
+        return None
+    R_rest, t_rest = bone_rest_transforms[body_name]
+    R_cur = body_node.getWorldTransform().rotation()
+    t_cur = body_node.getWorldTransform().translation()
+    v_m = bone_verts_cm * 0.01  # cm → m
+    local = (R_rest.T @ (v_m - t_rest).T).T
+    return (R_cur @ local.T).T + t_cur
+
+
+def run_ipc_frame(muscles, frame_positions, skel, bone_meshes, bone_rest_transforms,
+                  side, d_hat_mm=0.5, elastic_kpa=10.0):
+    """Run IPC collision resolution for one frame. Returns updated positions."""
+    from uipc import view
+    import uipc.builtin as builtin
+    from uipc.core import Engine, World, Scene
+    from uipc.geometry import tetmesh, label_surface, label_triangle_orient
+    from uipc.constitution import StableNeoHookean, ElasticModuli
+    from uipc.unit import kPa, MPa
+
+    SCALE = 1000.0
+
+    # Pre-push: push vertices out of non-attachment bones
+    import trimesh as _trimesh
+    pushed = 0
+    for bone_name, bm in bone_meshes.items():
+        body_name = BONE_NAME_TO_BODY.get(bone_name, bone_name + '0')
+        wv = get_bone_world_verts(skel, bone_name, bm['vertices'], bone_rest_transforms)
+        if wv is None:
+            continue
+        bone_tree = cKDTree(wv)
+        bone_surf = None
+
+        for m in muscles:
+            # Skip if muscle attaches to this bone
+            attach_bones = set()
+            for s in m.get('xml_streams', []):
+                attach_bones.add(s[0])  # origin bone
+                attach_bones.add(s[1])  # insertion bone
+            if body_name in attach_bones:
+                continue
+
+            pos = frame_positions[m['name']].copy()
+            dists, _ = bone_tree.query(pos)
+            close_mask = dists < 0.005
+            if not np.any(close_mask):
+                continue
+            close_idx = np.where(close_mask)[0]
+            fixed_set = set(m['fixed_vertices'])
+            free_close = np.array([vi for vi in close_idx if vi not in fixed_set])
+            if len(free_close) == 0:
+                continue
+            if bone_surf is None:
+                bone_surf = _trimesh.Trimesh(vertices=wv, faces=bm['faces'], process=False)
+            try:
+                inside = bone_surf.contains(pos[free_close])
+            except:
+                continue
+            if not np.any(inside):
+                continue
+            pen = free_close[inside]
+            closest, _, face_ids = _trimesh.proximity.closest_point(bone_surf, pos[pen])
+            normals = bone_surf.face_normals[face_ids]
+            margin = d_hat_mm * 1.5 / SCALE
+            frame_positions[m['name']][pen] = closest + normals * margin
+            pushed += len(pen)
+
+    if pushed > 0:
+        print(f"    Pre-push: {pushed} verts", flush=True)
+
+    # Build IPC scene
+    engine = Engine('cuda')
+    world = World(engine)
+    config = Scene.default_config()
+    config['dt'] = 0.01
+    config['gravity'] = [[0.0], [0.0], [0.0]]
+    config['contact'] = {'enable': True, 'friction': {'enable': False}, 'd_hat': d_hat_mm}
+    config['sanity_check'] = {'enable': False}
+    config['newton'] = {'max_iter': 512}
+    scene = Scene(config)
+    scene.contact_tabular().default_model(0.0, 1.0 * MPa)
+
+    snh = StableNeoHookean()
+    moduli = ElasticModuli.youngs_poisson(elastic_kpa * kPa, 0.45)
+
+    geo_slots = []
+    valid_muscles = []
+    for m in muscles:
+        arap_pos = frame_positions[m['name']] * SCALE  # m → mm
+        tets = m['tetrahedra'].copy()
+        # Fix orientation for current positions
+        v = arap_pos[tets]
+        vols = np.einsum('ij,ij->i', v[:, 1] - v[:, 0], np.cross(v[:, 2] - v[:, 0], v[:, 3] - v[:, 0]))
+        neg = vols < 0
+        tets[neg, 1], tets[neg, 2] = tets[neg, 2].copy(), tets[neg, 1].copy()
+        # Remove degenerate tets
+        v2 = arap_pos[tets]
+        vols2 = np.abs(np.einsum('ij,ij->i', v2[:, 1] - v2[:, 0], np.cross(v2[:, 2] - v2[:, 0], v2[:, 3] - v2[:, 0])))
+        tets = tets[vols2 > 0.0]
+
+        try:
+            mesh = tetmesh(arap_pos, tets)
+            label_surface(mesh)
+            label_triangle_orient(mesh)
+            snh.apply_to(mesh, moduli, mass_density=1060.0)
+            is_fixed = view(mesh.vertices().find(builtin.is_fixed))
+            for vi in m['fixed_vertices']:
+                if vi < len(is_fixed):
+                    is_fixed[vi] = 1
+        except Exception as e:
+            continue
+
+        obj = scene.objects().create(m['name'])
+        geo_slot, _ = obj.geometries().create(mesh)
+        geo_slots.append(geo_slot)
+        valid_muscles.append(m)
+
+    # Solve
+    result = {}
+    try:
+        world.init(scene)
+        world.advance()
+        world.retrieve()
+        for i, m in enumerate(valid_muscles):
+            geo = geo_slots[i].geometry()
+            pos = np.array(geo.positions().view()).reshape(-1, 3) / SCALE  # mm → m
+            result[m['name']] = pos.astype(np.float32)
+    except Exception as e:
+        print(f"    IPC failed: {e}", flush=True)
+
+    # Fill missing muscles with ARAP positions
+    for m in muscles:
+        if m['name'] not in result:
+            result[m['name']] = frame_positions[m['name']].astype(np.float32)
+
+    del world, engine
+    return result
+
+
+# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 def main():
@@ -445,6 +606,9 @@ def main():
     parser.add_argument('--settle-iters', type=int, default=150)
     parser.add_argument('--backend', default='auto', choices=['auto', 'taichi', 'gpu', 'cpu'])
     parser.add_argument('--output-dir', default='data/motion_cache')
+    parser.add_argument('--ipc', action='store_true', help='Run IPC collision after ARAP')
+    parser.add_argument('--d-hat', type=float, default=0.5, help='IPC barrier distance (mm)')
+    parser.add_argument('--elastic', type=float, default=10.0, help='IPC elastic modulus (kPa)')
     args = parser.parse_args()
 
     t_start = time.time()
@@ -469,6 +633,31 @@ def main():
     print("[3] Parsing muscle XML...")
     xml_data = parse_muscle_xml()
     print(f"    {len(xml_data)} muscles found")
+
+    # ── Load bone meshes for IPC collision ────────────────────────────────
+    bone_meshes = {}
+    bone_rest_transforms = {}
+    if args.ipc:
+        print("[3b] Loading bone meshes for IPC...")
+        for bone_name in ['L_Os_Coxae', 'L_Femur', 'L_Tibia_Fibula', 'L_Patella',
+                          'R_Os_Coxae', 'R_Femur', 'R_Tibia_Fibula', 'R_Patella',
+                          'Saccrum_Coccyx']:
+            path = os.path.join(SKEL_MESH_DIR, f'{bone_name}.obj')
+            if os.path.exists(path):
+                m = trimesh.load(path, process=False)
+                bone_meshes[bone_name] = {
+                    'vertices': np.array(m.vertices, dtype=np.float64),
+                    'faces': np.array(m.faces, dtype=np.int32),
+                }
+        # Compute rest transforms
+        skel.setPositions(np.zeros(skel.getNumDofs()))
+        for bone_name in bone_meshes:
+            body_name = BONE_NAME_TO_BODY.get(bone_name, bone_name + '0')
+            bn = skel.getBodyNode(body_name)
+            if bn is not None:
+                wt = bn.getWorldTransform()
+                bone_rest_transforms[body_name] = (wt.rotation().copy(), wt.translation().copy())
+        print(f"    {len(bone_meshes)} bones, {len(bone_rest_transforms)} transforms")
 
     # ── Load BVH ──────────────────────────────────────────────────────────
     print("[4] Loading BVH...")
@@ -569,6 +758,7 @@ def main():
                 'skinning_weights': skin_w,
                 'skinning_bones': skin_bones,
                 'n_orig': len(verts),
+                'xml_streams': mxml,  # for IPC attachment bone check
             })
             print(f"    {full_name}: {len(tet_v)} verts, {len(tet_e)} tets, {n_fixed} fixed")
 
@@ -699,11 +889,23 @@ def main():
                 max_iterations=solve_iters, tolerance=1e-4, verbose=(fi % 20 == 0)
             )
 
-            # Capture
+            # Extract per-muscle ARAP positions
+            arap_results = {}
             for m in muscles:
                 off = global_offset[m['name']]
                 n = len(m['vertices'])
-                bake_data[m['name']][frame] = global_positions[off:off + n].astype(np.float32)
+                arap_results[m['name']] = global_positions[off:off + n].copy()
+
+            # IPC collision resolution (if enabled)
+            if args.ipc and bone_meshes:
+                ipc_results = run_ipc_frame(
+                    muscles, arap_results, skel, bone_meshes, bone_rest_transforms,
+                    side, d_hat_mm=args.d_hat, elastic_kpa=args.elastic)
+                for m in muscles:
+                    bake_data[m['name']][frame] = ipc_results[m['name']]
+            else:
+                for m in muscles:
+                    bake_data[m['name']][frame] = arap_results[m['name']].astype(np.float32)
 
             # Progress
             dt = time.time() - frame_start
