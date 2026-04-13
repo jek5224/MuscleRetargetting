@@ -510,6 +510,17 @@ def run_ipc_frame(muscles, frame_positions, skel, bone_meshes, bone_rest_transfo
         vols2 = np.abs(np.einsum('ij,ij->i', v2[:, 1] - v2[:, 0], np.cross(v2[:, 2] - v2[:, 0], v2[:, 3] - v2[:, 0])))
         tets = tets[vols2 > 0.0]
 
+        # Check tet quality — skip muscles with degenerate tets
+        v_check = arap_pos[tets]
+        vols_check = np.einsum('ij,ij->i', v_check[:, 1] - v_check[:, 0],
+                               np.cross(v_check[:, 2] - v_check[:, 0], v_check[:, 3] - v_check[:, 0]))
+        if np.any(vols_check <= 0):
+            n_bad = np.sum(vols_check <= 0)
+            # Try removing bad tets
+            tets = tets[vols_check > 0]
+            if len(tets) == 0:
+                continue
+
         try:
             mesh = tetmesh(arap_pos, tets)
             label_surface(mesh)
@@ -529,6 +540,9 @@ def run_ipc_frame(muscles, frame_positions, skel, bone_meshes, bone_rest_transfo
 
     # Solve
     result = {}
+    if len(valid_muscles) == 0:
+        return {m['name']: frame_positions[m['name']].astype(np.float32) for m in muscles}
+
     try:
         world.init(scene)
         world.advance()
