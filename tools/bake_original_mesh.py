@@ -477,53 +477,8 @@ def run_ipc_frame(muscles, frame_positions, skel, bone_meshes, bone_rest_transfo
 
     SCALE = 1000.0
 
-    # Pre-push: push vertices out of non-attachment bones
-    import trimesh as _trimesh
-    pushed = 0
-    for bone_name, bm in bone_meshes.items():
-        body_name = BONE_NAME_TO_BODY.get(bone_name, bone_name + '0')
-        wv = get_bone_world_verts(skel, bone_name, bm['vertices'], bone_rest_transforms)
-        if wv is None:
-            continue
-        bone_tree = cKDTree(wv)
-        bone_surf = None
-
-        for m in muscles:
-            # Skip if muscle attaches to this bone
-            attach_bones = set()
-            for s in m.get('xml_streams', []):
-                attach_bones.add(s[0])  # origin bone
-                attach_bones.add(s[1])  # insertion bone
-            if body_name in attach_bones:
-                continue
-
-            pos = frame_positions[m['name']].copy()
-            dists, _ = bone_tree.query(pos)
-            close_mask = dists < 0.005
-            if not np.any(close_mask):
-                continue
-            close_idx = np.where(close_mask)[0]
-            fixed_set = set(m['fixed_vertices'])
-            free_close = np.array([vi for vi in close_idx if vi not in fixed_set])
-            if len(free_close) == 0:
-                continue
-            if bone_surf is None:
-                bone_surf = _trimesh.Trimesh(vertices=wv, faces=bm['faces'], process=False)
-            try:
-                inside = bone_surf.contains(pos[free_close])
-            except:
-                continue
-            if not np.any(inside):
-                continue
-            pen = free_close[inside]
-            closest, _, face_ids = _trimesh.proximity.closest_point(bone_surf, pos[pen])
-            normals = bone_surf.face_normals[face_ids]
-            margin = d_hat_mm * 1.5 / SCALE
-            frame_positions[m['name']][pen] = closest + normals * margin
-            pushed += len(pen)
-
-    if pushed > 0:
-        print(f"    Pre-push: {pushed} verts", flush=True)
+    # No pre-push for original mesh — fine resolution handles most penetrations.
+    # Pre-push on dense meshes creates inverted tets → NaN in IPC.
 
     # Build IPC scene
     engine = Engine('cuda')
