@@ -910,13 +910,6 @@ class ARAPBackendTaichi(ARAPBackend):
         # Get RHS back to numpy
         b_np = self.rhs.to_numpy()
 
-        # Add collision penalty to RHS (projective dynamics style)
-        coll_w = getattr(self, '_collision_weight', 0.0)
-        if collision_targets and coll_w > 0:
-            for vi, target in collision_targets.items():
-                if not fixed_mask[vi]:
-                    b_np[vi] += coll_w * target
-
         # Set fixed vertex RHS
         fixed_indices = np.where(fixed_mask)[0]
         if fixed_targets is not None and len(fixed_targets) > 0:
@@ -1147,10 +1140,11 @@ class ARAPBackendTaichi(ARAPBackend):
 
     def solve(self, positions, rest_positions, neighbors, weights, rest_edges,
               fixed_mask, fixed_targets, max_iterations=20, tolerance=1e-4,
-              target_edges=None, verbose=False, collision_targets=None):
+              target_edges=None, verbose=False, collision_targets=None,
+              collision_projection=None):
         """Run full ARAP iteration using Taichi.
-        collision_targets: dict {vertex_idx: target_position} for bone collision.
-        Updated each iteration via collision_callback if provided.
+        collision_projection: callable(positions) -> positions with penetrating
+            vertices projected to bone surface. Called every N iterations.
         """
         n = len(positions)
         positions = positions.copy()
@@ -1197,6 +1191,9 @@ class ARAPBackendTaichi(ARAPBackend):
             positions = new_positions
             if fixed_targets is not None:
                 positions[fixed_indices] = fixed_targets
+            # Projective dynamics: collision projection every 10 iterations
+            if collision_projection is not None and (iteration + 1) % 10 == 0:
+                positions = collision_projection(positions)
             if verbose and (iteration + 1) % 5 == 0:
                 print(f"  Iter {iteration+1}: max_disp={max_disp:.2e}")
             if max_disp < tolerance:

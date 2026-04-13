@@ -817,34 +817,7 @@ def main():
                 backend_name = 'cpu'
         print(f"    Backend: {backend_name}")
         backend = get_backend(backend_name)
-        # Pre-identify collision candidate vertices (within 15mm of non-attachment bones at rest)
-        collision_candidates = set()
-        if bone_meshes:
-            skel.setPositions(np.zeros(skel.getNumDofs()))
-            for bone_name, bm in bone_meshes.items():
-                body_name = BONE_NAME_TO_BODY.get(bone_name, bone_name + '0')
-                wv = get_bone_world_verts(skel, bone_name, bm['vertices'], bone_rest_transforms)
-                if wv is None:
-                    continue
-                bone_tree = cKDTree(wv)
-                for m in muscles:
-                    attach_bones = set()
-                    for s in m.get('xml_streams', []):
-                        attach_bones.add(s[0])
-                        attach_bones.add(s[1])
-                    if body_name in attach_bones:
-                        continue
-                    off = global_offset[m['name']]
-                    dists, _ = bone_tree.query(m['vertices'])
-                    for vi in np.where(dists < 0.015)[0]:
-                        if not global_fixed_mask[off + vi]:
-                            collision_candidates.add(off + vi)
-            print(f"    Collision candidates: {len(collision_candidates)} vertices near bones")
-
-        # RHS-only collision penalty (no diagonal change — avoids rest-position pull)
-        collision_weight = 50.0 if collision_candidates else 0.0
         backend.build_system(n_total, neighbors, edge_weights, global_fixed_mask, regularization=1e-6)
-        backend._collision_weight = collision_weight
         print(f"    System built")
 
         # ── Frame loop ────────────────────────────────────────────────────
@@ -905,19 +878,23 @@ def main():
             # First frame: more iterations
             solve_iters = args.settle_iters * 10 if fi == 0 else args.settle_iters
 
-            # Compute collision targets (projective dynamics penalty)
-            # Detect LBS vertices inside non-attachment bones → target = bone surface + margin
+            # Build bone surfaces for collision projection
             import trimesh as _trimesh
-            collision_targets = {}
-            if bone_meshes and collision_candidates:
+            bone_surfs_frame = []  # [(trimesh, body_name, KDTree)]
+            if bone_meshes:
                 for bone_name, bm in bone_meshes.items():
                     body_name = BONE_NAME_TO_BODY.get(bone_name, bone_name + '0')
                     wv = get_bone_world_verts(skel, bone_name, bm['vertices'], bone_rest_transforms)
-                    if wv is None:
-                        continue
-                    bone_tree = cKDTree(wv)
-                    bone_surf = None
+                    if wv is not None:
+                        bone_surfs_frame.append((
+                            _trimesh.Trimesh(vertices=wv, faces=bm['faces'], process=False),
+                            body_name, cKDTree(wv)))
 
+            # Build collision projection function (projective dynamics)
+            def collision_projection(positions):
+                """Project penetrating vertices to bone surface + margin."""
+                proj_count = 0
+                for bone_surf, body_name, bone_tree in bone_surfs_frame:
                     for m in muscles:
                         attach_bones = set()
                         for s in m.get('xml_streams', []):
@@ -925,48 +902,39 @@ def main():
                             attach_bones.add(s[1])
                         if body_name in attach_bones:
                             continue
-
                         off = global_offset[m['name']]
-                        pos = global_positions[off:off + len(m['vertices'])]
+                        n = len(m['vertices'])
+                        pos = positions[off:off + n]
+                        fixed_set = set(m['fixed_vertices'])
+
                         dists, _ = bone_tree.query(pos)
                         close_mask = dists < 0.005
                         if not np.any(close_mask):
                             continue
                         close_idx = np.where(close_mask)[0]
-                        # Only check collision candidates (have penalty weight in matrix)
-                        cand_close = [vi for vi in close_idx if (off + vi) in collision_candidates]
-                        if not cand_close:
+                        free_close = np.array([vi for vi in close_idx if vi not in fixed_set])
+                        if len(free_close) == 0:
                             continue
-                        cand_close = np.array(cand_close)
-
-                        if bone_surf is None:
-                            bone_surf = _trimesh.Trimesh(vertices=wv, faces=bm['faces'], process=False)
                         try:
-                            inside = bone_surf.contains(pos[cand_close])
+                            inside = bone_surf.contains(pos[free_close])
                         except:
                             continue
                         if not np.any(inside):
                             continue
-
-                        pen = cand_close[inside]
+                        pen = free_close[inside]
                         closest, _, face_ids = _trimesh.proximity.closest_point(bone_surf, pos[pen])
                         normals = bone_surf.face_normals[face_ids]
                         margin = 0.002  # 2mm
-                        for k, vi in enumerate(pen):
-                            collision_targets[off + vi] = closest[k] + normals[k] * margin
+                        positions[off + pen] = closest + normals * margin
+                        proj_count += len(pen)
+                return positions
 
-                if collision_targets and (fi < 3 or fi % 20 == 0):
-                    print(f"    Collision targets: {len(collision_targets)} verts", flush=True)
-
-            # Only penetrating vertices get collision targets.
-            # Non-penetrating candidates: no RHS addition, diagonal weight acts as mild regularization.
-
-            # ARAP solve with collision penalty (no system rebuild needed)
+            # ARAP solve with collision projection inside iteration loop
             global_positions, iterations, max_disp = backend.solve(
                 global_positions, global_rest, neighbors, edge_weights, rest_edge_vectors,
                 global_fixed_mask, fixed_targets,
                 max_iterations=solve_iters, tolerance=1e-4, verbose=(fi % 20 == 0),
-                collision_targets=collision_targets
+                collision_projection=collision_projection if bone_surfs_frame else None
             )
 
             # Capture
