@@ -664,35 +664,62 @@ def main():
             xml_key = f"L_{mname}"
             mxml = xml_data.get(xml_key, [])
 
-            # Load and identify boundaries
-            try:
-                verts, faces, boundary_verts = load_and_identify_boundaries(obj_path, mxml)
-            except Exception as e:
-                print(f"    {full_name}: load failed: {e}")
-                continue
+            # Load from cache or tetrahedralize
+            cache_path = os.path.join('tet_orig', f"L_{mname}_tet.npz")
+            os.makedirs('tet_orig', exist_ok=True)
+
+            if os.path.exists(cache_path) and side == 'L':
+                # Load cached tet
+                with open(cache_path, 'rb') as _f:
+                    _cd = pickle.load(_f)
+                verts = _cd['orig_vertices']
+                tet_v = _cd['tet_vertices']
+                tet_e = _cd['tet_elements']
+                cap_verts = _cd['cap_vertices']  # {vi: 'origin'/'insertion'}
+                boundary_verts = _cd['boundary_vertices']
+            else:
+                # Load and identify boundaries
+                try:
+                    verts, faces, boundary_verts = load_and_identify_boundaries(obj_path, mxml)
+                except Exception as e:
+                    print(f"    {full_name}: load failed: {e}")
+                    continue
+
+                # Tetrahedralize (pymeshfix closes boundaries)
+                try:
+                    tet_v, tet_e, surf_v, surf_f = tetrahedralize_mesh(verts, faces)
+                except Exception as e:
+                    print(f"    {full_name}: tetgen failed: {e}")
+                    continue
+
+                # Map boundary vertices to tet mesh
+                cap_verts = {}
+                if boundary_verts:
+                    orig_tree = cKDTree(tet_v)
+                    for orig_vi, end_type in boundary_verts.items():
+                        if orig_vi < len(verts):
+                            d, tet_vi = orig_tree.query(verts[orig_vi])
+                            if d < 0.001:
+                                cap_verts[int(tet_vi)] = end_type
+
+                # Save cache (L side only, R is mirrored)
+                with open(cache_path, 'wb') as _f:
+                    pickle.dump({
+                        'orig_vertices': verts,
+                        'tet_vertices': tet_v,
+                        'tet_elements': tet_e,
+                        'cap_vertices': cap_verts,
+                        'boundary_vertices': boundary_verts,
+                    }, _f)
 
             # Mirror for R side
             if side == 'R':
                 verts = verts.copy()
                 verts[:, 0] *= -1
-                faces = faces[:, ::-1].copy()
-
-            # Tetrahedralize (pymeshfix closes boundaries)
-            try:
-                tet_v, tet_e, surf_v, surf_f = tetrahedralize_mesh(verts, faces)
-            except Exception as e:
-                print(f"    {full_name}: tetgen failed: {e}")
-                continue
-
-            # Map boundary vertices to tet mesh (pymeshfix may remap)
-            cap_verts = {}
-            if boundary_verts:
-                orig_tree = cKDTree(tet_v)
-                for orig_vi, end_type in boundary_verts.items():
-                    if orig_vi < len(verts):
-                        d, tet_vi = orig_tree.query(verts[orig_vi])
-                        if d < 0.001:
-                            cap_verts[int(tet_vi)] = end_type
+                tet_v = tet_v.copy()
+                tet_v[:, 0] *= -1
+                tet_e = tet_e.copy()
+                tet_e[:, 1], tet_e[:, 2] = tet_e[:, 2].copy(), tet_e[:, 1].copy()
 
             # Mirror bone names for R
             bone_map = None
