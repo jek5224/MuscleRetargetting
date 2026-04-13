@@ -603,11 +603,11 @@ def main():
     xml_data = parse_muscle_xml()
     print(f"    {len(xml_data)} muscles found")
 
-    # ── Load bone meshes for IPC collision ────────────────────────────────
+    # ── Load bone meshes for collision ──────────────────────────────────
     bone_meshes = {}
     bone_rest_transforms = {}
-    if args.ipc:
-        print("[3b] Loading bone meshes for IPC...")
+    if True:  # always load bones for ARAP collision
+        print("[3b] Loading bone meshes...")
         for bone_name in ['L_Os_Coxae', 'L_Femur', 'L_Tibia_Fibula', 'L_Patella',
                           'R_Os_Coxae', 'R_Femur', 'R_Tibia_Fibula', 'R_Patella',
                           'Saccrum_Coccyx']:
