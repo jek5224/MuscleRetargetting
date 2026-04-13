@@ -814,9 +814,10 @@ def main():
                             collision_candidates.add(off + vi)
             print(f"    Collision candidates: {len(collision_candidates)} vertices near bones")
 
-        collision_weight = 100.0 if collision_candidates else 0.0
-        backend.build_system(n_total, neighbors, edge_weights, global_fixed_mask, regularization=1e-6,
-                             collision_vertices=collision_candidates, collision_weight=collision_weight)
+        # RHS-only collision penalty (no diagonal change — avoids rest-position pull)
+        collision_weight = 50.0 if collision_candidates else 0.0
+        backend.build_system(n_total, neighbors, edge_weights, global_fixed_mask, regularization=1e-6)
+        backend._collision_weight = collision_weight
         print(f"    System built")
 
         # ── Frame loop ────────────────────────────────────────────────────
