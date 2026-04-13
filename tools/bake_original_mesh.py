@@ -902,37 +902,36 @@ def main():
                             gi = off + vi
                             bone_fixed_targets[gi] = closest[k] + normals[k] * margin
 
-            # Temporarily expand fixed set for bone-contact vertices
-            need_rebuild = len(bone_fixed_targets) > 0
-            if need_rebuild:
+            # Expand fixed set for bone-contact vertices
+            has_bone_fix = len(bone_fixed_targets) > 0
+            if has_bone_fix:
                 for gi, target in bone_fixed_targets.items():
                     global_fixed_mask[gi] = True
                     global_positions[gi] = target
                 backend.build_system(n_total, neighbors, edge_weights, global_fixed_mask, regularization=1e-6)
                 if fi < 3 or fi % 20 == 0:
-                    print(f"    Bone fix: {len(bone_fixed_targets)} verts fixed at bone surface", flush=True)
+                    print(f"    Bone fix: {len(bone_fixed_targets)} verts", flush=True)
 
-            # Single ARAP solve with expanded fixed set
-            all_fixed_indices = np.where(global_fixed_mask)[0]
-            all_fixed_targets = np.zeros((len(all_fixed_indices), 3))
-            fi_map = {int(gi): idx for idx, gi in enumerate(all_fixed_indices)}
-            # Cap targets from bone transforms
+            # Build fixed targets array
+            cur_fixed_indices = np.where(global_fixed_mask)[0]
+            cur_fixed_targets = np.zeros((len(cur_fixed_indices), 3))
+            fi_map = {int(gi): idx for idx, gi in enumerate(cur_fixed_indices)}
             for idx, gi in enumerate(np.where(orig_fixed_mask)[0]):
                 if gi in fi_map:
-                    all_fixed_targets[fi_map[gi]] = fixed_targets[idx]
-            # Bone-contact targets
+                    cur_fixed_targets[fi_map[gi]] = fixed_targets[idx]
             for gi, target in bone_fixed_targets.items():
                 if gi in fi_map:
-                    all_fixed_targets[fi_map[gi]] = target
+                    cur_fixed_targets[fi_map[gi]] = target
 
+            # ARAP solve
             global_positions, iterations, max_disp = backend.solve(
                 global_positions, global_rest, neighbors, edge_weights, rest_edge_vectors,
-                global_fixed_mask, all_fixed_targets,
+                global_fixed_mask, cur_fixed_targets,
                 max_iterations=solve_iters, tolerance=1e-4, verbose=(fi % 20 == 0)
             )
 
-            # Restore original fixed mask and rebuild system for next frame
-            if need_rebuild:
+            # Restore original fixed mask (rebuild only if we changed it)
+            if has_bone_fix:
                 global_fixed_mask[:] = orig_fixed_mask
                 backend.build_system(n_total, neighbors, edge_weights, global_fixed_mask, regularization=1e-6)
 
