@@ -575,7 +575,7 @@ def main():
     parser.add_argument('--settle-iters', type=int, default=150)
     parser.add_argument('--backend', default='auto', choices=['auto', 'taichi', 'gpu', 'cpu'])
     parser.add_argument('--output-dir', default='data/motion_cache')
-    parser.add_argument('--ipc', action='store_true', help='Run IPC collision after ARAP')
+    parser.add_argument('--ipc', action='store_true', help='Run IPC collision after ARAP (experimental, may fail on dense meshes)')
     parser.add_argument('--d-hat', type=float, default=0.5, help='IPC barrier distance (mm)')
     parser.add_argument('--elastic', type=float, default=10.0, help='IPC elastic modulus (kPa)')
     args = parser.parse_args()
@@ -851,30 +851,85 @@ def main():
             # First frame: more iterations
             solve_iters = args.settle_iters * 10 if fi == 0 else args.settle_iters
 
-            # ARAP solve
-            global_positions, iterations, max_disp = backend.solve(
-                global_positions, global_rest, neighbors, edge_weights, rest_edge_vectors,
-                global_fixed_mask, fixed_targets,
-                max_iterations=solve_iters, tolerance=1e-4, verbose=(fi % 20 == 0)
-            )
+            # Build bone surfaces for this frame (for collision)
+            import trimesh as _trimesh
+            bone_surfs = []  # (trimesh, body_name)
+            if bone_meshes:
+                for bone_name, bm in bone_meshes.items():
+                    body_name = BONE_NAME_TO_BODY.get(bone_name, bone_name + '0')
+                    wv = get_bone_world_verts(skel, bone_name, bm['vertices'], bone_rest_transforms)
+                    if wv is not None:
+                        bone_surfs.append((_trimesh.Trimesh(vertices=wv, faces=bm['faces'], process=False),
+                                           body_name))
 
-            # Extract per-muscle ARAP positions
-            arap_results = {}
+            # ARAP + bone collision outer loop
+            max_outer = 5 if bone_surfs else 1
+            for outer_iter in range(max_outer):
+                # ARAP solve
+                iters_this = solve_iters if outer_iter == 0 else args.settle_iters // 2
+                global_positions, iterations, max_disp = backend.solve(
+                    global_positions, global_rest, neighbors, edge_weights, rest_edge_vectors,
+                    global_fixed_mask, fixed_targets,
+                    max_iterations=iters_this, tolerance=1e-4,
+                    verbose=(fi % 20 == 0 and outer_iter == 0)
+                )
+
+                if not bone_surfs:
+                    break
+
+                # Push vertices out of non-attachment bones
+                pushed_total = 0
+                for bone_surf, body_name in bone_surfs:
+                    bone_tree = cKDTree(bone_surf.vertices)
+                    for m in muscles:
+                        # Skip attachment bones
+                        attach_bones = set()
+                        for s in m.get('xml_streams', []):
+                            attach_bones.add(s[0])
+                            attach_bones.add(s[1])
+                        if body_name in attach_bones:
+                            continue
+
+                        off = global_offset[m['name']]
+                        n = len(m['vertices'])
+                        pos = global_positions[off:off + n]
+                        fixed_set = set(m['fixed_vertices'])
+
+                        # Fast: KDTree filter
+                        dists, _ = bone_tree.query(pos)
+                        close_mask = dists < 0.005
+                        if not np.any(close_mask):
+                            continue
+                        close_idx = np.where(close_mask)[0]
+                        free_close = np.array([vi for vi in close_idx if vi not in fixed_set])
+                        if len(free_close) == 0:
+                            continue
+
+                        # Accurate: trimesh.contains
+                        try:
+                            inside = bone_surf.contains(pos[free_close])
+                        except:
+                            continue
+                        if not np.any(inside):
+                            continue
+
+                        pen = free_close[inside]
+                        closest, _, face_ids = _trimesh.proximity.closest_point(bone_surf, pos[pen])
+                        normals = bone_surf.face_normals[face_ids]
+                        margin = 0.001  # 1mm margin
+                        global_positions[off + pen] = closest + normals * margin
+                        pushed_total += len(pen)
+
+                if pushed_total == 0:
+                    break
+                if fi < 3 or fi % 20 == 0:
+                    print(f"    Bone push iter {outer_iter}: {pushed_total} verts", flush=True)
+
+            # Capture
             for m in muscles:
                 off = global_offset[m['name']]
                 n = len(m['vertices'])
-                arap_results[m['name']] = global_positions[off:off + n].copy()
-
-            # IPC collision resolution (if enabled)
-            if args.ipc and bone_meshes:
-                ipc_results = run_ipc_frame(
-                    muscles, arap_results, skel, bone_meshes, bone_rest_transforms,
-                    side, d_hat_mm=args.d_hat, elastic_kpa=args.elastic)
-                for m in muscles:
-                    bake_data[m['name']][frame] = ipc_results[m['name']]
-            else:
-                for m in muscles:
-                    bake_data[m['name']][frame] = arap_results[m['name']].astype(np.float32)
+                bake_data[m['name']][frame] = global_positions[off:off + n].astype(np.float32)
 
             # Progress
             dt = time.time() - frame_start
