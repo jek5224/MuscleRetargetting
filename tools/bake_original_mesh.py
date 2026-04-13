@@ -916,8 +916,17 @@ def main():
                         pen = free_close[inside]
                         closest, _, face_ids = _trimesh.proximity.closest_point(bone_surf, pos[pen])
                         normals = bone_surf.face_normals[face_ids]
-                        margin = 0.001  # 1mm margin
-                        global_positions[off + pen] = closest + normals * margin
+                        margin = 0.003  # 3mm margin
+                        new_pos = closest + normals * margin
+                        global_positions[off + pen] = new_pos
+                        # Update rest positions so ARAP doesn't pull back
+                        global_rest[off + pen] = new_pos
+                        # Update rest edge vectors for affected vertices
+                        for vi in pen:
+                            gi = off + vi
+                            for gj in neighbors[gi]:
+                                rest_edge_vectors[gi][gj] = global_rest[gi] - global_rest[gj]
+                                rest_edge_vectors[gj][gi] = global_rest[gj] - global_rest[gi]
                         pushed_total += len(pen)
 
                 if pushed_total == 0:
