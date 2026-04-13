@@ -15,8 +15,12 @@ class ARAPBackend(ABC):
         self.is_gpu = False
 
     @abstractmethod
-    def build_system(self, num_vertices, neighbors, weights, fixed_mask, regularization=1e-6):
-        """Build the ARAP system matrix."""
+    def build_system(self, num_vertices, neighbors, weights, fixed_mask, regularization=1e-6,
+                     collision_vertices=None, collision_weight=0.0):
+        """Build the ARAP system matrix.
+        collision_vertices: set of vertex indices that may collide with bones.
+        collision_weight: added to diagonal for those vertices (projective dynamics penalty).
+        """
         pass
 
     @abstractmethod
@@ -646,8 +650,9 @@ class ARAPBackendTaichi(ARAPBackend):
 
         self._fields_allocated = True
 
-    def build_system(self, num_vertices, neighbors, weights, fixed_mask, regularization=1e-6):
-        """Build sparse Laplacian matrix."""
+    def build_system(self, num_vertices, neighbors, weights, fixed_mask, regularization=1e-6,
+                     collision_vertices=None, collision_weight=0.0):
+        """Build sparse Laplacian matrix with optional collision penalty on diagonal."""
         import scipy.sparse
 
         self._scipy_solver = None  # Clear cache
@@ -695,10 +700,15 @@ class ARAPBackendTaichi(ARAPBackend):
                     cols.append(j)
                     vals.append(-w)
                     weight_sum += w
+                diag = weight_sum + regularization
+                if collision_vertices and i in collision_vertices:
+                    diag += collision_weight
                 rows.append(i)
                 cols.append(i)
-                vals.append(weight_sum + regularization)
+                vals.append(diag)
 
+        self._collision_weight = collision_weight
+        self._collision_vertices = collision_vertices or set()
         self._L_scipy = scipy.sparse.csr_matrix(
             (vals, (rows, cols)), shape=(n, n)
         )
@@ -873,8 +883,11 @@ class ARAPBackendTaichi(ARAPBackend):
         return None
 
     def global_step(self, rest_positions, neighbors, weights, rest_edges,
-                    fixed_mask, fixed_targets, target_edges=None):
-        """Solve linear system using Taichi for RHS, scipy for solve."""
+                    fixed_mask, fixed_targets, target_edges=None,
+                    collision_targets=None):
+        """Solve linear system using Taichi for RHS, scipy for solve.
+        collision_targets: dict {vertex_idx: target_position} for bone collision penalty.
+        """
         import scipy.sparse.linalg
         ti = self.ti
 
@@ -896,6 +909,13 @@ class ARAPBackendTaichi(ARAPBackend):
 
         # Get RHS back to numpy
         b_np = self.rhs.to_numpy()
+
+        # Add collision penalty to RHS (projective dynamics style)
+        coll_w = getattr(self, '_collision_weight', 0.0)
+        if collision_targets and coll_w > 0:
+            for vi, target in collision_targets.items():
+                if not fixed_mask[vi]:
+                    b_np[vi] += coll_w * target
 
         # Set fixed vertex RHS
         fixed_indices = np.where(fixed_mask)[0]
@@ -1127,11 +1147,10 @@ class ARAPBackendTaichi(ARAPBackend):
 
     def solve(self, positions, rest_positions, neighbors, weights, rest_edges,
               fixed_mask, fixed_targets, max_iterations=20, tolerance=1e-4,
-              target_edges=None, verbose=False):
+              target_edges=None, verbose=False, collision_targets=None):
         """Run full ARAP iteration using Taichi.
-        Uses GPU PCG for the linear solve when CG fields are allocated,
-        keeping positions on GPU between iterations to eliminate transfers.
-        Falls back to scipy otherwise.
+        collision_targets: dict {vertex_idx: target_position} for bone collision.
+        Updated each iteration via collision_callback if provided.
         """
         n = len(positions)
         positions = positions.copy()
@@ -1164,7 +1183,8 @@ class ARAPBackendTaichi(ARAPBackend):
                 self.rest_positions.from_numpy(rest_pos_f64)
                 rest_uploaded = True
             new_positions = self.global_step(rest_positions, neighbors, weights, rest_edges,
-                                             fixed_mask, fixed_targets, target_edges)
+                                             fixed_mask, fixed_targets, target_edges,
+                                             collision_targets=collision_targets)
             if not np.isfinite(new_positions).all():
                 if verbose:
                     print(f"  Taichi: Non-finite at iteration {iteration}, reverting")

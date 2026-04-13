@@ -790,7 +790,33 @@ def main():
                 backend_name = 'cpu'
         print(f"    Backend: {backend_name}")
         backend = get_backend(backend_name)
-        backend.build_system(n_total, neighbors, edge_weights, global_fixed_mask, regularization=1e-6)
+        # Pre-identify collision candidate vertices (within 15mm of non-attachment bones at rest)
+        collision_candidates = set()
+        if bone_meshes:
+            skel.setPositions(np.zeros(skel.getNumDofs()))
+            for bone_name, bm in bone_meshes.items():
+                body_name = BONE_NAME_TO_BODY.get(bone_name, bone_name + '0')
+                wv = get_bone_world_verts(skel, bone_name, bm['vertices'], bone_rest_transforms)
+                if wv is None:
+                    continue
+                bone_tree = cKDTree(wv)
+                for m in muscles:
+                    attach_bones = set()
+                    for s in m.get('xml_streams', []):
+                        attach_bones.add(s[0])
+                        attach_bones.add(s[1])
+                    if body_name in attach_bones:
+                        continue
+                    off = global_offset[m['name']]
+                    dists, _ = bone_tree.query(m['vertices'])
+                    for vi in np.where(dists < 0.015)[0]:
+                        if not global_fixed_mask[off + vi]:
+                            collision_candidates.add(off + vi)
+            print(f"    Collision candidates: {len(collision_candidates)} vertices near bones")
+
+        collision_weight = 100.0 if collision_candidates else 0.0
+        backend.build_system(n_total, neighbors, edge_weights, global_fixed_mask, regularization=1e-6,
+                             collision_vertices=collision_candidates, collision_weight=collision_weight)
         print(f"    System built")
 
         # ── Frame loop ────────────────────────────────────────────────────
@@ -851,19 +877,18 @@ def main():
             # First frame: more iterations
             solve_iters = args.settle_iters * 10 if fi == 0 else args.settle_iters
 
-            orig_fixed_mask = global_fixed_mask.copy()
-            # Pre-detect bone collisions using LBS positions BEFORE ARAP
-            # Fix penetrating vertices upfront so ARAP smoothly deforms around them
+            # Compute collision targets (projective dynamics penalty)
+            # Detect LBS vertices inside non-attachment bones → target = bone surface + margin
             import trimesh as _trimesh
-            bone_fixed_targets = {}  # global_vi -> target position
-            if bone_meshes:
+            collision_targets = {}
+            if bone_meshes and collision_candidates:
                 for bone_name, bm in bone_meshes.items():
                     body_name = BONE_NAME_TO_BODY.get(bone_name, bone_name + '0')
                     wv = get_bone_world_verts(skel, bone_name, bm['vertices'], bone_rest_transforms)
                     if wv is None:
                         continue
-                    bone_surf = _trimesh.Trimesh(vertices=wv, faces=bm['faces'], process=False)
                     bone_tree = cKDTree(wv)
+                    bone_surf = None
 
                     for m in muscles:
                         attach_bones = set()
@@ -874,66 +899,49 @@ def main():
                             continue
 
                         off = global_offset[m['name']]
-                        n = len(m['vertices'])
-                        pos = global_positions[off:off + n]  # LBS positions
-                        fixed_set = set(m['fixed_vertices'])
-
+                        pos = global_positions[off:off + len(m['vertices'])]
                         dists, _ = bone_tree.query(pos)
                         close_mask = dists < 0.005
                         if not np.any(close_mask):
                             continue
                         close_idx = np.where(close_mask)[0]
-                        free_close = np.array([vi for vi in close_idx if vi not in fixed_set])
-                        if len(free_close) == 0:
+                        # Only check collision candidates (have penalty weight in matrix)
+                        cand_close = [vi for vi in close_idx if (off + vi) in collision_candidates]
+                        if not cand_close:
                             continue
+                        cand_close = np.array(cand_close)
 
+                        if bone_surf is None:
+                            bone_surf = _trimesh.Trimesh(vertices=wv, faces=bm['faces'], process=False)
                         try:
-                            inside = bone_surf.contains(pos[free_close])
+                            inside = bone_surf.contains(pos[cand_close])
                         except:
                             continue
                         if not np.any(inside):
                             continue
 
-                        pen = free_close[inside]
+                        pen = cand_close[inside]
                         closest, _, face_ids = _trimesh.proximity.closest_point(bone_surf, pos[pen])
                         normals = bone_surf.face_normals[face_ids]
                         margin = 0.002  # 2mm
                         for k, vi in enumerate(pen):
-                            gi = off + vi
-                            bone_fixed_targets[gi] = closest[k] + normals[k] * margin
+                            collision_targets[off + vi] = closest[k] + normals[k] * margin
 
-            # Expand fixed set for bone-contact vertices
-            has_bone_fix = len(bone_fixed_targets) > 0
-            if has_bone_fix:
-                for gi, target in bone_fixed_targets.items():
-                    global_fixed_mask[gi] = True
-                    global_positions[gi] = target
-                backend.build_system(n_total, neighbors, edge_weights, global_fixed_mask, regularization=1e-6)
-                if fi < 3 or fi % 20 == 0:
-                    print(f"    Bone fix: {len(bone_fixed_targets)} verts", flush=True)
+                if collision_targets and (fi < 3 or fi % 20 == 0):
+                    print(f"    Collision targets: {len(collision_targets)} verts", flush=True)
 
-            # Build fixed targets array
-            cur_fixed_indices = np.where(global_fixed_mask)[0]
-            cur_fixed_targets = np.zeros((len(cur_fixed_indices), 3))
-            fi_map = {int(gi): idx for idx, gi in enumerate(cur_fixed_indices)}
-            for idx, gi in enumerate(np.where(orig_fixed_mask)[0]):
-                if gi in fi_map:
-                    cur_fixed_targets[fi_map[gi]] = fixed_targets[idx]
-            for gi, target in bone_fixed_targets.items():
-                if gi in fi_map:
-                    cur_fixed_targets[fi_map[gi]] = target
+            # For non-penetrating collision candidates: target = current position (zero net force)
+            for gi in collision_candidates:
+                if gi not in collision_targets:
+                    collision_targets[gi] = global_positions[gi]
 
-            # ARAP solve
+            # ARAP solve with collision penalty (no system rebuild needed)
             global_positions, iterations, max_disp = backend.solve(
                 global_positions, global_rest, neighbors, edge_weights, rest_edge_vectors,
-                global_fixed_mask, cur_fixed_targets,
-                max_iterations=solve_iters, tolerance=1e-4, verbose=(fi % 20 == 0)
+                global_fixed_mask, fixed_targets,
+                max_iterations=solve_iters, tolerance=1e-4, verbose=(fi % 20 == 0),
+                collision_targets=collision_targets
             )
-
-            # Restore original fixed mask (rebuild only if we changed it)
-            if has_bone_fix:
-                global_fixed_mask[:] = orig_fixed_mask
-                backend.build_system(n_total, neighbors, edge_weights, global_fixed_mask, regularization=1e-6)
 
             # Capture
             for m in muscles:
