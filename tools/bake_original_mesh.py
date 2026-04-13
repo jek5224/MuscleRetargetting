@@ -930,10 +930,8 @@ def main():
                 if collision_targets and (fi < 3 or fi % 20 == 0):
                     print(f"    Collision targets: {len(collision_targets)} verts", flush=True)
 
-            # For non-penetrating collision candidates: target = current position (zero net force)
-            for gi in collision_candidates:
-                if gi not in collision_targets:
-                    collision_targets[gi] = global_positions[gi]
+            # Only penetrating vertices get collision targets.
+            # Non-penetrating candidates: no RHS addition, diagonal weight acts as mild regularization.
 
             # ARAP solve with collision penalty (no system rebuild needed)
             global_positions, iterations, max_disp = backend.solve(
