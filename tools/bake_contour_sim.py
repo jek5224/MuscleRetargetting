@@ -430,109 +430,147 @@ def build_bone_trimeshes(skel, bone_meshes, bone_rest_transforms):
 # ---------------------------------------------------------------------------
 # Edge-bone surface collision (post-XPBD)
 # ---------------------------------------------------------------------------
-def resolve_edge_bone_collisions(solver, muscles, bone_trimeshes,
-                                  margin=0.002, max_iters=3, verbose=False):
-    """Detect and resolve edge-bone tunneling after XPBD vertex-level collision.
+def resolve_surface_collisions(solver, muscles, bone_trimeshes,
+                                margin=0.002, max_iters=3, verbose=False):
+    """Surface collision: vertex-bone + edge-bone resolution.
 
-    For each muscle's surface edges near bones, ray-cast along the edge.
-    If the ray hits a bone within the edge segment, push the inside
-    endpoint(s) to the bone surface + margin.
+    Phase 1: Push surface vertices inside ANY bone to surface + margin.
+             Uses closest_point + signed distance (works for non-watertight).
+    Phase 2: Ray-cast along surface edges to detect edge-bone tunneling.
+             Push inside endpoint(s) to bone surface + margin.
 
-    Returns total number of edge crossings resolved.
+    Returns (n_vert_pushed, n_edge_resolved).
     """
     if not bone_trimeshes:
-        return 0
+        return 0, 0
 
     # Merge all bones for KDTree pre-filter
     all_bone_verts = np.vstack([bm.vertices for bm in bone_trimeshes])
     bone_kdtree = cKDTree(all_bone_verts)
 
-    total_resolved = 0
+    total_vert_pushed = 0
+    total_edge_resolved = 0
 
     for iteration in range(max_iters):
-        n_resolved_this_iter = 0
+        n_vert = 0
+        n_edge = 0
 
         for m in muscles:
             name = m['name']
             pos = solver.get_muscle_positions(name).copy()
-            surface_edges = m['_surface_edges']
             fixed_set = set(m['fixed_vertices'])
+            modified = False
 
-            # Pre-filter: edges with at least one endpoint near a bone
+            # ── Phase 1: Vertex-bone collision ──────────────────────
+            surf_verts = np.array(m['_surface_vert_set'], dtype=np.int64)
+            sv_pos = pos[surf_verts]
+            dists_kd, _ = bone_kdtree.query(sv_pos)
+            near_mask = dists_kd < 0.03  # 3cm
+            if np.any(near_mask):
+                near_sv = surf_verts[near_mask]
+                near_pos = pos[near_sv]
+
+                for bone_mesh in bone_trimeshes:
+                    try:
+                        # AABB pre-filter
+                        bmin = bone_mesh.bounds[0] - 0.03
+                        bmax = bone_mesh.bounds[1] + 0.03
+                        in_bbox = np.all((near_pos >= bmin) & (near_pos <= bmax), axis=1)
+                        if not np.any(in_bbox):
+                            continue
+
+                        bbox_pos = near_pos[in_bbox]
+                        bbox_sv = near_sv[in_bbox]
+
+                        # Use contains() for reliable inside/outside detection
+                        inside = bone_mesh.contains(bbox_pos)
+
+                        if not np.any(inside):
+                            continue
+
+                        # Project inside vertices to surface + margin
+                        inside_pos = bbox_pos[inside]
+                        inside_sv = bbox_sv[inside]
+                        closest, _, face_ids = trimesh.proximity.closest_point(
+                            bone_mesh, inside_pos)
+                        normals = bone_mesh.face_normals[face_ids]
+
+                        for k in range(len(inside_sv)):
+                            vi = int(inside_sv[k])
+                            if vi in fixed_set:
+                                continue
+                            pos[vi] = closest[k] + normals[k] * margin
+                            modified = True
+                            n_vert += 1
+                    except Exception:
+                        continue
+
+                near_pos = pos[near_sv]
+
+            # ── Phase 2: Edge-bone collision ────────────────────────
+            surface_edges = m['_surface_edges']
             edge_v0 = pos[surface_edges[:, 0]]
             edge_v1 = pos[surface_edges[:, 1]]
 
             d0, _ = bone_kdtree.query(edge_v0)
             d1, _ = bone_kdtree.query(edge_v1)
-            near_mask = (d0 < 0.02) | (d1 < 0.02)  # 2cm
-            if not np.any(near_mask):
-                continue
+            edge_near = (d0 < 0.02) | (d1 < 0.02)
+            if np.any(edge_near):
+                candidate_edges = surface_edges[edge_near]
+                origins = pos[candidate_edges[:, 0]]
+                endpoints = pos[candidate_edges[:, 1]]
+                dirs = endpoints - origins
+                lengths = np.linalg.norm(dirs, axis=1)
+                valid = lengths > 1e-10
+                if np.any(valid):
+                    dirs_norm = dirs.copy()
+                    dirs_norm[valid] /= lengths[valid, None]
 
-            candidate_edges = surface_edges[near_mask]
-            origins = pos[candidate_edges[:, 0]]
-            endpoints = pos[candidate_edges[:, 1]]
-            dirs = endpoints - origins
-            lengths = np.linalg.norm(dirs, axis=1)
-            valid = lengths > 1e-10
-            if not np.any(valid):
-                continue
-
-            dirs_norm = dirs.copy()
-            dirs_norm[valid] /= lengths[valid, None]
-
-            # Ray-cast against each bone
-            modified = False
-            for bone_mesh in bone_trimeshes:
-                try:
-                    locations, ray_idx, tri_idx = bone_mesh.ray.intersects_location(
-                        origins[valid], dirs_norm[valid], multiple_hits=True)
-                except Exception:
-                    continue
-
-                if len(locations) == 0:
-                    continue
-
-                valid_edges = candidate_edges[valid]
-                for loc, ri, ti in zip(locations, ray_idx, tri_idx):
-                    t_param = np.dot(loc - origins[valid][ri], dirs_norm[valid][ri])
-                    edge_len = lengths[valid][ri]
-                    if 0 < t_param < edge_len:
-                        v0i, v1i = int(valid_edges[ri, 0]), int(valid_edges[ri, 1])
-                        if v0i in fixed_set and v1i in fixed_set:
+                    for bone_mesh in bone_trimeshes:
+                        try:
+                            locations, ray_idx, tri_idx = bone_mesh.ray.intersects_location(
+                                origins[valid], dirs_norm[valid], multiple_hits=True)
+                        except Exception:
+                            continue
+                        if len(locations) == 0:
                             continue
 
-                        p0 = pos[v0i]
-                        p1 = pos[v1i]
-                        face_normal = bone_mesh.face_normals[ti]
-                        face_center = bone_mesh.triangles[ti].mean(axis=0)
-
-                        d0_signed = np.dot(p0 - face_center, face_normal)
-                        d1_signed = np.dot(p1 - face_center, face_normal)
-
-                        for vi, di in [(v0i, d0_signed), (v1i, d1_signed)]:
-                            if di < 0 and vi not in fixed_set:
-                                cp, _, fid = trimesh.proximity.closest_point(
-                                    bone_mesh, pos[vi:vi + 1])
-                                fn = bone_mesh.face_normals[fid[0]]
-                                depth = abs(di)
-                                push_margin = min(depth * 1.5 + margin, 0.020)
-                                pos[vi] = cp[0] + fn * push_margin
-                                modified = True
-                                n_resolved_this_iter += 1
+                        valid_edges = candidate_edges[valid]
+                        for loc, ri, ti in zip(locations, ray_idx, tri_idx):
+                            t_param = np.dot(loc - origins[valid][ri], dirs_norm[valid][ri])
+                            edge_len = lengths[valid][ri]
+                            if 0 < t_param < edge_len:
+                                v0i, v1i = int(valid_edges[ri, 0]), int(valid_edges[ri, 1])
+                                if v0i in fixed_set and v1i in fixed_set:
+                                    continue
+                                face_normal = bone_mesh.face_normals[ti]
+                                face_center = bone_mesh.triangles[ti].mean(axis=0)
+                                d0s = np.dot(pos[v0i] - face_center, face_normal)
+                                d1s = np.dot(pos[v1i] - face_center, face_normal)
+                                for vi, di in [(v0i, d0s), (v1i, d1s)]:
+                                    if di < 0 and vi not in fixed_set:
+                                        cp, _, fid = trimesh.proximity.closest_point(
+                                            bone_mesh, pos[vi:vi + 1])
+                                        fn = bone_mesh.face_normals[fid[0]]
+                                        depth = abs(di)
+                                        push_margin = min(depth * 1.5 + margin, 0.020)
+                                        pos[vi] = cp[0] + fn * push_margin
+                                        modified = True
+                                        n_edge += 1
 
             if modified:
-                # Write back to solver
                 vs, ve, _, _ = solver._muscle_ranges[name]
                 solver.positions[vs:ve] = pos
 
-        if verbose and n_resolved_this_iter > 0:
-            print(f"    edge-bone iter {iteration}: {n_resolved_this_iter} endpoints pushed")
+        if verbose and (n_vert > 0 or n_edge > 0):
+            print(f"    surface coll iter {iteration}: {n_vert} verts, {n_edge} edges pushed")
 
-        total_resolved += n_resolved_this_iter
-        if n_resolved_this_iter == 0:
+        total_vert_pushed += n_vert
+        total_edge_resolved += n_edge
+        if n_vert == 0 and n_edge == 0:
             break
 
-    return total_resolved
+    return total_vert_pushed, total_edge_resolved
 
 
 def resolve_muscle_muscle_collisions(solver, muscles, d_min=0.002):
@@ -880,24 +918,38 @@ def main():
             verbose=(frame == args.start_frame),
         )
 
-        # Post-solve: edge-bone surface collision
-        n_edge_resolved = resolve_edge_bone_collisions(
+        # Snapshot XPBD-converged positions (clean state for next frame)
+        xpbd_positions = {m['name']: solver.get_muscle_positions(m['name']).copy()
+                          for m in muscles}
+
+        # Post-solve: surface collision on a COPY (output only,
+        # don't pollute solver state which would cause cascading inversions)
+        n_vert_pushed, n_edge_resolved = resolve_surface_collisions(
             solver, muscles, bone_tms,
             margin=args.margin,
             max_iters=args.post_iters,
             verbose=(frame == args.start_frame),
         )
 
-        # Post-solve: muscle-muscle push-apart
+        # Post-solve: muscle-muscle push-apart (also on output copy)
         n_mm_pushed = resolve_muscle_muscle_collisions(
             solver, muscles, d_min=args.margin)
 
+        # Capture output positions (with edge-bone and muscle-muscle corrections)
+        output_positions = {m['name']: solver.get_muscle_positions(m['name']).astype(np.float32)
+                            for m in muscles}
+
+        # Restore solver to XPBD-converged state (clean carry-forward)
+        for m in muscles:
+            vs, ve, _, _ = solver._muscle_ranges[m['name']]
+            solver.positions[vs:ve] = xpbd_positions[m['name']]
+
         dt = time.time() - t0
 
-        # Count inversions
+        # Count inversions (on XPBD-converged positions)
         total_inv = 0
         for m in muscles:
-            pos = solver.get_muscle_positions(m['name'])
+            pos = xpbd_positions[m['name']]
             tets = m['tetrahedra']
             if len(tets) > 0:
                 v0 = pos[tets[:, 0]]
@@ -907,11 +959,12 @@ def main():
 
         print(f"  Frame {frame}: {dt:.2f}s, iters={fevals}, "
               f"||dx||={residual:.2e}, inv={total_inv}/{total_tets}, "
-              f"edge_coll={n_edge_resolved}, mm={n_mm_pushed}", flush=True)
+              f"vert_coll={n_vert_pushed}, edge_coll={n_edge_resolved}, mm={n_mm_pushed}",
+              flush=True)
 
-        # Capture positions
+        # Buffer output positions (with corrections applied)
         for m in muscles:
-            bake_buffers[m['name']][frame] = solver.get_muscle_positions(m['name']).astype(np.float32)
+            bake_buffers[m['name']][frame] = output_positions[m['name']]
 
         # Flush periodically
         if (frame - args.start_frame + 1) % FLUSH_INTERVAL == 0:
