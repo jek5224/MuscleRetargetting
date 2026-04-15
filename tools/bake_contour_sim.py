@@ -902,6 +902,10 @@ def main():
                 'fixed_targets': fixed_targets,
             }
 
+        # Always use LBS as initial guess — prevents inversion accumulation
+        # across frames. The solver's carry-forward causes inversions to compound
+        # because contour mesh tets are thin and the solver can't recover.
+        solver._has_previous_solution = False
         solver.update_targets_and_positions(muscles_update)
 
         # Build bone trimeshes at current pose
