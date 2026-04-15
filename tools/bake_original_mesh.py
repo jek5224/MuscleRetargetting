@@ -876,7 +876,7 @@ def main():
                 global_positions[off:off + n] = lbs
 
             # First frame: more iterations
-            solve_iters = args.settle_iters * 10 if fi == 0 else args.settle_iters
+            solve_iters = args.settle_iters * 2 if fi == 0 else args.settle_iters
 
             # Build bone surfaces for collision projection
             import trimesh as _trimesh
@@ -892,7 +892,10 @@ def main():
 
             # Build collision projection function (projective dynamics)
             def collision_projection(positions):
-                """Project penetrating vertices to bone surface + margin."""
+                """Project penetrating vertices to bone surface + margin.
+                Uses closest_point + normal dot product instead of ray-casting contains.
+                Fast enough to run every ARAP iteration.
+                """
                 proj_count = 0
                 for bone_surf, body_name, bone_tree in bone_surfs_frame:
                     for m in muscles:
@@ -907,25 +910,32 @@ def main():
                         pos = positions[off:off + n]
                         fixed_set = set(m['fixed_vertices'])
 
+                        # KDTree pre-filter: only check vertices near bone
                         dists, _ = bone_tree.query(pos)
-                        close_mask = dists < 0.005
+                        close_mask = dists < 0.030  # 30mm radius (deep penetrations can be >15mm)
                         if not np.any(close_mask):
                             continue
                         close_idx = np.where(close_mask)[0]
                         free_close = np.array([vi for vi in close_idx if vi not in fixed_set])
                         if len(free_close) == 0:
                             continue
-                        try:
-                            inside = bone_surf.contains(pos[free_close])
-                        except:
-                            continue
+
+                        # Closest point on bone surface (BVH, fast)
+                        closest, _, face_ids = _trimesh.proximity.closest_point(
+                            bone_surf, pos[free_close])
+                        normals = bone_surf.face_normals[face_ids]
+                        # Inside test: dot(vertex - closest, face_normal) < 0
+                        to_vert = pos[free_close] - closest
+                        dots = np.sum(to_vert * normals, axis=1)
+                        inside = dots < 0
+
                         if not np.any(inside):
                             continue
                         pen = free_close[inside]
-                        closest, _, face_ids = _trimesh.proximity.closest_point(bone_surf, pos[pen])
-                        normals = bone_surf.face_normals[face_ids]
-                        margin = 0.002  # 2mm
-                        positions[off + pen] = closest + normals * margin
+                        # Depth-dependent margin: deeper penetration → push further out
+                        depths = -dots[inside]  # positive values in meters
+                        margins = np.clip(depths + 0.005, 0.005, 0.020)  # 5-20mm
+                        positions[off + pen] = closest[inside] + normals[inside] * margins[:, None]
                         proj_count += len(pen)
                 return positions
 

@@ -910,6 +910,16 @@ class ARAPBackendTaichi(ARAPBackend):
         # Get RHS back to numpy
         b_np = self.rhs.to_numpy()
 
+        # Collision penalty: for collision candidate vertices, add
+        # collision_weight * target to RHS.  The diagonal already has
+        # collision_weight added (from build_system), so the combined
+        # effect is a spring pulling vertex toward target.
+        # For inside-bone: target = surface_point (pulls out)
+        # For outside: target = current_pos (zero net force at convergence)
+        if collision_targets is not None and self._collision_weight > 0:
+            for vi, target in collision_targets.items():
+                b_np[vi] += self._collision_weight * target
+
         # Set fixed vertex RHS
         fixed_indices = np.where(fixed_mask)[0]
         if fixed_targets is not None and len(fixed_targets) > 0:
@@ -1141,10 +1151,18 @@ class ARAPBackendTaichi(ARAPBackend):
     def solve(self, positions, rest_positions, neighbors, weights, rest_edges,
               fixed_mask, fixed_targets, max_iterations=20, tolerance=1e-4,
               target_edges=None, verbose=False, collision_targets=None,
-              collision_projection=None):
+              collision_projection=None, collision_target_fn=None):
         """Run full ARAP iteration using Taichi.
-        collision_projection: callable(positions) -> positions with penetrating
-            vertices projected to bone surface. Called every N iterations.
+
+        collision_target_fn: callable(positions) -> dict {vi: target_pos}
+            Called every iteration to compute collision targets for the
+            penalty-in-diagonal approach.  For inside-bone vertices,
+            target = bone_surface + margin.  For outside collision
+            candidates, target = current_pos (zero net force).
+            Requires collision_vertices/collision_weight in build_system.
+
+        collision_projection: callable(positions) -> positions
+            Legacy: external projection every N iterations.
         """
         n = len(positions)
         positions = positions.copy()
@@ -1157,28 +1175,37 @@ class ARAPBackendTaichi(ARAPBackend):
 
         rest_pos_f64 = rest_positions if rest_positions.dtype == np.float64 else rest_positions.astype(np.float64)
 
-        # GPU CG path disabled: iterative CG is slower than scipy's direct
-        # LU forward/back-sub for this problem size (~11k verts).
+        # GPU CG path disabled
         use_gpu_cg = False
         if use_gpu_cg and not getattr(self, '_cg_kernels_built', False):
             self._build_cg_kernels()
-
         if use_gpu_cg:
             return self._solve_gpu_cg(
                 positions, rest_pos_f64, n, free_indices, fixed_indices,
                 fixed_mask, fixed_targets, neighbors, weights, rest_edges,
                 target_edges, max_iterations, tolerance, verbose)
 
-        # Fallback: original scipy path
+        # Tolerance: with penalty contact, convergence is proper (no oscillation)
+        proj_interval = 5
+        effective_tol = tolerance
+        if collision_projection is not None and collision_target_fn is None:
+            effective_tol = max(tolerance, 2e-3)
+
         rest_uploaded = False
         for iteration in range(max_iterations):
             self.local_step(positions, rest_positions, neighbors, weights, rest_edges, target_edges)
             if not rest_uploaded:
                 self.rest_positions.from_numpy(rest_pos_f64)
                 rest_uploaded = True
+
+            # Compute collision targets for this iteration
+            iter_collision_targets = collision_targets
+            if collision_target_fn is not None:
+                iter_collision_targets = collision_target_fn(positions)
+
             new_positions = self.global_step(rest_positions, neighbors, weights, rest_edges,
                                              fixed_mask, fixed_targets, target_edges,
-                                             collision_targets=collision_targets)
+                                             collision_targets=iter_collision_targets)
             if not np.isfinite(new_positions).all():
                 if verbose:
                     print(f"  Taichi: Non-finite at iteration {iteration}, reverting")
@@ -1191,12 +1218,13 @@ class ARAPBackendTaichi(ARAPBackend):
             positions = new_positions
             if fixed_targets is not None:
                 positions[fixed_indices] = fixed_targets
-            # Projective dynamics: collision projection every 10 iterations
-            if collision_projection is not None and (iteration + 1) % 10 == 0:
-                positions = collision_projection(positions)
+            # Legacy projection (only if no collision_target_fn)
+            if collision_projection is not None and collision_target_fn is None:
+                if (iteration + 1) % proj_interval == 0:
+                    positions = collision_projection(positions)
             if verbose and (iteration + 1) % 5 == 0:
                 print(f"  Iter {iteration+1}: max_disp={max_disp:.2e}")
-            if max_disp < tolerance:
+            if max_disp < effective_tol:
                 if verbose:
                     print(f"  Converged at iteration {iteration+1}, max_disp={max_disp:.2e}")
                 return positions, iteration + 1, max_disp
