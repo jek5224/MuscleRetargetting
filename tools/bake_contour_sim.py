@@ -747,6 +747,8 @@ def main():
                         help='XPBD iterations per frame')
     parser.add_argument('--margin', type=float, default=0.002,
                         help='Collision margin (m)')
+    parser.add_argument('--shape-weight', type=float, default=0.5,
+                        help='LBS shape-following weight (0=pure XPBD, 1=pure LBS)')
     parser.add_argument('--post-iters', type=int, default=3,
                         help='Edge-bone post-processing iterations')
     parser.add_argument('--constraint-threshold', type=float, default=0.015,
@@ -982,10 +984,28 @@ def main():
         n_mm_pushed = resolve_muscle_muscle_collisions(
             solver, muscles, d_min=args.margin)
 
-        # Taubin smoothing to reduce XPBD wrinkling on output
+        # Blend XPBD result toward LBS for bone-following (like ARAP targets).
+        # XPBD only constrains fixed vertices; this pulls free vertices toward
+        # their LBS positions so muscles follow bones, not float in air.
+        if args.shape_weight > 0:
+            for m in muscles:
+                name = m['name']
+                vs, ve, _, _ = solver._muscle_ranges[name]
+                xpbd_pos = solver.positions[vs:ve]
+                lbs_pos = muscles_update[name]['positions']
+                fixed_set = set(m['fixed_vertices'])
+                w = args.shape_weight
+                blended = (1.0 - w) * xpbd_pos + w * lbs_pos
+                # Keep fixed vertices exactly at XPBD result (bone-locked)
+                for vi in fixed_set:
+                    if vi < len(blended):
+                        blended[vi] = xpbd_pos[vi]
+                solver.positions[vs:ve] = blended
+
+        # Taubin smoothing to reduce wrinkling on output
         smooth_output_positions(solver, muscles, iterations=3)
 
-        # Capture output positions (with collision + smoothing corrections)
+        # Capture output positions (with blending + collision + smoothing)
         output_positions = {m['name']: solver.get_muscle_positions(m['name']).astype(np.float32)
                             for m in muscles}
 
