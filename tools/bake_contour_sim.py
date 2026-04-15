@@ -742,7 +742,7 @@ def main():
                         help='XPBD iterations per frame')
     parser.add_argument('--margin', type=float, default=0.002,
                         help='Collision margin (m)')
-    parser.add_argument('--shape-weight', type=float, default=0.7,
+    parser.add_argument('--shape-weight', type=float, default=0.0,
                         help='LBS shape-following weight (0=pure XPBD, 1=pure LBS)')
     parser.add_argument('--post-iters', type=int, default=3,
                         help='Edge-bone post-processing iterations')
@@ -958,15 +958,31 @@ def main():
                 'fixed_targets': fixed_targets,
             }
 
-        # LBS-init each frame — carry-forward diverges on contour meshes
-        # because poor-quality tets invert and XPBD can't recover.
+        # Update rest shape to current LBS each frame.
+        # This makes muscles follow bones rigidly (F≈I when pos≈LBS).
+        # Elastic energy only appears where collisions or attachment distance
+        # changes force deviation from LBS — matching real muscle behavior
+        # (nearly rigid body that deforms when origin/insertion move).
+        for m in muscles:
+            if m['name'] not in muscles_update:
+                continue
+            vs, ve, _, _ = solver._muscle_ranges[m['name']]
+            solver.rest_positions[vs:ve] = muscles_update[m['name']]['positions']
+        solver._precompute_rest_state()
+        solver._tet_mass = 1060.0 * solver.rest_volume
+        solver.ti_Bm_inv.from_numpy(solver.Bm_inv)
+        solver.ti_rest_volume.from_numpy(solver.rest_volume)
+
+        # LBS-init positions
         solver._has_previous_solution = False
         solver.update_targets_and_positions(muscles_update)
 
         # Build bone trimeshes at current pose
         bone_tms = build_bone_trimeshes(skel, bone_meshes, bone_rest_transforms)
 
-        # XPBD solve (handles vertex-bone collision internally)
+        # XPBD solve — starts at LBS with rest=LBS, so F≈I initially.
+        # Only collision projection and constraint violations create F≠I,
+        # which the elastic solve distributes smoothly.
         fevals, residual = solver.solve(
             mu=mu, lam=lam,
             vol_penalty=args.vol_penalty,
