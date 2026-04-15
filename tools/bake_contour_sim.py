@@ -172,20 +172,9 @@ def load_muscle(tet_dir, name):
     for vi in anchors:
         fixed_verts.add(int(vi))
 
-    # Compact unused vertices for efficient XPBD simulation.
-    # Store n_orig and reverse map so we can expand back to full vertex count
-    # when saving output (viewer expects the original vertex count).
-    n_orig = len(verts)
-    used = np.unique(tets.ravel())
-    remap = None
-    unmap = None  # compact → original
-    if len(used) < len(verts):
-        remap = np.full(len(verts), -1, dtype=np.int32)
-        remap[used] = np.arange(len(used), dtype=np.int32)
-        unmap = used.copy()  # unmap[compact_idx] = original_idx
-        verts = verts[used]
-        tets = remap[tets]
-        fixed_verts = {int(remap[vi]) for vi in fixed_verts if vi < len(remap) and remap[vi] >= 0}
+    # Keep ALL vertices (no compaction). Orphan vertices (not in any tet)
+    # get zero inverse mass in XPBD = fixed. This ensures output vertex
+    # count matches the viewer's tet_vertices and LBS covers all vertices.
 
     cap_attachments = data.get('cap_attachments', [])
     attach_skel_names = data.get('attach_skeleton_names', [])
@@ -198,9 +187,7 @@ def load_muscle(tet_dir, name):
         'fixed_vertices': sorted(fixed_verts),
         'cap_attachments': cap_attachments,
         'attach_skeleton_names': attach_skel_names,
-        'remap': remap,
-        'unmap': unmap,
-        'n_orig': n_orig,
+        'remap': None,
     }
 
 
@@ -954,17 +941,9 @@ def main():
                     fixed_mask[vi] = True
             fixed_targets = lbs_pos[fixed_mask]
 
-            # Expand LBS to full vertex count for orphan fill in output
-            if m['unmap'] is not None:
-                lbs_full = np.zeros((m['n_orig'], 3), dtype=np.float64)
-                lbs_full[m['unmap']] = lbs_pos
-            else:
-                lbs_full = lbs_pos
-
             muscles_update[m['name']] = {
                 'positions': lbs_pos,
                 'fixed_targets': fixed_targets,
-                '_lbs_full': lbs_full,
             }
 
         # LBS-init each frame — carry-forward diverges on contour meshes
@@ -1033,17 +1012,9 @@ def main():
               f"vert_coll={n_vert_pushed}, edge_coll={n_edge_resolved}, mm={n_mm_pushed}",
               flush=True)
 
-        # Buffer output positions — expand back to full vertex count for viewer
+        # Buffer output positions (no remap needed — all vertices kept)
         for m in muscles:
-            compact_pos = output_positions[m['name']]
-            if m['unmap'] is not None:
-                # Fill orphan vertices with LBS positions (not zeros)
-                lbs_full = muscles_update[m['name']]['_lbs_full']
-                full_pos = lbs_full.astype(np.float32)
-                full_pos[m['unmap']] = compact_pos
-                bake_buffers[m['name']][frame] = full_pos
-            else:
-                bake_buffers[m['name']][frame] = compact_pos
+            bake_buffers[m['name']][frame] = output_positions[m['name']]
 
         # Flush periodically
         if (frame - args.start_frame + 1) % FLUSH_INTERVAL == 0:
