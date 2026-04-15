@@ -981,22 +981,8 @@ def main():
                 'fixed_targets': fixed_targets,
             }
 
-        # Update rest shape to current LBS each frame.
-        # This makes muscles follow bones rigidly (F≈I when pos≈LBS).
-        # Elastic energy only appears where collisions or attachment distance
-        # changes force deviation from LBS — matching real muscle behavior
-        # (nearly rigid body that deforms when origin/insertion move).
-        for m in muscles:
-            if m['name'] not in muscles_update:
-                continue
-            vs, ve, _, _ = solver._muscle_ranges[m['name']]
-            solver.rest_positions[vs:ve] = muscles_update[m['name']]['positions']
-        solver._precompute_rest_state()
-        solver._tet_mass = 1060.0 * solver.rest_volume
-        solver.ti_Bm_inv.from_numpy(solver.Bm_inv)
-        solver.ti_rest_volume.from_numpy(solver.rest_volume)
-
-        # LBS-init positions
+        # Fixed rest shape (frame-0 LBS) — elastic energy preserves volume
+        # and edge lengths. LBS-init each frame prevents carry-forward divergence.
         solver._has_previous_solution = False
         solver.update_targets_and_positions(muscles_update)
 
