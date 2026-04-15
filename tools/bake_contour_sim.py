@@ -753,11 +753,11 @@ def main():
     parser.add_argument('--end-frame', type=int, default=None)
     parser.add_argument('--tet-dir', default='tet', help='Tet mesh directory')
     parser.add_argument('--output-dir', default='data/motion_cache')
-    parser.add_argument('--youngs', type=float, default=500.0,
+    parser.add_argument('--youngs', type=float, default=5000.0,
                         help='Young\'s modulus (Pa)')
     parser.add_argument('--poisson', type=float, default=0.40,
                         help='Poisson ratio')
-    parser.add_argument('--vol-penalty', type=float, default=5000.0,
+    parser.add_argument('--vol-penalty', type=float, default=50000.0,
                         help='Volume stiffness')
     parser.add_argument('--kappa', type=float, default=1e4,
                         help='Collision stiffness')
@@ -769,7 +769,7 @@ def main():
                         help='LBS shape-following weight (0=pure XPBD, 1=pure LBS)')
     parser.add_argument('--post-iters', type=int, default=3,
                         help='Edge-bone post-processing iterations')
-    parser.add_argument('--constraint-threshold', type=float, default=0.015,
+    parser.add_argument('--constraint-threshold', type=float, default=0.005,
                         help='Inter-muscle constraint distance (m)')
     args = parser.parse_args()
 
