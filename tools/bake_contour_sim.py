@@ -141,12 +141,22 @@ def load_muscle(tet_dir, name):
     if np.any(neg):
         tets[neg, 1], tets[neg, 2] = tets[neg, 2].copy(), tets[neg, 1].copy()
 
-    # Remove degenerate tets
+    # Remove degenerate and near-degenerate tets.
+    # Contour meshes have many thin tets (24% with quality<0.001 in some muscles)
+    # that flip instantly under LBS deformation, causing cascading inversions.
     v0 = verts[tets[:, 0]]
     cross = np.cross(verts[tets[:, 1]] - v0, verts[tets[:, 2]] - v0)
     vol = np.einsum('ij,ij->i', cross, verts[tets[:, 3]] - v0) / 6.0
-    good = vol > 1e-12
+    # Quality metric: vol / avg_edge^3 — thin slivers have near-zero quality
+    edge_lens = []
+    for i in range(4):
+        for j in range(i + 1, 4):
+            edge_lens.append(np.linalg.norm(verts[tets[:, i]] - verts[tets[:, j]], axis=1))
+    avg_edge = np.mean(edge_lens, axis=0)
+    quality = vol / (avg_edge ** 3 + 1e-30)
+    good = quality > 1e-4  # remove worst slivers
     if not np.all(good):
+        n_removed = int(np.sum(~good))
         tets = tets[good]
 
     # Collect fixed vertices from caps + anchors
@@ -631,6 +641,46 @@ def resolve_muscle_muscle_collisions(solver, muscles, d_min=0.002):
     return n_pushed
 
 
+def smooth_output_positions(solver, muscles, iterations=3):
+    """Taubin smoothing on output positions to reduce XPBD wrinkling.
+
+    Alternates shrink (lambda) and inflate (mu) to smooth without shrinkage.
+    Only smooths free surface vertices; fixed vertices stay put.
+    """
+    lam = 0.5
+    mu = -0.52  # slightly stronger inflate to prevent shrinkage
+
+    for m in muscles:
+        name = m['name']
+        vs, ve, _, _ = solver._muscle_ranges[name]
+        pos = solver.positions[vs:ve].copy()
+        adj = m['_adj']
+        fixed_set = set(m['fixed_vertices'])
+        surf_set = set(m['_surface_vert_set'])
+
+        for _ in range(iterations):
+            # Shrink
+            new_pos = pos.copy()
+            for vi in surf_set:
+                if vi in fixed_set or len(adj[vi]) == 0:
+                    continue
+                nbrs = list(adj[vi])
+                centroid = np.mean(pos[nbrs], axis=0)
+                new_pos[vi] = pos[vi] + lam * (centroid - pos[vi])
+            pos = new_pos
+            # Inflate
+            new_pos = pos.copy()
+            for vi in surf_set:
+                if vi in fixed_set or len(adj[vi]) == 0:
+                    continue
+                nbrs = list(adj[vi])
+                centroid = np.mean(pos[nbrs], axis=0)
+                new_pos[vi] = pos[vi] + mu * (centroid - pos[vi])
+            pos = new_pos
+
+        solver.positions[vs:ve] = pos
+
+
 # ---------------------------------------------------------------------------
 # Inter-muscle constraint discovery
 # ---------------------------------------------------------------------------
@@ -904,14 +954,21 @@ def main():
                     fixed_mask[vi] = True
             fixed_targets = lbs_pos[fixed_mask]
 
+            # Expand LBS to full vertex count for orphan fill in output
+            if m['unmap'] is not None:
+                lbs_full = np.zeros((m['n_orig'], 3), dtype=np.float64)
+                lbs_full[m['unmap']] = lbs_pos
+            else:
+                lbs_full = lbs_pos
+
             muscles_update[m['name']] = {
                 'positions': lbs_pos,
                 'fixed_targets': fixed_targets,
+                '_lbs_full': lbs_full,
             }
 
-        # Always use LBS as initial guess — prevents inversion accumulation
-        # across frames. The solver's carry-forward causes inversions to compound
-        # because contour mesh tets are thin and the solver can't recover.
+        # LBS-init each frame — carry-forward diverges on contour meshes
+        # because poor-quality tets invert and XPBD can't recover.
         solver._has_previous_solution = False
         solver.update_targets_and_positions(muscles_update)
 
@@ -946,7 +1003,10 @@ def main():
         n_mm_pushed = resolve_muscle_muscle_collisions(
             solver, muscles, d_min=args.margin)
 
-        # Capture output positions (with edge-bone and muscle-muscle corrections)
+        # Taubin smoothing to reduce XPBD wrinkling on output
+        smooth_output_positions(solver, muscles, iterations=3)
+
+        # Capture output positions (with collision + smoothing corrections)
         output_positions = {m['name']: solver.get_muscle_positions(m['name']).astype(np.float32)
                             for m in muscles}
 
@@ -977,7 +1037,9 @@ def main():
         for m in muscles:
             compact_pos = output_positions[m['name']]
             if m['unmap'] is not None:
-                full_pos = np.zeros((m['n_orig'], 3), dtype=np.float32)
+                # Fill orphan vertices with LBS positions (not zeros)
+                lbs_full = muscles_update[m['name']]['_lbs_full']
+                full_pos = lbs_full.astype(np.float32)
                 full_pos[m['unmap']] = compact_pos
                 bake_buffers[m['name']][frame] = full_pos
             else:
