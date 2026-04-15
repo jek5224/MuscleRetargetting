@@ -628,40 +628,35 @@ def resolve_muscle_muscle_collisions(solver, muscles, d_min=0.002):
     return n_pushed
 
 
-def smooth_output_positions(solver, muscles, iterations=3):
-    """Taubin smoothing on output positions to reduce XPBD wrinkling.
+def smooth_output_positions(solver, muscles, iterations=5):
+    """Taubin smoothing on output surface using surface-only adjacency.
 
-    Alternates shrink (lambda) and inflate (mu) to smooth without shrinkage.
-    Only smooths free surface vertices; fixed vertices stay put.
+    Uses surface triangle edges (not tet edges) so smoothing stays on the
+    surface instead of pulling vertices inward toward interior.
     """
     lam = 0.5
-    mu = -0.52  # slightly stronger inflate to prevent shrinkage
+    mu = -0.52
 
     for m in muscles:
         name = m['name']
         vs, ve, _, _ = solver._muscle_ranges[name]
         pos = solver.positions[vs:ve].copy()
-        adj = m['_adj']
         fixed_set = set(m['fixed_vertices'])
-        surf_set = set(m['_surface_vert_set'])
+        surf_adj = m['_surf_adj']
 
         for _ in range(iterations):
-            # Shrink
             new_pos = pos.copy()
-            for vi in surf_set:
-                if vi in fixed_set or len(adj[vi]) == 0:
+            for vi, nbrs in surf_adj.items():
+                if vi in fixed_set or len(nbrs) == 0:
                     continue
-                nbrs = list(adj[vi])
-                centroid = np.mean(pos[nbrs], axis=0)
+                centroid = np.mean(pos[list(nbrs)], axis=0)
                 new_pos[vi] = pos[vi] + lam * (centroid - pos[vi])
             pos = new_pos
-            # Inflate
             new_pos = pos.copy()
-            for vi in surf_set:
-                if vi in fixed_set or len(adj[vi]) == 0:
+            for vi, nbrs in surf_adj.items():
+                if vi in fixed_set or len(nbrs) == 0:
                     continue
-                nbrs = list(adj[vi])
-                centroid = np.mean(pos[nbrs], axis=0)
+                centroid = np.mean(pos[list(nbrs)], axis=0)
                 new_pos[vi] = pos[vi] + mu * (centroid - pos[vi])
             pos = new_pos
 
@@ -747,7 +742,7 @@ def main():
                         help='XPBD iterations per frame')
     parser.add_argument('--margin', type=float, default=0.002,
                         help='Collision margin (m)')
-    parser.add_argument('--shape-weight', type=float, default=0.5,
+    parser.add_argument('--shape-weight', type=float, default=0.7,
                         help='LBS shape-following weight (0=pure XPBD, 1=pure LBS)')
     parser.add_argument('--post-iters', type=int, default=3,
                         help='Edge-bone post-processing iterations')
@@ -803,6 +798,14 @@ def main():
         m['_surface_faces'] = surf_tri
         m['_surface_edges'] = surf_edges
         m['_surface_vert_set'] = surf_vert_set
+        # Surface-only adjacency (triangle edges, not tet edges)
+        surf_adj = {}
+        for f in surf_tri:
+            for i in range(3):
+                a, b = int(f[i]), int(f[(i + 1) % 3])
+                surf_adj.setdefault(a, set()).add(b)
+                surf_adj.setdefault(b, set()).add(a)
+        m['_surf_adj'] = surf_adj
     total_surf_faces = sum(len(m['_surface_faces']) for m in muscles)
     total_surf_edges = sum(len(m['_surface_edges']) for m in muscles)
     print(f"    {total_surf_faces} surface faces, {total_surf_edges} surface edges")
@@ -849,6 +852,13 @@ def main():
                 m['_surface_faces'] = extract_surface_triangles(m['tetrahedra'])
                 m['_surface_edges'] = extract_edges_from_faces(m['_surface_faces'])
                 m['_surface_vert_set'] = sorted(set(np.unique(m['_surface_faces']).tolist()))
+                surf_adj = {}
+                for f in m['_surface_faces']:
+                    for i in range(3):
+                        a, b = int(f[i]), int(f[(i + 1) % 3])
+                        surf_adj.setdefault(a, set()).add(b)
+                        surf_adj.setdefault(b, set()).add(a)
+                m['_surf_adj'] = surf_adj
 
     # ── Build XPBD solver ────────────────────────────────────────────────
     print("[8] Building XPBD solver...")
