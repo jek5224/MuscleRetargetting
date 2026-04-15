@@ -162,12 +162,17 @@ def load_muscle(tet_dir, name):
     for vi in anchors:
         fixed_verts.add(int(vi))
 
-    # Remove unused vertices
+    # Compact unused vertices for efficient XPBD simulation.
+    # Store n_orig and reverse map so we can expand back to full vertex count
+    # when saving output (viewer expects the original vertex count).
+    n_orig = len(verts)
     used = np.unique(tets.ravel())
     remap = None
+    unmap = None  # compact → original
     if len(used) < len(verts):
         remap = np.full(len(verts), -1, dtype=np.int32)
         remap[used] = np.arange(len(used), dtype=np.int32)
+        unmap = used.copy()  # unmap[compact_idx] = original_idx
         verts = verts[used]
         tets = remap[tets]
         fixed_verts = {int(remap[vi]) for vi in fixed_verts if vi < len(remap) and remap[vi] >= 0}
@@ -184,6 +189,8 @@ def load_muscle(tet_dir, name):
         'cap_attachments': cap_attachments,
         'attach_skeleton_names': attach_skel_names,
         'remap': remap,
+        'unmap': unmap,
+        'n_orig': n_orig,
     }
 
 
@@ -966,9 +973,15 @@ def main():
               f"vert_coll={n_vert_pushed}, edge_coll={n_edge_resolved}, mm={n_mm_pushed}",
               flush=True)
 
-        # Buffer output positions (with corrections applied)
+        # Buffer output positions — expand back to full vertex count for viewer
         for m in muscles:
-            bake_buffers[m['name']][frame] = output_positions[m['name']]
+            compact_pos = output_positions[m['name']]
+            if m['unmap'] is not None:
+                full_pos = np.zeros((m['n_orig'], 3), dtype=np.float32)
+                full_pos[m['unmap']] = compact_pos
+                bake_buffers[m['name']][frame] = full_pos
+            else:
+                bake_buffers[m['name']][frame] = compact_pos
 
         # Flush periodically
         if (frame - args.start_frame + 1) % FLUSH_INTERVAL == 0:
