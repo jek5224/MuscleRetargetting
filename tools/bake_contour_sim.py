@@ -277,6 +277,29 @@ def compute_multibone_lbs(muscle, skel):
                     per_vertex[vi] = [(bone_name, 1.0)]
                     anchor_bone[vi] = bone_name
 
+    # Assign ALL fixed (cap) vertices to nearest bone — not just cap_attachments.
+    # cap_attachments only has 2 anchor points per stream, but cap faces have
+    # many more vertices that must also rigidly follow their bone.
+    fixed_verts = muscle.get('fixed_vertices', [])
+    if len(anchor_bone) > 0 and len(fixed_verts) > len(anchor_bone):
+        bone_centers = {bn: bi['t0'] for bn, bi in bone_info.items()}
+        for vi in fixed_verts:
+            if vi in per_vertex:
+                continue
+            if vi >= n_verts:
+                continue
+            # Assign to nearest bone
+            best_bone = None
+            best_dist = float('inf')
+            for bname, center in bone_centers.items():
+                d = np.linalg.norm(rest_verts[vi] - center)
+                if d < best_dist:
+                    best_dist = d
+                    best_bone = bname
+            if best_bone is not None:
+                per_vertex[vi] = [(best_bone, 1.0)]
+                anchor_bone[vi] = best_bone
+
     # Heat diffusion from anchors
     tets = muscle['tetrahedra']
     adj = [set() for _ in range(n_verts)]
