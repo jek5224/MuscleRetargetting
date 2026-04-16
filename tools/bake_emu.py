@@ -441,39 +441,51 @@ def compute_fiber_directions(vertices, tetrahedra, vertex_contour_level):
     return fiber_dirs
 
 
-def precompute_emu(vertices, tetrahedra, vertex_contour_level, k_modes=48):
+def precompute_emu(vertices, tetrahedra, fixed_vertices, vertex_contour_level, k_modes=48):
     """Precompute all EMU data structures.
 
-    Returns dict with: G, GtG, GtG_solver, Phi, Lambda_inv, Dm_inv, volumes,
-                        fiber_dirs, B (Phi^T @ G^T)
+    Builds a reduced ACAP system (Eq. 21) with fixed vertex Dirichlet
+    constraints baked in, so the ACAP solve correctly pins cap vertices
+    to bone positions while solving free vertices consistently.
     """
     n = len(vertices)
     m = len(tetrahedra)
-    print(f"    EMU precompute: {n} verts, {m} tets")
+    print(f"    EMU precompute: {n} verts, {m} tets, {len(fixed_vertices)} fixed")
 
     t0 = time.time()
     G, Dm_inv, volumes = build_gradient_operator(vertices, tetrahedra)
     GtG = G.T @ G  # (3n, 3n) sparse
+    Gt = G.T.tocsc()
     print(f"    G: {G.shape}, GtG: {GtG.shape}, built in {time.time()-t0:.2f}s")
 
-    # Factorize G^T G for ACAP solve (add regularization for null space)
+    # Build fixed/free index sets in the 3n DOF space
+    # Each vertex i has 3 DOFs: 3i, 3i+1, 3i+2
+    fixed_set = set(fixed_vertices)
+    free_vert_idx = np.array([i for i in range(n) if i not in fixed_set], dtype=np.int32)
+    fixed_vert_idx = np.array(sorted(fixed_set), dtype=np.int32)
+    free_dofs = np.concatenate([3 * free_vert_idx + d for d in range(3)])
+    free_dofs.sort()
+    fixed_dofs = np.concatenate([3 * fixed_vert_idx + d for d in range(3)])
+    fixed_dofs.sort()
+
+    # Reduced ACAP system: L_ff q_free = rhs_free - L_fc q_fixed
     t0 = time.time()
     reg = 1e-6
     GtG_reg = GtG + reg * sp.eye(3 * n)
     GtG_csc = GtG_reg.tocsc()
-    GtG_solver = splu(GtG_csc)
-    Gt = G.T.tocsc()
-    print(f"    GtG factorized in {time.time()-t0:.2f}s")
+    L_ff = GtG_csc[np.ix_(free_dofs, free_dofs)].tocsc()
+    L_fc = GtG_csc[np.ix_(free_dofs, fixed_dofs)].tocsc()
+    acap_solver = splu(L_ff)
+    print(f"    Reduced ACAP: {len(free_dofs)} free, {len(fixed_dofs)} fixed, "
+          f"factorized in {time.time()-t0:.2f}s")
 
     # Eigendecomposition for Woodbury (Eq. 13)
     t0 = time.time()
     k = min(k_modes, 3 * n - 2)
     eigenvalues, eigenvectors = eigsh(GtG_csc, k=k, which='LM')
-    # eigenvalues: (k,), eigenvectors: (3n, k)
     Phi = eigenvectors  # (3n, k)
     Lambda_inv = np.diag(1.0 / (eigenvalues + 1e-30))  # (k, k)
 
-    # B = Phi^T @ G^T  (k, 9m) — precompute for Woodbury
     B_sparse = Phi.T @ Gt  # (k, 9m)
     B = B_sparse if isinstance(B_sparse, np.ndarray) else B_sparse.toarray()
     print(f"    Eigenmodes: k={k}, captured {eigenvalues.sum():.2f} "
@@ -486,7 +498,13 @@ def precompute_emu(vertices, tetrahedra, vertex_contour_level, k_modes=48):
         'G': G,
         'Gt': Gt,
         'GtG': GtG,
-        'GtG_solver': GtG_solver,
+        'GtG_csc': GtG_csc,
+        'acap_solver': acap_solver,  # reduced system solver
+        'L_fc': L_fc,
+        'free_dofs': free_dofs,
+        'fixed_dofs': fixed_dofs,
+        'free_vert_idx': free_vert_idx,
+        'fixed_vert_idx': fixed_vert_idx,
         'Phi': Phi,
         'Lambda_inv': Lambda_inv,
         'B': B,
@@ -564,27 +582,25 @@ def stable_neohookean_hessian_blocks(F, volumes, mu, lam):
     """
     m = len(F)
     H = np.zeros((m, 9, 9))
+    min_diag = 1e-4  # minimum diagonal value for SPD guarantee
 
     for i in range(m):
         Fi = F[i]
-        V = volumes[i]
+        V = max(volumes[i], 1e-15)
         Ji = np.linalg.det(Fi)
 
-        # Compute full Hessian analytically (simplified SPD version):
-        # H_iso ≈ μ I_9 + λ J² (vec(F^{-T}) vec(F^{-T})^T)
-        # This is the dominant SPD part; we skip the non-SPD correction terms
         try:
             FiT_inv = np.linalg.inv(Fi).T
         except np.linalg.LinAlgError:
-            FiT_inv = np.linalg.pinv(Fi).T
+            # Degenerate F — use identity-like Hessian
+            H[i] = V * mu * np.eye(9) + min_diag * np.eye(9)
+            continue
 
-        g = FiT_inv.ravel()  # (9,)
-        H[i] = V * (mu * np.eye(9) + lam * Ji * Ji * np.outer(g, g))
+        g = FiT_inv.ravel()
+        H[i] = V * (mu * np.eye(9) + lam * max(Ji * Ji, 0) * np.outer(g, g))
 
-        # Ensure SPD by clamping eigenvalues
-        eigvals = np.linalg.eigvalsh(H[i])
-        if eigvals.min() < 1e-8:
-            H[i] += (1e-8 - eigvals.min()) * np.eye(9)
+        # Ensure SPD
+        H[i] += min_diag * np.eye(9)
 
     return H  # (m, 9, 9)
 
@@ -592,26 +608,35 @@ def stable_neohookean_hessian_blocks(F, volumes, mu, lam):
 # ---------------------------------------------------------------------------
 # ACAP energy and position recovery
 # ---------------------------------------------------------------------------
-def acap_positions(Fvec, precomp, fixed_mask=None, fixed_targets=None):
-    """Recover vertex positions from deformation gradients via ACAP (Eq. 4).
+def acap_positions(Fvec, precomp, fixed_targets_flat):
+    """Recover vertex positions via ACAP with Dirichlet constraints (Eq. 4, 21).
 
-    q* = (G^T G)^{-1} G^T vec(F)
-    Then enforce fixed vertex positions.
+    Solves the reduced system:
+        L_ff q_free = rhs_free - L_fc q_fixed
+    where q_fixed = fixed_targets_flat[fixed_dofs].
     """
-    rhs = precomp['Gt'] @ Fvec  # (3n,)
-    q_flat = precomp['GtG_solver'].solve(rhs)  # (3n,)
-    q = q_flat.reshape(-1, 3)
+    n = precomp['n_verts']
+    free_dofs = precomp['free_dofs']
+    fixed_dofs = precomp['fixed_dofs']
 
-    # Enforce fixed vertices
-    if fixed_mask is not None and fixed_targets is not None:
-        q[fixed_mask] = fixed_targets[fixed_mask]
+    full_rhs = (precomp['Gt'] @ Fvec).toarray().ravel() if sp.issparse(precomp['Gt'] @ Fvec) else precomp['Gt'] @ Fvec
 
-    return q
+    q_fixed = fixed_targets_flat[fixed_dofs]
+    rhs_free = full_rhs[free_dofs] - precomp['L_fc'] @ q_fixed
+
+    q_free = precomp['acap_solver'].solve(rhs_free)
+
+    q_flat = np.zeros(3 * n)
+    q_flat[free_dofs] = q_free
+    q_flat[fixed_dofs] = q_fixed
+
+    return q_flat.reshape(-1, 3)
 
 
-def acap_energy(Fvec, precomp):
-    """E_C = ½ ||G q(F) - F||² where q(F) is the ACAP solution (Eq. 3)."""
-    q_flat = precomp['GtG_solver'].solve(precomp['Gt'] @ Fvec)
+def acap_energy(Fvec, precomp, fixed_targets_flat):
+    """E_C = ½ ||G q(F) - F||² with constrained ACAP solve."""
+    q = acap_positions(Fvec, precomp, fixed_targets_flat)
+    q_flat = q.ravel()
     residual = precomp['G'] @ q_flat - Fvec
     return 0.5 * np.dot(residual, residual)
 
@@ -619,20 +644,20 @@ def acap_energy(Fvec, precomp):
 # ---------------------------------------------------------------------------
 # EMU total energy and gradient
 # ---------------------------------------------------------------------------
-def emu_energy(Fvec, precomp, mu, lam, alpha):
+def emu_energy(Fvec, precomp, fixed_targets_flat, mu, lam, alpha):
     """Total EMU energy: Ψ_iso + α·E_C (Eq. 5, no fiber activation)."""
     m = precomp['n_tets']
     F = _vec_to_F(Fvec, m)
     E_iso = stable_neohookean_energy(F, precomp['volumes'], mu, lam)
-    E_c = acap_energy(Fvec, precomp)
+    E_c = acap_energy(Fvec, precomp, fixed_targets_flat)
     return E_iso + alpha * E_c
 
 
-def emu_gradient(Fvec, precomp, mu, lam, alpha):
+def emu_gradient(Fvec, precomp, fixed_targets_flat, mu, lam, alpha):
     """Gradient dE/dF (Eq. 9).
 
     dE/dF = ∂Ψ_iso/∂F + α·∂E_C/∂F
-    ∂E_C/∂F = F - G(G^TG)^{-1}G^T F  (Eq. 10)
+    ∂E_C/∂F = F - G q(F)  where q(F) is the constrained ACAP solve (Eq. 10)
     """
     m = precomp['n_tets']
     F = _vec_to_F(Fvec, m)
@@ -641,10 +666,9 @@ def emu_gradient(Fvec, precomp, mu, lam, alpha):
     P = stable_neohookean_gradient(F, precomp['volumes'], mu, lam)
     g_iso = _F_to_vec(P)
 
-    # ACAP gradient: ∂E_C/∂F = F - G (G^T G)^{-1} G^T F
-    GtF = precomp['Gt'] @ Fvec
-    q_flat = precomp['GtG_solver'].solve(GtF)
-    Gq = precomp['G'] @ q_flat
+    # ACAP gradient with constrained solve
+    q = acap_positions(Fvec, precomp, fixed_targets_flat)
+    Gq = precomp['G'] @ q.ravel()
     g_acap = Fvec - Gq  # (9m,)
 
     return g_iso + alpha * g_acap
@@ -675,7 +699,10 @@ def newton_step_woodbury(gradient, Fvec, precomp, mu, lam, alpha):
     g_blocks = gradient.reshape(m, 9)
     Hinv_g = np.zeros_like(g_blocks)
     for i in range(m):
-        Hinv_g[i] = np.linalg.solve(H_blocks[i], g_blocks[i])
+        try:
+            Hinv_g[i] = np.linalg.solve(H_blocks[i], g_blocks[i])
+        except np.linalg.LinAlgError:
+            Hinv_g[i] = g_blocks[i] / (np.diag(H_blocks[i]).mean() + 1e-8)
     Hinv_g_flat = Hinv_g.ravel()
 
     # Woodbury correction (Eq. 17):
@@ -693,7 +720,10 @@ def newton_step_woodbury(gradient, Fvec, precomp, mu, lam, alpha):
     BT_blocks = BT.reshape(m, 9, -1)  # (m, 9, k)
     Hinv_BT = np.zeros_like(BT_blocks)
     for i in range(m):
-        Hinv_BT[i] = np.linalg.solve(H_blocks[i], BT_blocks[i])
+        try:
+            Hinv_BT[i] = np.linalg.solve(H_blocks[i], BT_blocks[i])
+        except np.linalg.LinAlgError:
+            Hinv_BT[i] = BT_blocks[i] / (np.diag(H_blocks[i]).mean() + 1e-8)
     Hinv_BT_flat = Hinv_BT.reshape(9 * m, -1)  # (9m, k)
     B_Hinv_BT = B @ Hinv_BT_flat  # (k, k)
 
@@ -728,7 +758,7 @@ def newton_step_woodbury(gradient, Fvec, precomp, mu, lam, alpha):
 # ---------------------------------------------------------------------------
 def emu_solve(q_init, precomp, fixed_mask, fixed_targets,
               mu, lam, alpha, max_iters=30, verbose=False):
-    """Run EMU quasi-Newton solver for one frame.
+    """Run EMU solver using L-BFGS optimization in deformation gradient space.
 
     Args:
         q_init: (n, 3) initial vertex positions (from LBS)
@@ -742,62 +772,45 @@ def emu_solve(q_init, precomp, fixed_mask, fixed_targets,
         q_final: (n, 3) optimized vertex positions
         info: dict with convergence stats
     """
-    m = precomp['n_tets']
-    n = precomp['n_verts']
-    tets = None  # We work in F-space, not q-space
+    from scipy.optimize import minimize as sp_minimize
+
+    fixed_targets_flat = fixed_targets.ravel()
 
     # Initialize F from q_init
-    # We need tetrahedra to compute F from q — store in precomp
-    # Actually, F = G @ q_flat, so:
     q_flat = q_init.ravel()
-    Fvec = (precomp['G'] @ q_flat).copy()
+    Fvec_init = (precomp['G'] @ q_flat).copy()
 
-    # Initial energy
-    E = emu_energy(Fvec, precomp, mu, lam, alpha)
     if verbose:
-        print(f"    EMU iter 0: E={E:.6e}")
+        E0 = emu_energy(Fvec_init, precomp, fixed_targets_flat, mu, lam, alpha)
+        print(f"    EMU init: E={E0:.6e}")
 
-    sigma_init = 10.0
-    rho = 0.5
-    eps = 1e-8
+    iter_count = [0]
+    def callback(Fvec):
+        iter_count[0] += 1
 
-    for iteration in range(max_iters):
-        # Gradient
-        g = emu_gradient(Fvec, precomp, mu, lam, alpha)
-        g_norm = np.linalg.norm(g)
+    def objective(Fvec):
+        return emu_energy(Fvec, precomp, fixed_targets_flat, mu, lam, alpha)
 
-        if g_norm < 1e-6:
-            if verbose:
-                print(f"    EMU converged: gradient norm {g_norm:.2e}")
-            break
+    def gradient(Fvec):
+        return emu_gradient(Fvec, precomp, fixed_targets_flat, mu, lam, alpha)
 
-        # Newton step (Woodbury)
-        d = newton_step_woodbury(g, Fvec, precomp, mu, lam, alpha)
+    result = sp_minimize(
+        objective, Fvec_init, jac=gradient, method='L-BFGS-B',
+        options={'maxiter': max_iters, 'ftol': 1e-10, 'gtol': 1e-6,
+                 'disp': verbose},
+        callback=callback)
 
-        # Backtracking line search (Armijo)
-        sigma = sigma_init
-        dir_deriv = np.dot(g, d)
-        if dir_deriv > 0:
-            d = -g  # Fall back to gradient descent if Newton direction is ascent
-            dir_deriv = np.dot(g, d)
+    Fvec_final = result.x
 
-        for ls_iter in range(20):
-            F_new = Fvec + sigma * d
-            E_new = emu_energy(F_new, precomp, mu, lam, alpha)
-            if E_new <= E + eps * sigma * dir_deriv:
-                break
-            sigma *= rho
+    # Recover vertex positions with proper constraints
+    q = acap_positions(Fvec_final, precomp, fixed_targets_flat)
 
-        Fvec = F_new
-        E = E_new
+    if verbose:
+        print(f"    EMU done: E={result.fun:.6e}, iters={result.nit}, "
+              f"|g|={np.linalg.norm(result.jac):.2e}, success={result.success}")
 
-        if verbose and (iteration + 1) % 5 == 0:
-            print(f"    EMU iter {iteration+1}: E={E:.6e}, |g|={g_norm:.2e}, σ={sigma:.4f}")
-
-    # Recover vertex positions from final F
-    q = acap_positions(Fvec, precomp, fixed_mask, fixed_targets)
-
-    info = {'iterations': iteration + 1, 'energy': E, 'grad_norm': g_norm}
+    info = {'iterations': result.nit, 'energy': result.fun,
+            'grad_norm': np.linalg.norm(result.jac)}
     return q, info
 
 
@@ -885,7 +898,7 @@ def main():
     print("[5] EMU precomputation...")
     for m in muscles:
         m['emu'] = precompute_emu(
-            m['vertices'], m['tetrahedra'],
+            m['vertices'], m['tetrahedra'], m['fixed_vertices'],
             m.get('vertex_contour_level'), k_modes=args.k_modes)
 
     # ── Setup output ─────────────────────────────────────────────────
