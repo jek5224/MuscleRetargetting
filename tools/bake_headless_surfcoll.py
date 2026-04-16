@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
-"""Headless muscle baking with surface collision (vertex-bone + edge-bone).
+"""Headless ARAP muscle baking with surface collision inside the ARAP iteration.
 
-Same as bake_headless.py but adds post-solve surface collision resolution:
-  Phase 1: Push vertices inside bones to surface (trimesh.contains)
-  Phase 2: Detect edge-through-bone tunneling via ray-cast, push endpoints
+Collision is integrated as penalty-in-diagonal in the ARAP global solve:
+  - build_system: collision_weight added to diagonal for surface vertices near bones
+  - Every ARAP iteration: collision_target_fn detects bone penetration (vertex + edge)
+    and sets targets; the linear solve converges smoothly, no oscillation.
 
 Usage:
     python tools/bake_headless_surfcoll.py --bvh data/motion/walk.bvh
@@ -21,7 +22,6 @@ import numpy as np
 import trimesh
 from scipy.spatial import cKDTree
 
-# Ensure project root is on sys.path so `from viewer.*` / `from core.*` work
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
@@ -33,11 +33,10 @@ from core.bvhparser import MyBVH
 from viewer.mesh_loader import MeshLoader
 from viewer.zygote_mesh_ui import (
     find_inter_muscle_constraints,
-    run_all_tet_sim_with_constraints,
     _detect_bvh_tframe,
     _flatten_waypoints,
 )
-from viewer.arap_backends import check_taichi_available, check_gpu_available
+from viewer.arap_backends import check_taichi_available, check_gpu_available, get_backend
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -300,7 +299,7 @@ def flush_bake_data(bake_data, cache_dir, flush_count):
 
 
 # ---------------------------------------------------------------------------
-# Surface collision
+# Surface collision helpers
 # ---------------------------------------------------------------------------
 def extract_surface_triangles(tet_elements):
     """Extract boundary faces from tet mesh (faces belonging to exactly 1 tet)."""
@@ -319,7 +318,7 @@ def extract_surface_triangles(tet_elements):
 
 
 def extract_edges_from_faces(faces):
-    """Extract unique edges from surface faces. Returns Ex2 array."""
+    """Extract unique edges from surface faces."""
     edges = set()
     for f in faces:
         for i in range(3):
@@ -332,7 +331,7 @@ def extract_edges_from_faces(faces):
 def precompute_surface_data(active_muscles):
     """Precompute surface triangles and edges for each muscle."""
     for mname, mobj in active_muscles.items():
-        tets = mobj.tet_tetrahedra if hasattr(mobj, 'tet_tetrahedra') else None
+        tets = getattr(mobj, 'tet_tetrahedra', None)
         if tets is None and hasattr(mobj, 'soft_body'):
             tets = getattr(mobj.soft_body, 'tetrahedra', None)
         if tets is None:
@@ -394,83 +393,67 @@ def cache_bone_rest_transforms(skel):
     return rest_transforms
 
 
-def resolve_surface_collisions(positions_dict, active_muscles, bone_trimeshes,
-                                margin=0.002, max_iters=3, verbose=False):
-    """Surface collision: vertex-bone + edge-bone resolution.
+def make_collision_target_fn(bone_trimeshes, global_surf_edges, global_surf_verts,
+                              global_fixed_mask, collision_vertex_set, margin=0.002):
+    """Create a collision_target_fn for the ARAP solver's penalty-in-diagonal approach.
 
-    Phase 1: Push surface vertices inside ANY bone to surface + margin.
-    Phase 2: Ray-cast along surface edges to detect edge-bone tunneling.
-
-    Modifies positions_dict in-place.
-    Returns (total_vert_pushed, total_edge_resolved).
+    Called every ARAP iteration with current positions.
+    Returns dict {global_vertex_idx: target_position}:
+      - Inside bone: target = bone surface + margin (pulls vertex out)
+      - Outside but in collision_vertex_set: target = current_pos (zero net force)
     """
-    if not bone_trimeshes:
-        return 0, 0
+    bone_kdtree = cKDTree(np.vstack([bm.vertices for bm in bone_trimeshes]))
 
-    all_bone_verts = np.vstack([bm.vertices for bm in bone_trimeshes])
-    bone_kdtree = cKDTree(all_bone_verts)
+    def collision_target_fn(positions):
+        targets = {}
+        # For all collision candidates, default to current pos (zero force)
+        for vi in collision_vertex_set:
+            targets[vi] = positions[vi].copy()
 
-    total_vert = 0
-    total_edge = 0
-
-    for iteration in range(max_iters):
-        n_vert = 0
-        n_edge = 0
-
-        for mname, mobj in active_muscles.items():
-            if not hasattr(mobj, '_surf_faces'):
-                continue
-            pos = positions_dict[mname]
-            fixed_set = mobj._surf_fixed
-            modified = False
-
-            # ── Phase 1: Vertex-bone ────────────────────────────────
-            surf_verts = np.array(mobj._surf_verts, dtype=np.int64)
-            sv_pos = pos[surf_verts]
-            dists_kd, _ = bone_kdtree.query(sv_pos)
-            near_mask = dists_kd < 0.03
-            if np.any(near_mask):
-                near_sv = surf_verts[near_mask]
-                near_pos = pos[near_sv]
-                for bone_mesh in bone_trimeshes:
-                    try:
-                        bmin = bone_mesh.bounds[0] - 0.03
-                        bmax = bone_mesh.bounds[1] + 0.03
-                        in_bbox = np.all((near_pos >= bmin) & (near_pos <= bmax), axis=1)
-                        if not np.any(in_bbox):
-                            continue
-                        bbox_pos = near_pos[in_bbox]
-                        bbox_sv = near_sv[in_bbox]
-                        inside = bone_mesh.contains(bbox_pos)
-                        if not np.any(inside):
-                            continue
-                        inside_pos = bbox_pos[inside]
-                        inside_sv = bbox_sv[inside]
-                        closest, _, face_ids = trimesh.proximity.closest_point(
-                            bone_mesh, inside_pos)
-                        normals = bone_mesh.face_normals[face_ids]
-                        for k in range(len(inside_sv)):
-                            vi = int(inside_sv[k])
-                            if vi in fixed_set:
-                                continue
-                            pos[vi] = closest[k] + normals[k] * margin
-                            modified = True
-                            n_vert += 1
-                    except Exception:
+        # Phase 1: Vertex-bone via contains()
+        sv_arr = np.array(sorted(collision_vertex_set), dtype=np.int64)
+        sv_pos = positions[sv_arr]
+        dists_kd, _ = bone_kdtree.query(sv_pos)
+        near_mask = dists_kd < 0.03
+        if np.any(near_mask):
+            near_sv = sv_arr[near_mask]
+            near_pos = positions[near_sv]
+            for bone_mesh in bone_trimeshes:
+                try:
+                    bmin = bone_mesh.bounds[0] - 0.03
+                    bmax = bone_mesh.bounds[1] + 0.03
+                    in_bbox = np.all((near_pos >= bmin) & (near_pos <= bmax), axis=1)
+                    if not np.any(in_bbox):
                         continue
-                near_pos = pos[near_sv]
+                    bbox_pos = near_pos[in_bbox]
+                    bbox_sv = near_sv[in_bbox]
+                    inside = bone_mesh.contains(bbox_pos)
+                    if not np.any(inside):
+                        continue
+                    inside_pos = bbox_pos[inside]
+                    inside_sv = bbox_sv[inside]
+                    closest, _, face_ids = trimesh.proximity.closest_point(
+                        bone_mesh, inside_pos)
+                    normals = bone_mesh.face_normals[face_ids]
+                    for k in range(len(inside_sv)):
+                        vi = int(inside_sv[k])
+                        if global_fixed_mask[vi]:
+                            continue
+                        targets[vi] = closest[k] + normals[k] * margin
+                except Exception:
+                    continue
 
-            # ── Phase 2: Edge-bone ──────────────────────────────────
-            surface_edges = mobj._surf_edges
-            edge_v0 = pos[surface_edges[:, 0]]
-            edge_v1 = pos[surface_edges[:, 1]]
+        # Phase 2: Edge-bone via ray-cast
+        if len(global_surf_edges) > 0:
+            edge_v0 = positions[global_surf_edges[:, 0]]
+            edge_v1 = positions[global_surf_edges[:, 1]]
             d0, _ = bone_kdtree.query(edge_v0)
             d1, _ = bone_kdtree.query(edge_v1)
             edge_near = (d0 < 0.02) | (d1 < 0.02)
             if np.any(edge_near):
-                candidate_edges = surface_edges[edge_near]
-                origins = pos[candidate_edges[:, 0]]
-                endpoints = pos[candidate_edges[:, 1]]
+                candidate_edges = global_surf_edges[edge_near]
+                origins = positions[candidate_edges[:, 0]]
+                endpoints = positions[candidate_edges[:, 1]]
                 dirs = endpoints - origins
                 lengths = np.linalg.norm(dirs, axis=1)
                 valid = lengths > 1e-10
@@ -491,40 +474,246 @@ def resolve_surface_collisions(positions_dict, active_muscles, bone_trimeshes,
                             edge_len = lengths[valid][ri]
                             if 0 < t_param < edge_len:
                                 v0i, v1i = int(valid_edges[ri, 0]), int(valid_edges[ri, 1])
-                                if v0i in fixed_set and v1i in fixed_set:
-                                    continue
                                 face_normal = bone_mesh.face_normals[ti]
                                 face_center = bone_mesh.triangles[ti].mean(axis=0)
-                                d0s = np.dot(pos[v0i] - face_center, face_normal)
-                                d1s = np.dot(pos[v1i] - face_center, face_normal)
-                                for vi, di in [(v0i, d0s), (v1i, d1s)]:
-                                    if di < 0 and vi not in fixed_set:
+                                for vi in [v0i, v1i]:
+                                    if global_fixed_mask[vi]:
+                                        continue
+                                    di = np.dot(positions[vi] - face_center, face_normal)
+                                    if di < 0:
                                         cp, _, fid = trimesh.proximity.closest_point(
-                                            bone_mesh, pos[vi:vi + 1])
+                                            bone_mesh, positions[vi:vi + 1])
                                         fn = bone_mesh.face_normals[fid[0]]
-                                        depth = abs(di)
-                                        push_margin = min(depth * 1.5 + margin, 0.020)
-                                        pos[vi] = cp[0] + fn * push_margin
-                                        modified = True
-                                        n_edge += 1
+                                        targets[vi] = cp[0] + fn * margin
+        return targets
 
-            if modified:
-                positions_dict[mname] = pos
+    return collision_target_fn
 
-        if verbose and (n_vert > 0 or n_edge > 0):
-            print(f"    surfcoll iter {iteration}: {n_vert} verts, {n_edge} edges")
 
-        total_vert += n_vert
-        total_edge += n_edge
-        if n_vert == 0 and n_edge == 0:
-            break
+# ---------------------------------------------------------------------------
+# Unified ARAP sim with collision (inlined from _run_unified_volume_sim)
+# ---------------------------------------------------------------------------
+def run_unified_sim_with_collision(ctx, active_muscles, skeleton_meshes, skel,
+                                    bone_rest_transforms, bone_trimeshes,
+                                    max_iterations=100, tolerance=1e-4,
+                                    collision_weight=10.0, collision_margin=0.002,
+                                    verbose=True):
+    """Run unified ARAP sim with surface collision integrated in the iteration loop."""
+    import time as _time
 
-    return total_vert, total_edge
+    if ctx.use_taichi_arap:
+        backend_name = 'taichi'
+    elif ctx.use_gpu_arap:
+        backend_name = 'gpu'
+    else:
+        backend_name = 'cpu'
+
+    # Step 1: Update positions and fixed targets from skeleton
+    for name, mobj in active_muscles.items():
+        if hasattr(mobj, '_update_tet_positions_from_skeleton'):
+            mobj._update_tet_positions_from_skeleton(skel)
+        if hasattr(mobj, '_update_fixed_targets_from_skeleton'):
+            mobj._update_fixed_targets_from_skeleton(skeleton_meshes, skel)
+
+    # Build or reuse cached topology
+    muscle_names = list(active_muscles.keys())
+    total_verts = sum(active_muscles[n].soft_body.num_vertices for n in muscle_names)
+
+    cache = getattr(ctx, '_unified_sim_cache', None)
+    cache_valid = (cache is not None
+                   and cache['muscle_names'] == muscle_names
+                   and cache['total_verts'] == total_verts)
+
+    if not cache_valid:
+        global_offset = {}
+        offset_accum = 0
+        for name in muscle_names:
+            global_offset[name] = offset_accum
+            offset_accum += active_muscles[name].soft_body.num_vertices
+
+        global_rest_positions = np.zeros((total_verts, 3))
+        global_fixed_mask = np.zeros(total_verts, dtype=bool)
+        for name, mobj in active_muscles.items():
+            offset = global_offset[name]
+            n = mobj.soft_body.num_vertices
+            global_rest_positions[offset:offset+n] = mobj.soft_body.rest_positions
+            global_fixed_mask[offset:offset+n] = mobj.soft_body.fixed_mask
+
+        # Build edges
+        all_edges = []
+        for name, mobj in active_muscles.items():
+            offset = global_offset[name]
+            sb = mobj.soft_body
+            for edge_idx, (i, j) in enumerate(zip(sb.edge_i, sb.edge_j)):
+                if hasattr(sb, 'rest_lengths') and sb.rest_lengths is not None and edge_idx < len(sb.rest_lengths):
+                    rest_len = sb.rest_lengths[edge_idx]
+                else:
+                    rest_len = np.linalg.norm(sb.rest_positions[j] - sb.rest_positions[i])
+                all_edges.append((offset + i, offset + j, rest_len, 1.0))
+
+        # Inter-muscle constraints as edges
+        for constraint in ctx.inter_muscle_constraints:
+            name1, v1_idx, v1_fixed, name2, v2_idx, v2_fixed, rest_dist = constraint
+            if name1 in active_muscles and name2 in active_muscles:
+                gi = global_offset[name1] + v1_idx
+                gj = global_offset[name2] + v2_idx
+                all_edges.append((gi, gj, rest_dist, 1.0))
+
+        neighbors = [[] for _ in range(total_verts)]
+        edge_weights = {}
+        rest_edge_vectors = [{} for _ in range(total_verts)]
+        for gi, gj, rest_len, weight in all_edges:
+            neighbors[gi].append(gj)
+            neighbors[gj].append(gi)
+            edge_weights[(gi, gj)] = weight
+            edge_weights[(gj, gi)] = weight
+            rest_edge_vectors[gi][gj] = global_rest_positions[gj] - global_rest_positions[gi]
+            rest_edge_vectors[gj][gi] = global_rest_positions[gi] - global_rest_positions[gj]
+
+        # Build collision vertex set: free surface verts (global indices)
+        collision_vertex_set = set()
+        global_surf_edges_list = []
+        for name, mobj in active_muscles.items():
+            offset = global_offset[name]
+            if hasattr(mobj, '_surf_verts'):
+                for lv in mobj._surf_verts:
+                    gv = offset + lv
+                    if not global_fixed_mask[gv]:
+                        collision_vertex_set.add(gv)
+            if hasattr(mobj, '_surf_edges'):
+                for e in mobj._surf_edges:
+                    global_surf_edges_list.append([offset + int(e[0]), offset + int(e[1])])
+        global_surf_edges = np.array(global_surf_edges_list, dtype=np.int64) if global_surf_edges_list else np.zeros((0, 2), dtype=np.int64)
+
+        ctx._unified_sim_cache = {
+            'global_offset': global_offset,
+            'total_verts': total_verts,
+            'global_rest_positions': global_rest_positions,
+            'global_fixed_mask': global_fixed_mask,
+            'neighbors': neighbors,
+            'edge_weights': edge_weights,
+            'rest_edge_vectors': rest_edge_vectors,
+            'muscle_names': muscle_names,
+            'collision_vertex_set': collision_vertex_set,
+            'global_surf_edges': global_surf_edges,
+        }
+        print(f"  Built topology: {total_verts} verts, {len(all_edges)} edges, "
+              f"{len(collision_vertex_set)} collision candidates")
+    else:
+        print(f"  Reusing cached topology ({total_verts} verts)")
+
+    cache = ctx._unified_sim_cache
+    global_offset = cache['global_offset']
+    global_rest_positions = cache['global_rest_positions']
+    global_fixed_mask = cache['global_fixed_mask']
+    neighbors = cache['neighbors']
+    edge_weights = cache['edge_weights']
+    rest_edge_vectors = cache['rest_edge_vectors']
+    collision_vertex_set = cache['collision_vertex_set']
+    global_surf_edges = cache['global_surf_edges']
+
+    # Compute LBS positions
+    global_lbs = np.zeros((total_verts, 3))
+    for name, mobj in active_muscles.items():
+        offset = global_offset[name]
+        n = mobj.soft_body.num_vertices
+        rest = mobj.soft_body.rest_positions
+        if hasattr(mobj, 'skinning_weights') and mobj.skinning_weights is not None and len(mobj.skinning_bones) > 0:
+            lbs = np.zeros((n, 3))
+            for bone_idx, bone_name in enumerate(mobj.skinning_bones):
+                body_node = skel.getBodyNode(bone_name)
+                if body_node is None:
+                    continue
+                R = body_node.getWorldTransform().rotation()
+                t = body_node.getWorldTransform().translation()
+                if bone_name in mobj.soft_body_initial_transforms:
+                    R0, t0 = mobj.soft_body_initial_transforms[bone_name]
+                else:
+                    continue
+                w = mobj.skinning_weights[:, bone_idx:bone_idx+1]
+                local = (R0.T @ (rest - t0).T).T
+                deformed = (R @ local.T).T + t
+                lbs += w * deformed
+            global_lbs[offset:offset+n] = lbs
+        else:
+            global_lbs[offset:offset+n] = mobj.soft_body.positions
+
+    # Warm-start blend
+    prev_solution = cache.get('prev_solution', None) if cache_valid else None
+    if prev_solution is not None and prev_solution.shape[0] == total_verts:
+        global_positions = 0.7 * global_lbs + 0.3 * prev_solution
+        fixed_idx = np.where(global_fixed_mask)[0]
+        global_positions[fixed_idx] = global_lbs[fixed_idx]
+    else:
+        global_positions = global_lbs.copy()
+
+    # Fixed targets
+    fixed_indices = np.where(global_fixed_mask)[0]
+    global_fixed_targets = {}
+    for name, mobj in active_muscles.items():
+        offset = global_offset[name]
+        if mobj.soft_body.fixed_targets is not None and len(mobj.soft_body.fixed_indices) > 0:
+            for local_idx, target in zip(mobj.soft_body.fixed_indices, mobj.soft_body.fixed_targets):
+                global_fixed_targets[offset + local_idx] = target
+    fixed_targets_array = np.array([global_fixed_targets.get(i, global_rest_positions[i])
+                                     for i in fixed_indices])
+
+    # Get or create backend
+    cached_backend = getattr(ctx, '_unified_arap_backend', None)
+    if cached_backend is not None and getattr(cached_backend, '_backend_name', None) == backend_name:
+        backend = cached_backend
+    else:
+        backend = get_backend(backend_name)
+        backend._backend_name = backend_name
+        ctx._unified_arap_backend = backend
+
+    # Build system with collision weight on diagonal
+    need_build = (not cache_valid
+                  or (getattr(backend, '_splu', None) is None
+                      and getattr(backend, '_scipy_solver', None) is None))
+    if need_build:
+        t0 = _time.time()
+        backend.build_system(total_verts, neighbors, edge_weights, global_fixed_mask,
+                             regularization=1e-6,
+                             collision_vertices=collision_vertex_set,
+                             collision_weight=collision_weight)
+        print(f"  System built in {_time.time() - t0:.3f}s (collision_weight={collision_weight})")
+
+    # Create collision target function
+    coll_fn = make_collision_target_fn(
+        bone_trimeshes, global_surf_edges, np.array(sorted(collision_vertex_set), dtype=np.int64),
+        global_fixed_mask, collision_vertex_set, margin=collision_margin)
+
+    # First frame gets more iterations
+    is_first_frame = prev_solution is None
+    solve_iters = max_iterations * 10 if is_first_frame else max_iterations
+
+    # Solve with collision inside the iteration loop
+    t0 = _time.time()
+    global_positions, iterations, max_disp = backend.solve(
+        global_positions, global_rest_positions, neighbors, edge_weights, rest_edge_vectors,
+        global_fixed_mask, fixed_targets_array,
+        max_iterations=solve_iters, tolerance=tolerance,
+        verbose=verbose,
+        collision_target_fn=coll_fn,
+    )
+    dt = _time.time() - t0
+    print(f"  ARAP+collision solved in {dt:.3f}s ({iterations} iters, max_disp={max_disp:.2e})")
+
+    # Stash for warm-start
+    ctx._unified_sim_cache['prev_solution'] = global_positions.copy()
+
+    # Write back to muscles
+    for name, mobj in active_muscles.items():
+        offset = global_offset[name]
+        n = mobj.soft_body.num_vertices
+        mobj.soft_body.positions = global_positions[offset:offset+n].copy()
+        mobj.tet_vertices = mobj.soft_body.get_positions().astype(np.float32)
 
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Headless muscle baking with surface collision")
+        description="Headless ARAP muscle baking with integrated surface collision")
     parser.add_argument("--bvh", required=True, help="Path to BVH file")
     parser.add_argument(
         "--muscles",
@@ -672,43 +861,20 @@ def main():
             mobj.waypoints_from_tet_sim = False
             mobj._baking_mode = True
 
-        # Run simulation
-        if ctx.use_fem_sim:
-            from viewer.fem_sim import run_all_fem_sim
-            run_all_fem_sim(ctx, max_iterations=args.settle_iters, tolerance=1e-4,
-                            verbose=(frame == start_frame))
-        else:
-            run_all_tet_sim_with_constraints(
-                ctx, max_iterations=args.settle_iters, tolerance=1e-4
-            )
-
-        # Capture positions
-        frame_positions = {}
-        for mname, mobj in active_muscles.items():
-            positions = mobj.soft_body.get_positions()
-            if frame == start_frame and hasattr(mobj, 'soft_body_local_anchors'):
-                for vi, (body_name, local_pos) in mobj.soft_body_local_anchors.items():
-                    body_node = skel.getBodyNode(body_name)
-                    if body_node is None:
-                        continue
-                    wt = body_node.getWorldTransform()
-                    expected = wt.rotation() @ local_pos + wt.translation()
-                    actual = positions[int(vi)]
-                    err = np.linalg.norm(actual - expected)
-                    if err > 0.001:
-                        print(f"  WARN {mname} vi={vi}: bone={body_name}, err={err:.4f}m",
-                              flush=True)
-            frame_positions[mname] = positions.astype(np.float32)
-
-        # Surface collision post-processing (vertex + edge vs bone)
+        # Build bone collision meshes at current pose
         bone_tms = build_bone_collision_meshes(skeleton_meshes, skel, bone_rest_transforms)
-        n_vert, n_edge = resolve_surface_collisions(
-            frame_positions, active_muscles, bone_tms,
-            margin=0.002, max_iters=3,
+
+        # Run ARAP with surface collision inside the iteration loop
+        run_unified_sim_with_collision(
+            ctx, active_muscles, skeleton_meshes, skel,
+            bone_rest_transforms, bone_tms,
+            max_iterations=args.settle_iters, tolerance=1e-4,
+            collision_weight=10.0, collision_margin=0.002,
             verbose=(frame == start_frame))
 
-        for mname in active_muscles:
-            bake_data[mname][frame] = frame_positions[mname]
+        # Capture positions
+        for mname, mobj in active_muscles.items():
+            bake_data[mname][frame] = mobj.soft_body.get_positions().astype(np.float32)
 
         # Restore flags
         for mname, mobj in active_muscles.items():
@@ -732,7 +898,7 @@ def main():
             f"  Frame {frame}/{end_frame}  "
             f"({frames_done}/{total_frames})  "
             f"{frame_dt:.2f}s  "
-            f"vcoll={n_vert} ecoll={n_edge}  "
+            f""
             f"avg {avg:.2f}s/frame  "
             f"ETA {remaining:.0f}s",
             flush=True,
