@@ -983,8 +983,8 @@ def compute_collision_forces(q, bone_trimeshes, muscle_surfaces, margin=0.002):
                     if (vi - offset) in fixed_set:
                         continue
                     target = closest[k] + normals[k] * margin
-                    # Spring-like force toward target (moderate stiffness)
-                    forces[vi] = (target - q[vi]) * 1e2
+                    # Spring-like force toward target
+                    forces[vi] = (target - q[vi]) * 1e4
             except Exception:
                 continue
 
@@ -1011,7 +1011,7 @@ def compute_collision_forces(q, bone_trimeshes, muscle_surfaces, margin=0.002):
             dist = np.linalg.norm(diff)
             if dist < 1e-10:
                 continue
-            push = (margin * 2 - dist) * 0.5 * diff / dist * 1e2
+            push = (margin * 2 - dist) * 0.5 * diff / dist * 1e4
             forces[gvi_i] -= push
             forces[gvi_j] += push
 
@@ -1112,34 +1112,33 @@ def emu_solve(q_init, precomp, fixed_mask, fixed_targets,
             Fvec = F_new
             E = E_new
 
-        # Lines 28-41: Collision resolution
+        # Lines 28-43: Collision resolution (inner loop until resolved)
         if bone_trimeshes is not None or muscle_surfaces is not None:
-            q_current = acap_positions(Fvec, precomp, fixed_targets_flat)
-            f_coll = compute_collision_forces(
-                q_current, bone_trimeshes or [], muscle_surfaces or [], margin)
-            n_coll = int(np.sum(np.linalg.norm(f_coll, axis=1) > 1e-10))
+            # Build H blocks once for collision sub-iterations
+            F_mat = _vec_to_F(Fvec, m)
+            if use_gpu:
+                H_coll = np.zeros((m, 9, 9), dtype=np.float64)
+                _ti_hessian_build(F_mat.reshape(m, 9).copy(), precomp['volumes'], mu, lam, 0.0, H_coll)
+            else:
+                H_coll = stable_neohookean_hessian_blocks(F_mat, precomp['volumes'], mu, lam)
+            eigv, eigvc = np.linalg.eigh(H_coll)
+            eigv = np.maximum(eigv, 1e-6)
+            H_coll = np.einsum('mij,mj,mkj->mik', eigvc, eigv, eigvc)
+            H_coll += alpha * np.eye(9)[None, :, :]
 
-            if n_coll > 0:
-                # Line 34: Woodbury with contact forces
+            for coll_iter in range(5):  # inner collision loop
+                q_current = acap_positions(Fvec, precomp, fixed_targets_flat)
+                f_coll = compute_collision_forces(
+                    q_current, bone_trimeshes or [], muscle_surfaces or [], margin)
+                n_coll = int(np.sum(np.linalg.norm(f_coll, axis=1) > 1e-10))
+                if n_coll == 0:
+                    break
                 g_ext = generalized_force_on_F(f_coll, precomp, fixed_targets_flat)
-                # Line 35: Contact descent direction via block-diagonal H^{-1}
-                # (use only H^{-1}, not full Woodbury, for stability)
-                F_mat = _vec_to_F(Fvec, m)
-                if use_gpu:
-                    H_blocks = np.zeros((m, 9, 9), dtype=np.float64)
-                    _ti_hessian_build(F_mat.reshape(m, 9).copy(), precomp['volumes'], mu, lam, 0.0, H_blocks)
-                else:
-                    H_blocks = stable_neohookean_hessian_blocks(F_mat, precomp['volumes'], mu, lam)
-                eigv, eigvc = np.linalg.eigh(H_blocks)
-                eigv = np.maximum(eigv, 1e-6)
-                H_blocks = np.einsum('mij,mj,mkj->mik', eigvc, eigv, eigvc)
-                H_blocks += alpha * np.eye(9)[None, :, :]
                 g_ext_blocks = g_ext.reshape(m, 9)
-                d_contact = np.linalg.solve(H_blocks, g_ext_blocks[:, :, None]).squeeze(-1)
-                d_contact_flat = d_contact.ravel()
-                # Damped update (avoid overshooting)
-                Fvec = Fvec + 0.5 * d_contact_flat
-                E = emu_energy(Fvec, precomp, fixed_targets_flat, mu, lam, alpha, use_gpu=use_gpu)
+                d_contact = np.linalg.solve(H_coll, g_ext_blocks[:, :, None]).squeeze(-1)
+                Fvec = Fvec + d_contact.ravel()
+
+            E = emu_energy(Fvec, precomp, fixed_targets_flat, mu, lam, alpha, use_gpu=use_gpu)
 
         if verbose and (iteration + 1) % 5 == 0:
             print(f"    EMU iter {iteration+1}: E={E:.6e}, |g|={g_norm:.2e}, "
