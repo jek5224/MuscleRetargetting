@@ -484,9 +484,10 @@ def precompute_emu(vertices, tetrahedra, fixed_vertices, vertex_contour_level, k
     k = min(k_modes, 3 * n - 2)
     eigenvalues, eigenvectors = eigsh(GtG_csc, k=k, which='LM')
     Phi = eigenvectors  # (3n, k)
-    Lambda_inv = np.diag(1.0 / (eigenvalues + 1e-30))  # (k, k)
+    Lambda = np.diag(eigenvalues)  # (k, k)
 
-    B_sparse = Phi.T @ Gt  # (k, 9m)
+    # B = G @ Phi (9m × k) — maps eigenmode coefficients to F-space
+    B_sparse = G @ Phi  # (9m, k)
     B = B_sparse if isinstance(B_sparse, np.ndarray) else B_sparse.toarray()
     print(f"    Eigenmodes: k={k}, captured {eigenvalues.sum():.2f} "
           f"({time.time()-t0:.2f}s)")
@@ -506,7 +507,7 @@ def precompute_emu(vertices, tetrahedra, fixed_vertices, vertex_contour_level, k
         'free_vert_idx': free_vert_idx,
         'fixed_vert_idx': fixed_vert_idx,
         'Phi': Phi,
-        'Lambda_inv': Lambda_inv,
+        'Lambda': Lambda,
         'B': B,
         'Dm_inv': Dm_inv,
         'volumes': volumes,
@@ -577,12 +578,12 @@ def stable_neohookean_gradient(F, volumes, mu, lam):
 def stable_neohookean_hessian_blocks(F, volumes, mu, lam):
     """Per-tet 9×9 Hessian blocks of V*Ψ_iso w.r.t. vec(F_i).
 
-    Uses the SPD projection from [SGK18] — guaranteed positive definite.
-    For simplicity, we use the analytical Hessian clamped to SPD via eigenvalue fix.
+    SPD projection: compute eigendecomposition of each 9×9 block,
+    clamp negative eigenvalues to a small positive value.
     """
     m = len(F)
     H = np.zeros((m, 9, 9))
-    min_diag = 1e-4  # minimum diagonal value for SPD guarantee
+    eps_spd = 1e-6
 
     for i in range(m):
         Fi = F[i]
@@ -590,17 +591,23 @@ def stable_neohookean_hessian_blocks(F, volumes, mu, lam):
         Ji = np.linalg.det(Fi)
 
         try:
-            FiT_inv = np.linalg.inv(Fi).T
+            Fi_inv = np.linalg.inv(Fi)
         except np.linalg.LinAlgError:
-            # Degenerate F — use identity-like Hessian
-            H[i] = V * mu * np.eye(9) + min_diag * np.eye(9)
+            H[i] = V * mu * np.eye(9)
+            H[i] += eps_spd * np.eye(9)
             continue
 
-        g = FiT_inv.ravel()
-        H[i] = V * (mu * np.eye(9) + lam * max(Ji * Ji, 0) * np.outer(g, g))
+        FiT_inv = Fi_inv.T
+        g = FiT_inv.ravel()  # vec(F^{-T})
 
-        # Ensure SPD
-        H[i] += min_diag * np.eye(9)
+        # Hessian of Stable Neo-Hookean:
+        # d²Ψ/dF² = μ I + λ J² g g^T  (dominant SPD terms)
+        Hi = V * (mu * np.eye(9) + lam * Ji * Ji * np.outer(g, g))
+
+        # SPD projection via eigenvalue clamping
+        eigvals, eigvecs = np.linalg.eigh(Hi)
+        eigvals = np.maximum(eigvals, eps_spd)
+        H[i] = eigvecs @ np.diag(eigvals) @ eigvecs.T
 
     return H  # (m, 9, 9)
 
@@ -678,139 +685,305 @@ def emu_gradient(Fvec, precomp, fixed_targets_flat, mu, lam, alpha):
 # Newton step with Woodbury (Eq. 14-17)
 # ---------------------------------------------------------------------------
 def newton_step_woodbury(gradient, Fvec, precomp, mu, lam, alpha):
-    """Compute Newton descent direction using Woodbury Hessian approximation.
+    """Compute Newton descent direction using Woodbury Hessian (Eq. 14-17).
 
-    H_approx = H + α I  (block diagonal, H from Ψ_iso)
-    Full Hessian ≈ H_approx - α G (G^TG)^{-1} G^T  (via Woodbury)
+    Full Hessian = (H + αI) - α B Λ^{-1} B^T
+    where:
+      H = block-diagonal per-tet Hessian of Ψ_iso (9×9 blocks)
+      B = G Φ (9m × k), Λ = eigenvalues of G^T G (k × k)
 
-    Uses precomputed eigenmodes (Eq. 13-17).
+    Using Woodbury: (A - U C V)^{-1} = A^{-1} + A^{-1} U (C^{-1} - V A^{-1} U)^{-1} V A^{-1}
+    with A = H + αI, U = B, C = α Λ^{-1}, V = B^T
     """
     m = precomp['n_tets']
+    k = precomp['B'].shape[1]
     F = _vec_to_F(Fvec, m)
 
-    # Block-diagonal H: (m, 9, 9) per tet
-    H_blocks = stable_neohookean_hessian_blocks(F, precomp['volumes'], mu, lam)
-
-    # Add α·I to each block (ACAP Hessian diagonal contribution)
+    # A = H + αI (block-diagonal, m × 9 × 9)
+    A_blocks = stable_neohookean_hessian_blocks(F, precomp['volumes'], mu, lam)
     for i in range(m):
-        H_blocks[i] += alpha * np.eye(9)
+        A_blocks[i] += alpha * np.eye(9)
 
-    # H^{-1} g (block-diagonal inverse applied to gradient)
+    # A^{-1} g  (block-diagonal solve)
     g_blocks = gradient.reshape(m, 9)
-    Hinv_g = np.zeros_like(g_blocks)
+    Ainv_g = np.zeros_like(g_blocks)
     for i in range(m):
-        try:
-            Hinv_g[i] = np.linalg.solve(H_blocks[i], g_blocks[i])
-        except np.linalg.LinAlgError:
-            Hinv_g[i] = g_blocks[i] / (np.diag(H_blocks[i]).mean() + 1e-8)
-    Hinv_g_flat = Hinv_g.ravel()
+        Ainv_g[i] = np.linalg.solve(A_blocks[i], g_blocks[i])
+    Ainv_g_flat = Ainv_g.ravel()  # (9m,)
 
-    # Woodbury correction (Eq. 17):
-    # d = H^{-1}g - H^{-1} B^T (Λ/α + B H^{-1} B^T)^{-1} B H^{-1} g
-    B = precomp['B']  # (k, 9m)
-    Lambda_inv = precomp['Lambda_inv']  # (k, k)
+    # B = G Φ (9m × k)
+    B = precomp['B']
+    Lambda = precomp['Lambda']  # (k, k) diagonal
 
-    # B @ H^{-1} — need H^{-1} applied to each column of B^T
-    # Instead compute B @ Hinv_g directly (vector), and B @ H^{-1} @ B^T (matrix)
-    B_Hinv_g = B @ Hinv_g_flat  # (k,)
+    # V A^{-1} g = B^T A^{-1} g  (k,)
+    Bt_Ainv_g = B.T @ Ainv_g_flat
 
-    # B H^{-1} B^T: (k, k) — expensive but k is small (48)
-    # Apply H^{-1} to each row of B^T
-    BT = B.T  # (9m, k)
-    BT_blocks = BT.reshape(m, 9, -1)  # (m, 9, k)
-    Hinv_BT = np.zeros_like(BT_blocks)
+    # V A^{-1} U = B^T A^{-1} B  (k × k)
+    # Apply A^{-1} to each column of B
+    B_blocks = B.reshape(m, 9, k)
+    Ainv_B = np.zeros_like(B_blocks)
     for i in range(m):
-        try:
-            Hinv_BT[i] = np.linalg.solve(H_blocks[i], BT_blocks[i])
-        except np.linalg.LinAlgError:
-            Hinv_BT[i] = BT_blocks[i] / (np.diag(H_blocks[i]).mean() + 1e-8)
-    Hinv_BT_flat = Hinv_BT.reshape(9 * m, -1)  # (9m, k)
-    B_Hinv_BT = B @ Hinv_BT_flat  # (k, k)
+        Ainv_B[i] = np.linalg.solve(A_blocks[i], B_blocks[i])
+    Ainv_B_flat = Ainv_B.reshape(9 * m, k)
+    Bt_Ainv_B = B.T @ Ainv_B_flat  # (k, k)
 
-    # Middle matrix: (Λ/α + B H^{-1} B^T)^{-1}
-    middle = Lambda_inv / alpha + B_Hinv_BT  # Wait, paper says Λ/α
-    # Eq 17: (Λ - αBH^{-1}B^T)^{-1} ... actually let me re-derive.
-    # The Woodbury identity for (A + UCV)^{-1}:
-    # Here our full Hessian is H_block + α(I - G(G^TG)^{-1}G^T)
-    # The low-rank part is -α G(G^TG)^{-1}G^T ≈ -α Φ Λ^{-1} Φ^T (in F-space via B)
-    # So: (H_block + αI - α B^T Λ^{-1} B)
-    # Woodbury: (A - UCV)^{-1} = A^{-1} + A^{-1}U(C^{-1} - VA^{-1}U)^{-1}VA^{-1}
-    # A = H_block + αI, U = B^T, C = αΛ^{-1}, V = B
-    # middle = (C^{-1} - B A^{-1} B^T)^{-1} = (Λ/α - B_Hinv_BT)^{-1}
+    # Middle = (C^{-1} - V A^{-1} U)^{-1} = (Λ/α - B^T A^{-1} B)^{-1}
+    middle = Lambda / alpha - Bt_Ainv_B
+    # Regularize to prevent blow-up from near-singular middle matrix
+    eigvals_m, eigvecs_m = np.linalg.eigh(middle)
+    eigvals_m = np.maximum(eigvals_m, np.max(np.abs(eigvals_m)) * 1e-6 + 1e-10)
+    middle_inv = eigvecs_m @ np.diag(1.0 / eigvals_m) @ eigvecs_m.T
 
-    eigenvalues = np.diag(1.0 / (np.diag(Lambda_inv) + 1e-30))  # Λ
-    C_inv = eigenvalues / alpha  # Λ/α
-    middle_matrix = C_inv - B_Hinv_BT
-    try:
-        middle_inv = np.linalg.inv(middle_matrix)
-    except np.linalg.LinAlgError:
-        middle_inv = np.linalg.pinv(middle_matrix)
+    # d = -[A^{-1} + A^{-1} U (middle)^{-1} V A^{-1}] g
+    correction = Ainv_B_flat @ (middle_inv @ Bt_Ainv_g)  # (9m,)
 
-    # Correction: A^{-1} U (middle)^{-1} V A^{-1} g
-    correction = Hinv_BT_flat @ (middle_inv @ B_Hinv_g)  # (9m,)
+    direction = -(Ainv_g_flat + correction)
 
-    direction = -(Hinv_g_flat + correction)
+    # Trust region: clamp step magnitude to prevent overshooting
+    d_norm = np.linalg.norm(direction)
+    g_norm = np.linalg.norm(gradient)
+    max_step = g_norm * 5.0
+    if d_norm > max_step:
+        direction = direction * (max_step / d_norm)
+
     return direction
+
+
+# ---------------------------------------------------------------------------
+# Collision forces (EMU Section 3.5, Algorithm 1 lines 28-35)
+# ---------------------------------------------------------------------------
+def compute_collision_forces(q, bone_trimeshes, muscle_surfaces, margin=0.002):
+    """Detect collisions and compute per-vertex contact forces.
+
+    Returns (n, 3) force array. Non-zero only at penetrating vertices.
+    Force direction: push vertex to bone surface + margin.
+    """
+    import trimesh
+    from scipy.spatial import cKDTree
+
+    n = len(q)
+    forces = np.zeros((n, 3))
+
+    if not bone_trimeshes:
+        return forces
+
+    bone_kdtree = cKDTree(np.vstack([bm.vertices for bm in bone_trimeshes]))
+
+    # Bone-muscle collision
+    for surf_info in muscle_surfaces:
+        surf_verts = surf_info['surf_verts']
+        fixed_set = surf_info['fixed_set']
+        offset = surf_info['offset']
+
+        sv_pos = q[np.array(surf_verts) + offset]
+        dists, _ = bone_kdtree.query(sv_pos)
+        near = dists < 0.03
+
+        if not np.any(near):
+            continue
+
+        near_sv = np.array(surf_verts)[near]
+        near_pos = q[near_sv + offset]
+
+        for bone_mesh in bone_trimeshes:
+            try:
+                bmin = bone_mesh.bounds[0] - 0.03
+                bmax = bone_mesh.bounds[1] + 0.03
+                in_bbox = np.all((near_pos >= bmin) & (near_pos <= bmax), axis=1)
+                if not np.any(in_bbox):
+                    continue
+                bbox_pos = near_pos[in_bbox]
+                bbox_sv = near_sv[in_bbox]
+                inside = bone_mesh.contains(bbox_pos)
+                if not np.any(inside):
+                    continue
+                inside_pos = bbox_pos[inside]
+                inside_sv = bbox_sv[inside]
+                closest, _, face_ids = trimesh.proximity.closest_point(
+                    bone_mesh, inside_pos)
+                normals = bone_mesh.face_normals[face_ids]
+                for k in range(len(inside_sv)):
+                    vi = int(inside_sv[k]) + offset
+                    if (vi - offset) in fixed_set:
+                        continue
+                    target = closest[k] + normals[k] * margin
+                    # Spring-like force toward target (moderate stiffness)
+                    forces[vi] = (target - q[vi]) * 1e2
+            except Exception:
+                continue
+
+    # Muscle-muscle collision
+    all_surf_pts = []
+    all_surf_info = []
+    for si, surf_info in enumerate(muscle_surfaces):
+        offset = surf_info['offset']
+        for vi in surf_info['surf_verts']:
+            gvi = vi + offset
+            all_surf_pts.append(q[gvi])
+            all_surf_info.append((si, gvi))
+
+    if len(all_surf_pts) > 1:
+        pts = np.array(all_surf_pts)
+        tree = cKDTree(pts)
+        pairs = tree.query_pairs(r=margin * 2)
+        for i, j in pairs:
+            si_i, gvi_i = all_surf_info[i]
+            si_j, gvi_j = all_surf_info[j]
+            if si_i == si_j:
+                continue
+            diff = q[gvi_j] - q[gvi_i]
+            dist = np.linalg.norm(diff)
+            if dist < 1e-10:
+                continue
+            push = (margin * 2 - dist) * 0.5 * diff / dist * 1e2
+            forces[gvi_i] -= push
+            forces[gvi_j] += push
+
+    return forces
+
+
+def generalized_force_on_F(forces_q, precomp, fixed_targets_flat):
+    """Convert per-vertex forces to per-tet generalized forces on F (Eq. 22).
+
+    f_ext on F = F^T (G^TG)^{-1} G^T)^T f_q  (adapted from Eq. 22)
+    Simplified: propagate vertex forces through G^T.
+    """
+    f_flat = forces_q.ravel()  # (3n,)
+    # The generalized force on F from vertex forces:
+    # Since q = (G^TG)^{-1} G^T F, forces on q map to F via:
+    # f_F = G (G^TG)^{-1} f_q  (adjoint of the ACAP mapping)
+    n = precomp['n_verts']
+    free_dofs = precomp['free_dofs']
+    fixed_dofs = precomp['fixed_dofs']
+
+    # Only free DOF forces matter (fixed vertices don't move)
+    f_free = f_flat[free_dofs]
+    q_force_free = precomp['acap_solver'].solve(f_free)
+
+    q_force_flat = np.zeros(3 * n)
+    q_force_flat[free_dofs] = q_force_free
+
+    f_F = precomp['G'] @ q_force_flat  # (9m,)
+    return f_F
 
 
 # ---------------------------------------------------------------------------
 # EMU solver (Algorithm 1)
 # ---------------------------------------------------------------------------
 def emu_solve(q_init, precomp, fixed_mask, fixed_targets,
-              mu, lam, alpha, max_iters=30, verbose=False):
-    """Run EMU solver using L-BFGS optimization in deformation gradient space.
+              mu, lam, alpha, max_iters=30, verbose=False,
+              bone_trimeshes=None, muscle_surfaces=None, margin=0.002):
+    """Run EMU quasi-Newton solver (Algorithm 1 from the paper).
 
-    Args:
-        q_init: (n, 3) initial vertex positions (from LBS)
-        precomp: dict from precompute_emu
-        fixed_mask: (n,) bool array
-        fixed_targets: (n, 3) target positions for fixed vertices
-        mu, lam: Lamé parameters
-        alpha: ACAP continuity weight
-
-    Returns:
-        q_final: (n, 3) optimized vertex positions
-        info: dict with convergence stats
+    Uses Woodbury Hessian approximation for the Newton step,
+    backtracking line search, and collision resolution after each iteration.
     """
-    from scipy.optimize import minimize as sp_minimize
+    m = precomp['n_tets']
+    n = precomp['n_verts']
 
     fixed_targets_flat = fixed_targets.ravel()
 
     # Initialize F from q_init
     q_flat = q_init.ravel()
-    Fvec_init = (precomp['G'] @ q_flat).copy()
+    Fvec = (precomp['G'] @ q_flat).copy()
+
+    # Algorithm 1 parameters
+    sigma_init = 1.0  # adaptive: start moderate, use previous σ
+    rho = 0.5
+    eps = 1e-4  # Armijo constant
+    e1 = 1e-4  # convergence: gradient norm
+    e2 = 1e-8  # convergence: energy change
+
+    E = emu_energy(Fvec, precomp, fixed_targets_flat, mu, lam, alpha)
+    if verbose:
+        print(f"    EMU iter 0: E={E:.6e}")
+
+    g_norm = float('inf')
+    n_coll = 0
+    prev_sigma = sigma_init
+
+    for iteration in range(max_iters):
+        # Line 10: Compute gradient
+        g = emu_gradient(Fvec, precomp, fixed_targets_flat, mu, lam, alpha)
+        g_norm = np.linalg.norm(g)
+
+        # Line 12: Woodbury method for search direction
+        d = newton_step_woodbury(g, Fvec, precomp, mu, lam, alpha)
+
+        # Check descent direction
+        dir_deriv = np.dot(g, d)
+        if dir_deriv > 0:
+            # Not a descent direction — fall back to negative gradient
+            d = -g
+            dir_deriv = np.dot(g, d)
+
+        # Lines 15-22: Backtracking line search
+        # Adaptive: start from 2x previous successful σ (grow back toward larger steps)
+        sigma = min(sigma_init, sigma_init) if iteration == 0 else min(prev_sigma * 2, sigma_init)
+        E_prev = E
+        ls_success = False
+        for ls_iter in range(20):
+            F_new = Fvec + sigma * d
+            E_new = emu_energy(F_new, precomp, fixed_targets_flat, mu, lam, alpha)
+            if np.isfinite(E_new) and E_new <= E_prev + eps * sigma * dir_deriv:
+                ls_success = True
+                break
+            sigma *= rho
+
+        if ls_success:
+            Fvec = F_new
+            E = E_new
+            prev_sigma = sigma
+
+        # Lines 28-41: Collision resolution
+        if bone_trimeshes is not None or muscle_surfaces is not None:
+            q_current = acap_positions(Fvec, precomp, fixed_targets_flat)
+            f_coll = compute_collision_forces(
+                q_current, bone_trimeshes or [], muscle_surfaces or [], margin)
+            n_coll = int(np.sum(np.linalg.norm(f_coll, axis=1) > 1e-10))
+
+            if n_coll > 0:
+                # Line 34: Woodbury with contact forces
+                g_ext = generalized_force_on_F(f_coll, precomp, fixed_targets_flat)
+                # Line 35: Contact descent direction via block-diagonal H^{-1}
+                # (use only H^{-1}, not full Woodbury, for stability)
+                F_mat = _vec_to_F(Fvec, m)
+                H_blocks = stable_neohookean_hessian_blocks(F_mat, precomp['volumes'], mu, lam)
+                for bi in range(m):
+                    H_blocks[bi] += alpha * np.eye(9)
+                g_ext_blocks = g_ext.reshape(m, 9)
+                d_contact = np.zeros_like(g_ext_blocks)
+                for bi in range(m):
+                    d_contact[bi] = np.linalg.solve(H_blocks[bi], g_ext_blocks[bi])
+                d_contact_flat = d_contact.ravel()
+                # Damped update (avoid overshooting)
+                Fvec = Fvec + 0.5 * d_contact_flat
+                # Re-evaluate energy after collision correction
+                E = emu_energy(Fvec, precomp, fixed_targets_flat, mu, lam, alpha)
+
+        if verbose and (iteration + 1) % 5 == 0:
+            print(f"    EMU iter {iteration+1}: E={E:.6e}, |g|={g_norm:.2e}, "
+                  f"σ={sigma:.4f}, coll={n_coll}")
+
+        # Line 43: Convergence check (on elastic energy change, not collision)
+        if g_norm < e1:
+            if verbose:
+                print(f"    EMU converged: |g|={g_norm:.2e} < {e1}")
+            break
+        # Only check ΔE convergence if line search succeeded
+        if ls_success and abs(E_prev - E) < e2 and n_coll == 0:
+            if verbose:
+                print(f"    EMU converged: |ΔE|={abs(E_prev-E):.2e} < {e2}")
+            break
+
+    # Final ACAP solve
+    q = acap_positions(Fvec, precomp, fixed_targets_flat)
 
     if verbose:
-        E0 = emu_energy(Fvec_init, precomp, fixed_targets_flat, mu, lam, alpha)
-        print(f"    EMU init: E={E0:.6e}")
+        print(f"    EMU done: E={E:.6e}, iters={iteration+1}, "
+              f"|g|={g_norm:.2e}, coll={n_coll}")
 
-    iter_count = [0]
-    def callback(Fvec):
-        iter_count[0] += 1
-
-    def objective(Fvec):
-        return emu_energy(Fvec, precomp, fixed_targets_flat, mu, lam, alpha)
-
-    def gradient(Fvec):
-        return emu_gradient(Fvec, precomp, fixed_targets_flat, mu, lam, alpha)
-
-    result = sp_minimize(
-        objective, Fvec_init, jac=gradient, method='L-BFGS-B',
-        options={'maxiter': max_iters, 'ftol': 1e-10, 'gtol': 1e-6,
-                 'disp': verbose},
-        callback=callback)
-
-    Fvec_final = result.x
-
-    # Recover vertex positions with proper constraints
-    q = acap_positions(Fvec_final, precomp, fixed_targets_flat)
-
-    if verbose:
-        print(f"    EMU done: E={result.fun:.6e}, iters={result.nit}, "
-              f"|g|={np.linalg.norm(result.jac):.2e}, success={result.success}")
-
-    info = {'iterations': result.nit, 'energy': result.fun,
-            'grad_norm': np.linalg.norm(result.jac)}
+    info = {'iterations': iteration + 1, 'energy': E, 'grad_norm': g_norm}
     return q, info
 
 
@@ -846,8 +1019,8 @@ def main():
     parser.add_argument('--youngs', type=float, default=6e6,
                         help='Young\'s modulus (Pa, default: 6e6 for muscle)')
     parser.add_argument('--poisson', type=float, default=0.49)
-    parser.add_argument('--alpha', type=float, default=1e3,
-                        help='ACAP continuity weight')
+    parser.add_argument('--alpha', type=float, default=1.0,
+                        help='ACAP continuity weight (paper: start at 1, increase until Newton iters spike)')
     parser.add_argument('--max-iters', type=int, default=30,
                         help='Newton iterations per frame')
     parser.add_argument('--k-modes', type=int, default=48,
@@ -901,6 +1074,53 @@ def main():
             m['vertices'], m['tetrahedra'], m['fixed_vertices'],
             m.get('vertex_contour_level'), k_modes=args.k_modes)
 
+    # ── Load bone meshes for collision ──────────────────────────────
+    print("[6] Loading bone meshes...")
+    import trimesh
+    bone_meshes_data = {}
+    bone_names_for_side = {
+        'L': ['L_Os_Coxae', 'L_Femur', 'L_Tibia_Fibula', 'L_Patella'],
+        'R': ['R_Os_Coxae', 'R_Femur', 'R_Tibia_Fibula', 'R_Patella'],
+    }
+    bone_names = set()
+    for side in args.sides:
+        bone_names.update(bone_meshes_data.get(side, bone_names_for_side.get(side, [])))
+    bone_names.add('Saccrum_Coccyx')
+    for bn in list(bone_names_for_side.get(args.sides[0], [])) + ['Saccrum_Coccyx']:
+        path = os.path.join(SKEL_MESH_DIR, f'{bn}.obj')
+        if os.path.exists(path):
+            m_obj = trimesh.load(path, process=False)
+            bone_meshes_data[bn] = {
+                'vertices': np.array(m_obj.vertices, dtype=np.float64),
+                'faces': np.array(m_obj.faces, dtype=np.int32),
+            }
+    # Cache rest transforms
+    saved_pos = skel.getPositions().copy()
+    skel.setPositions(np.zeros(skel.getNumDofs()))
+    bone_rest_transforms = {}
+    for bn in bone_meshes_data:
+        body_name = BONE_NAME_TO_BODY.get(bn, bn + '0')
+        body_node = skel.getBodyNode(body_name)
+        if body_node:
+            wt = body_node.getWorldTransform()
+            bone_rest_transforms[body_name] = (wt.rotation().copy(), wt.translation().copy())
+    skel.setPositions(saved_pos)
+    print(f"    {len(bone_meshes_data)} bones loaded")
+
+    # Precompute surface data for collision
+    from collections import Counter as _Counter
+    for m in muscles:
+        tets = m['tetrahedra']
+        fc = _Counter()
+        fo = {}
+        for t in tets:
+            v0, v1, v2, v3 = int(t[0]), int(t[1]), int(t[2]), int(t[3])
+            for f in [(v0,v2,v1),(v0,v1,v3),(v1,v2,v3),(v0,v3,v2)]:
+                key = tuple(sorted(f)); fc[key] += 1
+                if key not in fo: fo[key] = f
+        sf = [fo[k] for k, c in fc.items() if c == 1]
+        m['_surf_verts'] = sorted(set(v for f in sf for v in f))
+
     # ── Setup output ─────────────────────────────────────────────────
     bvh_stem = os.path.splitext(os.path.basename(args.bvh))[0]
     side_tag = ''.join(args.sides)
@@ -911,8 +1131,11 @@ def main():
     bake_buffers = {m['name']: {} for m in muscles}
     chunk_counters = {m['name']: 0 for m in muscles}
 
+    # Warm-start: carry forward F from previous frame
+    prev_Fvec = {}  # muscle_name -> Fvec from previous frame
+
     # ── Bake loop ────────────────────────────────────────────────────
-    print(f"\n[6] Baking frames {args.start_frame}-{end_frame}...")
+    print(f"\n[7] Baking frames {args.start_frame}-{end_frame}...")
     t_total = time.time()
 
     for frame in range(args.start_frame, end_frame + 1):
@@ -920,25 +1143,51 @@ def main():
         pose = motion_bvh.mocap_refs[frame].copy()
         skel.setPositions(pose)
 
+        # Build posed bone trimeshes for collision
+        bone_tms = []
+        for bn, bm in bone_meshes_data.items():
+            body_name = BONE_NAME_TO_BODY.get(bn, bn + '0')
+            body_node = skel.getBodyNode(body_name)
+            if body_node is None or body_name not in bone_rest_transforms:
+                continue
+            R_rest, t_rest = bone_rest_transforms[body_name]
+            R_cur = body_node.getWorldTransform().rotation()
+            t_cur = body_node.getWorldTransform().translation()
+            v_m = bm['vertices'] * MESH_SCALE
+            local = (R_rest.T @ (v_m - t_rest).T).T
+            posed = (R_cur @ local.T).T + t_cur
+            bone_tms.append(trimesh.Trimesh(vertices=posed, faces=bm['faces'].copy(), process=True))
+
+        # Build muscle surface info for collision
+        muscle_surfaces = []
         for m in muscles:
+            muscle_surfaces.append({
+                'surf_verts': m['_surf_verts'],
+                'fixed_set': set(m['fixed_vertices']),
+                'offset': 0,  # per-muscle solve, offset=0
+            })
+
+        for mi, m in enumerate(muscles):
             if m['lbs_bindings'] is None:
                 continue
 
             n_v = len(m['vertices'])
             lbs_pos = compute_lbs_positions(m['lbs_bindings'], skel, n_v)
 
-            # Build fixed mask and targets
             fixed_mask = np.zeros(n_v, dtype=bool)
             for vi in m['fixed_vertices']:
                 if vi < n_v:
                     fixed_mask[vi] = True
 
-            # EMU solve
+            # EMU solve with collision
             q, info = emu_solve(
                 lbs_pos, m['emu'], fixed_mask, lbs_pos,
                 mu, lam, args.alpha,
                 max_iters=args.max_iters,
-                verbose=(frame == args.start_frame))
+                verbose=(frame == args.start_frame),
+                bone_trimeshes=bone_tms,
+                muscle_surfaces=[muscle_surfaces[mi]],
+                margin=0.002)
 
             bake_buffers[m['name']][frame] = q.astype(np.float32)
 
