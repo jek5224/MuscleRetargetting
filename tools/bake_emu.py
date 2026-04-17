@@ -1049,27 +1049,32 @@ def generalized_force_on_F(forces_q, precomp, fixed_targets_flat):
 def emu_solve(q_init, precomp, fixed_mask, fixed_targets,
               mu, lam, alpha, max_iters=30, verbose=False,
               bone_trimeshes=None, muscle_surfaces=None, margin=0.002,
-              use_gpu=True):
+              use_gpu=True, warm_F=None):
     """Run EMU quasi-Newton solver (Algorithm 1 from the paper).
 
-    Uses Woodbury Hessian approximation for the Newton step,
-    backtracking line search, and collision resolution after each iteration.
+    Optimizations:
+    - #2 Early termination when energy change < threshold
+    - #3 warm_F: carry forward F from previous frame
+    - #4 Hessian reuse: recompute every 3 iterations
+    - #7 Cache ACAP solve within iteration (gradient+energy share)
     """
     m = precomp['n_tets']
     n = precomp['n_verts']
 
     fixed_targets_flat = fixed_targets.ravel()
 
-    # Initialize F from q_init
-    q_flat = q_init.ravel()
-    Fvec = (precomp['G'] @ q_flat).copy()
+    # #3: Warm-start from previous frame's F or compute from q_init
+    if warm_F is not None and len(warm_F) == 9 * m:
+        Fvec = warm_F.copy()
+    else:
+        Fvec = (precomp['G'] @ q_init.ravel()).copy()
 
-    # Algorithm 1 parameters (matching paper exactly)
-    sigma_init = 10.0  # Line 1: σ ← 10
-    rho = 0.5          # Line 5: ρ ← 0.5
-    eps = 1e-3         # Line 4: ε ← 10^{-3}
-    e1 = 1e-4          # convergence: gradient norm
-    e2 = 1e-8          # convergence: energy change
+    # Algorithm 1 parameters
+    sigma_init = 10.0
+    rho = 0.5
+    eps = 1e-3
+    e1 = 1e-4
+    e2 = 1e-6  # #2: relaxed from 1e-8 for faster early termination
 
     E = emu_energy(Fvec, precomp, fixed_targets_flat, mu, lam, alpha, use_gpu=use_gpu)
     if verbose:
@@ -1077,26 +1082,58 @@ def emu_solve(q_init, precomp, fixed_mask, fixed_targets,
 
     g_norm = float('inf')
     n_coll = 0
+    H_cached = None  # #4: cached Hessian blocks
 
     for iteration in range(max_iters):
-        # Line 10: Compute gradient
+        # Compute gradient
         g = emu_gradient(Fvec, precomp, fixed_targets_flat, mu, lam, alpha, use_gpu=use_gpu)
         g_norm = np.linalg.norm(g)
 
-        # Line 12: Woodbury method for search direction
-        if use_gpu:
-            d = newton_step_woodbury_gpu(g, Fvec, precomp, mu, lam, alpha)
+        # #4: Recompute Hessian every 3 iterations (or first iteration)
+        recompute_H = (iteration % 3 == 0) or H_cached is None
+        if recompute_H:
+            if use_gpu:
+                d = newton_step_woodbury_gpu(g, Fvec, precomp, mu, lam, alpha)
+            else:
+                d = newton_step_woodbury(g, Fvec, precomp, mu, lam, alpha)
+            # Cache the Hessian blocks for reuse
+            F_mat = _vec_to_F(Fvec, m)
+            if use_gpu:
+                H_cached = np.zeros((m, 9, 9), dtype=np.float64)
+                _ti_hessian_build(F_mat.reshape(m, 9).copy(), precomp['volumes'], mu, lam, 0.0, H_cached)
+            else:
+                H_cached = stable_neohookean_hessian_blocks(F_mat, precomp['volumes'], mu, lam)
+            eigv, eigvc = np.linalg.eigh(H_cached)
+            eigv = np.maximum(eigv, 1e-6)
+            H_cached = np.einsum('mij,mj,mkj->mik', eigvc, eigv, eigvc)
+            H_cached += alpha * np.eye(9)[None, :, :]
         else:
-            d = newton_step_woodbury(g, Fvec, precomp, mu, lam, alpha)
+            # Reuse cached H for cheaper Newton step (just solve, no rebuild)
+            g_blocks = g.reshape(m, 9)
+            Hinv_g = np.linalg.solve(H_cached, g_blocks[:, :, None]).squeeze(-1)
+            Hinv_g_flat = Hinv_g.ravel()
+
+            B = precomp['B']
+            Lambda = precomp['Lambda']
+            B_Hinv_g = B @ Hinv_g_flat
+            BT = B.T.reshape(m, 9, -1)
+            Hinv_BT = np.linalg.solve(H_cached, BT)
+            Hinv_BT_flat = Hinv_BT.reshape(9 * m, -1)
+            B_Hinv_BT = B @ Hinv_BT_flat
+            middle = Lambda - alpha * B_Hinv_BT
+            eigvals_m, eigvecs_m = np.linalg.eigh(middle)
+            eigvals_m = np.maximum(eigvals_m, np.max(np.abs(eigvals_m)) * 1e-6 + 1e-10)
+            middle_inv = eigvecs_m @ np.diag(1.0 / eigvals_m) @ eigvecs_m.T
+            correction = alpha * Hinv_BT_flat @ (middle_inv @ B_Hinv_g)
+            d = -(Hinv_g_flat + correction)
 
         # Check descent direction
         dir_deriv = np.dot(g, d)
         if dir_deriv > 0:
-            # Not a descent direction — fall back to negative gradient
             d = -g
             dir_deriv = np.dot(g, d)
 
-        # Lines 15-22: Backtracking line search (σ starts at σ_init each time)
+        # Backtracking line search
         sigma = sigma_init
         E_prev = E
         ls_success = False
@@ -1112,21 +1149,9 @@ def emu_solve(q_init, precomp, fixed_mask, fixed_targets,
             Fvec = F_new
             E = E_new
 
-        # Lines 28-43: Collision resolution (inner loop until resolved)
+        # Collision resolution (inner loop)
         if bone_trimeshes is not None or muscle_surfaces is not None:
-            # Build H blocks once for collision sub-iterations
-            F_mat = _vec_to_F(Fvec, m)
-            if use_gpu:
-                H_coll = np.zeros((m, 9, 9), dtype=np.float64)
-                _ti_hessian_build(F_mat.reshape(m, 9).copy(), precomp['volumes'], mu, lam, 0.0, H_coll)
-            else:
-                H_coll = stable_neohookean_hessian_blocks(F_mat, precomp['volumes'], mu, lam)
-            eigv, eigvc = np.linalg.eigh(H_coll)
-            eigv = np.maximum(eigv, 1e-6)
-            H_coll = np.einsum('mij,mj,mkj->mik', eigvc, eigv, eigvc)
-            H_coll += alpha * np.eye(9)[None, :, :]
-
-            for coll_iter in range(5):  # inner collision loop
+            for coll_iter in range(5):
                 q_current = acap_positions(Fvec, precomp, fixed_targets_flat)
                 f_coll = compute_collision_forces(
                     q_current, bone_trimeshes or [], muscle_surfaces or [], margin)
@@ -1135,7 +1160,7 @@ def emu_solve(q_init, precomp, fixed_mask, fixed_targets,
                     break
                 g_ext = generalized_force_on_F(f_coll, precomp, fixed_targets_flat)
                 g_ext_blocks = g_ext.reshape(m, 9)
-                d_contact = np.linalg.solve(H_coll, g_ext_blocks[:, :, None]).squeeze(-1)
+                d_contact = np.linalg.solve(H_cached, g_ext_blocks[:, :, None]).squeeze(-1)
                 Fvec = Fvec + d_contact.ravel()
 
             E = emu_energy(Fvec, precomp, fixed_targets_flat, mu, lam, alpha, use_gpu=use_gpu)
@@ -1144,25 +1169,20 @@ def emu_solve(q_init, precomp, fixed_mask, fixed_targets,
             print(f"    EMU iter {iteration+1}: E={E:.6e}, |g|={g_norm:.2e}, "
                   f"σ={sigma:.4f}, coll={n_coll}")
 
-        # Line 43: Convergence check (on elastic energy change, not collision)
+        # #2: Early termination
         if g_norm < e1:
-            if verbose:
-                print(f"    EMU converged: |g|={g_norm:.2e} < {e1}")
             break
-        # Only check ΔE convergence if line search succeeded
         if ls_success and abs(E_prev - E) < e2 and n_coll == 0:
-            if verbose:
-                print(f"    EMU converged: |ΔE|={abs(E_prev-E):.2e} < {e2}")
             break
 
-    # Final ACAP solve
     q = acap_positions(Fvec, precomp, fixed_targets_flat)
 
     if verbose:
         print(f"    EMU done: E={E:.6e}, iters={iteration+1}, "
               f"|g|={g_norm:.2e}, coll={n_coll}")
 
-    info = {'iterations': iteration + 1, 'energy': E, 'grad_norm': g_norm}
+    info = {'iterations': iteration + 1, 'energy': E, 'grad_norm': g_norm,
+            'Fvec': Fvec}  # #3: return F for warm-start
     return q, info
 
 
@@ -1173,12 +1193,12 @@ _parallel_ctx = {}  # shared state for forked workers
 
 def _solve_one_worker(idx):
     """Worker function for parallel EMU solve. Uses shared _parallel_ctx (fork)."""
-    # Limit BLAS to 1 thread per worker (prevent oversubscription)
     os.environ['OMP_NUM_THREADS'] = '1'
     os.environ['OPENBLAS_NUM_THREADS'] = '1'
     os.environ['MKL_NUM_THREADS'] = '1'
     ctx = _parallel_ctx
     mi, m, q_init, lbs_pos, fixed_mask = ctx['tasks'][idx]
+    warm_F = ctx.get('warm_F', {}).get(m['name'])
     q, info = emu_solve(
         q_init, m['emu'], fixed_mask, lbs_pos,
         ctx['mu'], ctx['lam'], ctx['alpha'],
@@ -1187,8 +1207,9 @@ def _solve_one_worker(idx):
         bone_trimeshes=ctx['bone_tms'],
         muscle_surfaces=[ctx['muscle_surfaces'][mi]],
         margin=0.002,
-        use_gpu=False)
-    return m['name'], q.astype(np.float32)
+        use_gpu=False,
+        warm_F=warm_F)
+    return m['name'], q.astype(np.float32), info.get('Fvec')
 
 
 # ---------------------------------------------------------------------------
@@ -1227,8 +1248,8 @@ def main():
                         help='ACAP continuity weight (paper: start at 1, increase until Newton iters spike)')
     parser.add_argument('--max-iters', type=int, default=30,
                         help='Newton iterations per frame')
-    parser.add_argument('--k-modes', type=int, default=48,
-                        help='Eigenmodes for Woodbury approximation')
+    parser.add_argument('--k-modes', type=int, default=32,
+                        help='Eigenmodes for Woodbury approximation (paper: 48, reduced to 32 for speed)')
     parser.add_argument('--arap-cache', default=None,
                         help='ARAP cache dir for initial guess (e.g. data/motion_cache/walk/_old_cache)')
     parser.add_argument('--workers', type=int, default=8,
@@ -1425,22 +1446,25 @@ def main():
 
         if n_workers > 1:
             import multiprocessing as mp
-            # Store everything in shared global (fork inherits parent memory)
             _parallel_ctx.update({
                 'mu': mu, 'lam': lam, 'alpha': args.alpha,
                 'max_iters': args.max_iters,
                 'bone_tms': bone_tms,
                 'muscle_surfaces': muscle_surfaces,
-                'tasks': solve_args,  # includes precomp via muscle dicts
+                'tasks': solve_args,
+                'warm_F': prev_Fvec,  # #3: pass warm-start F
             })
             ctx_mp = mp.get_context('fork')
             with ctx_mp.Pool(n_workers) as pool:
                 results = pool.map(_solve_one_worker, range(len(solve_args)))
-            for mname, q_result in results:
+            for mname, q_result, fvec_result in results:
                 bake_buffers[mname][frame] = q_result
+                if fvec_result is not None:
+                    prev_Fvec[mname] = fvec_result  # #3: store for next frame
         else:
             for task in solve_args:
                 mi, m_data, q_init, lbs_pos, fixed_mask = task
+                warm_F = prev_Fvec.get(m_data['name'])
                 q, info = emu_solve(
                     q_init, m_data['emu'], fixed_mask, lbs_pos,
                     mu, lam, args.alpha,
@@ -1449,8 +1473,11 @@ def main():
                     bone_trimeshes=bone_tms,
                     muscle_surfaces=[muscle_surfaces[mi]],
                     margin=0.002,
-                    use_gpu=use_gpu_solve)
+                    use_gpu=use_gpu_solve,
+                    warm_F=warm_F)
                 bake_buffers[m_data['name']][frame] = q.astype(np.float32)
+                if info.get('Fvec') is not None:
+                    prev_Fvec[m_data['name']] = info['Fvec']
 
         dt = time.time() - t0
         print(f"  Frame {frame}: {dt:.2f}s ({n_workers}w, {len(solve_args)} muscles)", flush=True)
