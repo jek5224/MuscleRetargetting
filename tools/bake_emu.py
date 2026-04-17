@@ -604,28 +604,19 @@ def stable_neohookean_hessian_blocks(F, volumes, mu, lam):
     # Term 2: coeff1 * g_ab * g_cd = coeff1 * outer(g_vec, g_vec)
     H += coeff1[:, None, None] * (g_vec[:, :, None] * g_vec[:, None, :])
 
-    # Term 3: -coeff2 * g_{cb} * g_{ad}
-    # g_{cb} at index [3c+d] needs c from row index, b from col index...
-    # Build cross-term matrix: M[3a+b, 3c+d] = g[c,b] * g[a,d]
-    # g[c,b] = g_vec[3c+b] — but b comes from the ROW index (3a+b)
-    # This requires a permutation. Build index arrays:
-    idx_ab = np.arange(9)
-    a_idx = idx_ab // 3  # (9,) — a for each row
-    b_idx = idx_ab % 3   # (9,) — b for each row
-
+    # Term 3: -coeff2 * g_{cb} * g_{ad}  (fully vectorized, no loops)
     # M[i,j] = g[m, c_j, b_i] * g[m, a_i, d_j]
-    # where i=3*a_i+b_i, j=3*c_j+d_j
-    c_idx = idx_ab // 3  # c for each col
-    d_idx = idx_ab % 3   # d for each col
-
-    # g_cb: for row i (a,b) and col j (c,d): g[m, c, b] = g[m, c_idx[j], b_idx[i]]
-    # g_ad: g[m, a, d] = g[m, a_idx[i], d_idx[j]]
-    cross = np.zeros((m, 9, 9))
-    for i in range(9):
-        ai, bi = a_idx[i], b_idx[i]
-        cross[:, i, :] = g[:, c_idx, bi] * g[:, ai, d_idx]
-
-    H -= coeff2[:, None, None] * cross
+    # where i=3a+b, j=3c+d
+    # g_cb[m,i,j] = g[m, j//3, i%3]  and  g_ad[m,i,j] = g[m, i//3, j%3]
+    row_a = np.arange(9) // 3  # (9,)
+    row_b = np.arange(9) % 3   # (9,)
+    col_c = np.arange(9) // 3  # (9,)
+    col_d = np.arange(9) % 3   # (9,)
+    # g_cb: shape (m, 9_rows, 9_cols) = g[m, col_c[j], row_b[i]]
+    g_cb = g[:, col_c, :][:, :, row_b].transpose(0, 2, 1)  # (m, 9, 9)
+    # g_ad: shape (m, 9_rows, 9_cols) = g[m, row_a[i], col_d[j]]
+    g_ad = g[:, row_a, :][:, :, col_d]  # (m, 9, 9)
+    H -= coeff2[:, None, None] * (g_cb * g_ad)
 
     # Volume-weight and SPD-project each block
     H = V[:, None, None] * H
