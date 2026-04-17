@@ -1405,40 +1405,23 @@ def main():
                 'offset': 0,  # per-muscle solve, offset=0
             })
 
-        # Prepare per-muscle solve arguments
-        # Check ARAP init for collisions — skip EMU if collision-free
+        # Prepare per-muscle solve arguments — ALL muscles run EMU
         solve_args = []
-        skip_count = 0
         for mi, m in enumerate(muscles):
             if m['lbs_bindings'] is None:
                 continue
             n_v = len(m['vertices'])
             lbs_pos = compute_lbs_positions(m['lbs_bindings'], skel, n_v)
             q_init = lbs_pos
-            has_arap = False
             if m['name'] in arap_cache and frame in arap_cache[m['name']]:
                 arap_pos = arap_cache[m['name']][frame]
                 if len(arap_pos) == n_v:
                     q_init = arap_pos.astype(np.float64)
-                    has_arap = True
             fixed_mask = np.zeros(n_v, dtype=bool)
             for vi in m['fixed_vertices']:
                 if vi < n_v:
                     fixed_mask[vi] = True
-
-            # Check if ARAP init has collisions (skip EMU if clean)
-            needs_emu = True
-            if has_arap and bone_tms:
-                f_coll = compute_collision_forces(
-                    q_init, bone_tms, [muscle_surfaces[mi]], margin=0.002)
-                n_coll = int(np.sum(np.linalg.norm(f_coll, axis=1) > 1e-10))
-                if n_coll == 0:
-                    needs_emu = False
-                    bake_buffers[m['name']][frame] = q_init.astype(np.float32)
-                    skip_count += 1
-
-            if needs_emu:
-                solve_args.append((mi, m, q_init, lbs_pos, fixed_mask))
+            solve_args.append((mi, m, q_init, lbs_pos, fixed_mask))
 
         if n_workers > 1:
             import multiprocessing as mp
@@ -1470,8 +1453,7 @@ def main():
                 bake_buffers[m_data['name']][frame] = q.astype(np.float32)
 
         dt = time.time() - t0
-        n_solved = len(solve_args)
-        print(f"  Frame {frame}: {dt:.2f}s ({n_workers}w, {n_solved} EMU + {skip_count} skip)", flush=True)
+        print(f"  Frame {frame}: {dt:.2f}s ({n_workers}w, {len(solve_args)} muscles)", flush=True)
 
         if (frame - args.start_frame + 1) % FLUSH_INTERVAL == 0:
             flush_bake_data(bake_buffers, out_dir, chunk_counters)
