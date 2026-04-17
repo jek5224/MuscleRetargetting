@@ -166,14 +166,24 @@ def newton_step_woodbury_gpu(gradient, Fvec, precomp, mu, lam, alpha):
     _ti_hessian_build(F_flat, precomp['volumes'], mu, lam, 0.0, H_blocks)
 
     # SPD projection on V*H (same as CPU), then add αI
+    # Replace NaN/Inf from degenerate tets with identity
+    bad = ~np.isfinite(H_blocks).all(axis=(1, 2))
+    if np.any(bad):
+        H_blocks[bad] = np.eye(9)
     eigvals, eigvecs = np.linalg.eigh(H_blocks)
-    eigvals = np.maximum(eigvals, 1e-6)
+    eigvals = np.maximum(eigvals, 1e-4)
     H_blocks = np.einsum('mij,mj,mkj->mik', eigvecs, eigvals, eigvecs)
     H_blocks += alpha * np.eye(9)[None, :, :]
 
-    # Batched solves (numpy LAPACK)
+    # Batched solves — use per-tet fallback if batched solve fails
     g_blocks = gradient.reshape(m, 9)
-    Hinv_g = np.linalg.solve(H_blocks, g_blocks[:, :, None]).squeeze(-1)
+    try:
+        Hinv_g = np.linalg.solve(H_blocks, g_blocks[:, :, None]).squeeze(-1)
+    except np.linalg.LinAlgError:
+        # Per-tet fallback with lstsq
+        Hinv_g = np.zeros_like(g_blocks)
+        for i in range(m):
+            Hinv_g[i], _, _, _ = np.linalg.lstsq(H_blocks[i], g_blocks[i], rcond=None)
     Hinv_g_flat = Hinv_g.ravel()
 
     B = precomp['B']  # (k, 9m)
@@ -182,7 +192,12 @@ def newton_step_woodbury_gpu(gradient, Fvec, precomp, mu, lam, alpha):
     B_Hinv_g = B @ Hinv_g_flat
 
     BT = B.T.reshape(m, 9, -1)  # (m, 9, k)
-    Hinv_BT = np.linalg.solve(H_blocks, BT)
+    try:
+        Hinv_BT = np.linalg.solve(H_blocks, BT)
+    except np.linalg.LinAlgError:
+        Hinv_BT = np.zeros_like(BT)
+        for i in range(m):
+            Hinv_BT[i], _, _, _ = np.linalg.lstsq(H_blocks[i], BT[i], rcond=None)
     Hinv_BT_flat = Hinv_BT.reshape(9 * m, -1)
     B_Hinv_BT = B @ Hinv_BT_flat
 
@@ -920,21 +935,30 @@ def newton_step_woodbury(gradient, Fvec, precomp, mu, lam, alpha):
         H_blocks[i] += alpha * np.eye(9)
 
     # H^{-1} g  (batched block-diagonal solve)
+    bad = ~np.isfinite(H_blocks).all(axis=(1, 2))
+    if np.any(bad):
+        H_blocks[bad] = (alpha + 1e-4) * np.eye(9)
     g_blocks = gradient.reshape(m, 9)
-    Hinv_g = np.linalg.solve(H_blocks, g_blocks[:, :, None]).squeeze(-1)  # (m, 9)
-    Hinv_g_flat = Hinv_g.ravel()  # (9m,)
+    try:
+        Hinv_g = np.linalg.solve(H_blocks, g_blocks[:, :, None]).squeeze(-1)
+    except np.linalg.LinAlgError:
+        Hinv_g = np.zeros_like(g_blocks)
+        for i in range(m):
+            Hinv_g[i], _, _, _ = np.linalg.lstsq(H_blocks[i], g_blocks[i], rcond=None)
+    Hinv_g_flat = Hinv_g.ravel()
 
-    # B = Φ^T G^T  (k × 9m)
-    B = precomp['B']  # (k, 9m)
-    Lambda = precomp['Lambda']  # (k, k) diagonal
-
-    # B H^{-1} g  (k,)
+    B = precomp['B']
+    Lambda = precomp['Lambda']
     B_Hinv_g = B @ Hinv_g_flat
 
-    # B H^{-1} B^T  (k × k)
-    BT = B.T  # (9m, k)
-    BT_blocks = BT.reshape(m, 9, -1)  # (m, 9, k)
-    Hinv_BT = np.linalg.solve(H_blocks, BT_blocks)  # (m, 9, k) batched
+    BT = B.T
+    BT_blocks = BT.reshape(m, 9, -1)
+    try:
+        Hinv_BT = np.linalg.solve(H_blocks, BT_blocks)
+    except np.linalg.LinAlgError:
+        Hinv_BT = np.zeros_like(BT_blocks)
+        for i in range(m):
+            Hinv_BT[i], _, _, _ = np.linalg.lstsq(H_blocks[i], BT_blocks[i], rcond=None)
     Hinv_BT_flat = Hinv_BT.reshape(9 * m, -1)  # (9m, k)
     B_Hinv_BT = B @ Hinv_BT_flat  # (k, k)
 
@@ -955,11 +979,16 @@ def newton_step_woodbury(gradient, Fvec, precomp, mu, lam, alpha):
 # ---------------------------------------------------------------------------
 # Collision forces (EMU Section 3.5, Algorithm 1 lines 28-35)
 # ---------------------------------------------------------------------------
-def compute_collision_forces(q, bone_trimeshes, muscle_surfaces, margin=0.002):
+def compute_collision_forces(q, bone_trimeshes, muscle_surfaces, margin=0.002,
+                              neighbor_positions=None, fascia_pairs=None):
     """Detect collisions and compute per-vertex contact forces.
 
-    Returns (n, 3) force array. Non-zero only at penetrating vertices.
-    Force direction: push vertex to bone surface + margin.
+    Includes bone-muscle collision AND inter-muscle fascia proximity.
+    Fascia forces pull vertices toward their rest-distance neighbors from
+    other muscles, distributed as per-vertex forces so the EMU solver
+    propagates them smoothly through the elastic energy.
+
+    Returns (n, 3) force array.
     """
     import trimesh
     from scipy.spatial import cKDTree
@@ -967,13 +996,18 @@ def compute_collision_forces(q, bone_trimeshes, muscle_surfaces, margin=0.002):
     n = len(q)
     forces = np.zeros((n, 3))
 
-    if not bone_trimeshes:
+    if not bone_trimeshes and not fascia_pairs:
         return forces
 
-    bone_kdtree = cKDTree(np.vstack([bm.vertices for bm in bone_trimeshes]))
+    if not bone_trimeshes:
+        bone_trimeshes = []
+
+    bone_kdtree = cKDTree(np.vstack([bm.vertices for bm in bone_trimeshes])) if bone_trimeshes else None
 
     # Bone-muscle collision
     for surf_info in muscle_surfaces:
+        if bone_kdtree is None:
+            break
         surf_verts = surf_info['surf_verts']
         fixed_set = surf_info['fixed_set']
         offset = surf_info['offset']
@@ -1042,6 +1076,39 @@ def compute_collision_forces(q, bone_trimeshes, muscle_surfaces, margin=0.002):
             forces[gvi_i] -= push
             forces[gvi_j] += push
 
+    # Fascia proximity: pull vertices toward rest-distance neighbors
+    # These forces feed into EMU's Newton iteration, so the solver
+    # distributes them smoothly through the elastic energy (whole muscle moves)
+    if fascia_pairs and neighbor_positions is not None:
+        names_map = neighbor_positions.get('_names', {})
+        # Determine which muscle index we're solving (from muscle_surfaces)
+        my_surf_verts = set()
+        my_fixed = set()
+        for surf_info in muscle_surfaces:
+            my_surf_verts.update(surf_info['surf_verts'])
+            my_fixed.update(surf_info['fixed_set'])
+
+        for mi_idx, vi, mj_idx, vj, rest_dist in fascia_pairs:
+            # Determine which vertex is ours and which is the neighbor
+            if vi in my_surf_verts and vi not in my_fixed:
+                other_name = names_map.get(mj_idx)
+                if other_name and other_name in neighbor_positions:
+                    other_pos = neighbor_positions[other_name][vj]
+                    diff = other_pos - q[vi]
+                    dist = np.linalg.norm(diff)
+                    if dist > rest_dist and dist > 1e-10:
+                        excess = dist - rest_dist
+                        forces[vi] += (diff / dist) * excess * 1e3
+            elif vj in my_surf_verts and vj not in my_fixed:
+                other_name = names_map.get(mi_idx)
+                if other_name and other_name in neighbor_positions:
+                    other_pos = neighbor_positions[other_name][vi]
+                    diff = other_pos - q[vj]
+                    dist = np.linalg.norm(diff)
+                    if dist > rest_dist and dist > 1e-10:
+                        excess = dist - rest_dist
+                        forces[vj] += (diff / dist) * excess * 1e3
+
     return forces
 
 
@@ -1076,7 +1143,8 @@ def generalized_force_on_F(forces_q, precomp, fixed_targets_flat):
 def emu_solve(q_init, precomp, fixed_mask, fixed_targets,
               mu, lam, alpha, max_iters=30, verbose=False,
               bone_trimeshes=None, muscle_surfaces=None, margin=0.002,
-              use_gpu=True, warm_F=None):
+              use_gpu=True, warm_F=None,
+              neighbor_positions=None, fascia_pairs=None):
     """Run EMU quasi-Newton solver (Algorithm 1 from the paper).
 
     Optimizations:
@@ -1135,16 +1203,27 @@ def emu_solve(q_init, precomp, fixed_mask, fixed_targets,
             H_cached = np.einsum('mij,mj,mkj->mik', eigvc, eigv, eigvc)
             H_cached += alpha * np.eye(9)[None, :, :]
         else:
-            # Reuse cached H for cheaper Newton step (just solve, no rebuild)
+            # Reuse cached H for cheaper Newton step
+            H_reg = H_cached.copy()
             g_blocks = g.reshape(m, 9)
-            Hinv_g = np.linalg.solve(H_cached, g_blocks[:, :, None]).squeeze(-1)
+            try:
+                Hinv_g = np.linalg.solve(H_reg, g_blocks[:, :, None]).squeeze(-1)
+            except np.linalg.LinAlgError:
+                Hinv_g = np.zeros_like(g_blocks)
+                for bi in range(m):
+                    Hinv_g[bi], _, _, _ = np.linalg.lstsq(H_reg[bi], g_blocks[bi], rcond=None)
             Hinv_g_flat = Hinv_g.ravel()
 
             B = precomp['B']
             Lambda = precomp['Lambda']
             B_Hinv_g = B @ Hinv_g_flat
             BT = B.T.reshape(m, 9, -1)
-            Hinv_BT = np.linalg.solve(H_cached, BT)
+            try:
+                Hinv_BT = np.linalg.solve(H_reg, BT)
+            except np.linalg.LinAlgError:
+                Hinv_BT = np.zeros_like(BT)
+                for bi in range(m):
+                    Hinv_BT[bi], _, _, _ = np.linalg.lstsq(H_reg[bi], BT[bi], rcond=None)
             Hinv_BT_flat = Hinv_BT.reshape(9 * m, -1)
             B_Hinv_BT = B @ Hinv_BT_flat
             middle = Lambda - alpha * B_Hinv_BT
@@ -1181,14 +1260,18 @@ def emu_solve(q_init, precomp, fixed_mask, fixed_targets,
             for coll_iter in range(5):
                 q_current = acap_positions(Fvec, precomp, fixed_targets_flat)
                 f_coll = compute_collision_forces(
-                    q_current, bone_trimeshes or [], muscle_surfaces or [], margin)
+                    q_current, bone_trimeshes or [], muscle_surfaces or [], margin,
+                    neighbor_positions=neighbor_positions, fascia_pairs=fascia_pairs)
                 n_coll = int(np.sum(np.linalg.norm(f_coll, axis=1) > 1e-10))
                 if n_coll == 0:
                     break
                 g_ext = generalized_force_on_F(f_coll, precomp, fixed_targets_flat)
                 g_ext_blocks = g_ext.reshape(m, 9)
-                d_contact = np.linalg.solve(H_cached, g_ext_blocks[:, :, None]).squeeze(-1)
-                Fvec = Fvec + d_contact.ravel()
+                try:
+                    d_contact = np.linalg.solve(H_cached, g_ext_blocks[:, :, None]).squeeze(-1)
+                    Fvec = Fvec + d_contact.ravel()
+                except np.linalg.LinAlgError:
+                    break  # Hessian singular, skip remaining collision iters
 
             E = emu_energy(Fvec, precomp, fixed_targets_flat, mu, lam, alpha, use_gpu=use_gpu)
 
@@ -1319,6 +1402,11 @@ def _solve_one_worker(idx):
     ctx = _parallel_ctx
     mi, m, q_init, lbs_pos, fixed_mask = ctx['tasks'][idx]
     warm_F = ctx.get('warm_F', {}).get(m['name'])
+
+    # Build neighbor_positions for fascia from ARAP/init positions of all muscles
+    neighbor_positions = ctx.get('neighbor_positions', None)
+    fascia_pairs_for_muscle = ctx.get('fascia_pairs_for_muscle', {}).get(mi, [])
+
     q, info = emu_solve(
         q_init, m['emu'], fixed_mask, lbs_pos,
         ctx['mu'], ctx['lam'], ctx['alpha'],
@@ -1328,7 +1416,9 @@ def _solve_one_worker(idx):
         muscle_surfaces=[ctx['muscle_surfaces'][mi]],
         margin=0.002,
         use_gpu=False,
-        warm_F=warm_F)
+        warm_F=warm_F,
+        neighbor_positions=neighbor_positions,
+        fascia_pairs=fascia_pairs_for_muscle)
     return m['name'], q.astype(np.float32), info.get('Fvec')
 
 
@@ -1569,6 +1659,23 @@ def main():
                     fixed_mask[vi] = True
             solve_args.append((mi, m, q_init, lbs_pos, fixed_mask))
 
+        # Build neighbor positions from ARAP/init for fascia forces
+        neighbor_positions = {'_names': {mi: m['name'] for mi, m in enumerate(muscles)}}
+        for mi, m in enumerate(muscles):
+            if m['name'] in arap_cache and frame in arap_cache[m['name']]:
+                neighbor_positions[m['name']] = arap_cache[m['name']][frame].astype(np.float64)
+            elif m['lbs_bindings'] is not None:
+                skel.setPositions(motion_bvh.mocap_refs[frame])
+                neighbor_positions[m['name']] = compute_lbs_positions(
+                    m['lbs_bindings'], skel, len(m['vertices']))
+
+        # Split fascia pairs per muscle (for per-muscle solve)
+        fascia_pairs_for_muscle = {}
+        for fp in fascia_pairs:
+            mi_idx, vi, mj_idx, vj, rd = fp
+            fascia_pairs_for_muscle.setdefault(mi_idx, []).append(fp)
+            fascia_pairs_for_muscle.setdefault(mj_idx, []).append(fp)
+
         if n_workers > 1:
             import multiprocessing as mp
             _parallel_ctx.update({
@@ -1577,7 +1684,9 @@ def main():
                 'bone_tms': bone_tms,
                 'muscle_surfaces': muscle_surfaces,
                 'tasks': solve_args,
-                'warm_F': prev_Fvec,  # #3: pass warm-start F
+                'warm_F': prev_Fvec,
+                'neighbor_positions': neighbor_positions,
+                'fascia_pairs_for_muscle': fascia_pairs_for_muscle,
             })
             ctx_mp = mp.get_context('fork')
             with ctx_mp.Pool(n_workers) as pool:
@@ -1599,13 +1708,12 @@ def main():
                     muscle_surfaces=[muscle_surfaces[mi]],
                     margin=0.002,
                     use_gpu=use_gpu_solve,
-                    warm_F=warm_F)
+                    warm_F=warm_F,
+                    neighbor_positions=neighbor_positions,
+                    fascia_pairs=fascia_pairs_for_muscle.get(mi, []))
                 bake_buffers[m_data['name']][frame] = q.astype(np.float32)
                 if info.get('Fvec') is not None:
                     prev_Fvec[m_data['name']] = info['Fvec']
-
-        # Fascia constraints: pull neighboring muscles together
-        n_fascia = apply_fascia_constraints(bake_buffers, muscles, fascia_pairs, frame)
 
         # Count remaining collisions across all muscles
         total_coll = 0
@@ -1624,7 +1732,7 @@ def main():
 
         dt = time.time() - t0
         print(f"  Frame {frame}: {dt:.2f}s ({n_workers}w, {len(solve_args)} muscles, "
-              f"coll={total_coll}, fascia={n_fascia})", flush=True)
+              f"coll={total_coll})", flush=True)
 
         if (frame - args.start_frame + 1) % FLUSH_INTERVAL == 0:
             flush_bake_data(bake_buffers, out_dir, chunk_counters)
