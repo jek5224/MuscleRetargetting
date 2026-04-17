@@ -370,26 +370,48 @@ def compute_multibone_lbs(muscle, skel):
                     per_vertex[vi] = [(bone_name, 1.0)]
                     anchor_bone[vi] = bone_name
 
-    # Assign all fixed vertices to the same bone as their nearest anchor.
-    # This correctly assigns insertion cap verts to the insertion bone
-    # (not the nearest bone center, which can be wrong for muscles like
-    # Gluteus Medius where Os Coxae center is closer than Femur center).
+    # Assign fixed (cap) vertices to their anchor's bone via flood-fill
+    # through tet adjacency. Nearest-anchor by distance fails when cap
+    # verts are geometrically closer to the wrong anchor (e.g., Gluteus
+    # Maximus origin verts near the insertion end).
     fixed_verts = muscle.get('fixed_vertices', [])
     if len(anchor_bone) > 0 and len(fixed_verts) > len(anchor_bone):
-        anchor_positions = {vi: rest_verts[vi] for vi in anchor_bone}
+        # Build adjacency among fixed vertices only (cap connectivity)
+        fixed_set_local = set(fixed_verts)
+        fix_adj = {vi: set() for vi in fixed_verts}
+        for t in muscle['tetrahedra']:
+            verts_in_fix = [int(v) for v in t if int(v) in fixed_set_local]
+            for a in verts_in_fix:
+                for b in verts_in_fix:
+                    if a != b:
+                        fix_adj[a].add(b)
+
+        # BFS from each anchor to assign connected cap verts
+        assigned = set(anchor_bone.keys())
+        from collections import deque
+        for anchor_vi, bname in list(anchor_bone.items()):
+            queue = deque([anchor_vi])
+            while queue:
+                vi = queue.popleft()
+                for nb in fix_adj.get(vi, []):
+                    if nb not in assigned and nb in fixed_set_local:
+                        per_vertex[nb] = [(bname, 1.0)]
+                        anchor_bone[nb] = bname
+                        assigned.add(nb)
+                        queue.append(nb)
+
+        # Any remaining unassigned fixed verts: nearest anchor fallback
         for vi in fixed_verts:
             if vi in per_vertex or vi >= n_verts:
                 continue
-            # Find nearest anchor vertex → use its bone
             best_anchor, best_dist = None, float('inf')
-            for avi, apos in anchor_positions.items():
-                d = np.linalg.norm(rest_verts[vi] - apos)
+            for avi in anchor_bone:
+                d = np.linalg.norm(rest_verts[vi] - rest_verts[avi])
                 if d < best_dist:
                     best_dist, best_anchor = d, avi
             if best_anchor is not None:
-                bname = anchor_bone[best_anchor]
-                per_vertex[vi] = [(bname, 1.0)]
-                anchor_bone[vi] = bname
+                per_vertex[vi] = [(anchor_bone[best_anchor], 1.0)]
+                anchor_bone[vi] = anchor_bone[best_anchor]
 
     # Heat diffusion
     tets = muscle['tetrahedra']
