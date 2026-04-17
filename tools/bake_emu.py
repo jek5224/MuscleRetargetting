@@ -370,21 +370,26 @@ def compute_multibone_lbs(muscle, skel):
                     per_vertex[vi] = [(bone_name, 1.0)]
                     anchor_bone[vi] = bone_name
 
-    # Assign all fixed vertices to nearest bone
+    # Assign all fixed vertices to the same bone as their nearest anchor.
+    # This correctly assigns insertion cap verts to the insertion bone
+    # (not the nearest bone center, which can be wrong for muscles like
+    # Gluteus Medius where Os Coxae center is closer than Femur center).
     fixed_verts = muscle.get('fixed_vertices', [])
     if len(anchor_bone) > 0 and len(fixed_verts) > len(anchor_bone):
-        bone_centers = {bn: bi['t0'] for bn, bi in bone_info.items()}
+        anchor_positions = {vi: rest_verts[vi] for vi in anchor_bone}
         for vi in fixed_verts:
             if vi in per_vertex or vi >= n_verts:
                 continue
-            best_bone, best_dist = None, float('inf')
-            for bname, center in bone_centers.items():
-                d = np.linalg.norm(rest_verts[vi] - center)
+            # Find nearest anchor vertex → use its bone
+            best_anchor, best_dist = None, float('inf')
+            for avi, apos in anchor_positions.items():
+                d = np.linalg.norm(rest_verts[vi] - apos)
                 if d < best_dist:
-                    best_dist, best_bone = d, bname
-            if best_bone:
-                per_vertex[vi] = [(best_bone, 1.0)]
-                anchor_bone[vi] = best_bone
+                    best_dist, best_anchor = d, avi
+            if best_anchor is not None:
+                bname = anchor_bone[best_anchor]
+                per_vertex[vi] = [(bname, 1.0)]
+                anchor_bone[vi] = bname
 
     # Heat diffusion
     tets = muscle['tetrahedra']
