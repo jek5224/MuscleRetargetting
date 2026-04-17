@@ -20,12 +20,175 @@ import numpy as np
 import scipy.sparse as sp
 from scipy.sparse.linalg import splu, eigsh
 
+import taichi as ti
+
+_ti_initialized = False
+def _ensure_ti():
+    global _ti_initialized
+    if not _ti_initialized:
+        ti.init(arch=ti.cuda, default_fp=ti.f64)
+        _ti_initialized = True
+
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
 
 from core.dartHelper import saveSkeletonInfo, buildFromInfo
 from core.bvhparser import MyBVH
+
+# ---------------------------------------------------------------------------
+# Taichi GPU kernels
+# ---------------------------------------------------------------------------
+@ti.kernel
+def _ti_hessian_build(
+    F_field: ti.types.ndarray(dtype=ti.f64, ndim=2),    # (m, 9)
+    vol_field: ti.types.ndarray(dtype=ti.f64, ndim=1),   # (m,)
+    mu_val: ti.f64, lam_val: ti.f64, alpha_val: ti.f64,
+    H_out: ti.types.ndarray(dtype=ti.f64, ndim=3),      # (m, 9, 9)
+):
+    """Per-tet: build Hessian H+αI on GPU."""
+    for tet_i in range(F_field.shape[0]):
+        F = ti.Matrix.zero(ti.f64, 3, 3)
+        for a in range(3):
+            for b in range(3):
+                F[a, b] = F_field[tet_i, 3 * a + b]
+
+        V = ti.max(vol_field[tet_i], 1e-15)
+        J = F.determinant()
+        # Regularize near-singular F
+        if ti.abs(J) < 1e-12:
+            for a in range(3):
+                F[a, a] += 1e-8
+            J = F.determinant()
+        g = F.inverse().transpose()
+
+        c = lam_val * (J - 1.0) - mu_val
+        coeff1 = J * (lam_val * (2.0 * J - 1.0) - mu_val)
+        coeff2 = c * J
+
+        for ii in range(9):
+            ai = ii // 3
+            bi = ii % 3
+            for jj in range(9):
+                cj = jj // 3
+                dj = jj % 3
+                val = coeff1 * g[ai, bi] * g[cj, dj] - coeff2 * g[cj, bi] * g[ai, dj]
+                if ai == cj and bi == dj:
+                    val += mu_val
+                H_out[tet_i, ii, jj] = V * val
+        for ii in range(9):
+            H_out[tet_i, ii, ii] += alpha_val
+
+
+@ti.kernel
+def _ti_snh_gradient(
+    F_field: ti.types.ndarray(dtype=ti.f64, ndim=2),   # (m, 9)
+    vol_field: ti.types.ndarray(dtype=ti.f64, ndim=1),  # (m,)
+    mu_val: ti.f64, lam_val: ti.f64,
+    P_out: ti.types.ndarray(dtype=ti.f64, ndim=2),      # (m, 9)
+):
+    """Per-tet SNH gradient (PK1 stress × volume)."""
+    for tet_i in range(F_field.shape[0]):
+        F = ti.Matrix.zero(ti.f64, 3, 3)
+        for a in range(3):
+            for b in range(3):
+                F[a, b] = F_field[tet_i, 3 * a + b]
+        V = ti.max(vol_field[tet_i], 1e-15)
+        J = F.determinant()
+        F_invT = F.inverse().transpose()
+        coeff = (lam_val * (J - 1.0) - mu_val) * J
+        for a in range(3):
+            for b in range(3):
+                P_out[tet_i, 3 * a + b] = V * (mu_val * F[a, b] + coeff * F_invT[a, b])
+
+
+@ti.kernel
+def _ti_snh_energy(
+    F_field: ti.types.ndarray(dtype=ti.f64, ndim=2),   # (m, 9)
+    vol_field: ti.types.ndarray(dtype=ti.f64, ndim=1),  # (m,)
+    mu_val: ti.f64, lam_val: ti.f64,
+    result: ti.types.ndarray(dtype=ti.f64, ndim=1),     # (1,) output
+):
+    """Sum of per-tet SNH energy."""
+    for tet_i in range(F_field.shape[0]):
+        F = ti.Matrix.zero(ti.f64, 3, 3)
+        for a in range(3):
+            for b in range(3):
+                F[a, b] = F_field[tet_i, 3 * a + b]
+        V = ti.max(vol_field[tet_i], 1e-15)
+        I_C = 0.0
+        for a in range(3):
+            for b in range(3):
+                I_C += F[a, b] * F[a, b]
+        J = F.determinant()
+        psi = mu_val / 2.0 * (I_C - 3.0) - mu_val * (J - 1.0) + lam_val / 2.0 * (J - 1.0) ** 2
+        result[0] += V * psi
+
+
+# ---------------------------------------------------------------------------
+# GPU-accelerated wrappers
+# ---------------------------------------------------------------------------
+def stable_neohookean_energy_gpu(F, volumes, mu, lam):
+    """GPU SNH energy."""
+    _ensure_ti()
+    m = len(F)
+    F_flat = F.reshape(m, 9).copy()
+    result = np.zeros(1, dtype=np.float64)
+    _ti_snh_energy(F_flat, volumes, mu, lam, result)
+    return result[0]
+
+
+def stable_neohookean_gradient_gpu(F, volumes, mu, lam):
+    """GPU SNH gradient, returns (m, 3, 3)."""
+    _ensure_ti()
+    m = len(F)
+    F_flat = F.reshape(m, 9).copy()
+    P_out = np.zeros((m, 9), dtype=np.float64)
+    _ti_snh_gradient(F_flat, volumes, mu, lam, P_out)
+    return P_out.reshape(m, 3, 3)
+
+
+def newton_step_woodbury_gpu(gradient, Fvec, precomp, mu, lam, alpha):
+    """Woodbury Newton step: GPU Hessian build + numpy batched solve."""
+    _ensure_ti()
+    m = precomp['n_tets']
+    F = _vec_to_F(Fvec, m)
+    F_flat = F.reshape(m, 9).copy()
+
+    # GPU: build V*H blocks WITHOUT αI (m × 9 × 9)
+    H_blocks = np.zeros((m, 9, 9), dtype=np.float64)
+    _ti_hessian_build(F_flat, precomp['volumes'], mu, lam, 0.0, H_blocks)
+
+    # SPD projection on V*H (same as CPU), then add αI
+    eigvals, eigvecs = np.linalg.eigh(H_blocks)
+    eigvals = np.maximum(eigvals, 1e-6)
+    H_blocks = np.einsum('mij,mj,mkj->mik', eigvecs, eigvals, eigvecs)
+    H_blocks += alpha * np.eye(9)[None, :, :]
+
+    # Batched solves (numpy LAPACK)
+    g_blocks = gradient.reshape(m, 9)
+    Hinv_g = np.linalg.solve(H_blocks, g_blocks[:, :, None]).squeeze(-1)
+    Hinv_g_flat = Hinv_g.ravel()
+
+    B = precomp['B']  # (k, 9m)
+    Lambda = precomp['Lambda']
+
+    B_Hinv_g = B @ Hinv_g_flat
+
+    BT = B.T.reshape(m, 9, -1)  # (m, 9, k)
+    Hinv_BT = np.linalg.solve(H_blocks, BT)
+    Hinv_BT_flat = Hinv_BT.reshape(9 * m, -1)
+    B_Hinv_BT = B @ Hinv_BT_flat
+
+    middle = Lambda - alpha * B_Hinv_BT
+    eigvals_m, eigvecs_m = np.linalg.eigh(middle)
+    eigvals_m = np.maximum(eigvals_m, np.max(np.abs(eigvals_m)) * 1e-6 + 1e-10)
+    middle_inv = eigvecs_m @ np.diag(1.0 / eigvals_m) @ eigvecs_m.T
+
+    correction = alpha * Hinv_BT_flat @ (middle_inv @ B_Hinv_g)
+    direction = -(Hinv_g_flat + correction)
+    return direction
+
 
 # ---------------------------------------------------------------------------
 # Constants (same as other bake scripts)
@@ -668,26 +831,27 @@ def acap_energy(Fvec, precomp, fixed_targets_flat):
 # ---------------------------------------------------------------------------
 # EMU total energy and gradient
 # ---------------------------------------------------------------------------
-def emu_energy(Fvec, precomp, fixed_targets_flat, mu, lam, alpha):
+def emu_energy(Fvec, precomp, fixed_targets_flat, mu, lam, alpha, use_gpu=True):
     """Total EMU energy: Ψ_iso + α·E_C (Eq. 5, no fiber activation)."""
     m = precomp['n_tets']
     F = _vec_to_F(Fvec, m)
-    E_iso = stable_neohookean_energy(F, precomp['volumes'], mu, lam)
+    if use_gpu:
+        E_iso = stable_neohookean_energy_gpu(F, precomp['volumes'], mu, lam)
+    else:
+        E_iso = stable_neohookean_energy(F, precomp['volumes'], mu, lam)
     E_c = acap_energy(Fvec, precomp, fixed_targets_flat)
     return E_iso + alpha * E_c
 
 
-def emu_gradient(Fvec, precomp, fixed_targets_flat, mu, lam, alpha):
-    """Gradient dE/dF (Eq. 9).
-
-    dE/dF = ∂Ψ_iso/∂F + α·∂E_C/∂F
-    ∂E_C/∂F = F - G q(F)  where q(F) is the constrained ACAP solve (Eq. 10)
-    """
+def emu_gradient(Fvec, precomp, fixed_targets_flat, mu, lam, alpha, use_gpu=True):
+    """Gradient dE/dF (Eq. 9)."""
     m = precomp['n_tets']
     F = _vec_to_F(Fvec, m)
 
-    # Neo-Hookean gradient
-    P = stable_neohookean_gradient(F, precomp['volumes'], mu, lam)
+    if use_gpu:
+        P = stable_neohookean_gradient_gpu(F, precomp['volumes'], mu, lam)
+    else:
+        P = stable_neohookean_gradient(F, precomp['volumes'], mu, lam)
     g_iso = _F_to_vec(P)
 
     # ACAP gradient with constrained solve
@@ -912,8 +1076,8 @@ def emu_solve(q_init, precomp, fixed_mask, fixed_targets,
         g = emu_gradient(Fvec, precomp, fixed_targets_flat, mu, lam, alpha)
         g_norm = np.linalg.norm(g)
 
-        # Line 12: Woodbury method for search direction
-        d = newton_step_woodbury(g, Fvec, precomp, mu, lam, alpha)
+        # Line 12: Woodbury method for search direction (GPU)
+        d = newton_step_woodbury_gpu(g, Fvec, precomp, mu, lam, alpha)
 
         # Check descent direction
         dir_deriv = np.dot(g, d)
