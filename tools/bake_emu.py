@@ -486,8 +486,8 @@ def precompute_emu(vertices, tetrahedra, fixed_vertices, vertex_contour_level, k
     Phi = eigenvectors  # (3n, k)
     Lambda = np.diag(eigenvalues)  # (k, k)
 
-    # B = G @ Phi (9m × k) — maps eigenmode coefficients to F-space
-    B_sparse = G @ Phi  # (9m, k)
+    # B = Φ^T G^T (k × 9m) per Eq. 15
+    B_sparse = Phi.T @ Gt  # (k, 9m)
     B = B_sparse if isinstance(B_sparse, np.ndarray) else B_sparse.toarray()
     print(f"    Eigenmodes: k={k}, captured {eigenvalues.sum():.2f} "
           f"({time.time()-t0:.2f}s)")
@@ -576,10 +576,16 @@ def stable_neohookean_gradient(F, volumes, mu, lam):
 
 
 def stable_neohookean_hessian_blocks(F, volumes, mu, lam):
-    """Per-tet 9×9 Hessian blocks of V*Ψ_iso w.r.t. vec(F_i).
+    """Per-tet 9×9 analytical Hessian of V*Ψ_iso w.r.t. vec(F_i).
 
-    SPD projection: compute eigendecomposition of each 9×9 block,
-    clamp negative eigenvalues to a small positive value.
+    Full Stable Neo-Hookean [SGK18] Hessian including all cross-terms
+    from ∂²J/∂F². SPD-projected via eigenvalue clamping.
+
+    ∂P_{ab}/∂F_{cd} = μ δ_{ac}δ_{bd}
+                     + J·g_{cd}·g_{ab}·[λ(2J-1) - μ]
+                     - [λ(J-1) - μ]·J·g_{cb}·g_{ad}
+
+    where g_{ab} = (F^{-T})_{ab}, row-major vec indexing i=3a+b.
     """
     m = len(F)
     H = np.zeros((m, 9, 9))
@@ -593,19 +599,33 @@ def stable_neohookean_hessian_blocks(F, volumes, mu, lam):
         try:
             Fi_inv = np.linalg.inv(Fi)
         except np.linalg.LinAlgError:
-            H[i] = V * mu * np.eye(9)
-            H[i] += eps_spd * np.eye(9)
+            H[i] = V * mu * np.eye(9) + eps_spd * np.eye(9)
             continue
 
-        FiT_inv = Fi_inv.T
-        g = FiT_inv.ravel()  # vec(F^{-T})
+        FiT_inv = Fi_inv.T  # g_{ab} = FiT_inv[a,b]
+        c = lam * (Ji - 1) - mu
+        coeff1 = Ji * (lam * (2 * Ji - 1) - mu)
+        coeff2 = -c * Ji
 
-        # Hessian of Stable Neo-Hookean:
-        # d²Ψ/dF² = μ I + λ J² g g^T  (dominant SPD terms)
-        Hi = V * (mu * np.eye(9) + lam * Ji * Ji * np.outer(g, g))
+        Hi = np.zeros((9, 9))
+        for a in range(3):
+            for b in range(3):
+                ii = 3 * a + b
+                for cc in range(3):
+                    for d in range(3):
+                        jj = 3 * cc + d
+                        val = 0.0
+                        # Term 1: μ I
+                        if a == cc and b == d:
+                            val += mu
+                        # Term 2: coeff1 * g_ab * g_cd (outer product)
+                        val += coeff1 * FiT_inv[a, b] * FiT_inv[cc, d]
+                        # Term 3: coeff2 * g_cb * g_ad (cross term from ∂²J/∂F²)
+                        val += coeff2 * FiT_inv[cc, b] * FiT_inv[a, d]
+                        Hi[ii, jj] = val
 
         # SPD projection via eigenvalue clamping
-        eigvals, eigvecs = np.linalg.eigh(Hi)
+        eigvals, eigvecs = np.linalg.eigh(V * Hi)
         eigvals = np.maximum(eigvals, eps_spd)
         H[i] = eigvecs @ np.diag(eigvals) @ eigvecs.T
 
@@ -687,64 +707,58 @@ def emu_gradient(Fvec, precomp, fixed_targets_flat, mu, lam, alpha):
 def newton_step_woodbury(gradient, Fvec, precomp, mu, lam, alpha):
     """Compute Newton descent direction using Woodbury Hessian (Eq. 14-17).
 
-    Full Hessian = (H + αI) - α B Λ^{-1} B^T
-    where:
-      H = block-diagonal per-tet Hessian of Ψ_iso (9×9 blocks)
-      B = G Φ (9m × k), Λ = eigenvalues of G^T G (k × k)
+    Paper notation:
+      H = ∂²Ψ_iso/∂F² + αI  (block-diagonal, includes αI per Eq. 15)
+      B = Φ^T G^T  (k × 9m, Eq. 15)
+      Λ = eigenvalues of G^T G  (k × k)
 
-    Using Woodbury: (A - U C V)^{-1} = A^{-1} + A^{-1} U (C^{-1} - V A^{-1} U)^{-1} V A^{-1}
-    with A = H + αI, U = B, C = α Λ^{-1}, V = B^T
+    Full Hessian (Eq. 14): d²E/dF² ≈ H - αB^T Λ^{-1} B
+
+    Woodbury (Eq. 17):
+      (d²E/dF²)^{-1} = H^{-1} + α H^{-1} B^T (Λ - α B H^{-1} B^T)^{-1} B H^{-1}
     """
     m = precomp['n_tets']
-    k = precomp['B'].shape[1]
     F = _vec_to_F(Fvec, m)
 
-    # A = H + αI (block-diagonal, m × 9 × 9)
-    A_blocks = stable_neohookean_hessian_blocks(F, precomp['volumes'], mu, lam)
+    # H = ∂²Ψ_iso/∂F² + αI  (block-diagonal, m × 9 × 9)
+    H_blocks = stable_neohookean_hessian_blocks(F, precomp['volumes'], mu, lam)
     for i in range(m):
-        A_blocks[i] += alpha * np.eye(9)
+        H_blocks[i] += alpha * np.eye(9)
 
-    # A^{-1} g  (block-diagonal solve)
+    # H^{-1} g  (block-diagonal solve)
     g_blocks = gradient.reshape(m, 9)
-    Ainv_g = np.zeros_like(g_blocks)
+    Hinv_g = np.zeros_like(g_blocks)
     for i in range(m):
-        Ainv_g[i] = np.linalg.solve(A_blocks[i], g_blocks[i])
-    Ainv_g_flat = Ainv_g.ravel()  # (9m,)
+        Hinv_g[i] = np.linalg.solve(H_blocks[i], g_blocks[i])
+    Hinv_g_flat = Hinv_g.ravel()  # (9m,)
 
-    # B = G Φ (9m × k)
-    B = precomp['B']
+    # B = Φ^T G^T  (k × 9m)
+    B = precomp['B']  # (k, 9m)
     Lambda = precomp['Lambda']  # (k, k) diagonal
 
-    # V A^{-1} g = B^T A^{-1} g  (k,)
-    Bt_Ainv_g = B.T @ Ainv_g_flat
+    # B H^{-1} g  (k,)
+    B_Hinv_g = B @ Hinv_g_flat
 
-    # V A^{-1} U = B^T A^{-1} B  (k × k)
-    # Apply A^{-1} to each column of B
-    B_blocks = B.reshape(m, 9, k)
-    Ainv_B = np.zeros_like(B_blocks)
+    # B H^{-1} B^T  (k × k)
+    # Need H^{-1} applied to each row of B^T = each column of B transposed
+    BT = B.T  # (9m, k)
+    BT_blocks = BT.reshape(m, 9, -1)  # (m, 9, k)
+    Hinv_BT = np.zeros_like(BT_blocks)
     for i in range(m):
-        Ainv_B[i] = np.linalg.solve(A_blocks[i], B_blocks[i])
-    Ainv_B_flat = Ainv_B.reshape(9 * m, k)
-    Bt_Ainv_B = B.T @ Ainv_B_flat  # (k, k)
+        Hinv_BT[i] = np.linalg.solve(H_blocks[i], BT_blocks[i])
+    Hinv_BT_flat = Hinv_BT.reshape(9 * m, -1)  # (9m, k)
+    B_Hinv_BT = B @ Hinv_BT_flat  # (k, k)
 
-    # Middle = (C^{-1} - V A^{-1} U)^{-1} = (Λ/α - B^T A^{-1} B)^{-1}
-    middle = Lambda / alpha - Bt_Ainv_B
-    # Regularize to prevent blow-up from near-singular middle matrix
+    # Middle matrix (Eq. 17): (Λ - α B H^{-1} B^T)^{-1}
+    middle = Lambda - alpha * B_Hinv_BT
+    # SPD regularization
     eigvals_m, eigvecs_m = np.linalg.eigh(middle)
     eigvals_m = np.maximum(eigvals_m, np.max(np.abs(eigvals_m)) * 1e-6 + 1e-10)
     middle_inv = eigvecs_m @ np.diag(1.0 / eigvals_m) @ eigvecs_m.T
 
-    # d = -[A^{-1} + A^{-1} U (middle)^{-1} V A^{-1}] g
-    correction = Ainv_B_flat @ (middle_inv @ Bt_Ainv_g)  # (9m,)
-
-    direction = -(Ainv_g_flat + correction)
-
-    # Trust region: clamp step magnitude to prevent overshooting
-    d_norm = np.linalg.norm(direction)
-    g_norm = np.linalg.norm(gradient)
-    max_step = g_norm * 5.0
-    if d_norm > max_step:
-        direction = direction * (max_step / d_norm)
+    # Eq. 17: d = -[H^{-1} + α H^{-1} B^T (middle)^{-1} B H^{-1}] g
+    correction = alpha * Hinv_BT_flat @ (middle_inv @ B_Hinv_g)  # (9m,)
+    direction = -(Hinv_g_flat + correction)
 
     return direction
 
@@ -887,12 +901,12 @@ def emu_solve(q_init, precomp, fixed_mask, fixed_targets,
     q_flat = q_init.ravel()
     Fvec = (precomp['G'] @ q_flat).copy()
 
-    # Algorithm 1 parameters
-    sigma_init = 1.0  # adaptive: start moderate, use previous σ
-    rho = 0.5
-    eps = 1e-4  # Armijo constant
-    e1 = 1e-4  # convergence: gradient norm
-    e2 = 1e-8  # convergence: energy change
+    # Algorithm 1 parameters (matching paper exactly)
+    sigma_init = 10.0  # Line 1: σ ← 10
+    rho = 0.5          # Line 5: ρ ← 0.5
+    eps = 1e-3         # Line 4: ε ← 10^{-3}
+    e1 = 1e-4          # convergence: gradient norm
+    e2 = 1e-8          # convergence: energy change
 
     E = emu_energy(Fvec, precomp, fixed_targets_flat, mu, lam, alpha)
     if verbose:
@@ -900,7 +914,6 @@ def emu_solve(q_init, precomp, fixed_mask, fixed_targets,
 
     g_norm = float('inf')
     n_coll = 0
-    prev_sigma = sigma_init
 
     for iteration in range(max_iters):
         # Line 10: Compute gradient
@@ -917,9 +930,8 @@ def emu_solve(q_init, precomp, fixed_mask, fixed_targets,
             d = -g
             dir_deriv = np.dot(g, d)
 
-        # Lines 15-22: Backtracking line search
-        # Adaptive: start from 2x previous successful σ (grow back toward larger steps)
-        sigma = min(sigma_init, sigma_init) if iteration == 0 else min(prev_sigma * 2, sigma_init)
+        # Lines 15-22: Backtracking line search (σ starts at σ_init each time)
+        sigma = sigma_init
         E_prev = E
         ls_success = False
         for ls_iter in range(20):
@@ -933,7 +945,6 @@ def emu_solve(q_init, precomp, fixed_mask, fixed_targets,
         if ls_success:
             Fvec = F_new
             E = E_new
-            prev_sigma = sigma
 
         # Lines 28-41: Collision resolution
         if bone_trimeshes is not None or muscle_surfaces is not None:
