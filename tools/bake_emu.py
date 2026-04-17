@@ -1526,12 +1526,48 @@ def main():
     for m in muscles:
         m['lbs_bindings'] = compute_multibone_lbs(m, skel)
 
-    # ── EMU precomputation (per muscle) ──────────────────────────────
-    print("[5] EMU precomputation...")
+    # ── EMU unified precomputation ──────────────────────────────────
+    print("[5] EMU unified precomputation (all muscles as one system)...")
+
+    # Build combined vertex/tet arrays with offset tracking
+    vert_offset = {}
+    tet_offset = {}
+    all_verts = []
+    all_tets = []
+    all_fixed = []
+    all_vcl = []
+    v_off = 0
+    t_off = 0
     for m in muscles:
-        m['emu'] = precompute_emu(
-            m['vertices'], m['tetrahedra'], m['fixed_vertices'],
-            m.get('vertex_contour_level'), k_modes=args.k_modes)
+        vert_offset[m['name']] = v_off
+        tet_offset[m['name']] = t_off
+        all_verts.append(m['vertices'])
+        all_tets.append(m['tetrahedra'] + v_off)
+        all_fixed.extend([vi + v_off for vi in m['fixed_vertices']])
+        vcl = m.get('vertex_contour_level')
+        if vcl is not None:
+            if len(vcl) < len(m['vertices']):
+                vcl_pad = np.zeros(len(m['vertices']), dtype=vcl.dtype)
+                vcl_pad[:len(vcl)] = vcl
+                vcl = vcl_pad
+            all_vcl.append(vcl)
+        else:
+            all_vcl.append(np.zeros(len(m['vertices']), dtype=np.int32))
+        v_off += len(m['vertices'])
+        t_off += len(m['tetrahedra'])
+
+    combined_verts = np.concatenate(all_verts, axis=0)
+    combined_tets = np.concatenate(all_tets, axis=0)
+    combined_fixed = sorted(all_fixed)
+    combined_vcl = np.concatenate(all_vcl)
+
+    total_n = len(combined_verts)
+    total_m = len(combined_tets)
+    print(f"    Combined: {total_n} verts, {total_m} tets, {len(combined_fixed)} fixed")
+
+    unified_precomp = precompute_emu(
+        combined_verts, combined_tets, combined_fixed,
+        combined_vcl, k_modes=args.k_modes)
 
     # ── Load bone meshes for collision ──────────────────────────────
     print("[6] Loading bone meshes...")
@@ -1595,17 +1631,21 @@ def main():
     bake_buffers = {m['name']: {} for m in muscles}
     chunk_counters = {m['name']: 0 for m in muscles}
 
-    # Warm-start: carry forward F from previous frame
-    prev_Fvec = {}  # muscle_name -> Fvec from previous frame
+    # Warm-start: carry forward unified F
+    prev_Fvec_unified = None
 
-    # Determine parallelism — skip Taichi init if parallel (CUDA not thread-safe)
-    n_workers = args.workers if args.workers > 0 else min(os.cpu_count() or 4, len(muscles))
-    use_gpu_solve = (n_workers <= 1)
-    if use_gpu_solve:
-        _ensure_ti()
-        print(f"    Mode: serial with GPU (Taichi CUDA)")
-    else:
-        print(f"    Mode: parallel {n_workers} workers (CPU only)")
+    # Unified mode: single solve for all muscles
+    _ensure_ti()
+    print(f"    Mode: unified (all muscles in one EMU solve)")
+
+    # Build unified collision surface info (with global offsets)
+    unified_surfaces = []
+    for m in muscles:
+        unified_surfaces.append({
+            'surf_verts': [vi + vert_offset[m['name']] for vi in m['_surf_verts']],
+            'fixed_set': set(vi + vert_offset[m['name']] for vi in m['fixed_vertices']),
+            'offset': 0,  # already global
+        })
 
     # ── Bake loop ────────────────────────────────────────────────────
     print(f"\n[7] Baking frames {args.start_frame}-{end_frame}...")
@@ -1631,107 +1671,62 @@ def main():
             posed = (R_cur @ local.T).T + t_cur
             bone_tms.append(trimesh.Trimesh(vertices=posed, faces=bm['faces'].copy(), process=True))
 
-        # Build muscle surface info for collision
-        muscle_surfaces = []
-        for m in muscles:
-            muscle_surfaces.append({
-                'surf_verts': m['_surf_verts'],
-                'fixed_set': set(m['fixed_vertices']),
-                'offset': 0,  # per-muscle solve, offset=0
-            })
+        # Build unified q_init and fixed_targets from per-muscle LBS/ARAP
+        q_init_unified = np.zeros((total_n, 3), dtype=np.float64)
+        lbs_unified = np.zeros((total_n, 3), dtype=np.float64)
+        fixed_mask_unified = np.zeros(total_n, dtype=bool)
 
-        # Prepare per-muscle solve arguments — ALL muscles run EMU
-        solve_args = []
-        for mi, m in enumerate(muscles):
+        for m in muscles:
             if m['lbs_bindings'] is None:
                 continue
             n_v = len(m['vertices'])
+            off = vert_offset[m['name']]
             lbs_pos = compute_lbs_positions(m['lbs_bindings'], skel, n_v)
+            lbs_unified[off:off + n_v] = lbs_pos
+
             q_init = lbs_pos
             if m['name'] in arap_cache and frame in arap_cache[m['name']]:
                 arap_pos = arap_cache[m['name']][frame]
                 if len(arap_pos) == n_v:
                     q_init = arap_pos.astype(np.float64)
-            fixed_mask = np.zeros(n_v, dtype=bool)
+            q_init_unified[off:off + n_v] = q_init
+
             for vi in m['fixed_vertices']:
                 if vi < n_v:
-                    fixed_mask[vi] = True
-            solve_args.append((mi, m, q_init, lbs_pos, fixed_mask))
+                    fixed_mask_unified[off + vi] = True
 
-        # Build neighbor positions from ARAP/init for fascia forces
-        neighbor_positions = {'_names': {mi: m['name'] for mi, m in enumerate(muscles)}}
-        for mi, m in enumerate(muscles):
-            if m['name'] in arap_cache and frame in arap_cache[m['name']]:
-                neighbor_positions[m['name']] = arap_cache[m['name']][frame].astype(np.float64)
-            elif m['lbs_bindings'] is not None:
-                skel.setPositions(motion_bvh.mocap_refs[frame])
-                neighbor_positions[m['name']] = compute_lbs_positions(
-                    m['lbs_bindings'], skel, len(m['vertices']))
+        # Unified EMU solve
+        q_result, info = emu_solve(
+            q_init_unified, unified_precomp, fixed_mask_unified, lbs_unified,
+            mu, lam, args.alpha,
+            max_iters=args.max_iters,
+            verbose=(frame == args.start_frame),
+            bone_trimeshes=bone_tms,
+            muscle_surfaces=unified_surfaces,
+            margin=0.002,
+            use_gpu=True,
+            warm_F=prev_Fvec_unified)
 
-        # Split fascia pairs per muscle (for per-muscle solve)
-        fascia_pairs_for_muscle = {}
-        for fp in fascia_pairs:
-            mi_idx, vi, mj_idx, vj, rd = fp
-            fascia_pairs_for_muscle.setdefault(mi_idx, []).append(fp)
-            fascia_pairs_for_muscle.setdefault(mj_idx, []).append(fp)
+        prev_Fvec_unified = info.get('Fvec')
 
-        if n_workers > 1:
-            import multiprocessing as mp
-            _parallel_ctx.update({
-                'mu': mu, 'lam': lam, 'alpha': args.alpha,
-                'max_iters': args.max_iters,
-                'bone_tms': bone_tms,
-                'muscle_surfaces': muscle_surfaces,
-                'tasks': solve_args,
-                'warm_F': prev_Fvec,
-                'neighbor_positions': neighbor_positions,
-                'fascia_pairs_for_muscle': fascia_pairs_for_muscle,
-            })
-            ctx_mp = mp.get_context('fork')
-            with ctx_mp.Pool(n_workers) as pool:
-                results = pool.map(_solve_one_worker, range(len(solve_args)))
-            for mname, q_result, fvec_result in results:
-                bake_buffers[mname][frame] = q_result
-                if fvec_result is not None:
-                    prev_Fvec[mname] = fvec_result  # #3: store for next frame
-        else:
-            for task in solve_args:
-                mi, m_data, q_init, lbs_pos, fixed_mask = task
-                warm_F = prev_Fvec.get(m_data['name'])
-                q, info = emu_solve(
-                    q_init, m_data['emu'], fixed_mask, lbs_pos,
-                    mu, lam, args.alpha,
-                    max_iters=args.max_iters,
-                    verbose=(frame == args.start_frame),
-                    bone_trimeshes=bone_tms,
-                    muscle_surfaces=[muscle_surfaces[mi]],
-                    margin=0.002,
-                    use_gpu=use_gpu_solve,
-                    warm_F=warm_F,
-                    neighbor_positions=neighbor_positions,
-                    fascia_pairs=fascia_pairs_for_muscle.get(mi, []))
-                bake_buffers[m_data['name']][frame] = q.astype(np.float32)
-                if info.get('Fvec') is not None:
-                    prev_Fvec[m_data['name']] = info['Fvec']
+        # Split results back to per-muscle buffers
+        for m in muscles:
+            off = vert_offset[m['name']]
+            n_v = len(m['vertices'])
+            bake_buffers[m['name']][frame] = q_result[off:off + n_v].astype(np.float32)
 
-        # Count remaining collisions across all muscles
+        # Count remaining collisions
         total_coll = 0
         if bone_tms:
-            for mname_check in bake_buffers:
-                if frame not in bake_buffers[mname_check]:
+            for mi, m in enumerate(muscles):
+                if frame not in bake_buffers[m['name']]:
                     continue
-                pos_check = bake_buffers[mname_check][frame]
-                for mi_check, m_check in enumerate(muscles):
-                    if m_check['name'] != mname_check:
-                        continue
-                    f_c = compute_collision_forces(
-                        pos_check.astype(np.float64), bone_tms,
-                        [muscle_surfaces[mi_check]], margin=0.002)
-                    total_coll += int(np.sum(np.linalg.norm(f_c, axis=1) > 1e-10))
+                f_c = compute_collision_forces(
+                    q_result, bone_tms, [unified_surfaces[mi]], margin=0.002)
+                total_coll += int(np.sum(np.linalg.norm(f_c, axis=1) > 1e-10))
 
         dt = time.time() - t0
-        print(f"  Frame {frame}: {dt:.2f}s ({n_workers}w, {len(solve_args)} muscles, "
-              f"coll={total_coll})", flush=True)
+        print(f"  Frame {frame}: {dt:.2f}s (unified, coll={total_coll})", flush=True)
 
         if (frame - args.start_frame + 1) % FLUSH_INTERVAL == 0:
             flush_bake_data(bake_buffers, out_dir, chunk_counters)
