@@ -1260,8 +1260,7 @@ def emu_solve(q_init, precomp, fixed_mask, fixed_targets,
             for coll_iter in range(5):
                 q_current = acap_positions(Fvec, precomp, fixed_targets_flat)
                 f_coll = compute_collision_forces(
-                    q_current, bone_trimeshes or [], muscle_surfaces or [], margin,
-                    neighbor_positions=neighbor_positions, fascia_pairs=fascia_pairs)
+                    q_current, bone_trimeshes or [], muscle_surfaces or [], margin)
                 n_coll = int(np.sum(np.linalg.norm(f_coll, axis=1) > 1e-10))
                 if n_coll == 0:
                     break
