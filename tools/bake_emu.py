@@ -1506,8 +1506,24 @@ def main():
                 if info.get('Fvec') is not None:
                     prev_Fvec[m_data['name']] = info['Fvec']
 
+        # Count remaining collisions across all muscles
+        total_coll = 0
+        if bone_tms:
+            for mname_check in bake_buffers:
+                if frame not in bake_buffers[mname_check]:
+                    continue
+                pos_check = bake_buffers[mname_check][frame]
+                for mi_check, m_check in enumerate(muscles):
+                    if m_check['name'] != mname_check:
+                        continue
+                    f_c = compute_collision_forces(
+                        pos_check.astype(np.float64), bone_tms,
+                        [muscle_surfaces[mi_check]], margin=0.002)
+                    total_coll += int(np.sum(np.linalg.norm(f_c, axis=1) > 1e-10))
+
         dt = time.time() - t0
-        print(f"  Frame {frame}: {dt:.2f}s ({n_workers}w, {len(solve_args)} muscles)", flush=True)
+        print(f"  Frame {frame}: {dt:.2f}s ({n_workers}w, {len(solve_args)} muscles, "
+              f"coll={total_coll})", flush=True)
 
         if (frame - args.start_frame + 1) % FLUSH_INTERVAL == 0:
             flush_bake_data(bake_buffers, out_dir, chunk_counters)
