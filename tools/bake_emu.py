@@ -1028,6 +1028,8 @@ def main():
                         help='Newton iterations per frame')
     parser.add_argument('--k-modes', type=int, default=48,
                         help='Eigenmodes for Woodbury approximation')
+    parser.add_argument('--arap-cache', default=None,
+                        help='ARAP cache dir for initial guess (e.g. data/motion_cache/walk/_old_cache)')
     args = parser.parse_args()
 
     mu, lam = lame_parameters(args.youngs, args.poisson)
@@ -1064,6 +1066,27 @@ def main():
     total_verts = sum(len(m['vertices']) for m in muscles)
     total_tets = sum(len(m['tetrahedra']) for m in muscles)
     print(f"    {len(muscles)} muscles: {total_verts} verts, {total_tets} tets")
+
+    # ── Load ARAP cache for initial guess ────────────────────────────
+    arap_cache = {}  # {muscle_name: {frame: positions}}
+    if args.arap_cache and os.path.isdir(args.arap_cache):
+        import glob as glob_mod
+        print(f"[3b] Loading ARAP cache from {args.arap_cache}...")
+        for m in muscles:
+            chunks = sorted(glob_mod.glob(
+                os.path.join(args.arap_cache, f"{m['name']}_chunk_*.npz")))
+            if not chunks:
+                continue
+            frame_data = {}
+            for cp in chunks:
+                d = np.load(cp)
+                for fi, frame_num in enumerate(d['frames']):
+                    frame_data[int(frame_num)] = d['positions'][fi]
+            arap_cache[m['name']] = frame_data
+        n_cached = sum(len(v) for v in arap_cache.values())
+        print(f"    Loaded {len(arap_cache)} muscles, {n_cached} frames")
+    elif args.arap_cache:
+        print(f"    WARNING: ARAP cache dir not found: {args.arap_cache}")
 
     # ── Compute LBS bindings ─────────────────────────────────────────
     print("[4] Computing LBS bindings...")
@@ -1177,14 +1200,21 @@ def main():
             n_v = len(m['vertices'])
             lbs_pos = compute_lbs_positions(m['lbs_bindings'], skel, n_v)
 
+            # Use ARAP cache as initial guess if available
+            q_init = lbs_pos
+            if m['name'] in arap_cache and frame in arap_cache[m['name']]:
+                arap_pos = arap_cache[m['name']][frame]
+                if len(arap_pos) == n_v:
+                    q_init = arap_pos.astype(np.float64)
+
             fixed_mask = np.zeros(n_v, dtype=bool)
             for vi in m['fixed_vertices']:
                 if vi < n_v:
                     fixed_mask[vi] = True
 
-            # EMU solve with collision
+            # EMU solve: q_init for F initialization, lbs_pos for fixed targets
             q, info = emu_solve(
-                lbs_pos, m['emu'], fixed_mask, lbs_pos,
+                q_init, m['emu'], fixed_mask, lbs_pos,
                 mu, lam, args.alpha,
                 max_iters=args.max_iters,
                 verbose=(frame == args.start_frame),
