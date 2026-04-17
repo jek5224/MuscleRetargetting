@@ -554,80 +554,86 @@ def stable_neohookean_energy(F, volumes, mu, lam):
 
 
 def stable_neohookean_gradient(F, volumes, mu, lam):
-    """∂Ψ/∂F for Stable Neo-Hookean, returns (m, 3, 3).
-
-    P = μF - μ J F^{-T} + λ(J-1) J F^{-T}
-    ∂(VΨ)/∂F = V * P
-    """
-    m = len(F)
+    """∂Ψ/∂F for Stable Neo-Hookean, returns (m, 3, 3). Vectorized."""
     J = np.linalg.det(F)  # (m,)
+    # Batch inverse — handle singular via regularization
+    F_reg = F.copy()
+    degen = np.abs(J) < 1e-12
+    if np.any(degen):
+        F_reg[degen] += 1e-8 * np.eye(3)
+    F_invT = np.linalg.inv(F_reg).transpose(0, 2, 1)  # (m, 3, 3)
 
-    # F^{-T} = (F^{-1})^T — handle near-singular with pseudoinverse
-    F_invT = np.zeros_like(F)
-    for i in range(m):
-        try:
-            F_invT[i] = np.linalg.inv(F[i]).T
-        except np.linalg.LinAlgError:
-            F_invT[i] = np.linalg.pinv(F[i]).T
-
-    P = mu * F - mu * J[:, None, None] * F_invT + lam * ((J - 1) * J)[:, None, None] * F_invT
-
-    return volumes[:, None, None] * P  # (m, 3, 3)
+    coeff = (lam * (J - 1) - mu) * J  # (m,)
+    P = mu * F + coeff[:, None, None] * F_invT
+    return volumes[:, None, None] * P
 
 
 def stable_neohookean_hessian_blocks(F, volumes, mu, lam):
-    """Per-tet 9×9 analytical Hessian of V*Ψ_iso w.r.t. vec(F_i).
+    """Per-tet 9×9 analytical Hessian of V*Ψ_iso w.r.t. vec(F_i). Vectorized.
 
     Full Stable Neo-Hookean [SGK18] Hessian including all cross-terms
     from ∂²J/∂F². SPD-projected via eigenvalue clamping.
 
-    ∂P_{ab}/∂F_{cd} = μ δ_{ac}δ_{bd}
-                     + J·g_{cd}·g_{ab}·[λ(2J-1) - μ]
-                     - [λ(J-1) - μ]·J·g_{cb}·g_{ad}
-
-    where g_{ab} = (F^{-T})_{ab}, row-major vec indexing i=3a+b.
+    H[3a+b, 3c+d] = μ δ_{ac}δ_{bd}
+                   + coeff1 · g_{ab} · g_{cd}
+                   - coeff2 · g_{cb} · g_{ad}
     """
     m = len(F)
-    H = np.zeros((m, 9, 9))
     eps_spd = 1e-6
+    J = np.linalg.det(F)  # (m,)
+    V = np.maximum(volumes, 1e-15)  # (m,)
 
-    for i in range(m):
-        Fi = F[i]
-        V = max(volumes[i], 1e-15)
-        Ji = np.linalg.det(Fi)
+    # Batch inverse
+    F_reg = F.copy()
+    degen = np.abs(J) < 1e-12
+    if np.any(degen):
+        F_reg[degen] += 1e-8 * np.eye(3)
+    g = np.linalg.inv(F_reg).transpose(0, 2, 1)  # g[m,a,b] = (F^{-T})_{ab}
 
-        try:
-            Fi_inv = np.linalg.inv(Fi)
-        except np.linalg.LinAlgError:
-            H[i] = V * mu * np.eye(9) + eps_spd * np.eye(9)
-            continue
+    c = lam * (J - 1) - mu                    # (m,)
+    coeff1 = J * (lam * (2 * J - 1) - mu)     # (m,)
+    coeff2 = c * J                             # (m,) note: sign absorbed below
 
-        FiT_inv = Fi_inv.T  # g_{ab} = FiT_inv[a,b]
-        c = lam * (Ji - 1) - mu
-        coeff1 = Ji * (lam * (2 * Ji - 1) - mu)
-        coeff2 = -c * Ji
+    # Vectorize: build (m, 9, 9) without Python loops
+    # g_vec[m, i] = g[m, a, b] where i = 3a+b
+    g_vec = g.reshape(m, 9)  # (m, 9)
 
-        Hi = np.zeros((9, 9))
-        for a in range(3):
-            for b in range(3):
-                ii = 3 * a + b
-                for cc in range(3):
-                    for d in range(3):
-                        jj = 3 * cc + d
-                        val = 0.0
-                        # Term 1: μ I
-                        if a == cc and b == d:
-                            val += mu
-                        # Term 2: coeff1 * g_ab * g_cd (outer product)
-                        val += coeff1 * FiT_inv[a, b] * FiT_inv[cc, d]
-                        # Term 3: coeff2 * g_cb * g_ad (cross term from ∂²J/∂F²)
-                        val += coeff2 * FiT_inv[cc, b] * FiT_inv[a, d]
-                        Hi[ii, jj] = val
+    # Term 1: μ I  →  (m, 9, 9)
+    H = mu * np.broadcast_to(np.eye(9), (m, 9, 9)).copy()
 
-        # SPD projection via eigenvalue clamping
-        eigvals, eigvecs = np.linalg.eigh(V * Hi)
-        eigvals = np.maximum(eigvals, eps_spd)
-        H[i] = eigvecs @ np.diag(eigvals) @ eigvecs.T
+    # Term 2: coeff1 * g_ab * g_cd = coeff1 * outer(g_vec, g_vec)
+    H += coeff1[:, None, None] * (g_vec[:, :, None] * g_vec[:, None, :])
+
+    # Term 3: -coeff2 * g_{cb} * g_{ad}
+    # g_{cb} at index [3c+d] needs c from row index, b from col index...
+    # Build cross-term matrix: M[3a+b, 3c+d] = g[c,b] * g[a,d]
+    # g[c,b] = g_vec[3c+b] — but b comes from the ROW index (3a+b)
+    # This requires a permutation. Build index arrays:
+    idx_ab = np.arange(9)
+    a_idx = idx_ab // 3  # (9,) — a for each row
+    b_idx = idx_ab % 3   # (9,) — b for each row
+
+    # M[i,j] = g[m, c_j, b_i] * g[m, a_i, d_j]
+    # where i=3*a_i+b_i, j=3*c_j+d_j
+    c_idx = idx_ab // 3  # c for each col
+    d_idx = idx_ab % 3   # d for each col
+
+    # g_cb: for row i (a,b) and col j (c,d): g[m, c, b] = g[m, c_idx[j], b_idx[i]]
+    # g_ad: g[m, a, d] = g[m, a_idx[i], d_idx[j]]
+    cross = np.zeros((m, 9, 9))
+    for i in range(9):
+        ai, bi = a_idx[i], b_idx[i]
+        cross[:, i, :] = g[:, c_idx, bi] * g[:, ai, d_idx]
+
+    H -= coeff2[:, None, None] * cross
+
+    # Volume-weight and SPD-project each block
+    H = V[:, None, None] * H
+
+    # Batch SPD projection
+    eigvals, eigvecs = np.linalg.eigh(H)  # (m, 9), (m, 9, 9)
+    eigvals = np.maximum(eigvals, eps_spd)
+    H = np.einsum('mij,mj,mkj->mik', eigvecs, eigvals, eigvecs)
 
     return H  # (m, 9, 9)
 
@@ -725,11 +731,9 @@ def newton_step_woodbury(gradient, Fvec, precomp, mu, lam, alpha):
     for i in range(m):
         H_blocks[i] += alpha * np.eye(9)
 
-    # H^{-1} g  (block-diagonal solve)
+    # H^{-1} g  (batched block-diagonal solve)
     g_blocks = gradient.reshape(m, 9)
-    Hinv_g = np.zeros_like(g_blocks)
-    for i in range(m):
-        Hinv_g[i] = np.linalg.solve(H_blocks[i], g_blocks[i])
+    Hinv_g = np.linalg.solve(H_blocks, g_blocks[:, :, None]).squeeze(-1)  # (m, 9)
     Hinv_g_flat = Hinv_g.ravel()  # (9m,)
 
     # B = Φ^T G^T  (k × 9m)
@@ -740,12 +744,9 @@ def newton_step_woodbury(gradient, Fvec, precomp, mu, lam, alpha):
     B_Hinv_g = B @ Hinv_g_flat
 
     # B H^{-1} B^T  (k × k)
-    # Need H^{-1} applied to each row of B^T = each column of B transposed
     BT = B.T  # (9m, k)
     BT_blocks = BT.reshape(m, 9, -1)  # (m, 9, k)
-    Hinv_BT = np.zeros_like(BT_blocks)
-    for i in range(m):
-        Hinv_BT[i] = np.linalg.solve(H_blocks[i], BT_blocks[i])
+    Hinv_BT = np.linalg.solve(H_blocks, BT_blocks)  # (m, 9, k) batched
     Hinv_BT_flat = Hinv_BT.reshape(9 * m, -1)  # (9m, k)
     B_Hinv_BT = B @ Hinv_BT_flat  # (k, k)
 
