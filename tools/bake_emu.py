@@ -16,6 +16,12 @@ import re
 import sys
 import time
 
+# Limit BLAS threads for multiprocessing (must be set before numpy import)
+if 'OMP_NUM_THREADS' not in os.environ:
+    os.environ['OMP_NUM_THREADS'] = '1'
+    os.environ['OPENBLAS_NUM_THREADS'] = '1'
+    os.environ['MKL_NUM_THREADS'] = '1'
+
 import numpy as np
 import scipy.sparse as sp
 from scipy.sparse.linalg import splu, eigsh
@@ -1042,7 +1048,8 @@ def generalized_force_on_F(forces_q, precomp, fixed_targets_flat):
 # ---------------------------------------------------------------------------
 def emu_solve(q_init, precomp, fixed_mask, fixed_targets,
               mu, lam, alpha, max_iters=30, verbose=False,
-              bone_trimeshes=None, muscle_surfaces=None, margin=0.002):
+              bone_trimeshes=None, muscle_surfaces=None, margin=0.002,
+              use_gpu=True):
     """Run EMU quasi-Newton solver (Algorithm 1 from the paper).
 
     Uses Woodbury Hessian approximation for the Newton step,
@@ -1064,7 +1071,7 @@ def emu_solve(q_init, precomp, fixed_mask, fixed_targets,
     e1 = 1e-4          # convergence: gradient norm
     e2 = 1e-8          # convergence: energy change
 
-    E = emu_energy(Fvec, precomp, fixed_targets_flat, mu, lam, alpha)
+    E = emu_energy(Fvec, precomp, fixed_targets_flat, mu, lam, alpha, use_gpu=use_gpu)
     if verbose:
         print(f"    EMU iter 0: E={E:.6e}")
 
@@ -1073,11 +1080,14 @@ def emu_solve(q_init, precomp, fixed_mask, fixed_targets,
 
     for iteration in range(max_iters):
         # Line 10: Compute gradient
-        g = emu_gradient(Fvec, precomp, fixed_targets_flat, mu, lam, alpha)
+        g = emu_gradient(Fvec, precomp, fixed_targets_flat, mu, lam, alpha, use_gpu=use_gpu)
         g_norm = np.linalg.norm(g)
 
-        # Line 12: Woodbury method for search direction (GPU)
-        d = newton_step_woodbury_gpu(g, Fvec, precomp, mu, lam, alpha)
+        # Line 12: Woodbury method for search direction
+        if use_gpu:
+            d = newton_step_woodbury_gpu(g, Fvec, precomp, mu, lam, alpha)
+        else:
+            d = newton_step_woodbury(g, Fvec, precomp, mu, lam, alpha)
 
         # Check descent direction
         dir_deriv = np.dot(g, d)
@@ -1092,7 +1102,7 @@ def emu_solve(q_init, precomp, fixed_mask, fixed_targets,
         ls_success = False
         for ls_iter in range(20):
             F_new = Fvec + sigma * d
-            E_new = emu_energy(F_new, precomp, fixed_targets_flat, mu, lam, alpha)
+            E_new = emu_energy(F_new, precomp, fixed_targets_flat, mu, lam, alpha, use_gpu=use_gpu)
             if np.isfinite(E_new) and E_new <= E_prev + eps * sigma * dir_deriv:
                 ls_success = True
                 break
@@ -1115,18 +1125,21 @@ def emu_solve(q_init, precomp, fixed_mask, fixed_targets,
                 # Line 35: Contact descent direction via block-diagonal H^{-1}
                 # (use only H^{-1}, not full Woodbury, for stability)
                 F_mat = _vec_to_F(Fvec, m)
-                H_blocks = stable_neohookean_hessian_blocks(F_mat, precomp['volumes'], mu, lam)
-                for bi in range(m):
-                    H_blocks[bi] += alpha * np.eye(9)
+                if use_gpu:
+                    H_blocks = np.zeros((m, 9, 9), dtype=np.float64)
+                    _ti_hessian_build(F_mat.reshape(m, 9).copy(), precomp['volumes'], mu, lam, 0.0, H_blocks)
+                else:
+                    H_blocks = stable_neohookean_hessian_blocks(F_mat, precomp['volumes'], mu, lam)
+                eigv, eigvc = np.linalg.eigh(H_blocks)
+                eigv = np.maximum(eigv, 1e-6)
+                H_blocks = np.einsum('mij,mj,mkj->mik', eigvc, eigv, eigvc)
+                H_blocks += alpha * np.eye(9)[None, :, :]
                 g_ext_blocks = g_ext.reshape(m, 9)
-                d_contact = np.zeros_like(g_ext_blocks)
-                for bi in range(m):
-                    d_contact[bi] = np.linalg.solve(H_blocks[bi], g_ext_blocks[bi])
+                d_contact = np.linalg.solve(H_blocks, g_ext_blocks[:, :, None]).squeeze(-1)
                 d_contact_flat = d_contact.ravel()
                 # Damped update (avoid overshooting)
                 Fvec = Fvec + 0.5 * d_contact_flat
-                # Re-evaluate energy after collision correction
-                E = emu_energy(Fvec, precomp, fixed_targets_flat, mu, lam, alpha)
+                E = emu_energy(Fvec, precomp, fixed_targets_flat, mu, lam, alpha, use_gpu=use_gpu)
 
         if verbose and (iteration + 1) % 5 == 0:
             print(f"    EMU iter {iteration+1}: E={E:.6e}, |g|={g_norm:.2e}, "
@@ -1152,6 +1165,31 @@ def emu_solve(q_init, precomp, fixed_mask, fixed_targets,
 
     info = {'iterations': iteration + 1, 'energy': E, 'grad_norm': g_norm}
     return q, info
+
+
+# ---------------------------------------------------------------------------
+# Parallel worker
+# ---------------------------------------------------------------------------
+_parallel_ctx = {}  # shared state for forked workers
+
+def _solve_one_worker(idx):
+    """Worker function for parallel EMU solve. Uses shared _parallel_ctx (fork)."""
+    # Limit BLAS to 1 thread per worker (prevent oversubscription)
+    os.environ['OMP_NUM_THREADS'] = '1'
+    os.environ['OPENBLAS_NUM_THREADS'] = '1'
+    os.environ['MKL_NUM_THREADS'] = '1'
+    ctx = _parallel_ctx
+    mi, m, q_init, lbs_pos, fixed_mask = ctx['tasks'][idx]
+    q, info = emu_solve(
+        q_init, m['emu'], fixed_mask, lbs_pos,
+        ctx['mu'], ctx['lam'], ctx['alpha'],
+        max_iters=ctx['max_iters'],
+        verbose=False,
+        bone_trimeshes=ctx['bone_tms'],
+        muscle_surfaces=[ctx['muscle_surfaces'][mi]],
+        margin=0.002,
+        use_gpu=False)
+    return m['name'], q.astype(np.float32)
 
 
 # ---------------------------------------------------------------------------
@@ -1194,6 +1232,8 @@ def main():
                         help='Eigenmodes for Woodbury approximation')
     parser.add_argument('--arap-cache', default=None,
                         help='ARAP cache dir for initial guess (e.g. data/motion_cache/walk/_old_cache)')
+    parser.add_argument('--workers', type=int, default=0,
+                        help='Parallel workers for per-muscle solve (0=auto, 1=serial)')
     args = parser.parse_args()
 
     mu, lam = lame_parameters(args.youngs, args.poisson)
@@ -1324,6 +1364,15 @@ def main():
     # Warm-start: carry forward F from previous frame
     prev_Fvec = {}  # muscle_name -> Fvec from previous frame
 
+    # Determine parallelism — skip Taichi init if parallel (CUDA not thread-safe)
+    n_workers = args.workers if args.workers > 0 else min(os.cpu_count() or 4, len(muscles))
+    use_gpu_solve = (n_workers <= 1)
+    if use_gpu_solve:
+        _ensure_ti()
+        print(f"    Mode: serial with GPU (Taichi CUDA)")
+    else:
+        print(f"    Mode: parallel {n_workers} workers (CPU only)")
+
     # ── Bake loop ────────────────────────────────────────────────────
     print(f"\n[7] Baking frames {args.start_frame}-{end_frame}...")
     t_total = time.time()
@@ -1357,39 +1406,55 @@ def main():
                 'offset': 0,  # per-muscle solve, offset=0
             })
 
+        # Prepare per-muscle solve arguments
+        solve_args = []
         for mi, m in enumerate(muscles):
             if m['lbs_bindings'] is None:
                 continue
-
             n_v = len(m['vertices'])
             lbs_pos = compute_lbs_positions(m['lbs_bindings'], skel, n_v)
-
-            # Use ARAP cache as initial guess if available
             q_init = lbs_pos
             if m['name'] in arap_cache and frame in arap_cache[m['name']]:
                 arap_pos = arap_cache[m['name']][frame]
                 if len(arap_pos) == n_v:
                     q_init = arap_pos.astype(np.float64)
-
             fixed_mask = np.zeros(n_v, dtype=bool)
             for vi in m['fixed_vertices']:
                 if vi < n_v:
                     fixed_mask[vi] = True
+            solve_args.append((mi, m, q_init, lbs_pos, fixed_mask))
 
-            # EMU solve: q_init for F initialization, lbs_pos for fixed targets
-            q, info = emu_solve(
-                q_init, m['emu'], fixed_mask, lbs_pos,
-                mu, lam, args.alpha,
-                max_iters=args.max_iters,
-                verbose=(frame == args.start_frame),
-                bone_trimeshes=bone_tms,
-                muscle_surfaces=[muscle_surfaces[mi]],
-                margin=0.002)
-
-            bake_buffers[m['name']][frame] = q.astype(np.float32)
+        if n_workers > 1:
+            import multiprocessing as mp
+            # Store everything in shared global (fork inherits parent memory)
+            _parallel_ctx.update({
+                'mu': mu, 'lam': lam, 'alpha': args.alpha,
+                'max_iters': args.max_iters,
+                'bone_tms': bone_tms,
+                'muscle_surfaces': muscle_surfaces,
+                'tasks': solve_args,  # includes precomp via muscle dicts
+            })
+            ctx_mp = mp.get_context('fork')
+            with ctx_mp.Pool(n_workers) as pool:
+                results = pool.map(_solve_one_worker, range(len(solve_args)))
+            for mname, q_result in results:
+                bake_buffers[mname][frame] = q_result
+        else:
+            for task in solve_args:
+                mi, m_data, q_init, lbs_pos, fixed_mask = task
+                q, info = emu_solve(
+                    q_init, m_data['emu'], fixed_mask, lbs_pos,
+                    mu, lam, args.alpha,
+                    max_iters=args.max_iters,
+                    verbose=(frame == args.start_frame),
+                    bone_trimeshes=bone_tms,
+                    muscle_surfaces=[muscle_surfaces[mi]],
+                    margin=0.002,
+                    use_gpu=use_gpu_solve)
+                bake_buffers[m_data['name']][frame] = q.astype(np.float32)
 
         dt = time.time() - t0
-        print(f"  Frame {frame}: {dt:.2f}s", flush=True)
+        print(f"  Frame {frame}: {dt:.2f}s ({n_workers} workers)", flush=True)
 
         if (frame - args.start_frame + 1) % FLUSH_INTERVAL == 0:
             flush_bake_data(bake_buffers, out_dir, chunk_counters)
