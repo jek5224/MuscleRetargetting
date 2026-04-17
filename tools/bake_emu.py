@@ -1214,6 +1214,99 @@ def emu_solve(q_init, precomp, fixed_mask, fixed_targets,
 
 
 # ---------------------------------------------------------------------------
+# Fascia proximity constraints (inter-muscle attachment)
+# ---------------------------------------------------------------------------
+def compute_fascia_pairs(muscles, threshold=0.005):
+    """Find pairs of surface vertices from different muscles within threshold.
+
+    Returns list of (muscle_i, vert_i, muscle_j, vert_j, rest_dist).
+    Only pairs where both vertices are free (not fixed).
+    """
+    from scipy.spatial import cKDTree
+    pairs = []
+    for i in range(len(muscles)):
+        mi = muscles[i]
+        sv_i = np.array(mi['_surf_verts'])
+        pos_i = mi['rest_vertices'][sv_i]
+        fixed_i = set(mi['fixed_vertices'])
+        tree_i = cKDTree(pos_i)
+
+        for j in range(i + 1, len(muscles)):
+            mj = muscles[j]
+            sv_j = np.array(mj['_surf_verts'])
+            pos_j = mj['rest_vertices'][sv_j]
+            fixed_j = set(mj['fixed_vertices'])
+
+            # Query pairs within threshold
+            nearby = tree_i.query_ball_point(pos_j, threshold)
+            for jj, near_list in enumerate(nearby):
+                vj = sv_j[jj]
+                if vj in fixed_j:
+                    continue
+                for ii_idx in near_list:
+                    vi = sv_i[ii_idx]
+                    if vi in fixed_i:
+                        continue
+                    rest_dist = np.linalg.norm(pos_i[ii_idx] - pos_j[jj])
+                    pairs.append((i, int(vi), j, int(vj), rest_dist))
+    return pairs
+
+
+def apply_fascia_constraints(bake_buffers, muscles, fascia_pairs, frame,
+                              stiffness=0.5, max_iters=5):
+    """Pull neighboring muscle surface vertices together when they drift apart.
+
+    One-sided: only penalize when distance EXCEEDS rest distance (fascia
+    stretching). Distance decreasing (sliding/compression) is free.
+    Modifies bake_buffers in-place.
+    """
+    if not fascia_pairs:
+        return 0
+
+    # Collect current positions
+    positions = {}
+    for m in muscles:
+        if frame in bake_buffers.get(m['name'], {}):
+            positions[m['name']] = bake_buffers[m['name']][frame].copy()
+
+    n_corrected = 0
+    for _ in range(max_iters):
+        iter_corrected = 0
+        for mi_idx, vi, mj_idx, vj, rest_dist in fascia_pairs:
+            mi_name = muscles[mi_idx]['name']
+            mj_name = muscles[mj_idx]['name']
+            if mi_name not in positions or mj_name not in positions:
+                continue
+
+            pi = positions[mi_name][vi]
+            pj = positions[mj_name][vj]
+            diff = pj - pi
+            dist = np.linalg.norm(diff)
+
+            if dist < 1e-10 or dist <= rest_dist:
+                continue  # not stretched — no correction
+
+            # Pull both vertices toward each other
+            excess = dist - rest_dist
+            direction = diff / dist
+            correction = stiffness * excess * 0.5 * direction
+            positions[mi_name][vi] += correction
+            positions[mj_name][vj] -= correction
+            iter_corrected += 1
+
+        n_corrected += iter_corrected
+        if iter_corrected == 0:
+            break
+
+    # Write back
+    for m in muscles:
+        if m['name'] in positions:
+            bake_buffers[m['name']][frame] = positions[m['name']]
+
+    return n_corrected
+
+
+# ---------------------------------------------------------------------------
 # Parallel worker
 # ---------------------------------------------------------------------------
 _parallel_ctx = {}  # shared state for forked workers
@@ -1398,6 +1491,11 @@ def main():
         sf = [fo[k] for k, c in fc.items() if c == 1]
         m['_surf_verts'] = sorted(set(v for f in sf for v in f))
 
+    # ── Compute fascia proximity pairs ─────────────────────────────
+    print("[6b] Computing fascia proximity pairs...")
+    fascia_pairs = compute_fascia_pairs(muscles, threshold=0.005)
+    print(f"    {len(fascia_pairs)} inter-muscle fascia pairs")
+
     # ── Setup output ─────────────────────────────────────────────────
     bvh_stem = os.path.splitext(os.path.basename(args.bvh))[0]
     side_tag = ''.join(args.sides)
@@ -1506,6 +1604,9 @@ def main():
                 if info.get('Fvec') is not None:
                     prev_Fvec[m_data['name']] = info['Fvec']
 
+        # Fascia constraints: pull neighboring muscles together
+        n_fascia = apply_fascia_constraints(bake_buffers, muscles, fascia_pairs, frame)
+
         # Count remaining collisions across all muscles
         total_coll = 0
         if bone_tms:
@@ -1523,7 +1624,7 @@ def main():
 
         dt = time.time() - t0
         print(f"  Frame {frame}: {dt:.2f}s ({n_workers}w, {len(solve_args)} muscles, "
-              f"coll={total_coll})", flush=True)
+              f"coll={total_coll}, fascia={n_fascia})", flush=True)
 
         if (frame - args.start_frame + 1) % FLUSH_INTERVAL == 0:
             flush_bake_data(bake_buffers, out_dir, chunk_counters)
