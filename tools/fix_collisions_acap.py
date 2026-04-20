@@ -234,61 +234,91 @@ def detect_collisions(positions, surf_faces, fixed_set, bone_trimeshes,
 # ---------------------------------------------------------------------------
 # ACAP collision projection
 # ---------------------------------------------------------------------------
-def acap_collision_project(positions, G, GtG, fixed_dofs, free_dofs,
-                            collision_targets, collision_weight=100.0):
-    """Project colliding vertices using modified ACAP solve.
+def precompute_acap_solver(GtG, free_dofs, fixed_dofs, n):
+    """Pre-factorize the base ACAP system (done once, reused every frame)."""
+    from scipy.sparse.linalg import splu
+    reg = 1e-6
+    GtG_reg = GtG + reg * sp.eye(3 * n)
+    GtG_csc = GtG_reg.tocsc()
 
-    (G^TG + w*D) q = G^T F + w*D*targets
+    free_arr = np.array(sorted(free_dofs), dtype=np.int32)
+    fixed_arr = np.array(sorted(fixed_dofs), dtype=np.int32)
 
-    where D selects colliding vertex DOFs and w is the penalty weight.
-    Fixed vertices stay at their current positions (Dirichlet BCs).
+    L_ff = GtG_csc[np.ix_(free_arr, free_arr)].tocsc()
+    L_fc = GtG_csc[np.ix_(free_arr, fixed_arr)].tocsc()
+    solver = splu(L_ff)
+
+    return {
+        'solver': solver,
+        'L_fc': L_fc,
+        'free_arr': free_arr,
+        'fixed_arr': fixed_arr,
+        'GtG_csc': GtG_csc,
+    }
+
+
+def acap_collision_project(positions, G, acap_data, collision_targets,
+                            collision_weight=100.0, n_inner=5):
+    """Project colliding vertices using iterative ACAP + collision penalty.
+
+    Instead of rebuilding the factorization each frame, uses the
+    pre-factorized base ACAP system and iteratively applies collision
+    corrections:
+      1. Solve base ACAP: q = (G^TG)^{-1} G^T F  (pre-factorized, fast)
+      2. For colliding verts: blend toward target
+      3. Recompute F from corrected q, repeat
+
+    This converges quickly (3-5 iterations) because most vertices
+    don't collide, so the base ACAP solution is already close.
     """
     n = len(positions)
     q_flat = positions.ravel()
-    Fvec = G @ q_flat  # current deformation gradients
 
-    # RHS: G^T F
-    rhs = G.T @ Fvec
+    solver = acap_data['solver']
+    L_fc = acap_data['L_fc']
+    free_arr = acap_data['free_arr']
+    fixed_arr = acap_data['fixed_arr']
+    free_set = set(free_arr.tolist())
 
-    # Add collision penalty to RHS and diagonal
-    coll_dofs = set()
+    q_fixed = q_flat[fixed_arr]
+
+    # Build collision target array
+    coll_verts = {}  # free vertex global idx → target
     for vi, target in collision_targets.items():
-        for d in range(3):
-            dof = 3 * vi + d
-            if dof in free_dofs:
-                coll_dofs.add(dof)
-                rhs[dof] += collision_weight * target[d]
+        if any(3 * vi + d in free_set for d in range(3)):
+            coll_verts[vi] = target
 
-    # Build modified system matrix: GtG + w*D (only for free DOFs)
-    free_dofs_set = set(free_dofs.tolist()) if hasattr(free_dofs, 'tolist') else set(free_dofs)
-    free_dofs_arr = np.array(sorted(free_dofs_set), dtype=np.int32)
-    fixed_dofs_arr = np.array(sorted(set(range(3 * n)) - free_dofs_set), dtype=np.int32)
+    if not coll_verts:
+        return positions
 
-    # Extract reduced system
-    reg = 1e-6
-    GtG_reg = GtG + reg * sp.eye(3 * n)
+    blend = min(collision_weight / (collision_weight + 1.0), 0.9)
 
-    # Add collision weight to diagonal for colliding DOFs
-    if coll_dofs:
-        coll_diag = np.zeros(3 * n)
-        for dof in coll_dofs:
-            coll_diag[dof] = collision_weight
-        GtG_mod = GtG_reg + sp.diags(coll_diag)
-    else:
-        GtG_mod = GtG_reg
+    q_current = q_flat.copy()
+    for it in range(n_inner):
+        # Compute F from current q
+        Fvec = G @ q_current
+        rhs_full = G.T @ Fvec
 
-    GtG_csc = GtG_mod.tocsc()
-    L_ff = GtG_csc[np.ix_(free_dofs_arr, free_dofs_arr)].tocsc()
-    L_fc = GtG_csc[np.ix_(free_dofs_arr, fixed_dofs_arr)].tocsc()
+        # Solve base ACAP (pre-factorized)
+        rhs_free = rhs_full[free_arr] - L_fc @ q_fixed
+        q_free = solver.solve(rhs_free)
 
-    q_fixed = q_flat[fixed_dofs_arr]
-    rhs_free = rhs[free_dofs_arr] - L_fc @ q_fixed
+        q_new = q_current.copy()
+        q_new[free_arr] = q_free
+        q_new[fixed_arr] = q_fixed
 
-    q_free = spsolve(L_ff, rhs_free)
+        # Blend colliding vertices toward targets
+        n_blended = 0
+        for vi, target in coll_verts.items():
+            q_vi = q_new[3*vi:3*vi+3]
+            q_new[3*vi:3*vi+3] = (1 - blend) * q_vi + blend * target
+            n_blended += 1
 
-    q_new = q_flat.copy()
-    q_new[free_dofs_arr] = q_free
-    return q_new.reshape(-1, 3)
+        q_current = q_new
+        if n_blended == 0:
+            break
+
+    return q_current.reshape(-1, 3)
 
 
 # ---------------------------------------------------------------------------
@@ -410,6 +440,14 @@ def main():
     GtG = G.T @ G
     print(f"    G: {G.shape}")
 
+    # Pre-factorize ACAP system (done once, reused every frame)
+    print("    Pre-factorizing ACAP system...")
+    t_fac = time.time()
+    free_dofs_set = set(range(3 * total_n)) - set(3 * vi + d for vi in all_fixed for d in range(3))
+    fixed_dofs_set = set(3 * vi + d for vi in all_fixed for d in range(3))
+    acap_data = precompute_acap_solver(GtG, free_dofs_set, fixed_dofs_set, total_n)
+    print(f"    Factorized in {time.time() - t_fac:.2f}s")
+
     # Surface faces
     all_surf = extract_surface_triangles(combined_tets)
     print(f"    Surface: {len(all_surf)} faces")
@@ -503,8 +541,8 @@ def main():
             if n_coll == 0:
                 break
             positions = acap_collision_project(
-                positions, G, GtG, None, free_dofs,
-                targets, collision_weight=args.collision_weight)
+                positions, G, acap_data, targets,
+                collision_weight=args.collision_weight)
 
         # Split back to per-muscle
         for m in muscles:
