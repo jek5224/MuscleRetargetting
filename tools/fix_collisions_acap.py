@@ -124,6 +124,8 @@ def detect_collisions(positions, surf_faces, fixed_set, bone_trimeshes,
     surf_verts = sorted(set(np.unique(surf_faces).tolist()))
 
     # ── Bone-muscle collision ──────────────────────────────────────
+    if not bone_trimeshes:
+        bone_trimeshes = []
     if bone_trimeshes:
         bone_kdtree = cKDTree(np.vstack([bm.vertices for bm in bone_trimeshes]))
         sv_pos = positions[surf_verts]
@@ -142,20 +144,32 @@ def detect_collisions(positions, surf_faces, fixed_set, bone_trimeshes,
                         continue
                     bbox_sv = near_sv[in_bbox]
                     bbox_pos = near_pos[in_bbox]
-                    inside = bone_mesh.contains(bbox_pos)
+
+                    # Use contains() for watertight, dot-product for non-watertight
+                    if bone_mesh.is_watertight:
+                        inside = bone_mesh.contains(bbox_pos)
+                    else:
+                        closest, _, face_ids = trimesh.proximity.closest_point(
+                            bone_mesh, bbox_pos)
+                        normals = bone_mesh.face_normals[face_ids]
+                        to_vert = bbox_pos - closest
+                        signed_dist = np.sum(to_vert * normals, axis=1)
+                        dists_to_surf = np.linalg.norm(to_vert, axis=1)
+                        inside = (signed_dist < 0) & (dists_to_surf < margin * 10)
+
                     if not np.any(inside):
                         continue
                     inside_sv = bbox_sv[inside]
                     inside_pos = bbox_pos[inside]
-                    closest, _, face_ids = trimesh.proximity.closest_point(
+                    closest_pts, _, face_ids = trimesh.proximity.closest_point(
                         bone_mesh, inside_pos)
-                    normals = bone_mesh.face_normals[face_ids]
+                    norms = bone_mesh.face_normals[face_ids]
                     for k in range(len(inside_sv)):
                         vi = int(inside_sv[k])
                         if vi in fixed_set:
                             continue
-                        targets[vi] = closest[k] + normals[k] * margin
-                except Exception:
+                        targets[vi] = closest_pts[k] + norms[k] * margin
+                except Exception as e:
                     continue
 
     # ── Muscle-muscle collision (optional, slow) ────────────────────
@@ -339,6 +353,8 @@ def main():
                         help='Collision detection + ACAP iterations per frame')
     parser.add_argument('--muscle-muscle', action='store_true',
                         help='Also check muscle-muscle collision (slow, usually not needed for ARAP)')
+    parser.add_argument('--start-frame', type=int, default=None)
+    parser.add_argument('--end-frame', type=int, default=None)
     parser.add_argument('--sides', default='L')
     args = parser.parse_args()
 
@@ -496,6 +512,10 @@ def main():
                 frame_data[int(fn)] = d['positions'][fi]
         arap_cache[m['name']] = frame_data
     all_frames = sorted(set(f for fd in arap_cache.values() for f in fd.keys()))
+    if args.start_frame is not None:
+        all_frames = [f for f in all_frames if f >= args.start_frame]
+    if args.end_frame is not None:
+        all_frames = [f for f in all_frames if f <= args.end_frame]
     print(f"    {len(arap_cache)} muscles, {len(all_frames)} frames")
 
     # ── Output ───────────────────────────────────────────────────
@@ -533,15 +553,24 @@ def main():
             else:
                 positions[off:off + m['n_verts']] = m['vertices']
 
+        # Debug: verify bone meshes
+        if frame == all_frames[0]:
+            print(f"    Bone meshes: {len(bone_tms)}, surf_verts: {len(set(np.unique(all_surf).tolist()))}, fixed: {len(all_fixed)}")
+            for bi, bm in enumerate(bone_tms):
+                print(f"      bone {bi}: {len(bm.vertices)}v, watertight={bm.is_watertight}")
+
         # Iterate: detect collisions → ACAP project → repeat
-        total_coll = 0
+        initial_coll = 0
+        final_coll = 0
         for it in range(args.max_iters):
             targets = detect_collisions(
                 positions, all_surf, all_fixed, bone_tms,
                 muscle_ranges, margin=args.margin,
                 check_muscle_muscle=args.muscle_muscle)
             n_coll = len(targets)
-            total_coll = n_coll
+            if it == 0:
+                initial_coll = n_coll
+            final_coll = n_coll
             if n_coll == 0:
                 break
             positions = acap_collision_project(
@@ -554,7 +583,7 @@ def main():
             bake_buffers[m['name']][frame] = positions[off:off + m['n_verts']].astype(np.float32)
 
         dt = time.time() - t0
-        print(f"  Frame {frame}: {dt:.2f}s, coll={total_coll}", flush=True)
+        print(f"  Frame {frame}: {dt:.2f}s, coll={initial_coll}→{final_coll}", flush=True)
 
     # ── Save ─────────────────────────────────────────────────────
     print(f"\nSaving to {args.output_dir}...")
