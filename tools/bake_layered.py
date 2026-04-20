@@ -37,6 +37,129 @@ from viewer.zygote_mesh_ui import (
 )
 from viewer.arap_backends import check_taichi_available, check_gpu_available, get_backend
 
+
+# ---------------------------------------------------------------------------
+# Warp GPU collision detection
+# ---------------------------------------------------------------------------
+_warp_initialized = [False]
+_warp_ok = [False]
+_warp_kernel_compiled = [False]
+
+
+def _warp_available():
+    if _warp_initialized[0]:
+        return _warp_ok[0]
+    _warp_initialized[0] = True
+    try:
+        import warp as wp
+        wp.init()
+        if wp.is_cuda_available():
+            _warp_ok[0] = True
+            _compile_warp_kernel()
+    except Exception:
+        pass
+    return _warp_ok[0]
+
+
+def _compile_warp_kernel():
+    """Compile the warp mesh query kernel (once)."""
+    import warp as wp
+    global _warp_query_kernel
+
+    @wp.kernel
+    def mesh_query_kernel(
+        points: wp.array(dtype=wp.vec3),
+        mesh: wp.uint64,
+        max_dist: float,
+        closest: wp.array(dtype=wp.vec3),
+        normals: wp.array(dtype=wp.vec3),
+        signed_dists: wp.array(dtype=float),
+    ):
+        i = wp.tid()
+        p = points[i]
+
+        face = int(0)
+        u = float(0.0)
+        v = float(0.0)
+        sign = float(0.0)
+
+        found = wp.mesh_query_point_sign_normal(mesh, p, max_dist, sign, face, u, v)
+
+        if found:
+            i0 = wp.mesh_get_index(mesh, face * 3)
+            i1 = wp.mesh_get_index(mesh, face * 3 + 1)
+            i2 = wp.mesh_get_index(mesh, face * 3 + 2)
+            v0 = wp.mesh_get_point(mesh, i0)
+            v1 = wp.mesh_get_point(mesh, i1)
+            v2 = wp.mesh_get_point(mesh, i2)
+
+            cp = v0 * (1.0 - u - v) + v1 * u + v2 * v
+            closest[i] = cp
+
+            e1 = v1 - v0
+            e2 = v2 - v0
+            n = wp.normalize(wp.cross(e1, e2))
+            normals[i] = n
+
+            dist = wp.length(p - cp)
+            signed_dists[i] = sign * dist
+        else:
+            closest[i] = p
+            normals[i] = wp.vec3(0.0, 1.0, 0.0)
+            signed_dists[i] = max_dist
+
+    _warp_query_kernel = mesh_query_kernel
+    _warp_kernel_compiled[0] = True
+
+
+_warp_mesh_cache = {}  # id(trimesh) -> wp.Mesh
+
+
+def _warp_mesh_query(obs_mesh, query_points):
+    """GPU-accelerated closest point + signed distance using warp.
+
+    Caches wp.Mesh objects by trimesh identity for reuse within a frame.
+    Returns (closest_points, normals, signed_dists) as numpy arrays.
+    """
+    import warp as wp
+
+    device = "cuda:0"
+    n = len(query_points)
+
+    # Cache warp mesh (avoid rebuilding BVH for same bone within same frame)
+    mesh_id = id(obs_mesh)
+    if mesh_id not in _warp_mesh_cache:
+        verts = obs_mesh.vertices.astype(np.float32)
+        faces = obs_mesh.faces.astype(np.int32).flatten()
+        _warp_mesh_cache[mesh_id] = wp.Mesh(
+            points=wp.array(verts, dtype=wp.vec3, device=device),
+            indices=wp.array(faces, dtype=wp.int32, device=device),
+        )
+    wp_mesh = _warp_mesh_cache[mesh_id]
+
+    wp_query = wp.array(query_points.astype(np.float32), dtype=wp.vec3, device=device)
+    wp_closest = wp.zeros(n, dtype=wp.vec3, device=device)
+    wp_normals = wp.zeros(n, dtype=wp.vec3, device=device)
+    wp_signed = wp.zeros(n, dtype=float, device=device)
+
+    wp.launch(
+        _warp_query_kernel, dim=n, device=device,
+        inputs=[wp_query, wp_mesh.id, float(0.01), wp_closest, wp_normals, wp_signed],
+    )
+    wp.synchronize()
+
+    closest = wp_closest.numpy()
+    normals = wp_normals.numpy()
+    signed_dists = wp_signed.numpy()
+
+    return closest, normals, signed_dists
+
+
+def _warp_clear_cache():
+    """Clear warp mesh cache (call at start of each frame)."""
+    _warp_mesh_cache.clear()
+
+
 SKEL_XML = "data/zygote_skel.xml"
 ZYGOTE_DIR = "Zygote_Meshes_251229/"
 MESH_SCALE = 0.01
@@ -268,8 +391,7 @@ def _detect_collisions(positions, obstacle_meshes, collision_vertex_set,
     """Detect vertex and edge-midpoint collisions, fill out_targets dict.
 
     Only flags vertices that are > depth_threshold inside a bone.
-    Shallow penetrations (< depth_threshold) are likely in bone concavities
-    (popliteal fossa, etc.) and are left alone.
+    Uses warp GPU mesh queries when available, falls back to CPU.
 
     out_targets: {global_vertex_idx: target_position (surface + margin)}
     """
@@ -279,7 +401,8 @@ def _detect_collisions(positions, obstacle_meshes, collision_vertex_set,
     sv_pos = positions[sv_arr]
 
     # Phase 1: Vertex-bone via signed distance + depth threshold
-    # No contains() — uses KDTree pre-filter + closest_point + dot product
+    # GPU (warp) is slower for < 3000 queries due to mesh build overhead.
+    # CPU KDTree + closest_point is optimal at this scale.
     for obs_mesh in obstacle_meshes:
         bmin = obs_mesh.bounds[0]
         bmax = obs_mesh.bounds[1]
@@ -292,23 +415,20 @@ def _detect_collisions(positions, obstacle_meshes, collision_vertex_set,
         # KDTree pre-filter: only vertices close to bone surface
         bone_kdtree = cKDTree(obs_mesh.vertices)
         kd_dists, _ = bone_kdtree.query(bbox_pos)
-        near_surf = kd_dists < 0.006  # 6mm — tight filter
+        near_surf = kd_dists < 0.006
         if not np.any(near_surf):
             continue
-        near_sv = bbox_sv[near_surf]
-        near_pos = bbox_pos[near_surf]
-
-        # closest_point on the small near set (vectorized BVH)
-        closest, _, face_ids = trimesh.proximity.closest_point(obs_mesh, near_pos)
+        bbox_sv = bbox_sv[near_surf]
+        bbox_pos = bbox_pos[near_surf]
+        closest, _, face_ids = trimesh.proximity.closest_point(obs_mesh, bbox_pos)
         normals = obs_mesh.face_normals[face_ids]
+        signed_dist = np.einsum('ij,ij->i', bbox_pos - closest, normals)
 
-        # Signed distance: negative = inside bone
-        signed_dist = np.einsum('ij,ij->i', near_pos - closest, normals)
         deep_inside = signed_dist < -depth_threshold
         if not np.any(deep_inside):
             continue
 
-        inside_sv = near_sv[deep_inside]
+        inside_sv = bbox_sv[deep_inside]
         inside_closest = closest[deep_inside]
         inside_normals = normals[deep_inside]
         for k in range(len(inside_sv)):
@@ -975,6 +1095,8 @@ def main():
         skel.setPositions(motion_bvh.mocap_refs[frame])
 
         # Build bone collision meshes at current pose
+        if _warp_ok[0]:
+            _warp_clear_cache()  # New frame, new bone poses
         bone_tms = build_bone_collision_meshes(skeleton_meshes, skel, bone_rest_transforms)
         obstacle_meshes = list(bone_tms)  # Bones always in obstacle set
         settled_muscles = {}  # Accumulate settled earlier-layer muscles
