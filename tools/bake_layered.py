@@ -939,12 +939,75 @@ def main():
     parser.add_argument("--frame-independent", action="store_true",
                         help="No warm-start between frames. Each frame starts from Iron Man offset. "
                              "Enables frame-level parallelization.")
+    parser.add_argument("--num-workers", type=int, default=1,
+                        help="Number of parallel workers (subprocesses). Implies --frame-independent.")
     parser.add_argument("--backend", choices=["auto","taichi","gpu","cpu"], default="auto")
     parser.add_argument("--start-frame", type=int, default=0)
     parser.add_argument("--end-frame", type=int, default=None)
     parser.add_argument("--sides", default="L")
     parser.add_argument("--region-tag", default="layered")
     args = parser.parse_args()
+
+    # Multi-worker: split frames into chunks, launch subprocesses
+    if args.num_workers > 1:
+        import subprocess
+        args.frame_independent = True
+
+        # Determine frame range
+        if args.end_frame is None:
+            # Need to load BVH to get frame count
+            skel_info, root_name, bvh_info, _pd, mesh_info, _smpl = saveSkeletonInfo(SKEL_XML)
+            skel = buildFromInfo(skel_info, root_name)
+            t_frame = _detect_bvh_tframe(args.bvh)
+            motion_bvh = MyBVH(args.bvh, bvh_info, skel, T_frame=t_frame)
+            end_frame = motion_bvh.mocap_refs.shape[0] - 1
+        else:
+            end_frame = args.end_frame
+
+        total_frames = end_frame - args.start_frame + 1
+        chunk_size = (total_frames + args.num_workers - 1) // args.num_workers
+
+        procs = []
+        for wi in range(args.num_workers):
+            sf = args.start_frame + wi * chunk_size
+            ef = min(sf + chunk_size - 1, end_frame)
+            if sf > end_frame:
+                break
+            cmd = [sys.executable, __file__,
+                   "--bvh", args.bvh,
+                   "--muscles", args.muscles,
+                   "--settle-iters", str(args.settle_iters),
+                   "--constraint-threshold", str(args.constraint_threshold),
+                   "--collision-margin", str(args.collision_margin),
+                   "--frame-independent",
+                   "--backend", args.backend,
+                   "--start-frame", str(sf),
+                   "--end-frame", str(ef),
+                   "--sides", args.sides,
+                   "--region-tag", args.region_tag,
+                   ]
+            # On multi-GPU: assign one GPU per worker
+            env = os.environ.copy()
+            env["CUDA_VISIBLE_DEVICES"] = str(wi % max(1, int(os.environ.get("NUM_GPUS", "1"))))
+            print(f"Worker {wi}: frames {sf}-{ef} (GPU {env['CUDA_VISIBLE_DEVICES']})")
+            procs.append(subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, env=env))
+
+        # Wait for all workers to complete (they run in parallel)
+        t0 = time.time()
+        outputs = [None] * len(procs)
+        for wi, proc in enumerate(procs):
+            out, _ = proc.communicate()
+            outputs[wi] = out.decode()
+
+        wall_time = time.time() - t0
+        for wi, out in enumerate(outputs):
+            for line in out.strip().split('\n'):
+                if 'Frame' in line or 'Done' in line:
+                    print(f"  [W{wi}] {line.strip()}")
+
+        print(f"\nAll {args.num_workers} workers done. Wall time: {wall_time:.1f}s "
+              f"({wall_time/total_frames:.1f}s/frame effective)")
+        return
 
     # Resolve backend
     backend_name = args.backend
