@@ -89,36 +89,43 @@ def build_vert_to_tet_map(tets, n_verts):
 def build_mapping_for_muscle(contour_verts, orig_verts, orig_tets):
     """Build barycentric mapping from contour vertices to original tets.
 
-    Returns list of (tet_idx, bary_coords) for each contour vertex.
-    If a vertex can't be mapped, uses nearest-tet fallback.
+    For vertices inside a tet: exact barycentric coords.
+    For surface vertices outside all tets: project to nearest original
+    surface point, then find the enclosing tet and clamp barycentrics.
     """
+    import trimesh
+    from collections import Counter
+
     n_contour = len(contour_verts)
     n_orig = len(orig_verts)
-    m_orig = len(orig_tets)
 
-    # Build KDTree on original vertices
+    # Build KDTree and vertex-to-tet map
     kdtree = cKDTree(orig_verts)
-
-    # Build vertex-to-tet map
     v2t = build_vert_to_tet_map(orig_tets, n_orig)
 
-    # For each contour vertex, find containing tet
-    mapping = []  # [(tet_idx, bary_coords), ...]
+    # Build original surface for projection fallback
+    face_count = Counter()
+    face_orient = {}
+    for t in orig_tets:
+        for f in [(t[0],t[2],t[1]),(t[0],t[1],t[3]),(t[1],t[2],t[3]),(t[0],t[3],t[2])]:
+            key = tuple(sorted(f)); face_count[key] += 1
+            if key not in face_orient: face_orient[key] = f
+    surf_faces = np.array([face_orient[k] for k,c in face_count.items() if c==1], dtype=np.int32)
+    orig_surface = trimesh.Trimesh(vertices=orig_verts, faces=surf_faces, process=False)
+
+    mapping = []
     n_inside = 0
-    n_nearest = 0
+    n_projected = 0
 
     for ci in range(n_contour):
         point = contour_verts[ci]
 
-        # Find nearby original vertices
+        # Try to find containing tet
         _, nearby_idx = kdtree.query(point, k=min(30, n_orig))
-
-        # Collect candidate tets
         candidate_tets = set()
         for vi in nearby_idx:
             candidate_tets.update(v2t[int(vi)])
 
-        # Check each candidate tet
         best_tet = -1
         best_bary = None
         best_min_bary = -float('inf')
@@ -127,36 +134,62 @@ def build_mapping_for_muscle(contour_verts, orig_verts, orig_tets):
             tet_verts = orig_verts[orig_tets[ti]]
             bary = compute_barycentric(point, tet_verts)
             min_bary = bary.min()
-
             if min_bary >= -1e-6:
-                # Inside this tet (within tolerance)
                 best_tet = ti
                 best_bary = bary
                 n_inside += 1
                 break
             elif min_bary > best_min_bary:
-                # Track closest tet for fallback
                 best_tet = ti
                 best_bary = bary
                 best_min_bary = min_bary
 
-        if best_bary is None:
-            # Absolute fallback: nearest vertex's first tet
-            _, nearest = kdtree.query(point, k=1)
-            if v2t[int(nearest)]:
-                ti = v2t[int(nearest)][0]
-                best_tet = ti
-                best_bary = compute_barycentric(point, orig_verts[orig_tets[ti]])
-            else:
-                best_tet = 0
-                best_bary = np.array([1.0, 0.0, 0.0, 0.0])
-            n_nearest += 1
-        elif best_min_bary < -1e-6:
-            n_nearest += 1
+        if best_bary is not None and best_min_bary >= -1e-6:
+            mapping.append((best_tet, best_bary))
+            continue
 
-        mapping.append((best_tet, best_bary))
+        # Surface projection: find closest point on original surface,
+        # then use the enclosing tet of that face
+        closest, _, face_id = trimesh.proximity.closest_point(
+            orig_surface, point.reshape(1, 3))
+        closest_pt = closest[0]
+        fid = face_id[0]
 
-    return mapping, n_inside, n_nearest
+        # The face's vertices — find a tet containing this face
+        face_vi = surf_faces[fid]
+        proj_tets = set()
+        for fv in face_vi:
+            proj_tets.update(v2t[int(fv)])
+
+        # Find best tet for the projected point
+        best_tet2 = -1
+        best_bary2 = None
+        best_min2 = -float('inf')
+        for ti in proj_tets:
+            bary = compute_barycentric(closest_pt, orig_verts[orig_tets[ti]])
+            if bary.min() > best_min2:
+                best_tet2 = ti
+                best_bary2 = bary
+                best_min2 = bary.min()
+
+        if best_bary2 is not None:
+            # Clamp barycentrics to [0,1] for robustness
+            best_bary2 = np.maximum(best_bary2, 0.0)
+            s = best_bary2.sum()
+            if s > 1e-10:
+                best_bary2 /= s
+            mapping.append((best_tet2, best_bary2))
+        elif best_tet >= 0:
+            # Fall back to nearest tet with clamped bary
+            best_bary = np.maximum(best_bary, 0.0)
+            s = best_bary.sum()
+            if s > 1e-10: best_bary /= s
+            mapping.append((best_tet, best_bary))
+        else:
+            mapping.append((0, np.array([0.25, 0.25, 0.25, 0.25])))
+        n_projected += 1
+
+    return mapping, n_inside, n_projected
 
 
 def cmd_build(args):

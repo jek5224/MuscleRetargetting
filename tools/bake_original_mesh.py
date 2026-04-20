@@ -346,18 +346,24 @@ def identify_fixed_and_assign_bones(tet_verts, cap_vertices_orig, orig_verts,
     tree = cKDTree(tet_verts)
     fixed_verts = {}  # tet_vi -> (bone_name, 'origin'/'insertion')
 
+    # Use only TWO attachment bones: the origin bone and insertion bone
+    # from the first stream. Multi-stream muscles share the same endpoints.
+    # Intermediate bones (e.g., Femur for Biceps Femoris) are NOT attachments.
+    if muscle_xml_data:
+        origin_bone = muscle_xml_data[0][0]  # first stream origin
+        insertion_bone = muscle_xml_data[0][1]  # first stream insertion
+    else:
+        origin_bone = 'L_Femur0'
+        insertion_bone = 'L_Femur0'
+
     for orig_vi, end_type in cap_vertices_orig.items():
         if orig_vi < len(orig_verts):
             pos = orig_verts[orig_vi]
         else:
             continue
         dist, tet_vi = tree.query(pos)
-        if dist < 0.005:  # 5mm tolerance (TetGen can move vertices)
-            # Determine bone from XML
-            if end_type == 'origin':
-                bone = muscle_xml_data[0][0] if muscle_xml_data else 'L_Femur0'
-            else:
-                bone = muscle_xml_data[0][1] if muscle_xml_data else 'L_Femur0'
+        if dist < 0.005:  # 5mm tolerance
+            bone = origin_bone if end_type == 'origin' else insertion_bone
             if bone_name_map:
                 bone = bone_name_map.get(bone, bone)
             fixed_verts[int(tet_vi)] = (bone, end_type)
