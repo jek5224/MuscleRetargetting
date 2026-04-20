@@ -111,7 +111,7 @@ def extract_surface_triangles(tet_elements):
 # Collision detection on unified mesh
 # ---------------------------------------------------------------------------
 def detect_collisions(positions, surf_faces, fixed_set, bone_trimeshes,
-                       muscle_ranges, margin=0.002):
+                       muscle_ranges, margin=0.002, check_muscle_muscle=False):
     """Detect bone-muscle and muscle-muscle collisions on the unified mesh.
 
     Returns dict {global_vert_idx: target_position} for colliding free vertices.
@@ -158,8 +158,9 @@ def detect_collisions(positions, surf_faces, fixed_set, bone_trimeshes,
                 except Exception:
                     continue
 
-    # ── Muscle-muscle collision ────────────────────────────────────
-    # Build per-muscle trimesh and check cross-muscle penetration
+    # ── Muscle-muscle collision (optional, slow) ────────────────────
+    if not check_muscle_muscle:
+        return targets
     import trimesh
     muscle_meshes = {}
     for mname, (v_start, v_end) in muscle_ranges.items():
@@ -336,6 +337,8 @@ def main():
     parser.add_argument('--margin', type=float, default=0.002)
     parser.add_argument('--max-iters', type=int, default=3,
                         help='Collision detection + ACAP iterations per frame')
+    parser.add_argument('--muscle-muscle', action='store_true',
+                        help='Also check muscle-muscle collision (slow, usually not needed for ARAP)')
     parser.add_argument('--sides', default='L')
     args = parser.parse_args()
 
@@ -535,7 +538,8 @@ def main():
         for it in range(args.max_iters):
             targets = detect_collisions(
                 positions, all_surf, all_fixed, bone_tms,
-                muscle_ranges, margin=args.margin)
+                muscle_ranges, margin=args.margin,
+                check_muscle_muscle=args.muscle_muscle)
             n_coll = len(targets)
             total_coll = n_coll
             if n_coll == 0:
