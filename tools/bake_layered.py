@@ -264,7 +264,7 @@ def collision_project(positions, obstacle_meshes, collision_vertex_set,
 
 def _detect_collisions(positions, obstacle_meshes, collision_vertex_set,
                        surface_edges, fixed_mask, margin, out_targets,
-                       depth_threshold=0.003):
+                       depth_threshold=0.0015):
     """Detect vertex and edge-midpoint collisions, fill out_targets dict.
 
     Only flags vertices that are > depth_threshold inside a bone.
@@ -287,14 +287,24 @@ def _detect_collisions(positions, obstacle_meshes, collision_vertex_set,
             continue
         bbox_sv = sv_arr[in_bbox]
         bbox_pos = sv_pos[in_bbox]
+
+        # KDTree pre-filter: only check vertices very close to bone surface
+        bone_kdtree = cKDTree(obs_mesh.vertices)
+        dists, _ = bone_kdtree.query(bbox_pos)
+        near_surf = dists < 0.008  # 8mm from surface — if farther, can't be inside
+        if not np.any(near_surf):
+            continue
+        near_sv = bbox_sv[near_surf]
+        near_pos = bbox_pos[near_surf]
+
         try:
-            inside = obs_mesh.contains(bbox_pos)
+            inside = obs_mesh.contains(near_pos)
         except Exception:
             continue
         if not np.any(inside):
             continue
-        inside_sv = bbox_sv[inside]
-        inside_pos = bbox_pos[inside]
+        inside_sv = near_sv[inside]
+        inside_pos = near_pos[inside]
         closest, _, face_ids = trimesh.proximity.closest_point(obs_mesh, inside_pos)
         normals = obs_mesh.face_normals[face_ids]
         # Penetration depth: distance from vertex to nearest surface point
@@ -686,7 +696,7 @@ def run_layer_sim_with_collision(layer_muscles, frozen_muscles, skeleton_meshes,
     do_offset = (frame_independent or is_first_frame) and len(obstacle_meshes) > 0
     if do_offset:
         n_offset = 0
-        offset_amount = 0.02  # 20mm detachment
+        offset_amount = 0.005  # 5mm detachment
         for name, mobj in layer_muscles.items():
             off = global_offset[name]
             n = mobj.soft_body.num_vertices
@@ -727,7 +737,7 @@ def run_layer_sim_with_collision(layer_muscles, frozen_muscles, skeleton_meshes,
                              regularization=1e-6)
 
     # Step 1: Pure ARAP solve (full convergence, smooth result)
-    arap_iters = max_iterations * 2 if (is_first_frame or frame_independent) else max_iterations
+    arap_iters = max_iterations
     global_positions, iterations, max_disp = backend.solve(
         global_positions, global_rest_positions, neighbors, edge_weights, rest_edge_vectors,
         global_fixed_mask, fixed_targets_array,
@@ -735,24 +745,53 @@ def run_layer_sim_with_collision(layer_muscles, frozen_muscles, skeleton_meshes,
         verbose=verbose,
     )
 
+    # Pre-filter obstacle meshes: only keep bones whose AABB overlaps muscle group
+    current_layer_verts = sum(layer_muscles[n].soft_body.num_vertices for n in muscle_names)
+    layer_pos = global_positions[:current_layer_verts]
+    layer_min = layer_pos.min(0) - 0.02
+    layer_max = layer_pos.max(0) + 0.02
+    nearby_obstacles = []
+    for om in obstacle_meshes:
+        ob_min, ob_max = om.bounds[0], om.bounds[1]
+        if np.all(ob_min <= layer_max) and np.all(ob_max >= layer_min):
+            nearby_obstacles.append(om)
+
     # Step 2+3: Iterative detect + local ARAP re-solve
     n_rings = 3
     total_targets = 0
     for coll_round in range(2):
         collision_targets = {}
-        _detect_collisions(global_positions, obstacle_meshes, collision_vertex_set,
+        _detect_collisions(global_positions, nearby_obstacles, collision_vertex_set,
                            global_surf_edges, global_fixed_mask, collision_margin,
                            collision_targets)
         if not collision_targets:
             break
         total_targets += len(collision_targets)
-        _local_arap_resolve(global_positions, global_rest_positions, neighbors,
-                            edge_weights, rest_edge_vectors, global_fixed_mask,
-                            collision_targets, n_rings, collision_weight=5.0,
-                            max_iterations=50, tolerance=1e-4)
+
+        # Split: shallow corrections → direct projection, deep → local ARAP
+        shallow_targets = {}
+        deep_targets = {}
+        for vi, target in collision_targets.items():
+            depth = np.linalg.norm(global_positions[vi] - target)
+            if depth < 0.004:  # < 4mm: direct projection (fast, smooth enough)
+                shallow_targets[vi] = target
+            else:
+                deep_targets[vi] = target
+
+        # Direct projection for shallow (just move vertex toward target)
+        for vi, target in shallow_targets.items():
+            global_positions[vi] = target
+
+        # Local ARAP re-solve only for deep penetrations
+        if deep_targets:
+            _local_arap_resolve(global_positions, global_rest_positions, neighbors,
+                                edge_weights, rest_edge_vectors, global_fixed_mask,
+                                deep_targets, n_rings, collision_weight=5.0,
+                                max_iterations=50, tolerance=1e-4)
+
     if verbose and total_targets > 0:
-        print(f"    Local ARAP: {total_targets} collision targets over {coll_round+1} rounds, "
-              f"{n_rings}-ring patches")
+        print(f"    Collision: {total_targets} targets ({len(nearby_obstacles)} bones checked), "
+              f"{coll_round+1} rounds")
 
     # Stash for warm-start
     layer_cache['prev_solution'] = global_positions.copy()
