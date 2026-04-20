@@ -1526,8 +1526,15 @@ def main():
     for m in muscles:
         m['lbs_bindings'] = compute_multibone_lbs(m, skel)
 
-    # ── EMU unified precomputation ──────────────────────────────────
-    print("[5] EMU unified precomputation (all muscles as one system)...")
+    # ── EMU precomputation (per muscle) ──────────────────────────────
+    print("[5] EMU precomputation...")
+    for m in muscles:
+        m['emu'] = precompute_emu(
+            m['vertices'], m['tetrahedra'], m['fixed_vertices'],
+            m.get('vertex_contour_level'), k_modes=args.k_modes)
+
+    # ── (Optional) unified precomputation for reference ──────────────
+    print("[5b] Building unified vertex/tet arrays...")
 
     # Build combined vertex/tet arrays with offset tracking
     vert_offset = {}
