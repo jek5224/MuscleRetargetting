@@ -400,6 +400,8 @@ def main():
 
     bake_data = {n: {} for n in active_muscles}
     flush_count = 0
+    # Warm-start: carry forward previous frame's solution per layer
+    prev_solutions = [None, None, None]
 
     # ── Frame loop ───────────────────────────────────────────────────
     print(f"\n[10] Baking frames {args.start_frame}-{end_frame}...")
@@ -437,12 +439,20 @@ def main():
                 if hasattr(mobj, '_update_fixed_targets_from_skeleton'):
                     mobj._update_fixed_targets_from_skeleton(skeleton_meshes, skel)
 
-            # Collect positions from soft body (already updated by skeleton bindings)
-            global_positions = np.zeros((total_verts, 3))
+            # Collect LBS positions from soft body (updated by skeleton bindings)
+            global_lbs = np.zeros((total_verts, 3))
             for name, mobj in layer_active.items():
                 off = global_offset[name]
                 n = mobj.soft_body.num_vertices
-                global_positions[off:off+n] = mobj.soft_body.positions
+                global_lbs[off:off+n] = mobj.soft_body.positions
+
+            # Warm-start: blend with previous frame's solution (same as _run_unified_volume_sim)
+            if prev_solutions[li] is not None and prev_solutions[li].shape[0] == total_verts:
+                global_positions = 0.7 * global_lbs + 0.3 * prev_solutions[li]
+                fixed_idx = np.where(global_fixed_mask)[0]
+                global_positions[fixed_idx] = global_lbs[fixed_idx]
+            else:
+                global_positions = global_lbs.copy()
 
             # Fixed targets
             fixed_indices = np.where(global_fixed_mask)[0]
@@ -470,6 +480,9 @@ def main():
                 max_iterations=solve_iters, tolerance=2e-3,
                 collision_target_fn=coll_fn,
                 verbose=(frame == args.start_frame and li == 0))
+
+            # Save for warm-start next frame
+            prev_solutions[li] = result.copy()
 
             # Store results and build obstacle meshes for next layer
             for name, mobj in layer_active.items():
