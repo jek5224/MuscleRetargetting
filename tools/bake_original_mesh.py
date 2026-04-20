@@ -756,6 +756,52 @@ def main():
             total_verts += len(tet_v)
             total_tets += len(tet_e)
 
+            # Compute skeleton bindings: muscle-axis blending weights
+            # Same approach as viewer's _build_skeleton_bindings
+            origin_bone = mxml[0][0] if mxml else list(init_transforms.keys())[0]
+            insertion_bone = mxml[0][1] if mxml else list(init_transforms.keys())[-1]
+            if bone_map:
+                origin_bone = bone_map.get(origin_bone, origin_bone)
+                insertion_bone = bone_map.get(insertion_bone, insertion_bone)
+
+            # Compute muscle axis from fixed vertex clusters
+            origin_pts = [tet_v[vi] for vi, (b, _) in local_anchors.items()
+                          if b == origin_bone]
+            insertion_pts = [tet_v[vi] for vi, (b, _) in local_anchors.items()
+                            if b == insertion_bone]
+            if origin_pts and insertion_pts:
+                origin_mean = np.mean(origin_pts, axis=0)
+                insertion_mean = np.mean(insertion_pts, axis=0)
+            else:
+                bn_o = skel.getBodyNode(origin_bone)
+                bn_i = skel.getBodyNode(insertion_bone)
+                origin_mean = bn_o.getWorldTransform().translation() if bn_o else tet_v[0]
+                insertion_mean = bn_i.getWorldTransform().translation() if bn_i else tet_v[-1]
+
+            muscle_axis = insertion_mean - origin_mean
+            muscle_length = np.linalg.norm(muscle_axis)
+            if muscle_length < 1e-6:
+                muscle_length = 1.0
+            axis_dir = muscle_axis / muscle_length
+
+            # Per-vertex weight: project onto axis, 0=origin, 1=insertion
+            axis_weights = np.dot(tet_v - origin_mean, axis_dir) / muscle_length
+            axis_weights = np.clip(axis_weights, 0.0, 1.0)
+
+            # Store initial bone transforms for both bones
+            skel_bindings = {
+                'origin_bone': origin_bone,
+                'insertion_bone': insertion_bone,
+                'axis_weights': axis_weights,
+                'initial_transforms': {},
+            }
+            for bname in [origin_bone, insertion_bone]:
+                bn = skel.getBodyNode(bname)
+                if bn:
+                    wt = bn.getWorldTransform()
+                    skel_bindings['initial_transforms'][bname] = (
+                        wt.rotation().copy(), wt.translation().copy())
+
             muscles.append({
                 'name': full_name,
                 'vertices': tet_v,
@@ -766,8 +812,9 @@ def main():
                 'initial_transforms': init_transforms,
                 'skinning_weights': skin_w,
                 'skinning_bones': skin_bones,
+                'skeleton_bindings': skel_bindings,
                 'n_orig': len(verts),
-                'xml_streams': mxml,  # for IPC attachment bone check
+                'xml_streams': mxml,
             })
             print(f"    {full_name}: {len(tet_v)} verts, {len(tet_e)} tets, {n_fixed} fixed")
 
@@ -832,7 +879,7 @@ def main():
         backend = get_backend(backend_name)
         # Higher regularization for original meshes — prevents per-vertex collapse
         # on fine-resolution meshes where ARAP has too many DOFs to "cheat"
-        backend.build_system(n_total, neighbors, edge_weights, global_fixed_mask, regularization=1.0)
+        backend.build_system(n_total, neighbors, edge_weights, global_fixed_mask, regularization=1e-6)
         print(f"    System built")
 
         # ── Frame loop ────────────────────────────────────────────────────
@@ -867,27 +914,39 @@ def main():
                 else:
                     fixed_targets[idx] = global_rest[gi]
 
-            # LBS initial guess
+            # LBS initial guess via muscle-axis blending (same as viewer's
+            # _update_tet_positions_from_skeleton): each vertex blends between
+            # origin and insertion bone transforms based on position along axis.
             for m in muscles:
                 off = global_offset[m['name']]
                 n = len(m['vertices'])
                 rest = m['vertices']
-                lbs = np.zeros((n, 3))
-                for bi, bone in enumerate(m['skinning_bones']):
-                    body_node = skel.getBodyNode(bone)
-                    if body_node is None:
-                        continue
-                    wt = body_node.getWorldTransform()
-                    R_cur = wt.rotation()
-                    t_cur = wt.translation()
-                    if bone in m['initial_transforms']:
-                        R0, t0 = m['initial_transforms'][bone]
-                    else:
-                        continue
-                    local = (R0.T @ (rest - t0).T).T
-                    deformed = (R_cur @ local.T).T + t_cur
-                    w = m['skinning_weights'][:, bi:bi + 1]
-                    lbs += w * deformed
+
+                # Get origin/insertion bone transforms
+                origin_bone = m['skeleton_bindings']['origin_bone']
+                insertion_bone = m['skeleton_bindings']['insertion_bone']
+                axis_weights = m['skeleton_bindings']['axis_weights']  # (n,) 0=origin, 1=insertion
+                R0_o, t0_o = m['skeleton_bindings']['initial_transforms'][origin_bone]
+                R0_i, t0_i = m['skeleton_bindings']['initial_transforms'][insertion_bone]
+
+                bn_o = skel.getBodyNode(origin_bone)
+                bn_i = skel.getBodyNode(insertion_bone)
+                if bn_o is None or bn_i is None:
+                    global_positions[off:off + n] = rest
+                    continue
+
+                R1_o = bn_o.getWorldTransform().rotation()
+                t1_o = bn_o.getWorldTransform().translation()
+                R1_i = bn_i.getWorldTransform().rotation()
+                t1_i = bn_i.getWorldTransform().translation()
+
+                # Position from each bone
+                pos_from_origin = (R1_o @ (R0_o.T @ (rest - t0_o).T)).T + t1_o
+                pos_from_insertion = (R1_i @ (R0_i.T @ (rest - t0_i).T)).T + t1_i
+
+                # Blend
+                w = axis_weights[:, None]  # (n, 1)
+                lbs = (1.0 - w) * pos_from_origin + w * pos_from_insertion
                 global_positions[off:off + n] = lbs
 
             # First frame: more iterations
