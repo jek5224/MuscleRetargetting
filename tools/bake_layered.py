@@ -424,8 +424,36 @@ def run_layer_sim_with_collision(layer_muscles, frozen_muscles, skeleton_meshes,
     fixed_targets_array = np.array([global_fixed_targets.get(i, global_rest_positions[i])
                                      for i in fixed_indices])
 
-    # First frame detection (for extra iterations)
+    # First frame: offset each muscle outward from its bone axis (Iron Man start)
     is_first_frame = prev_solution is None
+    if is_first_frame and len(obstacle_meshes) > 0:
+        n_offset = 0
+        offset_amount = 0.02  # 20mm detachment
+        for name, mobj in layer_muscles.items():
+            off = global_offset[name]
+            n = mobj.soft_body.num_vertices
+
+            # Compute direction: muscle centroid relative to bone midpoint at rest
+            if hasattr(mobj, 'skinning_bones') and len(mobj.skinning_bones) >= 2:
+                bone_positions = []
+                for bname in mobj.skinning_bones:
+                    bn = skel.getBodyNode(bname)
+                    if bn is not None:
+                        bone_positions.append(bn.getWorldTransform().translation())
+                if len(bone_positions) >= 2:
+                    bone_mid = np.mean(bone_positions, axis=0)
+                    muscle_centroid = global_positions[off:off+n].mean(axis=0)
+                    direction = muscle_centroid - bone_mid
+                    dist = np.linalg.norm(direction)
+                    if dist > 1e-6:
+                        direction /= dist
+                        # Offset all FREE vertices of this muscle outward
+                        for vi in range(off, off + n):
+                            if not global_fixed_mask[vi]:
+                                global_positions[vi] += direction * offset_amount
+                                n_offset += 1
+        if verbose and n_offset > 0:
+            print(f"    First frame: offset {n_offset} vertices outward (Iron Man start)")
 
     # Get or create backend
     backend = layer_cache.get('backend', None)
