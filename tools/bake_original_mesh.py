@@ -266,15 +266,22 @@ def load_and_identify_boundaries(obj_path, muscle_xml_data):
     insertion_mean = insertion_pts.mean(axis=0)
 
     boundary_vertices = {}  # vi -> 'origin' or 'insertion'
+    # Per-vertex classification: each boundary vertex assigned to nearest
+    # XML waypoint (origin or insertion). More robust than per-loop centroid
+    # which fails when loops are in unexpected locations.
+    all_origin = origin_pts  # (N, 3) from XML
+    all_insertion = insertion_pts  # (M, 3) from XML
+    origin_tree = cKDTree(all_origin) if len(all_origin) > 0 else None
+    insertion_tree = cKDTree(all_insertion) if len(all_insertion) > 0 else None
+
     for loop in loops:
-        if len(loop) < 10:
+        if len(loop) < 3:
             continue
-        loop_mean = np.mean([vertices[vi] for vi in loop], axis=0)
-        d_origin = np.linalg.norm(loop_mean - origin_mean)
-        d_insertion = np.linalg.norm(loop_mean - insertion_mean)
-        end_type = 'origin' if d_origin < d_insertion else 'insertion'
         for vi in loop:
-            boundary_vertices[vi] = end_type
+            pos = vertices[vi]
+            d_o = origin_tree.query(pos)[0] if origin_tree else float('inf')
+            d_i = insertion_tree.query(pos)[0] if insertion_tree else float('inf')
+            boundary_vertices[vi] = 'origin' if d_o < d_i else 'insertion'
 
     return vertices, faces, boundary_vertices
 
@@ -345,7 +352,7 @@ def identify_fixed_and_assign_bones(tet_verts, cap_vertices_orig, orig_verts,
         else:
             continue
         dist, tet_vi = tree.query(pos)
-        if dist < 0.001:  # 1mm tolerance
+        if dist < 0.005:  # 5mm tolerance (TetGen can move vertices)
             # Determine bone from XML
             if end_type == 'origin':
                 bone = muscle_xml_data[0][0] if muscle_xml_data else 'L_Femur0'
