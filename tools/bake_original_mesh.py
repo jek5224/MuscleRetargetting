@@ -830,7 +830,9 @@ def main():
                 backend_name = 'cpu'
         print(f"    Backend: {backend_name}")
         backend = get_backend(backend_name)
-        backend.build_system(n_total, neighbors, edge_weights, global_fixed_mask, regularization=1e-6)
+        # Higher regularization for original meshes — prevents per-vertex collapse
+        # on fine-resolution meshes where ARAP has too many DOFs to "cheat"
+        backend.build_system(n_total, neighbors, edge_weights, global_fixed_mask, regularization=1.0)
         print(f"    System built")
 
         # ── Frame loop ────────────────────────────────────────────────────
