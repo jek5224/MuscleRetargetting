@@ -262,6 +262,210 @@ def collision_project(positions, obstacle_meshes, collision_vertex_set,
     return positions, n_projected
 
 
+def _detect_collisions(positions, obstacle_meshes, collision_vertex_set,
+                       surface_edges, fixed_mask, margin, out_targets):
+    """Detect vertex and edge-midpoint collisions, fill out_targets dict.
+
+    out_targets: {global_vertex_idx: target_position (surface + margin)}
+    """
+    from scipy.spatial import cKDTree
+
+    sv_arr = np.array(sorted(collision_vertex_set), dtype=np.int64)
+    sv_pos = positions[sv_arr]
+
+    # Phase 1: Vertex-bone via contains()
+    for obs_mesh in obstacle_meshes:
+        bmin = obs_mesh.bounds[0] - 0.005
+        bmax = obs_mesh.bounds[1] + 0.005
+        in_bbox = np.all((sv_pos >= bmin) & (sv_pos <= bmax), axis=1)
+        if not np.any(in_bbox):
+            continue
+        bbox_sv = sv_arr[in_bbox]
+        bbox_pos = sv_pos[in_bbox]
+        try:
+            inside = obs_mesh.contains(bbox_pos)
+        except Exception:
+            continue
+        if not np.any(inside):
+            continue
+        inside_sv = bbox_sv[inside]
+        inside_pos = bbox_pos[inside]
+        closest, _, face_ids = trimesh.proximity.closest_point(obs_mesh, inside_pos)
+        normals = obs_mesh.face_normals[face_ids]
+        for k in range(len(inside_sv)):
+            vi = int(inside_sv[k])
+            if fixed_mask[vi]:
+                continue
+            out_targets[vi] = closest[k] + normals[k] * margin
+
+    # Phase 2: Edge midpoint check (long edges only)
+    if len(surface_edges) > 0 and len(obstacle_meshes) > 0:
+        edge_v0 = positions[surface_edges[:, 0]]
+        edge_v1 = positions[surface_edges[:, 1]]
+        edge_lengths = np.linalg.norm(edge_v1 - edge_v0, axis=1)
+        long_mask = edge_lengths > 0.008
+
+        if np.any(long_mask):
+            long_edges = surface_edges[long_mask]
+            midpoints = 0.5 * (edge_v0[long_mask] + edge_v1[long_mask])
+
+            obs_verts = np.vstack([om.vertices for om in obstacle_meshes])
+            obs_kdtree = cKDTree(obs_verts)
+            d_mid, _ = obs_kdtree.query(midpoints)
+            edge_near = d_mid < 0.015
+
+            if np.any(edge_near):
+                candidate_edges = long_edges[edge_near]
+                candidate_mids = midpoints[edge_near]
+
+                for obs_mesh in obstacle_meshes:
+                    bmin = obs_mesh.bounds[0] - 0.005
+                    bmax = obs_mesh.bounds[1] + 0.005
+                    in_bbox = np.all((candidate_mids >= bmin) & (candidate_mids <= bmax), axis=1)
+                    if not np.any(in_bbox):
+                        continue
+                    bbox_mids = candidate_mids[in_bbox]
+                    bbox_edges = candidate_edges[in_bbox]
+                    closest, _, face_ids = trimesh.proximity.closest_point(obs_mesh, bbox_mids)
+                    normals = obs_mesh.face_normals[face_ids]
+                    signed_dist = np.einsum('ij,ij->i', bbox_mids - closest, normals)
+                    inside = signed_dist < 0
+                    if not np.any(inside):
+                        continue
+                    inside_edges = bbox_edges[inside]
+                    inside_closest = closest[inside]
+                    inside_normals = normals[inside]
+                    for k in range(len(inside_edges)):
+                        # Target for endpoints: push along normal by margin
+                        target = inside_closest[k] + inside_normals[k] * margin
+                        for vi in [int(inside_edges[k, 0]), int(inside_edges[k, 1])]:
+                            if fixed_mask[vi]:
+                                continue
+                            if vi not in out_targets:
+                                # Soft target: midway between current and surface
+                                out_targets[vi] = positions[vi] + inside_normals[k] * margin
+
+
+def _local_arap_resolve(positions, rest_positions, neighbors, edge_weights,
+                         rest_edge_vectors, fixed_mask, collision_targets,
+                         n_rings, collision_weight=5.0, max_iterations=50, tolerance=1e-4):
+    """Re-solve local ARAP patches around collision vertices.
+
+    Grows collision vertices by n_rings to form a patch. Boundary of patch
+    is fixed at current (ARAP) positions. Collision vertices get a soft
+    pull toward their targets. Interior vertices are free to adjust smoothly.
+    """
+    # Grow collision vertices by n_rings
+    collision_verts = set(collision_targets.keys())
+    patch_verts = set(collision_verts)
+    frontier = set(collision_verts)
+
+    for _ in range(n_rings):
+        new_frontier = set()
+        for vi in frontier:
+            if vi < len(neighbors):
+                for nj in neighbors[vi]:
+                    if nj not in patch_verts:
+                        patch_verts.add(nj)
+                        new_frontier.add(nj)
+        frontier = new_frontier
+
+    if not patch_verts:
+        return
+
+    # Classify patch vertices
+    # Boundary: vertices at the edge of the patch (in patch but have neighbor outside)
+    # Interior: collision verts + their interior neighbors
+    patch_list = sorted(patch_verts)
+    patch_set = set(patch_list)
+
+    boundary = set()
+    for vi in patch_list:
+        if fixed_mask[vi]:
+            boundary.add(vi)
+            continue
+        if vi < len(neighbors):
+            for nj in neighbors[vi]:
+                if nj not in patch_set:
+                    boundary.add(vi)
+                    break
+
+    interior = patch_set - boundary
+
+    if not interior:
+        return
+
+    # Build local index mapping
+    local_idx = {vi: li for li, vi in enumerate(patch_list)}
+    n_local = len(patch_list)
+
+    # Local fixed mask: boundary vertices are fixed
+    local_fixed = np.array([vi in boundary for vi in patch_list])
+
+    # Local positions
+    local_pos = positions[patch_list].copy()
+    local_rest = rest_positions[patch_list].copy()
+    local_fixed_targets = local_pos[local_fixed].copy()
+
+    # Build local edges
+    local_neighbors = [[] for _ in range(n_local)]
+    local_edge_weights = {}
+    local_rest_edges = [{} for _ in range(n_local)]
+
+    for vi in patch_list:
+        li = local_idx[vi]
+        if vi >= len(neighbors):
+            continue
+        for nj in neighbors[vi]:
+            if nj in patch_set:
+                lj = local_idx[nj]
+                if lj not in local_neighbors[li]:
+                    local_neighbors[li].append(lj)
+                w = edge_weights.get((vi, nj), 1.0)
+                local_edge_weights[(li, lj)] = w
+                re = rest_edge_vectors[vi].get(nj, local_rest[lj] - local_rest[li])
+                local_rest_edges[li][lj] = re
+
+    # Collision vertices get soft target via penalty
+    coll_local_set = set()
+    for vi in collision_targets:
+        if vi in local_idx:
+            coll_local_set.add(local_idx[vi])
+
+    # Solve local ARAP with collision as soft penalty
+    local_backend = get_backend('taichi')
+    local_backend.build_system(n_local, local_neighbors, local_edge_weights,
+                                local_fixed, regularization=1e-6,
+                                collision_vertices=coll_local_set,
+                                collision_weight=collision_weight)
+
+    # Collision target function for local system
+    def local_coll_fn(pos):
+        targets = {}
+        for vi, target in collision_targets.items():
+            if vi in local_idx:
+                li = local_idx[vi]
+                if not local_fixed[li]:
+                    targets[li] = target
+        # Free collision candidates default to current pos (zero force)
+        for li in coll_local_set:
+            if li not in targets:
+                targets[li] = pos[li].copy()
+        return targets
+
+    fixed_indices_local = np.where(local_fixed)[0]
+    local_pos, _, _ = local_backend.solve(
+        local_pos, local_rest, local_neighbors, local_edge_weights, local_rest_edges,
+        local_fixed, local_fixed_targets,
+        max_iterations=max_iterations, tolerance=tolerance,
+        collision_target_fn=local_coll_fn,
+    )
+
+    # Write back only interior vertices
+    for vi in interior:
+        li = local_idx[vi]
+        positions[vi] = local_pos[li]
+
 
 # ---------------------------------------------------------------------------
 # Per-layer unified ARAP solve with collision projection
@@ -536,32 +740,30 @@ def run_layer_sim_with_collision(layer_muscles, frozen_muscles, skeleton_meshes,
             if verbose:
                 print(f"    Excluded {len(initially_inside)} initially-inside vertices from collision")
 
-    # Alternating: ARAP (shape) + vertex projection, then final edge check
+    # Step 1: Pure ARAP solve (full convergence, smooth result)
     arap_iters = max_iterations if not is_first_frame else max_iterations * 2
-    outer_iters = 3
+    global_positions, iterations, max_disp = backend.solve(
+        global_positions, global_rest_positions, neighbors, edge_weights, rest_edge_vectors,
+        global_fixed_mask, fixed_targets_array,
+        max_iterations=arap_iters, tolerance=tolerance,
+        verbose=verbose,
+    )
 
-    total_projected = 0
-    for outer in range(outer_iters):
-        # Step 1: Pure ARAP solve
-        inner_iters = arap_iters if outer == 0 else max(arap_iters // 3, 30)
-        global_positions, iterations, max_disp = backend.solve(
-            global_positions, global_rest_positions, neighbors, edge_weights, rest_edge_vectors,
-            global_fixed_mask, fixed_targets_array,
-            max_iterations=inner_iters, tolerance=tolerance,
-            verbose=(verbose and outer == 0),
-        )
+    # Step 2: Detect collisions (vertex + edge midpoint)
+    collision_targets = {}  # {global_vi: target_position}
+    _detect_collisions(global_positions, obstacle_meshes, collision_vertex_set,
+                       global_surf_edges, global_fixed_mask, collision_margin, collision_targets)
 
-        # Step 2: Collision projection (vertex contains + edge midpoint check)
-        global_positions, n_proj = collision_project(
-            global_positions, obstacle_meshes, collision_vertex_set,
-            global_surf_edges, global_fixed_mask, margin=collision_margin)
-        total_projected += n_proj
-
-        if n_proj == 0:
-            break
-
-    if verbose:
-        print(f"    Alternating: {outer+1} rounds, {total_projected} vertices projected")
+    # Step 3: Local ARAP re-solve around collision patches
+    if collision_targets:
+        n_rings = 3  # Grow collision vertices by 3 rings for smooth distribution
+        _local_arap_resolve(global_positions, global_rest_positions, neighbors,
+                            edge_weights, rest_edge_vectors, global_fixed_mask,
+                            collision_targets, n_rings, collision_weight=5.0,
+                            max_iterations=50, tolerance=1e-4)
+        if verbose:
+            print(f"    Local ARAP: {len(collision_targets)} collision targets, "
+                  f"{n_rings}-ring patches")
 
     # Stash for warm-start
     layer_cache['prev_solution'] = global_positions.copy()
