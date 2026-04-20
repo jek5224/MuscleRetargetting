@@ -263,8 +263,13 @@ def collision_project(positions, obstacle_meshes, collision_vertex_set,
 
 
 def _detect_collisions(positions, obstacle_meshes, collision_vertex_set,
-                       surface_edges, fixed_mask, margin, out_targets):
+                       surface_edges, fixed_mask, margin, out_targets,
+                       depth_threshold=0.003):
     """Detect vertex and edge-midpoint collisions, fill out_targets dict.
+
+    Only flags vertices that are > depth_threshold inside a bone.
+    Shallow penetrations (< depth_threshold) are likely in bone concavities
+    (popliteal fossa, etc.) and are left alone.
 
     out_targets: {global_vertex_idx: target_position (surface + margin)}
     """
@@ -273,7 +278,7 @@ def _detect_collisions(positions, obstacle_meshes, collision_vertex_set,
     sv_arr = np.array(sorted(collision_vertex_set), dtype=np.int64)
     sv_pos = positions[sv_arr]
 
-    # Phase 1: Vertex-bone via contains()
+    # Phase 1: Vertex-bone via contains() + depth threshold
     for obs_mesh in obstacle_meshes:
         bmin = obs_mesh.bounds[0] - 0.005
         bmax = obs_mesh.bounds[1] + 0.005
@@ -292,10 +297,14 @@ def _detect_collisions(positions, obstacle_meshes, collision_vertex_set,
         inside_pos = bbox_pos[inside]
         closest, _, face_ids = trimesh.proximity.closest_point(obs_mesh, inside_pos)
         normals = obs_mesh.face_normals[face_ids]
+        # Penetration depth: distance from vertex to nearest surface point
+        depths = np.linalg.norm(inside_pos - closest, axis=1)
         for k in range(len(inside_sv)):
             vi = int(inside_sv[k])
             if fixed_mask[vi]:
                 continue
+            if depths[k] < depth_threshold:
+                continue  # Shallow — likely in bone concavity, not real penetration
             out_targets[vi] = closest[k] + normals[k] * margin
 
     # Phase 2: Edge midpoint check (long edges only)
@@ -714,32 +723,6 @@ def run_layer_sim_with_collision(layer_muscles, frozen_muscles, skeleton_meshes,
         backend.build_system(total_verts, neighbors, edge_weights, global_fixed_mask,
                              regularization=1e-6)
 
-    # Exclude vertices that are ALREADY inside bones at initial position.
-    # These are anatomically near/inside bones and should not be pushed out.
-    if is_first_frame and len(obstacle_meshes) > 0:
-        initially_inside = set()
-        sv_arr_check = np.array(sorted(collision_vertex_set), dtype=np.int64)
-        sv_pos_check = global_positions[sv_arr_check]
-        for obs_mesh in obstacle_meshes:
-            bmin = obs_mesh.bounds[0] - 0.005
-            bmax = obs_mesh.bounds[1] + 0.005
-            in_bbox = np.all((sv_pos_check >= bmin) & (sv_pos_check <= bmax), axis=1)
-            if not np.any(in_bbox):
-                continue
-            bbox_sv = sv_arr_check[in_bbox]
-            bbox_pos = sv_pos_check[in_bbox]
-            try:
-                inside = obs_mesh.contains(bbox_pos)
-            except Exception:
-                continue
-            if np.any(inside):
-                for vi in bbox_sv[inside]:
-                    initially_inside.add(int(vi))
-        if initially_inside:
-            collision_vertex_set = collision_vertex_set - initially_inside
-            if verbose:
-                print(f"    Excluded {len(initially_inside)} initially-inside vertices from collision")
-
     # Step 1: Pure ARAP solve (full convergence, smooth result)
     arap_iters = max_iterations if not is_first_frame else max_iterations * 2
     global_positions, iterations, max_disp = backend.solve(
@@ -749,21 +732,24 @@ def run_layer_sim_with_collision(layer_muscles, frozen_muscles, skeleton_meshes,
         verbose=verbose,
     )
 
-    # Step 2: Detect collisions (vertex + edge midpoint)
-    collision_targets = {}  # {global_vi: target_position}
-    _detect_collisions(global_positions, obstacle_meshes, collision_vertex_set,
-                       global_surf_edges, global_fixed_mask, collision_margin, collision_targets)
-
-    # Step 3: Local ARAP re-solve around collision patches
-    if collision_targets:
-        n_rings = 3  # Grow collision vertices by 3 rings for smooth distribution
+    # Step 2+3: Iterative detect + local ARAP re-solve
+    n_rings = 3
+    total_targets = 0
+    for coll_round in range(2):
+        collision_targets = {}
+        _detect_collisions(global_positions, obstacle_meshes, collision_vertex_set,
+                           global_surf_edges, global_fixed_mask, collision_margin,
+                           collision_targets)
+        if not collision_targets:
+            break
+        total_targets += len(collision_targets)
         _local_arap_resolve(global_positions, global_rest_positions, neighbors,
                             edge_weights, rest_edge_vectors, global_fixed_mask,
                             collision_targets, n_rings, collision_weight=5.0,
                             max_iterations=50, tolerance=1e-4)
-        if verbose:
-            print(f"    Local ARAP: {len(collision_targets)} collision targets, "
-                  f"{n_rings}-ring patches")
+    if verbose and total_targets > 0:
+        print(f"    Local ARAP: {total_targets} collision targets over {coll_round+1} rounds, "
+              f"{n_rings}-ring patches")
 
     # Stash for warm-start
     layer_cache['prev_solution'] = global_positions.copy()
