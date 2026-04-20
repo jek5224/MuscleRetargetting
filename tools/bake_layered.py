@@ -278,44 +278,44 @@ def _detect_collisions(positions, obstacle_meshes, collision_vertex_set,
     sv_arr = np.array(sorted(collision_vertex_set), dtype=np.int64)
     sv_pos = positions[sv_arr]
 
-    # Phase 1: Vertex-bone via contains() + depth threshold
+    # Phase 1: Vertex-bone via signed distance + depth threshold
+    # No contains() — uses KDTree pre-filter + closest_point + dot product
     for obs_mesh in obstacle_meshes:
-        bmin = obs_mesh.bounds[0] - 0.005
-        bmax = obs_mesh.bounds[1] + 0.005
+        bmin = obs_mesh.bounds[0]
+        bmax = obs_mesh.bounds[1]
         in_bbox = np.all((sv_pos >= bmin) & (sv_pos <= bmax), axis=1)
         if not np.any(in_bbox):
             continue
         bbox_sv = sv_arr[in_bbox]
         bbox_pos = sv_pos[in_bbox]
 
-        # KDTree pre-filter: only check vertices very close to bone surface
+        # KDTree pre-filter: only vertices close to bone surface
         bone_kdtree = cKDTree(obs_mesh.vertices)
-        dists, _ = bone_kdtree.query(bbox_pos)
-        near_surf = dists < 0.008  # 8mm from surface — if farther, can't be inside
+        kd_dists, _ = bone_kdtree.query(bbox_pos)
+        near_surf = kd_dists < 0.006  # 6mm — tight filter
         if not np.any(near_surf):
             continue
         near_sv = bbox_sv[near_surf]
         near_pos = bbox_pos[near_surf]
 
-        try:
-            inside = obs_mesh.contains(near_pos)
-        except Exception:
-            continue
-        if not np.any(inside):
-            continue
-        inside_sv = near_sv[inside]
-        inside_pos = near_pos[inside]
-        closest, _, face_ids = trimesh.proximity.closest_point(obs_mesh, inside_pos)
+        # closest_point on the small near set (vectorized BVH)
+        closest, _, face_ids = trimesh.proximity.closest_point(obs_mesh, near_pos)
         normals = obs_mesh.face_normals[face_ids]
-        # Penetration depth: distance from vertex to nearest surface point
-        depths = np.linalg.norm(inside_pos - closest, axis=1)
+
+        # Signed distance: negative = inside bone
+        signed_dist = np.einsum('ij,ij->i', near_pos - closest, normals)
+        deep_inside = signed_dist < -depth_threshold
+        if not np.any(deep_inside):
+            continue
+
+        inside_sv = near_sv[deep_inside]
+        inside_closest = closest[deep_inside]
+        inside_normals = normals[deep_inside]
         for k in range(len(inside_sv)):
             vi = int(inside_sv[k])
             if fixed_mask[vi]:
                 continue
-            if depths[k] < depth_threshold:
-                continue  # Shallow — likely in bone concavity, not real penetration
-            out_targets[vi] = closest[k] + normals[k] * margin
+            out_targets[vi] = inside_closest[k] + inside_normals[k] * margin
 
     # Phase 2: Edge midpoint check (long edges only)
     if len(surface_edges) > 0 and len(obstacle_meshes) > 0:
@@ -748,8 +748,8 @@ def run_layer_sim_with_collision(layer_muscles, frozen_muscles, skeleton_meshes,
     # Pre-filter obstacle meshes: only keep bones whose AABB overlaps muscle group
     current_layer_verts = sum(layer_muscles[n].soft_body.num_vertices for n in muscle_names)
     layer_pos = global_positions[:current_layer_verts]
-    layer_min = layer_pos.min(0) - 0.02
-    layer_max = layer_pos.max(0) + 0.02
+    layer_min = layer_pos.min(0)
+    layer_max = layer_pos.max(0)
     nearby_obstacles = []
     for om in obstacle_meshes:
         ob_min, ob_max = om.bounds[0], om.bounds[1]
