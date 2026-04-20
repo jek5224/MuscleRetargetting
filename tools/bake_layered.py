@@ -250,7 +250,7 @@ def offset_outward_from_bones(positions, free_indices, bone_meshes, offset_amoun
 # ---------------------------------------------------------------------------
 # Per-layer unified ARAP solve with collision projection
 # ---------------------------------------------------------------------------
-def run_layer_sim_with_collision(layer_muscles, skeleton_meshes, skel,
+def run_layer_sim_with_collision(layer_muscles, frozen_muscles, skeleton_meshes, skel,
                                   obstacle_meshes, inter_muscle_constraints,
                                   layer_cache, backend_name,
                                   max_iterations=100, tolerance=1e-4,
@@ -260,9 +260,15 @@ def run_layer_sim_with_collision(layer_muscles, skeleton_meshes, skel,
 
     Muscles start outside obstacles. ARAP pulls toward attachments.
     Collision projection (every 5 iters) prevents surface crossing.
+
+    frozen_muscles: dict of earlier-layer muscles (already settled). Included in
+    system as fixed vertices so cross-layer distance constraints work.
     """
     muscle_names = list(layer_muscles.keys())
-    total_verts = sum(layer_muscles[n].soft_body.num_vertices for n in muscle_names)
+    frozen_names = list(frozen_muscles.keys())
+    all_names = muscle_names + frozen_names
+    total_verts = (sum(layer_muscles[n].soft_body.num_vertices for n in muscle_names)
+                   + sum(frozen_muscles[n].soft_body.num_vertices for n in frozen_names))
 
     # Step 1: Update positions and fixed targets from skeleton
     for name, mobj in layer_muscles.items():
@@ -273,24 +279,39 @@ def run_layer_sim_with_collision(layer_muscles, skeleton_meshes, skel,
 
     # Check if cached topology is still valid
     cache_valid = (layer_cache.get('muscle_names') == muscle_names
+                   and layer_cache.get('frozen_names') == frozen_names
                    and layer_cache.get('total_verts') == total_verts)
 
     if not cache_valid:
         global_offset = {}
         offset_accum = 0
+        # Current layer muscles first
         for name in muscle_names:
             global_offset[name] = offset_accum
             offset_accum += layer_muscles[name].soft_body.num_vertices
+        # Frozen (earlier layer) muscles after
+        for name in frozen_names:
+            global_offset[name] = offset_accum
+            offset_accum += frozen_muscles[name].soft_body.num_vertices
 
         global_rest_positions = np.zeros((total_verts, 3))
         global_fixed_mask = np.zeros(total_verts, dtype=bool)
+
+        # Current layer: use their own fixed_mask
         for name, mobj in layer_muscles.items():
             offset = global_offset[name]
             n = mobj.soft_body.num_vertices
             global_rest_positions[offset:offset+n] = mobj.soft_body.rest_positions
             global_fixed_mask[offset:offset+n] = mobj.soft_body.fixed_mask
 
-        # Build edges from tet connectivity
+        # Frozen muscles: ALL vertices are fixed
+        for name, mobj in frozen_muscles.items():
+            offset = global_offset[name]
+            n = mobj.soft_body.num_vertices
+            global_rest_positions[offset:offset+n] = mobj.soft_body.rest_positions
+            global_fixed_mask[offset:offset+n] = True  # All frozen
+
+        # Build edges from tet connectivity (current layer only)
         all_edges = []
         for name, mobj in layer_muscles.items():
             offset = global_offset[name]
@@ -302,14 +323,20 @@ def run_layer_sim_with_collision(layer_muscles, skeleton_meshes, skel,
                     rest_len = np.linalg.norm(sb.rest_positions[j] - sb.rest_positions[i])
                 all_edges.append((offset + i, offset + j, rest_len, 1.0))
 
-        # Inter-muscle constraints as edges
-        layer_muscle_set = set(muscle_names)
+        # Inter-muscle constraints as edges (within-layer AND cross-layer)
+        all_muscle_set = set(all_names)
+        n_within = 0
+        n_cross = 0
         for constraint in inter_muscle_constraints:
             name1, v1_idx, v1_fixed, name2, v2_idx, v2_fixed, rest_dist = constraint
-            if name1 in layer_muscle_set and name2 in layer_muscle_set:
+            if name1 in all_muscle_set and name2 in all_muscle_set:
                 gi = global_offset[name1] + v1_idx
                 gj = global_offset[name2] + v2_idx
                 all_edges.append((gi, gj, rest_dist, 1.0))
+                if name1 in set(muscle_names) and name2 in set(muscle_names):
+                    n_within += 1
+                else:
+                    n_cross += 1
 
         neighbors = [[] for _ in range(total_verts)]
         edge_weights = {}
@@ -322,7 +349,7 @@ def run_layer_sim_with_collision(layer_muscles, skeleton_meshes, skel,
             rest_edge_vectors[gi][gj] = global_rest_positions[gj] - global_rest_positions[gi]
             rest_edge_vectors[gj][gi] = global_rest_positions[gi] - global_rest_positions[gj]
 
-        # Build collision vertex set: free surface verts (global indices)
+        # Build collision vertex set: free surface verts (current layer only)
         collision_vertex_set = set()
         for name, mobj in layer_muscles.items():
             offset = global_offset[name]
@@ -341,11 +368,13 @@ def run_layer_sim_with_collision(layer_muscles, skeleton_meshes, skel,
             'edge_weights': edge_weights,
             'rest_edge_vectors': rest_edge_vectors,
             'muscle_names': muscle_names,
+            'frozen_names': frozen_names,
             'collision_vertex_set': collision_vertex_set,
         })
         if verbose:
             print(f"    Built topology: {total_verts} verts, {len(all_edges)} edges, "
-                  f"{len(collision_vertex_set)} collision candidates")
+                  f"{len(collision_vertex_set)} collision candidates, "
+                  f"{n_within} within-layer + {n_cross} cross-layer constraints")
 
     # Unpack cache
     global_offset = layer_cache['global_offset']
@@ -356,7 +385,7 @@ def run_layer_sim_with_collision(layer_muscles, skeleton_meshes, skel,
     rest_edge_vectors = layer_cache['rest_edge_vectors']
     collision_vertex_set = layer_cache['collision_vertex_set']
 
-    # Compute LBS positions (skeleton-following)
+    # Compute LBS positions (skeleton-following) for current layer
     global_lbs = np.zeros((total_verts, 3))
     for name, mobj in layer_muscles.items():
         offset = global_offset[name]
@@ -382,7 +411,13 @@ def run_layer_sim_with_collision(layer_muscles, skeleton_meshes, skel,
         else:
             global_lbs[offset:offset+n] = mobj.soft_body.positions
 
-    # Warm-start: 70% LBS + 30% previous solution
+    # Frozen muscles: use their current settled positions
+    for name, mobj in frozen_muscles.items():
+        offset = global_offset[name]
+        n = mobj.soft_body.num_vertices
+        global_lbs[offset:offset+n] = mobj.soft_body.get_positions()
+
+    # Warm-start: 70% LBS + 30% previous solution (current layer only)
     prev_solution = layer_cache.get('prev_solution', None)
     if prev_solution is not None and prev_solution.shape[0] == total_verts:
         global_positions = 0.7 * global_lbs + 0.3 * prev_solution
@@ -391,21 +426,30 @@ def run_layer_sim_with_collision(layer_muscles, skeleton_meshes, skel,
     else:
         global_positions = global_lbs.copy()
 
-    # Fixed targets
+    # Fixed targets: bone attachments for current layer + all positions for frozen
     fixed_indices = np.where(global_fixed_mask)[0]
     global_fixed_targets = {}
+    # Current layer: origin/insertion targets from skeleton
     for name, mobj in layer_muscles.items():
         offset = global_offset[name]
         if mobj.soft_body.fixed_targets is not None and len(mobj.soft_body.fixed_indices) > 0:
             for local_idx, target in zip(mobj.soft_body.fixed_indices, mobj.soft_body.fixed_targets):
                 global_fixed_targets[offset + local_idx] = target
+    # Frozen muscles: all vertices are fixed at their settled positions
+    for name, mobj in frozen_muscles.items():
+        offset = global_offset[name]
+        settled_pos = mobj.soft_body.get_positions()
+        for local_idx in range(mobj.soft_body.num_vertices):
+            global_fixed_targets[offset + local_idx] = settled_pos[local_idx]
     fixed_targets_array = np.array([global_fixed_targets.get(i, global_rest_positions[i])
                                      for i in fixed_indices])
 
-    # First frame: offset outward from bones to guarantee starting outside
+    # First frame: offset current-layer free vertices outward from bones
     is_first_frame = prev_solution is None
     if is_first_frame and len(obstacle_meshes) > 0:
-        free_indices = np.where(~global_fixed_mask)[0]
+        # Only offset current layer's free vertices, not frozen ones
+        current_layer_verts = sum(layer_muscles[n].soft_body.num_vertices for n in muscle_names)
+        free_indices = np.where(~global_fixed_mask[:current_layer_verts])[0]
         global_positions, n_pushed = offset_outward_from_bones(
             global_positions, free_indices, obstacle_meshes, offset_amount=offset_amount)
         if verbose:
@@ -443,7 +487,7 @@ def run_layer_sim_with_collision(layer_muscles, skeleton_meshes, skel,
     # Stash for warm-start
     layer_cache['prev_solution'] = global_positions.copy()
 
-    # Write back to muscles
+    # Write back to current layer muscles only (frozen are unchanged)
     for name, mobj in layer_muscles.items():
         offset = global_offset[name]
         n = mobj.soft_body.num_vertices
@@ -622,6 +666,7 @@ def main():
         # Build bone collision meshes at current pose
         bone_tms = build_bone_collision_meshes(skeleton_meshes, skel, bone_rest_transforms)
         obstacle_meshes = list(bone_tms)  # Bones always in obstacle set
+        settled_muscles = {}  # Accumulate settled earlier-layer muscles
 
         # Process each layer in depth order
         for li in range(3):
@@ -636,8 +681,9 @@ def main():
                 mobj._baking_mode = True
 
             # Run ARAP with collision projection
+            # frozen_muscles = all muscles from earlier layers (already settled)
             iters, max_disp = run_layer_sim_with_collision(
-                layer_active, skeleton_meshes, skel,
+                layer_active, settled_muscles, skeleton_meshes, skel,
                 obstacle_meshes, layer_constraints[li],
                 layer_caches[li], backend_name,
                 max_iterations=args.settle_iters, tolerance=1e-4,
@@ -651,8 +697,9 @@ def main():
                 mobj._baking_mode = False
                 bake_data[mname][frame] = mobj.soft_body.get_positions().astype(np.float32)
 
-            # Settled muscles become obstacles for next layer
+            # Settled muscles become obstacles AND frozen constraints for next layer
             for mname, mobj in layer_active.items():
+                settled_muscles[mname] = mobj
                 if hasattr(mobj, '_surf_faces'):
                     verts = mobj.soft_body.get_positions()
                     tm = trimesh.Trimesh(vertices=verts,
