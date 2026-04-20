@@ -153,98 +153,78 @@ def build_bone_collision_meshes(skeleton_meshes, skel, rest_transforms):
     return bone_meshes
 
 
-def make_collision_projection(obstacle_meshes, collision_vertex_set, fixed_mask, margin=0.002):
-    """Create projection function: project crossed vertices back to surface + margin.
+def make_collision_target_fn(obstacle_meshes, collision_vertex_set, fixed_mask,
+                              margin=0.002, check_interval=10):
+    """Create collision_target_fn with cached contains() checks.
 
-    Uses closest_point + signed distance (dot product). No contains(), no ray-cast.
-    Called every 5 ARAP iterations.
+    Uses contains() for reliable inside/outside detection (handles concave bones).
+    Full check runs every `check_interval` iterations; other iterations reuse
+    cached targets. Penalty-in-diagonal gives smooth convergence.
+
+    Returns dict {vertex_idx: target_position}:
+      - Inside bone: target = surface + margin (pulls vertex out)
+      - Outside: target = current_pos (zero net force)
     """
     sv_arr = np.array(sorted(collision_vertex_set), dtype=np.int64)
+    cached_inside = {}  # vi -> target_position (bone surface + margin)
+    call_count = [0]
 
-    def projection(positions):
-        sv_pos = positions[sv_arr]
+    def collision_target_fn(positions):
+        call_count[0] += 1
 
-        for obs_mesh in obstacle_meshes:
-            # AABB pre-filter
-            bmin = obs_mesh.bounds[0] - 0.005
-            bmax = obs_mesh.bounds[1] + 0.005
-            in_bbox = np.all((sv_pos >= bmin) & (sv_pos <= bmax), axis=1)
-            if not np.any(in_bbox):
-                continue
+        # Default: current position for all candidates (zero force)
+        targets = {}
+        for vi in collision_vertex_set:
+            targets[vi] = positions[vi].copy()
 
-            bbox_sv = sv_arr[in_bbox]
-            bbox_pos = sv_pos[in_bbox]
+        # Only do expensive contains() check every N iterations
+        do_full_check = (call_count[0] % check_interval == 1) or not cached_inside
 
-            # closest_point: vectorized O(log n) via BVH
-            closest, _, face_ids = trimesh.proximity.closest_point(obs_mesh, bbox_pos)
-            normals = obs_mesh.face_normals[face_ids]
+        if do_full_check:
+            cached_inside.clear()
+            sv_pos = positions[sv_arr]
 
-            # Signed distance: positive = outside, negative = crossed surface
-            signed_dist = np.einsum('ij,ij->i', bbox_pos - closest, normals)
-
-            crossed = signed_dist < 0
-            if not np.any(crossed):
-                continue
-
-            # Project back to surface + margin
-            for k in np.where(crossed)[0]:
-                vi = int(bbox_sv[k])
-                if fixed_mask[vi]:
+            for obs_mesh in obstacle_meshes:
+                # AABB pre-filter
+                bmin = obs_mesh.bounds[0] - 0.005
+                bmax = obs_mesh.bounds[1] + 0.005
+                in_bbox = np.all((sv_pos >= bmin) & (sv_pos <= bmax), axis=1)
+                if not np.any(in_bbox):
                     continue
-                positions[vi] = closest[k] + normals[k] * margin
-                # Update sv_pos for subsequent obstacle checks
-                local_idx = np.searchsorted(sv_arr, vi)
-                if local_idx < len(sv_pos) and sv_arr[local_idx] == vi:
-                    sv_pos[local_idx] = positions[vi]
 
-        return positions
+                bbox_sv = sv_arr[in_bbox]
+                bbox_pos = sv_pos[in_bbox]
 
-    return projection
+                # Reliable inside/outside via contains()
+                try:
+                    inside = obs_mesh.contains(bbox_pos)
+                except Exception:
+                    continue
+                if not np.any(inside):
+                    continue
 
+                # Compute surface targets for inside vertices
+                inside_sv = bbox_sv[inside]
+                inside_pos = bbox_pos[inside]
+                closest, _, face_ids = trimesh.proximity.closest_point(obs_mesh, inside_pos)
+                normals = obs_mesh.face_normals[face_ids]
 
-def offset_outward_from_bones(positions, free_indices, bone_meshes, offset_amount=0.01):
-    """Push free vertices outward from nearest bone surface to ensure clearance.
+                for k in range(len(inside_sv)):
+                    vi = int(inside_sv[k])
+                    if fixed_mask[vi]:
+                        continue
+                    target = closest[k] + normals[k] * margin
+                    cached_inside[vi] = target
+                    targets[vi] = target
+        else:
+            # Reuse cached targets — re-check positions against cached surface points
+            for vi, cached_target in cached_inside.items():
+                targets[vi] = cached_target
 
-    Used on first frame to guarantee starting positions are outside all bones.
-    """
-    if len(free_indices) == 0 or len(bone_meshes) == 0:
-        return positions
+        return targets
 
-    free_pos = positions[free_indices]
-    n_pushed = 0
+    return collision_target_fn
 
-    # Batch: find nearest bone for each free vertex
-    for bone_mesh in bone_meshes:
-        bmin = bone_mesh.bounds[0] - offset_amount
-        bmax = bone_mesh.bounds[1] + offset_amount
-        in_bbox = np.all((free_pos >= bmin) & (free_pos <= bmax), axis=1)
-        if not np.any(in_bbox):
-            continue
-
-        bbox_pos = free_pos[in_bbox]
-        bbox_idx = np.where(in_bbox)[0]
-
-        closest, _, face_ids = trimesh.proximity.closest_point(bone_mesh, bbox_pos)
-        normals = bone_mesh.face_normals[face_ids]
-        dists = np.linalg.norm(bbox_pos - closest, axis=1)
-
-        # Signed distance check
-        signed_dist = np.einsum('ij,ij->i', bbox_pos - closest, normals)
-
-        # Push vertices that are inside OR too close to bone surface
-        need_push = signed_dist < offset_amount
-        if not np.any(need_push):
-            continue
-
-        for k in np.where(need_push)[0]:
-            local_k = bbox_idx[k]
-            vi = free_indices[local_k]
-            # Push to surface + offset along outward normal
-            positions[vi] = closest[k] + normals[k] * offset_amount
-            free_pos[local_k] = positions[vi]
-            n_pushed += 1
-
-    return positions, n_pushed
 
 
 # ---------------------------------------------------------------------------
@@ -254,8 +234,8 @@ def run_layer_sim_with_collision(layer_muscles, frozen_muscles, skeleton_meshes,
                                   obstacle_meshes, inter_muscle_constraints,
                                   layer_cache, backend_name,
                                   max_iterations=100, tolerance=1e-4,
-                                  collision_margin=0.002, offset_amount=0.01,
-                                  verbose=False):
+                                  collision_margin=0.002, collision_weight=10.0,
+                                  check_interval=10, verbose=False):
     """Run unified ARAP for one layer with collision projection.
 
     Muscles start outside obstacles. ARAP pulls toward attachments.
@@ -444,16 +424,8 @@ def run_layer_sim_with_collision(layer_muscles, frozen_muscles, skeleton_meshes,
     fixed_targets_array = np.array([global_fixed_targets.get(i, global_rest_positions[i])
                                      for i in fixed_indices])
 
-    # First frame: offset current-layer free vertices outward from bones
+    # First frame detection (for extra iterations)
     is_first_frame = prev_solution is None
-    if is_first_frame and len(obstacle_meshes) > 0:
-        # Only offset current layer's free vertices, not frozen ones
-        current_layer_verts = sum(layer_muscles[n].soft_body.num_vertices for n in muscle_names)
-        free_indices = np.where(~global_fixed_mask[:current_layer_verts])[0]
-        global_positions, n_pushed = offset_outward_from_bones(
-            global_positions, free_indices, obstacle_meshes, offset_amount=offset_amount)
-        if verbose:
-            print(f"    First frame: offset {n_pushed} vertices outward from bones")
 
     # Get or create backend
     backend = layer_cache.get('backend', None)
@@ -462,26 +434,32 @@ def run_layer_sim_with_collision(layer_muscles, frozen_muscles, skeleton_meshes,
         backend._backend_name = backend_name
         layer_cache['backend'] = backend
 
-    # Build system (no collision_weight — using projection, not penalty)
+    # Build system with collision_weight on diagonal for penalty approach
     need_build = not cache_valid or getattr(backend, '_splu', None) is None
     if need_build:
         backend.build_system(total_verts, neighbors, edge_weights, global_fixed_mask,
-                             regularization=1e-6)
+                             regularization=1e-6,
+                             collision_vertices=collision_vertex_set,
+                             collision_weight=collision_weight)
 
-    # Create collision projection function
-    proj_fn = make_collision_projection(
-        obstacle_meshes, collision_vertex_set, global_fixed_mask, margin=collision_margin)
+    # Create collision target function (cached contains() every N iterations)
+    coll_fn = make_collision_target_fn(
+        obstacle_meshes, collision_vertex_set, global_fixed_mask,
+        margin=collision_margin, check_interval=check_interval)
 
-    # More iterations on first frame (muscles fly in from outside)
-    solve_iters = max_iterations * 5 if is_first_frame else max_iterations
+    # First frame: extra iterations; convergence tolerance accounts for
+    # penalty oscillation (~3e-4 between collision and ARAP shape energy)
+    solve_iters = max_iterations * 2 if is_first_frame else max_iterations
 
-    # Solve ARAP with collision projection
+    # Solve ARAP with penalty-in-diagonal collision
+    # Use slightly relaxed tolerance to avoid oscillation between penalty and shape
+    solve_tol = max(tolerance, 5e-4)
     global_positions, iterations, max_disp = backend.solve(
         global_positions, global_rest_positions, neighbors, edge_weights, rest_edge_vectors,
         global_fixed_mask, fixed_targets_array,
-        max_iterations=solve_iters, tolerance=tolerance,
+        max_iterations=solve_iters, tolerance=solve_tol,
         verbose=verbose,
-        collision_projection=proj_fn,
+        collision_target_fn=coll_fn,
     )
 
     # Stash for warm-start
@@ -507,7 +485,9 @@ def main():
     parser.add_argument("--settle-iters", type=int, default=150)
     parser.add_argument("--constraint-threshold", type=float, default=0.015)
     parser.add_argument("--collision-margin", type=float, default=0.002)
-    parser.add_argument("--offset-amount", type=float, default=0.01)
+    parser.add_argument("--collision-weight", type=float, default=10.0)
+    parser.add_argument("--check-interval", type=int, default=20,
+                        help="Run contains() check every N ARAP iterations (default: 20)")
     parser.add_argument("--backend", choices=["auto","taichi","gpu","cpu"], default="auto")
     parser.add_argument("--start-frame", type=int, default=0)
     parser.add_argument("--end-frame", type=int, default=None)
@@ -680,7 +660,7 @@ def main():
                 mobj.waypoints_from_tet_sim = False
                 mobj._baking_mode = True
 
-            # Run ARAP with collision projection
+            # Run ARAP with penalty-in-diagonal collision
             # frozen_muscles = all muscles from earlier layers (already settled)
             iters, max_disp = run_layer_sim_with_collision(
                 layer_active, settled_muscles, skeleton_meshes, skel,
@@ -688,7 +668,8 @@ def main():
                 layer_caches[li], backend_name,
                 max_iterations=args.settle_iters, tolerance=1e-4,
                 collision_margin=args.collision_margin,
-                offset_amount=args.offset_amount,
+                collision_weight=args.collision_weight,
+                check_interval=args.check_interval,
                 verbose=(frame == args.start_frame and li == 0))
 
             # Restore flags and capture positions
