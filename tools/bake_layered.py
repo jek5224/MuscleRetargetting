@@ -153,19 +153,23 @@ def build_bone_collision_meshes(skeleton_meshes, skel, rest_transforms):
     return bone_meshes
 
 
-def collision_project(positions, obstacle_meshes, collision_vertex_set, fixed_mask, margin=0.002):
-    """Project penetrating vertices to bone surface + margin.
+def collision_project(positions, obstacle_meshes, collision_vertex_set,
+                      surface_edges, fixed_mask, margin=0.002):
+    """Project penetrating vertices/edges to bone surface + margin.
 
-    Uses contains() for reliable inside/outside detection.
+    Phase 1: Vertex-bone via contains() (reliable inside/outside).
+    Phase 2: Edge-bone via ray-cast (detects edge tunneling through bones).
     Does NOT modify ARAP system — operates on positions only.
     Returns (corrected_positions, n_projected).
     """
+    from scipy.spatial import cKDTree
+
     sv_arr = np.array(sorted(collision_vertex_set), dtype=np.int64)
     sv_pos = positions[sv_arr]
     n_projected = 0
 
+    # Phase 1: Vertex-bone collision via contains()
     for obs_mesh in obstacle_meshes:
-        # AABB pre-filter
         bmin = obs_mesh.bounds[0] - 0.005
         bmax = obs_mesh.bounds[1] + 0.005
         in_bbox = np.all((sv_pos >= bmin) & (sv_pos <= bmax), axis=1)
@@ -192,11 +196,82 @@ def collision_project(positions, obstacle_meshes, collision_vertex_set, fixed_ma
             if fixed_mask[vi]:
                 continue
             positions[vi] = closest[k] + normals[k] * margin
-            # Update sv_pos for subsequent obstacle checks
             local_idx = np.searchsorted(sv_arr, vi)
             if local_idx < len(sv_pos) and sv_arr[local_idx] == vi:
                 sv_pos[local_idx] = positions[vi]
             n_projected += 1
+
+    # Phase 2: Edge-bone collision via ray-cast
+    if len(surface_edges) > 0 and len(obstacle_meshes) > 0:
+        # Pre-filter edges near ANY obstacle (KDTree on all obstacle verts)
+        obs_verts = np.vstack([om.vertices for om in obstacle_meshes])
+        obs_kdtree = cKDTree(obs_verts)
+
+        edge_v0 = positions[surface_edges[:, 0]]
+        edge_v1 = positions[surface_edges[:, 1]]
+        d0, _ = obs_kdtree.query(edge_v0)
+        d1, _ = obs_kdtree.query(edge_v1)
+        edge_near = (d0 < 0.02) | (d1 < 0.02)
+
+        if np.any(edge_near):
+            candidate_edges = surface_edges[edge_near]
+            origins = positions[candidate_edges[:, 0]]
+            endpoints = positions[candidate_edges[:, 1]]
+            dirs = endpoints - origins
+            lengths = np.linalg.norm(dirs, axis=1)
+            valid = lengths > 1e-10
+
+            if np.any(valid):
+                dirs_norm = dirs.copy()
+                dirs_norm[valid] /= lengths[valid, None]
+                valid_origins = origins[valid]
+                valid_endpoints = endpoints[valid]
+
+                for obs_mesh in obstacle_meshes:
+                    # Per-bone AABB filter: skip bones far from candidate edges
+                    bmin = obs_mesh.bounds[0] - 0.01
+                    bmax = obs_mesh.bounds[1] + 0.01
+                    # Check if any valid edge endpoint is within bone AABB
+                    o_in = np.all((valid_origins >= bmin) & (valid_origins <= bmax), axis=1)
+                    e_in = np.all((valid_endpoints >= bmin) & (valid_endpoints <= bmax), axis=1)
+                    near_bone = o_in | e_in
+                    if not np.any(near_bone):
+                        continue
+
+                    # Only ray-cast edges near this bone
+                    try:
+                        locations, ray_idx, tri_idx = obs_mesh.ray.intersects_location(
+                            valid_origins[near_bone], dirs_norm[valid][near_bone],
+                            multiple_hits=True)
+                    except Exception:
+                        continue
+                    if len(locations) == 0:
+                        continue
+
+                    valid_edges = candidate_edges[valid]
+                    near_edges = valid_edges[near_bone]
+                    near_lengths = lengths[valid][near_bone]
+                    near_origins = valid_origins[near_bone]
+                    near_dirs = dirs_norm[valid][near_bone]
+
+                    for loc, ri, ti in zip(locations, ray_idx, tri_idx):
+                        t_param = np.dot(loc - near_origins[ri], near_dirs[ri])
+                        edge_len = near_lengths[ri]
+                        if 0 < t_param < edge_len:
+                            v0i = int(near_edges[ri, 0])
+                            v1i = int(near_edges[ri, 1])
+                            face_normal = obs_mesh.face_normals[ti]
+                            face_center = obs_mesh.triangles[ti].mean(axis=0)
+                            for vi in [v0i, v1i]:
+                                if fixed_mask[vi]:
+                                    continue
+                                di = np.dot(positions[vi] - face_center, face_normal)
+                                if di < 0:
+                                    cp, _, fid = trimesh.proximity.closest_point(
+                                        obs_mesh, positions[vi:vi + 1])
+                                    fn = obs_mesh.face_normals[fid[0]]
+                                    positions[vi] = cp[0] + fn * margin
+                                    n_projected += 1
 
     return positions, n_projected
 
@@ -303,8 +378,9 @@ def run_layer_sim_with_collision(layer_muscles, frozen_muscles, skeleton_meshes,
             rest_edge_vectors[gi][gj] = global_rest_positions[gj] - global_rest_positions[gi]
             rest_edge_vectors[gj][gi] = global_rest_positions[gi] - global_rest_positions[gj]
 
-        # Build collision vertex set: free surface verts (current layer only)
+        # Build collision vertex set and surface edges (current layer only)
         collision_vertex_set = set()
+        global_surf_edges_list = []
         for name, mobj in layer_muscles.items():
             offset = global_offset[name]
             if hasattr(mobj, '_surf_verts'):
@@ -312,6 +388,10 @@ def run_layer_sim_with_collision(layer_muscles, frozen_muscles, skeleton_meshes,
                     gv = offset + lv
                     if not global_fixed_mask[gv]:
                         collision_vertex_set.add(gv)
+            if hasattr(mobj, '_surf_edges'):
+                for e in mobj._surf_edges:
+                    global_surf_edges_list.append([offset + int(e[0]), offset + int(e[1])])
+        global_surf_edges = np.array(global_surf_edges_list, dtype=np.int64) if global_surf_edges_list else np.zeros((0, 2), dtype=np.int64)
 
         layer_cache.update({
             'global_offset': global_offset,
@@ -324,6 +404,7 @@ def run_layer_sim_with_collision(layer_muscles, frozen_muscles, skeleton_meshes,
             'muscle_names': muscle_names,
             'frozen_names': frozen_names,
             'collision_vertex_set': collision_vertex_set,
+            'global_surf_edges': global_surf_edges,
         })
         if verbose:
             print(f"    Built topology: {total_verts} verts, {len(all_edges)} edges, "
@@ -338,6 +419,7 @@ def run_layer_sim_with_collision(layer_muscles, frozen_muscles, skeleton_meshes,
     edge_weights = layer_cache['edge_weights']
     rest_edge_vectors = layer_cache['rest_edge_vectors']
     collision_vertex_set = layer_cache['collision_vertex_set']
+    global_surf_edges = layer_cache['global_surf_edges']
 
     # Compute LBS positions (skeleton-following) for current layer
     global_lbs = np.zeros((total_verts, 3))
@@ -442,15 +524,39 @@ def run_layer_sim_with_collision(layer_muscles, frozen_muscles, skeleton_meshes,
         backend.build_system(total_verts, neighbors, edge_weights, global_fixed_mask,
                              regularization=1e-6)
 
-    # Alternating: ARAP (shape) + Projection (collision), separated
-    # ARAP doesn't know about collision → no shape distortion
-    # Projection only touches genuinely penetrating vertices
+    # Exclude vertices that are ALREADY inside bones at initial position.
+    # These are anatomically near/inside bones and should not be pushed out.
+    if is_first_frame and len(obstacle_meshes) > 0:
+        initially_inside = set()
+        sv_arr_check = np.array(sorted(collision_vertex_set), dtype=np.int64)
+        sv_pos_check = global_positions[sv_arr_check]
+        for obs_mesh in obstacle_meshes:
+            bmin = obs_mesh.bounds[0] - 0.005
+            bmax = obs_mesh.bounds[1] + 0.005
+            in_bbox = np.all((sv_pos_check >= bmin) & (sv_pos_check <= bmax), axis=1)
+            if not np.any(in_bbox):
+                continue
+            bbox_sv = sv_arr_check[in_bbox]
+            bbox_pos = sv_pos_check[in_bbox]
+            try:
+                inside = obs_mesh.contains(bbox_pos)
+            except Exception:
+                continue
+            if np.any(inside):
+                for vi in bbox_sv[inside]:
+                    initially_inside.add(int(vi))
+        if initially_inside:
+            collision_vertex_set = collision_vertex_set - initially_inside
+            if verbose:
+                print(f"    Excluded {len(initially_inside)} initially-inside vertices from collision")
+
+    # Alternating: ARAP (shape) + vertex projection, then final edge check
     arap_iters = max_iterations if not is_first_frame else max_iterations * 2
-    outer_iters = 3  # alternation rounds
+    outer_iters = 3
 
     total_projected = 0
     for outer in range(outer_iters):
-        # Step 1: Pure ARAP solve (no collision in system)
+        # Step 1: Pure ARAP solve
         inner_iters = arap_iters if outer == 0 else max(arap_iters // 3, 30)
         global_positions, iterations, max_disp = backend.solve(
             global_positions, global_rest_positions, neighbors, edge_weights, rest_edge_vectors,
@@ -459,14 +565,15 @@ def run_layer_sim_with_collision(layer_muscles, frozen_muscles, skeleton_meshes,
             verbose=(verbose and outer == 0),
         )
 
-        # Step 2: Collision projection (separate from ARAP)
+        # Step 2: Vertex collision projection (contains() only, no edge ray-cast)
         global_positions, n_proj = collision_project(
             global_positions, obstacle_meshes, collision_vertex_set,
+            np.zeros((0, 2), dtype=np.int64),
             global_fixed_mask, margin=collision_margin)
         total_projected += n_proj
 
         if n_proj == 0:
-            break  # No collisions → done
+            break
 
     if verbose:
         print(f"    Alternating: {outer+1} rounds, {total_projected} vertices projected")
