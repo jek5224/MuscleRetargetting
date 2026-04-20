@@ -199,17 +199,37 @@ def main():
         )
         return ctx
 
+    # Find ALL inter-muscle constraints globally (cross-layer + within-layer)
+    print("    Finding global inter-muscle constraints...")
+    global_ctx = make_ctx(list(active_all.keys()))
+    n_global = find_inter_muscle_constraints(global_ctx)
+    all_constraints = global_ctx.inter_muscle_constraints
+    print(f"    {n_global} global constraints")
+
+    # Build per-layer contexts, each including constraints where BOTH
+    # vertices belong to muscles in that layer OR earlier settled layers.
+    # For layer N: include constraints between any muscles in layers 0..N.
     layer_ctxs = []
+    cumulative_muscles = set()
     for li in range(3):
-        if layer_muscles[li]:
-            ctx = make_ctx(layer_muscles[li])
-            # Find inter-muscle constraints for this layer
-            print(f"    Layer {li}: finding constraints...")
-            n_c = find_inter_muscle_constraints(ctx)
-            print(f"    Layer {li}: {n_c} constraints")
-            layer_ctxs.append(ctx)
-        else:
+        if not layer_muscles[li]:
             layer_ctxs.append(None)
+            continue
+
+        # This layer's muscles + all previously settled muscles
+        cumulative_muscles.update(layer_muscles[li])
+        ctx = make_ctx(list(cumulative_muscles))
+
+        # Filter global constraints to only those involving muscles in cumulative set
+        layer_constraints = []
+        for c in all_constraints:
+            name1, v1, f1, name2, v2, f2, dist = c
+            if name1 in cumulative_muscles and name2 in cumulative_muscles:
+                layer_constraints.append(c)
+        ctx.inter_muscle_constraints = layer_constraints
+        print(f"    Layer {li}: {len(layer_muscles[li])} muscles, "
+              f"{len(layer_constraints)} constraints (cumulative {len(cumulative_muscles)} muscles)")
+        layer_ctxs.append(ctx)
 
     # ── Frame loop ────────────────────────────────────────────────────
     print(f"\n[8] Baking frames {args.start_frame}-{end_frame}...")
