@@ -483,7 +483,8 @@ def run_layer_sim_with_collision(layer_muscles, frozen_muscles, skeleton_meshes,
                                   obstacle_meshes, inter_muscle_constraints,
                                   layer_cache, backend_name,
                                   max_iterations=100, tolerance=1e-4,
-                                  collision_margin=0.002, verbose=False):
+                                  collision_margin=0.002, frame_independent=False,
+                                  verbose=False):
     """Run unified ARAP for one layer with collision projection.
 
     Muscles start outside obstacles. ARAP pulls toward attachments.
@@ -652,9 +653,9 @@ def run_layer_sim_with_collision(layer_muscles, frozen_muscles, skeleton_meshes,
         n = mobj.soft_body.num_vertices
         global_lbs[offset:offset+n] = mobj.soft_body.get_positions()
 
-    # Warm-start: 70% LBS + 30% previous solution (current layer only)
+    # Warm-start: 70% LBS + 30% previous solution (skip if frame_independent)
     prev_solution = layer_cache.get('prev_solution', None)
-    if prev_solution is not None and prev_solution.shape[0] == total_verts:
+    if not frame_independent and prev_solution is not None and prev_solution.shape[0] == total_verts:
         global_positions = 0.7 * global_lbs + 0.3 * prev_solution
         fixed_idx = np.where(global_fixed_mask)[0]
         global_positions[fixed_idx] = global_lbs[fixed_idx]
@@ -679,9 +680,11 @@ def run_layer_sim_with_collision(layer_muscles, frozen_muscles, skeleton_meshes,
     fixed_targets_array = np.array([global_fixed_targets.get(i, global_rest_positions[i])
                                      for i in fixed_indices])
 
-    # First frame: offset each muscle outward from its bone axis (Iron Man start)
+    # Iron Man offset: detach muscles outward from bones
+    # In frame_independent mode: every frame. Otherwise: first frame only.
     is_first_frame = prev_solution is None
-    if is_first_frame and len(obstacle_meshes) > 0:
+    do_offset = (frame_independent or is_first_frame) and len(obstacle_meshes) > 0
+    if do_offset:
         n_offset = 0
         offset_amount = 0.02  # 20mm detachment
         for name, mobj in layer_muscles.items():
@@ -724,7 +727,7 @@ def run_layer_sim_with_collision(layer_muscles, frozen_muscles, skeleton_meshes,
                              regularization=1e-6)
 
     # Step 1: Pure ARAP solve (full convergence, smooth result)
-    arap_iters = max_iterations if not is_first_frame else max_iterations * 2
+    arap_iters = max_iterations * 2 if (is_first_frame or frame_independent) else max_iterations
     global_positions, iterations, max_disp = backend.solve(
         global_positions, global_rest_positions, neighbors, edge_weights, rest_edge_vectors,
         global_fixed_mask, fixed_targets_array,
@@ -774,6 +777,9 @@ def main():
     parser.add_argument("--settle-iters", type=int, default=150)
     parser.add_argument("--constraint-threshold", type=float, default=0.015)
     parser.add_argument("--collision-margin", type=float, default=0.002)
+    parser.add_argument("--frame-independent", action="store_true",
+                        help="No warm-start between frames. Each frame starts from Iron Man offset. "
+                             "Enables frame-level parallelization.")
     parser.add_argument("--backend", choices=["auto","taichi","gpu","cpu"], default="auto")
     parser.add_argument("--start-frame", type=int, default=0)
     parser.add_argument("--end-frame", type=int, default=None)
@@ -954,6 +960,7 @@ def main():
                 layer_caches[li], backend_name,
                 max_iterations=args.settle_iters, tolerance=1e-4,
                 collision_margin=args.collision_margin,
+                frame_independent=args.frame_independent,
                 verbose=(frame == args.start_frame and li == 0))
 
             # Restore flags and capture positions
