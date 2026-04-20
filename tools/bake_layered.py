@@ -201,77 +201,63 @@ def collision_project(positions, obstacle_meshes, collision_vertex_set,
                 sv_pos[local_idx] = positions[vi]
             n_projected += 1
 
-    # Phase 2: Edge-bone collision via ray-cast
+    # Phase 2: Edge midpoint collision check (long edges only)
+    # Only edges > 8mm can tunnel through bones without vertex detection.
+    # Compute virtual midpoints, check with contains(), push endpoints if inside.
     if len(surface_edges) > 0 and len(obstacle_meshes) > 0:
-        # Pre-filter edges near ANY obstacle (KDTree on all obstacle verts)
-        obs_verts = np.vstack([om.vertices for om in obstacle_meshes])
-        obs_kdtree = cKDTree(obs_verts)
-
         edge_v0 = positions[surface_edges[:, 0]]
         edge_v1 = positions[surface_edges[:, 1]]
-        d0, _ = obs_kdtree.query(edge_v0)
-        d1, _ = obs_kdtree.query(edge_v1)
-        edge_near = (d0 < 0.02) | (d1 < 0.02)
+        edge_lengths = np.linalg.norm(edge_v1 - edge_v0, axis=1)
 
-        if np.any(edge_near):
-            candidate_edges = surface_edges[edge_near]
-            origins = positions[candidate_edges[:, 0]]
-            endpoints = positions[candidate_edges[:, 1]]
-            dirs = endpoints - origins
-            lengths = np.linalg.norm(dirs, axis=1)
-            valid = lengths > 1e-10
+        # Only check long edges (short ones can't tunnel)
+        long_mask = edge_lengths > 0.008  # 8mm threshold
+        if np.any(long_mask):
+            long_edges = surface_edges[long_mask]
+            long_v0 = edge_v0[long_mask]
+            long_v1 = edge_v1[long_mask]
+            midpoints = 0.5 * (long_v0 + long_v1)
 
-            if np.any(valid):
-                dirs_norm = dirs.copy()
-                dirs_norm[valid] /= lengths[valid, None]
-                valid_origins = origins[valid]
-                valid_endpoints = endpoints[valid]
+            # Pre-filter: midpoints near any obstacle
+            obs_verts = np.vstack([om.vertices for om in obstacle_meshes])
+            obs_kdtree = cKDTree(obs_verts)
+            d_mid, _ = obs_kdtree.query(midpoints)
+            edge_near = d_mid < 0.015
+            candidate_edges = long_edges[edge_near]
+            candidate_mids = midpoints[edge_near]
+        else:
+            candidate_edges = np.zeros((0, 2), dtype=np.int64)
+            candidate_mids = np.zeros((0, 3))
 
-                for obs_mesh in obstacle_meshes:
-                    # Per-bone AABB filter: skip bones far from candidate edges
-                    bmin = obs_mesh.bounds[0] - 0.01
-                    bmax = obs_mesh.bounds[1] + 0.01
-                    # Check if any valid edge endpoint is within bone AABB
-                    o_in = np.all((valid_origins >= bmin) & (valid_origins <= bmax), axis=1)
-                    e_in = np.all((valid_endpoints >= bmin) & (valid_endpoints <= bmax), axis=1)
-                    near_bone = o_in | e_in
-                    if not np.any(near_bone):
-                        continue
+        if len(candidate_mids) > 0:
+            for obs_mesh in obstacle_meshes:
+                bmin = obs_mesh.bounds[0] - 0.005
+                bmax = obs_mesh.bounds[1] + 0.005
+                in_bbox = np.all((candidate_mids >= bmin) & (candidate_mids <= bmax), axis=1)
+                if not np.any(in_bbox):
+                    continue
 
-                    # Only ray-cast edges near this bone
-                    try:
-                        locations, ray_idx, tri_idx = obs_mesh.ray.intersects_location(
-                            valid_origins[near_bone], dirs_norm[valid][near_bone],
-                            multiple_hits=True)
-                    except Exception:
-                        continue
-                    if len(locations) == 0:
-                        continue
+                bbox_mids = candidate_mids[in_bbox]
+                bbox_edges = candidate_edges[in_bbox]
 
-                    valid_edges = candidate_edges[valid]
-                    near_edges = valid_edges[near_bone]
-                    near_lengths = lengths[valid][near_bone]
-                    near_origins = valid_origins[near_bone]
-                    near_dirs = dirs_norm[valid][near_bone]
+                # Signed distance (fast, no contains())
+                # Reliable here: midpoint is between two outside endpoints
+                closest, _, face_ids = trimesh.proximity.closest_point(obs_mesh, bbox_mids)
+                normals = obs_mesh.face_normals[face_ids]
+                signed_dist = np.einsum('ij,ij->i', bbox_mids - closest, normals)
+                inside = signed_dist < 0
+                if not np.any(inside):
+                    continue
 
-                    for loc, ri, ti in zip(locations, ray_idx, tri_idx):
-                        t_param = np.dot(loc - near_origins[ri], near_dirs[ri])
-                        edge_len = near_lengths[ri]
-                        if 0 < t_param < edge_len:
-                            v0i = int(near_edges[ri, 0])
-                            v1i = int(near_edges[ri, 1])
-                            face_normal = obs_mesh.face_normals[ti]
-                            face_center = obs_mesh.triangles[ti].mean(axis=0)
-                            for vi in [v0i, v1i]:
-                                if fixed_mask[vi]:
-                                    continue
-                                di = np.dot(positions[vi] - face_center, face_normal)
-                                if di < 0:
-                                    cp, _, fid = trimesh.proximity.closest_point(
-                                        obs_mesh, positions[vi:vi + 1])
-                                    fn = obs_mesh.face_normals[fid[0]]
-                                    positions[vi] = cp[0] + fn * margin
-                                    n_projected += 1
+                inside_edges = bbox_edges[inside]
+                inside_normals = normals[inside]
+
+                for k in range(len(inside_edges)):
+                    push_dir = inside_normals[k]
+                    for vi in [int(inside_edges[k, 0]), int(inside_edges[k, 1])]:
+                        if fixed_mask[vi]:
+                            continue
+                        positions[vi] += push_dir * margin
+                        n_projected += 1
 
     return positions, n_projected
 
@@ -565,11 +551,10 @@ def run_layer_sim_with_collision(layer_muscles, frozen_muscles, skeleton_meshes,
             verbose=(verbose and outer == 0),
         )
 
-        # Step 2: Vertex collision projection (contains() only, no edge ray-cast)
+        # Step 2: Collision projection (vertex contains + edge midpoint check)
         global_positions, n_proj = collision_project(
             global_positions, obstacle_meshes, collision_vertex_set,
-            np.zeros((0, 2), dtype=np.int64),
-            global_fixed_mask, margin=collision_margin)
+            global_surf_edges, global_fixed_mask, margin=collision_margin)
         total_projected += n_proj
 
         if n_proj == 0:
