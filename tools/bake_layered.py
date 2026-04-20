@@ -430,35 +430,19 @@ def main():
             total_verts = sys_data['total_verts']
 
             # Update positions and fixed targets from skeleton
+            # (same as _run_unified_volume_sim — uses muscle-axis blending, not LBS)
             for name, mobj in layer_active.items():
                 if hasattr(mobj, '_update_tet_positions_from_skeleton'):
                     mobj._update_tet_positions_from_skeleton(skel)
                 if hasattr(mobj, '_update_fixed_targets_from_skeleton'):
                     mobj._update_fixed_targets_from_skeleton(skeleton_meshes, skel)
 
-            # Compute LBS positions
+            # Collect positions from soft body (already updated by skeleton bindings)
             global_positions = np.zeros((total_verts, 3))
             for name, mobj in layer_active.items():
                 off = global_offset[name]
                 n = mobj.soft_body.num_vertices
-                rest = mobj.soft_body.rest_positions
-                if hasattr(mobj, 'skinning_weights') and mobj.skinning_weights is not None and len(mobj.skinning_bones) > 0:
-                    lbs = np.zeros((n, 3))
-                    for bi, bone_name in enumerate(mobj.skinning_bones):
-                        bn = skel.getBodyNode(bone_name)
-                        if bn is None: continue
-                        R = bn.getWorldTransform().rotation()
-                        t = bn.getWorldTransform().translation()
-                        if bone_name in mobj.soft_body_initial_transforms:
-                            R0, t0 = mobj.soft_body_initial_transforms[bone_name]
-                        else: continue
-                        w = mobj.skinning_weights[:, bi:bi+1]
-                        local = (R0.T @ (rest - t0).T).T
-                        deformed = (R @ local.T).T + t
-                        lbs += w * deformed
-                    global_positions[off:off+n] = lbs
-                else:
-                    global_positions[off:off+n] = mobj.soft_body.positions
+                global_positions[off:off+n] = mobj.soft_body.positions
 
             # Fixed targets
             fixed_indices = np.where(global_fixed_mask)[0]
