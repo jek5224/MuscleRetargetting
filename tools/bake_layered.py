@@ -324,64 +324,6 @@ def collision_project(positions, obstacle_meshes, collision_vertex_set,
                 sv_pos[local_idx] = positions[vi]
             n_projected += 1
 
-    # Phase 2: Edge midpoint collision check (long edges only)
-    # Only edges > 8mm can tunnel through bones without vertex detection.
-    # Compute virtual midpoints, check with contains(), push endpoints if inside.
-    if len(surface_edges) > 0 and len(obstacle_meshes) > 0:
-        edge_v0 = positions[surface_edges[:, 0]]
-        edge_v1 = positions[surface_edges[:, 1]]
-        edge_lengths = np.linalg.norm(edge_v1 - edge_v0, axis=1)
-
-        # Only check long edges (short ones can't tunnel)
-        long_mask = edge_lengths > 0.008  # 8mm threshold
-        if np.any(long_mask):
-            long_edges = surface_edges[long_mask]
-            long_v0 = edge_v0[long_mask]
-            long_v1 = edge_v1[long_mask]
-            midpoints = 0.5 * (long_v0 + long_v1)
-
-            # Pre-filter: midpoints near any obstacle
-            obs_verts = np.vstack([om.vertices for om in obstacle_meshes])
-            obs_kdtree = cKDTree(obs_verts)
-            d_mid, _ = obs_kdtree.query(midpoints)
-            edge_near = d_mid < 0.015
-            candidate_edges = long_edges[edge_near]
-            candidate_mids = midpoints[edge_near]
-        else:
-            candidate_edges = np.zeros((0, 2), dtype=np.int64)
-            candidate_mids = np.zeros((0, 3))
-
-        if len(candidate_mids) > 0:
-            for obs_mesh in obstacle_meshes:
-                bmin = obs_mesh.bounds[0] - 0.005
-                bmax = obs_mesh.bounds[1] + 0.005
-                in_bbox = np.all((candidate_mids >= bmin) & (candidate_mids <= bmax), axis=1)
-                if not np.any(in_bbox):
-                    continue
-
-                bbox_mids = candidate_mids[in_bbox]
-                bbox_edges = candidate_edges[in_bbox]
-
-                # Signed distance (fast, no contains())
-                # Reliable here: midpoint is between two outside endpoints
-                closest, _, face_ids = trimesh.proximity.closest_point(obs_mesh, bbox_mids)
-                normals = obs_mesh.face_normals[face_ids]
-                signed_dist = np.einsum('ij,ij->i', bbox_mids - closest, normals)
-                inside = signed_dist < 0
-                if not np.any(inside):
-                    continue
-
-                inside_edges = bbox_edges[inside]
-                inside_normals = normals[inside]
-
-                for k in range(len(inside_edges)):
-                    push_dir = inside_normals[k]
-                    for vi in [int(inside_edges[k, 0]), int(inside_edges[k, 1])]:
-                        if fixed_mask[vi]:
-                            continue
-                        positions[vi] += push_dir * margin
-                        n_projected += 1
-
     return positions, n_projected
 
 
@@ -437,52 +379,68 @@ def _detect_collisions(positions, obstacle_meshes, collision_vertex_set,
                 continue
             out_targets[vi] = inside_closest[k] + inside_normals[k] * margin
 
-    # Phase 2: Edge midpoint check (long edges only)
+    # Phase 2: Edge sample-point check (long edges only)
+    # Sample at 1/3, 1/2, 2/3 along edge. Use contains() for reliable detection.
+    # Signed distance misses concave bone regions (femur condyles).
     if len(surface_edges) > 0 and len(obstacle_meshes) > 0:
         edge_v0 = positions[surface_edges[:, 0]]
         edge_v1 = positions[surface_edges[:, 1]]
         edge_lengths = np.linalg.norm(edge_v1 - edge_v0, axis=1)
-        long_mask = edge_lengths > 0.008
+        long_mask = edge_lengths > 0.005  # 5mm threshold
 
         if np.any(long_mask):
             long_edges = surface_edges[long_mask]
-            midpoints = 0.5 * (edge_v0[long_mask] + edge_v1[long_mask])
+            lv0 = edge_v0[long_mask]
+            lv1 = edge_v1[long_mask]
+            # Sample at 3 points along each edge
+            samples = np.vstack([
+                lv0 * (2/3) + lv1 * (1/3),
+                lv0 * (1/2) + lv1 * (1/2),
+                lv0 * (1/3) + lv1 * (2/3),
+            ])  # shape: (3*n_long, 3)
+            n_long = len(long_edges)
+            # edge_idx[i] = which long_edge this sample belongs to
+            edge_idx = np.tile(np.arange(n_long), 3)
 
-            obs_verts = np.vstack([om.vertices for om in obstacle_meshes])
-            obs_kdtree = cKDTree(obs_verts)
-            d_mid, _ = obs_kdtree.query(midpoints)
-            edge_near = d_mid < 0.015
+            for obs_mesh in obstacle_meshes:
+                bmin = obs_mesh.bounds[0] - 0.003
+                bmax = obs_mesh.bounds[1] + 0.003
+                in_bbox = np.all((samples >= bmin) & (samples <= bmax), axis=1)
+                if not np.any(in_bbox):
+                    continue
 
-            if np.any(edge_near):
-                candidate_edges = long_edges[edge_near]
-                candidate_mids = midpoints[edge_near]
+                bbox_samples = samples[in_bbox]
+                bbox_edge_idx = edge_idx[in_bbox]
 
-                for obs_mesh in obstacle_meshes:
-                    bmin = obs_mesh.bounds[0] - 0.005
-                    bmax = obs_mesh.bounds[1] + 0.005
-                    in_bbox = np.all((candidate_mids >= bmin) & (candidate_mids <= bmax), axis=1)
-                    if not np.any(in_bbox):
-                        continue
-                    bbox_mids = candidate_mids[in_bbox]
-                    bbox_edges = candidate_edges[in_bbox]
-                    closest, _, face_ids = trimesh.proximity.closest_point(obs_mesh, bbox_mids)
-                    normals = obs_mesh.face_normals[face_ids]
-                    signed_dist = np.einsum('ij,ij->i', bbox_mids - closest, normals)
-                    inside = signed_dist < 0
-                    if not np.any(inside):
-                        continue
-                    inside_edges = bbox_edges[inside]
-                    inside_closest = closest[inside]
-                    inside_normals = normals[inside]
-                    for k in range(len(inside_edges)):
-                        # Target for endpoints: push along normal by margin
-                        target = inside_closest[k] + inside_normals[k] * margin
-                        for vi in [int(inside_edges[k, 0]), int(inside_edges[k, 1])]:
-                            if fixed_mask[vi]:
-                                continue
-                            if vi not in out_targets:
-                                # Soft target: midway between current and surface
-                                out_targets[vi] = positions[vi] + inside_normals[k] * margin
+                # KDTree pre-filter: only samples close to bone surface
+                bone_kdtree = cKDTree(obs_mesh.vertices)
+                kd_dists, _ = bone_kdtree.query(bbox_samples)
+                near = kd_dists < 0.006
+                if not np.any(near):
+                    continue
+                bbox_samples = bbox_samples[near]
+                bbox_edge_idx = bbox_edge_idx[near]
+
+                try:
+                    inside = obs_mesh.contains(bbox_samples)
+                except Exception:
+                    continue
+                if not np.any(inside):
+                    continue
+
+                # Unique edges with at least one inside sample
+                inside_edge_set = set(bbox_edge_idx[inside].tolist())
+                for ei in inside_edge_set:
+                    v0i = int(long_edges[ei, 0])
+                    v1i = int(long_edges[ei, 1])
+                    for vi in [v0i, v1i]:
+                        if fixed_mask[vi] or vi in out_targets:
+                            continue
+                        # Target: closest point on bone surface + margin
+                        cp, _, fid = trimesh.proximity.closest_point(
+                            obs_mesh, positions[vi:vi + 1])
+                        fn = obs_mesh.face_normals[fid[0]]
+                        out_targets[vi] = cp[0] + fn * margin
 
 
 def _local_arap_resolve(positions, rest_positions, neighbors, edge_weights,
