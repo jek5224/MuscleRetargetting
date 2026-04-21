@@ -162,6 +162,7 @@ def _warp_clear_cache():
 
 SKEL_XML = "data/zygote_skel.xml"
 ZYGOTE_DIR = "Zygote_Meshes_251229/"
+ZYGOTE_HIRES_DIR = "Zygote_Meshes/"  # Fine-grained meshes for collision
 MESH_SCALE = 0.01
 FLUSH_INTERVAL = 20
 
@@ -249,15 +250,56 @@ def cache_bone_rest_transforms(skel):
     return rest_transforms
 
 
+def load_hires_skeleton_meshes():
+    """Load fine-grained skeleton meshes for collision detection."""
+    hires_dir = os.path.join(ZYGOTE_HIRES_DIR, "Skeleton")
+    if not os.path.isdir(hires_dir):
+        return {}
+    # Naming: "Legs_L_Femur.obj" → body name "L_Femur0"
+    # Also: "Legs_L_Tibia.obj" + "Legs_L_Fibula.obj" (separate in hires)
+    meshes = {}
+    for fname in sorted(os.listdir(hires_dir)):
+        if not fname.endswith(".obj"):
+            continue
+        # Strip prefix: "Legs_L_Femur.obj" → "L_Femur"
+        name = fname.replace(".obj", "")
+        if name.startswith("Legs_"):
+            name = name[5:]  # "L_Femur"
+        elif name.startswith("Hips_"):
+            name = name[5:]
+        elif name.startswith("Spine_"):
+            name = name[6:]
+        path = os.path.join(hires_dir, fname)
+        skel_tri = trimesh.load_mesh(path)
+        skel_tri.vertices *= MESH_SCALE
+        meshes[name] = SimpleNamespace(trimesh=skel_tri)
+    if meshes:
+        print(f"    Loaded {len(meshes)} hi-res skeleton meshes for collision")
+        # Show vertex counts for key bones
+        for key in ['L_Femur', 'L_Tibia', 'L_Fibula', 'L_Os_Coxae', 'L_Patella']:
+            if key in meshes:
+                print(f"      {key}: {meshes[key].trimesh.vertices.shape[0]} verts")
+    return meshes
+
+
 def build_bone_collision_meshes(skeleton_meshes, skel, rest_transforms):
     """Build bone trimeshes at current skeleton pose."""
+    # Name mapping: hi-res mesh name → DART body name
+    BODY_NAME_MAP = {
+        'L_Tibia': 'L_Tibia_Fibula0', 'L_Fibula': 'L_Tibia_Fibula0',
+        'R_Tibia': 'R_Tibia_Fibula0', 'R_Fibula': 'R_Tibia_Fibula0',
+        'Saccrum_Coccyx': 'Saccrum_Coccyx0', 'Saccrum': 'Saccrum_Coccyx0',
+    }
     bone_meshes = []
     for mesh_name, mesh_obj in skeleton_meshes.items():
         if not (hasattr(mesh_obj, 'trimesh') and mesh_obj.trimesh is not None):
             continue
         body_node = None
         body_name = None
-        for candidate in [mesh_name, mesh_name + '0']:
+        # Try direct name, name+0, and explicit mapping
+        for candidate in [mesh_name, mesh_name + '0', BODY_NAME_MAP.get(mesh_name, '')]:
+            if not candidate:
+                continue
             body_node = skel.getBodyNode(candidate)
             if body_node is not None:
                 body_name = candidate
@@ -1043,6 +1085,9 @@ def main():
     total_sv = sum(len(getattr(m, '_surf_verts', [])) for m in active_all.values())
     print(f"    {total_sv} surface vertices for collision")
 
+    # Load hi-res skeleton meshes for collision detection (10x finer)
+    hires_skeleton = load_hires_skeleton_meshes()
+
     # ── Classify into layers ──────────────────────────────────────────────
     print("[7] Classifying into layers...")
     layer_muscles = [[], [], []]
@@ -1128,9 +1173,11 @@ def main():
         skel.setPositions(motion_bvh.mocap_refs[frame])
 
         # Build bone collision meshes at current pose
+        # Use hi-res meshes if available (10x finer → better inverse collision detection)
         if _warp_ok[0]:
-            _warp_clear_cache()  # New frame, new bone poses
-        bone_tms = build_bone_collision_meshes(skeleton_meshes, skel, bone_rest_transforms)
+            _warp_clear_cache()
+        coll_skel = hires_skeleton if hires_skeleton else skeleton_meshes
+        bone_tms = build_bone_collision_meshes(coll_skel, skel, bone_rest_transforms)
         obstacle_meshes = list(bone_tms)  # Bones always in obstacle set
         settled_muscles = {}  # Accumulate settled earlier-layer muscles
 
