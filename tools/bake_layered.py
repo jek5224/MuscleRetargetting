@@ -1140,12 +1140,12 @@ def main():
     all_muscle_meshes = dict(sorted(all_muscle_meshes.items()))
 
     print("[4] Loading tet meshes...")
-    orig_vert_counts = {}  # Track original vertex count for cache compatibility
-    bary_mappings = {}  # Barycentric mapping from orig verts to fine tet
-    orig_anchor_sets = {}  # Original anchor vertex indices (for direct skeleton targets)
+    orig_vert_counts = {}
+    bary_mappings = {}
+    orig_anchor_sets = {}
+    anchor_bone_maps = {}  # Per-anchor bone assignment from original mesh
     for name, mobj in all_muscle_meshes.items():
         tet_path = os.path.join(args.tet_dir, f"{name}_tet.npz")
-        # Check for barycentric mapping (from remesh_tet_for_collision.py)
         if args.tet_dir != "tet" and os.path.exists(tet_path):
             import pickle as _pkl
             with open(tet_path, 'rb') as _f:
@@ -1157,12 +1157,13 @@ def main():
                 with open(os.path.join("tet", f"{name}_tet.npz"), 'rb') as _f:
                     _orig = _pkl.load(_f)
                 orig_vert_counts[name] = len(_orig['vertices'])
-            # Load original anchor vertices for direct position setting
             orig_tet_path = os.path.join("tet", f"{name}_tet.npz")
             if os.path.exists(orig_tet_path):
                 with open(orig_tet_path, 'rb') as _f:
                     _orig_data = _pkl.load(_f)
                 orig_anchor_sets[name] = set(int(v) for v in _orig_data.get('anchor_vertices', []))
+            if 'anchor_bone_map' in _tet_data:
+                anchor_bone_maps[name] = _tet_data['anchor_bone_map']
         mobj.load_tetrahedron_mesh(name, filepath=tet_path)
 
     print("[5] Initializing soft bodies...")
@@ -1170,6 +1171,22 @@ def main():
     for name, mobj in all_muscle_meshes.items():
         if mobj.tet_vertices is None: continue
         mobj.init_soft_body(skeleton_meshes=skeleton_meshes, skeleton=skel, mesh_info=mesh_info)
+        # Override bone assignments from original mesh if available
+        abm = anchor_bone_maps.get(name)
+        if abm and hasattr(mobj, 'soft_body_local_anchors'):
+            for fine_vi, bone_name in abm.items():
+                fine_vi = int(fine_vi)
+                if fine_vi in mobj.soft_body_local_anchors:
+                    old_bone, local_pos = mobj.soft_body_local_anchors[fine_vi]
+                    if old_bone != bone_name:
+                        # Recompute local anchor position for the correct bone
+                        body_node = skel.getBodyNode(bone_name)
+                        if body_node is not None:
+                            R = body_node.getWorldTransform().rotation()
+                            t = body_node.getWorldTransform().translation()
+                            world_pos = mobj.tet_vertices[fine_vi]
+                            new_local = R.T @ (world_pos - t)
+                            mobj.soft_body_local_anchors[fine_vi] = (bone_name, new_local)
 
     # Filter to active muscles on requested side
     side = args.sides[0]
@@ -1341,8 +1358,6 @@ def main():
                                     if d < 0.001:
                                         anchor_targets[int(oa_idx)] = ft[fi_local]
 
-                    if mname == 'L_Vastus_Lateralis' and frame == 64:
-                        if 11 in anchor_targets:
                     for ci, (tet_idx, bary) in enumerate(mapping):
                         if ci >= n_orig:
                             break
@@ -1358,13 +1373,10 @@ def main():
                                         bary[1] * fine_pos[tv[1]] +
                                         bary[2] * fine_pos[tv[2]] +
                                         bary[3] * fine_pos[tv[3]])
-                    if mname == 'L_Vastus_Lateralis' and frame == 64:
                     bake_data[mname][frame] = orig_pos
                 elif n_orig is not None and n_orig < len(fine_pos):
-                    if mname == 'L_Vastus_Lateralis' and frame == 64:
                     bake_data[mname][frame] = fine_pos[:n_orig]
                 else:
-                    if mname == 'L_Vastus_Lateralis' and frame == 64:
                     bake_data[mname][frame] = fine_pos
 
             # Settled muscles become obstacles AND frozen constraints for next layer

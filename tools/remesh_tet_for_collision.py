@@ -272,15 +272,63 @@ def process_muscle(input_path, output_path, bone_kdtree, bone_trimeshes,
         tetrahedralize_surface(sub_verts, sub_faces)
 
     # Identify anchor vertices in new tet mesh (match by position)
+    # Also build per-anchor bone assignment from original cap_attachments
     orig_anchors = orig_data.get('anchor_vertices', [])
     orig_anchor_positions = orig_verts[orig_anchors]
     new_kdtree = cKDTree(tet_verts)
     new_anchors = []
-    for ap in orig_anchor_positions:
+    # Map each original anchor to its new index in fine mesh
+    orig_to_new_anchor = {}  # orig_anchor_idx → new_anchor_idx
+    for oi, ap in zip(orig_anchors, orig_anchor_positions):
         d, idx = new_kdtree.query(ap)
-        if d < 0.001:  # 1mm tolerance
+        if d < 0.001:
             new_anchors.append(int(idx))
+            orig_to_new_anchor[int(oi)] = int(idx)
     new_anchors = sorted(set(new_anchors))
+
+    # Build per-anchor bone assignment map from original mesh
+    # This will be stored in the fine tet and used to override init_soft_body
+    # grouping (which can be wrong after remeshing changes face connectivity)
+    orig_cap_attach = orig_data.get('cap_attachments')
+    attach_names = orig_data.get('attach_skeleton_names', [[]])
+    anchor_bone_map = {}  # new_anchor_idx → bone_name
+    if orig_cap_attach is not None and len(orig_cap_attach) > 0 and len(attach_names) > 0:
+        # Determine which original anchors belong to which group
+        # Use init_soft_body's result on original mesh (by loading it temporarily)
+        import sys as _sys
+        _sys.path.insert(0, PROJECT_ROOT)
+        from viewer.mesh_loader import MeshLoader as _ML
+        from core.dartHelper import saveSkeletonInfo as _ssi, buildFromInfo as _bfi
+        _si, _rn, _bi, _, _mi, _ = _ssi(SKEL_XML)
+        _sk = _bfi(_si, _rn)
+        _sk.setPositions(np.zeros(_sk.getNumDofs()))
+        _skel_meshes = {}
+        import os as _os
+        _skel_dir = _os.path.join(ZYGOTE_DIR, "Skeleton")
+        for _fn in sorted(_os.listdir(_skel_dir)):
+            if not _fn.endswith('.obj'): continue
+            _skel_meshes[_fn.split('.')[0]] = _ML()
+            _skel_meshes[_fn.split('.')[0]].load(_os.path.join(_skel_dir, _fn))
+        _tmp = _ML.__new__(_ML)
+        _tmp.tet_vertices = orig_verts
+        _tmp.tet_tetrahedra = orig_data['tetrahedra']
+        _tmp.tet_render_faces = orig_data.get('render_faces', orig_data.get('faces'))
+        _tmp.tet_sim_faces = orig_data.get('sim_faces')
+        _tmp.tet_cap_face_indices = list(orig_data.get('cap_face_indices', []))
+        _tmp.tet_anchor_vertices = list(orig_data.get('anchor_vertices', []))
+        _tmp.tet_cap_attachments = orig_cap_attach
+        for k in ['waypoints', 'waypoint_bary_coords', 'attach_skeleton_names',
+                   'attach_skeletons', 'attach_skeletons_sub', 'contours',
+                   'vertex_contour_level', 'contour_to_tet_mapping', 'mvc_weights',
+                   'stream_contours', 'stream_bounding_planes', '_stream_endpoints']:
+            if k in orig_data:
+                setattr(_tmp, k if not k.startswith('_') else k, orig_data[k])
+        _tmp.init_soft_body(skeleton_meshes=_skel_meshes, skeleton=_sk, mesh_info=_mi)
+        if hasattr(_tmp, 'soft_body_local_anchors'):
+            for orig_vi, (bname, _) in _tmp.soft_body_local_anchors.items():
+                new_vi = orig_to_new_anchor.get(int(orig_vi))
+                if new_vi is not None:
+                    anchor_bone_map[new_vi] = bname
 
     # Identify cap faces (all vertices in anchor set)
     anchor_set = set(new_anchors)
@@ -338,6 +386,9 @@ def process_muscle(input_path, output_path, bone_kdtree, bone_trimeshes,
     # Store mapping for position conversion
     data['orig_to_fine_mapping'] = mapping
     data['orig_n_verts'] = n_orig
+    # Per-anchor bone assignment (overrides init_soft_body grouping)
+    if anchor_bone_map:
+        data['anchor_bone_map'] = anchor_bone_map
 
     with open(output_path, 'wb') as f:
         pickle.dump(data, f)
