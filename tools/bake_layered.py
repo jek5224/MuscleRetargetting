@@ -1288,13 +1288,23 @@ def main():
                 bake_data[mname][frame] = pos
 
             # Settled muscles become obstacles AND frozen constraints for next layer
+            # Inflate obstacle slightly so outer muscles can't reach bone through gaps
+            obstacle_margin = 0.002  # 2mm buffer
             for mname, mobj in layer_active.items():
                 settled_muscles[mname] = mobj
                 if hasattr(mobj, '_surf_faces'):
-                    verts = mobj.soft_body.get_positions()
+                    verts = mobj.soft_body.get_positions().copy()
                     tm = trimesh.Trimesh(vertices=verts,
                                          faces=mobj._surf_faces.copy(), process=True)
-                    obstacle_meshes.append(tm)
+                    # Inflate: push each vertex outward along its vertex normal
+                    try:
+                        vnormals = tm.vertex_normals
+                        verts_inflated = verts + vnormals * obstacle_margin
+                        tm_inflated = trimesh.Trimesh(vertices=verts_inflated,
+                                                       faces=mobj._surf_faces.copy(), process=True)
+                        obstacle_meshes.append(tm_inflated)
+                    except Exception:
+                        obstacle_meshes.append(tm)
 
         frame_dt = time.time() - frame_start
         frames_done = frame - args.start_frame + 1
