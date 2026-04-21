@@ -237,6 +237,146 @@ def precompute_surface_data(active_muscles):
         mobj._surf_fixed = fixed_set
 
 
+def subdivide_long_edges_near_bones(mobj, bone_trimeshes, max_edge_len=0.010, bone_dist=0.015):
+    """Subdivide long surface edges near bones in the tet mesh.
+
+    For each surface edge > max_edge_len that is within bone_dist of any bone:
+    - Add midpoint vertex
+    - Split all tets containing the edge into 2 tets each
+    - Split surface faces containing the edge into 2 faces each
+    - Interpolate per-vertex data (vertex_contour_level)
+
+    Modifies mobj.tet_vertices, mobj.tet_tetrahedra, etc. in place.
+    Returns number of edges subdivided.
+    """
+    from scipy.spatial import cKDTree
+
+    verts = mobj.tet_vertices.copy()  # (N, 3) float32
+    tets = mobj.tet_tetrahedra.copy()  # (T, 4) int32
+    if verts is None or tets is None:
+        return 0
+
+    # Get surface faces and edges
+    sf = extract_surface_triangles(tets)
+    se = extract_edges_from_faces(sf)
+
+    # Tet vertices are already in meters
+    verts_m = verts
+
+    # Find long edges near bones
+    v0_pos = verts_m[se[:, 0]]
+    v1_pos = verts_m[se[:, 1]]
+    edge_lens = np.linalg.norm(v1_pos - v0_pos, axis=1)
+    long_mask = edge_lens > max_edge_len
+
+    if not np.any(long_mask):
+        return 0
+
+    # KDTree from all bone vertices for proximity check
+    if not bone_trimeshes:
+        return 0
+    all_bone_verts = np.vstack([bm.vertices for bm in bone_trimeshes])
+    bone_kdtree = cKDTree(all_bone_verts)
+
+    long_edges = se[long_mask]
+    long_mids = 0.5 * (verts_m[long_edges[:, 0]] + verts_m[long_edges[:, 1]])
+    d_mid, _ = bone_kdtree.query(long_mids)
+    near_bone = d_mid < bone_dist
+
+    edges_to_split = long_edges[near_bone]
+    if len(edges_to_split) == 0:
+        return 0
+
+    # Build edge → tet mapping
+    edge_set = set()
+    for e in edges_to_split:
+        edge_set.add((min(int(e[0]), int(e[1])), max(int(e[0]), int(e[1]))))
+
+    # Per-vertex data to interpolate
+    vcl = getattr(mobj, '_tet_vertex_contour_level', None)
+
+    new_verts = list(verts)
+    new_tets = []
+    new_vcl = list(vcl) if vcl is not None else None
+    midpoint_cache = {}  # (v0, v1) → new vertex index
+
+    def get_midpoint(a, b):
+        key = (min(a, b), max(a, b))
+        if key in midpoint_cache:
+            return midpoint_cache[key]
+        mid_pos = 0.5 * (verts[a] + verts[b])
+        new_idx = len(new_verts)
+        new_verts.append(mid_pos)
+        if new_vcl is not None and vcl is not None:
+            new_vcl.append(0.5 * (vcl[a] + vcl[b]))
+        midpoint_cache[key] = new_idx
+        return new_idx
+
+    # Process each tet
+    for t in tets:
+        t = [int(x) for x in t]
+        # Find which edges of this tet need splitting
+        tet_edges = [(t[i], t[j]) for i in range(4) for j in range(i+1, 4)]
+        splits = []
+        for a, b in tet_edges:
+            key = (min(a, b), max(a, b))
+            if key in edge_set:
+                splits.append((a, b))
+
+        if not splits:
+            new_tets.append(t)
+            continue
+
+        if len(splits) == 1:
+            # Split one edge → tet becomes 2 tets
+            a, b = splits[0]
+            m = get_midpoint(a, b)
+            # Other two vertices
+            others = [v for v in t if v != a and v != b]
+            c, d = others
+            new_tets.append([a, m, c, d])
+            new_tets.append([m, b, c, d])
+        else:
+            # Multiple edges split — keep tet as-is for simplicity
+            # (multi-edge splits produce complex configurations)
+            new_tets.append(t)
+
+    # Update surface faces
+    new_faces = []
+    for f in sf:
+        f = [int(x) for x in f]
+        face_edges = [(f[i], f[(i+1) % 3]) for i in range(3)]
+        face_splits = []
+        for a, b in face_edges:
+            key = (min(a, b), max(a, b))
+            if key in midpoint_cache:
+                face_splits.append((a, b, midpoint_cache[key]))
+
+        if not face_splits:
+            new_faces.append(f)
+        elif len(face_splits) == 1:
+            a, b, m = face_splits[0]
+            c = [v for v in f if v != a and v != b][0]
+            new_faces.append([a, m, c])
+            new_faces.append([m, b, c])
+        else:
+            new_faces.append(f)  # Multi-split face: keep as-is
+
+    # Write back
+    mobj.tet_vertices = np.array(new_verts, dtype=np.float32)
+    mobj.tet_tetrahedra = np.array(new_tets, dtype=np.int32)
+
+    # Update render_faces (same as surface faces for contour meshes)
+    new_faces_arr = np.array(new_faces, dtype=np.int32)
+    mobj.tet_render_faces = new_faces_arr
+    mobj.tet_sim_faces = new_faces_arr
+
+    if new_vcl is not None:
+        mobj._tet_vertex_contour_level = np.array(new_vcl, dtype=np.float32)
+
+    return len(midpoint_cache)
+
+
 def cache_bone_rest_transforms(skel):
     """Cache rest-pose transforms for all body nodes."""
     saved_pos = skel.getPositions().copy()
@@ -1066,8 +1206,23 @@ def main():
     for name, mobj in all_muscle_meshes.items():
         mobj.load_tetrahedron_mesh(name)
 
-    print("[5] Initializing soft bodies...")
+    # Subdivide long surface edges near bones (one-time preprocessing)
+    print("[5] Subdividing long edges near bones...")
     skel.setPositions(np.zeros(skel.getNumDofs()))
+    bone_rest_for_subdiv = cache_bone_rest_transforms(skel)
+    bone_tms_rest = build_bone_collision_meshes(skeleton_meshes, skel, bone_rest_for_subdiv)
+    total_subdiv = 0
+    for name, mobj in all_muscle_meshes.items():
+        if mobj.tet_vertices is None: continue
+        n_split = subdivide_long_edges_near_bones(mobj, bone_tms_rest,
+                                                   max_edge_len=0.010, bone_dist=0.015)
+        if n_split > 0:
+            print(f"    {name}: +{n_split} midpoints ({mobj.tet_vertices.shape[0]} verts, "
+                  f"{mobj.tet_tetrahedra.shape[0]} tets)")
+            total_subdiv += n_split
+    print(f"    Total: {total_subdiv} edges subdivided")
+
+    print("[6] Initializing soft bodies...")
     for name, mobj in all_muscle_meshes.items():
         if mobj.tet_vertices is None: continue
         mobj.init_soft_body(skeleton_meshes=skeleton_meshes, skeleton=skel, mesh_info=mesh_info)
@@ -1079,7 +1234,7 @@ def main():
     print(f"    {len(active_all)} active {side}-side muscles")
 
     # ── Precompute surface data ───────────────────────────────────────────
-    print("[6] Precomputing surface data...")
+    print("[7] Precomputing surface data...")
     precompute_surface_data(active_all)
     bone_rest_transforms = cache_bone_rest_transforms(skel)
     total_sv = sum(len(getattr(m, '_surf_verts', [])) for m in active_all.values())
@@ -1089,7 +1244,7 @@ def main():
     hires_skeleton = load_hires_skeleton_meshes()
 
     # ── Classify into layers ──────────────────────────────────────────────
-    print("[7] Classifying into layers...")
+    print("[8] Classifying into layers...")
     layer_muscles = [[], [], []]
     for name in active_all:
         short = name.replace(f"{side}_", "")
@@ -1106,7 +1261,7 @@ def main():
         print(f"    Layer {li}: {len(layer_muscles[li])} — {layer_muscles[li]}")
 
     # ── Find inter-muscle constraints ─────────────────────────────────────
-    print("[8] Finding inter-muscle constraints...")
+    print("[9] Finding inter-muscle constraints...")
     global_ctx = SimpleNamespace(
         env=SimpleNamespace(skel=skel, mesh_info=mesh_info),
         zygote_muscle_meshes=active_all,
@@ -1141,7 +1296,7 @@ def main():
         print(f"    Layer {li}: {len(layer_constraints[li])} constraints")
 
     # ── Load BVH ──────────────────────────────────────────────────────────
-    print("[9] Loading BVH...")
+    print("[10] Loading BVH...")
     t_frame = _detect_bvh_tframe(args.bvh)
     motion_bvh = MyBVH(args.bvh, bvh_info, skel, T_frame=t_frame)
     n_frames = motion_bvh.mocap_refs.shape[0]
@@ -1166,7 +1321,7 @@ def main():
     layer_caches = [{}, {}, {}]
 
     # ── Frame loop ────────────────────────────────────────────────────────
-    print(f"\n[10] Baking frames {args.start_frame}-{end_frame}...")
+    print(f"\n[11] Baking frames {args.start_frame}-{end_frame}...")
 
     for frame in range(args.start_frame, end_frame + 1):
         frame_start = time.time()
@@ -1176,8 +1331,7 @@ def main():
         # Use hi-res meshes if available (10x finer → better inverse collision detection)
         if _warp_ok[0]:
             _warp_clear_cache()
-        coll_skel = hires_skeleton if hires_skeleton else skeleton_meshes
-        bone_tms = build_bone_collision_meshes(coll_skel, skel, bone_rest_transforms)
+        bone_tms = build_bone_collision_meshes(skeleton_meshes, skel, bone_rest_transforms)
         obstacle_meshes = list(bone_tms)  # Bones always in obstacle set
         settled_muscles = {}  # Accumulate settled earlier-layer muscles
 
