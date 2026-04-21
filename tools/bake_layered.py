@@ -379,68 +379,9 @@ def _detect_collisions(positions, obstacle_meshes, collision_vertex_set,
                 continue
             out_targets[vi] = inside_closest[k] + inside_normals[k] * margin
 
-    # Phase 2: Edge sample-point check (long edges only)
-    # Sample at 1/3, 1/2, 2/3 along edge. Use contains() for reliable detection.
-    # Signed distance misses concave bone regions (femur condyles).
-    if len(surface_edges) > 0 and len(obstacle_meshes) > 0:
-        edge_v0 = positions[surface_edges[:, 0]]
-        edge_v1 = positions[surface_edges[:, 1]]
-        edge_lengths = np.linalg.norm(edge_v1 - edge_v0, axis=1)
-        long_mask = edge_lengths > 0.005  # 5mm threshold
-
-        if np.any(long_mask):
-            long_edges = surface_edges[long_mask]
-            lv0 = edge_v0[long_mask]
-            lv1 = edge_v1[long_mask]
-            # Sample at 3 points along each edge
-            samples = np.vstack([
-                lv0 * (2/3) + lv1 * (1/3),
-                lv0 * (1/2) + lv1 * (1/2),
-                lv0 * (1/3) + lv1 * (2/3),
-            ])  # shape: (3*n_long, 3)
-            n_long = len(long_edges)
-            # edge_idx[i] = which long_edge this sample belongs to
-            edge_idx = np.tile(np.arange(n_long), 3)
-
-            for obs_mesh in obstacle_meshes:
-                bmin = obs_mesh.bounds[0] - 0.003
-                bmax = obs_mesh.bounds[1] + 0.003
-                in_bbox = np.all((samples >= bmin) & (samples <= bmax), axis=1)
-                if not np.any(in_bbox):
-                    continue
-
-                bbox_samples = samples[in_bbox]
-                bbox_edge_idx = edge_idx[in_bbox]
-
-                # KDTree pre-filter: only samples close to bone surface
-                bone_kdtree = cKDTree(obs_mesh.vertices)
-                kd_dists, _ = bone_kdtree.query(bbox_samples)
-                near = kd_dists < 0.006
-                if not np.any(near):
-                    continue
-                bbox_samples = bbox_samples[near]
-                bbox_edge_idx = bbox_edge_idx[near]
-
-                try:
-                    inside = obs_mesh.contains(bbox_samples)
-                except Exception:
-                    continue
-                if not np.any(inside):
-                    continue
-
-                # Unique edges with at least one inside sample
-                inside_edge_set = set(bbox_edge_idx[inside].tolist())
-                for ei in inside_edge_set:
-                    v0i = int(long_edges[ei, 0])
-                    v1i = int(long_edges[ei, 1])
-                    for vi in [v0i, v1i]:
-                        if fixed_mask[vi] or vi in out_targets:
-                            continue
-                        # Target: closest point on bone surface + margin
-                        cp, _, fid = trimesh.proximity.closest_point(
-                            obs_mesh, positions[vi:vi + 1])
-                        fn = obs_mesh.face_normals[fid[0]]
-                        out_targets[vi] = cp[0] + fn * margin
+    # Edge collision detection removed — pushing endpoints near concave bone
+    # regions (femur condyles) makes TFL worse. Vertex-only collision is the
+    # best tradeoff. Edge tunneling is a mesh resolution limitation.
 
 
 def _local_arap_resolve(positions, rest_positions, neighbors, edge_weights,
