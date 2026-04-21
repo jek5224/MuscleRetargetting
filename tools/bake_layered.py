@@ -1128,7 +1128,16 @@ def main():
     all_muscle_meshes = dict(sorted(all_muscle_meshes.items()))
 
     print("[4] Loading tet meshes...")
+    orig_vert_counts = {}  # Track original vertex count for cache compatibility
     for name, mobj in all_muscle_meshes.items():
+        # Load original tet first to get vertex count (for cache compatibility)
+        orig_path = os.path.join("tet", f"{name}_tet.npz")
+        if args.tet_dir != "tet" and os.path.exists(orig_path):
+            import pickle as _pkl
+            with open(orig_path, 'rb') as _f:
+                _orig = _pkl.load(_f)
+            orig_vert_counts[name] = len(_orig['vertices'])
+        # Load actual tet (possibly subdivided)
         tet_path = os.path.join(args.tet_dir, f"{name}_tet.npz")
         mobj.load_tetrahedron_mesh(name, filepath=tet_path)
 
@@ -1271,7 +1280,12 @@ def main():
             for mname, mobj in layer_active.items():
                 mobj.waypoints_from_tet_sim = True
                 mobj._baking_mode = False
-                bake_data[mname][frame] = mobj.soft_body.get_positions().astype(np.float32)
+                pos = mobj.soft_body.get_positions().astype(np.float32)
+                # If using subdivided tet, only save original vertices (viewer loads from tet/)
+                n_orig = orig_vert_counts.get(mname)
+                if n_orig is not None and n_orig < len(pos):
+                    pos = pos[:n_orig]
+                bake_data[mname][frame] = pos
 
             # Settled muscles become obstacles AND frozen constraints for next layer
             for mname, mobj in layer_active.items():
