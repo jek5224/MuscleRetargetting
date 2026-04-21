@@ -966,7 +966,7 @@ def run_layer_sim_with_collision(layer_muscles, frozen_muscles, skeleton_meshes,
     # Step 2+3: Iterative detect + local ARAP re-solve
     n_rings = 3
     total_targets = 0
-    for coll_round in range(2):
+    for coll_round in range(3):
         collision_targets = {}
         _detect_collisions(global_positions, nearby_obstacles, collision_vertex_set,
                            global_surf_edges, global_fixed_mask, collision_margin,
@@ -993,7 +993,7 @@ def run_layer_sim_with_collision(layer_muscles, frozen_muscles, skeleton_meshes,
         if deep_targets:
             _local_arap_resolve(global_positions, global_rest_positions, neighbors,
                                 edge_weights, rest_edge_vectors, global_fixed_mask,
-                                deep_targets, n_rings, collision_weight=5.0,
+                                deep_targets, n_rings, collision_weight=10.0,
                                 max_iterations=50, tolerance=1e-4)
 
     if verbose and total_targets > 0:
