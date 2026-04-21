@@ -536,22 +536,34 @@ def _detect_collisions(positions, obstacle_meshes, collision_vertex_set,
         # KDTree pre-filter: only vertices close to bone surface
         bone_kdtree = cKDTree(obs_mesh.vertices)
         kd_dists, _ = bone_kdtree.query(bbox_pos)
-        near_surf = kd_dists < 0.006
+        near_surf = kd_dists < 0.008  # 8mm — slightly wider for contains() accuracy
         if not np.any(near_surf):
             continue
-        bbox_sv = bbox_sv[near_surf]
-        bbox_pos = bbox_pos[near_surf]
-        closest, _, face_ids = trimesh.proximity.closest_point(obs_mesh, bbox_pos)
-        normals = obs_mesh.face_normals[face_ids]
-        signed_dist = np.einsum('ij,ij->i', bbox_pos - closest, normals)
+        near_sv = bbox_sv[near_surf]
+        near_pos = bbox_pos[near_surf]
 
-        deep_inside = signed_dist < -depth_threshold
-        if not np.any(deep_inside):
+        # Use contains() for reliable detection (signed distance misses concavities)
+        try:
+            inside = obs_mesh.contains(near_pos)
+        except Exception:
+            continue
+        if not np.any(inside):
             continue
 
-        inside_sv = bbox_sv[deep_inside]
-        inside_closest = closest[deep_inside]
-        inside_normals = normals[deep_inside]
+        inside_sv = near_sv[inside]
+        inside_pos = near_pos[inside]
+        closest, _, face_ids = trimesh.proximity.closest_point(obs_mesh, inside_pos)
+        normals = obs_mesh.face_normals[face_ids]
+        depths = np.linalg.norm(inside_pos - closest, axis=1)
+
+        # Depth filter: skip shallow (likely in concavity, not real penetration)
+        deep = depths > depth_threshold
+        if not np.any(deep):
+            continue
+
+        inside_sv = inside_sv[deep]
+        inside_closest = closest[deep]
+        inside_normals = normals[deep]
         for k in range(len(inside_sv)):
             vi = int(inside_sv[k])
             if fixed_mask[vi]:
