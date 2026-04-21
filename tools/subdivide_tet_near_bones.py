@@ -99,9 +99,17 @@ def subdivide_tet_file(input_path, output_path, bone_trimeshes,
             pickle.dump(data, f)
         return 0
 
+    # Never split edges where BOTH endpoints are anchor vertices (cap edges)
+    # Splitting cap edges breaks cap_face_indices and fixed vertex detection
+    anchor_set = set(int(v) for v in data.get('anchor_vertices', []))
     edge_set = set()
+    n_skipped_cap = 0
     for e in edges_to_split:
-        edge_set.add((min(int(e[0]), int(e[1])), max(int(e[0]), int(e[1]))))
+        a, b = int(e[0]), int(e[1])
+        if a in anchor_set and b in anchor_set:
+            n_skipped_cap += 1
+            continue
+        edge_set.add((min(a, b), max(a, b)))
 
     # --- Subdivide ---
     new_verts = list(verts)
