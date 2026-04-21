@@ -946,13 +946,26 @@ def run_layer_sim_with_collision(layer_muscles, frozen_muscles, skeleton_meshes,
         verbose=verbose,
     )
 
+    # Inflate bone meshes for collision — keeps muscles 3mm from bone surface
+    # Only used for detection; ARAP system is unmodified
+    bone_inflate = 0.005  # 5mm inflation
+    inflated_obstacles = []
+    for om in obstacle_meshes:
+        try:
+            vn = om.vertex_normals
+            inflated_verts = om.vertices + vn * bone_inflate
+            inflated = trimesh.Trimesh(vertices=inflated_verts, faces=om.faces.copy(), process=True)
+            inflated_obstacles.append(inflated)
+        except Exception:
+            inflated_obstacles.append(om)
+
     # Pre-filter obstacle meshes
     current_layer_verts = sum(layer_muscles[n].soft_body.num_vertices for n in muscle_names)
     layer_pos = global_positions[:current_layer_verts]
     layer_min = layer_pos.min(0)
     layer_max = layer_pos.max(0)
     nearby_obstacles = []
-    for om in obstacle_meshes:
+    for om in inflated_obstacles:
         ob_min, ob_max = om.bounds[0], om.bounds[1]
         if np.all(ob_min <= layer_max) and np.all(ob_max >= layer_min):
             nearby_obstacles.append(om)
