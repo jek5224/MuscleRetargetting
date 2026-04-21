@@ -1021,6 +1021,8 @@ def main():
     parser.add_argument("--end-frame", type=int, default=None)
     parser.add_argument("--sides", default="L")
     parser.add_argument("--region-tag", default="layered")
+    parser.add_argument("--tet-dir", default="tet",
+                        help="Directory for tet mesh files (default: tet, use tet_subdiv for subdivided)")
     args = parser.parse_args()
 
     # Multi-worker: split frames into chunks, launch subprocesses
@@ -1127,7 +1129,8 @@ def main():
 
     print("[4] Loading tet meshes...")
     for name, mobj in all_muscle_meshes.items():
-        mobj.load_tetrahedron_mesh(name)
+        tet_path = os.path.join(args.tet_dir, f"{name}_tet.npz")
+        mobj.load_tetrahedron_mesh(name, filepath=tet_path)
 
     print("[5] Initializing soft bodies...")
     skel.setPositions(np.zeros(skel.getNumDofs()))
