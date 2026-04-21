@@ -511,7 +511,7 @@ def collision_project(positions, obstacle_meshes, collision_vertex_set,
 
 def _detect_collisions(positions, obstacle_meshes, collision_vertex_set,
                        surface_edges, fixed_mask, margin, out_targets,
-                       depth_threshold=0.0005):
+                       depth_threshold=0.0015):
     """Detect vertex-bone collisions via signed distance + depth threshold.
 
     out_targets: {global_vertex_idx: target_position (surface + margin)}
@@ -966,7 +966,7 @@ def run_layer_sim_with_collision(layer_muscles, frozen_muscles, skeleton_meshes,
     # Step 2+3: Iterative detect + local ARAP re-solve
     n_rings = 3
     total_targets = 0
-    for coll_round in range(3):
+    for coll_round in range(2):
         collision_targets = {}
         _detect_collisions(global_positions, nearby_obstacles, collision_vertex_set,
                            global_surf_edges, global_fixed_mask, collision_margin,
@@ -993,7 +993,7 @@ def run_layer_sim_with_collision(layer_muscles, frozen_muscles, skeleton_meshes,
         if deep_targets:
             _local_arap_resolve(global_positions, global_rest_positions, neighbors,
                                 edge_weights, rest_edge_vectors, global_fixed_mask,
-                                deep_targets, n_rings, collision_weight=10.0,
+                                deep_targets, n_rings, collision_weight=5.0,
                                 max_iterations=50, tolerance=1e-4)
 
     if verbose and total_targets > 0:
@@ -1142,6 +1142,7 @@ def main():
     print("[4] Loading tet meshes...")
     orig_vert_counts = {}  # Track original vertex count for cache compatibility
     bary_mappings = {}  # Barycentric mapping from orig verts to fine tet
+    orig_anchor_sets = {}  # Original anchor vertex indices (for direct skeleton targets)
     for name, mobj in all_muscle_meshes.items():
         tet_path = os.path.join(args.tet_dir, f"{name}_tet.npz")
         # Check for barycentric mapping (from remesh_tet_for_collision.py)
@@ -1156,6 +1157,12 @@ def main():
                 with open(os.path.join("tet", f"{name}_tet.npz"), 'rb') as _f:
                     _orig = _pkl.load(_f)
                 orig_vert_counts[name] = len(_orig['vertices'])
+            # Load original anchor vertices for direct position setting
+            orig_tet_path = os.path.join("tet", f"{name}_tet.npz")
+            if os.path.exists(orig_tet_path):
+                with open(orig_tet_path, 'rb') as _f:
+                    _orig_data = _pkl.load(_f)
+                orig_anchor_sets[name] = set(int(v) for v in _orig_data.get('anchor_vertices', []))
         mobj.load_tetrahedron_mesh(name, filepath=tet_path)
 
     print("[5] Initializing soft bodies...")
@@ -1301,13 +1308,48 @@ def main():
                 # Convert fine mesh positions to original mesh positions
                 mapping = bary_mappings.get(mname)
                 n_orig = orig_vert_counts.get(mname)
+                anchor_set = orig_anchor_sets.get(mname, set())
                 if mapping is not None and n_orig:
                     # Barycentric interpolation from fine tet to original vertices
+                    # Anchor/cap vertices: use their fixed target positions directly
+                    # (barycentric mapping is unreliable for vertices on mesh boundary)
                     orig_pos = np.zeros((n_orig, 3), dtype=np.float32)
                     fine_tets = mobj.tet_tetrahedra
+
+                    # Anchor vertices: use skeleton fixed targets directly
+                    # (barycentric mapping is unreliable for boundary vertices)
+                    anchor_targets = {}
+                    if anchor_set and hasattr(mobj, 'soft_body') and mobj.soft_body is not None:
+                        ft = mobj.soft_body.fixed_targets
+                        fi_arr = mobj.soft_body.fixed_indices
+                        if ft is not None and fi_arr is not None:
+                            # Match fine fixed vertices to original anchors by rest position
+                            fine_rest = mobj.soft_body.rest_positions
+                            orig_tet_path = os.path.join("tet", f"{mname}_tet.npz")
+                            if os.path.exists(orig_tet_path):
+                                import pickle as _pkl2
+                                with open(orig_tet_path, 'rb') as _f2:
+                                    _od = _pkl2.load(_f2)
+                                orig_rest = _od['vertices']
+                                from scipy.spatial import cKDTree as _cKDTree
+                                # For each original anchor: find matching fine fixed vertex,
+                                # use its FIXED TARGET (skeleton position, guaranteed correct)
+                                fine_fixed_rest = fine_rest[fi_arr]
+                                _kd = _cKDTree(fine_fixed_rest)
+                                for oa_idx in anchor_set:
+                                    d, fi_local = _kd.query(orig_rest[oa_idx])
+                                    if d < 0.001:
+                                        anchor_targets[int(oa_idx)] = ft[fi_local]
+
+                    if mname == 'L_Vastus_Lateralis' and frame == 64:
+                        if 11 in anchor_targets:
                     for ci, (tet_idx, bary) in enumerate(mapping):
                         if ci >= n_orig:
                             break
+                        # Anchor vertices: use matched fine-mesh position directly
+                        if ci in anchor_targets:
+                            orig_pos[ci] = anchor_targets[ci]
+                            continue
                         if tet_idx < 0 or tet_idx >= len(fine_tets):
                             orig_pos[ci] = fine_pos[ci] if ci < len(fine_pos) else 0
                             continue
@@ -1316,10 +1358,13 @@ def main():
                                         bary[1] * fine_pos[tv[1]] +
                                         bary[2] * fine_pos[tv[2]] +
                                         bary[3] * fine_pos[tv[3]])
+                    if mname == 'L_Vastus_Lateralis' and frame == 64:
                     bake_data[mname][frame] = orig_pos
                 elif n_orig is not None and n_orig < len(fine_pos):
+                    if mname == 'L_Vastus_Lateralis' and frame == 64:
                     bake_data[mname][frame] = fine_pos[:n_orig]
                 else:
+                    if mname == 'L_Vastus_Lateralis' and frame == 64:
                     bake_data[mname][frame] = fine_pos
 
             # Settled muscles become obstacles AND frozen constraints for next layer

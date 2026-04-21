@@ -94,30 +94,42 @@ def build_mapping(query_verts, tet_verts, tet_elems):
 
 
 def tetrahedralize_surface(vertices, faces):
-    """Tetrahedralize a closed surface mesh using TetGen."""
-    import pymeshfix
+    """Tetrahedralize a closed surface mesh using TetGen.
 
-    # Repair mesh
-    fixer = pymeshfix.MeshFix(vertices.astype(np.float64), faces.astype(np.int32))
-    fixer.repair(verbose=False)
-    v_fixed, f_fixed = fixer.v, fixer.f
+    Uses nobisect=True to preserve surface vertices exactly.
+    Skips pymeshfix to avoid losing surface vertices.
+    """
+    v_in = vertices.astype(np.float64)
+    f_in = faces.astype(np.int32)
 
-    # TetGen
+    # TetGen with nobisect: don't modify boundary facets
     try:
         import tetgen
-        tg = tetgen.TetGen(v_fixed, f_fixed)
-        tg.tetrahedralize(order=1, mindihedral=0, quality=False)
+        tg = tetgen.TetGen(v_in, f_in)
+        tg.tetrahedralize(order=1, mindihedral=0, quality=False, nobisect=True)
         tet_verts = np.array(tg.node, dtype=np.float64)
         tet_elems = np.array(tg.elem, dtype=np.int32)
     except Exception as e:
-        print(f"    TetGen failed: {e}, using Delaunay fallback")
-        from scipy.spatial import Delaunay
-        mesh_check = trimesh.Trimesh(vertices=v_fixed, faces=f_fixed, process=False)
-        dl = Delaunay(v_fixed)
-        centroids = v_fixed[dl.simplices].mean(axis=1)
-        inside = mesh_check.contains(centroids)
-        tet_elems = dl.simplices[inside]
-        tet_verts = v_fixed
+        # Fallback: try with pymeshfix repair first
+        try:
+            import pymeshfix
+            fixer = pymeshfix.MeshFix(v_in, f_in)
+            fixer.repair(verbose=False)
+            v_in, f_in = fixer.v, fixer.f
+            import tetgen
+            tg = tetgen.TetGen(v_in, f_in)
+            tg.tetrahedralize(order=1, mindihedral=0, quality=False, nobisect=True)
+            tet_verts = np.array(tg.node, dtype=np.float64)
+            tet_elems = np.array(tg.elem, dtype=np.int32)
+        except Exception as e2:
+            print(f"    TetGen failed: {e2}, using Delaunay fallback")
+            from scipy.spatial import Delaunay
+            mesh_check = trimesh.Trimesh(vertices=v_in, faces=f_in, process=False)
+            dl = Delaunay(v_in)
+            centroids = v_in[dl.simplices].mean(axis=1)
+            inside = mesh_check.contains(centroids)
+            tet_elems = dl.simplices[inside]
+            tet_verts = v_in
 
     # Fix orientation (positive volume)
     v = tet_verts[tet_elems]
@@ -127,7 +139,7 @@ def tetrahedralize_surface(vertices, faces):
     tet_elems[neg, 1], tet_elems[neg, 2] = tet_elems[neg, 2].copy(), tet_elems[neg, 1].copy()
 
     return tet_verts.astype(np.float32), tet_elems.astype(np.int32), \
-           v_fixed.astype(np.float32), f_fixed.astype(np.int32)
+           v_in.astype(np.float32), f_in.astype(np.int32)
 
 
 def subdivide_surface_near_bones(verts, faces, bone_kdtree,
