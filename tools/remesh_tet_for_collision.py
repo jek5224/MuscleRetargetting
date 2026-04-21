@@ -295,40 +295,38 @@ def process_muscle(input_path, output_path, bone_kdtree, bone_trimeshes,
     if orig_cap_attach is not None and len(orig_cap_attach) > 0 and len(attach_names) > 0:
         # Determine which original anchors belong to which group
         # Use init_soft_body's result on original mesh (by loading it temporarily)
-        import sys as _sys
-        _sys.path.insert(0, PROJECT_ROOT)
+        # Load original muscle through the normal pipeline to get correct bone assignments
+        import json as _json
         from viewer.mesh_loader import MeshLoader as _ML
         from core.dartHelper import saveSkeletonInfo as _ssi, buildFromInfo as _bfi
         _si, _rn, _bi, _, _mi, _ = _ssi(SKEL_XML)
         _sk = _bfi(_si, _rn)
         _sk.setPositions(np.zeros(_sk.getNumDofs()))
         _skel_meshes = {}
-        import os as _os
-        _skel_dir = _os.path.join(ZYGOTE_DIR, "Skeleton")
-        for _fn in sorted(_os.listdir(_skel_dir)):
+        _skel_dir = os.path.join(ZYGOTE_DIR, "Skeleton")
+        for _fn in sorted(os.listdir(_skel_dir)):
             if not _fn.endswith('.obj'): continue
             _skel_meshes[_fn.split('.')[0]] = _ML()
-            _skel_meshes[_fn.split('.')[0]].load(_os.path.join(_skel_dir, _fn))
-        _tmp = _ML.__new__(_ML)
-        _tmp.tet_vertices = orig_verts
-        _tmp.tet_tetrahedra = orig_data['tetrahedra']
-        _tmp.tet_render_faces = orig_data.get('render_faces', orig_data.get('faces'))
-        _tmp.tet_sim_faces = orig_data.get('sim_faces')
-        _tmp.tet_cap_face_indices = list(orig_data.get('cap_face_indices', []))
-        _tmp.tet_anchor_vertices = list(orig_data.get('anchor_vertices', []))
-        _tmp.tet_cap_attachments = orig_cap_attach
-        for k in ['waypoints', 'waypoint_bary_coords', 'attach_skeleton_names',
-                   'attach_skeletons', 'attach_skeletons_sub', 'contours',
-                   'vertex_contour_level', 'contour_to_tet_mapping', 'mvc_weights',
-                   'stream_contours', 'stream_bounding_planes', '_stream_endpoints']:
-            if k in orig_data:
-                setattr(_tmp, k if not k.startswith('_') else k, orig_data[k])
-        _tmp.init_soft_body(skeleton_meshes=_skel_meshes, skeleton=_sk, mesh_info=_mi)
-        if hasattr(_tmp, 'soft_body_local_anchors'):
-            for orig_vi, (bname, _) in _tmp.soft_body_local_anchors.items():
-                new_vi = orig_to_new_anchor.get(int(orig_vi))
-                if new_vi is not None:
-                    anchor_bone_map[new_vi] = bname
+            _skel_meshes[_fn.split('.')[0]].load(os.path.join(_skel_dir, _fn))
+        # Find muscle entry in .last_loaded_muscles.json
+        _muscle_name = os.path.basename(input_path).replace('_tet.npz', '')
+        _muscle_path = None
+        if os.path.exists('.last_loaded_muscles.json'):
+            with open('.last_loaded_muscles.json') as _f:
+                for _e in _json.load(_f):
+                    if _e['name'] == _muscle_name:
+                        _muscle_path = _e['path']
+                        break
+        if _muscle_path and os.path.exists(_muscle_path):
+            _tmp = _ML()
+            _tmp.load(_muscle_path)
+            _tmp.load_tetrahedron_mesh(_muscle_name, filepath=input_path)
+            _tmp.init_soft_body(skeleton_meshes=_skel_meshes, skeleton=_sk, mesh_info=_mi)
+            if hasattr(_tmp, 'soft_body_local_anchors'):
+                for orig_vi, (bname, _) in _tmp.soft_body_local_anchors.items():
+                    new_vi = orig_to_new_anchor.get(int(orig_vi))
+                    if new_vi is not None:
+                        anchor_bone_map[new_vi] = bname
 
     # Identify cap faces (all vertices in anchor set)
     anchor_set = set(new_anchors)
