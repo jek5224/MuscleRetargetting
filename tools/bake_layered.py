@@ -511,7 +511,7 @@ def collision_project(positions, obstacle_meshes, collision_vertex_set,
 
 def _detect_collisions(positions, obstacle_meshes, collision_vertex_set,
                        surface_edges, fixed_mask, margin, out_targets,
-                       depth_threshold=0.0015):
+                       depth_threshold=0.0005):
     """Detect vertex-bone collisions via signed distance + depth threshold.
 
     out_targets: {global_vertex_idx: target_position (surface + margin)}
