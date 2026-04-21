@@ -952,7 +952,7 @@ def run_layer_sim_with_collision(layer_muscles, frozen_muscles, skeleton_meshes,
         verbose=verbose,
     )
 
-    # Pre-filter obstacle meshes: only keep bones whose AABB overlaps muscle group
+    # Pre-filter obstacle meshes
     current_layer_verts = sum(layer_muscles[n].soft_body.num_vertices for n in muscle_names)
     layer_pos = global_positions[:current_layer_verts]
     layer_min = layer_pos.min(0)
@@ -963,7 +963,7 @@ def run_layer_sim_with_collision(layer_muscles, frozen_muscles, skeleton_meshes,
         if np.all(ob_min <= layer_max) and np.all(ob_max >= layer_min):
             nearby_obstacles.append(om)
 
-    # Step 2+3: Iterative detect + local ARAP re-solve
+    # Step 2+3: Detect + local ARAP re-solve (contains() for reliable detection)
     n_rings = 3
     total_targets = 0
     for coll_round in range(2):
@@ -975,21 +975,18 @@ def run_layer_sim_with_collision(layer_muscles, frozen_muscles, skeleton_meshes,
             break
         total_targets += len(collision_targets)
 
-        # Split: shallow corrections → direct projection, deep → local ARAP
         shallow_targets = {}
         deep_targets = {}
         for vi, target in collision_targets.items():
             depth = np.linalg.norm(global_positions[vi] - target)
-            if depth < 0.004:  # < 4mm: direct projection (fast, smooth enough)
+            if depth < 0.004:
                 shallow_targets[vi] = target
             else:
                 deep_targets[vi] = target
 
-        # Direct projection for shallow (just move vertex toward target)
         for vi, target in shallow_targets.items():
             global_positions[vi] = target
 
-        # Local ARAP re-solve only for deep penetrations
         if deep_targets:
             _local_arap_resolve(global_positions, global_rest_positions, neighbors,
                                 edge_weights, rest_edge_vectors, global_fixed_mask,
@@ -997,7 +994,7 @@ def run_layer_sim_with_collision(layer_muscles, frozen_muscles, skeleton_meshes,
                                 max_iterations=50, tolerance=1e-4)
 
     if verbose and total_targets > 0:
-        print(f"    Collision: {total_targets} targets ({len(nearby_obstacles)} bones checked), "
+        print(f"    Collision: {total_targets} targets ({len(nearby_obstacles)} bones), "
               f"{coll_round+1} rounds")
 
     # Stash for warm-start
