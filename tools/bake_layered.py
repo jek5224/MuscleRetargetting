@@ -1141,16 +1141,21 @@ def main():
 
     print("[4] Loading tet meshes...")
     orig_vert_counts = {}  # Track original vertex count for cache compatibility
+    bary_mappings = {}  # Barycentric mapping from orig verts to fine tet
     for name, mobj in all_muscle_meshes.items():
-        # Load original tet first to get vertex count (for cache compatibility)
-        orig_path = os.path.join("tet", f"{name}_tet.npz")
-        if args.tet_dir != "tet" and os.path.exists(orig_path):
-            import pickle as _pkl
-            with open(orig_path, 'rb') as _f:
-                _orig = _pkl.load(_f)
-            orig_vert_counts[name] = len(_orig['vertices'])
-        # Load actual tet (possibly subdivided)
         tet_path = os.path.join(args.tet_dir, f"{name}_tet.npz")
+        # Check for barycentric mapping (from remesh_tet_for_collision.py)
+        if args.tet_dir != "tet" and os.path.exists(tet_path):
+            import pickle as _pkl
+            with open(tet_path, 'rb') as _f:
+                _tet_data = _pkl.load(_f)
+            if 'orig_to_fine_mapping' in _tet_data:
+                bary_mappings[name] = _tet_data['orig_to_fine_mapping']
+                orig_vert_counts[name] = _tet_data.get('orig_n_verts', 0)
+            elif os.path.exists(os.path.join("tet", f"{name}_tet.npz")):
+                with open(os.path.join("tet", f"{name}_tet.npz"), 'rb') as _f:
+                    _orig = _pkl.load(_f)
+                orig_vert_counts[name] = len(_orig['vertices'])
         mobj.load_tetrahedron_mesh(name, filepath=tet_path)
 
     print("[5] Initializing soft bodies...")
@@ -1292,12 +1297,30 @@ def main():
             for mname, mobj in layer_active.items():
                 mobj.waypoints_from_tet_sim = True
                 mobj._baking_mode = False
-                pos = mobj.soft_body.get_positions().astype(np.float32)
-                # If using subdivided tet, only save original vertices (viewer loads from tet/)
+                fine_pos = mobj.soft_body.get_positions().astype(np.float32)
+                # Convert fine mesh positions to original mesh positions
+                mapping = bary_mappings.get(mname)
                 n_orig = orig_vert_counts.get(mname)
-                if n_orig is not None and n_orig < len(pos):
-                    pos = pos[:n_orig]
-                bake_data[mname][frame] = pos
+                if mapping is not None and n_orig:
+                    # Barycentric interpolation from fine tet to original vertices
+                    orig_pos = np.zeros((n_orig, 3), dtype=np.float32)
+                    fine_tets = mobj.tet_tetrahedra
+                    for ci, (tet_idx, bary) in enumerate(mapping):
+                        if ci >= n_orig:
+                            break
+                        if tet_idx < 0 or tet_idx >= len(fine_tets):
+                            orig_pos[ci] = fine_pos[ci] if ci < len(fine_pos) else 0
+                            continue
+                        tv = fine_tets[tet_idx]
+                        orig_pos[ci] = (bary[0] * fine_pos[tv[0]] +
+                                        bary[1] * fine_pos[tv[1]] +
+                                        bary[2] * fine_pos[tv[2]] +
+                                        bary[3] * fine_pos[tv[3]])
+                    bake_data[mname][frame] = orig_pos
+                elif n_orig is not None and n_orig < len(fine_pos):
+                    bake_data[mname][frame] = fine_pos[:n_orig]
+                else:
+                    bake_data[mname][frame] = fine_pos
 
             # Settled muscles become obstacles AND frozen constraints for next layer
             # Inflate obstacle slightly so outer muscles can't reach bone through gaps
