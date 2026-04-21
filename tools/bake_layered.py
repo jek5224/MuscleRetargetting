@@ -329,12 +329,14 @@ def collision_project(positions, obstacle_meshes, collision_vertex_set,
 
 def _detect_collisions(positions, obstacle_meshes, collision_vertex_set,
                        surface_edges, fixed_mask, margin, out_targets,
-                       depth_threshold=0.0015):
-    """Detect vertex and edge-midpoint collisions, fill out_targets dict.
+                       muscle_surfaces=None, depth_threshold=0.0015):
+    """Detect collisions: muscle-vertex-in-bone AND bone-vertex-in-muscle.
 
-    Only flags vertices that are > depth_threshold inside a bone.
-    Uses warp GPU mesh queries when available, falls back to CPU.
+    Phase 1: Check if muscle vertices are inside bones (signed distance + depth threshold).
+    Phase 2: Check if bone vertices are inside muscle surfaces (inverse check).
+             Catches edge/face tunneling that Phase 1 misses.
 
+    muscle_surfaces: list of (global_offset, n_verts, surf_faces_local) per muscle.
     out_targets: {global_vertex_idx: target_position (surface + margin)}
     """
     from scipy.spatial import cKDTree
@@ -379,9 +381,70 @@ def _detect_collisions(positions, obstacle_meshes, collision_vertex_set,
                 continue
             out_targets[vi] = inside_closest[k] + inside_normals[k] * margin
 
-    # Edge collision detection removed — pushing endpoints near concave bone
-    # regions (femur condyles) makes TFL worse. Vertex-only collision is the
-    # best tradeoff. Edge tunneling is a mesh resolution limitation.
+    # Phase 2: Inverse collision — bone vertices inside muscle surface
+    # Catches edge/face tunneling: if a bone vertex is inside the muscle,
+    # the muscle's surface has wrapped around the bone incorrectly.
+    if muscle_surfaces and len(obstacle_meshes) > 0:
+        for m_offset, m_nverts, m_surf_faces in muscle_surfaces:
+            # Build muscle trimesh from current positions
+            m_verts = positions[m_offset:m_offset + m_nverts]
+            try:
+                m_tri = trimesh.Trimesh(vertices=m_verts, faces=m_surf_faces, process=False)
+            except Exception:
+                continue
+
+            m_bbox_min = m_verts.min(0) - 0.005
+            m_bbox_max = m_verts.max(0) + 0.005
+
+            for obs_mesh in obstacle_meshes:
+                # Only check bone vertices near this muscle
+                bv = obs_mesh.vertices
+                in_muscle_bbox = np.all((bv >= m_bbox_min) & (bv <= m_bbox_max), axis=1)
+                if not np.any(in_muscle_bbox):
+                    continue
+
+                near_bone_verts = bv[in_muscle_bbox]
+
+                # Which bone vertices are inside the muscle surface?
+                try:
+                    inside = m_tri.contains(near_bone_verts)
+                except Exception:
+                    continue
+                if not np.any(inside):
+                    continue
+
+                # Depth filter: only correct if bone vertex is > 1.5mm inside muscle
+                inside_bone_pts = near_bone_verts[inside]
+                cp_m, _, _ = trimesh.proximity.closest_point(m_tri, inside_bone_pts)
+                bone_depths = np.linalg.norm(inside_bone_pts - cp_m, axis=1)
+                deep = bone_depths > depth_threshold
+                if not np.any(deep):
+                    continue
+                inside_bone_pts = inside_bone_pts[deep]
+                m_kdtree = cKDTree(m_verts)
+
+                for bp in inside_bone_pts:
+                    # Find nearest muscle vertices to this bone vertex
+                    dists, near_mvi = m_kdtree.query(bp, k=min(6, m_nverts))
+                    if np.isscalar(near_mvi):
+                        near_mvi = [near_mvi]
+                        dists = [dists]
+
+                    for d, lvi in zip(dists, near_mvi):
+                        gvi = m_offset + int(lvi)
+                        if fixed_mask[gvi] or gvi in out_targets:
+                            continue
+                        # Push direction: away from bone vertex
+                        push_dir = positions[gvi] - bp
+                        push_len = np.linalg.norm(push_dir)
+                        if push_len < 1e-8:
+                            continue
+                        push_dir /= push_len
+                        # Target: bone surface + margin along push direction
+                        cp, _, fid = trimesh.proximity.closest_point(
+                            obs_mesh, positions[gvi:gvi + 1])
+                        fn = obs_mesh.face_normals[fid[0]]
+                        out_targets[gvi] = cp[0] + fn * margin
 
 
 def _local_arap_resolve(positions, rest_positions, neighbors, edge_weights,
@@ -777,12 +840,20 @@ def run_layer_sim_with_collision(layer_muscles, frozen_muscles, skeleton_meshes,
 
     # Step 2+3: Iterative detect + local ARAP re-solve
     n_rings = 3
+    # Build muscle surface info for inverse collision check
+    muscle_surfaces = []
+    for name, mobj in layer_muscles.items():
+        off = global_offset[name]
+        n = mobj.soft_body.num_vertices
+        if hasattr(mobj, '_surf_faces'):
+            muscle_surfaces.append((off, n, mobj._surf_faces))
+
     total_targets = 0
     for coll_round in range(2):
         collision_targets = {}
         _detect_collisions(global_positions, nearby_obstacles, collision_vertex_set,
                            global_surf_edges, global_fixed_mask, collision_margin,
-                           collision_targets)
+                           collision_targets, muscle_surfaces=muscle_surfaces)
         if not collision_targets:
             break
         total_targets += len(collision_targets)
