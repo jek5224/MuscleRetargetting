@@ -934,6 +934,18 @@ def run_layer_sim_with_collision(layer_muscles, frozen_muscles, skeleton_meshes,
 
     # Build system WITHOUT collision penalty (pure ARAP)
     need_build = not cache_valid or getattr(backend, '_splu', None) is None
+    if need_build:
+        backend.build_system(total_verts, neighbors, edge_weights, global_fixed_mask,
+                             regularization=1e-6)
+
+    # Step 1: Pure ARAP solve
+    global_positions, iterations, max_disp = backend.solve(
+        global_positions, global_rest_positions, neighbors, edge_weights, rest_edge_vectors,
+        global_fixed_mask, fixed_targets_array,
+        max_iterations=max_iterations, tolerance=tolerance,
+        verbose=verbose,
+    )
+
     # Pre-filter obstacle meshes
     current_layer_verts = sum(layer_muscles[n].soft_body.num_vertices for n in muscle_names)
     layer_pos = global_positions[:current_layer_verts]
@@ -945,105 +957,39 @@ def run_layer_sim_with_collision(layer_muscles, frozen_muscles, skeleton_meshes,
         if np.all(ob_min <= layer_max) and np.all(ob_max >= layer_min):
             nearby_obstacles.append(om)
 
-    # Build system WITH collision weight on diagonal
-    coll_weight = 3.0  # Gentle — barrier force is distance-dependent
-    if need_build:
-        backend.build_system(total_verts, neighbors, edge_weights, global_fixed_mask,
-                             regularization=1e-6,
-                             collision_vertices=collision_vertex_set,
-                             collision_weight=coll_weight)
+    # Step 2: Detect + local ARAP re-solve
+    n_rings = 3
+    total_targets = 0
+    for coll_round in range(2):
+        collision_targets = {}
+        _detect_collisions(global_positions, nearby_obstacles, collision_vertex_set,
+                           global_surf_edges, global_fixed_mask, collision_margin,
+                           collision_targets)
+        if not collision_targets:
+            break
+        total_targets += len(collision_targets)
 
-    # Distance-dependent barrier collision_target_fn
-    # - Far from bone (d > d_hat): target = current_pos (zero force)
-    # - Close to bone (d < d_hat): target blends toward surface + margin
-    # - Inside bone: target = surface + margin (full force)
-    # Force ramps smoothly — ARAP converges to equilibrium, no cascading
-    d_hat = 0.004  # 4mm activation distance
-    check_interval = 15  # Recompute distances every N iterations
-    cached_targets = [{}]
-    call_count = [0]
+        shallow_targets = {}
+        deep_targets = {}
+        for vi, target in collision_targets.items():
+            depth = np.linalg.norm(global_positions[vi] - target)
+            if depth < 0.004:
+                shallow_targets[vi] = target
+            else:
+                deep_targets[vi] = target
 
-    def barrier_collision_fn(positions):
-        from scipy.spatial import cKDTree
-        call_count[0] += 1
-        targets = {}
-        for vi in collision_vertex_set:
-            targets[vi] = positions[vi].copy()
+        for vi, target in shallow_targets.items():
+            global_positions[vi] = target
 
-        do_check = (call_count[0] % check_interval == 1) or not cached_targets[0]
+        if deep_targets:
+            _local_arap_resolve(global_positions, global_rest_positions, neighbors,
+                                edge_weights, rest_edge_vectors, global_fixed_mask,
+                                deep_targets, n_rings, collision_weight=5.0,
+                                max_iterations=50, tolerance=1e-4)
 
-        if do_check:
-            cached_targets[0].clear()
-            sv_arr = np.array(sorted(collision_vertex_set), dtype=np.int64)
-            sv_pos = positions[sv_arr]
-
-            for obs_mesh in nearby_obstacles:
-                bmin = obs_mesh.bounds[0] - d_hat
-                bmax = obs_mesh.bounds[1] + d_hat
-                in_bbox = np.all((sv_pos >= bmin) & (sv_pos <= bmax), axis=1)
-                if not np.any(in_bbox):
-                    continue
-                bbox_sv = sv_arr[in_bbox]
-                bbox_pos = sv_pos[in_bbox]
-
-                bone_kd = cKDTree(obs_mesh.vertices)
-                kd_dists, _ = bone_kd.query(bbox_pos)
-                near = kd_dists < d_hat
-                if not np.any(near):
-                    continue
-                near_sv = bbox_sv[near]
-                near_pos = bbox_pos[near]
-
-                cp, _, fid = trimesh.proximity.closest_point(obs_mesh, near_pos)
-                normals = obs_mesh.face_normals[fid]
-                dists = np.linalg.norm(near_pos - cp, axis=1)
-
-                # Use contains() for reliable inside detection
-                try:
-                    inside = obs_mesh.contains(near_pos)
-                except Exception:
-                    inside = np.zeros(len(near_pos), dtype=bool)
-
-                for k in range(len(near_sv)):
-                    vi = int(near_sv[k])
-                    if global_fixed_mask[vi]:
-                        continue
-                    d = dists[k]
-                    surface_target = cp[k] + normals[k] * collision_margin
-
-                    if inside[k]:
-                        # Inside: full force toward surface + margin
-                        alpha = 1.0
-                    elif d < d_hat:
-                        # Outside but close: smooth ramp
-                        alpha = ((d_hat - d) / d_hat) ** 2
-                    else:
-                        continue
-
-                    # Blended target: alpha * surface_target + (1-alpha) * current_pos
-                    blended = alpha * surface_target + (1.0 - alpha) * near_pos[k]
-                    cached_targets[0][vi] = blended
-
-            # Apply cached targets
-            for vi, tgt in cached_targets[0].items():
-                targets[vi] = tgt
-        else:
-            # Reuse cached, but update blended positions
-            for vi, tgt in cached_targets[0].items():
-                targets[vi] = tgt
-
-        return targets
-
-    # Solve ARAP with barrier collision
-    global_positions, iterations, max_disp = backend.solve(
-        global_positions, global_rest_positions, neighbors, edge_weights, rest_edge_vectors,
-        global_fixed_mask, fixed_targets_array,
-        max_iterations=max_iterations, tolerance=tolerance,
-        verbose=verbose,
-        collision_target_fn=barrier_collision_fn,
-    )
-    if verbose:
-        print(f"    Barrier ARAP: {iterations} iters, {len(cached_targets[0])} barrier targets")
+    if verbose and total_targets > 0:
+        print(f"    Collision: {total_targets} targets ({len(nearby_obstacles)} bones), "
+              f"{coll_round+1} rounds")
 
     # Stash for warm-start
     layer_cache['prev_solution'] = global_positions.copy()
