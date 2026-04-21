@@ -521,9 +521,7 @@ def _detect_collisions(positions, obstacle_meshes, collision_vertex_set,
     sv_arr = np.array(sorted(collision_vertex_set), dtype=np.int64)
     sv_pos = positions[sv_arr]
 
-    # Phase 1: Vertex-bone via signed distance + depth threshold
-    # GPU (warp) is slower for < 3000 queries due to mesh build overhead.
-    # CPU KDTree + closest_point is optimal at this scale.
+    # Phase 1: Muscle vertices inside bones → push to surface + margin
     for obs_mesh in obstacle_meshes:
         bmin = obs_mesh.bounds[0]
         bmax = obs_mesh.bounds[1]
@@ -533,16 +531,14 @@ def _detect_collisions(positions, obstacle_meshes, collision_vertex_set,
         bbox_sv = sv_arr[in_bbox]
         bbox_pos = sv_pos[in_bbox]
 
-        # KDTree pre-filter: only vertices close to bone surface
         bone_kdtree = cKDTree(obs_mesh.vertices)
         kd_dists, _ = bone_kdtree.query(bbox_pos)
-        near_surf = kd_dists < 0.008  # 8mm — slightly wider for contains() accuracy
+        near_surf = kd_dists < 0.008
         if not np.any(near_surf):
             continue
         near_sv = bbox_sv[near_surf]
         near_pos = bbox_pos[near_surf]
 
-        # Use contains() for reliable detection (signed distance misses concavities)
         try:
             inside = obs_mesh.contains(near_pos)
         except Exception:
@@ -556,7 +552,6 @@ def _detect_collisions(positions, obstacle_meshes, collision_vertex_set,
         normals = obs_mesh.face_normals[face_ids]
         depths = np.linalg.norm(inside_pos - closest, axis=1)
 
-        # Depth filter: skip shallow (likely in concavity, not real penetration)
         deep = depths > depth_threshold
         if not np.any(deep):
             continue
