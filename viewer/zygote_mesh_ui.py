@@ -2069,6 +2069,14 @@ def _draw_motion_browser_ui(v):
             if imgui.button("Recompute Waypoints in Cache##motion_cache"):
                 _motion_patch_waypoints(v)
 
+        # --- Mesh Mode (Original / Contour) ---
+        imgui.separator()
+        if not hasattr(v, '_mesh_mode'):
+            v._mesh_mode = 'contour'
+        mode_label = f"Mesh: {v._mesh_mode.upper()}"
+        if imgui.button(f"Swap to {'Original' if v._mesh_mode == 'contour' else 'Contour'}##mesh_mode"):
+            _swap_mesh_mode(v)
+
         # --- Neural Network ---
         imgui.separator()
         imgui.text("--- Neural Network ---")
@@ -8094,6 +8102,76 @@ def _motion_run_tet_settle(v):
             max_iterations=v.motion_settle_iters,
             tolerance=1e-4
         )
+
+
+def _swap_mesh_mode(v):
+    """Swap between original and contour mesh display for muscles with original tets."""
+    import shutil
+    import pickle
+
+    ORIG_DIR = 'tet_orig_std'
+    MUSCLES = ['L_Vastus_Lateralis']  # Muscles with original mesh available
+    ORIG_CACHE_TAG = 'layered_coll_indep'
+    CONTOUR_CACHE_TAG = 'layered_contour'
+
+    if not hasattr(v, '_mesh_mode'):
+        v._mesh_mode = 'contour'
+
+    new_mode = 'original' if v._mesh_mode == 'contour' else 'contour'
+
+    for mname in MUSCLES:
+        if mname not in v.zygote_muscle_meshes:
+            continue
+        mobj = v.zygote_muscle_meshes[mname]
+        tet_path = os.path.join('tet', f'{mname}_tet.npz')
+        backup_path = tet_path + '.contour_backup'
+        orig_path = os.path.join(ORIG_DIR, f'{mname}_tet.npz')
+
+        if new_mode == 'original':
+            if not os.path.exists(orig_path):
+                continue
+            if not os.path.exists(backup_path) and os.path.exists(tet_path):
+                shutil.copy2(tet_path, backup_path)
+            shutil.copy2(orig_path, tet_path)
+        else:
+            if os.path.exists(backup_path):
+                shutil.copy2(backup_path, tet_path)
+
+        # Reload tet mesh in memory
+        mobj.load_tetrahedron_mesh(mname, filepath=tet_path)
+
+    # Swap cache: reload from the correct cache directory
+    if v.motion_bvh is not None:
+        bvh_name = os.path.splitext(os.path.basename(v.motion_bvh_files[v.motion_selected_idx]))[0]
+        tag = ORIG_CACHE_TAG if new_mode == 'original' else CONTOUR_CACHE_TAG
+        cache_dir = os.path.join('data', 'motion_cache', bvh_name, tag)
+        if os.path.exists(cache_dir):
+            # Load from specific tag directory
+            for mname in v.zygote_muscle_meshes:
+                npz_files = sorted(glob.glob(os.path.join(cache_dir, f'{mname}_chunk_*.npz')))
+                if not npz_files:
+                    continue
+                cache = {}
+                for npz_path in npz_files:
+                    data = np.load(npz_path, allow_pickle=True)
+                    frames = data['frames']
+                    positions = data['positions']
+                    has_wp = 'waypoints_flat' in data and 'waypoints_shape' in data
+                    wp_flats = data['waypoints_flat'] if has_wp else None
+                    wp_shape_str = None
+                    if has_wp:
+                        raw = data['waypoints_shape'][0]
+                        wp_shape_str = raw.decode('utf-8') if isinstance(raw, (bytes, np.bytes_)) else str(raw)
+                    for i, f in enumerate(frames):
+                        entry = {'positions': positions[i]}
+                        if has_wp:
+                            entry['waypoints_flat'] = wp_flats[i]
+                            entry['waypoints_shape'] = wp_shape_str
+                        cache[int(f)] = entry
+                v.motion_deform_cache[mname] = cache
+
+    v._mesh_mode = new_mode
+    print(f"Mesh mode: {new_mode.upper()}")
 
 
 def _motion_cache_dir(v):
