@@ -1195,7 +1195,7 @@ def main():
                 _td = _pkl.load(_f)
             _has_orig_format = 'cap_vertex_types' in _td
 
-        if _has_orig_format:
+        if False and _has_orig_format:  # Disabled: init_soft_body handles original mesh
             # Original mesh: manual soft body setup (init_soft_body doesn't handle it)
             from viewer.muscle_mesh import SoftBodySimulation
             cap_types = _td['cap_vertex_types']  # {vi: 'origin'/'insertion'}
