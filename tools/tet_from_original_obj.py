@@ -58,8 +58,15 @@ def process_muscle(muscle_name, obj_path, contour_tet_path, output_path, skel, m
     tet_verts, tet_elems, surf_verts, surf_faces = tetrahedralize_mesh(
         vertices.astype(np.float64), faces.astype(np.int32))
 
-    # Extract surface faces from tets
+    # Use ORIGINAL OBJ faces for rendering (not TetGen's closed surface)
+    # TetGen adds cap faces that deform badly. OBJ faces are the artist's surface.
     from collections import Counter, defaultdict
+    from scipy.spatial import cKDTree
+    tet_kd = cKDTree(tet_verts)
+    _, obj_to_tet = tet_kd.query(vertices)  # Map OBJ vertex indices to tet indices
+    render_faces = obj_to_tet[faces].astype(np.int32)
+
+    # Also extract tet boundary faces for sim_faces (used internally)
     face_count = Counter()
     face_orient = {}
     for t in tet_elems:
@@ -68,7 +75,7 @@ def process_muscle(muscle_name, obj_path, contour_tet_path, output_path, skel, m
             face_count[key] += 1
             if key not in face_orient:
                 face_orient[key] = f
-    render_faces = np.array([face_orient[k] for k, c in face_count.items() if c == 1], dtype=np.int32)
+    sim_faces = np.array([face_orient[k] for k, c in face_count.items() if c == 1], dtype=np.int32)
 
     # Find anchor vertices using XML waypoint positions (not boundary loops)
     # Same approach as contour mesh: vertices near origin/insertion waypoints → fixed
@@ -135,7 +142,7 @@ def process_muscle(muscle_name, obj_path, contour_tet_path, output_path, skel, m
         'tetrahedra': tet_elems.astype(np.int32),
         'faces': render_faces,
         'render_faces': render_faces,
-        'sim_faces': None,
+        'sim_faces': sim_faces,
         'cap_face_indices': np.array(cap_face_indices, dtype=np.int32),
         'anchor_vertices': np.array(anchor_vertices, dtype=np.int32),
         'cap_attachments': np.array(cap_attachments, dtype=np.int32) if cap_attachments else np.zeros((0, 5), dtype=np.int32),
