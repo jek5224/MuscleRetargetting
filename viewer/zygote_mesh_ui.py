@@ -47,6 +47,15 @@ def draw_zygote_ui(v):
 def draw_zygote_muscle_ui(v):
     """Muscle section inside the Zygote tree node."""
     if imgui.tree_node("Muscle", imgui.TREE_NODE_DEFAULT_OPEN):
+        # Mesh mode swap (original / contour)
+        if not hasattr(v, '_mesh_mode'):
+            v._mesh_mode = 'contour'
+        if os.path.exists('tet_orig_std'):
+            cur = v._mesh_mode.upper()
+            nxt = 'Original' if v._mesh_mode == 'contour' else 'Contour'
+            if imgui.button(f"[{cur}] Swap to {nxt}##mesh_mode_top"):
+                _swap_mesh_mode(v)
+
         changed, v.is_draw_zygote_muscle = imgui.checkbox("Draw", v.is_draw_zygote_muscle)
         if changed:
             for name, obj in v.zygote_muscle_meshes.items():
