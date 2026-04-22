@@ -248,12 +248,41 @@ def cap_boundary_loop(loop_indices, vertices):
     return faces, centroid
 
 
+def _weld_close_vertices(vertices, faces, tol=1e-3):
+    """Merge OBJ verts within `tol` meters. Removes micro-edges that become
+    visual tears under ARAP deformation (short edges amplify vertex drift)."""
+    kd = cKDTree(vertices)
+    groups = kd.query_ball_tree(kd, tol)
+    parent = list(range(len(vertices)))
+    def find(x):
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+    for i, g in enumerate(groups):
+        for j in g:
+            ra, rb = find(i), find(j)
+            if ra != rb:
+                parent[ra] = rb
+    repr_ = [find(i) for i in range(len(vertices))]
+    uniq = sorted(set(repr_))
+    remap = {old: new for new, old in enumerate(uniq)}
+    new_v = vertices[uniq]
+    new_f = np.array([[remap[repr_[int(x)]] for x in face] for face in faces], dtype=np.int32)
+    keep = np.array([len({int(x) for x in face}) == 3 for face in new_f])
+    new_f = new_f[keep]
+    idx_map = np.array([remap[repr_[i]] for i in range(len(vertices))], dtype=np.int32)
+    return new_v, new_f, idx_map
+
+
 def load_and_identify_boundaries(obj_path, muscle_xml_data):
     """Load OBJ, identify boundary vertices as origin/insertion.
     pymeshfix will close the mesh during tetrahedralization."""
     mesh = trimesh.load(obj_path, process=False)
     vertices = np.array(mesh.vertices, dtype=np.float64) * MESH_SCALE  # cm → m
     faces = np.array(mesh.faces, dtype=np.int32)
+
+    vertices, faces, _idx_map = _weld_close_vertices(vertices, faces, tol=1e-3)
 
     loops = find_boundary_loops(vertices, faces)
     if not loops:

@@ -115,11 +115,18 @@ def process_muscle(muscle_name, obj_path, contour_tet_path, output_path, skel, m
 
     anchor_vertices = sorted(fixed_verts.keys())
     anchor_set = set(anchor_vertices)
-    # Render faces: tet boundary without cap faces
-    render_faces = np.array([f for f in all_surf
-                              if not all(int(v) in anchor_set for v in f)],
-                             dtype=np.int32)
-    cap_face_indices = [fi for fi, f in enumerate(sim_faces)
+    # Render faces: ORIGINAL OBJ faces remapped to tet vertex indices
+    # Tet boundary faces deform badly (8.8% normal flips, 136 >3x area change)
+    # OBJ faces are the artist's original surface — deform properly
+    from scipy.spatial import cKDTree as _cKDTree2
+    _tet_kd2 = _cKDTree2(tet_verts)
+    _, _obj_to_tet = _tet_kd2.query(vertices)
+    render_faces = _obj_to_tet[faces].astype(np.int32)
+    # cap_face_indices must index into render_faces (consumers: init_soft_body,
+    # draw code treat it as render-face indices). OBJ surface has open caps, so
+    # no render face has all 3 verts anchored — list is empty for original mesh.
+    # anchor_vertices already covers all cap verts via init_soft_body.
+    cap_face_indices = [fi for fi, f in enumerate(render_faces)
                         if all(int(v) in anchor_set for v in f)]
 
     origin_verts = [v for v, (b, t) in fixed_verts.items() if t == 'origin']
