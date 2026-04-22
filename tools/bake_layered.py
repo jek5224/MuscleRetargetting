@@ -1158,7 +1158,10 @@ def main():
                 bary_mappings[name] = _tet_data['orig_to_fine_mapping']
                 orig_vert_counts[name] = _tet_data.get('orig_n_verts', 0)
             elif 'cap_vertex_types' in _tet_data:
-                pass  # Original mesh: save all verts directly (no mapping)
+                # Original mesh: save all verts + also contour-mapped version
+                if 'contour_mapping' in _tet_data:
+                    bary_mappings[name] = _tet_data['contour_mapping']
+                    orig_vert_counts[name] = _tet_data.get('contour_n_verts', 0)
             elif os.path.exists(os.path.join("tet", f"{name}_tet.npz")):
                 with open(os.path.join("tet", f"{name}_tet.npz"), 'rb') as _f:
                     _orig = _pkl.load(_f)
@@ -1390,6 +1393,12 @@ def main():
         os.remove(old)
 
     bake_data = {n: {} for n in active_all}
+    contour_bake_data = {n: {} for n in active_all}  # Contour-mapped positions
+    contour_cache_dir = os.path.join("data", "motion_cache", bvh_stem, "layered_contour")
+    if bary_mappings:
+        os.makedirs(contour_cache_dir, exist_ok=True)
+        for old in glob_mod.glob(os.path.join(contour_cache_dir, "*_chunk_*.npz")):
+            os.remove(old)
     flush_count = 0
     bake_start = time.time()
 
@@ -1439,18 +1448,16 @@ def main():
                 mobj.waypoints_from_tet_sim = True
                 mobj._baking_mode = False
                 fine_pos = mobj.soft_body.get_positions().astype(np.float32)
-                # Convert fine mesh positions to original mesh positions
+                # Save original mesh positions (all verts)
+                bake_data[mname][frame] = fine_pos.copy()
+
+                # Also save contour-mapped positions for contour display
                 mapping = bary_mappings.get(mname)
                 n_orig = orig_vert_counts.get(mname)
                 anchor_set = orig_anchor_sets.get(mname, set())
                 if mapping is not None and n_orig:
-                    # Barycentric interpolation from fine tet to original vertices
-                    # Anchor/cap vertices: use their fixed target positions directly
-                    # (barycentric mapping is unreliable for vertices on mesh boundary)
-                    orig_pos = np.zeros((n_orig, 3), dtype=np.float32)
+                    contour_pos = np.zeros((n_orig, 3), dtype=np.float32)
                     fine_tets = mobj.tet_tetrahedra
-
-                    # Anchor vertices: compute skeleton targets from contour mesh
                     anchor_targets = {}
                     if anchor_set and mname in _contour_anchor_cache_init:
                         for oa_idx, (bname, local_pos) in _contour_anchor_cache_init[mname].items():
@@ -1461,27 +1468,21 @@ def main():
                                 R = bn.getWorldTransform().rotation()
                                 t = bn.getWorldTransform().translation()
                                 anchor_targets[int(oa_idx)] = (R @ local_pos) + t
-
                     for ci, (tet_idx, bary) in enumerate(mapping):
                         if ci >= n_orig:
                             break
-                        # Anchor vertices: use matched fine-mesh position directly
                         if ci in anchor_targets:
-                            orig_pos[ci] = anchor_targets[ci]
+                            contour_pos[ci] = anchor_targets[ci]
                             continue
                         if tet_idx < 0 or tet_idx >= len(fine_tets):
-                            orig_pos[ci] = fine_pos[ci] if ci < len(fine_pos) else 0
+                            contour_pos[ci] = fine_pos[ci] if ci < len(fine_pos) else 0
                             continue
                         tv = fine_tets[tet_idx]
-                        orig_pos[ci] = (bary[0] * fine_pos[tv[0]] +
-                                        bary[1] * fine_pos[tv[1]] +
-                                        bary[2] * fine_pos[tv[2]] +
-                                        bary[3] * fine_pos[tv[3]])
-                    bake_data[mname][frame] = orig_pos
-                elif n_orig is not None and n_orig < len(fine_pos):
-                    bake_data[mname][frame] = fine_pos[:n_orig]
-                else:
-                    bake_data[mname][frame] = fine_pos
+                        contour_pos[ci] = (bary[0] * fine_pos[tv[0]] +
+                                           bary[1] * fine_pos[tv[1]] +
+                                           bary[2] * fine_pos[tv[2]] +
+                                           bary[3] * fine_pos[tv[3]])
+                    contour_bake_data[mname][frame] = contour_pos
 
             # Settled muscles become obstacles AND frozen constraints for next layer
             # Inflate obstacle slightly so outer muscles can't reach bone through gaps
@@ -1520,6 +1521,14 @@ def main():
                 np.savez(fp, frames=np.array(sf, dtype=np.int32),
                          positions=np.array([fd[f] for f in sf], dtype=np.float32))
                 fd.clear()
+            # Also flush contour-mapped data
+            for mname, fd in contour_bake_data.items():
+                if not fd: continue
+                sf = sorted(fd.keys())
+                fp = os.path.join(contour_cache_dir, f"{mname}_chunk_{flush_count:04d}.npz")
+                np.savez(fp, frames=np.array(sf, dtype=np.int32),
+                         positions=np.array([fd[f] for f in sf], dtype=np.float32))
+                fd.clear()
             flush_count += 1; gc.collect()
 
     # Final flush
@@ -1527,6 +1536,13 @@ def main():
         if not fd: continue
         sf = sorted(fd.keys())
         fp = os.path.join(cache_dir, f"{mname}_chunk_{flush_count:04d}.npz")
+        np.savez(fp, frames=np.array(sf, dtype=np.int32),
+                 positions=np.array([fd[f] for f in sf], dtype=np.float32))
+        fd.clear()
+    for mname, fd in contour_bake_data.items():
+        if not fd: continue
+        sf = sorted(fd.keys())
+        fp = os.path.join(contour_cache_dir, f"{mname}_chunk_{flush_count:04d}.npz")
         np.savez(fp, frames=np.array(sf, dtype=np.int32),
                  positions=np.array([fd[f] for f in sf], dtype=np.float32))
         fd.clear()

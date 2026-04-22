@@ -8182,6 +8182,10 @@ def _swap_mesh_mode(v):
     v._mesh_mode = new_mode
     print(f"Mesh mode: {new_mode.upper()}")
 
+    # Immediately apply cached positions for current frame
+    if hasattr(v, 'motion_current_frame') and v.motion_deform_cache:
+        _motion_apply_cached_deformation(v, v.motion_current_frame)
+
 
 def _motion_cache_dir(v):
     """Returns cache directory path for current BVH. Creates it if needed."""
