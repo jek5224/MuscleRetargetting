@@ -149,8 +149,12 @@ def process_muscle(muscle_name, obj_path, contour_tet_path, output_path, skel, m
         'orig_n_verts': len(tet_verts),
     }
 
-    # Copy from contour tet
-    for key in ['attach_skeleton_names', 'attach_skeletons', 'attach_skeletons_sub',
+    # Set attach_skeleton_names from XML (contour tet may not have it)
+    if origin_bone and insertion_bone:
+        data['attach_skeleton_names'] = [[origin_bone, insertion_bone]]
+
+    # Copy other metadata from contour tet
+    for key in ['attach_skeletons', 'attach_skeletons_sub',
                 'waypoints', 'waypoint_bary_coords', 'contours', 'fiber_architecture',
                 'bounding_planes', 'draw_contour_stream', 'fiber_sampling_seed',
                 'stream_contours', 'stream_bounding_planes', 'stream_groups',
