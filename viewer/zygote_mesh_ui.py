@@ -8114,12 +8114,16 @@ def _motion_run_tet_settle(v):
 
 
 def _swap_mesh_mode(v):
-    """Swap between original and contour mesh display for muscles with original tets."""
+    """Swap between original and contour mesh display for muscles with original tets.
+
+    Original: loads 650-vert original OBJ tet mesh + 650-vert ARAP cache
+    Contour:  loads 512-vert contour tet mesh + 512-vert mapped cache
+    """
     import shutil
     import pickle
 
     ORIG_DIR = 'tet_orig_open'
-    MUSCLES = ['L_Vastus_Lateralis']  # Muscles with original mesh available
+    MUSCLES = ['L_Vastus_Lateralis']
     ORIG_CACHE_TAG = 'layered_coll_indep'
     CONTOUR_CACHE_TAG = 'layered_contour'
 
@@ -8146,43 +8150,37 @@ def _swap_mesh_mode(v):
             if os.path.exists(backup_path):
                 shutil.copy2(backup_path, tet_path)
 
-        # Reload tet mesh in memory
+        # Reload tet mesh
         mobj.load_tetrahedron_mesh(mname, filepath=tet_path)
 
-    # Swap cache: reload from the correct cache directory
+    # Reload cache: ONLY from the specific tag directory for swapped muscles
     if v.motion_bvh is not None:
         bvh_name = os.path.splitext(os.path.basename(v.motion_bvh_files[v.motion_selected_idx]))[0]
         tag = ORIG_CACHE_TAG if new_mode == 'original' else CONTOUR_CACHE_TAG
         cache_dir = os.path.join('data', 'motion_cache', bvh_name, tag)
         if os.path.exists(cache_dir):
-            # Load from specific tag directory
-            for mname in v.zygote_muscle_meshes:
+            for mname in MUSCLES:
                 npz_files = sorted(glob.glob(os.path.join(cache_dir, f'{mname}_chunk_*.npz')))
                 if not npz_files:
                     continue
                 cache = {}
                 for npz_path in npz_files:
                     data = np.load(npz_path, allow_pickle=True)
-                    frames = data['frames']
-                    positions = data['positions']
-                    has_wp = 'waypoints_flat' in data and 'waypoints_shape' in data
-                    wp_flats = data['waypoints_flat'] if has_wp else None
-                    wp_shape_str = None
-                    if has_wp:
-                        raw = data['waypoints_shape'][0]
-                        wp_shape_str = raw.decode('utf-8') if isinstance(raw, (bytes, np.bytes_)) else str(raw)
-                    for i, f in enumerate(frames):
-                        entry = {'positions': positions[i]}
-                        if has_wp:
-                            entry['waypoints_flat'] = wp_flats[i]
-                            entry['waypoints_shape'] = wp_shape_str
+                    for i, f in enumerate(data['frames']):
+                        entry = {'positions': data['positions'][i]}
+                        if 'waypoints_flat' in data:
+                            entry['waypoints_flat'] = data['waypoints_flat'][i]
+                            raw = data['waypoints_shape'][0]
+                            entry['waypoints_shape'] = raw.decode('utf-8') if isinstance(raw, (bytes, np.bytes_)) else str(raw)
                         cache[int(f)] = entry
                 v.motion_deform_cache[mname] = cache
+                n_verts = data['positions'].shape[1] if len(data['positions'].shape) == 3 else 0
+                print(f"  {mname}: loaded {len(cache)} frames, {n_verts} verts from {tag}")
 
     v._mesh_mode = new_mode
     print(f"Mesh mode: {new_mode.upper()}")
 
-    # Immediately apply cached positions for current frame
+    # Immediately apply current frame
     if hasattr(v, 'motion_current_frame') and v.motion_deform_cache:
         _motion_apply_cached_deformation(v, v.motion_current_frame)
 
