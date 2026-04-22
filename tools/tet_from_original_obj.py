@@ -70,60 +70,31 @@ def process_muscle(muscle_name, obj_path, contour_tet_path, output_path, skel, m
                 face_orient[key] = f
     render_faces = np.array([face_orient[k] for k, c in face_count.items() if c == 1], dtype=np.int32)
 
-    # Match OBJ boundary vertices to tet mesh by position
-    # (TET mesh may be closed by pymeshfix, but original boundary positions still match)
+    # Find anchor vertices using XML waypoint positions (not boundary loops)
+    # Same approach as contour mesh: vertices near origin/insertion waypoints → fixed
     from scipy.spatial import cKDTree
-    obj_loops = find_boundary_loops(vertices, faces)
-    tet_kd = cKDTree(tet_verts)
-    tet_loops = []
-    for loop in obj_loops:
-        matched = []
-        for vi in loop:
-            d, tet_vi = tet_kd.query(vertices[vi])
-            if d < 0.005:  # 5mm match
-                matched.append(int(tet_vi))
-        if len(matched) >= 3:
-            tet_loops.append(matched)
 
-    # Assign loops to origin/insertion by matching to XML waypoints
-    # Use per-loop assignment: the loop closest to origin waypoints → origin bone,
-    # the loop closest to insertion waypoints → insertion bone
     origin_pts = np.vstack([s[2] for s in xml_data]) if xml_data else np.zeros((1, 3))
     insertion_pts = np.vstack([s[3] for s in xml_data]) if xml_data else np.zeros((1, 3))
-    origin_mean = origin_pts.mean(axis=0)
-    insertion_mean = insertion_pts.mean(axis=0)
-
     origin_bone = xml_data[0][0] if xml_data else None
     insertion_bone = xml_data[0][1] if xml_data else None
 
-    # Score each loop: distance to origin vs insertion
-    loop_scores = []
-    for loop in tet_loops:
-        c = tet_verts[loop].mean(axis=0)
-        loop_scores.append((np.linalg.norm(c - origin_mean), np.linalg.norm(c - insertion_mean)))
-
-    # Assign: loop closest to origin → origin, closest to insertion → insertion
-    # If only 2 loops, assign by relative distance
+    # For each XML waypoint, find the N closest tet vertices
     fixed_verts = {}
-    if len(tet_loops) == 2:
-        s0 = loop_scores[0][0] - loop_scores[0][1]  # negative = closer to origin
-        s1 = loop_scores[1][0] - loop_scores[1][1]
-        if s0 < s1:
-            assign = ['origin', 'insertion']
-        else:
-            assign = ['insertion', 'origin']
-        for li, end_type in enumerate(assign):
-            bone = origin_bone if end_type == 'origin' else insertion_bone
-            for vi in tet_loops[li]:
-                fixed_verts[int(vi)] = (bone, end_type)
-    else:
-        # Multiple loops: assign each independently
-        for li, loop in enumerate(tet_loops):
-            d_o, d_i = loop_scores[li]
-            end_type = 'origin' if d_o < d_i else 'insertion'
-            bone = origin_bone if end_type == 'origin' else insertion_bone
-            for vi in loop:
-                fixed_verts[int(vi)] = (bone, end_type)
+    tet_kd = cKDTree(tet_verts)
+    n_per_waypoint = 3  # Fix ~3 vertices per waypoint
+
+    for wp_pos in origin_pts:
+        dists, idxs = tet_kd.query(wp_pos, k=n_per_waypoint)
+        for d, vi in zip(dists, idxs):
+            if d < 0.02:  # 20mm from waypoint
+                fixed_verts[int(vi)] = (origin_bone, 'origin')
+
+    for wp_pos in insertion_pts:
+        dists, idxs = tet_kd.query(wp_pos, k=n_per_waypoint)
+        for d, vi in zip(dists, idxs):
+            if d < 0.02:
+                fixed_verts[int(vi)] = (insertion_bone, 'insertion')
 
     # Compute local anchors at rest pose
     skel.setPositions(np.zeros(skel.getNumDofs()))
