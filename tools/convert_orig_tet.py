@@ -103,6 +103,17 @@ def convert_one(input_path, output_path, contour_path):
         if key in contour_data:
             data[key] = contour_data[key]
 
+    # Build barycentric mapping: contour verts → original tet
+    # So bake can map original mesh positions back to contour mesh for viewer
+    if contour_path and os.path.exists(contour_path):
+        with open(contour_path, 'rb') as f:
+            cd = pickle.load(f)
+        contour_verts = cd['vertices']
+        from tools.remesh_tet_for_collision import build_mapping
+        mapping = build_mapping(contour_verts, verts, tets)
+        data['contour_mapping'] = mapping
+        data['contour_n_verts'] = len(contour_verts)
+
     with open(output_path, 'wb') as f:
         pickle.dump(data, f)
 

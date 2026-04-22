@@ -1157,8 +1157,10 @@ def main():
             if 'orig_to_fine_mapping' in _tet_data:
                 bary_mappings[name] = _tet_data['orig_to_fine_mapping']
                 orig_vert_counts[name] = _tet_data.get('orig_n_verts', 0)
-            elif 'cap_vertex_types' in _tet_data:
-                pass  # Original mesh: save all verts, no truncation
+            elif 'contour_mapping' in _tet_data:
+                # Original mesh: map back to contour vertices for viewer
+                bary_mappings[name] = _tet_data['contour_mapping']
+                orig_vert_counts[name] = _tet_data.get('contour_n_verts', 0)
             elif os.path.exists(os.path.join("tet", f"{name}_tet.npz")):
                 with open(os.path.join("tet", f"{name}_tet.npz"), 'rb') as _f:
                     _orig = _pkl.load(_f)
@@ -1284,6 +1286,30 @@ def main():
     print(f"    {len(active_all)} active {side}-side muscles")
 
     # ── Precompute surface data ───────────────────────────────────────────
+    # Pre-compute contour mesh anchor soft bodies for position conversion
+    # (needed when ARAP runs on original mesh but viewer uses contour mesh)
+    _contour_anchor_cache_init = {}  # {name: {anchor_vi: (bone_name, local_pos)}}
+    for name in list(orig_anchor_sets.keys()):
+        if name not in bary_mappings:
+            continue
+        contour_tet_path = os.path.join("tet", f"{name}_tet.npz")
+        if not os.path.exists(contour_tet_path):
+            continue
+        import json as _json_init
+        _entry = None
+        with open('.last_loaded_muscles.json') as _mf:
+            for _e in _json_init.load(_mf):
+                if _e['name'] == name:
+                    _entry = _e; break
+        if not _entry or not os.path.exists(_entry['path']):
+            continue
+        _tmp = MeshLoader()
+        _tmp.load(_entry['path'])
+        _tmp.load_tetrahedron_mesh(name, filepath=contour_tet_path)
+        _tmp.init_soft_body(skeleton_meshes=skeleton_meshes, skeleton=skel, mesh_info=mesh_info)
+        if _tmp.soft_body and hasattr(_tmp, 'soft_body_local_anchors'):
+            _contour_anchor_cache_init[name] = dict(_tmp.soft_body_local_anchors)
+
     print("[7] Precomputing surface data...")
     precompute_surface_data(active_all)
     bone_rest_transforms = cache_bone_rest_transforms(skel)
@@ -1422,30 +1448,17 @@ def main():
                     orig_pos = np.zeros((n_orig, 3), dtype=np.float32)
                     fine_tets = mobj.tet_tetrahedra
 
-                    # Anchor vertices: use skeleton fixed targets directly
-                    # (barycentric mapping is unreliable for boundary vertices)
+                    # Anchor vertices: compute skeleton targets from contour mesh
                     anchor_targets = {}
-                    if anchor_set and hasattr(mobj, 'soft_body') and mobj.soft_body is not None:
-                        ft = mobj.soft_body.fixed_targets
-                        fi_arr = mobj.soft_body.fixed_indices
-                        if ft is not None and fi_arr is not None:
-                            # Match fine fixed vertices to original anchors by rest position
-                            fine_rest = mobj.soft_body.rest_positions
-                            orig_tet_path = os.path.join("tet", f"{mname}_tet.npz")
-                            if os.path.exists(orig_tet_path):
-                                import pickle as _pkl2
-                                with open(orig_tet_path, 'rb') as _f2:
-                                    _od = _pkl2.load(_f2)
-                                orig_rest = _od['vertices']
-                                from scipy.spatial import cKDTree as _cKDTree
-                                # For each original anchor: find matching fine fixed vertex,
-                                # use its FIXED TARGET (skeleton position, guaranteed correct)
-                                fine_fixed_rest = fine_rest[fi_arr]
-                                _kd = _cKDTree(fine_fixed_rest)
-                                for oa_idx in anchor_set:
-                                    d, fi_local = _kd.query(orig_rest[oa_idx])
-                                    if d < 0.001:
-                                        anchor_targets[int(oa_idx)] = ft[fi_local]
+                    if anchor_set and mname in _contour_anchor_cache_init:
+                        for oa_idx, (bname, local_pos) in _contour_anchor_cache_init[mname].items():
+                            if int(oa_idx) not in anchor_set:
+                                continue
+                            bn = skel.getBodyNode(bname)
+                            if bn is not None:
+                                R = bn.getWorldTransform().rotation()
+                                t = bn.getWorldTransform().translation()
+                                anchor_targets[int(oa_idx)] = (R @ local_pos) + t
 
                     for ci, (tet_idx, bary) in enumerate(mapping):
                         if ci >= n_orig:
