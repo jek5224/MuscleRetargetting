@@ -304,11 +304,15 @@ def tetrahedralize_mesh(vertices, faces):
         v_fixed, f_fixed = fixer._return_arrays()
 
     # Try TetGen first
+    # nobisect=True: preserve input surface exactly (no Steiner points on boundary).
+    # Required for render_faces = OBJ-remapped faces to be valid tet faces — otherwise
+    # TetGen splits boundary triangles and OBJ faces reference non-adjacent tet verts,
+    # producing "broken" faces during ARAP deformation.
     tet_verts, tet_elems = None, None
     try:
         import tetgen
         tg = tetgen.TetGen(v_fixed, f_fixed)
-        tg.tetrahedralize(order=1, mindihedral=0, quality=False)
+        tg.tetrahedralize(order=1, mindihedral=0, quality=False, nobisect=True)
         tet_verts = np.array(tg.node, dtype=np.float64)
         tet_elems = np.array(tg.elem, dtype=np.int32)
     except Exception:
