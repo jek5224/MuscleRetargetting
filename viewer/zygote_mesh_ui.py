@@ -8118,7 +8118,7 @@ def _swap_mesh_mode(v):
     import shutil
     import pickle
 
-    ORIG_DIR = 'tet_orig_std'
+    ORIG_DIR = 'tet_orig_open'
     MUSCLES = ['L_Vastus_Lateralis']  # Muscles with original mesh available
     ORIG_CACHE_TAG = 'layered_coll_indep'
     CONTOUR_CACHE_TAG = 'layered_contour'

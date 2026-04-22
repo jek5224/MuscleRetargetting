@@ -16,7 +16,7 @@ MUSCLES_WITH_ORIG = [
 ]
 
 TET_DIR = 'tet'
-ORIG_DIR = 'tet_orig_std'
+ORIG_DIR = 'tet_orig_open'
 ORIG_CACHE = 'data/motion_cache/walk/layered_coll_indep'
 CONTOUR_CACHE = 'data/motion_cache/walk/layered_contour'
 ACTIVE_CACHE = 'data/motion_cache/walk/layered'  # Viewer loads from here
