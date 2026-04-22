@@ -122,6 +122,19 @@ def process_muscle(muscle_name, obj_path, contour_tet_path, output_path, skel, m
     _tet_kd2 = _cKDTree2(tet_verts)
     _, _obj_to_tet = _tet_kd2.query(vertices)
     render_faces = _obj_to_tet[faces].astype(np.int32)
+    # Remove folded face pairs (adjacent faces with opposite normals). Caused by
+    # OBJ cap pinch where dup-seam verts merged → real geometric fold exposed.
+    # Drop one face from each fold pair; breaks non-manifold but render stays clean.
+    import trimesh as _tm
+    _mesh = _tm.Trimesh(vertices=tet_verts, faces=render_faces, process=False)
+    _fa = _mesh.face_adjacency
+    _fn = _mesh.face_normals
+    _dots = (_fn[_fa[:, 0]] * _fn[_fa[:, 1]]).sum(axis=1)
+    _drop = set(int(_fa[i, 1]) for i in range(len(_fa)) if _dots[i] < -0.5)
+    if _drop:
+        render_faces = np.array(
+            [f for fi, f in enumerate(render_faces) if fi not in _drop],
+            dtype=np.int32)
     # cap_face_indices must index into render_faces (consumers: init_soft_body,
     # draw code treat it as render-face indices). OBJ surface has open caps, so
     # no render face has all 3 verts anchored — list is empty for original mesh.
