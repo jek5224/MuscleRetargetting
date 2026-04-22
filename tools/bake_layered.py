@@ -1192,26 +1192,8 @@ def main():
             cap_types = _td['cap_vertex_types']  # {vi: 'origin'/'insertion'}
             attach_names = _td.get('attach_skeleton_names', [[]])
 
-            # Fixed vertices = ONLY cap face boundary vertices (not interior cap verts)
-            # Interior cap vertices (embedded in mesh body) cause spikes when fixed
-            cap_face_verts = set()
-            cap_face_indices_arr = _td.get('cap_face_indices', [])
-            faces_arr = _td.get('faces', _td.get('render_faces'))
-            if len(cap_face_indices_arr) > 0 and faces_arr is not None:
-                for fi in cap_face_indices_arr:
-                    if fi < len(faces_arr):
-                        for v in faces_arr[fi]:
-                            cap_face_verts.add(int(v))
-            # Use cap face verts if available, otherwise fall back to small anchor set
-            if len(cap_face_verts) >= 6:
-                fixed_indices = sorted(cap_face_verts)
-            else:
-                # Too few cap face verts — use boundary_vertices from orig data
-                bv = _td.get('boundary_vertices', {})
-                if bv:
-                    fixed_indices = sorted(bv.keys())
-                else:
-                    fixed_indices = sorted(cap_types.keys())
+            # Fixed vertices = all cap vertices (proper boundary from open mesh)
+            fixed_indices = sorted(cap_types.keys())
             fixed_mask = np.zeros(len(mobj.tet_vertices), dtype=bool)
             for vi in fixed_indices:
                 if vi < len(fixed_mask):
