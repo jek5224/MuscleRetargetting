@@ -1157,6 +1157,8 @@ def main():
             if 'orig_to_fine_mapping' in _tet_data:
                 bary_mappings[name] = _tet_data['orig_to_fine_mapping']
                 orig_vert_counts[name] = _tet_data.get('orig_n_verts', 0)
+            elif 'cap_vertex_types' in _tet_data:
+                pass  # Original mesh: save all verts, no truncation
             elif os.path.exists(os.path.join("tet", f"{name}_tet.npz")):
                 with open(os.path.join("tet", f"{name}_tet.npz"), 'rb') as _f:
                     _orig = _pkl.load(_f)
@@ -1174,7 +1176,90 @@ def main():
     skel.setPositions(np.zeros(skel.getNumDofs()))
     for name, mobj in all_muscle_meshes.items():
         if mobj.tet_vertices is None: continue
-        mobj.init_soft_body(skeleton_meshes=skeleton_meshes, skeleton=skel, mesh_info=mesh_info)
+
+        # Check if this is an original mesh (has cap_vertex_types)
+        tet_path = os.path.join(args.tet_dir, f"{name}_tet.npz")
+        _has_orig_format = False
+        if os.path.exists(tet_path):
+            import pickle as _pkl
+            with open(tet_path, 'rb') as _f:
+                _td = _pkl.load(_f)
+            _has_orig_format = 'cap_vertex_types' in _td
+
+        if _has_orig_format:
+            # Original mesh: manual soft body setup (init_soft_body doesn't handle it)
+            from viewer.muscle_mesh import SoftBodySimulation
+            cap_types = _td['cap_vertex_types']  # {vi: 'origin'/'insertion'}
+            attach_names = _td.get('attach_skeleton_names', [[]])
+
+            # Fixed vertices = cap vertices
+            fixed_indices = sorted(cap_types.keys())
+            fixed_mask = np.zeros(len(mobj.tet_vertices), dtype=bool)
+            for vi in fixed_indices:
+                if vi < len(fixed_mask):
+                    fixed_mask[vi] = True
+
+            # Create soft body
+            mobj.soft_body = SoftBodySimulation(
+                vertices=mobj.tet_vertices,
+                tetrahedra=mobj.tet_tetrahedra,
+                fixed_vertices=fixed_indices,
+            )
+
+            # Skeleton bindings: origin → first bone, insertion → second bone
+            bones = attach_names[0] if attach_names else []
+            origin_bone = bones[0] if len(bones) > 0 else None
+            insertion_bone = bones[1] if len(bones) > 1 else None
+
+            mobj.soft_body_local_anchors = {}
+            mobj.soft_body_initial_transforms = {}
+            mobj.skinning_bones = []
+            mobj.skinning_weights = None
+
+            if origin_bone and insertion_bone:
+                mobj.skinning_bones = [origin_bone, insertion_bone]
+                # Compute rest transforms
+                for bname in mobj.skinning_bones:
+                    bn = skel.getBodyNode(bname)
+                    if bn:
+                        R = bn.getWorldTransform().rotation()
+                        t = bn.getWorldTransform().translation()
+                        mobj.soft_body_initial_transforms[bname] = (R.copy(), t.copy())
+
+                # Per-anchor local position and bone assignment
+                for vi, cap_type in cap_types.items():
+                    vi = int(vi)
+                    if vi >= len(mobj.tet_vertices):
+                        continue
+                    bname = origin_bone if cap_type == 'origin' else insertion_bone
+                    bn = skel.getBodyNode(bname)
+                    if bn:
+                        R = bn.getWorldTransform().rotation()
+                        t = bn.getWorldTransform().translation()
+                        local_pos = R.T @ (mobj.tet_vertices[vi] - t)
+                        mobj.soft_body_local_anchors[vi] = (bname, local_pos)
+
+                # Skinning weights: muscle-axis blending (same as contour mesh)
+                n_verts = len(mobj.tet_vertices)
+                weights = np.zeros((n_verts, 2), dtype=np.float32)
+                if origin_bone in mobj.soft_body_initial_transforms and insertion_bone in mobj.soft_body_initial_transforms:
+                    _, t_o = mobj.soft_body_initial_transforms[origin_bone]
+                    _, t_i = mobj.soft_body_initial_transforms[insertion_bone]
+                    axis = t_i - t_o
+                    axis_len = np.linalg.norm(axis)
+                    if axis_len > 1e-6:
+                        axis_dir = axis / axis_len
+                        for vi in range(n_verts):
+                            proj = np.dot(mobj.tet_vertices[vi] - t_o, axis_dir) / axis_len
+                            proj = np.clip(proj, 0, 1)
+                            weights[vi, 0] = 1.0 - proj  # origin weight
+                            weights[vi, 1] = proj  # insertion weight
+                mobj.skinning_weights = weights
+
+            print(f"    {name}: orig mesh {len(mobj.tet_vertices)} verts, "
+                  f"{len(fixed_indices)} fixed, {len(mobj.skinning_bones)} bones")
+        else:
+            mobj.init_soft_body(skeleton_meshes=skeleton_meshes, skeleton=skel, mesh_info=mesh_info)
         # Override bone assignments from original mesh if available
         abm = anchor_bone_maps.get(name)
         if abm and hasattr(mobj, 'soft_body_local_anchors'):
