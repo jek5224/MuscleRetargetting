@@ -8123,7 +8123,11 @@ def _swap_mesh_mode(v):
     import pickle
 
     ORIG_DIR = 'tet_orig_open'
-    MUSCLES = ['L_Vastus_Lateralis']
+    # Swap every muscle that has an original-tet file available.
+    MUSCLES = sorted(
+        os.path.basename(p)[:-len('_tet.npz')]
+        for p in glob.glob(os.path.join(ORIG_DIR, '*_tet.npz'))
+    )
     ORIG_CACHE_TAG = 'layered_coll_indep'
     CONTOUR_CACHE_TAG = 'layered_contour'
 
