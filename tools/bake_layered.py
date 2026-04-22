@@ -1157,10 +1157,8 @@ def main():
             if 'orig_to_fine_mapping' in _tet_data:
                 bary_mappings[name] = _tet_data['orig_to_fine_mapping']
                 orig_vert_counts[name] = _tet_data.get('orig_n_verts', 0)
-            elif 'contour_mapping' in _tet_data:
-                # Original mesh: map back to contour vertices for viewer
-                bary_mappings[name] = _tet_data['contour_mapping']
-                orig_vert_counts[name] = _tet_data.get('contour_n_verts', 0)
+            elif 'cap_vertex_types' in _tet_data:
+                pass  # Original mesh: save all verts directly (no mapping)
             elif os.path.exists(os.path.join("tet", f"{name}_tet.npz")):
                 with open(os.path.join("tet", f"{name}_tet.npz"), 'rb') as _f:
                     _orig = _pkl.load(_f)
