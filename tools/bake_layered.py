@@ -1166,11 +1166,17 @@ def main():
                 with open(os.path.join("tet", f"{name}_tet.npz"), 'rb') as _f:
                     _orig = _pkl.load(_f)
                 orig_vert_counts[name] = len(_orig['vertices'])
-            orig_tet_path = os.path.join("tet", f"{name}_tet.npz")
-            if os.path.exists(orig_tet_path):
-                with open(orig_tet_path, 'rb') as _f:
+            # Load CONTOUR anchors (for position mapping back to contour mesh)
+            # Try contour backup first, then tet/
+            contour_tet_path = os.path.join("tet", f"{name}_tet.npz.contour_backup")
+            if not os.path.exists(contour_tet_path):
+                contour_tet_path = os.path.join("tet", f"{name}_tet.npz")
+            if os.path.exists(contour_tet_path):
+                with open(contour_tet_path, 'rb') as _f:
                     _orig_data = _pkl.load(_f)
-                orig_anchor_sets[name] = set(int(v) for v in _orig_data.get('anchor_vertices', []))
+                # Only use if it's actually the contour mesh (not original)
+                if 'cap_vertex_types' not in _orig_data:
+                    orig_anchor_sets[name] = set(int(v) for v in _orig_data.get('anchor_vertices', []))
             if 'anchor_bone_map' in _tet_data:
                 anchor_bone_maps[name] = _tet_data['anchor_bone_map']
         mobj.load_tetrahedron_mesh(name, filepath=tet_path)
@@ -1297,7 +1303,10 @@ def main():
     for name in list(orig_anchor_sets.keys()):
         if name not in bary_mappings:
             continue
-        contour_tet_path = os.path.join("tet", f"{name}_tet.npz")
+        # Use contour backup if available (tet/ may have original mesh)
+        contour_tet_path = os.path.join("tet", f"{name}_tet.npz.contour_backup")
+        if not os.path.exists(contour_tet_path):
+            contour_tet_path = os.path.join("tet", f"{name}_tet.npz")
         if not os.path.exists(contour_tet_path):
             continue
         import json as _json_init
