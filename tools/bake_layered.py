@@ -1239,22 +1239,26 @@ def main():
                         local_pos = R.T @ (mobj.tet_vertices[vi] - t)
                         mobj.soft_body_local_anchors[vi] = (bname, local_pos)
 
-                # Skinning weights: muscle-axis blending (same as contour mesh)
+                # Skeleton bindings for _update_tet_positions_from_skeleton
                 n_verts = len(mobj.tet_vertices)
-                weights = np.zeros((n_verts, 2), dtype=np.float32)
-                if origin_bone in mobj.soft_body_initial_transforms and insertion_bone in mobj.soft_body_initial_transforms:
-                    _, t_o = mobj.soft_body_initial_transforms[origin_bone]
-                    _, t_i = mobj.soft_body_initial_transforms[insertion_bone]
+                mobj.tet_skeleton_bindings = []
+                mobj.tet_initial_bone_transforms = dict(mobj.soft_body_initial_transforms)
+
+                _, t_o = mobj.soft_body_initial_transforms.get(origin_bone, (None, None))
+                _, t_i = mobj.soft_body_initial_transforms.get(insertion_bone, (None, None))
+                if t_o is not None and t_i is not None:
                     axis = t_i - t_o
                     axis_len = np.linalg.norm(axis)
-                    if axis_len > 1e-6:
-                        axis_dir = axis / axis_len
-                        for vi in range(n_verts):
-                            proj = np.dot(mobj.tet_vertices[vi] - t_o, axis_dir) / axis_len
-                            proj = np.clip(proj, 0, 1)
-                            weights[vi, 0] = 1.0 - proj  # origin weight
-                            weights[vi, 1] = proj  # insertion weight
-                mobj.skinning_weights = weights
+                    axis_dir = axis / axis_len if axis_len > 1e-6 else np.array([0, 1, 0])
+                    weights = np.zeros((n_verts, 2), dtype=np.float32)
+                    for vi in range(n_verts):
+                        proj = np.dot(mobj.tet_vertices[vi] - t_o, axis_dir) / max(axis_len, 1e-6)
+                        proj = np.clip(proj, 0, 1)
+                        weights[vi, 0] = 1.0 - proj
+                        weights[vi, 1] = proj
+                        mobj.tet_skeleton_bindings.append(
+                            (origin_bone, insertion_bone, proj, mobj.tet_vertices[vi].copy()))
+                    mobj.skinning_weights = weights
 
             print(f"    {name}: orig mesh {len(mobj.tet_vertices)} verts, "
                   f"{len(fixed_indices)} fixed, {len(mobj.skinning_bones)} bones")
