@@ -49,8 +49,10 @@ def convert_one(input_path, output_path, contour_path):
     # Extract surface faces
     faces = extract_surface_faces(tets)
 
-    # Anchor vertices = all cap vertices
-    anchor_vertices = sorted(cap_verts.keys())
+    # Anchor vertices = only cap vertices on cap faces (not interior)
+    # First identify cap faces, then get their vertices
+    all_cap = set(cap_verts.keys())
+    anchor_vertices = sorted(all_cap)  # Initially all, refined after cap face detection
 
     # Cap face indices: faces where ALL vertices are cap vertices
     anchor_set = set(anchor_vertices)
