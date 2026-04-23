@@ -377,37 +377,58 @@ def process_muscle(muscle_name, obj_path, contour_tet_path, output_path, skel, m
     origin_tree = cKDTree(origin_pts)
     insertion_tree = cKDTree(insertion_pts)
 
-    # Fallback: OBJ has no open boundary (e.g. L_Gluteus_Maximus) → no anchors
-    # from cap loops. Find tet verts near XML waypoints directly.
-    if not tet_anchor_verts:
-        tet_kd = cKDTree(tet_v)
-        fallback = set()
-        for wp in origin_pts:
-            _, ids = tet_kd.query(wp, k=min(5, len(tet_v)))
-            for ni in np.atleast_1d(ids):
-                if np.linalg.norm(tet_v[int(ni)] - wp) < 0.02:
-                    fallback.add(int(ni))
-        for wp in insertion_pts:
-            _, ids = tet_kd.query(wp, k=min(5, len(tet_v)))
-            for ni in np.atleast_1d(ids):
-                if np.linalg.norm(tet_v[int(ni)] - wp) < 0.02:
-                    fallback.add(int(ni))
-        tet_anchor_verts = sorted(fallback)
-        print(f'    (closed OBJ) XML-waypoint anchors: {len(tet_anchor_verts)}')
+    # Per-LOOP anatomical classification. Each boundary loop (contour) is
+    # either (a) an origin cap near the XML origin waypoints, (b) an
+    # insertion cap near the XML insertion waypoints, or (c) a seam
+    # unrelated to attachment (wrap-around boundary on scanned OBJs).
+    # All verts in a classified loop attach to the SAME bone. Seam loops
+    # get no bone and are dropped from anchors.
+    fixed_verts = {}
+    anchor_tet_set = set()
+    origin_mean = origin_pts.mean(axis=0) if len(origin_pts) else None
+    insertion_mean = insertion_pts.mean(axis=0) if len(insertion_pts) else None
+    CAP_CLASSIFY_MAX = 0.05  # 50mm: loop centroid within this of waypoint → cap
 
-    # Per-vert classification via XML waypoint proximity. Works for both
-    # cleanly-disjoint caps AND single wrap-around boundary loops (scanned
-    # muscles). anchor_bone_map is consumed by bake_layered to OVERRIDE
-    # init_soft_body's per-cap bone assignment after BFS.
-    fixed_verts = {}  # tet_vi -> (bone_name, 'origin'/'insertion')
-    for tet_vi in tet_anchor_verts:
-        pos = tet_v[tet_vi]
-        d_o, _ = origin_tree.query(pos)
-        d_i, _ = insertion_tree.query(pos)
-        end_type = 'origin' if d_o < d_i else 'insertion'
-        bone = origin_bone if end_type == 'origin' else insertion_bone
-        if bone:
-            fixed_verts[tet_vi] = (bone, end_type)
+    for loop in named_cap_loops:
+        tet_loop_verts = sorted({int(c2t[int(vi)]) for vi in loop})
+        centroid = tet_v[tet_loop_verts].mean(axis=0)
+        d_o = np.linalg.norm(centroid - origin_mean) if origin_mean is not None else float('inf')
+        d_i = np.linalg.norm(centroid - insertion_mean) if insertion_mean is not None else float('inf')
+        if min(d_o, d_i) > CAP_CLASSIFY_MAX:
+            # Loop is a seam, not an attachment cap. Skip.
+            continue
+        if d_o <= d_i:
+            bone, end_type = origin_bone, 'origin'
+        else:
+            bone, end_type = insertion_bone, 'insertion'
+        if not bone:
+            continue
+        for vi in tet_loop_verts:
+            fixed_verts[vi] = (bone, end_type)
+            anchor_tet_set.add(vi)
+
+    # If no cap loops classified (all seams, or closed-mesh OBJ with no
+    # boundaries): fall back to XML-waypoint-nearest tet verts. Each tet
+    # vert gets the bone of the waypoint cluster it's closest to.
+    if not anchor_tet_set:
+        tet_kd = cKDTree(tet_v)
+        if origin_mean is not None and origin_bone:
+            for wp in origin_pts:
+                _, ids = tet_kd.query(wp, k=min(5, len(tet_v)))
+                for ni in np.atleast_1d(ids):
+                    if np.linalg.norm(tet_v[int(ni)] - wp) < 0.02:
+                        fixed_verts[int(ni)] = (origin_bone, 'origin')
+                        anchor_tet_set.add(int(ni))
+        if insertion_mean is not None and insertion_bone:
+            for wp in insertion_pts:
+                _, ids = tet_kd.query(wp, k=min(5, len(tet_v)))
+                for ni in np.atleast_1d(ids):
+                    if np.linalg.norm(tet_v[int(ni)] - wp) < 0.02:
+                        fixed_verts[int(ni)] = (insertion_bone, 'insertion')
+                        anchor_tet_set.add(int(ni))
+        print(f'    (no cap loops classified) XML fallback anchors: {len(anchor_tet_set)}')
+
+    tet_anchor_verts = sorted(anchor_tet_set)
 
     cap_attachments = []
     origin_verts_list = [v for v, (b, t) in fixed_verts.items() if t == 'origin']
@@ -417,9 +438,6 @@ def process_muscle(muscle_name, obj_path, contour_tet_path, output_path, skel, m
     if insertion_verts_list:
         cap_attachments.append([insertion_verts_list[0], 0, 1, 0, 0])
 
-    # anchor_bone_map: per-vert final bone. bake_layered overrides
-    # init_soft_body's assignment with this → origin/insertion verts always
-    # follow the anatomically correct bone regardless of BFS behavior.
     anchor_bone_map = {int(vi): bone for vi, (bone, _) in fixed_verts.items()}
 
     # cap_face_indices = faces where all 3 verts are anchors with same bone
