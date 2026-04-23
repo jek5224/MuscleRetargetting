@@ -422,6 +422,26 @@ def process_muscle(muscle_name, obj_path, contour_tet_path, output_path, skel, m
     # follow the anatomically correct bone regardless of BFS behavior.
     anchor_bone_map = {int(vi): bone for vi, (bone, _) in fixed_verts.items()}
 
+    # cap_face_indices = faces where all 3 verts are anchors with same bone
+    # AND max edge ≤30mm. Excludes body-spanning CDT fan tris from green
+    # rendering but KEEPS them in render_faces so mesh stays watertight.
+    anchor_set = set(anchor_bone_map.keys())
+    cap_list = []
+    for fi, f in enumerate(render_faces):
+        fa, fb, fc = int(f[0]), int(f[1]), int(f[2])
+        if fa not in anchor_set or fb not in anchor_set or fc not in anchor_set:
+            continue
+        if len({anchor_bone_map[fa], anchor_bone_map[fb], anchor_bone_map[fc]}) != 1:
+            continue
+        p = tet_v[[fa, fb, fc]]
+        max_edge = max(np.linalg.norm(p[0] - p[1]),
+                       np.linalg.norm(p[1] - p[2]),
+                       np.linalg.norm(p[2] - p[0]))
+        if max_edge > 0.030:
+            continue
+        cap_list.append(fi)
+    cap_face_indices = np.array(cap_list, dtype=np.int32)
+
     # Copy metadata from contour tet (waypoints, contours, attach_skeleton_names …)
     contour_data = {}
     if contour_tet_path and os.path.exists(contour_tet_path):
