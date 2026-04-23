@@ -327,6 +327,24 @@ def process_muscle(muscle_name, obj_path, contour_tet_path, output_path, skel, m
     origin_tree = cKDTree(origin_pts)
     insertion_tree = cKDTree(insertion_pts)
 
+    # Fallback: OBJ has no open boundary (e.g. L_Gluteus_Maximus) → no anchors
+    # from cap loops. Find tet verts near XML waypoints directly.
+    if not tet_anchor_verts:
+        tet_kd = cKDTree(tet_v)
+        fallback = set()
+        for wp in origin_pts:
+            _, ids = tet_kd.query(wp, k=min(5, len(tet_v)))
+            for ni in np.atleast_1d(ids):
+                if np.linalg.norm(tet_v[int(ni)] - wp) < 0.02:
+                    fallback.add(int(ni))
+        for wp in insertion_pts:
+            _, ids = tet_kd.query(wp, k=min(5, len(tet_v)))
+            for ni in np.atleast_1d(ids):
+                if np.linalg.norm(tet_v[int(ni)] - wp) < 0.02:
+                    fallback.add(int(ni))
+        tet_anchor_verts = sorted(fallback)
+        print(f'    (closed OBJ) XML-waypoint anchors: {len(tet_anchor_verts)}')
+
     fixed_verts = {}  # tet_vi -> (bone_name, 'origin'/'insertion')
     for tet_vi in tet_anchor_verts:
         pos = tet_v[tet_vi]
