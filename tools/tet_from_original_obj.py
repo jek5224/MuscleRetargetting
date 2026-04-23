@@ -248,9 +248,7 @@ def process_muscle(muscle_name, obj_path, contour_tet_path, output_path, skel, m
     obj_f = np.array(mesh.faces, dtype=np.int32)
     print(f'  [{muscle_name}] OBJ {len(obj_v)}v {len(obj_f)}f', flush=True)
 
-    # Decimate very dense OBJs — ARAP bake cost scales with total verts across
-    # all muscles (~25 × target). Keep quality tetgen feasible and layered ARAP
-    # converging within reasonable time.
+    print(f'  [{muscle_name}] decimate', flush=True)
     target_verts = 1500
     if len(obj_v) > target_verts:
         ratio = target_verts / len(obj_v)
@@ -262,31 +260,32 @@ def process_muscle(muscle_name, obj_path, contour_tet_path, output_path, skel, m
         except Exception as e:
             print(f'    decimate failed: {e} — using raw OBJ')
 
-    # Merge exact-position duplicate verts — OBJ cap seams duplicate boundary
-    # verts at the same 3D position. Keeping them separate poisons CDT with
-    # degenerate segments; merging keeps surface geometry intact.
+    print(f'  [{muscle_name}] dedup', flush=True)
     rounded = np.round(obj_v, 6)
     _, uniq_idx, inv = np.unique(rounded, axis=0, return_index=True, return_inverse=True)
     obj_v = obj_v[uniq_idx]
     obj_f = inv[obj_f].astype(np.int32)
     keep_f = np.array([len({int(x) for x in f}) == 3 for f in obj_f])
     obj_f = obj_f[keep_f]
-
-    # Boundary loops
-    loops = _find_boundary_loops(obj_v, obj_f)
-    if not loops:
+    print(f'  [{muscle_name}] loops', flush=True)
+    all_loops = _find_boundary_loops(obj_v, obj_f)
+    print(f'  [{muscle_name}] loops={[len(L) for L in all_loops]}', flush=True)
+    if not all_loops:
         print(f'    No boundary loops (already closed mesh)')
-    # Keep only the 2 largest loops — origin and insertion caps. Smaller
-    # loops are decimation artifacts that confuse CDT + TetGen.
-    loops = sorted([L for L in loops if len(L) >= 5], key=len, reverse=True)[:2]
+    # Close EVERY loop ≥3 verts to keep the surface watertight. Decimation
+    # artifact loops would leave holes otherwise. Only the 2 largest become
+    # named caps (anchors + green rendering); tiny loops close silently.
+    all_loops = sorted([L for L in all_loops if len(L) >= 3], key=len, reverse=True)
+    named_cap_loops = all_loops[:2]
+    other_loops = all_loops[2:]
 
     # CDT-cap each loop
     closed_v = obj_v.tolist()
     closed_f = obj_f.tolist()
     n_surface = len(obj_f)
-    cap_face_indices_pre = []  # indices into closed_f of cap triangles
+    cap_face_indices_pre = []  # indices into closed_f of NAMED cap triangles
     anchor_verts = set()
-    for loop in loops:
+    for loop in named_cap_loops:
         cap_tris, center_vi = _cap_loop(list(loop), closed_v)
         for tri in cap_tris:
             cap_face_indices_pre.append(len(closed_f))
@@ -295,6 +294,17 @@ def process_muscle(muscle_name, obj_path, contour_tet_path, output_path, skel, m
             anchor_verts.add(int(vi))
         if center_vi is not None:
             anchor_verts.add(int(center_vi))
+    # Close artifact loops with simple centroid fan — CDT is unreliable on
+    # small decimation-artifact loops and triangle lib can segfault on them.
+    for li, loop in enumerate(other_loops):
+        n = len(loop)
+        if n < 3:
+            continue
+        centroid = np.mean([closed_v[vi] for vi in loop], axis=0)
+        center_idx = len(closed_v)
+        closed_v.append(centroid.tolist())
+        for i in range(n):
+            closed_f.append([loop[i], loop[(i + 1) % n], center_idx])
 
     closed_v = np.array(closed_v, dtype=np.float64)
     closed_f = np.array(closed_f, dtype=np.int32)
@@ -451,7 +461,7 @@ def process_muscle(muscle_name, obj_path, contour_tet_path, output_path, skel, m
 
     print(f'  {muscle_name}: {len(tet_v)} verts, {len(tet_e)} tets, '
           f'{len(render_faces)} render_faces ({len(cap_face_indices)} cap), '
-          f'{len(tet_anchor_verts)} anchors, {len(loops)} cap loops')
+          f'{len(tet_anchor_verts)} anchors, {len(named_cap_loops)} named + {len(other_loops)} filler loops')
     return len(tet_v)
 
 
