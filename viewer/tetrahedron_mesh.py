@@ -1745,6 +1745,20 @@ except Exception as e:
             self._tet_edge_verts = None
             self._tet_surface_normals = None
             self._tet_cap_normals = None
+            # Invalidate stale soft body + fixed-vertex state from a previous
+            # tet (different vertex count). Swap to original mesh kept the
+            # contour mesh's soft_body and fixed indices → fixed dots drawn
+            # at wrong positions and ARAP ran with contour's anchor map.
+            self.soft_body = None
+            self.soft_body_fixed_vertices = []
+            self.soft_body_local_anchors = {}
+            self.soft_body_initial_transforms = {}
+            self.skinning_weights = None
+            self.skinning_bones = []
+            # Original-tet per-vert bone override. init_soft_body reads this
+            # to assign each anchor to the XML-waypoint-correct bone even when
+            # BFS groups would otherwise send it to the wrong bone.
+            self.tet_anchor_bone_map = data.get('anchor_bone_map', {})
 
             # Load dual face system (with backwards compatibility)
             if 'render_faces' in data and data['render_faces'] is not None:

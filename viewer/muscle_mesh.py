@@ -4078,6 +4078,33 @@ class MuscleMeshMixin:
 
             print(f"  Assigned {len(self.soft_body_local_anchors)} fixed vertices to bodies")
 
+            # Apply per-vert anchor_bone_map override (original mesh format):
+            # BFS-based bone assignment floods wrap-around caps across bones.
+            # XML-waypoint-nearest per-vert map is authoritative.
+            abm = getattr(self, 'tet_anchor_bone_map', None) or {}
+            if abm and skeleton is not None:
+                n_fixed = 0
+                for vi, bone_name in abm.items():
+                    vi = int(vi)
+                    if vi not in self.soft_body_local_anchors:
+                        continue
+                    old_bone, _ = self.soft_body_local_anchors[vi]
+                    if old_bone == bone_name:
+                        continue
+                    bn = skeleton.getBodyNode(bone_name)
+                    if bn is None:
+                        continue
+                    R = bn.getWorldTransform().rotation()
+                    t = bn.getWorldTransform().translation()
+                    world_pos = self.soft_body.rest_positions[vi]
+                    new_local = R.T @ (world_pos - t)
+                    self.soft_body_local_anchors[vi] = (bone_name, new_local)
+                    if bone_name not in self.soft_body_initial_transforms:
+                        self.soft_body_initial_transforms[bone_name] = (R.copy(), t.copy())
+                    n_fixed += 1
+                if n_fixed:
+                    print(f"  anchor_bone_map override: fixed {n_fixed} verts")
+
         # Compute LBS skinning weights for ALL vertices (not just fixed)
         self._compute_skinning_weights(skeleton, mesh_to_body, list(skeleton_meshes.keys()) if skeleton_meshes else [])
 
