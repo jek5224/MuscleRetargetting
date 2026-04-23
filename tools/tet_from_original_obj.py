@@ -377,33 +377,50 @@ def process_muscle(muscle_name, obj_path, contour_tet_path, output_path, skel, m
     origin_tree = cKDTree(origin_pts)
     insertion_tree = cKDTree(insertion_pts)
 
-    # Per-LOOP anatomical classification. Each boundary loop (contour) is
-    # either (a) an origin cap near the XML origin waypoints, (b) an
-    # insertion cap near the XML insertion waypoints, or (c) a seam
-    # unrelated to attachment (wrap-around boundary on scanned OBJs).
-    # All verts in a classified loop attach to the SAME bone. Seam loops
-    # get no bone and are dropped from anchors.
+    # Per-LOOP anatomical classification. All verts in a loop attach to
+    # the SAME bone. Origin and insertion must be DIFFERENT loops when both
+    # waypoint clusters have a plausible match — bipartite assign loops to
+    # {origin, insertion} minimising total centroid distance.
     fixed_verts = {}
     anchor_tet_set = set()
     origin_mean = origin_pts.mean(axis=0) if len(origin_pts) else None
     insertion_mean = insertion_pts.mean(axis=0) if len(insertion_pts) else None
     CAP_CLASSIFY_MAX = 0.05  # 50mm: loop centroid within this of waypoint → cap
 
+    # Score each named loop against both waypoint clusters.
+    loop_scores = []
     for loop in named_cap_loops:
         tet_loop_verts = sorted({int(c2t[int(vi)]) for vi in loop})
         centroid = tet_v[tet_loop_verts].mean(axis=0)
         d_o = np.linalg.norm(centroid - origin_mean) if origin_mean is not None else float('inf')
         d_i = np.linalg.norm(centroid - insertion_mean) if insertion_mean is not None else float('inf')
-        if min(d_o, d_i) > CAP_CLASSIFY_MAX:
-            # Loop is a seam, not an attachment cap. Skip.
-            continue
-        if d_o <= d_i:
-            bone, end_type = origin_bone, 'origin'
+        loop_scores.append((tet_loop_verts, d_o, d_i))
+
+    # Assign anatomically: 2 loops → one origin + one insertion via
+    # min-total-distance bipartite match. No threshold when 2 loops present
+    # (each muscle's two ends are DIFFERENT bones by definition — XML
+    # waypoint distance only resolves ordering). 1 loop → single cap,
+    # classify by nearest waypoint if within threshold.
+    assigned = []  # list of (tet_loop_verts, end_type)
+    n = len(loop_scores)
+    if n == 1:
+        lv, d_o, d_i = loop_scores[0]
+        if min(d_o, d_i) <= CAP_CLASSIFY_MAX:
+            assigned.append((lv, 'origin' if d_o <= d_i else 'insertion'))
+    elif n >= 2:
+        (lv0, d0o, d0i), (lv1, d1o, d1i) = loop_scores[0], loop_scores[1]
+        opt_a = d0o + d1i  # loop0=origin, loop1=insertion
+        opt_b = d0i + d1o  # loop0=insertion, loop1=origin
+        if opt_a <= opt_b:
+            assigned = [(lv0, 'origin'), (lv1, 'insertion')]
         else:
-            bone, end_type = insertion_bone, 'insertion'
+            assigned = [(lv0, 'insertion'), (lv1, 'origin')]
+
+    for lv, end_type in assigned:
+        bone = origin_bone if end_type == 'origin' else insertion_bone
         if not bone:
             continue
-        for vi in tet_loop_verts:
+        for vi in lv:
             fixed_verts[vi] = (bone, end_type)
             anchor_tet_set.add(vi)
 
