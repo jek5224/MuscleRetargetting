@@ -20,17 +20,24 @@ import numpy as np
 import trimesh
 
 
-def fold_faces(vertices, faces, threshold):
-    """Return indices of render faces in adjacent-fold pairs (normal dot < -thr)."""
+def fold_faces(vertices, faces, threshold, protected=None):
+    """Return indices of render faces in adjacent-fold pairs (normal dot < -thr).
+    `protected` — face indices that must never be dropped (e.g. cap faces)."""
     tm = trimesh.Trimesh(vertices=vertices, faces=faces, process=False)
     fa = tm.face_adjacency
     fn = tm.face_normals
     dots = np.einsum('ij,ij->i', fn[fa[:, 0]], fn[fa[:, 1]])
     bad_pairs = np.where(dots < -threshold)[0]
+    protected = protected or set()
     drop = set()
     for i in bad_pairs:
-        # drop whichever face has more non-manifold neighbors; tie-break by higher index
-        drop.add(int(fa[i, 1]))
+        a, b = int(fa[i, 0]), int(fa[i, 1])
+        # prefer dropping face not in protected set
+        if b not in protected:
+            drop.add(b)
+        elif a not in protected:
+            drop.add(a)
+        # else both protected — can't drop either, skip
     return drop
 
 
@@ -38,8 +45,8 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('--tet', required=True)
     ap.add_argument('--cache', required=True, help='glob pattern for *_chunk_*.npz')
-    ap.add_argument('--threshold', type=float, default=0.3)
-    ap.add_argument('--max-iters', type=int, default=5)
+    ap.add_argument('--threshold', type=float, default=0.7)
+    ap.add_argument('--max-iters', type=int, default=3)
     args = ap.parse_args()
 
     with open(args.tet, 'rb') as f:
@@ -47,6 +54,8 @@ def main():
     rest = td['vertices']
     rf = np.asarray(td['render_faces'], dtype=np.int32)
     n0 = len(rf)
+    # Cap faces render green; never drop them — holes would expose raw cap.
+    protected = set(int(x) for x in td.get('cap_face_indices', []))
 
     chunks = sorted(glob.glob(args.cache))
     if not chunks:
@@ -61,10 +70,10 @@ def main():
 
     for it in range(args.max_iters):
         keep = np.ones(len(rf), dtype=bool)
-        drop_rest = fold_faces(rest, rf, args.threshold)
+        drop_rest = fold_faces(rest, rf, args.threshold, protected)
         total_drop = set(drop_rest)
         for pos in all_pos:
-            total_drop |= fold_faces(pos, rf, args.threshold)
+            total_drop |= fold_faces(pos, rf, args.threshold, protected)
         if not total_drop:
             print(f'iter {it}: no folds; done')
             break
