@@ -35,7 +35,10 @@ if PROJECT_ROOT not in sys.path:
 from tools.bake_original_mesh import parse_muscle_xml
 
 SKEL_XML = "data/zygote_skel.xml"
-OBJ_DIR = "Zygote_Meshes/Muscle/"
+# Match the OBJ paths the viewer loads from .last_loaded_muscles.json. These
+# are the hi-res versions that are open at origin/insertion.
+OBJ_ROOT = "Zygote_Meshes_251229/Muscle/"
+OBJ_SUBDIRS = ['UpLeg', 'LowLeg', 'Foot', 'Hand', 'Torso']
 MESH_SCALE = 0.01
 
 
@@ -165,30 +168,46 @@ def _cap_loop(loop, all_vertices):
 # TetGen with contour-mesh-compatible parameters
 # ---------------------------------------------------------------------------
 def _tetrahedralize(vertices, faces):
-    """Mirror the contour-mesh subprocess tetgen call: scale to mm, nobisect,
-    mindihedral/minratio/maxvolume/steinerleft limits. Delaunay fallback when
-    TetGen rejects the surface."""
-    import tetgen
+    """Contour-mesh compatible tetgen. Use subprocess so any tetgen segfault
+    surfaces as a RuntimeError instead of killing the parent.
+    Delaunay fallback if subprocess fails."""
+    import subprocess, sys as _sys, tempfile, json as _json
     rv = (vertices * 1000.0).astype(np.float64)
     rf = faces.astype(np.int32)
-    mesh = trimesh.Trimesh(vertices=rv, faces=rf, process=False)
-    mesh_vol = abs(mesh.volume)
-    max_vol = max(mesh_vol / 1500.0, 1e-6)
-    steiner_budget = max(len(rv), 300)
-    try:
-        t = tetgen.TetGen(rv.copy(), rf.copy())
-        t.tetrahedralize(order=1, mindihedral=5, minratio=2.0,
-                         maxvolume=max_vol, nobisect=True,
-                         steinerleft=steiner_budget)
-        return np.asarray(t.node) / 1000.0, np.asarray(t.elem, dtype=np.int32)
-    except Exception:
-        pass
-    try:
-        t = tetgen.TetGen(rv.copy(), rf.copy())
-        t.tetrahedralize(quality=False, nobisect=True)
-        return np.asarray(t.node) / 1000.0, np.asarray(t.elem, dtype=np.int32)
-    except Exception:
-        pass
+    with tempfile.NamedTemporaryFile(suffix='.npz', delete=False) as inp:
+        np.savez(inp, v=rv, f=rf)
+        inp_path = inp.name
+    out_path = inp_path.replace('.npz', '_out.npz')
+    script = f'''
+import numpy as np, tetgen, trimesh, sys
+d = np.load("{inp_path}")
+rv = d["v"].astype(np.float64); rf = d["f"].astype(np.int32)
+mesh = trimesh.Trimesh(vertices=rv, faces=rf, process=False)
+mv = abs(mesh.volume); max_vol = max(mv / 1500.0, 1e-6)
+steiner = max(len(rv), 300)
+try:
+    t = tetgen.TetGen(rv.copy(), rf.copy())
+    t.tetrahedralize(order=1, mindihedral=5, minratio=2.0,
+                     maxvolume=max_vol, nobisect=True, steinerleft=steiner)
+    np.savez("{out_path}", node=np.asarray(t.node), elem=np.asarray(t.elem).astype(np.int32), mode=np.array([1]))
+    sys.exit(0)
+except Exception: pass
+try:
+    t = tetgen.TetGen(rv.copy(), rf.copy())
+    t.tetrahedralize(quality=False, nobisect=True)
+    np.savez("{out_path}", node=np.asarray(t.node), elem=np.asarray(t.elem).astype(np.int32), mode=np.array([2]))
+    sys.exit(0)
+except Exception: pass
+sys.exit(1)
+'''
+    proc = subprocess.run([_sys.executable, '-c', script], capture_output=True, timeout=90)
+    if proc.returncode == 0 and os.path.exists(out_path):
+        o = np.load(out_path)
+        os.unlink(inp_path); os.unlink(out_path)
+        return np.asarray(o['node']) / 1000.0, np.asarray(o['elem'], dtype=np.int32)
+    os.unlink(inp_path)
+    if os.path.exists(out_path):
+        os.unlink(out_path)
     # Delaunay + inside filter — preserves all vertices, no Steiner points.
     from scipy.spatial import Delaunay as _Delaunay
     dl = _Delaunay(rv)
@@ -214,6 +233,7 @@ def _tetrahedralize(vertices, faces):
 # Main per-muscle pipeline
 # ---------------------------------------------------------------------------
 def process_muscle(muscle_name, obj_path, contour_tet_path, output_path, skel, mesh_info):
+    print(f'  [{muscle_name}] start', flush=True)
     all_xml = parse_muscle_xml()
     short = muscle_name.replace('L_', '').replace('R_', '')
     xml_data = all_xml.get(muscle_name) or all_xml.get(short)
@@ -222,9 +242,25 @@ def process_muscle(muscle_name, obj_path, contour_tet_path, output_path, skel, m
         return 0
 
     # Load OBJ
+    print(f'  [{muscle_name}] load OBJ', flush=True)
     mesh = trimesh.load(obj_path, process=False)
     obj_v = np.array(mesh.vertices, dtype=np.float64) * MESH_SCALE
     obj_f = np.array(mesh.faces, dtype=np.int32)
+    print(f'  [{muscle_name}] OBJ {len(obj_v)}v {len(obj_f)}f', flush=True)
+
+    # Decimate very dense OBJs — ARAP bake cost scales with total verts across
+    # all muscles (~25 × target). Keep quality tetgen feasible and layered ARAP
+    # converging within reasonable time.
+    target_verts = 1500
+    if len(obj_v) > target_verts:
+        ratio = target_verts / len(obj_v)
+        try:
+            simp = trimesh.Trimesh(vertices=obj_v, faces=obj_f, process=False)
+            simp = simp.simplify_quadric_decimation(face_count=int(len(obj_f) * ratio))
+            obj_v = np.array(simp.vertices, dtype=np.float64)
+            obj_f = np.array(simp.faces, dtype=np.int32)
+        except Exception as e:
+            print(f'    decimate failed: {e} — using raw OBJ')
 
     # Merge exact-position duplicate verts — OBJ cap seams duplicate boundary
     # verts at the same 3D position. Keeping them separate poisons CDT with
@@ -240,7 +276,9 @@ def process_muscle(muscle_name, obj_path, contour_tet_path, output_path, skel, m
     loops = _find_boundary_loops(obj_v, obj_f)
     if not loops:
         print(f'    No boundary loops (already closed mesh)')
-    loops = [L for L in loops if len(L) >= 5]
+    # Keep only the 2 largest loops — origin and insertion caps. Smaller
+    # loops are decimation artifacts that confuse CDT + TetGen.
+    loops = sorted([L for L in loops if len(L) >= 5], key=len, reverse=True)[:2]
 
     # CDT-cap each loop
     closed_v = obj_v.tolist()
@@ -272,7 +310,9 @@ def process_muscle(muscle_name, obj_path, contour_tet_path, output_path, skel, m
     n_closed_v = len(closed_v)
 
     # Tetrahedralize — TetGen preserves boundary vertices (nobisect)
+    print(f'  [{muscle_name}] tetgen on {len(closed_v)}v {len(closed_f)}f', flush=True)
     tet_v, tet_e = _tetrahedralize(closed_v, closed_f)
+    print(f'  [{muscle_name}] tetgen done {len(tet_v)}v {len(tet_e)}e', flush=True)
 
     # Remap closed_v indices → tet_v indices via nearest-neighbor.
     # nobisect keeps boundary verts exact, so distances should be ~0.
@@ -428,15 +468,21 @@ def main():
     skel = buildFromInfo(skel_info, root_name)
     skel.setPositions(np.zeros(skel.getNumDofs()))
 
-    for obj_name in sorted(os.listdir(OBJ_DIR)):
-        if not obj_name.endswith('.obj'):
+    # Build name → OBJ path map over all subdirs. File name is already
+    # <muscle_name>.obj (no UpLegA_/Hip_ prefix), so muscle_name matches
+    # contour tet names directly.
+    obj_map = {}
+    for sub in OBJ_SUBDIRS:
+        sub_path = os.path.join(OBJ_ROOT, sub)
+        if not os.path.isdir(sub_path):
             continue
-        parts = obj_name.replace('.obj', '').split('_', 1)
-        if len(parts) < 2:
-            continue
-        muscle_name = parts[1]
+        for fname in sorted(os.listdir(sub_path)):
+            if not fname.endswith('.obj'):
+                continue
+            muscle_name = fname[:-len('.obj')]
+            obj_map[muscle_name] = os.path.join(sub_path, fname)
 
-        obj_path = os.path.join(OBJ_DIR, obj_name)
+    for muscle_name, obj_path in sorted(obj_map.items()):
         contour_path = os.path.join(args.contour_dir, f'{muscle_name}_tet.npz')
         output_path = os.path.join(args.output_dir, f'{muscle_name}_tet.npz')
         if not os.path.exists(contour_path):
