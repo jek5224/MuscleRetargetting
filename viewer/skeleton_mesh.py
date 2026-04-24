@@ -1093,10 +1093,11 @@ class SkeletonMeshMixin:
         self.skinning_weights = np.zeros((num_verts, num_bones))
         vertices = self.soft_body.rest_positions
 
-        # Compute characteristic length scale for falloff
-        bbox_size = np.ptp(vertices, axis=0)
-        char_length = np.max(bbox_size)
-        falloff_distance = char_length * 0.5  # 50% of bounding box
+        # Inverse-squared distance weighting: never zero for finite distance,
+        # so every vert always gets a skinning target. Compact-support kernels
+        # left some body verts with zero total weight → stuck at rest during
+        # ARAP since no bone target pulled them.
+        IDW_EPSILON = 1e-4  # 0.1 mm — avoids divide-by-zero AT the anchor
 
         for bone_idx, bone_name in enumerate(self.skinning_bones):
             anchors = bone_anchor_positions.get(bone_name, [])
@@ -1106,22 +1107,13 @@ class SkeletonMeshMixin:
 
             anchors = np.array(anchors)
 
-            # For each vertex, find distance to closest anchor of this bone
+            # Sum of 1/r² over all of THIS bone's anchors — not just min_dist.
+            # Bones with many anchors get proportionally more weight, which
+            # matches the "more cap coverage = stronger attachment" intuition.
             diff = vertices[:, np.newaxis, :] - anchors[np.newaxis, :, :]
             dists = np.linalg.norm(diff, axis=2)
-            min_dists = np.min(dists, axis=1)
-
-            # === Improved weight function: smooth falloff ===
-            # Use normalized distance with smooth falloff
-            normalized_dist = min_dists / falloff_distance
-
-            # Smooth kernel: (1 - d²)² for d < 1, else 0
-            # This gives smooth gradients and compact support
-            weights = np.where(
-                normalized_dist < 1.0,
-                (1.0 - normalized_dist**2)**2,
-                0.0
-            )
+            inv_sq = 1.0 / (dists ** 2 + IDW_EPSILON ** 2)
+            weights = np.sum(inv_sq, axis=1)
 
             self.skinning_weights[:, bone_idx] = weights
 

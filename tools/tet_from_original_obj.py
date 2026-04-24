@@ -433,8 +433,26 @@ def process_muscle(muscle_name, obj_path, contour_tet_path, output_path, skel, m
     if neg.any():
         tet_e[neg, 1], tet_e[neg, 2] = tet_e[neg, 2].copy(), tet_e[neg, 1].copy()
 
-    # Render faces = all closed_f (surface + caps), remapped to tet indices.
-    # Drop degenerate tris where remap collapses.
+    # Prune tet_v to only verts actually used by tet elements. Orphaned verts
+    # (in tet_v but not in any tet) never move under ARAP → visible as
+    # stuck-at-rest faces on the render mesh. Pruning + remapping eliminates
+    # them and keeps tet volume == surface volume.
+    used_mask = np.zeros(len(tet_v), dtype=bool)
+    used_mask[tet_e.flatten()] = True
+    n_orphan = int((~used_mask).sum())
+    if n_orphan:
+        old_to_new = np.full(len(tet_v), -1, dtype=np.int32)
+        old_to_new[used_mask] = np.arange(int(used_mask.sum()), dtype=np.int32)
+        tet_v = tet_v[used_mask]
+        tet_e = old_to_new[tet_e]
+        # Rebuild c2t with the pruned tet_v.
+        kd = cKDTree(tet_v)
+        _, c2t = kd.query(closed_v)
+        print(f'    pruned {n_orphan} orphan tet verts', flush=True)
+
+    # Render faces = all closed_f (surface + caps), remapped to pruned tet
+    # indices. Every render-face vert now belongs to a tet (pruning above
+    # guarantees it), so ARAP moves the whole surface.
     render_faces_list = []
     cap_face_indices_new = []
     cap_set_pre = set(cap_face_indices_pre)
