@@ -4078,18 +4078,21 @@ class MuscleMeshMixin:
 
             print(f"  Assigned {len(self.soft_body_local_anchors)} fixed vertices to bodies")
 
-            # Apply per-vert anchor_bone_map override (original mesh format):
-            # BFS-based bone assignment floods wrap-around caps across bones.
-            # XML-waypoint-nearest per-vert map is authoritative.
+            # Apply per-vert anchor_bone_map override (original mesh format).
+            # anchor_bone_map is authoritative for original-tet muscles —
+            # it was built by mesh-based nearest-bone classification on the
+            # actual boundary verts. Overwrites init_soft_body's BFS-derived
+            # assignment AND ensures every anchor_bone_map vert becomes a
+            # fixed anchor (BFS may skip non-connected cap verts).
             abm = getattr(self, 'tet_anchor_bone_map', None) or {}
             if abm and skeleton is not None:
+                # Discard the BFS assignment entirely; rebuild from abm.
+                self.soft_body_local_anchors = {}
+                self.soft_body_initial_transforms = {}
                 n_fixed = 0
                 for vi, bone_name in abm.items():
                     vi = int(vi)
-                    if vi not in self.soft_body_local_anchors:
-                        continue
-                    old_bone, _ = self.soft_body_local_anchors[vi]
-                    if old_bone == bone_name:
+                    if vi >= len(self.soft_body.rest_positions):
                         continue
                     bn = skeleton.getBodyNode(bone_name)
                     if bn is None:
@@ -4102,8 +4105,16 @@ class MuscleMeshMixin:
                     if bone_name not in self.soft_body_initial_transforms:
                         self.soft_body_initial_transforms[bone_name] = (R.copy(), t.copy())
                     n_fixed += 1
-                if n_fixed:
-                    print(f"  anchor_bone_map override: fixed {n_fixed} verts")
+                # Mark fixed verts in the soft body solver + sync indices.
+                new_fixed = sorted(self.soft_body_local_anchors.keys())
+                self.soft_body_fixed_vertices = new_fixed
+                self.soft_body.fixed_mask[:] = False
+                self.soft_body.free_mask[:] = True
+                fixed_arr = np.array(new_fixed, dtype=np.int32)
+                valid = fixed_arr < self.soft_body.num_vertices
+                self.soft_body.fixed_mask[fixed_arr[valid]] = True
+                self.soft_body.free_mask[fixed_arr[valid]] = False
+                print(f"  anchor_bone_map authoritative: {n_fixed} fixed verts")
 
         # Compute LBS skinning weights for ALL vertices (not just fixed)
         self._compute_skinning_weights(skeleton, mesh_to_body, list(skeleton_meshes.keys()) if skeleton_meshes else [])
