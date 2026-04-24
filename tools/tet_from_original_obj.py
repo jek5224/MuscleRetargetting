@@ -39,7 +39,34 @@ SKEL_XML = "data/zygote_skel.xml"
 # are the hi-res versions that are open at origin/insertion.
 OBJ_ROOT = "Zygote_Meshes_251229/Muscle/"
 OBJ_SUBDIRS = ['UpLeg', 'LowLeg', 'Foot', 'Hand', 'Torso']
+SKEL_OBJ_DIR = "Zygote_Meshes_251229/Skeleton"
 MESH_SCALE = 0.01
+
+
+_bone_kd = None
+_bone_names = None
+
+def _load_bone_kd():
+    """KD-tree over all skeleton OBJ vertices. Returns (tree, bone_name_per_point)."""
+    global _bone_kd, _bone_names
+    if _bone_kd is not None:
+        return _bone_kd, _bone_names
+    import os
+    pts = []
+    names = []
+    for fname in sorted(os.listdir(SKEL_OBJ_DIR)):
+        if not fname.endswith('.obj'):
+            continue
+        # Zygote file naming: "L_Femur.obj" → DART body node "L_Femur0"
+        bone_name = fname[:-len('.obj')] + '0'
+        m = trimesh.load(os.path.join(SKEL_OBJ_DIR, fname), process=False)
+        bv = np.array(m.vertices, dtype=np.float64) * MESH_SCALE
+        pts.append(bv)
+        names.extend([bone_name] * len(bv))
+    pts = np.vstack(pts)
+    _bone_kd = cKDTree(pts)
+    _bone_names = names
+    return _bone_kd, _bone_names
 
 
 # ---------------------------------------------------------------------------
@@ -269,6 +296,7 @@ def process_muscle(muscle_name, obj_path, contour_tet_path, output_path, skel, m
     obj_f = obj_f[keep_f]
     print(f'  [{muscle_name}] loops', flush=True)
     all_loops = _find_boundary_loops(obj_v, obj_f)
+    all_loops = [L for L in all_loops if len(L) >= 3]
     print(f'  [{muscle_name}] loops={[len(L) for L in all_loops]}', flush=True)
     if not all_loops:
         print(f'    No boundary loops (already closed mesh)')
@@ -279,44 +307,36 @@ def process_muscle(muscle_name, obj_path, contour_tet_path, output_path, skel, m
     # 'insertion') and find contiguous runs of same label → each run is a
     # cap sub-contour. All verts in a sub-contour share the same bone.
     all_loops = [L for L in all_loops if len(L) >= 3]
-    # Build a per-waypoint bone table: each XML waypoint is an attachment
-    # point with its own stream's origin/insertion bone. Supports multi-head
-    # muscles where different streams have different origin bones
-    # (e.g. Biceps Femoris: long head Os_Coxae, short head Femur).
-    _wp_pts = []
-    _wp_bones = []
-    _wp_ends = []  # 'origin' or 'insertion'
+    # Per-vert mesh-based bone assignment: each boundary vert labels to its
+    # nearest skeleton OBJ vertex's bone. Contiguous runs of same bone on a
+    # loop → one sub-contour (cap). No XML waypoints used.
+    _bone_tree, _bone_names_list = _load_bone_kd()
+    _allowed_bones = set()
     if xml_data:
-        for (o_bone, i_bone, o_pts, i_pts) in xml_data:
-            for p in o_pts:
-                _wp_pts.append(p); _wp_bones.append(o_bone); _wp_ends.append('origin')
-            for p in i_pts:
-                _wp_pts.append(p); _wp_bones.append(i_bone); _wp_ends.append('insertion')
-    _wp_pts = np.array(_wp_pts) if _wp_pts else np.zeros((1, 3))
-    _wp_tree = cKDTree(_wp_pts) if len(_wp_pts) else None
-    _CAP_MAX_OBJ = 0.05
+        for (o_bone, i_bone, _, _) in xml_data:
+            _allowed_bones.add(o_bone); _allowed_bones.add(i_bone)
+    _CAP_BONE_MAX = 0.015
 
     def _classify_vi(vi):
-        if _wp_tree is None:
+        if vi >= len(obj_v):
             return None
         p = obj_v[vi]
-        d, idx = _wp_tree.query(p)
-        if d > _CAP_MAX_OBJ:
-            return None  # seam vert — far from every attachment waypoint
-        # Return (end_type, bone) so downstream sees both
-        return (_wp_ends[idx], _wp_bones[idx])
+        d, idx = _bone_tree.query(p)
+        if d > _CAP_BONE_MAX:
+            return None
+        bone = _bone_names_list[idx]
+        if _allowed_bones and bone not in _allowed_bones:
+            return None
+        end_type = 'origin' if bone == (xml_data[0][0] if xml_data else '') else 'insertion'
+        return (end_type, bone)
 
     named_cap_loops = []
-    named_cap_end_types = []  # (end_type, bone_name) tuples
+    named_cap_end_types = []
     other_loops = []
     for loop in all_loops:
         labels = [_classify_vi(vi) for vi in loop]
-        # Find contiguous runs of same non-None label around the cyclic loop.
         n = len(loop)
-        # rotate so a boundary (label transition) starts at index 0 for clean
-        # splitting — only when there's at least one non-None label
         if any(lab is not None for lab in labels):
-            # find a transition or None boundary as starting point
             start = 0
             for i in range(n):
                 if labels[i] != labels[i - 1]:
@@ -326,7 +346,6 @@ def process_muscle(muscle_name, obj_path, contour_tet_path, output_path, skel, m
             rot_labels = labels[start:] + labels[:start]
         else:
             rot_loop, rot_labels = loop, labels
-        # Walk runs
         i = 0
         made_any = False
         while i < len(rot_loop):
@@ -356,8 +375,8 @@ def process_muscle(muscle_name, obj_path, contour_tet_path, output_path, skel, m
     for arc in named_cap_loops:
         for vi in arc:
             anchor_verts.add(int(vi))
-    # Build per-loop dominant bone from sub-contour assignments.
-    loop_dominant = {}  # id(loop) -> (bone, end_type) or None
+    # Build per-loop dominant bone from sub-contour (arc) assignments.
+    loop_dominant = {}  # id(loop) -> (bone, end_type)
     from collections import Counter as _Counter
     for li, loop in enumerate(all_loops):
         loop_set = set(loop)
@@ -365,7 +384,8 @@ def process_muscle(muscle_name, obj_path, contour_tet_path, output_path, skel, m
         for arc, (et, bone) in zip(named_cap_loops, named_cap_end_types):
             if arc and arc[0] in loop_set:
                 votes[(bone, et)] += len(arc)
-        loop_dominant[li] = votes.most_common(1)[0][0] if votes else None
+        if votes:
+            loop_dominant[li] = votes.most_common(1)[0][0]
     for li, loop in enumerate(all_loops):
         n = len(loop)
         if n < 3:
