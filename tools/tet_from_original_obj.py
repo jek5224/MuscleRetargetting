@@ -625,7 +625,11 @@ def main():
             obj_map[muscle_name] = os.path.join(sub_path, fname)
 
     for muscle_name, obj_path in sorted(obj_map.items()):
-        contour_path = os.path.join(args.contour_dir, f'{muscle_name}_tet.npz')
+        # Prefer contour_backup (true contour tet) over tet/ (may be swapped
+        # to original mesh from a previous viewer session).
+        contour_backup = os.path.join(args.contour_dir, f'{muscle_name}_tet.npz.contour_backup')
+        contour_main = os.path.join(args.contour_dir, f'{muscle_name}_tet.npz')
+        contour_path = contour_backup if os.path.exists(contour_backup) else contour_main
         output_path = os.path.join(args.output_dir, f'{muscle_name}_tet.npz')
         if not os.path.exists(contour_path):
             continue

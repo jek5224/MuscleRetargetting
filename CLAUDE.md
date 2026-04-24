@@ -35,6 +35,12 @@
 - When discussing research ideas or biomechanics, cite sources or explicitly mark speculation as such
 - Always read the relevant code before explaining how something works
 
+## Verify Before Claiming
+- Before reporting a fix as done, VERIFY the claim is actually true. Inspect real data (cache files, tet files, etc.), not just logs.
+- Do NOT repeat prior summaries as if they're fresh verification. Re-run the check against current state.
+- When the user disputes a result, drop my prior conclusion and investigate from scratch.
+- Don't paraphrase bake logs as proof. Logs say what the script printed, not whether the result is anatomically correct.
+
 ## No Unsolicited Fallbacks
 - Do NOT add fallback logic or edge case handling unless explicitly asked
 - If you think a fallback is necessary, ASK the user first before implementing
