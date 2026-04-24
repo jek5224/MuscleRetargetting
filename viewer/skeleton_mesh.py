@@ -1060,16 +1060,16 @@ class SkeletonMeshMixin:
             print("  Warning: No cap attachments for skinning")
             return
 
-        # Collect unique body names from cap attachments
+        # Collect unique body names + per-anchor bone map from ALL anchors.
+        # Previous code used only cap_attachments representatives → missed
+        # multi-head muscles and left long caps with one anchor point,
+        # producing zero skinning weight on verts far from that point.
         body_names_set = set()
         anchor_to_body = {}
 
-        for attachment in self.tet_cap_attachments:
-            anchor_idx, stream_idx, end_type, skel_mesh_idx, subpart_idx = attachment
-            if anchor_idx in self.soft_body_local_anchors:
-                body_name = self.soft_body_local_anchors[anchor_idx][0]
-                body_names_set.add(body_name)
-                anchor_to_body[anchor_idx] = body_name
+        for anchor_idx, (body_name, _local_pos) in self.soft_body_local_anchors.items():
+            body_names_set.add(body_name)
+            anchor_to_body[int(anchor_idx)] = body_name
 
         if len(body_names_set) == 0:
             print("  Warning: No bones found for skinning")
