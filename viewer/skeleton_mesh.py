@@ -1093,31 +1093,42 @@ class SkeletonMeshMixin:
         self.skinning_weights = np.zeros((num_verts, num_bones))
         vertices = self.soft_body.rest_positions
 
-        # Inverse-squared distance weighting: never zero for finite distance,
-        # so every vert always gets a skinning target. Compact-support kernels
-        # left some body verts with zero total weight → stuck at rest during
-        # ARAP since no bone target pulled them.
-        IDW_EPSILON = 1e-4  # 0.1 mm — avoids divide-by-zero AT the anchor
+        # Inverse-squared distance weighting with TOP-2 BONE PRUNING.
+        # For multi-bone muscles (e.g. Biceps Femoris: Os_Coxae + Femur +
+        # Tibia) verts near the shared belly inherited weight from all 3
+        # bones. Walk flexion rotates the bones differently → the IDW
+        # average lands somewhere none of the bones "want", showing as
+        # outlier positions. Keep only the nearest TWO bones per vert so
+        # each vert interpolates along a single bone segment.
+        IDW_EPSILON = 1e-4  # 0.1 mm
 
+        # Distance from each vert to nearest anchor of each bone.
+        min_dist_per_bone = np.full((num_verts, num_bones), np.inf)
+        inv_sq_per_bone = np.zeros((num_verts, num_bones))
         for bone_idx, bone_name in enumerate(self.skinning_bones):
             anchors = bone_anchor_positions.get(bone_name, [])
             if len(anchors) == 0:
                 print(f"  Warning: Bone '{bone_name}' has no anchors")
                 continue
-
             anchors = np.array(anchors)
-
-            # Sum of 1/r² over all of THIS bone's anchors — not just min_dist.
-            # Bones with many anchors get proportionally more weight, which
-            # matches the "more cap coverage = stronger attachment" intuition.
             diff = vertices[:, np.newaxis, :] - anchors[np.newaxis, :, :]
             dists = np.linalg.norm(diff, axis=2)
-            inv_sq = 1.0 / (dists ** 2 + IDW_EPSILON ** 2)
-            weights = np.sum(inv_sq, axis=1)
+            min_dist_per_bone[:, bone_idx] = np.min(dists, axis=1)
+            inv_sq_per_bone[:, bone_idx] = np.sum(
+                1.0 / (dists ** 2 + IDW_EPSILON ** 2), axis=1)
 
-            self.skinning_weights[:, bone_idx] = weights
+        # Per-vert: zero out all but the top-K nearest bones.
+        K = min(2, num_bones)
+        # argsort ascending by min_dist (closest first); keep first K.
+        nearest_K = np.argsort(min_dist_per_bone, axis=1)[:, :K]
+        mask = np.zeros_like(inv_sq_per_bone, dtype=bool)
+        rows = np.arange(num_verts)[:, None].repeat(K, axis=1)
+        mask[rows, nearest_K] = True
+        self.skinning_weights = np.where(mask, inv_sq_per_bone, 0.0)
 
-            print(f"    Bone '{bone_name}': {np.sum(weights > 0.01)} vertices affected")
+        for bone_idx, bone_name in enumerate(self.skinning_bones):
+            n_aff = int(np.sum(self.skinning_weights[:, bone_idx] > 1e-10))
+            print(f"    Bone '{bone_name}': {n_aff} vertices affected")
 
         # Normalize weights per vertex
         weight_sums = np.sum(self.skinning_weights, axis=1, keepdims=True)
