@@ -272,31 +272,85 @@ def process_muscle(muscle_name, obj_path, contour_tet_path, output_path, skel, m
     print(f'  [{muscle_name}] loops={[len(L) for L in all_loops]}', flush=True)
     if not all_loops:
         print(f'    No boundary loops (already closed mesh)')
-    # Close EVERY loop ≥3 verts to keep the surface watertight. Decimation
-    # artifact loops would leave holes otherwise. Only the 2 largest become
-    # named caps (anchors + green rendering); tiny loops close silently.
-    all_loops = sorted([L for L in all_loops if len(L) >= 3], key=len, reverse=True)
-    named_cap_loops = all_loops[:2]
-    other_loops = all_loops[2:]
+    # Split every boundary loop into per-end SUB-CONTOURS. OBJ boundaries
+    # often wrap from origin around to insertion as ONE long loop; a single
+    # centroid-based label would force the whole loop to one bone. Instead,
+    # classify each loop vert by nearest XML waypoint cluster ('origin' or
+    # 'insertion') and find contiguous runs of same label → each run is a
+    # cap sub-contour. All verts in a sub-contour share the same bone.
+    all_loops = [L for L in all_loops if len(L) >= 3]
+    _origin_mean_obj = (np.vstack([s[2] for s in xml_data]).mean(axis=0)
+                        if xml_data else None)
+    _insertion_mean_obj = (np.vstack([s[3] for s in xml_data]).mean(axis=0)
+                           if xml_data else None)
+    _origin_pts = np.vstack([s[2] for s in xml_data]) if xml_data else np.zeros((1, 3))
+    _insertion_pts = np.vstack([s[3] for s in xml_data]) if xml_data else np.zeros((1, 3))
+    _origin_tree = cKDTree(_origin_pts) if len(_origin_pts) else None
+    _insertion_tree = cKDTree(_insertion_pts) if len(_insertion_pts) else None
+    _CAP_MAX_OBJ = 0.05
 
-    # CDT-cap each loop
+    def _classify_vi(vi):
+        p = obj_v[vi]
+        d_o = (_origin_tree.query(p)[0] if _origin_tree is not None else float('inf'))
+        d_i = (_insertion_tree.query(p)[0] if _insertion_tree is not None else float('inf'))
+        if min(d_o, d_i) > _CAP_MAX_OBJ:
+            return None  # too far from either attachment → seam vert
+        return 'origin' if d_o <= d_i else 'insertion'
+
+    named_cap_loops = []
+    named_cap_end_types = []
+    other_loops = []
+    for loop in all_loops:
+        labels = [_classify_vi(vi) for vi in loop]
+        # Find contiguous runs of same non-None label around the cyclic loop.
+        n = len(loop)
+        # rotate so a boundary (label transition) starts at index 0 for clean
+        # splitting — only when there's at least one non-None label
+        if any(lab is not None for lab in labels):
+            # find a transition or None boundary as starting point
+            start = 0
+            for i in range(n):
+                if labels[i] != labels[i - 1]:
+                    start = i
+                    break
+            rot_loop = loop[start:] + loop[:start]
+            rot_labels = labels[start:] + labels[:start]
+        else:
+            rot_loop, rot_labels = loop, labels
+        # Walk runs
+        i = 0
+        made_any = False
+        while i < len(rot_loop):
+            lab = rot_labels[i]
+            j = i
+            while j < len(rot_loop) and rot_labels[j] == lab:
+                j += 1
+            run = rot_loop[i:j]
+            if lab is not None and len(run) >= 3:
+                named_cap_loops.append(run)
+                named_cap_end_types.append(lab)
+                made_any = True
+            i = j
+        if not made_any:
+            other_loops.append(loop)
+
+    # Close every full boundary loop with a centroid fan (watertight).
+    # Sub-contour classification above provides per-vert bone labels
+    # (anchor_bone_map); cap_face_indices afterward filters to small
+    # same-bone tris for green rendering. Using fan (not CDT) for every
+    # loop avoids triangle-lib crashes on wrap-around boundaries.
     closed_v = obj_v.tolist()
     closed_f = obj_f.tolist()
     n_surface = len(obj_f)
-    cap_face_indices_pre = []  # indices into closed_f of NAMED cap triangles
+    cap_face_indices_pre = []  # every cap tri (same-bone filter applied later)
     anchor_verts = set()
-    for loop in named_cap_loops:
-        cap_tris, center_vi = _cap_loop(list(loop), closed_v)
-        for tri in cap_tris:
-            cap_face_indices_pre.append(len(closed_f))
-            closed_f.append(tri)
-        for vi in loop:
+    # Anchor set: verts in any named (sub-contour) arc.
+    for arc in named_cap_loops:
+        for vi in arc:
             anchor_verts.add(int(vi))
-        if center_vi is not None:
-            anchor_verts.add(int(center_vi))
-    # Close artifact loops with simple centroid fan — CDT is unreliable on
-    # small decimation-artifact loops and triangle lib can segfault on them.
-    for li, loop in enumerate(other_loops):
+    # Fan-close the FULL boundary loops that contributed to named_cap_loops
+    # and any remaining filler loops.
+    for loop in all_loops:
         n = len(loop)
         if n < 3:
             continue
@@ -304,7 +358,9 @@ def process_muscle(muscle_name, obj_path, contour_tet_path, output_path, skel, m
         center_idx = len(closed_v)
         closed_v.append(centroid.tolist())
         for i in range(n):
+            fi = len(closed_f)
             closed_f.append([loop[i], loop[(i + 1) % n], center_idx])
+            cap_face_indices_pre.append(fi)
 
     closed_v = np.array(closed_v, dtype=np.float64)
     closed_f = np.array(closed_f, dtype=np.int32)
@@ -377,50 +433,16 @@ def process_muscle(muscle_name, obj_path, contour_tet_path, output_path, skel, m
     origin_tree = cKDTree(origin_pts)
     insertion_tree = cKDTree(insertion_pts)
 
-    # Per-LOOP anatomical classification. All verts in a loop attach to
-    # the SAME bone. Origin and insertion must be DIFFERENT loops when both
-    # waypoint clusters have a plausible match — bipartite assign loops to
-    # {origin, insertion} minimising total centroid distance.
+    # Apply the per-loop classification computed earlier (named_cap_end_types
+    # parallel to named_cap_loops). All verts in a loop get the SAME bone.
     fixed_verts = {}
     anchor_tet_set = set()
-    origin_mean = origin_pts.mean(axis=0) if len(origin_pts) else None
-    insertion_mean = insertion_pts.mean(axis=0) if len(insertion_pts) else None
-    CAP_CLASSIFY_MAX = 0.05  # 50mm: loop centroid within this of waypoint → cap
-
-    # Score each named loop against both waypoint clusters.
-    loop_scores = []
-    for loop in named_cap_loops:
+    for loop, end_type in zip(named_cap_loops, named_cap_end_types):
         tet_loop_verts = sorted({int(c2t[int(vi)]) for vi in loop})
-        centroid = tet_v[tet_loop_verts].mean(axis=0)
-        d_o = np.linalg.norm(centroid - origin_mean) if origin_mean is not None else float('inf')
-        d_i = np.linalg.norm(centroid - insertion_mean) if insertion_mean is not None else float('inf')
-        loop_scores.append((tet_loop_verts, d_o, d_i))
-
-    # Assign anatomically: 2 loops → one origin + one insertion via
-    # min-total-distance bipartite match. No threshold when 2 loops present
-    # (each muscle's two ends are DIFFERENT bones by definition — XML
-    # waypoint distance only resolves ordering). 1 loop → single cap,
-    # classify by nearest waypoint if within threshold.
-    assigned = []  # list of (tet_loop_verts, end_type)
-    n = len(loop_scores)
-    if n == 1:
-        lv, d_o, d_i = loop_scores[0]
-        if min(d_o, d_i) <= CAP_CLASSIFY_MAX:
-            assigned.append((lv, 'origin' if d_o <= d_i else 'insertion'))
-    elif n >= 2:
-        (lv0, d0o, d0i), (lv1, d1o, d1i) = loop_scores[0], loop_scores[1]
-        opt_a = d0o + d1i  # loop0=origin, loop1=insertion
-        opt_b = d0i + d1o  # loop0=insertion, loop1=origin
-        if opt_a <= opt_b:
-            assigned = [(lv0, 'origin'), (lv1, 'insertion')]
-        else:
-            assigned = [(lv0, 'insertion'), (lv1, 'origin')]
-
-    for lv, end_type in assigned:
         bone = origin_bone if end_type == 'origin' else insertion_bone
         if not bone:
             continue
-        for vi in lv:
+        for vi in tet_loop_verts:
             fixed_verts[vi] = (bone, end_type)
             anchor_tet_set.add(vi)
 
