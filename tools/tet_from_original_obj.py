@@ -343,29 +343,40 @@ def process_muscle(muscle_name, obj_path, contour_tet_path, output_path, skel, m
         if not made_any:
             other_loops.append(loop)
 
-    # Close every full boundary loop with a centroid fan (watertight).
-    # Sub-contour classification above provides per-vert bone labels
-    # (anchor_bone_map); cap_face_indices afterward filters to small
-    # same-bone tris for green rendering. Using fan (not CDT) for every
-    # loop avoids triangle-lib crashes on wrap-around boundaries.
+    # Close every full boundary loop with a single centroid fan. Each fan
+    # centroid also gets anchored to the dominant bone of its loop's
+    # sub-contours — so when AM's loop runs around from Os_Coxae (top) to
+    # Femur (bottom), the centroid follows whichever bone has more anchors
+    # in that loop, preventing arbitrary drift of the fan star vertex.
     closed_v = obj_v.tolist()
     closed_f = obj_f.tolist()
-    n_surface = len(obj_f)
-    cap_face_indices_pre = []  # every cap tri (same-bone filter applied later)
+    cap_face_indices_pre = []
     anchor_verts = set()
-    # Anchor set: verts in any named (sub-contour) arc.
+    extra_anchor_centers = {}  # center_idx -> (bone, end_type)
     for arc in named_cap_loops:
         for vi in arc:
             anchor_verts.add(int(vi))
-    # Fan-close the FULL boundary loops that contributed to named_cap_loops
-    # and any remaining filler loops.
-    for loop in all_loops:
+    # Build per-loop dominant bone from sub-contour assignments.
+    loop_dominant = {}  # id(loop) -> (bone, end_type) or None
+    from collections import Counter as _Counter
+    for li, loop in enumerate(all_loops):
+        loop_set = set(loop)
+        votes = _Counter()
+        for arc, (et, bone) in zip(named_cap_loops, named_cap_end_types):
+            if arc and arc[0] in loop_set:
+                votes[(bone, et)] += len(arc)
+        loop_dominant[li] = votes.most_common(1)[0][0] if votes else None
+    for li, loop in enumerate(all_loops):
         n = len(loop)
         if n < 3:
             continue
         centroid = np.mean([closed_v[vi] for vi in loop], axis=0)
         center_idx = len(closed_v)
         closed_v.append(centroid.tolist())
+        dom = loop_dominant.get(li)
+        if dom:
+            extra_anchor_centers[center_idx] = dom
+            anchor_verts.add(center_idx)
         for i in range(n):
             fi = len(closed_f)
             closed_f.append([loop[i], loop[(i + 1) % n], center_idx])
@@ -454,6 +465,12 @@ def process_muscle(muscle_name, obj_path, contour_tet_path, output_path, skel, m
         for vi in tet_arc_verts:
             fixed_verts[vi] = (bone, end_type)
             anchor_tet_set.add(vi)
+    # Also anchor fan-centroid verts to their loop's dominant bone.
+    for center_idx_obj, (bone, end_type) in extra_anchor_centers.items():
+        tet_vi = int(c2t[int(center_idx_obj)])
+        if bone:
+            fixed_verts[tet_vi] = (bone, end_type)
+            anchor_tet_set.add(tet_vi)
 
     # If no cap loops classified (all seams, or closed-mesh OBJ with no
     # boundaries): fall back to XML-waypoint-nearest tet verts. Each tet
