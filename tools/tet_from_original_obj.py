@@ -279,26 +279,35 @@ def process_muscle(muscle_name, obj_path, contour_tet_path, output_path, skel, m
     # 'insertion') and find contiguous runs of same label → each run is a
     # cap sub-contour. All verts in a sub-contour share the same bone.
     all_loops = [L for L in all_loops if len(L) >= 3]
-    _origin_mean_obj = (np.vstack([s[2] for s in xml_data]).mean(axis=0)
-                        if xml_data else None)
-    _insertion_mean_obj = (np.vstack([s[3] for s in xml_data]).mean(axis=0)
-                           if xml_data else None)
-    _origin_pts = np.vstack([s[2] for s in xml_data]) if xml_data else np.zeros((1, 3))
-    _insertion_pts = np.vstack([s[3] for s in xml_data]) if xml_data else np.zeros((1, 3))
-    _origin_tree = cKDTree(_origin_pts) if len(_origin_pts) else None
-    _insertion_tree = cKDTree(_insertion_pts) if len(_insertion_pts) else None
+    # Build a per-waypoint bone table: each XML waypoint is an attachment
+    # point with its own stream's origin/insertion bone. Supports multi-head
+    # muscles where different streams have different origin bones
+    # (e.g. Biceps Femoris: long head Os_Coxae, short head Femur).
+    _wp_pts = []
+    _wp_bones = []
+    _wp_ends = []  # 'origin' or 'insertion'
+    if xml_data:
+        for (o_bone, i_bone, o_pts, i_pts) in xml_data:
+            for p in o_pts:
+                _wp_pts.append(p); _wp_bones.append(o_bone); _wp_ends.append('origin')
+            for p in i_pts:
+                _wp_pts.append(p); _wp_bones.append(i_bone); _wp_ends.append('insertion')
+    _wp_pts = np.array(_wp_pts) if _wp_pts else np.zeros((1, 3))
+    _wp_tree = cKDTree(_wp_pts) if len(_wp_pts) else None
     _CAP_MAX_OBJ = 0.05
 
     def _classify_vi(vi):
+        if _wp_tree is None:
+            return None
         p = obj_v[vi]
-        d_o = (_origin_tree.query(p)[0] if _origin_tree is not None else float('inf'))
-        d_i = (_insertion_tree.query(p)[0] if _insertion_tree is not None else float('inf'))
-        if min(d_o, d_i) > _CAP_MAX_OBJ:
-            return None  # too far from either attachment → seam vert
-        return 'origin' if d_o <= d_i else 'insertion'
+        d, idx = _wp_tree.query(p)
+        if d > _CAP_MAX_OBJ:
+            return None  # seam vert — far from every attachment waypoint
+        # Return (end_type, bone) so downstream sees both
+        return (_wp_ends[idx], _wp_bones[idx])
 
     named_cap_loops = []
-    named_cap_end_types = []
+    named_cap_end_types = []  # (end_type, bone_name) tuples
     other_loops = []
     for loop in all_loops:
         labels = [_classify_vi(vi) for vi in loop]
@@ -433,16 +442,16 @@ def process_muscle(muscle_name, obj_path, contour_tet_path, output_path, skel, m
     origin_tree = cKDTree(origin_pts)
     insertion_tree = cKDTree(insertion_pts)
 
-    # Apply the per-loop classification computed earlier (named_cap_end_types
-    # parallel to named_cap_loops). All verts in a loop get the SAME bone.
+    # Apply per-sub-contour classification. named_cap_end_types holds
+    # (end_type, bone_name) from the per-waypoint lookup — supports
+    # multi-head muscles with different bones per origin stream.
     fixed_verts = {}
     anchor_tet_set = set()
-    for loop, end_type in zip(named_cap_loops, named_cap_end_types):
-        tet_loop_verts = sorted({int(c2t[int(vi)]) for vi in loop})
-        bone = origin_bone if end_type == 'origin' else insertion_bone
+    for arc, (end_type, bone) in zip(named_cap_loops, named_cap_end_types):
+        tet_arc_verts = sorted({int(c2t[int(vi)]) for vi in arc})
         if not bone:
             continue
-        for vi in tet_loop_verts:
+        for vi in tet_arc_verts:
             fixed_verts[vi] = (bone, end_type)
             anchor_tet_set.add(vi)
 
