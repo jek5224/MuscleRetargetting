@@ -275,17 +275,61 @@ def process_muscle(muscle_name, obj_path, contour_tet_path, output_path, skel, m
     obj_f = np.array(mesh.faces, dtype=np.int32)
     print(f'  [{muscle_name}] OBJ {len(obj_v)}v {len(obj_f)}f', flush=True)
 
-    print(f'  [{muscle_name}] decimate', flush=True)
+    print(f'  [{muscle_name}] decimate (preserving boundary verts)', flush=True)
     target_verts = 1500
     if len(obj_v) > target_verts:
+        # Detect boundary verts BEFORE decimation — these are attachment
+        # sites and must be preserved anatomically.
+        _ec = Counter()
+        for face in obj_f:
+            for i in range(3):
+                a, b = int(face[i]), int(face[(i+1) % 3])
+                _ec[(min(a, b), max(a, b))] += 1
+        bnd_verts_raw = set()
+        for (a, b), c in _ec.items():
+            if c == 1:
+                bnd_verts_raw.add(a); bnd_verts_raw.add(b)
+        bnd_pos_raw = np.array([obj_v[i] for i in sorted(bnd_verts_raw)])
+        print(f'    raw boundary verts: {len(bnd_verts_raw)}', flush=True)
+
         ratio = target_verts / len(obj_v)
         try:
             simp = trimesh.Trimesh(vertices=obj_v, faces=obj_f, process=False)
-            simp = simp.simplify_quadric_decimation(face_count=int(len(obj_f) * ratio))
+            # Lower aggressiveness → quadric decimator tries harder to keep
+            # feature edges. Available via fast_simplification backend.
+            try:
+                simp = simp.simplify_quadric_decimation(
+                    face_count=int(len(obj_f) * ratio), aggression=5.0)
+            except TypeError:
+                simp = simp.simplify_quadric_decimation(
+                    face_count=int(len(obj_f) * ratio))
             obj_v = np.array(simp.vertices, dtype=np.float64)
             obj_f = np.array(simp.faces, dtype=np.int32)
         except Exception as e:
             print(f'    decimate failed: {e} — using raw OBJ')
+
+        # Snap decimated boundary verts to nearest raw boundary verts so
+        # attachment geometry is preserved exactly at origin/insertion.
+        if len(bnd_pos_raw) > 0:
+            _ec2 = Counter()
+            for face in obj_f:
+                for i in range(3):
+                    a, b = int(face[i]), int(face[(i+1) % 3])
+                    _ec2[(min(a, b), max(a, b))] += 1
+            bnd_verts_dec = set()
+            for (a, b), c in _ec2.items():
+                if c == 1:
+                    bnd_verts_dec.add(a); bnd_verts_dec.add(b)
+            bnd_verts_dec = sorted(bnd_verts_dec)
+            if bnd_verts_dec:
+                raw_bnd_tree = cKDTree(bnd_pos_raw)
+                dec_pos = obj_v[bnd_verts_dec]
+                _, nn_idx = raw_bnd_tree.query(dec_pos)
+                snapped = bnd_pos_raw[nn_idx]
+                max_snap = np.linalg.norm(snapped - dec_pos, axis=1).max()
+                obj_v[bnd_verts_dec] = snapped
+                print(f'    snapped {len(bnd_verts_dec)} decimated boundary '
+                      f'verts; max_snap={max_snap*1000:.2f}mm', flush=True)
 
     print(f'  [{muscle_name}] dedup', flush=True)
     rounded = np.round(obj_v, 6)
