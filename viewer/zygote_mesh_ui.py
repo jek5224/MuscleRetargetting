@@ -7154,6 +7154,20 @@ def run_all_tet_sim_with_constraints(v, max_iterations=100, tolerance=1e-4, oute
         # Standard mode: alternating individual solve + constraint enforcement
         print(f"Running coupled tet sim for {len(active_muscles)} muscles with {n_constraints} inter-muscle constraints...")
 
+        # Build bone collision trimeshes ONCE per frame and share across all
+        # muscles. Without this every muscle rebuilds them and trimesh
+        # construction over the full skeleton is the dominant cost on dense
+        # meshes (~hundreds of ms per muscle).
+        shared_bone_meshes = None
+        first_mobj = next(iter(active_muscles.values()))
+        if getattr(first_mobj, 'soft_body_collision', False):
+            shared_bone_meshes = first_mobj._build_transformed_collision_meshes(
+                v.zygote_skeleton_meshes, v.env.skel, verbose=False
+            )
+            shared_bone_meshes.extend(
+                first_mobj._build_dart_shape_collision_meshes(v.env.skel, verbose=False)
+            )
+
         for outer_iter in range(outer_iterations):
             # Step 1: Run individual soft body solves
             total_residual = 0
@@ -7165,6 +7179,7 @@ def run_all_tet_sim_with_constraints(v, max_iterations=100, tolerance=1e-4, oute
                     tolerance=tolerance,
                     enable_collision=mobj.soft_body_collision,
                     collision_margin=mobj.soft_body_collision_margin,
+                    collision_mesh_override=shared_bone_meshes,
                     verbose=False,
                     use_arap=mobj.use_arap
                 )

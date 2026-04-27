@@ -1025,8 +1025,14 @@ class SoftBodySimulation:
             if self.fixed_targets is not None and len(self.fixed_indices) > 0:
                 self.positions[self.fixed_indices] = self.fixed_targets
 
-            # Collision resolution within ARAP loop (multiple passes)
-            if collision_meshes is not None and len(collision_meshes) > 0:
+            # In-loop collision is now disabled by default — ARAP elasticity
+            # was undoing the push next iter, and on dense bone meshes the
+            # trimesh nearest queries dominate runtime. The post-ARAP
+            # bone_surface_collision pass below survives elasticity. Set
+            # `_inloop_collision = True` on the soft body to restore.
+            if (getattr(self, '_inloop_collision', False)
+                    and collision_meshes is not None
+                    and len(collision_meshes) > 0):
                 total_pushed = 0
                 for pass_i in range(3):  # Multiple passes for deep penetrations
                     pushed = self._resolve_collisions_arap(collision_meshes, collision_margin)
@@ -1079,16 +1085,25 @@ class SoftBodySimulation:
                     self.positions[i] = 0.3 * self.positions[i] + 0.7 * neighbor_avg
                     print(f"  Fixed stuck vertex {i} (neighbors={n_neighbors}) by moving toward neighbors")
 
-        # Final collision pass (not undone by ARAP)
+        # Final collision pass (not undone by ARAP). Uses surface vertex- and
+        # edge-bone resolution so contour-mesh muscles, whose long surface
+        # edges can tunnel through bones, get pushed back out cleanly.
         if collision_meshes is not None and len(collision_meshes) > 0:
-            final_pushed = 0
-            for _ in range(5):
-                pushed = self._resolve_collisions_arap(collision_meshes, collision_margin)
-                final_pushed += pushed
-                if pushed == 0:
-                    break
-            if final_pushed > 0:
-                print(f"    Final collision: pushed {final_pushed} verts")
+            from viewer.bone_surface_collision import (
+                resolve_bone_collisions, compute_surface_topology,
+            )
+            sv = getattr(self, '_surf_vidx_cache', None)
+            se = getattr(self, '_surf_edges_cache', None)
+            if sv is None or se is None:
+                sv, se = compute_surface_topology(tetrahedra=self.tetrahedra)
+                self._surf_vidx_cache = sv
+                self._surf_edges_cache = se
+            n_v, n_e = resolve_bone_collisions(
+                self.positions, self.fixed_indices, sv, se,
+                collision_meshes, margin=collision_margin, max_iters=1,
+            )
+            if n_v + n_e > 0:
+                print(f"    Bone collision: pushed {n_v} verts, {n_e} edge tunnels")
 
         return max_iterations, max_disp
 
