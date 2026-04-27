@@ -8753,17 +8753,21 @@ def _motion_load_cache(v):
     for mname in v.zygote_muscle_meshes:
         mobj = v.zygote_muscle_meshes[mname]
         expected_n = mobj.tet_vertices.shape[0] if mobj.tet_vertices is not None else None
-        # Collect files: region subdirs first, then top-level last (top-level wins on overlap)
+        # Collect files from every subdir + top-level, sorted by mtime so the
+        # most recently baked chunk wins on overlap. Older bakes left lying
+        # around (e.g. _old_cache/emu_*, layered_coll) no longer shadow newer
+        # ones at frames they happen to cover.
         npz_files = []
-        for subdir in sorted(glob.glob(os.path.join(cache_dir, '*/'))):
-            npz_files.extend(sorted(glob.glob(os.path.join(subdir, f'{mname}_chunk_*.npz'))))
+        for subdir in glob.glob(os.path.join(cache_dir, '*/')):
+            npz_files.extend(glob.glob(os.path.join(subdir, f'{mname}_chunk_*.npz')))
             sub_legacy = os.path.join(subdir, f'{mname}.npz')
             if os.path.exists(sub_legacy):
                 npz_files.append(sub_legacy)
-        npz_files.extend(sorted(glob.glob(os.path.join(cache_dir, f'{mname}_chunk_*.npz'))))
+        npz_files.extend(glob.glob(os.path.join(cache_dir, f'{mname}_chunk_*.npz')))
         legacy = os.path.join(cache_dir, f'{mname}.npz')
         if os.path.exists(legacy):
             npz_files.append(legacy)
+        npz_files.sort(key=lambda p: os.path.getmtime(p))
         if not npz_files:
             continue
         cache = {}
