@@ -8736,12 +8736,18 @@ def _motion_patch_waypoints(v):
 
 def _motion_load_cache(v):
     """Load all cached deformation data for the current BVH into memory.
-    Supports both legacy single-file ({mname}.npz) and chunked ({mname}_chunk_*.npz) formats."""
+    Supports both legacy single-file ({mname}.npz) and chunked ({mname}_chunk_*.npz) formats.
+
+    Filters cache entries by vertex-count match against current tet so a
+    1216-vert original-mesh bake doesn't silently shadow a 512-vert contour
+    bake (or vice versa) when subdirs from both modes coexist."""
     v.motion_deform_cache = {}
     cache_dir = _motion_cache_dir(v)
     if cache_dir is None:
         return
     for mname in v.zygote_muscle_meshes:
+        mobj = v.zygote_muscle_meshes[mname]
+        expected_n = mobj.tet_vertices.shape[0] if mobj.tet_vertices is not None else None
         # Collect files: region subdirs first, then top-level last (top-level wins on overlap)
         npz_files = []
         for subdir in sorted(glob.glob(os.path.join(cache_dir, '*/'))):
@@ -8760,6 +8766,9 @@ def _motion_load_cache(v):
             data = np.load(npz_path, allow_pickle=True)
             frames = data['frames']
             positions = data['positions']
+            # Skip entire chunk if its vertex count doesn't match current tet.
+            if expected_n is not None and positions.shape[1] != expected_n:
+                continue
             has_wp = 'waypoints_flat' in data and 'waypoints_shape' in data
             wp_flats = data['waypoints_flat'] if has_wp else None
             wp_shape_str = None
