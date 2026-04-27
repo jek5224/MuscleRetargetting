@@ -49,7 +49,7 @@ def draw_zygote_muscle_ui(v):
     if imgui.tree_node("Muscle", imgui.TREE_NODE_DEFAULT_OPEN):
         # Mesh mode swap (original / contour)
         if not hasattr(v, '_mesh_mode'):
-            v._mesh_mode = 'contour'
+            v._mesh_mode = _detect_mesh_mode()
         if os.path.exists('tet_orig_std'):
             cur = v._mesh_mode.upper()
             nxt = 'Original' if v._mesh_mode == 'contour' else 'Contour'
@@ -2081,7 +2081,7 @@ def _draw_motion_browser_ui(v):
         # --- Mesh Mode (Original / Contour) ---
         imgui.separator()
         if not hasattr(v, '_mesh_mode'):
-            v._mesh_mode = 'contour'
+            v._mesh_mode = _detect_mesh_mode()
         mode_label = f"Mesh: {v._mesh_mode.upper()}"
         if imgui.button(f"Swap to {'Original' if v._mesh_mode == 'contour' else 'Contour'}##mesh_mode"):
             _swap_mesh_mode(v)
@@ -8141,6 +8141,22 @@ def _motion_run_tet_settle(v):
         )
 
 
+def _detect_mesh_mode():
+    """Infer current mesh mode by checking tet/<m>_tet.npz size against the
+    .contour_backup. If any tet file in tet/ has been overwritten by an
+    original-mesh tet (file size differs from backup), report 'original'."""
+    for backup in glob.glob(os.path.join('tet', '*_tet.npz.contour_backup')):
+        live = backup[:-len('.contour_backup')]
+        if not os.path.exists(live):
+            continue
+        try:
+            if os.path.getsize(live) != os.path.getsize(backup):
+                return 'original'
+        except OSError:
+            continue
+    return 'contour'
+
+
 def _swap_mesh_mode(v):
     """Swap between original and contour mesh display for muscles with original tets.
 
@@ -8185,31 +8201,20 @@ def _swap_mesh_mode(v):
         # Reload tet mesh
         mobj.load_tetrahedron_mesh(mname, filepath=tet_path)
 
-    # Reload cache: ONLY from the specific tag directory for swapped muscles
-    if v.motion_bvh is not None:
-        bvh_name = os.path.splitext(os.path.basename(v.motion_bvh_files[v.motion_selected_idx]))[0]
-        tag = ORIG_CACHE_TAG if new_mode == 'original' else CONTOUR_CACHE_TAG
-        cache_dir = os.path.join('data', 'motion_cache', bvh_name, tag)
-        if os.path.exists(cache_dir):
-            for mname in MUSCLES:
-                npz_files = sorted(glob.glob(os.path.join(cache_dir, f'{mname}_chunk_*.npz')))
-                if not npz_files:
-                    continue
-                cache = {}
-                for npz_path in npz_files:
-                    data = np.load(npz_path, allow_pickle=True)
-                    for i, f in enumerate(data['frames']):
-                        entry = {'positions': data['positions'][i]}
-                        if 'waypoints_flat' in data:
-                            entry['waypoints_flat'] = data['waypoints_flat'][i]
-                            raw = data['waypoints_shape'][0]
-                            entry['waypoints_shape'] = raw.decode('utf-8') if isinstance(raw, (bytes, np.bytes_)) else str(raw)
-                        cache[int(f)] = entry
-                v.motion_deform_cache[mname] = cache
-                n_verts = data['positions'].shape[1] if len(data['positions'].shape) == 3 else 0
-                print(f"  {mname}: loaded {len(cache)} frames, {n_verts} verts from {tag}")
-
     v._mesh_mode = new_mode
+
+    # Reload cache via the shared loader so any subdir whose chunk vert count
+    # matches the active tet is picked up — not just the hardcoded
+    # layered_contour / layered_coll_indep tags.
+    if v.motion_bvh is not None:
+        _motion_load_cache(v)
+        for mname in MUSCLES:
+            if mname in v.motion_deform_cache and v.motion_deform_cache[mname]:
+                cache = v.motion_deform_cache[mname]
+                first_frame = next(iter(cache))
+                n_verts = cache[first_frame]['positions'].shape[0]
+                print(f"  {mname}: {len(cache)} frames, {n_verts} verts")
+
     print(f"Mesh mode: {new_mode.upper()}")
 
     # Immediately apply current frame
