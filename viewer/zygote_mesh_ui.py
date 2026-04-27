@@ -7616,66 +7616,94 @@ def _enforce_inter_muscle_constraints(v, active_muscles, stiffness=0.9):
     Enforce inter-muscle distance constraints by adjusting vertex positions.
     Respects fixed vertices - only moves free vertices.
 
-    Returns: total constraint error
+    Returns: average constraint error.
+
+    Vectorized: groups constraints by (name1, name2) pair and applies all
+    distance corrections at once. The previous Python loop over every
+    constraint became O(seconds) per call once total constraints exceeded
+    ~100k (e.g. dense original-mesh tets at 0.015 m threshold).
     """
-    total_error = 0
-    constraint_count = 0
+    if not v.inter_muscle_constraints:
+        return 0.0
 
-    for constraint in v.inter_muscle_constraints:
-        # Unpack constraint (new format with fixed status)
-        name1, v1_idx, v1_fixed, name2, v2_idx, v2_fixed, rest_dist = constraint
+    # Group constraints by (name1, name2) pair to amortize muscle-positions
+    # lookup; each pair becomes a vectorized batch.
+    if not hasattr(v, '_inter_muscle_grouped_cache') or \
+            v._inter_muscle_grouped_cache_id != id(v.inter_muscle_constraints):
+        groups = {}
+        for c in v.inter_muscle_constraints:
+            key = (c[0], c[3])
+            groups.setdefault(key, []).append(c)
+        compiled = {}
+        for (n1, n2), lst in groups.items():
+            v1_idx = np.array([c[1] for c in lst], dtype=np.int64)
+            v1_fixed = np.array([c[2] for c in lst], dtype=bool)
+            v2_idx = np.array([c[4] for c in lst], dtype=np.int64)
+            v2_fixed = np.array([c[5] for c in lst], dtype=bool)
+            rest = np.array([c[6] for c in lst], dtype=np.float64)
+            both_fixed = v1_fixed & v2_fixed
+            keep = ~both_fixed
+            compiled[(n1, n2)] = (
+                v1_idx[keep], v1_fixed[keep],
+                v2_idx[keep], v2_fixed[keep],
+                rest[keep],
+            )
+        v._inter_muscle_grouped_cache = compiled
+        v._inter_muscle_grouped_cache_id = id(v.inter_muscle_constraints)
 
-        if name1 not in active_muscles or name2 not in active_muscles:
+    total_error = 0.0
+    total_count = 0
+    skip_draw = any(getattr(m, "_baking_mode", False) for m in active_muscles.values())
+
+    # Per-muscle accumulators so verts touched by N constraints get the AVERAGE
+    # correction, not the sum (sum diverges on dense meshes with ~1.2M constraints).
+    corr_acc = {name: np.zeros_like(m.soft_body.positions) for name, m in active_muscles.items()}
+    count_acc = {name: np.zeros(len(m.soft_body.positions)) for name, m in active_muscles.items()}
+
+    for (n1, n2), (i1, f1, i2, f2, rest) in v._inter_muscle_grouped_cache.items():
+        if n1 not in active_muscles or n2 not in active_muscles:
             continue
-
-        # Skip if both vertices are fixed
-        if v1_fixed and v2_fixed:
+        if i1.size == 0:
             continue
-
-        mobj1 = active_muscles[name1]
-        mobj2 = active_muscles[name2]
-
-        # Get current positions
-        pos1 = mobj1.soft_body.positions[v1_idx].copy()
-        pos2 = mobj2.soft_body.positions[v2_idx].copy()
-
-        # Current distance
-        diff = pos2 - pos1
-        curr_dist = np.linalg.norm(diff)
-
-        if curr_dist < 1e-8:
+        m1 = active_muscles[n1]
+        m2 = active_muscles[n2]
+        p1 = m1.soft_body.positions[i1]
+        p2 = m2.soft_body.positions[i2]
+        diff = p2 - p1
+        curr = np.linalg.norm(diff, axis=1)
+        valid = curr > 1e-8
+        if not valid.any():
             continue
+        err = curr - rest
+        total_error += float(np.sum(np.abs(err[valid])))
+        total_count += int(valid.sum())
+        # Correction weights per side: fixed verts don't move.
+        w1 = np.where(f1, 0.0, np.where(f2, 1.0, 0.5))
+        w2 = np.where(f2, 0.0, np.where(f1, 1.0, 0.5))
+        unit = np.zeros_like(diff)
+        unit[valid] = diff[valid] / curr[valid, None]
+        corr = err[:, None] * stiffness * unit
+        # Mask invalid rows out (no contribution)
+        valid_mask = valid.astype(np.float64)[:, None]
+        np.add.at(corr_acc[n1], i1, corr * w1[:, None] * valid_mask)
+        np.add.at(count_acc[n1], i1, (w1 > 0) & valid)
+        np.add.at(corr_acc[n2], i2, -corr * w2[:, None] * valid_mask)
+        np.add.at(count_acc[n2], i2, (w2 > 0) & valid)
 
-        # Error
-        error = curr_dist - rest_dist
-        total_error += abs(error)
-        constraint_count += 1
+    # Apply averaged correction per muscle
+    for name, mobj in active_muscles.items():
+        cnt = count_acc[name]
+        mask = cnt > 0
+        if mask.any():
+            mobj.soft_body.positions[mask] += corr_acc[name][mask] / cnt[mask, None]
 
-        # Correction direction
-        direction = diff / curr_dist
-
-        # Determine correction weights based on fixed status
-        if v1_fixed:
-            # Only v2 moves
-            w1, w2 = 0.0, 1.0
-        elif v2_fixed:
-            # Only v1 moves
-            w1, w2 = 1.0, 0.0
-        else:
-            # Both move equally
-            w1, w2 = 0.5, 0.5
-
-        # Apply correction
-        correction = error * stiffness
-        mobj1.soft_body.positions[v1_idx] += direction * correction * w1
-        mobj2.soft_body.positions[v2_idx] -= direction * correction * w2
-
-    # Update tet_vertices for rendering
+    # Sync tet_vertices; skip draw-array rebuild when any muscle is baking.
     for name, mobj in active_muscles.items():
         mobj.tet_vertices = mobj.soft_body.get_positions().astype(np.float32)
-        mobj._prepare_tet_draw_arrays()
+        if not skip_draw:
+            mobj._prepare_tet_draw_arrays()
 
-    return total_error / max(1, constraint_count)
+    return total_error / max(1, total_count)
 
 
 def draw_inter_muscle_constraint_lines(v):

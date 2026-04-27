@@ -96,12 +96,16 @@ def load_muscle_meshes(muscles_path):
     return muscle_meshes
 
 
-def load_tet_meshes(muscle_meshes):
-    """Load tetrahedron meshes for each muscle."""
-    print("[4/8] Loading tet meshes...")
+def load_tet_meshes(muscle_meshes, tet_dir="tet"):
+    """Load tetrahedron meshes for each muscle from `tet_dir`."""
+    print(f"[4/8] Loading tet meshes from {tet_dir}/...")
     loaded = 0
     for name, mobj in muscle_meshes.items():
-        mobj.load_tetrahedron_mesh(name)
+        path = os.path.join(tet_dir, f"{name}_tet.npz")
+        if os.path.exists(path):
+            mobj.load_tetrahedron_mesh(name, filepath=path)
+        else:
+            mobj.load_tetrahedron_mesh(name)
         if mobj.tet_vertices is not None:
             loaded += 1
         else:
@@ -159,7 +163,7 @@ def build_context(skel, muscle_meshes, skeleton_meshes, mesh_info, args):
         zygote_skeleton_meshes=skeleton_meshes,
         inter_muscle_constraints=[],
         inter_muscle_constraint_threshold=args.constraint_threshold,
-        coupled_as_unified_volume=True,
+        coupled_as_unified_volume=False,
         use_gpu_arap=use_gpu,
         use_taichi_arap=use_taichi,
         use_muscle_aware_arap=True,
@@ -347,7 +351,46 @@ def main():
         help="Region tag for per-region baking (e.g. L_UpLeg). "
              "Output goes to motion_cache/<bvh>/<tag>/ instead of motion_cache/<bvh>/",
     )
+    parser.add_argument(
+        "--tet-dir",
+        default="tet",
+        help="Directory holding <muscle>_tet.npz tet meshes (default: tet).",
+    )
+    parser.add_argument(
+        "--phase1-iters",
+        type=int,
+        default=None,
+        help="Mass-spring (Phase-1) iterations per outer round per muscle. "
+             "Default: auto — 50 for contour tets, 8 for non-default --tet-dir.",
+    )
+    parser.add_argument(
+        "--outer-iters",
+        type=int,
+        default=None,
+        help="Outer iterations alternating per-muscle solve + inter-muscle "
+             "constraint enforcement. Default: auto — 20 for contour, 3 for "
+             "non-default --tet-dir.",
+    )
+    parser.add_argument(
+        "--tolerance",
+        type=float,
+        default=1e-4,
+        help="ARAP convergence tolerance (m). Default 1e-4.",
+    )
+    parser.add_argument(
+        "--no-self-collision",
+        action="store_true",
+        help="Disable per-muscle bone collision push. Faster on dense tets; "
+             "use when bones are simple and inter-muscle constraints suffice.",
+    )
     args = parser.parse_args()
+
+    # Auto defaults: original-mesh tets are denser → cap Phase-1 / outer iters.
+    is_original_tet = args.tet_dir != "tet"
+    if args.phase1_iters is None:
+        args.phase1_iters = 8 if is_original_tet else 50
+    if args.outer_iters is None:
+        args.outer_iters = 3 if is_original_tet else 20
 
     if not os.path.exists(args.bvh):
         print(f"ERROR: BVH file not found: {args.bvh}")
@@ -360,7 +403,7 @@ def main():
     skel, bvh_info, mesh_info = load_skeleton()
     skeleton_meshes = load_skeleton_meshes()
     muscle_meshes = load_muscle_meshes(args.muscles)
-    load_tet_meshes(muscle_meshes)
+    load_tet_meshes(muscle_meshes, tet_dir=args.tet_dir)
 
     # Reset skeleton to rest pose before init
     print("[6/8] Resetting skeleton to rest pose...")
@@ -408,10 +451,15 @@ def main():
     }
     print(f"Active muscles: {len(active_muscles)}")
 
-    # Reset soft bodies to rest state
+    # Reset soft bodies to rest state + override Phase-1/2 iter caps for the
+    # baking driver. With dense original tets, Phase-1 (mass-spring) becomes
+    # the bottleneck — phase1-iters lets the driver lower the floor.
     for mobj in active_muscles.values():
         mobj.soft_body.positions = mobj.soft_body.rest_positions.copy()
         mobj.tet_vertices = mobj.soft_body.rest_positions.astype(np.float32).copy()
+        mobj._baking_phase1_iters = args.phase1_iters
+        if args.no_self_collision:
+            mobj.soft_body_collision = False
 
     # Clear cached backend
     ctx._unified_arap_backend = None
@@ -440,16 +488,34 @@ def main():
         # Run simulation
         if ctx.use_fem_sim:
             from viewer.fem_sim import run_all_fem_sim
-            run_all_fem_sim(ctx, max_iterations=args.settle_iters, tolerance=1e-4,
+            run_all_fem_sim(ctx, max_iterations=args.settle_iters,
+                            tolerance=args.tolerance,
                             verbose=(frame == start_frame))
         else:
             run_all_tet_sim_with_constraints(
-                ctx, max_iterations=args.settle_iters, tolerance=1e-4
+                ctx, max_iterations=args.settle_iters,
+                tolerance=args.tolerance,
+                outer_iterations=args.outer_iters,
             )
 
-        # Capture positions
+        # Capture positions — verify fixed vertices match bone positions
         for mname, mobj in active_muscles.items():
-            bake_data[mname][frame] = mobj.soft_body.get_positions().astype(np.float32)
+            positions = mobj.soft_body.get_positions()
+            if frame == start_frame and hasattr(mobj, 'soft_body_local_anchors'):
+                # Check every fixed vertex
+                for vi, (body_name, local_pos) in mobj.soft_body_local_anchors.items():
+                    body_node = skel.getBodyNode(body_name)
+                    if body_node is None:
+                        print(f"  WARN {mname} vi={vi}: bone '{body_name}' not found!", flush=True)
+                        continue
+                    wt = body_node.getWorldTransform()
+                    expected = wt.rotation() @ local_pos + wt.translation()
+                    actual = positions[int(vi)]
+                    err = np.linalg.norm(actual - expected)
+                    if err > 0.001:
+                        print(f"  WARN {mname} vi={vi}: bone={body_name}, err={err:.4f}m, "
+                              f"actual={actual}, expected={expected}", flush=True)
+            bake_data[mname][frame] = positions.astype(np.float32)
 
         # Restore flags
         for mname, mobj in active_muscles.items():

@@ -355,6 +355,7 @@ class SoftBodySimulation:
         if self.fixed_targets is not None and len(self.fixed_indices) > 0:
             self.positions[self.fixed_indices] = self.fixed_targets
 
+        max_disp = 0.0
         for iteration in range(max_iterations):
             old_positions = self.positions.copy()
             self._relaxation_step_vectorized(muscle_mode=muscle_mode)
@@ -697,6 +698,19 @@ class SoftBodySimulation:
                 edges[j] = self.rest_positions[j] - self.rest_positions[i]
             self.arap_rest_edges.append(edges)
 
+        # Vectorized directed-edge arrays for fast local/global ARAP steps.
+        # Each undirected edge (i,j) becomes two directed edges (i->j) and (j->i).
+        ei = np.asarray(self.edge_i, dtype=np.int64)
+        ej = np.asarray(self.edge_j, dtype=np.int64)
+        self._arap_e_src = np.concatenate([ei, ej])
+        self._arap_e_dst = np.concatenate([ej, ei])
+        rest_ij = self.rest_positions[ej] - self.rest_positions[ei]
+        self._arap_e_rest = np.concatenate([rest_ij, -rest_ij], axis=0).astype(np.float64)
+        self._arap_e_w = np.ones(self._arap_e_src.shape[0], dtype=np.float64)
+        # Cache for target_edges flat array (rebuilt when target_edges identity changes)
+        self._arap_target_rest_arr = None
+        self._arap_target_rest_id = None
+
         # Build and pre-factorize system matrix with fixed constraints
         self._build_arap_system()
 
@@ -875,6 +889,86 @@ class SoftBodySimulation:
 
         return new_positions
 
+    def _arap_local_step_vec(self, target_rest_arr=None):
+        """
+        Vectorized ARAP local step. Returns rotations as (n, 3, 3) array.
+        target_rest_arr: optional (E_directed, 3) array of scaled rest edges.
+        """
+        n = self.num_vertices
+        e_src = self._arap_e_src
+        e_dst = self._arap_e_dst
+        e_w = self._arap_e_w
+        rest = target_rest_arr if target_rest_arr is not None else self._arap_e_rest
+
+        curr = self.positions[e_dst] - self.positions[e_src]  # (E, 3)
+        # Per-edge contribution: w * outer(curr, rest)  → (E, 3, 3)
+        contrib = (e_w[:, None, None] *
+                   curr[:, :, None] * rest[:, None, :])
+        S = np.zeros((n, 3, 3), dtype=np.float64)
+        np.add.at(S, e_src, contrib)
+
+        # Batched SVD over (n, 3, 3)
+        try:
+            U, sigma, Vt = np.linalg.svd(S)
+        except np.linalg.LinAlgError:
+            # Fallback: identity for all
+            R = np.broadcast_to(np.eye(3), (n, 3, 3)).copy()
+            return R
+
+        R = np.matmul(U, Vt)
+        # Reflection fix: where det(R) < 0, flip last column of U
+        dets = np.linalg.det(R)
+        neg = dets < 0
+        if neg.any():
+            U[neg, :, -1] *= -1
+            R[neg] = np.matmul(U[neg], Vt[neg])
+        # Degenerate cells (S ≈ 0) → identity
+        S_norm = np.linalg.norm(S.reshape(n, -1), axis=1)
+        small = (S_norm < 1e-10) | (sigma[:, 0] < 1e-10) | ~np.isfinite(R).all(axis=(1, 2))
+        if small.any():
+            R[small] = np.eye(3)
+        return R
+
+    def _arap_global_step_vec(self, rotations, target_rest_arr=None):
+        """
+        Vectorized ARAP global step. rotations: (n, 3, 3) array.
+        Returns new positions (n, 3).
+        """
+        n = self.num_vertices
+        e_src = self._arap_e_src
+        e_dst = self._arap_e_dst
+        e_w = self._arap_e_w
+        rest = target_rest_arr if target_rest_arr is not None else self._arap_e_rest
+
+        # b initialized for fixed verts to target, free verts to 0
+        b = np.zeros((n, 3), dtype=np.float64)
+        if self.fixed_targets is not None and len(self.fixed_indices) > 0:
+            b[self.fixed_indices] = self.fixed_targets
+        # Free verts get regularization * rest (must match _build_arap_system)
+        free_mask = ~self.fixed_mask
+        b[free_mask] += 1e-6 * self.rest_positions[free_mask]
+
+        # R_avg per directed edge
+        R_avg = 0.5 * (rotations[e_src] + rotations[e_dst])
+        edge_i_to_j = -rest  # (E, 3)
+        rhs = e_w[:, None] * np.einsum('eij,ej->ei', R_avg, edge_i_to_j)
+        # Only accumulate to free-vertex rows
+        free_edges = free_mask[e_src]
+        np.add.at(b, e_src[free_edges], rhs[free_edges])
+
+        new_positions = self.positions.copy()
+        for coord in range(3):
+            try:
+                if self.arap_use_factorized:
+                    result = self.arap_solver(b[:, coord])
+                else:
+                    result = scipy.sparse.linalg.spsolve(self.arap_L, b[:, coord])
+                if np.isfinite(result).all():
+                    new_positions[:, coord] = result
+            except Exception as e:
+                print(f"  ARAP solve failed (vec): {e}")
+        return new_positions
+
     def solve_arap(self, max_iterations=10, tolerance=1e-6, target_edges=None,
                    collision_meshes=None, collision_margin=0.002):
         """
@@ -895,14 +989,31 @@ class SoftBodySimulation:
         if self.fixed_targets is not None and len(self.fixed_indices) > 0:
             self.positions[self.fixed_indices] = self.fixed_targets
 
+        # Build flat (E,3) target rest array if target_edges is provided.
+        target_rest_arr = None
+        if target_edges is not None:
+            if isinstance(target_edges, np.ndarray):
+                target_rest_arr = target_edges
+            else:
+                tid = id(target_edges)
+                if self._arap_target_rest_id != tid:
+                    E_und = len(self.edge_i)
+                    rest_ij = np.empty((E_und, 3), dtype=np.float64)
+                    rest_ji = np.empty((E_und, 3), dtype=np.float64)
+                    for k, (i, j) in enumerate(zip(self.edge_i, self.edge_j)):
+                        rest_ij[k] = target_edges[i].get(j, self.arap_rest_edges[i][j])
+                        rest_ji[k] = target_edges[j].get(i, self.arap_rest_edges[j][i])
+                    self._arap_target_rest_arr = np.concatenate([rest_ij, rest_ji], axis=0)
+                    self._arap_target_rest_id = tid
+                target_rest_arr = self._arap_target_rest_arr
+
         for iteration in range(max_iterations):
             old_positions = self.positions.copy()
 
-            # Local step: find best rotations for current positions
-            rotations = self._arap_local_step(target_edges)
-
-            # Global step: solve for positions given rotations
-            self.positions = self._arap_global_step(rotations, target_edges)
+            # Vectorized local + global step (cached LU). Old per-vertex versions
+            # remain in the file for reference but are no longer the active path.
+            rotations = self._arap_local_step_vec(target_rest_arr)
+            self.positions = self._arap_global_step_vec(rotations, target_rest_arr)
 
             # Check for NaN/Inf and recover if needed
             if not np.isfinite(self.positions).all():
@@ -1104,8 +1215,8 @@ class SoftBodySimulation:
             if rest_len > 1e-6:
                 axis_ratio = np.clip(current_len / rest_len, 0.5, 2.0)
 
-        # Build target edges based on muscle behavior
-        target_edges = None
+        # Build target edges based on muscle behavior — vectorized flat (E_dir, 3) array.
+        target_rest_arr = None
         if (hasattr(self, 'cross_contour_edges') and self.cross_contour_edges is not None and
             hasattr(self, 'intra_contour_edges') and self.intra_contour_edges is not None):
 
@@ -1116,26 +1227,18 @@ class SoftBodySimulation:
             else:
                 perp_scale = 1.0
 
-            # Create scaled target edges
-            target_edges = [{} for _ in range(self.num_vertices)]
+            E_und = len(self.edge_i)
+            scale_arr = np.ones(E_und, dtype=np.float64)
+            scale_arr[self.cross_contour_edges] = axis_ratio
+            # intra-contour overrides cross only when cross is False
+            intra_only = self.intra_contour_edges & ~self.cross_contour_edges
+            scale_arr[intra_only] = perp_scale
+            # Apply scale to base directed-edge rest array (E_und forward, then E_und backward).
+            base = self._arap_e_rest  # (2*E_und, 3)
+            scale2 = np.concatenate([scale_arr, scale_arr])  # apply same scale to both directions
+            target_rest_arr = base * scale2[:, None]
 
-            for edge_idx, (i, j) in enumerate(zip(self.edge_i, self.edge_j)):
-                rest_ij = self.arap_rest_edges[i][j]
-                rest_ji = self.arap_rest_edges[j][i]
-
-                if self.cross_contour_edges[edge_idx]:
-                    # Cross-contour: scale with axis ratio
-                    scale = axis_ratio
-                elif self.intra_contour_edges[edge_idx]:
-                    # Intra-contour: expand perpendicular
-                    scale = perp_scale
-                else:
-                    scale = 1.0
-
-                target_edges[i][j] = rest_ij * scale
-                target_edges[j][i] = rest_ji * scale
-
-        return self.solve_arap(max_iterations, tolerance, target_edges,
+        return self.solve_arap(max_iterations, tolerance, target_rest_arr,
                                collision_meshes, collision_margin)
 
     # ============================================================================
@@ -1907,11 +2010,17 @@ class MuscleMeshMixin:
                     print(f"  Collision: muscle bbox = [{muscle_min[0]:.3f},{muscle_min[1]:.3f},{muscle_min[2]:.3f}] to [{muscle_max[0]:.3f},{muscle_max[1]:.3f},{muscle_max[2]:.3f}]")
 
         # === STEP 4: Two-phase relaxation ===
-        phase1_iters = max(max_iterations // 3, 50)
+        # Phase-1 (mass-spring) is `O(num_edges)` numpy work and dominates on
+        # dense original-mesh tets. Allow the bake driver to override the
+        # default floor of 50 via mobj._baking_phase1_iters before the frame
+        # loop. GUI/contour bake unaffected (attribute absent → default).
+        phase1_iters = getattr(self, '_baking_phase1_iters',
+                               max(max_iterations // 3, 50))
         effective_margin = collision_margin * 2
 
         if use_arap:
-            phase2_iters = min(15, max(max_iterations // 10, 5))
+            phase2_iters = getattr(self, '_baking_phase2_iters',
+                                   min(15, max(max_iterations // 10, 5)))
             arap_collision_meshes = collision_trimeshes if len(collision_trimeshes) > 0 else None
             if arap_collision_meshes is not None:
                 collision_in_arap = True
