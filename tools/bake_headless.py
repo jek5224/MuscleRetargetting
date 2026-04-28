@@ -163,7 +163,7 @@ def build_context(skel, muscle_meshes, skeleton_meshes, mesh_info, args):
         zygote_skeleton_meshes=skeleton_meshes,
         inter_muscle_constraints=[],
         inter_muscle_constraint_threshold=args.constraint_threshold,
-        coupled_as_unified_volume=False,
+        coupled_as_unified_volume=args.unified_volume,
         use_gpu_arap=use_gpu,
         use_taichi_arap=use_taichi,
         use_muscle_aware_arap=True,
@@ -278,20 +278,43 @@ def patch_waypoints(cache_dir, active_muscles, motion_bvh, skel):
     print(f"Waypoint patch complete: {patched} muscles updated")
 
 
-def flush_bake_data(bake_data, cache_dir, flush_count):
-    """Write accumulated frame data to chunk files, then clear memory."""
+def flush_bake_data(bake_data, cache_dir, flush_count, bake_anim=None):
+    """Write accumulated frame data to chunk files, then clear memory.
+
+    If bake_anim is provided, also writes a `positions_anim` array of shape
+    (F, K, V, 3) where K is the number of convergence snapshots per frame
+    (padded to the per-chunk max with the final position).
+    """
     for mname, frame_data in bake_data.items():
         if len(frame_data) == 0:
             continue
         sorted_frames = sorted(frame_data.keys())
         filepath = os.path.join(cache_dir, f"{mname}_chunk_{flush_count:04d}.npz")
-        np.savez(
-            filepath,
-            frames=np.array(sorted_frames, dtype=np.int32),
-            positions=np.array(
+        save_dict = {
+            'frames': np.array(sorted_frames, dtype=np.int32),
+            'positions': np.array(
                 [frame_data[f] for f in sorted_frames], dtype=np.float32
             ),
-        )
+        }
+        if bake_anim is not None and mname in bake_anim:
+            anim = bake_anim[mname]
+            present = [f for f in sorted_frames if f in anim and len(anim[f]) > 0]
+            if present:
+                k_max = max(len(anim[f]) for f in present)
+                v = save_dict['positions'].shape[1]
+                anim_arr = np.empty((len(sorted_frames), k_max, v, 3), dtype=np.float32)
+                for i, f in enumerate(sorted_frames):
+                    snaps = anim.get(f, [])
+                    if not snaps:
+                        snaps = [frame_data[f]]
+                    # pad short sequences with the final converged frame so
+                    # k stays uniform per chunk.
+                    last = snaps[-1]
+                    for k in range(k_max):
+                        anim_arr[i, k] = snaps[k] if k < len(snaps) else last
+                save_dict['positions_anim'] = anim_arr
+            anim.clear()
+        np.savez(filepath, **save_dict)
         frame_data.clear()
     gc.collect()
     return flush_count + 1
@@ -378,10 +401,22 @@ def main():
         help="ARAP convergence tolerance (m). Default 1e-4.",
     )
     parser.add_argument(
+        "--unified-volume",
+        action="store_true",
+        help="Build one global ARAP system across all muscles. Required to "
+             "engage the Taichi backend (per-muscle path uses scipy+numpy).",
+    )
+    parser.add_argument(
         "--no-self-collision",
         action="store_true",
         help="Disable per-muscle bone collision push. Faster on dense tets; "
              "use when bones are simple and inter-muscle constraints suffice.",
+    )
+    parser.add_argument(
+        "--save-anim",
+        action="store_true",
+        help="Save per-outer-iter convergence snapshots inside each chunk so "
+             "the viewer can scrub the iron-man-style settling sequence.",
     )
     args = parser.parse_args()
 
@@ -467,6 +502,8 @@ def main():
 
     # Init bake accumulators
     bake_data = {name: {} for name in active_muscles}
+    # bake_anim[mname][frame] = list of (n_verts, 3) per snapshot (init + each outer iter)
+    bake_anim = {name: {} for name in active_muscles} if args.save_anim else None
     flush_count = 0
     bake_start = time.time()
 
@@ -492,10 +529,21 @@ def main():
                             tolerance=args.tolerance,
                             verbose=(frame == start_frame))
         else:
+            anim_cb = None
+            if bake_anim is not None:
+                # Snapshot each outer iter so the viewer can scrub the
+                # iron-man-style settling sequence per frame.
+                def anim_cb(stage, ams, _f=frame, _ba=bake_anim):
+                    for nm, mo in ams.items():
+                        if mo.soft_body is None:
+                            continue
+                        snap = mo.soft_body.get_positions().astype(np.float32).copy()
+                        _ba[nm].setdefault(_f, []).append(snap)
             run_all_tet_sim_with_constraints(
                 ctx, max_iterations=args.settle_iters,
                 tolerance=args.tolerance,
                 outer_iterations=args.outer_iters,
+                snapshot_callback=anim_cb,
             )
 
         # Capture positions — verify fixed vertices match bone positions
@@ -526,7 +574,7 @@ def main():
         n_accumulated = sum(len(fd) for fd in bake_data.values())
         if n_accumulated >= FLUSH_INTERVAL * len(active_muscles):
             print(f"  Flushing chunk {flush_count} to disk...")
-            flush_count = flush_bake_data(bake_data, cache_dir, flush_count)
+            flush_count = flush_bake_data(bake_data, cache_dir, flush_count, bake_anim)
             gc.collect()
 
         # Progress reporting — every frame for monitoring
@@ -546,7 +594,7 @@ def main():
 
     # Final flush
     if any(len(fd) > 0 for fd in bake_data.values()):
-        flush_count = flush_bake_data(bake_data, cache_dir, flush_count)
+        flush_count = flush_bake_data(bake_data, cache_dir, flush_count, bake_anim)
 
     # Remove legacy single-file caches
     for mname in active_muscles:

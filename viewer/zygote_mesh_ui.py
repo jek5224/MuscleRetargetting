@@ -1982,6 +1982,21 @@ def _draw_motion_browser_ui(v):
                 _motion_clear_heatmap(v)
                 _motion_apply_cached_deformation(v, new_frame)
 
+        # Convergence-anim scrubber: visible only if cache has positions_anim.
+        anim_k = _motion_anim_steps(v, v.motion_current_frame)
+        if anim_k > 1:
+            if not hasattr(v, 'motion_anim_idx'):
+                v.motion_anim_idx = anim_k - 1
+            v.motion_anim_idx = min(v.motion_anim_idx, anim_k - 1)
+            imgui.push_item_width(imgui.get_content_region_available_width())
+            ch_a, new_a = imgui.slider_int(
+                "##anim_slider", v.motion_anim_idx, 0, anim_k - 1,
+                f"Iron-Man iter {v.motion_anim_idx} / {anim_k - 1}")
+            imgui.pop_item_width()
+            if ch_a:
+                v.motion_anim_idx = new_a
+                _motion_apply_cached_deformation(v, v.motion_current_frame)
+
         # Transport buttons
         if imgui.button("Reset##motion"):
             _motion_reset(v)
@@ -7128,12 +7143,17 @@ def find_inter_muscle_constraints(v, threshold=None):
     return len(v.inter_muscle_constraints)
 
 
-def run_all_tet_sim_with_constraints(v, max_iterations=100, tolerance=1e-4, outer_iterations=20):
+def run_all_tet_sim_with_constraints(v, max_iterations=100, tolerance=1e-4, outer_iterations=20,
+                                     snapshot_callback=None):
     """
     Run tet simulation for all muscles together, respecting inter-muscle constraints.
     Uses ARAP with collision detection integrated.
 
     If v.coupled_as_unified_volume is True, treats all muscles as one unified system.
+
+    snapshot_callback(stage, active_muscles): if provided, called with stage="init"
+    before any solve and stage=f"outer{i}" after each outer iter. Bake driver uses
+    this to save per-iter positions for iron-man-style convergence playback.
     """
     # Get all muscles with soft body
     active_muscles = {}
@@ -7168,6 +7188,9 @@ def run_all_tet_sim_with_constraints(v, max_iterations=100, tolerance=1e-4, oute
                 first_mobj._build_dart_shape_collision_meshes(v.env.skel, verbose=False)
             )
 
+        if snapshot_callback is not None:
+            snapshot_callback("init", active_muscles)
+
         for outer_iter in range(outer_iterations):
             # Step 1: Run individual soft body solves
             total_residual = 0
@@ -7186,17 +7209,22 @@ def run_all_tet_sim_with_constraints(v, max_iterations=100, tolerance=1e-4, oute
                 total_residual += residual
 
             # Step 2: Enforce inter-muscle constraints
+            stop = False
             if n_constraints > 0:
                 constraint_error = _enforce_inter_muscle_constraints(v, active_muscles)
                 print(f"  Iter {outer_iter+1}/{outer_iterations}: residual={total_residual:.2e}, constraint_err={constraint_error:.6f}m")
-
                 if constraint_error < tolerance:
                     print(f"  Constraints satisfied (error < {tolerance}), stopping")
-                    break
+                    stop = True
             else:
                 print(f"  Iter {outer_iter+1}: residual={total_residual:.2e} (no constraints)")
                 if total_residual < tolerance * len(active_muscles):
-                    break
+                    stop = True
+
+            if snapshot_callback is not None:
+                snapshot_callback(f"outer{outer_iter}", active_muscles)
+            if stop:
+                break
 
         print(f"Coupled tet sim complete ({len(active_muscles)} muscles)")
 
@@ -8799,11 +8827,14 @@ def _motion_load_cache(v):
             if has_wp:
                 raw = data['waypoints_shape'][0]
                 wp_shape_str = raw.decode('utf-8') if isinstance(raw, (bytes, np.bytes_)) else str(raw)
+            anim = data['positions_anim'] if 'positions_anim' in data.files else None
             for i, f in enumerate(frames):
                 entry = {'positions': positions[i]}
                 if has_wp:
                     entry['waypoints_flat'] = wp_flats[i]
                     entry['waypoints_shape'] = wp_shape_str
+                if anim is not None:
+                    entry['positions_anim'] = anim[i]
                 cache[int(f)] = entry
         v.motion_deform_cache[mname] = cache
 
@@ -8845,6 +8876,18 @@ def _unflatten_waypoints(flat, shape_json):
             offset += n
         waypoints.append(stream)
     return waypoints
+
+
+def _motion_anim_steps(v, frame):
+    """Return number of convergence snapshots cached for `frame` (0 if none)."""
+    if not getattr(v, 'motion_deform_cache', None):
+        return 0
+    k = 0
+    for cache in v.motion_deform_cache.values():
+        entry = cache.get(int(frame)) if cache else None
+        if entry is not None and 'positions_anim' in entry:
+            k = max(k, int(entry['positions_anim'].shape[0]))
+    return k
 
 
 def _motion_apply_cached_deformation(v, frame):
@@ -8890,12 +8933,20 @@ def _motion_apply_cached_deformation(v, frame):
             continue
         if mname in v.motion_deform_cache and frame in v.motion_deform_cache[mname]:
             cached = v.motion_deform_cache[mname][frame]
-            if cached['positions'].shape[0] != mobj.tet_vertices.shape[0]:
+            # Optional iron-man-style scrub: pick a per-iter snapshot if user
+            # has selected one and this muscle has anim data for the frame.
+            anim_idx = getattr(v, 'motion_anim_idx', None)
+            base_pos = cached['positions']
+            if anim_idx is not None and 'positions_anim' in cached:
+                anim = cached['positions_anim']
+                if 0 <= anim_idx < anim.shape[0]:
+                    base_pos = anim[anim_idx]
+            if base_pos.shape[0] != mobj.tet_vertices.shape[0]:
                 continue  # skip: bake vertex count doesn't match current tet mesh
             if fix_rot_mat is not None:
-                cached_pos = (fix_rot_mat @ (cached['positions'] - pivot).T).T + fix_dest
+                cached_pos = (fix_rot_mat @ (base_pos - pivot).T).T + fix_dest
             else:
-                cached_pos = cached['positions'] + fix_offset
+                cached_pos = base_pos + fix_offset
             # Skip soft_body.positions update during cached playback — not needed
             # for rendering, and the internal C state can cause segfaults.
             mobj.tet_vertices = cached_pos.astype(np.float32).copy()

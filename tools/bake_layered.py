@@ -696,7 +696,7 @@ def run_layer_sim_with_collision(layer_muscles, frozen_muscles, skeleton_meshes,
                                   layer_cache, backend_name,
                                   max_iterations=100, tolerance=1e-4,
                                   collision_margin=0.002, frame_independent=False,
-                                  verbose=False):
+                                  do_collision=True, inloop_collision=False, verbose=False):
     """Run unified ARAP for one layer with collision projection.
 
     Muscles start outside obstacles. ARAP pulls toward attachments.
@@ -833,29 +833,17 @@ def run_layer_sim_with_collision(layer_muscles, frozen_muscles, skeleton_meshes,
     collision_vertex_set = layer_cache['collision_vertex_set']
     global_surf_edges = layer_cache['global_surf_edges']
 
-    # Compute LBS positions (skeleton-following) for current layer
+    # Compute warm-start positions per muscle using the same path as
+    # bake_headless: _update_tet_positions_from_skeleton (origin/insertion-bone
+    # blend via tet_skeleton_bindings). This reads back from
+    # mobj.soft_body.positions which the helper mutates in place.
     global_lbs = np.zeros((total_verts, 3))
     for name, mobj in layer_muscles.items():
         offset = global_offset[name]
         n = mobj.soft_body.num_vertices
-        rest = mobj.soft_body.rest_positions
-        if hasattr(mobj, 'skinning_weights') and mobj.skinning_weights is not None and len(mobj.skinning_bones) > 0:
-            lbs = np.zeros((n, 3))
-            for bone_idx, bone_name in enumerate(mobj.skinning_bones):
-                body_node = skel.getBodyNode(bone_name)
-                if body_node is None:
-                    continue
-                R = body_node.getWorldTransform().rotation()
-                t = body_node.getWorldTransform().translation()
-                if bone_name in mobj.soft_body_initial_transforms:
-                    R0, t0 = mobj.soft_body_initial_transforms[bone_name]
-                else:
-                    continue
-                w = mobj.skinning_weights[:, bone_idx:bone_idx+1]
-                local = (R0.T @ (rest - t0).T).T
-                deformed = (R @ local.T).T + t
-                lbs += w * deformed
-            global_lbs[offset:offset+n] = lbs
+        if hasattr(mobj, '_update_tet_positions_from_skeleton') and getattr(mobj, 'tet_skeleton_bindings', None):
+            mobj._update_tet_positions_from_skeleton(skel)
+            global_lbs[offset:offset+n] = mobj.soft_body.get_positions()
         else:
             global_lbs[offset:offset+n] = mobj.soft_body.positions
 
@@ -898,7 +886,7 @@ def run_layer_sim_with_collision(layer_muscles, frozen_muscles, skeleton_meshes,
     do_offset = (frame_independent or is_first_frame) and len(obstacle_meshes) > 0
     if do_offset:
         n_offset = 0
-        offset_amount = 0.005  # 5mm detachment
+        offset_amount = layer_cache.get('_iron_man_offset', 0.005)
         for name, mobj in layer_muscles.items():
             off = global_offset[name]
             n = mobj.soft_body.num_vertices
@@ -938,13 +926,86 @@ def run_layer_sim_with_collision(layer_muscles, frozen_muscles, skeleton_meshes,
         backend.build_system(total_verts, neighbors, edge_weights, global_fixed_mask,
                              regularization=1e-6)
 
-    # Step 1: Pure ARAP solve
-    global_positions, iterations, max_disp = backend.solve(
-        global_positions, global_rest_positions, neighbors, edge_weights, rest_edge_vectors,
-        global_fixed_mask, fixed_targets_array,
-        max_iterations=max_iterations, tolerance=tolerance,
-        verbose=verbose,
-    )
+    # Optional per-iter collision callback: project surface verts inside any
+    # bone out to bone_surface + margin. Each call re-detects.
+    coll_fn = None
+    if inloop_collision and len(obstacle_meshes) > 0:
+        # Build inflated bone meshes once.
+        bone_inflate = collision_margin
+        inflated = []
+        for om in obstacle_meshes:
+            try:
+                vn = om.vertex_normals
+                inflated.append(trimesh.Trimesh(
+                    vertices=om.vertices + vn * bone_inflate,
+                    faces=om.faces.copy(), process=True))
+            except Exception:
+                inflated.append(om)
+        coll_vidx = list(layer_cache.get('collision_vertex_set', set()))
+        coll_vidx_arr = np.array(coll_vidx, dtype=np.int64) if coll_vidx else np.zeros(0, dtype=np.int64)
+
+        def coll_fn(positions):
+            targets = {}
+            if coll_vidx_arr.size == 0:
+                return targets
+            cand_pos = positions[coll_vidx_arr]
+            for bm in inflated:
+                bmin = bm.bounds[0] - 0.01
+                bmax = bm.bounds[1] + 0.01
+                in_bb = np.all((cand_pos >= bmin) & (cand_pos <= bmax), axis=1)
+                if not np.any(in_bb):
+                    continue
+                bb_pos = cand_pos[in_bb]
+                bb_idx = coll_vidx_arr[in_bb]
+                try:
+                    inside = bm.contains(bb_pos)
+                except Exception:
+                    continue
+                if not np.any(inside):
+                    continue
+                inside_pos = bb_pos[inside]
+                inside_idx = bb_idx[inside]
+                cp, _, fid = trimesh.proximity.closest_point(bm, inside_pos)
+                fn = bm.face_normals[fid]
+                pushed = cp + fn * collision_margin
+                for k in range(len(inside_idx)):
+                    vi = int(inside_idx[k])
+                    if global_fixed_mask[vi]:
+                        continue
+                    targets[vi] = pushed[k]
+            return targets
+
+    # Step 1: Pure ARAP solve. Run in 10-iter chunks so we can snapshot the
+    # iron-man-style settling for visualization.
+    snapshots = [global_positions.copy()]  # iter 0
+    chunk = 10
+    iterations_total = 0
+    max_disp = float('inf')
+    while iterations_total < max_iterations and max_disp > tolerance:
+        remaining = max_iterations - iterations_total
+        step_iters = min(chunk, remaining)
+        kwargs = {}
+        if coll_fn is not None:
+            kwargs['collision_target_fn'] = coll_fn
+        global_positions, _, max_disp = backend.solve(
+            global_positions, global_rest_positions, neighbors, edge_weights, rest_edge_vectors,
+            global_fixed_mask, fixed_targets_array,
+            max_iterations=step_iters, tolerance=tolerance,
+            verbose=verbose, **kwargs,
+        )
+        iterations_total += step_iters
+        snapshots.append(global_positions.copy())
+    iterations = iterations_total
+    layer_cache['snapshots'] = snapshots
+
+    if not do_collision:
+        layer_cache['prev_solution'] = global_positions.copy()
+        # Write back per-muscle positions and return.
+        for name, mobj in layer_muscles.items():
+            offset = global_offset[name]
+            n = mobj.soft_body.num_vertices
+            mobj.soft_body.positions = global_positions[offset:offset+n].copy()
+        return iterations, max_disp
 
     # Inflate bone meshes for collision — keeps muscles 3mm from bone surface
     # Only used for detection; ARAP system is unmodified
@@ -973,7 +1034,8 @@ def run_layer_sim_with_collision(layer_muscles, frozen_muscles, skeleton_meshes,
     # Step 2: Detect + local ARAP re-solve
     n_rings = 3
     total_targets = 0
-    for coll_round in range(2):
+    coll_rounds = layer_cache.get('_postcoll_rounds', 2)
+    for coll_round in range(coll_rounds):
         collision_targets = {}
         _detect_collisions(global_positions, nearby_obstacles, collision_vertex_set,
                            global_surf_edges, global_fixed_mask, collision_margin,
@@ -1025,6 +1087,8 @@ def main():
     parser.add_argument("--bvh", required=True)
     parser.add_argument("--muscles", default=".last_loaded_muscles.json")
     parser.add_argument("--settle-iters", type=int, default=150)
+    parser.add_argument("--tolerance", type=float, default=1e-4,
+                        help="ARAP convergence tolerance (m). Loose = early exit.")
     parser.add_argument("--constraint-threshold", type=float, default=0.015)
     parser.add_argument("--collision-margin", type=float, default=0.002)
     parser.add_argument("--frame-independent", action="store_true",
@@ -1039,6 +1103,22 @@ def main():
     parser.add_argument("--region-tag", default="layered")
     parser.add_argument("--tet-dir", default="tet",
                         help="Directory for tet mesh files (default: tet, use tet_subdiv for subdivided)")
+    parser.add_argument("--no-collision", action="store_true",
+                        help="Skip second-stage detect+resolve collision pass. Iron-Man "
+                             "warm-start offset still runs. Useful for timing the pure "
+                             "ARAP path without bone-collision overhead.")
+    parser.add_argument("--iron-man-offset", type=float, default=0.005,
+                        help="Outward offset (m) applied to free verts at iron-man warm "
+                             "start. Larger offsets give per-iter collision more room to "
+                             "intervene before ARAP teleports muscles into bones. "
+                             "Default 0.005 m.")
+    parser.add_argument("--inloop-collision", action="store_true",
+                        help="Run collision projection every iteration via taichi backend's "
+                             "collision_target_fn. Catches bone-tunneling before ARAP "
+                             "completes; combine with larger --iron-man-offset.")
+    parser.add_argument("--postcoll-rounds", type=int, default=2,
+                        help="Post-ARAP detect+resolve rounds (default 2). More rounds "
+                             "iteratively project deep penetrations toward bone surface.")
     args = parser.parse_args()
 
     # Multi-worker: split frames into chunks, launch subprocesses
@@ -1443,14 +1523,48 @@ def main():
 
             # Run ARAP with penalty-in-diagonal collision
             # frozen_muscles = all muscles from earlier layers (already settled)
+            layer_caches[li]['_iron_man_offset'] = args.iron_man_offset
+            layer_caches[li]['_postcoll_rounds'] = args.postcoll_rounds
             iters, max_disp = run_layer_sim_with_collision(
                 layer_active, settled_muscles, skeleton_meshes, skel,
                 obstacle_meshes, layer_constraints[li],
                 layer_caches[li], backend_name,
-                max_iterations=args.settle_iters, tolerance=1e-4,
+                max_iterations=args.settle_iters, tolerance=args.tolerance,
                 collision_margin=args.collision_margin,
                 frame_independent=args.frame_independent,
+                do_collision=not args.no_collision,
+                inloop_collision=args.inloop_collision,
                 verbose=(frame == args.start_frame and li == 0))
+
+            # Dump iron-man-style convergence snapshots for this layer/frame
+            # so an offline renderer can produce per-iter images.
+            snaps = layer_caches[li].get('snapshots')
+            if snaps:
+                anim_dir = os.path.join(cache_dir, '_anim')
+                os.makedirs(anim_dir, exist_ok=True)
+                anim_path = os.path.join(anim_dir, f'frame{frame:04d}_layer{li:02d}.npz')
+                # Per-muscle metadata so the renderer can rebuild surface meshes.
+                go = layer_caches[li]['global_offset']
+                names = list(layer_active.keys())
+                muscle_meta = {
+                    n: {
+                        'offset': int(go[n]),
+                        'n_verts': int(layer_active[n].soft_body.num_vertices),
+                        'surf_faces': (layer_active[n]._surf_faces.astype(np.int32)
+                                        if hasattr(layer_active[n], '_surf_faces')
+                                        else np.zeros((0, 3), dtype=np.int32)),
+                    } for n in names
+                }
+                np.savez(
+                    anim_path,
+                    snapshots=np.array(snaps, dtype=np.float32),
+                    muscle_names=np.array(names),
+                    offsets=np.array([go[n] for n in names], dtype=np.int32),
+                    n_verts=np.array([layer_active[n].soft_body.num_vertices for n in names], dtype=np.int32),
+                    surf_faces_flat=np.concatenate([muscle_meta[n]['surf_faces'].ravel() for n in names])
+                        if names else np.zeros(0, dtype=np.int32),
+                    surf_faces_lens=np.array([muscle_meta[n]['surf_faces'].size for n in names], dtype=np.int32),
+                )
 
             # Restore flags and capture positions
             for mname, mobj in layer_active.items():

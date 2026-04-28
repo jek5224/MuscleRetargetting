@@ -1683,7 +1683,11 @@ class SkeletonMeshMixin:
         if not hasattr(self, 'tet_vertices') or self.tet_vertices is None:
             print("  Skeleton bindings: no tet vertices")
             return
-        if not hasattr(self, 'attach_skeletons') or len(self.attach_skeletons) == 0:
+        has_idx = hasattr(self, 'attach_skeletons') and len(self.attach_skeletons) > 0
+        has_names = (hasattr(self, 'attach_skeleton_names')
+                     and self.attach_skeleton_names
+                     and len(self.attach_skeleton_names) > 0)
+        if not has_idx and not has_names:
             print("  Skeleton bindings: no attach_skeletons info")
             return
 
