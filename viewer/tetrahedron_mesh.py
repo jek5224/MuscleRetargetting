@@ -1495,6 +1495,63 @@ except Exception as e:
         sim_faces = np.array(sim_faces, dtype=np.int32)
         print(f"  Extracted {len(sim_faces)} tet boundary faces for simulation")
 
+        # Step 5b: Star-fan rescue for any vertex left out of every tetrahedron.
+        # Contour-guided + Delaunay rescue can still leave shared-edge / cap-loop
+        # vertices unused (Peroneus Longus had 286). Without this pass those
+        # vertices fall to the bake-time isolated-vertex fallback, which makes
+        # them visibly stuck at rest. For each unused vertex, build one
+        # tetrahedron to its 3 nearest used vertices that yields a non-degenerate
+        # volume.
+        all_tet_verts = set(int(v) for v in interior_tetrahedra.ravel()) if len(interior_tetrahedra) > 0 else set()
+        unused_idx = [i for i in range(len(closed_vertices)) if i not in all_tet_verts]
+        if unused_idx:
+            from scipy.spatial import cKDTree as _cKD_starfan
+            used_arr = np.array(sorted(all_tet_verts), dtype=np.int64)
+            used_pts = closed_vertices[used_arr]
+            tree = _cKD_starfan(used_pts)
+            K = min(8, len(used_arr))
+            _, nn_local = tree.query(closed_vertices[np.asarray(unused_idx, dtype=np.int64)], k=K)
+            if K == 1:
+                nn_local = nn_local[:, None]
+            new_tets = []
+            n_skipped = 0
+            VOL_EPS = 1e-12
+            for ri, vi in enumerate(unused_idx):
+                p0 = closed_vertices[vi]
+                cand = used_arr[nn_local[ri]]
+                # Pick the first triple of candidates that yields a non-degenerate
+                # tetrahedron (signed volume above epsilon).
+                placed = False
+                for a in range(K):
+                    for b in range(a + 1, K):
+                        for c in range(b + 1, K):
+                            i0, i1, i2 = int(cand[a]), int(cand[b]), int(cand[c])
+                            v1 = closed_vertices[i0] - p0
+                            v2 = closed_vertices[i1] - p0
+                            v3 = closed_vertices[i2] - p0
+                            vol = float(np.dot(v1, np.cross(v2, v3)))
+                            if abs(vol) < VOL_EPS:
+                                continue
+                            # Enforce positive orientation: swap if needed.
+                            if vol < 0:
+                                i1, i2 = i2, i1
+                            new_tets.append([vi, i0, i1, i2])
+                            placed = True
+                            break
+                        if placed:
+                            break
+                    if placed:
+                        break
+                if not placed:
+                    n_skipped += 1
+            if new_tets:
+                interior_tetrahedra = np.vstack([
+                    interior_tetrahedra,
+                    np.array(new_tets, dtype=interior_tetrahedra.dtype)
+                ])
+                print(f"  Star-fan: rescued {len(new_tets)} unused verts "
+                      f"({n_skipped} still unplaced — coplanar neighbors).")
+
         # Step 6: Store results with dual face system
         self.tet_vertices = closed_vertices
         self.tet_tetrahedra = interior_tetrahedra
