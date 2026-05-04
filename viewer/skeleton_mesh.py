@@ -1005,42 +1005,42 @@ class SkeletonMeshMixin:
             print(f"  No valid bone meshes found for nearest-bone assignment")
             return
 
-        # For each fixed vertex, find the nearest bone
+        # For each fixed vertex, find the nearest bone (batched).
+        # Was per-vert × per-bone tree.query() → 8000 calls per big muscle.
+        # Now: one batched query per bone tree (25× fewer calls, ~50× faster).
         assigned_count = 0
         bones_used = set()
 
-        for fixed_vi in self.soft_body_fixed_vertices:
-            if fixed_vi in self.soft_body_local_anchors:
-                # Already assigned (e.g., cap centroid)
-                bones_used.add(self.soft_body_local_anchors[fixed_vi][0])
-                continue
+        unassigned = [vi for vi in self.soft_body_fixed_vertices if vi not in self.soft_body_local_anchors]
+        for vi in self.soft_body_fixed_vertices:
+            if vi in self.soft_body_local_anchors:
+                bones_used.add(self.soft_body_local_anchors[vi][0])
 
-            vertex_pos = self.soft_body.rest_positions[fixed_vi]
+        if len(unassigned) > 0 and len(bone_trees) > 0:
+            unassigned_pos = np.array([self.soft_body.rest_positions[vi] for vi in unassigned])
+            bone_names_list = list(bone_trees.keys())
+            all_dists = np.full((len(unassigned), len(bone_names_list)), np.inf)
+            for bi, mesh_name in enumerate(bone_names_list):
+                tree, _bn = bone_trees[mesh_name]
+                d, _ = tree.query(unassigned_pos)
+                all_dists[:, bi] = d
+            nearest_bone_idx = np.argmin(all_dists, axis=1)
 
-            # Find nearest bone mesh
-            min_dist = float('inf')
-            nearest_body = None
-            nearest_mesh = None
-
-            for mesh_name, (tree, body_name) in bone_trees.items():
-                dist, _ = tree.query(vertex_pos)
-                if dist < min_dist:
-                    min_dist = dist
-                    nearest_body = body_name
-                    nearest_mesh = mesh_name
-
-            if nearest_body is not None:
+            for ui, fixed_vi in enumerate(unassigned):
+                bone_mesh_name = bone_names_list[int(nearest_bone_idx[ui])]
+                _tree, nearest_body = bone_trees[bone_mesh_name]
                 try:
                     body_node = skeleton.getBodyNode(nearest_body)
                     if body_node is not None:
                         world_transform = body_node.getWorldTransform()
                         rotation = world_transform.rotation()
                         translation = world_transform.translation()
+                        vertex_pos = self.soft_body.rest_positions[fixed_vi]
                         local_pos = rotation.T @ (vertex_pos - translation)
                         self.soft_body_local_anchors[fixed_vi] = (nearest_body, local_pos.copy())
                         assigned_count += 1
                         bones_used.add(nearest_body)
-                except Exception as e:
+                except Exception:
                     continue
 
         print(f"  Nearest-bone assignment: {assigned_count} vertices -> {len(bones_used)} bones")
@@ -1405,16 +1405,17 @@ class SkeletonMeshMixin:
         bone_names = list(bone_data.keys())
         bone_positions = np.array([bone_data[bn][1] for bn in bone_names])
 
+        # Vectorized nearest-bone assignment. Was per-vert Python loop with
+        # np.linalg.norm × n_verts × n_bones. For 8704v × 25 bones = 217k
+        # iterations of small-array norm calls.
+        # Vectorize: one (V, B) pairwise distance + argmin.
+        diff = rest_pos[:, None, :] - bone_positions[None, :, :]  # (V, B, 3)
+        all_dists = np.linalg.norm(diff, axis=2)  # (V, B)
+        nearest_indices = np.argmin(all_dists, axis=1)  # (V,)
         for i in range(n_verts):
-            p = rest_pos[i]
-            distances = np.linalg.norm(bone_positions - p, axis=1)
-            nearest_idx = np.argmin(distances)
-            nearest_bone = bone_names[nearest_idx]
-
-            # Store local position relative to bone's initial transform
+            nearest_bone = bone_names[int(nearest_indices[i])]
             init_rot, init_trans = bone_data[nearest_bone]
-            local_pos = init_rot.T @ (p - init_trans)
-
+            local_pos = init_rot.T @ (rest_pos[i] - init_trans)
             self.vertex_bone_assignments[i] = (nearest_bone, local_pos)
 
         print(f"  Assigned {n_verts} vertices to {len(bone_names)} bones")
