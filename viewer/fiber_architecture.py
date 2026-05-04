@@ -2822,11 +2822,14 @@ class FiberArchitectureMixin:
                 body_node = skeleton.getBodyNode(body_name)
                 if body_node is not None:
                     return body_name
-                # Try without trailing digit
-                from viewer.muscle_mesh import find_dart_body
-                body_node, found_name = find_dart_body(skeleton, body_name.rstrip('0123456789'))
-                if body_node is not None:
-                    return found_name
+                # Try variants: stripped digit suffix, stripped + '0', stripped + '1'.
+                # The previous `from viewer.muscle_mesh import find_dart_body` failed
+                # because that helper is defined inside `init_soft_body` (closure),
+                # not at module scope — `bake_headless` crashed on import.
+                stripped = body_name.rstrip('0123456789')
+                for cand in (stripped, stripped + '0', stripped + '1'):
+                    if cand and skeleton.getBodyNode(cand) is not None:
+                        return cand
 
         # Fallback to index-based
         if hasattr(self, 'attach_skeletons') and stream_idx < len(self.attach_skeletons):
@@ -2857,13 +2860,18 @@ class FiberArchitectureMixin:
         # For efficiency, first find nearest tetrahedra by centroid
         tet_centroids = np.mean(tet_verts[tetrahedra], axis=1)
         dists = np.linalg.norm(tet_centroids - point, axis=1)
-        sorted_indices = np.argsort(dists)
+        # Only check the K nearest tets — Python loop over all 30k+ tets per
+        # waypoint was a per-init bottleneck (multi-minute stall on dense
+        # multi-stream LowLeg meshes). 200 covers ~99% of inside hits since
+        # the containing tet is always near the centroid-nearest one.
+        K_search = min(200, len(tetrahedra))
+        sorted_indices = np.argpartition(dists, K_search - 1)[:K_search]
+        sorted_indices = sorted_indices[np.argsort(dists[sorted_indices])]
 
         best_tet_idx = None
         best_bary = None
         best_min_coord = -float('inf')  # Track least-negative barycentric coord
 
-        # Check all tets (contour-guided meshes have ~1000 tets — fast enough)
         for tet_idx in sorted_indices:
             tet = tetrahedra[tet_idx]
             v0, v1, v2, v3 = tet_verts[tet[0]], tet_verts[tet[1]], tet_verts[tet[2]], tet_verts[tet[3]]
