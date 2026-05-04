@@ -8179,7 +8179,11 @@ class ContourMeshMixin(ContourAnimationMixin):
         glPopMatrix()
 
     def draw_contour_mesh(self):
-        """Draw the contour mesh using OpenGL."""
+        """Draw the contour mesh using OpenGL vertex arrays.
+        Was per-vertex glBegin/glVertex3fv immediate-mode loop — multi-thousand
+        glVertex calls per frame.  Now glDrawElements over cached flat
+        contiguous vertex/normal arrays + uint32 indices.
+        """
         # During edge phases (0,1) draw animated edges; phase 2 falls through to normal draw
         if getattr(self, '_mesh_anim_active', False) and self._mesh_anim_phase < 2:
             self._draw_contour_mesh_animated()
@@ -8187,6 +8191,21 @@ class ContourMeshMixin(ContourAnimationMixin):
 
         if self.contour_mesh_vertices is None or self.contour_mesh_faces is None:
             return
+
+        # (Re)build cached arrays if mesh changed.
+        v_id = id(self.contour_mesh_vertices)
+        f_id = id(self.contour_mesh_faces)
+        n_id = id(self.contour_mesh_normals) if self.contour_mesh_normals is not None else None
+        cache_key = (v_id, f_id, n_id)
+        if getattr(self, '_cm_draw_cache_key', None) != cache_key:
+            self._cm_draw_verts = np.ascontiguousarray(self.contour_mesh_vertices, dtype=np.float32)
+            self._cm_draw_indices = np.ascontiguousarray(
+                np.asarray(self.contour_mesh_faces, dtype=np.uint32).ravel())
+            if self.contour_mesh_normals is not None:
+                self._cm_draw_normals = np.ascontiguousarray(self.contour_mesh_normals, dtype=np.float32)
+            else:
+                self._cm_draw_normals = None
+            self._cm_draw_cache_key = cache_key
 
         glPushMatrix()
         glEnable(GL_LIGHTING)
@@ -8197,28 +8216,32 @@ class ContourMeshMixin(ContourAnimationMixin):
         alpha = self.contour_mesh_transparency
         glColor4f(color[0], color[1], color[2], alpha)
 
+        glEnableClientState(GL_VERTEX_ARRAY)
+        glVertexPointer(3, GL_FLOAT, 0, self._cm_draw_verts)
+        if self._cm_draw_normals is not None:
+            glEnableClientState(GL_NORMAL_ARRAY)
+            glNormalPointer(GL_FLOAT, 0, self._cm_draw_normals)
+
+        n_indices = len(self._cm_draw_indices)
+
         def draw_triangles():
-            glBegin(GL_TRIANGLES)
-            for face in self.contour_mesh_faces:
-                for vi in face:
-                    if self.contour_mesh_normals is not None:
-                        glNormal3fv(self.contour_mesh_normals[vi])
-                    glVertex3fv(self.contour_mesh_vertices[vi])
-            glEnd()
+            glDrawElements(GL_TRIANGLES, n_indices, GL_UNSIGNED_INT, self._cm_draw_indices)
 
         is_transparent = alpha < 1.0
         if is_transparent:
             # Two-pass rendering for correct transparency
-            # Draw back faces first, then front faces on top
             glEnable(GL_CULL_FACE)
-            glCullFace(GL_FRONT)  # Cull front, draw back
+            glCullFace(GL_FRONT)
             draw_triangles()
-            glCullFace(GL_BACK)   # Cull back, draw front
+            glCullFace(GL_BACK)
             draw_triangles()
             glDisable(GL_CULL_FACE)
         else:
             draw_triangles()
 
+        glDisableClientState(GL_VERTEX_ARRAY)
+        if self._cm_draw_normals is not None:
+            glDisableClientState(GL_NORMAL_ARRAY)
         glPopMatrix()
 
     def find_contour_stream_simplified(self, skeleton_meshes=None):

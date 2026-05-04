@@ -2097,45 +2097,91 @@ except Exception as e:
         glEnable(GL_BLEND)
         glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
 
+        # Per-band cached numpy arrays for vectorized line generation.
+        # Was Python double loop with per-vertex glVertex3fv; thousands of
+        # edges per frame killed framerate during the tet build animation.
+        cache_key = (id(band_edges), id(vcl))
+        if getattr(self, '_tet_anim_band_cache_key', None) != cache_key:
+            band_pairs = []   # list[(E,2) int64] per band
+            band_lv01 = []    # list[(E,2) int32] per band: (lv0, lv1)
+            for be in band_edges or []:
+                if be is None or len(be) == 0:
+                    band_pairs.append(np.empty((0, 2), dtype=np.int64))
+                    band_lv01.append(np.empty((0, 2), dtype=np.int32))
+                    continue
+                pairs = np.asarray(be, dtype=np.int64).reshape(-1, 2)
+                lv = np.maximum(vcl[pairs], 0).astype(np.int32)
+                band_pairs.append(pairs)
+                band_lv01.append(lv)
+            self._tet_anim_band_pairs = band_pairs
+            self._tet_anim_band_lv01 = band_lv01
+            self._tet_anim_band_cache_key = cache_key
+
+        band_pairs = self._tet_anim_band_pairs
+        band_lv01 = self._tet_anim_band_lv01
+
         if phase == 1:
             # Edge grow: lines grow from origin→insertion
             t = (progress - fade_dur) / grow_dur if grow_dur > 0 else 1.0
             level_prog = smoothstep(t) * num_bands
 
-            glDisable(GL_LIGHTING)
-            glLineWidth(1.5)
-            glColor4f(color[0], color[1], color[2], 1.0)
-            glBegin(GL_LINES)
-            for band_idx in range(num_bands):
-                if band_idx > level_prog + 1:
-                    break
-                if band_idx >= len(band_edges):
+            line_chunks = []
+            visible_band_max = int(level_prog + 1)
+            for band_idx in range(min(num_bands, visible_band_max + 1)):
+                if band_idx >= len(band_pairs):
                     continue
-                for vi0, vi1 in band_edges[band_idx]:
-                    lv0 = max(int(vcl[vi0]), 0)
-                    lv1 = max(int(vcl[vi1]), 0)
-                    min_lv = min(lv0, lv1)
-                    max_lv = max(lv0, lv1)
-                    if min_lv > level_prog:
-                        continue
-                    p0 = verts[vi0]
-                    p1 = verts[vi1]
-                    if lv0 == lv1:
-                        glVertex3fv(p0)
-                        glVertex3fv(p1)
-                    elif max_lv <= level_prog:
-                        glVertex3fv(p0)
-                        glVertex3fv(p1)
-                    else:
-                        frac = max(0.0, min(1.0, level_prog - min_lv))
-                        if lv0 <= lv1:
-                            glVertex3fv(p0)
-                            glVertex3fv(p0 + frac * (p1 - p0))
-                        else:
-                            glVertex3fv(p1)
-                            glVertex3fv(p1 + frac * (p0 - p1))
-            glEnd()
-            glEnable(GL_LIGHTING)
+                pairs = band_pairs[band_idx]
+                if len(pairs) == 0:
+                    continue
+                lv01 = band_lv01[band_idx]
+                lv0, lv1 = lv01[:, 0], lv01[:, 1]
+                min_lv = np.minimum(lv0, lv1)
+                max_lv = np.maximum(lv0, lv1)
+                visible = min_lv <= level_prog
+                if not np.any(visible):
+                    continue
+                pairs_v = pairs[visible]
+                lv0v, lv1v = lv0[visible], lv1[visible]
+                min_lvv, max_lvv = min_lv[visible], max_lv[visible]
+                p0 = verts[pairs_v[:, 0]]
+                p1 = verts[pairs_v[:, 1]]
+                # Full-length: lv0==lv1 OR max_lv <= level_prog
+                full_mask = (lv0v == lv1v) | (max_lvv <= level_prog)
+                # Partial edges: interpolate from the lower-level endpoint
+                if np.any(~full_mask):
+                    pm = ~full_mask
+                    p0_p = p0[pm]
+                    p1_p = p1[pm]
+                    lv0_p = lv0v[pm]
+                    lv1_p = lv1v[pm]
+                    min_p = min_lvv[pm].astype(np.float32)
+                    frac = np.clip(level_prog - min_p, 0.0, 1.0).astype(np.float32)[:, None]
+                    starts_from_p0 = lv0_p <= lv1_p
+                    starts = np.where(starts_from_p0[:, None], p0_p, p1_p)
+                    ends = np.where(starts_from_p0[:, None], p1_p, p0_p)
+                    interp_ends = starts + frac * (ends - starts)
+                    chunk = np.empty((len(starts) * 2, 3), dtype=np.float32)
+                    chunk[0::2] = starts
+                    chunk[1::2] = interp_ends
+                    line_chunks.append(chunk)
+                if np.any(full_mask):
+                    p0f = p0[full_mask].astype(np.float32, copy=False)
+                    p1f = p1[full_mask].astype(np.float32, copy=False)
+                    chunk = np.empty((len(p0f) * 2, 3), dtype=np.float32)
+                    chunk[0::2] = p0f
+                    chunk[1::2] = p1f
+                    line_chunks.append(chunk)
+
+            if line_chunks:
+                lines = np.ascontiguousarray(np.concatenate(line_chunks, axis=0), dtype=np.float32)
+                glDisable(GL_LIGHTING)
+                glLineWidth(1.5)
+                glColor4f(color[0], color[1], color[2], 1.0)
+                glEnableClientState(GL_VERTEX_ARRAY)
+                glVertexPointer(3, GL_FLOAT, 0, lines)
+                glDrawArrays(GL_LINES, 0, len(lines))
+                glDisableClientState(GL_VERTEX_ARRAY)
+                glEnable(GL_LIGHTING)
 
         elif phase == 2:
             # Edge fade: all edges visible, alpha 1.0→0.0
@@ -2143,18 +2189,33 @@ except Exception as e:
             wire_alpha = 1.0 - smoothstep(t)
 
             if wire_alpha > 0.005:
-                glDisable(GL_LIGHTING)
-                glLineWidth(1.5)
-                glColor4f(color[0], color[1], color[2], wire_alpha)
-                glBegin(GL_LINES)
-                for band_idx in range(num_bands):
-                    if band_idx >= len(band_edges):
-                        continue
-                    for v0, v1 in band_edges[band_idx]:
-                        glVertex3fv(verts[v0])
-                        glVertex3fv(verts[v1])
-                glEnd()
-                glEnable(GL_LIGHTING)
+                # Cache one flattened line buffer for phase 2.
+                if getattr(self, '_tet_anim_phase2_cache_key', None) != cache_key:
+                    chunks = []
+                    for pairs in band_pairs:
+                        if len(pairs) == 0:
+                            continue
+                        p0 = verts[pairs[:, 0]]
+                        p1 = verts[pairs[:, 1]]
+                        chunk = np.empty((len(p0) * 2, 3), dtype=np.float32)
+                        chunk[0::2] = p0
+                        chunk[1::2] = p1
+                        chunks.append(chunk)
+                    self._tet_anim_phase2_lines = (
+                        np.ascontiguousarray(np.concatenate(chunks, axis=0), dtype=np.float32)
+                        if chunks else np.empty((0, 3), dtype=np.float32)
+                    )
+                    self._tet_anim_phase2_cache_key = cache_key
+                lines = self._tet_anim_phase2_lines
+                if len(lines) > 0:
+                    glDisable(GL_LIGHTING)
+                    glLineWidth(1.5)
+                    glColor4f(color[0], color[1], color[2], wire_alpha)
+                    glEnableClientState(GL_VERTEX_ARRAY)
+                    glVertexPointer(3, GL_FLOAT, 0, lines)
+                    glDrawArrays(GL_LINES, 0, len(lines))
+                    glDisableClientState(GL_VERTEX_ARRAY)
+                    glEnable(GL_LIGHTING)
 
         glPopMatrix()
 
