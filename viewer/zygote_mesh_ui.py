@@ -7192,30 +7192,31 @@ def find_inter_muscle_constraints(v, threshold=None):
             verts2 = data2['rest_positions']
             fixed2 = data2['fixed_mask']
 
-            # Build KD-tree for muscle2 vertices
+            # Build KD-tree for muscle2 vertices.
+            # Batched query_ball_point: single call returns list-of-lists for
+            # ALL verts in muscle1 → ~500× fewer Python calls per pair than
+            # the prior per-vert loop.
             tree2 = cKDTree(verts2)
-
-            # Find all pairs within threshold
-            for v1_idx, v1 in enumerate(verts1):
-                # Query nearby vertices in muscle2
-                nearby_indices = tree2.query_ball_point(v1, threshold)
-
-                for v2_idx in nearby_indices:
-                    # Skip fixed-to-free constraints: they create tug-of-war
-                    # between rigid bone motion and elastic ARAP deformation
-                    is_fixed1 = bool(fixed1[v1_idx])
+            all_nearby = tree2.query_ball_point(verts1, threshold)
+            for v1_idx, nearby_indices in enumerate(all_nearby):
+                if not nearby_indices:
+                    continue
+                is_fixed1 = bool(fixed1[v1_idx])
+                v1 = verts1[v1_idx]
+                # Filter by fixed-status match (same fixed/same free)
+                idx_arr = np.asarray(nearby_indices, dtype=np.int32)
+                same_fixed_mask = fixed2[idx_arr] == is_fixed1
+                idx_arr = idx_arr[same_fixed_mask]
+                if len(idx_arr) == 0:
+                    continue
+                # Vectorized rest-distance computation
+                dists = np.linalg.norm(verts2[idx_arr] - v1, axis=1)
+                for k, v2_idx in enumerate(idx_arr):
                     is_fixed2 = bool(fixed2[v2_idx])
-                    if is_fixed1 != is_fixed2:
-                        continue
-
-                    v2 = verts2[v2_idx]
-                    dist = np.linalg.norm(v1 - v2)
-
-                    # Store constraint with fixed status
                     v.inter_muscle_constraints.append((
-                        name1, v1_idx, is_fixed1,
-                        name2, v2_idx, is_fixed2,
-                        dist  # rest distance
+                        name1, int(v1_idx), is_fixed1,
+                        name2, int(v2_idx), is_fixed2,
+                        float(dists[k])
                     ))
 
     print(f"Found {len(v.inter_muscle_constraints)} inter-muscle constraints")

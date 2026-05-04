@@ -4167,22 +4167,25 @@ class MuscleMeshMixin:
             remaining = [vi for vi in self.soft_body_fixed_vertices if vi not in all_cap_verts]
             if remaining and cap_groups:
                 # Build KD-tree per group
+                # Vectorized: batched cKDTree query per group across all
+                # remaining verts at once, then argmin across groups.
+                # Was per-vert × per-group Python loop with single-point
+                # queries (Flexor: ~800 queries total).
+                group_keys = list(cap_groups.keys())
                 group_trees = {}
                 for key, group_verts in cap_groups.items():
                     pts = np.array([self.soft_body.rest_positions[v] for v in group_verts])
                     group_trees[key] = _cKDTree(pts)
 
-                for vi in remaining:
-                    vi_pos = self.soft_body.rest_positions[vi]
-                    best_key = None
-                    best_dist = float('inf')
-                    for key, tree in group_trees.items():
-                        d, _ = tree.query(vi_pos)
-                        if d < best_dist:
-                            best_dist = d
-                            best_key = key
-                    if best_key is not None:
-                        cap_groups[best_key].append(vi)
+                if len(remaining) > 0:
+                    rem_pos = np.array([self.soft_body.rest_positions[vi] for vi in remaining])
+                    all_dists = np.full((len(remaining), len(group_keys)), np.inf)
+                    for ki, key in enumerate(group_keys):
+                        d, _ = group_trees[key].query(rem_pos)
+                        all_dists[:, ki] = d
+                    best_idx = np.argmin(all_dists, axis=1)
+                    for ri, vi in enumerate(remaining):
+                        cap_groups[group_keys[int(best_idx[ri])]].append(vi)
 
             # Assign each group to its bone from XML
             for (stream_idx, end_type), group_verts in cap_groups.items():
