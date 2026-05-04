@@ -163,6 +163,7 @@ def build_context(skel, muscle_meshes, skeleton_meshes, mesh_info, args):
         zygote_skeleton_meshes=skeleton_meshes,
         inter_muscle_constraints=[],
         inter_muscle_constraint_threshold=args.constraint_threshold,
+        inter_muscle_k_cap=args.inter_k,
         coupled_as_unified_volume=args.unified_volume,
         use_gpu_arap=use_gpu,
         use_taichi_arap=use_taichi,
@@ -341,6 +342,14 @@ def main():
         help="Inter-muscle constraint distance in meters (default: 0.015)",
     )
     parser.add_argument(
+        "--inter-k",
+        type=int,
+        default=3,
+        help="Per-vertex cap on cross-muscle neighbors (default: 3). "
+             "Bounds inter-muscle edge count; prevents quadratic blowup "
+             "in dense regions like LowLeg.",
+    )
+    parser.add_argument(
         "--backend",
         choices=["auto", "taichi", "gpu", "cpu"],
         default="auto",
@@ -417,6 +426,12 @@ def main():
         action="store_true",
         help="Save per-outer-iter convergence snapshots inside each chunk so "
              "the viewer can scrub the iron-man-style settling sequence.",
+    )
+    parser.add_argument(
+        "--skip-waypoints",
+        action="store_true",
+        help="Skip post-bake waypoint patching. Use when only tet positions "
+             "are needed (e.g. distillation training).",
     )
     args = parser.parse_args()
 
@@ -614,8 +629,11 @@ def main():
     )
 
     # Patch waypoints into chunk files
-    print("\nComputing waypoints...")
-    patch_waypoints(cache_dir, active_muscles, motion_bvh, skel)
+    if args.skip_waypoints:
+        print("\nSkipping waypoint patching (--skip-waypoints)")
+    else:
+        print("\nComputing waypoints...")
+        patch_waypoints(cache_dir, active_muscles, motion_bvh, skel)
 
     # Write completion marker so batch runner can detect fully-baked caches
     done_marker = os.path.join(cache_dir, ".done")

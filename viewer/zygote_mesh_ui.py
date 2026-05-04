@@ -7143,7 +7143,7 @@ def load_previous_muscles(v):
         return 0
 
 
-def find_inter_muscle_constraints(v, threshold=None):
+def find_inter_muscle_constraints(v, threshold=None, k_cap=None):
     """
     Find distance constraints between vertices of different muscles.
     Uses REST positions (from soft_body.rest_positions) to find constraints.
@@ -7151,12 +7151,18 @@ def find_inter_muscle_constraints(v, threshold=None):
 
     Args:
         threshold: Maximum distance to create constraint (default: v.inter_muscle_constraint_threshold)
+        k_cap: Per-vertex max number of cross-muscle neighbors (default:
+            v.inter_muscle_k_cap, fallback 3). Bounds total inter-muscle
+            edges to ~k_cap * N_verts; sparse-system non-zeros stop scaling
+            quadratically with vert density.
 
     Returns:
         Number of constraints found
     """
     if threshold is None:
         threshold = v.inter_muscle_constraint_threshold
+    if k_cap is None:
+        k_cap = int(getattr(v, 'inter_muscle_k_cap', 3))
 
     v.inter_muscle_constraints = []
 
@@ -7194,7 +7200,8 @@ def find_inter_muscle_constraints(v, threshold=None):
         return 0
 
     muscle_names = list(tet_muscles.keys())
-    print(f"Finding inter-muscle constraints for {len(muscle_names)} muscles (threshold={threshold*100:.1f}cm)...")
+    print(f"Finding inter-muscle constraints for {len(muscle_names)} muscles "
+          f"(threshold={threshold*100:.1f}cm, k_cap={k_cap})...")
 
     # For each pair of muscles
     from scipy.spatial import cKDTree
@@ -7215,33 +7222,44 @@ def find_inter_muscle_constraints(v, threshold=None):
             s_fixed2 = data2['surface_fixed']
             s_vidx2 = data2['surface_vidx']
 
-            # Build KD-tree on muscle2 surface verts.
-            # Batched query_ball_point: single call returns list-of-lists for
-            # all surface verts in muscle1.
+            # Build KD-tree on muscle2 surface verts; query k_cap nearest
+            # within threshold for every muscle1 surface vert. cKDTree.query
+            # with k=k_cap returns INF/k for misses, which we filter out.
             tree2 = cKDTree(s_verts2)
-            all_nearby = tree2.query_ball_point(s_verts1, threshold)
-            for s_v1_idx, nearby_indices in enumerate(all_nearby):
-                if not nearby_indices:
+            n2 = len(s_verts2)
+            k_query = min(k_cap, n2) if k_cap > 0 else n2
+            if k_query <= 0:
+                continue
+            dists, idxs = tree2.query(s_verts1, k=k_query,
+                                      distance_upper_bound=threshold)
+            # Normalize shape to (N1, K) regardless of k_query.
+            if k_query == 1:
+                dists = dists[:, None]
+                idxs = idxs[:, None]
+            # Iterate per source vert; skip misses (idx==n2 or inf dist).
+            for s_v1_idx in range(len(s_verts1)):
+                row_idx = idxs[s_v1_idx]
+                row_d = dists[s_v1_idx]
+                valid = (row_idx < n2) & np.isfinite(row_d)
+                if not np.any(valid):
                     continue
+                idx_arr = row_idx[valid].astype(np.int32)
+                d_arr = row_d[valid]
                 is_fixed1 = bool(s_fixed1[s_v1_idx])
-                v1 = s_verts1[s_v1_idx]
-                # Filter by fixed-status match (same fixed/same free)
-                idx_arr = np.asarray(nearby_indices, dtype=np.int32)
+                # Same fixed-status match (same fixed/same free)
                 same_fixed_mask = s_fixed2[idx_arr] == is_fixed1
                 idx_arr = idx_arr[same_fixed_mask]
+                d_arr = d_arr[same_fixed_mask]
                 if len(idx_arr) == 0:
                     continue
-                # Vectorized rest-distance computation
-                dists = np.linalg.norm(s_verts2[idx_arr] - v1, axis=1)
-                # Map surface idx → original tet-vert idx
                 orig_v1_idx = int(s_vidx1[s_v1_idx])
                 orig_v2_indices = s_vidx2[idx_arr]
-                for k, s_v2_idx in enumerate(idx_arr):
-                    is_fixed2 = bool(s_fixed2[s_v2_idx])
+                for kk in range(len(idx_arr)):
+                    is_fixed2 = bool(s_fixed2[idx_arr[kk]])
                     v.inter_muscle_constraints.append((
                         name1, orig_v1_idx, is_fixed1,
-                        name2, int(orig_v2_indices[k]), is_fixed2,
-                        float(dists[k])
+                        name2, int(orig_v2_indices[kk]), is_fixed2,
+                        float(d_arr[kk])
                     ))
 
     print(f"Found {len(v.inter_muscle_constraints)} inter-muscle constraints")
