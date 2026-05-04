@@ -1058,32 +1058,38 @@ class SoftBodySimulation:
         # Fix isolated vertices (0 neighbors) by finding closest connected vertex
         for i in self.free_indices:
             if len(self.arap_neighbors[i]) == 0:
-                rest_pos = self.rest_positions[i]
-                best_dist = float('inf')
-                best_j = -1
-                for j in range(self.num_vertices):
-                    if j != i and len(self.arap_neighbors[j]) > 0:
-                        d = np.linalg.norm(self.rest_positions[j] - rest_pos)
-                        if d < best_dist:
-                            best_dist = d
-                            best_j = j
-                if best_j >= 0:
-                    disp = self.positions[best_j] - self.rest_positions[best_j]
-                    self.positions[i] = rest_pos + disp
-                    print(f"  Fixed isolated vertex {i} by copying displacement from vertex {best_j}")
+                # Vectorized nearest-non-isolated lookup (was O(N) Python loop
+                # per isolated vert × hundreds of orphan verts = O(N²)).
+                has_neighbors = np.array([len(self.arap_neighbors[k]) > 0 for k in range(self.num_vertices)])
+                if has_neighbors.any():
+                    diffs = self.rest_positions - self.rest_positions[i]
+                    dists = np.linalg.norm(diffs, axis=1)
+                    dists[~has_neighbors] = np.inf
+                    dists[i] = np.inf
+                    best_j = int(np.argmin(dists))
+                    if dists[best_j] < np.inf:
+                        disp = self.positions[best_j] - self.rest_positions[best_j]
+                        self.positions[i] = self.rest_positions[i] + disp
 
-        # Check for other stuck vertices (didn't move from rest)
+        # Check for other stuck vertices (didn't move from rest).
+        # Was per-vert Python loop with mean() over neighbor list — for big
+        # meshes (8k+ verts, 100s of stuck) this iterates per-frame and
+        # prints per-stuck-vert. Aggregate prints, vectorize selection.
         total_disp_from_rest = np.linalg.norm(self.positions - self.rest_positions, axis=1)
-        stuck_threshold = 1e-6  # Essentially didn't move
-        for i in self.free_indices:
-            if total_disp_from_rest[i] < stuck_threshold:
-                n_neighbors = len(self.arap_neighbors[i])
-                if n_neighbors > 0:
-                    neighbor_positions = [self.positions[j] for j in self.arap_neighbors[i]]
-                    neighbor_avg = np.mean(neighbor_positions, axis=0)
-                    # Move toward neighbors
-                    self.positions[i] = 0.3 * self.positions[i] + 0.7 * neighbor_avg
-                    print(f"  Fixed stuck vertex {i} (neighbors={n_neighbors}) by moving toward neighbors")
+        stuck_threshold = 1e-6
+        free_arr = np.asarray(self.free_indices)
+        stuck_mask = total_disp_from_rest[free_arr] < stuck_threshold
+        stuck_verts = free_arr[stuck_mask]
+        n_fixed = 0
+        for i in stuck_verts:
+            n_neighbors = len(self.arap_neighbors[i])
+            if n_neighbors > 0:
+                neighbor_positions = [self.positions[j] for j in self.arap_neighbors[i]]
+                neighbor_avg = np.mean(neighbor_positions, axis=0)
+                self.positions[i] = 0.3 * self.positions[i] + 0.7 * neighbor_avg
+                n_fixed += 1
+        if n_fixed > 0:
+            print(f"  Fixed {n_fixed} stuck vertices by averaging toward neighbors")
 
         # Final collision pass (not undone by ARAP). Uses surface vertex- and
         # edge-bone resolution so contour-mesh muscles, whose long surface
