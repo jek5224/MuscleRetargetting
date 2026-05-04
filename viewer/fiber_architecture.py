@@ -1922,7 +1922,7 @@ class FiberArchitectureMixin:
             return
 
         # Rebuild cached arrays if dirty
-        if getattr(self, '_fiber_draw_dirty', False):
+        if getattr(self, '_fiber_draw_dirty', False) or not hasattr(self, '_fiber_draw_pts'):
             self._rebuild_fiber_draw_arrays()
             self._fiber_draw_dirty = False
 
