@@ -7160,14 +7160,33 @@ def find_inter_muscle_constraints(v, threshold=None):
 
     v.inter_muscle_constraints = []
 
-    # Get all muscles with soft body (need rest_positions)
+    # Get all muscles with soft body (need rest_positions).
+    # Surface-only: interior tet verts cannot physically contact another
+    # muscle, so restrict KD-tree query to surface verts. Surface vert
+    # set = unique indices in tet_render_faces excluding cap faces (caps
+    # are origin/insertion lids hidden inside bone, not in tissue contact).
     tet_muscles = {}
     for name, mobj in v.zygote_muscle_meshes.items():
         if hasattr(mobj, 'soft_body') and mobj.soft_body is not None:
-            # Use REST positions for finding constraints
+            rest = mobj.soft_body.rest_positions.copy()
+            fixed = mobj.soft_body.fixed_mask.copy()
+
+            render_faces = getattr(mobj, 'tet_render_faces', None)
+            surf_count = int(getattr(mobj, 'tet_surface_face_count', 0) or 0)
+            if render_faces is not None and surf_count > 0:
+                surf_faces = np.asarray(render_faces[:surf_count], dtype=np.int64)
+                surface_vidx = np.unique(surf_faces.reshape(-1))
+            else:
+                # Fallback: every tet vert is candidate (shouldn't happen for
+                # tet-baked muscles, but keeps behavior safe).
+                surface_vidx = np.arange(len(rest), dtype=np.int64)
+
             tet_muscles[name] = {
-                'rest_positions': mobj.soft_body.rest_positions.copy(),
-                'fixed_mask': mobj.soft_body.fixed_mask.copy()
+                'rest_positions': rest,
+                'fixed_mask': fixed,
+                'surface_vidx': surface_vidx,
+                'surface_rest': rest[surface_vidx],
+                'surface_fixed': fixed[surface_vidx],
             }
 
     if len(tet_muscles) < 2:
@@ -7183,39 +7202,45 @@ def find_inter_muscle_constraints(v, threshold=None):
     for i in range(len(muscle_names)):
         name1 = muscle_names[i]
         data1 = tet_muscles[name1]
-        verts1 = data1['rest_positions']
-        fixed1 = data1['fixed_mask']
+        # Surface-only: query and tree are over surface verts; map results
+        # back to original tet-vert indices via surface_vidx.
+        s_verts1 = data1['surface_rest']
+        s_fixed1 = data1['surface_fixed']
+        s_vidx1 = data1['surface_vidx']
 
         for j in range(i + 1, len(muscle_names)):
             name2 = muscle_names[j]
             data2 = tet_muscles[name2]
-            verts2 = data2['rest_positions']
-            fixed2 = data2['fixed_mask']
+            s_verts2 = data2['surface_rest']
+            s_fixed2 = data2['surface_fixed']
+            s_vidx2 = data2['surface_vidx']
 
-            # Build KD-tree for muscle2 vertices.
+            # Build KD-tree on muscle2 surface verts.
             # Batched query_ball_point: single call returns list-of-lists for
-            # ALL verts in muscle1 → ~500× fewer Python calls per pair than
-            # the prior per-vert loop.
-            tree2 = cKDTree(verts2)
-            all_nearby = tree2.query_ball_point(verts1, threshold)
-            for v1_idx, nearby_indices in enumerate(all_nearby):
+            # all surface verts in muscle1.
+            tree2 = cKDTree(s_verts2)
+            all_nearby = tree2.query_ball_point(s_verts1, threshold)
+            for s_v1_idx, nearby_indices in enumerate(all_nearby):
                 if not nearby_indices:
                     continue
-                is_fixed1 = bool(fixed1[v1_idx])
-                v1 = verts1[v1_idx]
+                is_fixed1 = bool(s_fixed1[s_v1_idx])
+                v1 = s_verts1[s_v1_idx]
                 # Filter by fixed-status match (same fixed/same free)
                 idx_arr = np.asarray(nearby_indices, dtype=np.int32)
-                same_fixed_mask = fixed2[idx_arr] == is_fixed1
+                same_fixed_mask = s_fixed2[idx_arr] == is_fixed1
                 idx_arr = idx_arr[same_fixed_mask]
                 if len(idx_arr) == 0:
                     continue
                 # Vectorized rest-distance computation
-                dists = np.linalg.norm(verts2[idx_arr] - v1, axis=1)
-                for k, v2_idx in enumerate(idx_arr):
-                    is_fixed2 = bool(fixed2[v2_idx])
+                dists = np.linalg.norm(s_verts2[idx_arr] - v1, axis=1)
+                # Map surface idx → original tet-vert idx
+                orig_v1_idx = int(s_vidx1[s_v1_idx])
+                orig_v2_indices = s_vidx2[idx_arr]
+                for k, s_v2_idx in enumerate(idx_arr):
+                    is_fixed2 = bool(s_fixed2[s_v2_idx])
                     v.inter_muscle_constraints.append((
-                        name1, int(v1_idx), is_fixed1,
-                        name2, int(v2_idx), is_fixed2,
+                        name1, orig_v1_idx, is_fixed1,
+                        name2, int(orig_v2_indices[k]), is_fixed2,
                         float(dists[k])
                     ))
 
