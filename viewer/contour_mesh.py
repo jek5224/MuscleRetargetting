@@ -1516,6 +1516,11 @@ class ContourMeshMixin(ContourAnimationMixin):
         for i in range(len(bp_before)):
             swing_level = []
             twist_level = []
+            # Stream count may differ between before/after (e.g. cut shrinks streams).
+            if i >= len(bp_after):
+                smooth_swing_data.append(swing_level)
+                smooth_twist_data.append(twist_level)
+                continue
             for j in range(len(bp_before[i])):
                 if j < len(bp_after[i]):
                     before = bp_before[i][j]
@@ -1628,6 +1633,11 @@ class ContourMeshMixin(ContourAnimationMixin):
         for i in range(len(bp_before)):
             swing_level = []
             twist_level = []
+            # Stream count may differ between before/after (e.g. cut shrinks streams).
+            if i >= len(bp_after):
+                smooth_swing_data.append(swing_level)
+                smooth_twist_data.append(twist_level)
+                continue
             for j in range(len(bp_before[i])):
                 if j < len(bp_after[i]):
                     before = bp_before[i][j]

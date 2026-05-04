@@ -972,7 +972,6 @@ def draw_zygote_muscle_ui(v):
                             print(f"[{name}] Build Contour Mesh done in {time.time()-_t0:.3f}s")
                         except Exception as e:
                             print(f"[{name}] Build Contour Mesh error: {e}")
-                            import traceback
                             traceback.print_exc()
                     else:
                         print(f"[{name}] Prerequisites: Run 'Build Fiber' first")
@@ -1000,7 +999,6 @@ def draw_zygote_muscle_ui(v):
                                     obj._tetrahedralize_replayed = True
                         except Exception as e:
                             print(f"[{name}] Tetrahedralize error: {e}")
-                            import traceback
                             traceback.print_exc()
                     else:
                         print(f"[{name}] Prerequisites: Run 'Build Contour Mesh' first")
