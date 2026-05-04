@@ -1894,9 +1894,18 @@ class ContourAnimationMixin:
         state['_scalar_anim_target_colors'] = getattr(self, '_scalar_anim_target_colors', None)
         state['_scalar_anim_normalized_u'] = getattr(self, '_scalar_anim_normalized_u', None)
 
-        # Contours and bounding planes (the final processed state)
-        state['contours'] = self.contours
-        state['bounding_planes'] = self.bounding_planes
+        # Contours and bounding planes (the final processed state). Deep-copy
+        # each per-cell entry so that any aliasing between cells in memory
+        # (e.g., post-cut sharing of bp dicts via reference) is broken before
+        # pickle, and so later in-memory mutations don't reach the saved state.
+        # Pickle preserves object identity, which would otherwise let two
+        # `bounding_planes[s][l]` cells reload as the same dict and corrupt
+        # whichever pieces of code subsequently mutate one of them.
+        state['contours'] = [[np.array(c).copy() if c is not None else None
+                               for c in group]
+                              for group in self.contours] if self.contours is not None else None
+        state['bounding_planes'] = [[copy.deepcopy(bp) for bp in group]
+                                     for group in self.bounding_planes] if self.bounding_planes is not None else None
         state['draw_contour_stream'] = getattr(self, 'draw_contour_stream', None)
         state['is_draw_contours'] = self.is_draw_contours
         state['is_draw_bounding_box'] = self.is_draw_bounding_box
@@ -1933,9 +1942,20 @@ class ContourAnimationMixin:
         state['_precut_bounding_planes'] = getattr(self, '_precut_bounding_planes', None)
         state['_precut_draw_contour_stream'] = getattr(self, '_precut_draw_contour_stream', None)
 
-        # Stream data (post-cut)
-        state['stream_contours'] = getattr(self, 'stream_contours', None)
-        state['stream_bounding_planes'] = getattr(self, 'stream_bounding_planes', None)
+        # Cut-time canonical shared boundary state — used by build_contour_mesh
+        # to anchor cross-stream vertex merging when per-stream resample drifts
+        # boundary vertices apart.
+        state['shared_cut_vertices'] = getattr(self, 'shared_cut_vertices', None)
+        state['shared_boundary_registry'] = getattr(self, 'shared_boundary_registry', None)
+
+        # Stream data (post-cut). Deep-copy for the same aliasing reason as the
+        # main contours/bounding_planes block above.
+        sc = getattr(self, 'stream_contours', None)
+        sbp = getattr(self, 'stream_bounding_planes', None)
+        state['stream_contours'] = [[np.array(c).copy() if c is not None else None
+                                      for c in group] for group in sc] if sc is not None else None
+        state['stream_bounding_planes'] = [[copy.deepcopy(bp) for bp in group]
+                                            for group in sbp] if sbp is not None else None
         state['stream_groups'] = getattr(self, 'stream_groups', None)
 
         # Cut animation data
@@ -1990,6 +2010,11 @@ class ContourAnimationMixin:
         state['_mesh_anim_band_edges'] = getattr(self, '_mesh_anim_band_edges', None)
         state['_mesh_anim_num_bands'] = getattr(self, '_mesh_anim_num_bands', 0)
         state['is_draw_contour_mesh'] = getattr(self, 'is_draw_contour_mesh', False)
+        # Per-stream face mapping + shared vertex pairs — needed by tet
+        # subprocess for per-stream split. Without these, multi-stream muscles
+        # collapse into single-component path that fails on high-NM meshes.
+        state['_face_stream_map'] = getattr(self, '_face_stream_map', None)
+        state['_shared_vertex_pairs'] = getattr(self, '_shared_vertex_pairs', None)
 
         # Tetrahedralize animation data
         state['tet_vertices'] = getattr(self, 'tet_vertices', None)
@@ -2071,6 +2096,15 @@ class ContourAnimationMixin:
         self._precut_bounding_planes = state.get('_precut_bounding_planes')
         self._precut_draw_contour_stream = state.get('_precut_draw_contour_stream')
 
+        # Cut-time canonical shared boundary state for build_contour_mesh
+        # cross-stream anchor matching.
+        scv = state.get('shared_cut_vertices')
+        if scv is not None:
+            self.shared_cut_vertices = scv
+        sbr = state.get('shared_boundary_registry')
+        if sbr is not None:
+            self.shared_boundary_registry = sbr
+
         # Stream data (post-cut)
         self.stream_contours = state.get('stream_contours')
         self.stream_bounding_planes = state.get('stream_bounding_planes')
@@ -2132,6 +2166,10 @@ class ContourAnimationMixin:
         self._mesh_anim_band_edges = state.get('_mesh_anim_band_edges')
         self._mesh_anim_num_bands = state.get('_mesh_anim_num_bands', 0)
         self.is_draw_contour_mesh = state.get('is_draw_contour_mesh', False)
+        # Per-stream face mapping + shared vertex pairs (required by tet
+        # subprocess for per-stream split path on multi-stream muscles).
+        self._face_stream_map = state.get('_face_stream_map')
+        self._shared_vertex_pairs = state.get('_shared_vertex_pairs')
 
         # Tetrahedralize animation data
         if state.get('tet_vertices') is not None:
@@ -2231,8 +2269,20 @@ class ContourAnimationMixin:
                 (n, 1)
             )
 
-        # 2. Contours: restore pre-cut level-mode data if available
-        if self._precut_contours is not None and self._cut_color_before is not None:
+        # 2. Contours: restore pre-cut level-mode data if available — but only
+        # when downstream post-cut state isn't present. If the saved animation
+        # already advanced past resample/build_mesh/tetrahedralize, rewinding
+        # `contours`/`bounding_planes` to pre-cut breaks index mode for stream-
+        # mode data (contours_resampled, contour_mesh_vertices, tet, waypoints)
+        # — inspect-2D would project resampled with the wrong BP.
+        post_cut_state_present = (
+            getattr(self, 'contours_resampled', None) is not None
+            or getattr(self, 'contour_mesh_vertices', None) is not None
+            or getattr(self, 'tet_vertices', None) is not None
+        )
+        if (self._precut_contours is not None
+                and self._cut_color_before is not None
+                and not post_cut_state_present):
             # Restore level-mode contours and BPs for pre-cut animations
             self.contours = self._precut_contours
             self.bounding_planes = [[copy.deepcopy(bp) for bp in level] for level in self._precut_bounding_planes] if self._precut_bounding_planes else self.bounding_planes
@@ -2259,15 +2309,22 @@ class ContourAnimationMixin:
             else:
                 self.draw_contour_stream = [False] * len(self.contours)
 
-        # 3. Smooth: apply pre-smooth BPs
-        if self._smooth_bp_before is not None:
+        # 3. Smooth: apply pre-smooth BPs — but skip when post-cut state is
+        # present. The snapshot was captured before cut split contours into
+        # streams, so it has level-mode shape `[level][stream]`. Applying it
+        # into now-stream-mode `bounding_planes` `[stream][level]` writes
+        # mismatched cells onto every position where stream != level, which
+        # is exactly the off-diagonal corruption seen in inspect-2D after
+        # save→reset→load on Soleus.
+        if self._smooth_bp_before is not None and not post_cut_state_present:
             self._apply_bp_snapshot(self._smooth_bp_before)
 
-        # 4. Cut: handle deferred state based on mode
+        # 4. Cut: handle deferred state based on mode. Same gate — skip the
+        # rewind snapshots when the live state is already past cut.
         if self._precut_contours is not None:
             # New: level mode — no color override needed (normal coloring is correct)
             self._cut_anim_contour_colors = None
-        else:
+        elif not post_cut_state_present:
             # Backward compat: stream mode — use color override for pre-cut appearance
             if self._cut_color_before is not None:
                 self._cut_anim_contour_colors = [[c.copy() for c in stream] for stream in self._cut_color_before]

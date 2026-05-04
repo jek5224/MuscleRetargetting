@@ -895,19 +895,27 @@ except Exception as e:
                 dl = _Delaunay(closed_vertices.astype(np.float64))
                 all_dl_tets = dl.simplices
 
-                # Filter: keep tets whose centroid is inside the surface mesh
+                # Filter: keep tets whose centroid is inside the surface mesh.
+                # Batched contains() — single-call on 30k+ centroids vs non-watertight
+                # 6k+ vert mesh OOMs the process (multi-ray voting allocates large arrays).
                 mesh_dl = trimesh.Trimesh(vertices=closed_vertices.astype(np.float64),
                                           faces=closed_faces.astype(np.int32), process=False)
                 mesh_dl.fix_normals()
                 dl_centroids = np.mean(closed_vertices[all_dl_tets].astype(np.float64), axis=1)
-                interior_mask = mesh_dl.contains(dl_centroids)
+                interior_mask = np.zeros(len(dl_centroids), dtype=bool)
+                _b = 5000
+                for _i in range(0, len(dl_centroids), _b):
+                    interior_mask[_i:_i+_b] = mesh_dl.contains(dl_centroids[_i:_i+_b])
 
-                # Add tets needed for uncovered interior points
-                n_dense = min(50000, max(10000, len(closed_vertices) * 50))
+                # Add tets needed for uncovered interior points (capped + batched)
+                n_dense = min(5000, max(2000, len(closed_vertices) * 5))
                 bbox_min = closed_vertices.min(axis=0)
                 bbox_max = closed_vertices.max(axis=0)
                 dense_samples = np.random.uniform(bbox_min, bbox_max, (n_dense, 3)).astype(np.float64)
-                interior_pts = dense_samples[mesh_dl.contains(dense_samples)]
+                _ds_mask = np.zeros(len(dense_samples), dtype=bool)
+                for _i in range(0, len(dense_samples), _b):
+                    _ds_mask[_i:_i+_b] = mesh_dl.contains(dense_samples[_i:_i+_b])
+                interior_pts = dense_samples[_ds_mask]
                 if len(interior_pts) > 0:
                     simplex_ids = dl.find_simplex(interior_pts)
                     interior_set = set(np.where(interior_mask)[0])
@@ -1743,22 +1751,6 @@ except Exception as e:
             self._tet_surface_verts = None
             self._tet_cap_verts = None
             self._tet_edge_verts = None
-            self._tet_surface_normals = None
-            self._tet_cap_normals = None
-            # Invalidate stale soft body + fixed-vertex state from a previous
-            # tet (different vertex count). Swap to original mesh kept the
-            # contour mesh's soft_body and fixed indices → fixed dots drawn
-            # at wrong positions and ARAP ran with contour's anchor map.
-            self.soft_body = None
-            self.soft_body_fixed_vertices = []
-            self.soft_body_local_anchors = {}
-            self.soft_body_initial_transforms = {}
-            self.skinning_weights = None
-            self.skinning_bones = []
-            # Original-tet per-vert bone override. init_soft_body reads this
-            # to assign each anchor to the XML-waypoint-correct bone even when
-            # BFS groups would otherwise send it to the wrong bone.
-            self.tet_anchor_bone_map = data.get('anchor_bone_map', {})
 
             # Load dual face system (with backwards compatibility)
             if 'render_faces' in data and data['render_faces'] is not None:
