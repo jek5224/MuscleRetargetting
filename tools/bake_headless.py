@@ -338,8 +338,8 @@ def main():
     parser.add_argument(
         "--constraint-threshold",
         type=float,
-        default=0.015,
-        help="Inter-muscle constraint distance in meters (default: 0.015)",
+        default=0.005,
+        help="Inter-muscle constraint distance in meters (default: 0.005)",
     )
     parser.add_argument(
         "--inter-k",
