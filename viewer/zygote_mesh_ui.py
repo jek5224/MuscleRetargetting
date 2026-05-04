@@ -7706,51 +7706,70 @@ def _run_unified_volume_sim(v, active_muscles, max_iterations=100, tolerance=1e-
     )
     print(f"  ARAP solved in {time.time() - start_time:.3f}s ({iterations} iterations)")
 
-    # Fix isolated vertices (0 neighbors) by copying displacement from
-    # the nearest connected vertex. Vectorized via cKDTree on connected
-    # verts: was Python O(N_iso * N_total) double loop, ~50s/frame on
-    # LowLeg (367 isolated × 27k verts × per-iter np.linalg.norm).
+    # Build a vertex → muscle ID array so isolated/stuck fixes only borrow
+    # displacement from same-muscle connected verts. Cross-muscle copies
+    # produce visibly wrong attachments when adjacent muscles ride
+    # different bones (e.g. soleus interior vs gastrocnemius).
+    vert_muscle = np.empty(total_verts, dtype=np.int32)
+    for mid, name in enumerate(muscle_names):
+        off = global_offset[name]
+        n = active_muscles[name].soft_body.num_vertices
+        vert_muscle[off:off + n] = mid
+
+    # Fix isolated vertices (0 neighbors) by copying displacement from the
+    # nearest connected vertex IN THE SAME MUSCLE. Was global cKDTree,
+    # which could copy displacement across muscle boundaries.
     nbr_lens = np.array([len(neighbors[i]) for i in range(total_verts)],
                         dtype=np.int32)
     iso_mask = (nbr_lens == 0) & (~global_fixed_mask)
     iso_indices = np.where(iso_mask)[0]
     if len(iso_indices) > 0:
+        from scipy.spatial import cKDTree as _cKDT_iso
         connected_mask = nbr_lens > 0
-        connected_idx = np.where(connected_mask)[0]
-        if len(connected_idx) > 0:
-            from scipy.spatial import cKDTree as _cKDT_iso
-            tree = _cKDT_iso(global_rest_positions[connected_idx])
-            _, nearest_local = tree.query(global_rest_positions[iso_indices])
-            best_j = connected_idx[nearest_local]
+        unmatched = []
+        for mid in np.unique(vert_muscle[iso_indices]):
+            iso_m = iso_indices[vert_muscle[iso_indices] == mid]
+            conn_m = np.where(connected_mask & (vert_muscle == mid))[0]
+            if len(conn_m) == 0:
+                unmatched.extend(iso_m.tolist())
+                continue
+            tree = _cKDT_iso(global_rest_positions[conn_m])
+            _, nearest_local = tree.query(global_rest_positions[iso_m])
+            best_j = conn_m[nearest_local]
             disp = global_positions[best_j] - global_rest_positions[best_j]
-            global_positions[iso_indices] = global_rest_positions[iso_indices] + disp
-            # Only print on first call this session — count is identical
-            # across frames since topology doesn't change.
-            if not getattr(v, '_iso_fix_announced', False):
-                print(f"  Fixed {len(iso_indices)} isolated vertices by copying nearby displacement (printed once)")
-                v._iso_fix_announced = True
+            global_positions[iso_m] = global_rest_positions[iso_m] + disp
+        if unmatched and not getattr(v, '_iso_unmatched_announced', False):
+            print(f"  WARNING: {len(unmatched)} isolated verts have no connected same-muscle vert; left at rest")
+            v._iso_unmatched_announced = True
+        if not getattr(v, '_iso_fix_announced', False):
+            print(f"  Fixed {len(iso_indices) - len(unmatched)} isolated vertices via same-muscle nearest connected (printed once)")
+            v._iso_fix_announced = True
 
-    # Check for other stuck vertices and fix them
-    # Only apply if there's actual deformation (fixed vertices moved from rest)
+    # Stuck-vertex fix: free verts with neighbors but ~zero displacement.
+    # Vectorize the prior Python per-vert loop and restrict to same-muscle
+    # neighbors via average over neighbors[] (those are already global
+    # indices; muscle membership comes from the same vert_muscle map).
     fixed_indices = np.where(global_fixed_mask)[0]
     fixed_disp = np.linalg.norm(global_positions[fixed_indices] - global_rest_positions[fixed_indices], axis=1)
     max_fixed_disp = np.max(fixed_disp) if len(fixed_disp) > 0 else 0.0
-
-    if max_fixed_disp > 1e-6:  # Only fix stuck vertices if there's actual deformation
+    if max_fixed_disp > 1e-6:
         total_disp_from_rest = np.linalg.norm(global_positions - global_rest_positions, axis=1)
         stuck_threshold = 1e-6
-        stuck_count = 0
-        for i in range(total_verts):
-            if not global_fixed_mask[i] and total_disp_from_rest[i] < stuck_threshold:
-                n_neighbors = len(neighbors[i])
-                if n_neighbors > 0:
-                    neighbor_positions = [global_positions[j] for j in neighbors[i]]
-                    neighbor_avg = np.mean(neighbor_positions, axis=0)
-                    # Move toward neighbor average
-                    global_positions[i] = 0.3 * global_positions[i] + 0.7 * neighbor_avg
-                    stuck_count += 1
-        if stuck_count > 0:
-            print(f"  Fixed {stuck_count} stuck vertices by moving toward neighbors")
+        stuck_mask = (~global_fixed_mask) & (total_disp_from_rest < stuck_threshold) & (nbr_lens > 0)
+        stuck_indices = np.where(stuck_mask)[0]
+        if len(stuck_indices) > 0:
+            new_positions = global_positions[stuck_indices].copy()
+            for k, i in enumerate(stuck_indices):
+                same_mid = vert_muscle[i]
+                same_neighbors = [j for j in neighbors[i] if vert_muscle[j] == same_mid]
+                if not same_neighbors:
+                    continue
+                neighbor_avg = global_positions[np.asarray(same_neighbors, dtype=np.int64)].mean(axis=0)
+                new_positions[k] = 0.3 * global_positions[i] + 0.7 * neighbor_avg
+            global_positions[stuck_indices] = new_positions
+            if not getattr(v, '_stuck_fix_announced', False):
+                print(f"  Fixed {len(stuck_indices)} stuck vertices via same-muscle neighbor average (printed once)")
+                v._stuck_fix_announced = True
 
     # Stash solution for warm-starting the next frame
     if v._unified_sim_cache is not None:
