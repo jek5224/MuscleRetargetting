@@ -148,12 +148,14 @@ class TetrahedronMeshMixin:
 
         return np.array(boundary_faces, dtype=np.int32) if boundary_faces else np.array([], dtype=np.int32).reshape(0, 3)
 
-    def tetrahedralize_contour_mesh(self):
+    def tetrahedralize_contour_mesh(self, skeleton_meshes=None):
         """
         Tetrahedralize the contour mesh for soft body simulation.
         - Caps open edges at origins/insertions with triangular faces using mean point as anchor
         - Tetrahedralizes the closed volume
         - Marks cap faces as fixed (for attachment to skeleton)
+        - If skeleton_meshes is provided, also auto-populates
+          self.attach_skeleton_names per stream so saved tet binds to bones at bake time.
 
         Shared boundary handling (cut contours):
         - The contour mesh may have duplicate vertices at shared cut boundaries
@@ -1606,6 +1608,15 @@ except Exception as e:
         print(f"  Sim faces: {len(self.tet_sim_faces)} (tet boundary)")
         print(f"  Tetrahedra: {len(self.tet_tetrahedra)}")
         print(f"  Fixed cap faces: {len(self.tet_cap_face_indices)}")
+
+        # Auto-populate attach_skeleton_names so saved tet binds to bones at
+        # bake time. Without this, bake_headless can't resolve anchors → bone
+        # binding broken.
+        if skeleton_meshes is not None and len(skeleton_meshes) > 0:
+            try:
+                self.auto_detect_attachments(skeleton_meshes)
+            except Exception as _e:
+                print(f"  auto_detect_attachments failed: {_e}")
 
         return True
 

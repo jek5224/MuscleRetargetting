@@ -652,7 +652,7 @@ def draw_zygote_muscle_ui(v):
                             print(f"  [12/{max_step}] Tetrahedralizing...")
                             _t0 = time.time()
                             obj.soft_body = None
-                            obj.tetrahedralize_contour_mesh()
+                            obj.tetrahedralize_contour_mesh(skeleton_meshes=v.zygote_skeleton_meshes)
                             if obj.tet_vertices is not None:
                                 if defer:
                                     obj._extract_internal_tet_edges()
@@ -987,7 +987,7 @@ def draw_zygote_muscle_ui(v):
                         try:
                             _t0 = time.time()
                             obj.soft_body = None  # Reset soft body when re-tetrahedralizing
-                            obj.tetrahedralize_contour_mesh()
+                            obj.tetrahedralize_contour_mesh(skeleton_meshes=v.zygote_skeleton_meshes)
                             print(f"[{name}] Tetrahedralize done in {time.time()-_t0:.3f}s")
                             if obj.tet_vertices is not None:
                                 if animate:
@@ -2046,12 +2046,14 @@ def _draw_motion_browser_ui(v):
         imgui.separator()
         imgui.text("--- Deformation Cache ---")
 
-        # Cache info: count how many frames are cached
+        # Cache info: count how many frames are cached. Snapshot values() to a
+        # list so the background loader thread can keep mutating the dict safely.
         cached_frames = set()
-        for mname_cache in v.motion_deform_cache.values():
+        for mname_cache in list(v.motion_deform_cache.values()):
             cached_frames.update(mname_cache.keys())
         num_cached = len(cached_frames)
-        imgui.text(f"Cache: {num_cached}/{v.motion_total_frames} frames baked")
+        loading_tag = " [loading...]" if getattr(v, 'motion_cache_loading', False) else ""
+        imgui.text(f"Cache: {num_cached}/{v.motion_total_frames} frames baked{loading_tag}")
 
         # Save Current Frame button
         has_soft_bodies = any(m.soft_body is not None for m in v.zygote_muscle_meshes.values()) if hasattr(v, 'zygote_muscle_meshes') else False
@@ -2627,13 +2629,53 @@ def _render_inspect_2d_windows(v):
                         hovered_idx = _best_p_idx
                         hovered_type = 'vertex'
 
-                # Draw bounding plane (blue)
+                # Draw bounding plane (blue). If bp['bounding_plane'] corners are
+                # inconsistent with bp['mean']/basis (happens after some load_anim
+                # paths where the corner array was carried over from a different
+                # cell of bounding_planes), the projected square explodes far off
+                # the contour. Detect that case and re-derive corners from the
+                # contour's projected extent so the square stays sane.
                 if bp is not None and len(bp) >= 4:
-                    bp_screen = []
+                    bp_corners_2d = []
                     for corner_3d in bp[:4]:
                         corner_3d = np.array(corner_3d)
-                        corner_2d = np.array([np.dot(corner_3d - mean, _dbx), np.dot(corner_3d - mean, _dby)])
-                        bp_screen.append(_p2d_to_screen(corner_2d))
+                        bp_corners_2d.append(np.array([
+                            np.dot(corner_3d - mean, _dbx),
+                            np.dot(corner_3d - mean, _dby),
+                        ]))
+                    bp_corners_2d_arr = np.array(bp_corners_2d)
+
+                    # Sanity: BP should roughly enclose contour P points. If its
+                    # extent is much bigger than P extent OR centroid is far from
+                    # P centroid, treat corners as stale.
+                    p_min = p_2d_arr.min(axis=0)
+                    p_max = p_2d_arr.max(axis=0)
+                    p_range = p_max - p_min
+                    p_center = (p_min + p_max) / 2
+                    bp_min = bp_corners_2d_arr.min(axis=0)
+                    bp_max = bp_corners_2d_arr.max(axis=0)
+                    bp_range = bp_max - bp_min
+                    bp_center = (bp_min + bp_max) / 2
+                    p_diag = float(np.linalg.norm(p_range)) or 1.0
+                    extent_ratio = float(np.linalg.norm(bp_range)) / p_diag
+                    center_drift = float(np.linalg.norm(bp_center - p_center)) / p_diag
+                    bp_stale = extent_ratio > 5.0 or center_drift > 2.0
+                    if bp_stale:
+                        # Fallback: derive a rectangle aligned with (basis_x, basis_y)
+                        # frame, sized to enclose contour with 5% margin. Better
+                        # than rendering a far-off quad. Order matches BP convention
+                        # (0=BL, 1=BR, 2=TR, 3=TL).
+                        m = 0.05 * np.maximum(p_range, 1e-6)
+                        bl = p_min - m
+                        tr = p_max + m
+                        bp_corners_2d_arr = np.array([
+                            [bl[0], bl[1]],
+                            [tr[0], bl[1]],
+                            [tr[0], tr[1]],
+                            [bl[0], tr[1]],
+                        ])
+
+                    bp_screen = [_p2d_to_screen(c) for c in bp_corners_2d_arr]
                     for i in range(4):
                         p1 = bp_screen[i]
                         p2 = bp_screen[(i + 1) % 4]
@@ -2688,11 +2730,17 @@ def _render_inspect_2d_windows(v):
                         # Corner index label
                         draw_list.add_text(cx + 7, cy - 7, imgui.get_color_u32_rgba(0.8, 0.2, 0.8, 1.0), str(ci))
 
-                        # Check hover on corners (right side) — corners take priority over vertices
-                        dist = np.sqrt((mouse_pos[0] - cx)**2 + (mouse_pos[1] - cy)**2)
-                        if dist < hover_radius:
-                            hovered_idx = ci
-                            hovered_type = 'corner'
+                        # Check hover on corners (right side). Corners normally
+                        # take priority over vertices, but in correspondence
+                        # mode the user is trying to PICK a vertex to assign to
+                        # the already-selected corner — so a near-corner vertex
+                        # must remain selectable. Skip the override while
+                        # corr_mode is active so vertex hover (set earlier) wins.
+                        if not corr_mode:
+                            dist = np.sqrt((mouse_pos[0] - cx)**2 + (mouse_pos[1] - cy)**2)
+                            if dist < hover_radius:
+                                hovered_idx = ci
+                                hovered_type = 'corner'
 
                     # Show corner-vertex mapping as text
                     imgui.text(f"Corners: {q_based_corner_indices}")
@@ -2891,9 +2939,9 @@ def _render_inspect_2d_windows(v):
                         # Highlight the corresponding Q vertex
                         if closest_vi < len(q_screen_points):
                             qx, qy = q_screen_points[closest_vi]
-                        draw_list.add_circle_filled(qx, qy, 7, imgui.get_color_u32_rgba(0.0, 0.8, 0.8, 1.0))
-                        draw_list.add_circle(qx, qy, 9, imgui.get_color_u32_rgba(1.0, 1.0, 1.0, 1.0), thickness=2.5)
-                    break
+                            draw_list.add_circle_filled(qx, qy, 7, imgui.get_color_u32_rgba(0.0, 0.8, 0.8, 1.0))
+                            draw_list.add_circle(qx, qy, 9, imgui.get_color_u32_rgba(1.0, 1.0, 1.0, 1.0), thickness=2.5)
+                        break
 
         # Set 3D highlights based on hover
         if hovered_type == 'vertex' and hovered_idx >= 0 and contour_match is not None and hovered_idx < len(contour_match):
@@ -3251,7 +3299,7 @@ def _render_inspect_2d_windows(v):
             else:
                 imgui.text(f"Selected {corner_name}, hover vertex to preview")
 
-            # "Find cor" buttons: apply this corner's unit-square ratio to all levels
+            # "Find cor" buttons: apply this corner's unit-square ratio to all levels.
             imgui.same_line()
             if imgui.button(f"Find cor (x)##{name}"):
                 _find_correspondence_all_levels(v, name, obj, stream_idx, level_idx,
@@ -3500,14 +3548,21 @@ def _find_correspondence_all_levels(v, name, obj, stream_idx, level_idx, corner_
 
     print(f"  [Find cor ({axis})] Corner {corner_idx} at ({target_u:.3f}, {target_v:.3f})")
 
-    # Determine which side the corner is on using BP corner index directly
-    # Corners: 0=bottom-left, 1=bottom-right, 2=top-right, 3=top-left
+    # Target ratio = projected u/v of the selected corner's vertex (so any
+    # displacement propagates). Side preference inferred from the SAME
+    # projection: if target_v > 0.5 the reference vertex is in the upper half
+    # of the unit square → prefer upper v on other levels too. Likewise for u.
+    # Inferring from the actual vertex position avoids reliance on whether
+    # corner_idx 0..3 corresponds to BL/BR/TR/TL on the user's BP, which can
+    # vary per cell.
     if axis == 'x':
         target_ratio = target_u
-        side_above = corner_idx in (2, 3)  # top corners pick uppermost
+        prefer_high_other = target_v > 0.5
     else:
         target_ratio = target_v
-        side_above = corner_idx in (1, 2)  # right corners pick rightmost
+        prefer_high_other = target_u > 0.5
+    print(f"  [Find cor ({axis})] target=({target_u:.3f},{target_v:.3f}) "
+          f"prefer_high_other={prefer_high_other}")
 
     # Apply to all levels in this stream
     if is_post_stream:
@@ -3559,26 +3614,39 @@ def _find_correspondence_all_levels(v, name, obj, stream_idx, level_idx, corner_
         else:
             diffs = np.abs(vert_uv[:, 1] - target_ratio)
 
-        # Get top candidates (within 2x of best diff)
-        best_diff = np.min(diffs)
-        candidates = np.where(diffs < max(best_diff * 2, 0.05))[0]
+        # Candidate window: include any vertex whose matched-axis distance to
+        # target is within 0.05 (5% of unit square) OR within 2x the best
+        # diff — whichever is larger. A closed contour at a given u typically
+        # has TWO vertices (upper-half and lower-half), and they're rarely
+        # equidistant from target_u, so the tie window must be loose enough
+        # to admit both. Side disambig below then picks the half matching the
+        # reference corner.
+        best_diff = float(np.min(diffs))
+        tie_eps = max(best_diff, 0.05)
+        candidates = np.where(diffs <= best_diff + tie_eps)[0]
 
         if len(candidates) == 0:
             continue
 
-        # Disambiguate: pick candidate on the correct side
-        if axis == 'x':
-            # Among candidates at similar x, pick by y side
-            if side_above:
-                best_vi = candidates[np.argmax(vert_uv[candidates, 1])]
-            else:
-                best_vi = candidates[np.argmin(vert_uv[candidates, 1])]
+        # If only one within tie window, take it. Otherwise pick by side in 2D:
+        # for axis='x' tie-break on v (high if top corner, low if bottom);
+        # for axis='y' tie-break on u (high if right corner, low if left).
+        if len(candidates) == 1:
+            best_vi = int(candidates[0])
+            print(f"  [Find cor lev={lev}] single candidate vi={best_vi} "
+                  f"uv={vert_uv[best_vi].tolist()}")
         else:
-            # Among candidates at similar y, pick by x side
-            if side_above:
-                best_vi = candidates[np.argmax(vert_uv[candidates, 0])]
+            other_axis = 1 if axis == 'x' else 0
+            other_vals = vert_uv[candidates, other_axis]
+            if prefer_high_other:
+                pick = int(np.argmax(other_vals))
             else:
-                best_vi = candidates[np.argmin(vert_uv[candidates, 0])]
+                pick = int(np.argmin(other_vals))
+            best_vi = int(candidates[pick])
+            cand_uvs = [vert_uv[c].tolist() for c in candidates]
+            print(f"  [Find cor lev={lev}] {len(candidates)} cands uv={cand_uvs} "
+                  f"prefer_high={prefer_high_other} → vi={best_vi} "
+                  f"uv={vert_uv[best_vi].tolist()}")
 
         # Apply this corner correspondence
         ci_lev = bp_lev.get('corner_indices')
@@ -3960,7 +4028,13 @@ def _apply_corner_correspondence_lightweight(obj, stream_idx, level_idx, corner_
         for i in range(1, len(seg_indices)):
             arc_lengths.append(arc_lengths[-1] +
                 np.linalg.norm(P_vertices[seg_indices[i]] - P_vertices[seg_indices[i - 1]]))
-        total_arc = arc_lengths[-1] if arc_lengths[-1] > 1e-10 else 1.0
+        # End corner (P_vertices[ve]) is NOT in this edge's segment (it is the next
+        # edge's start), but the segment from seg_indices[-1] to it IS part of this
+        # edge's arc length. Include it so the last in-segment vertex gets t<1.
+        closing_seg = np.linalg.norm(P_vertices[ve] - P_vertices[seg_indices[-1]])
+        total_arc = arc_lengths[-1] + closing_seg
+        if total_arc < 1e-10:
+            total_arc = 1.0
 
         for i, vi in enumerate(seg_indices):
             t = arc_lengths[i] / total_arc
@@ -4055,12 +4129,17 @@ def _apply_corner_correspondence(v, name, obj, stream_idx, level_idx, corner_idx
         if len(seg_indices) == 0:
             continue
 
-        # Arc-length parameterization
+        # Arc-length parameterization. Include the closing segment from the last
+        # in-segment vertex to the end corner P_vertices[ve] so the last vertex
+        # before the corner gets t<1 instead of snapping to the corner's Q.
         arc_lengths = [0.0]
         for i in range(1, len(seg_indices)):
             arc_lengths.append(arc_lengths[-1] +
                 np.linalg.norm(P_vertices[seg_indices[i]] - P_vertices[seg_indices[i - 1]]))
-        total_arc = arc_lengths[-1] if arc_lengths[-1] > 1e-10 else 1.0
+        closing_seg = np.linalg.norm(P_vertices[ve] - P_vertices[seg_indices[-1]])
+        total_arc = arc_lengths[-1] + closing_seg
+        if total_arc < 1e-10:
+            total_arc = 1.0
 
         for i, vi in enumerate(seg_indices):
             t = arc_lengths[i] / total_arc
@@ -4541,7 +4620,7 @@ def _resume_pipeline_after_cut(v, obj, name):
             print(f"  [12/{max_step}] Tetrahedralizing...")
             _t0 = time.time()
             obj.soft_body = None
-            obj.tetrahedralize_contour_mesh()
+            obj.tetrahedralize_contour_mesh(skeleton_meshes=v.zygote_skeleton_meshes)
             print(f"  [12/{max_step}] Done in {time.time()-_t0:.3f}s")
             if obj.tet_vertices is not None:
                 if _defer:
@@ -6496,7 +6575,7 @@ def _render_level_select_windows(v):
                             print(f"  [12/{max_step}] Tetrahedralizing...")
                             _t0 = time.time()
                             obj.soft_body = None
-                            obj.tetrahedralize_contour_mesh()
+                            obj.tetrahedralize_contour_mesh(skeleton_meshes=v.zygote_skeleton_meshes)
                             print(f"  [12/{max_step}] Done in {time.time()-_t0:.3f}s")
                             if obj.tet_vertices is not None:
                                 if _defer:
@@ -8091,12 +8170,24 @@ def _load_motion_bvh(v, idx):
         v.motion_play_accumulator = 0.0
         # Enable OBJ skeleton rendering so posed skeleton is visible
         v.draw_obj = True
-        # Load cached deformation data if available
-        _motion_load_cache(v)
+        # Initialize cache dict so playback can proceed without deform until
+        # the background loader populates it. Skeleton+pose are ready immediately;
+        # cached muscle positions stream in per-muscle as the thread completes.
+        v.motion_deform_cache = {}
+        v.motion_cache_loading = True
+        import threading
+        def _bg_load():
+            try:
+                _motion_load_cache(v)
+            finally:
+                v.motion_cache_loading = False
+                print(f"[Motion] Cache load complete: {len(v.motion_deform_cache)} muscles")
+        threading.Thread(target=_bg_load, daemon=True).start()
         # Load NN checkpoint if available
         _motion_load_nn_checkpoint(v)
         v.motion_bake_end_frame = min(v.motion_bake_end_frame, v.motion_total_frames - 1)
-        # Apply frame 0 pose and initialize tet meshes from cache if available
+        # Apply frame 0 pose; skeleton plays immediately, cached deformation
+        # kicks in once background thread populates entries for this frame.
         _motion_reset(v)
         print(f"Loaded motion: {os.path.basename(bvh_path)} ({v.motion_total_frames} frames, {1.0/v.motion_bvh.frame_time:.0f} FPS)")
     except Exception as e:
@@ -8883,7 +8974,7 @@ def _motion_anim_steps(v, frame):
     if not getattr(v, 'motion_deform_cache', None):
         return 0
     k = 0
-    for cache in v.motion_deform_cache.values():
+    for cache in list(v.motion_deform_cache.values()):
         entry = cache.get(int(frame)) if cache else None
         if entry is not None and 'positions_anim' in entry:
             k = max(k, int(entry['positions_anim'].shape[0]))

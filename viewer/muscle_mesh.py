@@ -4095,6 +4095,22 @@ class MuscleMeshMixin:
                 any(any(n for n in group) for group in self.attach_skeleton_names)
             )
 
+            # Fallback: if attach_skeleton_names is empty/missing, derive bones
+            # from waypoint/contour endpoints via nearest-bone-mesh query. Lets
+            # bake_headless work on tets that didn't have attach_skeleton_names
+            # populated at save time.
+            if not has_skel_names and hasattr(self, 'auto_detect_attachments'):
+                print("  attach_skeleton_names empty — running auto_detect_attachments")
+                try:
+                    self.auto_detect_attachments(skeleton_meshes)
+                    has_skel_names = (
+                        hasattr(self, 'attach_skeleton_names') and
+                        len(self.attach_skeleton_names) > 0 and
+                        any(any(n for n in group) for group in self.attach_skeleton_names)
+                    )
+                except Exception as _e:
+                    print(f"  auto_detect_attachments failed: {_e}")
+
             # Group cap vertices by (stream, end_type)
             cap_groups = {}
             for attachment in self.tet_cap_attachments:
