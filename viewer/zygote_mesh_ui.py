@@ -7703,28 +7703,25 @@ def _run_unified_volume_sim(v, active_muscles, max_iterations=100, tolerance=1e-
     )
     print(f"  ARAP solved in {time.time() - start_time:.3f}s ({iterations} iterations)")
 
-    # Fix isolated vertices (0 neighbors) by finding closest non-isolated vertex
-    # and applying same displacement
-    isolated_fixed = 0
-    for i in range(total_verts):
-        if len(neighbors[i]) == 0 and not global_fixed_mask[i]:
-            # Find closest vertex that has neighbors
-            rest_pos = global_rest_positions[i]
-            best_dist = float('inf')
-            best_j = -1
-            for j in range(total_verts):
-                if j != i and len(neighbors[j]) > 0:
-                    d = np.linalg.norm(global_rest_positions[j] - rest_pos)
-                    if d < best_dist:
-                        best_dist = d
-                        best_j = j
-            if best_j >= 0:
-                # Apply same displacement as closest connected vertex
-                disp = global_positions[best_j] - global_rest_positions[best_j]
-                global_positions[i] = rest_pos + disp
-                isolated_fixed += 1
-    if isolated_fixed > 0:
-        print(f"  Fixed {isolated_fixed} isolated vertices by copying nearby displacement")
+    # Fix isolated vertices (0 neighbors) by copying displacement from
+    # the nearest connected vertex. Vectorized via cKDTree on connected
+    # verts: was Python O(N_iso * N_total) double loop, ~50s/frame on
+    # LowLeg (367 isolated × 27k verts × per-iter np.linalg.norm).
+    nbr_lens = np.array([len(neighbors[i]) for i in range(total_verts)],
+                        dtype=np.int32)
+    iso_mask = (nbr_lens == 0) & (~global_fixed_mask)
+    iso_indices = np.where(iso_mask)[0]
+    if len(iso_indices) > 0:
+        connected_mask = nbr_lens > 0
+        connected_idx = np.where(connected_mask)[0]
+        if len(connected_idx) > 0:
+            from scipy.spatial import cKDTree as _cKDT_iso
+            tree = _cKDT_iso(global_rest_positions[connected_idx])
+            _, nearest_local = tree.query(global_rest_positions[iso_indices])
+            best_j = connected_idx[nearest_local]
+            disp = global_positions[best_j] - global_rest_positions[best_j]
+            global_positions[iso_indices] = global_rest_positions[iso_indices] + disp
+            print(f"  Fixed {len(iso_indices)} isolated vertices by copying nearby displacement")
 
     # Check for other stuck vertices and fix them
     # Only apply if there's actual deformation (fixed vertices moved from rest)
