@@ -1191,7 +1191,16 @@ class ARAPBackendTaichi(ARAPBackend):
         if collision_projection is not None and collision_target_fn is None:
             effective_tol = max(tolerance, 2e-3)
 
+        # Plateau early-exit: when max_disp stops decreasing over a sliding
+        # window of K iterations, accept and return. Inter-muscle springs
+        # often produce sub-tolerance oscillation that never reaches `tolerance`,
+        # wasting all remaining iterations.
+        PLATEAU_WINDOW = 30
+        PLATEAU_REL = 0.02   # require >2% relative drop over the window
+        plateau_min = float('inf')
+
         rest_uploaded = False
+        max_disp = 0.0
         for iteration in range(max_iterations):
             self.local_step(positions, rest_positions, neighbors, weights, rest_edges, target_edges)
             if not rest_uploaded:
@@ -1228,6 +1237,16 @@ class ARAPBackendTaichi(ARAPBackend):
                 if verbose:
                     print(f"  Converged at iteration {iteration+1}, max_disp={max_disp:.2e}")
                 return positions, iteration + 1, max_disp
+            # Plateau detection: track running min over a window, stop when
+            # the window can't drive the disp below (1 - PLATEAU_REL) * window_min.
+            if (iteration + 1) % PLATEAU_WINDOW == 0:
+                if max_disp >= plateau_min * (1.0 - PLATEAU_REL):
+                    if verbose:
+                        print(f"  Plateau at iter {iteration+1}, max_disp={max_disp:.2e} (window min={plateau_min:.2e})")
+                    return positions, iteration + 1, max_disp
+                plateau_min = max_disp
+            else:
+                plateau_min = min(plateau_min, max_disp)
         if verbose:
             print(f"  Max iterations reached, max_disp={max_disp:.2e}")
         return positions, max_iterations, max_disp

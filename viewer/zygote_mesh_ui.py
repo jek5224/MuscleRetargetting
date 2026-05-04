@@ -7690,10 +7690,13 @@ def _run_unified_volume_sim(v, active_muscles, max_iterations=100, tolerance=1e-
 
     # First frame: more iterations to converge from large T-pose → walk displacement.
     # Subsequent frames: normal iterations (warm-start makes convergence fast).
+    # Plateau early-exit in the solver makes the cap a worst-case bound rather
+    # than a typical iteration count, so 4x is enough headroom for the few
+    # frames that actually need extra iters; the rest exit early on plateau.
     is_first_frame = prev_solution is None
-    solve_iters = max_iterations * 10 if is_first_frame else max_iterations
+    solve_iters = max_iterations * 4 if is_first_frame else max_iterations
     if is_first_frame:
-        print(f"  First frame: {solve_iters} iterations (10x) for convergence")
+        print(f"  First frame: {solve_iters} iterations (4x cap) for convergence")
 
     start_time = time.time()
     global_positions, iterations, max_disp = backend.solve(
