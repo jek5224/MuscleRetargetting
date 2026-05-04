@@ -31,6 +31,7 @@ def _vert_keys(d):
     return [
         'soft_body_fixed_vertices',
         'tet_anchor_vertices',
+        'anchor_vertices',  # serialized name for tet_anchor_vertices
     ]
 
 
@@ -50,7 +51,25 @@ def strip(path, dry_run):
     used = np.zeros(n_v, dtype=bool)
     used[tets.reshape(-1)] = True
     n_orph = int((~used).sum())
+
+    # Repair stale vert-index lists from a prior partial strip (anchor_vertices
+    # was not remapped before; clamp/filter to valid range).
+    repaired_keys = []
+    if not dry_run:
+        for key in _vert_keys(d):
+            if key not in d or d[key] is None:
+                continue
+            arr = np.asarray(d[key], dtype=np.int64)
+            if arr.size and arr.max() >= n_v:
+                arr = arr[arr < n_v]
+                d[key] = arr
+                repaired_keys.append(key)
+
     if n_orph == 0:
+        if repaired_keys:
+            with open(path, 'wb') as f:
+                pickle.dump(d, f)
+            return f"  no orphans; repaired stale {','.join(repaired_keys)}"
         return "  ok (no orphans)"
 
     if dry_run:
