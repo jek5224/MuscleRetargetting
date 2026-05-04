@@ -2706,23 +2706,44 @@ class FiberArchitectureMixin:
         self._build_neighbor_tet_blending(tet_verts, tetrahedra)
 
     def _tet_aspect_ratio(self, tet_verts, tetrahedra, tet_idx):
-        """Compute aspect ratio for a single tet."""
-        tet = tetrahedra[tet_idx]
-        v = tet_verts[tet]
-        edges = [v[1]-v[0], v[2]-v[0], v[3]-v[0], v[2]-v[1], v[3]-v[1], v[3]-v[2]]
-        max_edge = max(np.linalg.norm(e) for e in edges)
-        vol = abs(np.dot(v[1]-v[0], np.cross(v[2]-v[0], v[3]-v[0]))) / 6.0
-        f_areas = [
-            0.5 * np.linalg.norm(np.cross(v[2]-v[1], v[3]-v[1])),
-            0.5 * np.linalg.norm(np.cross(v[0]-v[2], v[3]-v[2])),
-            0.5 * np.linalg.norm(np.cross(v[0]-v[3], v[1]-v[3])),
-            0.5 * np.linalg.norm(np.cross(v[1]-v[0], v[2]-v[0])),
-        ]
-        sa = sum(f_areas)
-        if sa < 1e-20 or vol < 1e-20:
-            return 1e6
-        r = 3 * vol / sa
-        return max_edge / (2 * r)
+        """Aspect ratio for a single tet (uses batched cache)."""
+        return float(self._all_tet_aspect_ratios(tet_verts, tetrahedra)[tet_idx])
+
+    def _all_tet_aspect_ratios(self, tet_verts, tetrahedra):
+        """Vectorized aspect ratio for every tet, cached on self.
+        max_edge / (2 * inradius), inradius = 3*vol/surface_area.
+        """
+        if (hasattr(self, '_fct_tet_ar')
+                and self._fct_tet_ar is not None
+                and len(self._fct_tet_ar) == len(tetrahedra)):
+            return self._fct_tet_ar
+
+        v = tet_verts[tetrahedra]                # (T, 4, 3)
+        e = np.stack([
+            v[:, 1] - v[:, 0],
+            v[:, 2] - v[:, 0],
+            v[:, 3] - v[:, 0],
+            v[:, 2] - v[:, 1],
+            v[:, 3] - v[:, 1],
+            v[:, 3] - v[:, 2],
+        ], axis=1)                                # (T, 6, 3)
+        max_edge = np.linalg.norm(e, axis=2).max(axis=1)
+        vol = np.abs(np.einsum('ti,ti->t',
+                               v[:, 1] - v[:, 0],
+                               np.cross(v[:, 2] - v[:, 0], v[:, 3] - v[:, 0]))) / 6.0
+        f1 = 0.5 * np.linalg.norm(np.cross(v[:, 2] - v[:, 1], v[:, 3] - v[:, 1]), axis=1)
+        f2 = 0.5 * np.linalg.norm(np.cross(v[:, 0] - v[:, 2], v[:, 3] - v[:, 2]), axis=1)
+        f3 = 0.5 * np.linalg.norm(np.cross(v[:, 0] - v[:, 3], v[:, 1] - v[:, 3]), axis=1)
+        f4 = 0.5 * np.linalg.norm(np.cross(v[:, 1] - v[:, 0], v[:, 2] - v[:, 0]), axis=1)
+        sa = f1 + f2 + f3 + f4
+        ar = np.full(len(tetrahedra), 1e6, dtype=np.float64)
+        valid = (sa >= 1e-20) & (vol >= 1e-20)
+        if np.any(valid):
+            r = np.zeros(len(tetrahedra), dtype=np.float64)
+            r[valid] = 3.0 * vol[valid] / sa[valid]
+            ar[valid] = max_edge[valid] / (2.0 * r[valid])
+        self._fct_tet_ar = ar
+        return ar
 
     def _build_neighbor_tet_blending(self, tet_verts, tetrahedra):
         """For waypoints in sliver tets (AR>20), find neighbor tets and compute
@@ -2738,20 +2759,31 @@ class FiberArchitectureMixin:
         if not hasattr(self, 'waypoint_bary_coords') or len(self.waypoint_bary_coords) == 0:
             return
 
-        # Build tet adjacency: tets sharing a face
-        face_to_tet = defaultdict(list)
-        for ti, tet in enumerate(tetrahedra):
-            for face in [(tet[0],tet[1],tet[2]), (tet[0],tet[1],tet[3]),
-                         (tet[0],tet[2],tet[3]), (tet[1],tet[2],tet[3])]:
-                key = tuple(sorted(face))
-                face_to_tet[key].append(ti)
+        # Pre-compute aspect ratio for ALL tets once (vectorized).
+        ar_all = self._all_tet_aspect_ratios(tet_verts, tetrahedra)
+
+        # Build tet adjacency vectorized: face -> tet pairs via lex sort.
+        # Was Python double loop building face_to_tet then face_to_tet -> tet_adj.
+        T = len(tetrahedra)
+        tetra = np.asarray(tetrahedra, dtype=np.int64)
+        # Each tet has 4 faces; emit (face_sorted, ti) for all and group.
+        f_corner = np.array([[0, 1, 2], [0, 1, 3], [0, 2, 3], [1, 2, 3]], dtype=np.int64)
+        all_faces = tetra[:, f_corner].reshape(T * 4, 3)             # (4T, 3)
+        all_faces = np.sort(all_faces, axis=1)
+        all_ti = np.repeat(np.arange(T, dtype=np.int64), 4)
+        # Lexsort by (a, b, c) — group identical faces.
+        order = np.lexsort((all_faces[:, 2], all_faces[:, 1], all_faces[:, 0]))
+        sf = all_faces[order]
+        st = all_ti[order]
+        # Identical neighbors within sorted array (manifold tet faces appear at most twice)
+        same = (sf[:-1, 0] == sf[1:, 0]) & (sf[:-1, 1] == sf[1:, 1]) & (sf[:-1, 2] == sf[1:, 2])
+        pair_a = st[:-1][same]
+        pair_b = st[1:][same]
 
         tet_adj = defaultdict(set)
-        for face_key, tet_list in face_to_tet.items():
-            for i in range(len(tet_list)):
-                for j in range(i+1, len(tet_list)):
-                    tet_adj[tet_list[i]].add(tet_list[j])
-                    tet_adj[tet_list[j]].add(tet_list[i])
+        for a, b in zip(pair_a.tolist(), pair_b.tolist()):
+            tet_adj[a].add(b)
+            tet_adj[b].add(a)
 
         blend_count = 0
         for stream_idx, stream_bary in enumerate(self.waypoint_bary_coords):
@@ -2767,7 +2799,7 @@ class FiberArchitectureMixin:
                     if tet_idx >= len(tetrahedra):
                         continue
 
-                    ar = self._tet_aspect_ratio(tet_verts, tetrahedra, tet_idx)
+                    ar = ar_all[tet_idx]
                     if ar < AR_THRESHOLD:
                         continue
 
@@ -2792,7 +2824,7 @@ class FiberArchitectureMixin:
                             tet_verts[nb_tet[2]], tet_verts[nb_tet[3]])
                         if nb_bary is None:
                             continue
-                        nb_ar = self._tet_aspect_ratio(tet_verts, tetrahedra, nb_ti)
+                        nb_ar = ar_all[nb_ti]
                         # Weight: inverse aspect ratio (good tets get high weight)
                         nb_w = 1.0 / max(nb_ar, 1.0)
                         neighbors.append((nb_ti, nb_bary, nb_w))
