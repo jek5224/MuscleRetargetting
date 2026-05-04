@@ -1804,7 +1804,10 @@ except Exception as e:
 
             # Load attach_skeleton_names (for stable name-based resolution)
             if 'attach_skeleton_names' in data and data['attach_skeleton_names'] is not None:
-                self.attach_skeleton_names = data['attach_skeleton_names']
+                raw_names = data['attach_skeleton_names']
+                # Always store as a plain Python list-of-lists; numpy object arrays
+                # break truthiness checks ("ambiguous truth value") and don't have .append.
+                self.attach_skeleton_names = [list(row) for row in raw_names]
                 print(f"  Loaded attach_skeleton_names: {self.attach_skeleton_names}")
 
             # Load contours (needed for soft body fixed vertices)

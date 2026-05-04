@@ -2857,40 +2857,50 @@ class FiberArchitectureMixin:
         Returns:
             (tet_idx, barycentric_coords, was_inside) - was_inside=True if point was truly inside
         """
-        # For efficiency, first find nearest tetrahedra by centroid
-        tet_centroids = np.mean(tet_verts[tetrahedra], axis=1)
+        # Cache tet centroids to avoid recomputing per call (was rebuilt
+        # for every waypoint).
+        if (not hasattr(self, '_fct_tet_centroids')
+                or self._fct_tet_centroids is None
+                or len(self._fct_tet_centroids) != len(tetrahedra)):
+            self._fct_tet_centroids = np.mean(tet_verts[tetrahedra], axis=1)
+        tet_centroids = self._fct_tet_centroids
+
         dists = np.linalg.norm(tet_centroids - point, axis=1)
-        # Only check the K nearest tets — Python loop over all 30k+ tets per
-        # waypoint was a per-init bottleneck (multi-minute stall on dense
-        # multi-stream LowLeg meshes). 200 covers ~99% of inside hits since
-        # the containing tet is always near the centroid-nearest one.
         K_search = min(200, len(tetrahedra))
         sorted_indices = np.argpartition(dists, K_search - 1)[:K_search]
         sorted_indices = sorted_indices[np.argsort(dists[sorted_indices])]
 
-        best_tet_idx = None
-        best_bary = None
-        best_min_coord = -float('inf')  # Track least-negative barycentric coord
+        # Vectorized barycentric for K candidate tets at once.
+        # Was Python loop with single-tet np.linalg.solve per iteration.
+        cand_tets = tetrahedra[sorted_indices]              # (K, 4)
+        v0 = tet_verts[cand_tets[:, 0]]                      # (K, 3)
+        v1 = tet_verts[cand_tets[:, 1]]
+        v2 = tet_verts[cand_tets[:, 2]]
+        v3 = tet_verts[cand_tets[:, 3]]
+        T = np.stack([v1 - v0, v2 - v0, v3 - v0], axis=2)    # (K, 3, 3)
+        rhs = (point - v0)                                    # (K, 3)
+        # Skip degenerate tets via det check
+        dets = np.linalg.det(T)
+        valid = np.abs(dets) >= 1e-10
+        if not np.any(valid):
+            return None, None, False
+        bary_123 = np.zeros((len(sorted_indices), 3))
+        bary_123[valid] = np.linalg.solve(T[valid], rhs[valid])
+        bary_0 = 1.0 - bary_123.sum(axis=1)
+        bary_all = np.column_stack([bary_0, bary_123])       # (K, 4)
+        min_coords = bary_all.min(axis=1)
+        # Inside test (vectorized): first index meeting threshold
+        inside_mask = (min_coords >= -0.01) & valid
+        if np.any(inside_mask):
+            first_in = np.argmax(inside_mask)
+            return int(sorted_indices[first_in]), bary_all[first_in], True
 
-        for tet_idx in sorted_indices:
-            tet = tetrahedra[tet_idx]
-            v0, v1, v2, v3 = tet_verts[tet[0]], tet_verts[tet[1]], tet_verts[tet[2]], tet_verts[tet[3]]
-
-            bary = self._compute_barycentric(point, v0, v1, v2, v3)
-            if bary is None:
-                continue
-
-            min_coord = np.min(bary)
-
-            # Point is inside this tetrahedron (with small tolerance)
-            if min_coord >= -0.01:
-                return tet_idx, bary, True  # was_inside=True
-
-            # Track the best candidate (least outside)
-            if min_coord > best_min_coord:
-                best_min_coord = min_coord
-                best_tet_idx = tet_idx
-                best_bary = bary
+        # Best (least negative) candidate among valid
+        min_coords_valid = np.where(valid, min_coords, -np.inf)
+        best_local = int(np.argmax(min_coords_valid))
+        best_tet_idx = int(sorted_indices[best_local])
+        best_bary = bary_all[best_local]
+        best_min_coord = float(min_coords_valid[best_local])
 
         # Use best candidate with unclamped barycentric coords so that
         # points outside the tet extrapolate naturally during deformation

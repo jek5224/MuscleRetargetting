@@ -1686,7 +1686,7 @@ class SkeletonMeshMixin:
             return
         has_idx = hasattr(self, 'attach_skeletons') and len(self.attach_skeletons) > 0
         has_names = (hasattr(self, 'attach_skeleton_names')
-                     and self.attach_skeleton_names
+                     and self.attach_skeleton_names is not None
                      and len(self.attach_skeleton_names) > 0)
         if not has_idx and not has_names:
             print("  Skeleton bindings: no attach_skeletons info")
@@ -1698,7 +1698,7 @@ class SkeletonMeshMixin:
         # Get origin and insertion bone names — prefer attach_skeleton_names (robust)
         # over attach_skeletons indices (fragile, depends on dict ordering)
         skeleton_names = list(skeleton_meshes.keys())
-        if hasattr(self, 'attach_skeleton_names') and self.attach_skeleton_names and len(self.attach_skeleton_names) > 0:
+        if has_names:
             origin_mesh_name = self.attach_skeleton_names[0][0]
             insertion_mesh_name = self.attach_skeleton_names[0][1]
         else:
@@ -2029,16 +2029,18 @@ class SkeletonMeshMixin:
                 if hasattr(mesh, 'vertices') and mesh.vertices is not None and len(mesh.vertices) > 0:
                     verts = np.array(mesh.vertices)
 
-                    # Distance from query center to closest vertex
-                    dists = np.linalg.norm(verts - query_center, axis=1)
-                    min_dist = np.min(dists)
-
-                    # Also check distance from each query point to mesh
-                    for p in points:
-                        d = np.min(np.linalg.norm(verts - p, axis=1))
-                        min_dist = min(min_dist, d)
-
-                    score = min_dist
+                    # Vectorized: cKDTree query for all points at once.
+                    # Was Python loop per-point with np.linalg.norm scan over
+                    # all bone verts → P×V iter per bone × 25 bones × per stream.
+                    if not hasattr(self, '_skel_bone_tree_cache'):
+                        self._skel_bone_tree_cache = {}
+                    if name not in self._skel_bone_tree_cache:
+                        from scipy.spatial import cKDTree as _cKDT_skel
+                        self._skel_bone_tree_cache[name] = _cKDT_skel(verts)
+                    tree = self._skel_bone_tree_cache[name]
+                    dists_pts, _ = tree.query(points)
+                    d_center, _ = tree.query(query_center.reshape(1, 3))
+                    score = float(min(np.min(dists_pts), d_center[0]))
 
                 # Fallback: Use trimesh for surface distance
                 elif hasattr(mesh, 'trimesh') and mesh.trimesh is not None:
@@ -2069,7 +2071,9 @@ class SkeletonMeshMixin:
         Resolve attach_skeleton_names to attach_skeletons indices based on current skeleton order.
         Call this after loading when skeleton data is available.
         """
-        if not hasattr(self, 'attach_skeleton_names') or not self.attach_skeleton_names:
+        if (not hasattr(self, 'attach_skeleton_names')
+                or self.attach_skeleton_names is None
+                or len(self.attach_skeleton_names) == 0):
             return False
 
         # Build name-to-index mapping
