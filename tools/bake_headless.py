@@ -411,9 +411,17 @@ def main():
     )
     parser.add_argument(
         "--unified-volume",
+        dest="unified_volume",
         action="store_true",
-        help="Build one global ARAP system across all muscles. Required to "
-             "engage the Taichi backend (per-muscle path uses scipy+numpy).",
+        default=True,
+        help="Build one global ARAP system across all muscles (default). "
+             "Required to engage the Taichi backend.",
+    )
+    parser.add_argument(
+        "--per-muscle",
+        dest="unified_volume",
+        action="store_false",
+        help="Opt out of unified volume; run per-muscle scipy+numpy path.",
     )
     parser.add_argument(
         "--no-self-collision",
