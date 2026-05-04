@@ -763,6 +763,9 @@ class ContourAnimationMixin:
         self._contour_anim_bp_scale = {}
         self._stream_smooth_anim_progress = 0.0
         self._stream_smooth_anim_active = True
+        # Invalidate per-frame batched cache so update_stream_smooth_animation
+        # rebuilds it from current bp_before/after data.
+        self._stream_smooth_batch = None
         self.is_draw = True
         self.is_draw_contours = True
         self.is_draw_bounding_box = True
@@ -810,81 +813,193 @@ class ContourAnimationMixin:
 
         rod = self._rodrigues
 
-        for i in range(num_streams):
-            # Per-stream progress offset by stagger
-            sp = progress - stream_stagger * i
-            if sp < 0:
-                continue  # This stream hasn't started yet
-
-            # Sub-phase progress for this stream
-            swing_overall = np.clip(sp / p1_dur, 0.0, 1.0)
-            twist_overall = np.clip((sp - p1_dur) / p2_dur, 0.0, 1.0) if sp > p1_dur else 0.0
-            bp_overall = np.clip((sp - p1_dur - p2_dur) / p3_dur, 0.0, 1.0) if sp > p1_dur + p2_dur else 0.0
-
-            for j in range(min(len(bp_before[i]), len(self.bounding_planes[i]))):
-                if j >= len(bp_after[i]):
-                    continue
-
-                swing_t = self._smooth_wave_t(swing_overall, j, num_levels)
-                twist_t = self._smooth_wave_t(twist_overall, j, num_levels)
-                bp_t = self._smooth_wave_t(bp_overall, j, num_levels)
-
-                bpl = self.bounding_planes[i][j]
-                before = bp_before[i][j]
-                after = bp_after[i][j]
-
-                z_b = before['basis_z']
-                x_b = before['basis_x']
-                y_b = before['basis_y']
-                z_a = after['basis_z']
-
-                has_swing = (swing_data is not None and i < len(swing_data) and
-                             j < len(swing_data[i]) and swing_data[i][j] is not None)
-                has_twist = (twist_data is not None and i < len(twist_data) and
-                             j < len(twist_data[i]) and twist_data[i][j] is not None)
-
-                # Phase 1: swing all axes to align z with target
-                if has_swing:
-                    swing_axis, swing_angle = swing_data[i][j]
-                    if swing_angle > 1e-10 and swing_t > 0:
-                        a = swing_angle * swing_t
-                        z = rod(z_b, swing_axis, a)
-                        x = rod(x_b, swing_axis, a)
-                        y = rod(y_b, swing_axis, a)
+        # Build flat batched numpy arrays once per replay. Was per-(i,j)
+        # rod() calls + dict lookups; replaced with vectorized Rodrigues +
+        # vectorized lerp, with a single dict writeback loop at the end.
+        cache = getattr(self, '_stream_smooth_batch', None)
+        rebuild = cache is None or cache.get('num_streams') != num_streams
+        if rebuild:
+            ij_pairs = []           # (n,)
+            stream_idx = []         # (n,)
+            level_idx = []          # (n,)
+            z_b_list = []; x_b_list = []; y_b_list = []
+            z_a_list = []
+            mean_b = []; mean_a = []
+            bp_b = []; bp_a = []     # bounding_plane corners (None-tolerant via has_bp mask)
+            has_bp = []
+            swing_axis_list = []; swing_angle_list = []
+            twist_angle_list = []
+            sq_change = []           # bool: sq_before != sq_after
+            sq_b = []; sq_a = []
+            for i in range(num_streams):
+                row_count = min(len(bp_before[i]), len(self.bounding_planes[i]))
+                for j in range(row_count):
+                    if j >= len(bp_after[i]):
+                        continue
+                    before = bp_before[i][j]
+                    after = bp_after[i][j]
+                    ij_pairs.append((i, j))
+                    stream_idx.append(i)
+                    level_idx.append(j)
+                    z_b_list.append(before['basis_z'])
+                    x_b_list.append(before['basis_x'])
+                    y_b_list.append(before['basis_y'])
+                    z_a_list.append(after['basis_z'])
+                    mean_b.append(before['mean'])
+                    mean_a.append(after['mean'])
+                    bb = before.get('bounding_plane')
+                    ba = after.get('bounding_plane')
+                    if bb is not None and ba is not None:
+                        bp_b.append(np.asarray(bb))
+                        bp_a.append(np.asarray(ba))
+                        has_bp.append(True)
                     else:
-                        z = z_b.copy()
-                        x = x_b.copy()
-                        y = y_b.copy()
-                else:
-                    z = z_b.copy()
-                    x = x_b.copy()
-                    y = y_b.copy()
+                        bp_b.append(None)
+                        bp_a.append(None)
+                        has_bp.append(False)
+                    if (swing_data is not None and i < len(swing_data)
+                            and j < len(swing_data[i]) and swing_data[i][j] is not None):
+                        sa, sang = swing_data[i][j]
+                        swing_axis_list.append(np.asarray(sa, dtype=np.float64))
+                        swing_angle_list.append(float(sang))
+                    else:
+                        swing_axis_list.append(np.array([1.0, 0.0, 0.0]))
+                        swing_angle_list.append(0.0)
+                    if (twist_data is not None and i < len(twist_data)
+                            and j < len(twist_data[i]) and twist_data[i][j] is not None):
+                        twist_angle_list.append(float(twist_data[i][j]))
+                    else:
+                        twist_angle_list.append(0.0)
+                    sb = bool(before.get('square_like', False))
+                    sa = bool(after.get('square_like', False))
+                    sq_change.append(sb != sa)
+                    sq_b.append(sb)
+                    sq_a.append(sa)
+            n = len(ij_pairs)
+            cache = {
+                'num_streams': num_streams,
+                'n': n,
+                'ij_pairs': ij_pairs,
+                'stream_idx': np.array(stream_idx, dtype=np.int32),
+                'level_idx': np.array(level_idx, dtype=np.int32),
+                'z_b': np.array(z_b_list, dtype=np.float64) if n else np.empty((0, 3)),
+                'x_b': np.array(x_b_list, dtype=np.float64) if n else np.empty((0, 3)),
+                'y_b': np.array(y_b_list, dtype=np.float64) if n else np.empty((0, 3)),
+                'z_a': np.array(z_a_list, dtype=np.float64) if n else np.empty((0, 3)),
+                'mean_b': np.array(mean_b, dtype=np.float64) if n else np.empty((0, 3)),
+                'mean_a': np.array(mean_a, dtype=np.float64) if n else np.empty((0, 3)),
+                'bp_b_list': bp_b,
+                'bp_a_list': bp_a,
+                'has_bp': np.array(has_bp, dtype=bool),
+                'swing_axis': np.array(swing_axis_list, dtype=np.float64) if n else np.empty((0, 3)),
+                'swing_angle': np.array(swing_angle_list, dtype=np.float64) if n else np.empty((0,)),
+                'twist_angle': np.array(twist_angle_list, dtype=np.float64) if n else np.empty((0,)),
+                'sq_change': np.array(sq_change, dtype=bool),
+                'sq_b': np.array(sq_b, dtype=bool),
+                'sq_a': np.array(sq_a, dtype=bool),
+            }
+            self._stream_smooth_batch = cache
+        n = cache['n']
+        if n == 0:
+            if progress >= total_duration:
+                self._stream_smooth_anim_active = False
+                self._stream_smooth_replayed = True
+                self._smooth_anim_bp_colors = None
+                self._apply_bp_snapshot(bp_after)
+                return False
+            return True
 
-                # Phase 2: twist x,y around z_after
-                if has_twist and abs(twist_data[i][j]) > 1e-10 and twist_t > 0:
-                    ta = twist_data[i][j] * twist_t
-                    x = rod(x, z_a, ta)
-                    y = rod(y, z_a, ta)
+        ij_pairs = cache['ij_pairs']
+        stream_idx_arr = cache['stream_idx']
+        level_idx_arr = cache['level_idx']
+        z_b = cache['z_b']
+        x_b = cache['x_b']
+        y_b = cache['y_b']
+        z_a = cache['z_a']
+        mean_b = cache['mean_b']
+        mean_a = cache['mean_a']
+        bp_b_list = cache['bp_b_list']
+        bp_a_list = cache['bp_a_list']
+        has_bp_arr = cache['has_bp']
+        swing_axis_arr = cache['swing_axis']
+        swing_angle_arr = cache['swing_angle']
+        twist_angle_arr = cache['twist_angle']
 
-                bpl['basis_x'] = x
-                bpl['basis_y'] = y
-                bpl['basis_z'] = z
+        # Per-row stagger and sub-phase progress (vectorized)
+        sp = progress - stream_stagger * stream_idx_arr.astype(np.float64)
+        active = sp >= 0
+        sp_clipped = np.where(active, sp, 0.0)
+        swing_overall = np.clip(sp_clipped / p1_dur, 0.0, 1.0)
+        twist_overall = np.where(sp_clipped > p1_dur,
+                                 np.clip((sp_clipped - p1_dur) / p2_dur, 0.0, 1.0), 0.0)
+        bp_overall = np.where(sp_clipped > p1_dur + p2_dur,
+                              np.clip((sp_clipped - p1_dur - p2_dur) / p3_dur, 0.0, 1.0), 0.0)
 
-                # Phase 3: bounding plane corners + mean
-                bpl['mean'] = (1 - bp_t) * before['mean'] + bp_t * after['mean']
-                if before['bounding_plane'] is not None and after['bounding_plane'] is not None:
-                    bpl['bounding_plane'] = (1 - bp_t) * before['bounding_plane'] + bp_t * after['bounding_plane']
+        # Per-row wave_t (the python helper is cheap enough; keep as Python)
+        swing_t = np.array(
+            [self._smooth_wave_t(float(swing_overall[k]), int(level_idx_arr[k]), num_levels)
+             for k in range(n)], dtype=np.float64)
+        twist_t = np.array(
+            [self._smooth_wave_t(float(twist_overall[k]), int(level_idx_arr[k]), num_levels)
+             for k in range(n)], dtype=np.float64)
+        bp_t = np.array(
+            [self._smooth_wave_t(float(bp_overall[k]), int(level_idx_arr[k]), num_levels)
+             for k in range(n)], dtype=np.float64)
 
-                # Color lerp when square_like changes
-                sq_before = before.get('square_like', False)
-                sq_after = after.get('square_like', False)
-                if sq_before != sq_after:
-                    color_b = (1, 0, 0, 1) if sq_before else (0, 0, 0, 1)
-                    color_a = (1, 0, 0, 1) if sq_after else (0, 0, 0, 1)
-                    lerped = tuple((1 - bp_t) * b + bp_t * a for b, a in zip(color_b, color_a))
-                    if self._smooth_anim_bp_colors is None:
-                        self._smooth_anim_bp_colors = {}
-                    self._smooth_anim_bp_colors[(i, j)] = lerped
+        # Vectorized Rodrigues. Skip cost when angle*t is ~0 by using cos/sin
+        # of the scaled angle directly — math handles 0 case correctly.
+        def _rod_batch(v, axis, angle_scalar):
+            cos_a = np.cos(angle_scalar)[:, None]
+            sin_a = np.sin(angle_scalar)[:, None]
+            cross = np.cross(axis, v)
+            dot = np.einsum('ij,ij->i', axis, v)[:, None]
+            return v * cos_a + cross * sin_a + axis * dot * (1.0 - cos_a)
+
+        # Phase 1: swing all axes by swing_angle * swing_t around swing_axis
+        a1 = swing_angle_arr * swing_t
+        z_after_swing = _rod_batch(z_b, swing_axis_arr, a1)
+        x_after_swing = _rod_batch(x_b, swing_axis_arr, a1)
+        y_after_swing = _rod_batch(y_b, swing_axis_arr, a1)
+
+        # Phase 2: twist x,y by twist_angle * twist_t around z_a
+        a2 = twist_angle_arr * twist_t
+        x_final = _rod_batch(x_after_swing, z_a, a2)
+        y_final = _rod_batch(y_after_swing, z_a, a2)
+        z_final = z_after_swing
+
+        # Phase 3: bp/mean lerp
+        bp_t_col = bp_t[:, None]
+        mean_lerp = (1.0 - bp_t_col) * mean_b + bp_t_col * mean_a
+
+        # Single Python loop to write results back into bounding_planes dicts.
+        for k, (i, j) in enumerate(ij_pairs):
+            if not active[k]:
+                continue
+            bpl = self.bounding_planes[i][j]
+            bpl['basis_x'] = x_final[k]
+            bpl['basis_y'] = y_final[k]
+            bpl['basis_z'] = z_final[k]
+            bpl['mean'] = mean_lerp[k]
+            if has_bp_arr[k]:
+                t = float(bp_t[k])
+                bpl['bounding_plane'] = (1.0 - t) * bp_b_list[k] + t * bp_a_list[k]
+
+        # square_like color transitions
+        sq_change = cache['sq_change']
+        if np.any(sq_change):
+            sq_b = cache['sq_b']
+            sq_a = cache['sq_a']
+            if self._smooth_anim_bp_colors is None:
+                self._smooth_anim_bp_colors = {}
+            for k in range(n):
+                i, j = ij_pairs[k]
+                if sq_change[k] and active[k]:
+                    color_b = (1.0, 0.0, 0.0, 1.0) if sq_b[k] else (0.0, 0.0, 0.0, 1.0)
+                    color_a = (1.0, 0.0, 0.0, 1.0) if sq_a[k] else (0.0, 0.0, 0.0, 1.0)
+                    t = float(bp_t[k])
+                    self._smooth_anim_bp_colors[(i, j)] = tuple(
+                        (1.0 - t) * b + t * a for b, a in zip(color_b, color_a)
+                    )
                 elif self._smooth_anim_bp_colors is not None and (i, j) in self._smooth_anim_bp_colors:
                     del self._smooth_anim_bp_colors[(i, j)]
 
