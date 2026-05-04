@@ -4201,6 +4201,18 @@ class MuscleMeshMixin:
 
                 try:
                     body_node = skeleton.getBodyNode(body_name)
+                    # XML attach names are mesh names (e.g. "L_Toe2"); DART
+                    # body names append a copy index (e.g. "L_Toe20"). Try the
+                    # exact mesh name + "0" / "1" before the rstrip-digits
+                    # fallback, otherwise FDL streams targeting L_Toe2/3/4/5
+                    # all collapse onto the first L_Toe* body found.
+                    if body_node is None:
+                        for suffix in ('0', '1'):
+                            cand = body_name + suffix
+                            bn = skeleton.getBodyNode(cand)
+                            if bn is not None:
+                                body_node, body_name = bn, cand
+                                break
                     if body_node is None:
                         body_node, body_name = find_dart_body(skeleton, body_name.rstrip('0123456789'))
                     if body_node is None:

@@ -7724,7 +7724,11 @@ def _run_unified_volume_sim(v, active_muscles, max_iterations=100, tolerance=1e-
             best_j = connected_idx[nearest_local]
             disp = global_positions[best_j] - global_rest_positions[best_j]
             global_positions[iso_indices] = global_rest_positions[iso_indices] + disp
-            print(f"  Fixed {len(iso_indices)} isolated vertices by copying nearby displacement")
+            # Only print on first call this session — count is identical
+            # across frames since topology doesn't change.
+            if not getattr(v, '_iso_fix_announced', False):
+                print(f"  Fixed {len(iso_indices)} isolated vertices by copying nearby displacement (printed once)")
+                v._iso_fix_announced = True
 
     # Check for other stuck vertices and fix them
     # Only apply if there's actual deformation (fixed vertices moved from rest)
