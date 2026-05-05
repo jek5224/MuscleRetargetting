@@ -1950,8 +1950,6 @@ def _draw_motion_browser_ui(v):
         imgui.text(f"Frames: {v.motion_total_frames}   FPS: {fps:.0f}   Duration: {duration:.2f}s")
 
         # Section 2: Sequential Playback Transport
-        imgui.separator()
-
         # Frame slider
         imgui.push_item_width(imgui.get_content_region_available_width())
         changed, new_frame = imgui.slider_int(
@@ -2032,7 +2030,6 @@ def _draw_motion_browser_ui(v):
             imgui.pop_item_width()
 
         # --- Deformation Cache ---
-        imgui.separator()
         imgui.text("--- Deformation Cache ---")
 
         # Cache info: count how many frames are cached. Snapshot values() to a
