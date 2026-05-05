@@ -1495,33 +1495,112 @@ except Exception as e:
         sim_faces = np.array(sim_faces, dtype=np.int32)
         print(f"  Extracted {len(sim_faces)} tet boundary faces for simulation")
 
-        # Step 5b: Star-fan rescue for any vertex left out of every tetrahedron.
+        # Step 5b: Steiner-point rescue for any vertex left out of every tetrahedron.
         # Contour-guided + Delaunay rescue can still leave shared-edge / cap-loop
         # vertices unused (Peroneus Longus had 286). Without this pass those
         # vertices fall to the bake-time isolated-vertex fallback, which makes
-        # them visibly stuck at rest. For each unused vertex, build one
-        # tetrahedron to its 3 nearest used vertices that yields a non-degenerate
-        # volume.
+        # them visibly stuck at rest.
+        #
+        # Strategy:
+        #   1. Try to insert the orphan as a Steiner point inside the nearest
+        #      existing tetrahedron — split that tet into 4 valid sub-tets
+        #      fanning to the orphan. Always non-degenerate when the orphan is
+        #      strictly interior.
+        #   2. If the orphan lies outside every nearby tet (boundary orphans on
+        #      cap rings), fall back to a star-fan: pick the volume-maximizing
+        #      triple from the K=16 nearest used verts.
         all_tet_verts = set(int(v) for v in interior_tetrahedra.ravel()) if len(interior_tetrahedra) > 0 else set()
         unused_idx = [i for i in range(len(closed_vertices)) if i not in all_tet_verts]
         if unused_idx:
-            from scipy.spatial import cKDTree as _cKD_starfan
-            used_arr = np.array(sorted(all_tet_verts), dtype=np.int64)
-            used_pts = closed_vertices[used_arr]
-            tree = _cKD_starfan(used_pts)
-            K = min(8, len(used_arr))
-            _, nn_local = tree.query(closed_vertices[np.asarray(unused_idx, dtype=np.int64)], k=K)
-            if K == 1:
-                nn_local = nn_local[:, None]
-            new_tets = []
-            n_skipped = 0
+            from scipy.spatial import cKDTree as _cKD_steiner
             VOL_EPS = 1e-12
-            for ri, vi in enumerate(unused_idx):
+            INSIDE_TOL = 1e-6  # bary >= -INSIDE_TOL counts as inside
+
+            interior_tetrahedra = interior_tetrahedra.tolist()  # mutable for split
+
+            def _bary4(p, v0, v1, v2, v3):
+                """Return barycentric coords (b0, b1, b2, b3) for p w.r.t. tet."""
+                T = np.column_stack([v1 - v0, v2 - v0, v3 - v0])
+                det = np.linalg.det(T)
+                if abs(det) < VOL_EPS:
+                    return None
+                b123 = np.linalg.solve(T, p - v0)
+                return float(1.0 - b123.sum()), float(b123[0]), float(b123[1]), float(b123[2])
+
+            # Build initial centroid tree
+            def _build_centroid_tree(tets):
+                arr = np.asarray(tets, dtype=np.int64)
+                if len(arr) == 0:
+                    return None, None
+                cents = closed_vertices[arr].mean(axis=1)
+                return _cKD_steiner(cents), cents
+
+            tree_c, _ = _build_centroid_tree(interior_tetrahedra)
+
+            n_steiner = 0
+            n_starfan = 0
+            n_skipped = 0
+            STEINER_K = 12
+
+            # Per-vertex used-mask grows as orphans get placed; rebuild centroid
+            # tree only every REBUILD_EVERY orphans to avoid O(N) rebuilds.
+            REBUILD_EVERY = 64
+            placed_count = 0
+
+            used_arr = np.array(sorted(all_tet_verts), dtype=np.int64)
+            used_tree = _cKD_steiner(closed_vertices[used_arr])
+
+            for vi in unused_idx:
                 p0 = closed_vertices[vi]
-                cand = used_arr[nn_local[ri]]
-                # Pick the first triple of candidates that yields a non-degenerate
-                # tetrahedron (signed volume above epsilon).
                 placed = False
+
+                # Step A: try Steiner-point split
+                if tree_c is not None:
+                    nA = min(STEINER_K, len(interior_tetrahedra))
+                    _, ti_arr = tree_c.query(p0.reshape(1, 3), k=nA)
+                    ti_arr = np.atleast_1d(np.asarray(ti_arr).ravel())
+                    for ti in ti_arr:
+                        ti = int(ti)
+                        if ti >= len(interior_tetrahedra):
+                            continue
+                        tet = interior_tetrahedra[ti]
+                        v0p, v1p, v2p, v3p = (closed_vertices[int(tet[0])],
+                                              closed_vertices[int(tet[1])],
+                                              closed_vertices[int(tet[2])],
+                                              closed_vertices[int(tet[3])])
+                        bary = _bary4(p0, v0p, v1p, v2p, v3p)
+                        if bary is None:
+                            continue
+                        if min(bary) >= -INSIDE_TOL:
+                            # Split this tetrahedron into 4 fanning to vi
+                            t0, t1, t2, t3 = (int(tet[0]), int(tet[1]),
+                                              int(tet[2]), int(tet[3]))
+                            new_subs = [
+                                [vi, t1, t2, t3],
+                                [t0, vi, t2, t3],
+                                [t0, t1, vi, t3],
+                                [t0, t1, t2, vi],
+                            ]
+                            # Replace the original tet with 4 sub-tets
+                            interior_tetrahedra[ti] = new_subs[0]
+                            interior_tetrahedra.extend(new_subs[1:])
+                            n_steiner += 1
+                            placed = True
+                            placed_count += 1
+                            break
+                    if placed and (placed_count % REBUILD_EVERY == 0):
+                        tree_c, _ = _build_centroid_tree(interior_tetrahedra)
+
+                if placed:
+                    continue
+
+                # Step B: star-fan with volume-maximizing triple from K=16 nearest used verts
+                K = min(16, len(used_arr))
+                _, nn_local = used_tree.query(p0.reshape(1, 3), k=K)
+                nn_local = np.atleast_1d(np.asarray(nn_local).ravel())
+                cand = used_arr[nn_local]
+                best_vol = 0.0
+                best_triple = None
                 for a in range(K):
                     for b in range(a + 1, K):
                         for c in range(b + 1, K):
@@ -1530,27 +1609,22 @@ except Exception as e:
                             v2 = closed_vertices[i1] - p0
                             v3 = closed_vertices[i2] - p0
                             vol = float(np.dot(v1, np.cross(v2, v3)))
-                            if abs(vol) < VOL_EPS:
-                                continue
-                            # Enforce positive orientation: swap if needed.
-                            if vol < 0:
-                                i1, i2 = i2, i1
-                            new_tets.append([vi, i0, i1, i2])
-                            placed = True
-                            break
-                        if placed:
-                            break
-                    if placed:
-                        break
-                if not placed:
+                            if abs(vol) > best_vol:
+                                best_vol = abs(vol)
+                                best_triple = (i0, i1, i2, vol)
+                if best_triple is None or best_vol < VOL_EPS:
                     n_skipped += 1
-            if new_tets:
-                interior_tetrahedra = np.vstack([
-                    interior_tetrahedra,
-                    np.array(new_tets, dtype=interior_tetrahedra.dtype)
-                ])
-                print(f"  Star-fan: rescued {len(new_tets)} unused verts "
-                      f"({n_skipped} still unplaced — coplanar neighbors).")
+                    continue
+                i0, i1, i2, vol = best_triple
+                if vol < 0:
+                    i1, i2 = i2, i1
+                interior_tetrahedra.append([vi, i0, i1, i2])
+                n_starfan += 1
+
+            interior_tetrahedra = np.array(interior_tetrahedra, dtype=np.int32)
+            if n_steiner or n_starfan or n_skipped:
+                print(f"  Orphan rescue: {n_steiner} via Steiner-split, "
+                      f"{n_starfan} via star-fan, {n_skipped} unplaced.")
 
         # Step 6: Store results with dual face system
         self.tet_vertices = closed_vertices
