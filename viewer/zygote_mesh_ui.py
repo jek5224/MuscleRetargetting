@@ -1089,45 +1089,6 @@ def draw_zygote_muscle_ui(v):
                     obj._build_mesh_replayed = False
                     obj._tetrahedralize_replayed = False
 
-                # Bounding box method selector
-                bbox_methods = ['farthest_vertex', 'pca', 'bbox']
-                current_method = getattr(obj, 'bounding_box_method', 'farthest_vertex')
-                current_idx = bbox_methods.index(current_method) if current_method in bbox_methods else 0
-                changed, new_idx = imgui.combo(f"BBox Method##{name}", current_idx, bbox_methods)
-                if changed:
-                    obj.bounding_box_method = bbox_methods[new_idx]
-
-                # Contour spacing scale slider (lower = more contours)
-                changed, obj.contour_spacing_scale = imgui.slider_float(
-                    f"Spacing##{name}", obj.contour_spacing_scale, 0.1, 2.0, "%.2f")
-
-                # Min level distance for Select Levels (as % of muscle length)
-                if not hasattr(obj, 'min_level_distance'):
-                    obj.min_level_distance = 0.01  # Default 1%
-                changed, obj.min_level_distance = imgui.slider_float(
-                    f"Min Dist##{name}", obj.min_level_distance, 0.001, 0.1, "%.3f")
-
-                # Error threshold for level selection (as % of muscle length)
-                if not hasattr(obj, 'level_select_error_threshold'):
-                    obj.level_select_error_threshold = 0.005  # Default 0.5%
-                changed, obj.level_select_error_threshold = imgui.slider_float(
-                    f"Err Thresh##{name}", obj.level_select_error_threshold, 0.001, 0.05, "%.3f")
-
-                # Sampling method selector
-                sampling_methods = ['grid', 'sobol_unit_square', 'sobol_min_contour']
-                current_idx = sampling_methods.index(obj.sampling_method) if obj.sampling_method in sampling_methods else 0
-                changed, new_idx = imgui.combo(f"Sampling##{name}", current_idx, sampling_methods)
-                if changed:
-                    obj.sampling_method = sampling_methods[new_idx]
-
-                # Cutting method selector
-                cutting_methods = ['bp', 'area_based', 'voronoi', 'angular', 'gradient', 'ratio', 'cumulative_area', 'projected_area']
-                current_cut_idx = cutting_methods.index(obj.cutting_method) if obj.cutting_method in cutting_methods else 0
-                changed, new_cut_idx = imgui.combo(f"Cutting##{name}", current_cut_idx, cutting_methods)
-                if changed:
-                    obj.cutting_method = cutting_methods[new_cut_idx]
-
-                imgui.same_line()
                 imgui.text(obj.link_mode)
                 changed1, obj.specific_contour_value = imgui.slider_float(f"Ori##{name}", obj.specific_contour_value, 1.0, obj.contour_value_min, flags=imgui.SLIDER_FLAGS_NO_ROUND_TO_FORMAT)
                 changed2, obj.specific_contour_value = imgui.slider_float(f"Mid##{name}", obj.specific_contour_value, obj.contour_value_min, obj.contour_value_max, flags=imgui.SLIDER_FLAGS_NO_ROUND_TO_FORMAT)
@@ -1140,16 +1101,6 @@ def draw_zygote_muscle_ui(v):
                     obj.find_contour_with_value(obj.specific_contour_value)
                 # if imgui.button(f"Find Value Contour##{name}"):
                 #     obj.find_contour_with_value()
-                if imgui.button(f"Switch Link Mode##{name}"):
-                    if obj.link_mode == 'mean':
-                        obj.link_mode = 'vertex'
-                    else:
-                        obj.link_mode = 'mean'
-
-                # Minimum contour distance threshold
-                if hasattr(obj, 'min_contour_distance'):
-                    _, obj.min_contour_distance = imgui.slider_float(
-                        f"Min Dist##{name}", obj.min_contour_distance, 0.001, 0.02, "%.3f")
 
                 # if imgui.button("Find Interesecting Bones"):
                 #     for other_name, other_obj in v.zygote_muscle_meshes.items():
@@ -1268,183 +1219,6 @@ def draw_zygote_muscle_ui(v):
                 _, obj.is_draw_tet_edges = imgui.checkbox("Tet Edges", obj.is_draw_tet_edges)
                 imgui.same_line()
                 _, obj.is_draw_constraints = imgui.checkbox("Constraints", obj.is_draw_constraints)
-
-                # Soft body simulation controls (quasistatic, on-demand)
-                if imgui.tree_node(f"Soft Body##{name}"):
-                    # Initialize soft body if tet mesh exists but soft body doesn't
-                    if obj.soft_body is None and obj.tet_vertices is not None:
-                        if imgui.button(f"Init Soft Body##{name}", width=wide_button_width):
-                            try:
-                                obj.init_soft_body(v.zygote_skeleton_meshes, v.env.skel, v.env.mesh_info)
-                            except Exception as e:
-                                print(f"[{name}] Init Soft Body error: {e}")
-                    elif obj.tet_vertices is not None:
-                        # Parameters: Volume is primary (muscle), Edge is secondary
-                        _, obj.soft_body_volume_stiffness = imgui.slider_float(f"Volume##soft_{name}", obj.soft_body_volume_stiffness, 0.1, 1.0)
-                        _, obj.soft_body_stiffness = imgui.slider_float(f"Edge##soft_{name}", obj.soft_body_stiffness, 0.0, 1.0)
-                        _, obj.soft_body_damping = imgui.slider_float(f"Damping##soft_{name}", obj.soft_body_damping, 0.0, 0.95)
-                        _, obj.soft_body_collision = imgui.checkbox(f"Collision##soft_{name}", obj.soft_body_collision)
-                        _, obj.waypoints_from_tet_sim = imgui.checkbox(f"Update Waypoints##soft_{name}", obj.waypoints_from_tet_sim)
-                        if obj.soft_body_collision:
-                            imgui.same_line()
-                            imgui.push_item_width(80)
-                            _, obj.soft_body_collision_margin = imgui.slider_float(f"Margin##soft_{name}", obj.soft_body_collision_margin, 0.001, 0.02)
-                            imgui.pop_item_width()
-
-                        # Run simulation button
-                        if imgui.button(f"Run Tet Sim##{name}", width=wide_button_width):
-                            try:
-                                iterations, residual = obj.run_soft_body_to_convergence(
-                                    v.zygote_skeleton_meshes,
-                                    v.env.skel,
-                                    max_iterations=100,
-                                    tolerance=1e-4,
-                                    enable_collision=obj.soft_body_collision,
-                                    collision_margin=obj.soft_body_collision_margin,
-                                    use_arap=obj.use_arap
-                                )
-                                print(f"{name}: Converged in {iterations} iterations, residual={residual:.2e} (ARAP={obj.use_arap})")
-                            except Exception as e:
-                                print(f"[{name}] Run Tet Sim error: {e}")
-
-                        # Test button to verify deformation works
-                        if imgui.button(f"Test Deform##{name}", width=wide_button_width):
-                            try:
-                                if obj.soft_body is not None and obj.soft_body.fixed_targets is not None:
-                                    test_offset = np.array([0.02, 0.0, 0.0])  # 2cm in X
-                                    obj.soft_body.fixed_targets += test_offset
-                                    iterations, residual = obj.soft_body.solve_to_convergence(100, 1e-4)
-                                    obj.tet_vertices = obj.soft_body.get_positions().astype(np.float32)
-                                    obj._prepare_tet_draw_arrays()
-                                    print(f"{name}: Test deform - {iterations} iters, residual={residual:.2e}")
-                            except Exception as e:
-                                print(f"[{name}] Test Deform error: {e}")
-
-                        if imgui.button(f"Reset Soft Body##{name}", width=wide_button_width):
-                            try:
-                                obj.reset_soft_body()
-                            except Exception as e:
-                                print(f"[{name}] Reset Soft Body error: {e}")
-
-                    imgui.tree_pop()
-
-                # VIPER rod simulation controls
-                if imgui.tree_node(f"VIPER Rods##{name}"):
-                    if obj.viper_available:
-                        # Initialize VIPER if waypoints exist but VIPER doesn't
-                        if obj.viper_sim is None and len(obj.waypoints) > 0:
-                            if imgui.button(f"Init VIPER##{name}", width=wide_button_width):
-                                try:
-                                    obj.init_viper(v.zygote_skeleton_meshes, v.env.skel)
-                                except Exception as e:
-                                    print(f"[{name}] Init VIPER error: {e}")
-                        elif obj.viper_sim is not None:
-                            # VIPER parameters
-                            changed, obj.viper_sim.stretch_stiffness = imgui.slider_float(
-                                f"Stretch##viper_{name}", obj.viper_sim.stretch_stiffness, 0.1, 1.0)
-                            changed, obj.viper_sim.volume_stiffness = imgui.slider_float(
-                                f"Volume##viper_{name}", obj.viper_sim.volume_stiffness, 0.1, 1.0)
-                            changed, obj.viper_sim.bend_stiffness = imgui.slider_float(
-                                f"Bend##viper_{name}", obj.viper_sim.bend_stiffness, 0.1, 1.0)
-                            changed, obj.viper_sim.damping = imgui.slider_float(
-                                f"Damping##viper_{name}", obj.viper_sim.damping, 0.8, 0.999)
-                            changed, obj.viper_sim.iterations = imgui.slider_int(
-                                f"Iterations##viper_{name}", obj.viper_sim.iterations, 1, 50)
-
-                            # Volume preservation toggle (VIPER key feature)
-                            changed, obj.viper_sim.enable_volume_constraint = imgui.checkbox(
-                                f"Volume Preserve##viper_{name}", obj.viper_sim.enable_volume_constraint)
-
-                            # Collision toggle
-                            _, obj.viper_sim.enable_collision = imgui.checkbox(
-                                f"Collision##viper_{name}", obj.viper_sim.enable_collision)
-                            if obj.viper_sim.enable_collision:
-                                imgui.same_line()
-                                imgui.push_item_width(80)
-                                _, obj.viper_sim.collision_margin = imgui.slider_float(
-                                    f"Margin##viper_col_{name}", obj.viper_sim.collision_margin, 0.001, 0.01, "%.3f")
-                                imgui.pop_item_width()
-
-                            imgui.separator()
-                            imgui.text("Visualization:")
-                            # Visualization controls
-                            _, obj.is_draw_viper = imgui.checkbox(
-                                f"Draw Rods##viper_{name}", obj.is_draw_viper)
-                            imgui.same_line()
-                            _, obj.viper_only_mode = imgui.checkbox(
-                                f"VIPER Only##viper_{name}", obj.viper_only_mode)
-                            _, obj.is_draw_viper_tubes = imgui.checkbox(
-                                f"Tube Mode##viper_{name}", obj.is_draw_viper_tubes)
-                            # Show VIPER rod-based mesh (built from rods)
-                            _, obj.is_draw_viper_rod_mesh = imgui.checkbox(
-                                f"Rod Mesh##viper_{name}", getattr(obj, 'is_draw_viper_rod_mesh', False))
-                            imgui.push_item_width(100)
-                            _, obj.viper_rod_radius = imgui.slider_float(
-                                f"Rod Radius##viper_{name}", obj.viper_rod_radius, 0.001, 0.01, "%.3f")
-                            _, obj.viper_point_size = imgui.slider_float(
-                                f"Point Size##viper_{name}", obj.viper_point_size, 2.0, 15.0)
-                            imgui.pop_item_width()
-
-                            imgui.separator()
-                            # Show rod info
-                            if hasattr(obj, 'viper_waypoints') and obj.viper_waypoints:
-                                num_rods = len(obj.viper_waypoints)
-                                total_pts = sum(len(rod) for rod in obj.viper_waypoints)
-                            else:
-                                num_rods = 0
-                                total_pts = 0
-                            imgui.text(f"Rods: {num_rods}, Points: {total_pts}")
-
-                            # Run VIPER simulation button
-                            if imgui.button(f"Run VIPER##{name}", width=wide_button_width):
-                                try:
-                                    skel = v.env.skel if hasattr(v, 'env') and v.env is not None else None
-                                    skel_meshes = v.zygote_skeleton_meshes if obj.viper_sim.enable_collision else None
-                                    iterations = obj.run_viper_to_convergence(max_iterations=100, tolerance=1e-5, skeleton=skel, skeleton_meshes=skel_meshes)
-                                    print(f"{name}: VIPER converged in {iterations} iterations")
-                                except Exception as e:
-                                    print(f"[{name}] Run VIPER error: {e}")
-
-                            # Single step button
-                            if imgui.button(f"VIPER Step##{name}", width=wide_button_width):
-                                try:
-                                    skel = v.env.skel if hasattr(v, 'env') and v.env is not None else None
-                                    skel_meshes = v.zygote_skeleton_meshes if obj.viper_sim.enable_collision else None
-                                    max_disp = obj.run_viper_step(skeleton=skel, skeleton_meshes=skel_meshes)
-                                    print(f"{name}: VIPER step, max_disp={max_disp:.2e}")
-                                except Exception as e:
-                                    print(f"[{name}] VIPER Step error: {e}")
-
-                            # Reset button
-                            if imgui.button(f"Reset VIPER##{name}", width=wide_button_width):
-                                try:
-                                    obj.reset_viper()
-                                    print(f"{name}: VIPER reset")
-                                except Exception as e:
-                                    print(f"[{name}] Reset VIPER error: {e}")
-
-                            # Debug button - show constraint residuals
-                            if imgui.button(f"Debug Info##{name}", width=wide_button_width):
-                                try:
-                                    from viewer.viper_rods import get_viper_backend
-                                    info = obj.viper_sim.get_debug_info()
-                                    residuals = obj.viper_sim.get_constraint_residuals()
-                                    backend = get_viper_backend()
-                                    print(f"\n=== {name} VIPER Debug ===")
-                                    print(f"  Backend: {backend.upper() if backend else 'Not initialized'} (use_gpu={info.get('use_gpu', False)})")
-                                    print(f"  Rods: {info.get('num_rods', 0)}, Verts/rod: {info.get('num_vertices_per_rod', 0)}")
-                                    print(f"  Scale: min={info.get('min_scale', 0):.3f}, max={info.get('max_scale', 0):.3f}, avg={info.get('avg_scale', 0):.3f}")
-                                    print(f"  Stretch error: mean={residuals.get('stretch_error_mean', 0):.4f}, max={residuals.get('stretch_error_max', 0):.4f}")
-                                    print(f"  Volume error: mean={residuals.get('volume_error_mean', 0):.4f}, max={residuals.get('volume_error_max', 0):.4f}")
-                                    print(f"  Bend error: mean={residuals.get('bend_error_mean', 0):.4f}, max={residuals.get('bend_error_max', 0):.4f}")
-                                    print(f"  Collision: {obj.viper_sim.enable_collision} (margin={obj.viper_sim.collision_margin:.3f})")
-                                except Exception as e:
-                                    print(f"[{name}] Debug error: {e}")
-                        else:
-                            imgui.text("Generate waypoints first")
-                    else:
-                        imgui.text("VIPER requires Taichi")
-                    imgui.tree_pop()
 
                 if imgui.button("Export Muscle Waypoints", width=wide_button_width):
                     pass
@@ -9181,22 +8955,18 @@ def _motion_reset(v):
 def reset(v, reset_time=None):
     v.env.reset(reset_time)
     v.reward_buffer = [v.env.get_reward()]
-    # Reset soft body and VIPER simulations
+    # Reset soft body simulations
     for name, obj in v.zygote_muscle_meshes.items():
         if obj.soft_body is not None:
             obj.reset_soft_body()
-        if hasattr(obj, 'viper_sim') and obj.viper_sim is not None:
-            obj.reset_viper()
 
 
 def zero_reset(v):
     v.env.zero_reset()
     v.reward_buffer = [v.env.get_reward()]
-    # Reset soft body and VIPER simulations
+    # Reset soft body simulations
     for name, obj in v.zygote_muscle_meshes.items():
         if obj.soft_body is not None:
             obj.reset_soft_body()
-        if hasattr(obj, 'viper_sim') and obj.viper_sim is not None:
-            obj.reset_viper()
 
 

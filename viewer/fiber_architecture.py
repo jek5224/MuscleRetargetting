@@ -1595,9 +1595,6 @@ class FiberArchitectureMixin:
         self.waypoints_from_tet_sim = True  # If False, waypoints are imported and won't be updated by tet sim
         self.waypoint_bary_coords = []
 
-        # VIPER waypoints
-        self.viper_waypoints = []
-
         # Bone bounds for skeleton attachment
         self._bone_bounds = {}
 
@@ -3110,27 +3107,6 @@ class FiberArchitectureMixin:
             if clamped_count > 0:
                 msg += f", {clamped_count} outside mesh (extrapolated)"
             print(msg)
-
-    def update_waypoints_from_viper(self):
-        """Update viper_waypoints array from VIPER rod positions."""
-        if self.viper_sim is None:
-            return
-
-        if not hasattr(self, 'viper_waypoints'):
-            return
-
-        # Get positions from VIPER rods
-        positions = self.viper_sim.get_positions_flat()
-        if positions is None:
-            return
-
-        # Update viper_waypoints structure
-        idx = 0
-        for rod_idx in range(len(self.viper_waypoints)):
-            for point_idx in range(len(self.viper_waypoints[rod_idx])):
-                if idx < len(positions):
-                    self.viper_waypoints[rod_idx][point_idx] = positions[idx].copy()
-                    idx += 1
 
     def _ensure_waypoints_inside_mesh(self, vertices_original, vertices_smoothed, faces):
         """

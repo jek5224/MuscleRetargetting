@@ -100,11 +100,6 @@ def _draw_tet_meshes_batched(app):
     edge_muscles = []
 
     for name, obj in app.zygote_muscle_meshes.items():
-        viper_only = obj.viper_sim is not None and obj.viper_only_mode
-        if viper_only:
-            continue
-
-
         if not (obj.is_draw_tet_mesh or getattr(obj, '_tet_anim_active', False)):
             continue
 
@@ -959,24 +954,18 @@ class GLFWApp():
 
         # Draw muscle mesh parts (contours, bounding boxes, edges — NOT the mesh itself)
         for name, obj in self.zygote_muscle_meshes.items():
-            viper_only = obj.viper_sim is not None and obj.viper_only_mode
-            if obj.viper_sim is not None and obj.is_draw_viper:
-                obj.draw_viper()
-            if obj.viper_sim is not None and getattr(obj, 'is_draw_viper_rod_mesh', False):
-                obj.draw_viper_mesh()
-            if not viper_only:
-                if obj.is_draw_contours:
-                    obj.draw_contours()
-                if obj.is_draw_open_edges:
-                    obj.draw_open_edges([0.0, 0.0, 1.0, obj.transparency])
-                if obj.is_draw_centroid:
-                    obj.draw_centroid()
-                if obj.is_draw_bounding_box:
-                    obj.draw_bounding_box()
-                if obj.is_draw_edges:
-                    obj.draw_edges()
-                if obj.is_draw_constraints:
-                    obj.draw_constraints()
+            if obj.is_draw_contours:
+                obj.draw_contours()
+            if obj.is_draw_open_edges:
+                obj.draw_open_edges([0.0, 0.0, 1.0, obj.transparency])
+            if obj.is_draw_centroid:
+                obj.draw_centroid()
+            if obj.is_draw_bounding_box:
+                obj.draw_bounding_box()
+            if obj.is_draw_edges:
+                obj.draw_edges()
+            if obj.is_draw_constraints:
+                obj.draw_constraints()
 
         # Draw inter-muscle constraints if enabled
         if getattr(self, 'draw_inter_muscle_constraints', False):
@@ -1016,8 +1005,7 @@ class GLFWApp():
 
         # Draw fiber structure
         for name, obj in self.zygote_muscle_meshes.items():
-            viper_only = obj.viper_sim is not None and obj.viper_only_mode
-            if not viper_only and obj.is_draw_fiber_architecture:
+            if obj.is_draw_fiber_architecture:
                 obj.fiber_transparency = self.zygote_fiber_transparency
                 obj.draw_fiber_architecture()
 
@@ -1026,14 +1014,12 @@ class GLFWApp():
 
         # Draw contour mesh (after fibers and tet so it fades cleanly on top)
         for name, obj in self.zygote_muscle_meshes.items():
-            viper_only = obj.viper_sim is not None and obj.viper_only_mode
-            if not viper_only and (obj.is_draw_contour_mesh or getattr(obj, '_mesh_anim_active', False)):
+            if obj.is_draw_contour_mesh or getattr(obj, '_mesh_anim_active', False):
                 obj.draw_contour_mesh()
 
         # Draw muscle mesh (last so transparency shows skeleton and fibers through it)
         for name, obj in self.zygote_muscle_meshes.items():
-            viper_only = obj.viper_sim is not None and obj.viper_only_mode
-            if not viper_only and obj.is_draw:
+            if obj.is_draw:
                 obj.draw([obj.color[0], obj.color[1], obj.color[2], obj.transparency])
 
         # if self.draw_pd_target:
