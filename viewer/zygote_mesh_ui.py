@@ -7678,7 +7678,13 @@ def _run_unified_volume_sim(v, active_muscles, max_iterations=100, tolerance=1e-
                 ratio = axis_ratios.get(name, 1.0)
                 if abs(ratio - 1.0) < 0.02:
                     continue
-                perp_scale = np.clip(np.sqrt(1.0 / ratio), 1.0, 1.2)
+                # Volume-preserving perpendicular scale: under axial compression
+                # ratio<1, intra-contour edges grow by 1/sqrt(ratio) so that
+                # cross-section area * length stays constant.  Clip to [1.0, 2.0]
+                # so a fully-contracted muscle (ratio≈0.25) can double its
+                # cross-section width — needed to overcome ARAP's natural
+                # tendency to buckle into S-shape under axial compression.
+                perp_scale = np.clip(np.sqrt(1.0 / ratio), 1.0, 2.0)
                 muscle_mask = cache['csr_muscle_id'] == mid
                 scaled_rest[muscle_mask & cache['csr_cross_mask']] *= ratio
                 scaled_rest[muscle_mask & cache['csr_intra_mask']] *= perp_scale
