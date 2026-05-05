@@ -1963,7 +1963,13 @@ class SkeletonMeshMixin:
             print(f"  hasattr waypoints: {hasattr(self, 'waypoints')}, waypoints is None: {getattr(self, 'waypoints', None) is None}")
             return False
 
-        # Ensure attach_skeletons arrays exist
+        # Truncate to exactly num_streams. Without truncation prior runs at
+        # different stream counts left stale rows in attach_skeleton_names —
+        # accumulating to 68+ rows for FDL after several auto_detect calls.
+        self.attach_skeletons = [list(r) for r in self.attach_skeletons[:num_streams]]
+        self.attach_skeletons_sub = [list(r) for r in self.attach_skeletons_sub[:num_streams]]
+        self.attach_skeleton_names = [list(r) for r in self.attach_skeleton_names[:num_streams]]
+        # Pad to num_streams if shorter.
         while len(self.attach_skeletons) < num_streams:
             self.attach_skeletons.append([0, 0])
         while len(self.attach_skeletons_sub) < num_streams:

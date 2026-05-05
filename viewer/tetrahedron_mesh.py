@@ -1594,24 +1594,31 @@ except Exception as e:
                 if placed:
                     continue
 
-                # Step B: star-fan with volume-maximizing triple from K=16 nearest used verts
-                K = min(16, len(used_arr))
+                # Step B: star-fan with volume-maximizing triple. K=64 ensures
+                # candidates reach beyond a single cap ring; cap-ring orphans
+                # surrounded by 30+ coplanar ring vertices need a wider net to
+                # find an off-plane partner.
+                K = min(64, len(used_arr))
                 _, nn_local = used_tree.query(p0.reshape(1, 3), k=K)
                 nn_local = np.atleast_1d(np.asarray(nn_local).ravel())
                 cand = used_arr[nn_local]
                 best_vol = 0.0
                 best_triple = None
-                for a in range(K):
-                    for b in range(a + 1, K):
-                        for c in range(b + 1, K):
-                            i0, i1, i2 = int(cand[a]), int(cand[b]), int(cand[c])
-                            v1 = closed_vertices[i0] - p0
-                            v2 = closed_vertices[i1] - p0
-                            v3 = closed_vertices[i2] - p0
-                            vol = float(np.dot(v1, np.cross(v2, v3)))
-                            if abs(vol) > best_vol:
-                                best_vol = abs(vol)
-                                best_triple = (i0, i1, i2, vol)
+                # Try smallest K first (closer triples preferred), expand if all coplanar.
+                for kbound in (min(8, K), min(16, K), min(32, K), K):
+                    for a in range(kbound):
+                        for b in range(a + 1, kbound):
+                            for c in range(b + 1, kbound):
+                                i0, i1, i2 = int(cand[a]), int(cand[b]), int(cand[c])
+                                v1 = closed_vertices[i0] - p0
+                                v2 = closed_vertices[i1] - p0
+                                v3 = closed_vertices[i2] - p0
+                                vol = float(np.dot(v1, np.cross(v2, v3)))
+                                if abs(vol) > best_vol:
+                                    best_vol = abs(vol)
+                                    best_triple = (i0, i1, i2, vol)
+                    if best_triple is not None and best_vol >= VOL_EPS * 1000:
+                        break  # Good enough; no need to widen further.
                 if best_triple is None or best_vol < VOL_EPS:
                     n_skipped += 1
                     continue
