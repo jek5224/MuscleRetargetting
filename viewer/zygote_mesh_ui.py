@@ -7442,30 +7442,41 @@ def _run_unified_volume_sim(v, active_muscles, max_iterations=100, tolerance=1e-
             has_edge_types = (hasattr(sb, 'cross_contour_edges') and sb.cross_contour_edges is not None and
                               hasattr(sb, 'intra_contour_edges') and sb.intra_contour_edges is not None)
 
+            # Anisotropic ARAP: muscle-fiber-aware weighting.
+            # Cross-contour edges run roughly along the fiber direction (between
+            # adjacent contour rings); intra-contour edges run perpendicular
+            # (around a ring).  Lower cross weight → fiber direction can
+            # contract more freely; higher intra weight → cross-section keeps
+            # its width, producing perpendicular bulging.  Disabled by default
+            # (isotropic w=1.0 everywhere).
+            arap_aniso = bool(getattr(v, 'arap_anisotropic', False))
+            cross_w = float(getattr(v, 'arap_cross_w', 1.0))
+            intra_w = float(getattr(v, 'arap_intra_w', 1.0))
+            neutral_w = float(getattr(v, 'arap_neutral_w', 1.0))
+
             for edge_idx, (i, j) in enumerate(zip(sb.edge_i, sb.edge_j)):
                 # Use stored rest_lengths if available, otherwise compute from rest positions
                 if hasattr(sb, 'rest_lengths') and sb.rest_lengths is not None and edge_idx < len(sb.rest_lengths):
                     rest_len = sb.rest_lengths[edge_idx]
                 else:
                     rest_len = np.linalg.norm(sb.rest_positions[j] - sb.rest_positions[i])
-                all_edges.append((offset + i, offset + j, rest_len, 1.0))
+                etype = 0
+                if has_edge_types:
+                    if sb.cross_contour_edges[edge_idx]:
+                        etype = 1
+                    elif sb.intra_contour_edges[edge_idx]:
+                        etype = 2
+                if arap_aniso and has_edge_types:
+                    w = cross_w if etype == 1 else (intra_w if etype == 2 else neutral_w)
+                else:
+                    w = 1.0
+                all_edges.append((offset + i, offset + j, rest_len, w))
 
                 gi, gj = offset + i, offset + j
                 edge_muscle_map[(gi, gj)] = name
                 edge_muscle_map[(gj, gi)] = name
-                if has_edge_types:
-                    if sb.cross_contour_edges[edge_idx]:
-                        edge_type_map[(gi, gj)] = 1
-                        edge_type_map[(gj, gi)] = 1
-                    elif sb.intra_contour_edges[edge_idx]:
-                        edge_type_map[(gi, gj)] = 2
-                        edge_type_map[(gj, gi)] = 2
-                    else:
-                        edge_type_map[(gi, gj)] = 0
-                        edge_type_map[(gj, gi)] = 0
-                else:
-                    edge_type_map[(gi, gj)] = 0
-                    edge_type_map[(gj, gi)] = 0
+                edge_type_map[(gi, gj)] = etype
+                edge_type_map[(gj, gi)] = etype
 
         n_internal = len(all_edges)
 

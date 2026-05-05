@@ -164,6 +164,10 @@ def build_context(skel, muscle_meshes, skeleton_meshes, mesh_info, args):
         inter_muscle_constraints=[],
         inter_muscle_constraint_threshold=args.constraint_threshold,
         inter_muscle_k_cap=args.inter_k,
+        arap_anisotropic=args.anisotropic,
+        arap_cross_w=args.arap_cross_w,
+        arap_intra_w=args.arap_intra_w,
+        arap_neutral_w=args.arap_neutral_w,
         coupled_as_unified_volume=args.unified_volume,
         use_gpu_arap=use_gpu,
         use_taichi_arap=use_taichi,
@@ -348,6 +352,35 @@ def main():
         help="Per-vertex cap on cross-muscle neighbors (default: 3). "
              "Bounds inter-muscle edge count; prevents quadratic blowup "
              "in dense regions like LowLeg.",
+    )
+    parser.add_argument(
+        "--anisotropic",
+        action="store_true",
+        help="Anisotropic ARAP weights along/perpendicular to muscle fiber. "
+             "Cross-contour edges (along fiber) get --arap-cross-w; "
+             "intra-contour edges (perpendicular ring) get --arap-intra-w. "
+             "Default isotropic (all weights 1.0).",
+    )
+    parser.add_argument(
+        "--arap-cross-w",
+        type=float,
+        default=0.2,
+        help="Cross-contour (along-fiber) edge weight when --anisotropic "
+             "is on (default: 0.2 — fibers contract more freely).",
+    )
+    parser.add_argument(
+        "--arap-intra-w",
+        type=float,
+        default=1.0,
+        help="Intra-contour (perpendicular) edge weight when --anisotropic "
+             "is on (default: 1.0 — preserves cross-section).",
+    )
+    parser.add_argument(
+        "--arap-neutral-w",
+        type=float,
+        default=1.0,
+        help="Weight for edges that are neither cross- nor intra-contour "
+             "(default: 1.0).",
     )
     parser.add_argument(
         "--backend",
