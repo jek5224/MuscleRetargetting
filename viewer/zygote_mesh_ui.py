@@ -7668,6 +7668,14 @@ def _run_unified_volume_sim(v, active_muscles, max_iterations=100, tolerance=1e-
                 axis_ratios[name] = np.clip(current_len / rest_len, 0.5, 2.0)
             else:
                 axis_ratios[name] = 1.0
+        # Temporal smoothing of per-muscle axis ratio dampens frame-to-frame
+        # cap-distance noise that propagated into target rest lengths and
+        # caused visible oscillation in the bulge response.
+        prev_ratios = cache.get('prev_axis_ratios')
+        if prev_ratios is not None:
+            for name in axis_ratios:
+                axis_ratios[name] = 0.7 * axis_ratios[name] + 0.3 * prev_ratios.get(name, axis_ratios[name])
+        cache['prev_axis_ratios'] = dict(axis_ratios)
 
         # Check if any muscle actually has non-trivial ratio
         any_scaled = any(abs(r - 1.0) >= 0.02 for r in axis_ratios.values())
@@ -7680,11 +7688,10 @@ def _run_unified_volume_sim(v, active_muscles, max_iterations=100, tolerance=1e-
                     continue
                 # Volume-preserving perpendicular scale: under axial compression
                 # ratio<1, intra-contour edges grow by 1/sqrt(ratio) so that
-                # cross-section area * length stays constant.  Clip to [1.0, 2.0]
-                # so a fully-contracted muscle (ratio≈0.25) can double its
-                # cross-section width — needed to overcome ARAP's natural
-                # tendency to buckle into S-shape under axial compression.
-                perp_scale = np.clip(np.sqrt(1.0 / ratio), 1.0, 2.0)
+                # cross-section area * length stays constant. Clip [1.0, 1.6]
+                # — 60% bulge enough to suppress S-buckling without driving
+                # frame-to-frame oscillation that 2.0 produced.
+                perp_scale = np.clip(np.sqrt(1.0 / ratio), 1.0, 1.6)
                 muscle_mask = cache['csr_muscle_id'] == mid
                 scaled_rest[muscle_mask & cache['csr_cross_mask']] *= ratio
                 scaled_rest[muscle_mask & cache['csr_intra_mask']] *= perp_scale
