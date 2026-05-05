@@ -1745,20 +1745,30 @@ class MuscleMeshMixin:
             print("  Edge classification: no vertex_contour_level (build contour mesh first)")
             return None, None
 
-        if not hasattr(self, 'contour_to_tet_indices') or self.contour_to_tet_indices is None:
-            self.build_contour_to_tet_mapping()
-
-        # Build reverse mapping: tet_vertex_idx -> contour_level
         n_tet_verts = len(self.tet_vertices)
         tet_vertex_level = np.full(n_tet_verts, -1.0, dtype=np.float32)
-
-        # First, assign known levels from contour mesh
         max_level = 0
-        for contour_idx, tet_idx in enumerate(self.contour_to_tet_indices):
-            if tet_idx >= 0 and tet_idx < n_tet_verts:
-                level = self.vertex_contour_level[contour_idx]
-                tet_vertex_level[tet_idx] = float(level)
-                max_level = max(max_level, level)
+
+        # Two storage conventions for vertex_contour_level:
+        # (a) contour-vert-indexed (length = num contour mesh verts) — needs
+        #     contour_to_tet_indices to remap.
+        # (b) tet-vert-indexed (length = num tet verts) — direct lookup. The
+        #     bake-time tet npz stores it this way; contour_mesh_vertices is
+        #     not loaded so the contour_to_tet_indices remap fails silently.
+        vcl = np.asarray(self.vertex_contour_level)
+        if vcl.ndim == 1 and len(vcl) == n_tet_verts:
+            valid = vcl >= 0
+            tet_vertex_level[valid] = vcl[valid].astype(np.float32)
+            if np.any(valid):
+                max_level = int(vcl[valid].max())
+        else:
+            if not hasattr(self, 'contour_to_tet_indices') or self.contour_to_tet_indices is None:
+                self.build_contour_to_tet_mapping()
+            for contour_idx, tet_idx in enumerate(self.contour_to_tet_indices or []):
+                if tet_idx >= 0 and tet_idx < n_tet_verts and contour_idx < len(vcl):
+                    level = vcl[contour_idx]
+                    tet_vertex_level[tet_idx] = float(level)
+                    max_level = max(max_level, int(level))
 
         # Compute muscle axis from fixed vertices
         tet_verts = np.array(self.tet_vertices)
