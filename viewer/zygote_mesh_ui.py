@@ -408,7 +408,8 @@ def draw_zygote_muscle_ui(v):
             "Draw##inter_constraints", getattr(v, 'draw_inter_muscle_constraints', False)
         )
 
-        # Unified volume checkbox
+        # Unified-volume + muscle-aware ARAP are the only path now (Taichi
+        # backend, no per-muscle/FEM/CPU/GPU alternatives).
         _, v.coupled_as_unified_volume = imgui.checkbox(
             "Unified Volume", v.coupled_as_unified_volume
         )
@@ -416,68 +417,9 @@ def draw_zygote_muscle_ui(v):
             imgui.same_line()
             _, v.use_muscle_aware_arap = imgui.checkbox("Muscle-Aware", v.use_muscle_aware_arap)
 
-        # Simulation method selector
-        imgui.text("Sim Method:")
-        imgui.same_line()
-        changed_arap, checked_arap = imgui.checkbox("ARAP", not v.use_fem_sim)
-        if changed_arap and checked_arap:
-            v.use_fem_sim = False
-        imgui.same_line()
-        changed_fem, checked_fem = imgui.checkbox("FEM", v.use_fem_sim)
-        if changed_fem and checked_fem:
-            v.use_fem_sim = True
-
-        if v.use_fem_sim:
-            # FEM material parameter sliders
-            imgui.push_item_width(120)
-            _, v.fem_youngs_modulus = imgui.slider_float(
-                "Young's (Pa)", v.fem_youngs_modulus, 1000.0, 50000.0, "%.0f"
-            )
-            _, v.fem_poisson_ratio = imgui.slider_float(
-                "Poisson", v.fem_poisson_ratio, 0.3, 0.499, "%.3f"
-            )
-            _, v.fem_volume_penalty = imgui.slider_float(
-                "Vol Penalty", v.fem_volume_penalty, 0.0, 1000.0, "%.0f"
-            )
-            imgui.pop_item_width()
-        else:
-            # Backend selection (radio-button style with checkboxes)
-            imgui.text("Backend:")
-            imgui.same_line()
-
-            # CPU (always available, default)
-            use_cpu = not v.use_gpu_arap and not v.use_taichi_arap
-            if imgui.checkbox("CPU", use_cpu)[1] and not use_cpu:
-                v.use_gpu_arap = False
-                v.use_taichi_arap = False
-
-            # GPU (PyTorch)
-            if v.gpu_available:
-                imgui.same_line()
-                changed, checked = imgui.checkbox("GPU", v.use_gpu_arap)
-                if changed and checked:
-                    v.use_gpu_arap = True
-                    v.use_taichi_arap = False
-                elif changed and not checked:
-                    v.use_gpu_arap = False
-
-            # Taichi
-            if v.taichi_available:
-                imgui.same_line()
-                changed, checked = imgui.checkbox("Taichi", v.use_taichi_arap)
-                if changed and checked:
-                    v.use_taichi_arap = True
-                    v.use_gpu_arap = False
-                elif changed and not checked:
-                    v.use_taichi_arap = False
-
         # Run coupled simulation button
         if imgui.button("Run Coupled Tet Sim", width=wide_button_width):
-            if v.use_fem_sim:
-                from viewer.fem_sim import run_all_fem_sim
-                run_all_fem_sim(v, max_iterations=10, tolerance=1e-4)
-            else:
-                run_all_tet_sim_with_constraints(v)
+            run_all_tet_sim_with_constraints(v)
 
         imgui.separator()
 
