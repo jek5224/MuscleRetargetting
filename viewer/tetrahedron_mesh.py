@@ -1891,9 +1891,8 @@ except Exception as e:
             self.tet_cap_face_indices = list(data['cap_face_indices'])
             self.tet_anchor_vertices = list(data['anchor_vertices']) if 'anchor_vertices' in data and len(data['anchor_vertices']) > 0 else []
             self.tet_surface_face_count = int(data['surface_face_count'])
-            # Invalidate draw-array index caches so next update rebuilds against
-            # the freshly loaded faces. Without this, swap_mesh_mode 512↔736 silently
-            # uses stale indices (contour max 511 < 736 → guard doesn't trigger).
+            # Invalidate draw-array index caches so next update rebuilds
+            # against the freshly loaded faces.
             self._tet_surface_vidx = None
             self._tet_cap_vidx = None
             self._tet_edge_vidx = None

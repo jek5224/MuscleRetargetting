@@ -47,15 +47,6 @@ def draw_zygote_ui(v):
 def draw_zygote_muscle_ui(v):
     """Muscle section inside the Zygote tree node."""
     if imgui.tree_node("Muscle", imgui.TREE_NODE_DEFAULT_OPEN):
-        # Mesh mode swap (original / contour)
-        if not hasattr(v, '_mesh_mode'):
-            v._mesh_mode = _detect_mesh_mode()
-        if os.path.exists('tet_orig_std'):
-            cur = v._mesh_mode.upper()
-            nxt = 'Original' if v._mesh_mode == 'contour' else 'Contour'
-            if imgui.button(f"[{cur}] Swap to {nxt}##mesh_mode_top"):
-                _swap_mesh_mode(v)
-
         changed, v.is_draw_zygote_muscle = imgui.checkbox("Draw", v.is_draw_zygote_muscle)
         if changed:
             for name, obj in v.zygote_muscle_meshes.items():
@@ -2092,14 +2083,6 @@ def _draw_motion_browser_ui(v):
         if num_cached > 0 and has_soft_bodies and not v.motion_baking:
             if imgui.button("Recompute Waypoints in Cache##motion_cache"):
                 _motion_patch_waypoints(v)
-
-        # --- Mesh Mode (Original / Contour) ---
-        imgui.separator()
-        if not hasattr(v, '_mesh_mode'):
-            v._mesh_mode = _detect_mesh_mode()
-        mode_label = f"Mesh: {v._mesh_mode.upper()}"
-        if imgui.button(f"Swap to {'Original' if v._mesh_mode == 'contour' else 'Contour'}##mesh_mode"):
-            _swap_mesh_mode(v)
 
         # --- Neural Network ---
         imgui.separator()
@@ -8362,87 +8345,6 @@ def _motion_run_tet_settle(v):
             max_iterations=v.motion_settle_iters,
             tolerance=1e-4
         )
-
-
-def _detect_mesh_mode():
-    """Infer current mesh mode by checking tet/<m>_tet.npz size against the
-    .contour_backup. If any tet file in tet/ has been overwritten by an
-    original-mesh tet (file size differs from backup), report 'original'."""
-    for backup in glob.glob(os.path.join('tet', '*_tet.npz.contour_backup')):
-        live = backup[:-len('.contour_backup')]
-        if not os.path.exists(live):
-            continue
-        try:
-            if os.path.getsize(live) != os.path.getsize(backup):
-                return 'original'
-        except OSError:
-            continue
-    return 'contour'
-
-
-def _swap_mesh_mode(v):
-    """Swap between original and contour mesh display for muscles with original tets.
-
-    Original: loads 650-vert original OBJ tet mesh + 650-vert ARAP cache
-    Contour:  loads 512-vert contour tet mesh + 512-vert mapped cache
-    """
-    import shutil
-    import pickle
-
-    ORIG_DIR = 'tet_orig_open'
-    # Swap every muscle that has an original-tet file available.
-    MUSCLES = sorted(
-        os.path.basename(p)[:-len('_tet.npz')]
-        for p in glob.glob(os.path.join(ORIG_DIR, '*_tet.npz'))
-    )
-    ORIG_CACHE_TAG = 'layered_coll_indep'
-    CONTOUR_CACHE_TAG = 'layered_contour'
-
-    if not hasattr(v, '_mesh_mode'):
-        v._mesh_mode = 'contour'
-
-    new_mode = 'original' if v._mesh_mode == 'contour' else 'contour'
-
-    for mname in MUSCLES:
-        if mname not in v.zygote_muscle_meshes:
-            continue
-        mobj = v.zygote_muscle_meshes[mname]
-        tet_path = os.path.join('tet', f'{mname}_tet.npz')
-        backup_path = tet_path + '.contour_backup'
-        orig_path = os.path.join(ORIG_DIR, f'{mname}_tet.npz')
-
-        if new_mode == 'original':
-            if not os.path.exists(orig_path):
-                continue
-            if not os.path.exists(backup_path) and os.path.exists(tet_path):
-                shutil.copy2(tet_path, backup_path)
-            shutil.copy2(orig_path, tet_path)
-        else:
-            if os.path.exists(backup_path):
-                shutil.copy2(backup_path, tet_path)
-
-        # Reload tet mesh
-        mobj.load_tetrahedron_mesh(mname, filepath=tet_path)
-
-    v._mesh_mode = new_mode
-
-    # Reload cache via the shared loader so any subdir whose chunk vert count
-    # matches the active tet is picked up — not just the hardcoded
-    # layered_contour / layered_coll_indep tags.
-    if v.motion_bvh is not None:
-        _motion_load_cache(v)
-        for mname in MUSCLES:
-            if mname in v.motion_deform_cache and v.motion_deform_cache[mname]:
-                cache = v.motion_deform_cache[mname]
-                first_frame = next(iter(cache))
-                n_verts = cache[first_frame]['positions'].shape[0]
-                print(f"  {mname}: {len(cache)} frames, {n_verts} verts")
-
-    print(f"Mesh mode: {new_mode.upper()}")
-
-    # Immediately apply current frame
-    if hasattr(v, 'motion_current_frame') and v.motion_deform_cache:
-        _motion_apply_cached_deformation(v, v.motion_current_frame)
 
 
 def _motion_cache_dir(v):
