@@ -413,9 +413,6 @@ def draw_zygote_muscle_ui(v):
         _, v.coupled_as_unified_volume = imgui.checkbox(
             "Unified Volume", v.coupled_as_unified_volume
         )
-        if v.coupled_as_unified_volume:
-            imgui.same_line()
-            _, v.use_muscle_aware_arap = imgui.checkbox("Muscle-Aware", v.use_muscle_aware_arap)
 
         # Run coupled simulation button
         if imgui.button("Run Coupled Tet Sim", width=wide_button_width):

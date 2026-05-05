@@ -342,8 +342,8 @@ def main():
     parser.add_argument(
         "--constraint-threshold",
         type=float,
-        default=0.005,
-        help="Inter-muscle constraint distance in meters (default: 0.005)",
+        default=0.015,
+        help="Inter-muscle constraint distance in meters (default: 0.015)",
     )
     parser.add_argument(
         "--inter-k",
@@ -354,26 +354,26 @@ def main():
              "in dense regions like LowLeg.",
     )
     parser.add_argument(
-        "--anisotropic",
-        action="store_true",
-        help="Anisotropic ARAP weights along/perpendicular to muscle fiber. "
-             "Cross-contour edges (along fiber) get --arap-cross-w; "
-             "intra-contour edges (perpendicular ring) get --arap-intra-w. "
-             "Default isotropic (all weights 1.0).",
+        "--isotropic",
+        dest="anisotropic",
+        action="store_false",
+        default=True,
+        help="Disable anisotropic ARAP weights (cross-fiber softer than "
+             "perpendicular).  Defaults on; pass --isotropic to revert.",
     )
     parser.add_argument(
         "--arap-cross-w",
         type=float,
-        default=0.2,
-        help="Cross-contour (along-fiber) edge weight when --anisotropic "
-             "is on (default: 0.2 — fibers contract more freely).",
+        default=0.1,
+        help="Cross-contour (along-fiber) edge weight when anisotropic is "
+             "on (default: 0.1 — fibers contract more freely).",
     )
     parser.add_argument(
         "--arap-intra-w",
         type=float,
-        default=1.0,
-        help="Intra-contour (perpendicular) edge weight when --anisotropic "
-             "is on (default: 1.0 — preserves cross-section).",
+        default=3.0,
+        help="Intra-contour (perpendicular) edge weight when anisotropic "
+             "is on (default: 3.0 — strongly preserves cross-section).",
     )
     parser.add_argument(
         "--arap-neutral-w",
@@ -457,10 +457,12 @@ def main():
         help="Opt out of unified volume; run per-muscle scipy+numpy path.",
     )
     parser.add_argument(
-        "--no-self-collision",
-        action="store_true",
-        help="Disable per-muscle bone collision push. Faster on dense tets; "
-             "use when bones are simple and inter-muscle constraints suffice.",
+        "--self-collision",
+        dest="no_self_collision",
+        action="store_false",
+        default=True,
+        help="Enable per-muscle bone collision push.  Defaults off; pass "
+             "--self-collision to engage.",
     )
     parser.add_argument(
         "--save-anim",
