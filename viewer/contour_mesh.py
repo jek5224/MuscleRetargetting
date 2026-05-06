@@ -13041,7 +13041,7 @@ class ContourMeshMixin(ContourAnimationMixin):
         # `level_select_min_spacing` apart in muscle-axis distance.
         # `level_select_percentage` retained as a fallback if min_spacing
         # isn't set.
-        min_spacing = float(getattr(self, 'level_select_min_spacing', 0.05))
+        min_spacing = float(getattr(self, 'level_select_min_spacing', 0.04))
         print(f"Min spacing threshold: {min_spacing*100:.1f} cm")
 
         # Single-stream muscles or post-fill/transition flows may leave

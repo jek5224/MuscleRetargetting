@@ -1102,7 +1102,7 @@ def draw_zygote_muscle_ui(v):
                 # `v` so adjusting from any muscle's tree propagates to
                 # every muscle on the next render.
                 if not hasattr(v, 'global_level_select_min_spacing'):
-                    v.global_level_select_min_spacing = 0.05
+                    v.global_level_select_min_spacing = 0.04
                 changed_sp, v.global_level_select_min_spacing = imgui.slider_float(
                     "Min Spacing (m)", v.global_level_select_min_spacing,
                     0.005, 0.5, "%.3f")
