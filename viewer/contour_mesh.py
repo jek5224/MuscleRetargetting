@@ -13036,16 +13036,13 @@ class ContourMeshMixin(ContourAnimationMixin):
         last_mean = self.stream_bounding_planes[0][-1]['mean']
         muscle_length = np.linalg.norm(last_mean - first_mean)
 
-        # Selection size is now driven by a percentage of the total number
-        # of contours (level_select_percentage in [0, 1]) instead of a
-        # relative-Frobenius error threshold.  The error threshold tended to
-        # bunch added levels near the origin because relative errors are
-        # larger there; percentage-based selection delegated to
-        # select_levels_count distributes additions globally by greedy
-        # error reduction.
-        percentage = float(getattr(self, 'level_select_percentage', 0.1))
-        percentage = max(0.0, min(1.0, percentage))
-        print(f"Selection percentage: {percentage:.3f}")
+        # Length-density mode: pick the largest N (>= min_count) such that
+        # every consecutive selected pair stays at least
+        # `level_select_min_spacing` apart in muscle-axis distance.
+        # `level_select_percentage` retained as a fallback if min_spacing
+        # isn't set.
+        min_spacing = float(getattr(self, 'level_select_min_spacing', 0.20))
+        print(f"Min spacing threshold: {min_spacing*100:.1f} cm")
 
         # Identify original contour counts per level
         original_counts = []
@@ -13084,35 +13081,65 @@ class ContourMeshMixin(ContourAnimationMixin):
 
         print(f"Must-use levels: {sorted(must_use_levels)}")
 
-        # ========== Step 2: Percentage-based delegation ==========
-        # Compute the desired number of levels from the percentage slider
-        # (origin + insertion + at least one middle, plus all must-use
-        # transitions count as the floor).  Then defer to select_levels_count
-        # for the actual greedy-by-N selection so error-bunching near origin
-        # is avoided.
-        target_count = max(max(3, len(must_use_levels)),
-                           int(round(num_levels * percentage)))
-        target_count = min(target_count, num_levels)
-        print(f"Target count from percentage: {target_count}/{num_levels}")
+        # ========== Step 2: Length-density target_count search ==========
+        # For each candidate k starting from min_count, ask select_levels_count
+        # for its globally-optimal k-level path and inspect consecutive
+        # bounding-plane mean distances.  Stop when any gap drops below
+        # min_spacing (i.e., adding more levels would put them too close
+        # together).  If even min_count violates the threshold, keep
+        # min_count anyway.
+        min_count = max(3, len(must_use_levels))
+        min_count = min(min_count, num_levels)
 
-        # Snapshot the post-stream-smooth state before delegating; subsequent
-        # re-clicks of Select Levels reset to this snapshot.
+        # Reference stream for axial distance — first stream's
+        # bounding_plane means are along the muscle axis.
+        ref_means = [bp['mean'] for bp in self.stream_bounding_planes[0]]
+
+        def _path_min_gap(level_indices):
+            sl = sorted(level_indices)
+            best = float('inf')
+            for a, b in zip(sl[:-1], sl[1:]):
+                d = float(np.linalg.norm(ref_means[a] - ref_means[b]))
+                if d < best:
+                    best = d
+            return best
+
+        # Snapshot once before the search loop.
         self._level_select_original = {
             'stream_contours': [list(sc) for sc in self.stream_contours],
             'stream_bounding_planes': [list(bp) for bp in self.stream_bounding_planes],
             'stream_groups': list(self.stream_groups),
         }
-        # Empty checkbox + selected_levels seed so select_levels_count's
-        # guards pass.
         self.stream_selected_levels = [list(sorted(must_use_levels)) for _ in range(max_stream_count)]
         self._level_select_checkboxes = [
             [(li in must_use_levels) for li in range(len(self.stream_contours[s]))]
             for s in range(max_stream_count)
         ]
-        # Delegate the actual N-level selection.
-        self.select_levels_count(target_count)
-        # Seed the GUI Desired stepper from the percentage-derived target so
-        # the window always opens at that count.
+
+        target_count = min_count
+        for k in range(min_count, num_levels + 1):
+            self.select_levels_count(k)
+            # Use stream 0's selected levels — same across streams here.
+            sel = list(self.stream_selected_levels[0])
+            gap = _path_min_gap(sel)
+            if k == min_count:
+                # Always at least min_count, even if gaps are below threshold.
+                target_count = k
+                if gap < min_spacing:
+                    print(f"  k={k} (min_count): gap {gap*100:.1f}cm < {min_spacing*100:.1f}cm; using min anyway")
+                    break
+                continue
+            if gap < min_spacing:
+                print(f"  k={k}: gap {gap*100:.1f}cm < {min_spacing*100:.1f}cm; rolling back to k={target_count}")
+                # Rollback to previous valid k
+                self.select_levels_count(target_count)
+                break
+            target_count = k
+        else:
+            # Loop finished without break: every k satisfied threshold.
+            target_count = num_levels
+        print(f"Length-density chose {target_count}/{num_levels}")
+        # Seed the GUI Desired stepper from the chosen target.
         self._level_select_desired_count = target_count
 
         # Update visualization to show initial selection

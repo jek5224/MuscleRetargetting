@@ -1089,19 +1089,20 @@ def draw_zygote_muscle_ui(v):
                     obj._build_mesh_replayed = False
                     obj._tetrahedralize_replayed = False
 
-                # Percentage of total contours to keep during auto-selection.
-                # 0.0 → minimum (must-use + min-3); 1.0 → all levels.  Value
-                # is global on `v` so adjusting from any muscle's tree
-                # propagates to every muscle on the next render.
-                if not hasattr(v, 'global_level_select_percentage'):
-                    v.global_level_select_percentage = 0.1
-                changed_pct, v.global_level_select_percentage = imgui.slider_float(
-                    "Percentage", v.global_level_select_percentage,
-                    0.0, 1.0, "%.2f")
-                obj.level_select_percentage = v.global_level_select_percentage
-                if changed_pct:
+                # Min-spacing threshold for length-density auto-selection.
+                # Search increases N until any consecutive pair drops below
+                # this distance along the muscle axis.  Value is global on
+                # `v` so adjusting from any muscle's tree propagates to
+                # every muscle on the next render.
+                if not hasattr(v, 'global_level_select_min_spacing'):
+                    v.global_level_select_min_spacing = 0.20
+                changed_sp, v.global_level_select_min_spacing = imgui.slider_float(
+                    "Min Spacing (m)", v.global_level_select_min_spacing,
+                    0.005, 0.5, "%.3f")
+                obj.level_select_min_spacing = v.global_level_select_min_spacing
+                if changed_sp:
                     for _other in v.zygote_muscle_meshes.values():
-                        _other.level_select_percentage = v.global_level_select_percentage
+                        _other.level_select_min_spacing = v.global_level_select_min_spacing
 
                 imgui.text(obj.link_mode)
                 changed1, obj.specific_contour_value = imgui.slider_float(f"Ori##{name}", obj.specific_contour_value, 1.0, obj.contour_value_min, flags=imgui.SLIDER_FLAGS_NO_ROUND_TO_FORMAT)
