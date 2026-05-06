@@ -13111,6 +13111,9 @@ class ContourMeshMixin(ContourAnimationMixin):
         ]
         # Delegate the actual N-level selection.
         self.select_levels_count(target_count)
+        # Seed the GUI Desired stepper from the percentage-derived target so
+        # the window always opens at that count.
+        self._level_select_desired_count = target_count
 
         # Update visualization to show initial selection
         self._update_level_select_visualization()
