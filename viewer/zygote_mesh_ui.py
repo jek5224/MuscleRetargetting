@@ -6339,6 +6339,16 @@ def _render_level_select_windows(v):
         imgui.text(f"Streams: {max_stream_count}")
         imgui.text("Check/uncheck levels. Linked levels toggle together.")
 
+        # Cut muscles must keep level selection synced across all streams,
+        # even at split levels where stream_groups[level_i] = [[0], [1]].
+        # Detect once: any stream_groups entry with a multi-stream group
+        # means this muscle was cut and is "linked overall".
+        muscle_is_linked = any(
+            len(g) > 1
+            for groups in stream_groups
+            for g in groups
+        ) and max_stream_count > 1
+
         # Total / desired-count / reselect controls.
         # Origin + insertion always selected → minimum 3.
         total_levels = len(checkboxes[0]) if max_stream_count > 0 else 0
@@ -6563,8 +6573,17 @@ def _render_level_select_windows(v):
                         vis_changed = True
                         checkboxes[stream_i][level_i] = new_value
 
-                        # If linked, update all streams in THIS stream's group
-                        if is_this_linked:
+                        # If linked, update all streams in THIS stream's group.
+                        # For cut muscles the level index set must stay
+                        # synced across every stream even at split levels,
+                        # so propagate to all streams when the muscle is
+                        # globally linked.
+                        if muscle_is_linked:
+                            for other_stream in range(max_stream_count):
+                                if other_stream != stream_i:
+                                    if level_i < len(checkboxes[other_stream]):
+                                        checkboxes[other_stream][level_i] = new_value
+                        elif is_this_linked:
                             for other_stream in this_group:
                                 if other_stream != stream_i and other_stream < max_stream_count:
                                     if level_i < len(checkboxes[other_stream]):

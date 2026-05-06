@@ -13045,17 +13045,31 @@ class ContourMeshMixin(ContourAnimationMixin):
         print(f"Min spacing threshold: {min_spacing*100:.1f} cm")
 
         # Single-stream muscles or post-fill/transition flows may leave
-        # stream_groups stale or shorter than num_levels.  Rebuild as
-        # independent-per-stream when the size doesn't match.
+        # stream_groups stale or shorter than num_levels.  Pad/truncate
+        # while preserving any existing linkage so cut muscles keep
+        # their linked groups; only single-stream falls back to the
+        # fully-independent default.
         sg = getattr(self, 'stream_groups', None)
         if sg is None or len(sg) != num_levels:
             prev_len = 'None' if sg is None else len(sg)
-            print(f"  stream_groups size {prev_len} != num_levels {num_levels}; "
-                  f"rebuilding as independent")
-            self.stream_groups = [
-                [[s] for s in range(max_stream_count)]
-                for _ in range(num_levels)
-            ]
+            default_groups = [[s] for s in range(max_stream_count)]
+            if sg is None or len(sg) == 0:
+                print(f"  stream_groups size {prev_len} != num_levels "
+                      f"{num_levels}; seeding independent")
+                self.stream_groups = [list(default_groups) for _ in range(num_levels)]
+            elif len(sg) < num_levels:
+                # Extend by repeating the last existing entry so any
+                # split/merge tail keeps its linkage instead of
+                # collapsing to independent.
+                tail = list(sg[-1])
+                print(f"  stream_groups size {prev_len} < {num_levels}; "
+                      f"padding with last entry {tail}")
+                self.stream_groups = list(sg) + [list(tail) for _ in range(num_levels - len(sg))]
+            else:
+                # len(sg) > num_levels: truncate.
+                print(f"  stream_groups size {prev_len} > {num_levels}; "
+                      f"truncating")
+                self.stream_groups = list(sg[:num_levels])
 
         # Identify original contour counts per level
         original_counts = []
