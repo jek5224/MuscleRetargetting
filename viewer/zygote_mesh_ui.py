@@ -1089,6 +1089,20 @@ def draw_zygote_muscle_ui(v):
                     obj._build_mesh_replayed = False
                     obj._tetrahedralize_replayed = False
 
+                # Error threshold for level selection (relative Frobenius).
+                # Higher → fewer auto-selected levels.  Slider value is
+                # global on `v` so changing it from any muscle's tree
+                # propagates to every muscle on the next render.
+                if not hasattr(v, 'global_level_select_error_threshold'):
+                    v.global_level_select_error_threshold = 0.05
+                changed_thr, v.global_level_select_error_threshold = imgui.slider_float(
+                    "Err Thresh", v.global_level_select_error_threshold,
+                    0.001, 0.2, "%.3f")
+                obj.level_select_error_threshold = v.global_level_select_error_threshold
+                if changed_thr:
+                    for _other in v.zygote_muscle_meshes.values():
+                        _other.level_select_error_threshold = v.global_level_select_error_threshold
+
                 imgui.text(obj.link_mode)
                 changed1, obj.specific_contour_value = imgui.slider_float(f"Ori##{name}", obj.specific_contour_value, 1.0, obj.contour_value_min, flags=imgui.SLIDER_FLAGS_NO_ROUND_TO_FORMAT)
                 changed2, obj.specific_contour_value = imgui.slider_float(f"Mid##{name}", obj.specific_contour_value, obj.contour_value_min, obj.contour_value_max, flags=imgui.SLIDER_FLAGS_NO_ROUND_TO_FORMAT)

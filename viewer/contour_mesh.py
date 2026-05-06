@@ -9301,7 +9301,7 @@ class ContourMeshMixin(ContourAnimationMixin):
 
         # Default error threshold: 2% of muscle length
         if error_threshold is None:
-            error_threshold = getattr(self, 'level_select_error_threshold', 0.02) * muscle_length
+            error_threshold = getattr(self, 'level_select_error_threshold', 0.05) * muscle_length
 
         print(f"Error threshold: {error_threshold:.6f} ({error_threshold/muscle_length*100:.1f}% of muscle length)")
 
