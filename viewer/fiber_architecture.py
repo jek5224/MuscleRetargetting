@@ -1993,26 +1993,35 @@ class FiberArchitectureMixin:
                 glColorPointer(4, GL_FLOAT, 0, self._fiber_pt_rgba)
                 glDrawArrays(GL_POINTS, 0, n_pts)
 
-            # Draw fiber lines (dark red + depth alpha)
+            # Draw fiber lines (dark red + depth alpha).  Using immediate
+            # mode glBegin/glVertex3f instead of client-side arrays:
+            # repeated glDrawArrays with self.<arr> pointers segfaulted
+            # inside the GL driver during BVH playback even after every
+            # dtype / contiguity / finite check passed.  Immediate mode
+            # is slower per call but doesn't expose the driver to a
+            # vertex-buffer pointer that may briefly point at freed
+            # memory across renderer/sim threading.
             if self._fiber_draw_lines is not None and len(self._fiber_draw_lines) > 0:
                 arr = self._fiber_draw_lines
                 _ok = (arr.dtype == np.float32
                        and arr.flags['C_CONTIGUOUS']
-                       and arr.ndim == 2 and arr.shape[1] == 3)
+                       and arr.ndim == 2 and arr.shape[1] == 3
+                       and (len(arr) % 2 == 0))
                 if _ok and not np.isfinite(arr).all():
                     _ok = False
                 if _ok:
-                    glLineWidth(2)
                     n_lines = len(arr)
-                    line_rgba = np.empty((n_lines, 4), dtype=np.float32)
-                    line_rgba[:, 0] = 0.75
-                    line_rgba[:, 1] = 0.0
-                    line_rgba[:, 2] = 0.0
-                    line_rgba[:, 3] = compute_depth_alphas(arr, alpha)
-                    self._fiber_line_rgba = np.ascontiguousarray(line_rgba)
-                    glVertexPointer(3, GL_FLOAT, 0, arr)
-                    glColorPointer(4, GL_FLOAT, 0, self._fiber_line_rgba)
-                    glDrawArrays(GL_LINES, 0, n_lines)
+                    alphas = compute_depth_alphas(arr, alpha)
+                    glLineWidth(2)
+                    glDisableClientState(GL_VERTEX_ARRAY)
+                    glDisableClientState(GL_COLOR_ARRAY)
+                    glBegin(GL_LINES)
+                    for i in range(n_lines):
+                        glColor4f(0.75, 0.0, 0.0, float(alphas[i]))
+                        glVertex3f(float(arr[i, 0]), float(arr[i, 1]), float(arr[i, 2]))
+                    glEnd()
+                    glEnableClientState(GL_VERTEX_ARRAY)
+                    glEnableClientState(GL_COLOR_ARRAY)
 
             glDisableClientState(GL_COLOR_ARRAY)
             glDisableClientState(GL_VERTEX_ARRAY)
