@@ -13044,6 +13044,19 @@ class ContourMeshMixin(ContourAnimationMixin):
         min_spacing = float(getattr(self, 'level_select_min_spacing', 0.05))
         print(f"Min spacing threshold: {min_spacing*100:.1f} cm")
 
+        # Single-stream muscles or post-fill/transition flows may leave
+        # stream_groups stale or shorter than num_levels.  Rebuild as
+        # independent-per-stream when the size doesn't match.
+        sg = getattr(self, 'stream_groups', None)
+        if sg is None or len(sg) != num_levels:
+            prev_len = 'None' if sg is None else len(sg)
+            print(f"  stream_groups size {prev_len} != num_levels {num_levels}; "
+                  f"rebuilding as independent")
+            self.stream_groups = [
+                [[s] for s in range(max_stream_count)]
+                for _ in range(num_levels)
+            ]
+
         # Identify original contour counts per level
         original_counts = []
         for level_i in range(num_levels):
