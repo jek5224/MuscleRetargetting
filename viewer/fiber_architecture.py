@@ -1891,8 +1891,14 @@ class FiberArchitectureMixin:
                                     pairs[1::2] = nx
                                     line_pairs.append(pairs)
 
-        self._fiber_draw_pts = np.concatenate(all_pts, dtype=np.float32) if all_pts else None
-        self._fiber_draw_lines = np.concatenate(line_pairs, dtype=np.float32) if line_pairs else None
+        self._fiber_draw_pts = (
+            np.ascontiguousarray(np.concatenate(all_pts, dtype=np.float32))
+            if all_pts else None
+        )
+        self._fiber_draw_lines = (
+            np.ascontiguousarray(np.concatenate(line_pairs, dtype=np.float32))
+            if line_pairs else None
+        )
 
     def invalidate_fiber_draw_cache(self):
         """Mark fiber draw arrays as needing rebuild."""
@@ -1939,6 +1945,7 @@ class FiberArchitectureMixin:
                 glColor4f(0.75, 0, 0, alpha)
                 glVertexPointer(3, GL_FLOAT, 0, self._fiber_draw_lines)
                 glDrawArrays(GL_LINES, 0, len(self._fiber_draw_lines))
+            glDisableClientState(GL_VERTEX_ARRAY)
         else:
             # Depth fade path — per-vertex alpha from eye-space depth
             glDisable(GL_LIGHTING)
@@ -1963,7 +1970,10 @@ class FiberArchitectureMixin:
                     return (base_a * (1.0 - 0.85 * t)).astype(np.float32)
                 return np.full(n, base_a, dtype=np.float32)
 
-            # Draw waypoints (orange + depth alpha)
+            # Draw waypoints (orange + depth alpha).  rgba buffers stashed on
+            # self so they outlive this Python frame — GL implementations may
+            # read the pointer asynchronously, and a freed numpy buffer
+            # produces an immediate segfault during BVH playback.
             if self._fiber_draw_pts is not None and len(self._fiber_draw_pts) > 0:
                 glPointSize(5)
                 n_pts = len(self._fiber_draw_pts)
@@ -1972,8 +1982,9 @@ class FiberArchitectureMixin:
                 pt_rgba[:, 1] = 0.6
                 pt_rgba[:, 2] = 0.0
                 pt_rgba[:, 3] = compute_depth_alphas(self._fiber_draw_pts, alpha)
+                self._fiber_pt_rgba = np.ascontiguousarray(pt_rgba)
                 glVertexPointer(3, GL_FLOAT, 0, self._fiber_draw_pts)
-                glColorPointer(4, GL_FLOAT, 0, pt_rgba)
+                glColorPointer(4, GL_FLOAT, 0, self._fiber_pt_rgba)
                 glDrawArrays(GL_POINTS, 0, n_pts)
 
             # Draw fiber lines (dark red + depth alpha)
@@ -1985,11 +1996,13 @@ class FiberArchitectureMixin:
                 line_rgba[:, 1] = 0.0
                 line_rgba[:, 2] = 0.0
                 line_rgba[:, 3] = compute_depth_alphas(self._fiber_draw_lines, alpha)
+                self._fiber_line_rgba = np.ascontiguousarray(line_rgba)
                 glVertexPointer(3, GL_FLOAT, 0, self._fiber_draw_lines)
-                glColorPointer(4, GL_FLOAT, 0, line_rgba)
+                glColorPointer(4, GL_FLOAT, 0, self._fiber_line_rgba)
                 glDrawArrays(GL_LINES, 0, n_lines)
 
             glDisableClientState(GL_COLOR_ARRAY)
+            glDisableClientState(GL_VERTEX_ARRAY)
             # Don't disable GL_BLEND — viewer expects it globally enabled
 
         # Draw test fiber (blue) if available
