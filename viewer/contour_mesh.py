@@ -13132,29 +13132,85 @@ class ContourMeshMixin(ContourAnimationMixin):
             for s in range(max_stream_count)
         ]
 
-        target_count = min_count
-        for k in range(min_count, num_levels + 1):
-            self.select_levels_count(k)
-            gap = _overall_min_gap()
-            if k == min_count:
-                # Always at least min_count, even if gaps are below threshold.
-                target_count = k
-                if gap < min_spacing:
-                    print(f"  k={k} (min_count): gap {gap*100:.1f}cm < {min_spacing*100:.1f}cm; using min anyway")
+        # Detect independence so per-stream search activates for muscles
+        # like biceps femoris (long + short head, never linked).  Reuse
+        # exactly the linkage criterion select_levels_count uses.
+        any_linked = False
+        for grp_list in self.stream_groups:
+            for g in grp_list:
+                if len(g) > 1:
+                    any_linked = True
                     break
-                continue
-            if gap < min_spacing:
-                print(f"  k={k}: gap {gap*100:.1f}cm < {min_spacing*100:.1f}cm; rolling back to k={target_count}")
-                # Rollback to previous valid k
-                self.select_levels_count(target_count)
+            if any_linked:
                 break
-            target_count = k
+        independent_streams = (not any_linked) and max_stream_count > 1
+
+        if independent_streams:
+            # Per-stream spacing search: each stream may converge to a
+            # different optimal count.
+            per_stream_target = [min_count] * max_stream_count
+            for k in range(min_count, num_levels + 1):
+                # Run with current per-stream targets; bump only those
+                # streams whose previous gap stayed >= threshold.
+                self.select_levels_count(per_stream_target)
+                bumped_any = False
+                for s in range(max_stream_count):
+                    if per_stream_target[s] != k:
+                        continue
+                    gap_s = _stream_min_gap(self.stream_selected_levels[s], s) \
+                        if len(self.stream_selected_levels[s]) >= 2 else float('inf')
+                    if k == min_count:
+                        # Allow min even if it violates.
+                        if gap_s < min_spacing:
+                            print(f"  Stream {s} k={k} (min): gap {gap_s*100:.1f}cm < "
+                                  f"{min_spacing*100:.1f}cm; using min anyway")
+                        else:
+                            per_stream_target[s] = k + 1
+                            bumped_any = True
+                    else:
+                        if gap_s < min_spacing:
+                            # Rollback this stream to previous k.
+                            per_stream_target[s] = k - 1
+                            print(f"  Stream {s} k={k}: gap {gap_s*100:.1f}cm < "
+                                  f"{min_spacing*100:.1f}cm; rollback to k={k - 1}")
+                        else:
+                            per_stream_target[s] = k + 1
+                            bumped_any = True
+                if not bumped_any:
+                    break
+            # Final apply with the resolved per-stream targets.
+            self.select_levels_count(per_stream_target)
+            target_count = per_stream_target
+            print(f"Length-density per-stream targets: {per_stream_target}")
+        else:
+            target_count = min_count
+            for k in range(min_count, num_levels + 1):
+                self.select_levels_count(k)
+                gap = _overall_min_gap()
+                if k == min_count:
+                    target_count = k
+                    if gap < min_spacing:
+                        print(f"  k={k} (min_count): gap {gap*100:.1f}cm < "
+                              f"{min_spacing*100:.1f}cm; using min anyway")
+                        break
+                    continue
+                if gap < min_spacing:
+                    print(f"  k={k}: gap {gap*100:.1f}cm < {min_spacing*100:.1f}cm; "
+                          f"rolling back to k={target_count}")
+                    self.select_levels_count(target_count)
+                    break
+                target_count = k
         else:
             # Loop finished without break: every k satisfied threshold.
             target_count = num_levels
-        print(f"Length-density chose {target_count}/{num_levels}")
-        # Seed the GUI Desired stepper from the chosen target.
-        self._level_select_desired_count = target_count
+        # For per-stream targets, log a representative summary; the GUI
+        # Desired stepper uses the max so it caps high enough.
+        if isinstance(target_count, list):
+            print(f"Length-density per-stream chose {target_count}/{num_levels}")
+            self._level_select_desired_count = max(target_count)
+        else:
+            print(f"Length-density chose {target_count}/{num_levels}")
+            self._level_select_desired_count = target_count
 
         # Update visualization to show initial selection
         self._update_level_select_visualization()
@@ -13191,12 +13247,16 @@ class ContourMeshMixin(ContourAnimationMixin):
                         print(f"  WARNING: Level {level_i} group {group} - contours are DIFFERENT!")
 
     def select_levels_count(self, target_count):
-        """Re-pick exactly `target_count` levels (origin + insertion + best-error
-        intermediates) using the same inertia-tensor reconstruction error as
-        select_levels.  Cut-merged level groups always toggle together because
-        every stream gets the same level indices.
+        """Re-pick the optimal level set.
 
-        Range: max(3, num_must_use_levels) ≤ target_count ≤ num_levels.
+        target_count semantics:
+          - int : single target applied uniformly.  Cut/linked muscles
+                  use this; fully-independent multi-stream muscles use it
+                  as the per-stream target.
+          - list/tuple of ints (one per stream) : per-stream targets.  Only
+                  valid when the muscle has no linked levels.  Each stream
+                  independently picks its own optimal set of size
+                  target_count[s].
         """
         if not hasattr(self, 'stream_contours') or self.stream_contours is None:
             print("Run cut_streams + select_levels first")
@@ -13222,8 +13282,17 @@ class ContourMeshMixin(ContourAnimationMixin):
                 must_use.add(i + 1)
                 break
 
-        target_count = int(max(max(3, len(must_use)), min(num_levels, target_count)))
-        print(f"\n=== Reselect Levels: target_count={target_count} ===")
+        # Normalise target_count.
+        if isinstance(target_count, (list, tuple)):
+            per_stream_targets = [
+                int(max(max(3, len(must_use)), min(num_levels, t)))
+                for t in target_count
+            ]
+            print(f"\n=== Reselect Levels: per-stream target_counts={per_stream_targets} ===")
+        else:
+            per_stream_targets = None
+            target_count = int(max(max(3, len(must_use)), min(num_levels, target_count)))
+            print(f"\n=== Reselect Levels: target_count={target_count} ===")
         print(f"Must-use: {sorted(must_use)}  (count={len(must_use)})")
 
         # Per-stream level error (relative Frobenius capped at 1.0) when
@@ -13299,7 +13368,12 @@ class ContourMeshMixin(ContourAnimationMixin):
         # reconstruction.  Complexity O(num_levels^2 * target_count); the
         # cost_mat fill is O(num_levels^3) but each level error is cached.
         # DP runner — works on a single error function (per-stream or mean).
-        def _run_dp(error_fn):
+        # Accepts target_count_local so per-stream targets can differ.
+        def _run_dp(error_fn, target_count_local=None):
+            if target_count_local is None:
+                target_count_local = target_count if not per_stream_targets else None
+                if target_count_local is None:
+                    raise ValueError("target_count_local required for per-stream DP")
             INF = float('inf')
             err_cache_dp = {}
             def _err(level_i, prev_l, next_l):
@@ -13326,7 +13400,7 @@ class ContourMeshMixin(ContourAnimationMixin):
                 if j + 1 >= num_levels:
                     return True
                 return next_mu[j + 1] >= i
-            K_total = target_count
+            K_total = target_count_local
             dp = [[INF] * (K_total + 1) for _ in range(num_levels)]
             par = [[-1] * (K_total + 1) for _ in range(num_levels)]
             dp[0][1] = 0.0
@@ -13359,20 +13433,38 @@ class ContourMeshMixin(ContourAnimationMixin):
             return set(path), best_total
 
         per_stream_chosen = None
-        if target_count <= len(must_use):
-            chosen = set(must_use)
-        elif independent_streams:
-            # Per-stream DP: each stream picks its own optimal k-level set.
+        if per_stream_targets is not None:
+            # Caller supplied a per-stream target list (independent muscle
+            # with potentially different counts per stream).
             per_stream_chosen = []
             for s in range(max_stream_count):
+                t_s = per_stream_targets[s]
+                if t_s <= len(must_use):
+                    per_stream_chosen.append(sorted(must_use))
+                    print(f"  Stream {s}: target {t_s} <= must_use, using must_use only")
+                    continue
                 chosen_s, total_s = _run_dp(
-                    lambda l, p, n, _s=s: _level_error_stream(_s, l, p, n))
+                    lambda l, p, n, _s=s: _level_error_stream(_s, l, p, n),
+                    target_count_local=t_s)
                 per_stream_chosen.append(sorted(chosen_s))
                 print(f"  Stream {s} optimal {len(chosen_s)} levels: "
                       f"{sorted(chosen_s)}  (total={total_s:.6f})")
-            chosen = None  # not used in independent path
+            chosen = None
+        elif target_count <= len(must_use):
+            chosen = set(must_use)
+        elif independent_streams:
+            # Per-stream DP with same target_count for every stream.
+            per_stream_chosen = []
+            for s in range(max_stream_count):
+                chosen_s, total_s = _run_dp(
+                    lambda l, p, n, _s=s: _level_error_stream(_s, l, p, n),
+                    target_count_local=target_count)
+                per_stream_chosen.append(sorted(chosen_s))
+                print(f"  Stream {s} optimal {len(chosen_s)} levels: "
+                      f"{sorted(chosen_s)}  (total={total_s:.6f})")
+            chosen = None
         else:
-            chosen, best_total = _run_dp(_level_error)
+            chosen, best_total = _run_dp(_level_error, target_count_local=target_count)
             if best_total == float('inf'):
                 print(f"  DP infeasible at K={target_count}; falling back to must_use only")
             else:
