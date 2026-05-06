@@ -13303,6 +13303,114 @@ class ContourMeshMixin(ContourAnimationMixin):
         # Update visualization to show initial selection
         self._update_level_select_visualization()
 
+    def select_levels_count(self, target_count):
+        """Re-pick exactly `target_count` levels (origin + insertion + best-error
+        intermediates) using the same inertia-tensor reconstruction error as
+        select_levels.  Cut-merged level groups always toggle together because
+        every stream gets the same level indices.
+
+        Range: max(3, num_must_use_levels) ≤ target_count ≤ num_levels.
+        """
+        if not hasattr(self, 'stream_contours') or self.stream_contours is None:
+            print("Run cut_streams + select_levels first")
+            return False
+        if not hasattr(self, '_level_select_checkboxes') or self._level_select_checkboxes is None:
+            print("No level-select session active")
+            return False
+
+        max_stream_count = self.max_stream_count
+        num_levels = len(self.stream_contours[0])
+
+        # Origin + insertion + transition (count-change) levels are forced.
+        original_counts = [len(self.stream_groups[i]) for i in range(num_levels)]
+        must_use = {0, num_levels - 1}
+        for i in range(num_levels - 1):
+            if original_counts[i] != original_counts[i + 1]:
+                if original_counts[i] < original_counts[i + 1]:
+                    must_use.add(i)
+                else:
+                    must_use.add(i + 1)
+        for i in range(num_levels - 1):
+            if original_counts[i] > original_counts[i + 1]:
+                must_use.add(i + 1)
+                break
+
+        target_count = int(max(max(3, len(must_use)), min(num_levels, target_count)))
+        print(f"\n=== Reselect Levels: target_count={target_count} ===")
+        print(f"Must-use: {sorted(must_use)}  (count={len(must_use)})")
+
+        # Score each non-must-use level by mean reconstruction error across
+        # streams when interpolating between its immediate neighbours in the
+        # full level list.
+        def _level_error(level_i, prev_level, next_level):
+            err_sum = 0.0
+            n = 0
+            for s in range(max_stream_count):
+                try:
+                    contour_actual = np.asarray(self.stream_contours[s][level_i])
+                    contour_prev = np.asarray(self.stream_contours[s][prev_level])
+                    contour_next = np.asarray(self.stream_contours[s][next_level])
+                    I_actual = self._inertia_tensor_3D(contour_actual)
+                    I_prev = self._inertia_tensor_3D(contour_prev)
+                    I_next = self._inertia_tensor_3D(contour_next)
+                    bp_prev = self.stream_bounding_planes[s][prev_level]
+                    bp_next = self.stream_bounding_planes[s][next_level]
+                    bp_actual = self.stream_bounding_planes[s][level_i]
+                    p = bp_prev.get('scalar_value', prev_level)
+                    nx = bp_next.get('scalar_value', next_level)
+                    a = bp_actual.get('scalar_value', level_i)
+                    if abs(nx - p) > 1e-10:
+                        t = float(np.clip((a - p) / (nx - p), 0.0, 1.0))
+                    else:
+                        t = 0.5
+                    I_interp = (1.0 - t) * I_prev + t * I_next
+                    norm = float(np.linalg.norm(I_actual, 'fro'))
+                    if norm < 1e-15:
+                        continue
+                    err_sum += float(np.linalg.norm(I_actual - I_interp, 'fro')) / norm
+                    n += 1
+                except Exception:
+                    continue
+            return err_sum / max(n, 1)
+
+        scored = []
+        for li in range(num_levels):
+            if li in must_use:
+                continue
+            scored.append((_level_error(li, max(0, li - 1), min(num_levels - 1, li + 1)), li))
+        scored.sort(reverse=True)
+
+        chosen = set(must_use)
+        for _, li in scored:
+            if len(chosen) >= target_count:
+                break
+            chosen.add(li)
+
+        # Pad with closest unselected if must-use already exceeds target.
+        if len(chosen) < target_count:
+            for _, li in scored:
+                if li not in chosen:
+                    chosen.add(li)
+                    if len(chosen) >= target_count:
+                        break
+
+        # Apply: every stream gets the same level set (linked groups handled
+        # implicitly because stream_contours have one entry per stream and the
+        # checkbox state ties level_i across streams).
+        chosen_sorted = sorted(chosen)
+        self.stream_selected_levels = [list(chosen_sorted) for _ in range(max_stream_count)]
+        self._level_select_checkboxes = []
+        for s in range(max_stream_count):
+            n = len(self.stream_contours[s])
+            row = [False] * n
+            for li in chosen_sorted:
+                if li < n:
+                    row[li] = True
+            self._level_select_checkboxes.append(row)
+        print(f"Selected {len(chosen_sorted)} levels: {chosen_sorted}")
+        self._update_level_select_visualization()
+        return True
+
         # Open GUI window for manual selection adjustment
         self._level_select_window_open = True
         print(f"\nLevel selection GUI window opened. Adjust selection and click 'Finish Select'.")

@@ -6316,6 +6316,34 @@ def _render_level_select_windows(v):
 
         imgui.text(f"Streams: {max_stream_count}")
         imgui.text("Check/uncheck levels. Linked levels toggle together.")
+
+        # Total / desired-count / reselect controls.
+        # Origin + insertion always selected → minimum 3.
+        total_levels = len(checkboxes[0]) if max_stream_count > 0 else 0
+        current_count = sum(1 for c in checkboxes[0] if c) if max_stream_count > 0 else 0
+        if not hasattr(obj, '_level_select_desired_count'):
+            obj._level_select_desired_count = max(3, current_count)
+        # Clamp to [3, total_levels]
+        obj._level_select_desired_count = int(np.clip(
+            obj._level_select_desired_count, 3, max(3, total_levels)))
+        imgui.text(f"Total: {total_levels}    Selected: {current_count}")
+        imgui.text("Desired:")
+        imgui.same_line()
+        if imgui.button(f"<##{name}_lvl_dec"):
+            obj._level_select_desired_count = max(3, obj._level_select_desired_count - 1)
+        imgui.same_line()
+        imgui.text(f"{obj._level_select_desired_count}")
+        imgui.same_line()
+        if imgui.button(f">##{name}_lvl_inc"):
+            obj._level_select_desired_count = min(total_levels, obj._level_select_desired_count + 1)
+        imgui.same_line()
+        if imgui.button(f"Reselect##{name}_lvl_reselect"):
+            try:
+                obj.select_levels_count(obj._level_select_desired_count)
+                vis_changed = True
+            except Exception as _e:
+                print(f"[{name}] Reselect error: {_e}")
+
         imgui.separator()
 
         # Create scrollable region for checkboxes
