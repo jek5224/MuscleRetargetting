@@ -1035,9 +1035,16 @@ def draw_zygote_muscle_ui(v):
                 if is_rotating:
                     imgui.pop_style_color(3)
 
+                if not hasattr(v, 'global_animate_process'):
+                    v.global_animate_process = getattr(obj, 'animate_process', True)
                 if not hasattr(obj, 'animate_process'):
-                    obj.animate_process = True
-                _, obj.animate_process = imgui.checkbox(f"Animate##{name}", obj.animate_process)
+                    obj.animate_process = v.global_animate_process
+                changed_anim, new_anim = imgui.checkbox(f"Animate##{name}", obj.animate_process)
+                obj.animate_process = new_anim
+                if changed_anim:
+                    v.global_animate_process = new_anim
+                    for _other in v.zygote_muscle_meshes.values():
+                        _other.animate_process = new_anim
 
                 # Save/Load animation state + Play All
                 imgui.same_line()
