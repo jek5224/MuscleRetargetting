@@ -13200,9 +13200,6 @@ class ContourMeshMixin(ContourAnimationMixin):
                     self.select_levels_count(target_count)
                     break
                 target_count = k
-        else:
-            # Loop finished without break: every k satisfied threshold.
-            target_count = num_levels
         # For per-stream targets, log a representative summary; the GUI
         # Desired stepper uses the max so it caps high enough.
         if isinstance(target_count, list):
