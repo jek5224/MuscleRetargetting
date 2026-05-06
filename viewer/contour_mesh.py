@@ -13025,7 +13025,12 @@ class ContourMeshMixin(ContourAnimationMixin):
             self.stream_groups = list(prev_orig['stream_groups'])
             print(f"Restored unfiltered stream state from previous select_levels snapshot")
 
-        max_stream_count = self.max_stream_count
+        # Single-stream muscles that skipped cut_streams never set
+        # max_stream_count — derive it from stream_contours and persist.
+        max_stream_count = getattr(self, 'max_stream_count', None)
+        if max_stream_count is None:
+            max_stream_count = len(self.stream_contours)
+            self.max_stream_count = max_stream_count
         num_levels = len(self.stream_contours[0])
 
         print(f"\n=== Select Levels ===")
