@@ -1941,10 +1941,16 @@ class FiberArchitectureMixin:
                 glDrawArrays(GL_POINTS, 0, len(self._fiber_draw_pts))
 
             if self._fiber_draw_lines is not None and len(self._fiber_draw_lines) > 0:
-                glLineWidth(2)
-                glColor4f(0.75, 0, 0, alpha)
-                glVertexPointer(3, GL_FLOAT, 0, self._fiber_draw_lines)
-                glDrawArrays(GL_LINES, 0, len(self._fiber_draw_lines))
+                arr = self._fiber_draw_lines
+                _ok = (arr.dtype == np.float32
+                       and arr.flags['C_CONTIGUOUS']
+                       and arr.ndim == 2 and arr.shape[1] == 3
+                       and np.isfinite(arr).all())
+                if _ok:
+                    glLineWidth(2)
+                    glColor4f(0.75, 0, 0, alpha)
+                    glVertexPointer(3, GL_FLOAT, 0, arr)
+                    glDrawArrays(GL_LINES, 0, len(arr))
             glDisableClientState(GL_VERTEX_ARRAY)
         else:
             # Depth fade path — per-vertex alpha from eye-space depth
@@ -1989,17 +1995,24 @@ class FiberArchitectureMixin:
 
             # Draw fiber lines (dark red + depth alpha)
             if self._fiber_draw_lines is not None and len(self._fiber_draw_lines) > 0:
-                glLineWidth(2)
-                n_lines = len(self._fiber_draw_lines)
-                line_rgba = np.empty((n_lines, 4), dtype=np.float32)
-                line_rgba[:, 0] = 0.75
-                line_rgba[:, 1] = 0.0
-                line_rgba[:, 2] = 0.0
-                line_rgba[:, 3] = compute_depth_alphas(self._fiber_draw_lines, alpha)
-                self._fiber_line_rgba = np.ascontiguousarray(line_rgba)
-                glVertexPointer(3, GL_FLOAT, 0, self._fiber_draw_lines)
-                glColorPointer(4, GL_FLOAT, 0, self._fiber_line_rgba)
-                glDrawArrays(GL_LINES, 0, n_lines)
+                arr = self._fiber_draw_lines
+                _ok = (arr.dtype == np.float32
+                       and arr.flags['C_CONTIGUOUS']
+                       and arr.ndim == 2 and arr.shape[1] == 3)
+                if _ok and not np.isfinite(arr).all():
+                    _ok = False
+                if _ok:
+                    glLineWidth(2)
+                    n_lines = len(arr)
+                    line_rgba = np.empty((n_lines, 4), dtype=np.float32)
+                    line_rgba[:, 0] = 0.75
+                    line_rgba[:, 1] = 0.0
+                    line_rgba[:, 2] = 0.0
+                    line_rgba[:, 3] = compute_depth_alphas(arr, alpha)
+                    self._fiber_line_rgba = np.ascontiguousarray(line_rgba)
+                    glVertexPointer(3, GL_FLOAT, 0, arr)
+                    glColorPointer(4, GL_FLOAT, 0, self._fiber_line_rgba)
+                    glDrawArrays(GL_LINES, 0, n_lines)
 
             glDisableClientState(GL_COLOR_ARRAY)
             glDisableClientState(GL_VERTEX_ARRAY)
