@@ -13036,13 +13036,16 @@ class ContourMeshMixin(ContourAnimationMixin):
         last_mean = self.stream_bounding_planes[0][-1]['mean']
         muscle_length = np.linalg.norm(last_mean - first_mean)
 
-        if error_threshold is None:
-            error_threshold = getattr(self, 'level_select_error_threshold', 1.0)  # relative Frobenius
-        print(f"Error threshold: {error_threshold:.6f} (relative Frobenius norm)")
-
-        # Minimum absolute distance between selected levels
-        min_spacing = getattr(self, 'level_select_min_spacing', 0.01)  # 10mm default
-        print(f"Minimum spacing: {min_spacing:.6f} (absolute)")
+        # Selection size is now driven by a percentage of the total number
+        # of contours (level_select_percentage in [0, 1]) instead of a
+        # relative-Frobenius error threshold.  The error threshold tended to
+        # bunch added levels near the origin because relative errors are
+        # larger there; percentage-based selection delegated to
+        # select_levels_count distributes additions globally by greedy
+        # error reduction.
+        percentage = float(getattr(self, 'level_select_percentage', 0.2))
+        percentage = max(0.0, min(1.0, percentage))
+        print(f"Selection percentage: {percentage:.3f}")
 
         # Identify original contour counts per level
         original_counts = []
@@ -13081,238 +13084,33 @@ class ContourMeshMixin(ContourAnimationMixin):
 
         print(f"Must-use levels: {sorted(must_use_levels)}")
 
-        # ========== Step 2: Per-stream error-based selection ==========
-        # For each stream, select levels independently where allowed
+        # ========== Step 2: Percentage-based delegation ==========
+        # Compute the desired number of levels from the percentage slider
+        # (origin + insertion + at least one middle, plus all must-use
+        # transitions count as the floor).  Then defer to select_levels_count
+        # for the actual greedy-by-N selection so error-bunching near origin
+        # is avoided.
+        target_count = max(max(3, len(must_use_levels)),
+                           int(round(num_levels * percentage)))
+        target_count = min(target_count, num_levels)
+        print(f"Target count from percentage: {target_count}/{num_levels}")
 
-        # Helper: compute interpolation error for a stream at a level
-        def compute_stream_error(stream_i, level_i, prev_level, next_level):
-            # Get contour points
-            contour_actual = np.asarray(self.stream_contours[stream_i][level_i])
-            contour_prev = np.asarray(self.stream_contours[stream_i][prev_level])
-            contour_next = np.asarray(self.stream_contours[stream_i][next_level])
-
-            # Compute 3D inertia tensors
-            I_actual = self._inertia_tensor_3D(contour_actual)
-            I_prev = self._inertia_tensor_3D(contour_prev)
-            I_next = self._inertia_tensor_3D(contour_next)
-
-            # Interpolation parameter from scalar values
-            bp_prev = self.stream_bounding_planes[stream_i][prev_level]
-            bp_next = self.stream_bounding_planes[stream_i][next_level]
-            bp_actual = self.stream_bounding_planes[stream_i][level_i]
-
-            prev_scalar = bp_prev.get('scalar_value', prev_level)
-            next_scalar = bp_next.get('scalar_value', next_level)
-            actual_scalar = bp_actual.get('scalar_value', level_i)
-
-            if abs(next_scalar - prev_scalar) > 1e-10:
-                t = (actual_scalar - prev_scalar) / (next_scalar - prev_scalar)
-            else:
-                t = 0.5
-            t = np.clip(t, 0, 1)
-
-            # Interpolated tensor and relative error
-            I_interp = (1 - t) * I_prev + t * I_next
-            I_norm = np.linalg.norm(I_actual, 'fro')
-            if I_norm < 1e-15:
-                return 0.0
-            # Cap to [0, 1] so threshold semantics are predictable across
-            # muscles regardless of geometric complexity.
-            return min(float(np.linalg.norm(I_actual - I_interp, 'fro') / I_norm), 1.0)
-
-        # Helper: check if a level is too close to any already-selected level
-        def is_too_close(level_i, selected_levels, stream_i=0, verbose=False):
-            """Check if level_i is within min_spacing of any selected level."""
-            if min_spacing <= 0:
-                return False
-            level_mean = self.stream_bounding_planes[stream_i][level_i]['mean']
-            for sel_level in selected_levels:
-                sel_mean = self.stream_bounding_planes[stream_i][sel_level]['mean']
-                dist = np.linalg.norm(level_mean - sel_mean)
-                if dist < min_spacing:
-                    if verbose:
-                        print(f"    Level {level_i} skipped: too close to level {sel_level} (dist={dist:.4f} < {min_spacing:.4f})")
-                    return True
-            return False
-
-        # Group levels by original count
-        # Levels with same original count in consecutive range form a region
-        regions = []
-        region_start = 0
-        for i in range(1, num_levels):
-            if original_counts[i] != original_counts[region_start]:
-                regions.append({
-                    'start': region_start,
-                    'end': i - 1,
-                    'count': original_counts[region_start]
-                })
-                region_start = i
-        regions.append({
-            'start': region_start,
-            'end': num_levels - 1,
-            'count': original_counts[region_start]
-        })
-
-        print(f"Regions: {regions}")
-
-        # For each stream, maintain selected levels
-        stream_selected = [set(must_use_levels) for _ in range(max_stream_count)]
-
-        # Process each region
-        for region in regions:
-            start, end = region['start'], region['end']
-            orig_count = region['count']
-
-            if end - start < 1:
-                continue  # Region has only 1-2 levels, skip
-
-            # Check if this region has merged contours (orig_count < max_stream_count)
-            is_merged = orig_count < max_stream_count
-
-            if is_merged:
-                # All streams must select same levels in this region
-                # Use combined error across all streams
-                region_selected = set()
-                for level_i in range(start, end + 1):
-                    if level_i in must_use_levels:
-                        region_selected.add(level_i)
-
-                # Greedy selection using max error across streams
-                while True:
-                    max_error = 0
-                    max_error_level = None
-                    selected_sorted = sorted(region_selected)
-
-                    for gap_idx in range(len(selected_sorted) - 1):
-                        prev_idx = selected_sorted[gap_idx]
-                        next_idx = selected_sorted[gap_idx + 1]
-
-                        for level_i in range(prev_idx + 1, next_idx):
-                            if level_i in region_selected:
-                                continue
-                            if level_i < start or level_i > end:
-                                continue
-                            # Skip if too close to any already-selected level
-                            if is_too_close(level_i, region_selected, stream_i=0, verbose=True):
-                                continue
-
-                            # Max error across all streams
-                            error = max(compute_stream_error(s, level_i, prev_idx, next_idx)
-                                       for s in range(max_stream_count))
-                            if error > max_error:
-                                max_error = error
-                                max_error_level = level_i
-
-                    if max_error <= error_threshold or max_error_level is None:
-                        break
-
-                    region_selected.add(max_error_level)
-                    print(f"  Region [{start}-{end}] (merged): added level {max_error_level} (error={max_error:.6f})")
-
-                # Apply to all streams
-                for s in range(max_stream_count):
-                    stream_selected[s].update(region_selected)
-
-            else:
-                # Non-merged region: originally separate contours
-                # Each stream selects independently based on its own error
-                for stream_i in range(max_stream_count):
-                    region_selected = set()
-                    for level_i in range(start, end + 1):
-                        if level_i in must_use_levels:
-                            region_selected.add(level_i)
-
-                    # Add start boundary as anchor
-                    region_selected.add(start)
-                    # Use first dividing level as end anchor if it's right after this region
-                    if first_dividing_level is not None and first_dividing_level == end + 1:
-                        region_selected.add(first_dividing_level)
-                    else:
-                        region_selected.add(end)
-
-                    # Greedy selection for this stream
-                    while True:
-                        max_error = 0
-                        max_error_level = None
-                        selected_sorted = sorted(region_selected)
-
-                        for gap_idx in range(len(selected_sorted) - 1):
-                            prev_idx = selected_sorted[gap_idx]
-                            next_idx = selected_sorted[gap_idx + 1]
-
-                            for level_i in range(prev_idx + 1, next_idx):
-                                if level_i in region_selected:
-                                    continue
-                                # Skip if too close to any already-selected level
-                                if is_too_close(level_i, region_selected, stream_i=stream_i, verbose=True):
-                                    continue
-
-                                error = compute_stream_error(stream_i, level_i, prev_idx, next_idx)
-                                if error > max_error:
-                                    max_error = error
-                                    max_error_level = level_i
-
-                        if max_error <= error_threshold or max_error_level is None:
-                            break
-
-                        region_selected.add(max_error_level)
-
-                    stream_selected[stream_i].update(region_selected)
-                    print(f"  Region [{start}-{end}] stream {stream_i} (non-merged): {len(region_selected)} levels selected")
-
-        # Final enforcement: ensure first dividing level is always included
-        if first_dividing_level is not None:
-            for s in range(max_stream_count):
-                stream_selected[s].add(first_dividing_level)
-            print(f"  Enforced first dividing level {first_dividing_level} in all streams")
-
-        # Ensure minimum 3 levels per stream (origin + at least 1 middle + insertion)
-        for s in range(max_stream_count):
-            if len(stream_selected[s]) < 3 and num_levels >= 3:
-                # Add the level with highest error (most important to keep)
-                selected_sorted = sorted(stream_selected[s])
-                best_level = None
-                best_error = -1
-                for level_i in range(1, num_levels - 1):
-                    if level_i in stream_selected[s]:
-                        continue
-                    # Find surrounding selected levels
-                    prev_sel = max(l for l in selected_sorted if l < level_i) if any(l < level_i for l in selected_sorted) else 0
-                    next_sel = min(l for l in selected_sorted if l > level_i) if any(l > level_i for l in selected_sorted) else num_levels - 1
-                    error = compute_stream_error(s, level_i, prev_sel, next_sel)
-                    if error > best_error:
-                        best_error = error
-                        best_level = level_i
-                if best_level is not None:
-                    stream_selected[s].add(best_level)
-                    print(f"  Stream {s}: added level {best_level} to meet minimum 3 levels (error={best_error:.6f})")
-
-        counts = [len(s) for s in stream_selected]
-        print(f"Level counts per stream: {counts}")
-
-        # Store results (initial automatic selection)
-        self.stream_selected_levels = [sorted(s) for s in stream_selected]
-        print(f"\nInitial selected levels per stream:")
-        for s in range(max_stream_count):
-            print(f"  Stream {s}: {self.stream_selected_levels[s]}")
-
-        # Save original state for "Undo Selection" functionality
+        # Snapshot the post-stream-smooth state before delegating; subsequent
+        # re-clicks of Select Levels reset to this snapshot.
         self._level_select_original = {
             'stream_contours': [list(sc) for sc in self.stream_contours],
             'stream_bounding_planes': [list(bp) for bp in self.stream_bounding_planes],
             'stream_groups': list(self.stream_groups),
         }
-
-        # Create checkbox state for GUI: level_checkbox[stream_i][level_i] = True/False
-        # Initialize with automatic selection result
-        self._level_select_checkboxes = []
-        for stream_i in range(max_stream_count):
-            num_levels_stream = len(self.stream_contours[stream_i])
-            stream_checkboxes = [False] * num_levels_stream
-            for level_i in self.stream_selected_levels[stream_i]:
-                if level_i < num_levels_stream:
-                    stream_checkboxes[level_i] = True
-            self._level_select_checkboxes.append(stream_checkboxes)
+        # Empty checkbox + selected_levels seed so select_levels_count's
+        # guards pass.
+        self.stream_selected_levels = [list(sorted(must_use_levels)) for _ in range(max_stream_count)]
+        self._level_select_checkboxes = [
+            [(li in must_use_levels) for li in range(len(self.stream_contours[s]))]
+            for s in range(max_stream_count)
+        ]
+        # Delegate the actual N-level selection.
+        self.select_levels_count(target_count)
 
         # Update visualization to show initial selection
         self._update_level_select_visualization()

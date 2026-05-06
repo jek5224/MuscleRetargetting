@@ -1089,19 +1089,19 @@ def draw_zygote_muscle_ui(v):
                     obj._build_mesh_replayed = False
                     obj._tetrahedralize_replayed = False
 
-                # Error threshold for level selection (relative Frobenius).
-                # Higher → fewer auto-selected levels.  Slider value is
-                # global on `v` so changing it from any muscle's tree
+                # Percentage of total contours to keep during auto-selection.
+                # 0.0 → minimum (must-use + min-3); 1.0 → all levels.  Value
+                # is global on `v` so adjusting from any muscle's tree
                 # propagates to every muscle on the next render.
-                if not hasattr(v, 'global_level_select_error_threshold'):
-                    v.global_level_select_error_threshold = 1.0
-                changed_thr, v.global_level_select_error_threshold = imgui.slider_float(
-                    "Err Thresh", v.global_level_select_error_threshold,
-                    0.001, 1.0, "%.3f")
-                obj.level_select_error_threshold = v.global_level_select_error_threshold
-                if changed_thr:
+                if not hasattr(v, 'global_level_select_percentage'):
+                    v.global_level_select_percentage = 0.2
+                changed_pct, v.global_level_select_percentage = imgui.slider_float(
+                    "Percentage", v.global_level_select_percentage,
+                    0.0, 1.0, "%.2f")
+                obj.level_select_percentage = v.global_level_select_percentage
+                if changed_pct:
                     for _other in v.zygote_muscle_meshes.values():
-                        _other.level_select_error_threshold = v.global_level_select_error_threshold
+                        _other.level_select_percentage = v.global_level_select_percentage
 
                 imgui.text(obj.link_mode)
                 changed1, obj.specific_contour_value = imgui.slider_float(f"Ori##{name}", obj.specific_contour_value, 1.0, obj.contour_value_min, flags=imgui.SLIDER_FLAGS_NO_ROUND_TO_FORMAT)
