@@ -1039,7 +1039,7 @@ def draw_zygote_muscle_ui(v):
                     v.global_animate_process = getattr(obj, 'animate_process', True)
                 if not hasattr(obj, 'animate_process'):
                     obj.animate_process = v.global_animate_process
-                changed_anim, new_anim = imgui.checkbox(f"Animate##{name}", obj.animate_process)
+                changed_anim, new_anim = imgui.checkbox("Animate", obj.animate_process)
                 obj.animate_process = new_anim
                 if changed_anim:
                     v.global_animate_process = new_anim
