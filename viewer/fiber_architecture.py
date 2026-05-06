@@ -1852,11 +1852,26 @@ class FiberArchitectureMixin:
 
         return muscle_contour, result
 
+    def _ensure_fiber_vbos(self):
+        """Lazily create VBO ids for fiber draw."""
+        for attr in ('_fiber_pts_vbo', '_fiber_lines_vbo',
+                     '_fiber_pts_color_vbo', '_fiber_lines_color_vbo'):
+            if getattr(self, attr, None) is None:
+                setattr(self, attr, int(glGenBuffers(1)))
+
+    def _upload_fiber_vbo(self, vbo_id, data):
+        """Upload numpy float32 data to a VBO with GL_STATIC_DRAW."""
+        glBindBuffer(GL_ARRAY_BUFFER, vbo_id)
+        glBufferData(GL_ARRAY_BUFFER, data.nbytes, data, GL_STATIC_DRAW)
+        glBindBuffer(GL_ARRAY_BUFFER, 0)
+
     def _rebuild_fiber_draw_arrays(self):
         """Rebuild cached GL arrays for fiber/waypoint drawing (vectorized)."""
         if not hasattr(self, 'waypoints') or not self.waypoints:
             self._fiber_draw_pts = None
             self._fiber_draw_lines = None
+            self._fiber_pts_count = 0
+            self._fiber_lines_count = 0
             return
 
         # Collect all visible waypoint arrays
@@ -1899,6 +1914,24 @@ class FiberArchitectureMixin:
             np.ascontiguousarray(np.concatenate(line_pairs, dtype=np.float32))
             if line_pairs else None
         )
+        # Upload to server-side VBOs.  Driver owns the memory after this,
+        # so client-side numpy buffers can be freed without breaking the
+        # next draw — fixes the segfaults inside glDrawArrays.
+        try:
+            self._ensure_fiber_vbos()
+            if self._fiber_draw_pts is not None and len(self._fiber_draw_pts) > 0:
+                self._upload_fiber_vbo(self._fiber_pts_vbo, self._fiber_draw_pts)
+                self._fiber_pts_count = len(self._fiber_draw_pts)
+            else:
+                self._fiber_pts_count = 0
+            if self._fiber_draw_lines is not None and len(self._fiber_draw_lines) > 0:
+                self._upload_fiber_vbo(self._fiber_lines_vbo, self._fiber_draw_lines)
+                self._fiber_lines_count = len(self._fiber_draw_lines)
+            else:
+                self._fiber_lines_count = 0
+        except Exception:
+            self._fiber_pts_count = 0
+            self._fiber_lines_count = 0
 
     def invalidate_fiber_draw_cache(self):
         """Mark fiber draw arrays as needing rebuild."""
@@ -1930,36 +1963,30 @@ class FiberArchitectureMixin:
             self._fiber_draw_dirty = False
 
         if not use_depth_fade:
-            # Original fast path — uniform color, no per-vertex alpha.
-            # Use immediate mode for both points and lines: glDrawArrays
-            # against a client-side numpy buffer keeps segfaulting inside
-            # the GL driver during BVH playback.
+            # VBO-backed path — uniform color, no per-vertex alpha.
+            # Position data lives in server-side VBO so the driver can't
+            # be reading freed numpy memory across frames.
             glDisable(GL_LIGHTING)
+            glEnableClientState(GL_VERTEX_ARRAY)
 
-            if self._fiber_draw_pts is not None and len(self._fiber_draw_pts) > 0:
-                pts = self._fiber_draw_pts
-                if (pts.dtype == np.float32 and pts.flags['C_CONTIGUOUS']
-                        and pts.ndim == 2 and pts.shape[1] == 3
-                        and np.isfinite(pts).all()):
-                    glPointSize(5)
-                    glColor4f(1.0, 0.6, 0.0, alpha)
-                    glBegin(GL_POINTS)
-                    for i in range(len(pts)):
-                        glVertex3f(float(pts[i, 0]), float(pts[i, 1]), float(pts[i, 2]))
-                    glEnd()
+            n_pts = getattr(self, '_fiber_pts_count', 0)
+            if n_pts > 0 and getattr(self, '_fiber_pts_vbo', None):
+                glPointSize(5)
+                glColor4f(1.0, 0.6, 0.0, alpha)
+                glBindBuffer(GL_ARRAY_BUFFER, self._fiber_pts_vbo)
+                glVertexPointer(3, GL_FLOAT, 0, None)
+                glDrawArrays(GL_POINTS, 0, n_pts)
 
-            if self._fiber_draw_lines is not None and len(self._fiber_draw_lines) > 0:
-                arr = self._fiber_draw_lines
-                if (arr.dtype == np.float32 and arr.flags['C_CONTIGUOUS']
-                        and arr.ndim == 2 and arr.shape[1] == 3
-                        and len(arr) % 2 == 0
-                        and np.isfinite(arr).all()):
-                    glLineWidth(2)
-                    glColor4f(0.75, 0, 0, alpha)
-                    glBegin(GL_LINES)
-                    for i in range(len(arr)):
-                        glVertex3f(float(arr[i, 0]), float(arr[i, 1]), float(arr[i, 2]))
-                    glEnd()
+            n_lines = getattr(self, '_fiber_lines_count', 0)
+            if n_lines > 0 and getattr(self, '_fiber_lines_vbo', None):
+                glLineWidth(2)
+                glColor4f(0.75, 0, 0, alpha)
+                glBindBuffer(GL_ARRAY_BUFFER, self._fiber_lines_vbo)
+                glVertexPointer(3, GL_FLOAT, 0, None)
+                glDrawArrays(GL_LINES, 0, n_lines)
+
+            glBindBuffer(GL_ARRAY_BUFFER, 0)
+            glDisableClientState(GL_VERTEX_ARRAY)
         else:
             # Depth fade path — per-vertex alpha from eye-space depth
             glDisable(GL_LIGHTING)
@@ -1984,60 +2011,47 @@ class FiberArchitectureMixin:
                     return (base_a * (1.0 - 0.85 * t)).astype(np.float32)
                 return np.full(n, base_a, dtype=np.float32)
 
-            # Draw waypoints (orange + depth alpha) via immediate mode for
-            # the same reason as the line draw below: glDrawArrays on a
-            # client-side numpy buffer kept segfaulting inside the GL
-            # driver during BVH playback even after dtype / contiguity /
-            # finite checks passed.
-            if self._fiber_draw_pts is not None and len(self._fiber_draw_pts) > 0:
-                pts = self._fiber_draw_pts
-                _pok = (pts.dtype == np.float32
-                        and pts.flags['C_CONTIGUOUS']
-                        and pts.ndim == 2 and pts.shape[1] == 3
-                        and np.isfinite(pts).all())
-                if _pok:
-                    n_pts = len(pts)
-                    p_alphas = compute_depth_alphas(pts, alpha)
-                    glPointSize(5)
-                    glDisableClientState(GL_VERTEX_ARRAY)
-                    glDisableClientState(GL_COLOR_ARRAY)
-                    glBegin(GL_POINTS)
-                    for i in range(n_pts):
-                        glColor4f(1.0, 0.6, 0.0, float(p_alphas[i]))
-                        glVertex3f(float(pts[i, 0]), float(pts[i, 1]), float(pts[i, 2]))
-                    glEnd()
-                    glEnableClientState(GL_VERTEX_ARRAY)
-                    glEnableClientState(GL_COLOR_ARRAY)
+            # Draw waypoints (orange + depth alpha) via VBO.  Position
+            # buffer is the static fiber-pts VBO; per-frame depth alphas
+            # go into a small color VBO.
+            n_pts = getattr(self, '_fiber_pts_count', 0)
+            if n_pts > 0 and getattr(self, '_fiber_pts_vbo', None):
+                p_alphas = compute_depth_alphas(self._fiber_draw_pts, alpha)
+                pt_rgba = np.empty((n_pts, 4), dtype=np.float32)
+                pt_rgba[:, 0] = 1.0
+                pt_rgba[:, 1] = 0.6
+                pt_rgba[:, 2] = 0.0
+                pt_rgba[:, 3] = p_alphas
+                pt_rgba = np.ascontiguousarray(pt_rgba)
+                self._ensure_fiber_vbos()
+                glBindBuffer(GL_ARRAY_BUFFER, self._fiber_pts_color_vbo)
+                glBufferData(GL_ARRAY_BUFFER, pt_rgba.nbytes, pt_rgba, GL_DYNAMIC_DRAW)
+                glColorPointer(4, GL_FLOAT, 0, None)
+                glBindBuffer(GL_ARRAY_BUFFER, self._fiber_pts_vbo)
+                glVertexPointer(3, GL_FLOAT, 0, None)
+                glPointSize(5)
+                glDrawArrays(GL_POINTS, 0, n_pts)
+                glBindBuffer(GL_ARRAY_BUFFER, 0)
 
-            # Draw fiber lines (dark red + depth alpha).  Using immediate
-            # mode glBegin/glVertex3f instead of client-side arrays:
-            # repeated glDrawArrays with self.<arr> pointers segfaulted
-            # inside the GL driver during BVH playback even after every
-            # dtype / contiguity / finite check passed.  Immediate mode
-            # is slower per call but doesn't expose the driver to a
-            # vertex-buffer pointer that may briefly point at freed
-            # memory across renderer/sim threading.
-            if self._fiber_draw_lines is not None and len(self._fiber_draw_lines) > 0:
-                arr = self._fiber_draw_lines
-                _ok = (arr.dtype == np.float32
-                       and arr.flags['C_CONTIGUOUS']
-                       and arr.ndim == 2 and arr.shape[1] == 3
-                       and (len(arr) % 2 == 0))
-                if _ok and not np.isfinite(arr).all():
-                    _ok = False
-                if _ok:
-                    n_lines = len(arr)
-                    alphas = compute_depth_alphas(arr, alpha)
-                    glLineWidth(2)
-                    glDisableClientState(GL_VERTEX_ARRAY)
-                    glDisableClientState(GL_COLOR_ARRAY)
-                    glBegin(GL_LINES)
-                    for i in range(n_lines):
-                        glColor4f(0.75, 0.0, 0.0, float(alphas[i]))
-                        glVertex3f(float(arr[i, 0]), float(arr[i, 1]), float(arr[i, 2]))
-                    glEnd()
-                    glEnableClientState(GL_VERTEX_ARRAY)
-                    glEnableClientState(GL_COLOR_ARRAY)
+            # Draw fiber lines via VBO with per-frame color VBO.
+            n_lines = getattr(self, '_fiber_lines_count', 0)
+            if n_lines > 0 and getattr(self, '_fiber_lines_vbo', None):
+                alphas = compute_depth_alphas(self._fiber_draw_lines, alpha)
+                line_rgba = np.empty((n_lines, 4), dtype=np.float32)
+                line_rgba[:, 0] = 0.75
+                line_rgba[:, 1] = 0.0
+                line_rgba[:, 2] = 0.0
+                line_rgba[:, 3] = alphas
+                line_rgba = np.ascontiguousarray(line_rgba)
+                self._ensure_fiber_vbos()
+                glBindBuffer(GL_ARRAY_BUFFER, self._fiber_lines_color_vbo)
+                glBufferData(GL_ARRAY_BUFFER, line_rgba.nbytes, line_rgba, GL_DYNAMIC_DRAW)
+                glColorPointer(4, GL_FLOAT, 0, None)
+                glBindBuffer(GL_ARRAY_BUFFER, self._fiber_lines_vbo)
+                glVertexPointer(3, GL_FLOAT, 0, None)
+                glLineWidth(2)
+                glDrawArrays(GL_LINES, 0, n_lines)
+                glBindBuffer(GL_ARRAY_BUFFER, 0)
 
             glDisableClientState(GL_COLOR_ARRAY)
             glDisableClientState(GL_VERTEX_ARRAY)
