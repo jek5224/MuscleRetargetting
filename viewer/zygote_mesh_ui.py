@@ -430,9 +430,12 @@ def draw_zygote_muscle_ui(v):
                 num_process_buttons = 12  # Match number of buttons on right
                 process_all_height = num_process_buttons * imgui.get_frame_height() + (num_process_buttons - 1) * imgui.get_style().item_spacing[1]
 
-                # Initialize process step slider value
+                # Process step slider is global so adjusting it on any
+                # muscle propagates to every other muscle's tree.
+                if not hasattr(v, 'global_process_step'):
+                    v.global_process_step = getattr(obj, '_process_step', 12)
                 if not hasattr(obj, '_process_step'):
-                    obj._process_step = 12
+                    obj._process_step = v.global_process_step
 
                 # Vertical slider for step selection (top=1, bottom=12)
                 # Reversed min/max (12, 1) makes value increase downward
@@ -440,6 +443,9 @@ def draw_zygote_muscle_ui(v):
                     f"##step{name}", 20, process_all_height, obj._process_step, 12, 1)
                 if changed:
                     obj._process_step = new_val
+                    v.global_process_step = new_val
+                    for _other in v.zygote_muscle_meshes.values():
+                        _other._process_step = new_val
                 imgui.same_line()
 
                 # Step names matching button order (1=top, 12=bottom)
