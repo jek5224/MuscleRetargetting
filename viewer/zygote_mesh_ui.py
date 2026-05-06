@@ -7930,10 +7930,15 @@ def _load_motion_bvh(v, idx):
     bvh_path = v.motion_bvh_files[idx]
     v.motion_selected_idx = idx
     try:
-        # Store initial root position BEFORE MyBVH constructor modifies skeleton
+        # Reset skeleton to zero pose first so captured root rotation is
+        # canonical (identity).  Without this reset the previous BVH's last
+        # frame leaks into motion_root_rotation, leaving "Fix Rotation"
+        # locked to a slightly rotated pelvis when the new BVH is loaded.
         root_jn = v.env.skel.getJoint(0)
         root_dofs = root_jn.getNumDofs()
         if root_dofs == 6:
+            n_dofs = v.env.skel.getNumDofs()
+            v.env.skel.setPositions(np.zeros(n_dofs))
             init_pos = v.env.skel.getPositions()
             v.motion_root_translation = init_pos[3:6].copy()
             v.motion_root_rotation = init_pos[0:3].copy()
