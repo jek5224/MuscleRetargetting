@@ -13013,6 +13013,18 @@ class ContourMeshMixin(ContourAnimationMixin):
             print("Run cut_streams first")
             return
 
+        # If a previous level-selection session reduced stream_contours to its
+        # filtered form (apply_level_selection / level-select animation
+        # aliases stream_contours = self.contours), restore the unfiltered
+        # post-stream-smooth snapshot so each click of "Select Levels"
+        # starts from every found contour again.
+        prev_orig = getattr(self, '_level_select_original', None)
+        if prev_orig is not None:
+            self.stream_contours = [list(sc) for sc in prev_orig['stream_contours']]
+            self.stream_bounding_planes = [list(bp) for bp in prev_orig['stream_bounding_planes']]
+            self.stream_groups = list(prev_orig['stream_groups'])
+            print(f"Restored unfiltered stream state from previous select_levels snapshot")
+
         max_stream_count = self.max_stream_count
         num_levels = len(self.stream_contours[0])
 
