@@ -13219,82 +13219,103 @@ class ContourMeshMixin(ContourAnimationMixin):
                     continue
             return err_sum / max(n, 1)
 
-        # Globally optimal: enumerate every combination of (target_count -
-        # len(must_use)) additional levels from the candidates, score by total
-        # reconstruction error of unselected levels, pick the minimum.
-        # Cap the search at ~200k combinations; if the count exceeds, fall
-        # back to the prior greedy approximation.
-        from math import comb
-        from itertools import combinations
-        candidates = [li for li in range(num_levels) if li not in must_use]
-        k = target_count - len(must_use)
-        if k <= 0:
+        # Globally optimal via dynamic programming:
+        #
+        #   cost_mat[i][j] = sum over l in (i, j) of _level_error(l, i, j)
+        #     for i < j; the per-segment penalty when only i and j are
+        #     selected and every level strictly between is interpolated.
+        #
+        #   dp[i][k] = min total cost over paths that
+        #     - start at level 0,
+        #     - end at level i,
+        #     - pick k+1 levels (including 0 and i),
+        #     - never skip a must_use level (transitions j->i must satisfy
+        #       no m in must_use with j < m < i).
+        #
+        # Answer = dp[num_levels-1][target_count - 1] with path
+        # reconstruction.  Complexity O(num_levels^2 * target_count); the
+        # cost_mat fill is O(num_levels^3) but each level error is cached.
+        if target_count <= len(must_use):
             chosen = set(must_use)
         else:
-            COMBO_CAP = 200_000
-            n_combos = comb(len(candidates), k) if k <= len(candidates) else 0
-            if n_combos == 0:
+            INF = float('inf')
+            err_cache_dp = {}
+            def _err(level_i, prev_l, next_l):
+                key = (level_i, prev_l, next_l)
+                v = err_cache_dp.get(key)
+                if v is None:
+                    v = _level_error(level_i, prev_l, next_l)
+                    err_cache_dp[key] = v
+                return v
+
+            # cost_mat[i][j] only filled for i < j; lower triangle stays 0.
+            cost_mat = [[0.0] * num_levels for _ in range(num_levels)]
+            for i in range(num_levels):
+                for j in range(i + 1, num_levels):
+                    s = 0.0
+                    for l in range(i + 1, j):
+                        s += _err(l, i, j)
+                    cost_mat[i][j] = s
+
+            mu_sorted = sorted(must_use)
+            # Precompute "next must_use after position p": next_mu[p] is the
+            # smallest must_use level > p, or num_levels if none.  A
+            # transition j->i is legal iff next_mu[j] >= i (no must_use is
+            # strictly between j and i except possibly i itself).
+            next_mu = [num_levels] * (num_levels + 1)
+            cur = num_levels
+            for p in range(num_levels - 1, -1, -1):
+                if p in must_use:
+                    cur = p
+                next_mu[p] = cur
+            # Skip 0 from must_use lookup at position 0
+            # next_mu[p] = smallest must_use > p
+
+            def _transition_legal(j, i):
+                # No must_use strictly between j and i.
+                # Find smallest must_use > j; require it >= i.
+                if j + 1 >= num_levels:
+                    return True
+                m = next_mu[j + 1]
+                return m >= i
+
+            K_total = target_count
+            # dp[i][k] = (min cost, parent j); k counts selected so far.
+            dp = [[INF] * (K_total + 1) for _ in range(num_levels)]
+            par = [[-1] * (K_total + 1) for _ in range(num_levels)]
+            # Base: path starts at 0 with 1 selected level.
+            dp[0][1] = 0.0
+            for i in range(1, num_levels):
+                for j in range(i):
+                    if not _transition_legal(j, i):
+                        continue
+                    cm = cost_mat[j][i]
+                    for k in range(1, K_total):
+                        v = dp[j][k]
+                        if v == INF:
+                            continue
+                        nv = v + cm
+                        if nv < dp[i][k + 1]:
+                            dp[i][k + 1] = nv
+                            par[i][k + 1] = j
+            best_total = dp[num_levels - 1][K_total]
+            if best_total == INF:
+                print(f"  DP infeasible at K={K_total}; falling back to must_use only")
                 chosen = set(must_use)
-            elif n_combos <= COMBO_CAP:
-                # Cache pairwise errors to avoid recomputing across combos.
-                err_cache = {}
-                def cached(level_i, prev_l, next_l):
-                    key = (level_i, prev_l, next_l)
-                    if key not in err_cache:
-                        err_cache[key] = _level_error(level_i, prev_l, next_l)
-                    return err_cache[key]
-                must_sorted = sorted(must_use)
-                best_combo = None
-                best_total = float('inf')
-                for combo in combinations(candidates, k):
-                    sel_sorted = sorted(must_sorted + list(combo))
-                    total = 0.0
-                    si = 0
-                    for li in range(num_levels):
-                        if si + 1 < len(sel_sorted) and li > sel_sorted[si + 1]:
-                            si += 1
-                        if li == sel_sorted[si] or (si + 1 < len(sel_sorted) and li == sel_sorted[si + 1]):
-                            continue  # selected, no error contribution
-                        prev_l = sel_sorted[si]
-                        next_l = sel_sorted[si + 1] if si + 1 < len(sel_sorted) else sel_sorted[si]
-                        if next_l == prev_l:
-                            continue
-                        total += cached(li, prev_l, next_l)
-                        if total >= best_total:
-                            break  # prune: cannot beat current best
-                    if total < best_total:
-                        best_total = total
-                        best_combo = combo
-                chosen = set(must_use) | set(best_combo or [])
-                print(f"  Globally optimal: searched {n_combos} combinations, best total error={best_total:.6f}")
             else:
-                # Combination space too large → greedy fallback.
-                print(f"  Combination space {n_combos:,} > {COMBO_CAP:,}; falling back to greedy.")
-                chosen = sorted(must_use)
-                while len(chosen) < target_count:
-                    best_li = None
-                    best_gain = -float('inf')
-                    for li in range(num_levels):
-                        if li in chosen:
-                            continue
-                        prev = max((s for s in chosen if s < li), default=0)
-                        nxt = min((s for s in chosen if s > li), default=num_levels - 1)
-                        gain = 0.0
-                        for kk in range(prev + 1, nxt):
-                            if kk == li or kk in chosen:
-                                continue
-                            old_e = _level_error(kk, prev, nxt)
-                            new_e = _level_error(kk, prev, li) if kk < li else _level_error(kk, li, nxt)
-                            gain += (old_e - new_e)
-                        gain += _level_error(li, prev, nxt)
-                        if gain > best_gain:
-                            best_gain = gain
-                            best_li = li
-                    if best_li is None:
+                # Reconstruct path
+                path = []
+                cur_i = num_levels - 1
+                cur_k = K_total
+                while cur_i >= 0 and cur_k >= 1:
+                    path.append(cur_i)
+                    if cur_k == 1:
                         break
-                    chosen.append(best_li)
-                    chosen.sort()
-                chosen = set(chosen)
+                    nxt = par[cur_i][cur_k]
+                    cur_i = nxt
+                    cur_k -= 1
+                chosen = set(path)
+                print(f"  Globally optimal (DP): {len(chosen)} levels, total error={best_total:.6f}")
 
         # Apply: every stream gets the same level set (linked groups handled
         # implicitly because stream_contours have one entry per stream and the
