@@ -13091,17 +13091,33 @@ class ContourMeshMixin(ContourAnimationMixin):
         min_count = max(3, len(must_use_levels))
         min_count = min(min_count, num_levels)
 
-        # Reference stream for axial distance — first stream's
-        # bounding_plane means are along the muscle axis.
-        ref_means = [bp['mean'] for bp in self.stream_bounding_planes[0]]
+        # Per-stream means; each stream's gaps are evaluated against its
+        # own bounding-plane centroids so independent streams (e.g. biceps
+        # femoris long vs short head) can each contribute to the violation
+        # check.
+        all_means = [[bp['mean'] for bp in self.stream_bounding_planes[s]]
+                     for s in range(max_stream_count)]
 
-        def _path_min_gap(level_indices):
+        def _stream_min_gap(level_indices, stream_idx):
             sl = sorted(level_indices)
+            means = all_means[stream_idx]
             best = float('inf')
             for a, b in zip(sl[:-1], sl[1:]):
-                d = float(np.linalg.norm(ref_means[a] - ref_means[b]))
+                d = float(np.linalg.norm(means[a] - means[b]))
                 if d < best:
                     best = d
+            return best
+
+        def _overall_min_gap():
+            # After select_levels_count: each stream may have its own
+            # selected level set (independent muscles) or all share one.
+            best = float('inf')
+            for s in range(max_stream_count):
+                sel_s = self.stream_selected_levels[s]
+                if len(sel_s) >= 2:
+                    g = _stream_min_gap(sel_s, s)
+                    if g < best:
+                        best = g
             return best
 
         # Snapshot once before the search loop.
@@ -13119,9 +13135,7 @@ class ContourMeshMixin(ContourAnimationMixin):
         target_count = min_count
         for k in range(min_count, num_levels + 1):
             self.select_levels_count(k)
-            # Use stream 0's selected levels — same across streams here.
-            sel = list(self.stream_selected_levels[0])
-            gap = _path_min_gap(sel)
+            gap = _overall_min_gap()
             if k == min_count:
                 # Always at least min_count, even if gaps are below threshold.
                 target_count = k
@@ -13212,39 +13226,61 @@ class ContourMeshMixin(ContourAnimationMixin):
         print(f"\n=== Reselect Levels: target_count={target_count} ===")
         print(f"Must-use: {sorted(must_use)}  (count={len(must_use)})")
 
-        # Score each non-must-use level by mean reconstruction error across
-        # streams when interpolating between its immediate neighbours in the
-        # full level list.
+        # Per-stream level error (relative Frobenius capped at 1.0) when
+        # interpolating between its immediate neighbours.
+        def _level_error_stream(stream_idx, level_i, prev_level, next_level):
+            try:
+                contour_actual = np.asarray(self.stream_contours[stream_idx][level_i])
+                contour_prev = np.asarray(self.stream_contours[stream_idx][prev_level])
+                contour_next = np.asarray(self.stream_contours[stream_idx][next_level])
+                I_actual = self._inertia_tensor_3D(contour_actual)
+                I_prev = self._inertia_tensor_3D(contour_prev)
+                I_next = self._inertia_tensor_3D(contour_next)
+                bp_prev = self.stream_bounding_planes[stream_idx][prev_level]
+                bp_next = self.stream_bounding_planes[stream_idx][next_level]
+                bp_actual = self.stream_bounding_planes[stream_idx][level_i]
+                p = bp_prev.get('scalar_value', prev_level)
+                nx = bp_next.get('scalar_value', next_level)
+                a = bp_actual.get('scalar_value', level_i)
+                if abs(nx - p) > 1e-10:
+                    t = float(np.clip((a - p) / (nx - p), 0.0, 1.0))
+                else:
+                    t = 0.5
+                I_interp = (1.0 - t) * I_prev + t * I_next
+                norm = float(np.linalg.norm(I_actual, 'fro'))
+                if norm < 1e-15:
+                    return 0.0
+                return min(float(np.linalg.norm(I_actual - I_interp, 'fro')) / norm, 1.0)
+            except Exception:
+                return 0.0
+
+        # Mean across streams (used by global DP for cut/mixed muscles).
         def _level_error(level_i, prev_level, next_level):
             err_sum = 0.0
             n = 0
             for s in range(max_stream_count):
-                try:
-                    contour_actual = np.asarray(self.stream_contours[s][level_i])
-                    contour_prev = np.asarray(self.stream_contours[s][prev_level])
-                    contour_next = np.asarray(self.stream_contours[s][next_level])
-                    I_actual = self._inertia_tensor_3D(contour_actual)
-                    I_prev = self._inertia_tensor_3D(contour_prev)
-                    I_next = self._inertia_tensor_3D(contour_next)
-                    bp_prev = self.stream_bounding_planes[s][prev_level]
-                    bp_next = self.stream_bounding_planes[s][next_level]
-                    bp_actual = self.stream_bounding_planes[s][level_i]
-                    p = bp_prev.get('scalar_value', prev_level)
-                    nx = bp_next.get('scalar_value', next_level)
-                    a = bp_actual.get('scalar_value', level_i)
-                    if abs(nx - p) > 1e-10:
-                        t = float(np.clip((a - p) / (nx - p), 0.0, 1.0))
-                    else:
-                        t = 0.5
-                    I_interp = (1.0 - t) * I_prev + t * I_next
-                    norm = float(np.linalg.norm(I_actual, 'fro'))
-                    if norm < 1e-15:
-                        continue
-                    err_sum += min(float(np.linalg.norm(I_actual - I_interp, 'fro')) / norm, 1.0)
-                    n += 1
-                except Exception:
-                    continue
+                err_sum += _level_error_stream(s, level_i, prev_level, next_level)
+                n += 1
             return err_sum / max(n, 1)
+
+        # Detect linkage: if any level has a stream_groups entry containing
+        # more than one stream, this muscle has cut/merged segments and all
+        # streams must agree on the level index set.  Otherwise (e.g.
+        # biceps femoris long + short head), each stream is anatomically
+        # independent and selects its own optimal levels.
+        any_linked = False
+        for grp_list in self.stream_groups:
+            for g in grp_list:
+                if len(g) > 1:
+                    any_linked = True
+                    break
+            if any_linked:
+                break
+        independent_streams = (not any_linked) and max_stream_count > 1
+        if independent_streams:
+            print(f"  Streams independent (no linked groups) → per-stream DP")
+        else:
+            print(f"  Streams linked or single → shared global DP")
 
         # Globally optimal via dynamic programming:
         #
@@ -13262,20 +13298,17 @@ class ContourMeshMixin(ContourAnimationMixin):
         # Answer = dp[num_levels-1][target_count - 1] with path
         # reconstruction.  Complexity O(num_levels^2 * target_count); the
         # cost_mat fill is O(num_levels^3) but each level error is cached.
-        if target_count <= len(must_use):
-            chosen = set(must_use)
-        else:
+        # DP runner — works on a single error function (per-stream or mean).
+        def _run_dp(error_fn):
             INF = float('inf')
             err_cache_dp = {}
             def _err(level_i, prev_l, next_l):
                 key = (level_i, prev_l, next_l)
                 v = err_cache_dp.get(key)
                 if v is None:
-                    v = _level_error(level_i, prev_l, next_l)
+                    v = error_fn(level_i, prev_l, next_l)
                     err_cache_dp[key] = v
                 return v
-
-            # cost_mat[i][j] only filled for i < j; lower triangle stays 0.
             cost_mat = [[0.0] * num_levels for _ in range(num_levels)]
             for i in range(num_levels):
                 for j in range(i + 1, num_levels):
@@ -13283,38 +13316,23 @@ class ContourMeshMixin(ContourAnimationMixin):
                     for l in range(i + 1, j):
                         s += _err(l, i, j)
                     cost_mat[i][j] = s
-
-            mu_sorted = sorted(must_use)
-            # Precompute "next must_use after position p": next_mu[p] is the
-            # smallest must_use level > p, or num_levels if none.  A
-            # transition j->i is legal iff next_mu[j] >= i (no must_use is
-            # strictly between j and i except possibly i itself).
             next_mu = [num_levels] * (num_levels + 1)
             cur = num_levels
             for p in range(num_levels - 1, -1, -1):
                 if p in must_use:
                     cur = p
                 next_mu[p] = cur
-            # Skip 0 from must_use lookup at position 0
-            # next_mu[p] = smallest must_use > p
-
-            def _transition_legal(j, i):
-                # No must_use strictly between j and i.
-                # Find smallest must_use > j; require it >= i.
+            def _legal(j, i):
                 if j + 1 >= num_levels:
                     return True
-                m = next_mu[j + 1]
-                return m >= i
-
+                return next_mu[j + 1] >= i
             K_total = target_count
-            # dp[i][k] = (min cost, parent j); k counts selected so far.
             dp = [[INF] * (K_total + 1) for _ in range(num_levels)]
             par = [[-1] * (K_total + 1) for _ in range(num_levels)]
-            # Base: path starts at 0 with 1 selected level.
             dp[0][1] = 0.0
             for i in range(1, num_levels):
                 for j in range(i):
-                    if not _transition_legal(j, i):
+                    if not _legal(j, i):
                         continue
                     cm = cost_mat[j][i]
                     for k in range(1, K_total):
@@ -13327,37 +13345,61 @@ class ContourMeshMixin(ContourAnimationMixin):
                             par[i][k + 1] = j
             best_total = dp[num_levels - 1][K_total]
             if best_total == INF:
-                print(f"  DP infeasible at K={K_total}; falling back to must_use only")
-                chosen = set(must_use)
+                return set(must_use), float('inf')
+            path = []
+            cur_i = num_levels - 1
+            cur_k = K_total
+            while cur_i >= 0 and cur_k >= 1:
+                path.append(cur_i)
+                if cur_k == 1:
+                    break
+                nxt = par[cur_i][cur_k]
+                cur_i = nxt
+                cur_k -= 1
+            return set(path), best_total
+
+        per_stream_chosen = None
+        if target_count <= len(must_use):
+            chosen = set(must_use)
+        elif independent_streams:
+            # Per-stream DP: each stream picks its own optimal k-level set.
+            per_stream_chosen = []
+            for s in range(max_stream_count):
+                chosen_s, total_s = _run_dp(
+                    lambda l, p, n, _s=s: _level_error_stream(_s, l, p, n))
+                per_stream_chosen.append(sorted(chosen_s))
+                print(f"  Stream {s} optimal {len(chosen_s)} levels: "
+                      f"{sorted(chosen_s)}  (total={total_s:.6f})")
+            chosen = None  # not used in independent path
+        else:
+            chosen, best_total = _run_dp(_level_error)
+            if best_total == float('inf'):
+                print(f"  DP infeasible at K={target_count}; falling back to must_use only")
             else:
-                # Reconstruct path
-                path = []
-                cur_i = num_levels - 1
-                cur_k = K_total
-                while cur_i >= 0 and cur_k >= 1:
-                    path.append(cur_i)
-                    if cur_k == 1:
-                        break
-                    nxt = par[cur_i][cur_k]
-                    cur_i = nxt
-                    cur_k -= 1
-                chosen = set(path)
                 print(f"  Globally optimal (DP): {len(chosen)} levels, total error={best_total:.6f}")
 
-        # Apply: every stream gets the same level set (linked groups handled
-        # implicitly because stream_contours have one entry per stream and the
-        # checkbox state ties level_i across streams).
-        chosen_sorted = sorted(chosen)
-        self.stream_selected_levels = [list(chosen_sorted) for _ in range(max_stream_count)]
+        # Apply selection.
         self._level_select_checkboxes = []
-        for s in range(max_stream_count):
-            n = len(self.stream_contours[s])
-            row = [False] * n
-            for li in chosen_sorted:
-                if li < n:
-                    row[li] = True
-            self._level_select_checkboxes.append(row)
-        print(f"Selected {len(chosen_sorted)} levels: {chosen_sorted}")
+        if per_stream_chosen is not None:
+            self.stream_selected_levels = [list(per_stream_chosen[s]) for s in range(max_stream_count)]
+            for s in range(max_stream_count):
+                n = len(self.stream_contours[s])
+                row = [False] * n
+                for li in per_stream_chosen[s]:
+                    if li < n:
+                        row[li] = True
+                self._level_select_checkboxes.append(row)
+        else:
+            chosen_sorted = sorted(chosen)
+            self.stream_selected_levels = [list(chosen_sorted) for _ in range(max_stream_count)]
+            for s in range(max_stream_count):
+                n = len(self.stream_contours[s])
+                row = [False] * n
+                for li in chosen_sorted:
+                    if li < n:
+                        row[li] = True
+                self._level_select_checkboxes.append(row)
+            print(f"Selected {len(chosen_sorted)} levels: {chosen_sorted}")
         self._update_level_select_visualization()
         return True
 
