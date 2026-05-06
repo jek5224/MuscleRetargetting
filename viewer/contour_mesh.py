@@ -13149,6 +13149,19 @@ class ContourMeshMixin(ContourAnimationMixin):
         # select_levels_count consults this so repeated calls with the
         # same per-stream / global target during the search don't redo DP.
         self._level_select_dp_cache = {}
+        # cost_mat is independent of K, so cache per stream / global key
+        # to avoid redoing the O(n^3) fill for each new target value.
+        self._level_select_cost_cache = {}
+        # Pre-compute one inertia tensor per (stream, level).  Each level
+        # appears as actual / prev / next in many DP cost evaluations; without
+        # this cache _level_error_stream would re-do the same SVD-style work
+        # tens of thousands of times per session and dominate biceps-femoris-
+        # style multi-stream runs.
+        self._level_select_inertia_cache = [
+            [self._inertia_tensor_3D(np.asarray(self.stream_contours[s][li]))
+             for li in range(len(self.stream_contours[s]))]
+            for s in range(max_stream_count)
+        ]
 
         # Detect independence so per-stream search activates for muscles
         # like biceps femoris (long + short head, never linked).  Reuse
@@ -13312,14 +13325,18 @@ class ContourMeshMixin(ContourAnimationMixin):
 
         # Per-stream level error (relative Frobenius capped at 1.0) when
         # interpolating between its immediate neighbours.
+        inertia_cache = getattr(self, '_level_select_inertia_cache', None)
+
+        def _I(stream_idx, level_i):
+            if inertia_cache is not None:
+                return inertia_cache[stream_idx][level_i]
+            return self._inertia_tensor_3D(np.asarray(self.stream_contours[stream_idx][level_i]))
+
         def _level_error_stream(stream_idx, level_i, prev_level, next_level):
             try:
-                contour_actual = np.asarray(self.stream_contours[stream_idx][level_i])
-                contour_prev = np.asarray(self.stream_contours[stream_idx][prev_level])
-                contour_next = np.asarray(self.stream_contours[stream_idx][next_level])
-                I_actual = self._inertia_tensor_3D(contour_actual)
-                I_prev = self._inertia_tensor_3D(contour_prev)
-                I_next = self._inertia_tensor_3D(contour_next)
+                I_actual = _I(stream_idx, level_i)
+                I_prev = _I(stream_idx, prev_level)
+                I_next = _I(stream_idx, next_level)
                 bp_prev = self.stream_bounding_planes[stream_idx][prev_level]
                 bp_next = self.stream_bounding_planes[stream_idx][next_level]
                 bp_actual = self.stream_bounding_planes[stream_idx][level_i]
@@ -13382,14 +13399,17 @@ class ContourMeshMixin(ContourAnimationMixin):
         # Answer = dp[num_levels-1][target_count - 1] with path
         # reconstruction.  Complexity O(num_levels^2 * target_count); the
         # cost_mat fill is O(num_levels^3) but each level error is cached.
-        # DP runner — works on a single error function (per-stream or mean).
-        # Accepts target_count_local so per-stream targets can differ.
-        def _run_dp(error_fn, target_count_local=None):
-            if target_count_local is None:
-                target_count_local = target_count if not per_stream_targets else None
-                if target_count_local is None:
-                    raise ValueError("target_count_local required for per-stream DP")
-            INF = float('inf')
+        # cost_mat depends only on (error_fn, num_levels, must_use), not on
+        # target_count.  Cache per session so K=3, K=4, ... at the same
+        # stream skip the O(n^3) fill.
+        cost_cache = getattr(self, '_level_select_cost_cache', None)
+        if cost_cache is None:
+            self._level_select_cost_cache = cost_cache = {}
+
+        def _build_cost_mat(error_fn, cost_key):
+            cached = cost_cache.get(cost_key)
+            if cached is not None:
+                return cached
             err_cache_dp = {}
             def _err(level_i, prev_l, next_l):
                 key = (level_i, prev_l, next_l)
@@ -13398,13 +13418,25 @@ class ContourMeshMixin(ContourAnimationMixin):
                     v = error_fn(level_i, prev_l, next_l)
                     err_cache_dp[key] = v
                 return v
-            cost_mat = [[0.0] * num_levels for _ in range(num_levels)]
+            cm = [[0.0] * num_levels for _ in range(num_levels)]
             for i in range(num_levels):
                 for j in range(i + 1, num_levels):
                     s = 0.0
                     for l in range(i + 1, j):
                         s += _err(l, i, j)
-                    cost_mat[i][j] = s
+                    cm[i][j] = s
+            cost_cache[cost_key] = cm
+            return cm
+
+        # DP runner — works on a single error function (per-stream or mean).
+        # Accepts target_count_local so per-stream targets can differ.
+        def _run_dp(error_fn, target_count_local=None, cost_key=None):
+            if target_count_local is None:
+                target_count_local = target_count if not per_stream_targets else None
+                if target_count_local is None:
+                    raise ValueError("target_count_local required for per-stream DP")
+            INF = float('inf')
+            cost_mat = _build_cost_mat(error_fn, cost_key)
             next_mu = [num_levels] * (num_levels + 1)
             cur = num_levels
             for p in range(num_levels - 1, -1, -1):
@@ -13454,11 +13486,12 @@ class ContourMeshMixin(ContourAnimationMixin):
         if dp_cache is None:
             self._level_select_dp_cache = dp_cache = {}
 
-        def _cached_dp(key, error_fn, target_count_local):
+        def _cached_dp(key, error_fn, target_count_local, cost_key):
             cached = dp_cache.get(key)
             if cached is not None:
                 return cached
-            result = _run_dp(error_fn, target_count_local=target_count_local)
+            result = _run_dp(error_fn, target_count_local=target_count_local,
+                             cost_key=cost_key)
             dp_cache[key] = result
             return result
 
@@ -13476,7 +13509,8 @@ class ContourMeshMixin(ContourAnimationMixin):
                 chosen_s, total_s = _cached_dp(
                     ('stream', s, t_s),
                     lambda l, p, n, _s=s: _level_error_stream(_s, l, p, n),
-                    t_s)
+                    t_s,
+                    cost_key=('stream', s))
                 per_stream_chosen.append(sorted(chosen_s))
                 print(f"  Stream {s} optimal {len(chosen_s)} levels: "
                       f"{sorted(chosen_s)}  (total={total_s:.6f})")
@@ -13490,14 +13524,16 @@ class ContourMeshMixin(ContourAnimationMixin):
                 chosen_s, total_s = _cached_dp(
                     ('stream', s, target_count),
                     lambda l, p, n, _s=s: _level_error_stream(_s, l, p, n),
-                    target_count)
+                    target_count,
+                    cost_key=('stream', s))
                 per_stream_chosen.append(sorted(chosen_s))
                 print(f"  Stream {s} optimal {len(chosen_s)} levels: "
                       f"{sorted(chosen_s)}  (total={total_s:.6f})")
             chosen = None
         else:
             chosen, best_total = _cached_dp(
-                ('global', target_count), _level_error, target_count)
+                ('global', target_count), _level_error, target_count,
+                cost_key=('global',))
             if best_total == float('inf'):
                 print(f"  DP infeasible at K={target_count}; falling back to must_use only")
             else:
