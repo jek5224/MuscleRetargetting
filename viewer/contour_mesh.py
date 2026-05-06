@@ -9301,7 +9301,7 @@ class ContourMeshMixin(ContourAnimationMixin):
 
         # Default error threshold: 2% of muscle length
         if error_threshold is None:
-            error_threshold = getattr(self, 'level_select_error_threshold', 0.5) * muscle_length
+            error_threshold = getattr(self, 'level_select_error_threshold', 1.0) * muscle_length
 
         print(f"Error threshold: {error_threshold:.6f} ({error_threshold/muscle_length*100:.1f}% of muscle length)")
 
@@ -13037,7 +13037,7 @@ class ContourMeshMixin(ContourAnimationMixin):
         muscle_length = np.linalg.norm(last_mean - first_mean)
 
         if error_threshold is None:
-            error_threshold = getattr(self, 'level_select_error_threshold', 0.5)  # relative Frobenius
+            error_threshold = getattr(self, 'level_select_error_threshold', 1.0)  # relative Frobenius
         print(f"Error threshold: {error_threshold:.6f} (relative Frobenius norm)")
 
         # Minimum absolute distance between selected levels

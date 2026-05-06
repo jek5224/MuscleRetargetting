@@ -1094,7 +1094,7 @@ def draw_zygote_muscle_ui(v):
                 # global on `v` so changing it from any muscle's tree
                 # propagates to every muscle on the next render.
                 if not hasattr(v, 'global_level_select_error_threshold'):
-                    v.global_level_select_error_threshold = 0.5
+                    v.global_level_select_error_threshold = 1.0
                 changed_thr, v.global_level_select_error_threshold = imgui.slider_float(
                     "Err Thresh", v.global_level_select_error_threshold,
                     0.001, 1.0, "%.3f")
