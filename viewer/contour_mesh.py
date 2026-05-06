@@ -13043,7 +13043,7 @@ class ContourMeshMixin(ContourAnimationMixin):
         # larger there; percentage-based selection delegated to
         # select_levels_count distributes additions globally by greedy
         # error reduction.
-        percentage = float(getattr(self, 'level_select_percentage', 0.2))
+        percentage = float(getattr(self, 'level_select_percentage', 0.1))
         percentage = max(0.0, min(1.0, percentage))
         print(f"Selection percentage: {percentage:.3f}")
 

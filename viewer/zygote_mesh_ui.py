@@ -1094,7 +1094,7 @@ def draw_zygote_muscle_ui(v):
                 # is global on `v` so adjusting from any muscle's tree
                 # propagates to every muscle on the next render.
                 if not hasattr(v, 'global_level_select_percentage'):
-                    v.global_level_select_percentage = 0.2
+                    v.global_level_select_percentage = 0.1
                 changed_pct, v.global_level_select_percentage = imgui.slider_float(
                     "Percentage", v.global_level_select_percentage,
                     0.0, 1.0, "%.2f")
