@@ -13116,7 +13116,9 @@ class ContourMeshMixin(ContourAnimationMixin):
             I_norm = np.linalg.norm(I_actual, 'fro')
             if I_norm < 1e-15:
                 return 0.0
-            return np.linalg.norm(I_actual - I_interp, 'fro') / I_norm
+            # Cap to [0, 1] so threshold semantics are predictable across
+            # muscles regardless of geometric complexity.
+            return min(float(np.linalg.norm(I_actual - I_interp, 'fro') / I_norm), 1.0)
 
         # Helper: check if a level is too close to any already-selected level
         def is_too_close(level_i, selected_levels, stream_i=0, verbose=False):
@@ -13410,7 +13412,7 @@ class ContourMeshMixin(ContourAnimationMixin):
                     norm = float(np.linalg.norm(I_actual, 'fro'))
                     if norm < 1e-15:
                         continue
-                    err_sum += float(np.linalg.norm(I_actual - I_interp, 'fro')) / norm
+                    err_sum += min(float(np.linalg.norm(I_actual - I_interp, 'fro')) / norm, 1.0)
                     n += 1
                 except Exception:
                     continue
