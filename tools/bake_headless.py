@@ -342,8 +342,11 @@ def main():
     parser.add_argument(
         "--constraint-threshold",
         type=float,
-        default=0.015,
-        help="Inter-muscle constraint distance in meters (default: 0.015)",
+        default=0.03,
+        help="Inter-muscle constraint distance in meters (default: 0.03). "
+             "Contour tets are coarse (~160-512 verts/muscle vs ~1k+ for "
+             "original meshes) so the search radius needs to span the "
+             "wider vertex spacing.",
     )
     parser.add_argument(
         "--inter-k",
