@@ -1930,28 +1930,36 @@ class FiberArchitectureMixin:
             self._fiber_draw_dirty = False
 
         if not use_depth_fade:
-            # Original fast path — uniform color, no per-vertex alpha
+            # Original fast path — uniform color, no per-vertex alpha.
+            # Use immediate mode for both points and lines: glDrawArrays
+            # against a client-side numpy buffer keeps segfaulting inside
+            # the GL driver during BVH playback.
             glDisable(GL_LIGHTING)
-            glEnableClientState(GL_VERTEX_ARRAY)
 
             if self._fiber_draw_pts is not None and len(self._fiber_draw_pts) > 0:
-                glPointSize(5)
-                glColor4f(1.0, 0.6, 0.0, alpha)
-                glVertexPointer(3, GL_FLOAT, 0, self._fiber_draw_pts)
-                glDrawArrays(GL_POINTS, 0, len(self._fiber_draw_pts))
+                pts = self._fiber_draw_pts
+                if (pts.dtype == np.float32 and pts.flags['C_CONTIGUOUS']
+                        and pts.ndim == 2 and pts.shape[1] == 3
+                        and np.isfinite(pts).all()):
+                    glPointSize(5)
+                    glColor4f(1.0, 0.6, 0.0, alpha)
+                    glBegin(GL_POINTS)
+                    for i in range(len(pts)):
+                        glVertex3f(float(pts[i, 0]), float(pts[i, 1]), float(pts[i, 2]))
+                    glEnd()
 
             if self._fiber_draw_lines is not None and len(self._fiber_draw_lines) > 0:
                 arr = self._fiber_draw_lines
-                _ok = (arr.dtype == np.float32
-                       and arr.flags['C_CONTIGUOUS']
-                       and arr.ndim == 2 and arr.shape[1] == 3
-                       and np.isfinite(arr).all())
-                if _ok:
+                if (arr.dtype == np.float32 and arr.flags['C_CONTIGUOUS']
+                        and arr.ndim == 2 and arr.shape[1] == 3
+                        and len(arr) % 2 == 0
+                        and np.isfinite(arr).all()):
                     glLineWidth(2)
                     glColor4f(0.75, 0, 0, alpha)
-                    glVertexPointer(3, GL_FLOAT, 0, arr)
-                    glDrawArrays(GL_LINES, 0, len(arr))
-            glDisableClientState(GL_VERTEX_ARRAY)
+                    glBegin(GL_LINES)
+                    for i in range(len(arr)):
+                        glVertex3f(float(arr[i, 0]), float(arr[i, 1]), float(arr[i, 2]))
+                    glEnd()
         else:
             # Depth fade path — per-vertex alpha from eye-space depth
             glDisable(GL_LIGHTING)
@@ -1976,22 +1984,30 @@ class FiberArchitectureMixin:
                     return (base_a * (1.0 - 0.85 * t)).astype(np.float32)
                 return np.full(n, base_a, dtype=np.float32)
 
-            # Draw waypoints (orange + depth alpha).  rgba buffers stashed on
-            # self so they outlive this Python frame — GL implementations may
-            # read the pointer asynchronously, and a freed numpy buffer
-            # produces an immediate segfault during BVH playback.
+            # Draw waypoints (orange + depth alpha) via immediate mode for
+            # the same reason as the line draw below: glDrawArrays on a
+            # client-side numpy buffer kept segfaulting inside the GL
+            # driver during BVH playback even after dtype / contiguity /
+            # finite checks passed.
             if self._fiber_draw_pts is not None and len(self._fiber_draw_pts) > 0:
-                glPointSize(5)
-                n_pts = len(self._fiber_draw_pts)
-                pt_rgba = np.empty((n_pts, 4), dtype=np.float32)
-                pt_rgba[:, 0] = 1.0
-                pt_rgba[:, 1] = 0.6
-                pt_rgba[:, 2] = 0.0
-                pt_rgba[:, 3] = compute_depth_alphas(self._fiber_draw_pts, alpha)
-                self._fiber_pt_rgba = np.ascontiguousarray(pt_rgba)
-                glVertexPointer(3, GL_FLOAT, 0, self._fiber_draw_pts)
-                glColorPointer(4, GL_FLOAT, 0, self._fiber_pt_rgba)
-                glDrawArrays(GL_POINTS, 0, n_pts)
+                pts = self._fiber_draw_pts
+                _pok = (pts.dtype == np.float32
+                        and pts.flags['C_CONTIGUOUS']
+                        and pts.ndim == 2 and pts.shape[1] == 3
+                        and np.isfinite(pts).all())
+                if _pok:
+                    n_pts = len(pts)
+                    p_alphas = compute_depth_alphas(pts, alpha)
+                    glPointSize(5)
+                    glDisableClientState(GL_VERTEX_ARRAY)
+                    glDisableClientState(GL_COLOR_ARRAY)
+                    glBegin(GL_POINTS)
+                    for i in range(n_pts):
+                        glColor4f(1.0, 0.6, 0.0, float(p_alphas[i]))
+                        glVertex3f(float(pts[i, 0]), float(pts[i, 1]), float(pts[i, 2]))
+                    glEnd()
+                    glEnableClientState(GL_VERTEX_ARRAY)
+                    glEnableClientState(GL_COLOR_ARRAY)
 
             # Draw fiber lines (dark red + depth alpha).  Using immediate
             # mode glBegin/glVertex3f instead of client-side arrays:
