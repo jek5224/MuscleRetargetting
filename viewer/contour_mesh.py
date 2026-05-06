@@ -13098,27 +13098,28 @@ class ContourMeshMixin(ContourAnimationMixin):
         all_means = [[bp['mean'] for bp in self.stream_bounding_planes[s]]
                      for s in range(max_stream_count)]
 
-        def _stream_min_gap(level_indices, stream_idx):
+        def _stream_mean_gap(level_indices, stream_idx):
             sl = sorted(level_indices)
             means = all_means[stream_idx]
-            best = float('inf')
-            for a, b in zip(sl[:-1], sl[1:]):
-                d = float(np.linalg.norm(means[a] - means[b]))
-                if d < best:
-                    best = d
-            return best
+            gaps = [float(np.linalg.norm(means[a] - means[b]))
+                    for a, b in zip(sl[:-1], sl[1:])]
+            if not gaps:
+                return float('inf')
+            return float(np.mean(gaps))
 
-        def _overall_min_gap():
-            # After select_levels_count: each stream may have its own
-            # selected level set (independent muscles) or all share one.
-            best = float('inf')
+        def _overall_mean_gap():
+            # Mean gap across every consecutive pair in every stream.
+            # Independent muscles have per-stream selections; linked
+            # share one.  Either way pool the gaps.
+            all_gaps = []
             for s in range(max_stream_count):
-                sel_s = self.stream_selected_levels[s]
-                if len(sel_s) >= 2:
-                    g = _stream_min_gap(sel_s, s)
-                    if g < best:
-                        best = g
-            return best
+                sel_s = sorted(self.stream_selected_levels[s])
+                means = all_means[s]
+                for a, b in zip(sel_s[:-1], sel_s[1:]):
+                    all_gaps.append(float(np.linalg.norm(means[a] - means[b])))
+            if not all_gaps:
+                return float('inf')
+            return float(np.mean(all_gaps))
 
         # Snapshot once before the search loop.
         self._level_select_original = {
@@ -13157,12 +13158,12 @@ class ContourMeshMixin(ContourAnimationMixin):
                 for s in range(max_stream_count):
                     if per_stream_target[s] != k:
                         continue
-                    gap_s = _stream_min_gap(self.stream_selected_levels[s], s) \
+                    gap_s = _stream_mean_gap(self.stream_selected_levels[s], s) \
                         if len(self.stream_selected_levels[s]) >= 2 else float('inf')
                     if k == min_count:
                         # Allow min even if it violates.
                         if gap_s < min_spacing:
-                            print(f"  Stream {s} k={k} (min): gap {gap_s*100:.1f}cm < "
+                            print(f"  Stream {s} k={k} (min): mean gap {gap_s*100:.1f}cm < "
                                   f"{min_spacing*100:.1f}cm; using min anyway")
                         else:
                             per_stream_target[s] = k + 1
@@ -13171,7 +13172,7 @@ class ContourMeshMixin(ContourAnimationMixin):
                         if gap_s < min_spacing:
                             # Rollback this stream to previous k.
                             per_stream_target[s] = k - 1
-                            print(f"  Stream {s} k={k}: gap {gap_s*100:.1f}cm < "
+                            print(f"  Stream {s} k={k}: mean gap {gap_s*100:.1f}cm < "
                                   f"{min_spacing*100:.1f}cm; rollback to k={k - 1}")
                         else:
                             per_stream_target[s] = k + 1
@@ -13186,16 +13187,16 @@ class ContourMeshMixin(ContourAnimationMixin):
             target_count = min_count
             for k in range(min_count, num_levels + 1):
                 self.select_levels_count(k)
-                gap = _overall_min_gap()
+                gap = _overall_mean_gap()
                 if k == min_count:
                     target_count = k
                     if gap < min_spacing:
-                        print(f"  k={k} (min_count): gap {gap*100:.1f}cm < "
+                        print(f"  k={k} (min_count): mean gap {gap*100:.1f}cm < "
                               f"{min_spacing*100:.1f}cm; using min anyway")
                         break
                     continue
                 if gap < min_spacing:
-                    print(f"  k={k}: gap {gap*100:.1f}cm < {min_spacing*100:.1f}cm; "
+                    print(f"  k={k}: mean gap {gap*100:.1f}cm < {min_spacing*100:.1f}cm; "
                           f"rolling back to k={target_count}")
                     self.select_levels_count(target_count)
                     break
