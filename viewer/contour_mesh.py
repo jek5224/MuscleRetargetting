@@ -13219,40 +13219,82 @@ class ContourMeshMixin(ContourAnimationMixin):
                     continue
             return err_sum / max(n, 1)
 
-        # Greedy: start with must-use, repeatedly add the level whose
-        # inclusion most reduces total reconstruction error over the levels
-        # still unselected.  Per-level local-neighbour error (previous
-        # implementation) tends to be uniformly tiny for smooth muscles, so
-        # the sort fell through to insertion order — which is what the user
-        # observed as "just selecting the last contours".
-        chosen = sorted(must_use)
-        while len(chosen) < target_count:
-            best_li = None
-            best_gain = -float('inf')
-            for li in range(num_levels):
-                if li in chosen:
-                    continue
-                prev = max((s for s in chosen if s < li), default=0)
-                nxt = min((s for s in chosen if s > li), default=num_levels - 1)
-                gain = 0.0
-                # Re-interpolation gain for every still-unselected level in
-                # the segment that li would split.
-                for k in range(prev + 1, nxt):
-                    if k == li or k in chosen:
-                        continue
-                    old_e = _level_error(k, prev, nxt)
-                    new_e = _level_error(k, prev, li) if k < li else _level_error(k, li, nxt)
-                    gain += (old_e - new_e)
-                # Adding li also removes its own residual error.
-                gain += _level_error(li, prev, nxt)
-                if gain > best_gain:
-                    best_gain = gain
-                    best_li = li
-            if best_li is None:
-                break
-            chosen.append(best_li)
-            chosen.sort()
-        chosen = set(chosen)
+        # Globally optimal: enumerate every combination of (target_count -
+        # len(must_use)) additional levels from the candidates, score by total
+        # reconstruction error of unselected levels, pick the minimum.
+        # Cap the search at ~200k combinations; if the count exceeds, fall
+        # back to the prior greedy approximation.
+        from math import comb
+        from itertools import combinations
+        candidates = [li for li in range(num_levels) if li not in must_use]
+        k = target_count - len(must_use)
+        if k <= 0:
+            chosen = set(must_use)
+        else:
+            COMBO_CAP = 200_000
+            n_combos = comb(len(candidates), k) if k <= len(candidates) else 0
+            if n_combos == 0:
+                chosen = set(must_use)
+            elif n_combos <= COMBO_CAP:
+                # Cache pairwise errors to avoid recomputing across combos.
+                err_cache = {}
+                def cached(level_i, prev_l, next_l):
+                    key = (level_i, prev_l, next_l)
+                    if key not in err_cache:
+                        err_cache[key] = _level_error(level_i, prev_l, next_l)
+                    return err_cache[key]
+                must_sorted = sorted(must_use)
+                best_combo = None
+                best_total = float('inf')
+                for combo in combinations(candidates, k):
+                    sel_sorted = sorted(must_sorted + list(combo))
+                    total = 0.0
+                    si = 0
+                    for li in range(num_levels):
+                        if si + 1 < len(sel_sorted) and li > sel_sorted[si + 1]:
+                            si += 1
+                        if li == sel_sorted[si] or (si + 1 < len(sel_sorted) and li == sel_sorted[si + 1]):
+                            continue  # selected, no error contribution
+                        prev_l = sel_sorted[si]
+                        next_l = sel_sorted[si + 1] if si + 1 < len(sel_sorted) else sel_sorted[si]
+                        if next_l == prev_l:
+                            continue
+                        total += cached(li, prev_l, next_l)
+                        if total >= best_total:
+                            break  # prune: cannot beat current best
+                    if total < best_total:
+                        best_total = total
+                        best_combo = combo
+                chosen = set(must_use) | set(best_combo or [])
+                print(f"  Globally optimal: searched {n_combos} combinations, best total error={best_total:.6f}")
+            else:
+                # Combination space too large → greedy fallback.
+                print(f"  Combination space {n_combos:,} > {COMBO_CAP:,}; falling back to greedy.")
+                chosen = sorted(must_use)
+                while len(chosen) < target_count:
+                    best_li = None
+                    best_gain = -float('inf')
+                    for li in range(num_levels):
+                        if li in chosen:
+                            continue
+                        prev = max((s for s in chosen if s < li), default=0)
+                        nxt = min((s for s in chosen if s > li), default=num_levels - 1)
+                        gain = 0.0
+                        for kk in range(prev + 1, nxt):
+                            if kk == li or kk in chosen:
+                                continue
+                            old_e = _level_error(kk, prev, nxt)
+                            new_e = _level_error(kk, prev, li) if kk < li else _level_error(kk, li, nxt)
+                            gain += (old_e - new_e)
+                        gain += _level_error(li, prev, nxt)
+                        if gain > best_gain:
+                            best_gain = gain
+                            best_li = li
+                    if best_li is None:
+                        break
+                    chosen.append(best_li)
+                    chosen.sort()
+                chosen = set(chosen)
 
         # Apply: every stream gets the same level set (linked groups handled
         # implicitly because stream_contours have one entry per stream and the
