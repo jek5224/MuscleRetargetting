@@ -13145,6 +13145,10 @@ class ContourMeshMixin(ContourAnimationMixin):
             [(li in must_use_levels) for li in range(len(self.stream_contours[s]))]
             for s in range(max_stream_count)
         ]
+        # DP results memo for the duration of this select_levels session.
+        # select_levels_count consults this so repeated calls with the
+        # same per-stream / global target during the search don't redo DP.
+        self._level_select_dp_cache = {}
 
         # Detect independence so per-stream search activates for muscles
         # like biceps femoris (long + short head, never linked).  Reuse
@@ -13443,6 +13447,21 @@ class ContourMeshMixin(ContourAnimationMixin):
                 cur_k -= 1
             return set(path), best_total
 
+        # Memoized DP wrapper.  Cache lives on self._level_select_dp_cache
+        # for the duration of the select_levels session so the spacing
+        # search loop and the GUI Reselect button don't repeat work.
+        dp_cache = getattr(self, '_level_select_dp_cache', None)
+        if dp_cache is None:
+            self._level_select_dp_cache = dp_cache = {}
+
+        def _cached_dp(key, error_fn, target_count_local):
+            cached = dp_cache.get(key)
+            if cached is not None:
+                return cached
+            result = _run_dp(error_fn, target_count_local=target_count_local)
+            dp_cache[key] = result
+            return result
+
         per_stream_chosen = None
         if per_stream_targets is not None:
             # Caller supplied a per-stream target list (independent muscle
@@ -13454,9 +13473,10 @@ class ContourMeshMixin(ContourAnimationMixin):
                     per_stream_chosen.append(sorted(must_use))
                     print(f"  Stream {s}: target {t_s} <= must_use, using must_use only")
                     continue
-                chosen_s, total_s = _run_dp(
+                chosen_s, total_s = _cached_dp(
+                    ('stream', s, t_s),
                     lambda l, p, n, _s=s: _level_error_stream(_s, l, p, n),
-                    target_count_local=t_s)
+                    t_s)
                 per_stream_chosen.append(sorted(chosen_s))
                 print(f"  Stream {s} optimal {len(chosen_s)} levels: "
                       f"{sorted(chosen_s)}  (total={total_s:.6f})")
@@ -13467,15 +13487,17 @@ class ContourMeshMixin(ContourAnimationMixin):
             # Per-stream DP with same target_count for every stream.
             per_stream_chosen = []
             for s in range(max_stream_count):
-                chosen_s, total_s = _run_dp(
+                chosen_s, total_s = _cached_dp(
+                    ('stream', s, target_count),
                     lambda l, p, n, _s=s: _level_error_stream(_s, l, p, n),
-                    target_count_local=target_count)
+                    target_count)
                 per_stream_chosen.append(sorted(chosen_s))
                 print(f"  Stream {s} optimal {len(chosen_s)} levels: "
                       f"{sorted(chosen_s)}  (total={total_s:.6f})")
             chosen = None
         else:
-            chosen, best_total = _run_dp(_level_error, target_count_local=target_count)
+            chosen, best_total = _cached_dp(
+                ('global', target_count), _level_error, target_count)
             if best_total == float('inf'):
                 print(f"  DP infeasible at K={target_count}; falling back to must_use only")
             else:
