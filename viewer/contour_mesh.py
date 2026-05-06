@@ -13481,6 +13481,24 @@ class ContourMeshMixin(ContourAnimationMixin):
             print("Run cut_streams and select_levels first")
             return
 
+        # Discard previously baked fiber state.  Re-clicking Build Fibers
+        # should always rebuild from the currently-selected contours;
+        # leftover fiber_architecture / waypoints / waypoint_bary_coords
+        # / animation snapshots from a prior pass would otherwise leak
+        # into downstream operations (tetrahedralize, save_anim_state).
+        self.fiber_architecture = None
+        self.waypoints = []
+        self.waypoints_original = None
+        self.waypoint_bary_coords = []
+        self.normalized_Qs = []
+        self.mvc_weights = []
+        self._stream_endpoints = []
+        self._fiber_anim_waypoints = None
+        self._fiber_anim_stream_endpoints = None
+        self._fiber_draw_pts = None
+        self._fiber_draw_lines = None
+        self._fiber_draw_dirty = True
+
         # If level select animation is still running, force-apply the selection now
         if getattr(self, '_selected_stream_contours', None) is None and getattr(self, '_level_select_anim_active', False):
             print(f"[build_fibers] Level select animation still running — force-applying selection")
