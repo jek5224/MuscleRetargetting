@@ -8015,19 +8015,18 @@ def _load_motion_bvh(v, idx):
         v.motion_play_accumulator = 0.0
         # Enable OBJ skeleton rendering so posed skeleton is visible
         v.draw_obj = True
-        # Initialize cache dict so playback can proceed without deform until
-        # the background loader populates it. Skeleton+pose are ready immediately;
-        # cached muscle positions stream in per-muscle as the thread completes.
+        # Load cache synchronously: numpy / zipfile in a daemon thread
+        # races with PyOpenGL client-side draw arrays in the main loop and
+        # SIGSEGV's inside zipfile._EndRecData while the renderer is
+        # mid-glDrawArrays.  Loading inline is fast enough (~0.5s) and
+        # avoids the thread-safety hazard entirely.
         v.motion_deform_cache = {}
         v.motion_cache_loading = True
-        import threading
-        def _bg_load():
-            try:
-                _motion_load_cache(v)
-            finally:
-                v.motion_cache_loading = False
-                print(f"[Motion] Cache load complete: {len(v.motion_deform_cache)} muscles")
-        threading.Thread(target=_bg_load, daemon=True).start()
+        try:
+            _motion_load_cache(v)
+        finally:
+            v.motion_cache_loading = False
+            print(f"[Motion] Cache load complete: {len(v.motion_deform_cache)} muscles")
         # Load NN checkpoint if available
         _motion_load_nn_checkpoint(v)
         v.motion_bake_end_frame = min(v.motion_bake_end_frame, v.motion_total_frames - 1)
