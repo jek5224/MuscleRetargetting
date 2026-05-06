@@ -13303,6 +13303,37 @@ class ContourMeshMixin(ContourAnimationMixin):
         # Update visualization to show initial selection
         self._update_level_select_visualization()
 
+        # Open GUI window for manual selection adjustment
+        self._level_select_window_open = True
+        print(f"\nLevel selection GUI window opened. Adjust selection and click 'Finish Select'.")
+
+        # Debug: print stream_groups structure
+        print(f"\n[DEBUG] stream_groups structure ({len(self.stream_groups)} levels):")
+        for level_i, groups in enumerate(self.stream_groups):
+            linked_groups = [g for g in groups if len(g) > 1]
+            if linked_groups:
+                print(f"  Level {level_i}: {groups} (linked: {linked_groups})")
+        print(f"[DEBUG] Levels per stream: {[len(sc) for sc in self.stream_contours]}")
+
+        # Debug: verify stream_groups by checking if linked streams actually share contour data
+        print(f"\n[DEBUG] Verifying stream_groups linkage:")
+        for level_i, groups in enumerate(self.stream_groups):
+            for group in groups:
+                if len(group) > 1:
+                    # Check if these streams actually share the same contour at this level
+                    contours_same = True
+                    ref_contour = None
+                    for stream_i in group:
+                        if stream_i < len(self.stream_contours) and level_i < len(self.stream_contours[stream_i]):
+                            contour = self.stream_contours[stream_i][level_i]
+                            if ref_contour is None:
+                                ref_contour = contour
+                            elif len(contour) != len(ref_contour) or not np.allclose(contour, ref_contour, atol=1e-6):
+                                contours_same = False
+                                break
+                    if not contours_same:
+                        print(f"  WARNING: Level {level_i} group {group} - contours are DIFFERENT!")
+
     def select_levels_count(self, target_count):
         """Re-pick exactly `target_count` levels (origin + insertion + best-error
         intermediates) using the same inertia-tensor reconstruction error as
@@ -13410,37 +13441,6 @@ class ContourMeshMixin(ContourAnimationMixin):
         print(f"Selected {len(chosen_sorted)} levels: {chosen_sorted}")
         self._update_level_select_visualization()
         return True
-
-        # Open GUI window for manual selection adjustment
-        self._level_select_window_open = True
-        print(f"\nLevel selection GUI window opened. Adjust selection and click 'Finish Select'.")
-
-        # Debug: print stream_groups structure
-        print(f"\n[DEBUG] stream_groups structure ({len(self.stream_groups)} levels):")
-        for level_i, groups in enumerate(self.stream_groups):
-            linked_groups = [g for g in groups if len(g) > 1]
-            if linked_groups:
-                print(f"  Level {level_i}: {groups} (linked: {linked_groups})")
-        print(f"[DEBUG] Levels per stream: {[len(sc) for sc in self.stream_contours]}")
-
-        # Debug: verify stream_groups by checking if linked streams actually share contour data
-        print(f"\n[DEBUG] Verifying stream_groups linkage:")
-        for level_i, groups in enumerate(self.stream_groups):
-            for group in groups:
-                if len(group) > 1:
-                    # Check if these streams actually share the same contour at this level
-                    contours_same = True
-                    ref_contour = None
-                    for stream_i in group:
-                        if stream_i < len(self.stream_contours) and level_i < len(self.stream_contours[stream_i]):
-                            contour = self.stream_contours[stream_i][level_i]
-                            if ref_contour is None:
-                                ref_contour = contour
-                            elif len(contour) != len(ref_contour) or not np.allclose(contour, ref_contour, atol=1e-6):
-                                contours_same = False
-                                break
-                    if not contours_same:
-                        print(f"  WARNING: Level {level_i} group {group} - contours are DIFFERENT!")
 
     def build_fibers(self, skeleton_meshes=None, defer=False):
         """
