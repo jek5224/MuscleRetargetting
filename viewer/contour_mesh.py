@@ -13404,26 +13404,40 @@ class ContourMeshMixin(ContourAnimationMixin):
                     continue
             return err_sum / max(n, 1)
 
-        scored = []
-        for li in range(num_levels):
-            if li in must_use:
-                continue
-            scored.append((_level_error(li, max(0, li - 1), min(num_levels - 1, li + 1)), li))
-        scored.sort(reverse=True)
-
-        chosen = set(must_use)
-        for _, li in scored:
-            if len(chosen) >= target_count:
+        # Greedy: start with must-use, repeatedly add the level whose
+        # inclusion most reduces total reconstruction error over the levels
+        # still unselected.  Per-level local-neighbour error (previous
+        # implementation) tends to be uniformly tiny for smooth muscles, so
+        # the sort fell through to insertion order — which is what the user
+        # observed as "just selecting the last contours".
+        chosen = sorted(must_use)
+        while len(chosen) < target_count:
+            best_li = None
+            best_gain = -float('inf')
+            for li in range(num_levels):
+                if li in chosen:
+                    continue
+                prev = max((s for s in chosen if s < li), default=0)
+                nxt = min((s for s in chosen if s > li), default=num_levels - 1)
+                gain = 0.0
+                # Re-interpolation gain for every still-unselected level in
+                # the segment that li would split.
+                for k in range(prev + 1, nxt):
+                    if k == li or k in chosen:
+                        continue
+                    old_e = _level_error(k, prev, nxt)
+                    new_e = _level_error(k, prev, li) if k < li else _level_error(k, li, nxt)
+                    gain += (old_e - new_e)
+                # Adding li also removes its own residual error.
+                gain += _level_error(li, prev, nxt)
+                if gain > best_gain:
+                    best_gain = gain
+                    best_li = li
+            if best_li is None:
                 break
-            chosen.add(li)
-
-        # Pad with closest unselected if must-use already exceeds target.
-        if len(chosen) < target_count:
-            for _, li in scored:
-                if li not in chosen:
-                    chosen.add(li)
-                    if len(chosen) >= target_count:
-                        break
+            chosen.append(best_li)
+            chosen.sort()
+        chosen = set(chosen)
 
         # Apply: every stream gets the same level set (linked groups handled
         # implicitly because stream_contours have one entry per stream and the
