@@ -13201,9 +13201,7 @@ class ContourMeshMixin(ContourAnimationMixin):
                                 max_error = error
                                 max_error_level = level_i
 
-                    # threshold >= 1.0 always skips greedy adds (min selection).
-                    if (error_threshold >= 1.0 or max_error <= error_threshold
-                            or max_error_level is None):
+                    if max_error <= error_threshold or max_error_level is None:
                         break
 
                     region_selected.add(max_error_level)

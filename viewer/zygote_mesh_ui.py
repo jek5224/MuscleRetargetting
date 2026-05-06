@@ -1097,7 +1097,7 @@ def draw_zygote_muscle_ui(v):
                     v.global_level_select_error_threshold = 0.5
                 changed_thr, v.global_level_select_error_threshold = imgui.slider_float(
                     "Err Thresh", v.global_level_select_error_threshold,
-                    0.001, 10.0, "%.3f", flags=imgui.SLIDER_FLAGS_LOGARITHMIC)
+                    0.001, 1.0, "%.3f")
                 obj.level_select_error_threshold = v.global_level_select_error_threshold
                 if changed_thr:
                     for _other in v.zygote_muscle_meshes.values():
