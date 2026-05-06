@@ -932,6 +932,32 @@ except Exception as e:
 
                 interior_tetrahedra = all_dl_tets[interior_mask].astype(np.int32)
 
+                # Layer-adjacency filter: drop tets that span more than one
+                # contour level so the tet structure follows the contour
+                # mesh.  Without this, Delaunay generates long thin tets that
+                # bypass intermediate contours (e.g. a tet from level L to
+                # L+2 ignoring L+1).  Vertices with level=-1 are cap anchors
+                # / Steiner points and are treated as wildcards.
+                vlevel = getattr(self, 'vertex_contour_level', None)
+                if vlevel is not None:
+                    n_cv = len(closed_vertices)
+                    if len(vlevel) < n_cv:
+                        ext = np.full(n_cv, -1, dtype=np.int32)
+                        ext[:len(vlevel)] = vlevel
+                        vlevel = ext
+                    elif len(vlevel) > n_cv:
+                        vlevel = vlevel[:n_cv]
+                    levs = vlevel[interior_tetrahedra]
+                    has_valid = (levs >= 0).any(axis=1)
+                    levs_for_min = np.where(levs >= 0, levs, np.iinfo(np.int32).max)
+                    levs_for_max = np.where(levs >= 0, levs, -1)
+                    ranges = levs_for_max.max(axis=1) - levs_for_min.min(axis=1)
+                    keep = (~has_valid) | (ranges <= 1)
+                    n_dropped = int((~keep).sum())
+                    if n_dropped > 0:
+                        print(f"  Dropped {n_dropped} tets spanning >1 contour level")
+                    interior_tetrahedra = interior_tetrahedra[keep]
+
                 # Fix orientation
                 v0_dl = closed_vertices[interior_tetrahedra[:, 0]].astype(np.float64)
                 cr_dl = np.cross(
