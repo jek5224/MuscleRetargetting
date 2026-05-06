@@ -13503,6 +13503,24 @@ class ContourMeshMixin(ContourAnimationMixin):
                         row[li] = True
                 self._level_select_checkboxes.append(row)
             print(f"Selected {len(chosen_sorted)} levels: {chosen_sorted}")
+
+        # Per-pair spacing breakdown so user sees exact distances.
+        for s in range(max_stream_count):
+            sel_s = sorted(self.stream_selected_levels[s])
+            if len(sel_s) < 2:
+                continue
+            means_s = [self.stream_bounding_planes[s][li]['mean'] for li in sel_s]
+            pair_strs = []
+            gaps = []
+            for (a, b), (ma, mb) in zip(zip(sel_s[:-1], sel_s[1:]),
+                                        zip(means_s[:-1], means_s[1:])):
+                d = float(np.linalg.norm(mb - ma))
+                gaps.append(d)
+                pair_strs.append(f"{a}->{b}:{d*100:.1f}cm")
+            mean_g = float(np.mean(gaps))
+            print(f"  Stream {s} spacings ({len(gaps)} pairs, mean {mean_g*100:.1f}cm): "
+                  f"{', '.join(pair_strs)}")
+
         self._update_level_select_visualization()
         return True
 
