@@ -651,8 +651,15 @@ class ARAPBackendTaichi(ARAPBackend):
         self._fields_allocated = True
 
     def build_system(self, num_vertices, neighbors, weights, fixed_mask, regularization=1e-6,
-                     collision_vertices=None, collision_weight=0.0):
-        """Build sparse Laplacian matrix with optional collision penalty on diagonal."""
+                     collision_vertices=None, collision_weight=0.0,
+                     skin_prior_weights=None):
+        """Build sparse Laplacian matrix with optional collision penalty on diagonal.
+
+        skin_prior_weights: optional dict {vi: w} adding per-vert w to the
+            diagonal.  Used by the nearest-bone skinning prior so each vert
+            has its own decayed weight.  Targets are supplied per-frame
+            via solve(skin_prior_targets=...).
+        """
         import scipy.sparse
 
         self._scipy_solver = None  # Clear cache
@@ -703,12 +710,17 @@ class ARAPBackendTaichi(ARAPBackend):
                 diag = weight_sum + regularization
                 if collision_vertices and i in collision_vertices:
                     diag += collision_weight
+                if skin_prior_weights is not None:
+                    sw = skin_prior_weights.get(i)
+                    if sw:
+                        diag += sw
                 rows.append(i)
                 cols.append(i)
                 vals.append(diag)
 
         self._collision_weight = collision_weight
         self._collision_vertices = collision_vertices or set()
+        self._skin_prior_weights = skin_prior_weights or {}
         self._L_scipy = scipy.sparse.csr_matrix(
             (vals, (rows, cols)), shape=(n, n)
         )
@@ -884,9 +896,12 @@ class ARAPBackendTaichi(ARAPBackend):
 
     def global_step(self, rest_positions, neighbors, weights, rest_edges,
                     fixed_mask, fixed_targets, target_edges=None,
-                    collision_targets=None):
+                    collision_targets=None, skin_prior_targets=None):
         """Solve linear system using Taichi for RHS, scipy for solve.
+
         collision_targets: dict {vertex_idx: target_position} for bone collision penalty.
+        skin_prior_targets: dict {vertex_idx: target_position} added to RHS
+            via per-vert weights stored in self._skin_prior_weights.
         """
         import scipy.sparse.linalg
         ti = self.ti
@@ -919,6 +934,15 @@ class ARAPBackendTaichi(ARAPBackend):
         if collision_targets is not None and self._collision_weight > 0:
             for vi, target in collision_targets.items():
                 b_np[vi] += self._collision_weight * target
+
+        # Skin-prior penalty: per-vert weight × target.  Targets refresh
+        # each frame from the binder; weights are static (set in build_system).
+        if skin_prior_targets is not None and getattr(self, '_skin_prior_weights', None):
+            spw = self._skin_prior_weights
+            for vi, target in skin_prior_targets.items():
+                w = spw.get(vi)
+                if w:
+                    b_np[vi] += w * target
 
         # Set fixed vertex RHS
         fixed_indices = np.where(fixed_mask)[0]
@@ -1151,7 +1175,8 @@ class ARAPBackendTaichi(ARAPBackend):
     def solve(self, positions, rest_positions, neighbors, weights, rest_edges,
               fixed_mask, fixed_targets, max_iterations=20, tolerance=1e-4,
               target_edges=None, verbose=False, collision_targets=None,
-              collision_projection=None, collision_target_fn=None):
+              collision_projection=None, collision_target_fn=None,
+              skin_prior_targets=None):
         """Run full ARAP iteration using Taichi.
 
         collision_target_fn: callable(positions) -> dict {vi: target_pos}
@@ -1214,7 +1239,8 @@ class ARAPBackendTaichi(ARAPBackend):
 
             new_positions = self.global_step(rest_positions, neighbors, weights, rest_edges,
                                              fixed_mask, fixed_targets, target_edges,
-                                             collision_targets=iter_collision_targets)
+                                             collision_targets=iter_collision_targets,
+                                             skin_prior_targets=skin_prior_targets)
             if not np.isfinite(new_positions).all():
                 if verbose:
                     print(f"  Taichi: Non-finite at iteration {iteration}, reverting")

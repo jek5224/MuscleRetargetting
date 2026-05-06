@@ -7397,12 +7397,45 @@ def _run_unified_volume_sim(v, active_muscles, max_iterations=100, tolerance=1e-
                   or (getattr(backend, 'solver', None) is None
                       and getattr(backend, '_scipy_solver', None) is None
                       and getattr(backend, '_splu', None) is None))
+    # Skin-prior weights: per-vertex w_i added to system diagonal.  Static
+    # across frames (depends only on rest binding), so set once at build.
+    skin_prior_weights = None
+    skin_binder = getattr(v, 'skin_prior_binder', None)
+    if skin_binder is not None and getattr(skin_binder, 'bindings', None):
+        skin_prior_weights = {}
+        for name in muscle_names:
+            offset = global_offset[name]
+            for entry in skin_binder.bindings.get(name, []):
+                skin_prior_weights[offset + entry['vi_local']] = entry['weight']
+
     if need_build:
         start_time = time.time()
-        backend.build_system(total_verts, neighbors, edge_weights, global_fixed_mask, regularization=1e-6)
-        print(f"  System built in {time.time() - start_time:.3f}s")
+        if skin_prior_weights:
+            backend.build_system(
+                total_verts, neighbors, edge_weights, global_fixed_mask,
+                regularization=1e-6, skin_prior_weights=skin_prior_weights)
+            print(f"  System built in {time.time() - start_time:.3f}s "
+                  f"(skin prior on {len(skin_prior_weights)} verts)")
+        else:
+            backend.build_system(total_verts, neighbors, edge_weights, global_fixed_mask, regularization=1e-6)
+            print(f"  System built in {time.time() - start_time:.3f}s")
     else:
         print(f"  Reusing cached system (skipping build_system)")
+
+    # Compute skin-prior targets for THIS frame using the current bone
+    # poses.  Targets are static across the inner ARAP iterations
+    # (bones don't move during a single solve).
+    skin_prior_targets = None
+    if skin_binder is not None and getattr(skin_binder, 'bindings', None):
+        skin_prior_targets = {}
+        for name in muscle_names:
+            offset = global_offset[name]
+            res = skin_binder.compute_targets(name, offset)
+            if res is None:
+                continue
+            gi_arr, _w_arr, tgt_arr = res
+            for k in range(len(gi_arr)):
+                skin_prior_targets[int(gi_arr[k])] = tgt_arr[k]
 
     # Muscle-aware ARAP: scale rest edges based on fiber contraction
     cache = v._unified_sim_cache
@@ -7472,10 +7505,15 @@ def _run_unified_volume_sim(v, active_muscles, max_iterations=100, tolerance=1e-
         print(f"  First frame: {solve_iters} iterations (4x cap) for convergence")
 
     start_time = time.time()
+    solve_kwargs = dict(
+        max_iterations=solve_iters, tolerance=tolerance,
+        target_edges=target_edges, verbose=True,
+    )
+    if skin_prior_targets:
+        solve_kwargs['skin_prior_targets'] = skin_prior_targets
     global_positions, iterations, max_disp = backend.solve(
         global_positions, global_rest_positions, neighbors, edge_weights, rest_edge_vectors,
-        global_fixed_mask, fixed_targets_array, max_iterations=solve_iters, tolerance=tolerance,
-        target_edges=target_edges, verbose=True
+        global_fixed_mask, fixed_targets_array, **solve_kwargs
     )
     print(f"  ARAP solved in {time.time() - start_time:.3f}s ({iterations} iterations)")
 

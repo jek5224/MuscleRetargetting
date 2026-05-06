@@ -183,6 +183,10 @@ def build_context(skel, muscle_meshes, skeleton_meshes, mesh_info, args):
         fem_outer_iterations=3,
         fem_load_steps=getattr(args, 'load_steps', 10),
         motion_settle_iters=args.settle_iters,
+        skin_prior_enabled=getattr(args, 'skin_prior', False),
+        skin_prior_sigma=getattr(args, 'skin_prior_sigma', 0.02),
+        skin_prior_max_dist=getattr(args, 'skin_prior_max_dist', 0.05),
+        skin_prior_binder=None,
         _unified_arap_backend=None,
         _unified_sim_cache=None,
     )
@@ -468,6 +472,31 @@ def main():
              "--self-collision to engage.",
     )
     parser.add_argument(
+        "--skin-prior",
+        action="store_true",
+        default=False,
+        help="Enable nearest-bone skinning prior in ARAP.  At rest each "
+             "tet vert is bound to the nearest triangle on the nearest "
+             "bone; ARAP energy gains a soft term keeping the deformed "
+             "vert at the bone-local rest position transformed by the "
+             "current bone pose.  Cooperates with ARAP's min-deformation "
+             "objective rather than fighting it post-solve.",
+    )
+    parser.add_argument(
+        "--skin-prior-sigma",
+        type=float,
+        default=0.02,
+        help="Decay length scale (m) for skinning-prior weights "
+             "(default 0.02 = 2cm).  w_i = exp(-rest_dist/sigma).",
+    )
+    parser.add_argument(
+        "--skin-prior-max-dist",
+        type=float,
+        default=0.05,
+        help="Bind only verts whose nearest bone is within this distance "
+             "at rest (default 0.05 = 5cm).",
+    )
+    parser.add_argument(
         "--save-anim",
         action="store_true",
         help="Save per-outer-iter convergence snapshots inside each chunk so "
@@ -508,6 +537,16 @@ def main():
 
     # Build context and find constraints
     ctx = build_context(skel, muscle_meshes, skeleton_meshes, mesh_info, args)
+    if ctx.skin_prior_enabled:
+        print(f"[6.5/8] Precomputing skinning prior bindings (sigma={ctx.skin_prior_sigma}m, max_dist={ctx.skin_prior_max_dist}m)...")
+        from viewer.skin_prior import SkinPriorBinder
+        binder = SkinPriorBinder(
+            mesh_scale=MESH_SCALE,
+            sigma=ctx.skin_prior_sigma,
+            max_bind_dist=ctx.skin_prior_max_dist,
+        )
+        binder.precompute(muscle_meshes, skeleton_meshes, skel, "Zygote_Meshes_251229/Skeleton")
+        ctx.skin_prior_binder = binder
     print("[7/8] Finding inter-muscle constraints...")
     n_constraints = find_inter_muscle_constraints(ctx)
     print(f"       Found {n_constraints} constraints")
