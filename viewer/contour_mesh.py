@@ -11186,32 +11186,46 @@ class ContourMeshMixin(ContourAnimationMixin):
         if num_pieces == 0 or num_sources == 0:
             return
 
-        # Compute piece centroids
-        piece_centroids = [np.mean(piece, axis=0) for piece in current_pieces_3d]
-
-        # Compute source centroids projected onto target plane
+        # Use chamfer (not centroid) Hungarian assignment: closer to the
+        # cut step's actual source-region geometry, immune to the swap
+        # bug where two sources with similar projected centroids land on
+        # the wrong adjacent piece.
         target_mean = target_bp['mean']
         target_z = target_bp['basis_z']
 
-        source_centroids = []
-        for src in source_contours:
-            src_centroid = np.mean(src, axis=0)
-            # Project onto target plane
-            projected = src_centroid - np.dot(src_centroid - target_mean, target_z) * target_z
-            source_centroids.append(projected)
+        def _project_to_target(arr):
+            arr = np.asarray(arr, dtype=np.float64)
+            if arr.ndim == 1 or arr.shape[-1] != 3:
+                return arr
+            offsets = np.dot(arr - target_mean, target_z)
+            return arr - np.outer(offsets, target_z)
 
-        # Assign each source to its closest piece
+        from scipy.spatial import cKDTree
+        from scipy.optimize import linear_sum_assignment
+
+        proj_pieces = [_project_to_target(p) for p in current_pieces_3d]
+        proj_sources = [_project_to_target(s) for s in source_contours]
+        piece_trees = [cKDTree(p) for p in proj_pieces]
+        source_trees = [cKDTree(s) for s in proj_sources]
+
+        cost = np.zeros((num_sources, num_pieces))
+        for s_idx, src_proj in enumerate(proj_sources):
+            for p_idx, piece_proj in enumerate(proj_pieces):
+                d_sp, _ = piece_trees[p_idx].query(src_proj)
+                d_ps, _ = source_trees[s_idx].query(piece_proj)
+                cost[s_idx, p_idx] = 0.5 * (d_sp.mean() + d_ps.mean())
+
         piece_assignments = {i: [] for i in range(num_pieces)}
-
-        for src_idx, src_centroid in enumerate(source_centroids):
-            min_dist = float('inf')
-            best_piece = 0
-            for p_idx, piece_centroid in enumerate(piece_centroids):
-                dist = np.linalg.norm(src_centroid - piece_centroid)
-                if dist < min_dist:
-                    min_dist = dist
-                    best_piece = p_idx
-            piece_assignments[best_piece].append(src_idx)
+        if num_sources <= num_pieces:
+            row_ind, col_ind = linear_sum_assignment(cost)
+            for s, p in zip(row_ind, col_ind):
+                piece_assignments[int(p)].append(int(s))
+        else:
+            # More sources than pieces: every source gets its lowest-cost
+            # piece (multiple sources can share a piece, then sub-cut).
+            for s_idx in range(num_sources):
+                p_idx = int(np.argmin(cost[s_idx]))
+                piece_assignments[p_idx].append(s_idx)
 
         self._manual_cut_data['piece_assignments'] = piece_assignments
         print(f"[Init Assignments] {num_sources} sources -> {num_pieces} pieces: {piece_assignments}")
@@ -14041,33 +14055,60 @@ class ContourMeshMixin(ContourAnimationMixin):
             unmatched_pieces_3d = [p[1] for p in unmatched_pieces]
             return self._match_pieces_to_sources(unmatched_pieces_3d, source_contours, source_bps)
 
-        # Compute piece centroids for unmatched pieces
-        piece_centroids = [np.mean(p[1], axis=0) for p in unmatched_pieces]
-
-        # Compute source centroids (projected onto target plane)
+        # Match sources to pieces via chamfer distance over projected
+        # vertex sets (not single centroids).  Centroid matching swaps
+        # adjacent sources when their projected centers are close —
+        # exactly the bug seen on flexor digitorum longus origin where
+        # source order 1234 came out linked as 1324.  Hungarian on
+        # full-shape chamfer disambiguates because a piece's vertex
+        # cloud sits much closer to ITS own source's vertex cloud than
+        # to a neighbour's, even when centroids overlap.
         target_mean = target_bp['mean']
         target_z = target_bp['basis_z']
-        source_centroids = []
-        for src in source_contours:
-            src_centroid = np.mean(src, axis=0)
-            # Project to target plane
-            projected = src_centroid - np.dot(src_centroid - target_mean, target_z) * target_z
-            source_centroids.append(projected)
 
-        # Assign sources to unmatched pieces by distance
-        # Each source goes to its closest piece
+        def _project_to_target(arr):
+            arr = np.asarray(arr, dtype=np.float64)
+            if arr.ndim == 1 or arr.shape[-1] != 3:
+                return arr
+            offsets = np.dot(arr - target_mean, target_z)
+            return arr - np.outer(offsets, target_z)
+
+        from scipy.spatial import cKDTree
+        from scipy.optimize import linear_sum_assignment
+
+        proj_sources = [_project_to_target(src) for src in source_contours]
+        source_trees = [cKDTree(p) for p in proj_sources]
+        proj_pieces = [_project_to_target(p[1]) for p in unmatched_pieces]
+
+        # Symmetric chamfer between projected piece and projected source.
+        cost = np.zeros((num_unmatched_pieces, num_sources))
+        for p_i, piece_proj in enumerate(proj_pieces):
+            piece_tree = cKDTree(piece_proj)
+            for s_i, src_proj in enumerate(proj_sources):
+                d_ps, _ = source_trees[s_i].query(piece_proj)
+                d_sp, _ = piece_tree.query(src_proj)
+                cost[p_i, s_i] = 0.5 * (d_ps.mean() + d_sp.mean())
+
         piece_to_sources = [[] for _ in range(num_unmatched_pieces)]
-        for src_i, src_centroid in enumerate(source_centroids):
-            min_dist = float('inf')
-            best_piece = 0
-            for p_i, piece_centroid in enumerate(piece_centroids):
-                dist = np.linalg.norm(src_centroid - piece_centroid)
-                if dist < min_dist:
-                    min_dist = dist
-                    best_piece = p_i
-            piece_to_sources[best_piece].append(src_i)
+        if num_unmatched_pieces == 0 or num_sources == 0:
+            pass
+        else:
+            row_ind, col_ind = linear_sum_assignment(cost)
+            assigned_pieces = set()
+            assigned_sources = set()
+            for p, s in zip(row_ind, col_ind):
+                piece_to_sources[p].append(int(s))
+                assigned_pieces.add(int(p))
+                assigned_sources.add(int(s))
+            # If more sources than pieces, send each remaining source to
+            # whichever piece minimises its chamfer cost.
+            for s_i in range(num_sources):
+                if s_i in assigned_sources:
+                    continue
+                best_p = int(np.argmin(cost[:, s_i]))
+                piece_to_sources[best_p].append(s_i)
 
-        print(f"[Optimize Remaining] Source assignments: {piece_to_sources}")
+        print(f"[Optimize Remaining] Source assignments (chamfer Hungarian): {piece_to_sources}")
 
         # Always compute shared edges for visualization (even if 1:1 matching)
         if num_sources >= 2:
