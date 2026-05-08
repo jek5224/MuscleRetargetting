@@ -14173,11 +14173,19 @@ class ContourMeshMixin(ContourAnimationMixin):
 
     def _match_pieces_to_sources(self, pieces_3d, source_contours, source_bps):
         """
-        Match pieces to sources by centroid distance.
+        Match pieces to sources via Hungarian over symmetric chamfer
+        distance on the source-bp projection plane.
+
+        Centroid matching swaps adjacent sources when their projected
+        centroids overlap.  Full-vertex chamfer compares the actual
+        spatial extent of each piece against each source so adjacent
+        clusters (e.g. flexor digitorum longus origin → 4 toe tendon
+        sources) are disambiguated.
 
         Returns pieces reordered to match source order.
         """
         import numpy as np
+        from scipy.spatial import cKDTree
         from scipy.optimize import linear_sum_assignment
 
         num_pieces = len(pieces_3d)
@@ -14186,18 +14194,36 @@ class ContourMeshMixin(ContourAnimationMixin):
         if num_pieces == 0 or num_sources == 0:
             return pieces_3d
 
-        # Compute centroids
-        piece_centroids = [np.mean(p, axis=0) for p in pieces_3d]
-        source_centroids = [np.mean(s, axis=0) for s in source_contours]
+        # Project both pieces and sources onto each source's bp axis.
+        # When source_bps disagree we fall back to the first source's
+        # plane — sources at this stage typically share the same target
+        # plane already.
+        if source_bps and source_bps[0] is not None and 'mean' in source_bps[0] and 'basis_z' in source_bps[0]:
+            ref_mean = source_bps[0]['mean']
+            ref_z = source_bps[0]['basis_z']
+        else:
+            ref_mean = np.zeros(3)
+            ref_z = np.array([0.0, 0.0, 1.0])
 
-        # Build cost matrix
-        n = max(num_pieces, num_sources)
-        cost_matrix = np.full((n, n), 1e10)
+        def _project(arr):
+            arr = np.asarray(arr, dtype=np.float64)
+            if arr.ndim == 1 or arr.shape[-1] != 3:
+                return arr
+            offs = np.dot(arr - ref_mean, ref_z)
+            return arr - np.outer(offs, ref_z)
+
+        proj_pieces = [_project(p) for p in pieces_3d]
+        proj_sources = [_project(s) for s in source_contours]
+        piece_trees = [cKDTree(p) for p in proj_pieces]
+        source_trees = [cKDTree(s) for s in proj_sources]
+
+        cost_matrix = np.full((max(num_pieces, num_sources),) * 2, 1e10)
         for i in range(num_pieces):
             for j in range(num_sources):
-                cost_matrix[i, j] = np.linalg.norm(piece_centroids[i] - source_centroids[j])
+                d_ps, _ = source_trees[j].query(proj_pieces[i])
+                d_sp, _ = piece_trees[i].query(proj_sources[j])
+                cost_matrix[i, j] = 0.5 * (d_ps.mean() + d_sp.mean())
 
-        # Solve assignment
         row_ind, col_ind = linear_sum_assignment(cost_matrix)
 
         # Reorder pieces to match sources
