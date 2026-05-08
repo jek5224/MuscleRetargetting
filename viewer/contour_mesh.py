@@ -12564,16 +12564,19 @@ class ContourMeshMixin(ContourAnimationMixin):
                             )
                             cutting_info = None
 
-                        # Assign cut pieces to streams by distance matching
-                        # For each stream, find the cut piece closest to its previous contour
-                        # NOTE: For manual cut results, cut_contours is indexed by STREAM INDEX
-                        # (e.g., cut_contours[3] is the piece for stream 3)
-                        # We must NOT compact it or we'll lose the stream mapping!
+                        # Assign cut pieces to streams using the cut step's
+                        # own connectivity rather than centroid distance.
+                        #   - Manual cut: cut_contours is indexed by STREAM
+                        #     index (cut_contours[stream_i] is that stream's
+                        #     piece).
+                        #   - Auto cut (mesh / voronoi): cut routines return
+                        #     pieces in the same order as streams_for_contour
+                        #     (pieces[k] is the piece for streams_for_contour[k]).
+                        # Distance fallback would re-introduce the swap bug
+                        # the explicit cut connectivity is meant to fix.
                         valid_cut_indices = [i for i, c in enumerate(cut_contours) if c is not None]
                         valid_cut_contours = [cut_contours[i] for i in valid_cut_indices]
                         num_valid_pieces = len(valid_cut_contours)
-                        cut_centroids = [np.mean(c, axis=0) for c in valid_cut_contours]
-                        prev_centroids = [np.mean(stream_contours[s][-1], axis=0) for s in streams_for_contour]
 
                         # Handle case where cutting produced more pieces than current streams
                         # This happens in COMMON mode when user cuts aggressively
@@ -12634,89 +12637,42 @@ class ContourMeshMixin(ContourAnimationMixin):
                             print(f"  [EXPANSION] max_stream_count: {old_max_stream_count} -> {max_stream_count}")
                             print(f"  [EXPANSION] streams_for_contour: {streams_for_contour}")
 
-                        # Assign cut pieces to streams (silent unless errors)
-                        greedy_used_pieces = set()
-                        valid_cut_pieces = [(i, c) for i, c in enumerate(cut_contours) if c is not None]
-                        valid_cut_centroids = [(i, np.mean(c, axis=0)) for i, c in valid_cut_pieces]
-
-                        for stream_i in streams_for_contour:
+                        # Assign cut pieces to streams via the cut step's
+                        # connectivity (no distance matching).
+                        for k, stream_i in enumerate(streams_for_contour):
                             cut_contour = None
-
-                            # For manual cut results, try direct stream indexing first
                             if has_manual_result:
+                                # Manual cut writes cut_contours[stream_i].
                                 if stream_i < len(cut_contours) and cut_contours[stream_i] is not None:
                                     cut_contour = cut_contours[stream_i]
-                                    greedy_used_pieces.add(stream_i)
                                 else:
-                                    # Direct indexing failed - fall back to greedy centroid matching
-                                    # Get previous centroid for this stream
-                                    if len(stream_contours[stream_i]) > 0:
-                                        prev_centroid = np.mean(stream_contours[stream_i][-1], axis=0)
-                                    elif stream_i < len(prev_level_contours):
-                                        prev_centroid = np.mean(prev_level_contours[stream_i], axis=0)
-                                    else:
-                                        prev_centroid = np.mean(prev_level_contours[0], axis=0)
-
-                                    # Find closest unused piece
-                                    best_idx = None
-                                    best_dist = float('inf')
-                                    for idx, centroid in valid_cut_centroids:
-                                        if idx in greedy_used_pieces:
-                                            continue
-                                        dist = np.linalg.norm(centroid - prev_centroid)
-                                        if dist < best_dist:
-                                            best_dist = dist
-                                            best_idx = idx
-
-                                    if best_idx is not None:
-                                        greedy_used_pieces.add(best_idx)
-                                        cut_contour = cut_contours[best_idx]
-                                    else:
-                                        print(f"  [ERROR] Stream {stream_i}: no piece available, using target")
-                                        cut_contour = target_contour
-                            else:
-                                # Automatic cutting: use greedy centroid matching
-                                # For new streams or streams without data, use prev_level_contours
-                                if len(stream_contours[stream_i]) > 0:
-                                    prev_centroid = np.mean(stream_contours[stream_i][-1], axis=0)
-                                elif stream_i < len(prev_level_contours):
-                                    prev_centroid = np.mean(prev_level_contours[stream_i], axis=0)
-                                else:
-                                    # Fallback: use first stream's centroid (shouldn't happen)
-                                    prev_centroid = np.mean(prev_level_contours[0], axis=0)
-
-                                # Find closest unused piece using greedy matching
-                                best_idx = None
-                                best_dist = float('inf')
-                                for idx, cut_centroid in enumerate(cut_centroids):
-                                    if idx in greedy_used_pieces:
-                                        continue
-                                    dist = np.linalg.norm(cut_centroid - prev_centroid)
-                                    if dist < best_dist:
-                                        best_dist = dist
-                                        best_idx = idx
-
-                                # Guard: if no available piece found (more streams than pieces)
-                                if best_idx is None:
-                                    print(f"  [ERROR] Level {level_i}: No cut piece for stream {stream_i}!")
-                                    print(f"  [ERROR]   cut_contours has {len(cut_contours)} pieces but {len(streams_for_contour)} streams need them")
-                                    print(f"  [ERROR]   This is a bug - returning to request proper cutting")
-                                    # Clear the invalid result so it doesn't get reused
+                                    print(f"  [ERROR] Manual cut: stream {stream_i} has no piece "
+                                          f"(level {level_i}); requesting recut")
                                     result_key = (level_i, contour_i)
                                     if hasattr(self, '_manual_cut_results') and result_key in self._manual_cut_results:
                                         del self._manual_cut_results[result_key]
-                                    # Request manual cutting for this transition
                                     self._prepare_manual_cut_data_for_level(
                                         muscle_name, level_i, contour_i, streams_for_contour,
                                         target_contour, target_bp, source_contours, source_bps,
                                         prev_level,
                                         initial_cut_line=None,
-                                        is_common_mode=False  # Force SEPARATE mode
-                                    )
-                                    return  # Wait for proper cutting
+                                        is_common_mode=False)
+                                    return
+                            else:
+                                # Auto cut: pieces returned in streams_for_contour order.
+                                if k < len(cut_contours) and cut_contours[k] is not None:
+                                    cut_contour = cut_contours[k]
                                 else:
-                                    greedy_used_pieces.add(best_idx)
-                                    cut_contour = cut_contours[best_idx]
+                                    print(f"  [ERROR] Auto cut: missing piece at index {k} "
+                                          f"for stream {stream_i} (level {level_i}); "
+                                          f"requesting manual cut")
+                                    self._prepare_manual_cut_data_for_level(
+                                        muscle_name, level_i, contour_i, streams_for_contour,
+                                        target_contour, target_bp, source_contours, source_bps,
+                                        prev_level,
+                                        initial_cut_line=None,
+                                        is_common_mode=False)
+                                    return
 
                             # Debug: warn about small cut contours
                             if len(cut_contour) <= 5:
