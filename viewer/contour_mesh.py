@@ -11186,15 +11186,33 @@ class ContourMeshMixin(ContourAnimationMixin):
         if num_pieces == 0 or num_sources == 0:
             return
 
-        # Trust cut-step ordering: source[i] -> piece[i] for the 1:1
-        # prefix.  If sources outnumber pieces, the trailing sources
-        # share the last piece and get sub-cut later.  Re-deriving via
-        # centroid / chamfer here re-introduces the swap on tightly
-        # clustered sources (e.g. flexor digitorum longus origin).
+        # Initial UI suggestion: at this point the user has just cut and
+        # has NOT yet committed source-piece pairings, so we need a
+        # heuristic guess they can accept or edit.  Centroid distance is
+        # the cheapest reasonable starting point; the user fixes any
+        # swaps before confirming.  (The post-confirm helpers
+        # _match_pieces_to_sources / _optimize_remaining_pieces use
+        # cut-order indexing and don't run centroid logic.)
+        piece_centroids = [np.mean(piece, axis=0) for piece in current_pieces_3d]
+
+        target_mean = target_bp['mean']
+        target_z = target_bp['basis_z']
+        source_centroids = []
+        for src in source_contours:
+            src_centroid = np.mean(src, axis=0)
+            projected = src_centroid - np.dot(src_centroid - target_mean, target_z) * target_z
+            source_centroids.append(projected)
+
         piece_assignments = {i: [] for i in range(num_pieces)}
-        for s_idx in range(num_sources):
-            target_piece = s_idx if s_idx < num_pieces else num_pieces - 1
-            piece_assignments[target_piece].append(s_idx)
+        for src_idx, src_centroid in enumerate(source_centroids):
+            best_piece = 0
+            best_dist = float('inf')
+            for p_idx, piece_centroid in enumerate(piece_centroids):
+                d = np.linalg.norm(src_centroid - piece_centroid)
+                if d < best_dist:
+                    best_dist = d
+                    best_piece = p_idx
+            piece_assignments[best_piece].append(src_idx)
 
         self._manual_cut_data['piece_assignments'] = piece_assignments
         print(f"[Init Assignments] {num_sources} sources -> {num_pieces} pieces: {piece_assignments}")
