@@ -1316,6 +1316,13 @@ class ContourMeshMixin(ContourAnimationMixin):
 
             while iteration < max_iterations:
                 iteration += 1
+                # Hard upper bound: scalar values are normalised so the
+                # insertion cap sits at 10.  Any value past that means we
+                # over-shot and should stop iterating instead of probing
+                # invalid territory.
+                if contour_value >= 10.0:
+                    print(f"[contour iter {iteration}] contour_value {contour_value:.4f} >= 10.0 — stopping")
+                    break
                 # Pass previous bounding plane to maintain z-axis consistency
                 prev_plane = self.bounding_planes[-1][0] if len(self.bounding_planes) > 0 and len(self.bounding_planes[-1]) > 0 else None
                 bounding_planes, ordered_contour_vertices, ordered_contour_vertices_orig = self.find_contour(contour_value, prev_bounding_plane=prev_plane, use_geodesic_edges=use_geodesic_edges)
