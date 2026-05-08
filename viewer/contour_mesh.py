@@ -12073,22 +12073,21 @@ class ContourMeshMixin(ContourAnimationMixin):
             print(f"1:1 case with intermediate variations - forcing max_stream_count=1, ignoring noise")
             max_stream_count = 1  # Force single stream for 1:1 case
         if cut_method == 'bp' and max_stream_count >= 2 and contour_count_varies and not is_one_to_one:
-            # Check if we need to open manual cutting window
-            # Skip _prepare_manual_cut_data if we have results in _manual_cut_results
-            # (means we're resuming after a mid-processing cut was completed)
-            has_manual_results = hasattr(self, '_manual_cut_results') and self._manual_cut_results and len(self._manual_cut_results) > 0
-            if not self._manual_cut_pending and self._manual_cut_data is None and not has_manual_results:
-                # Prepare data for manual cutting and open window
-                needs_manual = self._prepare_manual_cut_data(muscle_name)
-                if needs_manual:
-                    return  # Wait for user to draw cutting line
-                # If no manual cutting needed, continue with automatic processing
-                print("No manual cutting required - proceeding with automatic cut")
-            elif self._manual_cut_pending:
-                # Still waiting for user to finish drawing
+            # Per-level loop now drives ALL manual-cut windows via
+            # _prepare_manual_cut_data_for_level on demand.  The earlier
+            # _prepare_manual_cut_data() call here ran a separate (and
+            # subtly different) Hungarian assignment to pick the merge
+            # target_i, which could disagree with the per-level loop's
+            # assignment and cause the same level to open the manual
+            # cutting window twice.  Initializing _manual_cut_results
+            # is enough; the loop handles everything else.
+            if not hasattr(self, '_manual_cut_results') or self._manual_cut_results is None:
+                self._manual_cut_results = {}
+            has_manual_results = len(self._manual_cut_results) > 0
+            if self._manual_cut_pending:
                 print("Manual cutting in progress - waiting for user to confirm")
                 return
-            elif has_manual_results:
+            if has_manual_results:
                 print(f"Resuming cut_streams with {len(self._manual_cut_results)} manual cut results")
 
         # Get contour counts per level
