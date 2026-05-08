@@ -11186,46 +11186,15 @@ class ContourMeshMixin(ContourAnimationMixin):
         if num_pieces == 0 or num_sources == 0:
             return
 
-        # Use chamfer (not centroid) Hungarian assignment: closer to the
-        # cut step's actual source-region geometry, immune to the swap
-        # bug where two sources with similar projected centroids land on
-        # the wrong adjacent piece.
-        target_mean = target_bp['mean']
-        target_z = target_bp['basis_z']
-
-        def _project_to_target(arr):
-            arr = np.asarray(arr, dtype=np.float64)
-            if arr.ndim == 1 or arr.shape[-1] != 3:
-                return arr
-            offsets = np.dot(arr - target_mean, target_z)
-            return arr - np.outer(offsets, target_z)
-
-        from scipy.spatial import cKDTree
-        from scipy.optimize import linear_sum_assignment
-
-        proj_pieces = [_project_to_target(p) for p in current_pieces_3d]
-        proj_sources = [_project_to_target(s) for s in source_contours]
-        piece_trees = [cKDTree(p) for p in proj_pieces]
-        source_trees = [cKDTree(s) for s in proj_sources]
-
-        cost = np.zeros((num_sources, num_pieces))
-        for s_idx, src_proj in enumerate(proj_sources):
-            for p_idx, piece_proj in enumerate(proj_pieces):
-                d_sp, _ = piece_trees[p_idx].query(src_proj)
-                d_ps, _ = source_trees[s_idx].query(piece_proj)
-                cost[s_idx, p_idx] = 0.5 * (d_sp.mean() + d_ps.mean())
-
+        # Trust cut-step ordering: source[i] -> piece[i] for the 1:1
+        # prefix.  If sources outnumber pieces, the trailing sources
+        # share the last piece and get sub-cut later.  Re-deriving via
+        # centroid / chamfer here re-introduces the swap on tightly
+        # clustered sources (e.g. flexor digitorum longus origin).
         piece_assignments = {i: [] for i in range(num_pieces)}
-        if num_sources <= num_pieces:
-            row_ind, col_ind = linear_sum_assignment(cost)
-            for s, p in zip(row_ind, col_ind):
-                piece_assignments[int(p)].append(int(s))
-        else:
-            # More sources than pieces: every source gets its lowest-cost
-            # piece (multiple sources can share a piece, then sub-cut).
-            for s_idx in range(num_sources):
-                p_idx = int(np.argmin(cost[s_idx]))
-                piece_assignments[p_idx].append(s_idx)
+        for s_idx in range(num_sources):
+            target_piece = s_idx if s_idx < num_pieces else num_pieces - 1
+            piece_assignments[target_piece].append(s_idx)
 
         self._manual_cut_data['piece_assignments'] = piece_assignments
         print(f"[Init Assignments] {num_sources} sources -> {num_pieces} pieces: {piece_assignments}")
@@ -14055,60 +14024,15 @@ class ContourMeshMixin(ContourAnimationMixin):
             unmatched_pieces_3d = [p[1] for p in unmatched_pieces]
             return self._match_pieces_to_sources(unmatched_pieces_3d, source_contours, source_bps)
 
-        # Match sources to pieces via chamfer distance over projected
-        # vertex sets (not single centroids).  Centroid matching swaps
-        # adjacent sources when their projected centers are close —
-        # exactly the bug seen on flexor digitorum longus origin where
-        # source order 1234 came out linked as 1324.  Hungarian on
-        # full-shape chamfer disambiguates because a piece's vertex
-        # cloud sits much closer to ITS own source's vertex cloud than
-        # to a neighbour's, even when centroids overlap.
-        target_mean = target_bp['mean']
-        target_z = target_bp['basis_z']
-
-        def _project_to_target(arr):
-            arr = np.asarray(arr, dtype=np.float64)
-            if arr.ndim == 1 or arr.shape[-1] != 3:
-                return arr
-            offsets = np.dot(arr - target_mean, target_z)
-            return arr - np.outer(offsets, target_z)
-
-        from scipy.spatial import cKDTree
-        from scipy.optimize import linear_sum_assignment
-
-        proj_sources = [_project_to_target(src) for src in source_contours]
-        source_trees = [cKDTree(p) for p in proj_sources]
-        proj_pieces = [_project_to_target(p[1]) for p in unmatched_pieces]
-
-        # Symmetric chamfer between projected piece and projected source.
-        cost = np.zeros((num_unmatched_pieces, num_sources))
-        for p_i, piece_proj in enumerate(proj_pieces):
-            piece_tree = cKDTree(piece_proj)
-            for s_i, src_proj in enumerate(proj_sources):
-                d_ps, _ = source_trees[s_i].query(piece_proj)
-                d_sp, _ = piece_tree.query(src_proj)
-                cost[p_i, s_i] = 0.5 * (d_ps.mean() + d_sp.mean())
-
+        # Trust cut-step ordering: pieces are produced in source order
+        # by _cut_contour_bp_transform, so source[i] -> piece[i] for the
+        # 1:1 prefix.  When num_sources > num_unmatched_pieces, the
+        # trailing sources share the last piece and get sub-cut below.
         piece_to_sources = [[] for _ in range(num_unmatched_pieces)]
-        if num_unmatched_pieces == 0 or num_sources == 0:
-            pass
-        else:
-            row_ind, col_ind = linear_sum_assignment(cost)
-            assigned_pieces = set()
-            assigned_sources = set()
-            for p, s in zip(row_ind, col_ind):
-                piece_to_sources[p].append(int(s))
-                assigned_pieces.add(int(p))
-                assigned_sources.add(int(s))
-            # If more sources than pieces, send each remaining source to
-            # whichever piece minimises its chamfer cost.
-            for s_i in range(num_sources):
-                if s_i in assigned_sources:
-                    continue
-                best_p = int(np.argmin(cost[:, s_i]))
-                piece_to_sources[best_p].append(s_i)
-
-        print(f"[Optimize Remaining] Source assignments (chamfer Hungarian): {piece_to_sources}")
+        for s_i in range(num_sources):
+            target_piece = s_i if s_i < num_unmatched_pieces else num_unmatched_pieces - 1
+            piece_to_sources[target_piece].append(s_i)
+        print(f"[Optimize Remaining] Source assignments (cut-order): {piece_to_sources}")
 
         # Always compute shared edges for visualization (even if 1:1 matching)
         if num_sources >= 2:
@@ -14173,20 +14097,16 @@ class ContourMeshMixin(ContourAnimationMixin):
 
     def _match_pieces_to_sources(self, pieces_3d, source_contours, source_bps):
         """
-        Match pieces to sources via Hungarian over symmetric chamfer
-        distance on the source-bp projection plane.
+        Match pieces to sources by INDEX ORDER.
 
-        Centroid matching swaps adjacent sources when their projected
-        centroids overlap.  Full-vertex chamfer compares the actual
-        spatial extent of each piece against each source so adjacent
-        clusters (e.g. flexor digitorum longus origin → 4 toe tendon
-        sources) are disambiguated.
-
-        Returns pieces reordered to match source order.
+        _cut_contour_bp_transform writes new_contours[src_idx] in source
+        order, so pieces[i] is already the piece for source[i].  Earlier
+        centroid / chamfer matching here re-derived the mapping and
+        could swap clusters whose projected vertex clouds overlap (e.g.
+        flexor digitorum longus origin → 4 close toe-tendon sources).
+        Trusting the cut step's order avoids re-derivation entirely.
         """
         import numpy as np
-        from scipy.spatial import cKDTree
-        from scipy.optimize import linear_sum_assignment
 
         num_pieces = len(pieces_3d)
         num_sources = len(source_contours)
@@ -14194,58 +14114,12 @@ class ContourMeshMixin(ContourAnimationMixin):
         if num_pieces == 0 or num_sources == 0:
             return pieces_3d
 
-        # Project both pieces and sources onto each source's bp axis.
-        # When source_bps disagree we fall back to the first source's
-        # plane — sources at this stage typically share the same target
-        # plane already.
-        if source_bps and source_bps[0] is not None and 'mean' in source_bps[0] and 'basis_z' in source_bps[0]:
-            ref_mean = source_bps[0]['mean']
-            ref_z = source_bps[0]['basis_z']
-        else:
-            ref_mean = np.zeros(3)
-            ref_z = np.array([0.0, 0.0, 1.0])
-
-        def _project(arr):
-            arr = np.asarray(arr, dtype=np.float64)
-            if arr.ndim == 1 or arr.shape[-1] != 3:
-                return arr
-            offs = np.dot(arr - ref_mean, ref_z)
-            return arr - np.outer(offs, ref_z)
-
-        proj_pieces = [_project(p) for p in pieces_3d]
-        proj_sources = [_project(s) for s in source_contours]
-        piece_trees = [cKDTree(p) for p in proj_pieces]
-        source_trees = [cKDTree(s) for s in proj_sources]
-
-        cost_matrix = np.full((max(num_pieces, num_sources),) * 2, 1e10)
-        for i in range(num_pieces):
-            for j in range(num_sources):
-                d_ps, _ = source_trees[j].query(proj_pieces[i])
-                d_sp, _ = piece_trees[i].query(proj_sources[j])
-                cost_matrix[i, j] = 0.5 * (d_ps.mean() + d_sp.mean())
-
-        row_ind, col_ind = linear_sum_assignment(cost_matrix)
-
-        # Reorder pieces to match sources
         matched_pieces = [None] * num_sources
-        for p_i, s_i in zip(row_ind, col_ind):
-            if p_i < num_pieces and s_i < num_sources:
-                matched_pieces[s_i] = pieces_3d[p_i]
-
-        # Fill any None with closest unassigned piece
-        used = set(row_ind[:num_pieces])
         for s_i in range(num_sources):
-            if matched_pieces[s_i] is None:
-                # Find any available piece
-                for p_i in range(num_pieces):
-                    if p_i not in used:
-                        matched_pieces[s_i] = pieces_3d[p_i]
-                        used.add(p_i)
-                        break
-                # If still None, use first piece
-                if matched_pieces[s_i] is None and num_pieces > 0:
-                    matched_pieces[s_i] = pieces_3d[0]
-
+            if s_i < num_pieces:
+                matched_pieces[s_i] = pieces_3d[s_i]
+        # If fewer pieces than sources, leave the trailing slots None —
+        # caller handles that case (subdivide / sub-cut).
         return matched_pieces
 
     def _cut_contour_bp_transform(self, target_contour, target_bp, source_contours, source_bps, stream_indices, is_first_division=True, target_level=None, source_level=None):
