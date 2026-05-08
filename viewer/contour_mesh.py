@@ -14562,7 +14562,24 @@ class ContourMeshMixin(ContourAnimationMixin):
                 # Penalize rotations away from 0 (quadratic, small weight)
                 rotation_penalty = (theta ** 2) * target_area * 0.5
 
-            return coverage_cost + area_cost + gap_cost + boundary_cost + rotation_penalty
+            # Drift penalty (separate transforms only): keep each source
+            # near its anatomical initial position.  Without this, the
+            # optimizer with N×5 free parameters can permute clustered
+            # sources (e.g. flexor digitorum longus origin: 4 toe sources
+            # with similar shapes inside a single target) and the cut
+            # step then assigns piece-source identity from the permuted
+            # layout, causing sources 2 and 3 to swap downstream.
+            drift_penalty = 0.0
+            if use_separate_transforms:
+                for i in range(n_pieces):
+                    tx = params[i * 5 + 2]
+                    ty = params[i * 5 + 3]
+                    dx = tx - initial_translations[i][0]
+                    dy = ty - initial_translations[i][1]
+                    drift_penalty += dx * dx + dy * dy
+                drift_penalty *= 10.0  # weight per unit² of squared drift
+
+            return coverage_cost + area_cost + gap_cost + boundary_cost + rotation_penalty + drift_penalty
 
         # ========== Step 4: Build initial configuration ==========
         # Compute initial scale based on area ratio (sources should roughly cover target)
