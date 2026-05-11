@@ -187,7 +187,7 @@ def build_context(skel, muscle_meshes, skeleton_meshes, mesh_info, args):
         skin_prior_enabled=getattr(args, 'skin_prior', False),
         skin_prior_sigma=getattr(args, 'skin_prior_sigma', 0.02),
         skin_prior_max_dist=getattr(args, 'skin_prior_max_dist', 0.05),
-        skin_prior_strength=getattr(args, 'skin_prior_strength', 0.3),
+        skin_prior_strength=getattr(args, 'skin_prior_strength', 0.7),
         skin_prior_binder=None,
         _unified_arap_backend=None,
         _unified_sim_cache=None,
@@ -520,11 +520,11 @@ def main():
     parser.add_argument(
         "--skin-prior-strength",
         type=float,
-        default=0.3,
+        default=0.7,
         help="Global multiplier on skin-prior weight (w_i = strength * "
-             "exp(-rest_dist/sigma)). Default 0.3 — full strength dragged "
-             "tendon insertions like pes anserinus too tightly to bone "
-             "during knee flexion.  Raise toward 1.0 for tighter binding.",
+             "exp(-rest_dist/sigma)). Default 0.7 — slightly less than "
+             "the original 1.0 to soften per-vertex ticking from bone "
+             "pose jitter while keeping near-bone verts anchored.",
     )
     parser.add_argument(
         "--save-anim",
@@ -568,12 +568,13 @@ def main():
     # Build context and find constraints
     ctx = build_context(skel, muscle_meshes, skeleton_meshes, mesh_info, args)
     if ctx.skin_prior_enabled:
-        print(f"[6.5/8] Precomputing skinning prior bindings (sigma={ctx.skin_prior_sigma}m, max_dist={ctx.skin_prior_max_dist}m)...")
+        print(f"[6.5/8] Precomputing skinning prior bindings (sigma={ctx.skin_prior_sigma}m, max_dist={ctx.skin_prior_max_dist}m, strength={ctx.skin_prior_strength})...")
         from viewer.skin_prior import SkinPriorBinder
         binder = SkinPriorBinder(
             mesh_scale=MESH_SCALE,
             sigma=ctx.skin_prior_sigma,
             max_bind_dist=ctx.skin_prior_max_dist,
+            strength=ctx.skin_prior_strength,
         )
         binder.precompute(muscle_meshes, skeleton_meshes, skel, "Zygote_Meshes_251229/Skeleton")
         ctx.skin_prior_binder = binder
