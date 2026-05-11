@@ -34,11 +34,10 @@ _MAX_BIND_DIST = 0.05      # 5cm: ignore verts farther than this at rest
 
 class SkinPriorBinder:
     def __init__(self, mesh_scale=0.01, sigma=_DEFAULT_SIGMA,
-                 max_bind_dist=_MAX_BIND_DIST, strength=1.0):
+                 max_bind_dist=_MAX_BIND_DIST):
         self.mesh_scale = mesh_scale
         self.sigma = sigma
         self.max_bind_dist = max_bind_dist
-        self.strength = float(strength)
         # bindings[muscle_name] = list of (global_vi, body_name, tri_idx,
         #                                  bary, normal_offset, weight)
         self.bindings = {}
@@ -204,7 +203,7 @@ class SkinPriorBinder:
                 d = best_d[vi]
                 if bn is None or d > self.max_bind_dist:
                     continue
-                w = float(self.strength * np.exp(-d / self.sigma))
+                w = float(np.exp(-d / self.sigma))
                 if w < _MIN_WEIGHT:
                     continue
                 # Capture this bone's rest transform (skips if already done).

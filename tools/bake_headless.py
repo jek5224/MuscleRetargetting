@@ -172,7 +172,7 @@ def build_context(skel, muscle_meshes, skeleton_meshes, mesh_info, args):
         coupled_as_unified_volume=args.unified_volume,
         use_gpu_arap=use_gpu,
         use_taichi_arap=use_taichi,
-        use_muscle_aware_arap=True,
+        use_muscle_aware_arap=args.use_muscle_aware_arap,
         use_fem_sim=use_fem,
         use_vbd_sim=use_vbd,
         use_pn_sim=use_pn,
@@ -353,6 +353,16 @@ def main():
              "Contour tets are coarse (~160-512 verts/muscle vs ~1k+ for "
              "original meshes) so the search radius needs to span the "
              "wider vertex spacing.",
+    )
+    parser.add_argument(
+        "--no-muscle-aware",
+        dest="use_muscle_aware_arap",
+        action="store_false",
+        default=True,
+        help="Disable muscle-aware ARAP per-frame target-edge scaling "
+             "(rest edges stay at base length, no contraction-tracking).  "
+             "Use to test whether the per-frame ratio tracking is causing "
+             "frame-to-frame tremble.",
     )
     parser.add_argument(
         "--inter-muscle-weight",
@@ -558,13 +568,12 @@ def main():
     # Build context and find constraints
     ctx = build_context(skel, muscle_meshes, skeleton_meshes, mesh_info, args)
     if ctx.skin_prior_enabled:
-        print(f"[6.5/8] Precomputing skinning prior bindings (sigma={ctx.skin_prior_sigma}m, max_dist={ctx.skin_prior_max_dist}m, strength={ctx.skin_prior_strength})...")
+        print(f"[6.5/8] Precomputing skinning prior bindings (sigma={ctx.skin_prior_sigma}m, max_dist={ctx.skin_prior_max_dist}m)...")
         from viewer.skin_prior import SkinPriorBinder
         binder = SkinPriorBinder(
             mesh_scale=MESH_SCALE,
             sigma=ctx.skin_prior_sigma,
             max_bind_dist=ctx.skin_prior_max_dist,
-            strength=ctx.skin_prior_strength,
         )
         binder.precompute(muscle_meshes, skeleton_meshes, skel, "Zygote_Meshes_251229/Skeleton")
         ctx.skin_prior_binder = binder
