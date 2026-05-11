@@ -7232,12 +7232,13 @@ def _run_unified_volume_sim(v, active_muscles, max_iterations=100, tolerance=1e-
         n_internal = len(all_edges)
 
         # Add inter-muscle constraints as edges
+        inter_w = float(getattr(v, 'inter_muscle_weight', 1.0))
         for constraint in v.inter_muscle_constraints:
             name1, v1_idx, v1_fixed, name2, v2_idx, v2_fixed, rest_dist = constraint
             if name1 in active_muscles and name2 in active_muscles:
                 global_i = global_offset[name1] + v1_idx
                 global_j = global_offset[name2] + v2_idx
-                all_edges.append((global_i, global_j, rest_dist, 1.0))  # Same weight as internal
+                all_edges.append((global_i, global_j, rest_dist, inter_w))
 
         n_inter = len(all_edges) - n_internal
         print(f"  Edges: {n_internal} internal + {n_inter} inter-muscle = {len(all_edges)} total")

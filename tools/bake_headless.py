@@ -164,6 +164,7 @@ def build_context(skel, muscle_meshes, skeleton_meshes, mesh_info, args):
         inter_muscle_constraints=[],
         inter_muscle_constraint_threshold=args.constraint_threshold,
         inter_muscle_k_cap=args.inter_k,
+        inter_muscle_weight=args.inter_muscle_weight,
         arap_anisotropic=args.anisotropic,
         arap_cross_w=args.arap_cross_w,
         arap_intra_w=args.arap_intra_w,
@@ -352,6 +353,15 @@ def main():
              "Contour tets are coarse (~160-512 verts/muscle vs ~1k+ for "
              "original meshes) so the search radius needs to span the "
              "wider vertex spacing.",
+    )
+    parser.add_argument(
+        "--inter-muscle-weight",
+        type=float,
+        default=1.0,
+        help="ARAP edge weight for inter-muscle constraint springs "
+             "(default 1.0 = same as internal neutral edges).  Lower "
+             "values weaken muscle-to-muscle pull; useful when adjacent "
+             "muscles pinch each other to near-zero volume.",
     )
     parser.add_argument(
         "--inter-k",
