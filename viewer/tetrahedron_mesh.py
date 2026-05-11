@@ -2107,26 +2107,6 @@ except Exception as e:
         self._tet_cap_verts = np.array(cap_verts, dtype=np.float32) if cap_verts else None
         self._tet_cap_normals = np.array(cap_normals, dtype=np.float32) if cap_normals else None
 
-        # ── Debug: per-band surface face count (one-shot per muscle) ──
-        # Helps confirm at render time that every contour band is being
-        # drawn.  User has reported tet visually skipping intermediate
-        # contours; this dumps the actual band coverage feeding the GL
-        # call so we can tell data-vs-display apart.
-        if not getattr(self, '_tet_band_dbg_printed', False):
-            vcl = getattr(self, 'vertex_contour_level', None)
-            if vcl is not None and surface_face_indices:
-                from collections import Counter
-                surf_arr = np.asarray(surface_face_indices, dtype=np.int32).reshape(-1, 3)
-                levs = np.asarray(vcl)[surf_arr]
-                bands = Counter()
-                for tri in levs:
-                    lo, hi = int(tri.min()), int(tri.max())
-                    bands[(lo, hi)] += 1
-                name = getattr(self, '_muscle_name', None) or getattr(self, '_tet_name', None) or '?'
-                print(f"[tet-draw {name}] surface faces per band: "
-                      f"{sorted(bands.items())}  total={len(surface_face_indices)}")
-                self._tet_band_dbg_printed = True
-
         # Store flattened vertex index arrays for fast update path
         self._tet_surface_vidx = np.array(surface_face_indices, dtype=np.int32).reshape(-1) if surface_face_indices else None
         self._tet_cap_vidx = np.array(cap_face_indices, dtype=np.int32).reshape(-1) if cap_face_indices else None
