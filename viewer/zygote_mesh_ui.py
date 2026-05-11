@@ -8025,6 +8025,8 @@ def _load_motion_bvh(v, idx):
         return
     bvh_path = v.motion_bvh_files[idx]
     v.motion_selected_idx = idx
+    import time as _t
+    _t_total = _t.time()
     try:
         # Reset skeleton to zero pose first so captured root rotation is
         # canonical (identity).  Without this reset the previous BVH's last
@@ -8044,9 +8046,12 @@ def _load_motion_bvh(v, idx):
         print(f"[Motion] bvh_info: {v.env.bvh_info}")
         print(f"[Motion] skel DOFs: {v.env.skel.getNumDofs()}, joints: {v.env.skel.getNumJoints()}")
         # Auto-detect if BVH needs T-pose correction (non-upright rest pose)
+        _t0 = _t.time()
         t_frame = _detect_bvh_tframe(bvh_path)
+        print(f"[Motion] _detect_bvh_tframe: {_t.time() - _t0:.2f}s")
+        _t0 = _t.time()
         v.motion_bvh = MyBVH(bvh_path, v.env.bvh_info, v.env.skel, T_frame=t_frame)
-        print(f"[Motion] mocap_refs shape: {v.motion_bvh.mocap_refs.shape}, max abs: {np.abs(v.motion_bvh.mocap_refs).max():.6f}")
+        print(f"[Motion] MyBVH parse: {_t.time() - _t0:.2f}s, mocap_refs shape: {v.motion_bvh.mocap_refs.shape}, max abs: {np.abs(v.motion_bvh.mocap_refs).max():.6f}")
         v.motion_total_frames = v.motion_bvh.num_frames
         v.motion_current_frame = 0
         v.motion_is_playing = False
@@ -8060,18 +8065,20 @@ def _load_motion_bvh(v, idx):
         # avoids the thread-safety hazard entirely.
         v.motion_deform_cache = {}
         v.motion_cache_loading = True
+        _t0 = _t.time()
         try:
             _motion_load_cache(v)
         finally:
             v.motion_cache_loading = False
-            print(f"[Motion] Cache load complete: {len(v.motion_deform_cache)} muscles")
-        # Load NN checkpoint if available
+            print(f"[Motion] Cache load: {_t.time() - _t0:.2f}s, {len(v.motion_deform_cache)} muscles")
+        _t0 = _t.time()
         _motion_load_nn_checkpoint(v)
+        print(f"[Motion] NN ckpt: {_t.time() - _t0:.2f}s")
         v.motion_bake_end_frame = min(v.motion_bake_end_frame, v.motion_total_frames - 1)
-        # Apply frame 0 pose; skeleton plays immediately, cached deformation
-        # kicks in once background thread populates entries for this frame.
+        _t0 = _t.time()
         _motion_reset(v)
-        print(f"Loaded motion: {os.path.basename(bvh_path)} ({v.motion_total_frames} frames, {1.0/v.motion_bvh.frame_time:.0f} FPS)")
+        print(f"[Motion] _motion_reset: {_t.time() - _t0:.2f}s")
+        print(f"Loaded motion: {os.path.basename(bvh_path)} ({v.motion_total_frames} frames, {1.0/v.motion_bvh.frame_time:.0f} FPS) — total {_t.time() - _t_total:.2f}s")
     except Exception as e:
         print(f"Error loading BVH: {e}")
         traceback.print_exc()
