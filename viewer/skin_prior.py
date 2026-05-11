@@ -56,6 +56,7 @@ class SkinPriorBinder:
         """Capture rest-pose transform and triangle data for a bone."""
         if body_name in self.bone_rest:
             return self.bone_rest[body_name]
+        from scipy.spatial import cKDTree as _cKDTree
         wt = body_node.getWorldTransform()
         R_rest = np.array(wt.rotation())
         t_rest = np.array(wt.translation())
@@ -74,6 +75,11 @@ class SkinPriorBinder:
             "rest_R": R_rest,
             "rest_t": t_rest,
             "body_node": body_node,
+            # KDTree on rest-local bone vertices.  Built once; per-frame
+            # queries transform muscle verts into bone-local space and look
+            # up nearest bone vertex — rigid transform preserves distance,
+            # so the nearest local vertex = nearest world vertex.
+            "kdtree": _cKDTree(verts_local),
         }
         self.bone_rest[body_name] = entry
         return entry
@@ -228,6 +234,7 @@ class SkinPriorBinder:
                     "tri_idx": tri_idx,
                     "bary": bary,
                     "normal_offset": offset,
+                    "rest_dist": float(d),  # rest Euclidean distance to bone surface
                     "weight": w,
                 })
             self.bindings[muscle_name] = entries
@@ -237,19 +244,18 @@ class SkinPriorBinder:
 
     def compute_targets(self, muscle_name, vert_offset, current_positions=None):
         """Return (global_indices, weights, target_world_positions) for the
-        given muscle's bound verts using CURRENT bone world transforms.
+        given muscle's bound verts.
 
-        vert_offset: integer added to local vi to get global system index.
-        current_positions: optional np.ndarray (N_muscle_verts, 3) of the
-            muscle's current world-space positions.  When provided, the
-            skin-prior becomes ONE-SIDED: each vert is pulled toward
-            ``surface + rest_offset * normal`` only if its current signed
-            distance along the bone normal is BELOW its rest offset
-            (i.e., the vert is trying to penetrate or sit closer to the
-            bone than at rest).  Verts farther from the bone get a
-            target equal to their current position, producing zero net
-            spring force.  Without ``current_positions`` the legacy
-            symmetric attractor is used.
+        When ``current_positions`` is provided, each vert's target is
+        computed via a DYNAMIC nearest-bone-point search at this frame's
+        bone pose: find the bone-surface point nearest the vert NOW,
+        then target = that nearest point + ``rest_dist`` along the
+        outward (vert - nearest) direction.  The spring pulls the vert
+        to keep its rest-distance separation from the bone — pushing
+        out when too close and pulling back when drifting away.
+
+        Without ``current_positions`` falls back to the legacy
+        rigid-transform target (T_bone @ rest-relative target).
         """
         entries = self.bindings.get(muscle_name)
         if not entries:
@@ -258,35 +264,48 @@ class SkinPriorBinder:
         gi = np.empty(n, dtype=np.int64)
         ws = np.empty(n, dtype=np.float64)
         targets = np.empty((n, 3), dtype=np.float64)
-        for k, e in enumerate(entries):
-            rest = self.bone_rest[e["body"]]
-            tri = rest["tris"][e["tri_idx"]]
-            a = rest["verts_local"][tri[0]]
-            b = rest["verts_local"][tri[1]]
-            c = rest["verts_local"][tri[2]]
-            n_local = rest["tri_normals_local"][e["tri_idx"]]
-            cp_local = e["bary"][0] * a + e["bary"][1] * b + e["bary"][2] * c
+
+        # Pre-compute current world transforms per bone touched by this
+        # muscle (avoids redundant getWorldTransform calls per vert).
+        bones_used = {e["body"] for e in entries}
+        bone_RT = {}
+        for bone in bones_used:
+            rest = self.bone_rest[bone]
             wt = rest["body_node"].getWorldTransform()
             R_now = np.array(wt.rotation())
             t_now = np.array(wt.translation())
-            surface_world = R_now @ cp_local + t_now
-            normal_world = R_now @ n_local
-            rest_offset = e["normal_offset"]
+            bone_RT[bone] = (R_now, t_now)
+
+        for k, e in enumerate(entries):
+            rest = self.bone_rest[e["body"]]
+            R_now, t_now = bone_RT[e["body"]]
             gi[k] = vert_offset + e["vi_local"]
             ws[k] = e["weight"]
-            if current_positions is not None:
-                vi_local = e["vi_local"]
-                if vi_local < len(current_positions):
-                    cur = current_positions[vi_local]
-                    current_offset = float(np.dot(cur - surface_world, normal_world))
-                    if current_offset < rest_offset:
-                        # Penetration tendency — pull back to rest offset.
-                        targets[k] = surface_world + rest_offset * normal_world
-                    else:
-                        # Outside rest distance — zero net pull (target =
-                        # current pos, so spring force ≈ 0).
-                        targets[k] = cur
-                    continue
-            # Legacy two-sided attractor (no current_positions supplied).
-            targets[k] = surface_world + rest_offset * normal_world
+
+            if current_positions is not None and e["vi_local"] < len(current_positions):
+                # ── Dynamic nearest-bone-point search ──
+                vert_world = current_positions[e["vi_local"]]
+                # Bring vert into bone-local rest frame (rigid transform).
+                vert_local = R_now.T @ (vert_world - t_now)
+                d_local, idx_local = rest["kdtree"].query(vert_local)
+                nearest_local = rest["verts_local"][idx_local]
+                # Outward direction = unit (vert - nearest).
+                if d_local > 1e-9:
+                    outward_local = (vert_local - nearest_local) / d_local
+                else:
+                    # Vert sits on bone vertex; reuse rest normal as
+                    # fallback direction.
+                    outward_local = rest["tri_normals_local"][e["tri_idx"]]
+                target_local = nearest_local + e["rest_dist"] * outward_local
+                targets[k] = R_now @ target_local + t_now
+            else:
+                # Fallback: rigid transform of rest-relative target.
+                tri = rest["tris"][e["tri_idx"]]
+                a = rest["verts_local"][tri[0]]
+                b = rest["verts_local"][tri[1]]
+                c = rest["verts_local"][tri[2]]
+                n_local = rest["tri_normals_local"][e["tri_idx"]]
+                cp_local = e["bary"][0] * a + e["bary"][1] * b + e["bary"][2] * c
+                target_local = cp_local + e["normal_offset"] * n_local
+                targets[k] = R_now @ target_local + t_now
         return gi, ws, targets

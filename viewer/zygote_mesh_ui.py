@@ -7423,17 +7423,20 @@ def _run_unified_volume_sim(v, active_muscles, max_iterations=100, tolerance=1e-
     else:
         print(f"  Reusing cached system (skipping build_system)")
 
-    # Compute skin-prior targets for THIS frame using the current bone
-    # poses.  Symmetric attractor: target = surface_world + rest_offset *
-    # normal_world (rigid transform of rest-relative bone-local target).
-    # One-sided eval at LBS init froze the target and made muscles drag
-    # behind the bone — reverted to the symmetric form for now.
+    # Skin-prior targets: dynamic nearest-bone-point search per frame.
+    # Each bound vert's target is computed from its CURRENT distance to
+    # the nearest bone surface (re-evaluated this frame, not frozen at
+    # rest binding).  Spring pulls the vert toward "nearest_now +
+    # rest_dist * outward" so the rest separation is maintained both
+    # when the muscle would penetrate AND when it drifts away.
     skin_prior_targets = None
     if skin_binder is not None and getattr(skin_binder, 'bindings', None):
         skin_prior_targets = {}
         for name in muscle_names:
             offset = global_offset[name]
-            res = skin_binder.compute_targets(name, offset)
+            n_local = active_muscles[name].soft_body.num_vertices
+            current = global_positions[offset:offset + n_local]
+            res = skin_binder.compute_targets(name, offset, current_positions=current)
             if res is None:
                 continue
             gi_arr, _w_arr, tgt_arr = res
