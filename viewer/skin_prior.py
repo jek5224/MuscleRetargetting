@@ -68,10 +68,25 @@ class SkinPriorBinder:
         n_local = np.cross(e1, e2)
         n_norm = np.linalg.norm(n_local, axis=1, keepdims=True)
         n_local = np.where(n_norm > 1e-12, n_local / n_norm, n_local)
+        # Per-vertex pseudo-normal: area-weighted average of incident
+        # face normals.  Used as the outward direction at the nearest
+        # bone vertex in dynamic skin-prior so verts that drift inside
+        # the bone still get pushed in the correct outward direction
+        # (the unit vector "vert - nearest" would point inward when
+        # vert is interior, sending the target the wrong way).
+        vert_normals_local = np.zeros_like(verts_local)
+        np.add.at(vert_normals_local, tris[:, 0], n_local)
+        np.add.at(vert_normals_local, tris[:, 1], n_local)
+        np.add.at(vert_normals_local, tris[:, 2], n_local)
+        vn_norm = np.linalg.norm(vert_normals_local, axis=1, keepdims=True)
+        vert_normals_local = np.where(
+            vn_norm > 1e-12, vert_normals_local / vn_norm, vert_normals_local)
+
         entry = {
             "verts_local": verts_local,
             "tris": tris,
             "tri_normals_local": n_local,
+            "vert_normals_local": vert_normals_local,
             "rest_R": R_rest,
             "rest_t": t_rest,
             "body_node": body_node,
@@ -284,18 +299,16 @@ class SkinPriorBinder:
 
             if current_positions is not None and e["vi_local"] < len(current_positions):
                 # ── Dynamic nearest-bone-point search ──
+                # Outward direction comes from the BONE's surface
+                # pseudo-normal at the nearest vertex, not the
+                # (vert - nearest) unit vector.  This stays outward
+                # even when the muscle vert has slipped inside the
+                # bone — otherwise the target ends up further inside.
                 vert_world = current_positions[e["vi_local"]]
-                # Bring vert into bone-local rest frame (rigid transform).
                 vert_local = R_now.T @ (vert_world - t_now)
-                d_local, idx_local = rest["kdtree"].query(vert_local)
+                _d_local, idx_local = rest["kdtree"].query(vert_local)
                 nearest_local = rest["verts_local"][idx_local]
-                # Outward direction = unit (vert - nearest).
-                if d_local > 1e-9:
-                    outward_local = (vert_local - nearest_local) / d_local
-                else:
-                    # Vert sits on bone vertex; reuse rest normal as
-                    # fallback direction.
-                    outward_local = rest["tri_normals_local"][e["tri_idx"]]
+                outward_local = rest["vert_normals_local"][idx_local]
                 target_local = nearest_local + e["rest_dist"] * outward_local
                 targets[k] = R_now @ target_local + t_now
             else:
