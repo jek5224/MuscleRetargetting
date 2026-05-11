@@ -41,6 +41,10 @@
 - When the user disputes a result, drop my prior conclusion and investigate from scratch.
 - Don't paraphrase bake logs as proof. Logs say what the script printed, not whether the result is anatomically correct.
 
+## Muscle Names
+- Always write muscle names in full (e.g., Semitendinosus, Flexor Digitorum Longus, Vastus Medialis).
+- No abbreviations like ST, SM, FDL, EDL, VM, RF, even in conversational replies.
+
 ## No Unsolicited Fallbacks
 - Do NOT add fallback logic or edge case handling unless explicitly asked
 - If you think a fallback is necessary, ASK the user first before implementing
