@@ -7455,15 +7455,14 @@ def _run_unified_volume_sim(v, active_muscles, max_iterations=100, tolerance=1e-
                 axis_ratios[name] = 1.0
         # No temporal smoothing — axis_ratio uses each frame's raw value.
 
-        # Check if any muscle actually has non-trivial ratio
-        any_scaled = any(abs(r - 1.0) >= 0.02 for r in axis_ratios.values())
-
-        if any_scaled:
+        # Always apply scaling — even a 1.001 ratio is fine (no-op).  The
+        # previous 2% deadband caused per-frame target-edge discontinuities
+        # when a muscle's raw ratio crossed the 1.0 ± 0.02 boundary,
+        # producing visible "ticks" between consecutive frames (gastrocnemius).
+        if True:
             scaled_rest = cache['csr_rest_edges_base'].copy()
             for name, mid in cache['muscle_id_map'].items():
                 ratio = axis_ratios.get(name, 1.0)
-                if abs(ratio - 1.0) < 0.02:
-                    continue
                 # Volume-preserving perpendicular scale: under axial compression
                 # ratio<1, intra-contour edges grow by 1/sqrt(ratio) so that
                 # cross-section area * length stays constant. Clip [1.0, 1.6]
