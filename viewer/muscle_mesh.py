@@ -3846,8 +3846,15 @@ class MuscleMeshMixin:
                 self.soft_body.free_mask[fixed_arr[valid]] = False
                 print(f"  anchor_bone_map authoritative: {n_fixed} fixed verts")
 
-        # Compute LBS skinning weights for ALL vertices (not just fixed)
-        self._compute_skinning_weights(skeleton, mesh_to_body, list(skeleton_meshes.keys()) if skeleton_meshes else [])
+        # Compute LBS skinning weights for ALL vertices (not just fixed).
+        # Pass skeleton_meshes so the function can auto-add wrap bones the
+        # muscle passes near but isn't directly attached to (e.g.,
+        # Gastrocnemius posterior tibia wrap).
+        self._compute_skinning_weights(
+            skeleton, mesh_to_body,
+            list(skeleton_meshes.keys()) if skeleton_meshes else [],
+            skeleton_meshes=skeleton_meshes,
+        )
 
         print(f"Initialized quasistatic soft body simulation:")
         print(f"  Vertices: {self.soft_body.num_vertices}")

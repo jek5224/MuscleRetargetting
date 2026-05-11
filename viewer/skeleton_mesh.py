@@ -1047,9 +1047,19 @@ class SkeletonMeshMixin:
         if len(bones_used) > 1:
             print(f"    Bones: {sorted(bones_used)}")
 
-    def _compute_skinning_weights(self, skeleton, mesh_to_body, skeleton_names):
+    def _compute_skinning_weights(self, skeleton, mesh_to_body, skeleton_names,
+                                  skeleton_meshes=None, wrap_dist_thresh=0.03):
         """
         Compute LBS skinning weights using distance to anchors with better falloff.
+
+        skeleton_meshes: optional dict {bone_name: MeshLoader} so we can scan
+            for nearby bones the muscle wraps around but isn't directly
+            attached to (e.g., Gastrocnemius wrapping posterior tibia
+            without being anchored to it).  Bones whose mesh comes within
+            ``wrap_dist_thresh`` of any muscle vertex are added to the
+            skinning set, so LBS init follows them as they rotate.  The
+            TOP-K=2 per-vert pruning still applies so wrap bones only
+            dominate verts that are actually near them.
         """
         self.skinning_bones = []
         self.skinning_weights = None
@@ -1075,6 +1085,57 @@ class SkeletonMeshMixin:
             print("  Warning: No bones found for skinning")
             return
 
+        # ── Auto-add wrap bones: scan skeleton_meshes for bones whose mesh
+        #    lies within wrap_dist_thresh of any muscle vertex but isn't
+        #    already in the anchored set.  Each wrap bone gets a virtual
+        #    anchor point = its mesh vertex nearest to the muscle.  This
+        #    keeps LBS routing along the bone (e.g., Gastrocnemius mid-
+        #    belly along posterior tibia) instead of cutting straight
+        #    through it from cap to cap.
+        wrap_bone_anchor_seed = {}  # bone_name -> np.array(3,) seed anchor
+        if skeleton_meshes is not None and skeleton_meshes:
+            from scipy.spatial import cKDTree as _cKDTree_wrap
+            muscle_verts = np.asarray(self.soft_body.rest_positions)
+            muscle_bb_min = muscle_verts.min(axis=0) - wrap_dist_thresh
+            muscle_bb_max = muscle_verts.max(axis=0) + wrap_dist_thresh
+            for bone_name, bone_mesh in skeleton_meshes.items():
+                if bone_name in body_names_set:
+                    continue  # already attached
+                if not hasattr(bone_mesh, 'vertices') or bone_mesh.vertices is None:
+                    continue
+                bv = np.asarray(bone_mesh.vertices, dtype=np.float64)
+                if len(bv) == 0:
+                    continue
+                # Bbox pre-filter
+                if (bv.min(axis=0) > muscle_bb_max).any() or (bv.max(axis=0) < muscle_bb_min).any():
+                    continue
+                # KDTree distance from each muscle vert to bone mesh
+                tree = _cKDTree_wrap(bv)
+                dists, _ = tree.query(muscle_verts)
+                # Add only if a non-cap muscle vert is genuinely close
+                close_n = int(np.sum(dists < wrap_dist_thresh))
+                if close_n >= 3:
+                    # Resolve to DART body name (with suffix handling).  If
+                    # we can't find it, skip — LBS needs the live
+                    # transform.
+                    resolved = None
+                    for cand in (bone_name, bone_name + "0", bone_name + "1",
+                                 bone_name.rstrip("0123456789")):
+                        if skeleton.getBodyNode(cand) is not None:
+                            resolved = cand
+                            break
+                    if resolved is None:
+                        continue
+                    # Seed anchor: muscle vert that is closest to this bone,
+                    # snapped to the bone surface.  Picking the muscle vert
+                    # (not a bone vert) keeps IDW symmetry with cap-based
+                    # anchors which also live on the muscle.
+                    closest_muscle_vi = int(np.argmin(dists))
+                    wrap_bone_anchor_seed[resolved] = muscle_verts[closest_muscle_vi]
+                    body_names_set.add(resolved)
+                    print(f"    Wrap bone auto-added: '{resolved}' "
+                          f"({close_n} muscle verts within {wrap_dist_thresh*100:.1f}cm)")
+
         self.skinning_bones = list(body_names_set)
         num_bones = len(self.skinning_bones)
         num_verts = len(self.soft_body.rest_positions)
@@ -1088,6 +1149,11 @@ class SkeletonMeshMixin:
                 anchor_pos = self.soft_body.rest_positions[anchor_idx]
                 bone_anchor_positions[body_name].append(anchor_pos)
                 print(f"    Bone '{body_name}': anchor at {anchor_pos}")
+        # Wrap bones use the seed muscle vert as their anchor point so IDW
+        # weights peak along the bone the muscle is wrapping.
+        for bone_name, seed_pos in wrap_bone_anchor_seed.items():
+            if bone_name in bone_anchor_positions:
+                bone_anchor_positions[bone_name].append(np.asarray(seed_pos))
 
         # For each vertex, compute weight to each bone
         self.skinning_weights = np.zeros((num_verts, num_bones))
