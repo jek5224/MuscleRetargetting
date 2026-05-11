@@ -7453,14 +7453,7 @@ def _run_unified_volume_sim(v, active_muscles, max_iterations=100, tolerance=1e-
                 axis_ratios[name] = np.clip(current_len / rest_len, 0.5, 2.0)
             else:
                 axis_ratios[name] = 1.0
-        # Temporal smoothing of per-muscle axis ratio dampens frame-to-frame
-        # cap-distance noise that propagated into target rest lengths and
-        # caused visible oscillation in the bulge response.
-        prev_ratios = cache.get('prev_axis_ratios')
-        if prev_ratios is not None:
-            for name in axis_ratios:
-                axis_ratios[name] = 0.7 * axis_ratios[name] + 0.3 * prev_ratios.get(name, axis_ratios[name])
-        cache['prev_axis_ratios'] = dict(axis_ratios)
+        # No temporal smoothing — axis_ratio uses each frame's raw value.
 
         # Check if any muscle actually has non-trivial ratio
         any_scaled = any(abs(r - 1.0) >= 0.02 for r in axis_ratios.values())
