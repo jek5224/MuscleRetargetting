@@ -8680,18 +8680,26 @@ def _motion_load_cache(v):
 
     Filters cache entries by vertex-count match against current tet so a
     1216-vert original-mesh bake doesn't silently shadow a 512-vert contour
-    bake (or vice versa) when subdirs from both modes coexist."""
+    bake (or vice versa) when subdirs from both modes coexist.
+
+    Chunk files are read in parallel via a thread pool — ~10k chunk reads
+    for a 7840-frame BVH × 25 muscles is pure I/O bound and scales well
+    with concurrent reads (Linux page cache + NVMe).
+    """
+    from concurrent.futures import ThreadPoolExecutor
+    import time as _t
+    _t_start = _t.time()
+
     v.motion_deform_cache = {}
     cache_dir = _motion_cache_dir(v)
     if cache_dir is None:
         return
+
+    # ── 1. Collect (mname, npz_files_sorted, expected_n) per muscle ──
+    muscle_files = []
     for mname in v.zygote_muscle_meshes:
         mobj = v.zygote_muscle_meshes[mname]
         expected_n = mobj.tet_vertices.shape[0] if mobj.tet_vertices is not None else None
-        # Collect files from every subdir + top-level, sorted by mtime so the
-        # most recently baked chunk wins on overlap. Older bakes left lying
-        # around (e.g. _old_cache/emu_*, layered_coll) no longer shadow newer
-        # ones at frames they happen to cover.
         npz_files = []
         for subdir in glob.glob(os.path.join(cache_dir, '*/')):
             npz_files.extend(glob.glob(os.path.join(subdir, f'{mname}_chunk_*.npz')))
@@ -8705,21 +8713,48 @@ def _motion_load_cache(v):
         npz_files.sort(key=lambda p: os.path.getmtime(p))
         if not npz_files:
             continue
-        cache = {}
-        for npz_path in npz_files:
-            data = np.load(npz_path, allow_pickle=True)
-            frames = data['frames']
-            positions = data['positions']
-            # Skip entire chunk if its vertex count doesn't match current tet.
-            if expected_n is not None and positions.shape[1] != expected_n:
+        muscle_files.append((mname, npz_files, expected_n))
+
+    if not muscle_files:
+        return
+
+    # ── 2. Build flat work list (mname, file_order_idx, path, expected_n) ──
+    work = []
+    for mname, files, exp_n in muscle_files:
+        for order_idx, path in enumerate(files):
+            work.append((mname, order_idx, path, exp_n))
+
+    def _load_one(item):
+        mname, order_idx, path, exp_n = item
+        data = np.load(path, allow_pickle=True)
+        positions = data['positions']
+        if exp_n is not None and positions.shape[1] != exp_n:
+            return mname, order_idx, None
+        frames = data['frames']
+        has_wp = 'waypoints_flat' in data and 'waypoints_shape' in data
+        wp_flats = data['waypoints_flat'] if has_wp else None
+        wp_shape_str = None
+        if has_wp:
+            raw = data['waypoints_shape'][0]
+            wp_shape_str = raw.decode('utf-8') if isinstance(raw, (bytes, np.bytes_)) else str(raw)
+        anim = data['positions_anim'] if 'positions_anim' in data.files else None
+        return mname, order_idx, (frames, positions, wp_flats, wp_shape_str, anim, has_wp)
+
+    # ── 3. Parallel load — disk I/O scales with threadpool, GIL released
+    #       during np.load's blocking read ──
+    max_workers = min(16, max(4, (os.cpu_count() or 4) * 2))
+    chunk_results = {}  # mname -> list-of (order_idx, payload)
+    with ThreadPoolExecutor(max_workers=max_workers) as ex:
+        for mname, order_idx, payload in ex.map(_load_one, work):
+            if payload is None:
                 continue
-            has_wp = 'waypoints_flat' in data and 'waypoints_shape' in data
-            wp_flats = data['waypoints_flat'] if has_wp else None
-            wp_shape_str = None
-            if has_wp:
-                raw = data['waypoints_shape'][0]
-                wp_shape_str = raw.decode('utf-8') if isinstance(raw, (bytes, np.bytes_)) else str(raw)
-            anim = data['positions_anim'] if 'positions_anim' in data.files else None
+            chunk_results.setdefault(mname, []).append((order_idx, payload))
+
+    # ── 4. Assemble per-muscle frame dict in original (mtime) order ──
+    for mname, items in chunk_results.items():
+        items.sort(key=lambda x: x[0])
+        cache = {}
+        for _, (frames, positions, wp_flats, wp_shape_str, anim, has_wp) in items:
             for i, f in enumerate(frames):
                 entry = {'positions': positions[i]}
                 if has_wp:
@@ -8729,6 +8764,11 @@ def _motion_load_cache(v):
                     entry['positions_anim'] = anim[i]
                 cache[int(f)] = entry
         v.motion_deform_cache[mname] = cache
+
+    n_chunks = len(work)
+    print(f"[Motion cache] {len(v.motion_deform_cache)} muscles, "
+          f"{n_chunks} chunks loaded via {max_workers}-thread pool "
+          f"in {_t.time() - _t_start:.2f}s")
 
 def _flatten_waypoints(waypoints):
     """Flatten nested waypoints list into a single float32 array + shape JSON string.
