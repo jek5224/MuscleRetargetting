@@ -7472,10 +7472,11 @@ def _run_unified_volume_sim(v, active_muscles, max_iterations=100, tolerance=1e-
                     continue
                 # Volume-preserving perpendicular scale: under axial compression
                 # ratio<1, intra-contour edges grow by 1/sqrt(ratio) so that
-                # cross-section area * length stays constant. Clip [1.0, 1.6]
-                # — 60% bulge enough to suppress S-buckling without driving
-                # frame-to-frame oscillation that 2.0 produced.
-                perp_scale = np.clip(np.sqrt(1.0 / ratio), 1.0, 1.6)
+                # cross-section area * length stays constant. Clip [1.0, 1.8]
+                # — bumped from 1.6 → 1.8 for stronger visible contraction
+                # bulge while staying well below 2.0 which caused frame-to-
+                # frame oscillation.
+                perp_scale = np.clip(np.sqrt(1.0 / ratio), 1.0, 1.8)
                 muscle_mask = cache['csr_muscle_id'] == mid
                 scaled_rest[muscle_mask & cache['csr_cross_mask']] *= ratio
                 scaled_rest[muscle_mask & cache['csr_intra_mask']] *= perp_scale
