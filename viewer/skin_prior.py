@@ -235,11 +235,21 @@ class SkinPriorBinder:
         print(f"  Skin prior: {n_bound} verts bound across {len(self.bindings)} muscles")
         return n_bound > 0
 
-    def compute_targets(self, muscle_name, vert_offset):
+    def compute_targets(self, muscle_name, vert_offset, current_positions=None):
         """Return (global_indices, weights, target_world_positions) for the
-        given muscle's bound verts.  Uses CURRENT bone world transforms.
+        given muscle's bound verts using CURRENT bone world transforms.
 
         vert_offset: integer added to local vi to get global system index.
+        current_positions: optional np.ndarray (N_muscle_verts, 3) of the
+            muscle's current world-space positions.  When provided, the
+            skin-prior becomes ONE-SIDED: each vert is pulled toward
+            ``surface + rest_offset * normal`` only if its current signed
+            distance along the bone normal is BELOW its rest offset
+            (i.e., the vert is trying to penetrate or sit closer to the
+            bone than at rest).  Verts farther from the bone get a
+            target equal to their current position, producing zero net
+            spring force.  Without ``current_positions`` the legacy
+            symmetric attractor is used.
         """
         entries = self.bindings.get(muscle_name)
         if not entries:
@@ -256,12 +266,27 @@ class SkinPriorBinder:
             c = rest["verts_local"][tri[2]]
             n_local = rest["tri_normals_local"][e["tri_idx"]]
             cp_local = e["bary"][0] * a + e["bary"][1] * b + e["bary"][2] * c
-            target_local = cp_local + e["normal_offset"] * n_local
             wt = rest["body_node"].getWorldTransform()
             R_now = np.array(wt.rotation())
             t_now = np.array(wt.translation())
-            target_world = R_now @ target_local + t_now
+            surface_world = R_now @ cp_local + t_now
+            normal_world = R_now @ n_local
+            rest_offset = e["normal_offset"]
             gi[k] = vert_offset + e["vi_local"]
             ws[k] = e["weight"]
-            targets[k] = target_world
+            if current_positions is not None:
+                vi_local = e["vi_local"]
+                if vi_local < len(current_positions):
+                    cur = current_positions[vi_local]
+                    current_offset = float(np.dot(cur - surface_world, normal_world))
+                    if current_offset < rest_offset:
+                        # Penetration tendency — pull back to rest offset.
+                        targets[k] = surface_world + rest_offset * normal_world
+                    else:
+                        # Outside rest distance — zero net pull (target =
+                        # current pos, so spring force ≈ 0).
+                        targets[k] = cur
+                    continue
+            # Legacy two-sided attractor (no current_positions supplied).
+            targets[k] = surface_world + rest_offset * normal_world
         return gi, ws, targets
