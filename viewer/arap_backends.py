@@ -1176,7 +1176,7 @@ class ARAPBackendTaichi(ARAPBackend):
               fixed_mask, fixed_targets, max_iterations=20, tolerance=1e-4,
               target_edges=None, verbose=False, collision_targets=None,
               collision_projection=None, collision_target_fn=None,
-              skin_prior_targets=None):
+              skin_prior_targets=None, disable_plateau_exit=False):
         """Run full ARAP iteration using Taichi.
 
         collision_target_fn: callable(positions) -> dict {vi: target_pos}
@@ -1265,7 +1265,10 @@ class ARAPBackendTaichi(ARAPBackend):
                 return positions, iteration + 1, max_disp
             # Plateau detection: track running min over a window, stop when
             # the window can't drive the disp below (1 - PLATEAU_REL) * window_min.
-            if (iteration + 1) % PLATEAU_WINDOW == 0:
+            # When disable_plateau_exit is True the solver always runs up to
+            # max_iterations so per-frame convergence depth is uniform
+            # (avoids visible per-frame ticks at fast-pose frames).
+            if not disable_plateau_exit and (iteration + 1) % PLATEAU_WINDOW == 0:
                 if max_disp >= plateau_min * (1.0 - PLATEAU_REL):
                     if verbose:
                         print(f"  Plateau at iter {iteration+1}, max_disp={max_disp:.2e} (window min={plateau_min:.2e})")

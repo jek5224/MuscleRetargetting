@@ -188,6 +188,7 @@ def build_context(skel, muscle_meshes, skeleton_meshes, mesh_info, args):
         skin_prior_sigma=getattr(args, 'skin_prior_sigma', 0.02),
         skin_prior_max_dist=getattr(args, 'skin_prior_max_dist', 0.05),
         skin_prior_strength=getattr(args, 'skin_prior_strength', 0.7),
+        disable_plateau_exit=getattr(args, 'no_plateau_exit', False),
         skin_prior_binder=None,
         _unified_arap_backend=None,
         _unified_sim_cache=None,
@@ -363,6 +364,16 @@ def main():
              "(rest edges stay at base length, no contraction-tracking).  "
              "Use to test whether the per-frame ratio tracking is causing "
              "frame-to-frame tremble.",
+    )
+    parser.add_argument(
+        "--no-plateau-exit",
+        action="store_true",
+        default=False,
+        help="Disable ARAP solver plateau early-exit so every frame "
+             "runs the full --settle-iters.  Trades compute for uniform "
+             "per-frame convergence depth — reduces per-frame ticking "
+             "at fast-pose frames where the early-exit accepts higher "
+             "residuals.",
     )
     parser.add_argument(
         "--inter-muscle-weight",

@@ -7507,6 +7507,8 @@ def _run_unified_volume_sim(v, active_muscles, max_iterations=100, tolerance=1e-
     )
     if skin_prior_targets:
         solve_kwargs['skin_prior_targets'] = skin_prior_targets
+    if getattr(v, 'disable_plateau_exit', False):
+        solve_kwargs['disable_plateau_exit'] = True
     global_positions, iterations, max_disp = backend.solve(
         global_positions, global_rest_positions, neighbors, edge_weights, rest_edge_vectors,
         global_fixed_mask, fixed_targets_array, **solve_kwargs
