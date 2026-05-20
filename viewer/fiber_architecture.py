@@ -1866,7 +1866,12 @@ class FiberArchitectureMixin:
         glBindBuffer(GL_ARRAY_BUFFER, 0)
 
     def _rebuild_fiber_draw_arrays(self):
-        """Rebuild cached GL arrays for fiber/waypoint drawing (vectorized)."""
+        """Rebuild cached GL arrays for fiber/waypoint drawing.
+
+        Vectorized: single concat of all visible (stream, level) waypoint arrays,
+        one bulk finite check, then line pair building per (stream, level) gap.
+        No persistent state — recomputes structure every call.
+        """
         if not hasattr(self, 'waypoints') or not self.waypoints:
             self._fiber_draw_pts = None
             self._fiber_draw_lines = None
@@ -1874,45 +1879,59 @@ class FiberArchitectureMixin:
             self._fiber_lines_count = 0
             return
 
-        # Collect all visible waypoint arrays
-        all_pts = []
-        line_pairs = []
-        for stream_idx, waypoint_group in enumerate(self.waypoints):
-            if self.draw_contour_stream is not None and stream_idx < len(self.draw_contour_stream) and self.draw_contour_stream[stream_idx]:
-                for level_idx, wps in enumerate(waypoint_group):
-                    arr = np.asarray(wps, dtype=np.float32)
-                    if arr.ndim != 2 or arr.shape[1] != 3 or len(arr) == 0:
-                        continue
-                    # Filter non-finite
-                    valid = np.all(np.isfinite(arr), axis=1)
-                    arr = arr[valid]
-                    if len(arr) > 0:
-                        all_pts.append(arr)
-                    # Fiber lines: connect this level to next
-                    if level_idx + 1 < len(waypoint_group):
-                        nxt = np.asarray(waypoint_group[level_idx + 1], dtype=np.float32)
-                        if nxt.ndim == 2 and nxt.shape[1] == 3:
-                            n = min(len(arr), len(nxt))
-                            if n > 0:
-                                c = arr[:n]
-                                nx = nxt[:n]
-                                valid_both = np.all(np.isfinite(c), axis=1) & np.all(np.isfinite(nx), axis=1)
-                                c = c[valid_both]
-                                nx = nx[valid_both]
-                                if len(c) > 0:
-                                    # Interleave: [c0, n0, c1, n1, ...]
-                                    pairs = np.empty((len(c) * 2, 3), dtype=np.float32)
-                                    pairs[0::2] = c
-                                    pairs[1::2] = nx
-                                    line_pairs.append(pairs)
+        # Walk visible (stream, level) once, recording offset + length.
+        # Single Python pass; rest is numpy.
+        arrs = []
+        meta = []  # (stream_idx, level_idx, start_offset, n)
+        total = 0
+        for stream_idx, group in enumerate(self.waypoints):
+            if (self.draw_contour_stream is not None
+                    and stream_idx < len(self.draw_contour_stream)
+                    and not self.draw_contour_stream[stream_idx]):
+                continue
+            for level_idx, wps in enumerate(group):
+                arr = np.asarray(wps, dtype=np.float32)
+                if arr.ndim != 2 or arr.shape[1] != 3 or len(arr) == 0:
+                    continue
+                arrs.append(arr)
+                meta.append((stream_idx, level_idx, total, len(arr)))
+                total += len(arr)
 
-        self._fiber_draw_pts = (
-            np.ascontiguousarray(np.concatenate(all_pts, dtype=np.float32))
-            if all_pts else None
-        )
+        if not arrs:
+            self._fiber_draw_pts = None
+            self._fiber_draw_lines = None
+            return
+
+        big = np.concatenate(arrs, axis=0)  # (total, 3)
+        valid = np.all(np.isfinite(big), axis=1)
+        self._fiber_draw_pts = np.ascontiguousarray(big[valid]) if valid.any() else None
+
+        # Build adjacency for lines: pair (stream_idx, level_idx) with (stream_idx, level_idx+1).
+        # Lookup offsets via dict.
+        off_map = {(s, l): (o, n) for (s, l, o, n) in meta}
+        line_arrs = []
+        for (s, l, o, n) in meta:
+            nxt = off_map.get((s, l + 1))
+            if nxt is None:
+                continue
+            o2, n2 = nxt
+            k = min(n, n2)
+            if k <= 0:
+                continue
+            c = big[o:o + k]
+            nx = big[o2:o2 + k]
+            vboth = np.all(np.isfinite(c), axis=1) & np.all(np.isfinite(nx), axis=1)
+            if not vboth.any():
+                continue
+            c = c[vboth]
+            nx = nx[vboth]
+            pairs = np.empty((len(c) * 2, 3), dtype=np.float32)
+            pairs[0::2] = c
+            pairs[1::2] = nx
+            line_arrs.append(pairs)
+
         self._fiber_draw_lines = (
-            np.ascontiguousarray(np.concatenate(line_pairs, dtype=np.float32))
-            if line_pairs else None
+            np.ascontiguousarray(np.concatenate(line_arrs, axis=0)) if line_arrs else None
         )
         # Upload to server-side VBOs.  Driver owns the memory after this,
         # so client-side numpy buffers can be freed without breaking the
@@ -1963,29 +1982,29 @@ class FiberArchitectureMixin:
             self._fiber_draw_dirty = False
 
         if not use_depth_fade:
-            # VBO-backed path — uniform color, no per-vertex alpha.
-            # Position data lives in server-side VBO so the driver can't
-            # be reading freed numpy memory across frames.
+            # Client-side immediate path — uniform color, no per-vertex alpha.
+            # Skips VBO entirely to avoid stale-buffer crashes when the
+            # waypoint structure changes between draws (e.g. checkpoint reload).
             glDisable(GL_LIGHTING)
+            glDisableClientState(GL_COLOR_ARRAY)
             glEnableClientState(GL_VERTEX_ARRAY)
 
-            n_pts = getattr(self, '_fiber_pts_count', 0)
-            if n_pts > 0 and getattr(self, '_fiber_pts_vbo', None):
+            pts_arr = getattr(self, '_fiber_draw_pts', None)
+            if pts_arr is not None and len(pts_arr) > 0:
                 glPointSize(5)
                 glColor4f(1.0, 0.6, 0.0, alpha)
-                glBindBuffer(GL_ARRAY_BUFFER, self._fiber_pts_vbo)
-                glVertexPointer(3, GL_FLOAT, 0, None)
-                glDrawArrays(GL_POINTS, 0, n_pts)
+                glBindBuffer(GL_ARRAY_BUFFER, 0)
+                glVertexPointer(3, GL_FLOAT, 0, pts_arr)
+                glDrawArrays(GL_POINTS, 0, len(pts_arr))
 
-            n_lines = getattr(self, '_fiber_lines_count', 0)
-            if n_lines > 0 and getattr(self, '_fiber_lines_vbo', None):
+            lines_arr = getattr(self, '_fiber_draw_lines', None)
+            if lines_arr is not None and len(lines_arr) > 0:
                 glLineWidth(2)
                 glColor4f(0.75, 0, 0, alpha)
-                glBindBuffer(GL_ARRAY_BUFFER, self._fiber_lines_vbo)
-                glVertexPointer(3, GL_FLOAT, 0, None)
-                glDrawArrays(GL_LINES, 0, n_lines)
+                glBindBuffer(GL_ARRAY_BUFFER, 0)
+                glVertexPointer(3, GL_FLOAT, 0, lines_arr)
+                glDrawArrays(GL_LINES, 0, len(lines_arr))
 
-            glBindBuffer(GL_ARRAY_BUFFER, 0)
             glDisableClientState(GL_VERTEX_ARRAY)
         else:
             # Depth fade path — per-vertex alpha from eye-space depth
@@ -2011,47 +2030,46 @@ class FiberArchitectureMixin:
                     return (base_a * (1.0 - 0.85 * t)).astype(np.float32)
                 return np.full(n, base_a, dtype=np.float32)
 
-            # Draw waypoints (orange + depth alpha) via VBO.  Position
-            # buffer is the static fiber-pts VBO; per-frame depth alphas
-            # go into a small color VBO.
-            n_pts = getattr(self, '_fiber_pts_count', 0)
-            if n_pts > 0 and getattr(self, '_fiber_pts_vbo', None):
-                p_alphas = compute_depth_alphas(self._fiber_draw_pts, alpha)
+            # Draw waypoints (orange + depth alpha) via client-side arrays.
+            # Force float32 contiguous + keep references alive on self to
+            # prevent GC while glDrawArrays reads the buffer.
+            pts_arr = getattr(self, '_fiber_draw_pts', None)
+            if pts_arr is not None and len(pts_arr) > 0:
+                pts_arr = np.ascontiguousarray(pts_arr, dtype=np.float32)
+                n_pts = len(pts_arr)
+                p_alphas = compute_depth_alphas(pts_arr, alpha)
                 pt_rgba = np.empty((n_pts, 4), dtype=np.float32)
                 pt_rgba[:, 0] = 1.0
                 pt_rgba[:, 1] = 0.6
                 pt_rgba[:, 2] = 0.0
-                pt_rgba[:, 3] = p_alphas
-                pt_rgba = np.ascontiguousarray(pt_rgba)
-                self._ensure_fiber_vbos()
-                glBindBuffer(GL_ARRAY_BUFFER, self._fiber_pts_color_vbo)
-                glBufferData(GL_ARRAY_BUFFER, pt_rgba.nbytes, pt_rgba, GL_DYNAMIC_DRAW)
-                glColorPointer(4, GL_FLOAT, 0, None)
-                glBindBuffer(GL_ARRAY_BUFFER, self._fiber_pts_vbo)
-                glVertexPointer(3, GL_FLOAT, 0, None)
+                pt_rgba[:, 3] = p_alphas.astype(np.float32)
+                pt_rgba = np.ascontiguousarray(pt_rgba, dtype=np.float32)
+                self._fiber_draw_pts_keepalive = pts_arr
+                self._fiber_pts_rgba_keepalive = pt_rgba
+                glBindBuffer(GL_ARRAY_BUFFER, 0)
+                glColorPointer(4, GL_FLOAT, 0, pt_rgba)
+                glVertexPointer(3, GL_FLOAT, 0, pts_arr)
                 glPointSize(5)
                 glDrawArrays(GL_POINTS, 0, n_pts)
-                glBindBuffer(GL_ARRAY_BUFFER, 0)
 
-            # Draw fiber lines via VBO with per-frame color VBO.
-            n_lines = getattr(self, '_fiber_lines_count', 0)
-            if n_lines > 0 and getattr(self, '_fiber_lines_vbo', None):
-                alphas = compute_depth_alphas(self._fiber_draw_lines, alpha)
+            lines_arr = getattr(self, '_fiber_draw_lines', None)
+            if lines_arr is not None and len(lines_arr) > 0:
+                lines_arr = np.ascontiguousarray(lines_arr, dtype=np.float32)
+                n_lines = len(lines_arr)
+                alphas = compute_depth_alphas(lines_arr, alpha)
                 line_rgba = np.empty((n_lines, 4), dtype=np.float32)
                 line_rgba[:, 0] = 0.75
                 line_rgba[:, 1] = 0.0
                 line_rgba[:, 2] = 0.0
-                line_rgba[:, 3] = alphas
-                line_rgba = np.ascontiguousarray(line_rgba)
-                self._ensure_fiber_vbos()
-                glBindBuffer(GL_ARRAY_BUFFER, self._fiber_lines_color_vbo)
-                glBufferData(GL_ARRAY_BUFFER, line_rgba.nbytes, line_rgba, GL_DYNAMIC_DRAW)
-                glColorPointer(4, GL_FLOAT, 0, None)
-                glBindBuffer(GL_ARRAY_BUFFER, self._fiber_lines_vbo)
-                glVertexPointer(3, GL_FLOAT, 0, None)
+                line_rgba[:, 3] = alphas.astype(np.float32)
+                line_rgba = np.ascontiguousarray(line_rgba, dtype=np.float32)
+                self._fiber_draw_lines_keepalive = lines_arr
+                self._fiber_lines_rgba_keepalive = line_rgba
+                glBindBuffer(GL_ARRAY_BUFFER, 0)
+                glColorPointer(4, GL_FLOAT, 0, line_rgba)
+                glVertexPointer(3, GL_FLOAT, 0, lines_arr)
                 glLineWidth(2)
                 glDrawArrays(GL_LINES, 0, n_lines)
-                glBindBuffer(GL_ARRAY_BUFFER, 0)
 
             glDisableClientState(GL_COLOR_ARRAY)
             glDisableClientState(GL_VERTEX_ARRAY)
@@ -2979,7 +2997,7 @@ class FiberArchitectureMixin:
         if not np.any(valid):
             return None, None, False
         bary_123 = np.zeros((len(sorted_indices), 3))
-        bary_123[valid] = np.linalg.solve(T[valid], rhs[valid])
+        bary_123[valid] = np.linalg.solve(T[valid], rhs[valid][..., None]).squeeze(-1)
         bary_0 = 1.0 - bary_123.sum(axis=1)
         bary_all = np.column_stack([bary_0, bary_123])       # (K, 4)
         min_coords = bary_all.min(axis=1)
@@ -3864,3 +3882,49 @@ class FiberArchitectureMixin:
 
         self._fiber_draw_dirty = True
         return True
+
+    def update_waypoints_fast_gpu(self, tet_verts_gpu):
+        """Compute waypoints on GPU + sync + scatter (convenience wrapper)."""
+        wp_pos_gpu = self.compute_waypoints_gpu(tet_verts_gpu)
+        if wp_pos_gpu is None:
+            return False
+        self.scatter_waypoints_numpy(wp_pos_gpu.cpu().numpy())
+        return True
+
+    def compute_waypoints_gpu(self, tet_verts_gpu):
+        """Compute waypoint world positions on GPU.
+
+        Returns torch tensor (N_waypoints, 3) on GPU or None if not ready.
+        Caller is responsible for syncing to CPU and calling scatter_waypoints_numpy.
+        Use this when batching multiple muscles into a single sync.
+        """
+        if not hasattr(self, 'waypoints') or self.waypoints is None or len(self.waypoints) == 0:
+            return None
+        if not hasattr(self, '_wp_tet_idx') or self._wp_tet_idx is None:
+            self._build_waypoint_nn_embedding()
+        if not hasattr(self, '_wp_tet_idx') or self._wp_tet_idx is None:
+            return None
+        import torch as _torch
+        device = tet_verts_gpu.device
+        if not hasattr(self, '_wp_flat_tet_idx_gpu') or self._wp_flat_tet_idx_gpu is None \
+                or self._wp_flat_tet_idx_gpu.device != device:
+            tetrahedra = np.asarray(self.tet_tetrahedra)
+            flat_tet_idx = tetrahedra[self._wp_tet_idx]
+            self._wp_flat_tet_idx_gpu = _torch.from_numpy(
+                np.ascontiguousarray(flat_tet_idx, dtype=np.int64)).to(device)
+            self._wp_bary_gpu = _torch.from_numpy(
+                np.ascontiguousarray(self._wp_bary, dtype=np.float32)).to(device)
+        v = tet_verts_gpu[self._wp_flat_tet_idx_gpu]
+        return _torch.einsum('ni,nij->nj', self._wp_bary_gpu, v)
+
+    def scatter_waypoints_numpy(self, wp_pos):
+        """Write a numpy (N, 3) waypoint array into self.waypoints structure."""
+        if not hasattr(self, '_wp_structure') or self._wp_structure is None:
+            return
+        offset = 0
+        for stream_idx, level_idx, n_fibers in self._wp_structure:
+            if n_fibers == 0:
+                continue
+            self.waypoints[stream_idx][level_idx] = wp_pos[offset:offset + n_fibers]
+            offset += n_fibers
+        self._fiber_draw_dirty = True

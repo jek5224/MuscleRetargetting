@@ -83,6 +83,18 @@ def draw_zygote_muscle_ui(v):
         imgui.same_line()
         _, v.zygote_fiber_transparency = imgui.slider_float("Fiber Transparency", v.zygote_fiber_transparency, 0.0, 1.0)
 
+        # Reverse-LBS waypoint override: shows fiber positions computed from
+        # solved 2/3-bone LBS local positions + current skeleton pose, instead
+        # of cache- or NN-derived waypoints. Tet mesh rendering is unaffected.
+        if not hasattr(v, 'reverse_lbs_enabled'):
+            v.reverse_lbs_enabled = False
+        changed_rlbs, v.reverse_lbs_enabled = imgui.checkbox(
+            "Show Reverse-LBS Waypoints##fiber_rlbs", v.reverse_lbs_enabled)
+        if changed_rlbs and v.reverse_lbs_enabled:
+            _reverse_lbs_load(v)
+        if changed_rlbs:
+            _reverse_lbs_apply(v)
+
         # Muscle Add/Remove UI
         if imgui.tree_node("Add/Remove Muscles"):
             imgui.text("Available:")
@@ -320,6 +332,17 @@ def draw_zygote_muscle_ui(v):
                         print(f"Imported {v.env.muscles.getNumMuscles()} muscles from {muscle_file}")
                 except Exception as e:
                     print(f"Error importing muscle waypoints: {e}")
+
+        if imgui.button("Update DART LBS Muscles", width=wide_button_width):
+            if hasattr(v.env, 'muscles') and v.env.muscles is not None \
+                    and v.env.muscles.getNumMuscles() > 0:
+                v.env.muscles.update()
+                v.env.muscle_pos = v.env.muscles.getMusclePositions()
+            else:
+                print("Click 'Import zygote_muscle' first.")
+
+        if imgui.button("Import Reverse-LBS muscles", width=wide_button_width):
+            _import_reverse_lbs_into_dart(v)
 
         # Load all tet meshes and init soft bodies
         if imgui.button("Load All Tets", width=wide_button_width):
@@ -1684,6 +1707,14 @@ def _draw_motion_browser_ui(v):
         imgui.end_combo()
     imgui.pop_item_width()
 
+    # Reload cache from disk (useful while a bake is writing fresh chunks).
+    if v.motion_bvh is not None:
+        if imgui.button("Reload Cache##motion"):
+            import time as _t
+            _t0 = _t.time()
+            _motion_load_cache(v, force=True)
+            print(f"[Motion] Cache reload: {_t.time() - _t0:.2f}s, {len(v.motion_deform_cache)} muscles")
+
     # Show info if loaded
     if v.motion_bvh is not None:
         fps = 1.0 / v.motion_bvh.frame_time
@@ -1709,6 +1740,8 @@ def _draw_motion_browser_ui(v):
             else:
                 _motion_clear_heatmap(v)
                 _motion_apply_cached_deformation(v, new_frame)
+            if getattr(v, 'reverse_lbs_enabled', False):
+                _reverse_lbs_apply(v)
 
         # Convergence-anim scrubber: visible only if cache has positions_anim.
         anim_k = _motion_anim_steps(v, v.motion_current_frame)
@@ -1728,6 +1761,22 @@ def _draw_motion_browser_ui(v):
         # Transport buttons
         if imgui.button("Reset##motion"):
             _motion_reset(v)
+        imgui.same_line()
+        if imgui.button("Step -1##motion"):
+            new_frame = max(0, v.motion_current_frame - 1)
+            if new_frame != v.motion_current_frame:
+                _motion_apply_pose(v, new_frame)
+                if v.motion_use_nn and v.motion_nn_model is not None:
+                    _motion_apply_nn_deformation(v, new_frame)
+                    if v.motion_nn_error_heatmap:
+                        _motion_update_nn_error_heatmap(v, new_frame)
+                    else:
+                        _motion_clear_heatmap(v)
+                else:
+                    _motion_clear_heatmap(v)
+                    _motion_apply_cached_deformation(v, new_frame)
+                if getattr(v, 'reverse_lbs_enabled', False):
+                    _reverse_lbs_apply(v)
         imgui.same_line()
         if imgui.button("Step +1##motion"):
             _motion_step_forward(v, 1, run_tet=v.motion_run_tet_sim)
@@ -1841,8 +1890,7 @@ def _draw_motion_browser_ui(v):
             val_str = f", val={v._motion_nn_val_loss:.6f}" if v._motion_nn_val_loss is not None else ""
             ver_str = f" [{v._motion_nn_model_version}]" if hasattr(v, '_motion_nn_model_version') else ""
             imgui.text(f"best.pt (epoch {v._motion_nn_epoch}{val_str}){ver_str}")
-            imgui.same_line()
-            if imgui.button("Reload##nn_reload"):
+            if imgui.button("Reload NN##nn_reload"):
                 _motion_load_nn_checkpoint(v)
                 if v.motion_nn_model is not None and v.motion_use_nn:
                     _motion_apply_nn_deformation(v, v.motion_current_frame)
@@ -7101,6 +7149,100 @@ def run_all_tet_sim_with_constraints(v, max_iterations=100, tolerance=1e-4, oute
         print(f"Coupled tet sim complete ({len(active_muscles)} muscles)")
 
 
+def _apply_tendon_elastic(cache, global_positions, scaled_rest):
+    """Slack-only rest-length update for tendon-zone cross-contour edges.
+
+    For each tendon cross-edge, if current edge length is shorter than the
+    rest edge length, rescale the rest vector to match the current length
+    (direction preserved).  Stretched edges keep their original rest.
+    Result: tendon segments can collapse freely (buckle) in compression,
+    behaving like elastic bands that go slack rather than fighting
+    contraction.
+    """
+    tendon_mask = cache.get('csr_tendon_mask')
+    if tendon_mask is None or not np.any(tendon_mask):
+        return scaled_rest
+    ei = cache['csr_edge_i']
+    ej = cache['csr_edge_j']
+    base_len = np.linalg.norm(scaled_rest, axis=1)
+    cur_len = np.linalg.norm(global_positions[ej] - global_positions[ei], axis=1)
+    slack = tendon_mask & (cur_len < base_len)
+    if not np.any(slack):
+        return scaled_rest
+    base_safe = np.maximum(base_len, 1e-12)
+    scale = np.where(slack, cur_len / base_safe, 1.0)
+    out = scaled_rest.copy()
+    out[slack] = scaled_rest[slack] * scale[slack, None]
+    return out
+
+
+def _apply_axial_pose_prior(v, cache, knee_angles):
+    """Axial pose prior — pose-conditioned ARAP rest-edge rescaling.
+
+    Replaces the old hardcoded "knee-angle contract" with a named, tunable
+    primitive.  For each knee-crossing muscle (KNEE_CROSSING_MUSCLES from
+    viewer/skin_prior.py), cross-contour rest edges shrink by `ratio` and
+    intra-contour rest edges grow by sqrt(1/ratio) — volume-preserving.
+
+    `ratio = 1 - (1 - min_ratio) * smoothstep(knee_angle / (π/2))` when
+    v.axial_curve == 'smooth'; linear otherwise.  Parameters come from
+    v.axial_min_ratio (default 0.65 — soft) and v.axial_max_bulge
+    (default 2.0).  Returns (scaled_rest, crosser_strs) or (None, []).
+    """
+    from viewer.skin_prior import KNEE_CROSSING_MUSCLES
+    if not v.use_muscle_aware_arap or cache.get('csr_cross_mask') is None:
+        return None, []
+    base_rest = cache['csr_rest_edges_base']
+    cross_mask = cache['csr_cross_mask']
+    intra_mask = cache.get('csr_intra_mask')
+    csr_muscle_id = cache.get('csr_muscle_id')
+    muscle_id_map = cache.get('muscle_id_map', {})
+    if csr_muscle_id is None:
+        return None, []
+    min_ratio = float(getattr(v, 'axial_min_ratio', 0.65))
+    max_bulge = float(getattr(v, 'axial_max_bulge', 2.0))
+    curve = str(getattr(v, 'axial_curve', 'smooth'))
+    HALF_PI = np.pi / 2.0
+    scaled = base_rest.copy()
+    notes = []
+    any_change = False
+    # Apply to all muscles in the unified system.  Per-muscle side ('L'/'R')
+    # is taken from the muscle name prefix; non-prefixed muscles fall back
+    # to max knee angle.
+    for muscle_name, mid in muscle_id_map.items():
+        if mid is None:
+            continue
+        side = muscle_name[0] if muscle_name and muscle_name[0] in 'LR' else None
+        if side is not None:
+            angle = knee_angles.get(side, 0.0)
+        else:
+            angle = max(knee_angles.values())
+        a = float(np.clip(angle / HALF_PI, 0.0, 1.5))
+        if curve == 'smooth':
+            t = min(a, 1.0)
+            s = t * t * (3.0 - 2.0 * t)
+        else:
+            s = min(a, 1.0)
+        ratio = 1.0 - (1.0 - min_ratio) * s
+        if abs(ratio - 1.0) < 0.01:
+            continue
+        any_change = True
+        muscle_mask = (csr_muscle_id == mid)
+        cross_edges = muscle_mask & cross_mask
+        if np.any(cross_edges):
+            scaled[cross_edges] = base_rest[cross_edges] * ratio
+            notes.append(f"{muscle_name}={ratio:.2f}")
+        if intra_mask is not None:
+            perp_scale = float(np.clip(np.sqrt(1.0 / max(ratio, 0.05)),
+                                       1.0, max_bulge))
+            intra_edges = muscle_mask & intra_mask
+            if np.any(intra_edges):
+                scaled[intra_edges] = base_rest[intra_edges] * perp_scale
+    if not any_change:
+        return None, []
+    return scaled, notes
+
+
 def _run_unified_volume_sim(v, active_muscles, max_iterations=100, tolerance=1e-4):
     """
     Run simulation treating all muscles as one unified volume.
@@ -7128,6 +7270,20 @@ def _run_unified_volume_sim(v, active_muscles, max_iterations=100, tolerance=1e-
         # Update fixed vertex targets (origins/insertions)
         if hasattr(mobj, '_update_fixed_targets_from_skeleton'):
             mobj._update_fixed_targets_from_skeleton(v.zygote_skeleton_meshes, v.env.skel)
+
+    # Build per-frame bone trimeshes for the unified-path bone-contact
+    # penalty.  Reuse from the per-muscle alternating branch's pattern
+    # (line ~7078) — DART body world transforms applied to each bone
+    # mesh, plus DART shape primitives.  Stashed on v for the closure
+    # below.
+    v._unified_bone_meshes = None
+    if getattr(v, 'unified_bone_contact', True):
+        first_mobj = next(iter(active_muscles.values()))
+        bone_meshes = first_mobj._build_transformed_collision_meshes(
+            v.zygote_skeleton_meshes, v.env.skel, verbose=False)
+        bone_meshes.extend(
+            first_mobj._build_dart_shape_collision_meshes(v.env.skel, verbose=False))
+        v._unified_bone_meshes = bone_meshes
 
     # Check if we have valid cached topology from a previous frame
     muscle_names = list(active_muscles.keys())
@@ -7294,6 +7450,59 @@ def _run_unified_volume_sim(v, active_muscles, max_iterations=100, tolerance=1e-
         n_intra = int(csr_intra_mask.sum())
         print(f"  Muscle-aware ARAP: {n_cross} cross-contour, {n_intra} intra-contour CSR edges")
 
+        # Tendon-zone per-edge mask.  A vertex is in the tendon zone if its
+        # vertex_contour_level falls in {1..5} (5 levels after origin level 0)
+        # or in {N-6..N-2} (5 levels before insertion level N-1).  A cross-
+        # contour edge is "tendon" iff BOTH endpoints are in the tendon zone.
+        # At solve time these edges use a slack-only rest update (elastic
+        # band in tension, buckles in compression) to let tendon segments
+        # collapse along the origin→insertion line when they cross a flexed
+        # joint.
+        # Tendon zone: 5 levels right after origin (1..5) AND 5 levels right
+        # before insertion (max-5..max-1).  Belly stays pure ARAP; only
+        # tendon edges get the fiber-spring (and slack-only) elastic energy.
+        TENDON_LEVELS = 2
+        tendon_vert_global = np.zeros(total_verts, dtype=bool)
+        for name, mobj in active_muscles.items():
+            offset = global_offset[name]
+            n = mobj.soft_body.num_vertices
+            vcl = np.asarray(getattr(mobj, 'vertex_contour_level',
+                                     np.full(n, -1)), dtype=np.int32)
+            if vcl.size != n:
+                continue
+            max_level = int(vcl.max())
+            if max_level < 2 * TENDON_LEVELS:
+                continue
+            tend_local = (((vcl >= 1) & (vcl <= TENDON_LEVELS))
+                          | ((vcl >= max_level - TENDON_LEVELS)
+                             & (vcl <= max_level - 1)))
+            tendon_vert_global[offset:offset + n] = tend_local
+        csr_tendon_mask = (tendon_vert_global[csr_edge_i]
+                           & tendon_vert_global[csr_edge_j]
+                           & csr_cross_mask)
+        n_tendon = int(csr_tendon_mask.sum())
+        print(f"  Tendon zones: {int(tendon_vert_global.sum())} verts, "
+              f"{n_tendon} tendon cross-edges")
+
+        # Collision candidate vertices: non-fixed surface verts per muscle.
+        # Used by the unified-path bone contact penalty.  Cap-attached / anchor
+        # verts (already in global_fixed_mask) are excluded automatically.
+        from viewer.bone_surface_collision import compute_surface_topology
+        collision_vertex_set = set()
+        for name, mobj in active_muscles.items():
+            offset = global_offset[name]
+            n = mobj.soft_body.num_vertices
+            tet_faces = getattr(mobj, 'tet_faces', None)
+            tet_tetrahedra = getattr(mobj, 'tet_tetrahedra', None)
+            surf_vidx, _ = compute_surface_topology(
+                tetrahedra=tet_tetrahedra, tet_faces=tet_faces)
+            if len(surf_vidx) == 0:
+                surf_vidx = np.arange(n, dtype=np.int64)
+            for vi in surf_vidx:
+                gi = offset + int(vi)
+                if gi < total_verts and not global_fixed_mask[gi]:
+                    collision_vertex_set.add(gi)
+
         # Cache topology for subsequent frames
         v._unified_sim_cache = {
             'global_offset': global_offset,
@@ -7313,7 +7522,10 @@ def _run_unified_volume_sim(v, active_muscles, max_iterations=100, tolerance=1e-
             'csr_rest_edges_base': csr_rest_edges_base,
             'csr_edge_i': csr_edge_i,
             'csr_edge_j': csr_edge_j,
+            'csr_tendon_mask': csr_tendon_mask,
+            'collision_vertex_set': collision_vertex_set,
         }
+        print(f"  Collision candidates: {len(collision_vertex_set)} non-fixed surface verts")
 
     # Compute LBS positions from skinning weights + skeleton transforms.
     # This gives ALL vertices skeleton-consistent positions as ARAP initial guess.
@@ -7351,7 +7563,7 @@ def _run_unified_volume_sim(v, active_muscles, max_iterations=100, tolerance=1e-
     # Blend LBS with warm-start for temporal coherence
     prev_solution = cache.get('prev_solution', None) if cache_valid else None
     if prev_solution is not None and prev_solution.shape[0] == total_verts:
-        lbs_weight = 0.7
+        lbs_weight = float(getattr(v, 'lbs_init_weight', 0.0))
         global_positions = lbs_weight * global_lbs_positions + (1 - lbs_weight) * prev_solution
         fixed_idx = np.where(global_fixed_mask)[0]
         global_positions[fixed_idx] = global_lbs_positions[fixed_idx]
@@ -7380,26 +7592,94 @@ def _run_unified_volume_sim(v, active_muscles, max_iterations=100, tolerance=1e-
     if n_fixed_mask != n_fixed_targets:
         print(f"  WARNING: Mismatch between fixed_mask ({n_fixed_mask}) and fixed_targets ({n_fixed_targets})")
 
-    # Reuse cached backend to avoid Taichi field re-allocation errors
-    cached = getattr(v, '_unified_arap_backend', None)
+    # Knee angles (used to switch between extension/flex backend bins and
+    # to drive cross-contour edge contraction below).  Subtract the rest
+    # baseline R_rel so T-pose = 0° (bones aren't exactly aligned in XML).
+    from viewer.skin_prior import KNEE_CROSSING_MUSCLES
+    skel_local = v.env.skel
+    rest_R_rel = getattr(v, '_rest_knee_R_rel', {'L': np.eye(3), 'R': np.eye(3)})
+    knee_angles = {'L': 0.0, 'R': 0.0}
+    for side, body_pair in (('L', ('L_Femur0', 'L_Tibia_Fibula0')),
+                            ('R', ('R_Femur0', 'R_Tibia_Fibula0'))):
+        fem = skel_local.getBodyNode(body_pair[0])
+        tib = skel_local.getBodyNode(body_pair[1])
+        if fem is None or tib is None:
+            continue
+        fR = np.array(fem.getWorldTransform().rotation())
+        tR = np.array(tib.getWorldTransform().rotation())
+        rel_now = tR @ fR.T
+        rel_baseline = rest_R_rel.get(side, np.eye(3))
+        delta = rel_now @ rel_baseline.T
+        tr = float(np.trace(delta))
+        knee_angles[side] = float(np.arccos(np.clip((tr - 1.0) * 0.5, -1.0, 1.0)))
+
+    # Two-bin matrix cache: separate factorized backends for "extension"
+    # (full skin prior on crossers) and "flex" (reduced skin prior on
+    # crossers so contraction wins).  Threshold: knee angle ≥ 45° → flex.
+    KNEE_FLEX_THRESHOLD = np.pi / 4.0      # 45°
+    FLEX_CROSSER_SP_SCALE = 0.0            # scale skin prior weight on
+                                           # crossers when in flex bin (0 = off)
+    max_knee = max(knee_angles.values())
+    in_flex_bin = max_knee >= KNEE_FLEX_THRESHOLD
+    bin_name = 'flex' if in_flex_bin else 'ext'
+    backend_attr = f'_unified_arap_backend_{bin_name}'
+
+    cached = getattr(v, backend_attr, None)
     if cached is not None and getattr(cached, '_backend_name', None) == backend_name:
         backend = cached
     else:
         backend = get_backend(backend_name)
         backend._backend_name = backend_name
-        v._unified_arap_backend = backend
+        setattr(v, backend_attr, backend)
+    # Track which bin is currently active so downstream callers see it
+    v._unified_arap_backend = backend
 
-    # Prepare fixed targets array (ordered by fixed indices)
     fixed_indices = np.where(global_fixed_mask)[0]
     fixed_targets_array = np.array([global_fixed_targets.get(i, global_rest_positions[i]) for i in fixed_indices])
 
-    # Build system only on first frame (when solver hasn't been factorized yet)
+    # Fiber-spring config (scalar Hookean spring on cross-contour edges,
+    # applied per-iter via the collision_target_fn slot).  Reuses the
+    # collision_vertices / collision_weight diag pipeline.  Mutually
+    # exclusive with bone-contact for now (single closure slot).
+    fiber_spring_on = bool(getattr(v, 'fiber_spring', False))
+    fiber_spring_w = float(getattr(v, 'fiber_spring_weight', 10.0)) if fiber_spring_on else 0.0
+    fiber_spring_scale = float(getattr(v, 'fiber_spring_rest_scale', 0.5))
+
+    # Bone-contact penalty wiring: include collision_vertices in build_system
+    # so the diagonal entry for each collision candidate gains the spring
+    # weight.  Force rebuild if the contact weight changed since last call.
+    bone_contact_on = bool(getattr(v, 'unified_bone_contact', True)) and v._unified_bone_meshes and not fiber_spring_on
+    collision_vertex_set = cache.get('collision_vertex_set') if cache_valid else (
+        v._unified_sim_cache.get('collision_vertex_set') if hasattr(v, '_unified_sim_cache') and v._unified_sim_cache else None
+    )
+    collision_weight = float(getattr(v, 'unified_bone_collision_weight', 1.5)) if bone_contact_on else 0.0
+
+    # For fiber spring: every vert that touches a cross-contour edge becomes
+    # a "collision vertex" (gets diag weight) and per-iter target = position
+    # that satisfies all its spring rest-lengths.  Spring weight overrides
+    # bone-contact weight here (mutually exclusive above).
+    if fiber_spring_on:
+        _spc = cache if cache is not None else v._unified_sim_cache
+        # Use tendon-zone cross edges only (belly stays pure ARAP).
+        tmask = _spc.get('csr_tendon_mask')
+        ei_arr = _spc.get('csr_edge_i')
+        ej_arr = _spc.get('csr_edge_j')
+        if tmask is not None and ei_arr is not None:
+            sp_edge_mask = np.asarray(tmask, dtype=bool)
+            sp_verts = np.unique(np.concatenate([
+                ei_arr[sp_edge_mask], ej_arr[sp_edge_mask]
+            ]).astype(np.int64))
+            non_fixed = ~global_fixed_mask[sp_verts]
+            sp_verts = sp_verts[non_fixed]
+            collision_vertex_set = set(int(x) for x in sp_verts)
+            collision_weight = fiber_spring_w
+    weight_changed = (getattr(backend, '_collision_weight_built', None) != collision_weight)
+
     need_build = (not cache_valid
+                  or weight_changed
                   or (getattr(backend, 'solver', None) is None
                       and getattr(backend, '_scipy_solver', None) is None
                       and getattr(backend, '_splu', None) is None))
-    # Skin-prior weights: per-vertex w_i added to system diagonal.  Static
-    # across frames (depends only on rest binding), so set once at build.
     skin_prior_weights = None
     skin_binder = getattr(v, 'skin_prior_binder', None)
     if skin_binder is not None and getattr(skin_binder, 'bindings', None):
@@ -7407,94 +7687,253 @@ def _run_unified_volume_sim(v, active_muscles, max_iterations=100, tolerance=1e-
         for name in muscle_names:
             offset = global_offset[name]
             for entry in skin_binder.bindings.get(name, []):
-                skin_prior_weights[offset + entry['vi_local']] = entry['weight']
+                gi = offset + entry['vi_local']
+                skin_prior_weights[gi] = skin_prior_weights.get(gi, 0.0) + entry['weight']
+
+    # Pes anserinus bundle prior — fold per-vert weights into skin_prior_weights
+    # so build_system bakes them into the L diagonal.
+    pes_bundle = getattr(v, 'pes_bundle_obj', None)
+    if pes_bundle is not None and getattr(pes_bundle, 'per_muscle', None):
+        if skin_prior_weights is None:
+            skin_prior_weights = {}
+        for mname, data in pes_bundle.per_muscle.items():
+            if mname not in global_offset:
+                continue
+            base = global_offset[mname]
+            vi = data['vi']
+            w = data['w']
+            for k in range(len(vi)):
+                gi = base + int(vi[k])
+                skin_prior_weights[gi] = skin_prior_weights.get(gi, 0.0) + float(w[k])
 
     if need_build:
         start_time = time.time()
+        build_kwargs = dict(regularization=1e-6)
         if skin_prior_weights:
-            backend.build_system(
-                total_verts, neighbors, edge_weights, global_fixed_mask,
-                regularization=1e-6, skin_prior_weights=skin_prior_weights)
-            print(f"  System built in {time.time() - start_time:.3f}s "
-                  f"(skin prior on {len(skin_prior_weights)} verts)")
-        else:
-            backend.build_system(total_verts, neighbors, edge_weights, global_fixed_mask, regularization=1e-6)
-            print(f"  System built in {time.time() - start_time:.3f}s")
+            build_kwargs['skin_prior_weights'] = skin_prior_weights
+        if (bone_contact_on or fiber_spring_on) and collision_vertex_set:
+            build_kwargs['collision_vertices'] = collision_vertex_set
+            build_kwargs['collision_weight'] = collision_weight
+        backend.build_system(
+            total_verts, neighbors, edge_weights, global_fixed_mask, **build_kwargs)
+        backend._collision_weight_built = collision_weight
+        sp_n = len(skin_prior_weights) if skin_prior_weights else 0
+        cv_n = len(collision_vertex_set) if ((bone_contact_on or fiber_spring_on) and collision_vertex_set) else 0
+        diag_label = 'fiber-spring' if fiber_spring_on else 'bone-contact'
+        print(f"  System built [{bin_name} bin] in {time.time() - start_time:.3f}s "
+              f"(skin prior on {sp_n} verts, {diag_label} diag on {cv_n} verts @ w={collision_weight})")
     else:
-        print(f"  Reusing cached system (skipping build_system)")
+        print(f"  Reusing cached system [{bin_name} bin]")
 
-    # Skin-prior targets: legacy bone-glued attractor.  Each vertex is
-    # bound at rest to a specific (bone, triangle, bary, normal_offset)
-    # and the per-frame target is just T_bone_now @ rest-relative
-    # bone-local target.  Dynamic nearest-point variants moved the
-    # target around and made motion worse; sticking with the rigid
-    # bone-glued formulation.
+    # Skin-prior targets: bone-glued attractor (multi-bone DQS for DQS_MUSCLES,
+    # single-bone for others).  For knee-crossing muscles, fade target toward
+    # current position proportional to knee flex — skin prior keeps them
+    # outside the bone at extension but stops fighting the cross-contour
+    # contraction at flex.
     skin_prior_targets = None
+    wt_sum = {}
+    wtgt_sum = {}
     if skin_binder is not None and getattr(skin_binder, 'bindings', None):
-        skin_prior_targets = {}
         for name in muscle_names:
             offset = global_offset[name]
-            res = skin_binder.compute_targets(name, offset)
+            res = skin_binder.compute_targets(
+                name, offset, current_positions=global_positions,
+            )
             if res is None:
                 continue
-            gi_arr, _w_arr, tgt_arr = res
+            gi_arr, w_arr, tgt_arr = res
             for k in range(len(gi_arr)):
-                skin_prior_targets[int(gi_arr[k])] = tgt_arr[k]
+                gi = int(gi_arr[k])
+                w = float(w_arr[k])
+                wt_sum[gi] = wt_sum.get(gi, 0.0) + w
+                if gi in wtgt_sum:
+                    wtgt_sum[gi] = wtgt_sum[gi] + w * tgt_arr[k]
+                else:
+                    wtgt_sum[gi] = w * tgt_arr[k]
+    # Pes anserinus bundle: per-frame target along the anatomical curve.
+    if pes_bundle is not None and getattr(pes_bundle, 'per_muscle', None):
+        shape_scale = float(getattr(v, 'pes_bundle_offset_scale', 1.0))
+        res_b = pes_bundle.compute_targets(v.env.skel, global_offset,
+                                            shape_scale=shape_scale)
+        if res_b is not None:
+            gi_arr, w_arr, tgt_arr = res_b
+            for k in range(len(gi_arr)):
+                gi = int(gi_arr[k])
+                w = float(w_arr[k])
+                wt_sum[gi] = wt_sum.get(gi, 0.0) + w
+                if gi in wtgt_sum:
+                    wtgt_sum[gi] = wtgt_sum[gi] + w * tgt_arr[k]
+                else:
+                    wtgt_sum[gi] = w * tgt_arr[k]
+    if wt_sum:
+        skin_prior_targets = {gi: wtgt_sum[gi] / wt_sum[gi] for gi in wt_sum}
 
-    # Muscle-aware ARAP: scale rest edges based on fiber contraction
+    # Axial pose prior — pose-conditioned rest-edge rescaling for fiber-like
+    # contraction.  Currently driven by knee flexion for KNEE_CROSSING_MUSCLES
+    # (hamstrings + Gracilis + Sartorius).  Cross-contour rest shrinks under
+    # flex, intra-contour rest grows to preserve cross-section volume.
     cache = v._unified_sim_cache
     target_edges = None
-    if v.use_muscle_aware_arap and cache.get('csr_cross_mask') is not None:
-        # Compute axis ratio per muscle
-        axis_ratios = {}
-        for name, mobj in active_muscles.items():
-            fixed_globals = cache['muscle_fixed_global'].get(name, [])
-            rest_len = cache['muscle_rest_axis_len'].get(name, 0.0)
-            if len(fixed_globals) >= 2 and rest_len > 1e-6:
-                current_targets = np.array([global_fixed_targets.get(i, global_rest_positions[i]) for i in fixed_globals])
-                current_len = np.linalg.norm(current_targets[-1] - current_targets[0])
-                axis_ratios[name] = np.clip(current_len / rest_len, 0.5, 2.0)
-            else:
-                axis_ratios[name] = 1.0
-        # No temporal smoothing — axis_ratio uses each frame's raw value.
+    scaled_rest, crosser_strs = _apply_axial_pose_prior(v, cache, knee_angles)
+    # Tendon-zone slack-only update — runs even when axial prior is a no-op.
+    if scaled_rest is None and cache.get('csr_tendon_mask') is not None:
+        scaled_rest = cache['csr_rest_edges_base'].copy()
+    if scaled_rest is None and fiber_spring_on:
+        # Need a scaled_rest to apply intra-contour bulge for volume
+        # preservation under spring contraction.
+        scaled_rest = cache['csr_rest_edges_base'].copy()
+    if scaled_rest is not None:
+        scaled_rest = _apply_tendon_elastic(cache, global_positions, scaled_rest)
+        # Volume-preserving intra-contour expansion to compensate for the
+        # fiber spring's axial contraction (target = rest * spring_rest_scale).
+        # perp_scale = sqrt(1 / spring_rest_scale), capped at axial_max_bulge.
+        if fiber_spring_on and cache.get('csr_intra_mask') is not None:
+            # Tendon-zone bulge only.  perp_scale = 1/rest_scale (rest 0.5 →
+            # 2.0).  Belly intra-contour edges keep their ARAP rest length —
+            # belly stays pure ARAP per user direction.
+            perp_scale = float(np.clip(
+                1.0 / max(fiber_spring_scale, 0.05),
+                1.0, float(getattr(v, 'axial_max_bulge', 2.0))))
+            intra_mask = np.asarray(cache['csr_intra_mask'], dtype=bool)
+            tendon_verts_mask = np.zeros(len(cache['csr_rest_edges_base']), dtype=bool)
+            # Restrict to intra-edges whose endpoints are both in tendon zone
+            _ei = cache['csr_edge_i']
+            _ej = cache['csr_edge_j']
+            tendon_v = cache.get('csr_tendon_mask')
+            if tendon_v is not None:
+                # csr_tendon_mask is per-edge cross-edges in tendon zone;
+                # we want per-vert tendon flag — derive from edges
+                tend_vset = np.zeros(total_verts, dtype=bool)
+                tmask_arr = np.asarray(tendon_v, dtype=bool)
+                tend_vset[_ei[tmask_arr]] = True
+                tend_vset[_ej[tmask_arr]] = True
+                tendon_intra = intra_mask & tend_vset[_ei] & tend_vset[_ej]
+                scaled_rest[tendon_intra] = scaled_rest[tendon_intra] * perp_scale
+        if hasattr(backend, 'update_rest_edges'):
+            backend.update_rest_edges(scaled_rest)
+        else:
+            ei = cache['csr_edge_i']
+            ej = cache['csr_edge_j']
+            target_edges = [{} for _ in range(total_verts)]
+            for k in range(len(ei)):
+                target_edges[ei[k]][ej[k]] = scaled_rest[k]
+        if crosser_strs:
+            print(f"  Axial pose prior: {', '.join(crosser_strs)}")
 
-        # Always apply scaling — even a 1.001 ratio is fine (no-op).  The
-        # previous 2% deadband caused per-frame target-edge discontinuities
-        # when a muscle's raw ratio crossed the 1.0 ± 0.02 boundary,
-        # producing visible "ticks" between consecutive frames (gastrocnemius).
-        if True:
-            scaled_rest = cache['csr_rest_edges_base'].copy()
-            for name, mid in cache['muscle_id_map'].items():
-                ratio = axis_ratios.get(name, 1.0)
-                # Volume-preserving perpendicular scale: under axial compression
-                # ratio<1, intra-contour edges grow by 1/sqrt(ratio) so that
-                # cross-section area * length stays constant. Clip [1.0, 1.6]
-                # — 60% bulge enough to suppress S-buckling without driving
-                # frame-to-frame oscillation that 2.0 produced.
-                perp_scale = np.clip(np.sqrt(1.0 / ratio), 1.0, 1.6)
-                muscle_mask = cache['csr_muscle_id'] == mid
-                scaled_rest[muscle_mask & cache['csr_cross_mask']] *= ratio
-                scaled_rest[muscle_mask & cache['csr_intra_mask']] *= perp_scale
+    # One-sided bone-contact penalty closure.  Called per ARAP iter.
+    # Outside-margin verts get target = current_pos (zero net force);
+    # only inside-bone verts get target = closest_point + face_normal * margin.
+    # Throttled — full bone-contact computation runs only every N iters;
+    # in-between iters reuse the cached penetration targets and just
+    # refresh outside-margin targets to current_pos.
+    collision_target_fn = None
+    if fiber_spring_on and collision_vertex_set:
+        # Per-iter scalar Hookean spring on cross-contour edges.  For each
+        # spring edge with current length L and target length L_rest *
+        # spring_rest_scale, accumulate corrective displacement on both
+        # endpoints; final target = position + accumulated displacement.
+        _spc2 = cache if cache is not None else v._unified_sim_cache
+        # Tendon cross-edges only, each undirected edge once.
+        _ei_full = _spc2['csr_edge_i']
+        _ej_full = _spc2['csr_edge_j']
+        cross_mask_arr = (np.asarray(_spc2['csr_tendon_mask'], dtype=bool)
+                          & (_ei_full < _ej_full))
+        sp_ei = _ei_full[cross_mask_arr]
+        sp_ej = _ej_full[cross_mask_arr]
+        sp_base = _spc2['csr_rest_edges_base'][cross_mask_arr]
+        sp_rest_len = np.linalg.norm(sp_base, axis=1) * fiber_spring_scale
+        cv_arr = np.fromiter(collision_vertex_set, dtype=np.int64)
 
-            # Upload to backend (Taichi/GPU) or build target_edges dict (CPU)
-            if hasattr(backend, 'update_rest_edges'):
-                backend.update_rest_edges(scaled_rest)
-            else:
-                # CPU backend: build target_edges dict from cached CSR index pairs
-                target_edges = [{} for _ in range(total_verts)]
-                ei = cache['csr_edge_i']
-                ej = cache['csr_edge_j']
-                for k in range(len(ei)):
-                    target_edges[ei[k]][ej[k]] = scaled_rest[k]
+        cv_int = cv_arr.astype(np.int64)
+        recompute_every = int(getattr(v, 'fiber_spring_recompute_every', 5))
+        state = {'iter': 0, 'targets': None}
 
-            ratio_strs = [f"{name}={r:.3f}" for name, r in axis_ratios.items() if abs(r - 1.0) >= 0.02]
-            print(f"  Muscle-aware ARAP: {', '.join(ratio_strs)}")
+        def collision_target_fn(positions, _ei=sp_ei, _ej=sp_ej,
+                                _rest=sp_rest_len, _cv=cv_int,
+                                _every=recompute_every, _state=state):
+            # Refresh corrective displacement every N iters; in-between iters
+            # reuse the cached targets relative to the same neighbor structure
+            # (effectively a damped Jacobi spring solve at coarser cadence).
+            if _state['iter'] % _every == 0:
+                p_i = positions[_ei]
+                p_j = positions[_ej]
+                d = p_j - p_i
+                cur = np.linalg.norm(d, axis=1)
+                inv_cur = np.zeros_like(cur)
+                ok = cur > 1e-9
+                inv_cur[ok] = 1.0 / cur[ok]
+                half = np.clip(0.5 * (cur - _rest), -0.5 * cur, 0.5 * cur)
+                delta = (half * inv_cur)[:, None] * d
+                disp = np.zeros((len(positions), 3))
+                count = np.zeros(len(positions), dtype=np.float64)
+                np.add.at(disp, _ei, +delta)
+                np.add.at(disp, _ej, -delta)
+                np.add.at(count, _ei, 1.0)
+                np.add.at(count, _ej, 1.0)
+                nz = count > 0
+                disp[nz] /= count[nz, None]
+                disp_mag = np.linalg.norm(disp, axis=1)
+                cap = 0.01
+                scale = np.where(disp_mag > cap, cap / np.maximum(disp_mag, 1e-12), 1.0)
+                disp *= scale[:, None]
+                target_pos = positions[_cv] + disp[_cv]
+                _state['targets'] = dict(zip(_cv.tolist(), target_pos))
+            _state['iter'] += 1
+            return _state['targets']
+    elif bone_contact_on and collision_vertex_set and v._unified_bone_meshes:
+        from scipy.spatial import cKDTree as _cKDT_coll
+        bone_meshes_for_fn = list(v._unified_bone_meshes)
+        bone_kdtree = _cKDT_coll(np.vstack([bm.vertices for bm in bone_meshes_for_fn]))
+        cv_arr = np.fromiter(collision_vertex_set, dtype=np.int64)
+        margin = float(getattr(v, 'unified_bone_contact_margin', 0.005))
+        recompute_every = int(getattr(v, 'unified_bone_contact_recompute_every', 5))
+        state = {'iter': 0, 'pen_targets': {}}
 
-    # First frame: more iterations to converge from large T-pose → walk displacement.
-    # Subsequent frames: normal iterations (warm-start makes convergence fast).
-    # Plateau early-exit in the solver makes the cap a worst-case bound rather
-    # than a typical iteration count, so 4x is enough headroom for the few
-    # frames that actually need extra iters; the rest exit early on plateau.
+        def collision_target_fn(positions, _bones=bone_meshes_for_fn,
+                                _kdt=bone_kdtree, _cv=cv_arr,
+                                _fmask=global_fixed_mask, _margin=margin,
+                                _every=recompute_every, _state=state):
+            targets = {int(vi): positions[int(vi)].copy() for vi in _cv}
+            # Recompute penetration targets every N iters to amortize the
+            # expensive contains() + closest_point queries.
+            if _state['iter'] % _every == 0:
+                new_pen = {}
+                sv_pos = positions[_cv]
+                d_kd, _ = _kdt.query(sv_pos)
+                near = d_kd < (_margin + 0.025)
+                if np.any(near):
+                    near_sv = _cv[near]
+                    near_pos = positions[near_sv]
+                    for bm in _bones:
+                        try:
+                            bmin = bm.bounds[0] - _margin
+                            bmax = bm.bounds[1] + _margin
+                            in_bbox = np.all((near_pos >= bmin) & (near_pos <= bmax), axis=1)
+                            if not np.any(in_bbox):
+                                continue
+                            bbox_pos = near_pos[in_bbox]
+                            bbox_sv = near_sv[in_bbox]
+                            inside = bm.contains(bbox_pos)
+                            if not np.any(inside):
+                                continue
+                            ipos = bbox_pos[inside]
+                            isv = bbox_sv[inside]
+                            cp, _, fid = trimesh.proximity.closest_point(bm, ipos)
+                            fn_arr = bm.face_normals[fid]
+                            for k in range(len(isv)):
+                                vi = int(isv[k])
+                                if _fmask[vi]:
+                                    continue
+                                new_pen[vi] = cp[k] + fn_arr[k] * _margin
+                        except Exception:
+                            continue
+                _state['pen_targets'] = new_pen
+            # Overlay cached penetration targets on the default current-pos targets
+            for vi, tgt in _state['pen_targets'].items():
+                targets[vi] = tgt
+            _state['iter'] += 1
+            return targets
+
     is_first_frame = prev_solution is None
     solve_iters = max_iterations * 4 if is_first_frame else max_iterations
     if is_first_frame:
@@ -7507,12 +7946,18 @@ def _run_unified_volume_sim(v, active_muscles, max_iterations=100, tolerance=1e-
     )
     if skin_prior_targets:
         solve_kwargs['skin_prior_targets'] = skin_prior_targets
+    if collision_target_fn is not None:
+        solve_kwargs['collision_target_fn'] = collision_target_fn
     if getattr(v, 'disable_plateau_exit', False):
         solve_kwargs['disable_plateau_exit'] = True
     global_positions, iterations, max_disp = backend.solve(
-        global_positions, global_rest_positions, neighbors, edge_weights, rest_edge_vectors,
-        global_fixed_mask, fixed_targets_array, **solve_kwargs
+        global_positions, global_rest_positions, neighbors, edge_weights,
+        rest_edge_vectors, global_fixed_mask, fixed_targets_array, **solve_kwargs
     )
+    # Restore base rest so next frame starts clean
+    if v.use_muscle_aware_arap and cache.get('csr_cross_mask') is not None:
+        if hasattr(backend, 'update_rest_edges'):
+            backend.update_rest_edges(cache['csr_rest_edges_base'])
     print(f"  ARAP solved in {time.time() - start_time:.3f}s ({iterations} iterations)")
 
     # Build a vertex → muscle ID array so isolated/stuck fixes only borrow
@@ -8129,6 +8574,8 @@ def _motion_step_forward(v, count=1, run_tet=False):
             _motion_apply_pose(v, next_frame)
             if not _motion_apply_cached_deformation(v, next_frame):
                 _motion_run_tet_settle(v)
+            if getattr(v, 'reverse_lbs_enabled', False):
+                _reverse_lbs_apply(v)
     else:
         # Skip mode: jump directly to final frame, apply pose+deformation once
         target_frame = v.motion_current_frame + count
@@ -8148,6 +8595,9 @@ def _motion_step_forward(v, count=1, run_tet=False):
         else:
             _motion_clear_heatmap(v)
             _motion_apply_cached_deformation(v, target_frame)
+        # Reverse-LBS overrides fiber waypoints last so it wins over cache/NN.
+        if getattr(v, 'reverse_lbs_enabled', False):
+            _reverse_lbs_apply(v)
 
 
 def _motion_run_tet_settle(v):
@@ -8240,6 +8690,40 @@ def _motion_load_nn_checkpoint(v):
     except Exception as e:
         print(f"[Motion] Failed to load NN checkpoint: {e}")
         v.motion_nn_model = None
+
+
+def _predict_frame_batched_gpu(model, l_dofs, r_dofs, rest_positions, r_rest_positions=None, device=None):
+    """V1/V1Dec GPU-end-to-end variant of _predict_frame_batched.
+
+    Returns (l_world_dict, r_world_dict) of torch tensors on GPU, in pelvis-local frame.
+    Caller must apply world transform R/t.  Use for fast pipelines (RL/sim) that
+    need GPU output for downstream operations (e.g. update_waypoints_fast_gpu).
+    """
+    import torch as _torch
+    if device is None:
+        device = next(model.parameters()).device
+    if r_rest_positions is None:
+        r_rest_positions = rest_positions
+    x = _torch.tensor(np.stack([l_dofs, r_dofs]), dtype=_torch.float32).to(device)
+    with _torch.no_grad():
+        preds = model(x)
+    # Cache rest tensors on device
+    if not hasattr(model, '_rest_dev'):
+        model._rest_dev = {}
+        model._r_rest_dev = {}
+        for n in rest_positions:
+            r = rest_positions[n]
+            model._rest_dev[n] = (r.to(device) if isinstance(r, _torch.Tensor)
+                                  else _torch.tensor(r, dtype=_torch.float32, device=device))
+            rr = r_rest_positions.get(n, r) if r_rest_positions else r
+            model._r_rest_dev[n] = (rr.to(device) if isinstance(rr, _torch.Tensor)
+                                    else _torch.tensor(rr, dtype=_torch.float32, device=device))
+    l_local = {}
+    r_local = {}
+    for name, disp_flat in preds.items():
+        l_local[name] = model._rest_dev[name] + disp_flat[0].reshape(-1, 3)
+        r_local[name] = model._r_rest_dev[name] + disp_flat[1].reshape(-1, 3)
+    return l_local, r_local
 
 
 def _predict_frame_batched(model, l_dofs, r_dofs, rest_positions, r_rest_positions=None, device=None):
@@ -8377,7 +8861,24 @@ def _motion_apply_nn_deformation(v, frame):
 
         # Batched L+R prediction in a single forward pass
         mirror_active = getattr(v, '_motion_nn_mirror_trained', False)
-        if mirror_active:
+        use_gpu_path = (v._motion_nn_model_version in ("v1", "v1dec")
+                        and mirror_active)
+        if not mirror_active:
+            predictions = predict_frame(v.motion_nn_model, dofs, v.motion_nn_rest_positions)
+            r_preds = None
+        elif use_gpu_path:
+            if v1_input_dim is not None and v1_input_dim == 7:
+                r_dof_indices = [18, 19, 20, 21, 22, 23, 24]
+            else:
+                r_dof_indices = [18, 19, 20, 21]
+            r_dofs = v.motion_bvh.mocap_refs[frame, r_dof_indices].astype(np.float32)
+            r_dofs[0] *= -1
+            l_local_gpu, r_local_gpu = _predict_frame_batched_gpu(
+                v.motion_nn_model, dofs, r_dofs, v.motion_nn_rest_positions,
+                r_rest_positions=getattr(v, 'motion_nn_r_rest_positions', None))
+            predictions = None
+            r_preds = None
+        else:
             if v1_input_dim is not None and v1_input_dim == 7:
                 r_dof_indices = [18, 19, 20, 21, 22, 23, 24]
             else:
@@ -8387,15 +8888,65 @@ def _motion_apply_nn_deformation(v, frame):
             predictions, r_preds = _predict_frame_batched(
                 v.motion_nn_model, dofs, r_dofs, v.motion_nn_rest_positions,
                 r_rest_positions=getattr(v, 'motion_nn_r_rest_positions', None))
-        else:
-            predictions = predict_frame(v.motion_nn_model, dofs, v.motion_nn_rest_positions)
-            r_preds = None
 
         # Get pelvis world transform
         T = v.env.skel.getBodyNode("Saccrum_Coccyx0").getWorldTransform().matrix()
         R = T[:3, :3].astype(np.float32)
         t = T[:3, 3].astype(np.float32)
         any_applied = False
+
+        if use_gpu_path:
+            import torch as _torch
+            device = next(v.motion_nn_model.parameters()).device
+            R_gpu = _torch.from_numpy(np.ascontiguousarray(R)).to(device)
+            t_gpu = _torch.from_numpy(np.ascontiguousarray(t)).to(device)
+
+            # Phase 1: pure GPU compute. Collect (mobj, world_gpu, wp_gpu_or_None).
+            items = []
+            for mname, local_pos_gpu in l_local_gpu.items():
+                if mname not in v.zygote_muscle_meshes:
+                    continue
+                mobj = v.zygote_muscle_meshes[mname]
+                if mobj.tet_vertices is None:
+                    continue
+                world_gpu = local_pos_gpu @ R_gpu.T + t_gpu
+                wp_gpu = mobj.compute_waypoints_gpu(world_gpu) if hasattr(mobj, 'compute_waypoints_gpu') else None
+                items.append((mobj, world_gpu, wp_gpu))
+            for lname, local_pos_gpu in r_local_gpu.items():
+                rname = "R_" + lname[2:] if lname.startswith("L_") else lname
+                if rname not in v.zygote_muscle_meshes:
+                    continue
+                mobj = v.zygote_muscle_meshes[rname]
+                if mobj.tet_vertices is None:
+                    continue
+                mirrored_gpu = local_pos_gpu.clone()
+                mirrored_gpu[:, 0] = -mirrored_gpu[:, 0]
+                world_gpu = mirrored_gpu @ R_gpu.T + t_gpu
+                wp_gpu = mobj.compute_waypoints_gpu(world_gpu) if hasattr(mobj, 'compute_waypoints_gpu') else None
+                items.append((mobj, world_gpu, wp_gpu))
+
+            # Phase 2: TWO concatenated CPU syncs (tets + waypoints)
+            tet_concat = _torch.cat([w for (_, w, _) in items], dim=0)
+            wp_items = [wp for (_, _, wp) in items if wp is not None]
+            wp_concat = _torch.cat(wp_items, dim=0) if wp_items else None
+            tet_cpu = tet_concat.cpu().numpy()
+            wp_cpu = wp_concat.cpu().numpy() if wp_concat is not None else None
+
+            # Phase 3: scatter to numpy per-muscle, update tet draw
+            tet_off = 0
+            wp_off = 0
+            for (mobj, world_gpu, wp_gpu) in items:
+                n_v = world_gpu.shape[0]
+                world_pos = tet_cpu[tet_off:tet_off + n_v]
+                tet_off += n_v
+                mobj.tet_vertices = world_pos
+                mobj._update_tet_draw_positions(skip_normals=True)
+                if wp_gpu is not None and wp_cpu is not None:
+                    n_wp = wp_gpu.shape[0]
+                    mobj.scatter_waypoints_numpy(wp_cpu[wp_off:wp_off + n_wp])
+                    wp_off += n_wp
+                any_applied = True
+            return any_applied
 
         # Apply L predictions
         for mname, local_pos in predictions.items():
@@ -8679,7 +9230,7 @@ def _motion_patch_waypoints(v):
     print(f"Waypoint patch complete: {patched} muscles updated")
 
 
-def _motion_load_cache(v):
+def _motion_load_cache(v, force=False):
     """Load all cached deformation data for the current BVH into memory.
     Supports both legacy single-file ({mname}.npz) and chunked ({mname}_chunk_*.npz) formats.
 
@@ -8690,12 +9241,22 @@ def _motion_load_cache(v):
     Chunk files are read in parallel via a thread pool — ~10k chunk reads
     for a 7840-frame BVH × 25 muscles is pure I/O bound and scales well
     with concurrent reads (Linux page cache + NVMe).
+
+    Incremental by default: muscles already in v.motion_deform_cache are
+    skipped, and removed muscles are pruned.  Pass force=True to clear and
+    rebuild from scratch (use when chunks on disk have changed).
     """
     from concurrent.futures import ThreadPoolExecutor
     import time as _t
     _t_start = _t.time()
 
-    v.motion_deform_cache = {}
+    if force or not hasattr(v, 'motion_deform_cache') or v.motion_deform_cache is None:
+        v.motion_deform_cache = {}
+    else:
+        # Prune entries for muscles no longer loaded
+        current_names = set(v.zygote_muscle_meshes.keys())
+        for stale in [n for n in v.motion_deform_cache if n not in current_names]:
+            del v.motion_deform_cache[stale]
     cache_dir = _motion_cache_dir(v)
     if cache_dir is None:
         return
@@ -8703,8 +9264,14 @@ def _motion_load_cache(v):
     # ── 1. Collect (mname, npz_files_sorted, expected_n) per muscle ──
     muscle_files = []
     for mname in v.zygote_muscle_meshes:
+        if mname in v.motion_deform_cache and not force:
+            continue
         mobj = v.zygote_muscle_meshes[mname]
-        expected_n = mobj.tet_vertices.shape[0] if mobj.tet_vertices is not None else None
+        # Skip muscles without tet — cached deformation can't apply, and
+        # scanning disk for chunks adds significant load time over slow mounts.
+        if mobj.tet_vertices is None:
+            continue
+        expected_n = mobj.tet_vertices.shape[0]
         npz_files = []
         for subdir in glob.glob(os.path.join(cache_dir, '*/')):
             npz_files.extend(glob.glob(os.path.join(subdir, f'{mname}_chunk_*.npz')))
@@ -8813,6 +9380,266 @@ def _unflatten_waypoints(flat, shape_json):
             offset += n
         waypoints.append(stream)
     return waypoints
+
+
+def _import_reverse_lbs_into_dart(v):
+    """Build env.muscles from reverse_lbs_results/*.npz (solver output)
+    instead of zygote_muscle.xml arc-length scheme.
+
+    For each fiber: groups records by (stream, fiber_idx), sorted by level,
+    reconstructs world-rest position from solver's (local, weight) data,
+    builds bn_names = [origin, mid?, insertion] union, and calls
+    addMuscleWeight per fiber.  DART will re-derive its own per-bone locals
+    from world_rest — solver's exact locals are not used (would require a
+    dartpy binding change), but the bone choice + weights ARE used.
+    """
+    import glob as _glob
+    import pickle as _pickle
+    from collections import defaultdict
+    import dartpy as dart
+
+    if v.env is None or v.env.skel is None:
+        print("[ReverseLBS->DART] skel not ready")
+        return
+    skel = v.env.skel
+    saved_pos = skel.getPositions().copy()
+    skel.resetPositions()
+
+    body_T_rest = {}
+    def get_T(name):
+        if name not in body_T_rest:
+            b = skel.getBodyNode(name)
+            if b is None:
+                body_T_rest[name] = None
+            else:
+                T = np.asarray(b.getWorldTransform().matrix())
+                body_T_rest[name] = (T[:3, :3].copy(), T[:3, 3].copy())
+        return body_T_rest[name]
+
+    v.env.muscles = dart.dynamics.Muscles(skel)
+    v.env.zygote_activation_indices = [0]
+
+    default_props = [1000.0, 1.2, 0.2, 0.0, -0.1, 0.0]
+    files = sorted(_glob.glob('reverse_lbs_results/*.npz'))
+    total_fibers = 0
+
+    for path in files:
+        muscle_name = os.path.basename(path).replace('.npz', '')
+        d = np.load(path, allow_pickle=True)
+        records = list(d['records'])
+        fiber_groups = defaultdict(list)
+        for r in records:
+            fiber_groups[(int(r['stream']), int(r['fiber']))].append(r)
+
+        n_fibers_added = 0
+        for (s_idx, f_idx), recs in sorted(fiber_groups.items()):
+            recs.sort(key=lambda r: int(r['level']))
+            origin_body = recs[0]['origin_body']
+            insertion_body = recs[0]['insertion_body']
+            mid_body = recs[0].get('mid_body')
+            uses_mid = bool(mid_body) and any(float(r.get('w_m', 0.0)) > 0.0 for r in recs)
+            if uses_mid:
+                bn_names = [origin_body, mid_body, insertion_body]
+            else:
+                bn_names = [origin_body, insertion_body]
+            # Validate bones exist
+            if any(get_T(b) is None for b in bn_names):
+                continue
+
+            # Build per-waypoint explicit (bones, locals, weights) using
+            # solver's exact data — addMuscleAnchorExplicit bypasses DART's
+            # bone-inverse derivation, so off-rest motion matches the
+            # viewer's reverse-LBS toggle exactly.
+            bn_names_per_wp = []
+            local_pos_per_wp = []
+            weights_per_wp = []
+            for r in recs:
+                w_o = float(r.get('w_o', 0.0))
+                w_m = float(r.get('w_m', 0.0)) if uses_mid else 0.0
+                w_i = float(r.get('w_i', 0.0))
+                bnodes = []
+                locals_ = []
+                wts = []
+                if w_o > 0:
+                    bnodes.append(origin_body)
+                    locals_.append(np.asarray(r['local_o'], dtype=np.float64))
+                    wts.append(w_o)
+                if uses_mid and w_m > 0:
+                    bnodes.append(mid_body)
+                    locals_.append(np.asarray(r['local_m'], dtype=np.float64))
+                    wts.append(w_m)
+                if w_i > 0:
+                    bnodes.append(insertion_body)
+                    locals_.append(np.asarray(r['local_i'], dtype=np.float64))
+                    wts.append(w_i)
+                bn_names_per_wp.append(bnodes)
+                local_pos_per_wp.append(locals_)
+                weights_per_wp.append(wts)
+            try:
+                v.env.muscles.addMuscleAnchorExplicit(
+                    f'{muscle_name}_{s_idx}_{f_idx}',
+                    default_props, False,
+                    bn_names_per_wp, local_pos_per_wp, weights_per_wp)
+                n_fibers_added += 1
+            except Exception as e:
+                print(f"[ReverseLBS->DART] {muscle_name} s{s_idx} f{f_idx}: {e}")
+                continue
+        v.env.zygote_activation_indices.append(n_fibers_added)
+        total_fibers += n_fibers_added
+
+    for i in range(1, len(v.env.zygote_activation_indices)):
+        v.env.zygote_activation_indices[i] += v.env.zygote_activation_indices[i - 1]
+    v.env.muscle_activation_levels = np.zeros(v.env.muscles.getNumMuscles())
+    v.env.zygote_activation_levels = np.zeros(len(files))
+    skel.setPositions(saved_pos)
+    print(f"[ReverseLBS->DART] Imported {total_fibers} fibers from {len(files)} muscle .npz files. "
+          f"Total DART muscles: {v.env.muscles.getNumMuscles()}")
+
+
+def _reverse_lbs_load(v):
+    """Lazy-load per-muscle reverse-LBS records from reverse_lbs_results/*.npz.
+
+    Builds vectorised arrays per muscle for fast per-frame LBS reconstruction.
+    Stores on viewer as `v._reverse_lbs_cache[muscle_name]` = dict with:
+        bodies: list[str] unique body names referenced by this muscle
+        body_idx_o, body_idx_m, body_idx_i: (n_wp,) int — index into bodies (-1 if unused)
+        local_o, local_m, local_i: (n_wp, 3) float
+        w_o, w_m, w_i: (n_wp,) float
+        wp_layout: list[(stream_idx, level_idx, fiber_idx)]
+        _wp_structure: list[(stream_idx, level_idx, n_fibers)] for scatter_waypoints_numpy.
+    """
+    import glob as _glob
+    if getattr(v, '_reverse_lbs_cache', None) is not None:
+        return
+    cache = {}
+    files = sorted(_glob.glob('reverse_lbs_results/*.npz'))
+    for path in files:
+        muscle_name = os.path.basename(path).replace('.npz', '')
+        if muscle_name not in v.zygote_muscle_meshes:
+            continue
+        d = np.load(path, allow_pickle=True)
+        recs = list(d['records'])
+        bodies = []
+        body_to_idx = {}
+
+        def _bidx(name):
+            if name is None:
+                return -1
+            if name not in body_to_idx:
+                body_to_idx[name] = len(bodies)
+                bodies.append(name)
+            return body_to_idx[name]
+
+        n = len(recs)
+        bi_o = np.full(n, -1, dtype=np.int32)
+        bi_m = np.full(n, -1, dtype=np.int32)
+        bi_i = np.full(n, -1, dtype=np.int32)
+        local_o = np.zeros((n, 3), dtype=np.float32)
+        local_m = np.zeros((n, 3), dtype=np.float32)
+        local_i = np.zeros((n, 3), dtype=np.float32)
+        w_o = np.zeros(n, dtype=np.float32)
+        w_m = np.zeros(n, dtype=np.float32)
+        w_i = np.zeros(n, dtype=np.float32)
+        wp_layout = []
+        for idx, r in enumerate(recs):
+            bi_o[idx] = _bidx(r.get('origin_body')) if r.get('w_o', 0.0) > 0.0 else -1
+            bi_m[idx] = _bidx(r.get('mid_body')) if r.get('w_m', 0.0) > 0.0 else -1
+            bi_i[idx] = _bidx(r.get('insertion_body')) if r.get('w_i', 0.0) > 0.0 else -1
+            local_o[idx] = r.get('local_o', np.zeros(3))
+            local_m[idx] = r.get('local_m', np.zeros(3))
+            local_i[idx] = r.get('local_i', np.zeros(3))
+            w_o[idx] = r.get('w_o', 0.0)
+            w_m[idx] = r.get('w_m', 0.0)
+            w_i[idx] = r.get('w_i', 0.0)
+            wp_layout.append((int(r['stream']), int(r['level']), int(r['fiber'])))
+        # Aggregate stream layout from records for scattering back into self.waypoints
+        from collections import defaultdict
+        stream_levels = defaultdict(lambda: defaultdict(int))
+        for s, l, f in wp_layout:
+            stream_levels[s][l] = max(stream_levels[s][l], f + 1)
+        wp_structure = []
+        for s in sorted(stream_levels.keys()):
+            for l in sorted(stream_levels[s].keys()):
+                wp_structure.append((s, l, stream_levels[s][l]))
+        cache[muscle_name] = dict(
+            bodies=bodies,
+            bi_o=bi_o, bi_m=bi_m, bi_i=bi_i,
+            local_o=local_o, local_m=local_m, local_i=local_i,
+            w_o=w_o, w_m=w_m, w_i=w_i,
+            wp_layout=wp_layout, wp_structure=wp_structure,
+        )
+    v._reverse_lbs_cache = cache
+    print(f'[ReverseLBS] Loaded solved waypoints for {len(cache)} muscles')
+
+
+def _reverse_lbs_compute(v, mobj_name, cache_entry):
+    """Compute world waypoint positions for one muscle from solved local
+    positions + current skeleton pose. Returns flat (n_wp, 3) array."""
+    skel = v.env.skel
+    body_world_R = []
+    body_world_t = []
+    for bn in cache_entry['bodies']:
+        b = skel.getBodyNode(bn)
+        if b is None:
+            body_world_R.append(np.eye(3, dtype=np.float32))
+            body_world_t.append(np.zeros(3, dtype=np.float32))
+            continue
+        T = np.asarray(b.getWorldTransform().matrix())
+        body_world_R.append(T[:3, :3].astype(np.float32))
+        body_world_t.append(T[:3, 3].astype(np.float32))
+    body_world_R = np.stack(body_world_R, axis=0) if body_world_R else np.zeros((0, 3, 3), dtype=np.float32)
+    body_world_t = np.stack(body_world_t, axis=0) if body_world_t else np.zeros((0, 3), dtype=np.float32)
+
+    n = cache_entry['bi_o'].shape[0]
+    out = np.zeros((n, 3), dtype=np.float32)
+    for (bi, local, w) in (
+        (cache_entry['bi_o'], cache_entry['local_o'], cache_entry['w_o']),
+        (cache_entry['bi_m'], cache_entry['local_m'], cache_entry['w_m']),
+        (cache_entry['bi_i'], cache_entry['local_i'], cache_entry['w_i']),
+    ):
+        mask = bi >= 0
+        if not mask.any():
+            continue
+        idx = bi[mask]
+        R = body_world_R[idx]               # (k, 3, 3)
+        t = body_world_t[idx]               # (k, 3)
+        lp = local[mask]                    # (k, 3)
+        wm = w[mask][:, None]               # (k, 1)
+        contrib = np.einsum('kij,kj->ki', R, lp) + t  # (k, 3)
+        out[mask] += wm * contrib
+    return out
+
+
+def _reverse_lbs_apply(v):
+    """Apply (or revert) reverse-LBS waypoint override on all known muscles."""
+    if not getattr(v, 'reverse_lbs_enabled', False):
+        # User toggled off — leave current waypoints; they will be refreshed
+        # next time motion advances or NN inference runs.
+        return
+    if getattr(v, '_reverse_lbs_cache', None) is None:
+        _reverse_lbs_load(v)
+    cache = getattr(v, '_reverse_lbs_cache', None)
+    if not cache:
+        return
+    for mname, entry in cache.items():
+        mobj = v.zygote_muscle_meshes.get(mname)
+        if mobj is None:
+            continue
+        try:
+            wp_flat = _reverse_lbs_compute(v, mname, entry)
+            # Scatter into mobj.waypoints using stream/level structure stored
+            # alongside solved data (must match the cache layout).
+            if getattr(mobj, 'waypoints', None):
+                offset = 0
+                for (s_idx, l_idx, n_f) in entry['wp_structure']:
+                    if n_f == 0:
+                        offset += n_f; continue
+                    if s_idx < len(mobj.waypoints) and l_idx < len(mobj.waypoints[s_idx]):
+                        mobj.waypoints[s_idx][l_idx] = wp_flat[offset:offset + n_f].copy()
+                    offset += n_f
+                mobj._fiber_draw_dirty = True
+        except Exception as e:
+            print(f'[ReverseLBS] {mname}: apply failed: {e}')
 
 
 def _motion_anim_steps(v, frame):
@@ -9100,18 +9927,24 @@ def _motion_reset(v):
 def reset(v, reset_time=None):
     v.env.reset(reset_time)
     v.reward_buffer = [v.env.get_reward()]
-    # Reset soft body simulations
+    # Reset soft body simulations + force fiber redraw
     for name, obj in v.zygote_muscle_meshes.items():
         if obj.soft_body is not None:
             obj.reset_soft_body()
+        obj._fiber_draw_dirty = True
+    if getattr(v, 'reverse_lbs_enabled', False):
+        _reverse_lbs_apply(v)
 
 
 def zero_reset(v):
     v.env.zero_reset()
     v.reward_buffer = [v.env.get_reward()]
-    # Reset soft body simulations
+    # Reset soft body simulations + force fiber redraw
     for name, obj in v.zygote_muscle_meshes.items():
         if obj.soft_body is not None:
             obj.reset_soft_body()
+        obj._fiber_draw_dirty = True
+    if getattr(v, 'reverse_lbs_enabled', False):
+        _reverse_lbs_apply(v)
 
 

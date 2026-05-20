@@ -208,7 +208,33 @@ class Env(gym.Env):
     def loading_zygote_muscle_info(self, zygote_muscle_info):
         self.muscles = dart.dynamics.Muscles(self.skel)
         self.zygote_activation_indices = [0]
-        # self.zygote_muscles = dart.dynamics.Zygote_Muscles(self.skel)
+
+        # Kinematic chain helpers (used to pick a 3rd intermediate bone for
+        # biarticular muscles like Rectus_Femoris where 2-bone LBS fails).
+        def _ancestors(body_name):
+            chain = []
+            b = self.skel.getBodyNode(body_name)
+            while b is not None:
+                chain.append(b.getName())
+                b = b.getParentBodyNode()
+            return chain
+
+        def _chain_between(o_name, i_name):
+            O = _ancestors(o_name); I = _ancestors(i_name)
+            O_set = set(O)
+            lca = next((n for n in I if n in O_set), None)
+            if lca is None:
+                return []
+            o_part = []
+            for n in O:
+                if n == lca: break
+                o_part.append(n)
+            i_part = []
+            for n in I:
+                if n == lca: break
+                i_part.append(n)
+            return [n for n in (o_part + [lca] + list(reversed(i_part)))
+                    if n != o_name and n != i_name]
 
         for name, muscle in zygote_muscle_info.items():
             muscle_properties = muscle['muscle_properties']
@@ -224,49 +250,71 @@ class Env(gym.Env):
                 for waypoint in waypoints_info:
                     body = waypoint['body']
                     p = waypoint['p']
-
                     waypoints.append((body, p))
                     ps.append(p)
                     if body not in mesh_names:
                         mesh_names.append(body)
 
-                # meshes = [self.meshes[mesh_name] for mesh_name in mesh_names]
-                # for p_i, p in enumerate(ps):
-                #     weights = []
+                origin_body = mesh_names[0]
+                insertion_body = mesh_names[-1]
 
-                #     # # Mesh Distance Based
-                #     # for mesh in meshes:
-                #     #     # get minimum distance from p to mesh.vertices
-                #     #     distances = np.linalg.norm(mesh.vertices - p, axis=1)
-                #     #     min_distance = np.min(distances)
-                #     #     weights.append(1.0 / np.sqrt(min_distance))
+                # Cumulative arc length from origin per waypoint
+                cum = [0.0]
+                for j in range(1, len(ps)):
+                    cum.append(cum[-1] + float(np.linalg.norm(ps[j] - ps[j - 1])))
+                total = cum[-1] if cum[-1] > 1e-9 else 1.0
 
-                #     # Mesh Mean Distance Based
-                #     for mesh in meshes:
-                #         distance = np.linalg.norm(np.mean(mesh.vertices, axis=0) - p)
-                #         weights.append(1.0 / (distance + 1e-6))  # Avoid division by zero
+                # Decide whether to use a 3rd intermediate bone
+                intermediate = None
+                chain = _chain_between(origin_body, insertion_body)
+                if len(chain) >= 2:
+                    # Multi-joint chain → biarticular muscle.  Pick the bone
+                    # closest to the fiber midpoint at rest.
+                    mid_world = ps[len(ps) // 2]
+                    best, best_d = None, float('inf')
+                    for bn in chain:
+                        b = self.skel.getBodyNode(bn)
+                        if b is None:
+                            continue
+                        t = np.asarray(b.getWorldTransform().translation())
+                        d = float(np.linalg.norm(t - mid_world))
+                        if d < best_d:
+                            best_d = d
+                            best = bn
+                    intermediate = best
 
-                #     weights = np.array(weights)
-                #     weights /= np.sum(weights)
-                #     waypoint_weights.append(weights)
+                if intermediate is not None:
+                    bn_names = [origin_body, intermediate, insertion_body]
+                    # Tent breakpoint u_m = arc fraction of waypoint nearest
+                    # to intermediate bone's rest world position.
+                    interm_b = self.skel.getBodyNode(intermediate)
+                    interm_pos = np.asarray(interm_b.getWorldTransform().translation())
+                    dists = [float(np.linalg.norm(p - interm_pos)) for p in ps]
+                    u_m_idx = int(np.argmin(dists))
+                    u_m = cum[u_m_idx] / total
+                    u_m = max(0.1, min(0.9, u_m))
+                    for p_i in range(len(ps)):
+                        u = cum[p_i] / total
+                        if u <= u_m:
+                            w_o = 1.0 - u / u_m
+                            w_mid = u / u_m
+                            w_in = 0.0
+                        else:
+                            w_o = 0.0
+                            w_mid = (1.0 - u) / (1.0 - u_m)
+                            w_in = (u - u_m) / (1.0 - u_m)
+                        waypoint_weights.append(np.array([w_o, w_mid, w_in]))
+                else:
+                    bn_names = [origin_body, insertion_body]
+                    for p_i in range(len(ps)):
+                        l_origin = cum[p_i]
+                        l_insertion = total - l_origin
+                        # P1-fixed convention: weight on mesh_names[k] is the
+                        # arc length to the OPPOSITE endpoint.
+                        weights = np.array([l_insertion, l_origin]) / total
+                        waypoint_weights.append(weights)
 
-                # # Distance to Origin and Insertion Based
-                mesh_names = [mesh_names[0], mesh_names[-1]]
-                for p_i, p in enumerate(ps):
-                    l_origin = 0.0
-                    l_insertion = 0.0
-                    for index in range(1, p_i + 1):
-                        l_origin += np.linalg.norm(ps[index] - ps[index - 1])
-                    for index in range(p_i + 1, len(ps)):
-                        l_insertion += np.linalg.norm(ps[index] - ps[index - 1])
-
-                    weights = np.array([l_origin, l_insertion])
-                    weights /= np.sum(weights)
-                    waypoint_weights.append(weights)
-
-                # self.muscles.addMuscle(name + str(i), muscle_properties, useVelocityForce, waypoints)
-                self.muscles.addMuscleWeight(name + str(i), muscle_properties, useVelocityForce, waypoints, mesh_names, waypoint_weights)
-                # print(self.muscles.getNumMuscles())
+                self.muscles.addMuscleWeight(name + str(i), muscle_properties, useVelocityForce, waypoints, bn_names, waypoint_weights)
 
             self.zygote_activation_indices.append(len(fibers))
 

@@ -66,22 +66,23 @@ def mirror_skeleton_names(names_list):
 
 def _mirror_body_name(name):
     """Remap a single L_ body name to R_."""
-    mapped = SKELETON_NAME_MAP.get(name.replace("0", ""), name)
-    if mapped == name and name.startswith("L_"):
-        mapped = "R_" + name[2:]
-    elif not name.startswith("L_"):
-        mapped = name  # non-L names stay as-is
-    else:
-        # Re-add suffix (e.g. "0") if present in original
-        suffix = ""
-        for i in range(len(name) - 1, -1, -1):
-            if name[i].isdigit():
-                suffix = name[i] + suffix
-            else:
-                break
-        if suffix and not mapped.endswith(suffix):
-            mapped = mapped + suffix
-    return mapped
+    if not name.startswith("L_"):
+        return name  # non-L names stay as-is
+    # Strip trailing-digit suffix once, look up in map, then re-attach the suffix.
+    # Avoids the .replace("0","") trick which removed embedded zeros and led
+    # to duplicate-digit body names (R_Toe550 instead of R_Toe50).
+    suffix = ""
+    base = name
+    for i in range(len(name) - 1, -1, -1):
+        if name[i].isdigit():
+            suffix = name[i] + suffix
+        else:
+            base = name[:i + 1]
+            break
+    mapped_base = SKELETON_NAME_MAP.get(base, None)
+    if mapped_base is None:
+        mapped_base = "R_" + base[2:]
+    return mapped_base + suffix
 
 
 def _mirror_bary_coords(bary_coords):
@@ -202,13 +203,41 @@ def mirror_tet_file(src_path, dst_path, dry_run=False):
         pickle.dump(mirrored, f)
 
 
+LOW_LEG_MUSCLES = [
+    "L_Extensor_Digitorum_Longus",
+    "L_Extensor_Hallucis_Longus",
+    "L_Flexor_Digitorum_Longus",
+    "L_Flexor_Hallucis",
+    "L_Gastrocnemius",
+    "L_Peroneus_Brevis",
+    "L_Peroneus_Longus",
+    "L_Peroneus_Tertius",
+    "L_Plantaris",
+    "L_Soleus",
+    "L_Tibialis_Anterior",
+    "L_Tibialis_Posterior",
+]
+
+
 def main():
     parser = argparse.ArgumentParser(description="Mirror L tet files to R")
     parser.add_argument("--dry-run", action="store_true", help="Don't write files")
+    parser.add_argument("--lowleg", action="store_true",
+                        help="Only mirror the 12 lower-leg muscles (skip upper leg)")
+    parser.add_argument("--names", nargs="+", default=None,
+                        help="Explicit muscle names (without _tet.npz, e.g. L_Soleus)")
     args = parser.parse_args()
 
     tet_dir = "tet"
-    l_files = sorted(glob.glob(os.path.join(tet_dir, "L_*_tet.npz")))
+
+    if args.names:
+        l_files = [os.path.join(tet_dir, f"{n}_tet.npz") for n in args.names]
+        l_files = [p for p in l_files if os.path.exists(p)]
+    elif args.lowleg:
+        l_files = [os.path.join(tet_dir, f"{n}_tet.npz") for n in LOW_LEG_MUSCLES]
+        l_files = [p for p in l_files if os.path.exists(p)]
+    else:
+        l_files = sorted(glob.glob(os.path.join(tet_dir, "L_*_tet.npz")))
     print(f"Found {len(l_files)} L tet files")
 
     mirrored = 0

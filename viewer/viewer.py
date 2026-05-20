@@ -1136,7 +1136,7 @@ class GLFWApp():
             if self.draw_muscle:
                 imgui.same_line()
                 if imgui.radio_button("Line Muscle", self.draw_line_muscle):
-                    self.draw_line_muscle = True 
+                    self.draw_line_muscle = True
                 imgui.same_line()
                 if imgui.radio_button("Cube Muscle", not self.draw_line_muscle):
                     self.draw_line_muscle = False
@@ -1297,11 +1297,11 @@ class GLFWApp():
             elif key == glfw.KEY_Z:
                 zero_reset(self)
 
-    def startLoop(self):        
+    def startLoop(self):
         while not glfw.window_should_close(self.window):
             start_time = time.time()
             glfw.poll_events()
-            
+
             self.impl.process_inputs()
 
             # Motion Browser: auto-advance in play mode
@@ -1426,7 +1426,7 @@ class GLFWApp():
             ## Rendering Simulation
             self.drawSimFrame()
             self.drawUIFrame()
-            
+
             self.impl.render(imgui.get_draw_data())
             glfw.swap_buffers(self.window)
 
