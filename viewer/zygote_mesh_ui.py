@@ -9496,7 +9496,7 @@ def _import_reverse_lbs_into_dart(v):
           f"Total DART muscles: {v.env.muscles.getNumMuscles()}")
 
 
-REVERSE_LBS_XML = 'data/zygote_muscle_LBS_combined.xml'
+REVERSE_LBS_XML = 'data/zygote_muscle_LBS_run.xml'
 
 
 def _reverse_lbs_load(v):
@@ -9535,7 +9535,7 @@ def _reverse_lbs_load(v):
                 bodies.append(name)
             return body_to_idx[name]
 
-        wp_bones, wp_locals, wp_weights, wp_layout = [], [], [], []
+        raw = []  # (s, l, f, bone_idx_arr, locals, weights)
         for fib in unit.findall('Fiber'):
             s_idx = int(fib.attrib.get('stream', 0))
             f_idx = int(fib.attrib.get('fiber', 0))
@@ -9545,12 +9545,17 @@ def _reverse_lbs_load(v):
                 locs = [np.fromstring(s, sep=' ', dtype=np.float32)
                         for s in wp.attrib['lbs_locals'].split(';')]
                 ws = np.fromstring(wp.attrib['lbs_weights'], sep=' ', dtype=np.float32)
-                wp_bones.append(np.array([_bidx(b) for b in bones], dtype=np.int32))
-                wp_locals.append(np.stack(locs, axis=0))
-                wp_weights.append(ws)
-                wp_layout.append((s_idx, l_idx, f_idx))
-        if not wp_bones:
+                raw.append((s_idx, l_idx, f_idx,
+                            np.array([_bidx(b) for b in bones], dtype=np.int32),
+                            np.stack(locs, axis=0), ws))
+        if not raw:
             continue
+        # Scatter expects (stream, level, fiber) order — sort.
+        raw.sort(key=lambda r: (r[0], r[1], r[2]))
+        wp_bones = [r[3] for r in raw]
+        wp_locals = [r[4] for r in raw]
+        wp_weights = [r[5] for r in raw]
+        wp_layout = [(r[0], r[1], r[2]) for r in raw]
         from collections import defaultdict
         stream_levels = defaultdict(lambda: defaultdict(int))
         for s, l, f in wp_layout:
