@@ -9496,63 +9496,61 @@ def _import_reverse_lbs_into_dart(v):
           f"Total DART muscles: {v.env.muscles.getNumMuscles()}")
 
 
-def _reverse_lbs_load(v):
-    """Lazy-load per-muscle reverse-LBS records from reverse_lbs_results/*.npz.
+REVERSE_LBS_XML = 'data/zygote_muscle_LBS_combined.xml'
 
-    Builds vectorised arrays per muscle for fast per-frame LBS reconstruction.
+
+def _reverse_lbs_load(v):
+    """Lazy-load per-muscle K-bone LBS data from REVERSE_LBS_XML.
+
+    Each <Waypoint> carries `lbs_bones` (CSV), `lbs_locals` (semicolon-
+    separated "x y z" per bone) and `lbs_weights` (space-separated). Builds
+    vectorised arrays for fast per-frame reconstruction.
+
     Stores on viewer as `v._reverse_lbs_cache[muscle_name]` = dict with:
         bodies: list[str] unique body names referenced by this muscle
-        body_idx_o, body_idx_m, body_idx_i: (n_wp,) int — index into bodies (-1 if unused)
-        local_o, local_m, local_i: (n_wp, 3) float
-        w_o, w_m, w_i: (n_wp,) float
-        wp_layout: list[(stream_idx, level_idx, fiber_idx)]
-        _wp_structure: list[(stream_idx, level_idx, n_fibers)] for scatter_waypoints_numpy.
+        wp_bones: list[np.ndarray int32]  (n_wp,) of per-waypoint bone-index arrays
+        wp_locals: list[np.ndarray float32 (k, 3)]
+        wp_weights: list[np.ndarray float32 (k,)]
+        wp_structure: list[(stream_idx, level_idx, n_fibers)] for scatter.
     """
-    import glob as _glob
+    import xml.etree.ElementTree as ET
     if getattr(v, '_reverse_lbs_cache', None) is not None:
         return
+    if not os.path.exists(REVERSE_LBS_XML):
+        print(f'[ReverseLBS] XML not found: {REVERSE_LBS_XML}')
+        v._reverse_lbs_cache = {}
+        return
+    tree = ET.parse(REVERSE_LBS_XML)
     cache = {}
-    files = sorted(_glob.glob('reverse_lbs_results/*.npz'))
-    for path in files:
-        muscle_name = os.path.basename(path).replace('.npz', '')
+    for unit in tree.getroot().findall('Unit'):
+        muscle_name = unit.attrib.get('name')
         if muscle_name not in v.zygote_muscle_meshes:
             continue
-        d = np.load(path, allow_pickle=True)
-        recs = list(d['records'])
         bodies = []
         body_to_idx = {}
 
         def _bidx(name):
-            if name is None:
-                return -1
             if name not in body_to_idx:
                 body_to_idx[name] = len(bodies)
                 bodies.append(name)
             return body_to_idx[name]
 
-        n = len(recs)
-        bi_o = np.full(n, -1, dtype=np.int32)
-        bi_m = np.full(n, -1, dtype=np.int32)
-        bi_i = np.full(n, -1, dtype=np.int32)
-        local_o = np.zeros((n, 3), dtype=np.float32)
-        local_m = np.zeros((n, 3), dtype=np.float32)
-        local_i = np.zeros((n, 3), dtype=np.float32)
-        w_o = np.zeros(n, dtype=np.float32)
-        w_m = np.zeros(n, dtype=np.float32)
-        w_i = np.zeros(n, dtype=np.float32)
-        wp_layout = []
-        for idx, r in enumerate(recs):
-            bi_o[idx] = _bidx(r.get('origin_body')) if r.get('w_o', 0.0) > 0.0 else -1
-            bi_m[idx] = _bidx(r.get('mid_body')) if r.get('w_m', 0.0) > 0.0 else -1
-            bi_i[idx] = _bidx(r.get('insertion_body')) if r.get('w_i', 0.0) > 0.0 else -1
-            local_o[idx] = r.get('local_o', np.zeros(3))
-            local_m[idx] = r.get('local_m', np.zeros(3))
-            local_i[idx] = r.get('local_i', np.zeros(3))
-            w_o[idx] = r.get('w_o', 0.0)
-            w_m[idx] = r.get('w_m', 0.0)
-            w_i[idx] = r.get('w_i', 0.0)
-            wp_layout.append((int(r['stream']), int(r['level']), int(r['fiber'])))
-        # Aggregate stream layout from records for scattering back into self.waypoints
+        wp_bones, wp_locals, wp_weights, wp_layout = [], [], [], []
+        for fib in unit.findall('Fiber'):
+            s_idx = int(fib.attrib.get('stream', 0))
+            f_idx = int(fib.attrib.get('fiber', 0))
+            for wp in fib.findall('Waypoint'):
+                l_idx = int(wp.attrib.get('level', 0))
+                bones = [b for b in wp.attrib['lbs_bones'].split(',') if b]
+                locs = [np.fromstring(s, sep=' ', dtype=np.float32)
+                        for s in wp.attrib['lbs_locals'].split(';')]
+                ws = np.fromstring(wp.attrib['lbs_weights'], sep=' ', dtype=np.float32)
+                wp_bones.append(np.array([_bidx(b) for b in bones], dtype=np.int32))
+                wp_locals.append(np.stack(locs, axis=0))
+                wp_weights.append(ws)
+                wp_layout.append((s_idx, l_idx, f_idx))
+        if not wp_bones:
+            continue
         from collections import defaultdict
         stream_levels = defaultdict(lambda: defaultdict(int))
         for s, l, f in wp_layout:
@@ -9562,19 +9560,16 @@ def _reverse_lbs_load(v):
             for l in sorted(stream_levels[s].keys()):
                 wp_structure.append((s, l, stream_levels[s][l]))
         cache[muscle_name] = dict(
-            bodies=bodies,
-            bi_o=bi_o, bi_m=bi_m, bi_i=bi_i,
-            local_o=local_o, local_m=local_m, local_i=local_i,
-            w_o=w_o, w_m=w_m, w_i=w_i,
-            wp_layout=wp_layout, wp_structure=wp_structure,
+            bodies=bodies, wp_bones=wp_bones, wp_locals=wp_locals,
+            wp_weights=wp_weights, wp_structure=wp_structure,
         )
     v._reverse_lbs_cache = cache
-    print(f'[ReverseLBS] Loaded solved waypoints for {len(cache)} muscles')
+    print(f'[ReverseLBS] Loaded {len(cache)} muscles from {REVERSE_LBS_XML}')
 
 
 def _reverse_lbs_compute(v, mobj_name, cache_entry):
-    """Compute world waypoint positions for one muscle from solved local
-    positions + current skeleton pose. Returns flat (n_wp, 3) array."""
+    """Compute world waypoint positions for one muscle from per-waypoint
+    K-bone LBS data + current skeleton pose. Returns flat (n_wp, 3) array."""
     skel = v.env.skel
     body_world_R = []
     body_world_t = []
@@ -9590,23 +9585,19 @@ def _reverse_lbs_compute(v, mobj_name, cache_entry):
     body_world_R = np.stack(body_world_R, axis=0) if body_world_R else np.zeros((0, 3, 3), dtype=np.float32)
     body_world_t = np.stack(body_world_t, axis=0) if body_world_t else np.zeros((0, 3), dtype=np.float32)
 
-    n = cache_entry['bi_o'].shape[0]
+    wp_bones = cache_entry['wp_bones']
+    wp_locals = cache_entry['wp_locals']
+    wp_weights = cache_entry['wp_weights']
+    n = len(wp_bones)
     out = np.zeros((n, 3), dtype=np.float32)
-    for (bi, local, w) in (
-        (cache_entry['bi_o'], cache_entry['local_o'], cache_entry['w_o']),
-        (cache_entry['bi_m'], cache_entry['local_m'], cache_entry['w_m']),
-        (cache_entry['bi_i'], cache_entry['local_i'], cache_entry['w_i']),
-    ):
-        mask = bi >= 0
-        if not mask.any():
-            continue
-        idx = bi[mask]
+    for i in range(n):
+        idx = wp_bones[i]
         R = body_world_R[idx]               # (k, 3, 3)
         t = body_world_t[idx]               # (k, 3)
-        lp = local[mask]                    # (k, 3)
-        wm = w[mask][:, None]               # (k, 1)
+        lp = wp_locals[i]                   # (k, 3)
+        w = wp_weights[i]                   # (k,)
         contrib = np.einsum('kij,kj->ki', R, lp) + t  # (k, 3)
-        out[mask] += wm * contrib
+        out[i] = (w[:, None] * contrib).sum(axis=0)
     return out
 
 

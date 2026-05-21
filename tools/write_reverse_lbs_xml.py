@@ -55,6 +55,11 @@ def load_revised_props(path):
 
 
 def main():
+    import argparse
+    ap = argparse.ArgumentParser()
+    ap.add_argument('--src', default='/home/jek/muscle_imitation_learning_study/reverse_lbs_results')
+    ap.add_argument('--out', default='/home/jek/muscle_imitation_learning_study/data/zygote_muscle_reverse.xml')
+    args = ap.parse_args()
     skel_info, root_name, *_ = saveSkeletonInfo('/home/jek/muscle_imitation_learning_study/data/zygote_skel.xml')
     skel = buildFromInfo(skel_info, root_name)
     skel.resetPositions()
@@ -72,7 +77,7 @@ def main():
     props_map = load_revised_props('/home/jek/muscle_imitation_learning_study/data/zygote_muscle_revised.xml')
     root = ET.Element('Muscle')
 
-    files = sorted(glob.glob('/home/jek/muscle_imitation_learning_study/reverse_lbs_results/*.npz'))
+    files = sorted(glob.glob(os.path.join(args.src, '*.npz')))
     print(f'Processing {len(files)} muscle NPZ files')
 
     for path in files:
@@ -91,7 +96,8 @@ def main():
 
         for (s_idx, f_idx), recs in sorted(fiber_groups.items()):
             recs.sort(key=lambda r: int(r['level']))
-            fiber = ET.SubElement(unit, 'Fiber')
+            fiber = ET.SubElement(unit, 'Fiber', attrib={
+                'stream': str(s_idx), 'fiber': str(f_idx)})
             for r in recs:
                 w_o = float(r.get('w_o', 0.0))
                 w_m = float(r.get('w_m', 0.0))
@@ -121,8 +127,31 @@ def main():
                 else:
                     body = mid_body if mid_body else origin_body
 
+                # K-bone LBS attrs (skip zero-weight bones)
+                bones, locals_, weights = [], [], []
+                if w_o > 0:
+                    bones.append(origin_body)
+                    locals_.append(np.asarray(r['local_o'], dtype=np.float64))
+                    weights.append(w_o)
+                if w_m > 0 and mid_body:
+                    bones.append(mid_body)
+                    locals_.append(np.asarray(r['local_m'], dtype=np.float64))
+                    weights.append(w_m)
+                if w_i > 0:
+                    bones.append(insertion_body)
+                    locals_.append(np.asarray(r['local_i'], dtype=np.float64))
+                    weights.append(w_i)
+
                 p_str = f'{world[0]:.6f} {world[1]:.6f} {world[2]:.6f}'
-                ET.SubElement(fiber, 'Waypoint', attrib={'body': body, 'p': p_str})
+                lbs_locals_str = '; '.join(
+                    f'{lp[0]:.6f} {lp[1]:.6f} {lp[2]:.6f}' for lp in locals_)
+                lbs_weights_str = ' '.join(f'{w:.6f}' for w in weights)
+                ET.SubElement(fiber, 'Waypoint', attrib={
+                    'body': body, 'p': p_str, 'level': str(level),
+                    'lbs_bones': ','.join(bones),
+                    'lbs_locals': lbs_locals_str,
+                    'lbs_weights': lbs_weights_str,
+                })
 
     # Pretty-indent (Python 3.8 compat)
     def _indent(elem, level=0):
@@ -141,7 +170,7 @@ def main():
                 elem.tail = i
     _indent(root)
 
-    out = '/home/jek/muscle_imitation_learning_study/data/zygote_muscle_reverse.xml'
+    out = args.out
     ET.ElementTree(root).write(out, encoding='utf-8', xml_declaration=False)
     n_units = len(root.findall('Unit'))
     n_fibers = sum(len(u.findall('Fiber')) for u in root.findall('Unit'))
