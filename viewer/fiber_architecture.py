@@ -1966,6 +1966,13 @@ class FiberArchitectureMixin:
         if self.fiber_architecture is None:
             return
 
+        # Defensive: reset GL array state so a stale VBO/COLOR_ARRAY from
+        # another muscle's draw can't be reinterpreted as offset into our
+        # client-side numpy buffers (cause of toggle-time segfaults).
+        glBindBuffer(GL_ARRAY_BUFFER, 0)
+        glDisableClientState(GL_COLOR_ARRAY)
+        glDisableClientState(GL_NORMAL_ARRAY)
+
         alpha = getattr(self, 'fiber_transparency', 1.0)
         use_depth_fade = getattr(self, 'fiber_depth_fade', True)
 
@@ -2084,12 +2091,14 @@ class FiberArchitectureMixin:
                 if len(valid_waypoints) > 0:
                     glPointSize(5)
                     glColor4f(0.2, 0.4, 1.0, alpha)
-                    pts = np.array(valid_waypoints, dtype=np.float32)
+                    pts = np.ascontiguousarray(valid_waypoints, dtype=np.float32)
+                    self._fiber_test_pts_keepalive = pts
+                    glBindBuffer(GL_ARRAY_BUFFER, 0)
+                    glDisableClientState(GL_COLOR_ARRAY)
                     glVertexPointer(3, GL_FLOAT, 0, pts)
                     glDrawArrays(GL_POINTS, 0, len(pts))
                     if len(valid_waypoints) >= 2:
                         glLineWidth(3)
-                        glVertexPointer(3, GL_FLOAT, 0, pts)
                         glDrawArrays(GL_LINE_STRIP, 0, len(pts))
 
         glDisableClientState(GL_VERTEX_ARRAY)
@@ -2107,6 +2116,10 @@ class FiberArchitectureMixin:
         glDisable(GL_LIGHTING)
         glEnable(GL_BLEND)
         glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
+        # Defensive: same VBO/state reset as fast path.
+        glBindBuffer(GL_ARRAY_BUFFER, 0)
+        glDisableClientState(GL_COLOR_ARRAY)
+        glDisableClientState(GL_NORMAL_ARRAY)
         glEnableClientState(GL_VERTEX_ARRAY)
 
         # Get modelview matrix for depth fade

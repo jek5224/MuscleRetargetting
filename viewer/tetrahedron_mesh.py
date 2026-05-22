@@ -2344,6 +2344,9 @@ except Exception as e:
         glEnable(GL_LIGHTING)
         glEnable(GL_COLOR_MATERIAL)
         glColorMaterial(GL_FRONT_AND_BACK, GL_AMBIENT_AND_DIFFUSE)
+        # Defensive: ensure client-side arrays aren't interpreted as VBO offsets.
+        glBindBuffer(GL_ARRAY_BUFFER, 0)
+        glDisableClientState(GL_COLOR_ARRAY)
         glEnableClientState(GL_VERTEX_ARRAY)
         glEnableClientState(GL_NORMAL_ARRAY)
 
