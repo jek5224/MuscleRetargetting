@@ -93,7 +93,16 @@ def draw_zygote_muscle_ui(v):
         if changed_rlbs and v.reverse_lbs_enabled:
             _reverse_lbs_load(v)
         if changed_rlbs:
-            _reverse_lbs_apply(v)
+            if v.reverse_lbs_enabled:
+                _reverse_lbs_apply(v)
+            else:
+                # Restore cached/NN waypoints for current frame.
+                cur = getattr(v, 'motion_current_frame', 0)
+                if not _motion_apply_cached_deformation(v, cur):
+                    for mobj in v.zygote_muscle_meshes.values():
+                        if hasattr(mobj, '_update_waypoints_from_tet'):
+                            mobj._update_waypoints_from_tet(v.env.skel, verbose=False)
+                        mobj._fiber_draw_dirty = True
 
         # Muscle Add/Remove UI
         if imgui.tree_node("Add/Remove Muscles"):
