@@ -147,7 +147,7 @@ def main():
                     f'{lp[0]:.6f} {lp[1]:.6f} {lp[2]:.6f}' for lp in locals_)
                 lbs_weights_str = ' '.join(f'{w:.6f}' for w in weights)
                 ET.SubElement(fiber, 'Waypoint', attrib={
-                    'body': body, 'p': p_str, 'level': str(level),
+                    'body': body, 'p': p_str,
                     'lbs_bones': ','.join(bones),
                     'lbs_locals': lbs_locals_str,
                     'lbs_weights': lbs_weights_str,

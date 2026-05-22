@@ -9548,8 +9548,7 @@ def _reverse_lbs_load(v):
         for fib in unit.findall('Fiber'):
             s_idx = int(fib.attrib.get('stream', 0))
             f_idx = int(fib.attrib.get('fiber', 0))
-            for wp in fib.findall('Waypoint'):
-                l_idx = int(wp.attrib.get('level', 0))
+            for l_idx, wp in enumerate(fib.findall('Waypoint')):
                 bones = [b for b in wp.attrib['lbs_bones'].split(',') if b]
                 locs = [np.fromstring(s, sep=' ', dtype=np.float32)
                         for s in wp.attrib['lbs_locals'].split(';')]
