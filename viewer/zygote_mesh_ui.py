@@ -7512,6 +7512,29 @@ def _run_unified_volume_sim(v, active_muscles, max_iterations=100, tolerance=1e-
                 if gi < total_verts and not global_fixed_mask[gi]:
                     collision_vertex_set.add(gi)
 
+        # Per-muscle ANATOMICAL surface faces in global indices (cap faces
+        # excluded).  Used for paper-§4.1.2 dynamic anisotropic contact.
+        anat_face_global_list = []
+        vert_owner_global = -np.ones(total_verts, dtype=np.int32)
+        for m_id, name in enumerate(muscle_names):
+            mobj = active_muscles[name]
+            offset = global_offset[name]
+            n = mobj.soft_body.num_vertices
+            vert_owner_global[offset:offset + n] = m_id
+            F_render = getattr(mobj, 'tet_render_faces', None)
+            cap = getattr(mobj, 'tet_cap_face_indices', None)
+            if F_render is None:
+                continue
+            F_render = np.asarray(F_render, dtype=np.int32)
+            cap = np.asarray(cap if cap is not None else [], dtype=np.int64)
+            mask = np.ones(len(F_render), dtype=bool)
+            mask[cap] = False
+            anat = F_render[mask].astype(np.int64) + offset  # global
+            anat_face_global_list.append(anat)
+        anat_face_global = (np.concatenate(anat_face_global_list, axis=0)
+                            if anat_face_global_list
+                            else np.zeros((0, 3), dtype=np.int64))
+
         # Cache topology for subsequent frames
         v._unified_sim_cache = {
             'global_offset': global_offset,
@@ -7533,7 +7556,56 @@ def _run_unified_volume_sim(v, active_muscles, max_iterations=100, tolerance=1e-
             'csr_edge_j': csr_edge_j,
             'csr_tendon_mask': csr_tendon_mask,
             'collision_vertex_set': collision_vertex_set,
+            'anat_face_global': anat_face_global,
+            'vert_owner_global': vert_owner_global,
         }
+
+        # Paper §4.1.2 barycentric fascia constraints (pre-compute at A-pose).
+        # For each anatomical surface vert, bind to barycentric position on
+        # the nearest other-muscle anatomical triangle within threshold.
+        if getattr(v, 'fascia_constraints_on', False) and len(anat_face_global) > 0:
+            fc_threshold = float(getattr(v, 'fascia_constraint_threshold', 0.01))
+            tri_centroids = global_rest_positions[anat_face_global].mean(axis=1)
+            tri_owner = vert_owner_global[anat_face_global[:, 0]]
+            anat_v_unique = np.unique(anat_face_global)
+            from scipy.spatial import cKDTree as _cKDT_fc
+            fc_vi, fc_tri, fc_bary = [], [], []
+            for m_id in np.unique(tri_owner):
+                other_mask = tri_owner != m_id
+                if not other_mask.any():
+                    continue
+                tree = _cKDT_fc(tri_centroids[other_mask])
+                back = np.where(other_mask)[0]
+                my_verts = anat_v_unique[vert_owner_global[anat_v_unique] == m_id]
+                my_pos = global_rest_positions[my_verts]
+                d, idx = tree.query(my_pos, k=1)
+                keep = d < fc_threshold
+                for k in range(len(my_verts)):
+                    if not keep[k]:
+                        continue
+                    tri_g = back[idx[k]]
+                    tri_v = anat_face_global[tri_g]
+                    a = global_rest_positions[tri_v[0]]
+                    b = global_rest_positions[tri_v[1]]
+                    c = global_rest_positions[tri_v[2]]
+                    nrm = np.cross(b - a, c - a)
+                    n_unit = nrm / (np.linalg.norm(nrm) + 1e-12)
+                    p = my_pos[k] - np.dot(my_pos[k] - a, n_unit) * n_unit
+                    v0 = b - a; v1 = c - a; v2 = p - a
+                    d00 = np.dot(v0, v0); d01 = np.dot(v0, v1); d11 = np.dot(v1, v1)
+                    d20 = np.dot(v2, v0); d21 = np.dot(v2, v1)
+                    denom = d00 * d11 - d01 * d01 + 1e-12
+                    v_b = (d11 * d20 - d01 * d21) / denom
+                    w_b = (d00 * d21 - d01 * d20) / denom
+                    u_b = 1.0 - v_b - w_b
+                    fc_vi.append(int(my_verts[k]))
+                    fc_tri.append(tri_v.astype(np.int64))
+                    fc_bary.append(np.array([u_b, v_b, w_b], dtype=np.float64))
+            v._unified_sim_cache['fc_vi'] = np.array(fc_vi, dtype=np.int64) if fc_vi else np.zeros(0, dtype=np.int64)
+            v._unified_sim_cache['fc_tri'] = np.stack(fc_tri, axis=0) if fc_tri else np.zeros((0, 3), dtype=np.int64)
+            v._unified_sim_cache['fc_bary'] = np.stack(fc_bary, axis=0) if fc_bary else np.zeros((0, 3), dtype=np.float64)
+            print(f"  Fascia constraints (barycentric): {len(fc_vi)} bindings, "
+                  f"threshold={fc_threshold*1000:.1f}mm")
         print(f"  Collision candidates: {len(collision_vertex_set)} non-fixed surface verts")
 
     # Compute LBS positions from skinning weights + skeleton transforms.
@@ -7942,6 +8014,126 @@ def _run_unified_volume_sim(v, active_muscles, max_iterations=100, tolerance=1e-
                 targets[vi] = tgt
             _state['iter'] += 1
             return targets
+
+    # Paper §4.1.2 dynamic anisotropic contact (muscle-muscle, muscle-bone)
+    # + barycentric fascia constraints (always-on attractive coupling).
+    # Activated by ctx.use_anisotropic_contact = True.
+    if (getattr(v, 'use_anisotropic_contact', False)
+            and collision_vertex_set
+            and (cache or v._unified_sim_cache)):
+        from scipy.spatial import cKDTree as _cKDT_aniso
+        _spc = cache if cache_valid else v._unified_sim_cache
+        anat_F = _spc.get('anat_face_global')
+        vert_owner = _spc.get('vert_owner_global')
+        if anat_F is None or vert_owner is None or len(anat_F) == 0:
+            pass  # fall through; flag is no-op
+        else:
+            cv_arr = np.fromiter(collision_vertex_set, dtype=np.int64)
+            mm_margin = float(getattr(v, 'inter_muscle_contact_margin', 0.002))
+            bone_margin = float(getattr(v, 'unified_bone_contact_margin', 0.005))
+            recompute_every = int(getattr(v, 'unified_bone_contact_recompute_every', 5))
+            bone_meshes_for_fn = list(v._unified_bone_meshes) if v._unified_bone_meshes else []
+            bone_kdtree = (_cKDT_aniso(np.vstack([bm.vertices for bm in bone_meshes_for_fn]))
+                           if bone_meshes_for_fn else None)
+            state = {'iter': 0, 'pen_targets': {}}
+            # Unique anatomical surface verts (global) and their owner muscle
+            anat_v_unique = np.unique(anat_F)
+            owner_of_anat = vert_owner[anat_v_unique]
+            # Barycentric fascia constraints (paper §4.1.2)
+            fc_vi = _spc.get('fc_vi')
+            fc_tri = _spc.get('fc_tri')
+            fc_bary = _spc.get('fc_bary')
+
+            def collision_target_fn(positions, _anatF=anat_F, _anatV=anat_v_unique,
+                                    _owner=owner_of_anat, _vert_owner=vert_owner,
+                                    _bones=bone_meshes_for_fn, _bone_kdt=bone_kdtree,
+                                    _cv=cv_arr, _fmask=global_fixed_mask,
+                                    _mmm=mm_margin, _bm=bone_margin,
+                                    _every=recompute_every, _state=state,
+                                    _fc_vi=fc_vi, _fc_tri=fc_tri, _fc_bary=fc_bary):
+                targets = {int(vi): positions[int(vi)].copy() for vi in _cv}
+                # Always-on fascia constraint targets (cheap, recomputed every iter).
+                if _fc_vi is not None and len(_fc_vi) > 0:
+                    fc_pos = (_fc_bary[:, :, None] * positions[_fc_tri]).sum(axis=1)
+                    for k in range(len(_fc_vi)):
+                        vi = int(_fc_vi[k])
+                        if _fmask[vi]:
+                            continue
+                        targets[vi] = fc_pos[k]
+                if _state['iter'] % _every == 0:
+                    new_pen = {}
+                    # Per-vertex outward normals from current positions of
+                    # anatomical faces (area-weighted).
+                    tri = positions[_anatF]
+                    cross = np.cross(tri[:, 1] - tri[:, 0], tri[:, 2] - tri[:, 0])
+                    area = 0.5 * np.linalg.norm(cross, axis=1)
+                    face_n = cross / (2.0 * area[:, None] + 1e-12)
+                    Vn = np.zeros((len(positions), 3))
+                    for kk in range(3):
+                        np.add.at(Vn, _anatF[:, kk], face_n * area[:, None])
+                    nn = np.linalg.norm(Vn, axis=1, keepdims=True) + 1e-12
+                    Vn = Vn / nn
+                    # KDTree over current anatomical surface vert positions.
+                    surf_pos = positions[_anatV]
+                    surf_normals = Vn[_anatV]
+                    tree = _cKDT_aniso(surf_pos)
+                    # For every collision-candidate vert, query 4 nearest
+                    # surface verts; pick first that belongs to a DIFFERENT
+                    # muscle and is penetrating.
+                    _, nn_idx = tree.query(positions[_cv], k=4)
+                    cv_owner = _vert_owner[_cv]
+                    for i, vi_global in enumerate(_cv):
+                        vi_int = int(vi_global)
+                        if _fmask[vi_int]:
+                            continue
+                        for kk in range(4):
+                            j = int(nn_idx[i, kk])
+                            if _owner[j] == cv_owner[i] or _owner[j] < 0:
+                                continue
+                            other_pos = surf_pos[j]
+                            other_n = surf_normals[j]
+                            signed = float(np.dot(positions[vi_int] - other_pos, other_n))
+                            if signed < 0.0:
+                                # Penetrating other muscle. Target = surface +
+                                # margin along its outward normal.
+                                new_pen[vi_int] = other_pos + other_n * _mmm
+                                break
+                    # Bone penetration push — same as bone-only branch.
+                    if _bones and _bone_kdt is not None:
+                        sv_pos = positions[_cv]
+                        d_kd, _ = _bone_kdt.query(sv_pos)
+                        near = d_kd < (_bm + 0.025)
+                        if np.any(near):
+                            near_sv = _cv[near]
+                            near_pos = positions[near_sv]
+                            for bm in _bones:
+                                try:
+                                    bmin = bm.bounds[0] - _bm
+                                    bmax = bm.bounds[1] + _bm
+                                    in_bbox = np.all((near_pos >= bmin) & (near_pos <= bmax), axis=1)
+                                    if not np.any(in_bbox):
+                                        continue
+                                    bbox_pos = near_pos[in_bbox]
+                                    bbox_sv = near_sv[in_bbox]
+                                    inside = bm.contains(bbox_pos)
+                                    if not np.any(inside):
+                                        continue
+                                    ipos = bbox_pos[inside]
+                                    isv = bbox_sv[inside]
+                                    cp, _, fid = trimesh.proximity.closest_point(bm, ipos)
+                                    fn_arr = bm.face_normals[fid]
+                                    for k in range(len(isv)):
+                                        vi = int(isv[k])
+                                        if _fmask[vi]:
+                                            continue
+                                        new_pen[vi] = cp[k] + fn_arr[k] * _bm
+                                except Exception:
+                                    continue
+                    _state['pen_targets'] = new_pen
+                for vi, tgt in _state['pen_targets'].items():
+                    targets[vi] = tgt
+                _state['iter'] += 1
+                return targets
 
     is_first_frame = prev_solution is None
     solve_iters = max_iterations * 4 if is_first_frame else max_iterations

@@ -175,9 +175,27 @@ def parse_args():
     ap.add_argument('--skin-prior-max-dist', type=float, default=0.05)
     ap.add_argument('--skin-prior-strength', type=float, default=0.35)
     ap.add_argument('--unified-bone-contact', dest='unified_bone_contact',
-                    action='store_true', default=False)
+                    action='store_true', default=True)
     ap.add_argument('--no-unified-bone-contact', dest='unified_bone_contact',
                     action='store_false')
+    ap.add_argument('--anisotropic-contact', action='store_true', default=True,
+                    help='Paper §4.1.2 dynamic muscle-muscle + muscle-bone contact '
+                         '(sliding-allowed repulsion).')
+    ap.add_argument('--no-anisotropic-contact', dest='anisotropic_contact',
+                    action='store_false')
+    ap.add_argument('--inter-muscle-contact-margin', type=float, default=0.002)
+    ap.add_argument('--fascia-constraints', action='store_true', default=True,
+                    help='Paper §4.1.2 barycentric fascia constraints: each '
+                         'muscle boundary vert bound to nearest OTHER-muscle '
+                         'triangle at A-pose; soft pull toward barycentric '
+                         'point on that triangle at current frame.')
+    ap.add_argument('--no-fascia-constraints', dest='fascia_constraints',
+                    action='store_false')
+    ap.add_argument('--fascia-constraint-threshold', type=float, default=0.01,
+                    help='Max A-pose distance (m) for forming a fascia '
+                         'constraint. Default 1 cm.')
+    ap.add_argument('--fascia-constraint-weight', type=float, default=1.0,
+                    help='Soft penalty weight for fascia constraints.')
     ap.add_argument('--unified-bone-contact-margin', type=float, default=0.005)
     ap.add_argument('--unified-bone-contact-weight', type=float, default=1.5)
     ap.add_argument('--axial-min-ratio', type=float, default=0.65)
@@ -217,9 +235,10 @@ def main():
     init_soft_bodies(muscle_meshes, skeleton_meshes, skel, mesh_info,
                      smooth_skinning=None)
 
-    print(f'[4/9] Building context (inter-muscle pins DISABLED)...')
+    print(f'[4/9] Building context (paper §4.1.2: barycentric fascia '
+          f'constraints + anisotropic contact)...')
     ctx = build_context(skel, muscle_meshes, skeleton_meshes, mesh_info, args)
-    ctx.inter_muscle_constraints = []   # explicit: no pins this bake
+    ctx.inter_muscle_constraints = []   # legacy pins OFF
 
     active_muscles = {n: m for n, m in muscle_meshes.items()
                       if m.soft_body is not None}
