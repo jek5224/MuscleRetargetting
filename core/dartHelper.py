@@ -645,6 +645,22 @@ def exportBoundingBoxes(skeleton_meshes, root_name='Skeleton', filename='zygote_
 
     from scipy.spatial.transform import Rotation as R
 
+    # Preserve bvh="..." attrs from the existing on-disk XML so the BVH
+    # joint mapping survives a Save XML. Without this, no joint has a BVH
+    # source and the skel won't move under motion playback.
+    bvh_map = {}
+    existing_path = f"data/{filename}"
+    if os.path.exists(existing_path):
+        try:
+            import xml.etree.ElementTree as _ET
+            _tree = _ET.parse(existing_path)
+            for _node in _tree.getroot().findall('Node'):
+                _j = _node.find('Joint')
+                if _j is not None and 'bvh' in _j.attrib:
+                    bvh_map[_node.attrib['name']] = _j.attrib['bvh']
+        except Exception:
+            pass
+
     def writeBoundingBoxes(name, mesh):
         for i in range(len(mesh.corners)):
             if i == 0:
@@ -694,8 +710,10 @@ def exportBoundingBoxes(skeleton_meshes, root_name='Skeleton', filename='zygote_
             tw(f, "</Body>", 2)
 
             joint_type = 'Free' if (mesh.is_root and i == 0) else 'Ball'#'Ball'
+            node_full_name = name + str(i)
+            bvh_attr = (' bvh="%s"' % bvh_map[node_full_name]) if node_full_name in bvh_map else ''
             if joint_type == "Free":
-                tw(f, "<Joint type=\"Free\">", 2)
+                tw(f, "<Joint type=\"Free\"%s>" % bvh_attr, 2)
             elif joint_type == "Ball":
                 if i > 0 or mesh.is_weld:
                     joint_type = 'Weld'
@@ -704,22 +722,23 @@ def exportBoundingBoxes(skeleton_meshes, root_name='Skeleton', filename='zygote_
                     # tw(f, "<Joint type=\"Revolute\" axis=\"%s\" lower=\"-0.00001\" upper=\"0.00001\">" %
                     #         (" ".join(axis.astype(str))),
                     #         2)
-                    tw(f, "<Joint type=\"Weld\">", 2)
+                    tw(f, "<Joint type=\"Weld\"%s>" % bvh_attr, 2)
                 else:
-                    lower = np.array([np.round(-np.pi/2, 2), 
-                                      np.round(-np.pi/2, 2), 
+                    lower = np.array([np.round(-np.pi/2, 2),
+                                      np.round(-np.pi/2, 2),
                                       np.round(-np.pi/2, 2)])
-                    upper = np.array([np.round(np.pi/2, 2), 
-                                      np.round(np.pi/2, 2), 
+                    upper = np.array([np.round(np.pi/2, 2),
+                                      np.round(np.pi/2, 2),
                                       np.round(np.pi/2, 2)])
-                
-                    tw(f, "<Joint type=\"Ball\" lower=\"%s\" upper=\"%s\">" %
-                            (" ".join(lower.astype(str)),
+
+                    tw(f, "<Joint type=\"Ball\"%s lower=\"%s\" upper=\"%s\">" %
+                            (bvh_attr,
+                            " ".join(lower.astype(str)),
                             " ".join(upper.astype(str)),
                             ),
                             2)
             elif joint_type == "Weld":
-                tw(f, "<Joint type=\"Weld\">", 2)
+                tw(f, "<Joint type=\"Weld\"%s>" % bvh_attr, 2)
 
             # elif joint_type == "Revolute":
             #     if 'bvh' in info:
@@ -775,13 +794,26 @@ def exportBoundingBoxes(skeleton_meshes, root_name='Skeleton', filename='zygote_
         print("xml file not saved) No root mesh found")
         return
 
-    f = open(f"data/{filename}", 'w')
-
-    tw(f, "<Skeleton name=\"%s\">" % (root_name), 0)
-    writeBoundingBoxes(root_name, root_mesh)
-
-    tw(f, "</Skeleton>", 0)
-    f.close()
+    # Atomic write: any error during writeBoundingBoxes used to truncate the
+    # live XML to "<Skeleton ...>" header only, breaking the next viewer
+    # launch. Write to a tempfile and only swap on full success.
+    import tempfile, shutil, traceback
+    tmp_fd, tmp_path = tempfile.mkstemp(suffix='.xml', dir='data')
+    f = os.fdopen(tmp_fd, 'w')
+    try:
+        tw(f, "<Skeleton name=\"%s\">" % (root_name), 0)
+        writeBoundingBoxes(root_name, root_mesh)
+        tw(f, "</Skeleton>", 0)
+        f.close()
+        shutil.move(tmp_path, f"data/{filename}")
+    except Exception:
+        f.close()
+        try:
+            os.remove(tmp_path)
+        except OSError:
+            pass
+        print(f"xml file not saved) writeBoundingBoxes failed:")
+        traceback.print_exc()
     return
 
 def exportMuscleWaypoints(muscle_meshes, skeleton_names, filename='zygote_muscle.xml'):

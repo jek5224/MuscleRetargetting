@@ -241,7 +241,8 @@ class SkeletonMeshMixin:
 
         return best_num
 
-    def find_bounding_box(self, axis=None, method='pca-cluster', symmetry=False, _from_auto=False):
+    def find_bounding_box(self, axis=None, method='pca-cluster', symmetry=False,
+                          midline=False, _from_auto=False):
         """
         Find bounding boxes for the mesh.
 
@@ -250,8 +251,17 @@ class SkeletonMeshMixin:
                   Can be None (full PCA), 'x', 'y', 'z', 'xy', 'xz', 'yz', 'xyz'
             method: Clustering method ('pca-cluster', 'thickness-aware', 'agglo')
             symmetry: If True, enforce symmetry across YZ plane (x=0)
+            midline: If True, force each box centered at x=0 with x-axis
+                aligned to world X (for midline structures like vertebrae).
+                When num_boxes > 1, split clusters along Z (front/back)
+                instead of along X (left/right).
             _from_auto: Internal flag to prevent recursion
         """
+        # midline overrides axis alignment + symmetry
+        if midline:
+            axis = 'x'
+            symmetry = False
+
         # If auto mode is enabled, find optimal number first
         if self.auto_num_boxes and not _from_auto:
             self.num_boxes = self.find_optimal_num_boxes(axis=axis, method=method, symmetry=symmetry)
@@ -263,6 +273,10 @@ class SkeletonMeshMixin:
 
         def compute_bbox(vertices_subset):
             mean = np.mean(vertices_subset, axis=0)
+            if midline:
+                # Force box center.x = 0 so the OBB is symmetric about YZ plane
+                mean = mean.copy()
+                mean[0] = 0.0
             centered = vertices_subset - mean
 
             try:
@@ -335,6 +349,15 @@ class SkeletonMeshMixin:
             proj = centered @ axes.T
             min_proj = proj.min(axis=0)
             max_proj = proj.max(axis=0)
+            if midline:
+                # Symmetric x-extent: with mean[0]=0 and axes[0]=[1,0,0],
+                # min/max in local x become world ±x. Take the larger side
+                # so every vertex still sits inside the box.
+                x_half = max(abs(float(min_proj[0])), abs(float(max_proj[0])))
+                min_proj = min_proj.copy()
+                max_proj = max_proj.copy()
+                min_proj[0] = -x_half
+                max_proj[0] = x_half
             sizes = max_proj - min_proj
 
             corners = np.array(list(product(
@@ -377,10 +400,16 @@ class SkeletonMeshMixin:
                 labels = clustering.labels_
 
             elif method == "pca-cluster":
-                pca = PCA(n_components=3).fit(sym_vertices)
-                proj = sym_vertices @ pca.components_.T
-                clustering = KMeans(n_clusters=self.num_boxes, n_init=10).fit(proj)
-                labels = clustering.labels_
+                if midline and self.num_boxes > 1:
+                    # Split along world Z (front vs back) for midline structures.
+                    z_features = sym_vertices[:, 2:3]
+                    clustering = KMeans(n_clusters=self.num_boxes, n_init=10).fit(z_features)
+                    labels = clustering.labels_
+                else:
+                    pca = PCA(n_components=3).fit(sym_vertices)
+                    proj = sym_vertices @ pca.components_.T
+                    clustering = KMeans(n_clusters=self.num_boxes, n_init=10).fit(proj)
+                    labels = clustering.labels_
 
             else:
                 raise ValueError(f"Unknown method: {method}")

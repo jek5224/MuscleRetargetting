@@ -314,6 +314,17 @@ class Env(gym.Env):
                         weights = np.array([l_insertion, l_origin]) / total
                         waypoint_weights.append(weights)
 
+                # Validate bn_names before passing into C++ binding; missing
+                # body nodes here segfault DART. Skip the fiber if any bone
+                # is not in the skeleton.
+                missing = [b for b in bn_names if self.skel.getBodyNode(b) is None]
+                if missing:
+                    print(f"[{name}#{i}] skip fiber: bone(s) not in skel: {missing}")
+                    continue
+                if len(waypoint_weights) != len(waypoints):
+                    print(f"[{name}#{i}] skip fiber: wp/weight mismatch "
+                          f"{len(waypoint_weights)} vs {len(waypoints)}")
+                    continue
                 self.muscles.addMuscleWeight(name + str(i), muscle_properties, useVelocityForce, waypoints, bn_names, waypoint_weights)
 
             self.zygote_activation_indices.append(len(fibers))

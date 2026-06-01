@@ -325,6 +325,13 @@ def draw_zygote_muscle_ui(v):
                 print(f"Error: Muscle file not found: {muscle_file}")
                 print("  Run 'Export Muscle Waypoints' first to create it.")
             else:
+                # Reload skel XML first so DART picks up bones added since the
+                # last skel import. Without this, newly added bones (e.g. L5)
+                # won't appear in draw_obj and muscles can't reference them.
+                try:
+                    _reimport_zygote_skel(v)
+                except Exception as _e:
+                    print(f"[Import zygote_muscle] skel reload failed: {_e}")
                 try:
                     v.env.muscle_info = v.env.saveZygoteMuscleInfo(muscle_file)
                     if not v.env.muscle_info:
@@ -1313,6 +1320,103 @@ def draw_zygote_muscle_ui(v):
         imgui.tree_pop()
 
 
+def _reimport_zygote_skel(v):
+    """Reload data/zygote_skel.xml into DART skel + rebuild dependent state
+    (muscles, soft bodies, attach indices). Used by Import zygote_skel button
+    and Import zygote_muscle button so muscle import always sees the latest
+    skeleton."""
+    from core.dartHelper import saveSkeletonInfo, buildFromInfo
+    from copy import deepcopy
+    import trimesh as _trimesh
+
+    # Rescan Zygote_Meshes_251229/Skeleton/ and load any OBJ file not already
+    # in v.zygote_skeleton_meshes. Skips files already present so existing
+    # state (corners, hierarchy edits, is_draw flags) isn't lost.
+    skel_dir = 'Zygote_Meshes_251229/Skeleton'
+    if os.path.isdir(skel_dir):
+        new_loaded = []
+        for fname in sorted(os.listdir(skel_dir)):
+            if not fname.endswith('.obj'):
+                continue
+            mesh_name = fname[:-4]
+            if mesh_name in v.zygote_skeleton_meshes:
+                continue
+            path = os.path.join(skel_dir, fname)
+            try:
+                ml = MeshLoader()
+                ml.load(path)
+                ml.color = np.array([0.9, 0.9, 0.9])
+                tri = _trimesh.load_mesh(path)
+                tri.vertices *= 0.01  # MESH_SCALE
+                ml.trimesh = tri
+                v.zygote_skeleton_meshes[mesh_name] = ml
+                new_loaded.append(mesh_name)
+            except Exception as _e:
+                print(f"[Import zygote_skel] failed to load {fname}: {_e}")
+        if new_loaded:
+            v.zygote_skeleton_meshes = dict(sorted(v.zygote_skeleton_meshes.items()))
+            # Refresh cand_parent_index so dropdown ordering is stable.
+            for _i, (_n, _m) in enumerate(v.zygote_skeleton_meshes.items()):
+                _m.cand_parent_index = _i
+            print(f"[Import zygote_skel] loaded {len(new_loaded)} new mesh(es): {new_loaded}")
+
+    if v.env.skel is not None:
+        v.env.world.removeSkeleton(v.env.skel)
+
+    skel_info, root_name, bvh_info, _, mesh_info, smpl_jn_idx = saveSkeletonInfo(
+        "data/zygote_skel.xml")
+    v.env.skel_info = skel_info
+    v.env.new_skel_info = deepcopy(skel_info)
+    v.env.root_name = root_name
+    v.env.bvh_info = bvh_info
+    v.env.mesh_info = mesh_info
+    v.env.smpl_jn_idx = smpl_jn_idx
+    v.env.skel = buildFromInfo(skel_info, root_name)
+    v.env.target_skel = v.env.skel.clone()
+    v.env.world.addSkeleton(v.env.skel)
+    v.env.kp = 300.0 * np.ones(v.env.skel.getNumDofs())
+    v.env.kv = 20.0 * np.ones(v.env.skel.getNumDofs())
+    v.env.kp[:6] = 0.0
+    v.env.kv[:6] = 0.0
+    v.env.num_action = len(v.env.get_zero_action()) * (3 if v.env.learning_gain else 1)
+    v.motion_skel = v.env.skel.clone()
+
+    # Rebuild dependent state — see Import zygote_skel button history for
+    # why each step matters.
+    try:
+        import dartpy as _dart_skel_rebuild
+        if getattr(v.env, 'muscle_info', None):
+            v.env.loading_zygote_muscle_info(v.env.muscle_info)
+            v.env.muscle_activation_levels = np.zeros(
+                v.env.muscles.getNumMuscles())
+        else:
+            v.env.muscles = _dart_skel_rebuild.dynamics.Muscles(v.env.skel)
+            v.env.muscle_activation_levels = np.zeros(0)
+    except Exception as _e:
+        print(f"[Import zygote_skel] muscle rebuild failed: {_e}")
+    for _mname, _mobj in v.zygote_muscle_meshes.items():
+        if getattr(_mobj, 'soft_body', None) is None:
+            continue
+        try:
+            _mobj.soft_body = None
+            _mobj.init_soft_body(
+                skeleton_meshes=v.zygote_skeleton_meshes,
+                skeleton=v.env.skel,
+                mesh_info=v.env.mesh_info,
+            )
+        except Exception as _e:
+            print(f"[Import zygote_skel] re-init {_mname} failed: {_e}")
+    _skel_names = list(v.zygote_skeleton_meshes.keys())
+    for _mobj in v.zygote_muscle_meshes.values():
+        if hasattr(_mobj, 'resolve_skeleton_attachments'):
+            try:
+                _mobj.resolve_skeleton_attachments(_skel_names)
+            except Exception:
+                pass
+    print(f"Import zygote_skel: DART skel {v.env.skel.getNumBodyNodes()} bodies, "
+          f"muscles {v.env.muscles.getNumMuscles() if v.env.muscles else 0}")
+
+
 def draw_zygote_skeleton_ui(v):
     """Skeleton section inside the Zygote tree node."""
     if imgui.tree_node("Skeleton"):
@@ -1368,10 +1472,17 @@ def draw_zygote_skeleton_ui(v):
                 _, obj.bb_align_z = imgui.checkbox(f"Z##{name}_bbz", obj.bb_align_z)
                 imgui.same_line()
                 _, obj.bb_enforce_symmetry = imgui.checkbox(f"Sym##{name}_sym", obj.bb_enforce_symmetry)
+                imgui.same_line()
+                if not hasattr(obj, 'bb_midline'):
+                    obj.bb_midline = False
+                _, obj.bb_midline = imgui.checkbox(f"Mid##{name}_mid", obj.bb_midline)
+                if obj.bb_midline:
+                    # Mid forces x-align + disables L/R symmetry
+                    obj.bb_enforce_symmetry = False
 
                 # Build axis string from checkboxes
                 axis_str = ''
-                if obj.bb_align_x:
+                if obj.bb_align_x or obj.bb_midline:
                     axis_str += 'x'
                 if obj.bb_align_y:
                     axis_str += 'y'
@@ -1382,31 +1493,26 @@ def draw_zygote_skeleton_ui(v):
                 # Show current alignment
                 align_label = axis_str.upper() if axis_str else "PCA"
                 sym_label = "+Sym" if obj.bb_enforce_symmetry else ""
+                mid_label = "+Mid" if obj.bb_midline else ""
                 auto_label = "+Auto" if obj.auto_num_boxes else ""
-                if imgui.button(f"Find BB ({align_label}{sym_label}{auto_label})##{name}", width=140):
-                    obj.find_bounding_box(axis=axis_param, symmetry=obj.bb_enforce_symmetry)
+                if imgui.button(f"Find BB ({align_label}{sym_label}{mid_label}{auto_label})##{name}", width=140):
+                    obj.find_bounding_box(axis=axis_param,
+                                          symmetry=obj.bb_enforce_symmetry,
+                                          midline=obj.bb_midline)
 
                 imgui.text(f"Parent: {obj.parent_name}")
-                if imgui.button(f"<##{name+'_parent'}"):
-                    obj.cand_parent_index -= 1
-                    if obj.cand_parent_index < 0:
-                        obj.cand_parent_index = len(v.zygote_skeleton_meshes) - 1
-                imgui.same_line()
-                if imgui.button(f">##{name+'_parent'}"):
-                    obj.cand_parent_index += 1
-                    if obj.cand_parent_index >= len(v.zygote_skeleton_meshes):
-                        obj.cand_parent_index = 0
-                imgui.same_line()
-                cand_name = list(v.zygote_skeleton_meshes.keys())[obj.cand_parent_index]
-                imgui.push_item_width(100)
-                changed, obj.cand_parent_index = imgui.input_int(f"Parent##{name}", obj.cand_parent_index)
+                _skel_names = list(v.zygote_skeleton_meshes.keys())
+                if obj.cand_parent_index >= len(_skel_names):
+                    obj.cand_parent_index = max(0, len(_skel_names) - 1)
+                elif obj.cand_parent_index < 0:
+                    obj.cand_parent_index = 0
+                imgui.push_item_width(180)
+                changed, new_idx = imgui.combo(
+                    f"Parent##{name}_parent", obj.cand_parent_index, _skel_names)
                 imgui.pop_item_width()
                 if changed:
-                    if obj.cand_parent_index > len(v.zygote_skeleton_meshes) - 1:
-                        obj.cand_parent_index = len(v.zygote_skeleton_meshes) - 1
-                    elif obj.cand_parent_index < 0:
-                        obj.cand_parent_index = 0
-                imgui.text("%3d: %s   " % (obj.cand_parent_index, cand_name))
+                    obj.cand_parent_index = new_idx
+                cand_name = _skel_names[obj.cand_parent_index]
 
                 if imgui.button(f"Set as root##{name}"):
                     for other_name, other_obj in v.zygote_skeleton_meshes.items():
@@ -1611,32 +1717,162 @@ def draw_zygote_skeleton_ui(v):
                     from core.dartHelper import exportBoundingBoxes
                     exportBoundingBoxes(v.zygote_skeleton_meshes)
                 if imgui.button("Import zygote_skel", width=wide_button_width):
-                    if v.env.skel is not None:
-                        v.env.world.removeSkeleton(v.env.skel)
+                    _reimport_zygote_skel(v)
 
-                    from core.dartHelper import saveSkeletonInfo
-                    from core.dartHelper import buildFromInfo
-                    from copy import deepcopy
-                    skel_info, root_name, bvh_info, _, mesh_info, smpl_jn_idx = saveSkeletonInfo("data/zygote_skel.xml")
-                    v.env.skel_info = skel_info
-                    v.env.new_skel_info = deepcopy(skel_info)
-                    v.env.root_name = root_name
-                    v.env.bvh_info = bvh_info
-                    v.env.mesh_info = mesh_info
-                    v.env.smpl_jn_idx = smpl_jn_idx
-                    v.env.skel = buildFromInfo(skel_info, root_name)
-                    v.env.target_skel = v.env.skel.clone()
-                    v.env.world.addSkeleton(v.env.skel)
-                    v.env.kp = 300.0 * np.ones(v.env.skel.getNumDofs())
-                    v.env.kv = 20.0 * np.ones(v.env.skel.getNumDofs())
-                    v.env.kp[:6] = 0.0
-                    v.env.kv[:6] = 0.0
-                    v.env.num_action = len(v.env.get_zero_action()) * (3 if v.env.learning_gain else 1)
-                    v.motion_skel = v.env.skel.clone()
-
-        # --- Joint Position Editor ---
-        if hasattr(v.env, 'new_skel_info') and v.env.new_skel_info is not None:
-            imgui.separator()
+        # --- Skeleton XML Edit Mode ---
+        imgui.separator()
+        xml_loaded = hasattr(v.env, 'new_skel_info') and v.env.new_skel_info is not None
+        if not hasattr(v, 'skel_edit_mode'):
+            v.skel_edit_mode = False
+        if not xml_loaded:
+            imgui.push_style_var(imgui.STYLE_ALPHA, 0.5)
+            imgui.checkbox("Edit Mode##skel", False)
+            imgui.pop_style_var()
+            if imgui.is_item_hovered():
+                imgui.set_tooltip("Load zygote_skel XML first")
+            if v.skel_edit_mode:
+                # XML unloaded mid-session — drop edit mode + hide BBs
+                v.skel_edit_mode = False
+                for _sm in getattr(v, 'zygote_skeleton_meshes', {}).values():
+                    _sm.is_draw_corners = False
+                v.joint_edit_mode = False
+        else:
+            prev_edit_mode = v.skel_edit_mode
+            _, v.skel_edit_mode = imgui.checkbox("Edit Mode##skel", v.skel_edit_mode)
+            if v.skel_edit_mode != prev_edit_mode:
+                # Edge: walk skel meshes once, toggle is_draw_corners.
+                # Per-mesh Draw Corners toggle stays independent between edges.
+                for _sm in getattr(v, 'zygote_skeleton_meshes', {}).values():
+                    _sm.is_draw_corners = v.skel_edit_mode
+                v.joint_edit_mode = False  # default OFF on Edit Mode toggle (either dir)
+                if v.skel_edit_mode:
+                    # Seed mesh hierarchy from XML so Save XML / exportBoundingBoxes
+                    # has root + parent links. User can still edit after.
+                    skel_meshes = v.zygote_skeleton_meshes
+                    # Resolve body key → mesh name by picking the LONGEST mesh
+                    # name that is a prefix of the key with a digits-only
+                    # suffix. Plain re.sub(r'\d+$', '') breaks on names like
+                    # 'L50' (mesh 'L5', body '0') — it strips both digits.
+                    _sorted_mesh_names = sorted(skel_meshes.keys(), key=lambda x: -len(x))
+                    def _resolve_mesh_name(body_key):
+                        if not body_key:
+                            return None
+                        for _sn in _sorted_mesh_names:
+                            if not body_key.startswith(_sn):
+                                continue
+                            _suf = body_key[len(_sn):]
+                            if _suf and _suf.isdigit():
+                                return _sn
+                        return None
+                    for _sm2 in skel_meshes.values():
+                        _sm2.is_root = False
+                        _sm2.parent_mesh = None
+                        _sm2.parent_name = None
+                        _sm2.children_names = []
+                    # Per-mesh: track the lowest-digit body's joint_type so
+                    # is_weld reflects XML state (Save XML writes Weld for
+                    # the first body only when mesh.is_weld is True).
+                    _mesh_first_jtype = {}
+                    for _bkey, _info in v.env.new_skel_info.items():
+                        _mesh_name = _resolve_mesh_name(_bkey)
+                        if _mesh_name is None:
+                            continue
+                        _digit = int(_bkey[len(_mesh_name):])
+                        _jt = _info.get('joint_type', 'Ball')
+                        if _mesh_name not in _mesh_first_jtype or _digit < _mesh_first_jtype[_mesh_name][0]:
+                            _mesh_first_jtype[_mesh_name] = (_digit, _jt)
+                        _mesh = skel_meshes[_mesh_name]
+                        _ps = _info.get('parent_str', 'None')
+                        if _ps == 'None' or _ps is None:
+                            _mesh.is_root = True
+                            continue
+                        _parent_mesh_name = _resolve_mesh_name(_ps)
+                        if _parent_mesh_name is None or _parent_mesh_name == _mesh_name:
+                            continue  # intra-mesh body link
+                        _parent = skel_meshes[_parent_mesh_name]
+                        _mesh.parent_mesh = _parent
+                        _mesh.parent_name = _parent_mesh_name
+                        if _mesh_name not in _parent.children_names:
+                            _parent.children_names.append(_mesh_name)
+                    # Apply is_weld from the lowest-digit body's joint_type
+                    for _mn, (_dig, _jt) in _mesh_first_jtype.items():
+                        skel_meshes[_mn].is_weld = (_jt == 'Weld')
+            if v.skel_edit_mode:
+                # Continuous: derive per-frame world-space OBBs + sizes/body_rs
+                # /body_ts/weld_joints from XML body_r/body_t/size via DART
+                # world transform so joint edits update geometry without
+                # re-toggling, and exportBoundingBoxes finds the data it needs.
+                _local_corners = np.array([
+                    [-1, -1, -1], [ 1, -1, -1], [-1,  1, -1], [ 1,  1, -1],
+                    [-1, -1,  1], [ 1, -1,  1], [-1,  1,  1], [ 1,  1,  1],
+                ], dtype=np.float32) * 0.5
+                # Group body keys by mesh, ordered by digit suffix.
+                # Greedy '\d+$' breaks on names like 'L50' (mesh 'L5' + body
+                # '0'). Pick the longest mesh name that prefixes the key with
+                # a digits-only suffix.
+                _sorted_mesh_names = sorted(
+                    v.zygote_skeleton_meshes.keys(), key=lambda x: -len(x))
+                _mesh_bodies = {}
+                for key, info in v.env.new_skel_info.items():
+                    mesh_name = None
+                    digit = None
+                    for _sn in _sorted_mesh_names:
+                        if not key.startswith(_sn):
+                            continue
+                        suf = key[len(_sn):]
+                        if suf and suf.isdigit():
+                            mesh_name = _sn
+                            digit = int(suf)
+                            break
+                    if mesh_name is None:
+                        continue
+                    _mesh_bodies.setdefault(mesh_name, []).append((digit, key, info))
+                for lst in _mesh_bodies.values():
+                    lst.sort(key=lambda t: t[0])
+                for sname, _sm in v.zygote_skeleton_meshes.items():
+                    bodies = _mesh_bodies.get(sname, [])
+                    if not bodies:
+                        continue
+                    body_corners = []
+                    sizes_list = []
+                    body_rs_list = []
+                    body_ts_list = []
+                    weld_joints = []
+                    joint_to_parent = None
+                    for idx, (_digit, key, info) in enumerate(bodies):
+                        sz = np.asarray(info['size'], dtype=np.float32)
+                        local = _local_corners * sz
+                        body_node = (v.env.skel.getBodyNode(key)
+                                     if v.env.skel is not None else None)
+                        if body_node is not None:
+                            T = np.asarray(body_node.getWorldTransform().matrix(), dtype=np.float32)
+                            R = T[:3, :3]
+                            tw = T[:3, 3]
+                        else:
+                            R = np.asarray(info['body_r'], dtype=np.float32)
+                            tw = np.asarray(info['body_t'], dtype=np.float32)
+                        corners = (R @ local.T).T + tw
+                        body_corners.append(corners)
+                        sizes_list.append(sz)
+                        body_rs_list.append(R)
+                        body_ts_list.append(np.mean(corners, axis=0))
+                        jt = np.asarray(info.get('joint_t', np.zeros(3)), dtype=np.float32)
+                        if idx == 0:
+                            joint_to_parent = jt
+                        else:
+                            weld_joints.append(jt)
+                    _sm.corners = body_corners
+                    # find_bounding_box keeps these two aliased; downstream
+                    # ops (Connect to parent overlap check at line 1426/1429)
+                    # read corners_list, so mirror the derived OBBs here.
+                    _sm.corners_list = body_corners
+                    _sm.sizes = sizes_list
+                    _sm.body_rs = body_rs_list
+                    _sm.body_ts = body_ts_list
+                    _sm.weld_joints = weld_joints
+                    if joint_to_parent is not None:
+                        _sm.joint_to_parent = joint_to_parent
+        if v.skel_edit_mode and xml_loaded:
             _, v.joint_edit_mode = imgui.checkbox("Edit Joint Positions", v.joint_edit_mode)
             if v.joint_edit_mode:
                 _, v.joint_edit_symmetry = imgui.checkbox("Symmetry (L<>R)", v.joint_edit_symmetry)
@@ -2107,6 +2343,29 @@ def _render_inspect_2d_windows(v):
                     contour_idx = new_contour_idx
 
             imgui.separator()
+
+            # Grid fiber resample: slider (1..10) + Apply
+            if getattr(obj, 'sampling_method', None) == 'grid':
+                if name not in v.inspect_2d_grid_n:
+                    current_fa = getattr(obj, 'fiber_architecture', None)
+                    if current_fa and len(current_fa) > 0:
+                        guess_n = int(round(np.sqrt(len(current_fa[0]))))
+                        v.inspect_2d_grid_n[name] = max(1, min(10, guess_n))
+                    else:
+                        v.inspect_2d_grid_n[name] = 5
+                changed_n, new_n = imgui.slider_int(
+                    f"Grid N##{name}_resample",
+                    v.inspect_2d_grid_n[name], 1, 10,
+                )
+                if changed_n:
+                    v.inspect_2d_grid_n[name] = new_n
+                imgui.same_line()
+                if imgui.button(f"Apply##{name}_resample"):
+                    obj.resample_grid_fibers(v.inspect_2d_grid_n[name])
+                imgui.separator()
+            else:
+                imgui.text(f"Fiber resample: sampling_method={getattr(obj, 'sampling_method', '?')} (grid only)")
+                imgui.separator()
 
             # Determine which contours to draw
             if show_all:
@@ -8636,16 +8895,18 @@ def _scan_motion_files(v):
 
 
 def _detect_bvh_tframe(bvh_path):
-    """Detect if a BVH file needs T_frame=0 (non-upright rest pose).
+    """Detect if a BVH file needs T_frame=0.
 
-    Checks if leg bone offsets extend primarily in Y (upright rest pose)
-    or in another axis (flat rest pose like LaFAN1). Returns 0 if T-pose
-    correction is needed, None otherwise.
+    Two triggers:
+    1. Non-upright skeleton rest pose (legs not Y-dominant, e.g. LaFAN1 flat).
+    2. T-pose arms (LeftArm/RightArm OFFSET X-dominant). Skel uses N-pose
+       rest (arms hanging); subtracting frame 0 aligns BVH rest with skel.
+    Returns 0 if any trigger fires, None otherwise.
     """
     import re
     with open(bvh_path, 'r') as f:
         content = f.read()
-    # Find thigh bone offset (LeftLeg or RightLeg joint)
+    # Check #1: leg upright
     for joint in ['LeftLeg', 'RightLeg']:
         pattern = rf'JOINT\s+{joint}\s*\{{[^}}]*?OFFSET\s+([\d.\-e]+)\s+([\d.\-e]+)\s+([\d.\-e]+)'
         match = re.search(pattern, content, re.DOTALL | re.IGNORECASE)
@@ -8654,12 +8915,14 @@ def _detect_bvh_tframe(bvh_path):
             max_axis = max(x, y, z)
             if max_axis < 1e-6:
                 continue
-            # If Y is the dominant axis, rest pose is upright -> no T_frame needed
-            if y / max_axis > 0.8:
-                return None
-            # Otherwise rest pose is flat -> need T_frame=0
-            print(f"[Motion] Non-upright rest pose detected (thigh offset: {match.group(1)}, {match.group(2)}, {match.group(3)}), using T_frame=0")
-            return 0
+            if y / max_axis <= 0.8:
+                print(f"[Motion] Non-upright rest pose detected (thigh offset: "
+                      f"{match.group(1)}, {match.group(2)}, {match.group(3)}), using T_frame=0")
+                return 0
+            break  # leg upright; continue to arm T-pose check
+    # T-pose arm trigger removed: was causing leg pose asymmetry when frame 0
+    # actor stance is mid-stride. Use bake_arm_retarget_bvh.py instead to
+    # subtract frame 0 from arm joints only.
     return None
 
 
@@ -9697,7 +9960,7 @@ def _import_reverse_lbs_into_dart(v):
           f"Total DART muscles: {v.env.muscles.getNumMuscles()}")
 
 
-REVERSE_LBS_XML = 'data/zygote_muscle_LBS_combined.xml'
+REVERSE_LBS_XML = 'data/zygote_muscle_25.xml'
 
 
 def _reverse_lbs_load(v):

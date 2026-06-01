@@ -455,6 +455,9 @@ class GLFWApp():
         self.inspect_2d_corr_backup_mvc = {}  # Dict: muscle_name -> original mvc_weights for preview level
         self.inspect_2d_corr_preview_active = {}  # Dict: muscle_name -> bool
 
+        # Grid fiber resample state for Inspect 2D
+        self.inspect_2d_grid_n = {}  # Dict: muscle_name -> int (current grid N, 1..10)
+
         # Edit fiber mode state for Inspect 2D
         self.inspect_2d_edit_fiber_mode = {}  # Dict: muscle_name -> bool (edit fiber mode active)
         self.inspect_2d_edit_fiber_selected = {}  # Dict: muscle_name -> selected fiber index or -1

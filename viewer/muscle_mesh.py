@@ -3954,11 +3954,11 @@ class MuscleMeshMixin:
 
         return samples
 
-    def grid_sampling_unit_square(self, n=10, margin=0.025):
+    def grid_sampling_unit_square(self, n=5, margin=0.025):
         """Generate an evenly spaced n×n grid in the unit square.
 
         Args:
-            n: Grid resolution per axis (default 10 → 100 points)
+            n: Grid resolution per axis (default 5 → 25 points)
             margin: Margin from edges (default 0.025 gives [0.025, 0.975] range)
 
         Returns:

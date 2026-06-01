@@ -8822,7 +8822,7 @@ class ContourMeshMixin(ContourAnimationMixin):
             self.bounding_planes = [[self.bounding_planes[0][0], self.bounding_planes[0][triplet_num], self.bounding_planes[0][triplet_num * 2], self.bounding_planes[0][-1]]]
         else:
             if self.sampling_method == 'grid':
-                # Fixed 10×10 grid (100 points) in unit square — same for all streams
+                # Fixed 5×5 grid (25 points) in unit square — same for all streams
                 grid_samples = self.grid_sampling_unit_square()
                 self.fiber_architecture = [grid_samples for _ in self.bounding_planes]
             else:
@@ -8857,11 +8857,27 @@ class ContourMeshMixin(ContourAnimationMixin):
                     # Original: Sobol sampling on unit square
                     self.fiber_architecture = [self.sobol_sampling_barycentric(fiber_num) for fiber_num in fiber_nums]
 
+        self.attach_skeletons = [[0, 0] for _ in range(len(self.bounding_planes))]
+        self.attach_skeletons_sub = [[0, 0] for _ in range(len(self.bounding_planes))]
+        self._regenerate_waypoints_from_fibers(skeleton_meshes=skeleton_meshes)
+
+    def _regenerate_waypoints_from_fibers(self, skeleton_meshes=None,
+                                          propagate_corners=True):
+        """Regenerate downstream data (normalized_Qs, waypoints, mvc_weights,
+        triangulation caches, corner correspondences, stream_endpoints) from
+        the current self.fiber_architecture. Reuses cached contour_match and
+        corner_indices on each bounding plane — does NOT re-find the contour
+        stream or re-detect corners from scratch, and does NOT touch
+        attach_skeletons.
+
+        propagate_corners: when True (full pipeline), re-run corner
+        propagation across levels. When False (resample with unchanged
+        contours), skip — existing corner_indices are already correct and
+        re-running can pick different corners on multi-stream muscles.
+        """
         self.normalized_Qs = [[] for _ in range(len(self.bounding_planes))]
         self.waypoints = [[] for _ in range(len(self.bounding_planes))]
         self.mvc_weights = [[] for _ in range(len(self.bounding_planes))]  # MVC weights per fiber sample
-        self.attach_skeletons = [[0, 0] for _ in range(len(self.waypoints))]
-        self.attach_skeletons_sub = [[0, 0] for _ in range(len(self.waypoints))]
         # Store stream endpoint positions for auto-detection
         self._stream_endpoints = []  # [(origin_pos, insertion_pos), ...]
 
@@ -9034,7 +9050,8 @@ class ContourMeshMixin(ContourAnimationMixin):
                 self.mvc_weights[i].append(mvc_weights)
 
         # Propagate corner correspondences from most non-square-like reference level
-        self._propagate_corner_correspondences()
+        if propagate_corners:
+            self._propagate_corner_correspondences()
 
         # Populate stream endpoints for bounding box visualization
         self._stream_endpoints = []
@@ -9057,6 +9074,52 @@ class ContourMeshMixin(ContourAnimationMixin):
             print(f"  auto_detect_attachments returned: {result}")
         else:
             print(f"[_find_contour_stream_post_process] Skipping auto_detect_attachments: skeleton_meshes={skeleton_meshes is not None}, len={len(skeleton_meshes) if skeleton_meshes else 0}")
+
+    def resample_grid_fibers(self, n, margin=0.025, skeleton_meshes=None):
+        """Replace fiber_architecture with an n×n grid (or a single center
+        fiber when n == 1) for every stream, then regenerate downstream
+        waypoints/MVC weights using cached corner correspondences. Does not
+        re-run the contour stream or modify attach_skeletons.
+        """
+        if n == 1:
+            samples = np.array([[0.5, 0.5]])
+        else:
+            samples = self.grid_sampling_unit_square(n=n, margin=margin)
+        self.fiber_architecture = [samples for _ in self.bounding_planes]
+        self._regenerate_waypoints_from_fibers(skeleton_meshes=skeleton_meshes,
+                                               propagate_corners=False)
+        # Stale: bary coords are sized to old fiber count. Clear so Save Tet
+        # does not persist mismatched arrays; rebuilt at next soft-body init.
+        self.waypoint_bary_coords = []
+        if hasattr(self, 'waypoints_original'):
+            self.waypoints_original = None
+        # Pickle-loaded multi-stream muscles have self.bounding_planes /
+        # self.contours as separate copies from self.stream_bounding_planes /
+        # self.stream_contours. Re-establish the post-cut alias so downstream
+        # consumers (build_contour_mesh, Inspect 2D, save_animation_state)
+        # see the regenerated bp dicts. Only do this when already in stream
+        # mode (post-cut) — pre-cut load does not touch stream_*.
+        if (getattr(self, 'stream_bounding_planes', None) is not None
+                and getattr(self, 'stream_contours', None) is not None
+                and len(self.stream_bounding_planes) == len(self.bounding_planes)):
+            self.stream_bounding_planes = self.bounding_planes
+            self.stream_contours = self.contours
+        # Ensure draw_contour_stream is in post-cut 2D form ([[True]*lvls]*streams).
+        # Loaded anims sometimes have it as 1D [False, False, ...] (legacy or
+        # mid-animation save state). Fiber draw paths skip a stream when its
+        # dcs entry is falsy → resample appears to do nothing on multi-stream.
+        n_streams = len(self.waypoints) if self.waypoints is not None else 0
+        dcs = self.draw_contour_stream
+        needs_reset = (dcs is None
+                       or len(dcs) != n_streams
+                       or any(not isinstance(s, list) for s in dcs))
+        if needs_reset and n_streams > 0:
+            self.draw_contour_stream = [
+                [True] * len(self.waypoints[s]) for s in range(n_streams)
+            ]
+        self._fiber_draw_dirty = True
+        self.is_draw = False
+        self.is_draw_fiber_architecture = True
 
     def _propagate_corner_correspondences(self):
         """Propagate corner correspondences from reference level using Find cor logic.
