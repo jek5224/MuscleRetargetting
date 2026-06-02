@@ -236,19 +236,16 @@ def main():
         mag = np.linalg.norm(R.from_matrix(M).as_rotvec()) * 180 / np.pi
         print(f"  {suf}: rest-align M mag={mag:.2f}°")
 
-    # f0 channel local rotation (R_local_0) per arm joint.
-    R_local_0 = {}
-    for suf, ji in arm_ji.items():
-        R_local_0[suf] = joint_local_R(joints[ji], rows[0], n2c)
-
-    # Per frame: ΔL_bvh = R_local_0.inv @ R_local_f, ΔL_skel = M^T @ ΔL_bvh @ M.
+    # Per frame: take full BVH joint-local rotation (no f0 subtract — BVH
+    # actor's T-pose rest must carry into skel as ~90° abduction so arms
+    # point sideways at f0 instead of hanging in N-pose).
+    # ΔL_skel = M^T @ R_local_bvh @ M.
     for fi, row in enumerate(rows):
         for suf, ji in arm_ji.items():
             j = joints[ji]
-            Rl_f = joint_local_R(j, row, n2c)
-            dL_bvh = (R_local_0[suf].inv() * Rl_f).as_matrix()
+            Rl_f = joint_local_R(j, row, n2c).as_matrix()
             M = M_align[suf]
-            dL_skel = M.T @ dL_bvh @ M
+            dL_skel = M.T @ Rl_f @ M
             chs = j["channels"]
             order = "".join(c[0] for c in chs if c.lower().endswith("rotation")).upper()
             c0 = n2c[j["name"]][0]

@@ -360,13 +360,17 @@ def normalize_bvh(in_path, out_path, skel_xml="data/zygote_skel.xml"):
             row[c0 + zi] -= z0
         print(f"  [normalize] centered root XZ (subtracted f0 X={x0:.3f}, Z={z0:.3f})")
 
-    # 5b. Bone-aligned → world-aligned conversion DISABLED.
-    # Earlier baseline (just name strip + Spine2 collapse + root XZ center)
-    # produced a skel that walked on the ground via viewer's T_frame=0
-    # auto-detection. Subsequent conversion attempts (offset pre-rotation,
-    # channel subtract, per-joint rest-align conjugation) broke that
-    # baseline by making skel float/spin in air. Reverting to baseline.
-    TRUNK_LEG_NAMES = set()  # nothing to convert
+    # 5b. Bone-aligned → world-aligned conversion for non-arm joints.
+    # LaFAN bone-aligned: each joint's local frame has X along its bone, so
+    # rest pose encoded in non-zero channels. Skel rest is N-pose with arms
+    # hanging. Under viewer's T_frame=0 auto-trigger (X-dominant leg
+    # offsets), MyBVH subtracts f0 channels entirely → skel f0 = rest. BVH
+    # actor f0 = T-pose, so arm directions cannot match.
+    # Solution: rotate non-arm bone offsets to world directions (Y-down legs,
+    # Y-up spine) and zero f0 channels. After this, leg offsets become
+    # Y-dominant → viewer picks T_frame=None. Arms keep bone-aligned values
+    # so arm-bake's M_align conjugation places skel arms in T-pose at f0.
+    TRUNK_LEG_NAMES = set()
     rig_style_check = detect_rig_style(joints)
     if False and rig_style_check == "bone_aligned" and rows:
         skel_rest_world_map = compute_skel_rest_world_rotations(skel_xml)
