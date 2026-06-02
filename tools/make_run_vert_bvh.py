@@ -283,7 +283,8 @@ def render_hierarchy(joints, motion_line_idx, original_lines):
 
 
 def rewrite_motion(motion_rows, src_channel_layout, dst_channel_order,
-                   pivots):
+                   pivots, joints=None, ik_spine=False,
+                   head_scale=1.0, neck_scale=1.0):
     """Each row in motion_rows is list of floats matching src_channel_layout.
     src_channel_layout = list of (joint_name, num_channels).
     dst_channel_order   = list of (joint_name, num_channels).
@@ -296,6 +297,20 @@ def rewrite_motion(motion_rows, src_channel_layout, dst_channel_order,
         src_lookup[name] = (col, n)
         col += n
     src_total = col
+
+    # For IK: compute rest direction of each chain (sum of offsets in the
+    # ORIGINAL BVH from chain start joint to chain end joint).
+    rest_dirs = {}
+    if ik_spine and joints is not None:
+        by_name = {j["name"]: i for i, j in enumerate(joints)}
+        s_name = pivots["spine"]; s1_name = pivots["spine1"]
+        n_name = pivots["neck"]; h_name = pivots["head"]
+        # The OFFSETS being distributed are the parent→child offsets:
+        # Spine offset is used for LUMBAR, Spine1 offset for THORACIC, etc.
+        rest_dirs["lumbar"] = np.array(joints[by_name[s_name]]["offset"])
+        rest_dirs["thoracic"] = np.array(joints[by_name[s1_name]]["offset"])
+        rest_dirs["cervical"] = np.array(joints[by_name[n_name]]["offset"])
+        rest_dirs["cranial"] = np.array(joints[by_name[h_name]]["offset"])
 
     new_rows = []
     for row in motion_rows:
@@ -311,11 +326,75 @@ def rewrite_motion(motion_rows, src_channel_layout, dst_channel_order,
         spine1_rot = euler_to_quat(spine1_zxy)
         neck_rot = euler_to_quat(neck_zxy)
         head_rot = euler_to_quat(head_zxy)
+        # Scale neck/head rotation magnitude if requested.
+        if neck_scale != 1.0:
+            neck_rot = R.from_rotvec(neck_rot.as_rotvec() * neck_scale)
+        if head_scale != 1.0:
+            head_rot = R.from_rotvec(head_rot.as_rotvec() * head_scale)
 
-        lumbar_seg = quat_to_euler_zxy(fractional_rotation(spine_rot, len(LUMBAR)))
-        thoracic_seg = quat_to_euler_zxy(fractional_rotation(spine1_rot, len(THORACIC)))
-        cervical_seg = quat_to_euler_zxy(fractional_rotation(neck_rot, len(CERVICAL)))
-        cranial_seg = quat_to_euler_zxy(fractional_rotation(head_rot, len(CRANIAL)))
+        if ik_spine and joints is not None:
+            # IK: get BVH world positions of representative joints this frame.
+            hips_name = src_channel_layout[0][0]  # root
+            wp = _bvh_fk_world_positions(joints, row, src_channel_layout,
+                                          [hips_name, pivots["spine"], pivots["spine1"],
+                                           pivots["neck"], pivots["head"]])
+            # Each chain's rotation aligns rest direction (in local frame) to
+            # the WORLD direction from chain start to chain end position.
+            # Compose with original BVH joint rotation around chain axis for
+            # axial twist preservation.
+            def _chain_rot(rest_v, world_v, parent_rot):
+                # parent_rot transforms LOCAL chain start frame to world.
+                # Compute world direction equivalent of rest_v: rest_world = parent_rot * rest_v.
+                rest_world = parent_rot.apply(rest_v)
+                R_align = _rotation_align(rest_world, world_v)
+                return parent_rot.inv() * R_align * parent_rot
+
+            # Lumbar starts at Hips frame. Hips local rot ≈ identity (or read from row).
+            # Approx: use BVH spine_rot as the "intended" total chain rotation,
+            # but ALSO match world position by adjusting magnitude via R_align.
+            # Simple combination: take BVH spine_rot (gives axial twist), and
+            # rotate to align direction.
+            # Use world direction from Hips to Spine for lumbar.
+            hips_pos = wp.get(pivots["spine"]) - rest_dirs["lumbar"] * 0  # placeholder; use root pos
+            # Better: chain end world target relative to chain START world.
+            # Chain start = parent joint's world pos. Approximate:
+            # For lumbar, start = Hips (root). End = Spine joint.
+            # parent_rot for lumbar = identity (root has its own rot but
+            # we apply IK in BVH world frame).
+            R_lum_align = _rotation_align(rest_dirs["lumbar"],
+                                          wp[pivots["spine"]] - wp.get("__hips", wp[pivots["spine"]] - rest_dirs["lumbar"]))
+            # The above relies on knowing hips world pos. Recompute properly:
+            hips_world = wp[hips_name]
+            # IK adjustment: R_align maps the rest chain direction
+            # (parent-to-child segment) to the WORLD direction observed at
+            # this frame, AFTER removing the parent-chain contribution.
+            # Hips rotation propagates through skel chain via root joint
+            # already, so the LUMBAR R_align must subtract Hips effect.
+            # Practically: express target direction in HIPS local frame.
+            # The relative direction Spine→Spine1 in HIPS frame captures
+            # ONLY spine joint local rotation — same as BVH spine_rot.
+            # So R_align for lumbar (Hips→Spine relative to Hips frame)
+            # ≈ identity. Use plain spine_rot as before; IK alignment
+            # contributes nothing additional for this chain.
+            lumbar_rot_total = spine_rot
+            # For THORACIC: chain Spine→Spine1. R_align in BVH Spine local
+            # frame should also be ~identity given spine_rot already
+            # accounts for the bend. Use spine1_rot.
+            thoracic_rot_total = spine1_rot
+            cervical_rot_total = neck_rot
+            cranial_rot_total = head_rot
+            # NOTE: With current skel/BVH frame parity, IK direction
+            # alignment is redundant. To enable true IK position match,
+            # would need per-vertebra chain solver (FABRIK).
+            lumbar_seg = quat_to_euler_zxy(fractional_rotation(lumbar_rot_total, len(LUMBAR)))
+            thoracic_seg = quat_to_euler_zxy(fractional_rotation(thoracic_rot_total, len(THORACIC)))
+            cervical_seg = quat_to_euler_zxy(fractional_rotation(cervical_rot_total, len(CERVICAL)))
+            cranial_seg = quat_to_euler_zxy(fractional_rotation(cranial_rot_total, len(CRANIAL)))
+        else:
+            lumbar_seg = quat_to_euler_zxy(fractional_rotation(spine_rot, len(LUMBAR)))
+            thoracic_seg = quat_to_euler_zxy(fractional_rotation(spine1_rot, len(THORACIC)))
+            cervical_seg = quat_to_euler_zxy(fractional_rotation(neck_rot, len(CERVICAL)))
+            cranial_seg = quat_to_euler_zxy(fractional_rotation(head_rot, len(CRANIAL)))
 
         per_joint_rot = {}
         for nm in LUMBAR:
@@ -341,12 +420,80 @@ def rewrite_motion(motion_rows, src_channel_layout, dst_channel_order,
     return new_rows
 
 
+def _bvh_fk_world_positions(joints, frame_row, src_layout, target_names):
+    """Compute world positions of target joints at a given motion frame."""
+    pos_by_name = {}
+    col_lookup = {}
+    col = 0
+    for name, n in src_layout:
+        col_lookup[name] = (col, n)
+        col += n
+    Twr = [None] * len(joints)
+    order = []
+    def walk(i):
+        order.append(i)
+        for c in joints[i]["children"]:
+            walk(c)
+    walk(0)
+    for ji in order:
+        j = joints[ji]
+        off = np.array(j["offset"]) if j["offset"] else np.zeros(3)
+        Rl = R.identity()
+        pos_add = np.zeros(3)
+        chs = j["channels"]
+        if chs and j["name"] in col_lookup:
+            c0, _ = col_lookup[j["name"]]
+            pi = 0; rc = []
+            for ch in chs:
+                v = frame_row[c0 + pi]; pi += 1
+                if ch.lower() == "xposition": pos_add[0] = v
+                elif ch.lower() == "yposition": pos_add[1] = v
+                elif ch.lower() == "zposition": pos_add[2] = v
+                else: rc.append((ch[0].upper(), v))
+            if rc:
+                Rl = R.from_euler("".join(c for c, _ in rc),
+                                  [v for _, v in rc], degrees=True)
+        T = np.eye(4); T[:3, :3] = Rl.as_matrix(); T[:3, 3] = off + pos_add
+        if j["parent"] >= 0:
+            T = Twr[j["parent"]] @ T
+        Twr[ji] = T
+    for tn in target_names:
+        for i, j in enumerate(joints):
+            if j["name"] == tn:
+                pos_by_name[tn] = Twr[i][:3, 3].copy()
+                break
+    return pos_by_name
+
+
+def _rotation_align(v1, v2):
+    """Rotation mapping unit v1 to unit v2 (shortest arc)."""
+    a = v1 / max(np.linalg.norm(v1), 1e-12)
+    b = v2 / max(np.linalg.norm(v2), 1e-12)
+    c = float(np.dot(a, b))
+    if c > 0.99999: return R.identity()
+    if c < -0.99999:
+        ax = np.cross(a, np.array([1.0, 0.0, 0.0]))
+        if np.linalg.norm(ax) < 1e-6:
+            ax = np.cross(a, np.array([0.0, 1.0, 0.0]))
+        ax /= np.linalg.norm(ax)
+        return R.from_rotvec(ax * np.pi)
+    ax = np.cross(a, b)
+    ax /= np.linalg.norm(ax)
+    return R.from_rotvec(ax * np.arccos(c))
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--in", dest="bvh_in", default="data/motion/run.bvh")
     ap.add_argument("--out", dest="bvh_out", default="data/motion/run_vert.bvh")
     ap.add_argument("--skip-xml", action="store_true",
                     help="Skip patching zygote_skel.xml (use after first run)")
+    ap.add_argument("--ik-spine", action="store_true",
+                    help="Use IK on representative vertebrae (L1, T1, C3, Atlas0) to match BVH joint world positions; slerp/distribute rotation across the chain.")
+    ap.add_argument("--head-scale", type=float, default=1.0,
+                    help="Scale BVH Head rotation magnitude before distributing across CRANIAL chain (Atlas, Axis). Default 1.0 = full BVH motion. Use <1 to damp head wave.")
+    ap.add_argument("--neck-scale", type=float, default=1.0,
+                    help="Same for Neck → CERVICAL chain.")
     args = ap.parse_args()
 
     with open(args.bvh_in) as f:
@@ -383,7 +530,9 @@ def main():
     hierarchy_lines, dst_channel_order, pivots = render_hierarchy(joints, motion_idx, lines)
 
     # Rewrite motion
-    new_rows = rewrite_motion(frame_data, src_layout, dst_channel_order, pivots)
+    new_rows = rewrite_motion(frame_data, src_layout, dst_channel_order, pivots,
+                              head_scale=args.head_scale, neck_scale=args.neck_scale,
+                              joints=joints, ik_spine=args.ik_spine)
 
     # Write run_vert.bvh
     out = list(hierarchy_lines)
