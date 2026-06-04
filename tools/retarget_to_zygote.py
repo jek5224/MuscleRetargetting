@@ -841,30 +841,36 @@ def main():
         "sternum",
     )
     if rig_style == "bone_aligned":
-        # World-direction arm bake: skel arm world direction = BVH arm world
-        # direction per frame. Humerus takes full R_motion (no clavicle split;
-        # clavicle motion would rotate arm direction off target).
-        arm_cmd = [py, "tools/bake_arm_body_relative.py",
+        # Direct skel pose bake: per-frame DART FK to compute desired arm DOFs
+        # (Clavicle/Humerus/Ulna/Radius/Carpal), then write BVH channels via
+        # inverse-T_net so MyBVH reproduces exact target DOFs on output load.
+        arm_cmd = [py, "tools/bake_arm_direct.py",
                    "--in", vert_st, "--out", armed,
+                   "--orig-bvh", norm,
                    "--skel-xml", args.skel_xml,
                    "--scapulohumeral", "0.27"]
-        run_stage(arm_cmd, "arm (world-direction + scapulohumeral)")
+        run_stage(arm_cmd, "arm (direct skel pose)")
     else:
         arm_cmd = [py, "tools/bake_arm_retarget_bvh.py", "--in", vert_st, "--out", armed,
                    "--skel-xml", args.skel_xml]
         run_stage(arm_cmd, f"arm ({rig_style})")
+    if rig_style == "bone_aligned":
+        # arm_direct bake handles ulna/radius/carpal DOFs. Copy to output,
+        # skip forearm bake.
+        import shutil
+        shutil.copy(armed, args.bvh_out)
+        print(f"\n[done] wrote {args.bvh_out} (bone_aligned: arm direct bake covers all arm DOFs)")
+        if not args.no_verify:
+            try:
+                verify(args.bvh_out, norm, args.skel_xml)
+            except Exception as e:
+                print(f"[verify] skipped: {e}")
+        return
     fa_cmd = [py, "tools/bake_forearm_retarget_bvh.py",
               "--in", armed, "--out", args.bvh_out,
               "--skip-xml", "--orig-bvh", norm,
-              "--skel-xml", args.skel_xml]
-    # Bone-aligned LaFAN: use anatomical elbow bend angle (from arm/forearm
-    # vectors) instead of IK target. IK fails when skel rest (N-pose) and
-    # BVH rest (T-pose) put arms in different world directions — IK target
-    # unreachable, picks max-bend. Anatomical bend = pure angle, sign-safe.
-    if rig_style == "bone_aligned":
-        fa_cmd += ["--use-bvh-bend"]
-    else:
-        fa_cmd += ["--ik-ulna"]
+              "--skel-xml", args.skel_xml,
+              "--ik-ulna"]
     # T-pose source: palm faces forward at rest; rotate via radius (forearm
     # axial twist) so palm faces ground. L_Radius axis ≈ -Y joint-local;
     # +90° around it = pronation → palm-down for L. R mirrored.
