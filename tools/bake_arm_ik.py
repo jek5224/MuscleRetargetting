@@ -280,9 +280,12 @@ def main():
 
     # IK loop.
     n_dofs = skel.getNumDofs()
-    print(f"  IK over {n_frames} frames × 2 sides × 7 dofs...")
+    print(f"  IK over {n_frames} frames × 2 sides × 4 dofs...")
     progress_step = max(1, n_frames // 20)
     new_mocap = mocap.copy()
+    # Warm-start cache: previous frame's solution per side for temporal
+    # coherence (avoids per-frame local-minimum jitter).
+    prev_x = {"L": None, "R": None}
     for f in range(n_frames):
         if f % progress_step == 0:
             print(f"    frame {f}/{n_frames}")
@@ -328,10 +331,13 @@ def main():
             R_hum_rest = np.asarray(hum_bn.getTransform().rotation())
             init_humerus_local = R_hum_rest.T @ init_humerus_world_rotvec
 
-            # 4 DOFs: Humerus (3) + Ulna (1). Clavicle stays at rest
-            # (anatomically minor for walking, removes 3 ambiguous DOFs).
-            x0 = np.zeros(4)
-            x0[0:3] = init_humerus_local
+            # 4 DOFs: Humerus (3) + Ulna (1). Clavicle stays at rest.
+            # Warm-start from previous frame's solution for temporal coherence.
+            if prev_x[side] is not None:
+                x0 = prev_x[side].copy()
+            else:
+                x0 = np.zeros(4)
+                x0[0:3] = init_humerus_local
 
             def _cost(x):
                 pose = base_pose.copy()
@@ -339,12 +345,17 @@ def main():
                 pose[ss["ulna_i"]] = x[3]
                 skel.setPositions(pose)
                 sh = skel.getBodyNode(ss["humerus_body"]).getTransform().translation()
+                el = skel.getBodyNode(ss["ulna_body"]).getTransform().translation()
                 wr = skel.getBodyNode(ss["carpal_body"]).getTransform().translation()
-                return float(np.sum(((wr - sh) - target_rel) ** 2))
+                # Wrist (primary) + elbow (low weight to constrain 3rd humerus
+                # DOF — pure wrist target leaves twist ambiguous → jitter).
+                return float(np.sum(((wr - sh) - target_rel) ** 2)
+                             + 0.3 * np.sum(((el - sh) - target_elbow_rel) ** 2))
 
             res = minimize(_cost, x0, method="L-BFGS-B",
                            options={"maxiter": 100, "ftol": 1e-9})
             x = res.x
+            prev_x[side] = x.copy()
             new_mocap[f, ss["hum_i"]:ss["hum_i"]+3] = x[0:3]
             new_mocap[f, ss["ulna_i"]] = x[3]
 
