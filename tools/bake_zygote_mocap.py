@@ -141,6 +141,9 @@ def main():
                          "down at T-pose. Applied per-frame as constant offset.")
     ap.add_argument("--palm-down-r-deg", type=float, default=-90.0,
                     help="R_Radius angle (deg) — symmetric for right arm.")
+    ap.add_argument("--clav-scale", type=float, default=0.7,
+                    help="Scale BVH-driven clavicle rotation (slerp from "
+                         "identity). <1 restricts clavicle motion.")
     args = ap.parse_args()
 
     olines, ojoints, omi = parse_bvh(args.orig_bvh)
@@ -216,6 +219,14 @@ def main():
                 arm_dof_set.extend(range(idx, idx + nd))
 
     share = float(args.scapulohumeral)
+    clav_scale = float(args.clav_scale)
+    # Scale BVH-driven clavicle DOFs (rotvec slerp from identity by factor).
+    # Linear rotvec scaling = exact slerp when axis fixed, approximate else.
+    if abs(clav_scale - 1.0) > 1e-6:
+        for sd in sides:
+            ci, nd = sd["dof_clav"]
+            if ci is not None and nd == 3:
+                mocap_in[:, ci:ci+3] *= clav_scale
     out_mocap = mocap_in.copy()
     prev_Z_target = {sd["L"]: None for sd in sides}
 
