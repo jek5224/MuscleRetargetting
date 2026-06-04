@@ -750,15 +750,12 @@ def main():
         "sternum",
     )
     if rig_style == "bone_aligned":
-        # IK-based: solve Clavicle+Humerus+Ulna to track BVH wrist delta from
-        # T-pose. Conjugation/decomposition approaches mapped BVH motion onto
-        # wrong skel axes (Humerus mostly twist instead of swing) due to BVH
-        # T-pose vs skel N-pose rest mismatch.
-        arm_cmd = [py, "tools/bake_arm_ik.py",
+        # Channel-delta with rest-align conjugation (same as Character1
+        # pipeline). Drives all arm joints from BVH channels.
+        arm_cmd = [py, "tools/bake_arm_retarget_bvh.py",
                    "--in", vert_st, "--out", armed,
-                   "--orig-bvh", norm,
-                   "--skel-xml", args.skel_xml]
-        run_stage(arm_cmd, "arm (IK)")
+                   "--skel-xml", args.skel_xml, "--rest-align"]
+        run_stage(arm_cmd, "arm (channel-delta + rest-align)")
     else:
         arm_cmd = [py, "tools/bake_arm_retarget_bvh.py", "--in", vert_st, "--out", armed,
                    "--skel-xml", args.skel_xml]

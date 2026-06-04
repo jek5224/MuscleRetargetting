@@ -361,12 +361,41 @@ def main():
             init_humerus_local = R_hum_rest.T @ init_humerus_world_rotvec
 
             # 4 DOFs: Humerus (3) + Ulna (1). Clavicle stays at rest.
-            # Warm-start from previous frame's solution for temporal coherence.
+            # Init Ulna from BVH anatomical elbow bend (angle between arm and
+            # forearm BVH vectors). Sign negative for skel flex direction.
+            bvh_arm_v = bvh_el - bvh_sh
+            bvh_fa_v = bvh_wr - bvh_el
+            an = np.linalg.norm(bvh_arm_v); fn = np.linalg.norm(bvh_fa_v)
+            if an > 1e-6 and fn > 1e-6:
+                cos_a = float(np.clip(np.dot(bvh_arm_v, bvh_fa_v) / (an * fn), -1, 1))
+                init_ulna = -float(np.arccos(cos_a))
+            else:
+                init_ulna = 0.0
+            # Warm-start: previous frame's solution but Ulna replaced by
+            # anatomical init (escapes "straight arm" local minimum).
             if prev_x[side] is not None:
                 x0 = prev_x[side].copy()
+                x0[3] = init_ulna
             else:
                 x0 = np.zeros(4)
                 x0[0:3] = init_humerus_local
+                x0[3] = init_ulna
+
+            # Use Ulna JOINT world transform for elbow position (not ulna body
+            # center which is mid-forearm). Likewise Humerus joint = shoulder
+            # joint, Carpal joint = wrist joint.
+            sh_joint_idx = next(j for j in range(skel.getNumJoints())
+                                if skel.getJoint(j).getName() == ss["humerus_body"])
+            el_joint_idx = next(j for j in range(skel.getNumJoints())
+                                if skel.getJoint(j).getName() == ss["ulna_body"])
+            wr_joint_idx = next(j for j in range(skel.getNumJoints())
+                                if skel.getJoint(j).getName() == ss["carpal_body"])
+
+            # Normalize elbow direction (skel bone lengths don't match BVH
+            # proportions exactly — match direction not absolute position).
+            tgt_elbow_dir = target_elbow_rel / max(np.linalg.norm(target_elbow_rel), 1e-9)
+            tgt_wrist_dir = target_rel / max(np.linalg.norm(target_rel), 1e-9)
+            tgt_wrist_len = np.linalg.norm(target_rel)
 
             def _cost(x):
                 pose = base_pose.copy()
@@ -376,10 +405,14 @@ def main():
                 sh = skel.getBodyNode(ss["humerus_body"]).getTransform().translation()
                 el = skel.getBodyNode(ss["ulna_body"]).getTransform().translation()
                 wr = skel.getBodyNode(ss["carpal_body"]).getTransform().translation()
-                # Wrist (primary) + elbow (low weight to constrain 3rd humerus
-                # DOF — pure wrist target leaves twist ambiguous → jitter).
-                return float(np.sum(((wr - sh) - target_rel) ** 2)
-                             + 0.3 * np.sum(((el - sh) - target_elbow_rel) ** 2))
+                wr_rel = wr - sh
+                el_rel = el - sh
+                el_dir = el_rel / max(np.linalg.norm(el_rel), 1e-9)
+                # Wrist position + elbow direction match. Strong elbow weight
+                # to force humerus to point correctly, then ulna bends for
+                # wrist (was tuning to "straight arm" with low elbow weight).
+                return float(np.sum((wr_rel - target_rel) ** 2)
+                             + 5.0 * np.sum((el_dir - tgt_elbow_dir) ** 2))
 
             res = minimize(_cost, x0, method="L-BFGS-B",
                            options={"maxiter": 100, "ftol": 1e-9})
