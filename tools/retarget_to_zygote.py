@@ -756,7 +756,8 @@ def main():
         arm_cmd = [py, "tools/bake_arm_retarget_bvh.py",
                    "--in", vert_st, "--out", armed,
                    "--skel-xml", args.skel_xml, "--rest-align",
-                   "--scapulohumeral", "0.27"]
+                   "--scapulohumeral", "0.27",
+                   "--scapulohumeral-r", "0.15"]
         run_stage(arm_cmd, "arm (channel-delta + scapulohumeral)")
     else:
         arm_cmd = [py, "tools/bake_arm_retarget_bvh.py", "--in", vert_st, "--out", armed,

@@ -90,6 +90,12 @@ def main():
                          "(0.27 ≈ anatomical). Clavicle gets rotvec*share, "
                          "Humerus gets compound (rotvec*(1-share)) + LeftArm. "
                          "Preserves LeftHand world position. 0 = disabled.")
+    ap.add_argument("--scapulohumeral-r", type=float, default=-1.0,
+                    help="Per-side override for right clavicle share. Default "
+                         "-1 means use --scapulohumeral for both sides. Set "
+                         "lower (e.g. 0.15) if right-side BVH source has "
+                         "amplified shoulder rotation (LaFAN Sternum bake "
+                         "produces asymmetric vert_st shoulder magnitudes).")
     ap.add_argument("--skel-xml", default="data/zygote_skel.xml")
     args = ap.parse_args()
 
@@ -217,14 +223,18 @@ def main():
                 R_subtracted[tn] = R_local_0[tn].inv() * R_f
 
             # Scapulohumeral distribution: split shoulder between clavicle and
-            # humerus. Share = args.scapulohumeral fraction goes to clavicle,
-            # remainder composes onto humerus. Preserves LeftHand world pos.
+            # humerus. Per-side share (R override available for asymmetric
+            # vert_st magnitudes from Sternum bake).
             R_dist = dict(R_subtracted)
             if args.scapulohumeral > 0:
-                share = float(args.scapulohumeral)
+                share_L = float(args.scapulohumeral)
+                share_R = (float(args.scapulohumeral_r)
+                           if args.scapulohumeral_r >= 0
+                           else share_L)
                 for side, sh_tn in shoulder_by_side.items():
                     arm_tn = arm_by_side.get(side)
                     if arm_tn is None: continue
+                    share = share_L if side == "L" else share_R
                     R_sh = R_subtracted[sh_tn]
                     R_arm = R_subtracted[arm_tn]
                     rv_sh = R_sh.as_rotvec()
