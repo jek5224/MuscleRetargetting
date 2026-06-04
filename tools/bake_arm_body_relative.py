@@ -166,14 +166,23 @@ def main():
     skel = buildFromInfo(si, rn)
     skel.setPositions(np.zeros(skel.getNumDofs()))
     skel_arm_data = {}
-    # Humerus bone direction = humerus body to ulna body (not all the way to
-    # carpal). Matches BVH humerus segment LeftArm → LeftForeArm.
+    # Humerus bone direction = shoulder JOINT to elbow JOINT (not body centers
+    # which can be offset from actual bone axis).
+    def joint_world_pos(body_name):
+        bn = skel.getBodyNode(body_name)
+        par_bn = bn.getParentBodyNode()
+        j = bn.getParentJoint()
+        T_par = j.getTransformFromParentBodyNode()
+        if par_bn is None: return T_par.translation()
+        return par_bn.getTransform().translation() + np.asarray(par_bn.getTransform().rotation()) @ T_par.translation()
+
     for side, hum, ulna_b, clav in [("L", "L_Humerus0", "L_Ulna0", "L_Clavicle0"),
                                        ("R", "R_Humerus0", "R_Ulna0", "R_Clavicle0")]:
         hum_bn = skel.getBodyNode(hum)
-        ulna_bn = skel.getBodyNode(ulna_b)
         clav_bn = skel.getBodyNode(clav)
-        d_rest = ulna_bn.getTransform().translation() - hum_bn.getTransform().translation()
+        sh_joint = joint_world_pos(hum)  # shoulder joint
+        el_joint = joint_world_pos(ulna_b)  # elbow joint
+        d_rest = el_joint - sh_joint
         skel_arm_data[side] = {
             "d_rest_world": d_rest.copy(),
             "R_hum_body_rest": np.asarray(hum_bn.getTransform().rotation()).copy(),
@@ -222,25 +231,16 @@ def main():
         for fi, row in enumerate(rows):
             Tf = bvh_fk_world_full(joints, row, n2c)
             for side, sh_suf, arm_suf, hand_suf in side_pairs:
-                # HUMERUS bone direction match: BVH shoulder→elbow vector.
+                # HUMERUS bone direction (BVH shoulder→elbow).
                 bvh_arm_pos = Tf[arm_idx[arm_suf]][:3, 3]
-                # arm_suf="LeftArm" → next is LeftForeArm. Look up forearm.
                 fa_name = "LeftForeArm" if "Left" in arm_suf else "RightForeArm"
                 fa_ji = arm_idx.get(fa_name)
-                if fa_ji is None:
-                    for ii, jj in enumerate(joints):
-                        if jj["name"] == fa_name or jj["name"].endswith("_" + fa_name):
-                            fa_ji = ii; break
                 bvh_fa_pos = Tf[fa_ji][:3, 3]
                 d_bvh_world = bvh_fa_pos - bvh_arm_pos
                 d_bvh_world = d_bvh_world / max(np.linalg.norm(d_bvh_world), 1e-12)
                 d_rest = skel_arm_data[side]["d_rest_world"]
                 R_motion_world = rotation_from_to(d_rest, d_bvh_world)
                 rv = R.from_matrix(R_motion_world).as_rotvec()
-                # Inman split: Clavicle takes share of R_motion.
-                # Total chain rotation needs to equal R_motion: humerus_dof * clav_dof = R_motion
-                # (post-T_frame=0; chain upstream of clavicle already accounted by
-                # MyBVH chain composition through trunk).
                 R_clav_world = R.from_rotvec(rv * share).as_matrix()
                 R_humerus_world = R_motion_world @ R_clav_world.T
                 for suf, R_local_skel in [(sh_suf, R_clav_world), (arm_suf, R_humerus_world)]:
