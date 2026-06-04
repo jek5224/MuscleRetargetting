@@ -146,10 +146,9 @@ def main():
     # Spine2→Neck: top thoracic → top cervical (C30 or C70).
     # Neck→Head: top cervical → Skull.
     # Skel ordering: lumbar L50(bottom)→L10(top), thoracic T120(bottom)→T10(top).
-    # Hips → Spine1 (BVH mid-spine, thoracolumbar junction).
-    # Skel: Sacrum_Coccyx0 → T120 (bottom of thoracic).
+    # Hips → Neck (BVH). Skel: Sacrum_Coccyx0 → C70 (cervicothoracic junction).
     skel_map_full = {
-        ("Hips", "Spine1"): ("Saccrum_Coccyx0", first_present(["T120"])),
+        ("Hips", "Neck"): ("Saccrum_Coccyx0", first_present(["C70"])),
     }
 
     N = mocap.shape[0]
