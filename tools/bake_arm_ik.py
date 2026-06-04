@@ -218,13 +218,13 @@ def main():
         hand = of(f"{prefix}Hand")
         bvh_sides.append({"side": L_or_R, "arm": arm, "forearm": forearm, "hand": hand})
 
-    # Compute scale + record BVH rest wrist offset and skel rest wrist for delta IK.
+    # Direct world target: BVH arm direction in BVH world ≈ skel arm direction
+    # in skel world (both Y-up, same axes). Scale magnitude by skel/BVH arm
+    # length. Walking pose (arm hanging) maps to skel hanging — natural.
+    # T-pose intro frames intentionally won't match (skel rest is N-pose).
     T0 = bvh_fk_world(ojoints, orows[0], on2c)
     skel.setPositions(np.zeros(skel.getNumDofs()))
     scales = {}
-    bvh_wrist_rest = {}
-    skel_wrist_rest = {}
-    skel_shoulder_rest = {}
     for bs, ss in zip(bvh_sides, sides_skel):
         bvh_sh = T0[bs["arm"]][:3, 3]
         bvh_wr = T0[bs["hand"]][:3, 3]
@@ -233,10 +233,7 @@ def main():
         sk_wr = skel.getBodyNode(ss["carpal_body"]).getTransform().translation().copy()
         sk_len = np.linalg.norm(sk_wr - sk_sh)
         scales[bs["side"]] = sk_len / max(bvh_len, 1e-9)
-        bvh_wrist_rest[bs["side"]] = bvh_wr - bvh_sh
-        skel_wrist_rest[bs["side"]] = sk_wr - sk_sh
-        skel_shoulder_rest[bs["side"]] = sk_sh
-    print(f"  scales: {scales}")
+        print(f"  {bs['side']}: scale={scales[bs['side']]:.3f}")
 
     # Channel column maps.
     bvh_arm_names = {"L": ("LeftShoulder", "LeftArm", "LeftForeArm"),
@@ -295,12 +292,10 @@ def main():
             side = bs["side"]
             sc = scales[side]
             bvh_sh = Tf[bs["arm"]][:3, 3]
+            bvh_el = Tf[bs["forearm"]][:3, 3]
             bvh_wr = Tf[bs["hand"]][:3, 3]
-            # Delta retarget: BVH wrist motion from T-pose added to skel rest.
-            # Skel f=0 must equal skel rest (T_frame=0 forces). Subsequent
-            # frames move skel wrist by the same world-frame displacement.
-            bvh_delta = (bvh_wr - bvh_sh) - bvh_wrist_rest[side]
-            target_rel = skel_wrist_rest[side] + bvh_delta * sc
+            target_rel = (bvh_wr - bvh_sh) * sc
+            target_elbow_rel = (bvh_el - bvh_sh) * sc
             # IK vars: 7 = clavicle (3) + humerus (3) + ulna (1).
             # Initial humerus: rotate skel arm rest direction to target.
             # Skel rest: set zero pose, get current arm direction.
@@ -323,25 +318,25 @@ def main():
             R_hum_rest = np.asarray(hum_bn.getTransform().rotation())
             init_humerus_local = R_hum_rest.T @ init_humerus_world_rotvec
 
-            x0 = np.zeros(7)
-            x0[3:6] = init_humerus_local
+            # 4 DOFs: Humerus (3) + Ulna (1). Clavicle stays at rest
+            # (anatomically minor for walking, removes 3 ambiguous DOFs).
+            x0 = np.zeros(4)
+            x0[0:3] = init_humerus_local
 
             def _cost(x):
                 pose = base_pose.copy()
-                pose[ss["clav_i"]:ss["clav_i"]+3] = x[0:3]
-                pose[ss["hum_i"]:ss["hum_i"]+3] = x[3:6]
-                pose[ss["ulna_i"]] = x[6]
+                pose[ss["hum_i"]:ss["hum_i"]+3] = x[0:3]
+                pose[ss["ulna_i"]] = x[3]
                 skel.setPositions(pose)
                 sh = skel.getBodyNode(ss["humerus_body"]).getTransform().translation()
                 wr = skel.getBodyNode(ss["carpal_body"]).getTransform().translation()
                 return float(np.sum(((wr - sh) - target_rel) ** 2))
 
             res = minimize(_cost, x0, method="L-BFGS-B",
-                           options={"maxiter": 80, "ftol": 1e-8})
+                           options={"maxiter": 100, "ftol": 1e-9})
             x = res.x
-            new_mocap[f, ss["clav_i"]:ss["clav_i"]+3] = x[0:3]
-            new_mocap[f, ss["hum_i"]:ss["hum_i"]+3] = x[3:6]
-            new_mocap[f, ss["ulna_i"]] = x[6]
+            new_mocap[f, ss["hum_i"]:ss["hum_i"]+3] = x[0:3]
+            new_mocap[f, ss["ulna_i"]] = x[3]
 
     # Inverse-T_net: convert mocap rotvec → BVH channel value.
     # mocap = T_net = parent_world_bvh(0) @ R_local_bvh(f) @ R_local_bvh(0).T @ parent_world_bvh(0).T
