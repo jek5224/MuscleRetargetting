@@ -734,6 +734,8 @@ def main():
                     help="Scale BVH Head rotation before distributing across Atlas/Axis. Default 1.0. Use <1 to damp head wave.")
     ap.add_argument("--neck-scale", type=float, default=1.0,
                     help="Scale BVH Neck rotation. Default 1.0.")
+    ap.add_argument("--spine-scale", type=float, default=1.0,
+                    help="Scale BVH Spine/Spine1 rotation. <1 dampens pelvis-to-neck waving.")
     args = ap.parse_args()
 
     work = tempfile.mkdtemp(prefix="retarget_zygote_")
@@ -751,8 +753,10 @@ def main():
     # offsets (similar to clavicle). Auto-damp to 0.3 if user didn't override.
     auto_head = 0.3 if (rig_style == "bone_aligned" and args.head_scale == 1.0) else args.head_scale
     auto_neck = 0.4 if (rig_style == "bone_aligned" and args.neck_scale == 1.0) else args.neck_scale
+    auto_spine = 0.3 if (rig_style == "bone_aligned" and args.spine_scale == 1.0) else args.spine_scale
     vert_cmd = [py, "tools/make_run_vert_bvh.py", "--in", norm, "--out", vert, "--skip-xml",
-                "--head-scale", str(auto_head), "--neck-scale", str(auto_neck)]
+                "--head-scale", str(auto_head), "--neck-scale", str(auto_neck),
+                "--spine-scale", str(auto_spine)]
     run_stage(vert_cmd, "spine expand")
     run_stage(
         [py, "tools/add_sternum_to_bvh.py", "--in", vert, "--out", vert_st],

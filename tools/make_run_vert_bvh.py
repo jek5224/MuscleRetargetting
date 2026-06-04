@@ -284,7 +284,8 @@ def render_hierarchy(joints, motion_line_idx, original_lines):
 
 def rewrite_motion(motion_rows, src_channel_layout, dst_channel_order,
                    pivots, joints=None, ik_spine=False,
-                   head_scale=1.0, neck_scale=1.0):
+                   head_scale=1.0, neck_scale=1.0,
+                   spine_scale=1.0):
     """Each row in motion_rows is list of floats matching src_channel_layout.
     src_channel_layout = list of (joint_name, num_channels).
     dst_channel_order   = list of (joint_name, num_channels).
@@ -326,7 +327,10 @@ def rewrite_motion(motion_rows, src_channel_layout, dst_channel_order,
         spine1_rot = euler_to_quat(spine1_zxy)
         neck_rot = euler_to_quat(neck_zxy)
         head_rot = euler_to_quat(head_zxy)
-        # Scale neck/head rotation magnitude if requested.
+        # Scale rotation magnitudes if requested.
+        if spine_scale != 1.0:
+            spine_rot = R.from_rotvec(spine_rot.as_rotvec() * spine_scale)
+            spine1_rot = R.from_rotvec(spine1_rot.as_rotvec() * spine_scale)
         if neck_scale != 1.0:
             neck_rot = R.from_rotvec(neck_rot.as_rotvec() * neck_scale)
         if head_scale != 1.0:
@@ -494,6 +498,8 @@ def main():
                     help="Scale BVH Head rotation magnitude before distributing across CRANIAL chain (Atlas, Axis). Default 1.0 = full BVH motion. Use <1 to damp head wave.")
     ap.add_argument("--neck-scale", type=float, default=1.0,
                     help="Same for Neck → CERVICAL chain.")
+    ap.add_argument("--spine-scale", type=float, default=1.0,
+                    help="Scale Spine + Spine1 rotation magnitude. Default 1.0 = full BVH motion. Use <1 to damp pelvis-to-neck waving.")
     args = ap.parse_args()
 
     with open(args.bvh_in) as f:
@@ -532,6 +538,7 @@ def main():
     # Rewrite motion
     new_rows = rewrite_motion(frame_data, src_layout, dst_channel_order, pivots,
                               head_scale=args.head_scale, neck_scale=args.neck_scale,
+                              spine_scale=args.spine_scale,
                               joints=joints, ik_spine=args.ik_spine)
 
     # Write run_vert.bvh
