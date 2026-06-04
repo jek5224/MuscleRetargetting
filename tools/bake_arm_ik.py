@@ -220,6 +220,33 @@ def main():
     # BVH root for actor-local frame.
     bvh_hips_ji = of("Hips")
 
+    # R_align_arm: rotation in BODY-LOCAL frame that maps BVH arm rest
+    # direction (T-pose, in BVH-hips-local) to skel arm rest direction
+    # (N-pose, in skel-root-local). Per side because T-pose mirrors (+X vs -X).
+    T0_bvh = bvh_fk_world(ojoints, orows[0], on2c)
+    R_bvh_hips_0 = T0_bvh[bvh_hips_ji][:3, :3]
+    skel.setPositions(np.zeros(skel.getNumDofs()))
+    R_skel_root_rest_for_align = np.asarray(
+        skel.getBodyNode("Saccrum_Coccyx0").getTransform().rotation()).copy()
+    R_align_arm = {}
+    for bs, ss in zip(bvh_sides, sides_skel):
+        bvh_dir_world = T0_bvh[bs["hand"]][:3, 3] - T0_bvh[bs["arm"]][:3, 3]
+        bvh_dir_local = R_bvh_hips_0.T @ bvh_dir_world
+        bvh_dir_local /= np.linalg.norm(bvh_dir_local)
+        sk_dir_world = (skel.getBodyNode(ss["carpal_body"]).getTransform().translation()
+                        - skel.getBodyNode(ss["humerus_body"]).getTransform().translation())
+        sk_dir_local = R_skel_root_rest_for_align.T @ sk_dir_world
+        sk_dir_local /= np.linalg.norm(sk_dir_local)
+        cross = np.cross(bvh_dir_local, sk_dir_local)
+        cn = np.linalg.norm(cross)
+        ang = float(np.arctan2(cn, float(bvh_dir_local @ sk_dir_local)))
+        if cn > 1e-9:
+            R_align_arm[bs["side"]] = R.from_rotvec(cross / cn * ang).as_matrix()
+        else:
+            R_align_arm[bs["side"]] = np.eye(3)
+    print(f"  R_align_arm L rotvec={R.from_matrix(R_align_arm['L']).as_rotvec().round(2)} "
+          f"R rotvec={R.from_matrix(R_align_arm['R']).as_rotvec().round(2)}")
+
     # Direct world target: BVH arm direction in BVH world ≈ skel arm direction
     # in skel world (both Y-up, same axes). Scale magnitude by skel/BVH arm
     # length. Walking pose (arm hanging) maps to skel hanging — natural.
@@ -293,8 +320,10 @@ def main():
         Tf = bvh_fk_world(ojoints, orows[f] if f < len(orows) else orows[-1], on2c)
         # Set base pose from mocap (everything else fixed).
         base_pose = mocap[f].copy()
-        # Express BVH wrist offset in BVH-root-local frame so target follows
-        # actor's body rotation (yaw + tilt). Then rotate by skel root world.
+        # Step 1: BVH offset in BVH-hips-local frame (removes actor yaw).
+        # Step 2: per-side R_align_arm rotates from BVH arm rest direction
+        #         to skel arm rest direction.
+        # Step 3: rotate by skel root world (applies skel actor's facing).
         R_bvh_root = Tf[bvh_hips_ji][:3, :3] if bvh_hips_ji is not None else np.eye(3)
         skel.setPositions(base_pose)
         R_skel_root = np.asarray(skel.getBodyNode("Saccrum_Coccyx0").getTransform().rotation())
@@ -304,11 +333,11 @@ def main():
             bvh_sh = Tf[bs["arm"]][:3, 3]
             bvh_el = Tf[bs["forearm"]][:3, 3]
             bvh_wr = Tf[bs["hand"]][:3, 3]
-            # Wrist in BVH-root-local frame → rotate to skel world via skel root.
             bvh_rel_world = (bvh_wr - bvh_sh) * sc
             bvh_rel_local = R_bvh_root.T @ bvh_rel_world
-            target_rel = R_skel_root @ bvh_rel_local
-            target_elbow_rel = R_skel_root @ (R_bvh_root.T @ ((bvh_el - bvh_sh) * sc))
+            target_rel = R_skel_root @ (R_align_arm[side] @ bvh_rel_local)
+            bvh_elbow_world = (bvh_el - bvh_sh) * sc
+            target_elbow_rel = R_skel_root @ (R_align_arm[side] @ (R_bvh_root.T @ bvh_elbow_world))
             # IK vars: 7 = clavicle (3) + humerus (3) + ulna (1).
             # Initial humerus: rotate skel arm rest direction to target.
             # Skel rest: set zero pose, get current arm direction.
