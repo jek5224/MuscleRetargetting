@@ -173,12 +173,21 @@ def main():
         d_rest = car_bn.getTransform().translation() - hum_bn.getTransform().translation()
         skel_arm_data[side] = {
             "d_rest_world": d_rest.copy(),
-            # Humerus body world rest — used to conjugate world rotation into
-            # humerus joint-local frame (matches DART ball joint convention).
             "R_hum_body_rest": np.asarray(hum_bn.getTransform().rotation()).copy(),
-            # Clavicle body world rest.
             "R_clav_body_rest": np.asarray(clav_bn.getTransform().rotation()).copy(),
         }
+    # BVH arm world rest rotation (from input BVH FK at f=0). Used to compute
+    # alignment for full-rotation match.
+    T0_bvh = bvh_fk_world_full(joints, rows[0], n2c)
+    R_align_arm = {}
+    for side, sh_suf, arm_suf, hand_suf in [("L", "LeftShoulder", "LeftArm", "LeftHand"),
+                                              ("R", "RightShoulder", "RightArm", "RightHand")]:
+        ji = arm_idx[arm_suf]
+        R_bvh_arm_rest = T0_bvh[ji][:3, :3].copy()
+        R_skel_hum_rest = skel_arm_data[side]["R_hum_body_rest"]
+        # R_align: skel arm world(f) = R_align @ R_bvh_arm_world(f).
+        # At rest: R_skel_hum_rest = R_align @ R_bvh_arm_rest → R_align = R_skel @ R_bvh.inv.
+        R_align_arm[side] = R_skel_hum_rest @ R_bvh_arm_rest.T
 
     # Pass 1: compute parent_world_at_F0 from input rows[0] (initial estimate).
     # Pass 2 (after writing): recompute from updated rows[0] for self-consistency.
@@ -210,6 +219,7 @@ def main():
         for fi, row in enumerate(rows):
             Tf = bvh_fk_world_full(joints, row, n2c)
             for side, sh_suf, arm_suf, hand_suf in side_pairs:
+                # Arm bone direction match (world).
                 bvh_arm_pos = Tf[arm_idx[arm_suf]][:3, 3]
                 bvh_hand_pos = Tf[arm_idx[hand_suf]][:3, 3]
                 d_bvh_world = bvh_hand_pos - bvh_arm_pos
@@ -220,9 +230,6 @@ def main():
                 R_clav_world = R.from_rotvec(rv * share).as_matrix()
                 R_residual_world = R.from_rotvec(rv * (1.0 - share)).as_matrix()
                 R_humerus_world = R_residual_world
-                # DART ball joint applies rotvec directly in WORLD frame:
-                # body_world(f) = R(rotvec_world) @ body_world_rest.
-                # Mocap rotvec = R_motion_world directly. No body_rest conj.
                 for suf, R_local_skel in [(sh_suf, R_clav_world), (arm_suf, R_humerus_world)]:
                     P = P_dict[suf]
                     R_channel = P.T @ R_local_skel @ P
