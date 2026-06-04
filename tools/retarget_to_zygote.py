@@ -355,17 +355,35 @@ def normalize_bvh(in_path, out_path, skel_xml="data/zygote_skel.xml",
     c0_h = name_to_col[joints[root_idx_h]["name"]][0]
     rot_idx_h = [k for k, ch in enumerate(r_chs_h) if ch.lower().endswith("rotation")]
     spine_idx_h = find_joint(joints, "Spine")
-    spine1_idx_h = find_joint(joints, "Spine1")
     if rot_idx_h and spine_idx_h is not None and hips_tilt_scale_value < 1.0:
         order_h = "".join(r_chs_h[k][0] for k in rot_idx_h).upper()
-        def joint_chan_info(ji):
+        sp_chs = joints[spine_idx_h]["channels"]
+        sp_c0 = name_to_col[joints[spine_idx_h]["name"]][0]
+        sp_rot = [k for k, ch in enumerate(sp_chs) if ch.lower().endswith("rotation")]
+        sp_ord = "".join(sp_chs[k][0] for k in sp_rot).upper()
+        # Reference Hips rotation at f=0 (so rest-pose tilt is preserved).
+        e0 = [rows[0][c0_h + k] for k in rot_idx_h]
+        Rh0 = R.from_euler(order_h, e0, degrees=True)
+        q0 = Rh0.as_quat()
+        tq0 = np.array([0.0, q0[1], 0.0, q0[3]])
+        n0 = float(np.linalg.norm(tq0))
+        twist0 = R.from_quat(tq0 / n0) if n0 > 1e-9 else R.identity()
+        swing0 = twist0.inv() * Rh0
+
+        # Find arm shoulder joints to compensate (so arm chain world unchanged
+        # despite Spine modification). LeftShoulder/RightShoulder channel:
+        # new = (tilt_delta) * orig. Compose pre-arm-bake; arm bake will see
+        # the modified channels and produce arm motion based on them.
+        sh_infos = []
+        for sh_n in ("LeftShoulder", "RightShoulder"):
+            ji = find_joint(joints, sh_n)
+            if ji is None: continue
             chs = joints[ji]["channels"]
             c0 = name_to_col[joints[ji]["name"]][0]
             rot_idx = [k for k, ch in enumerate(chs) if ch.lower().endswith("rotation")]
             order = "".join(chs[k][0] for k in rot_idx).upper()
-            return chs, c0, rot_idx, order
-        sp_chs, sp_c0, sp_rot, sp_ord = joint_chan_info(spine_idx_h)
-        sp1_info = joint_chan_info(spine1_idx_h) if spine1_idx_h is not None else None
+            sh_infos.append((c0, rot_idx, order))
+
         cancel_factor = 1.0 - float(hips_tilt_scale_value)
         for row in rows:
             e = [row[c0_h + k] for k in rot_idx_h]
@@ -374,23 +392,30 @@ def normalize_bvh(in_path, out_path, skel_xml="data/zygote_skel.xml",
             tq = np.array([0.0, q[1], 0.0, q[3]])
             n = float(np.linalg.norm(tq))
             if n < 1e-9: continue
-            tq = tq / n
-            twist = R.from_quat(tq)
+            twist = R.from_quat(tq / n)
             swing = twist.inv() * Rh
-            # Read Spine1 original rotation.
-            R_sp1 = R.identity()
-            if sp1_info is not None:
-                _, c0_1, rot1, ord1 = sp1_info
-                sp1_e = [row[c0_1 + k] for k in rot1]
-                R_sp1 = R.from_euler(ord1, sp1_e, degrees=True)
-            # Target: R_Spine_new * R_Spine1_orig = swing.inv (cancel hips tilt).
-            # So R_Spine_new = swing.inv * R_Spine1_orig.inv. Scale by cancel_factor.
-            target_total = R.from_rotvec(swing.as_rotvec() * (-cancel_factor))
-            R_sp_new = target_total * R_sp1.inv()
-            new_e = R_sp_new.as_euler(sp_ord, degrees=True).tolist()
+            tilt_delta = swing0.inv() * swing
+            # cancel = tilt_delta.inv (subtract gait-induced tilt at spine).
+            cancel = R.from_rotvec(tilt_delta.as_rotvec() * (-cancel_factor))
+            # Modify Spine: prepend cancel.
+            sp_e = [row[sp_c0 + k] for k in sp_rot]
+            Rsp = R.from_euler(sp_ord, sp_e, degrees=True)
+            Rsp_new = cancel * Rsp
+            new_sp_e = Rsp_new.as_euler(sp_ord, degrees=True).tolist()
             for kk, off in enumerate(sp_rot):
-                row[sp_c0 + off] = new_e[kk]
-        print(f"  [normalize] Hips tilt cancel: factor={cancel_factor:.2f} (Spine replaces with swing.inv * Spine1.inv)")
+                row[sp_c0 + off] = new_sp_e[kk]
+            # Compensate at shoulders: undo cancel for arm chain.
+            # arm_world_new = chain_with_cancel * shoulder_new * arm = orig.
+            # shoulder_new = cancel.inv * shoulder_orig (prepend cancel.inv).
+            cancel_inv = cancel.inv()
+            for c0_s, rot_idx_s, ord_s in sh_infos:
+                sh_e = [row[c0_s + k] for k in rot_idx_s]
+                Rsh = R.from_euler(ord_s, sh_e, degrees=True)
+                Rsh_new = cancel_inv * Rsh
+                new_e = Rsh_new.as_euler(ord_s, degrees=True).tolist()
+                for kk, off in enumerate(rot_idx_s):
+                    row[c0_s + off] = new_e[kk]
+        print(f"  [normalize] Hips tilt DELTA cancel at Spine + compensate at shoulders: factor={cancel_factor:.2f}")
     # 5. Root XZ centering: subtract f0 root X and Z position.
     root_idx = next(i for i, j in enumerate(joints) if j["parent"] == -1)
     r_chs = joints[root_idx]["channels"]
@@ -804,9 +829,9 @@ def main():
     # offsets (similar to clavicle). Auto-damp to 0.3 if user didn't override.
     auto_head = 0.3 if (rig_style == "bone_aligned" and args.head_scale == 1.0) else args.head_scale
     auto_neck = 0.4 if (rig_style == "bone_aligned" and args.neck_scale == 1.0) else args.neck_scale
-    # spine_scale=1.0 keeps spine motion (inc. Hips-tilt-cancel rotation
-    # added in Stage 0). User can override if want spine fully damped.
-    auto_spine = args.spine_scale
+    # Bone-aligned: dampen spine motion to 0.3 by default (further reduces wave
+    # on top of Hips tilt cancel). User can override.
+    auto_spine = 0.3 if (rig_style == "bone_aligned" and args.spine_scale == 1.0) else args.spine_scale
     vert_cmd = [py, "tools/make_run_vert_bvh.py", "--in", norm, "--out", vert, "--skip-xml",
                 "--head-scale", str(auto_head), "--neck-scale", str(auto_neck),
                 "--spine-scale", str(auto_spine)]
