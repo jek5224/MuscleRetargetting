@@ -162,7 +162,7 @@ def main():
     # Skel rest arm world direction.
     sys.path.insert(0, ".")
     from core.dartHelper import saveSkeletonInfo, buildFromInfo
-    si, rn, *_ = saveSkeletonInfo(args.skel_xml)
+    si, rn, bvh_info, *_ = saveSkeletonInfo(args.skel_xml)
     skel = buildFromInfo(si, rn)
     skel.setPositions(np.zeros(skel.getNumDofs()))
     skel_arm_data = {}
@@ -188,18 +188,27 @@ def main():
             "R_hum_body_rest": np.asarray(hum_bn.getTransform().rotation()).copy(),
             "R_clav_body_rest": np.asarray(clav_bn.getTransform().rotation()).copy(),
         }
-    # BVH arm world rest rotation (from input BVH FK at f=0). Used to compute
-    # alignment for full-rotation match.
-    T0_bvh = bvh_fk_world_full(joints, rows[0], n2c)
-    R_align_arm = {}
-    for side, sh_suf, arm_suf, hand_suf in [("L", "LeftShoulder", "LeftArm", "LeftHand"),
-                                              ("R", "RightShoulder", "RightArm", "RightHand")]:
-        ji = arm_idx[arm_suf]
-        R_bvh_arm_rest = T0_bvh[ji][:3, :3].copy()
-        R_skel_hum_rest = skel_arm_data[side]["R_hum_body_rest"]
-        # R_align: skel arm world(f) = R_align @ R_bvh_arm_world(f).
-        # At rest: R_skel_hum_rest = R_align @ R_bvh_arm_rest → R_align = R_skel @ R_bvh.inv.
-        R_align_arm[side] = R_skel_hum_rest @ R_bvh_arm_rest.T
+    # Pre-load mocap from input BVH (gives skel chain DOFs per frame).
+    from core.bvhparser import MyBVH
+    mbv_in = MyBVH(args.bvh_in, bvh_info, skel, T_frame=0)
+    mocap_in = mbv_in.mocap_refs.copy()
+
+    # Skel humerus body local X axis = bone direction. Body_rest[:,0] = bone in world.
+    bone_local_world_rest = {}
+    for side, hum in [("L", "L_Humerus0"), ("R", "R_Humerus0")]:
+        hum_bn = skel.getBodyNode(hum)
+        bone_local_world_rest[side] = np.asarray(hum_bn.getTransform().rotation())[:, 0].copy()
+
+    # Find arm DOF indices to zero out for chain FK.
+    arm_dof_indices = []
+    for jn_name in ["L_Clavicle0", "L_Humerus0", "L_Ulna0", "L_Radius0", "L_Carpal0",
+                    "R_Clavicle0", "R_Humerus0", "R_Ulna0", "R_Radius0", "R_Carpal0"]:
+        for j in range(skel.getNumJoints()):
+            jn = skel.getJoint(j)
+            if jn.getName() == jn_name:
+                idx = jn.getIndexInSkeleton(0); nd = jn.getNumDofs()
+                arm_dof_indices.extend(range(idx, idx + nd))
+                break
 
     # Pass 1: compute parent_world_at_F0 from input rows[0] (initial estimate).
     # Pass 2 (after writing): recompute from updated rows[0] for self-consistency.
@@ -230,6 +239,12 @@ def main():
         computed = {suf: [None] * len(rows) for suf in arm_channel_info}
         for fi, row in enumerate(rows):
             Tf = bvh_fk_world_full(joints, row, n2c)
+            # Apply mocap_in to skel with arm DOFs zeroed → read chain.
+            pose = mocap_in[fi].copy()
+            for di in arm_dof_indices:
+                if di < len(pose):
+                    pose[di] = 0.0
+            skel.setPositions(pose)
             for side, sh_suf, arm_suf, hand_suf in side_pairs:
                 # HUMERUS bone direction (BVH shoulder→elbow).
                 bvh_arm_pos = Tf[arm_idx[arm_suf]][:3, 3]
@@ -238,8 +253,16 @@ def main():
                 bvh_fa_pos = Tf[fa_ji][:3, 3]
                 d_bvh_world = bvh_fa_pos - bvh_arm_pos
                 d_bvh_world = d_bvh_world / max(np.linalg.norm(d_bvh_world), 1e-12)
-                d_rest = skel_arm_data[side]["d_rest_world"]
-                R_motion_world = rotation_from_to(d_rest, d_bvh_world)
+                # Read skel JOINT positions with chain applied + arm DOFs zero.
+                # Bone direction = elbow_joint - shoulder_joint.
+                hum_body = "L_Humerus0" if side == "L" else "R_Humerus0"
+                ulna_body = "L_Ulna0" if side == "L" else "R_Ulna0"
+                sh_joint_w = joint_world_pos(hum_body)
+                el_joint_w = joint_world_pos(ulna_body)
+                d_chain_humerus = el_joint_w - sh_joint_w
+                d_chain_humerus /= max(np.linalg.norm(d_chain_humerus), 1e-12)
+                # Rotation needed at humerus DOF.
+                R_motion_world = rotation_from_to(d_chain_humerus, d_bvh_world)
                 rv = R.from_matrix(R_motion_world).as_rotvec()
                 R_clav_world = R.from_rotvec(rv * share).as_matrix()
                 R_humerus_world = R_motion_world @ R_clav_world.T
