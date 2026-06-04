@@ -755,14 +755,13 @@ def main():
         "sternum",
     )
     if rig_style == "bone_aligned":
-        # Channel-delta with rest-align conjugation + Inman scapulohumeral
-        # rhythm. Clavicle gets ~27% of shoulder rotation, residual composes
-        # onto Humerus. Anatomical SC:ST:GH ratio ≈ 4:5:10 → clav share 0.27.
-        arm_cmd = [py, "tools/bake_arm_retarget_bvh.py",
+        # Body-relative arm bake: subtracts root yaw via BVH FK, computes
+        # arm motion in actor-body-local frame (anatomical magnitude, no
+        # bone-aligned encoding inflation). Inman scapulohumeral split.
+        arm_cmd = [py, "tools/bake_arm_body_relative.py",
                    "--in", vert_st, "--out", armed,
-                   "--skel-xml", args.skel_xml, "--rest-align",
                    "--scapulohumeral", "0.27"]
-        run_stage(arm_cmd, "arm (channel-delta + scapulohumeral)")
+        run_stage(arm_cmd, "arm (body-relative + scapulohumeral)")
     else:
         arm_cmd = [py, "tools/bake_arm_retarget_bvh.py", "--in", vert_st, "--out", armed,
                    "--skel-xml", args.skel_xml]
