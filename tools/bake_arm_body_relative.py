@@ -220,9 +220,10 @@ def main():
                 R_clav_world = R.from_rotvec(rv * share).as_matrix()
                 R_residual_world = R.from_rotvec(rv * (1.0 - share)).as_matrix()
                 R_humerus_world = R_residual_world
-                R_clav_local = skel_arm_data[side]["R_clav_body_rest"].T @ R_clav_world @ skel_arm_data[side]["R_clav_body_rest"]
-                R_hum_local = skel_arm_data[side]["R_hum_body_rest"].T @ R_humerus_world @ skel_arm_data[side]["R_hum_body_rest"]
-                for suf, R_local_skel in [(sh_suf, R_clav_local), (arm_suf, R_hum_local)]:
+                # DART ball joint applies rotvec directly in WORLD frame:
+                # body_world(f) = R(rotvec_world) @ body_world_rest.
+                # Mocap rotvec = R_motion_world directly. No body_rest conj.
+                for suf, R_local_skel in [(sh_suf, R_clav_world), (arm_suf, R_humerus_world)]:
                     P = P_dict[suf]
                     R_channel = P.T @ R_local_skel @ P
                     c0, order, rot_offs = arm_channel_info[suf]
@@ -238,9 +239,19 @@ def main():
                 for k, off in enumerate(rot_offs):
                     row[c0 + off] = float(eul[k])
 
-    # Single pass: P from input rows[0]. Iteration unstable for asymmetric
-    # R-side body rest rotations.
+    # 2-pass with channel(0)=identity forcing.
+    # Pass 1: zero arm channels at row[0] so P from FK gives Sternum-direction
+    # parent_world (the actual P that MyBVH will see).
+    for suf in arm_channel_info:
+        c0, order, rot_offs = arm_channel_info[suf]
+        for k, off in enumerate(rot_offs):
+            rows[0][c0 + off] = 0.0
+    bvh_parent_world_at_outputF0 = compute_parent_world(rows[0])
+    # Compute all channels using this P.
     computed = compute_all_channels(bvh_parent_world_at_outputF0)
+    # Force channel(0) = identity again (compute_all_channels overwrites).
+    for suf in arm_channel_info:
+        computed[suf][0] = [0.0] * 3
     write_channels(computed)
 
     out_lines = lines[:mi] + motion_header
