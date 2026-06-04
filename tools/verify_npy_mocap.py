@@ -83,7 +83,10 @@ def joint_world_pos(skel, body_name):
     par = bn.getParentBodyNode()
     j = bn.getParentJoint()
     T = j.getTransformFromParentBodyNode()
-    if par is None: return T.translation()
+    if par is None:
+        # Root: joint pivot = body world translation (FreeJoint translation
+        # already baked into body world transform).
+        return np.asarray(bn.getTransform().translation())
     return par.getTransform().translation() + np.asarray(par.getTransform().rotation()) @ T.translation()
 
 
@@ -124,31 +127,59 @@ def main():
         sd["skel_carp"] = f"{L_or_R}_Carpal0"
         sides.append(sd)
 
-    # Pelvis → Neck for spine direction.
-    bvh_hips = find_joint(ojoints, "Hips")
-    bvh_neck = find_joint(ojoints, "Neck")
-    # Skel: Pelvis joint to C70 (neck body) or T10 (top trunk).
-    spine_top_body = None
-    for cand in ("C70", "Neck0", "T10"):
-        for jj in range(skel.getNumJoints()):
-            if skel.getBodyNode(jj).getName() == cand:
-                spine_top_body = cand; break
-        if spine_top_body: break
+    # Multi-segment spine comparison. BVH may have Spine2 (LaFAN) or not.
+    bvh_spine = [find_joint(ojoints, n) for n in ("Hips", "Spine", "Spine1", "Spine2", "Neck", "Head")]
+    spine_chain = [(a, b) for a, b in zip(bvh_spine, bvh_spine[1:]) if a is not None and b is not None]
+    spine_names = [(n1, n2) for n1, n2 in zip(["Hips", "Spine", "Spine1", "Spine2", "Neck"],
+                                              ["Spine", "Spine1", "Spine2", "Neck", "Head"])
+                   if find_joint(ojoints, n1) is not None and find_joint(ojoints, n2) is not None]
+    # Skel chain top-of-segment body names.
+    skel_body_names = set(skel.getBodyNode(jj).getName() for jj in range(skel.getNumJoints()))
+    def first_present(cands):
+        for c in cands:
+            if c in skel_body_names: return c
+        return None
+    # Map BVH segment to skel endpoint.
+    # Hips→Spine: pelvis (root) → top of lumbar (L10).
+    # Spine→Spine1: L10 → top of thoracic (T10 or T120 top depends on order).
+    # Spine1→Spine2: subdivide thoracic, use mid as proxy.
+    # Spine2→Neck: top thoracic → top cervical (C30 or C70).
+    # Neck→Head: top cervical → Skull.
+    # Skel ordering: lumbar L50(bottom)→L10(top), thoracic T120(bottom)→T10(top).
+    # Empirical map (Y-position correspondence at f=0 T-pose):
+    # BVH Hips y=184cm ↔ skel Sacrum (root). BVH Spine y=191 ↔ L40.
+    # BVH Spine1 y=203 ↔ T120. BVH Spine2 y=216 ↔ T80.
+    # BVH Neck y=241 ↔ C30. BVH Head y=253 ↔ Skull0.
+    # Skel chain order is bottom→top (L50→L10, T120→T10, C70→C30).
+    skel_map_full = {
+        ("Hips", "Spine"): ("Saccrum_Coccyx0", first_present(["L40"])),
+        ("Spine", "Spine1"): (first_present(["L40"]), first_present(["T120"])),
+        ("Spine1", "Spine2"): (first_present(["T120"]), first_present(["T80"])),
+        ("Spine2", "Neck"): (first_present(["T80"]), first_present(["C30"])),
+        ("Spine1", "Neck"): (first_present(["T120"]), first_present(["C30"])),
+        ("Neck", "Head"): (first_present(["C30"]), first_present(["Skull0"])),
+    }
 
     N = mocap.shape[0]
     sample = [0, N // 4, N // 2, 3 * N // 4, N - 1]
     for f in sample:
         skel.setPositions(mocap[f])
         Tf = bvh_fk(ojoints, orows[f], on2c)
-        # Spine direction.
-        if spine_top_body and bvh_hips is not None and bvh_neck is not None:
-            d_bvh_sp = Tf[bvh_neck][:3, 3] - Tf[bvh_hips][:3, 3]
-            d_bvh_sp /= max(np.linalg.norm(d_bvh_sp), 1e-9)
-            pel = joint_world_pos(skel, "Pelvis0") if any(skel.getBodyNode(jj).getName() == "Pelvis0" for jj in range(skel.getNumJoints())) else np.asarray(skel.getRootBodyNode().getTransform().translation())
-            top = joint_world_pos(skel, spine_top_body)
-            d_sk_sp = top - pel; d_sk_sp /= max(np.linalg.norm(d_sk_sp), 1e-9)
-            csp = float(d_bvh_sp @ d_sk_sp)
-            print(f"  f{f:5d} spine Hips→Neck cosθ={csp:+.4f}")
+        # Multi-segment spine.
+        for (n_a, n_b), (s_a, s_b) in skel_map_full.items():
+            ji_a = find_joint(ojoints, n_a); ji_b = find_joint(ojoints, n_b)
+            if ji_a is None or ji_b is None or s_a is None or s_b is None:
+                continue
+            d_bvh = Tf[ji_b][:3, 3] - Tf[ji_a][:3, 3]
+            db = np.linalg.norm(d_bvh)
+            if db < 1e-6: continue
+            d_bvh /= db
+            pa = joint_world_pos(skel, s_a); pb = joint_world_pos(skel, s_b)
+            d_sk = pb - pa; ds = np.linalg.norm(d_sk)
+            if ds < 1e-6: continue
+            d_sk /= ds
+            csp = float(d_bvh @ d_sk)
+            print(f"  f{f:5d} spine {n_a:6s}→{n_b:6s} ({s_a:>14s}→{s_b:<6s}) cosθ={csp:+.4f}")
         for sd in sides:
             d_bvh_h = Tf[sd["bvh_fa"]][:3, 3] - Tf[sd["bvh_arm"]][:3, 3]
             d_bvh_h /= np.linalg.norm(d_bvh_h)

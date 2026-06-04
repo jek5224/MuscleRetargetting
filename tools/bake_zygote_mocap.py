@@ -199,9 +199,13 @@ def main():
             sd[f"dof_{k}"] = (idx, nd)
         sides.append(sd)
 
+    # Zero hum/ulna/rad/carp only. KEEP clavicle DOF from MyBVH-converted
+    # input (BVH LeftShoulder → L_Clavicle anatomical mapping). Letting
+    # clavicle ride bvh source avoids both T-pose over-spread (Inman full
+    # delta) and N-pose collapse (Inman zero at f=0).
     arm_dof_set = []
     for sd in sides:
-        for k in ("clav", "hum", "ulna", "rad", "carp"):
+        for k in ("hum", "ulna", "rad", "carp"):
             idx, nd = sd[f"dof_{k}"]
             if idx is not None:
                 arm_dof_set.extend(range(idx, idx + nd))
@@ -347,30 +351,20 @@ def main():
                     M_body_local = np.column_stack([bx, by, bz])
                     hum_body_world_target = M_target_w @ M_body_local.T
 
-            # Clavicle share applies to MOTION delta only (target relative
-            # to f=0 target), not to BVH-rest vs skel-rest offset. At f=0
-            # R_motion=I → clav stays at rest → no spread artifact.
-            R_motion = hum_body_world_target @ hum_target_0[sd["L"]].T
-            rv_motion = R.from_matrix(R_motion).as_rotvec()
-            R_clav_world = R.from_rotvec(rv_motion * share).as_matrix()
-
-            j_clav = skel.getJoint(sd["skel"]["clav"])
-            clav_parent_world = np.asarray(skel.getBodyNode(sd["skel"]["clav"]).getParentBodyNode().getTransform().rotation())
+            # Clavicle stays at BVH-converted MyBVH value (loaded from
+            # mocap_in via L_Clavicle bvh=LeftShoulder mapping). Humerus
+            # absorbs all remaining delta needed for d_bvh_hum direction.
+            # Scapula stays rigid with current clavicle pose.
             scap_world_init = np.asarray(skel.getBodyNode(sd["skel"]["hum"]).getParentBodyNode().getTransform().rotation())
-            J_clav_world = clav_parent_world @ np.asarray(j_clav.getTransformFromParentBodyNode().rotation())
             J_hum_world = scap_world_init @ T_p2j_hum
 
-            R_clav_local = J_clav_world.T @ R_clav_world @ J_clav_world
-
-            # Humerus local DOF: hum_body_world_after = par_after @ T_p2j @ expmap(rv) @ T_c2j.T
-            # par_after = R_clav_world @ scap_world_init (scapula rigid with clavicle).
-            # → expmap(rv) = T_p2j.T @ par_after.T @ hum_body_world_target @ T_c2j
-            par_after = R_clav_world @ scap_world_init
+            # par_after = current scapula world (already reflects BVH clav).
+            par_after = scap_world_init
             expmap_rv_hum = T_p2j_hum.T @ par_after.T @ hum_body_world_target @ T_c2j_hum
             R_hum_local = expmap_rv_hum
 
-            clav_idx, _ = sd["dof_clav"]; hum_idx, _ = sd["dof_hum"]
-            pose[clav_idx:clav_idx + 3] = R.from_matrix(R_clav_local).as_rotvec()
+            # Clavicle DOF preserved from mocap_in (not overwritten).
+            hum_idx, _ = sd["dof_hum"]
             pose[hum_idx:hum_idx + 3] = R.from_matrix(R_hum_local).as_rotvec()
             skel.setPositions(pose)
 
