@@ -830,8 +830,10 @@ def main():
     # offsets (similar to clavicle). Auto-damp to 0.3 if user didn't override.
     auto_head = 0.3 if (rig_style == "bone_aligned" and args.head_scale == 1.0) else args.head_scale
     auto_neck = 0.4 if (rig_style == "bone_aligned" and args.neck_scale == 1.0) else args.neck_scale
-    # Spine motion at full strength so arm chain inherits proper upstream rotation.
-    auto_spine = args.spine_scale
+    # Bone-aligned LaFAN sources accumulate visible spine wave when expanded
+    # to vertebrae at 1.0; damp to 0.5 unless user overrides.
+    auto_spine = (0.5 if (rig_style == "bone_aligned" and args.spine_scale == 1.0)
+                  else args.spine_scale)
     vert_cmd = [py, "tools/make_run_vert_bvh.py", "--in", norm, "--out", vert, "--skip-xml",
                 "--head-scale", str(auto_head), "--neck-scale", str(auto_neck),
                 "--spine-scale", str(auto_spine)]

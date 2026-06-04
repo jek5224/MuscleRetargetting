@@ -124,11 +124,31 @@ def main():
         sd["skel_carp"] = f"{L_or_R}_Carpal0"
         sides.append(sd)
 
+    # Pelvis → Neck for spine direction.
+    bvh_hips = find_joint(ojoints, "Hips")
+    bvh_neck = find_joint(ojoints, "Neck")
+    # Skel: Pelvis joint to C70 (neck body) or T10 (top trunk).
+    spine_top_body = None
+    for cand in ("C70", "Neck0", "T10"):
+        for jj in range(skel.getNumJoints()):
+            if skel.getBodyNode(jj).getName() == cand:
+                spine_top_body = cand; break
+        if spine_top_body: break
+
     N = mocap.shape[0]
     sample = [0, N // 4, N // 2, 3 * N // 4, N - 1]
     for f in sample:
         skel.setPositions(mocap[f])
         Tf = bvh_fk(ojoints, orows[f], on2c)
+        # Spine direction.
+        if spine_top_body and bvh_hips is not None and bvh_neck is not None:
+            d_bvh_sp = Tf[bvh_neck][:3, 3] - Tf[bvh_hips][:3, 3]
+            d_bvh_sp /= max(np.linalg.norm(d_bvh_sp), 1e-9)
+            pel = joint_world_pos(skel, "Pelvis0") if any(skel.getBodyNode(jj).getName() == "Pelvis0" for jj in range(skel.getNumJoints())) else np.asarray(skel.getRootBodyNode().getTransform().translation())
+            top = joint_world_pos(skel, spine_top_body)
+            d_sk_sp = top - pel; d_sk_sp /= max(np.linalg.norm(d_sk_sp), 1e-9)
+            csp = float(d_bvh_sp @ d_sk_sp)
+            print(f"  f{f:5d} spine Hips→Neck cosθ={csp:+.4f}")
         for sd in sides:
             d_bvh_h = Tf[sd["bvh_fa"]][:3, 3] - Tf[sd["bvh_arm"]][:3, 3]
             d_bvh_h /= np.linalg.norm(d_bvh_h)

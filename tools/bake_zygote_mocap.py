@@ -209,6 +209,59 @@ def main():
     share = float(args.scapulohumeral)
     out_mocap = mocap_in.copy()
 
+    def compute_hum_target(sd, pose_in, frame_idx):
+        """Two-vector basis humerus body world target for given frame.
+        Sets skel to pose_in with arm DOFs zero, reads d_chain_hum,
+        builds target from d_bvh_hum and d_bvh_fore."""
+        p = pose_in.copy()
+        for di in arm_dof_set:
+            if di < len(p): p[di] = 0.0
+        skel.setPositions(p)
+        Tf_o = bvh_fk_world_full(ojoints, orows[frame_idx] if frame_idx < len(orows) else orows[-1], on2c)
+        d_bvh_h = Tf_o[sd["bvh"]["fa"]][:3, 3] - Tf_o[sd["bvh"]["arm"]][:3, 3]
+        d_bvh_h /= max(np.linalg.norm(d_bvh_h), 1e-12)
+        d_bvh_f = Tf_o[sd["bvh"]["hd"]][:3, 3] - Tf_o[sd["bvh"]["fa"]][:3, 3]
+        d_bvh_f /= max(np.linalg.norm(d_bvh_f), 1e-12)
+        j_h = skel.getJoint(sd["skel"]["hum"])
+        j_u = None
+        for jj in range(skel.getNumJoints()):
+            if skel.getJoint(jj).getName() == sd["skel"]["ulna"]:
+                j_u = skel.getJoint(jj); break
+        T_p2j_u = np.asarray(j_u.getTransformFromParentBodyNode().rotation())
+        ax_lj = np.array(j_u.getAxis(), dtype=np.float64, copy=True)
+        ax_lj /= max(np.linalg.norm(ax_lj), 1e-12)
+        trans_p2j_u = np.asarray(j_u.getTransformFromParentBodyNode().translation())
+        X_loc = trans_p2j_u / max(np.linalg.norm(trans_p2j_u), 1e-12)
+        Z_loc = T_p2j_u @ ax_lj
+        hum_init = np.asarray(skel.getBodyNode(sd["skel"]["hum"]).getTransform().rotation())
+        n_pl = np.cross(d_bvh_h, d_bvh_f)
+        npn = np.linalg.norm(n_pl)
+        if npn < 1e-6:
+            Rm = rotation_from_to(np.asarray(j_h.getTransformFromChildBodyNode().rotation()) @ X_loc, d_bvh_h)
+            return Rm @ hum_init, d_bvh_h, d_bvh_f
+        Zt = n_pl / npn
+        if Zt @ (hum_init @ Z_loc) < 0:
+            Zt = -Zt
+        Yt = np.cross(Zt, d_bvh_h)
+        Yn = np.linalg.norm(Yt)
+        if Yn < 1e-9:
+            Rm = rotation_from_to(hum_init @ X_loc, d_bvh_h)
+            return Rm @ hum_init, d_bvh_h, d_bvh_f
+        Yt /= Yn
+        Zt = np.cross(d_bvh_h, Yt); Zt /= max(np.linalg.norm(Zt), 1e-12)
+        Mtw = np.column_stack([d_bvh_h, Yt, Zt])
+        bx = X_loc / np.linalg.norm(X_loc)
+        bz = Z_loc - (Z_loc @ bx) * bx; bz /= max(np.linalg.norm(bz), 1e-12)
+        by = np.cross(bz, bx)
+        Mbl = np.column_stack([bx, by, bz])
+        return Mtw @ Mbl.T, d_bvh_h, d_bvh_f
+
+    # Baseline f=0: hum_body_world_target at rest motion (T-pose for LaFAN).
+    hum_target_0 = {}
+    for sd in sides:
+        ht0, _, _ = compute_hum_target(sd, mocap_in[0], 0)
+        hum_target_0[sd["L"]] = ht0
+
     progress = max(1, n_frames // 20)
     for f in range(n_frames):
         if f % progress == 0:
@@ -294,11 +347,12 @@ def main():
                     M_body_local = np.column_stack([bx, by, bz])
                     hum_body_world_target = M_target_w @ M_body_local.T
 
-            # Distribute via clavicle share. clavicle rotates by fraction
-            # of total humerus delta (R_delta = hum_target @ hum_init.T).
-            R_delta = hum_body_world_target @ hum_body_world_init.T
-            rv_delta = R.from_matrix(R_delta).as_rotvec()
-            R_clav_world = R.from_rotvec(rv_delta * share).as_matrix()
+            # Clavicle share applies to MOTION delta only (target relative
+            # to f=0 target), not to BVH-rest vs skel-rest offset. At f=0
+            # R_motion=I → clav stays at rest → no spread artifact.
+            R_motion = hum_body_world_target @ hum_target_0[sd["L"]].T
+            rv_motion = R.from_matrix(R_motion).as_rotvec()
+            R_clav_world = R.from_rotvec(rv_motion * share).as_matrix()
 
             j_clav = skel.getJoint(sd["skel"]["clav"])
             clav_parent_world = np.asarray(skel.getBodyNode(sd["skel"]["clav"]).getParentBodyNode().getTransform().rotation())
