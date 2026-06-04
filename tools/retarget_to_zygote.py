@@ -725,7 +725,11 @@ def main():
     ap.add_argument("--keep-intermediates", action="store_true")
     ap.add_argument("--no-verify", action="store_true")
     ap.add_argument("--tpose-palm-deg", type=float, default=90.0,
-                    help="Radius offset (deg) applied for T-pose sources to rotate palm to face ground. L=+val, R=-val. Default 90.")
+                    help="Radius offset (deg) for T-pose sources. L=+val, R=-val.")
+    ap.add_argument("--tpose-palm-l", type=float, default=None,
+                    help="Override L_Radius offset (overrides --tpose-palm-deg sign).")
+    ap.add_argument("--tpose-palm-r", type=float, default=None,
+                    help="Override R_Radius offset.")
     ap.add_argument("--head-scale", type=float, default=1.0,
                     help="Scale BVH Head rotation before distributing across Atlas/Axis. Default 1.0. Use <1 to damp head wave.")
     ap.add_argument("--neck-scale", type=float, default=1.0,
@@ -783,10 +787,12 @@ def main():
     # axial twist) so palm faces ground. L_Radius axis ≈ -Y joint-local;
     # +90° around it = pronation → palm-down for L. R mirrored.
     if is_tpose:
-        fa_cmd += ["--l-radius-offset-deg", str(args.tpose_palm_deg),
-                   "--r-radius-offset-deg", str(-args.tpose_palm_deg),
+        l_off = args.tpose_palm_l if args.tpose_palm_l is not None else args.tpose_palm_deg
+        r_off = args.tpose_palm_r if args.tpose_palm_r is not None else -args.tpose_palm_deg
+        fa_cmd += ["--l-radius-offset-deg", str(l_off),
+                   "--r-radius-offset-deg", str(r_off),
                    "--const-radius-twist"]
-        print(f"  [forearm] T-pose detected → palm-down offset ±{args.tpose_palm_deg}° + const twist")
+        print(f"  [forearm] T-pose detected → L_offset={l_off}° R_offset={r_off}° + const twist")
     run_stage(fa_cmd, "forearm")
 
     print(f"\n[done] wrote {args.bvh_out}")
