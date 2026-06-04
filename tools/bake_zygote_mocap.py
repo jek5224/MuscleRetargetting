@@ -212,6 +212,7 @@ def main():
 
     share = float(args.scapulohumeral)
     out_mocap = mocap_in.copy()
+    prev_Z_target = {sd["L"]: None for sd in sides}
 
     def compute_hum_target(sd, pose_in, frame_idx):
         """Two-vector basis humerus body world target for given frame.
@@ -321,11 +322,12 @@ def main():
                 hum_body_world_target = R_motion_world @ hum_body_world_init
             else:
                 Z_target_w = n_plane / n_plane_norm
-                # Pick sign so Z_target_w consistent with Z_local_hum at rest
-                # (avoid 180° flip).
+                # Sign continuity: align with previous frame's Z_target if
+                # available (avoids near-straight-arm sign flip artifact).
+                # First frame: anchor to skel rest Z_local_w direction.
                 hum_body_world_init = np.asarray(skel.getBodyNode(sd["skel"]["hum"]).getTransform().rotation())
-                Z_local_w_init = hum_body_world_init @ Z_local_hum
-                if Z_target_w @ Z_local_w_init < 0:
+                anchor = prev_Z_target[sd["L"]] if prev_Z_target[sd["L"]] is not None else (hum_body_world_init @ Z_local_hum)
+                if Z_target_w @ anchor < 0:
                     Z_target_w = -Z_target_w
                 # Build hum_body_world_target via orthonormal basis from
                 # (X_target_w, Z_target_w → orthogonalized).
@@ -350,6 +352,7 @@ def main():
                     by = np.cross(bz, bx)
                     M_body_local = np.column_stack([bx, by, bz])
                     hum_body_world_target = M_target_w @ M_body_local.T
+                    prev_Z_target[sd["L"]] = Z_target_w.copy()
 
             # Clavicle stays at BVH-converted MyBVH value (loaded from
             # mocap_in via L_Clavicle bvh=LeftShoulder mapping). Humerus
