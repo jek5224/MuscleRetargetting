@@ -146,11 +146,10 @@ def main():
     # Spine2→Neck: top thoracic → top cervical (C30 or C70).
     # Neck→Head: top cervical → Skull.
     # Skel ordering: lumbar L50(bottom)→L10(top), thoracic T120(bottom)→T10(top).
-    # Pelvis → spine joint right before neck. LaFAN: Spine2. Otherwise Spine1.
-    # Skel: Sacrum_Coccyx0 → T10 (top of thoracic, bottom of cervical chain).
-    pre_neck = "Spine2" if find_joint(ojoints, "Spine2") is not None else "Spine1"
+    # Hips → Spine1 (BVH mid-spine, thoracolumbar junction).
+    # Skel: Sacrum_Coccyx0 → T120 (bottom of thoracic).
     skel_map_full = {
-        ("Hips", pre_neck): ("Saccrum_Coccyx0", first_present(["T10"])),
+        ("Hips", "Spine1"): ("Saccrum_Coccyx0", first_present(["T120"])),
     }
 
     N = mocap.shape[0]
