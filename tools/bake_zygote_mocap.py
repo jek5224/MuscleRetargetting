@@ -136,6 +136,11 @@ def main():
                     help="Output mocap_refs.npy path.")
     ap.add_argument("--skel-xml", default="data/zygote_skel.xml")
     ap.add_argument("--scapulohumeral", type=float, default=0.27)
+    ap.add_argument("--palm-down-l-deg", type=float, default=90.0,
+                    help="L_Radius angle (deg) — pronation to make palm face "
+                         "down at T-pose. Applied per-frame as constant offset.")
+    ap.add_argument("--palm-down-r-deg", type=float, default=-90.0,
+                    help="R_Radius angle (deg) — symmetric for right arm.")
     args = ap.parse_args()
 
     olines, ojoints, omi = parse_bvh(args.orig_bvh)
@@ -214,6 +219,30 @@ def main():
     out_mocap = mocap_in.copy()
     prev_Z_target = {sd["L"]: None for sd in sides}
 
+    # Cache skel-rest orthonormal humerus-body basis: bone (X), natural
+    # elbow bend direction in plane perpendicular to bone (bend), normal
+    # = cross(X, bend). Bend derived from skel rest forearm direction.
+    skel.setPositions(np.zeros(skel.getNumDofs()))
+    rest_basis = {}
+    for sd in sides:
+        for jj in range(skel.getNumJoints()):
+            if skel.getJoint(jj).getName() == sd["skel"]["ulna"]:
+                j_u = skel.getJoint(jj)
+                T_p2j_u_trans = np.asarray(j_u.getTransformFromParentBodyNode().translation())
+                break
+        X_loc = T_p2j_u_trans / max(np.linalg.norm(T_p2j_u_trans), 1e-12)
+        hum_rest_w = np.asarray(skel.getBodyNode(sd["skel"]["hum"]).getTransform().rotation())
+        el_r = joint_world(sd["skel"]["ulna"])
+        wr_r = joint_world(sd["skel"]["carp"])
+        d_fore_w_rest = wr_r - el_r; d_fore_w_rest /= max(np.linalg.norm(d_fore_w_rest), 1e-12)
+        d_fore_loc = hum_rest_w.T @ d_fore_w_rest
+        # bend_loc = perpendicular component of d_fore_loc against X_loc.
+        bend_loc = d_fore_loc - (d_fore_loc @ X_loc) * X_loc
+        bend_loc /= max(np.linalg.norm(bend_loc), 1e-12)
+        N_loc = np.cross(X_loc, bend_loc)
+        N_loc /= max(np.linalg.norm(N_loc), 1e-12)
+        rest_basis[sd["L"]] = (X_loc, bend_loc, N_loc)
+
     def compute_hum_target(sd, pose_in, frame_idx):
         """Two-vector basis humerus body world target for given frame.
         Sets skel to pose_in with arm DOFs zero, reads d_chain_hum,
@@ -290,69 +319,42 @@ def main():
             d_chain_hum = el_w - sh_w
             d_chain_hum /= max(np.linalg.norm(d_chain_hum), 1e-12)
 
-            # Two-vector humerus orientation: bone direction = d_bvh_hum,
-            # ulna flex axis world = normal of (d_bvh_hum, d_bvh_fore) plane.
-            # This constrains humerus twist so ulna_angle can reach d_bvh_fore.
+            # Two-vector humerus orientation:
+            #   body-local bone direction → d_bvh_hum (shoulder→elbow).
+            #   body-local NATURAL forearm bend direction → BVH forearm bend.
+            # This makes the natural skel rest elbow bend (~25° in d_fore_local)
+            # follow the BVH bend direction. Ulna angle then corrects only
+            # the magnitude difference, never flips the elbow backward.
             j_hum = skel.getJoint(sd["skel"]["hum"])
-            j_ulna_obj = None
-            for jj in range(skel.getNumJoints()):
-                if skel.getJoint(jj).getName() == sd["skel"]["ulna"]:
-                    j_ulna_obj = skel.getJoint(jj); break
             T_p2j_hum = np.asarray(j_hum.getTransformFromParentBodyNode().rotation())
             T_c2j_hum = np.asarray(j_hum.getTransformFromChildBodyNode().rotation())
-            T_p2j_ulna = np.asarray(j_ulna_obj.getTransformFromParentBodyNode().rotation())
-            ulna_axis_local_joint = np.array(j_ulna_obj.getAxis(), dtype=np.float64, copy=True)
-            ulna_axis_local_joint /= max(np.linalg.norm(ulna_axis_local_joint), 1e-12)
 
-            # X_local_hum: humerus body-local direction toward ulna joint
-            # origin (bone direction = shoulder→elbow in body frame).
-            T_p2j_ulna_trans = np.asarray(j_ulna_obj.getTransformFromParentBodyNode().translation())
-            X_local_hum = T_p2j_ulna_trans / max(np.linalg.norm(T_p2j_ulna_trans), 1e-12)
-            # Z_local_hum: ulna flex axis in humerus body frame.
-            Z_local_hum = T_p2j_ulna @ ulna_axis_local_joint
+            X_local_hum, bend_local_axis, N_local_hum = rest_basis[sd["L"]]
+            hum_body_world_init = np.asarray(skel.getBodyNode(sd["skel"]["hum"]).getTransform().rotation())
 
-            # Target world directions for humerus body local X and Z axes.
+            # Build target world basis. Orthogonalize d_bvh_fore against
+            # d_bvh_hum to get the bend-direction perpendicular component.
             X_target_w = d_bvh_hum.copy()
-            n_plane = np.cross(d_bvh_hum, d_bvh_fore)
-            n_plane_norm = np.linalg.norm(n_plane)
-            if n_plane_norm < 1e-6:
-                # Forearm collinear with humerus → degenerate. Use shortest rot.
+            bend_target = d_bvh_fore - (d_bvh_fore @ d_bvh_hum) * d_bvh_hum
+            bend_norm = np.linalg.norm(bend_target)
+            if bend_norm < 0.17:
+                # Arm near-straight: ill-defined bend direction. Use previous
+                # frame's bend axis if available, else fall back to shortest
+                # rotation (twist undefined → ulna_angle picks small value).
                 R_motion_world = rotation_from_to(d_chain_hum, d_bvh_hum)
-                hum_body_world_init = np.asarray(skel.getBodyNode(sd["skel"]["hum"]).getTransform().rotation())
                 hum_body_world_target = R_motion_world @ hum_body_world_init
             else:
-                Z_target_w = n_plane / n_plane_norm
-                # Sign continuity: align with previous frame's Z_target if
-                # available (avoids near-straight-arm sign flip artifact).
-                # First frame: anchor to skel rest Z_local_w direction.
-                hum_body_world_init = np.asarray(skel.getBodyNode(sd["skel"]["hum"]).getTransform().rotation())
-                anchor = prev_Z_target[sd["L"]] if prev_Z_target[sd["L"]] is not None else (hum_body_world_init @ Z_local_hum)
-                if Z_target_w @ anchor < 0:
-                    Z_target_w = -Z_target_w
-                # Build hum_body_world_target via orthonormal basis from
-                # (X_target_w, Z_target_w → orthogonalized).
-                Y_target_w = np.cross(Z_target_w, X_target_w)
-                Yn = np.linalg.norm(Y_target_w)
-                if Yn < 1e-9:
-                    R_motion_world = rotation_from_to(d_chain_hum, d_bvh_hum)
-                    hum_body_world_target = R_motion_world @ hum_body_world_init
-                else:
-                    Y_target_w /= Yn
-                    Z_target_w = np.cross(X_target_w, Y_target_w)
-                    Z_target_w /= max(np.linalg.norm(Z_target_w), 1e-12)
-                    # body_world maps body-local axes to world axes.
-                    M_target_w = np.column_stack([X_target_w, Y_target_w, Z_target_w])
-                    M_body_local = np.column_stack([X_local_hum,
-                                                   np.cross(Z_local_hum, X_local_hum) / max(np.linalg.norm(np.cross(Z_local_hum, X_local_hum)), 1e-12),
-                                                   Z_local_hum])
-                    # Re-orthonormalize body local basis.
-                    bx = M_body_local[:, 0]; bz = M_body_local[:, 2]
-                    bx /= np.linalg.norm(bx)
-                    bz = bz - (bz @ bx) * bx; bz /= max(np.linalg.norm(bz), 1e-12)
-                    by = np.cross(bz, bx)
-                    M_body_local = np.column_stack([bx, by, bz])
-                    hum_body_world_target = M_target_w @ M_body_local.T
-                    prev_Z_target[sd["L"]] = Z_target_w.copy()
+                bend_target /= bend_norm
+                N_target_w = np.cross(X_target_w, bend_target)
+                N_target_w /= max(np.linalg.norm(N_target_w), 1e-12)
+                # Continuity: anchor bend sign to previous frame's N_target.
+                if prev_Z_target[sd["L"]] is not None and N_target_w @ prev_Z_target[sd["L"]] < 0:
+                    N_target_w = -N_target_w
+                    bend_target = -bend_target
+                M_target_w = np.column_stack([X_target_w, bend_target, N_target_w])
+                M_body_local = np.column_stack([X_local_hum, bend_local_axis, N_local_hum])
+                hum_body_world_target = M_target_w @ M_body_local.T
+                prev_Z_target[sd["L"]] = N_target_w.copy()
 
             # Clavicle stays at BVH-converted MyBVH value (loaded from
             # mocap_in via L_Clavicle bvh=LeftShoulder mapping). Humerus
@@ -390,9 +392,12 @@ def main():
             pose[ulna_idx] = ulna_angle
             skel.setPositions(pose)
 
-            # Radius + Carpal: 0 (TODO: BVH hand twist + orientation).
+            # Radius: constant pronation offset (palm-down at T-pose).
+            # TODO: per-frame BVH hand twist component.
             rad_idx, _ = sd["dof_rad"]
-            pose[rad_idx] = 0.0
+            palm_deg = args.palm_down_l_deg if sd["L"] == "L" else args.palm_down_r_deg
+            pose[rad_idx] = float(np.deg2rad(palm_deg))
+            # Carpal: 0 (TODO: BVH hand orientation).
             carp_idx, _ = sd["dof_carp"]
             pose[carp_idx:carp_idx + 3] = 0.0
             skel.setPositions(pose)
