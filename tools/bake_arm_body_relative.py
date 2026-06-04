@@ -153,7 +153,8 @@ def main():
         rows.append([float(x) for x in s.split()])
 
     arm_idx = {}
-    for suf in ["LeftShoulder", "LeftArm", "LeftHand", "RightShoulder", "RightArm", "RightHand"]:
+    for suf in ["LeftShoulder", "LeftArm", "LeftForeArm", "LeftHand",
+                "RightShoulder", "RightArm", "RightForeArm", "RightHand"]:
         arm_idx[suf] = find_joint(joints, suf)
     if any(v is None for v in arm_idx.values()):
         sys.exit("missing arm joints")
@@ -165,12 +166,14 @@ def main():
     skel = buildFromInfo(si, rn)
     skel.setPositions(np.zeros(skel.getNumDofs()))
     skel_arm_data = {}
-    for side, hum, car, clav in [("L", "L_Humerus0", "L_Carpal0", "L_Clavicle0"),
-                                   ("R", "R_Humerus0", "R_Carpal0", "R_Clavicle0")]:
+    # Humerus bone direction = humerus body to ulna body (not all the way to
+    # carpal). Matches BVH humerus segment LeftArm → LeftForeArm.
+    for side, hum, ulna_b, clav in [("L", "L_Humerus0", "L_Ulna0", "L_Clavicle0"),
+                                       ("R", "R_Humerus0", "R_Ulna0", "R_Clavicle0")]:
         hum_bn = skel.getBodyNode(hum)
-        car_bn = skel.getBodyNode(car)
+        ulna_bn = skel.getBodyNode(ulna_b)
         clav_bn = skel.getBodyNode(clav)
-        d_rest = car_bn.getTransform().translation() - hum_bn.getTransform().translation()
+        d_rest = ulna_bn.getTransform().translation() - hum_bn.getTransform().translation()
         skel_arm_data[side] = {
             "d_rest_world": d_rest.copy(),
             "R_hum_body_rest": np.asarray(hum_bn.getTransform().rotation()).copy(),
@@ -219,10 +222,17 @@ def main():
         for fi, row in enumerate(rows):
             Tf = bvh_fk_world_full(joints, row, n2c)
             for side, sh_suf, arm_suf, hand_suf in side_pairs:
-                # Arm bone direction match (world).
+                # HUMERUS bone direction match: BVH shoulder→elbow vector.
                 bvh_arm_pos = Tf[arm_idx[arm_suf]][:3, 3]
-                bvh_hand_pos = Tf[arm_idx[hand_suf]][:3, 3]
-                d_bvh_world = bvh_hand_pos - bvh_arm_pos
+                # arm_suf="LeftArm" → next is LeftForeArm. Look up forearm.
+                fa_name = "LeftForeArm" if "Left" in arm_suf else "RightForeArm"
+                fa_ji = arm_idx.get(fa_name)
+                if fa_ji is None:
+                    for ii, jj in enumerate(joints):
+                        if jj["name"] == fa_name or jj["name"].endswith("_" + fa_name):
+                            fa_ji = ii; break
+                bvh_fa_pos = Tf[fa_ji][:3, 3]
+                d_bvh_world = bvh_fa_pos - bvh_arm_pos
                 d_bvh_world = d_bvh_world / max(np.linalg.norm(d_bvh_world), 1e-12)
                 d_rest = skel_arm_data[side]["d_rest_world"]
                 R_motion_world = rotation_from_to(d_rest, d_bvh_world)
