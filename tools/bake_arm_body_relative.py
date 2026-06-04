@@ -253,15 +253,13 @@ def main():
                 bvh_fa_pos = Tf[fa_ji][:3, 3]
                 d_bvh_world = bvh_fa_pos - bvh_arm_pos
                 d_bvh_world = d_bvh_world / max(np.linalg.norm(d_bvh_world), 1e-12)
-                # Read skel JOINT positions with chain applied + arm DOFs zero.
-                # Bone direction = elbow_joint - shoulder_joint.
+                # Read skel chain-only joint positions.
                 hum_body = "L_Humerus0" if side == "L" else "R_Humerus0"
                 ulna_body = "L_Ulna0" if side == "L" else "R_Ulna0"
                 sh_joint_w = joint_world_pos(hum_body)
                 el_joint_w = joint_world_pos(ulna_body)
                 d_chain_humerus = el_joint_w - sh_joint_w
                 d_chain_humerus /= max(np.linalg.norm(d_chain_humerus), 1e-12)
-                # Rotation needed at humerus DOF.
                 R_motion_world = rotation_from_to(d_chain_humerus, d_bvh_world)
                 rv = R.from_matrix(R_motion_world).as_rotvec()
                 R_clav_world = R.from_rotvec(rv * share).as_matrix()
