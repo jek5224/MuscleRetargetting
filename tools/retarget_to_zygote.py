@@ -755,13 +755,14 @@ def main():
         "sternum",
     )
     if rig_style == "bone_aligned":
-        # Body-relative arm bake: subtracts root yaw via BVH FK, computes
-        # arm motion in actor-body-local frame (anatomical magnitude, no
-        # bone-aligned encoding inflation). Inman scapulohumeral split.
+        # World-direction arm bake: skel arm world direction = BVH arm world
+        # direction per frame. Bypasses bone-aligned encoding inflation and
+        # skel body-local frame asymmetry. Inman scapulohumeral split.
         arm_cmd = [py, "tools/bake_arm_body_relative.py",
                    "--in", vert_st, "--out", armed,
+                   "--skel-xml", args.skel_xml,
                    "--scapulohumeral", "0.27"]
-        run_stage(arm_cmd, "arm (body-relative + scapulohumeral)")
+        run_stage(arm_cmd, "arm (world-direction + scapulohumeral)")
     else:
         arm_cmd = [py, "tools/bake_arm_retarget_bvh.py", "--in", vert_st, "--out", armed,
                    "--skel-xml", args.skel_xml]

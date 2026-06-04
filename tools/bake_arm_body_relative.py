@@ -1,24 +1,24 @@
-"""Body-relative arm retarget for LaFAN bone-aligned BVH.
+"""World-direction arm retarget for LaFAN bone-aligned BVH.
 
-Accounts for the actor's body orientation per frame (subtracts root yaw)
-so BVH bone-aligned channel inflation from rest-pose encoding doesn't
-propagate as huge skel mocap rotations.
+Matches skel arm WORLD BONE DIRECTION to BVH arm world bone direction.
+Avoids the asymmetric skel-body-local frame issue.
 
-Algorithm per arm joint (LeftShoulder, LeftArm + R mirrors):
-  1. BVH FK → R_arm_world(f), R_hips_world(f).
-  2. R_arm_body_rel(f) = R_hips_world(f).T @ R_arm_world(f).
-  3. R_motion_body(f) = R_arm_body_rel(f) @ R_arm_body_rel(0).T.
-     (Body-relative motion from f0; root yaw cancels.)
-  4. Channel value = R_parent_world_bvh(0).T @ R_motion_body(f) @ R_parent_world_bvh(0).
-     (Inverse-T_net assuming R_local(0) = identity; under MyBVH T_frame=0
-     this produces T_net = R_motion_body(f) = skel joint local rotation.)
+Algorithm per arm (LeftArm, RightArm):
+  1. BVH FK → d_bvh(f) = direction from arm joint to hand joint, world.
+  2. Skel rest: d_skel_rest = direction from humerus body to carpal body, world.
+  3. R_motion_world(f) = rotation that takes d_skel_rest to d_bvh(f).
+     This is the rotation skel humerus body needs to undergo.
+  4. Skel humerus body world target = R_motion_world(f) @ R_humerus_rest_world.
+  5. Skel humerus joint local = parent_skel_world_rest.T @ target.
+  6. Inverse-T_net: channel = parent_world_bvh(0).T @ joint_local @ parent_world_bvh(0).
 
-At f=0 R_motion = identity → channel(0) = identity → MyBVH T_frame=0
-forces skel rest (N-pose). For f>0 channel = body-relative motion only,
-magnitude = anatomical arm swing.
+Inman scapulohumeral split: clavicle takes ~27% of humerus rotvec, residual
+composes onto humerus.
 
-Note: assumes parent_world(f) ≈ parent_world(0) (clavicle motion small).
-For walking with ~5-15° clavicle, error is bounded.
+f=0 calibration: T_frame=0 forces skel rest at f=0. For LaFAN clips with
+T-pose intro, copy ref_frame's channel into row[0] so MyBVH calibrates
+skel rest = walking equilibrium. f=0 visual is N-pose (intended; T-pose
+mismatch only at first frame).
 """
 import argparse
 import re
@@ -80,46 +80,62 @@ def find_joint(joints, suf):
     return None
 
 
-def bvh_fk_world_R(joints, row, n2c):
-    Twr = [None] * len(joints); order = []
+def bvh_fk_world_full(joints, row, n2c):
+    """4x4 world transforms."""
+    T = [None] * len(joints); order = []
     def walk(i):
         order.append(i)
         for c in joints[i]["children"]: walk(c)
     for i, j in enumerate(joints):
         if j["parent"] == -1: walk(i)
     for ji in order:
-        j = joints[ji]; Rl = R.identity()
+        j = joints[ji]; Rl = R.identity(); pos = np.zeros(3)
         if j["channels"] and j["name"] in n2c:
             chs = j["channels"]; c0, _ = n2c[j["name"]]; rc = []
             for k, ch in enumerate(chs):
                 v = row[c0 + k]
-                if ch.lower().endswith("rotation"):
+                if ch.lower() == "xposition": pos[0] = v
+                elif ch.lower() == "yposition": pos[1] = v
+                elif ch.lower() == "zposition": pos[2] = v
+                elif ch.lower().endswith("rotation"):
                     rc.append((ch[0].upper(), v))
             if rc:
                 Rl = R.from_euler("".join(c for c, _ in rc), [v for _, v in rc], degrees=True)
-        M = Rl.as_matrix()
-        if j["parent"] >= 0 and Twr[j["parent"]] is not None:
-            M = Twr[j["parent"]] @ M
-        Twr[ji] = M
-    return Twr
+        off = np.array(j["offset"]) if j["offset"] else np.zeros(3)
+        M = np.eye(4); M[:3, :3] = Rl.as_matrix(); M[:3, 3] = off + pos
+        par = j["parent"]
+        T[ji] = M if par < 0 else T[par] @ M
+    return T
 
 
-def joint_local_R(j, row, n2c):
-    chs = j["channels"]; c0, _ = n2c[j["name"]]; rc = []
-    for k, ch in enumerate(chs):
-        v = row[c0 + k]
-        if ch.lower().endswith("rotation"):
-            rc.append((ch[0].upper(), v))
-    if not rc: return R.identity()
-    return R.from_euler("".join(c for c, _ in rc), [v for _, v in rc], degrees=True)
+def rotation_from_to(a, b):
+    """Rotation matrix that takes unit vector a to unit vector b."""
+    a = a / max(np.linalg.norm(a), 1e-12)
+    b = b / max(np.linalg.norm(b), 1e-12)
+    c = np.cross(a, b)
+    cn = np.linalg.norm(c)
+    dot = float(a @ b)
+    if cn < 1e-9:
+        if dot > 0:
+            return np.eye(3)
+        else:
+            # Antipodal — pick any perpendicular axis.
+            perp = np.array([1.0, 0.0, 0.0]) if abs(a[0]) < 0.9 else np.array([0.0, 1.0, 0.0])
+            axis = np.cross(a, perp); axis /= np.linalg.norm(axis)
+            return R.from_rotvec(axis * np.pi).as_matrix()
+    ang = float(np.arctan2(cn, dot))
+    return R.from_rotvec(c / cn * ang).as_matrix()
 
 
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--in", dest="bvh_in", required=True)
     ap.add_argument("--out", dest="bvh_out", required=True)
-    ap.add_argument("--scapulohumeral", type=float, default=0.27,
-                    help="Inman clavicle share. 0.27 = anatomical SC:GH ratio.")
+    ap.add_argument("--skel-xml", default="data/zygote_skel.xml")
+    ap.add_argument("--scapulohumeral", type=float, default=0.27)
+    ap.add_argument("--ref-frame", type=int, default=200,
+                    help="Frame index treated as walking equilibrium; written "
+                         "to output f=0 so T_frame=0 calibrates correctly.")
     args = ap.parse_args()
 
     lines, joints, mi = parse_bvh(args.bvh_in)
@@ -136,91 +152,105 @@ def main():
             motion_header.append(ln); continue
         rows.append([float(x) for x in s.split()])
 
-    hips_ji = find_joint(joints, "Hips")
-    arm_joints = {}
+    arm_idx = {}
+    for suf in ["LeftShoulder", "LeftArm", "LeftHand", "RightShoulder", "RightArm", "RightHand"]:
+        arm_idx[suf] = find_joint(joints, suf)
+    if any(v is None for v in arm_idx.values()):
+        sys.exit("missing arm joints")
+
+    # Skel rest arm world direction.
+    sys.path.insert(0, ".")
+    from core.dartHelper import saveSkeletonInfo, buildFromInfo
+    si, rn, *_ = saveSkeletonInfo(args.skel_xml)
+    skel = buildFromInfo(si, rn)
+    skel.setPositions(np.zeros(skel.getNumDofs()))
+    skel_arm_data = {}
+    for side, hum, car, clav_parent in [("L", "L_Humerus0", "L_Carpal0", "Sternum0"),
+                                          ("R", "R_Humerus0", "R_Carpal0", "Sternum0")]:
+        hum_bn = skel.getBodyNode(hum)
+        car_bn = skel.getBodyNode(car)
+        d_rest = car_bn.getTransform().translation() - hum_bn.getTransform().translation()
+        d_rest_world = d_rest.copy()
+        R_hum_rest_world = np.asarray(hum_bn.getTransform().rotation()).copy()
+        R_hum_parent_rest_world = np.asarray(hum_bn.getParentBodyNode().getTransform().rotation()).copy()
+        R_clav_parent_rest_world = np.asarray(skel.getBodyNode(clav_parent).getTransform().rotation()).copy()
+        skel_arm_data[side] = {
+            "d_rest_world": d_rest_world,
+            "R_hum_rest_world": R_hum_rest_world,
+            "R_hum_parent_rest_world": R_hum_parent_rest_world,
+            "R_clav_parent_rest_world": R_clav_parent_rest_world,
+        }
+
+    # BVH parent world rotation at f=0 (using OUTPUT BVH f=0 channels which
+    # we'll overwrite to ref_frame values — so use ref_frame's channels here).
+    ref_frame = min(args.ref_frame, len(rows) - 1)
+    print(f"  ref_frame={ref_frame}")
+    Twr_ref = bvh_fk_world_full(joints, rows[ref_frame], n2c)
+    bvh_parent_world_at_outputF0 = {}
     for suf in ["LeftShoulder", "LeftArm", "RightShoulder", "RightArm"]:
-        arm_joints[suf] = find_joint(joints, suf)
-    if any(v is None for v in arm_joints.values()) or hips_ji is None:
-        sys.exit("missing arm joints or Hips")
+        par = joints[arm_idx[suf]]["parent"]
+        bvh_parent_world_at_outputF0[suf] = Twr_ref[par][:3, :3].copy() if par >= 0 else np.eye(3)
 
-    # f0 world rotations.
-    Twr0 = bvh_fk_world_R(joints, rows[0], n2c)
-    R_hips0 = Twr0[hips_ji]
-    # BVH parent world rotation at f0 per arm joint.
-    parent_world_0 = {}
-    arm_body_rest = {}
-    for suf, ji in arm_joints.items():
-        par = joints[ji]["parent"]
-        parent_world_0[suf] = Twr0[par].copy() if par >= 0 else np.eye(3)
-        # Body-relative arm rest = root.T @ arm world rest.
-        arm_body_rest[suf] = R_hips0.T @ Twr0[ji]
+    side_pairs = [("L", "LeftShoulder", "LeftArm", "LeftHand"),
+                  ("R", "RightShoulder", "RightArm", "RightHand")]
 
-    # Per side, compute scapulohumeral share lookup.
-    side_pairs = [("L", "LeftShoulder", "LeftArm"),
-                  ("R", "RightShoulder", "RightArm")]
-
-    # Channel layout: each arm joint has 3 rotation channels.
-    arm_channels = {}
-    for suf in arm_joints:
-        chs = joints[arm_joints[suf]]["channels"]
+    arm_channel_info = {}
+    for suf in ["LeftShoulder", "LeftArm", "RightShoulder", "RightArm"]:
+        ji = arm_idx[suf]
+        chs = joints[ji]["channels"]
         order = "".join(c[0] for c in chs if c.lower().endswith("rotation")).upper()
-        c0 = n2c[joints[arm_joints[suf]]["name"]][0]
+        c0 = n2c[joints[ji]["name"]][0]
         rot_offs = [k for k, c in enumerate(chs) if c.lower().endswith("rotation")]
-        arm_channels[suf] = (c0, order, rot_offs)
+        arm_channel_info[suf] = (c0, order, rot_offs)
 
     share = float(args.scapulohumeral)
 
-    # Find walking equilibrium reference frame: pick median frame where
-    # actor's arm is far from T-pose (small +X-world component in body local).
-    # Heuristic: choose first frame after f=100 where Hips→LeftHand body-local
-    # Z component (lateral) is below 0.2 (arm not extended sideways).
-    lh_ji = find_joint(joints, "LeftHand")
-    ref_frame = 0
-    for fi in range(min(len(rows), 500), min(len(rows), 100), -1):
-        T = bvh_fk_world_R(joints, rows[fi], n2c)
-        R_h = T[hips_ji]
-        # body-local position of left hand
-        lh_world_pos = None  # placeholder; using rotation as proxy
-        break
-    # Simpler: pick frame 200 (after T-pose intro for LaFAN walking clips).
-    ref_frame = min(200, len(rows) - 1)
-    print(f"  Using ref_frame={ref_frame} as walking equilibrium calibration")
-
-    # Compute channel value per frame, store in arrays. Then overwrite
-    # row[0]'s arm channels with row[ref_frame]'s computed channels so
-    # MyBVH T_frame=0 calibrates skel rest = walking equilibrium (not T-pose).
-    computed_channels = {suf: [None] * len(rows) for suf in arm_joints}
+    # Compute channel per frame.
+    computed = {suf: [None] * len(rows) for suf in arm_channel_info}
     for fi, row in enumerate(rows):
-        Twr = bvh_fk_world_R(joints, row, n2c)
-        R_hips_f = Twr[hips_ji]
-        for side, sh_suf, arm_suf in side_pairs:
-            R_sh_world_f = Twr[arm_joints[sh_suf]]
-            R_arm_world_f = Twr[arm_joints[arm_suf]]
-            R_sh_body_f = R_hips_f.T @ R_sh_world_f
-            R_arm_body_f = R_hips_f.T @ R_arm_world_f
-            R_motion_sh = R_sh_body_f @ arm_body_rest[sh_suf].T
-            R_motion_arm = R_arm_body_f @ arm_body_rest[arm_suf].T
-            rv_sh = R.from_matrix(R_motion_sh).as_rotvec()
-            R_clav = R.from_rotvec(rv_sh * share).as_matrix()
-            R_residual = R.from_rotvec(rv_sh * (1.0 - share)).as_matrix()
-            R_humerus = R_residual @ R_motion_arm
-            for suf, R_target in [(sh_suf, R_clav), (arm_suf, R_humerus)]:
-                P = parent_world_0[suf]
-                R_channel = P.T @ R_target @ P
-                c0, order, rot_offs = arm_channels[suf]
+        Tf = bvh_fk_world_full(joints, row, n2c)
+        for side, sh_suf, arm_suf, hand_suf in side_pairs:
+            bvh_arm_pos = Tf[arm_idx[arm_suf]][:3, 3]
+            bvh_hand_pos = Tf[arm_idx[hand_suf]][:3, 3]
+            d_bvh_world = bvh_hand_pos - bvh_arm_pos
+            d_bvh_world = d_bvh_world / max(np.linalg.norm(d_bvh_world), 1e-12)
+
+            # Skel arm direction at rest in world.
+            d_rest = skel_arm_data[side]["d_rest_world"]
+            R_motion_world = rotation_from_to(d_rest, d_bvh_world)
+
+            # Distribute via Inman: clavicle gets share, humerus residual.
+            rv = R.from_matrix(R_motion_world).as_rotvec()
+            R_clav_world = R.from_rotvec(rv * share).as_matrix()
+            R_residual_world = R.from_rotvec(rv * (1.0 - share)).as_matrix()
+            # Humerus takes residual (the full rotation already includes
+            # humerus motion since we mapped bone direction; residual = extra
+            # to compose onto humerus's own motion).
+            R_humerus_world = R_residual_world  # arm motion fully absorbed
+                                                # since direction match.
+
+            # Joint local for clavicle: parent (Sternum) world rest inverse.
+            R_clav_local = skel_arm_data[side]["R_clav_parent_rest_world"].T @ R_clav_world @ skel_arm_data[side]["R_clav_parent_rest_world"]
+            # Joint local for humerus: parent (Scapula) world rest inverse.
+            R_hum_local = skel_arm_data[side]["R_hum_parent_rest_world"].T @ R_humerus_world @ skel_arm_data[side]["R_hum_parent_rest_world"]
+
+            # Inverse-T_net.
+            for suf, R_local_skel in [(sh_suf, R_clav_local), (arm_suf, R_hum_local)]:
+                P = bvh_parent_world_at_outputF0[suf]
+                R_channel = P.T @ R_local_skel @ P
+                c0, order, rot_offs = arm_channel_info[suf]
                 eul = R.from_matrix(R_channel).as_euler(order, degrees=True)
-                computed_channels[suf][fi] = list(eul)
+                computed[suf][fi] = list(eul)
 
-    # Write computed channels back to rows, but use ref_frame's value for f=0.
+    # Write: row[0] = ref_frame's computed; others = own.
     for fi, row in enumerate(rows):
-        for suf in arm_joints:
-            c0, order, rot_offs = arm_channels[suf]
+        for suf in arm_channel_info:
+            c0, order, rot_offs = arm_channel_info[suf]
             src_fi = ref_frame if fi == 0 else fi
-            eul = computed_channels[suf][src_fi]
+            eul = computed[suf][src_fi]
             for k, off in enumerate(rot_offs):
                 row[c0 + off] = float(eul[k])
 
-    # Write out.
     out_lines = lines[:mi] + motion_header
     for row in rows:
         out_lines.append(" ".join(f"{v:.6f}" for v in row))
