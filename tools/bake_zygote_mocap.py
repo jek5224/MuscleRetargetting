@@ -141,7 +141,7 @@ def main():
                          "down at T-pose. Applied per-frame as constant offset.")
     ap.add_argument("--palm-down-r-deg", type=float, default=-90.0,
                     help="R_Radius angle (deg) — symmetric for right arm.")
-    ap.add_argument("--clav-scale", type=float, default=0.7,
+    ap.add_argument("--clav-scale", type=float, default=0.4,
                     help="Scale BVH-driven clavicle rotation (slerp from "
                          "identity). <1 restricts clavicle motion.")
     args = ap.parse_args()
