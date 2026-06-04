@@ -146,18 +146,11 @@ def main():
     # Spine2→Neck: top thoracic → top cervical (C30 or C70).
     # Neck→Head: top cervical → Skull.
     # Skel ordering: lumbar L50(bottom)→L10(top), thoracic T120(bottom)→T10(top).
-    # Empirical map (Y-position correspondence at f=0 T-pose):
-    # BVH Hips y=184cm ↔ skel Sacrum (root). BVH Spine y=191 ↔ L40.
-    # BVH Spine1 y=203 ↔ T120. BVH Spine2 y=216 ↔ T80.
-    # BVH Neck y=241 ↔ C30. BVH Head y=253 ↔ Skull0.
-    # Skel chain order is bottom→top (L50→L10, T120→T10, C70→C30).
+    # Pelvis → spine joint right before neck. LaFAN: Spine2. Otherwise Spine1.
+    # Skel: Sacrum_Coccyx0 → T10 (top of thoracic, bottom of cervical chain).
+    pre_neck = "Spine2" if find_joint(ojoints, "Spine2") is not None else "Spine1"
     skel_map_full = {
-        ("Hips", "Spine"): ("Saccrum_Coccyx0", first_present(["L40"])),
-        ("Spine", "Spine1"): (first_present(["L40"]), first_present(["T120"])),
-        ("Spine1", "Spine2"): (first_present(["T120"]), first_present(["T80"])),
-        ("Spine2", "Neck"): (first_present(["T80"]), first_present(["C30"])),
-        ("Spine1", "Neck"): (first_present(["T120"]), first_present(["C30"])),
-        ("Neck", "Head"): (first_present(["C30"]), first_present(["Skull0"])),
+        ("Hips", pre_neck): ("Saccrum_Coccyx0", first_present(["T10"])),
     }
 
     N = mocap.shape[0]
