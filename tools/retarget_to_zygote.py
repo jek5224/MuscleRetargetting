@@ -818,9 +818,10 @@ def main():
     armed = os.path.join(work, f"{base}.arm.bvh")
 
     print(f"[Stage 0] normalize: {args.bvh_in} → {norm}")
-    # Hips tilt cancellation: 0 = full cancel (spine stays upright while
-    # legs see full Hips tilt). 1 = no cancel.
-    auto_hips_tilt = 0.0 if args.hips_tilt_scale == 1.0 else args.hips_tilt_scale
+    # Hips tilt cancellation default: 1.0 = NO cancel. Spine wave reduced by
+    # spine_scale damping alone. Cancel approach modifies upstream chain and
+    # required compensation at shoulders, accumulating errors in arm motion.
+    auto_hips_tilt = args.hips_tilt_scale
     rig_style, is_tpose = normalize_bvh(args.bvh_in, norm,
                                          hips_tilt_scale_value=auto_hips_tilt)
 
