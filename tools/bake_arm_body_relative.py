@@ -165,31 +165,31 @@ def main():
     skel = buildFromInfo(si, rn)
     skel.setPositions(np.zeros(skel.getNumDofs()))
     skel_arm_data = {}
-    for side, hum, car, clav_parent in [("L", "L_Humerus0", "L_Carpal0", "Sternum0"),
-                                          ("R", "R_Humerus0", "R_Carpal0", "Sternum0")]:
+    for side, hum, car, clav in [("L", "L_Humerus0", "L_Carpal0", "L_Clavicle0"),
+                                   ("R", "R_Humerus0", "R_Carpal0", "R_Clavicle0")]:
         hum_bn = skel.getBodyNode(hum)
         car_bn = skel.getBodyNode(car)
+        clav_bn = skel.getBodyNode(clav)
         d_rest = car_bn.getTransform().translation() - hum_bn.getTransform().translation()
-        d_rest_world = d_rest.copy()
-        R_hum_rest_world = np.asarray(hum_bn.getTransform().rotation()).copy()
-        R_hum_parent_rest_world = np.asarray(hum_bn.getParentBodyNode().getTransform().rotation()).copy()
-        R_clav_parent_rest_world = np.asarray(skel.getBodyNode(clav_parent).getTransform().rotation()).copy()
         skel_arm_data[side] = {
-            "d_rest_world": d_rest_world,
-            "R_hum_rest_world": R_hum_rest_world,
-            "R_hum_parent_rest_world": R_hum_parent_rest_world,
-            "R_clav_parent_rest_world": R_clav_parent_rest_world,
+            "d_rest_world": d_rest.copy(),
+            # Humerus body world rest — used to conjugate world rotation into
+            # humerus joint-local frame (matches DART ball joint convention).
+            "R_hum_body_rest": np.asarray(hum_bn.getTransform().rotation()).copy(),
+            # Clavicle body world rest.
+            "R_clav_body_rest": np.asarray(clav_bn.getTransform().rotation()).copy(),
         }
 
-    # BVH parent world rotation at f=0 (using OUTPUT BVH f=0 channels which
-    # we'll overwrite to ref_frame values — so use ref_frame's channels here).
-    ref_frame = min(args.ref_frame, len(rows) - 1)
-    print(f"  ref_frame={ref_frame}")
-    Twr_ref = bvh_fk_world_full(joints, rows[ref_frame], n2c)
-    bvh_parent_world_at_outputF0 = {}
-    for suf in ["LeftShoulder", "LeftArm", "RightShoulder", "RightArm"]:
-        par = joints[arm_idx[suf]]["parent"]
-        bvh_parent_world_at_outputF0[suf] = Twr_ref[par][:3, :3].copy() if par >= 0 else np.eye(3)
+    # Pass 1: compute parent_world_at_F0 from input rows[0] (initial estimate).
+    # Pass 2 (after writing): recompute from updated rows[0] for self-consistency.
+    def compute_parent_world(rows0):
+        T0 = bvh_fk_world_full(joints, rows0, n2c)
+        d = {}
+        for suf in ["LeftShoulder", "LeftArm", "RightShoulder", "RightArm"]:
+            par = joints[arm_idx[suf]]["parent"]
+            d[suf] = T0[par][:3, :3].copy() if par >= 0 else np.eye(3)
+        return d
+    bvh_parent_world_at_outputF0 = compute_parent_world(rows[0])
 
     side_pairs = [("L", "LeftShoulder", "LeftArm", "LeftHand"),
                   ("R", "RightShoulder", "RightArm", "RightHand")]
@@ -205,51 +205,43 @@ def main():
 
     share = float(args.scapulohumeral)
 
-    # Compute channel per frame.
-    computed = {suf: [None] * len(rows) for suf in arm_channel_info}
-    for fi, row in enumerate(rows):
-        Tf = bvh_fk_world_full(joints, row, n2c)
-        for side, sh_suf, arm_suf, hand_suf in side_pairs:
-            bvh_arm_pos = Tf[arm_idx[arm_suf]][:3, 3]
-            bvh_hand_pos = Tf[arm_idx[hand_suf]][:3, 3]
-            d_bvh_world = bvh_hand_pos - bvh_arm_pos
-            d_bvh_world = d_bvh_world / max(np.linalg.norm(d_bvh_world), 1e-12)
+    def compute_all_channels(P_dict):
+        computed = {suf: [None] * len(rows) for suf in arm_channel_info}
+        for fi, row in enumerate(rows):
+            Tf = bvh_fk_world_full(joints, row, n2c)
+            for side, sh_suf, arm_suf, hand_suf in side_pairs:
+                bvh_arm_pos = Tf[arm_idx[arm_suf]][:3, 3]
+                bvh_hand_pos = Tf[arm_idx[hand_suf]][:3, 3]
+                d_bvh_world = bvh_hand_pos - bvh_arm_pos
+                d_bvh_world = d_bvh_world / max(np.linalg.norm(d_bvh_world), 1e-12)
+                d_rest = skel_arm_data[side]["d_rest_world"]
+                R_motion_world = rotation_from_to(d_rest, d_bvh_world)
+                rv = R.from_matrix(R_motion_world).as_rotvec()
+                R_clav_world = R.from_rotvec(rv * share).as_matrix()
+                R_residual_world = R.from_rotvec(rv * (1.0 - share)).as_matrix()
+                R_humerus_world = R_residual_world
+                R_clav_local = skel_arm_data[side]["R_clav_body_rest"].T @ R_clav_world @ skel_arm_data[side]["R_clav_body_rest"]
+                R_hum_local = skel_arm_data[side]["R_hum_body_rest"].T @ R_humerus_world @ skel_arm_data[side]["R_hum_body_rest"]
+                for suf, R_local_skel in [(sh_suf, R_clav_local), (arm_suf, R_hum_local)]:
+                    P = P_dict[suf]
+                    R_channel = P.T @ R_local_skel @ P
+                    c0, order, rot_offs = arm_channel_info[suf]
+                    eul = R.from_matrix(R_channel).as_euler(order, degrees=True)
+                    computed[suf][fi] = list(eul)
+        return computed
 
-            # Skel arm direction at rest in world.
-            d_rest = skel_arm_data[side]["d_rest_world"]
-            R_motion_world = rotation_from_to(d_rest, d_bvh_world)
-
-            # Distribute via Inman: clavicle gets share, humerus residual.
-            rv = R.from_matrix(R_motion_world).as_rotvec()
-            R_clav_world = R.from_rotvec(rv * share).as_matrix()
-            R_residual_world = R.from_rotvec(rv * (1.0 - share)).as_matrix()
-            # Humerus takes residual (the full rotation already includes
-            # humerus motion since we mapped bone direction; residual = extra
-            # to compose onto humerus's own motion).
-            R_humerus_world = R_residual_world  # arm motion fully absorbed
-                                                # since direction match.
-
-            # Joint local for clavicle: parent (Sternum) world rest inverse.
-            R_clav_local = skel_arm_data[side]["R_clav_parent_rest_world"].T @ R_clav_world @ skel_arm_data[side]["R_clav_parent_rest_world"]
-            # Joint local for humerus: parent (Scapula) world rest inverse.
-            R_hum_local = skel_arm_data[side]["R_hum_parent_rest_world"].T @ R_humerus_world @ skel_arm_data[side]["R_hum_parent_rest_world"]
-
-            # Inverse-T_net.
-            for suf, R_local_skel in [(sh_suf, R_clav_local), (arm_suf, R_hum_local)]:
-                P = bvh_parent_world_at_outputF0[suf]
-                R_channel = P.T @ R_local_skel @ P
+    def write_channels(computed):
+        for fi, row in enumerate(rows):
+            for suf in arm_channel_info:
                 c0, order, rot_offs = arm_channel_info[suf]
-                eul = R.from_matrix(R_channel).as_euler(order, degrees=True)
-                computed[suf][fi] = list(eul)
+                eul = computed[suf][fi]
+                for k, off in enumerate(rot_offs):
+                    row[c0 + off] = float(eul[k])
 
-    # Write: row[0] = ref_frame's computed; others = own.
-    for fi, row in enumerate(rows):
-        for suf in arm_channel_info:
-            c0, order, rot_offs = arm_channel_info[suf]
-            src_fi = ref_frame if fi == 0 else fi
-            eul = computed[suf][src_fi]
-            for k, off in enumerate(rot_offs):
-                row[c0 + off] = float(eul[k])
+    # Single pass: P from input rows[0]. Iteration unstable for asymmetric
+    # R-side body rest rotations.
+    computed = compute_all_channels(bvh_parent_world_at_outputF0)
+    write_channels(computed)
 
     out_lines = lines[:mi] + motion_header
     for row in rows:
