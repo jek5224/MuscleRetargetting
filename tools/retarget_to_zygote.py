@@ -531,16 +531,21 @@ def _write_bvh(out_path, joints, motion_idx_orig, original_lines, rows, motion_h
         if j["parent"] == -1:
             walk_new(i)
 
-    # Old column lookup by joint idx. Use current child lists (post-collapse)
-    # — for LaFAN the "buggy" alignment actually produces less amplified
-    # arm motion since LeftShoulder ends up with Spine2's smaller rotation.
-    # NOTE: this is a known compromise pending proper LaFAN-aware arm bake.
-    old_layout = channel_layout(joints)
+    # Original column lookup: walk using ORIGINAL children snapshot (pre
+    # Spine2 collapse). Motion rows use original BVH column order; post-
+    # collapse walk would misalign LeftShoulder ↔ Spine2 column data.
     old_col = {}
-    col = 0
-    for ji, n in old_layout:
-        old_col[ji] = (col, n)
-        col += n
+    def walk_orig(i, col_acc):
+        if joints[i]["channels"]:
+            old_col[i] = (col_acc, len(joints[i]["channels"]))
+            col_acc += len(joints[i]["channels"])
+        for c in orig_children[i]:
+            col_acc = walk_orig(c, col_acc)
+        return col_acc
+    col_acc = 0
+    for i, j in enumerate(joints):
+        if j["parent"] == -1:
+            col_acc = walk_orig(i, col_acc)
 
     out_lines.append("MOTION")
     out_lines.append(f"Frames: {len(rows)}")
@@ -756,8 +761,7 @@ def main():
         arm_cmd = [py, "tools/bake_arm_retarget_bvh.py",
                    "--in", vert_st, "--out", armed,
                    "--skel-xml", args.skel_xml, "--rest-align",
-                   "--scapulohumeral", "0.27",
-                   "--scapulohumeral-r", "0.15"]
+                   "--scapulohumeral", "0.27"]
         run_stage(arm_cmd, "arm (channel-delta + scapulohumeral)")
     else:
         arm_cmd = [py, "tools/bake_arm_retarget_bvh.py", "--in", vert_st, "--out", armed,
