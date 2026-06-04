@@ -847,7 +847,7 @@ def main():
         arm_cmd = [py, "tools/bake_arm_body_relative.py",
                    "--in", vert_st, "--out", armed,
                    "--skel-xml", args.skel_xml,
-                   "--scapulohumeral", "0.0"]
+                   "--scapulohumeral", "0.27"]
         run_stage(arm_cmd, "arm (world-direction + scapulohumeral)")
     else:
         arm_cmd = [py, "tools/bake_arm_retarget_bvh.py", "--in", vert_st, "--out", armed,
@@ -869,12 +869,13 @@ def main():
     # axial twist) so palm faces ground. L_Radius axis ≈ -Y joint-local;
     # +90° around it = pronation → palm-down for L. R mirrored.
     if is_tpose:
+        # Disable const-radius-twist so per-frame BVH twist drives Radius.
+        # Offset 0 = palm stays at skel rest orientation (palm-down at T-pose).
         l_off = args.tpose_palm_l if args.tpose_palm_l is not None else -args.tpose_palm_deg
         r_off = args.tpose_palm_r if args.tpose_palm_r is not None else args.tpose_palm_deg
         fa_cmd += ["--l-radius-offset-deg", str(l_off),
-                   "--r-radius-offset-deg", str(r_off),
-                   "--const-radius-twist"]
-        print(f"  [forearm] T-pose detected → L_offset={l_off}° R_offset={r_off}° + const twist")
+                   "--r-radius-offset-deg", str(r_off)]
+        print(f"  [forearm] T-pose detected → L_offset={l_off}° R_offset={r_off}°")
     run_stage(fa_cmd, "forearm")
 
     print(f"\n[done] wrote {args.bvh_out}")
