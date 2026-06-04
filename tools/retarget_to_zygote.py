@@ -762,8 +762,15 @@ def main():
     fa_cmd = [py, "tools/bake_forearm_retarget_bvh.py",
               "--in", armed, "--out", args.bvh_out,
               "--skip-xml", "--orig-bvh", norm,
-              "--skel-xml", args.skel_xml,
-              "--ik-ulna"]
+              "--skel-xml", args.skel_xml]
+    # Bone-aligned LaFAN: use anatomical elbow bend angle (from arm/forearm
+    # vectors) instead of IK target. IK fails when skel rest (N-pose) and
+    # BVH rest (T-pose) put arms in different world directions — IK target
+    # unreachable, picks max-bend. Anatomical bend = pure angle, sign-safe.
+    if rig_style == "bone_aligned":
+        fa_cmd += ["--use-bvh-bend"]
+    else:
+        fa_cmd += ["--ik-ulna"]
     # T-pose source: palm faces forward at rest; rotate via radius (forearm
     # axial twist) so palm faces ground. L_Radius axis ≈ -Y joint-local;
     # +90° around it = pronation → palm-down for L. R mirrored.
