@@ -784,8 +784,9 @@ def main():
     # +90° around it = pronation → palm-down for L. R mirrored.
     if is_tpose:
         fa_cmd += ["--l-radius-offset-deg", str(args.tpose_palm_deg),
-                   "--r-radius-offset-deg", str(-args.tpose_palm_deg)]
-        print(f"  [forearm] T-pose detected → palm-down offset ±{args.tpose_palm_deg}°")
+                   "--r-radius-offset-deg", str(-args.tpose_palm_deg),
+                   "--const-radius-twist"]
+        print(f"  [forearm] T-pose detected → palm-down offset ±{args.tpose_palm_deg}° + const twist")
     run_stage(fa_cmd, "forearm")
 
     print(f"\n[done] wrote {args.bvh_out}")

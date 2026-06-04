@@ -194,6 +194,10 @@ def main():
                     help="Scale factor for ulna flex angle (tune visual bend vs BVH magnitude).")
     ap.add_argument("--orig-bvh",
                     help="Original BVH for joint-position comparison after bake.")
+    ap.add_argument("--const-radius-twist", action="store_true",
+                    help="Skip per-frame Radius twist (only constant offset "
+                         "from --l/r-radius-offset-deg). Palm orientation "
+                         "stays fixed relative to forearm across all frames.")
     ap.add_argument("--use-bvh-bend", action="store_true",
                     help="Replace ulna angle calc with BVH elbow bend angle (arccos of arm·forearm vec).")
     ap.add_argument("--ik-ulna", action="store_true",
@@ -466,6 +470,8 @@ def main():
             alpha_r_hd = twist_angle(tw_hd, bone_bvh)
             # Total Radius twist = ForeArm twist + Hand twist (palm axial).
             alpha_r = alpha_r_fa + alpha_r_hd
+            if args.const_radius_twist:
+                alpha_r = 0.0  # zero per-frame twist, only constant offset applied later
             R_radius_only = R.from_rotvec(s["radius_axis"] * alpha_r)
             # Carpal: hand swing only (no axial).
             R_carpal = sw_hd
