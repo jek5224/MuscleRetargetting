@@ -841,31 +841,29 @@ def main():
         "sternum",
     )
     if rig_style == "bone_aligned":
-        # Direct skel pose bake: per-frame DART FK to compute desired arm DOFs
-        # (Clavicle/Humerus/Ulna/Radius/Carpal), then write BVH channels via
-        # inverse-T_net so MyBVH reproduces exact target DOFs on output load.
-        arm_cmd = [py, "tools/bake_arm_direct.py",
-                   "--in", vert_st, "--out", armed,
+        # Viewer-hook bake: per-frame DART FK computes desired skel mocap_refs
+        # directly. Output .npy sibling sits next to .bvh; viewer loads .npy
+        # over MyBVH-converted refs → zero conversion error.
+        npy_out = args.bvh_out[:-4] + ".npy" if args.bvh_out.lower().endswith(".bvh") else args.bvh_out + ".npy"
+        arm_cmd = [py, "tools/bake_zygote_mocap.py",
+                   "--in", vert_st,
                    "--orig-bvh", norm,
+                   "--out-bvh", args.bvh_out,
+                   "--out-npy", npy_out,
                    "--skel-xml", args.skel_xml,
                    "--scapulohumeral", "0.27"]
-        run_stage(arm_cmd, "arm (direct skel pose)")
-    else:
-        arm_cmd = [py, "tools/bake_arm_retarget_bvh.py", "--in", vert_st, "--out", armed,
-                   "--skel-xml", args.skel_xml]
-        run_stage(arm_cmd, f"arm ({rig_style})")
-    if rig_style == "bone_aligned":
-        # arm_direct bake handles ulna/radius/carpal DOFs. Copy to output,
-        # skip forearm bake.
-        import shutil
-        shutil.copy(armed, args.bvh_out)
-        print(f"\n[done] wrote {args.bvh_out} (bone_aligned: arm direct bake covers all arm DOFs)")
+        run_stage(arm_cmd, "arm+mocap (viewer hook)")
+        print(f"\n[done] wrote {args.bvh_out} + {npy_out} (bone_aligned: viewer-hook mocap)")
         if not args.no_verify:
             try:
                 verify(args.bvh_out, norm, args.skel_xml)
             except Exception as e:
                 print(f"[verify] skipped: {e}")
         return
+    else:
+        arm_cmd = [py, "tools/bake_arm_retarget_bvh.py", "--in", vert_st, "--out", armed,
+                   "--skel-xml", args.skel_xml]
+        run_stage(arm_cmd, f"arm ({rig_style})")
     fa_cmd = [py, "tools/bake_forearm_retarget_bvh.py",
               "--in", armed, "--out", args.bvh_out,
               "--skip-xml", "--orig-bvh", norm,

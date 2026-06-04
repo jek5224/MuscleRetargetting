@@ -1413,8 +1413,52 @@ def _reimport_zygote_skel(v):
                 _mobj.resolve_skeleton_attachments(_skel_names)
             except Exception:
                 pass
+    # Reload self.meshes from updated mesh_info (new bones added mid-session
+    # like Sternum0 won't be in self.meshes otherwise), then re-run the
+    # body-local vertex shift so drawObj puts the OBJ at the right world
+    # rest position. Without this, newly added bones either don't render at
+    # all OR render at a stale offset.
+    import trimesh as _tm
+    for _k, _info in v.env.mesh_info.items():
+        if _k in v.meshes:
+            continue
+        try:
+            ml = MeshLoader()
+            ml.load(_info)
+            ml.use_two_pass_culling = False
+            v.meshes[_k] = ml
+            print(f"[Import zygote_skel] loaded {_k} mesh from {_info}")
+        except Exception as _e:
+            print(f"[Import zygote_skel] mesh load {_k} failed: {_e}")
+    # Re-run vertex shift for every mesh (cheap; ensures shifts match
+    # the current skel rest pose).
+    for _bn in v.env.skel.getBodyNodes():
+        _name = _bn.getName()
+        if _name not in v.meshes:
+            continue
+        try:
+            _xform = (np.asarray(_bn.getWorldTransform().matrix())
+                      @ np.asarray(_bn.getParentJoint().getTransformFromChildBodyNode().matrix()))
+            _t_parent = _xform[:3, 3]
+            _mesh = v.meshes[_name]
+            if hasattr(_mesh, 'vertices_3') and len(_mesh.vertices_3) > 0:
+                # vertices_3 store offsets; reset to original then re-subtract.
+                # If we don't track orig, re-load from file.
+                # Simpler: reload mesh fresh, then subtract.
+                fresh = MeshLoader()
+                fresh.load(_mesh.obj)
+                fresh.use_two_pass_culling = False
+                fresh.vertices_3 -= _t_parent
+                if hasattr(fresh, 'new_vertices_3') and len(fresh.new_vertices_3) > 0:
+                    fresh.new_vertices_3 -= _t_parent
+                if len(fresh.vertices_4) > 0:
+                    fresh.vertices_4 -= _t_parent
+                v.meshes[_name] = fresh
+        except Exception as _e:
+            print(f"[Import zygote_skel] vertex shift for {_name} failed: {_e}")
     print(f"Import zygote_skel: DART skel {v.env.skel.getNumBodyNodes()} bodies, "
-          f"muscles {v.env.muscles.getNumMuscles() if v.env.muscles else 0}")
+          f"muscles {v.env.muscles.getNumMuscles() if v.env.muscles else 0}, "
+          f"self.meshes {len(v.meshes)} entries")
 
 
 def draw_zygote_skeleton_ui(v):
@@ -1585,128 +1629,106 @@ def draw_zygote_skeleton_ui(v):
                                 obj.joint_to_parent = cand_joints[np.argmax(distances)]
                             obj.is_weld = True
 
-                # Revolute joint connection buttons
-                if imgui.button(f"Revolute (Knee)##{name}"):
-                    # Knee: bends backward, axis = x
+                # Revolute joint connection buttons. Try the OBB overlap
+                # picker first (same logic as Weld Connect); fall back to
+                # nearest vertex-pair midpoint when no overlap exists
+                # (handles meshes like L 2nd distal phalanx ↔ middle
+                # phalanx that don't geometrically intersect).
+                def _pick_revolute_joint(child_obj, parent_obj):
+                    """Overlap point if available, else nearest-pair midpoint."""
+                    if (child_obj.corners_list is not None
+                            and parent_obj.corners_list is not None):
+                        cand_joints = []
+                        for pc in parent_obj.corners_list:
+                            for cc in child_obj.corners_list:
+                                pt = child_obj.find_overlap_point(pc, cc)
+                                if pt is not None:
+                                    cand_joints.append(pt)
+                        if cand_joints:
+                            if len(cand_joints) == 1:
+                                return np.asarray(cand_joints[0], dtype=np.float32), 'overlap'
+                            cand_arr = np.asarray(cand_joints)
+                            ctr = np.mean(child_obj.vertices, axis=0)
+                            d = np.linalg.norm(cand_arr - ctr, axis=1)
+                            return cand_arr[int(np.argmax(d))].astype(np.float32), 'overlap'
+                    # Fallback: midpoint between the closest OBB CORNERS of
+                    # the two meshes. More stable than nearest-vertex (which
+                    # can pick anatomically wrong points on curved bones).
+                    if (child_obj.corners_list is None
+                            or parent_obj.corners_list is None):
+                        return None, None
+                    best_pair = None
+                    best_d = float('inf')
+                    for pc in parent_obj.corners_list:
+                        pc_arr = np.asarray(pc)
+                        for cc in child_obj.corners_list:
+                            cc_arr = np.asarray(cc)
+                            # pairwise distances between all 8x8 corner combos
+                            diff = cc_arr[:, None, :] - pc_arr[None, :, :]
+                            d2 = np.einsum('ijk,ijk->ij', diff, diff)
+                            i_min, j_min = np.unravel_index(np.argmin(d2), d2.shape)
+                            d = float(np.sqrt(d2[i_min, j_min]))
+                            if d < best_d:
+                                best_d = d
+                                best_pair = ((cc_arr[i_min] + pc_arr[j_min]) / 2.0)
+                    if best_pair is None:
+                        return None, None
+                    return best_pair.astype(np.float32), 'corner-pair'
+
+                def _connect_revolute(child_obj, parent_obj, parent_name_,
+                                      bends_backward, lower, upper, label):
+                    pt, mode = _pick_revolute_joint(child_obj, parent_obj)
+                    if pt is None:
+                        print(f"  could not pick joint pivot; skipping")
+                        return
+                    child_obj.parent_mesh = parent_obj
+                    child_obj.parent_name = parent_name_
+                    if name not in parent_obj.children_names:
+                        parent_obj.children_names.append(name)
+                    child_obj.joint_to_parent = pt
+                    child_obj.is_weld = False
+                    child_obj.is_revolute = True
+                    child_obj.bends_backward = bends_backward
+                    child_obj.revolute_axis = np.array([1.0, 0.0, 0.0])
+                    child_obj.revolute_lower = lower
+                    child_obj.revolute_upper = upper
+                    print(f"{name} → {parent_name_} as {label} "
+                          f"(pivot via {mode} @ {pt})")
+
+                def _revolute_preconditions():
+                    """Both meshes must have Find BB run, otherwise nearest-
+                    vertex fallback picks anatomically wrong points (meshes
+                    in their unfit rest pose)."""
+                    if name == cand_name:
+                        print("Self connection")
+                        return False
                     if v.zygote_skeleton_meshes[cand_name].corners is None:
                         print("First find bounding boxes for parent mesh")
-                    elif obj.corners is None:
+                        return False
+                    if obj.corners is None:
                         print("First find bounding boxes for this mesh")
-                    elif name == cand_name:
-                        print("Self connection")
-                    else:
-                        parent_mesh = v.zygote_skeleton_meshes[cand_name]
-                        parent_corners_list = parent_mesh.corners_list
-                        cand_joints = []
-                        for parent_corners in parent_corners_list:
-                            for corners in obj.corners_list:
-                                cand_joint = obj.find_overlap_point(parent_corners, corners)
-                                if cand_joint is not None:
-                                    cand_joints.append(cand_joint)
+                        return False
+                    return True
 
-                        if len(cand_joints) == 0:
-                            print("They can't be linked; No overlapping points")
-                        else:
-                            obj.parent_mesh = parent_mesh
-                            obj.parent_name = cand_name
-                            if name not in parent_mesh.children_names:
-                                parent_mesh.children_names.append(name)
-                            if len(cand_joints) == 1:
-                                obj.joint_to_parent = cand_joints[0]
-                            else:
-                                mean = np.mean(obj.vertices)
-                                distances = np.linalg.norm(cand_joints - mean, axis=1)
-                                obj.joint_to_parent = cand_joints[np.argmax(distances)]
-                            obj.is_weld = False
-                            obj.is_revolute = True
-                            obj.bends_backward = True  # Knee bends backward
-                            obj.revolute_axis = np.array([1.0, 0.0, 0.0])
-                            obj.revolute_lower = 0.0
-                            obj.revolute_upper = 2.5
-                            print(f"{name} connected to {cand_name} as Revolute (Knee, bends backward)")
+                if imgui.button(f"Revolute (Knee/Toe)##{name}"):
+                    if _revolute_preconditions():
+                        _connect_revolute(
+                            obj, v.zygote_skeleton_meshes[cand_name], cand_name,
+                            bends_backward=True, lower=0.0, upper=2.5,
+                            label="Revolute (Knee/Toe, bends backward)")
 
                 imgui.same_line()
-                if imgui.button(f"Revolute (Elbow)##{name}"):
-                    # Elbow/Finger/Toe: bends forward, axis = x
-                    if v.zygote_skeleton_meshes[cand_name].corners is None:
-                        print("First find bounding boxes for parent mesh")
-                    elif obj.corners is None:
-                        print("First find bounding boxes for this mesh")
-                    elif name == cand_name:
-                        print("Self connection")
-                    else:
-                        parent_mesh = v.zygote_skeleton_meshes[cand_name]
-                        parent_corners_list = parent_mesh.corners_list
-                        cand_joints = []
-                        for parent_corners in parent_corners_list:
-                            for corners in obj.corners_list:
-                                cand_joint = obj.find_overlap_point(parent_corners, corners)
-                                if cand_joint is not None:
-                                    cand_joints.append(cand_joint)
-
-                        if len(cand_joints) == 0:
-                            print("They can't be linked; No overlapping points")
-                        else:
-                            obj.parent_mesh = parent_mesh
-                            obj.parent_name = cand_name
-                            if name not in parent_mesh.children_names:
-                                parent_mesh.children_names.append(name)
-                            if len(cand_joints) == 1:
-                                obj.joint_to_parent = cand_joints[0]
-                            else:
-                                mean = np.mean(obj.vertices)
-                                distances = np.linalg.norm(cand_joints - mean, axis=1)
-                                obj.joint_to_parent = cand_joints[np.argmax(distances)]
-                            obj.is_weld = False
-                            obj.is_revolute = True
-                            obj.bends_backward = False  # Elbow/finger/toe bends forward
-                            obj.revolute_axis = np.array([1.0, 0.0, 0.0])
-                            obj.revolute_lower = -2.5
-                            obj.revolute_upper = 0.0
-                            print(f"{name} connected to {cand_name} as Revolute (Elbow/Finger/Toe, bends forward)")
-
-                if imgui.button(f"Revolute (Finger/Toe)##{name}"):
-                    # Finger/Toe: smaller range than elbow
-                    if v.zygote_skeleton_meshes[cand_name].corners is None:
-                        print("First find bounding boxes for parent mesh")
-                    elif obj.corners is None:
-                        print("First find bounding boxes for this mesh")
-                    elif name == cand_name:
-                        print("Self connection")
-                    else:
-                        parent_mesh = v.zygote_skeleton_meshes[cand_name]
-                        parent_corners_list = parent_mesh.corners_list
-                        cand_joints = []
-                        for parent_corners in parent_corners_list:
-                            for corners in obj.corners_list:
-                                cand_joint = obj.find_overlap_point(parent_corners, corners)
-                                if cand_joint is not None:
-                                    cand_joints.append(cand_joint)
-
-                        if len(cand_joints) == 0:
-                            print("They can't be linked; No overlapping points")
-                        else:
-                            obj.parent_mesh = parent_mesh
-                            obj.parent_name = cand_name
-                            if name not in parent_mesh.children_names:
-                                parent_mesh.children_names.append(name)
-                            if len(cand_joints) == 1:
-                                obj.joint_to_parent = cand_joints[0]
-                            else:
-                                mean = np.mean(obj.vertices)
-                                distances = np.linalg.norm(cand_joints - mean, axis=1)
-                                obj.joint_to_parent = cand_joints[np.argmax(distances)]
-                            obj.is_weld = False
-                            obj.is_revolute = True
-                            obj.bends_backward = False
-                            obj.revolute_axis = np.array([1.0, 0.0, 0.0])
-                            obj.revolute_lower = -1.57  # ~90 degrees for fingers/toes
-                            obj.revolute_upper = 0.3    # Slight hyperextension allowed
-                            print(f"{name} connected to {cand_name} as Revolute (Finger/Toe)")
+                if imgui.button(f"Revolute (Elbow/Finger)##{name}"):
+                    if _revolute_preconditions():
+                        _connect_revolute(
+                            obj, v.zygote_skeleton_meshes[cand_name], cand_name,
+                            bends_backward=False, lower=-2.5, upper=0.0,
+                            label="Revolute (Elbow/Finger, bends forward)")
 
                 # Show revolute joint settings if connected as revolute
                 if obj.is_revolute:
-                    imgui.text(f"Revolute: {'Knee (backward)' if obj.bends_backward else 'Elbow (forward)'}")
+                    label = 'Knee/Toe (backward)' if obj.bends_backward else 'Elbow/Finger (forward)'
+                    imgui.text(f"Revolute: {label}")
                     imgui.push_item_width(80)
                     changed, obj.revolute_lower = imgui.input_float(f"Lower##{name}_rev", obj.revolute_lower, 0.1)
                     imgui.same_line()
@@ -1797,6 +1819,24 @@ def draw_zygote_skeleton_ui(v):
                     # Apply is_weld from the lowest-digit body's joint_type
                     for _mn, (_dig, _jt) in _mesh_first_jtype.items():
                         skel_meshes[_mn].is_weld = (_jt == 'Weld')
+                    # Seed Revolute mesh state from skel_info so the 3D axis
+                    # overlay can show without a UI re-click after XML load.
+                    for _bkey, _info in v.env.new_skel_info.items():
+                        if _info.get('joint_type') != 'Revolute':
+                            continue
+                        _mesh_name2 = _resolve_mesh_name(_bkey)
+                        if _mesh_name2 is None:
+                            continue
+                        _sm3 = skel_meshes[_mesh_name2]
+                        _sm3.is_revolute = True
+                        _ax = np.asarray(_info.get('axis', [1.0, 0.0, 0.0]), dtype=np.float32)
+                        _sm3.revolute_axis = _ax
+                        _sm3.revolute_lower = float(_info.get('lower', -2.5))
+                        _sm3.revolute_upper = float(_info.get('upper', 2.5))
+                        _sm3.bends_backward = _sm3.revolute_lower >= 0
+                        # joint world position (XML stores world-frame translation)
+                        _sm3.joint_to_parent = np.asarray(
+                            _info.get('joint_t', [0.0, 0.0, 0.0]), dtype=np.float32)
             if v.skel_edit_mode:
                 # Continuous: derive per-frame world-space OBBs + sizes/body_rs
                 # /body_ts/weld_joints from XML body_r/body_t/size via DART
@@ -1913,6 +1953,68 @@ def draw_zygote_skeleton_ui(v):
                                 mt[0] = -mt[0]
                                 v.env.new_skel_info[mirror]['joint_t'] = mt
                         v.newSkeleton()
+
+                # Revolute axis editor (spherical). Shows when selected joint
+                # is either (a) saved as Revolute in new_skel_info OR (b)
+                # mesh-flagged is_revolute (not yet saved). Axis stored in
+                # JOINT-LOCAL frame. Slider angles:
+                #   axis_local = (cos(el)*cos(az), sin(el), cos(el)*sin(az))
+                # Az=0 → +X, Az=90° → +Z, El=+90° → +Y. Symmetric mode
+                # mirrors across YZ plane (X-flip) onto the L/R counterpart.
+                _sel = v.joint_edit_selected
+                _info = v.env.new_skel_info.get(_sel) if _sel else None
+                _is_saved_rev = _info is not None and _info.get('joint_type') == 'Revolute'
+                _mesh_name = _sel[:-1] if _sel and _sel.endswith('0') else None
+                _mesh = v.zygote_skeleton_meshes.get(_mesh_name) if _mesh_name else None
+                _is_mesh_rev = bool(getattr(_mesh, 'is_revolute', False)) if _mesh else False
+                if _is_saved_rev or _is_mesh_rev:
+                    if _is_saved_rev:
+                        ax = np.asarray(_info.get('axis', np.array([1.0, 0.0, 0.0])),
+                                        dtype=np.float64)
+                    else:
+                        ax = np.asarray(_mesh.revolute_axis, dtype=np.float64)
+                    n = np.linalg.norm(ax)
+                    if n > 1e-9:
+                        ax = ax / n
+                    el = float(np.degrees(np.arcsin(np.clip(ax[1], -1.0, 1.0))))
+                    az = float(np.degrees(np.arctan2(ax[2], ax[0])))
+                    imgui.text(f"Revolute axis (local): ({ax[0]:.3f}, {ax[1]:.3f}, {ax[2]:.3f})")
+                    imgui.push_item_width(120)
+                    c1, new_az = imgui.input_float(
+                        f"Azimuth°##jed_ax", az, 1.0, 10.0, "%.3f")
+                    c2, new_el = imgui.input_float(
+                        f"Elevation°##jed_el", el, 1.0, 10.0, "%.3f")
+                    imgui.pop_item_width()
+                    if c1 or c2:
+                        az_r = np.radians(new_az)
+                        el_r = np.radians(new_el)
+                        new_axis = np.array([
+                            np.cos(el_r) * np.cos(az_r),
+                            np.sin(el_r),
+                            np.cos(el_r) * np.sin(az_r),
+                        ], dtype=np.float64)
+                        if _is_saved_rev:
+                            _info['axis'] = new_axis
+                        if _mesh is not None:
+                            _mesh.revolute_axis = new_axis.astype(np.float32)
+                        # Symmetric mirror
+                        if v.joint_edit_symmetry:
+                            mirror = v._get_mirror_name(_sel)
+                            if mirror:
+                                m_axis = new_axis.copy()
+                                m_axis[0] = -m_axis[0]
+                                if mirror in v.env.new_skel_info and \
+                                        v.env.new_skel_info[mirror].get('joint_type') == 'Revolute':
+                                    v.env.new_skel_info[mirror]['axis'] = m_axis
+                                m_mesh_name = mirror[:-1] if mirror.endswith('0') else None
+                                m_mesh = v.zygote_skeleton_meshes.get(m_mesh_name) if m_mesh_name else None
+                                if m_mesh is not None and getattr(m_mesh, 'is_revolute', False):
+                                    m_mesh.revolute_axis = m_axis.astype(np.float32)
+                        # Axis-only change: the 3D arrow re-reads
+                        # mesh.revolute_axis next frame, so no skel rebuild
+                        # needed. (Joint position change still rebuilds via
+                        # the XYZ input handler above.) Skipping newSkeleton
+                        # makes the +/- click respond instantly.
 
                 # Save / Reset buttons
                 if imgui.button("Save XML##jed", width=100):
@@ -8958,6 +9060,19 @@ def _load_motion_bvh(v, idx):
         print(f"[Motion] _detect_bvh_tframe: {_t.time() - _t0:.2f}s")
         _t0 = _t.time()
         v.motion_bvh = MyBVH(bvh_path, v.env.bvh_info, v.env.skel, T_frame=t_frame)
+        # Sibling .npy override: skip MyBVH conversion entirely, use raw mocap_refs.
+        npy_path = bvh_path[:-4] + ".npy" if bvh_path.lower().endswith(".bvh") else bvh_path + ".npy"
+        if os.path.exists(npy_path):
+            try:
+                arr = np.load(npy_path)
+                if arr.ndim == 2 and arr.shape[1] == v.motion_bvh.mocap_refs.shape[1]:
+                    v.motion_bvh.mocap_refs = arr
+                    v.motion_bvh.num_frames = arr.shape[0]
+                    print(f"[Motion] mocap override from {os.path.basename(npy_path)}: shape {arr.shape}")
+                else:
+                    print(f"[Motion] WARN {npy_path} shape {arr.shape} mismatch — skip override")
+            except Exception as e:
+                print(f"[Motion] WARN failed loading {npy_path}: {e}")
         print(f"[Motion] MyBVH parse: {_t.time() - _t0:.2f}s, mocap_refs shape: {v.motion_bvh.mocap_refs.shape}, max abs: {np.abs(v.motion_bvh.mocap_refs).max():.6f}")
         v.motion_total_frames = v.motion_bvh.num_frames
         v.motion_current_frame = 0
