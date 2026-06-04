@@ -830,9 +830,8 @@ def main():
     # offsets (similar to clavicle). Auto-damp to 0.3 if user didn't override.
     auto_head = 0.3 if (rig_style == "bone_aligned" and args.head_scale == 1.0) else args.head_scale
     auto_neck = 0.4 if (rig_style == "bone_aligned" and args.neck_scale == 1.0) else args.neck_scale
-    # Bone-aligned: dampen spine motion to 0.3 by default (further reduces wave
-    # on top of Hips tilt cancel). User can override.
-    auto_spine = 0.3 if (rig_style == "bone_aligned" and args.spine_scale == 1.0) else args.spine_scale
+    # Spine motion at full strength so arm chain inherits proper upstream rotation.
+    auto_spine = args.spine_scale
     vert_cmd = [py, "tools/make_run_vert_bvh.py", "--in", norm, "--out", vert, "--skip-xml",
                 "--head-scale", str(auto_head), "--neck-scale", str(auto_neck),
                 "--spine-scale", str(auto_spine)]
@@ -843,12 +842,12 @@ def main():
     )
     if rig_style == "bone_aligned":
         # World-direction arm bake: skel arm world direction = BVH arm world
-        # direction per frame. Bypasses bone-aligned encoding inflation and
-        # skel body-local frame asymmetry. Inman scapulohumeral split.
+        # direction per frame. Humerus takes full R_motion (no clavicle split;
+        # clavicle motion would rotate arm direction off target).
         arm_cmd = [py, "tools/bake_arm_body_relative.py",
                    "--in", vert_st, "--out", armed,
                    "--skel-xml", args.skel_xml,
-                   "--scapulohumeral", "0.27"]
+                   "--scapulohumeral", "0.0"]
         run_stage(arm_cmd, "arm (world-direction + scapulohumeral)")
     else:
         arm_cmd = [py, "tools/bake_arm_retarget_bvh.py", "--in", vert_st, "--out", armed,
