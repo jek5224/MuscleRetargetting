@@ -230,16 +230,12 @@ def main():
         par = joints[ji]["parent"]
         Q_bvh[suf] = Twr0[par].copy() if par >= 0 and Twr0[par] is not None else np.eye(3)
 
-    # Rest-alignment rotation M = Q^T @ P (skel-parent frame → BVH-parent frame).
     M_align = {suf: Q_bvh[suf].T @ P_skel[suf] for suf in arm_ji}
     for suf, M in M_align.items():
         mag = np.linalg.norm(R.from_matrix(M).as_rotvec()) * 180 / np.pi
         print(f"  {suf}: rest-align M mag={mag:.2f}°")
 
-    # Per frame: take full BVH joint-local rotation (no f0 subtract — BVH
-    # actor's T-pose rest must carry into skel as ~90° abduction so arms
-    # point sideways at f0 instead of hanging in N-pose).
-    # ΔL_skel = M^T @ R_local_bvh @ M.
+    # Per frame: ΔL_skel = M^T @ R_local_bvh @ M.
     for fi, row in enumerate(rows):
         for suf, ji in arm_ji.items():
             j = joints[ji]
