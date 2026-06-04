@@ -208,7 +208,8 @@ def compute_skel_rest_world_rotations(skel_xml):
     return out
 
 
-def normalize_bvh(in_path, out_path, skel_xml="data/zygote_skel.xml"):
+def normalize_bvh(in_path, out_path, skel_xml="data/zygote_skel.xml",
+                  hips_tilt_scale_value=1.0):
     """Stage 0: read input BVH, apply normalizations, write out_path.
     Returns rig style string ('bone_aligned' / 'world_aligned')."""
     lines, joints, motion_idx = parse_bvh(in_path)
@@ -346,6 +347,50 @@ def normalize_bvh(in_path, out_path, skel_xml="data/zygote_skel.xml"):
                 for row in rows:
                     row[c0 + k] *= 0.01
 
+    # 5a. Hips tilt cancellation for spine chain only. Hips rotvec decomposed
+    # into Y-axis twist (yaw, kept) + swing (tilt). Add inverse-tilt to Spine
+    # channel so spine chain in world stays upright. Legs untouched.
+    root_idx_h = next(i for i, j in enumerate(joints) if j["parent"] == -1)
+    r_chs_h = joints[root_idx_h]["channels"]
+    c0_h = name_to_col[joints[root_idx_h]["name"]][0]
+    rot_idx_h = [k for k, ch in enumerate(r_chs_h) if ch.lower().endswith("rotation")]
+    spine_idx_h = find_joint(joints, "Spine")
+    spine1_idx_h = find_joint(joints, "Spine1")
+    if rot_idx_h and spine_idx_h is not None and hips_tilt_scale_value < 1.0:
+        order_h = "".join(r_chs_h[k][0] for k in rot_idx_h).upper()
+        def joint_chan_info(ji):
+            chs = joints[ji]["channels"]
+            c0 = name_to_col[joints[ji]["name"]][0]
+            rot_idx = [k for k, ch in enumerate(chs) if ch.lower().endswith("rotation")]
+            order = "".join(chs[k][0] for k in rot_idx).upper()
+            return chs, c0, rot_idx, order
+        sp_chs, sp_c0, sp_rot, sp_ord = joint_chan_info(spine_idx_h)
+        sp1_info = joint_chan_info(spine1_idx_h) if spine1_idx_h is not None else None
+        cancel_factor = 1.0 - float(hips_tilt_scale_value)
+        for row in rows:
+            e = [row[c0_h + k] for k in rot_idx_h]
+            Rh = R.from_euler(order_h, e, degrees=True)
+            q = Rh.as_quat()
+            tq = np.array([0.0, q[1], 0.0, q[3]])
+            n = float(np.linalg.norm(tq))
+            if n < 1e-9: continue
+            tq = tq / n
+            twist = R.from_quat(tq)
+            swing = twist.inv() * Rh
+            # Read Spine1 original rotation.
+            R_sp1 = R.identity()
+            if sp1_info is not None:
+                _, c0_1, rot1, ord1 = sp1_info
+                sp1_e = [row[c0_1 + k] for k in rot1]
+                R_sp1 = R.from_euler(ord1, sp1_e, degrees=True)
+            # Target: R_Spine_new * R_Spine1_orig = swing.inv (cancel hips tilt).
+            # So R_Spine_new = swing.inv * R_Spine1_orig.inv. Scale by cancel_factor.
+            target_total = R.from_rotvec(swing.as_rotvec() * (-cancel_factor))
+            R_sp_new = target_total * R_sp1.inv()
+            new_e = R_sp_new.as_euler(sp_ord, degrees=True).tolist()
+            for kk, off in enumerate(sp_rot):
+                row[sp_c0 + off] = new_e[kk]
+        print(f"  [normalize] Hips tilt cancel: factor={cancel_factor:.2f} (Spine replaces with swing.inv * Spine1.inv)")
     # 5. Root XZ centering: subtract f0 root X and Z position.
     root_idx = next(i for i, j in enumerate(joints) if j["parent"] == -1)
     r_chs = joints[root_idx]["channels"]
@@ -736,6 +781,8 @@ def main():
                     help="Scale BVH Neck rotation. Default 1.0.")
     ap.add_argument("--spine-scale", type=float, default=1.0,
                     help="Scale BVH Spine/Spine1 rotation. <1 dampens pelvis-to-neck waving.")
+    ap.add_argument("--hips-tilt-scale", type=float, default=1.0,
+                    help="Scale Hips tilt component (non-yaw rotation). <1 dampens body lean.")
     args = ap.parse_args()
 
     work = tempfile.mkdtemp(prefix="retarget_zygote_")
@@ -746,14 +793,20 @@ def main():
     armed = os.path.join(work, f"{base}.arm.bvh")
 
     print(f"[Stage 0] normalize: {args.bvh_in} → {norm}")
-    rig_style, is_tpose = normalize_bvh(args.bvh_in, norm)
+    # Hips tilt cancellation: 0 = full cancel (spine stays upright while
+    # legs see full Hips tilt). 1 = no cancel.
+    auto_hips_tilt = 0.0 if args.hips_tilt_scale == 1.0 else args.hips_tilt_scale
+    rig_style, is_tpose = normalize_bvh(args.bvh_in, norm,
+                                         hips_tilt_scale_value=auto_hips_tilt)
 
     py = sys.executable
     # For LaFAN-style sources, head BVH rotations encode large rest-pose
     # offsets (similar to clavicle). Auto-damp to 0.3 if user didn't override.
     auto_head = 0.3 if (rig_style == "bone_aligned" and args.head_scale == 1.0) else args.head_scale
     auto_neck = 0.4 if (rig_style == "bone_aligned" and args.neck_scale == 1.0) else args.neck_scale
-    auto_spine = 0.3 if (rig_style == "bone_aligned" and args.spine_scale == 1.0) else args.spine_scale
+    # spine_scale=1.0 keeps spine motion (inc. Hips-tilt-cancel rotation
+    # added in Stage 0). User can override if want spine fully damped.
+    auto_spine = args.spine_scale
     vert_cmd = [py, "tools/make_run_vert_bvh.py", "--in", norm, "--out", vert, "--skip-xml",
                 "--head-scale", str(auto_head), "--neck-scale", str(auto_neck),
                 "--spine-scale", str(auto_spine)]
