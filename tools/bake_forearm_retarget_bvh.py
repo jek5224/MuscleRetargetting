@@ -500,8 +500,10 @@ def main():
             new_tw_euler[s["twist_name"]] = _subtract_frame0(new_tw_euler[s["twist_name"]], order)
             new_hd_euler[s["hd_name"]] = _subtract_frame0(new_hd_euler[s["hd_name"]], order)
 
-    # Constant supination offset (palm-front → palm-medial). Applied around
-    # XML radius_axis (joint-local) so MyBVH projection picks it up fully.
+    # Constant supination offset (palm-front → palm-down). Applied around
+    # XML radius_axis. SKIP frame 0 — MyBVH T_frame=0 subtracts channel(0)
+    # from all frames, canceling any constant. Applying only at f≥1 means
+    # T_net(f≥1) carries the offset; T_net(0) stays identity (skel rest).
     for s in sides:
         order = s["order"]
         is_left = "Left" in s["fa_name"]
@@ -509,7 +511,10 @@ def main():
         if abs(off_deg) < 1e-9: continue
         R_off = R.from_rotvec(s["radius_axis"] * np.radians(off_deg))
         out = []
-        for e in new_tw_euler[s["twist_name"]]:
+        for fi, e in enumerate(new_tw_euler[s["twist_name"]]):
+            if fi == 0:
+                out.append(e)  # leave f=0 untouched (will be T_frame=0 ref)
+                continue
             Rf = R.from_euler(order, e, degrees=True)
             R_new = R_off * Rf
             out.append(R_new.as_euler(order, degrees=True).tolist())
