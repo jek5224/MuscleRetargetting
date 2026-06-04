@@ -370,29 +370,36 @@ def normalize_bvh(in_path, out_path, skel_xml="data/zygote_skel.xml"):
     # Y-up spine) and zero f0 channels. After this, leg offsets become
     # Y-dominant → viewer picks T_frame=None. Arms keep bone-aligned values
     # so arm-bake's M_align conjugation places skel arms in T-pose at f0.
-    TRUNK_LEG_NAMES = set()
+    # Non-arm joints get bone-aligned → world-aligned conversion. Arms
+    # stay raw so arm bake's M_align conjugation places skel arms at
+    # T-pose orientation at f0.
+    TRUNK_LEG_NAMES = {
+        "Hips", "Spine", "Spine1", "Neck", "Head",
+        "LeftUpLeg", "LeftLeg", "LeftFoot", "LeftToeBase",
+        "RightUpLeg", "RightLeg", "RightFoot", "RightToeBase",
+    }
     rig_style_check = detect_rig_style(joints)
-    if False and rig_style_check == "bone_aligned" and rows:
-        skel_rest_world_map = compute_skel_rest_world_rotations(skel_xml)
-        # Build joint order (pre-order DFS).
+    if rig_style_check == "bone_aligned" and rows:
         joint_order = []
         def _walk(i):
             if joints[i].get("_deleted"):
                 return
             joint_order.append(i)
             for c in joints[i]["children"]:
-                _walk(c)
+                if not joints[c].get("_deleted"):
+                    _walk(c)
         for i, j in enumerate(joints):
             if j["parent"] == -1:
                 _walk(i)
 
-        # Compute each joint's f0 LOCAL rotation matrix.
-        local_R0 = {}
         col_map_loc = {}
         c2 = 0
         for ji, n in layout:
             col_map_loc[ji] = (c2, n)
             c2 += n
+
+        # f0 local rotation per joint.
+        local_R0 = {}
         for ji in joint_order:
             j = joints[ji]
             if not j["channels"] or ji not in col_map_loc:
@@ -408,7 +415,7 @@ def normalize_bvh(in_path, out_path, skel_xml="data/zygote_skel.xml"):
             e0 = [rows[0][c0_j + k] for k in rot_offs]
             local_R0[ji] = R.from_euler(order_j, e0, degrees=True)
 
-        # Compute f0 cumulative world rotation per joint.
+        # f0 world cumulative rotation per joint.
         world_R0 = {}
         for ji in joint_order:
             j = joints[ji]
@@ -418,36 +425,22 @@ def normalize_bvh(in_path, out_path, skel_xml="data/zygote_skel.xml"):
             else:
                 world_R0[ji] = world_R0[parent] * local_R0[ji]
 
-        # Pre-rotate trunk joint OFFSETs by parent's f0 world rotation.
+        # Pre-rotate OFFSET of every joint whose parent is in TRUNK_LEG.
+        # This preserves world position when parent's f0 rotation gets zeroed.
         n_offsets = 0
         for ji in joint_order:
             j = joints[ji]
-            if j["name"] not in TRUNK_LEG_NAMES:
-                continue
             if j["offset"] is None or j["parent"] == -1:
+                continue
+            parent_name = joints[j["parent"]]["name"]
+            if parent_name not in TRUNK_LEG_NAMES:
                 continue
             parent_world_R = world_R0.get(j["parent"], R.identity())
             new_off = parent_world_R.apply(np.array(j["offset"]))
             j["offset"] = tuple(new_off.tolist())
             n_offsets += 1
 
-        # Subtract f0 rotation from TRUNK joints' channels. For ROOT,
-        # preserve yaw (Y-axis rotation = actor facing direction) and only
-        # subtract the residual swing (which encodes bone-aligned rest tilt).
-        def y_twist_swing(R_rot):
-            """Decompose R = R_twist_Y * R_swing. R_twist_Y around world Y."""
-            q = R_rot.as_quat()  # x,y,z,w
-            tq = np.array([0.0, q[1], 0.0, q[3]])
-            n = float(np.linalg.norm(tq))
-            if n < 1e-9:
-                return R.identity(), R_rot
-            tq = tq / n
-            twist = R.from_quat(tq)
-            swing = twist.inv() * R_rot
-            return twist, swing
-
-        # Subtract f0 from TRUNK+LEG joints' channels (not arms — arm bake
-        # handles those via its own subtract + --rest-align conjugation).
+        # Subtract f0 from TRUNK_LEG joints' channels.
         n_subs = 0
         for ji in joint_order:
             j = joints[ji]
@@ -461,31 +454,21 @@ def normalize_bvh(in_path, out_path, skel_xml="data/zygote_skel.xml"):
                 continue
             order_j = "".join(chs[k][0] for k in rot_offs).upper()
             c0_j = col_map_loc[ji][0]
-            R0 = local_R0[ji]
-            R0_inv = R0.inv()
-            # Per-joint rest alignment: convert delta from BVH local frame
-            # to skel local frame so that resulting WORLD body motion
-            # matches BVH WORLD body motion.
-            #   delta_skel_local = M * delta_bvh_local * M.inv,
-            #   M = skel_rest_world.inv * bvh_rest_world.
-            bvh_rest_world = world_R0[ji]
-            skel_rest_world = skel_rest_world_map.get(j["name"], R.identity())
-            M = skel_rest_world.inv() * bvh_rest_world
-            M_inv = M.inv()
+            R0_inv = local_R0[ji].inv()
             for row in rows:
                 e_f = [row[c0_j + k] for k in rot_offs]
                 R_f = R.from_euler(order_j, e_f, degrees=True)
-                delta_local = R0_inv * R_f
-                R_new = M * delta_local * M_inv
+                R_new = R0_inv * R_f
                 new_e = R_new.as_euler(order_j, degrees=True).tolist()
                 for k, off in enumerate(rot_offs):
                     row[c0_j + off] = new_e[k]
             n_subs += 1
         print(f"  [normalize] LaFAN bone→world: pre-rotated {n_offsets} offsets, "
-              f"subtracted f0 rotation from {n_subs} joints (root yaw preserved)")
+              f"f0-subtracted {n_subs} non-arm joints")
 
-    # 6. Detect rig style + T-pose.
-    rig_style = detect_rig_style(joints)
+    # 6. Detect rig style + T-pose. Use rig_style_check (computed pre-Stage-0
+    # conversion) so post-conversion zeros don't fool the bone-aligned detector.
+    rig_style = rig_style_check
     is_tpose = detect_tpose(joints)
     print(f"  [normalize] rig style: {rig_style}, T-pose: {is_tpose}")
 
@@ -783,6 +766,11 @@ def main():
               "--skip-xml", "--orig-bvh", norm,
               "--skel-xml", args.skel_xml,
               "--ik-ulna"]
+    # Bone-aligned rigs: arm bake preserves T-pose rest via M_align
+    # conjugation, so forearm bake must NOT subtract f0 (would erase the
+    # bone-aligned values and leave skel at N-pose).
+    if rig_style == "bone_aligned":
+        fa_cmd.append("--no-frame0-subtract")
     # T-pose source: palm faces forward at rest; rotate via radius (forearm
     # axial twist) so palm faces ground. L_Radius axis ≈ -Y joint-local;
     # +90° around it = pronation → palm-down for L. R mirrored.
