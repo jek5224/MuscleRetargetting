@@ -724,8 +724,8 @@ def main():
     ap.add_argument("--skel-xml", default="data/zygote_skel.xml")
     ap.add_argument("--keep-intermediates", action="store_true")
     ap.add_argument("--no-verify", action="store_true")
-    ap.add_argument("--tpose-palm-deg", type=float, default=90.0,
-                    help="Radius offset (deg) for T-pose sources. L=+val, R=-val.")
+    ap.add_argument("--tpose-palm-deg", type=float, default=0.0,
+                    help="Radius offset (deg) for T-pose sources. Default 0: palm orientation stays at skel rest (faces ground when arm extended sideways).")
     ap.add_argument("--tpose-palm-l", type=float, default=None,
                     help="Override L_Radius offset (overrides --tpose-palm-deg sign).")
     ap.add_argument("--tpose-palm-r", type=float, default=None,
@@ -787,8 +787,8 @@ def main():
     # axial twist) so palm faces ground. L_Radius axis ≈ -Y joint-local;
     # +90° around it = pronation → palm-down for L. R mirrored.
     if is_tpose:
-        l_off = args.tpose_palm_l if args.tpose_palm_l is not None else args.tpose_palm_deg
-        r_off = args.tpose_palm_r if args.tpose_palm_r is not None else -args.tpose_palm_deg
+        l_off = args.tpose_palm_l if args.tpose_palm_l is not None else -args.tpose_palm_deg
+        r_off = args.tpose_palm_r if args.tpose_palm_r is not None else args.tpose_palm_deg
         fa_cmd += ["--l-radius-offset-deg", str(l_off),
                    "--r-radius-offset-deg", str(r_off),
                    "--const-radius-twist"]
