@@ -370,16 +370,15 @@ def normalize_bvh(in_path, out_path, skel_xml="data/zygote_skel.xml"):
     # Y-up spine) and zero f0 channels. After this, leg offsets become
     # Y-dominant → viewer picks T_frame=None. Arms keep bone-aligned values
     # so arm-bake's M_align conjugation places skel arms in T-pose at f0.
-    # Non-arm joints get bone-aligned → world-aligned conversion. Arms
-    # stay raw so arm bake's M_align conjugation places skel arms at
-    # T-pose orientation at f0.
-    TRUNK_LEG_NAMES = {
-        "Hips", "Spine", "Spine1", "Neck", "Head",
-        "LeftUpLeg", "LeftLeg", "LeftFoot", "LeftToeBase",
-        "RightUpLeg", "RightLeg", "RightFoot", "RightToeBase",
-    }
+    # Stage 0 bone-aligned → world-aligned conversion DISABLED. Subtracting
+    # f0 from trunk joints orphans arm children whose channels are still
+    # interpreted in old parent frame (Spine1 used to be bone-aligned, now
+    # identity at f0). Arm direction goes wrong and root rotates in air.
+    # Would need to also rotate arm channels by parent f0 world rotation
+    # (not just OFFSET) to preserve world motion. Non-trivial.
+    TRUNK_LEG_NAMES = set()
     rig_style_check = detect_rig_style(joints)
-    if rig_style_check == "bone_aligned" and rows:
+    if False and rig_style_check == "bone_aligned" and rows:
         joint_order = []
         def _walk(i):
             if joints[i].get("_deleted"):
@@ -466,9 +465,8 @@ def normalize_bvh(in_path, out_path, skel_xml="data/zygote_skel.xml"):
         print(f"  [normalize] LaFAN bone→world: pre-rotated {n_offsets} offsets, "
               f"f0-subtracted {n_subs} non-arm joints")
 
-    # 6. Detect rig style + T-pose. Use rig_style_check (computed pre-Stage-0
-    # conversion) so post-conversion zeros don't fool the bone-aligned detector.
-    rig_style = rig_style_check
+    # 6. Detect rig style + T-pose.
+    rig_style = detect_rig_style(joints)
     is_tpose = detect_tpose(joints)
     print(f"  [normalize] rig style: {rig_style}, T-pose: {is_tpose}")
 
@@ -766,11 +764,6 @@ def main():
               "--skip-xml", "--orig-bvh", norm,
               "--skel-xml", args.skel_xml,
               "--ik-ulna"]
-    # Bone-aligned rigs: arm bake preserves T-pose rest via M_align
-    # conjugation, so forearm bake must NOT subtract f0 (would erase the
-    # bone-aligned values and leave skel at N-pose).
-    if rig_style == "bone_aligned":
-        fa_cmd.append("--no-frame0-subtract")
     # T-pose source: palm faces forward at rest; rotate via radius (forearm
     # axial twist) so palm faces ground. L_Radius axis ≈ -Y joint-local;
     # +90° around it = pronation → palm-down for L. R mirrored.
