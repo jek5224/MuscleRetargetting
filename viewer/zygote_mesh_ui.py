@@ -2061,6 +2061,10 @@ def _draw_motion_browser_ui(v):
             _t0 = _t.time()
             _motion_load_cache(v, force=True)
             print(f"[Motion] Cache reload: {_t.time() - _t0:.2f}s, {len(v.motion_deform_cache)} muscles")
+        imgui.same_line()
+    if imgui.button("Reload BVH List##motion"):
+        _scan_motion_files(v)
+        print(f"[Motion] BVH list rescanned: {len(v.motion_bvh_files)} files")
 
     # Show info if loaded
     if v.motion_bvh is not None:
