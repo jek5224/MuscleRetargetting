@@ -6,8 +6,11 @@ For each frame, computes desired skel DOF values via DART FK:
   - Humerus: rotation_from_to(chain_humerus_dir, bvh_humerus_dir), composed
     with clavicle so combined body_world rotation = R_motion @ body_rest.
   - Ulna: signed angle around current ulna joint axis to match bvh forearm dir.
-  - Radius: 0 (or BVH twist component — TODO).
-  - Carpal: 0 (or BVH hand orientation — TODO).
+  - Radius: swing-twist decomp of BVH hand motion-delta about forearm axis,
+    twist → radius revolute (pronation/supination). Additive constant palm
+    offset (--palm-down-*-deg) for T-pose rest alignment.
+  - Carpal: swing remainder via expmap formula (rad-world @ T_p2j @ exp(rv) @
+    T_c2j.T = R_carpal_target_w). Wrist itself does NOT twist.
 
 Saves mocap_refs as .npy alongside output BVH. Viewer loads .npy directly,
 skipping MyBVH conversion → zero conversion error.
@@ -122,6 +125,30 @@ def signed_angle_about_axis(a, b, axis):
     cos = float(np.clip(a_perp @ b_perp, -1.0, 1.0))
     sin = float(np.cross(a_perp, b_perp) @ axis)
     return float(np.arctan2(sin, cos))
+
+
+def swing_twist_about(R_mat, axis_w):
+    """Decompose world rotation R_mat = R_swing @ R_twist about axis_w.
+    Returns (twist_angle_signed, R_swing_world)."""
+    axis_w = axis_w / max(np.linalg.norm(axis_w), 1e-12)
+    q = R.from_matrix(R_mat).as_quat()  # [x,y,z,w]
+    qxyz = q[:3]
+    proj = float(qxyz @ axis_w)
+    twist_xyz = proj * axis_w
+    twist_w = float(q[3])
+    n = np.sqrt(twist_xyz @ twist_xyz + twist_w * twist_w)
+    if n < 1e-12:
+        return 0.0, R_mat.copy()
+    twist_xyz /= n; twist_w /= n
+    twist_q = np.array([twist_xyz[0], twist_xyz[1], twist_xyz[2], twist_w])
+    twist_R = R.from_quat(twist_q).as_matrix()
+    # R = swing @ twist  →  swing = R @ twist.T
+    swing_R = R_mat @ twist_R.T
+    twist_angle = 2.0 * np.arctan2(proj, q[3])  # signed about axis_w
+    # Wrap to [-pi, pi]
+    if twist_angle > np.pi: twist_angle -= 2 * np.pi
+    elif twist_angle < -np.pi: twist_angle += 2 * np.pi
+    return float(twist_angle), swing_R
 
 
 def main():
@@ -253,6 +280,14 @@ def main():
         N_loc = np.cross(X_loc, bend_loc)
         N_loc /= max(np.linalg.norm(N_loc), 1e-12)
         rest_basis[sd["L"]] = (X_loc, bend_loc, N_loc)
+
+    # Cache skel-rest carpal body world rotation per side (calibration target).
+    skel.setPositions(np.zeros(skel.getNumDofs()))
+    carp_rest_w = {sd["L"]: np.asarray(skel.getBodyNode(sd["skel"]["carp"]).getTransform().rotation()).copy() for sd in sides}
+
+    # Cache BVH hand world rotation at f=0 (rest-pose subtraction reference).
+    Tf0 = bvh_fk_world_full(ojoints, orows[0], on2c)
+    bvh_hand_rot_0 = {sd["L"]: Tf0[sd["bvh"]["hd"]][:3, :3].copy() for sd in sides}
 
     def compute_hum_target(sd, pose_in, frame_idx):
         """Two-vector basis humerus body world target for given frame.
@@ -403,14 +438,48 @@ def main():
             pose[ulna_idx] = ulna_angle
             skel.setPositions(pose)
 
-            # Radius: constant pronation offset (palm-down at T-pose).
-            # TODO: per-frame BVH hand twist component.
+            # Radius (twist about forearm) + Carpal (swing only, no twist):
+            # Decompose BVH hand world-frame motion-delta into:
+            #   twist about radius joint axis → Radius revolute angle
+            #   remainder swing → Carpal ball rotvec
+            # Anatomical constraint: wrist (carpal) does NOT twist about
+            # forearm long axis; radius (pron/sup) owns that DOF.
+            j_rad = None; j_carp = None
+            for jj in range(skel.getNumJoints()):
+                jn = skel.getJoint(jj)
+                if jn.getName() == sd["skel"]["rad"]: j_rad = jn
+                elif jn.getName() == sd["skel"]["carp"]: j_carp = jn
+            rad_axis_local = np.asarray(j_rad.getAxis(), dtype=np.float64)
+            rad_axis_local /= max(np.linalg.norm(rad_axis_local), 1e-12)
+            ulna_world = np.asarray(skel.getBodyNode(sd["skel"]["ulna"]).getTransform().rotation())
+            T_p2j_rad_R = np.asarray(j_rad.getTransformFromParentBodyNode().rotation())
+            rad_axis_w = ulna_world @ T_p2j_rad_R @ rad_axis_local
+            rad_axis_w /= max(np.linalg.norm(rad_axis_w), 1e-12)
+
+            # BVH-rest-subtracted target: world delta @ skel rest carpal.
+            R_hand_bvh_f = Tf_orig[hd_ji][:3, :3]
+            R_world_delta = R_hand_bvh_f @ bvh_hand_rot_0[sd["L"]].T
+            R_carpal_target_w = R_world_delta @ carp_rest_w[sd["L"]]
+
+            # Current carpal world (rad=0, carp=0 still in pose).
+            R_carpal_w_0 = np.asarray(skel.getBodyNode(sd["skel"]["carp"]).getTransform().rotation())
+            R_delta_carpal_w = R_carpal_target_w @ R_carpal_w_0.T
+
+            # Swing-twist decompose about radius axis in world.
+            twist_angle, R_swing_w = swing_twist_about(R_delta_carpal_w, rad_axis_w)
             rad_idx, _ = sd["dof_rad"]
+            # Additive constant palm offset (T-pose pronation alignment).
             palm_deg = args.palm_down_l_deg if sd["L"] == "L" else args.palm_down_r_deg
-            pose[rad_idx] = float(np.deg2rad(palm_deg))
-            # Carpal: 0 (TODO: BVH hand orientation).
+            pose[rad_idx] = float(twist_angle + np.deg2rad(palm_deg))
+            skel.setPositions(pose)
+
+            # Carpal: solve expmap from current radius world.
+            rad_world_after = np.asarray(skel.getBodyNode(sd["skel"]["rad"]).getTransform().rotation())
+            T_p2j_carp_R = np.asarray(j_carp.getTransformFromParentBodyNode().rotation())
+            T_c2j_carp_R = np.asarray(j_carp.getTransformFromChildBodyNode().rotation())
+            R_carp_local = T_p2j_carp_R.T @ rad_world_after.T @ R_carpal_target_w @ T_c2j_carp_R
             carp_idx, _ = sd["dof_carp"]
-            pose[carp_idx:carp_idx + 3] = 0.0
+            pose[carp_idx:carp_idx + 3] = R.from_matrix(R_carp_local).as_rotvec()
             skel.setPositions(pose)
 
         out_mocap[f] = pose
