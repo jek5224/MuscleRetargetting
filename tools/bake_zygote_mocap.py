@@ -732,6 +732,34 @@ def main():
 
         out_mocap[f] = pose
 
+    # Ground-plant correction: at f=0, measure lowest world Y across both
+    # foot body box bottoms (body center − projected half-extent onto -Y).
+    # Subtract that from root_y across all frames so foot sole sits at Y=0
+    # at f=0. Leg IK can push foot below where naive ankle-joint offset
+    # predicts; this measures the actual lowest geometry point.
+    skel.setPositions(out_mocap[0])
+    def _body_bottom_y(name):
+        bn = skel.getBodyNode(name)
+        T = bn.getTransform()
+        center = np.asarray(T.translation())
+        Rb = np.asarray(T.rotation())
+        # Box size from shape: shape.getSize() returns (sx, sy, sz) local.
+        shape = bn.getShapeNodes()[0].getShape()
+        sz = np.asarray(shape.getSize())
+        # 8 corners in body local, find lowest world Y.
+        corners = np.array([[sx, sy, sz_] for sx in (-sz[0]/2, sz[0]/2)
+                                            for sy in (-sz[1]/2, sz[1]/2)
+                                            for sz_ in (-sz[2]/2, sz[2]/2)])
+        world = corners @ Rb.T + center
+        return float(world[:, 1].min())
+    try:
+        f0_lowest = min(_body_bottom_y("L_Talus0"), _body_bottom_y("R_Talus0"))
+    except Exception:
+        f0_lowest = min(float(np.asarray(skel.getBodyNode("L_Talus0").getTransform().translation())[1]),
+                        float(np.asarray(skel.getBodyNode("R_Talus0").getTransform().translation())[1]))
+    print(f"  f=0 lowest foot world Y = {f0_lowest:.4f}; shifting all root_y by -this.")
+    out_mocap[:, 4] -= f0_lowest
+
     # Save .npy alongside output BVH.
     np.save(args.out_npy, out_mocap)
     print(f"Wrote {args.out_npy}")
