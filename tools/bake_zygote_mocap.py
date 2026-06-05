@@ -174,10 +174,11 @@ def main():
     ap.add_argument("--clav-scale", type=float, default=0.4,
                     help="Scale BVH-driven clavicle rotation (slerp from "
                          "identity). <1 restricts clavicle motion.")
-    ap.add_argument("--sternum-scale", type=float, default=0.3,
-                    help="Scale BVH-driven sternum rotation (rotvec scale "
-                         "from identity). <1 reduces sternum sway → less "
-                         "clavicle/scapula wobble. Default 0.3.")
+    ap.add_argument("--sternum-scale", type=float, default=1.0,
+                    help="Scale BVH-driven sternum rotation. Default 1.0. "
+                         "Sternum amplitude controlled at fit-time via "
+                         "--rib-weights in add_sternum_to_bvh; this is a "
+                         "post-hoc fallback knob.")
     ap.add_argument("--anatomical-forward", type=float, nargs=3,
                     default=[0.0, 0.0, 1.0],
                     help="World direction forearm should flex toward when "

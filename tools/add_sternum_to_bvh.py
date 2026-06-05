@@ -247,15 +247,21 @@ def main():
     ap.add_argument("--parent", default=None,
                     help="Force parent body (e.g. T50). Default: pick lowest residual.")
     ap.add_argument("--rib-weights", default=None,
-                    help="10 comma-sep floats, weight for ribs 1..10 (both sides share). "
-                         "Default: uniform.")
+                    help="10 comma-sep floats, weight for ribs 1..10 (both "
+                         "sides share). Default: rib1 (manubrium) heavy, "
+                         "lower ribs lighter — sternum pivots near manubrium "
+                         "instead of swinging the full body.")
     args = ap.parse_args()
     if args.rib_weights:
         rib_w = np.array([float(x) for x in args.rib_weights.split(",")])
         assert rib_w.shape == (10,), "need 10 weights"
         rib_weights = np.concatenate([rib_w, rib_w])  # L + R
     else:
-        rib_weights = np.ones(20)
+        # Manubrium-heavy default: rib1 anchored, ribs 2-10 maintain
+        # relative geometry but at lower weight. Keeps sternum top near
+        # clavicle joint, lower part can swing to absorb torso shape.
+        rib_w = np.array([10.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0])
+        rib_weights = np.concatenate([rib_w, rib_w])
     print(f"Rib weights: {rib_weights[:10]} (L=R)")
 
     # 1. Build skel
