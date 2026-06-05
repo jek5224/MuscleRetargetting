@@ -163,13 +163,14 @@ def main():
                     help="Output mocap_refs.npy path.")
     ap.add_argument("--skel-xml", default="data/zygote_skel.xml")
     ap.add_argument("--scapulohumeral", type=float, default=0.27)
-    ap.add_argument("--palm-down-l-deg", type=float, default=-90.0,
-                    help="L_Radius rest-pose pronation offset (deg). -90° "
-                         "tuned for L palm-down at T-pose under continuous "
-                         "anatomical-bend humerus orientation. Applied as "
-                         "rotation about radius axis in ulna-local frame.")
+    ap.add_argument("--palm-down-l-deg", type=float, default=90.0,
+                    help="L_Radius rest-pose pronation offset (deg). 90° "
+                         "tuned visually for L palm-down at T-pose. "
+                         "Applied as rotation about radius axis in ulna-"
+                         "local frame, baked into target hand-rel-fa.")
     ap.add_argument("--palm-down-r-deg", type=float, default=-90.0,
-                    help="R_Radius rest-pose pronation offset (deg).")
+                    help="R_Radius rest-pose pronation offset (deg). "
+                         "Opposite sign of L due to bilateral mesh mirror.")
     ap.add_argument("--clav-scale", type=float, default=0.4,
                     help="Scale BVH-driven clavicle rotation (slerp from "
                          "identity). <1 restricts clavicle motion.")
