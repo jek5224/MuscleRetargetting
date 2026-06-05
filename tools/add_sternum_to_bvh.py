@@ -257,10 +257,10 @@ def main():
         assert rib_w.shape == (10,), "need 10 weights"
         rib_weights = np.concatenate([rib_w, rib_w])  # L + R
     else:
-        # Manubrium-heavy default: rib1 anchored, ribs 2-10 maintain
-        # relative geometry but at lower weight. Keeps sternum top near
-        # clavicle joint, lower part can swing to absorb torso shape.
-        rib_w = np.array([10.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0])
+        # Manubrium-heavy default: weights decrease linearly from rib1 to
+        # rib10 (10..1). Anchors sternum top tightly while lower ribs
+        # maintain relative geometry with progressively less influence.
+        rib_w = np.linspace(10.0, 1.0, 10)
         rib_weights = np.concatenate([rib_w, rib_w])
     print(f"Rib weights: {rib_weights[:10]} (L=R)")
 
