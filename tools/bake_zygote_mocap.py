@@ -467,7 +467,28 @@ def main():
     mocap_in[:, 4] -= skel_rest_foot_y
     out_mocap = mocap_in.copy()
     # Cache BVH foot world rotation at f=0 for ankle calibration.
-    bvh_foot_rot_0 = {info["L"]: Tf0_legs[info["bvh_ankle_ji"]][:3, :3].copy() for info in leg_info}
+    # If left/right BVH foot rotations are asymmetric at f=0 (source isn't
+    # true T-pose), pick the closer-to-identity side and mirror to the
+    # other across YZ plane (M = diag(-1,1,1), R_mirror = M @ R @ M).
+    bvh_foot_rot_0_raw = {info["L"]: Tf0_legs[info["bvh_ankle_ji"]][:3, :3].copy() for info in leg_info}
+    M_yz = np.diag([-1.0, 1.0, 1.0])
+    def _rot_dev_from_I(R_mat):
+        tr = float(np.trace(R_mat))
+        return float(np.arccos(np.clip((tr - 1.0) / 2.0, -1.0, 1.0)))
+    dev_L = _rot_dev_from_I(bvh_foot_rot_0_raw["L"])
+    dev_R = _rot_dev_from_I(bvh_foot_rot_0_raw["R"])
+    print(f"  BVH foot f=0 deviation from identity: L={np.rad2deg(dev_L):.1f}° R={np.rad2deg(dev_R):.1f}°")
+    if abs(dev_L - dev_R) > np.deg2rad(15.0):
+        if dev_L < dev_R:
+            bvh_foot_rot_0 = {"L": bvh_foot_rot_0_raw["L"],
+                              "R": M_yz @ bvh_foot_rot_0_raw["L"] @ M_yz}
+            print(f"  Ankle f=0 asymmetric (L dev={np.rad2deg(dev_L):.1f}°, R dev={np.rad2deg(dev_R):.1f}°); mirroring L→R.")
+        else:
+            bvh_foot_rot_0 = {"R": bvh_foot_rot_0_raw["R"],
+                              "L": M_yz @ bvh_foot_rot_0_raw["R"] @ M_yz}
+            print(f"  Ankle f=0 asymmetric (L dev={np.rad2deg(dev_L):.1f}°, R dev={np.rad2deg(dev_R):.1f}°); mirroring R→L.")
+    else:
+        bvh_foot_rot_0 = bvh_foot_rot_0_raw
 
     progress = max(1, n_frames // 20)
     for f in range(n_frames):
