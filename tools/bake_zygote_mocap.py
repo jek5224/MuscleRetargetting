@@ -449,7 +449,7 @@ def main():
                 jn = skel.getJoint(jj)
                 if jn.getName() == sd["skel"]["rad"]: j_rad = jn
                 elif jn.getName() == sd["skel"]["carp"]: j_carp = jn
-            rad_axis_local = np.asarray(j_rad.getAxis(), dtype=np.float64)
+            rad_axis_local = np.array(j_rad.getAxis(), dtype=np.float64, copy=True)
             rad_axis_local /= max(np.linalg.norm(rad_axis_local), 1e-12)
             ulna_world = np.asarray(skel.getBodyNode(sd["skel"]["ulna"]).getTransform().rotation())
             T_p2j_rad_R = np.asarray(j_rad.getTransformFromParentBodyNode().rotation())
