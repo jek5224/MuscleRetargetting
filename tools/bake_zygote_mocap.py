@@ -288,6 +288,7 @@ def main():
                 break
     out_mocap = mocap_in.copy()
     prev_Z_target = {sd["L"]: None for sd in sides}
+    prev_bend_target = {sd["L"]: None for sd in sides}
 
     # Cache skel-rest orthonormal humerus-body basis: bone (X), natural
     # elbow bend direction in plane perpendicular to bone (bend), normal
@@ -670,7 +671,21 @@ def main():
             anat_bend_n = np.linalg.norm(anat_bend)
             anat_bend_hat = anat_bend / anat_bend_n if anat_bend_n > 1e-9 else np.zeros(3)
             alpha = float(np.clip(bvh_bend_n / max(args.bend_blend, 1e-6), 0.0, 1.0))
-            bend_target = alpha * bvh_bend_hat + (1.0 - alpha) * anat_bend_hat
+            # If previous bend exists and current confidence is low, use
+            # previous bend (projected perp to current X_target) instead of
+            # anatomical fallback — prevents per-frame bend whip when BVH
+            # bend signal weakens and anatomical+BVH directions disagree.
+            if prev_bend_target[sd["L"]] is not None and alpha < 1.0:
+                prev_perp = prev_bend_target[sd["L"]] - (prev_bend_target[sd["L"]] @ X_target_w) * X_target_w
+                prev_perp_n = np.linalg.norm(prev_perp)
+                if prev_perp_n > 1e-6:
+                    prev_perp /= prev_perp_n
+                    # Blend BVH with PREV (instead of anatomical) when low conf.
+                    bend_target = alpha * bvh_bend_hat + (1.0 - alpha) * prev_perp
+                else:
+                    bend_target = alpha * bvh_bend_hat + (1.0 - alpha) * anat_bend_hat
+            else:
+                bend_target = alpha * bvh_bend_hat + (1.0 - alpha) * anat_bend_hat
             bend_norm = np.linalg.norm(bend_target)
             if bend_norm < 1e-6:
                 R_motion_world = rotation_from_to(d_chain_hum, d_bvh_hum)
@@ -687,6 +702,7 @@ def main():
                 M_body_local = np.column_stack([X_local_hum, bend_local_axis, N_local_hum])
                 hum_body_world_target = M_target_w @ M_body_local.T
                 prev_Z_target[sd["L"]] = N_target_w.copy()
+                prev_bend_target[sd["L"]] = bend_target.copy()
 
             # Clavicle stays at BVH-converted MyBVH value (loaded from
             # mocap_in via L_Clavicle bvh=LeftShoulder mapping). Humerus
