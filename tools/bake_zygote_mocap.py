@@ -174,6 +174,10 @@ def main():
     ap.add_argument("--clav-scale", type=float, default=0.4,
                     help="Scale BVH-driven clavicle rotation (slerp from "
                          "identity). <1 restricts clavicle motion.")
+    ap.add_argument("--sternum-scale", type=float, default=0.3,
+                    help="Scale BVH-driven sternum rotation (rotvec scale "
+                         "from identity). <1 reduces sternum sway → less "
+                         "clavicle/scapula wobble. Default 0.3.")
     ap.add_argument("--anatomical-forward", type=float, nargs=3,
                     default=[0.0, 0.0, 1.0],
                     help="World direction forearm should flex toward when "
@@ -267,6 +271,16 @@ def main():
             ci, nd = sd["dof_clav"]
             if ci is not None and nd == 3:
                 mocap_in[:, ci:ci+3] *= clav_scale
+    # Sternum scale: dampen sternum body rotation amplitude.
+    sternum_scale = float(args.sternum_scale)
+    if abs(sternum_scale - 1.0) > 1e-6:
+        for jj in range(skel.getNumJoints()):
+            if skel.getJoint(jj).getName() == "Sternum0":
+                si_idx = skel.getJoint(jj).getIndexInSkeleton(0)
+                nd = skel.getJoint(jj).getNumDofs()
+                if nd == 3:
+                    mocap_in[:, si_idx:si_idx + 3] *= sternum_scale
+                break
     out_mocap = mocap_in.copy()
     prev_Z_target = {sd["L"]: None for sd in sides}
 
