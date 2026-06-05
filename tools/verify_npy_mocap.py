@@ -152,7 +152,7 @@ def main():
     }
 
     N = mocap.shape[0]
-    sample = [0, N // 4, N // 2, 3 * N // 4, N - 1]
+    sample = [0, N // 7, N // 3, N // 2, 2 * N // 3, 5 * N // 7, N - 1]
     for f in sample:
         skel.setPositions(mocap[f])
         Tf = bvh_fk(ojoints, orows[f], on2c)
@@ -183,6 +183,25 @@ def main():
             d_sk_f = wr - el; d_sk_f /= max(np.linalg.norm(d_sk_f), 1e-9)
             ch = float(d_bvh_h @ d_sk_h); cf = float(d_bvh_f @ d_sk_f)
             print(f"  f{f:5d} {sd['L']} humerus cosθ={ch:+.4f} forearm cosθ={cf:+.4f}")
+        # Legs: femur (hip→knee), shin (knee→ankle).
+        for L_or_R, p in [("L", "Left"), ("R", "Right")]:
+            ji_hip = find_joint(ojoints, f"{p}UpLeg")
+            ji_knee = find_joint(ojoints, f"{p}Leg")
+            ji_ankle = find_joint(ojoints, f"{p}Foot")
+            if ji_hip < 0 or ji_knee < 0 or ji_ankle < 0:
+                continue
+            d_bvh_femur = Tf[ji_knee][:3, 3] - Tf[ji_hip][:3, 3]
+            d_bvh_femur /= max(np.linalg.norm(d_bvh_femur), 1e-9)
+            d_bvh_shin = Tf[ji_ankle][:3, 3] - Tf[ji_knee][:3, 3]
+            d_bvh_shin /= max(np.linalg.norm(d_bvh_shin), 1e-9)
+            hip_w = joint_world_pos(skel, f"{L_or_R}_Femur0")
+            knee_w = joint_world_pos(skel, f"{L_or_R}_Tibia_Fibula0")
+            ankle_w = joint_world_pos(skel, f"{L_or_R}_Talus0")
+            d_sk_femur = knee_w - hip_w; d_sk_femur /= max(np.linalg.norm(d_sk_femur), 1e-9)
+            d_sk_shin = ankle_w - knee_w; d_sk_shin /= max(np.linalg.norm(d_sk_shin), 1e-9)
+            cfm = float(d_bvh_femur @ d_sk_femur)
+            csh = float(d_bvh_shin @ d_sk_shin)
+            print(f"  f{f:5d} {L_or_R} femur cosθ={cfm:+.4f} shin cosθ={csh:+.4f}")
 
 
 if __name__ == "__main__":
