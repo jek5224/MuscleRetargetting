@@ -163,13 +163,15 @@ def main():
                     help="Output mocap_refs.npy path.")
     ap.add_argument("--skel-xml", default="data/zygote_skel.xml")
     ap.add_argument("--scapulohumeral", type=float, default=0.27)
-    ap.add_argument("--palm-down-l-deg", type=float, default=90.0,
-                    help="L_Radius additive pronation offset (deg). Skel "
-                         "rest carpal orientation puts palm up at T-pose; "
-                         "+90° rotates palm to face ground.")
-    ap.add_argument("--palm-down-r-deg", type=float, default=-90.0,
-                    help="R_Radius additive pronation offset (deg, mirror "
-                         "of L).")
+    ap.add_argument("--palm-down-l-deg", type=float, default=0.0,
+                    help="L_Radius rest-pose pronation offset (deg). Skel "
+                         "L rest carpal already palm-down at T-pose; 0 "
+                         "preserves it. Offset rotates rest target about "
+                         "radius axis in ulna-local frame.")
+    ap.add_argument("--palm-down-r-deg", type=float, default=180.0,
+                    help="R_Radius rest-pose pronation offset (deg). Skel "
+                         "R rest carpal is palm-up at T-pose; 180° flips "
+                         "to palm-down (bilateral asymmetry in rest XML).")
     ap.add_argument("--clav-scale", type=float, default=0.4,
                     help="Scale BVH-driven clavicle rotation (slerp from "
                          "identity). <1 restricts clavicle motion.")
@@ -294,7 +296,23 @@ def main():
     fa_skel_rest_w = {sd["L"]: np.asarray(skel.getBodyNode(sd["skel"]["ulna"]).getTransform().rotation()).copy() for sd in sides}
     carp_rest_w = {sd["L"]: np.asarray(skel.getBodyNode(sd["skel"]["carp"]).getTransform().rotation()).copy() for sd in sides}
     # Skel-rest hand orientation relative to skel forearm.
-    R_hand_rel_skel_rest = {L: fa_skel_rest_w[L].T @ carp_rest_w[L] for L in fa_skel_rest_w}
+    R_hand_rel_skel_rest_raw = {L: fa_skel_rest_w[L].T @ carp_rest_w[L] for L in fa_skel_rest_w}
+    # Apply palm-down offset to the REST target (rotation about radius axis
+    # in ulna-body-local frame). Radius DOF absorbs this offset naturally
+    # at f=0; carpal stays at zero. Without this, palm offset on radius is
+    # compensated back by carpal.
+    R_hand_rel_skel_rest = {}
+    for sd in sides:
+        for jj in range(skel.getNumJoints()):
+            if skel.getJoint(jj).getName() == sd["skel"]["rad"]:
+                j_rad_rest = skel.getJoint(jj); break
+        rad_axis_l = np.array(j_rad_rest.getAxis(), dtype=np.float64, copy=True)
+        rad_axis_l /= max(np.linalg.norm(rad_axis_l), 1e-12)
+        T_p2j_rad_R = np.asarray(j_rad_rest.getTransformFromParentBodyNode().rotation())
+        palm_deg_rest = args.palm_down_l_deg if sd["L"] == "L" else args.palm_down_r_deg
+        R_pronate_in_joint = R.from_rotvec(rad_axis_l * np.deg2rad(palm_deg_rest)).as_matrix()
+        R_palm_ulna_local = T_p2j_rad_R @ R_pronate_in_joint @ T_p2j_rad_R.T
+        R_hand_rel_skel_rest[sd["L"]] = R_palm_ulna_local @ R_hand_rel_skel_rest_raw[sd["L"]]
 
     # Cache BVH forearm + hand world rotation at f=0.
     Tf0 = bvh_fk_world_full(ojoints, orows[0], on2c)
@@ -494,11 +512,11 @@ def main():
             R_delta_carpal_w = R_carpal_target_w @ R_carpal_w_0.T
 
             # Swing-twist decompose about radius axis in world.
+            # Palm offset already baked into R_hand_rel_skel_rest target →
+            # twist_angle at f=0 = palm_offset. No additional add here.
             twist_angle, R_swing_w = swing_twist_about(R_delta_carpal_w, rad_axis_w)
             rad_idx, _ = sd["dof_rad"]
-            # Additive constant palm offset (T-pose pronation alignment).
-            palm_deg = args.palm_down_l_deg if sd["L"] == "L" else args.palm_down_r_deg
-            pose[rad_idx] = float(twist_angle + np.deg2rad(palm_deg))
+            pose[rad_idx] = float(twist_angle)
             skel.setPositions(pose)
 
             # Carpal: solve expmap from current radius world.
