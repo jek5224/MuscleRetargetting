@@ -403,6 +403,72 @@ def main():
     bvh_hips_ji = find_joint(ojoints, "Hips")
     bvh_neck_ji = find_joint(ojoints, "Neck")
 
+    # Leg IK setup. Per side cache: joint indices, rest segment lengths,
+    # transforms, BVH joint indices. Used for 2-link IK to BVH-scaled foot
+    # world position, plus ankle orientation match.
+    leg_info = []
+    skel.setPositions(np.zeros(skel.getNumDofs()))
+    for L_or_R, p in [("L", "Left"), ("R", "Right")]:
+        hip_body = f"{L_or_R}_Femur0"
+        knee_body = f"{L_or_R}_Tibia_Fibula0"
+        ankle_body = f"{L_or_R}_Talus0"
+        hip_j = None; knee_j = None; ankle_j = None
+        for jj in range(skel.getNumJoints()):
+            jn = skel.getJoint(jj)
+            if jn.getName() == hip_body: hip_j = jn
+            elif jn.getName() == knee_body: knee_j = jn
+            elif jn.getName() == ankle_body: ankle_j = jn
+        def _jwp(body_name):
+            bn = skel.getBodyNode(body_name)
+            par = bn.getParentBodyNode()
+            jj = bn.getParentJoint()
+            T = jj.getTransformFromParentBodyNode()
+            return par.getTransform().translation() + np.asarray(par.getTransform().rotation()) @ T.translation()
+        hip_pos = _jwp(hip_body); knee_pos = _jwp(knee_body); ankle_pos = _jwp(ankle_body)
+        leg_info.append({
+            "L": L_or_R, "hip_body": hip_body, "knee_body": knee_body, "ankle_body": ankle_body,
+            "hip_dof": hip_j.getIndexInSkeleton(0), "hip_n": hip_j.getNumDofs(),
+            "knee_dof": knee_j.getIndexInSkeleton(0), "knee_n": knee_j.getNumDofs(),
+            "ankle_dof": ankle_j.getIndexInSkeleton(0), "ankle_n": ankle_j.getNumDofs(),
+            "L_femur": float(np.linalg.norm(knee_pos - hip_pos)),
+            "L_shin": float(np.linalg.norm(ankle_pos - knee_pos)),
+            "bvh_hip_ji": find_joint(ojoints, f"{p}UpLeg"),
+            "bvh_knee_ji": find_joint(ojoints, f"{p}Leg"),
+            "bvh_ankle_ji": find_joint(ojoints, f"{p}Foot"),
+            "T_p2j_hip_R": np.asarray(hip_j.getTransformFromParentBodyNode().rotation()).copy(),
+            "T_c2j_hip_R": np.asarray(hip_j.getTransformFromChildBodyNode().rotation()).copy(),
+            "T_p2j_knee_R": np.asarray(knee_j.getTransformFromParentBodyNode().rotation()).copy(),
+            "T_c2j_knee_R": np.asarray(knee_j.getTransformFromChildBodyNode().rotation()).copy(),
+            "T_p2j_ankle_R": np.asarray(ankle_j.getTransformFromParentBodyNode().rotation()).copy(),
+            "T_c2j_ankle_R": np.asarray(ankle_j.getTransformFromChildBodyNode().rotation()).copy(),
+            "ankle_rest_w": np.asarray(skel.getBodyNode(ankle_body).getTransform().rotation()).copy(),
+        })
+    # Leg-scale ratio: skel total / BVH total at f=0. Used to scale root
+    # translation (so feet plant on ground) and BVH ankle target positions.
+    Tf0_legs = bvh_fk_world_full(ojoints, orows[0], on2c)
+    bvh_leg_lens = []
+    for info in leg_info:
+        d1 = np.linalg.norm(Tf0_legs[info["bvh_knee_ji"]][:3, 3] - Tf0_legs[info["bvh_hip_ji"]][:3, 3])
+        d2 = np.linalg.norm(Tf0_legs[info["bvh_ankle_ji"]][:3, 3] - Tf0_legs[info["bvh_knee_ji"]][:3, 3])
+        bvh_leg_lens.append(d1 + d2)
+    skel_leg_lens = [i["L_femur"] + i["L_shin"] for i in leg_info]
+    leg_ratio = float(sum(skel_leg_lens) / max(sum(bvh_leg_lens), 1e-9))
+    print(f"  Leg scale ratio (skel/BVH) = {leg_ratio:.4f}")
+    # Plant skel feet on ground: subtract skel-rest foot Y from all root_y
+    # so stance foot lands at Y=0. BVH delta root motion preserved.
+    skel.setPositions(np.zeros(skel.getNumDofs()))
+    def _ankle_y(name):
+        bn = skel.getBodyNode(name); par = bn.getParentBodyNode(); jj = bn.getParentJoint()
+        T = jj.getTransformFromParentBodyNode()
+        p = par.getTransform().translation() + np.asarray(par.getTransform().rotation()) @ T.translation()
+        return float(p[1])
+    skel_rest_foot_y = min(_ankle_y("L_Talus0"), _ankle_y("R_Talus0"))
+    print(f"  Skel rest foot Y = {skel_rest_foot_y:.4f}; root_y -= this to ground feet.")
+    mocap_in[:, 4] -= skel_rest_foot_y
+    out_mocap = mocap_in.copy()
+    # Cache BVH foot world rotation at f=0 for ankle calibration.
+    bvh_foot_rot_0 = {info["L"]: Tf0_legs[info["bvh_ankle_ji"]][:3, :3].copy() for info in leg_info}
+
     progress = max(1, n_frames // 20)
     for f in range(n_frames):
         if f % progress == 0:
@@ -442,6 +508,81 @@ def main():
                     di = info["dof_idx"]
                     pose[di:di + info["n_dofs"]] = rv
                     skel.setPositions(pose)
+
+        # Leg IK: 2-link analytical solve to BVH-scaled ankle target.
+        # Knee/hip/ankle all Ball (3 DOF). Compute knee target position via
+        # law-of-cosines geometry, then rotation_from_to on hip + knee.
+        # Bend plane: anatomical forward direction (knee bends anteriorly).
+        for info in leg_info:
+            pose[info["hip_dof"]:info["hip_dof"] + 3] = 0.0
+            pose[info["knee_dof"]:info["knee_dof"] + 3] = 0.0
+            pose[info["ankle_dof"]:info["ankle_dof"] + 3] = 0.0
+            skel.setPositions(pose)
+            skel_hip_w = joint_world(info["hip_body"])
+            # Target = skel_hip + scaled (BVH_ankle - BVH_hip). Uses RELATIVE
+            # BVH hip→ankle vector since skel/BVH world frames have different
+            # origins (skel rest pose vs BVH absolute).
+            bvh_hip_w_f = Tf_orig[info["bvh_hip_ji"]][:3, 3]
+            bvh_ankle_w_f = Tf_orig[info["bvh_ankle_ji"]][:3, 3]
+            target_ankle_w = skel_hip_w + (bvh_ankle_w_f - bvh_hip_w_f) * leg_ratio
+            d_vec = target_ankle_w - skel_hip_w
+            d_dist = float(np.linalg.norm(d_vec))
+            L1 = info["L_femur"]; L2 = info["L_shin"]
+            d_clamped = max(min(d_dist, L1 + L2 - 1e-4), abs(L1 - L2) + 1e-4)
+            d_dir = d_vec / max(d_dist, 1e-9)
+            # Bend plane from BVH: perpendicular to skel hip→ankle direction,
+            # pointing toward BVH knee position. Preserves BVH femur direction
+            # in skel chain, regardless of segment-length differences.
+            bvh_femur_vec = Tf_orig[info["bvh_knee_ji"]][:3, 3] - Tf_orig[info["bvh_hip_ji"]][:3, 3]
+            perp = bvh_femur_vec - (bvh_femur_vec @ d_dir) * d_dir
+            pn = np.linalg.norm(perp)
+            if pn < 1e-6:
+                fwd_w = np.array(args.anatomical_forward, dtype=np.float64)
+                fwd_w /= max(np.linalg.norm(fwd_w), 1e-12)
+                perp = fwd_w - (fwd_w @ d_dir) * d_dir
+                pn = np.linalg.norm(perp)
+            perp /= max(pn, 1e-12)
+            # Knee position from hip via law of cosines.
+            a = (L1 * L1 - L2 * L2 + d_clamped * d_clamped) / (2.0 * d_clamped)
+            a = float(np.clip(a, -L1, L1))
+            h = float(np.sqrt(max(L1 * L1 - a * a, 0.0)))
+            K_target_w = skel_hip_w + a * d_dir + h * perp
+            A_target_w = skel_hip_w + d_vec  # = target_ankle_w
+            # Phase 1: rotate hip so femur points to K_target.
+            skel_knee_now = joint_world(info["knee_body"])
+            femur_dir_now = skel_knee_now - skel_hip_w
+            femur_dir_now /= max(np.linalg.norm(femur_dir_now), 1e-12)
+            femur_dir_target = K_target_w - skel_hip_w
+            femur_dir_target /= max(np.linalg.norm(femur_dir_target), 1e-12)
+            R_hip_align = rotation_from_to(femur_dir_now, femur_dir_target)
+            hip_par_w = np.asarray(skel.getBodyNode(info["hip_body"]).getParentBodyNode().getTransform().rotation())
+            hip_body_w_now = np.asarray(skel.getBodyNode(info["hip_body"]).getTransform().rotation())
+            hip_body_w_target = R_hip_align @ hip_body_w_now
+            R_hip_local = info["T_p2j_hip_R"].T @ hip_par_w.T @ hip_body_w_target @ info["T_c2j_hip_R"]
+            pose[info["hip_dof"]:info["hip_dof"] + 3] = R.from_matrix(R_hip_local).as_rotvec()
+            skel.setPositions(pose)
+            # Phase 2: rotate knee so shin points to A_target from new knee pos.
+            skel_knee_w = joint_world(info["knee_body"])
+            skel_ankle_w_now = joint_world(info["ankle_body"])
+            shin_dir_now = skel_ankle_w_now - skel_knee_w
+            shin_dir_now /= max(np.linalg.norm(shin_dir_now), 1e-12)
+            shin_dir_target = A_target_w - skel_knee_w
+            shin_dir_target /= max(np.linalg.norm(shin_dir_target), 1e-12)
+            R_knee_align = rotation_from_to(shin_dir_now, shin_dir_target)
+            knee_par_w = np.asarray(skel.getBodyNode(info["knee_body"]).getParentBodyNode().getTransform().rotation())
+            knee_body_w_now = np.asarray(skel.getBodyNode(info["knee_body"]).getTransform().rotation())
+            knee_body_w_target = R_knee_align @ knee_body_w_now
+            R_knee_local = info["T_p2j_knee_R"].T @ knee_par_w.T @ knee_body_w_target @ info["T_c2j_knee_R"]
+            pose[info["knee_dof"]:info["knee_dof"] + 3] = R.from_matrix(R_knee_local).as_rotvec()
+            skel.setPositions(pose)
+            # Phase 3: ankle world rotation matches BVH foot delta from rest.
+            R_foot_bvh_f = Tf_orig[info["bvh_ankle_ji"]][:3, :3]
+            R_world_delta_foot = R_foot_bvh_f @ bvh_foot_rot_0[info["L"]].T
+            R_ankle_target_w = R_world_delta_foot @ info["ankle_rest_w"]
+            shin_world = np.asarray(skel.getBodyNode(info["knee_body"]).getTransform().rotation())
+            R_ankle_local = info["T_p2j_ankle_R"].T @ shin_world.T @ R_ankle_target_w @ info["T_c2j_ankle_R"]
+            pose[info["ankle_dof"]:info["ankle_dof"] + 3] = R.from_matrix(R_ankle_local).as_rotvec()
+            skel.setPositions(pose)
 
         for sd in sides:
             sh_ji = sd["bvh"]["arm"]; fa_ji = sd["bvh"]["fa"]; hd_ji = sd["bvh"]["hd"]
