@@ -377,6 +377,32 @@ def main():
         ht0, _, _ = compute_hum_target(sd, mocap_in[0], 0)
         hum_target_0[sd["L"]] = ht0
 
+    # Spine chain (pelvis→neck direction matching). Cache per-vertebra parent
+    # body name + joint T_p2j_R for iterative world-uniform distribution.
+    SPINE_VERTS = ["L50","L40","L30","L20","L10",
+                   "T120","T110","T100","T90","T80","T70","T60","T50","T40","T30","T20","T10"]
+    NECK_BODY = "C70"
+    PELVIS_BODY = "Saccrum_Coccyx0"
+    spine_chain_info = []
+    for nm in SPINE_VERTS:
+        for jj in range(skel.getNumJoints()):
+            if skel.getJoint(jj).getName() == nm:
+                jt = skel.getJoint(jj)
+                par_body = skel.getBodyNode(nm).getParentBodyNode()
+                spine_chain_info.append({
+                    "name": nm,
+                    "par_name": par_body.getName(),
+                    "T_p2j_R": np.asarray(jt.getTransformFromParentBodyNode().rotation()).copy(),
+                    "dof_idx": jt.getIndexInSkeleton(0),
+                    "n_dofs": jt.getNumDofs(),
+                })
+                break
+    spine_dof_set = []
+    for info in spine_chain_info:
+        spine_dof_set.extend(range(info["dof_idx"], info["dof_idx"] + info["n_dofs"]))
+    bvh_hips_ji = find_joint(ojoints, "Hips")
+    bvh_neck_ji = find_joint(ojoints, "Neck")
+
     progress = max(1, n_frames // 20)
     for f in range(n_frames):
         if f % progress == 0:
@@ -384,8 +410,38 @@ def main():
         pose = mocap_in[f].copy()
         for di in arm_dof_set:
             if di < len(pose): pose[di] = 0.0
+        # Zero spine chain DOFs so direction match is computed from rest chain.
+        for di in spine_dof_set:
+            if di < len(pose): pose[di] = 0.0
         skel.setPositions(pose)
         Tf_orig = bvh_fk_world_full(ojoints, orows[f] if f < len(orows) else orows[-1], on2c)
+
+        # Spine: distribute pelvis→neck direction across vertebrae uniformly
+        # in world frame. R_align rotates skel rest pelvis→C70 vector to
+        # match BVH Hips→Neck vector. Each vertebra applies exp(rv/N) in
+        # world, conjugated to joint-local.
+        if bvh_hips_ji >= 0 and bvh_neck_ji >= 0 and len(spine_chain_info) > 0:
+            P_pelvis_w = np.asarray(skel.getBodyNode(PELVIS_BODY).getTransform().translation())
+            P_neck_w = np.asarray(skel.getBodyNode(NECK_BODY).getTransform().translation())
+            d_skel = P_neck_w - P_pelvis_w
+            n_skel = np.linalg.norm(d_skel)
+            P_hips_b = Tf_orig[bvh_hips_ji][:3, 3]
+            P_neck_b = Tf_orig[bvh_neck_ji][:3, 3]
+            d_bvh = P_neck_b - P_hips_b
+            n_bvh = np.linalg.norm(d_bvh)
+            if n_skel > 1e-9 and n_bvh > 1e-9:
+                d_skel /= n_skel; d_bvh /= n_bvh
+                R_align_w = rotation_from_to(d_skel, d_bvh)
+                rv_align = R.from_matrix(R_align_w).as_rotvec()
+                R_step_w = R.from_rotvec(rv_align / len(spine_chain_info)).as_matrix()
+                for info in spine_chain_info:
+                    par_world = np.asarray(skel.getBodyNode(info["par_name"]).getTransform().rotation())
+                    T_p2j_R = info["T_p2j_R"]
+                    R_step_local = T_p2j_R.T @ par_world.T @ R_step_w @ par_world @ T_p2j_R
+                    rv = R.from_matrix(R_step_local).as_rotvec()
+                    di = info["dof_idx"]
+                    pose[di:di + info["n_dofs"]] = rv
+                    skel.setPositions(pose)
 
         for sd in sides:
             sh_ji = sd["bvh"]["arm"]; fa_ji = sd["bvh"]["fa"]; hd_ji = sd["bvh"]["hd"]
