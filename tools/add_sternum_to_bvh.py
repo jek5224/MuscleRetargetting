@@ -272,9 +272,12 @@ def main():
         assert rib_w.shape == (10,), "need 10 weights"
         rib_weights = np.concatenate([rib_w, rib_w])  # L + R
     else:
-        # Uniform default: all 20 rib endpoints weighted equally. Lowest
-        # mean error fit; no top anchor.
-        rib_weights = np.ones(20)
+        # Manubrium-anchor heavy: rib1 dominant (100×), other ribs minimal.
+        # With constrained Procrustes (fixed pivot), this anchors sternum
+        # to rib1 attachment direction, lower ribs provide just enough
+        # signal to break rotational ambiguity.
+        rib_w = np.array([100.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0])
+        rib_weights = np.concatenate([rib_w, rib_w])
     print(f"Rib weights: {rib_weights[:10]} (L=R)")
 
     # 1. Build skel
