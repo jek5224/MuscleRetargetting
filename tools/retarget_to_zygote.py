@@ -843,10 +843,12 @@ def main():
         [py, "tools/add_sternum_to_bvh.py", "--in", vert, "--out", vert_st],
         "sternum",
     )
-    if rig_style == "bone_aligned":
+    if True:
         # Viewer-hook bake: per-frame DART FK computes desired skel mocap_refs
         # directly. Output .npy sibling sits next to .bvh; viewer loads .npy
         # over MyBVH-converted refs → zero conversion error.
+        # Applies to all rig styles (bone_aligned, world_aligned) since bake
+        # works on BVH world-space FK positions, rig-agnostic.
         npy_out = args.bvh_out[:-4] + ".npy" if args.bvh_out.lower().endswith(".bvh") else args.bvh_out + ".npy"
         arm_cmd = [py, "tools/bake_zygote_mocap.py",
                    "--in", vert_st,
