@@ -171,9 +171,13 @@ def main():
     ap.add_argument("--palm-down-r-deg", type=float, default=-90.0,
                     help="R_Radius rest-pose pronation offset (deg). "
                          "Opposite sign of L due to bilateral mesh mirror.")
-    ap.add_argument("--clav-scale", type=float, default=0.4,
+    ap.add_argument("--clav-scale", type=float, default=0.3,
                     help="Scale BVH-driven clavicle rotation (slerp from "
-                         "identity). <1 restricts clavicle motion.")
+                         "identity). Scapula is rigid child of clavicle "
+                         "in skel → scapula motion = clavicle motion. "
+                         "0.3 yields walk1 ~10° max, run ~4°, walk ~1.5° — "
+                         "within anatomical scapula range (5-15° walk, "
+                         "15-30° vigorous arm swing).")
     ap.add_argument("--sternum-scale", type=float, default=1.0,
                     help="Scale BVH-driven sternum rotation. Default 1.0. "
                          "Sternum amplitude controlled at fit-time via "
