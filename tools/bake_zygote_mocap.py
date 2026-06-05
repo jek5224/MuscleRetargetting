@@ -282,13 +282,19 @@ def main():
         N_loc /= max(np.linalg.norm(N_loc), 1e-12)
         rest_basis[sd["L"]] = (X_loc, bend_loc, N_loc)
 
-    # Cache skel-rest carpal body world rotation per side (calibration target).
+    # Cache skel-rest forearm + carpal body world rotation per side.
     skel.setPositions(np.zeros(skel.getNumDofs()))
+    fa_skel_rest_w = {sd["L"]: np.asarray(skel.getBodyNode(sd["skel"]["ulna"]).getTransform().rotation()).copy() for sd in sides}
     carp_rest_w = {sd["L"]: np.asarray(skel.getBodyNode(sd["skel"]["carp"]).getTransform().rotation()).copy() for sd in sides}
+    # Skel-rest hand orientation relative to skel forearm.
+    R_hand_rel_skel_rest = {L: fa_skel_rest_w[L].T @ carp_rest_w[L] for L in fa_skel_rest_w}
 
-    # Cache BVH hand world rotation at f=0 (rest-pose subtraction reference).
+    # Cache BVH forearm + hand world rotation at f=0.
     Tf0 = bvh_fk_world_full(ojoints, orows[0], on2c)
+    fa_bvh_rot_0 = {sd["L"]: Tf0[sd["bvh"]["fa"]][:3, :3].copy() for sd in sides}
     bvh_hand_rot_0 = {sd["L"]: Tf0[sd["bvh"]["hd"]][:3, :3].copy() for sd in sides}
+    # BVH-rest hand orientation relative to BVH forearm.
+    R_hand_rel_bvh_0 = {L: fa_bvh_rot_0[L].T @ bvh_hand_rot_0[L] for L in fa_bvh_rot_0}
 
     def compute_hum_target(sd, pose_in, frame_idx):
         """Two-vector basis humerus body world target for given frame.
@@ -457,10 +463,16 @@ def main():
             rad_axis_w = ulna_world @ T_p2j_rad_R @ rad_axis_local
             rad_axis_w /= max(np.linalg.norm(rad_axis_w), 1e-12)
 
-            # BVH-rest-subtracted target: world delta @ skel rest carpal.
+            # Express BVH hand pose in BVH forearm-local frame at frame f,
+            # then BVH-rest-subtract for local delta, then apply to skel-rest
+            # hand-rel-fa and rotate by skel forearm world (after hum+ulna).
             R_hand_bvh_f = Tf_orig[hd_ji][:3, :3]
-            R_world_delta = R_hand_bvh_f @ bvh_hand_rot_0[sd["L"]].T
-            R_carpal_target_w = R_world_delta @ carp_rest_w[sd["L"]]
+            R_fa_bvh_f = Tf_orig[fa_ji][:3, :3]
+            R_hand_rel_bvh_f = R_fa_bvh_f.T @ R_hand_bvh_f
+            R_local_delta_fa = R_hand_rel_bvh_0[sd["L"]].T @ R_hand_rel_bvh_f
+            R_hand_rel_skel_target = R_hand_rel_skel_rest[sd["L"]] @ R_local_delta_fa
+            R_fa_skel_w_after = np.asarray(skel.getBodyNode(sd["skel"]["ulna"]).getTransform().rotation())
+            R_carpal_target_w = R_fa_skel_w_after @ R_hand_rel_skel_target
 
             # Current carpal world (rad=0, carp=0 still in pose).
             R_carpal_w_0 = np.asarray(skel.getBodyNode(sd["skel"]["carp"]).getTransform().rotation())
