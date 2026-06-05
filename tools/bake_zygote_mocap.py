@@ -163,12 +163,13 @@ def main():
                     help="Output mocap_refs.npy path.")
     ap.add_argument("--skel-xml", default="data/zygote_skel.xml")
     ap.add_argument("--scapulohumeral", type=float, default=0.27)
-    ap.add_argument("--palm-down-l-deg", type=float, default=0.0,
-                    help="L_Radius additive offset (deg). Default 0: BVH "
-                         "world-delta calibration drives radius twist; no "
-                         "constant pronation needed.")
-    ap.add_argument("--palm-down-r-deg", type=float, default=0.0,
-                    help="R_Radius additive offset (deg).")
+    ap.add_argument("--palm-down-l-deg", type=float, default=90.0,
+                    help="L_Radius additive pronation offset (deg). Skel "
+                         "rest carpal orientation puts palm up at T-pose; "
+                         "+90° rotates palm to face ground.")
+    ap.add_argument("--palm-down-r-deg", type=float, default=-90.0,
+                    help="R_Radius additive pronation offset (deg, mirror "
+                         "of L).")
     ap.add_argument("--clav-scale", type=float, default=0.4,
                     help="Scale BVH-driven clavicle rotation (slerp from "
                          "identity). <1 restricts clavicle motion.")
