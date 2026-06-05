@@ -123,6 +123,21 @@ def kabsch(P, Q, weights=None):
     return R_mat, t_vec
 
 
+def procrustes_fixed_pivot(P, Q, weights=None):
+    """Orthogonal Procrustes with fixed translation. Solve R minimizing
+    sum_i w_i ||R @ P_i - Q_i||². P, Q are (N, 3) already centered at the
+    fixed pivot (caller subtracts pivot from both rest and frame points).
+    No centroid subtraction here."""
+    if weights is None:
+        weights = np.ones(len(P))
+    w = np.asarray(weights, dtype=np.float64)
+    H = (P * w[:, None]).T @ Q
+    U, S, Vt = np.linalg.svd(H)
+    d = np.sign(np.linalg.det(Vt.T @ U.T))
+    D = np.diag([1, 1, d])
+    return Vt.T @ D @ U.T
+
+
 def solve_endpoint_single_bone(target_world, R_b, t_b):
     """target_world (T,3), R_b (T,3,3) parent rotation, t_b (T,3) parent
     translation. Solve constant local = mean(R_b.T @ (target - t_b))."""
@@ -257,11 +272,9 @@ def main():
         assert rib_w.shape == (10,), "need 10 weights"
         rib_weights = np.concatenate([rib_w, rib_w])  # L + R
     else:
-        # Manubrium-heavy default: weights decrease linearly from rib1 to
-        # rib10 (10..1). Anchors sternum top tightly while lower ribs
-        # maintain relative geometry with progressively less influence.
-        rib_w = np.linspace(10.0, 1.0, 10)
-        rib_weights = np.concatenate([rib_w, rib_w])
+        # Uniform default: all 20 rib endpoints weighted equally. Lowest
+        # mean error fit; no top anchor.
+        rib_weights = np.ones(20)
     print(f"Rib weights: {rib_weights[:10]} (L=R)")
 
     # 1. Build skel
@@ -391,6 +404,26 @@ def main():
     else:
         print(f"\nBest parent: {best_parent}")
     print(f"Local offset (m): {best_local}")
+
+    # 6b. Recompute sternum_R with constrained Procrustes (pivot fixed at
+    # sternum joint location = parent body world @ best_local). This finds
+    # the best sternum world rotation given that translation is FIXED by
+    # the parent's joint pivot — no free centroid drift. Result: rib
+    # endpoint world positions are matched to sternum body contacts as
+    # closely as possible WITHOUT cheating via translation.
+    J_rest = (rest_T[best_parent] @ np.append(best_local, 1.0))[:3]
+    p_local = contacts_rest - J_rest  # (20, 3) sternum-rest contacts from pivot
+    for f in range(n_frames):
+        eps_world_f = np.zeros((len(endpoints_local), 3))
+        for k, parent in enumerate(parent_bodies):
+            T = body_T[parent][f]
+            eps_world_f[k] = (T @ np.append(endpoints_local[k], 1.0))[:3]
+        J_f = (body_T[best_parent][f] @ np.append(best_local, 1.0))[:3]
+        q_local = eps_world_f - J_f
+        sternum_R[f] = procrustes_fixed_pivot(p_local, q_local, rib_weights)
+    # Recompute loc_rots from updated sternum_R.
+    R_parent_arr = body_T[best_parent][:, :3, :3]
+    best_locrots = rest_R[best_parent] @ np.transpose(R_parent_arr, (0, 2, 1)) @ sternum_R
 
     # 7. Convert per-frame local rotation to ZXY Euler (deg)
     euler_zxy = R.from_matrix(best_locrots).as_euler("ZXY", degrees=True)
