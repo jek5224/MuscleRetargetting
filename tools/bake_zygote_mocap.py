@@ -173,6 +173,12 @@ def main():
     ap.add_argument("--clav-scale", type=float, default=0.4,
                     help="Scale BVH-driven clavicle rotation (slerp from "
                          "identity). <1 restricts clavicle motion.")
+    ap.add_argument("--anatomical-forward", type=float, nargs=3,
+                    default=[0.0, 0.0, 1.0],
+                    help="World direction forearm should flex toward at "
+                         "T-pose (degenerate bend). Default +Z. Sets ulna "
+                         "flex axis = humerus_dir x forward, so elbow "
+                         "naturally bends forward when arm starts straight.")
     args = ap.parse_args()
 
     olines, ojoints, omi = parse_bvh(args.orig_bvh)
@@ -392,9 +398,17 @@ def main():
             bend_target = d_bvh_fore - (d_bvh_fore @ d_bvh_hum) * d_bvh_hum
             bend_norm = np.linalg.norm(bend_target)
             if bend_norm < 0.17:
-                # Arm near-straight: ill-defined bend direction. Use previous
-                # frame's bend axis if available, else fall back to shortest
-                # rotation (twist undefined → ulna_angle picks small value).
+                # Arm near-straight (T-pose source): substitute anatomical
+                # forward direction so elbow flex axis is well-defined.
+                # Without this, humerus axial twist is unconstrained and
+                # palm ends up wherever skel rest puts the forearm frame.
+                fwd_w = np.array(args.anatomical_forward, dtype=np.float64)
+                fwd_w /= max(np.linalg.norm(fwd_w), 1e-12)
+                bend_target = fwd_w - (fwd_w @ X_target_w) * X_target_w
+                bend_norm = np.linalg.norm(bend_target)
+            if bend_norm < 1e-6:
+                # Humerus nearly parallel to forward direction (degenerate
+                # for any choice). Fall back to direction-only match.
                 R_motion_world = rotation_from_to(d_chain_hum, d_bvh_hum)
                 hum_body_world_target = R_motion_world @ hum_body_world_init
             else:
