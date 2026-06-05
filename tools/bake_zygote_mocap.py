@@ -493,7 +493,11 @@ def main():
     dev_L = _rot_dev_from_I(bvh_foot_rot_0_raw["L"])
     dev_R = _rot_dev_from_I(bvh_foot_rot_0_raw["R"])
     print(f"  BVH foot f=0 deviation from identity: L={np.rad2deg(dev_L):.1f}° R={np.rad2deg(dev_R):.1f}°")
-    if abs(dev_L - dev_R) > np.deg2rad(15.0):
+    # Mirror only when one side is near-identity (likely T-pose-rest) AND
+    # the other is way off. If both feet have significant deviation, both
+    # are likely valid for that character's rest orientation (e.g. LaFAN
+    # faces -Z, rest world rot ~90°).
+    if min(dev_L, dev_R) < np.deg2rad(15.0) and abs(dev_L - dev_R) > np.deg2rad(20.0):
         if dev_L < dev_R:
             bvh_foot_rot_0 = {"L": bvh_foot_rot_0_raw["L"],
                               "R": M_yz @ bvh_foot_rot_0_raw["L"] @ M_yz}
