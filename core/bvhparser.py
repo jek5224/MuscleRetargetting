@@ -110,8 +110,14 @@ class MyBVH():
                     if stripped and stripped in bvh_joint_set:
                         remapped[skel_name] = stripped
                     else:
-                        # Try all BVH joints that end with the target name
-                        matches = [jn for jn in bvh_joint_set if jn.endswith(bvh_name)]
+                        # Try all BVH joints that end with the target name.
+                        # Require a separator before the suffix (or exact match)
+                        # so e.g. "End_Character1_LeftHand" doesn't compete
+                        # with "Character1_LeftHand" when matching "LeftHand".
+                        matches = [jn for jn in bvh_joint_set
+                                   if jn == bvh_name or jn.endswith("_" + bvh_name)]
+                        # Filter out End Sites (named "End_..." by parser)
+                        matches = [m for m in matches if not m.startswith("End_")]
                         if len(matches) == 1:
                             remapped[skel_name] = matches[0]
                         else:
@@ -206,7 +212,22 @@ class MyBVH():
                     self.mocap_refs[:, skel_jn.getIndexInSkeleton(0):skel_jn.getIndexInSkeleton(0)+skel_jn.getNumDofs()] = (R.from_matrix(T_net[:,:3,:3]).as_rotvec())
                     # break
                 elif skel_jn.getNumDofs() == 1:
-                    self.mocap_refs[:, skel_jn.getIndexInSkeleton(0):skel_jn.getIndexInSkeleton(0)+skel_jn.getNumDofs()] = np.array([np.linalg.norm(R.from_matrix(T_net).as_rotvec(), axis=1)]).T
+                    rotvec = R.from_matrix(T_net[:, :3, :3]).as_rotvec()
+                    # Project rotvec onto the joint's revolute axis for a
+                    # SIGNED angle (np.linalg.norm gives unsigned, so the
+                    # joint would only bend one way regardless of BVH sign).
+                    try:
+                        axis = np.asarray(skel_jn.getAxis(), dtype=np.float64)
+                        an = np.linalg.norm(axis)
+                        if an > 1e-9:
+                            axis = axis / an
+                            signed = rotvec @ axis  # (T,)
+                        else:
+                            signed = np.linalg.norm(rotvec, axis=1)
+                    except Exception:
+                        signed = np.linalg.norm(rotvec, axis=1)
+                    idx0 = skel_jn.getIndexInSkeleton(0)
+                    self.mocap_refs[:, idx0:idx0 + 1] = signed.reshape(-1, 1)
 
 
         self.root_jn = self.skel.getJoint(0)

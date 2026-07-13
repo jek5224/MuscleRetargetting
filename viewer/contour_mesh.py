@@ -526,9 +526,10 @@ class ContourMeshMixin(ContourAnimationMixin):
 
         if self.specific_contour is not None:
             glDisable(GL_LIGHTING)
-            glColor3f(1, 0, 0)
+            glDisable(GL_DEPTH_TEST)
+            glColor3f(0, 1, 1)
 
-            glLineWidth(0.5)
+            glLineWidth(3.0)
             for contour in self.specific_contour:
                 glBegin(GL_LINE_LOOP)
                 for v in contour:
@@ -537,6 +538,7 @@ class ContourMeshMixin(ContourAnimationMixin):
                         glVertex3fv(v_arr[:3])
                 glEnd()
 
+            glPointSize(4.0)
             glBegin(GL_POINTS)
             for contour in self.specific_contour:
                 for v in contour:
@@ -545,6 +547,7 @@ class ContourMeshMixin(ContourAnimationMixin):
                         glVertex3fv(v_arr[:3])
             glEnd()
 
+            glEnable(GL_DEPTH_TEST)
             glEnable(GL_LIGHTING)
 
         if contours_to_draw is None:
@@ -868,6 +871,94 @@ class ContourMeshMixin(ContourAnimationMixin):
                 glDisable(GL_BLEND)
 
         glEnable(GL_LIGHTING)
+
+    def draw_specific_contour_overlay(self):
+        """Draw the slider-selected contour as a late overlay on top of meshes."""
+        if self.specific_contour is None:
+            return
+
+        glDisable(GL_LIGHTING)
+        glDisable(GL_DEPTH_TEST)
+        glDepthMask(GL_FALSE)
+        glColor4f(0.0, 1.0, 1.0, 1.0)
+
+        glLineWidth(5.0)
+        for contour in self.specific_contour:
+            glBegin(GL_LINE_LOOP)
+            for v in contour:
+                v_arr = np.asarray(v).flatten()
+                if len(v_arr) >= 3:
+                    glVertex3fv(v_arr[:3])
+            glEnd()
+
+        glPointSize(6.0)
+        glBegin(GL_POINTS)
+        for contour in self.specific_contour:
+            for v in contour:
+                v_arr = np.asarray(v).flatten()
+                if len(v_arr) >= 3:
+                    glVertex3fv(v_arr[:3])
+        glEnd()
+
+        glDepthMask(GL_TRUE)
+        glEnable(GL_DEPTH_TEST)
+        glEnable(GL_LIGHTING)
+
+    def draw_tendon_boundary_overlay(self):
+        """Draw optional parametric tendon boundary lines."""
+        line_sets = []
+        if getattr(self, 'draw_origin_tendon_boundary', False):
+            lines = getattr(self, '_tendon_origin_boundary_lines', None)
+            if lines is not None and len(lines) > 0:
+                line_sets.append((lines, (0.0, 1.0, 1.0, 1.0)))
+        if getattr(self, 'draw_insertion_tendon_boundary', False):
+            lines = getattr(self, '_tendon_insertion_boundary_lines', None)
+            if lines is not None and len(lines) > 0:
+                line_sets.append((lines, (1.0, 1.0, 0.0, 1.0)))
+
+        if line_sets:
+            glDisable(GL_LIGHTING)
+            glDisable(GL_DEPTH_TEST)
+            glDepthMask(GL_FALSE)
+            glEnableClientState(GL_VERTEX_ARRAY)
+            glBindBuffer(GL_ARRAY_BUFFER, 0)
+            for lines, color in line_sets:
+                glColor4f(*color)
+                glLineWidth(4.0)
+                glVertexPointer(3, GL_FLOAT, 0, lines)
+                glDrawArrays(GL_LINES, 0, len(lines))
+            glDisableClientState(GL_VERTEX_ARRAY)
+            glDepthMask(GL_TRUE)
+            glEnable(GL_DEPTH_TEST)
+            glEnable(GL_LIGHTING)
+
+        overlay = getattr(self, '_tendon_overlay_vertices', None)
+        if overlay is None or len(overlay) == 0:
+            return
+        overlay_normals = getattr(self, '_tendon_overlay_normals', None)
+
+        glEnable(GL_LIGHTING)
+        glEnable(GL_DEPTH_TEST)
+        glDepthMask(GL_FALSE)
+        glEnable(GL_POLYGON_OFFSET_FILL)
+        glPolygonOffset(-8.0, -8.0)
+        glDisable(GL_CULL_FACE)
+        glEnable(GL_COLOR_MATERIAL)
+        glColorMaterial(GL_FRONT_AND_BACK, GL_AMBIENT_AND_DIFFUSE)
+        glColor4f(0.82, 0.80, 0.70, 1.0)
+
+        glEnableClientState(GL_VERTEX_ARRAY)
+        if overlay_normals is not None and len(overlay_normals) == len(overlay):
+            glEnableClientState(GL_NORMAL_ARRAY)
+            glNormalPointer(GL_FLOAT, 0, overlay_normals)
+        glBindBuffer(GL_ARRAY_BUFFER, 0)
+        glVertexPointer(3, GL_FLOAT, 0, overlay)
+        glDrawArrays(GL_TRIANGLES, 0, len(overlay))
+        if overlay_normals is not None and len(overlay_normals) == len(overlay):
+            glDisableClientState(GL_NORMAL_ARRAY)
+        glDisableClientState(GL_VERTEX_ARRAY)
+        glDisable(GL_POLYGON_OFFSET_FILL)
+        glDepthMask(GL_TRUE)
 
     def find_reference_intersection(self, contour_value):
         """
@@ -1238,7 +1329,104 @@ class ContourMeshMixin(ContourAnimationMixin):
         _, ordered_contour_vertices, _ = self.find_contour(contour_value)
         self.specific_contour = ordered_contour_vertices
 
+        self.is_draw = True
         self.is_draw_contours = True
+
+    def get_contour_scalar_schedule(self):
+        """Return contour level scalar values from current bounding planes."""
+        values = []
+        for level_idx, planes in enumerate(getattr(self, 'bounding_planes', []) or []):
+            scalar_value = None
+            if planes and isinstance(planes[0], dict):
+                scalar_value = planes[0].get('scalar_value', None)
+            if scalar_value is None:
+                scalar_value = 1.0 if level_idx == 0 else 10.0 if level_idx == len(self.bounding_planes) - 1 else None
+            if scalar_value is not None:
+                values.append(float(scalar_value))
+        return values
+
+    def find_contours_at_values(self, contour_values, skeleton_meshes=None,
+                                use_geodesic_edges=False, defer=False):
+        """Build contour levels at externally prescribed scalar values.
+
+        This is used by linked muscle compartments: the master runs adaptive
+        contour/fill/transition logic, and the follower realizes the same
+        scalar schedule on its own geometry.
+        """
+        if self.scalar_field is None:
+            print("Please compute scalar field first")
+            return False
+        if contour_values is None or len(contour_values) == 0:
+            print("No contour values provided")
+            return False
+
+        if self._face_scalar_min is None:
+            self._precompute_face_scalar_ranges()
+
+        values = sorted({float(v) for v in contour_values})
+        if not values:
+            return False
+
+        self.contours = []
+        self.bounding_planes = []
+        self.contours_discarded = []
+        self.bounding_planes_discarded = []
+        self._contours_backup = None
+        self._bounding_planes_backup = None
+        self.selected_stream_levels = None
+
+        contours = []
+        prev_plane = None
+
+        for value in values:
+            if abs(value - 1.0) < 1e-6:
+                level_planes = []
+                level_contours = []
+                for i, edge_group in enumerate(self.edge_groups):
+                    if self.edge_classes[i] == 'origin':
+                        c, bp = self.save_bounding_planes(
+                            self.vertices[edge_group], 1.0, use_independent_axes=True)
+                        level_planes.append(bp)
+                        level_contours.append(c)
+                self.bounding_planes.append(level_planes)
+                contours.append(level_contours)
+                prev_plane = level_planes[0] if level_planes else prev_plane
+            elif abs(value - 10.0) < 1e-6:
+                level_planes = []
+                level_contours = []
+                for i, edge_group in enumerate(self.edge_groups):
+                    if self.edge_classes[i] == 'insertion':
+                        c, bp = self.save_bounding_planes(
+                            self.vertices[edge_group], 10.0, use_independent_axes=True)
+                        level_planes.append(bp)
+                        level_contours.append(c)
+                self.bounding_planes.append(level_planes)
+                contours.append(level_contours)
+                prev_plane = level_planes[0] if level_planes else prev_plane
+            else:
+                level_planes, level_contours, _ = self.find_contour(
+                    value, prev_bounding_plane=prev_plane,
+                    use_geodesic_edges=use_geodesic_edges)
+                self.bounding_planes.append(level_planes)
+                contours.append(level_contours)
+                prev_plane = level_planes[0] if level_planes else prev_plane
+
+        self.contours = contours
+        self._contour_replayed = False
+        self._find_contours_count = len(contours)
+        self._fill_gaps_inserted_indices = []
+        self._fill_gaps_replayed = not defer
+        self._transitions_inserted_indices = []
+        self._transitions_replayed = not defer
+
+        if defer:
+            self.draw_contour_stream = [False] * len(contours)
+            self.is_draw_contours = False
+        else:
+            self.draw_contour_stream = [True] * len(contours)
+            self.is_draw_contours = True
+            self._contour_replayed = True
+        return True
 
     def find_contours(self, scalar_step=0.1, skeleton_meshes=None, use_geodesic_edges=False, spacing_scale=1.0, defer=False):
         if self.scalar_field is None:
@@ -5559,11 +5747,9 @@ class ContourMeshMixin(ContourAnimationMixin):
         print(f"  DEBUG: {len(all_intersection_pairs)} total intersection point pairs to match")
 
         if num_streams > 0 and len(all_intersection_pairs) > 0:
-            # Find max levels across all streams
             max_levels = max(len(cg) for cg in self.contours)
             print(f"  DEBUG: max_levels={max_levels}")
 
-            # For each contour, check ALL intersection points to find matching boundaries
             for s_idx in range(num_streams):
                 for level_idx in range(len(self.contours[s_idx])):
                     contour = np.array(self.contours[s_idx][level_idx])
@@ -5574,11 +5760,7 @@ class ContourMeshMixin(ContourAnimationMixin):
                     found_boundary = False
 
                     for ip1, ip2 in all_intersection_pairs:
-                        # Find vertices that EXACTLY match ip1 and ip2
-                        # Use very tight tolerance to avoid false positives from wrong intersection pairs
-                        # Working contours have dist=0.0000, wrong matches have dist=0.002-0.003
-                        endpoint_tolerance = 0.001  # Must be essentially exact match
-
+                        endpoint_tolerance = 0.001
                         idx_at_ip1 = None
                         idx_at_ip2 = None
                         dist_to_ip1 = float('inf')
@@ -5594,38 +5776,118 @@ class ContourMeshMixin(ContourAnimationMixin):
                                 dist_to_ip2 = d2
                                 idx_at_ip2 = vi
 
-                        # Both endpoints must be present in this contour
                         if dist_to_ip1 > endpoint_tolerance or dist_to_ip2 > endpoint_tolerance:
                             continue
                         if idx_at_ip1 == idx_at_ip2:
-                            continue  # Same vertex can't be both endpoints
-
-                        # Only store the TWO intersection point indices
-                        # Don't try to find intermediate vertices - just use these two as fixed points
-                        # The resampling will create a straight line between them
-                        boundary_indices = [idx_at_ip1, idx_at_ip2]
+                            continue
 
                         if s_idx >= len(stream_boundary_info):
                             for _ in range(s_idx - len(stream_boundary_info) + 1):
                                 stream_boundary_info.append({})
 
-                        if level_idx not in stream_boundary_info[s_idx]:
-                            stream_boundary_info[s_idx][level_idx] = []
-
-                        # Store boundary info with ORIGINAL intersection points
+                        stream_boundary_info[s_idx].setdefault(level_idx, [])
                         stream_boundary_info[s_idx][level_idx].append((
                             idx_at_ip1, idx_at_ip2,
-                            ip1.copy(), ip2.copy(),  # Original intersection points
-                            boundary_indices
+                            ip1.copy(), ip2.copy(),
+                            [idx_at_ip1, idx_at_ip2]
                         ))
-                        print(f"    Stream {s_idx} level {level_idx}: boundary endpoints {idx_at_ip1}->{idx_at_ip2} (dist={dist_to_ip1:.4f}, {dist_to_ip2:.4f})")
+                        print(f"    Stream {s_idx} level {level_idx}: boundary endpoints "
+                              f"{idx_at_ip1}->{idx_at_ip2} (dist={dist_to_ip1:.4f}, {dist_to_ip2:.4f})")
                         found_boundary = True
-                        break  # Found the matching cut for this contour
+                        break
 
-                    if not found_boundary and level_idx == 0:
+                    if not found_boundary:
                         print(f"    Stream {s_idx} level {level_idx}: NO boundary found (contour has {n} vertices)")
 
-        # Ensure stream_boundary_info has entries for all streams
+        while len(stream_boundary_info) < num_streams:
+            stream_boundary_info.append({})
+
+        def _longest_index_run(indices, n_total):
+            if len(indices) < 2 or n_total < 2:
+                return None
+            anchors = sorted(set(int(i) for i in indices))
+            runs = []
+            run = [anchors[0]]
+            for idx in anchors[1:]:
+                if idx == run[-1] + 1:
+                    run.append(idx)
+                else:
+                    runs.append(run)
+                    run = [idx]
+            runs.append(run)
+            if len(runs) > 1 and runs[0][0] == 0 and runs[-1][-1] == n_total - 1:
+                runs = [runs[-1] + [i + n_total for i in runs[0]]] + runs[1:-1]
+            best = max(runs, key=len)
+            return best if len(best) >= 2 else None
+
+        def _add_boundary_info(stream_idx, level_idx, idx0, idx1, ip0, ip1):
+            while stream_idx >= len(stream_boundary_info):
+                stream_boundary_info.append({})
+            stream_boundary_info[stream_idx].setdefault(level_idx, [])
+            for existing in stream_boundary_info[stream_idx][level_idx]:
+                if len(existing) >= 2 and {int(existing[0]), int(existing[1])} == {int(idx0), int(idx1)}:
+                    return
+            stream_boundary_info[stream_idx][level_idx].append((
+                int(idx0), int(idx1),
+                np.asarray(ip0, dtype=np.float64).copy(),
+                np.asarray(ip1, dtype=np.float64).copy(),
+                [int(idx0), int(idx1)]
+            ))
+
+        inferred_boundary_count = 0
+        if num_streams >= 2:
+            base_shared_eps = float(getattr(self, '_connected_seam_stitch_eps', 1e-3))
+            shared_eps = float(getattr(
+                self, '_connected_seam_match_eps',
+                max(base_shared_eps * 6.0, 6e-3)))
+            max_levels = max(len(cg) for cg in self.contours)
+            for level_idx in range(max_levels):
+                for si in range(num_streams):
+                    if level_idx >= len(self.contours[si]) or level_idx in stream_boundary_info[si]:
+                        continue
+                    ci = np.asarray(self.contours[si][level_idx], dtype=np.float64)
+                    if len(ci) < 3:
+                        continue
+                    for sj in range(si + 1, num_streams):
+                        if level_idx >= len(self.contours[sj]) or level_idx in stream_boundary_info[sj]:
+                            continue
+                        cj = np.asarray(self.contours[sj][level_idx], dtype=np.float64)
+                        if len(cj) < 3:
+                            continue
+                        try:
+                            tree_j = cKDTree(cj)
+                            dists, nearest = tree_j.query(ci, k=1)
+                        except Exception:
+                            continue
+                        anchors_i = [i for i, d in enumerate(np.asarray(dists)) if d <= shared_eps]
+                        if len(anchors_i) < 2:
+                            continue
+                        anchors_j = [int(nearest[i]) for i in anchors_i]
+                        run_i = _longest_index_run(anchors_i, len(ci))
+                        run_j = _longest_index_run(anchors_j, len(cj))
+                        if run_i is None or run_j is None:
+                            continue
+                        i0, i1 = int(run_i[0] % len(ci)), int(run_i[-1] % len(ci))
+                        j0, j1 = int(run_j[0] % len(cj)), int(run_j[-1] % len(cj))
+                        direct = np.linalg.norm(ci[i0] - cj[j0]) + np.linalg.norm(ci[i1] - cj[j1])
+                        swapped = np.linalg.norm(ci[i0] - cj[j1]) + np.linalg.norm(ci[i1] - cj[j0])
+                        if direct <= swapped:
+                            ip0 = 0.5 * (ci[i0] + cj[j0])
+                            ip1 = 0.5 * (ci[i1] + cj[j1])
+                            _add_boundary_info(si, level_idx, i0, i1, ip0, ip1)
+                            _add_boundary_info(sj, level_idx, j0, j1, ip0, ip1)
+                        else:
+                            ip0 = 0.5 * (ci[i0] + cj[j1])
+                            ip1 = 0.5 * (ci[i1] + cj[j0])
+                            _add_boundary_info(si, level_idx, i0, i1, ip0, ip1)
+                            _add_boundary_info(sj, level_idx, j1, j0, ip0, ip1)
+                        inferred_boundary_count += 1
+                        print(f"    Inferred shared boundary at level {level_idx}: "
+                              f"stream {si} {i0}->{i1}, stream {sj} {j0}->{j1}")
+                        break
+        if inferred_boundary_count:
+            print(f"  Inferred {inferred_boundary_count} shared cut boundaries from counterpart streams")
+
         while len(stream_boundary_info) < num_streams:
             stream_boundary_info.append({})
 
@@ -7379,14 +7641,25 @@ class ContourMeshMixin(ContourAnimationMixin):
         self.contour_mesh_vertices = None
         self.contour_mesh_faces = None
 
-        # Use contours_resampled if available (has params for parametric mesh building)
-        # Otherwise fall back to self.contours
-        use_resampled = (hasattr(self, 'contours_resampled') and
-                        self.contours_resampled is not None and
-                        len(self.contours_resampled) > 0)
+        composite_source = getattr(self, '_connected_contour_mesh_source', None)
+        connected_weld = False
+        if composite_source is not None and len(composite_source) > 0:
+            source_contours = composite_source
+            source_name = "connected tendon/belly source"
+            source_params = getattr(self, '_connected_contour_mesh_params', None)
+            source_fixed = getattr(self, '_connected_contour_mesh_fixed', None)
+            connected_weld = True
+        else:
+            # Use contours_resampled if available (has params for parametric mesh building)
+            # Otherwise fall back to self.contours
+            use_resampled = (hasattr(self, 'contours_resampled') and
+                            self.contours_resampled is not None and
+                            len(self.contours_resampled) > 0)
 
-        source_contours = self.contours_resampled if use_resampled else self.contours
-        source_name = "contours_resampled" if use_resampled else "contours"
+            source_contours = self.contours_resampled if use_resampled else self.contours
+            source_name = "contours_resampled" if use_resampled else "contours"
+            source_params = self.contours_resampled_params if use_resampled and hasattr(self, 'contours_resampled_params') else None
+            source_fixed = self.contours_resampled_fixed if use_resampled and hasattr(self, 'contours_resampled_fixed') else None
 
         print(f"Building contour mesh from {len(source_contours)} streams (source: {source_name})...")
         num_streams = len(source_contours)
@@ -7410,21 +7683,159 @@ class ContourMeshMixin(ContourAnimationMixin):
             print("Not enough levels to build mesh.")
             return
 
+        base_weld_eps = float(getattr(self, '_connected_vertex_weld_eps', 2e-5))
+        seam_weld_eps = float(getattr(self, '_connected_seam_stitch_eps', 1e-3))
+        seam_match_eps = float(getattr(
+            self, '_connected_seam_match_eps',
+            max(seam_weld_eps * 6.0, 6e-3)))
+
+        def _connected_part_for_stream_level_pre(stream_idx, level_idx):
+            source_provenance = getattr(self, '_connected_contour_mesh_provenance', None)
+            if (source_provenance is not None
+                    and stream_idx < len(source_provenance)
+                    and level_idx < len(source_provenance[stream_idx])):
+                region = source_provenance[stream_idx][level_idx]
+                if isinstance(region, dict):
+                    return region.get('part')
+            return None
+
+        def _forward_positions(start, end, n_total):
+            start = int(start) % n_total
+            end = int(end) % n_total
+            if start <= end:
+                return list(range(start, end + 1))
+            return list(range(start, n_total)) + list(range(0, end + 1))
+
+        def _longest_contiguous_run(anchor_positions, n_total):
+            if len(anchor_positions) < 2 or n_total < 2:
+                return None
+            anchors = sorted(set(int(i) for i in anchor_positions))
+            runs = []
+            run = [anchors[0]]
+            for pos in anchors[1:]:
+                if pos == run[-1] + 1:
+                    run.append(pos)
+                else:
+                    runs.append(run)
+                    run = [pos]
+            runs.append(run)
+            if len(runs) > 1 and runs[0][0] == 0 and runs[-1][-1] == n_total - 1:
+                runs = [runs[-1] + [p + n_total for p in runs[0]]] + runs[1:-1]
+            best = max(runs, key=len)
+            return best if len(best) >= 2 else None
+
+        def _try_merge_two_connected_streams(stream_a, stream_b):
+            merged = []
+            merged_count = 0
+            eps = max(base_weld_eps, seam_match_eps)
+            for level_idx in range(min(len(stream_a), len(stream_b))):
+                ca = np.asarray(stream_a[level_idx], dtype=np.float64)
+                cb = np.asarray(stream_b[level_idx], dtype=np.float64)
+                if len(ca) < 3 or len(cb) < 3:
+                    print(f"  Connected outer merge skipped at level {level_idx}: degenerate contour")
+                    return None, 0
+                if _connected_part_for_stream_level_pre(0, level_idx) != _connected_part_for_stream_level_pre(1, level_idx):
+                    print(f"  Connected outer merge skipped at level {level_idx}: part mismatch "
+                          f"{_connected_part_for_stream_level_pre(0, level_idx)} vs "
+                          f"{_connected_part_for_stream_level_pre(1, level_idx)}")
+                    return None, 0
+                try:
+                    tb = cKDTree(cb)
+                    da, ia = tb.query(ca, k=1)
+                except Exception:
+                    print(f"  Connected outer merge skipped at level {level_idx}: KDTree failed")
+                    return None, 0
+                anchors_a = [i for i, d in enumerate(np.asarray(da)) if d <= eps]
+                anchors_b = sorted(set(int(ia[i]) for i in anchors_a))
+                run_a = _longest_contiguous_run(anchors_a, len(ca))
+                run_b = _longest_contiguous_run(anchors_b, len(cb))
+                if run_a is None or run_b is None:
+                    min_d = float(np.min(da)) if len(da) else float('inf')
+                    med_d = float(np.median(da)) if len(da) else float('inf')
+                    print(f"  Connected outer merge skipped at level {level_idx}: no seam run "
+                          f"(anchors={len(anchors_a)}, min={min_d:.6f}, median={med_d:.6f}, eps={eps:.6f})")
+                    return None, 0
+                a0, a1 = run_a[0], run_a[-1]
+                b0, b1 = run_b[0], run_b[-1]
+                a0p = ca[int(a0) % len(ca)]
+                a1p = ca[int(a1) % len(ca)]
+                b0p = cb[int(b0) % len(cb)]
+                b1p = cb[int(b1) % len(cb)]
+                direct = np.linalg.norm(a0p - b0p) + np.linalg.norm(a1p - b1p)
+                swapped = np.linalg.norm(a0p - b1p) + np.linalg.norm(a1p - b0p)
+                outer_a_pos = _forward_positions(a1, a0, len(ca))
+                if direct <= swapped:
+                    outer_b_pos = _forward_positions(b0, b1, len(cb))
+                else:
+                    outer_b_pos = list(reversed(_forward_positions(b1, b0, len(cb))))
+                outer_a = ca[[p % len(ca) for p in outer_a_pos]]
+                outer_b = cb[[p % len(cb) for p in outer_b_pos]]
+                # Average corresponding seam endpoints so the merged outline closes cleanly.
+                outer_a[0] = 0.5 * (outer_a[0] + outer_b[-1])
+                outer_b[-1] = outer_a[0]
+                outer_a[-1] = 0.5 * (outer_a[-1] + outer_b[0])
+                outer_b[0] = outer_a[-1]
+                contour = np.vstack([outer_a, outer_b[1:-1]])
+                if len(contour) < 3:
+                    return None, 0
+                merged.append(contour)
+                merged_count += 1
+            return merged, merged_count
+
+        if connected_weld and num_streams == 2:
+            merged_stream, merged_count = _try_merge_two_connected_streams(aligned_streams[0], aligned_streams[1])
+            if merged_stream is not None and len(merged_stream) >= 2:
+                print(f"  Merged connected master/follower contours into one outer stream ({merged_count} levels)")
+                aligned_streams = [merged_stream]
+                source_params = None
+                source_fixed = None
+                connected_weld = False
+                num_streams = 1
+                num_levels = len(merged_stream)
+
         # Build vertices and track indices per stream per level
         all_vertices = []
         # stream_level_indices[stream_idx][level_idx] = list of vertex indices for that contour
         stream_level_indices = [[[] for _ in range(num_levels)] for _ in range(num_streams)]
         # Shared vertex pairs: (global_vi_stream_A, global_vi_stream_B) — same contour point
         shared_vertex_pairs = []
+        welded_vertex_count = 0
 
-        # Epsilon for detecting exact duplicates (shared cut boundary vertices)
-        eps = 1e-6
+        # Epsilon for detecting duplicate/shared cut-boundary vertices.  For a
+        # connected master/follower source, independently processed contours can
+        # land a little apart even when they represent the same cut surface, so
+        # use the seam tolerance for cross-stream welding.
+        eps = max(base_weld_eps, seam_weld_eps) if connected_weld else base_weld_eps
+        source_provenance_for_weld = getattr(self, '_connected_contour_mesh_provenance', None)
+
+        def _connected_part_for_stream_level(stream_idx, level_idx):
+            if (source_provenance_for_weld is not None
+                    and stream_idx < len(source_provenance_for_weld)
+                    and level_idx < len(source_provenance_for_weld[stream_idx])):
+                region = source_provenance_for_weld[stream_idx][level_idx]
+                if isinstance(region, dict):
+                    return region.get('part')
+            return None
+
+        def _find_root(parent, i):
+            while parent[i] != i:
+                parent[i] = parent[parent[i]]
+                i = parent[i]
+            return i
+
+        def _union(parent, a, b):
+            ra = _find_root(parent, a)
+            rb = _find_root(parent, b)
+            if ra != rb:
+                parent[rb] = ra
+
+        seam_diag = []
 
         for level_idx in range(num_levels):
             level_vertices = []  # All vertices at this level (before dedup)
             level_stream_ranges = []  # (start, end) indices into level_vertices for each stream
 
-            # Collect all vertices at this level from all streams
+            # Collect all vertices at this level from all streams.
             for stream_idx, aligned_stream in enumerate(aligned_streams):
                 if level_idx >= len(aligned_stream) or len(aligned_stream[level_idx]) == 0:
                     level_stream_ranges.append((len(level_vertices), len(level_vertices)))
@@ -7444,8 +7855,66 @@ class ContourMeshMixin(ContourAnimationMixin):
             # Map from original index to deduplicated index
             dedup_map = list(range(n))
 
-            # No cross-stream vertex merging — each stream keeps its own vertices.
-            # Record correspondence pairs for deterministic merge after tetrahedralization.
+            local_stream = np.full(n, -1, dtype=np.int32)
+            for stream_idx, (start, end) in enumerate(level_stream_ranges):
+                if end > start:
+                    local_stream[start:end] = stream_idx
+
+            # Connected master/follower sources represent split pieces of the
+            # same anatomical surface.  Vertices that are coincident across
+            # streams at the same contour level must share one mesh vertex id,
+            # otherwise the final contour mesh is only visually touching.
+            if connected_weld and n > 1:
+                parent = list(range(n))
+                try:
+                    tree = cKDTree(level_vertices)
+                    pairs = tree.query_pairs(r=eps)
+                except Exception:
+                    pairs = []
+                for i, j in pairs:
+                    si = int(local_stream[i])
+                    sj = int(local_stream[j])
+                    if si < 0 or sj < 0 or si == sj:
+                        continue
+                    if _connected_part_for_stream_level(si, level_idx) != _connected_part_for_stream_level(sj, level_idx):
+                        continue
+                    _union(parent, int(i), int(j))
+                for si in range(num_streams):
+                    start_i, end_i = level_stream_ranges[si]
+                    if end_i <= start_i:
+                        continue
+                    vi = level_vertices[start_i:end_i]
+                    for sj in range(si + 1, num_streams):
+                        if _connected_part_for_stream_level(si, level_idx) != _connected_part_for_stream_level(sj, level_idx):
+                            continue
+                        start_j, end_j = level_stream_ranges[sj]
+                        if end_j <= start_j:
+                            continue
+                        vj = level_vertices[start_j:end_j]
+                        try:
+                            tree_j = cKDTree(vj)
+                            dists, _ = tree_j.query(vi, k=1)
+                            dists = np.asarray(dists, dtype=np.float64)
+                            close_count = int(np.sum(dists <= eps))
+                            match_count = int(np.sum(dists <= seam_match_eps))
+                            min_dist = float(np.min(dists)) if len(dists) else float('inf')
+                            median_dist = float(np.median(dists)) if len(dists) else float('inf')
+                            seam_diag.append((level_idx, (si, sj), close_count, match_count,
+                                              min_dist, median_dist))
+                        except Exception:
+                            pass
+                clusters = {}
+                for i in range(n):
+                    root = _find_root(parent, i)
+                    clusters.setdefault(root, []).append(i)
+                for root, members in clusters.items():
+                    if len(members) <= 1:
+                        continue
+                    welded_vertex_count += len(members) - 1
+                    mean_pos = np.mean(level_vertices[members], axis=0)
+                    level_vertices[root] = mean_pos
+                    for i in members:
+                        dedup_map[i] = root
 
             # Build deduplicated vertex list and create final index mapping
             final_indices = {}  # original index -> final vertex index (global)
@@ -7479,6 +7948,171 @@ class ContourMeshMixin(ContourAnimationMixin):
             print("No vertices generated.")
             return
 
+        if connected_weld and seam_diag:
+            weak = [d for d in seam_diag if d[2] < 2]
+            if weak:
+                print(f"  Connected seam diagnostic: {len(weak)} stream-pair levels have <2 strict weld samples")
+                for level_idx, pair, close_count, match_count, min_dist, median_dist in weak[:12]:
+                    print(f"    level {level_idx} streams {pair}: weld={close_count}, "
+                          f"match={match_count}, min={min_dist:.6f}, median={median_dist:.6f}")
+
+        vertex_level_tmp = np.full(len(all_vertices), -1, dtype=np.int32)
+        vertex_stream_sets = [set() for _ in range(len(all_vertices))]
+        for stream_idx in range(num_streams):
+            for level_idx in range(num_levels):
+                for vertex_idx in stream_level_indices[stream_idx][level_idx]:
+                    vertex_level_tmp[vertex_idx] = level_idx
+                    vertex_stream_sets[vertex_idx].add(stream_idx)
+
+        def _source_part(stream_idx, level_idx):
+            return _connected_part_for_stream_level(stream_idx, level_idx)
+
+        def _add_connected_seam_faces(vertices, faces, face_streams):
+            if not connected_weld or len(faces) == 0:
+                return 0
+            stitch_eps = float(getattr(self, '_connected_seam_stitch_eps', 1e-3))
+            edge_faces = defaultdict(list)
+            for fi, face in enumerate(faces):
+                for ei in range(3):
+                    a = int(face[ei])
+                    b = int(face[(ei + 1) % 3])
+                    edge_faces[tuple(sorted((a, b)))].append(fi)
+            boundary_edges = [
+                edge for edge, refs in edge_faces.items()
+                if len(refs) == 1
+            ]
+            seam_edges = []
+            for edge in boundary_edges:
+                a, b = edge
+                la = int(vertex_level_tmp[a])
+                lb = int(vertex_level_tmp[b])
+                if la < 0 or lb < 0 or la == lb:
+                    continue
+                fi = edge_faces[edge][0]
+                stream_idx = int(face_streams[fi]) if fi < len(face_streams) else -1
+                if stream_idx < 0:
+                    continue
+                part_a = _source_part(stream_idx, la)
+                part_b = _source_part(stream_idx, lb)
+                if part_a != part_b:
+                    continue
+                p0 = np.asarray(vertices[a], dtype=np.float64)
+                p1 = np.asarray(vertices[b], dtype=np.float64)
+                length = float(np.linalg.norm(p1 - p0))
+                if length < 1e-10:
+                    continue
+                midpoint = 0.5 * (p0 + p1)
+                direction = (p1 - p0) / length
+                seam_edges.append({
+                    'edge': edge,
+                    'levels': tuple(sorted((la, lb))),
+                    'stream': stream_idx,
+                    'part': part_a,
+                    'mid': midpoint,
+                    'dir': direction,
+                    'length': length,
+                })
+            if len(seam_edges) < 2:
+                return 0
+            tree = cKDTree(np.array([e['mid'] for e in seam_edges], dtype=np.float64))
+            used = set()
+            added = 0
+            for i, edge_i in enumerate(seam_edges):
+                if i in used:
+                    continue
+                candidates = tree.query_ball_point(edge_i['mid'], stitch_eps)
+                best = None
+                best_score = float('inf')
+                for j in candidates:
+                    if j == i or j in used:
+                        continue
+                    edge_j = seam_edges[j]
+                    if edge_i['levels'] != edge_j['levels']:
+                        continue
+                    if edge_i['part'] != edge_j['part']:
+                        continue
+                    if edge_i['stream'] == edge_j['stream']:
+                        continue
+                    if vertex_stream_sets[edge_i['edge'][0]] & vertex_stream_sets[edge_j['edge'][0]]:
+                        continue
+                    if abs(float(np.dot(edge_i['dir'], edge_j['dir']))) < 0.45:
+                        continue
+                    if abs(edge_i['length'] - edge_j['length']) > max(stitch_eps * 4.0, 0.5 * max(edge_i['length'], edge_j['length'])):
+                        continue
+                    a, b = edge_i['edge']
+                    c, d = edge_j['edge']
+                    direct = np.linalg.norm(np.asarray(vertices[a]) - np.asarray(vertices[c])) + np.linalg.norm(np.asarray(vertices[b]) - np.asarray(vertices[d]))
+                    crossed = np.linalg.norm(np.asarray(vertices[a]) - np.asarray(vertices[d])) + np.linalg.norm(np.asarray(vertices[b]) - np.asarray(vertices[c]))
+                    score = min(direct, crossed)
+                    if score < best_score:
+                        best_score = score
+                        best = (j, direct <= crossed)
+                if best is None:
+                    continue
+                j, direct_order = best
+                a, b = edge_i['edge']
+                c, d = seam_edges[j]['edge']
+                if direct_order:
+                    new_tris = ([a, b, d], [a, d, c])
+                else:
+                    new_tris = ([a, b, c], [a, c, d])
+                for tri in new_tris:
+                    pts = np.asarray([vertices[idx] for idx in tri], dtype=np.float64)
+                    area = np.linalg.norm(np.cross(pts[1] - pts[0], pts[2] - pts[0]))
+                    if area > 1e-12:
+                        faces.append(list(tri))
+                        face_streams.append(edge_i['stream'])
+                        added += 1
+                used.add(i)
+                used.add(j)
+            return added
+
+        def _smooth_connected_seam_normals():
+            if (not connected_weld
+                    or self.contour_mesh_normals is None
+                    or len(self.contour_mesh_vertices) < 2):
+                return 0
+            stitch_eps = float(getattr(self, '_connected_seam_stitch_eps', 1e-3))
+            try:
+                tree = cKDTree(self.contour_mesh_vertices)
+                pairs = tree.query_pairs(r=stitch_eps)
+            except Exception:
+                pairs = []
+            if not pairs:
+                return 0
+            parent = list(range(len(self.contour_mesh_vertices)))
+            for i, j in pairs:
+                i = int(i)
+                j = int(j)
+                if i >= len(vertex_level_tmp) or j >= len(vertex_level_tmp):
+                    continue
+                if vertex_level_tmp[i] != vertex_level_tmp[j]:
+                    continue
+                if vertex_stream_sets[i] & vertex_stream_sets[j]:
+                    continue
+                stream_i = next(iter(vertex_stream_sets[i]), -1)
+                stream_j = next(iter(vertex_stream_sets[j]), -1)
+                if stream_i < 0 or stream_j < 0:
+                    continue
+                level_idx = int(vertex_level_tmp[i])
+                if _source_part(stream_i, level_idx) != _source_part(stream_j, level_idx):
+                    continue
+                _union(parent, i, j)
+            clusters = defaultdict(list)
+            for i in range(len(parent)):
+                clusters[_find_root(parent, i)].append(i)
+            smoothed = 0
+            for members in clusters.values():
+                if len(members) <= 1:
+                    continue
+                avg = np.sum(self.contour_mesh_normals[members], axis=0)
+                norm = float(np.linalg.norm(avg))
+                if norm < 1e-10:
+                    continue
+                self.contour_mesh_normals[members] = avg / norm
+                smoothed += len(members)
+            return smoothed
+
         # Build faces
         all_faces = []
         face_stream_map = []  # face_idx -> stream_idx
@@ -7487,9 +8121,7 @@ class ContourMeshMixin(ContourAnimationMixin):
         processed_quads = set()
 
         # Check if parametric data is available
-        has_params = (hasattr(self, 'contours_resampled_params') and
-                      self.contours_resampled_params is not None and
-                      len(self.contours_resampled_params) > 0)
+        has_params = (source_params is not None and len(source_params) > 0)
         if has_params:
             print("  Using parametric mesh building (zipper algorithm)")
         else:
@@ -7514,18 +8146,18 @@ class ContourMeshMixin(ContourAnimationMixin):
                 next_fixed = None
                 if has_params:
                     try:
-                        if (stream_idx < len(self.contours_resampled_params) and
-                            level_idx < len(self.contours_resampled_params[stream_idx]) and
-                            level_idx + 1 < len(self.contours_resampled_params[stream_idx])):
-                            curr_params = self.contours_resampled_params[stream_idx][level_idx]
-                            next_params = self.contours_resampled_params[stream_idx][level_idx + 1]
+                        if (stream_idx < len(source_params) and
+                            level_idx < len(source_params[stream_idx]) and
+                            level_idx + 1 < len(source_params[stream_idx])):
+                            curr_params = source_params[stream_idx][level_idx]
+                            next_params = source_params[stream_idx][level_idx + 1]
                             # Check length matches
                             if (curr_params is not None and next_params is not None and
                                 len(curr_params) == n_curr and len(next_params) == n_next):
                                 # Get fixed indices if available
-                                if hasattr(self, 'contours_resampled_fixed'):
-                                    curr_fixed = self.contours_resampled_fixed[stream_idx][level_idx]
-                                    next_fixed = self.contours_resampled_fixed[stream_idx][level_idx + 1]
+                                if source_fixed is not None:
+                                    curr_fixed = source_fixed[stream_idx][level_idx]
+                                    next_fixed = source_fixed[stream_idx][level_idx + 1]
                             else:
                                 curr_params = None
                                 next_params = None
@@ -7616,8 +8248,18 @@ class ContourMeshMixin(ContourAnimationMixin):
                             face_stream_map.append(stream_idx)
                 else:
                     # Different sizes - variable band (fallback)
+                    shared_vertex_ids = None
+                    if connected_weld:
+                        shared_vertex_ids = set()
+                        for vi in curr_indices:
+                            if len(vertex_stream_sets[vi]) > 1:
+                                shared_vertex_ids.add(vi)
+                        for vi in next_indices:
+                            if len(vertex_stream_sets[vi]) > 1:
+                                shared_vertex_ids.add(vi)
                     faces = self._create_contour_band_variable_indices(
-                        curr_indices, next_indices, all_vertices, processed_quads
+                        curr_indices, next_indices, all_vertices, processed_quads,
+                        shared_vertex_ids=shared_vertex_ids
                     )
                     all_faces.extend(faces)
                     face_stream_map.extend([stream_idx] * len(faces))
@@ -7625,6 +8267,10 @@ class ContourMeshMixin(ContourAnimationMixin):
         if len(all_faces) == 0:
             print("No faces generated.")
             return
+
+        stitched_faces = _add_connected_seam_faces(all_vertices, all_faces, face_stream_map)
+        if stitched_faces:
+            print(f"  Stitched {stitched_faces} connected-source seam faces")
 
         # Convert to numpy arrays
         self.contour_mesh_vertices = np.array(all_vertices, dtype=np.float32)
@@ -7636,10 +8282,45 @@ class ContourMeshMixin(ContourAnimationMixin):
         # Store vertex-to-level mapping for edge classification
         # vertex_contour_level[vertex_idx] = level_idx
         self.vertex_contour_level = np.full(len(all_vertices), -1, dtype=np.int32)
+        source_provenance = getattr(self, '_connected_contour_mesh_provenance', None)
+        self.contour_mesh_vertex_regions = None
+        if source_provenance is not None:
+            self.contour_mesh_vertex_regions = [None] * len(all_vertices)
+
+        def _merge_vertex_region(existing, incoming):
+            if existing is None:
+                return dict(incoming) if isinstance(incoming, dict) else incoming
+            if incoming is None:
+                return existing
+            if not isinstance(existing, dict) or not isinstance(incoming, dict):
+                return existing
+            old_parts = set(existing.get('parts', [existing.get('part')]))
+            new_parts = set(incoming.get('parts', [incoming.get('part')]))
+            old_parts.discard(None)
+            new_parts.discard(None)
+            parts = sorted(old_parts | new_parts)
+            old_components = set(existing.get('components', [existing.get('component')]))
+            new_components = set(incoming.get('components', [incoming.get('component')]))
+            old_components.discard(None)
+            new_components.discard(None)
+            components = sorted(old_components | new_components)
+            merged = dict(existing)
+            merged['parts'] = parts
+            merged['components'] = components
+            merged['part'] = parts[0] if len(parts) == 1 else 'mixed'
+            merged['component'] = components[0] if len(components) == 1 else 'mixed'
+            return merged
+
         for stream_idx in range(num_streams):
             for level_idx in range(num_levels):
                 for vertex_idx in stream_level_indices[stream_idx][level_idx]:
                     self.vertex_contour_level[vertex_idx] = level_idx
+                    if (source_provenance is not None
+                            and stream_idx < len(source_provenance)
+                            and level_idx < len(source_provenance[stream_idx])):
+                        self.contour_mesh_vertex_regions[vertex_idx] = _merge_vertex_region(
+                            self.contour_mesh_vertex_regions[vertex_idx],
+                            source_provenance[stream_idx][level_idx])
 
         # Close internal gaps in the mesh (boundary loops that aren't at origin/insertion)
         # Pass stream max levels so we know which levels are insertions for each stream
@@ -7648,6 +8329,9 @@ class ContourMeshMixin(ContourAnimationMixin):
 
         # Compute normals
         self._compute_contour_mesh_normals()
+        smoothed_normals = _smooth_connected_seam_normals()
+        if smoothed_normals:
+            print(f"  Smoothed {smoothed_normals} connected-source seam vertex normals")
 
         # Classify faces into bands for animation
         self._classify_mesh_faces_into_bands()
@@ -7663,6 +8347,8 @@ class ContourMeshMixin(ContourAnimationMixin):
         self._shared_vertex_pairs = shared_vertex_pairs
         if shared_vertex_pairs:
             print(f"  {len(shared_vertex_pairs)} shared boundary vertex pairs across streams")
+        if welded_vertex_count:
+            print(f"  Welded {welded_vertex_count} duplicate connected-source vertices")
 
         # Save per-stream face mapping for per-stream tetrahedralization
         # Extend for any gap-closing faces added after mesh building
@@ -7815,6 +8501,7 @@ class ContourMeshMixin(ContourAnimationMixin):
         # Close each gap loop by adding triangular fan from centroid
         new_faces = list(faces)
         new_vertices = list(vertices)
+        new_regions = list(self.contour_mesh_vertex_regions) if getattr(self, 'contour_mesh_vertex_regions', None) is not None else None
 
         for loop in loops_to_close:
             # Calculate centroid
@@ -7824,6 +8511,26 @@ class ContourMeshMixin(ContourAnimationMixin):
             # Add centroid as new vertex
             centroid_idx = len(new_vertices)
             new_vertices.append(centroid)
+            if new_regions is not None:
+                merged_region = None
+                for vi in loop:
+                    if 0 <= int(vi) < len(new_regions):
+                        region = new_regions[int(vi)]
+                        if isinstance(region, dict):
+                            if merged_region is None:
+                                merged_region = dict(region)
+                            else:
+                                parts = set(merged_region.get('parts', [merged_region.get('part')]))
+                                parts.update(region.get('parts', [region.get('part')]))
+                                parts.discard(None)
+                                comps = set(merged_region.get('components', [merged_region.get('component')]))
+                                comps.update(region.get('components', [region.get('component')]))
+                                comps.discard(None)
+                                merged_region['parts'] = sorted(parts)
+                                merged_region['components'] = sorted(comps)
+                                merged_region['part'] = merged_region['parts'][0] if len(merged_region['parts']) == 1 else 'mixed'
+                                merged_region['component'] = merged_region['components'][0] if len(merged_region['components']) == 1 else 'mixed'
+                new_regions.append(merged_region)
 
             # Determine winding order from adjacent face
             # Find an edge in the loop that has an adjacent face
@@ -7854,6 +8561,8 @@ class ContourMeshMixin(ContourAnimationMixin):
         # Update mesh
         self.contour_mesh_vertices = np.array(new_vertices, dtype=np.float32)
         self.contour_mesh_faces = np.array(new_faces, dtype=np.int32)
+        if new_regions is not None:
+            self.contour_mesh_vertex_regions = new_regions
 
         # Update vertex_contour_level for new centroid vertices
         old_levels = self.vertex_contour_level
@@ -7866,7 +8575,8 @@ class ContourMeshMixin(ContourAnimationMixin):
     # _ensure_waypoints_inside_mesh method moved to FiberArchitectureMixin in fiber_architecture.py
     # _update_contours_from_smoothed_mesh method moved to FiberArchitectureMixin in fiber_architecture.py
 
-    def _create_contour_band_variable_indices(self, curr_indices, next_indices, all_vertices, processed_quads=None):
+    def _create_contour_band_variable_indices(self, curr_indices, next_indices, all_vertices,
+                                              processed_quads=None, shared_vertex_ids=None):
         """
         Create triangular faces between two contours with different vertex counts.
         Uses direct vertex indices instead of offsets.
@@ -7881,12 +8591,141 @@ class ContourMeshMixin(ContourAnimationMixin):
 
         print(f"  Variable band: {n_curr} -> {n_next} vertices")
 
+        def add_tri(tri):
+            if len(set(tri)) != 3:
+                return
+            tri_key = frozenset(tri)
+            if processed_quads is None or tri_key not in processed_quads:
+                faces.append(list(tri))
+                if processed_quads is not None:
+                    processed_quads.add(tri_key)
+
+        def build_open_band(curr_seg, next_seg):
+            if len(curr_seg) < 2 or len(next_seg) < 2:
+                return
+            i_curr = 0
+            i_next = 0
+            n_c = len(curr_seg) - 1
+            n_n = len(next_seg) - 1
+            while i_curr < n_c or i_next < n_n:
+                ratio_curr = i_curr / n_c if n_c > 0 else 1.0
+                ratio_next = i_next / n_n if n_n > 0 else 1.0
+                v0 = curr_seg[min(i_curr, n_c)]
+                v3 = next_seg[min(i_next, n_n)]
+                if (ratio_curr <= ratio_next and i_curr < n_c) or i_next >= n_n:
+                    v1 = curr_seg[i_curr + 1]
+                    add_tri([v0, v1, v3])
+                    i_curr += 1
+                else:
+                    v2 = next_seg[i_next + 1]
+                    add_tri([v0, v2, v3])
+                    i_next += 1
+
+        def cyclic_segment(indices, start_pos, end_pos):
+            if start_pos <= end_pos:
+                return indices[start_pos:end_pos + 1]
+            return indices[start_pos:] + indices[:end_pos + 1]
+
+        def positions_to_indices(indices, positions):
+            return [indices[int(pos) % len(indices)] for pos in positions]
+
+        def forward_positions(start, end, n_total):
+            start = int(start) % n_total
+            end = int(end) % n_total
+            if start <= end:
+                return list(range(start, end + 1))
+            return list(range(start, n_total)) + list(range(0, end + 1))
+
+        def complement_positions(run_positions, n_total):
+            return forward_positions(run_positions[-1], run_positions[0], n_total)
+
+        if shared_vertex_ids:
+            curr_anchors = [i for i, vi in enumerate(curr_indices) if vi in shared_vertex_ids]
+            next_anchors = [i for i, vi in enumerate(next_indices) if vi in shared_vertex_ids]
+        else:
+            curr_anchors = []
+            next_anchors = []
+
+        def longest_anchor_run(anchor_positions, n_total):
+            if len(anchor_positions) < 2 or n_total < 2:
+                return None
+            anchors = sorted(set(int(i) for i in anchor_positions))
+            runs = []
+            run = [anchors[0]]
+            for pos in anchors[1:]:
+                if pos == run[-1] + 1:
+                    run.append(pos)
+                else:
+                    runs.append(run)
+                    run = [pos]
+            runs.append(run)
+            if len(runs) > 1 and runs[0][0] == 0 and runs[-1][-1] == n_total - 1:
+                wrapped = runs[-1] + [p + n_total for p in runs[0]]
+                runs = [wrapped] + runs[1:-1]
+            best = max(runs, key=len)
+            if len(best) < 2:
+                return None
+            return best
+
+        curr_run = longest_anchor_run(curr_anchors, n_curr)
+        next_run = longest_anchor_run(next_anchors, n_next)
+        if curr_run is not None and next_run is not None:
+            c0, c1 = curr_run[0], curr_run[-1]
+            n0_raw, n1_raw = next_run[0], next_run[-1]
+            c0p = np.asarray(all_vertices[curr_indices[int(c0) % n_curr]], dtype=np.float64)
+            c1p = np.asarray(all_vertices[curr_indices[int(c1) % n_curr]], dtype=np.float64)
+            n0p = np.asarray(all_vertices[next_indices[int(n0_raw) % n_next]], dtype=np.float64)
+            n1p = np.asarray(all_vertices[next_indices[int(n1_raw) % n_next]], dtype=np.float64)
+            direct = np.linalg.norm(c0p - n0p) + np.linalg.norm(c1p - n1p)
+            swapped = np.linalg.norm(c0p - n1p) + np.linalg.norm(c1p - n0p)
+            curr_seam_pos = list(curr_run)
+            curr_outer_pos = complement_positions(curr_seam_pos, n_curr)
+            if direct <= swapped:
+                n0, n1 = n0_raw, n1_raw
+                next_seam_pos = list(next_run)
+                next_outer_pos = complement_positions(next_seam_pos, n_next)
+            else:
+                n0, n1 = n1_raw, n0_raw
+                next_seam_pos = list(reversed(next_run))
+                next_outer_pos = list(reversed(complement_positions(next_run, n_next)))
+            if (len(curr_seam_pos) + len(curr_outer_pos) > n_curr + 2
+                    or len(next_seam_pos) + len(next_outer_pos) > n_next + 2):
+                print(f"    Split variable band rejected: bad arc split "
+                      f"seam {len(curr_seam_pos)}->{len(next_seam_pos)}, "
+                      f"outer {len(curr_outer_pos)}->{len(next_outer_pos)}")
+            else:
+                curr_seam_frac = len(curr_seam_pos) / max(1, len(curr_seam_pos) + len(curr_outer_pos) - 2)
+                next_seam_frac = len(next_seam_pos) / max(1, len(next_seam_pos) + len(next_outer_pos) - 2)
+                frac_delta = abs(curr_seam_frac - next_seam_frac)
+                count_ratio = max(
+                    len(curr_seam_pos) / max(1, len(next_seam_pos)),
+                    len(next_seam_pos) / max(1, len(curr_seam_pos)),
+                    len(curr_outer_pos) / max(1, len(next_outer_pos)),
+                    len(next_outer_pos) / max(1, len(curr_outer_pos)),
+                )
+                if frac_delta > 0.25 or count_ratio > 2.25:
+                    print(f"    Split variable band unstable: seam {len(curr_seam_pos)} -> {len(next_seam_pos)}, "
+                          f"outer {len(curr_outer_pos)} -> {len(next_outer_pos)}; using endpoint anchors")
+                    build_open_band(cyclic_segment(curr_indices, c0, c1),
+                                    cyclic_segment(next_indices, n0, n1))
+                    build_open_band(cyclic_segment(curr_indices, c1, c0),
+                                    cyclic_segment(next_indices, n1, n0))
+                    return faces
+                print(f"    Split variable band: seam {len(curr_seam_pos)} -> {len(next_seam_pos)}, "
+                      f"outer {len(curr_outer_pos)} -> {len(next_outer_pos)}")
+                build_open_band(positions_to_indices(curr_indices, curr_seam_pos),
+                                positions_to_indices(next_indices, next_seam_pos))
+                build_open_band(positions_to_indices(curr_indices, curr_outer_pos),
+                                positions_to_indices(next_indices, next_outer_pos))
+                return faces
+        elif len(curr_anchors) >= 2 or len(next_anchors) >= 2:
+            print(f"    Variable band seam anchors incomplete: {len(curr_anchors)} -> {len(next_anchors)}, using ratio fallback")
+
         # Use ratio-based vertex pairing
         i_curr = 0
         i_next = 0
 
         while i_curr < n_curr or i_next < n_next:
-            # Current progress ratios
             ratio_curr = i_curr / n_curr if n_curr > 0 else 1
             ratio_next = i_next / n_next if n_next > 0 else 1
 
@@ -7896,20 +8735,10 @@ class ContourMeshMixin(ContourAnimationMixin):
             v3 = next_indices[i_next % n_next]
 
             if ratio_curr <= ratio_next and i_curr < n_curr:
-                # Advance on curr contour - create triangle [v0, v1, v3]
-                tri_key = frozenset([v0, v1, v3])
-                if processed_quads is None or tri_key not in processed_quads:
-                    faces.append([v0, v1, v3])
-                    if processed_quads is not None:
-                        processed_quads.add(tri_key)
+                add_tri([v0, v1, v3])
                 i_curr += 1
             elif i_next < n_next:
-                # Advance on next contour - create triangle [v0, v2, v3]
-                tri_key = frozenset([v0, v2, v3])
-                if processed_quads is None or tri_key not in processed_quads:
-                    faces.append([v0, v2, v3])
-                    if processed_quads is not None:
-                        processed_quads.add(tri_key)
+                add_tri([v0, v2, v3])
                 i_next += 1
             else:
                 break
@@ -18505,4 +19334,3 @@ class ContourMeshMixin(ContourAnimationMixin):
         print(f"  {len(self.contours)} contour levels, {len(self.bounding_planes)} bounding plane levels")
         if hasattr(self, 'stream_contours') and self.stream_contours is not None:
             print(f"  {len(self.stream_contours)} streams loaded")
-

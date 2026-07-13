@@ -385,7 +385,7 @@ class MeshLoader(ContourMeshMixin, TetrahedronMeshMixin, FiberArchitectureMixin,
                 else:
                     classes.append('origin')
             # print(classes)
-        
+
         return grouped_open_edges, ordered_edge_groups, classes
     
     def _draw_mesh_arrays(self, use_color_array):
@@ -424,7 +424,9 @@ class MeshLoader(ContourMeshMixin, TetrahedronMeshMixin, FiberArchitectureMixin,
         glPushMatrix()
 
         # Determine if color array should be enabled for scalar field rendering
-        use_color_array = self.vertex_colors is not None and self.is_draw_scalar_field
+        use_color_array = self.vertex_colors is not None and (
+            self.is_draw_scalar_field or getattr(self, 'is_draw_tendon_regions', False)
+        )
 
         if use_color_array:
             glEnableClientState(GL_COLOR_ARRAY)
@@ -464,7 +466,9 @@ class MeshLoader(ContourMeshMixin, TetrahedronMeshMixin, FiberArchitectureMixin,
         glPushMatrix()
 
         # Determine if color array should be enabled for scalar field rendering
-        use_color_array = self.vertex_colors is not None and self.is_draw_scalar_field
+        use_color_array = self.vertex_colors is not None and (
+            self.is_draw_scalar_field or getattr(self, 'is_draw_tendon_regions', False)
+        )
 
         if use_color_array:
             glEnableClientState(GL_COLOR_ARRAY)
@@ -830,4 +834,3 @@ class MeshLoader(ContourMeshMixin, TetrahedronMeshMixin, FiberArchitectureMixin,
 
                     glEnable(GL_LIGHTING)
                     glPopMatrix()
-

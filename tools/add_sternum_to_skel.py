@@ -86,12 +86,20 @@ def main():
         axes[1] = np.cross(pc2, axes[0])
     axes[2] = pc2
     body_r_pca = axes.T  # columns = local-axis directions in world frame
-    # Project verts around the BBOX CENTER (= centroid), not vertex mean, so
-    # the OBB is tight in both directions along each axis.
-    rel = verts - centroid
+    # Project verts onto PCA axes and find the BOX CENTER that tightly covers
+    # all extents along each axis. Project around any reference, then shift
+    # box center so projection range is symmetric in box-local frame.
+    rel = verts - mean
     proj = rel @ body_r_pca
-    size = proj.max(0) - proj.min(0)
-    print(f"Sternum bbox center (anchor): {centroid}")
+    proj_min = proj.min(0)
+    proj_max = proj.max(0)
+    size = proj_max - proj_min
+    proj_mid = (proj_max + proj_min) / 2.0  # local-frame offset from `mean` to true box center
+    # World-space box center = mean + R_pca @ proj_mid (since body_r_pca cols
+    # are world-axes of local axes, world_offset = body_r_pca @ proj_mid).
+    centroid = mean + body_r_pca @ proj_mid
+    print(f"Sternum mean: {mean}")
+    print(f"OBB world center: {centroid}")
     print(f"X-aligned PCA OBB size={size}")
     print(f"body_r=\n{body_r_pca}")
 
@@ -143,9 +151,18 @@ def main():
     # Remove existing Sternum0 if present (idempotent)
     for old in root.findall("Node[@name='Sternum0']"):
         root.remove(old)
-
-    node = ET.SubElement(root, "Node",
-                         {"name": "Sternum0", "parent": args.parent})
+    # saveSkeletonInfo requires parent-before-child ordering. Find insert
+    # position: just before the first node whose parent_str == "Sternum0",
+    # OR at end if no such child yet.
+    children = list(root)
+    insert_idx = len(children)
+    for i, child in enumerate(children):
+        if child.tag == "Node" and child.attrib.get("parent") == "Sternum0":
+            insert_idx = i
+            break
+    node = ET.Element("Node", {"name": "Sternum0", "parent": args.parent})
+    root.insert(insert_idx, node)
+    print(f"Inserted Sternum0 at index {insert_idx}; child count now {len(list(root))}")
     body = ET.SubElement(node, "Body", {
         "type": "Box",
         "mass": f"{mass:.6f}",
@@ -153,6 +170,7 @@ def main():
         "contact": "Off",
         "color": "0.9 0.9 0.9 1.0",
         "obj": STERNUM_OBJ_REL,
+        "stretch": "0 0 0",
     })
     ET.SubElement(body, "Transformation", {
         "linear": fmt_v(body_r),

@@ -33,6 +33,7 @@ from viewer.zygote_mesh_ui import (draw_zygote_ui,
     _render_manual_cut_windows, _render_level_select_windows,
     update_available_muscles, load_previous_muscles, save_loaded_muscles,
     draw_inter_muscle_constraint_lines, drawMuscles, drawTestMuscles,
+    draw_dti_ui, draw_dti_overlays,
     reset, zero_reset, _scan_motion_files,
     _motion_step_forward, _motion_bake_step)
 
@@ -115,7 +116,10 @@ def _draw_tet_meshes_batched(app):
 
         # Determine alpha
         if not getattr(obj, '_tet_anim_active', False):
-            alpha = app.zygote_tet_transparency
+            if getattr(obj, '_epic_use_local_tet_alpha', False):
+                alpha = obj.contour_mesh_transparency
+            else:
+                alpha = app.zygote_tet_transparency
         else:
             alpha = obj.contour_mesh_transparency
             if obj._tet_anim_phase == 1:
@@ -134,6 +138,10 @@ def _draw_tet_meshes_batched(app):
                 if heatmap_colors[0, 3] != alpha:
                     heatmap_colors[:, 3] = alpha
                 color_arrays.append(heatmap_colors)
+            elif (getattr(obj, '_tet_region_surface_colors', None) is not None
+                    and len(obj._tet_region_surface_colors) == len(obj._tet_surface_verts)):
+                obj._tet_region_surface_colors[:, 3] = alpha
+                color_arrays.append(obj._tet_region_surface_colors)
             else:
                 n = len(obj._tet_surface_verts)
                 flat = np.empty((n, 4), dtype=np.float32)
@@ -148,11 +156,16 @@ def _draw_tet_meshes_batched(app):
             cap_arrays.append(obj._tet_cap_verts)
             cap_normal_arrays.append(obj._tet_cap_normals)
             n = len(obj._tet_cap_verts)
-            cap_col = np.empty((n, 4), dtype=np.float32)
-            cap_col[:, 0] = 0.2
-            cap_col[:, 1] = 0.6
-            cap_col[:, 2] = 0.2
-            cap_col[:, 3] = alpha
+            region_cap_colors = getattr(obj, '_tet_region_cap_colors', None)
+            if region_cap_colors is not None and len(region_cap_colors) == n:
+                region_cap_colors[:, 3] = alpha
+                cap_col = region_cap_colors
+            else:
+                cap_col = np.empty((n, 4), dtype=np.float32)
+                cap_col[:, 0] = 0.2
+                cap_col[:, 1] = 0.6
+                cap_col[:, 2] = 0.2
+                cap_col[:, 3] = alpha
             cap_color_arrays.append(cap_col)
 
         # Edges (rare, keep per-muscle)
@@ -714,8 +727,12 @@ class GLFWApp():
         if action == glfw.PRESS:
             self.mouse_down = True
             if button == glfw.MOUSE_BUTTON_LEFT:
-                # Joint editor: pick instead of rotate
-                if self.joint_edit_mode and hasattr(self.env, 'new_skel_info'):
+                # Joint editor: pick instead of rotate. Fire when EITHER the
+                # master Skeleton Edit Mode is on OR the sub Edit Joint
+                # Positions is on — matches the visibility gate of the joint
+                # sphere/axis overlay so users can click on what they see.
+                if ((self.joint_edit_mode or getattr(self, 'skel_edit_mode', False))
+                        and hasattr(self.env, 'new_skel_info')):
                     ray_origin, ray_direction = self.get_ray_from_cursor()
                     hit = self.pick_joint(ray_origin, ray_direction)
                     if hit is not None:
@@ -915,18 +932,111 @@ class GLFWApp():
             glPopMatrix()
 
     def _draw_joint_editor_overlay(self):
-        """Draw larger colored spheres for all joints in edit mode."""
+        """Draw colored spheres for all joints in edit mode + revolute axes.
+
+        Spheres at half alpha so the underlying skeleton stays visible.
+        """
         joint_positions = self._get_joint_world_positions()
+        skel_info = getattr(self.env, 'new_skel_info', None)
+        glEnable(GL_BLEND)
+        glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
         for name, pos in joint_positions.items():
             glPushMatrix()
             glTranslatef(pos[0], pos[1], pos[2])
             if name == self.joint_edit_selected:
-                glColor4d(0.0, 1.0, 0.0, 0.9)  # green = selected
+                glColor4d(0.0, 1.0, 0.0, 0.5)
                 mygl.draw_sphere(0.015, 12, 12)
             else:
-                glColor4d(0.0, 0.5, 1.0, 0.7)  # blue = default (matches existing joint style)
+                glColor4d(0.0, 0.5, 1.0, 0.5)
                 mygl.draw_sphere(0.012, 10, 10)
             glPopMatrix()
+        # Revolute axis arrows. Axis stored in JOINT-LOCAL frame (matches
+        # DART convention). Transformed to world via the joint's current
+        # world rotation = parent_body_world @ T_parent_to_joint. Line
+        # starts at the joint pivot and extends 5cm along the world axis.
+        # Read live from skel_info (post-save) OR mesh state (pre-save).
+        skel_info = getattr(self.env, 'new_skel_info', None)
+
+        # Build a unified iteration: every DART body whose joint is Revolute,
+        # PLUS every mesh marked is_revolute (pre-save).
+        revolute_entries = []  # list of (display_name, axis_local, joint_world_pos, joint_world_R, selected_flag)
+
+        # From skel_info (XML-saved revolute joints)
+        if skel_info is not None:
+            for bn_name, info in skel_info.items():
+                if info.get('joint_type') != 'Revolute':
+                    continue
+                ax = np.asarray(info.get('axis', [1.0, 0.0, 0.0]), dtype=np.float64)
+                n_a = np.linalg.norm(ax)
+                if n_a < 1e-9:
+                    continue
+                ax = ax / n_a
+                bn = self.env.skel.getBodyNode(bn_name)
+                if bn is None:
+                    continue
+                pj = bn.getParentJoint()
+                if pj is None:
+                    continue
+                # Joint world transform = parent_world @ T_p2j (DART API).
+                parent_bn = bn.getParentBodyNode()
+                if parent_bn is not None:
+                    T_parent_world = np.asarray(parent_bn.getWorldTransform().matrix())
+                    T_p2j = np.asarray(pj.getTransformFromParentBodyNode().matrix())
+                    T_joint_world = T_parent_world @ T_p2j
+                else:
+                    T_joint_world = np.asarray(pj.getTransformFromParentBodyNode().matrix())
+                jp = T_joint_world[:3, 3]
+                jR = T_joint_world[:3, :3]
+                sel = (bn_name == self.joint_edit_selected)
+                revolute_entries.append((bn_name, ax, jp, jR, sel))
+
+        # Also include mesh-level Revolute markers not yet in skel_info
+        for sname, sm in self.zygote_skeleton_meshes.items():
+            if not getattr(sm, 'is_revolute', False):
+                continue
+            full_name = sname + '0'
+            if any(e[0] == full_name for e in revolute_entries):
+                continue  # already from skel_info
+            ax = np.asarray(getattr(sm, 'revolute_axis', [1.0, 0.0, 0.0]),
+                            dtype=np.float64)
+            n_a = np.linalg.norm(ax)
+            if n_a < 1e-9:
+                continue
+            ax = ax / n_a
+            jp = getattr(sm, 'joint_to_parent', None)
+            if jp is None:
+                continue
+            jp = np.asarray(jp, dtype=np.float64)
+            jR = np.eye(3)  # pre-save: assume identity joint rotation
+            sel = (full_name == self.joint_edit_selected)
+            revolute_entries.append((full_name, ax, jp, jR, sel))
+
+        # Only draw the axis for the currently selected revolute joint.
+        revolute_entries = [e for e in revolute_entries if e[4]]
+        SPHERE_R = 0.018  # max joint sphere radius (selected = 0.015)
+        L = 0.08          # 8 cm axis line, starting outside the sphere
+        for name, axis_local, jp, jR, selected in revolute_entries:
+            axis_world = jR @ axis_local
+            n_aw = np.linalg.norm(axis_world)
+            if n_aw < 1e-9:
+                continue
+            axis_world = axis_world / n_aw
+            # Start the line at the sphere boundary so the axis is visible.
+            p0 = jp + axis_world * SPHERE_R
+            p1 = jp + axis_world * (SPHERE_R + L)
+            color = (1.0, 0.2, 0.2, 1.0) if selected else (1.0, 0.6, 0.2, 0.9)
+            glDisable(GL_LIGHTING)
+            glColor4d(*color)
+            glLineWidth(5.0)
+            glBegin(GL_LINES)
+            glVertex3f(*p0)
+            glVertex3f(*p1)
+            glEnd()
+            glPointSize(10)
+            glBegin(GL_POINTS)
+            glVertex3f(*p1)
+            glEnd()
+            glEnable(GL_LIGHTING)
 
     def drawSimFrame(self):
         initGL()
@@ -1000,8 +1110,14 @@ class GLFWApp():
             if obj.is_draw_edges:
                 obj.draw_edges()
 
-        # Draw joint editor overlay on top of skeleton (disable depth test so joints show through)
-        if self.joint_edit_mode:
+        # Draw MRI/DTI subject meshes and fiber tract overlays.
+        draw_dti_overlays(self)
+
+        # Draw joint editor overlay on top of skeleton (disable depth test so joints show through).
+        # Fire when EITHER the master Skeleton Edit Mode is ON OR the sub
+        # Edit Joint Positions is ON. Master-only mode shows revolute axes
+        # so user can see them while doing other edit-mode work.
+        if self.joint_edit_mode or getattr(self, 'skel_edit_mode', False):
             glDisable(GL_DEPTH_TEST)
             self._draw_joint_editor_overlay()
             glEnable(GL_DEPTH_TEST)
@@ -1024,6 +1140,13 @@ class GLFWApp():
         for name, obj in self.zygote_muscle_meshes.items():
             if obj.is_draw:
                 obj.draw([obj.color[0], obj.color[1], obj.color[2], obj.transparency])
+
+        # Draw slider-selected scalar contour after meshes so it remains visible.
+        for name, obj in self.zygote_muscle_meshes.items():
+            if hasattr(obj, 'draw_tendon_boundary_overlay'):
+                obj.draw_tendon_boundary_overlay()
+            if hasattr(obj, 'draw_specific_contour_overlay'):
+                obj.draw_specific_contour_overlay()
 
         # if self.draw_pd_target:
         #     self.drawSkeleton(self.env.pd_target, np.array([0.3, 0.3, 1.0, 0.5]))
@@ -1063,6 +1186,39 @@ class GLFWApp():
         self.motion_skel = self.env.skel.clone()
         # self.motion_skel.setPositions(current_pos)
         self.motion_skel.setPositions(self.env.skel.getPositions())
+
+        # Re-shift self.meshes[bn].vertices_3 by the DELTA between the new
+        # joint_world translation and the last applied shift. Cached
+        # `_last_t_parent` on each mesh lets us skip a full disk reload —
+        # an order of magnitude faster, so XYZ +/- responds instantly.
+        for bn in self.env.skel.getBodyNodes():
+            bn_name = bn.getName()
+            if bn_name not in self.meshes:
+                continue
+            mesh_obj = self.meshes[bn_name]
+            try:
+                transform = (np.asarray(bn.getWorldTransform().matrix())
+                             @ np.asarray(bn.getParentJoint().getTransformFromChildBodyNode().matrix()))
+                t_parent = transform[:3, 3].astype(np.float32)
+                last = getattr(mesh_obj, '_last_t_parent', None)
+                if last is None:
+                    # First call after this mesh's initial setup-time shift —
+                    # vertices were already shifted by the original joint_t.
+                    # Treat that as the baseline.
+                    mesh_obj._last_t_parent = t_parent
+                    continue
+                delta = t_parent - last
+                if np.allclose(delta, 0.0):
+                    continue
+                if hasattr(mesh_obj, 'vertices_3') and len(mesh_obj.vertices_3) > 0:
+                    mesh_obj.vertices_3 -= delta
+                if hasattr(mesh_obj, 'new_vertices_3') and len(mesh_obj.new_vertices_3) > 0:
+                    mesh_obj.new_vertices_3 -= delta
+                if hasattr(mesh_obj, 'vertices_4') and len(mesh_obj.vertices_4) > 0:
+                    mesh_obj.vertices_4 -= delta
+                mesh_obj._last_t_parent = t_parent
+            except Exception as _e:
+                print(f"[newSkeleton] vertex delta-shift {bn_name}: {_e}")
 
         # reset(self, self.env.world.getTime())
         zero_reset(self)
@@ -1271,6 +1427,8 @@ class GLFWApp():
                 idx += 1
             imgui.tree_pop()
 
+        draw_dti_ui(self)
+
         imgui.end()
 
         # Render Inspect 2D windows for each muscle
@@ -1439,4 +1597,3 @@ class GLFWApp():
         self.impl.shutdown()
         glfw.terminate()
         return
-

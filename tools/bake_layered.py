@@ -721,7 +721,8 @@ def run_layer_sim_with_collision(layer_muscles, frozen_muscles, skeleton_meshes,
     # Check if cached topology is still valid
     cache_valid = (layer_cache.get('muscle_names') == muscle_names
                    and layer_cache.get('frozen_names') == frozen_names
-                   and layer_cache.get('total_verts') == total_verts)
+                   and layer_cache.get('total_verts') == total_verts
+                   and layer_cache.get('_skip_inter_built') == layer_cache.get('_skip_inter', False))
 
     if not cache_valid:
         global_offset = {}
@@ -764,20 +765,23 @@ def run_layer_sim_with_collision(layer_muscles, frozen_muscles, skeleton_meshes,
                     rest_len = np.linalg.norm(sb.rest_positions[j] - sb.rest_positions[i])
                 all_edges.append((offset + i, offset + j, rest_len, 1.0))
 
-        # Inter-muscle constraints as edges (within-layer AND cross-layer)
+        # Inter-muscle constraints as edges (within-layer AND cross-layer).
+        # Skip entirely when layer_cache._skip_inter is True (phase 1 of
+        # --two-phase-inter, where each muscle settles independently first).
         all_muscle_set = set(all_names)
         n_within = 0
         n_cross = 0
-        for constraint in inter_muscle_constraints:
-            name1, v1_idx, v1_fixed, name2, v2_idx, v2_fixed, rest_dist = constraint
-            if name1 in all_muscle_set and name2 in all_muscle_set:
-                gi = global_offset[name1] + v1_idx
-                gj = global_offset[name2] + v2_idx
-                all_edges.append((gi, gj, rest_dist, 1.0))
-                if name1 in set(muscle_names) and name2 in set(muscle_names):
-                    n_within += 1
-                else:
-                    n_cross += 1
+        if not layer_cache.get('_skip_inter', False):
+            for constraint in inter_muscle_constraints:
+                name1, v1_idx, v1_fixed, name2, v2_idx, v2_fixed, rest_dist = constraint
+                if name1 in all_muscle_set and name2 in all_muscle_set:
+                    gi = global_offset[name1] + v1_idx
+                    gj = global_offset[name2] + v2_idx
+                    all_edges.append((gi, gj, rest_dist, 1.0))
+                    if name1 in set(muscle_names) and name2 in set(muscle_names):
+                        n_within += 1
+                    else:
+                        n_cross += 1
 
         neighbors = [[] for _ in range(total_verts)]
         edge_weights = {}
@@ -817,6 +821,7 @@ def run_layer_sim_with_collision(layer_muscles, frozen_muscles, skeleton_meshes,
             'frozen_names': frozen_names,
             'collision_vertex_set': collision_vertex_set,
             'global_surf_edges': global_surf_edges,
+            '_skip_inter_built': layer_cache.get('_skip_inter', False),
         })
         if verbose:
             print(f"    Built topology: {total_verts} verts, {len(all_edges)} edges, "
@@ -892,30 +897,101 @@ def run_layer_sim_with_collision(layer_muscles, frozen_muscles, skeleton_meshes,
             n = mobj.soft_body.num_vertices
 
             # Compute direction: muscle centroid relative to bone midpoint at rest
-            if hasattr(mobj, 'skinning_bones') and len(mobj.skinning_bones) >= 2:
-                bone_positions = []
-                for bname in mobj.skinning_bones:
-                    bn = skel.getBodyNode(bname)
-                    if bn is not None:
-                        bone_positions.append(bn.getWorldTransform().translation())
-                if len(bone_positions) >= 2:
-                    bone_mid = np.mean(bone_positions, axis=0)
-                    muscle_centroid = global_positions[off:off+n].mean(axis=0)
-                    direction = muscle_centroid - bone_mid
-                    dist = np.linalg.norm(direction)
-                    if dist > 1e-6:
-                        direction /= dist
-                        # Offset all FREE vertices of this muscle outward
-                        for vi in range(off, off + n):
-                            if not global_fixed_mask[vi]:
-                                global_positions[vi] += direction * offset_amount
-                                n_offset += 1
-        if verbose and n_offset > 0:
-            print(f"    First frame: offset {n_offset} vertices outward (Iron Man start)")
+            # Pick the bone the muscle's rest centroid is CLOSEST to. That bone
+            # is the right reference for "outward perpendicular": muscles that
+            # wrap pelvis (obturators) use Os_Coxae; muscles along femur
+            # (vasti) use Femur. Avoids the trap of using femur for everything,
+            # which pushes obturators TOWARD pelvis interior.
+            origin_bone_name = None
+            try:
+                muscle_rest_c = np.asarray(mobj.soft_body.rest_positions).mean(0)
+                cand_names = list(getattr(mobj, 'skinning_bones', []) or [])
+                asn = getattr(mobj, 'attach_skeleton_names', None)
+                if asn and len(asn) > 0:
+                    cand_names = list(asn[0]) + cand_names
+                best = (float('inf'), None)
+                for cn in cand_names:
+                    bn = skel.getBodyNode(cn)
+                    if bn is None:
+                        continue
+                    bxfm = bone_rest_transforms.get(cn) if 'bone_rest_transforms' in dir() else layer_cache.get('_bone_rest_transforms', {}).get(cn)
+                    if bxfm is None:
+                        continue
+                    _, t0c = bxfm
+                    d = float(np.linalg.norm(muscle_rest_c - t0c))
+                    if d < best[0]:
+                        best = (d, cn)
+                origin_bone_name = best[1]
+            except Exception:
+                origin_bone_name = None
+            if origin_bone_name is not None and skel.getBodyNode(origin_bone_name) is not None:
+                origin_bn = skel.getBodyNode(origin_bone_name)
+                rest_xfm = layer_cache.get('_bone_rest_transforms', {}).get(origin_bone_name)
+                direction = None
+                if origin_bn is not None and rest_xfm is not None:
+                    R0_b, t0_b = rest_xfm
+                    # Muscle rest centroid (from tet rest verts).
+                    muscle_rest = np.asarray(mobj.soft_body.rest_positions).mean(axis=0)
+                    # Body-local displacement of rest centroid.
+                    local_disp = R0_b.T @ (muscle_rest - t0_b)
+                    # Project out shaft (local +x) component → perpendicular only.
+                    local_perp = local_disp.copy()
+                    local_perp[0] = 0.0
+                    perp_norm = np.linalg.norm(local_perp)
+                    if perp_norm > 1e-6:
+                        local_perp /= perp_norm
+                        # Rotate to current world frame via posed bone rotation.
+                        R1_b = origin_bn.getWorldTransform().rotation()
+                        direction = R1_b @ local_perp
+                if direction is not None:
+                    offset_fixed_too = layer_cache.get('_detached_start', False)
+                    for vi in range(off, off + n):
+                        if global_fixed_mask[vi] and not offset_fixed_too:
+                            continue
+                        global_positions[vi] += direction * offset_amount
+                        n_offset += 1
+        if n_offset > 0:
+            print(f"    First frame: offset {n_offset} vertices outward (Iron Man start)", flush=True)
 
-    # Get or create backend
+        # Snap-out: any free vert still inside a bone gets projected to bone
+        # surface + offset_amount along face normal. Guarantees starting state
+        # is fully outside every bone, which the adaptive chunk loop relies on.
+        if layer_cache.get('_snap_out', False) and len(obstacle_meshes) > 0:
+            n_snap = 0
+            free_idx = np.where(~global_fixed_mask)[0]
+            free_pos = global_positions[free_idx]
+            for om in obstacle_meshes:
+                bbmin = om.bounds[0] - 0.005
+                bbmax = om.bounds[1] + 0.005
+                in_bb = np.all((free_pos >= bbmin) & (free_pos <= bbmax), axis=1)
+                if not np.any(in_bb):
+                    continue
+                bb_pos = free_pos[in_bb]
+                bb_idx = free_idx[in_bb]
+                try:
+                    inside = om.contains(bb_pos)
+                except Exception:
+                    continue
+                if not np.any(inside):
+                    continue
+                inside_pos = bb_pos[inside]
+                inside_idx = bb_idx[inside]
+                cp, _, fid = trimesh.proximity.closest_point(om, inside_pos)
+                fn = om.face_normals[fid]
+                pushed = cp + fn * max(offset_amount, 0.01)
+                for k in range(len(inside_idx)):
+                    global_positions[int(inside_idx[k])] = pushed[k]
+                    n_snap += 1
+                free_pos = global_positions[free_idx]
+            if n_snap > 0:
+                print(f"    Snapped {n_snap} verts out of bones (clean iron-man start)", flush=True)
+
+    # Get or create backend. If topology changed (cache_valid False) the
+    # taichi backend's internal field sizes won't match — get fresh one.
     backend = layer_cache.get('backend', None)
-    if backend is None or getattr(backend, '_backend_name', None) != backend_name:
+    if (backend is None
+            or getattr(backend, '_backend_name', None) != backend_name
+            or not cache_valid):
         backend = get_backend(backend_name)
         backend._backend_name = backend_name
         layer_cache['backend'] = backend
@@ -975,26 +1051,268 @@ def run_layer_sim_with_collision(layer_muscles, frozen_muscles, skeleton_meshes,
                     targets[vi] = pushed[k]
             return targets
 
-    # Step 1: Pure ARAP solve. Run in 10-iter chunks so we can snapshot the
-    # iron-man-style settling for visualization.
+    # Step 1: chunked ARAP with optional per-chunk delta clamp + collision
+    # projection. Clamping forces slow iron-man-style convergence so muscles
+    # don't tunnel through bones in a single ARAP step.
     snapshots = [global_positions.copy()]  # iter 0
-    chunk = 10
+    chunk = layer_cache.get('_chunk_iters', 10)
+    max_step = layer_cache.get('_max_step', None)
+    adaptive = layer_cache.get('_adaptive_step', False)
+    detached_start = layer_cache.get('_detached_start', False)
     iterations_total = 0
     max_disp = float('inf')
+
+    # Detached-start: keep current fixed-vertex positions as the "initial
+    # target" so iter 0 has no pull toward bones. Across chunks, blend
+    # linearly toward the true bone targets.
+    final_fixed_targets = fixed_targets_array.copy()
+    initial_fixed_pos = global_positions[fixed_indices].copy() if detached_start else None
+    if detached_start:
+        # Iter 0 keeps muscle at warm-start position, fully detached.
+        fixed_targets_array = initial_fixed_pos.copy()
+    # Pre-build inflated bone meshes once if we have either inloop coll, max_step, or adaptive.
+    chunk_bone_meshes = None
+    chunk_bone_meshes_filled = None
+    # Skip per-chunk collision entirely if do_collision is off — ARAP rest
+    # constraint dominates anyway, the per-chunk push is wasted compute.
+    if (max_step is not None or adaptive or detached_start) and do_collision and len(obstacle_meshes) > 0:
+        chunk_bone_meshes = []
+        chunk_bone_meshes_filled = []
+        for om in obstacle_meshes:
+            try:
+                vn = om.vertex_normals
+                bm = trimesh.Trimesh(
+                    vertices=om.vertices + vn * collision_margin,
+                    faces=om.faces.copy(), process=True)
+                chunk_bone_meshes.append(bm)
+                # Filled copy: close foramen holes so the ray-cast tunneling
+                # check sees the bone as a solid lump. Without this, rays
+                # entering the obturator foramen exit through the hole and
+                # register no face-hit, so tunneling is missed.
+                bm_filled = trimesh.Trimesh(vertices=bm.vertices.copy(),
+                                            faces=bm.faces.copy(), process=True)
+                try:
+                    bm_filled.fill_holes()
+                except Exception:
+                    pass
+                chunk_bone_meshes_filled.append(bm_filled)
+            except Exception:
+                chunk_bone_meshes.append(om)
+                chunk_bone_meshes_filled.append(om)
+
+    # Pre-build KDTrees on bone vertices for fast pre-filter (KDTree query is
+    # O(log V) vs trimesh.contains O(F·N)). Re-uses bake_layered's existing
+    # _detect_collisions strategy.
+    from scipy.spatial import cKDTree as _cKDTree
+    chunk_bone_kdtrees = []
+    if chunk_bone_meshes:
+        for om in chunk_bone_meshes:
+            chunk_bone_kdtrees.append(_cKDTree(om.vertices))
+
+    cv_arr_cached = (np.array(sorted(collision_vertex_set), dtype=np.int64)
+                     if collision_vertex_set else np.zeros(0, dtype=np.int64))
+
+    def inside_set(positions):
+        """Return SET of muscle surface vert global indices currently inside any bone."""
+        if not chunk_bone_meshes or cv_arr_cached.size == 0:
+            return set()
+        pos = positions[cv_arr_cached]
+        out = set()
+        for om, tree in zip(chunk_bone_meshes, chunk_bone_kdtrees):
+            bbmin = om.bounds[0] - 0.005
+            bbmax = om.bounds[1] + 0.005
+            in_bb = np.all((pos >= bbmin) & (pos <= bbmax), axis=1)
+            if not np.any(in_bb):
+                continue
+            bb_pos = pos[in_bb]
+            bb_idx = cv_arr_cached[in_bb]
+            kd_dists, _ = tree.query(bb_pos)
+            near = kd_dists < 0.012
+            if not np.any(near):
+                continue
+            try:
+                inside = om.contains(bb_pos[near])
+            except Exception:
+                continue
+            if not np.any(inside):
+                continue
+            inside_idx = bb_idx[near][inside]
+            out.update(int(i) for i in inside_idx)
+        return out
+
+    # Adaptive chunk-size state. Track which verts are currently inside any
+    # bone — verts already-inside at warm-start are ignored (intrinsic rest
+    # overlap). Only NEW entries between chunks (a vert that was outside last
+    # chunk, now inside) count as crossings worth reverting for.
+    adaptive_chunk = chunk
+    inside_baseline = inside_set(global_positions) if adaptive else set()
+    revert_streak = 0
+    MAX_REVERTS = 4
+    NEW_CROSSING_THRESHOLD = 5  # tolerate up to N new entries per chunk
+    if adaptive:
+        print(f"    Adaptive start: {len(inside_baseline)} verts already inside bones (baseline)", flush=True)
+
     while iterations_total < max_iterations and max_disp > tolerance:
         remaining = max_iterations - iterations_total
-        step_iters = min(chunk, remaining)
+        step_iters = min(adaptive_chunk if adaptive else chunk, remaining)
         kwargs = {}
         if coll_fn is not None:
             kwargs['collision_target_fn'] = coll_fn
+        prev_positions = global_positions.copy()
+
+        # Detached-start: blend fixed targets from initial → final by
+        # progress fraction. By the time iterations_total == max_iterations
+        # the targets equal the true bone positions.
+        if detached_start and initial_fixed_pos is not None:
+            alpha = min(1.0, iterations_total / max(1, max_iterations))
+            fixed_targets_array = ((1.0 - alpha) * initial_fixed_pos
+                                   + alpha * final_fixed_targets).astype(np.float64)
+
         global_positions, _, max_disp = backend.solve(
             global_positions, global_rest_positions, neighbors, edge_weights, rest_edge_vectors,
             global_fixed_mask, fixed_targets_array,
             max_iterations=step_iters, tolerance=tolerance,
             verbose=verbose, **kwargs,
         )
+        # Adaptive: revert + halve if NEW crossings appeared (verts outside
+        # last chunk that are inside this chunk = surface tunneling).
+        if adaptive:
+            inside_now = inside_set(global_positions)
+            new_crossings = inside_now - inside_baseline
+            if (len(new_crossings) > NEW_CROSSING_THRESHOLD
+                    and step_iters > 1
+                    and revert_streak < MAX_REVERTS):
+                global_positions = prev_positions
+                adaptive_chunk = max(1, step_iters // 2)
+                revert_streak += 1
+                if verbose:
+                    print(f"    Adaptive: {len(new_crossings)} new crossings, "
+                          f"revert + halve to {adaptive_chunk} (streak {revert_streak})")
+                continue
+            else:
+                if verbose and len(new_crossings) > 0:
+                    if revert_streak >= MAX_REVERTS:
+                        print(f"    Adaptive: revert cap, accepting {len(new_crossings)} new crossings")
+                    else:
+                        print(f"    Adaptive: {len(new_crossings)} new crossings (≤{NEW_CROSSING_THRESHOLD}), accept")
+                # Update baseline so accepted crossings don't keep blocking growth.
+                inside_baseline = inside_now
+                revert_streak = 0
+                adaptive_chunk = min(chunk, max(1, adaptive_chunk * 2))
+        # Per-chunk delta clamp.
+        if max_step is not None:
+            delta = global_positions - prev_positions
+            norms = np.linalg.norm(delta, axis=1)
+            mask = norms > max_step
+            if np.any(mask):
+                scale = max_step / norms[mask]
+                delta[mask] *= scale[:, None]
+                global_positions = prev_positions + delta
+                # Re-pin fixed targets after clamp.
+                fixed_idx_arr = np.where(global_fixed_mask)[0]
+                if len(fixed_idx_arr) > 0:
+                    global_positions[fixed_idx_arr] = fixed_targets_array
+        # Per-chunk TUNNELING check: for each surface vert, ray-cast from
+        # prev_position to new_position against every bone face. If the ray
+        # crosses a bone face within the segment, the vert TUNNELED through
+        # the bone wall during this chunk (e.g. obturators passing through
+        # outer Os_Coxae wall to reach foramen). Push it back to the
+        # outside-of-bone side of that face.
+        if chunk_bone_meshes is not None and collision_vertex_set:
+            cv = np.array(list(collision_vertex_set), dtype=np.int64)
+            seg_a = prev_positions[cv]
+            seg_b = global_positions[cv]
+            seg = seg_b - seg_a
+            seg_len = np.linalg.norm(seg, axis=1)
+            moved = seg_len > 1e-6
+            if np.any(moved):
+                m_idx = np.where(moved)[0]
+                origins = seg_a[m_idx]
+                dirs = seg[m_idx] / seg_len[m_idx, None]
+                lengths = seg_len[m_idx]
+                # Use foramen-filled copies so rays into foramina register a
+                # face hit (otherwise they'd pass through the hole undetected).
+                ray_meshes = chunk_bone_meshes_filled if chunk_bone_meshes_filled else chunk_bone_meshes
+                for bm in ray_meshes:
+                    try:
+                        locs, ri, ti = bm.ray.intersects_location(
+                            origins, dirs, multiple_hits=False)
+                    except Exception:
+                        continue
+                    if len(locs) == 0:
+                        continue
+                    for hit_loc, ray_i, tri_i in zip(locs, ri, ti):
+                        t_param = float(np.dot(hit_loc - origins[ray_i], dirs[ray_i]))
+                        if t_param <= 0 or t_param >= lengths[ray_i]:
+                            continue
+                        # Tunneled: push vert back to outside side of hit face.
+                        gv = int(cv[m_idx[ray_i]])
+                        if global_fixed_mask[gv]:
+                            continue
+                        fn = bm.face_normals[tri_i]
+                        global_positions[gv] = hit_loc + fn * collision_margin
+
+        # Per-chunk collision projection: push verts that are inside-or-too-near
+        # bone surfaces to bone_surface + margin. Uses signed distance via
+        # face-normal dot product so foramina are TREATED AS SOLID — verts
+        # crossing the outer wall (even if topologically connected to air via
+        # a hole) are blocked. Anatomically, this prevents obturators from
+        # threading the obturator foramen, but matches the "outer-surface
+        # collision" semantics the user wants.
+        if chunk_bone_meshes is not None and collision_vertex_set:
+            cv = np.array(list(collision_vertex_set), dtype=np.int64)
+            cv_pos = global_positions[cv]
+            for bm in chunk_bone_meshes:
+                bbmin = bm.bounds[0] - 0.005
+                bbmax = bm.bounds[1] + 0.005
+                in_bb = np.all((cv_pos >= bbmin) & (cv_pos <= bbmax), axis=1)
+                if not np.any(in_bb):
+                    continue
+                bb_pos = cv_pos[in_bb]
+                bb_idx = cv[in_bb]
+                try:
+                    cp, dists, fid = trimesh.proximity.closest_point(bm, bb_pos)
+                except Exception:
+                    continue
+                fn = bm.face_normals[fid]
+                # Signed distance: positive when on side of face normal (outside).
+                signed = np.einsum('ij,ij->i', bb_pos - cp, fn)
+                # Push verts that are inside (signed<0) or within margin (close).
+                push_mask = signed < collision_margin
+                if not np.any(push_mask):
+                    continue
+                push_idx = bb_idx[push_mask]
+                push_cp = cp[push_mask]
+                push_fn = fn[push_mask]
+                pushed = push_cp + push_fn * collision_margin
+                for k in range(len(push_idx)):
+                    vi = int(push_idx[k])
+                    if global_fixed_mask[vi]:
+                        continue
+                    global_positions[vi] = pushed[k]
+                cv_pos = global_positions[cv]
         iterations_total += step_iters
         snapshots.append(global_positions.copy())
+    # Final pin: ensure fixed verts settle on true bone targets and free
+    # verts fully converge. Detached-start needs this — α blend may end
+    # below 1.0, and 20 iters can't fully converge a global 13k-vert system.
+    if detached_start:
+        global_positions[fixed_indices] = final_fixed_targets
+        # Snapshot per chunk so the playback shows the final attach phase.
+        pin_chunk = max(1, chunk)
+        pin_remaining = max_iterations
+        while pin_remaining > 0:
+            step_iters = min(pin_chunk, pin_remaining)
+            global_positions, _, pin_disp = backend.solve(
+                global_positions, global_rest_positions, neighbors, edge_weights, rest_edge_vectors,
+                global_fixed_mask, final_fixed_targets,
+                max_iterations=step_iters, tolerance=tolerance, verbose=False,
+            )
+            pin_remaining -= step_iters
+            snapshots.append(global_positions.copy())
+            if pin_disp < tolerance:
+                break
+        fixed_targets_array = final_fixed_targets
     iterations = iterations_total
     layer_cache['snapshots'] = snapshots
 
@@ -1119,6 +1437,37 @@ def main():
     parser.add_argument("--postcoll-rounds", type=int, default=2,
                         help="Post-ARAP detect+resolve rounds (default 2). More rounds "
                              "iteratively project deep penetrations toward bone surface.")
+    parser.add_argument("--max-step", type=float, default=None,
+                        help="Maximum per-vertex displacement (m) per ARAP chunk. Slows "
+                             "convergence so per-chunk collision detection can intervene "
+                             "before muscles tunnel through bones. Try 0.005 (5mm).")
+    parser.add_argument("--chunk-iters", type=int, default=10,
+                        help="ARAP iters per snapshot/clamp chunk (default 10). Smaller "
+                             "= more frequent collision interventions.")
+    parser.add_argument("--adaptive-step", action="store_true",
+                        help="Adaptive ARAP chunk sizing: take big steps, count bone "
+                             "penetrations after each chunk. If worse, revert and halve "
+                             "chunk size. If better, accept and grow. Combine with a "
+                             "strong --iron-man-offset so warm start is clearly outside "
+                             "all bones.")
+    parser.add_argument("--iron-man-snap-out", action="store_true",
+                        help="At warm start, snap any LBS-warmed vert that lies inside a "
+                             "bone to bone_surface + iron_man_offset along the face "
+                             "normal. Guarantees muscles start fully outside bones.")
+    parser.add_argument("--detached-start", action="store_true",
+                        help="True iron-man: at iter 0, fixed (origin/insertion) verts "
+                             "stay at the warm-start offset position rather than the "
+                             "bone target. Across chunks, fixed targets are linearly "
+                             "interpolated from start position to bone target so verts "
+                             "converge gradually onto the bones.")
+    parser.add_argument("--single-layer", action="store_true",
+                        help="Skip 3-layer classification — bake all muscles together "
+                             "in one layer.")
+    parser.add_argument("--two-phase-inter", action="store_true",
+                        help="Two-phase bake: first pass solves ARAP without "
+                             "inter-muscle constraint edges, lets each muscle settle "
+                             "individually onto bones. Second pass adds inter-muscle "
+                             "edges and continues until convergence.")
     args = parser.parse_args()
 
     # Multi-worker: split frames into chunks, launch subprocesses
@@ -1414,16 +1763,19 @@ def main():
     # ── Classify into layers ──────────────────────────────────────────────
     print("[8] Classifying into layers...")
     layer_muscles = [[], [], []]
-    for name in active_all:
-        short = name.replace(f"{side}_", "")
-        assigned = False
-        for li, lm in LAYERS.items():
-            if short in lm:
-                layer_muscles[li].append(name)
-                assigned = True
-                break
-        if not assigned:
-            layer_muscles[2].append(name)
+    if args.single_layer:
+        layer_muscles[0] = list(active_all.keys())
+    else:
+        for name in active_all:
+            short = name.replace(f"{side}_", "")
+            assigned = False
+            for li, lm in LAYERS.items():
+                if short in lm:
+                    layer_muscles[li].append(name)
+                    assigned = True
+                    break
+            if not assigned:
+                layer_muscles[2].append(name)
 
     for li in range(3):
         print(f"    Layer {li}: {len(layer_muscles[li])} — {layer_muscles[li]}")
@@ -1525,6 +1877,31 @@ def main():
             # frozen_muscles = all muscles from earlier layers (already settled)
             layer_caches[li]['_iron_man_offset'] = args.iron_man_offset
             layer_caches[li]['_postcoll_rounds'] = args.postcoll_rounds
+            layer_caches[li]['_max_step'] = args.max_step
+            layer_caches[li]['_chunk_iters'] = args.chunk_iters
+            layer_caches[li]['_adaptive_step'] = args.adaptive_step
+            layer_caches[li]['_snap_out'] = args.iron_man_snap_out
+            layer_caches[li]['_detached_start'] = args.detached_start
+            layer_caches[li]['_bone_rest_transforms'] = bone_rest_transforms
+            # Two-phase: first run with inter-muscle constraints disabled
+            # (each muscle settles individually), then re-run with them on.
+            phase1_snaps = []
+            if args.two_phase_inter:
+                layer_caches[li]['_skip_inter'] = True
+                run_layer_sim_with_collision(
+                    layer_active, settled_muscles, skeleton_meshes, skel,
+                    obstacle_meshes, layer_constraints[li],
+                    layer_caches[li], backend_name,
+                    max_iterations=args.settle_iters, tolerance=args.tolerance,
+                    collision_margin=args.collision_margin,
+                    frame_independent=args.frame_independent,
+                    do_collision=not args.no_collision,
+                    inloop_collision=args.inloop_collision,
+                    verbose=(frame == args.start_frame and li == 0))
+                phase1_snaps = list(layer_caches[li].get('snapshots', []))
+                # Phase 2: turn inter-muscle on, no more iron-man (already settled).
+                layer_caches[li]['_skip_inter'] = False
+                layer_caches[li]['_detached_start'] = False
             iters, max_disp = run_layer_sim_with_collision(
                 layer_active, settled_muscles, skeleton_meshes, skel,
                 obstacle_meshes, layer_constraints[li],
@@ -1535,6 +1912,13 @@ def main():
                 do_collision=not args.no_collision,
                 inloop_collision=args.inloop_collision,
                 verbose=(frame == args.start_frame and li == 0))
+
+            # Combine phase1+phase2 snapshots so renderer sees full sequence.
+            if args.two_phase_inter and phase1_snaps:
+                snaps_p2 = layer_caches[li].get('snapshots', [])
+                # Skip first p2 snap (it's same as last p1 snap).
+                combined = phase1_snaps + list(snaps_p2)[1:]
+                layer_caches[li]['snapshots'] = combined
 
             # Dump iron-man-style convergence snapshots for this layer/frame
             # so an offline renderer can produce per-iter images.

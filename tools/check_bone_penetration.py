@@ -72,6 +72,7 @@ def main():
         v = (R1 @ local.T).T + t1
         bone_meshes.append(trimesh.Trimesh(vertices=v, faces=tm.faces, process=True))
 
+    import pickle
     total = 0
     bad_muscles = []
     for chunk_path in sorted(glob.glob(os.path.join(cache_dir, '*_chunk_*.npz'))):
@@ -82,16 +83,36 @@ def main():
             continue
         idx = frames.index(frame)
         pos = d['positions'][idx]
+        # Build cap-vert exclusion set from tet's cap_attachments (these are
+        # the origin/insertion verts pinned to bones — they're SUPPOSED to be
+        # on bone surface, not real penetrations).
+        cap_set = set()
+        try:
+            with open(f'tet/{mname}_tet.npz', 'rb') as f:
+                t = pickle.load(f)
+            ca = t.get('cap_attachments')
+            if ca is not None and len(ca) > 0:
+                cap_set = set(int(v) for v in np.asarray(ca)[:, 0])
+            for vi in t.get('anchor_vertices', []):
+                cap_set.add(int(vi))
+        except Exception:
+            pass
         n_inside = 0
         for bm in bone_meshes:
             try:
                 bbmin = bm.bounds[0] - 0.01
                 bbmax = bm.bounds[1] + 0.01
-                bb = np.all((pos >= bbmin) & (pos <= bbmax), axis=1)
-                if not np.any(bb):
+                bb_mask = np.all((pos >= bbmin) & (pos <= bbmax), axis=1)
+                if not np.any(bb_mask):
                     continue
-                inside = bm.contains(pos[bb])
-                n_inside += int(np.sum(inside))
+                bb_idx_arr = np.where(bb_mask)[0]
+                bb_pos = pos[bb_idx_arr]
+                inside = bm.contains(bb_pos)
+                # Exclude any cap vert from the count.
+                for k in np.where(inside)[0]:
+                    if int(bb_idx_arr[k]) in cap_set:
+                        continue
+                    n_inside += 1
             except Exception:
                 continue
         total += n_inside

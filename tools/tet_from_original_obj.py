@@ -214,7 +214,10 @@ mv = abs(mesh.volume); max_vol = max(mv / 1500.0, 1e-6)
 steiner = max(len(rv), 300)
 try:
     t = tetgen.TetGen(rv.copy(), rf.copy())
-    t.tetrahedralize(order=1, mindihedral=5, minratio=2.0,
+    # Tighter quality: minratio=1.2 + mindihedral=10 = fewer sliver tets.
+    # Sliver tets (low dihedral angle, small volume vs edge length) caused
+    # ARAP to produce outlier verts even after boundary preservation.
+    t.tetrahedralize(order=1, mindihedral=10, minratio=1.2,
                      maxvolume=max_vol, nobisect=True, steinerleft=steiner)
     np.savez("{out_path}", node=np.asarray(t.node), elem=np.asarray(t.elem).astype(np.int32), mode=np.array([1]))
     sys.exit(0)
@@ -276,7 +279,7 @@ def process_muscle(muscle_name, obj_path, contour_tet_path, output_path, skel, m
     print(f'  [{muscle_name}] OBJ {len(obj_v)}v {len(obj_f)}f', flush=True)
 
     print(f'  [{muscle_name}] decimate (preserving boundary verts)', flush=True)
-    target_verts = 1500
+    target_verts = 1200
     if len(obj_v) > target_verts:
         # Detect boundary verts BEFORE decimation — these are attachment
         # sites and must be preserved anatomically.
@@ -477,22 +480,40 @@ def process_muscle(muscle_name, obj_path, contour_tet_path, output_path, skel, m
     if neg.any():
         tet_e[neg, 1], tet_e[neg, 2] = tet_e[neg, 2].copy(), tet_e[neg, 1].copy()
 
-    # Prune tet_v to only verts actually used by tet elements. Orphaned verts
-    # (in tet_v but not in any tet) never move under ARAP → visible as
-    # stuck-at-rest faces on the render mesh. Pruning + remapping eliminates
-    # them and keeps tet volume == surface volume.
-    used_mask = np.zeros(len(tet_v), dtype=bool)
-    used_mask[tet_e.flatten()] = True
-    n_orphan = int((~used_mask).sum())
-    if n_orphan:
-        old_to_new = np.full(len(tet_v), -1, dtype=np.int32)
-        old_to_new[used_mask] = np.arange(int(used_mask.sum()), dtype=np.int32)
-        tet_v = tet_v[used_mask]
-        tet_e = old_to_new[tet_e]
-        # Rebuild c2t with the pruned tet_v.
-        kd = cKDTree(tet_v)
-        _, c2t = kd.query(closed_v)
-        print(f'    pruned {n_orphan} orphan tet verts', flush=True)
+    # Prune tet_v to only verts actually used by tet elements AND to only
+    # tet elements whose verts each belong to ≥2 tets (so no vert is a
+    # singleton corner of exactly 1 tet — those produce ARAP outliers).
+    # Orphan (0-tet) + singleton (1-tet) removal via iterative pass.
+    for _pass in range(3):
+        used_mask = np.zeros(len(tet_v), dtype=bool)
+        used_mask[tet_e.flatten()] = True
+        # Count tet membership per vert
+        tet_count = np.zeros(len(tet_v), dtype=np.int32)
+        for tet in tet_e:
+            for v in tet:
+                tet_count[int(v)] += 1
+        singleton = (tet_count == 1)
+        if not singleton.any() and used_mask.all():
+            break
+        # Drop tets containing any singleton vert
+        keep_tet = np.ones(len(tet_e), dtype=bool)
+        if singleton.any():
+            for ti, tet in enumerate(tet_e):
+                if any(singleton[int(v)] for v in tet):
+                    keep_tet[ti] = False
+            tet_e = tet_e[keep_tet]
+        used_mask = np.zeros(len(tet_v), dtype=bool)
+        used_mask[tet_e.flatten()] = True
+        n_drop = int((~used_mask).sum())
+        if n_drop:
+            old_to_new = np.full(len(tet_v), -1, dtype=np.int32)
+            old_to_new[used_mask] = np.arange(int(used_mask.sum()), dtype=np.int32)
+            tet_v = tet_v[used_mask]
+            tet_e = old_to_new[tet_e]
+    # Rebuild c2t with pruned tet_v.
+    kd = cKDTree(tet_v)
+    _, c2t = kd.query(closed_v)
+    print(f'    pruned to {len(tet_v)}v {len(tet_e)}e (no orphans, no singleton-tet verts)', flush=True)
 
     # Render faces = all closed_f (surface + caps), remapped to pruned tet
     # indices. Every render-face vert now belongs to a tet (pruning above

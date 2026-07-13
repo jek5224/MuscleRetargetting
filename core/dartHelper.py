@@ -709,19 +709,30 @@ def exportBoundingBoxes(skeleton_meshes, root_name='Skeleton', filename='zygote_
             
             tw(f, "</Body>", 2)
 
-            joint_type = 'Free' if (mesh.is_root and i == 0) else 'Ball'#'Ball'
+            # Prefer mesh-flagged Revolute over Ball default; root stays Free.
+            if mesh.is_root and i == 0:
+                joint_type = 'Free'
+            elif i == 0 and getattr(mesh, 'is_revolute', False):
+                joint_type = 'Revolute'
+            else:
+                joint_type = 'Ball'
             node_full_name = name + str(i)
             bvh_attr = (' bvh="%s"' % bvh_map[node_full_name]) if node_full_name in bvh_map else ''
             if joint_type == "Free":
                 tw(f, "<Joint type=\"Free\"%s>" % bvh_attr, 2)
+            elif joint_type == "Revolute":
+                rev_axis = getattr(mesh, 'revolute_axis', np.array([1.0, 0.0, 0.0]))
+                rev_axis = np.asarray(rev_axis, dtype=np.float64)
+                rev_lower = float(getattr(mesh, 'revolute_lower', -np.pi / 2))
+                rev_upper = float(getattr(mesh, 'revolute_upper', np.pi / 2))
+                tw(f, "<Joint type=\"Revolute\"%s axis=\"%s\" lower=\"%s\" upper=\"%s\">" %
+                        (bvh_attr,
+                         " ".join(np.round(rev_axis, 6).astype(str)),
+                         f"{rev_lower:.6f}",
+                         f"{rev_upper:.6f}"), 2)
             elif joint_type == "Ball":
                 if i > 0 or mesh.is_weld:
                     joint_type = 'Weld'
-                    # axis = np.array([1.001, 0.001, 0.001,])
-
-                    # tw(f, "<Joint type=\"Revolute\" axis=\"%s\" lower=\"-0.00001\" upper=\"0.00001\">" %
-                    #         (" ".join(axis.astype(str))),
-                    #         2)
                     tw(f, "<Joint type=\"Weld\"%s>" % bvh_attr, 2)
                 else:
                     lower = np.array([np.round(-np.pi/2, 2),

@@ -1587,6 +1587,43 @@ class MuscleMeshMixin:
         self._face_scalar_min = None  # Invalidate precomputed ranges
         self._face_scalar_max = None
         self.vertex_colors = None
+        self.is_draw_tendon_regions = False
+        self.tendon_origin_value = 1.1
+        self.tendon_insertion_value = 9.9
+        self.tendon_blend_width = 0.3
+        self.tendon_origin_tilt_angle = 0.0
+        self.tendon_origin_tilt_amount = 0.0
+        self.tendon_insertion_tilt_angle = 0.0
+        self.tendon_insertion_tilt_amount = 0.0
+        self.draw_origin_tendon_boundary = False
+        self.draw_insertion_tendon_boundary = False
+        self._tendon_boundary_error = ""
+        self._tendon_region_colors = None
+        self._tendon_overlay_vertices = None
+        self._tendon_overlay_normals = None
+        self._tendon_origin_boundary_lines = None
+        self._tendon_insertion_boundary_lines = None
+
+        # Experimental Epic-style volume field workflow:
+        # closed open-surface tet -> volumetric Laplace field -> gradient streamlines.
+        self.epic_tet_vertices = None
+        self.epic_tetrahedra = None
+        self.epic_closed_faces = None
+        self.epic_cap_faces = []
+        self.epic_laplace_field = None
+        self.epic_tet_gradients = None
+        self.epic_fibers = None
+        self.epic_fibers_raw = None
+        self.epic_gradient_direction_segments = None
+        self.epic_gradient_direction_lines = None
+        self.epic_gradient_direction_points = None
+        self.epic_gradient_direction_line_colors = None
+        self.epic_gradient_direction_point_colors = None
+        self.epic_gradient_direction_limit = 8000
+        self.epic_fiber_count = 100
+        self.epic_fiber_levels = 64
+        self.epic_error = ""
+        self._epic_use_local_tet_alpha = False
 
         # Scalar field animation state
         self._scalar_anim_active = False
@@ -2692,6 +2729,28 @@ class MuscleMeshMixin:
         self.scalar_field = None
         self.vertex_colors = None
         self.is_draw_scalar_field = False
+        self.is_draw_tendon_regions = False
+        self._tendon_region_colors = None
+        self._tendon_overlay_vertices = None
+        self._tendon_overlay_normals = None
+        self._tendon_origin_boundary_lines = None
+        self._tendon_insertion_boundary_lines = None
+
+        self.epic_tet_vertices = None
+        self.epic_tetrahedra = None
+        self.epic_closed_faces = None
+        self.epic_cap_faces = []
+        self.epic_laplace_field = None
+        self.epic_tet_gradients = None
+        self.epic_fibers = None
+        self.epic_fibers_raw = None
+        self.epic_gradient_direction_segments = None
+        self.epic_gradient_direction_lines = None
+        self.epic_gradient_direction_points = None
+        self.epic_gradient_direction_line_colors = None
+        self.epic_gradient_direction_point_colors = None
+        self.epic_error = ""
+        self._epic_use_local_tet_alpha = False
 
         # Scalar field animation state
         self._scalar_anim_active = False
@@ -2852,6 +2911,7 @@ class MuscleMeshMixin:
         self.contour_mesh_vertices = None
         self.contour_mesh_faces = None
         self.contour_mesh_normals = None
+        self._connected_mesh_owner_name = ''
         self.is_draw_contour_mesh = False
         self.contour_mesh_transparency = 0.8
 
@@ -2938,6 +2998,12 @@ class MuscleMeshMixin:
 
         u = solve_scalar_field(self.vertices, self.faces_3, origin_indices, insertion_indices)
         self.scalar_field = u
+        self.is_draw_tendon_regions = False
+        self._tendon_region_colors = None
+        self._tendon_overlay_vertices = None
+        self._tendon_overlay_normals = None
+        self._tendon_origin_boundary_lines = None
+        self._tendon_insertion_boundary_lines = None
         # Invalidate precomputed face scalar ranges (will be recomputed on next find_contour)
         self._face_scalar_min = None
         self._face_scalar_max = None
@@ -2963,6 +3029,1539 @@ class MuscleMeshMixin:
             self.vertex_colors = self._scalar_anim_target_colors.copy()
             self.is_draw_scalar_field = True
             self._scalar_replayed = True
+
+    def apply_tendon_region_colors(self, origin_value=None, insertion_value=None, fast_preview=False):
+        """Color scalar-defined tendon regions white and belly red."""
+        if self.scalar_field is None:
+            print("Please compute scalar field first")
+            return False
+        if self.faces_3 is None or len(self.faces_3) == 0:
+            print("No triangular faces available for tendon coloring")
+            return False
+        if not self._is_single_stream_tendon_supported():
+            print("Tendon designation supports only single-origin/single-insertion muscles for now")
+            return False
+
+        if origin_value is not None:
+            self.tendon_origin_value = float(origin_value)
+        if insertion_value is not None:
+            self.tendon_insertion_value = float(insertion_value)
+
+        o_val = float(self.tendon_origin_value)
+        i_val = float(self.tendon_insertion_value)
+        field_min = float(np.min(self.scalar_field))
+        field_max = float(np.max(self.scalar_field))
+        if o_val >= i_val:
+            print(f"Invalid tendon values: origin {o_val:.4f} must be smaller than insertion {i_val:.4f}")
+            return False
+        if o_val <= field_min or i_val >= field_max:
+            print(f"Warning: tendon thresholds near/outside scalar range [{field_min:.4f}, {field_max:.4f}]")
+
+        face_indices = self.faces_3[:, :, 0].astype(int)
+        need_lines = (
+            (not fast_preview)
+            or getattr(self, 'draw_origin_tendon_boundary', False)
+            or getattr(self, 'draw_insertion_tendon_boundary', False)
+        )
+        origin_lines = self._tendon_origin_boundary_lines
+        insertion_lines = self._tendon_insertion_boundary_lines
+        if need_lines:
+            origin_lines, insertion_lines = self._build_tendon_boundary_lines(face_indices, o_val, i_val)
+            if not fast_preview:
+                origin_components = self._line_component_count(origin_lines)
+                insertion_components = self._line_component_count(insertion_lines)
+                if origin_components != 1 or insertion_components != 1:
+                    msg = (f"Tendon boundary invalid: expected 1 contour each, got "
+                           f"origin={origin_components}, insertion={insertion_components}. "
+                           f"Reduce Tilt Amount or adjust angle/base value.")
+                    self._tendon_boundary_error = msg
+                    print(msg)
+                    return False
+
+        colors = self._build_tendon_gradient_colors(face_indices, o_val, i_val)
+
+        self._tendon_region_colors = colors
+        self._tendon_overlay_vertices = None
+        self._tendon_overlay_normals = None
+        self._tendon_origin_boundary_lines = origin_lines
+        self._tendon_insertion_boundary_lines = insertion_lines
+        if not fast_preview:
+            self._tendon_boundary_error = ""
+        self.vertex_colors = colors.copy()
+        self.is_draw_tendon_regions = True
+        self.is_draw_scalar_field = False
+        self.is_draw_contours = False
+        self.specific_contour = None
+        return True
+
+    def epic_tetrahedralize_original_mesh(self):
+        """Tetrahedralize the original open muscle surface after capping holes."""
+        self.epic_error = ""
+        if self.vertices is None or self.faces_3 is None or len(self.faces_3) == 0:
+            self.epic_error = "No source surface mesh"
+            print(f"[Epic] {self.epic_error}")
+            return False
+        if not getattr(self, 'edge_groups', None) or not getattr(self, 'edge_classes', None):
+            self.epic_error = "No open origin/insertion edge groups"
+            print(f"[Epic] {self.epic_error}")
+            return False
+
+        try:
+            import tetgen
+        except Exception as e:
+            self.epic_error = f"tetgen import failed: {e}"
+            print(f"[Epic] {self.epic_error}")
+            return False
+
+        verts = np.asarray(self.vertices, dtype=np.float64)
+        faces = np.asarray(self.faces_3[:, :, 0], dtype=np.int32)
+        closed_verts = verts.tolist()
+        closed_faces = faces.tolist()
+        cap_faces = []
+
+        def cap_loop_cdt(loop):
+            try:
+                import triangle as tr
+            except Exception:
+                return None, None
+            n = len(loop)
+            if n < 3:
+                return [], None
+            if n == 3:
+                return [[loop[0], loop[1], loop[2]]], None
+            pts_3d = verts[loop]
+            centroid = pts_3d.mean(axis=0)
+            centered = pts_3d - centroid
+            _, _, vt = np.linalg.svd(centered, full_matrices=False)
+
+            def segments_cross(pts_2d):
+                for i in range(n):
+                    for j in range(i + 2, n):
+                        if i == 0 and j == n - 1:
+                            continue
+                        a, b = pts_2d[i], pts_2d[(i + 1) % n]
+                        c, d = pts_2d[j], pts_2d[(j + 1) % n]
+                        d1 = (c[0] - a[0]) * (b[1] - a[1]) - (c[1] - a[1]) * (b[0] - a[0])
+                        d2 = (d[0] - a[0]) * (b[1] - a[1]) - (d[1] - a[1]) * (b[0] - a[0])
+                        d3 = (a[0] - c[0]) * (d[1] - c[1]) - (a[1] - c[1]) * (d[0] - c[0])
+                        d4 = (b[0] - c[0]) * (d[1] - c[1]) - (b[1] - c[1]) * (d[0] - c[0])
+                        if ((d1 > 0 and d2 < 0) or (d1 < 0 and d2 > 0)) and \
+                           ((d3 > 0 and d4 < 0) or (d3 < 0 and d4 > 0)):
+                            return True
+                return False
+
+            projections = [
+                centered @ vt[:2].T,
+                pts_3d[:, :2],
+                pts_3d[:, [0, 2]],
+                pts_3d[:, 1:3],
+            ]
+            segments = np.array([[i, (i + 1) % n] for i in range(n)], dtype=np.int32)
+            for pts_2d in projections:
+                if segments_cross(pts_2d):
+                    continue
+                try:
+                    result = tr.triangulate({'vertices': pts_2d, 'segments': segments}, 'p')
+                    tris = result.get('triangles', None)
+                    if tris is None:
+                        continue
+                    out = [[loop[int(a)], loop[int(b)], loop[int(c)]] for a, b, c in tris]
+                    if len(out) >= n - 2:
+                        return out, None
+                except Exception:
+                    continue
+            return None, centroid
+
+        for group in self.edge_groups:
+            loop = [int(i) for i in group]
+            if len(loop) < 3:
+                continue
+            group_cap, centroid = cap_loop_cdt(loop)
+            if group_cap is None:
+                center_idx = len(closed_verts)
+                closed_verts.append(np.mean(verts[loop], axis=0).tolist() if centroid is None else centroid.tolist())
+                group_cap = []
+                for i in range(len(loop)):
+                    group_cap.append([loop[i], loop[(i + 1) % len(loop)], center_idx])
+            for tri in group_cap:
+                closed_faces.append(tri)
+            cap_faces.append(group_cap)
+
+        closed_verts = np.asarray(closed_verts, dtype=np.float64)
+        closed_faces = np.asarray(closed_faces, dtype=np.int32)
+
+        tet_vertices = None
+        tetrahedra = None
+        render_source_verts = closed_verts
+        render_source_faces = closed_faces
+        cap_face_indices = list(range(len(faces), len(closed_faces)))
+        direct_failed = False
+        try:
+            tg = tetgen.TetGen(closed_verts, closed_faces)
+            tg.tetrahedralize(order=1, quality=True, minratio=1.5, nobisect=True)
+            tet_vertices = np.asarray(tg.node, dtype=np.float64)
+            tetrahedra = np.asarray(tg.elem, dtype=np.int32)
+        except Exception:
+            direct_failed = True
+
+        if tet_vertices is None or tetrahedra is None or len(tetrahedra) == 0:
+            try:
+                import pymeshfix
+                fixer = pymeshfix.MeshFix(closed_verts, closed_faces)
+                try:
+                    fixer.repair(verbose=False)
+                except TypeError:
+                    fixer.repair()
+                try:
+                    fixed_verts, fixed_faces = fixer.v, fixer.f
+                except AttributeError:
+                    fixed_verts, fixed_faces = fixer._return_arrays()
+                fixed_verts = np.asarray(fixed_verts, dtype=np.float64)
+                fixed_faces = np.asarray(fixed_faces, dtype=np.int32)
+
+                tg = tetgen.TetGen(fixed_verts, fixed_faces)
+                tg.tetrahedralize(order=1, quality=True, minratio=1.5, nobisect=True)
+                tet_vertices = np.asarray(tg.node, dtype=np.float64)
+                tetrahedra = np.asarray(tg.elem, dtype=np.int32)
+                render_source_verts = fixed_verts
+                render_source_faces = fixed_faces
+                cap_face_indices = []
+                if direct_failed:
+                    print("[Epic] Direct tet failed; used pymeshfix repair fallback")
+            except Exception as e:
+                self.epic_error = f"tetrahedralization failed: {e}"
+                print(f"[Epic] {self.epic_error}")
+                return False
+
+        if len(tetrahedra) == 0:
+            self.epic_error = "tetrahedralization produced no tetrahedra"
+            print(f"[Epic] {self.epic_error}")
+            return False
+
+        tv = tet_vertices[tetrahedra]
+        vols = np.einsum('ij,ij->i', tv[:, 1] - tv[:, 0], np.cross(tv[:, 2] - tv[:, 0], tv[:, 3] - tv[:, 0]))
+        neg = vols < 0
+        if np.any(neg):
+            tetrahedra[neg, 1], tetrahedra[neg, 2] = tetrahedra[neg, 2].copy(), tetrahedra[neg, 1].copy()
+
+        from scipy.spatial import cKDTree
+        tet_node_tree = cKDTree(tet_vertices)
+        render_to_tet = tet_node_tree.query(render_source_verts, k=1)[1].astype(np.int32)
+        render_faces = render_to_tet[render_source_faces]
+        closed_to_tet = tet_node_tree.query(closed_verts, k=1)[1].astype(np.int32)
+        mapped_cap_faces = []
+        for caps in cap_faces:
+            mapped_cap_faces.append([closed_to_tet[np.asarray(tri, dtype=np.int32)].tolist() for tri in caps])
+
+        self.epic_tet_vertices = tet_vertices
+        self.epic_tetrahedra = tetrahedra
+        self.epic_closed_faces = render_faces
+        self.epic_cap_faces = mapped_cap_faces
+        self.epic_laplace_field = None
+        self.epic_tet_gradients = None
+        self.epic_fibers = None
+        self.epic_fibers_raw = None
+        self.epic_gradient_direction_segments = None
+        self.epic_gradient_direction_lines = None
+        self.epic_gradient_direction_points = None
+        self.epic_gradient_direction_line_colors = None
+        self.epic_gradient_direction_point_colors = None
+        self.tet_vertices = tet_vertices.copy()
+        self.tet_tetrahedra = tetrahedra.copy()
+        self.tet_render_faces = render_faces.copy()
+        self.tet_faces = self.tet_render_faces
+        self.tet_sim_faces = None
+        self.tet_cap_face_indices = cap_face_indices
+        self.tet_surface_face_count = len(faces)
+        self._tet_surface_verts = None
+        self._tet_surface_normals = None
+        self._tet_cap_verts = None
+        self._tet_cap_normals = None
+        self._tet_edge_verts = None
+        self.is_draw_tet_mesh = True
+        print(f"[Epic] Tetrahedralized original mesh: {len(tet_vertices)} vertices, {len(tetrahedra)} tets")
+        return True
+
+    def epic_solve_volume_laplace_field(self):
+        """Solve harmonic scalar field on the Epic tet graph."""
+        self.epic_error = ""
+        if self.epic_tet_vertices is None or self.epic_tetrahedra is None:
+            self.epic_error = "Run Epic tetrahedralization first"
+            print(f"[Epic] {self.epic_error}")
+            return False
+
+        origin_src = []
+        insertion_src = []
+        for cls, group in zip(self.edge_classes, self.edge_groups):
+            if cls == 'origin':
+                origin_src.extend(group)
+            elif cls == 'insertion':
+                insertion_src.extend(group)
+        origin_src = np.asarray(sorted(set(origin_src)), dtype=np.int32)
+        insertion_src = np.asarray(sorted(set(insertion_src)), dtype=np.int32)
+        if len(origin_src) == 0 or len(insertion_src) == 0:
+            self.epic_error = "Need both origin and insertion open-edge groups"
+            print(f"[Epic] {self.epic_error}")
+            return False
+
+        from scipy.spatial import cKDTree
+        tree = cKDTree(self.epic_tet_vertices)
+        origin_idx = tree.query(np.asarray(self.vertices)[origin_src], k=1)[1]
+        insertion_idx = tree.query(np.asarray(self.vertices)[insertion_src], k=1)[1]
+        origin_idx = np.asarray(sorted(set(origin_idx.tolist())), dtype=np.int32)
+        insertion_idx = np.asarray(sorted(set(insertion_idx.tolist())), dtype=np.int32)
+
+        n = len(self.epic_tet_vertices)
+        rows = []
+        cols = []
+        data = []
+        tet_shape_grads = np.zeros((len(self.epic_tetrahedra), 3, 4), dtype=np.float64)
+        for ti, tet in enumerate(self.epic_tetrahedra):
+            p = self.epic_tet_vertices[tet]
+            A = np.column_stack((np.ones(4), p))
+            try:
+                invA = np.linalg.inv(A)
+            except np.linalg.LinAlgError:
+                continue
+            grads = invA[1:4, :]
+            vol6 = abs(np.dot(p[1] - p[0], np.cross(p[2] - p[0], p[3] - p[0])))
+            vol = vol6 / 6.0
+            if vol <= 1e-16:
+                continue
+            tet_shape_grads[ti] = grads
+            Ke = vol * (grads.T @ grads)
+            for a in range(4):
+                ia = int(tet[a])
+                for b in range(4):
+                    rows.append(ia)
+                    cols.append(int(tet[b]))
+                    data.append(float(Ke[a, b]))
+        L = scipy.sparse.csr_matrix((data, (rows, cols)), shape=(n, n))
+
+        fixed = np.zeros(n, dtype=bool)
+        fixed[origin_idx] = True
+        fixed[insertion_idx] = True
+        free = ~fixed
+        u = np.zeros(n, dtype=np.float64)
+        u[insertion_idx] = 1.0
+        if not np.any(free):
+            self.epic_error = "No free vertices in tet graph"
+            print(f"[Epic] {self.epic_error}")
+            return False
+
+        rhs = -L[free][:, fixed] @ u[fixed]
+        try:
+            u[free] = scipy.sparse.linalg.spsolve(L[free][:, free], rhs)
+        except Exception as e:
+            self.epic_error = f"Laplace solve failed: {e}"
+            print(f"[Epic] {self.epic_error}")
+            return False
+        u = np.clip(u, 0.0, 1.0)
+
+        gradients = np.zeros((len(self.epic_tetrahedra), 3), dtype=np.float64)
+        for ti, tet in enumerate(self.epic_tetrahedra):
+            gradients[ti] = tet_shape_grads[ti] @ u[tet]
+
+        self.epic_laplace_field = u
+        self.epic_tet_gradients = gradients
+        self.epic_gradient_direction_segments = None
+        self.epic_gradient_direction_lines = None
+        self.epic_gradient_direction_points = None
+        self.epic_gradient_direction_line_colors = None
+        self.epic_gradient_direction_point_colors = None
+        self.contour_mesh_transparency = 0.5
+        self._epic_use_local_tet_alpha = True
+        try:
+            self._prepare_tet_draw_arrays()
+            vidx = getattr(self, '_tet_surface_vidx', None)
+            if vidx is not None and len(vidx) > 0:
+                vals = np.asarray(u[vidx], dtype=np.float32)
+                colors = np.empty((len(vals), 4), dtype=np.float32)
+                colors[:, 0] = 1.0 - vals
+                colors[:, 1] = 0.05
+                colors[:, 2] = vals
+                colors[:, 3] = float(getattr(self, 'contour_mesh_transparency', 0.5))
+                self._tet_surface_colors = colors
+                self.is_draw_tet_mesh = True
+        except Exception as e:
+            print(f"[Epic] Laplace color visualization failed: {e}")
+        print(f"[Epic] Solved volume Laplace field: range [{u.min():.4f}, {u.max():.4f}]")
+        return True
+
+    def epic_show_laplace_gradient_directions(self, max_segments=None):
+        """Show the EMU-style per-tet fiber direction from the Laplace gradient.
+
+        This is intentionally not a streamline sampler.  It computes one local
+        direction vector for every tet and draws short in-tet segments, avoiding
+        the expensive neighbor-walk used by epic_sample_gradient_fibers().
+        """
+        self.epic_error = ""
+        if self.epic_laplace_field is None or self.epic_tet_gradients is None:
+            self.epic_error = "Run Epic Laplace field first"
+            print(f"[Epic] {self.epic_error}")
+            return False
+
+        if self.epic_tet_vertices is None or self.epic_tetrahedra is None:
+            self.epic_error = "Run Epic tetrahedralization first"
+            print(f"[Epic] {self.epic_error}")
+            return False
+
+        tet_pts = self.epic_tet_vertices[self.epic_tetrahedra]
+        centers = tet_pts.mean(axis=1)
+        gradients = np.asarray(self.epic_tet_gradients, dtype=np.float64)
+        norms = np.linalg.norm(gradients, axis=1)
+        valid = np.isfinite(norms) & (norms > 1e-12)
+        if not np.any(valid):
+            self.epic_error = "No nonzero Laplace-gradient tets"
+            print(f"[Epic] {self.epic_error}")
+            return False
+
+        valid_idx = np.where(valid)[0]
+        max_segments = int(
+            max_segments if max_segments is not None
+            else getattr(self, 'epic_gradient_direction_limit', 8000)
+        )
+        if max_segments > 0 and len(valid_idx) > max_segments:
+            # Even spacing is deterministic and cheap; the field is still
+            # computed for every tet, only the draw overlay is thinned.
+            pick = np.linspace(0, len(valid_idx) - 1, max_segments, dtype=np.int32)
+            draw_idx = valid_idx[pick]
+        else:
+            draw_idx = valid_idx
+
+        dirs = gradients[draw_idx] / norms[draw_idx, None]
+
+        # Segment size follows local tet scale, so dense and coarse regions
+        # remain readable without tracing across tet boundaries.
+        tet_draw_pts = tet_pts[draw_idx]
+        edge_pairs = ((0, 1), (0, 2), (0, 3), (1, 2), (1, 3), (2, 3))
+        edge_lengths = []
+        for a, b in edge_pairs:
+            edge_lengths.append(np.linalg.norm(tet_draw_pts[:, a] - tet_draw_pts[:, b], axis=1))
+        local_len = 0.85 * np.median(np.stack(edge_lengths, axis=1), axis=1)
+        local_len = np.maximum(local_len, 1e-6)
+
+        c = centers[draw_idx]
+        start = c - 0.25 * local_len[:, None] * dirs
+        end = c + 0.55 * local_len[:, None] * dirs
+        segments = np.stack((start, end), axis=1).astype(np.float32)
+
+        # Arrowhead ticks make the sign of grad(u) visible.  Use a stable
+        # perpendicular vector per direction, switching reference axes when a
+        # direction is nearly parallel to world Z.
+        ref = np.tile(np.array([0.0, 0.0, 1.0], dtype=np.float64), (len(dirs), 1))
+        near_z = np.abs(dirs @ ref[0]) > 0.9
+        if np.any(near_z):
+            ref[near_z] = np.array([0.0, 1.0, 0.0], dtype=np.float64)
+        side = np.cross(dirs, ref)
+        side_norm = np.linalg.norm(side, axis=1)
+        good_side = side_norm > 1e-12
+        side[good_side] /= side_norm[good_side, None]
+        side[~good_side] = np.array([1.0, 0.0, 0.0], dtype=np.float64)
+        arrow_len = 0.16 * local_len[:, None]
+        arrow_width = 0.055 * local_len[:, None]
+        head_a = end - arrow_len * dirs + arrow_width * side
+        head_b = end - arrow_len * dirs - arrow_width * side
+
+        lines = np.empty((len(dirs) * 3, 2, 3), dtype=np.float32)
+        lines[0::3, 0] = start
+        lines[0::3, 1] = end
+        lines[1::3, 0] = end
+        lines[1::3, 1] = head_a
+        lines[2::3, 0] = end
+        lines[2::3, 1] = head_b
+
+        tet_u = np.mean(self.epic_laplace_field[self.epic_tetrahedra[draw_idx]], axis=1)
+
+        def scalar_to_rgb(scalar):
+            scalar = np.clip(np.asarray(scalar, dtype=np.float32), 0.0, 1.0)
+            rgb = np.zeros((len(scalar), 3), dtype=np.float32)
+            rgb[:, 0] = 1.0 - scalar
+            rgb[:, 1] = 0.08 * (1.0 - np.abs(2.0 * scalar - 1.0))
+            rgb[:, 2] = scalar
+            return rgb
+
+        # Color each glyph vertex by the linearly reconstructed Laplace value
+        # at that point: red near origin (u=0), blue near insertion (u=1).
+        flat_line_pts = lines.reshape(len(dirs), 6, 3).astype(np.float64)
+        line_u = tet_u[:, None] + np.einsum(
+            'mij,mj->mi',
+            flat_line_pts - c[:, None, :],
+            gradients[draw_idx]
+        )
+        line_colors = scalar_to_rgb(line_u.reshape(-1))
+        point_u = tet_u + np.einsum('ij,ij->i', end - c, gradients[draw_idx])
+        point_colors = scalar_to_rgb(point_u)
+
+        self.epic_gradient_direction_segments = segments
+        self.epic_gradient_direction_lines = lines
+        self.epic_gradient_direction_points = end.astype(np.float32)
+        self.epic_gradient_direction_line_colors = line_colors
+        self.epic_gradient_direction_point_colors = point_colors
+        self.epic_fibers = None
+        self.epic_fibers_raw = None
+        self.fiber_architecture = [np.zeros((len(segments), 2), dtype=np.float32)]
+        self.waypoints = []
+        self.draw_contour_stream = [True]
+        self.is_draw_fiber_architecture = True
+        self.is_draw_tet_mesh = False
+        self._fiber_draw_dirty = True
+        print(f"[Epic] Showing {len(segments)}/{len(valid_idx)} per-tet Laplace-gradient directions")
+        return True
+
+    def epic_sample_shape_coordinate_fibers(self, count=None, levels=None):
+        """Sample discrete fibers by transporting shape coordinates across Laplace levels.
+
+        Each seed gets a persistent 2D cross-section coordinate:
+        direction from the section center plus normalized radius along that
+        direction.  Every waypoint is then selected from the actual extracted
+        Laplace iso-section, so fibers stay tied to the outer tet shape instead
+        of following raw diffusion streamlines.
+        """
+        self.epic_error = ""
+        if self.epic_laplace_field is None or self.epic_tet_gradients is None:
+            self.epic_error = "Run Epic Laplace field first"
+            print(f"[Epic] {self.epic_error}")
+            return False
+        if self.epic_tet_vertices is None or self.epic_tetrahedra is None:
+            self.epic_error = "Run Epic tetrahedralization first"
+            print(f"[Epic] {self.epic_error}")
+            return False
+
+        count = int(count if count is not None else getattr(self, 'epic_fiber_count', 100))
+        levels = int(levels if levels is not None else getattr(self, 'epic_fiber_levels', 64))
+        count = int(np.clip(count, 1, 1000))
+        levels = max(16, levels)
+        self.epic_fiber_count = count
+        self.epic_fiber_levels = levels
+
+        tet_pts = self.epic_tet_vertices[self.epic_tetrahedra]
+        tet_vol6 = np.abs(np.einsum(
+            'ij,ij->i',
+            tet_pts[:, 1] - tet_pts[:, 0],
+            np.cross(tet_pts[:, 2] - tet_pts[:, 0], tet_pts[:, 3] - tet_pts[:, 0])
+        ))
+        valid_tets = np.where(tet_vol6 > 1e-14)[0]
+        if len(valid_tets) == 0:
+            self.epic_error = "No usable tetrahedra for shape-coordinate fibers"
+            print(f"[Epic] {self.epic_error}")
+            return False
+        tet_prob = tet_vol6[valid_tets] / np.sum(tet_vol6[valid_tets])
+
+        # Avoid exact caps; they often collapse to sparse boundary samples.
+        u_targets = np.linspace(0.02, 0.98, levels)
+        tet_edges = np.array([(0, 1), (0, 2), (0, 3), (1, 2), (1, 3), (2, 3)], dtype=np.int32)
+
+        def barycentric(point, tet_id):
+            tet = self.epic_tetrahedra[tet_id]
+            p = self.epic_tet_vertices[tet]
+            M = np.column_stack((p[0] - p[3], p[1] - p[3], p[2] - p[3]))
+            try:
+                abc = np.linalg.solve(M, point - p[3])
+            except np.linalg.LinAlgError:
+                return None
+            return np.array([abc[0], abc[1], abc[2], 1.0 - abc.sum()], dtype=np.float64)
+
+        def sample_u(tet_id, bary):
+            return float(np.dot(bary, self.epic_laplace_field[self.epic_tetrahedra[tet_id]]))
+
+        def iso_points(value):
+            pts = []
+            tids = []
+            for ti, tet in enumerate(self.epic_tetrahedra):
+                tu = self.epic_laplace_field[tet]
+                if value < np.min(tu) or value > np.max(tu):
+                    continue
+                tv = self.epic_tet_vertices[tet]
+                for ea, eb in tet_edges:
+                    ua = float(tu[ea])
+                    ub = float(tu[eb])
+                    if (ua - value) * (ub - value) > 0.0 or abs(ub - ua) < 1e-12:
+                        continue
+                    t = (value - ua) / (ub - ua)
+                    if -1e-8 <= t <= 1.0 + 1e-8:
+                        pts.append(tv[ea] * (1.0 - t) + tv[eb] * t)
+                        tids.append(ti)
+            if not pts:
+                return np.empty((0, 3), dtype=np.float64), np.empty((0,), dtype=np.int32)
+            pts = np.asarray(pts, dtype=np.float64)
+            tids = np.asarray(tids, dtype=np.int32)
+            key = np.round(pts / 1e-5).astype(np.int64)
+            _, unique_idx = np.unique(key, axis=0, return_index=True)
+            unique_idx = np.sort(unique_idx)
+            return pts[unique_idx], tids[unique_idx]
+
+        level_data = [iso_points(v) for v in u_targets]
+        level_points = [d[0] for d in level_data]
+        level_tets = [d[1] for d in level_data]
+        if any(len(p) < 8 for p in level_points):
+            self.epic_error = "Could not extract enough Laplace iso-section points"
+            print(f"[Epic] {self.epic_error}")
+            return False
+
+        centers = np.asarray([pts.mean(axis=0) for pts in level_points], dtype=np.float64)
+        axis = centers[-1] - centers[0]
+        axis_norm = np.linalg.norm(axis)
+        if axis_norm < 1e-12:
+            self.epic_error = "Laplace iso-centers are degenerate"
+            print(f"[Epic] {self.epic_error}")
+            return False
+        axis = axis / axis_norm
+
+        centered_vertices = self.epic_tet_vertices - np.mean(self.epic_tet_vertices, axis=0)
+        centered_vertices = centered_vertices - np.outer(centered_vertices @ axis, axis)
+        _, _, vt = np.linalg.svd(centered_vertices, full_matrices=False)
+        e1 = vt[0]
+        e1 = e1 - np.dot(e1, axis) * axis
+        e1_norm = np.linalg.norm(e1)
+        if e1_norm < 1e-12:
+            e1 = np.array([1.0, 0.0, 0.0])
+            e1 = e1 - np.dot(e1, axis) * axis
+            e1_norm = np.linalg.norm(e1)
+        e1 = e1 / max(e1_norm, 1e-12)
+        e2 = np.cross(axis, e1)
+        e2 = e2 / max(np.linalg.norm(e2), 1e-12)
+
+        level_coords = []
+        for li, pts in enumerate(level_points):
+            rel = pts - centers[li]
+            level_coords.append(np.column_stack((rel @ e1, rel @ e2)))
+
+        def center_at_u(u_value):
+            return np.array([
+                np.interp(u_value, u_targets, centers[:, 0]),
+                np.interp(u_value, u_targets, centers[:, 1]),
+                np.interp(u_value, u_targets, centers[:, 2]),
+            ], dtype=np.float64)
+
+        def max_projection(coords, direction2):
+            proj = coords @ direction2
+            pos = proj[proj > 0.0]
+            if len(pos) == 0:
+                return float(np.max(np.linalg.norm(coords, axis=1)))
+            return float(np.percentile(pos, 95))
+
+        def shape_coordinate_fiber(seed, start_tet):
+            bary = barycentric(seed, int(start_tet))
+            if bary is None:
+                return None
+            seed_u = float(np.clip(sample_u(int(start_tet), bary), u_targets[0], u_targets[-1]))
+            c_seed = center_at_u(seed_u)
+            rel = seed - c_seed
+            seed_2d = np.array([np.dot(rel, e1), np.dot(rel, e2)], dtype=np.float64)
+            seed_r = float(np.linalg.norm(seed_2d))
+            if seed_r < 1e-10:
+                direction2 = np.array([1.0, 0.0], dtype=np.float64)
+                rho = 0.0
+            else:
+                direction2 = seed_2d / seed_r
+                seed_level = int(np.argmin(np.abs(u_targets - seed_u)))
+                denom = max(max_projection(level_coords[seed_level], direction2), 1e-10)
+                rho = float(np.clip(seed_r / denom, 0.0, 1.0))
+
+            fiber = np.zeros((levels, 3), dtype=np.float64)
+            target_coords = np.zeros((levels, 2), dtype=np.float64)
+            chosen = np.zeros(levels, dtype=np.int32)
+            for li in range(levels):
+                coords = level_coords[li]
+                denom = max(max_projection(coords, direction2), 1e-10)
+                target_2d = direction2 * (rho * denom)
+                target_coords[li] = target_2d
+                diff = coords - target_2d
+                dist2 = np.sum(diff * diff, axis=1)
+                proj = coords @ direction2
+                wrong_side = proj < -0.05 * denom
+                dist2[wrong_side] += denom * denom * 100.0
+                idx = int(np.argmin(dist2))
+                chosen[li] = idx
+
+            smooth_coords = target_coords.copy()
+            for _ in range(2):
+                prev = smooth_coords.copy()
+                prev[1:-1] = 0.25 * smooth_coords[:-2] + 0.5 * smooth_coords[1:-1] + 0.25 * smooth_coords[2:]
+                smooth_coords = prev
+            for li in range(levels):
+                # Use the continuous transported coordinate.  Snapping back to
+                # nearest tet-edge iso samples makes fibers jump edge-to-edge.
+                fiber[li] = centers[li] + smooth_coords[li, 0] * e1 + smooth_coords[li, 1] * e2
+            return fiber
+
+        rng = np.random.default_rng(12345)
+        candidate_count = max(count * 12, count + 128)
+        sampled_valid = rng.choice(len(valid_tets), size=candidate_count, replace=True, p=tet_prob)
+        candidate_tets = valid_tets[sampled_valid].astype(np.int32)
+        weights = rng.exponential(1.0, size=(candidate_count, 4))
+        weights /= np.sum(weights, axis=1, keepdims=True)
+        candidates = np.einsum(
+            'ij,ijk->ik',
+            weights,
+            self.epic_tet_vertices[self.epic_tetrahedra[candidate_tets]]
+        ).astype(np.float64)
+
+        order = []
+        first = int(rng.integers(0, len(candidates)))
+        order.append(first)
+        min_d2 = np.sum((candidates - candidates[first]) ** 2, axis=1)
+        for _ in range(1, len(candidates)):
+            nxt = int(np.argmax(min_d2))
+            order.append(nxt)
+            d2 = np.sum((candidates - candidates[nxt]) ** 2, axis=1)
+            min_d2 = np.minimum(min_d2, d2)
+
+        traced = []
+        for idx in order:
+            fiber = shape_coordinate_fiber(candidates[idx], candidate_tets[idx])
+            if fiber is not None:
+                traced.append(fiber)
+                if len(traced) >= count:
+                    break
+        if not traced:
+            self.epic_error = "No shape-coordinate fibers could be sampled"
+            print(f"[Epic] {self.epic_error}")
+            return False
+
+        resampled = np.stack(traced, axis=1)
+        actual_count = resampled.shape[1]
+        self.epic_fibers = resampled
+        self.epic_fibers_raw = None
+        self.epic_gradient_direction_lines = None
+        self.epic_gradient_direction_points = None
+        self.epic_gradient_direction_line_colors = None
+        self.epic_gradient_direction_point_colors = None
+        self.waypoints = [[resampled[level].astype(np.float32) for level in range(levels)]]
+        self.fiber_architecture = [np.zeros((actual_count, 2), dtype=np.float32)]
+        self.draw_contour_stream = [True]
+        self.is_draw_fiber_architecture = True
+        self.is_draw_tet_mesh = False
+        self._fiber_draw_dirty = True
+        print(f"[Epic] Sampled {actual_count}/{count} Laplace shape-coordinate fibers, {levels} levels")
+        return True
+
+    def epic_sample_gradient_fibers(self, count=None, levels=None):
+        """Sample fibers by walking Laplace-gradient streamlines through tets."""
+        self.epic_error = ""
+        if self.epic_laplace_field is None or self.epic_tet_gradients is None:
+            self.epic_error = "Run Epic Laplace field first"
+            print(f"[Epic] {self.epic_error}")
+            return False
+
+        count = int(count if count is not None else getattr(self, 'epic_fiber_count', 100))
+        levels = int(levels if levels is not None else getattr(self, 'epic_fiber_levels', 32))
+        count = int(np.clip(count, 1, 1000))
+        levels = max(64, levels)
+        self.epic_fiber_count = count
+        self.epic_fiber_levels = levels
+
+        u_targets = np.linspace(0.0, 1.0, levels)
+        bbox_diag = float(np.linalg.norm(
+            np.max(self.epic_tet_vertices, axis=0) - np.min(self.epic_tet_vertices, axis=0)
+        ))
+        eps = max(bbox_diag * 1e-8, 1e-10)
+        max_segment_len = max(bbox_diag * 0.005, eps * 100.0)
+
+        # Face adjacency: local face i is opposite tet vertex i.
+        face_owner = {}
+        neighbor = np.full((len(self.epic_tetrahedra), 4), -1, dtype=np.int32)
+        for ti, tet in enumerate(self.epic_tetrahedra):
+            for li in range(4):
+                face = tuple(sorted(int(tet[j]) for j in range(4) if j != li))
+                prev = face_owner.get(face)
+                if prev is None:
+                    face_owner[face] = (ti, li)
+                else:
+                    tj, lj = prev
+                    neighbor[ti, li] = tj
+                    neighbor[tj, lj] = ti
+
+        origin_face_keys = set()
+        insertion_face_keys = set()
+        for cls, caps in zip(self.edge_classes, self.epic_cap_faces):
+            target_faces = origin_face_keys if cls == 'origin' else insertion_face_keys
+            for tri in caps:
+                target_faces.add(tuple(sorted(int(v) for v in tri)))
+
+        tet_pts = self.epic_tet_vertices[self.epic_tetrahedra]
+        tet_vol6 = np.abs(np.einsum(
+            'ij,ij->i',
+            tet_pts[:, 1] - tet_pts[:, 0],
+            np.cross(tet_pts[:, 2] - tet_pts[:, 0], tet_pts[:, 3] - tet_pts[:, 0])
+        ))
+        valid_tets = np.where(tet_vol6 > 1e-14)[0]
+        if len(valid_tets) == 0:
+            self.epic_error = "No usable tetrahedra for volume seeding"
+            print(f"[Epic] {self.epic_error}")
+            return False
+        tet_prob = tet_vol6[valid_tets] / np.sum(tet_vol6[valid_tets])
+
+        def barycentric(point, tet_id):
+            tet = self.epic_tetrahedra[tet_id]
+            p = self.epic_tet_vertices[tet]
+            M = np.column_stack((p[0] - p[3], p[1] - p[3], p[2] - p[3]))
+            try:
+                abc = np.linalg.solve(M, point - p[3])
+            except np.linalg.LinAlgError:
+                return None
+            return np.array([abc[0], abc[1], abc[2], 1.0 - abc.sum()], dtype=np.float64)
+
+        def bary_derivative(direction, tet_id):
+            tet = self.epic_tetrahedra[tet_id]
+            p = self.epic_tet_vertices[tet]
+            M = np.column_stack((p[0] - p[3], p[1] - p[3], p[2] - p[3]))
+            try:
+                abc = np.linalg.solve(M, direction)
+            except np.linalg.LinAlgError:
+                return None
+            return np.array([abc[0], abc[1], abc[2], -abc.sum()], dtype=np.float64)
+
+        def sample_u(tet_id, bary):
+            return float(np.dot(bary, self.epic_laplace_field[self.epic_tetrahedra[tet_id]]))
+
+        def append_segment(path_pts, path_u, a, ua, b, ub):
+            dist = float(np.linalg.norm(b - a))
+            if dist <= max_segment_len:
+                path_pts.append(b.copy())
+                path_u.append(float(ub))
+                return
+            steps = int(np.ceil(dist / max_segment_len))
+            for si in range(1, steps + 1):
+                t = si / steps
+                path_pts.append((a * (1.0 - t) + b * t).copy())
+                path_u.append(float(ua * (1.0 - t) + ub * t))
+
+        def resample_path(path_pts, path_u):
+            pts = np.asarray(path_pts, dtype=np.float64)
+            us = np.asarray(path_u, dtype=np.float64)
+            order = np.argsort(us)
+            pts = pts[order]
+            us = us[order]
+            keep = np.concatenate(([True], np.diff(us) > 1e-7))
+            pts = pts[keep]
+            us = us[keep]
+            if len(us) < 2 or us[0] > 0.01 or us[-1] < 0.99:
+                return None
+            out = np.zeros((levels, 3), dtype=np.float64)
+            for li, target in enumerate(u_targets):
+                if target <= us[0]:
+                    out[li] = pts[0]
+                elif target >= us[-1]:
+                    out[li] = pts[-1]
+                else:
+                    hi = int(np.searchsorted(us, target))
+                    lo = hi - 1
+                    t = (target - us[lo]) / max(us[hi] - us[lo], 1e-12)
+                    out[li] = pts[lo] * (1.0 - t) + pts[hi] * t
+            return out
+
+        def trace_half(seed, start_tet, sign):
+            tid = int(start_tet)
+            point = seed.copy()
+            bary = barycentric(point, tid)
+            if bary is None:
+                return None
+            if bary is None or np.min(bary) < -1e-4:
+                return None
+
+            path_pts = []
+            path_u = []
+            last_u = None
+            visited_steps = 0
+            max_steps = len(self.epic_tetrahedra) * 2
+            target_face_keys = insertion_face_keys if sign > 0 else origin_face_keys
+            hit_target_cap = False
+
+            while visited_steps < max_steps:
+                visited_steps += 1
+                bary = barycentric(point, tid)
+                if bary is None or np.min(bary) < -1e-5:
+                    break
+                u_val = sample_u(tid, bary)
+                if last_u is not None and sign * (u_val - last_u) < -1e-6:
+                    break
+                path_pts.append(point.copy())
+                path_u.append(u_val)
+                last_u = u_val
+                grad = self.epic_tet_gradients[tid]
+                gn = np.linalg.norm(grad)
+                if gn < 1e-12:
+                    break
+                direction = sign * grad / gn
+                db = bary_derivative(direction, tid)
+                if db is None:
+                    break
+
+                projected_once = False
+                while True:
+                    candidates = []
+                    for li in range(4):
+                        if db[li] < -1e-12:
+                            t = -bary[li] / db[li]
+                            if t > eps:
+                                candidates.append((t, li))
+                    if not candidates:
+                        break
+                    dist, exit_li = min(candidates, key=lambda item: item[0])
+                    next_tid = int(neighbor[tid, exit_li])
+                    face_key = tuple(sorted(
+                        int(self.epic_tetrahedra[tid][j]) for j in range(4) if j != exit_li
+                    ))
+                    is_target_cap = next_tid < 0 and face_key in target_face_keys
+                    if next_tid >= 0 or is_target_cap or projected_once:
+                        break
+
+                    # No neighbor means an exterior muscle face. Treat lateral
+                    # surfaces as no-flux: remove the normal component so the
+                    # streamline slides along the boundary instead of leaving.
+                    tet = self.epic_tetrahedra[tid]
+                    face_ids = [j for j in range(4) if j != exit_li]
+                    fp = self.epic_tet_vertices[tet[face_ids]]
+                    normal = np.cross(fp[1] - fp[0], fp[2] - fp[0])
+                    nn = np.linalg.norm(normal)
+                    if nn < 1e-12:
+                        break
+                    normal = normal / nn
+                    direction = direction - np.dot(direction, normal) * normal
+                    dn = np.linalg.norm(direction)
+                    if dn < 1e-12:
+                        break
+                    direction = direction / dn
+                    db = bary_derivative(direction, tid)
+                    if db is None:
+                        break
+                    bary[exit_li] = max(bary[exit_li], eps)
+                    bary = np.maximum(bary, 0.0)
+                    bary = bary / max(np.sum(bary), 1e-12)
+                    point = bary @ self.epic_tet_vertices[self.epic_tetrahedra[tid]]
+                    projected_once = True
+
+                if not candidates:
+                    break
+                dist, exit_li = min(candidates, key=lambda item: item[0])
+                next_tid = int(neighbor[tid, exit_li])
+                face_key = tuple(sorted(
+                    int(self.epic_tetrahedra[tid][j]) for j in range(4) if j != exit_li
+                ))
+                is_target_cap = next_tid < 0 and face_key in target_face_keys
+                exit_point = point + direction * (dist if is_target_cap else max(dist - eps, 0.0))
+                exit_bary = barycentric(exit_point, tid)
+                if exit_bary is not None:
+                    exit_u = sample_u(tid, exit_bary)
+                    if last_u is None or sign * (exit_u - last_u) >= -1e-6:
+                        if is_target_cap:
+                            exit_u = 1.0 if sign > 0 else 0.0
+                        append_segment(path_pts, path_u, point, u_val, exit_point, exit_u)
+                        last_u = exit_u
+                if next_tid < 0:
+                    if is_target_cap:
+                        hit_target_cap = True
+                    break
+                cross_point = point + direction * (dist + eps)
+                next_bary = barycentric(cross_point, next_tid)
+                if next_bary is None or np.min(next_bary) < -1e-4:
+                    cross_point = point + direction * dist
+                    next_bary = barycentric(cross_point, next_tid)
+                if next_bary is None or np.min(next_bary) < -1e-4:
+                    break
+                tid = next_tid
+                point = cross_point
+
+            return path_pts, path_u, hit_target_cap
+
+        def trace(seed, start_tet):
+            back = trace_half(seed, start_tet, -1.0)
+            forward = trace_half(seed, start_tet, 1.0)
+            if back is None or forward is None:
+                return None
+            b_pts, b_u, b_hit = back
+            f_pts, f_u, f_hit = forward
+            if not b_hit or not f_hit:
+                return None
+            if len(b_pts) < 2 or len(f_pts) < 2:
+                return None
+            pts = list(reversed(b_pts)) + f_pts[1:]
+            us = list(reversed(b_u)) + f_u[1:]
+            resampled = resample_path(pts, us)
+            if resampled is None:
+                return None
+            raw = np.asarray(pts, dtype=np.float64)
+            raw_keep = np.concatenate(([True], np.linalg.norm(np.diff(raw, axis=0), axis=1) > eps))
+            raw = raw[raw_keep]
+            if len(raw) < 2:
+                return None
+            return resampled, raw
+
+        # Paper-style fiber seeding: "randomly sample one fiber streamline
+        # starting point inside each origin tetrahedron." Our Zygote OBJ does
+        # not have manually labeled anatomical origin tetrahedra, so approximate
+        # them as tetrahedra close to the origin attachment in the FEM Laplace
+        # field, plus any tetrahedra adjacent to origin cap faces.
+        tet_u_mean = np.mean(self.epic_laplace_field[self.epic_tetrahedra], axis=1)
+        cap_origin_tets = []
+        for cls, caps in zip(self.edge_classes, self.epic_cap_faces):
+            if cls != 'origin':
+                continue
+            for tri in caps:
+                owner = face_owner.get(tuple(sorted(int(v) for v in tri)))
+                if owner is not None:
+                    cap_origin_tets.append(int(owner[0]))
+
+        threshold = 0.06
+        origin_tets = np.array([], dtype=np.int32)
+        while threshold <= 0.35:
+            low_tets = valid_tets[tet_u_mean[valid_tets] <= threshold]
+            origin_tets = np.unique(np.concatenate((
+                low_tets.astype(np.int32),
+                np.asarray(cap_origin_tets, dtype=np.int32)
+            )))
+            if len(origin_tets) >= count * 5:
+                break
+            threshold += 0.04
+        if len(origin_tets) == 0:
+            self.epic_error = "No origin-region tetrahedra found"
+            print(f"[Epic] {self.epic_error}")
+            return False
+
+        rng = np.random.default_rng(12345)
+        tet_centers = np.mean(self.epic_tet_vertices[self.epic_tetrahedra[origin_tets]], axis=1)
+        selected = []
+        first = int(rng.integers(0, len(origin_tets)))
+        selected.append(first)
+        min_d2 = np.sum((tet_centers - tet_centers[first]) ** 2, axis=1)
+        for _ in range(1, len(origin_tets)):
+            nxt = int(np.argmax(min_d2))
+            selected.append(nxt)
+            d2 = np.sum((tet_centers - tet_centers[nxt]) ** 2, axis=1)
+            min_d2 = np.minimum(min_d2, d2)
+        seed_tets = origin_tets[np.asarray(selected, dtype=np.int32)]
+
+        traced = []
+        traced_raw = []
+        for tid in seed_tets:
+            weights = rng.exponential(1.0, size=4)
+            weights /= np.sum(weights)
+            seed = weights @ self.epic_tet_vertices[self.epic_tetrahedra[int(tid)]]
+            result = trace(seed, int(tid))
+            if result is not None:
+                fiber, raw_fiber = result
+                traced.append(fiber)
+                traced_raw.append(raw_fiber)
+                if len(traced) >= count:
+                    break
+        if not traced:
+            self.epic_error = "No paper-style origin-tet streamlines reached insertion"
+            print(f"[Epic] {self.epic_error}")
+            return False
+
+        resampled = np.stack(traced, axis=1)
+        actual_count = resampled.shape[1]
+        self.epic_fibers = resampled
+        self.epic_fibers_raw = traced_raw
+        self.waypoints = [[resampled[level].astype(np.float32) for level in range(levels)]]
+        self.fiber_architecture = [np.zeros((actual_count, 2), dtype=np.float32)]
+        self.draw_contour_stream = [True]
+        self.is_draw_fiber_architecture = True
+        self.is_draw_tet_mesh = False
+        self._fiber_draw_dirty = True
+        print(f"[Epic] Sampled {actual_count}/{len(seed_tets)} paper-style origin-tet streamlines "
+              f"(origin threshold {threshold:.2f}), {levels} levels")
+        return True
+
+        tet_edges = np.array([(0, 1), (0, 2), (0, 3), (1, 2), (1, 3), (2, 3)], dtype=np.int32)
+
+        def iso_points(value):
+            pts = []
+            tids = []
+            for tet in self.epic_tetrahedra:
+                tu = self.epic_laplace_field[tet]
+                if value < np.min(tu) or value > np.max(tu):
+                    continue
+                tv = self.epic_tet_vertices[tet]
+                for ea, eb in tet_edges:
+                    ua = float(tu[ea])
+                    ub = float(tu[eb])
+                    if (ua - value) * (ub - value) > 0.0 or abs(ub - ua) < 1e-12:
+                        continue
+                    t = (value - ua) / (ub - ua)
+                    if -1e-8 <= t <= 1.0 + 1e-8:
+                        pts.append(tv[ea] * (1.0 - t) + tv[eb] * t)
+                        tids.append(len(tids) * 0 + 0)
+            if not pts:
+                return np.empty((0, 3), dtype=np.float64), np.empty((0,), dtype=np.int32)
+            pts = np.asarray(pts, dtype=np.float64)
+            # Reconstruct tet ids in a second pass to keep this block simple.
+            # The number of points per tet edge is small, so this extra loop is
+            # cheap compared with tet extraction and keeps every sample tied to
+            # an actual containing tet for later inward nudging.
+            tids = []
+            idx = 0
+            for ti, tet in enumerate(self.epic_tetrahedra):
+                tu = self.epic_laplace_field[tet]
+                if value < np.min(tu) or value > np.max(tu):
+                    continue
+                for ea, eb in tet_edges:
+                    ua = float(tu[ea])
+                    ub = float(tu[eb])
+                    if (ua - value) * (ub - value) > 0.0 or abs(ub - ua) < 1e-12:
+                        continue
+                    t = (value - ua) / (ub - ua)
+                    if -1e-8 <= t <= 1.0 + 1e-8:
+                        tids.append(ti)
+                        idx += 1
+            tids = np.asarray(tids, dtype=np.int32)
+            key = np.round(pts / 1e-5).astype(np.int64)
+            _, unique_idx = np.unique(key, axis=0, return_index=True)
+            unique_idx = np.sort(unique_idx)
+            return pts[unique_idx], tids[unique_idx]
+
+        level_data = [iso_points(v) for v in u_targets]
+        level_points = [d[0] for d in level_data]
+        level_tets = [d[1] for d in level_data]
+        if any(len(p) < 4 for p in level_points):
+            self.epic_error = "Could not extract enough Laplace iso-surface points"
+            print(f"[Epic] {self.epic_error}")
+            return False
+
+        centers = np.asarray([pts.mean(axis=0) for pts in level_points], dtype=np.float64)
+        axis = centers[-1] - centers[0]
+        axis_norm = np.linalg.norm(axis)
+        if axis_norm < 1e-12:
+            self.epic_error = "Laplace iso-centers are degenerate"
+            print(f"[Epic] {self.epic_error}")
+            return False
+        axis = axis / axis_norm
+
+        centered_vertices = self.epic_tet_vertices - np.mean(self.epic_tet_vertices, axis=0)
+        centered_vertices = centered_vertices - np.outer(centered_vertices @ axis, axis)
+        _, _, vt = np.linalg.svd(centered_vertices, full_matrices=False)
+        e1 = vt[0]
+        e1 = e1 - np.dot(e1, axis) * axis
+        e1_norm = np.linalg.norm(e1)
+        if e1_norm < 1e-12:
+            e1 = np.array([1.0, 0.0, 0.0])
+            e1 = e1 - np.dot(e1, axis) * axis
+            e1_norm = np.linalg.norm(e1)
+        e1 = e1 / max(e1_norm, 1e-12)
+        e2 = np.cross(axis, e1)
+        e2 = e2 / max(np.linalg.norm(e2), 1e-12)
+
+        level_coords = []
+        for li, pts in enumerate(level_points):
+            rel = pts - centers[li]
+            level_coords.append(np.column_stack((rel @ e1, rel @ e2)))
+
+        def center_at_u(u_value):
+            return np.column_stack((
+                np.interp(u_value, u_targets, centers[:, 0]),
+                np.interp(u_value, u_targets, centers[:, 1]),
+                np.interp(u_value, u_targets, centers[:, 2]),
+            ))[0]
+
+        def max_projection(coords, direction2):
+            proj = coords @ direction2
+            pos = proj[proj > 0.0]
+            if len(pos) == 0:
+                return float(np.max(np.linalg.norm(coords, axis=1)))
+            return float(np.percentile(pos, 95))
+
+        def shape_coordinate_fiber(seed, start_tet):
+            bary = barycentric(seed, int(start_tet))
+            if bary is None:
+                return None
+            seed_u = float(np.clip(sample_u(int(start_tet), bary), u_targets[0], u_targets[-1]))
+            c_seed = center_at_u(seed_u)
+            rel = seed - c_seed
+            seed_2d = np.array([np.dot(rel, e1), np.dot(rel, e2)], dtype=np.float64)
+            seed_r = float(np.linalg.norm(seed_2d))
+            if seed_r < 1e-10:
+                direction2 = np.array([1.0, 0.0], dtype=np.float64)
+                rho = 0.0
+            else:
+                direction2 = seed_2d / seed_r
+                seed_level = int(np.argmin(np.abs(u_targets - seed_u)))
+                denom = max(max_projection(level_coords[seed_level], direction2), 1e-10)
+                rho = float(np.clip(seed_r / denom, 0.0, 1.0))
+
+            fiber = np.zeros((levels, 3), dtype=np.float64)
+            chosen = np.zeros(levels, dtype=np.int32)
+            for li in range(levels):
+                coords = level_coords[li]
+                denom = max(max_projection(coords, direction2), 1e-10)
+                target_2d = direction2 * (rho * denom)
+
+                # Pull target to the extracted iso-surface sample. Weight angle
+                # and position so outer seeds stay near their side instead of
+                # collapsing to the closest axial point.
+                diff = coords - target_2d
+                dist2 = np.sum(diff * diff, axis=1)
+                proj = coords @ direction2
+                wrong_side = proj < -0.05 * denom
+                dist2[wrong_side] += denom * denom * 100.0
+                idx = int(np.argmin(dist2))
+                chosen[li] = idx
+                tet_center = np.mean(self.epic_tet_vertices[self.epic_tetrahedra[level_tets[li][idx]]], axis=0)
+                fiber[li] = level_points[li][idx] * (1.0 - 1e-3) + tet_center * 1e-3
+
+            # Smooth in 2D cross-section coordinates, then re-project every
+            # waypoint onto the actual extracted iso-surface samples. This
+            # improves visual continuity without placing points outside.
+            smooth_coords = np.zeros((levels, 2), dtype=np.float64)
+            for li in range(levels):
+                smooth_coords[li] = level_coords[li][chosen[li]]
+            for _ in range(2):
+                prev = smooth_coords.copy()
+                prev[1:-1] = 0.25 * smooth_coords[:-2] + 0.5 * smooth_coords[1:-1] + 0.25 * smooth_coords[2:]
+                smooth_coords = prev
+            for li in range(1, levels - 1):
+                coords = level_coords[li]
+                denom = max(max_projection(coords, direction2), 1e-10)
+                diff = coords - smooth_coords[li]
+                dist2 = np.sum(diff * diff, axis=1)
+                proj = coords @ direction2
+                wrong_side = proj < -0.05 * denom
+                dist2[wrong_side] += denom * denom * 25.0
+                idx = int(np.argmin(dist2))
+                tet_center = np.mean(self.epic_tet_vertices[self.epic_tetrahedra[level_tets[li][idx]]], axis=0)
+                fiber[li] = level_points[li][idx] * (1.0 - 1e-3) + tet_center * 1e-3
+            return fiber
+
+        rng = np.random.default_rng(12345)
+        candidate_count = max(count * 12, count + 128)
+        sampled_valid = rng.choice(len(valid_tets), size=candidate_count, replace=True, p=tet_prob)
+        candidate_tets = valid_tets[sampled_valid].astype(np.int32)
+        weights = rng.exponential(1.0, size=(candidate_count, 4))
+        weights /= np.sum(weights, axis=1, keepdims=True)
+        candidates = np.einsum(
+            'ij,ijk->ik',
+            weights,
+            self.epic_tet_vertices[self.epic_tetrahedra[candidate_tets]]
+        ).astype(np.float64)
+
+        # Farthest-point order over volume candidates keeps seeds distributed
+        # across the belly while still allowing failed traces to be skipped.
+        order = []
+        first = int(rng.integers(0, len(candidates)))
+        order.append(first)
+        min_d2 = np.sum((candidates - candidates[first]) ** 2, axis=1)
+        for _ in range(1, len(candidates)):
+            nxt = int(np.argmax(min_d2))
+            order.append(nxt)
+            d2 = np.sum((candidates - candidates[nxt]) ** 2, axis=1)
+            min_d2 = np.minimum(min_d2, d2)
+
+        traced = []
+        for idx in order:
+            fiber = shape_coordinate_fiber(candidates[idx], candidate_tets[idx])
+            if fiber is not None:
+                traced.append(fiber)
+                if len(traced) >= count:
+                    break
+        if not traced:
+            self.epic_error = "No shape-coordinate fibers could be sampled"
+            print(f"[Epic] {self.epic_error}")
+            return False
+
+        resampled = np.stack(traced, axis=1)
+        actual_count = resampled.shape[1]
+
+        self.epic_fibers = resampled
+        self.waypoints = [[resampled[level].astype(np.float32) for level in range(levels)]]
+        self.fiber_architecture = [np.zeros((actual_count, 2), dtype=np.float32)]
+        self.draw_contour_stream = [True]
+        self.is_draw_fiber_architecture = True
+        self.is_draw_tet_mesh = False
+        self._fiber_draw_dirty = True
+        print(f"[Epic] Sampled {actual_count}/{count} Laplace shape-coordinate fibers, {levels} levels")
+        return True
+
+    def _is_single_stream_tendon_supported(self):
+        if not hasattr(self, 'edge_groups') or not hasattr(self, 'edge_classes'):
+            return False
+        origin_count = sum(1 for c in self.edge_classes if c == 'origin')
+        insertion_count = sum(1 for c in self.edge_classes if c == 'insertion')
+        return origin_count == 1 and insertion_count == 1
+
+    def reset_tendon_region_colors(self):
+        """Disable tendon/belly visualization and return to normal draw state."""
+        self.is_draw_tendon_regions = False
+        self._tendon_region_colors = None
+        self._tendon_overlay_vertices = None
+        self._tendon_overlay_normals = None
+        self._tendon_origin_boundary_lines = None
+        self._tendon_insertion_boundary_lines = None
+        self._tendon_boundary_error = ""
+        if self.is_draw_scalar_field and self._scalar_anim_target_colors is not None:
+            self.vertex_colors = self._scalar_anim_target_colors.copy()
+        else:
+            self.vertex_colors = None
+
+    def _clip_triangle_by_scalar(self, points, values, threshold, keep_less):
+        poly = [(points[i].astype(np.float32), float(values[i])) for i in range(3)]
+
+        def inside(item):
+            return item[1] <= threshold if keep_less else item[1] >= threshold
+
+        def intersect(a, b):
+            pa, va = a
+            pb, vb = b
+            denom = vb - va
+            t = 0.0 if abs(denom) < 1e-12 else (threshold - va) / denom
+            t = float(np.clip(t, 0.0, 1.0))
+            return (pa + t * (pb - pa), threshold)
+
+        out = []
+        for i, current in enumerate(poly):
+            prev = poly[i - 1]
+            cur_in = inside(current)
+            prev_in = inside(prev)
+            if cur_in:
+                if not prev_in:
+                    out.append(intersect(prev, current))
+                out.append(current)
+            elif prev_in:
+                out.append(intersect(prev, current))
+        return [p for p, _ in out]
+
+    def _smoothstep(self, edge0, edge1, x):
+        denom = np.maximum(np.asarray(edge1) - np.asarray(edge0), 1e-8)
+        t = np.clip((x - edge0) / denom, 0.0, 1.0)
+        return t * t * (3.0 - 2.0 * t)
+
+    def _build_tendon_gradient_colors(self, face_indices, origin_value, insertion_value):
+        draw_indices = face_indices.reshape(-1)
+        points = np.asarray(self.vertices, dtype=np.float32)[draw_indices]
+        scalars = np.asarray(self.scalar_field, dtype=np.float64)[draw_indices]
+        width = 0.3
+
+        origin_coord = self._surface_tilt_coordinate(
+            points,
+            getattr(self, 'tendon_origin_tilt_angle', 0.0),
+        )
+        insertion_coord = self._surface_tilt_coordinate(
+            points,
+            getattr(self, 'tendon_insertion_tilt_angle', 0.0),
+        )
+        origin_threshold = origin_value + float(getattr(self, 'tendon_origin_tilt_amount', 0.0)) * origin_coord
+        insertion_threshold = insertion_value + float(getattr(self, 'tendon_insertion_tilt_amount', 0.0)) * insertion_coord
+
+        origin_w = 1.0 - self._smoothstep(origin_threshold - width, origin_threshold + width, scalars)
+        insertion_w = self._smoothstep(insertion_threshold - width, insertion_threshold + width, scalars)
+        tendon_w = np.clip(np.maximum(origin_w, insertion_w), 0.0, 1.0)
+
+        belly = np.array([0.72, 0.06, 0.045], dtype=np.float32)
+        tendon = np.array([0.86, 0.82, 0.68], dtype=np.float32)
+        color_rgb = belly[None, :] * (1.0 - tendon_w[:, None]) + tendon[None, :] * tendon_w[:, None]
+        colors = np.empty((len(draw_indices), 4), dtype=np.float32)
+        colors[:, :3] = color_rgb.astype(np.float32)
+        colors[:, 3] = self.transparency
+        return np.ascontiguousarray(colors, dtype=np.float32)
+
+    def _single_origin_insertion_indices(self):
+        origin = []
+        insertion = []
+        for cls, group in zip(self.edge_classes, self.edge_groups):
+            if cls == 'origin':
+                origin.extend(group)
+            elif cls == 'insertion':
+                insertion.extend(group)
+        return np.asarray(origin, dtype=np.int64), np.asarray(insertion, dtype=np.int64)
+
+    def _surface_frame(self):
+        cache = getattr(self, '_tendon_surface_frame_cache', None)
+        if cache is not None:
+            return cache
+        origin_idx, insertion_idx = self._single_origin_insertion_indices()
+        vertices = np.asarray(self.vertices, dtype=np.float64)
+        if len(origin_idx) == 0 or len(insertion_idx) == 0:
+            cache = (vertices.mean(axis=0), np.array([0.0, 1.0, 0.0]), np.array([1.0, 0.0, 0.0]), np.array([0.0, 0.0, 1.0]))
+            self._tendon_surface_frame_cache = cache
+            return cache
+
+        origin_center = vertices[origin_idx].mean(axis=0)
+        insertion_center = vertices[insertion_idx].mean(axis=0)
+        axis = insertion_center - origin_center
+        axis_norm = np.linalg.norm(axis)
+        if axis_norm < 1e-12:
+            axis = np.array([0.0, 1.0, 0.0])
+        else:
+            axis = axis / axis_norm
+
+        rel_all = vertices - vertices.mean(axis=0)
+        rel_perp = rel_all - np.outer(rel_all @ axis, axis)
+        cov = rel_perp.T @ rel_perp
+        evals, evecs = np.linalg.eigh(cov)
+        basis_x = evecs[:, int(np.argmax(evals))]
+        basis_x = basis_x - np.dot(basis_x, axis) * axis
+        bx_norm = np.linalg.norm(basis_x)
+        if bx_norm < 1e-12:
+            trial = np.array([1.0, 0.0, 0.0])
+            if abs(np.dot(trial, axis)) > 0.9:
+                trial = np.array([0.0, 1.0, 0.0])
+            basis_x = trial - np.dot(trial, axis) * axis
+            bx_norm = np.linalg.norm(basis_x)
+        basis_x = basis_x / max(bx_norm, 1e-12)
+        basis_y = np.cross(axis, basis_x)
+        basis_y = basis_y / max(np.linalg.norm(basis_y), 1e-12)
+        cache = (origin_center, axis, basis_x, basis_y)
+        self._tendon_surface_frame_cache = cache
+        return cache
+
+    def _surface_theta(self, points):
+        points = np.asarray(points, dtype=np.float64)
+        origin_center, axis, basis_x, basis_y = self._surface_frame()
+        rel = points - origin_center
+        axial = rel @ axis
+        radial = rel - np.outer(axial, axis)
+        x = radial @ basis_x
+        y = radial @ basis_y
+        theta = np.arctan2(y, x)
+        theta[theta < 0.0] += 2.0 * np.pi
+        return theta
+
+    def _surface_tilt_coordinate(self, points, angle):
+        points = np.asarray(points, dtype=np.float64)
+        origin_center, axis, basis_x, basis_y = self._surface_frame()
+        direction = np.cos(float(angle)) * basis_x + np.sin(float(angle)) * basis_y
+
+        vertices = np.asarray(self.vertices, dtype=np.float64)
+        rel_all = vertices - origin_center
+        axial_all = rel_all @ axis
+        radial_all = rel_all - np.outer(axial_all, axis)
+        all_proj = radial_all @ direction
+        scale = np.percentile(np.abs(all_proj), 95)
+        if scale < 1e-8:
+            scale = max(float(np.max(np.abs(all_proj))), 1e-8)
+
+        rel = points - origin_center
+        axial = rel @ axis
+        radial = rel - np.outer(axial, axis)
+        coord = (radial @ direction) / scale
+        return np.clip(coord, -1.0, 1.0)
+
+    def _tilt_value(self, theta, angle, amount):
+        return float(amount) * np.cos(theta - float(angle))
+
+    def _build_tendon_boundary_lines(self, face_indices, origin_value, insertion_value):
+        vertices = np.asarray(self.vertices, dtype=np.float32)
+        scalar = np.asarray(self.scalar_field, dtype=np.float64)
+        origin_lines = []
+        insertion_lines = []
+
+        for face in face_indices:
+            pts = vertices[face]
+            vals = scalar[face]
+            origin_coord = self._surface_tilt_coordinate(
+                pts,
+                getattr(self, 'tendon_origin_tilt_angle', 0.0),
+            )
+            insertion_coord = self._surface_tilt_coordinate(
+                pts,
+                getattr(self, 'tendon_insertion_tilt_angle', 0.0),
+            )
+            origin_threshold = origin_value + float(getattr(self, 'tendon_origin_tilt_amount', 0.0)) * origin_coord
+            insertion_threshold = insertion_value + float(getattr(self, 'tendon_insertion_tilt_amount', 0.0)) * insertion_coord
+            self._append_zero_crossing_segment(pts, vals - origin_threshold, origin_lines)
+            self._append_zero_crossing_segment(pts, vals - insertion_threshold, insertion_lines)
+
+        def pack(lines):
+            if not lines:
+                return np.empty((0, 3), dtype=np.float32)
+            return np.ascontiguousarray(np.asarray(lines, dtype=np.float32))
+
+        return pack(origin_lines), pack(insertion_lines)
+
+    def _append_zero_crossing_segment(self, pts, fvals, lines):
+        crossings = []
+        for a, b in ((0, 1), (1, 2), (2, 0)):
+            fa = float(fvals[a])
+            fb = float(fvals[b])
+            if abs(fa) < 1e-10 and abs(fb) < 1e-10:
+                continue
+            if fa == 0.0:
+                crossings.append(pts[a])
+                continue
+            if fb == 0.0:
+                crossings.append(pts[b])
+                continue
+            if fa * fb < 0.0:
+                t = fa / (fa - fb)
+                crossings.append(pts[a] + t * (pts[b] - pts[a]))
+        if len(crossings) >= 2:
+            lines.extend([crossings[0], crossings[1]])
+
+    def _line_component_count(self, lines):
+        lines = np.asarray(lines, dtype=np.float64)
+        if lines.size == 0:
+            return 0
+        if len(lines) < 2:
+            return 0
+
+        # Merge nearly identical edge-crossing points from adjacent faces.
+        bbox = np.ptp(np.asarray(self.vertices, dtype=np.float64), axis=0)
+        tol = max(float(np.max(bbox)) * 1e-5, 1e-8)
+        point_to_id = {}
+        parent = []
+
+        def find(a):
+            while parent[a] != a:
+                parent[a] = parent[parent[a]]
+                a = parent[a]
+            return a
+
+        def union(a, b):
+            ra = find(a)
+            rb = find(b)
+            if ra != rb:
+                parent[rb] = ra
+
+        def get_id(p):
+            key = tuple(np.round(p / tol).astype(np.int64))
+            idx = point_to_id.get(key)
+            if idx is None:
+                idx = len(parent)
+                point_to_id[key] = idx
+                parent.append(idx)
+            return idx
+
+        for i in range(0, len(lines) - 1, 2):
+            a = get_id(lines[i])
+            b = get_id(lines[i + 1])
+            if a != b:
+                union(a, b)
+
+        roots = {find(i) for i in range(len(parent))}
+        return len(roots)
+
+    def _build_tendon_overlay_arrays(self, face_indices, origin_value, insertion_value):
+        verts = []
+        normals = []
+        vertices = np.asarray(self.vertices, dtype=np.float32)
+        scalar = np.asarray(self.scalar_field, dtype=np.float64)
+
+        for face in face_indices:
+            pts = vertices[face]
+            vals = scalar[face].astype(np.float64).copy()
+            n = np.cross(pts[1] - pts[0], pts[2] - pts[0])
+            n_norm = float(np.linalg.norm(n))
+            if n_norm > 1e-12:
+                n = (n / n_norm).astype(np.float32)
+            else:
+                n = np.array([0.0, 1.0, 0.0], dtype=np.float32)
+            for threshold, keep_less in ((origin_value, True), (insertion_value, False)):
+                clipped = self._clip_triangle_by_scalar(pts, vals, threshold, keep_less)
+                if len(clipped) < 3:
+                    continue
+                p0 = clipped[0]
+                for i in range(1, len(clipped) - 1):
+                    verts.extend([p0, clipped[i], clipped[i + 1]])
+                    normals.extend([n, n, n])
+        if not verts:
+            return (
+                np.empty((0, 3), dtype=np.float32),
+                np.empty((0, 3), dtype=np.float32),
+            )
+        return (
+            np.ascontiguousarray(np.asarray(verts, dtype=np.float32)),
+            np.ascontiguousarray(np.asarray(normals, dtype=np.float32)),
+        )
 
     def replay_scalar_animation(self):
         """Start replaying the scalar field color flood animation."""

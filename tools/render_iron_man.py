@@ -41,6 +41,29 @@ def _detect_bvh_tframe(bvh_path):
     return None
 
 
+def load_bone_box_trimeshes(skel):
+    """Build trimesh boxes matching DART BoxShape primitives — same shapes the
+    viewer renders for skeleton bones. Result is a list of (body_node, trimesh)
+    where the trimesh is in body-local frame (centered on origin), so calling
+    transform_bone with the body's world transform places it correctly."""
+    out = []
+    for i in range(skel.getNumBodyNodes()):
+        bn = skel.getBodyNode(i)
+        for sn in bn.getShapeNodes():
+            shape = sn.getShape()
+            try:
+                size = np.array(shape.getSize(), dtype=np.float64)
+            except Exception:
+                continue
+            box = trimesh.creation.box(extents=size)
+            # Apply shape relative transform if non-identity.
+            rel = sn.getRelativeTransform().matrix()
+            box.vertices = (rel[:3, :3] @ box.vertices.T).T + rel[:3, 3]
+            out.append((bn, box))
+            break
+    return out
+
+
 def load_bone_trimeshes(skel):
     """Load Zygote skeleton OBJs scaled by MESH_SCALE; resolve to DART body node."""
     out = []
@@ -71,17 +94,23 @@ def load_bone_trimeshes(skel):
 
 
 def shape_world_transform(body_node):
-    """Combined body_world * shape_relative — same composition viewer uses."""
+    """Composition the viewer's drawObj uses:
+    body_world @ parent_joint.getTransformFromChildBodyNode()
+    NOT body_world alone — the OBJ is anchored at the joint, not the body origin.
+    """
     bw = body_node.getWorldTransform().matrix()
-    sn_iter = body_node.getShapeNodes()
-    if sn_iter is not None and len(sn_iter) > 0:
-        sr = sn_iter[0].getRelativeTransform().matrix()
-        return bw @ sr
+    pj = body_node.getParentJoint()
+    if pj is not None:
+        try:
+            jr = pj.getTransformFromChildBodyNode().matrix()
+            return bw @ jr
+        except Exception:
+            pass
     return bw
 
 
 def transform_bone(tm, body_node):
-    """Apply DART body's shape-world transform to shape-local OBJ verts."""
+    """Apply viewer-equivalent shape-world transform to OBJ verts."""
     M = shape_world_transform(body_node)
     R = M[:3, :3]
     t = M[:3, 3]
@@ -173,6 +202,15 @@ def main():
     ap.add_argument('--elev', type=float, default=8.0)
     ap.add_argument('--only-muscle', default=None,
                     help='Render only this muscle (e.g. L_Vastus_Intermedius).')
+    ap.add_argument('--stride', type=int, default=1,
+                    help='Render every Nth snapshot (default 1 = all).')
+    ap.add_argument('--side', default='L', choices=['L', 'R', 'both'],
+                    help='Which side bones to render (default L).')
+    ap.add_argument('--frame-camera', action='store_true',
+                    help='Use the muscles bbox (not the full skeleton) for camera fit.')
+    ap.add_argument('--bone-mode', default='obj', choices=['obj', 'box'],
+                    help='Bone visualization: obj = Zygote OBJ meshes, box = DART '
+                         'BoxShape primitives matching what the viewer draws.')
     args = ap.parse_args()
 
     os.makedirs(args.out_dir, exist_ok=True)
@@ -187,15 +225,34 @@ def main():
     # position is body_world * shape_relative at zero pose; converting OBJ
     # verts to shape-local just means dividing out that rest-world transform.
     skel.setPositions(np.zeros(skel.getNumDofs()))
-    bone_pairs = load_bone_trimeshes(skel)  # (body_node, world-rest trimesh)
-    rest_local_pairs = []
-    for bn, tm in bone_pairs:
-        M0 = shape_world_transform(bn)
-        R0, t0 = M0[:3, :3], M0[:3, 3]
-        local_verts = (R0.T @ (tm.vertices - t0).T).T
-        rest_local_pairs.append((bn, trimesh.Trimesh(vertices=local_verts,
-                                                      faces=tm.faces.copy(),
-                                                      process=False)))
+    if args.bone_mode == 'box':
+        # Box mode: trimeshes already in body-local frame, no rest-world conversion needed.
+        bone_pairs_local = load_bone_box_trimeshes(skel)
+    else:
+        bone_pairs = load_bone_trimeshes(skel)  # (body_node, world-rest trimesh)
+    def _keep(name):
+        if args.side == 'both':
+            return True
+        if name.startswith('Saccrum'):
+            return True
+        if 'Os_Coxae' in name:
+            return True
+        return name.startswith(args.side + '_')
+
+    if args.bone_mode == 'box':
+        # bone_pairs_local already in body-local frame.
+        rest_local_pairs = [(bn, tm) for bn, tm in bone_pairs_local
+                            if _keep(bn.getName())]
+    else:
+        bone_pairs = [(bn, tm) for bn, tm in bone_pairs if _keep(bn.getName())]
+        rest_local_pairs = []
+        for bn, tm in bone_pairs:
+            M0 = shape_world_transform(bn)
+            R0, t0 = M0[:3, :3], M0[:3, 3]
+            local_verts = (R0.T @ (tm.vertices - t0).T).T
+            rest_local_pairs.append((bn, trimesh.Trimesh(vertices=local_verts,
+                                                          faces=tm.faces.copy(),
+                                                          process=False)))
 
     # Now pose the skeleton at the target frame.
     t_frame = _detect_bvh_tframe(args.bvh)
@@ -236,13 +293,19 @@ def main():
     r = pyrender.OffscreenRenderer(viewport_width=args.width,
                                    viewport_height=args.height)
     muscle_color = [0.85, 0.25, 0.25, 1.0]   # red muscle
-    bone_color = [0.92, 0.90, 0.84, 1.0]     # bone ivory
+    # Slightly translucent bones so muscle/bone overlap is visible.
+    bone_color = [0.92, 0.90, 0.84, 0.55]
 
     for anim_path in anim_files:
         anim = np.load(anim_path, allow_pickle=False)
         snapshots = anim['snapshots']  # (K, total_verts, 3)
         layer_tag = os.path.basename(anim_path).replace('.npz', '')
-        for k in range(snapshots.shape[0]):
+        n_snap = snapshots.shape[0]
+        # Always include first and last; stride between.
+        idxs = list(range(0, n_snap, max(1, args.stride)))
+        if (n_snap - 1) not in idxs:
+            idxs.append(n_snap - 1)
+        for k in idxs:
             scene = build_scene(snapshots[k], anim, bones, muscle_color, bone_color,
                                 only_muscle=args.only_muscle)
             fit_camera(scene, azimuth_deg=args.azimuth, elev_deg=args.elev)

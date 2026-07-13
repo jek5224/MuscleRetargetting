@@ -110,28 +110,26 @@ def read_vtu_positions(vtu_path):
     raise RuntimeError(f"Could not read positions from {vtu_path}")
 
 
-def build_polyfem_config(muscle_msh, bone_objs, fixed_selections,
-                         dirichlet_bcs, youngs, poisson, dhat,
+def build_polyfem_config(muscle_entries, bone_objs, youngs, poisson, dhat,
                          output_dir):
     """Build PolyFEM JSON config for one frame.
 
     Args:
-        muscle_msh: path to unified muscle tet mesh
+        muscle_entries: list of (msh_path, point_selections, dirichlet_bcs) per muscle
         bone_objs: list of (path, name) for bone OBJ obstacles
-        fixed_selections: list of {"id": N, "box": [[x0,y0,z0],[x1,y1,z1]]}
-        dirichlet_bcs: list of {"id": N, "value": [x,y,z]}
-        youngs: Young's modulus
-        poisson: Poisson ratio
-        dhat: barrier distance
-        output_dir: where to write results
+        youngs, poisson, dhat: material/contact params
+        output_dir: output path
     """
-    geometry = [{
-        "mesh": muscle_msh,
-        "volume_selection": 1,
-        "point_selection": fixed_selections,
-    }]
+    geometry = []
+    all_dirichlet_bcs = []
 
-    # Add bone obstacles
+    for msh_path, point_sels, dbcs in muscle_entries:
+        geometry.append({
+            "mesh": msh_path,
+            "point_selection": point_sels,
+        })
+        all_dirichlet_bcs.extend(dbcs)
+
     for bone_path, bone_name in bone_objs:
         geometry.append({
             "mesh": bone_path,
@@ -146,10 +144,12 @@ def build_polyfem_config(muscle_msh, bone_objs, fixed_selections,
             "nu": poisson,
             "rho": 1000,
         },
+        # Quasi-static incremental loading from frame 0 to target.
+        # Start intersection-free, IPC prevents penetrations during loading.
         "time": {
             "quasistatic": True,
             "tend": 1.0,
-            "dt": 1.0,  # single step: rest → target in one go
+            "dt": 0.1,  # 10 incremental steps
         },
         "contact": {
             "enabled": True,
@@ -158,7 +158,7 @@ def build_polyfem_config(muscle_msh, bone_objs, fixed_selections,
         },
         "boundary_conditions": {
             "rhs": [0, 0, 0],
-            "dirichlet_boundary": dirichlet_bcs,
+            "dirichlet_boundary": all_dirichlet_bcs,
         },
         "solver": {
             "linear": {
@@ -377,10 +377,42 @@ def main():
             work_dir = os.path.abspath(os.path.join(args.output_dir, 'polyfem_work'))
             os.makedirs(work_dir, exist_ok=True)
 
-            # Write REST mesh (polyfem deforms from rest → target via BCs)
-            msh_path = os.path.join(work_dir, 'muscles.msh')
-            if fi == 0:  # only write once (rest shape doesn't change)
-                write_msh(msh_path, global_rest, global_tets)
+            # Write per-muscle MSH at FRAME 0 LBS (intersection-free).
+            # Polyfem will incrementally deform to target frame via BCs.
+            if fi == 0:
+                # Compute frame 0 LBS positions
+                skel.setPositions(motion_bvh.mocap_refs[0])
+                frame0_positions = np.zeros((n_total, 3))
+                for m in muscles:
+                    off = global_offset[m['name']]
+                    n_v = len(m['vertices'])
+                    rest = m['vertices']
+                    lbs = np.zeros((n_v, 3))
+                    for bi, bone_name in enumerate(m['skinning_bones']):
+                        body_node = skel.getBodyNode(bone_name)
+                        if body_node is None:
+                            continue
+                        R_cur = body_node.getWorldTransform().rotation()
+                        t_cur = body_node.getWorldTransform().translation()
+                        if bone_name in m['initial_transforms']:
+                            R0, t0 = m['initial_transforms'][bone_name]
+                        else:
+                            continue
+                        local = (R0.T @ (rest - t0).T).T
+                        deformed = (R_cur @ local.T).T + t_cur
+                        w = m['skinning_weights'][:, bi:bi + 1]
+                        lbs += w * deformed
+                    frame0_positions[off:off + n_v] = lbs
+
+                for m in muscles:
+                    off = global_offset[m['name']]
+                    n_v = len(m['vertices'])
+                    local_tets = m['tetrahedra'].copy()
+                    msh_path = os.path.join(work_dir, f"{m['name']}.msh")
+                    write_msh(msh_path, frame0_positions[off:off + n_v], local_tets)
+
+                # Restore skeleton to target frame
+                skel.setPositions(motion_bvh.mocap_refs[frame])
 
             # Bone obstacle OBJs
             bone_objs = []
@@ -414,55 +446,55 @@ def main():
             # Actually, use sphere selection with tiny radius around each fixed vert.
             # But 4888 selections is too many.
             #
-            # Practical approach: tag the MSH file with $PhysicalGroups
-            # and $NodeData to mark fixed vertices.
-
-            # Dirichlet BCs: use bounding box selections grouping fixed verts by bone
-            # Group fixed vertices by their attachment bone
+            # Build per-muscle BC entries
             from collections import defaultdict
-            bone_groups = defaultdict(list)
-            for gi in fixed_indices:
-                if gi in all_local_anchors:
-                    bone_name = all_local_anchors[gi][0]
-                    bone_groups[bone_name].append(gi)
-                else:
-                    bone_groups['_rest'].append(gi)
-
-            point_selections = []
-            dirichlet_bcs = []
             bc_id = 1
-            for bone_name, verts_gi in bone_groups.items():
-                if not verts_gi:
-                    continue
-                verts_gi = np.array(verts_gi)
-                # Bounding box around REST positions of these fixed verts
-                rest_pos = global_rest[verts_gi]
-                bbox_min = rest_pos.min(axis=0) - 1e-4
-                bbox_max = rest_pos.max(axis=0) + 1e-4
-                point_selections.append({
-                    "id": bc_id,
-                    "box": [bbox_min.tolist(), bbox_max.tolist()],
-                })
-                # Average displacement: rest → target for this bone group
-                # (all verts in group move with same bone, so avg is accurate)
-                disp = fixed_targets[verts_gi] - global_rest[verts_gi]
-                avg_disp = disp.mean(axis=0)
-                # Use "t" to interpolate: at t=1 apply full displacement
-                dirichlet_bcs.append({
-                    "id": bc_id,
-                    "value": [
-                        f"{avg_disp[0]:.8f} * t",
-                        f"{avg_disp[1]:.8f} * t",
-                        f"{avg_disp[2]:.8f} * t",
-                    ],
-                })
-                bc_id += 1
+            muscle_entries = []
+            for m in muscles:
+                off = global_offset[m['name']]
+                msh_path = os.path.join(work_dir, f"{m['name']}.msh")
+
+                # Group fixed vertices by bone (LOCAL indices)
+                bone_groups = defaultdict(list)
+                for vi, (bone_name, lpos) in m['local_anchors'].items():
+                    bone_groups[bone_name].append(vi)
+
+                point_sels = []
+                dbcs = []
+                f0_pos = frame0_positions[off:off + len(m['vertices'])]
+                for bone_name, local_vis in bone_groups.items():
+                    if not local_vis:
+                        continue
+                    local_arr = np.array(local_vis)
+                    # Bounding box in frame 0 LBS coords (what's in MSH)
+                    f0_group = f0_pos[local_arr]
+                    bbox_min = f0_group.min(axis=0) - 1e-4
+                    bbox_max = f0_group.max(axis=0) + 1e-4
+                    point_sels.append({
+                        "id": bc_id,
+                        "box": [bbox_min.tolist(), bbox_max.tolist()],
+                    })
+                    # Displacement: frame 0 → target frame, scaled by t
+                    global_vis = off + local_arr
+                    disp = fixed_targets[global_vis] - f0_pos[local_arr]
+                    avg_disp = disp.mean(axis=0)
+                    dbcs.append({
+                        "id": bc_id,
+                        "value": [
+                            f"{avg_disp[0]:.8f} * t",
+                            f"{avg_disp[1]:.8f} * t",
+                            f"{avg_disp[2]:.8f} * t",
+                        ],
+                    })
+                    bc_id += 1
+
+                muscle_entries.append((msh_path, point_sels, dbcs))
 
             out_dir = os.path.join(work_dir, 'output')
             os.makedirs(out_dir, exist_ok=True)
 
             config = build_polyfem_config(
-                msh_path, bone_objs, point_selections, dirichlet_bcs,
+                muscle_entries, bone_objs,
                 args.youngs, args.poisson, dhat_m, out_dir)
 
             config_path = os.path.join(work_dir, 'config.json')

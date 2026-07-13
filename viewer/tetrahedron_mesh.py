@@ -9,7 +9,7 @@ except ImportError:
 import os
 import pickle
 import trimesh
-from scipy.spatial import Delaunay
+from scipy.spatial import Delaunay, cKDTree
 from collections import defaultdict
 
 
@@ -81,6 +81,79 @@ def laplacian_smooth_mesh(vertices, faces, iterations=3, lambda_factor=0.5, pres
     return vertices.astype(np.float32)
 
 
+def _dominant_label(labels, default='unknown'):
+    counts = {}
+    for label in labels:
+        if label is None:
+            continue
+        counts[label] = counts.get(label, 0) + 1
+    if not counts:
+        return default
+    return max(counts.items(), key=lambda kv: kv[1])[0]
+
+
+def _count_labels(labels):
+    if labels is None:
+        return None
+    counts = {}
+    for label in labels:
+        counts[label] = counts.get(label, 0) + 1
+    return counts
+
+
+def _derive_tet_region_labels(tetrahedra, vertex_regions):
+    if vertex_regions is None:
+        return None, None, None
+    region_labels = []
+    component_labels = []
+    mixed = []
+    for tet in np.asarray(tetrahedra, dtype=np.int64):
+        regions = [
+            vertex_regions[int(vi)] if 0 <= int(vi) < len(vertex_regions) else None
+            for vi in tet
+        ]
+        parts = [
+            r.get('part') if isinstance(r, dict) else None
+            for r in regions
+        ]
+        comps = [
+            r.get('component') if isinstance(r, dict) else None
+            for r in regions
+        ]
+        region_labels.append(_dominant_label(parts))
+        component_labels.append(_dominant_label(comps))
+        valid_parts = {p for p in parts if p is not None}
+        valid_comps = {c for c in comps if c is not None}
+        mixed.append(len(valid_parts) > 1 or len(valid_comps) > 1)
+    return region_labels, component_labels, np.asarray(mixed, dtype=bool)
+
+
+def _tet_region_color(label, belly_color, alpha):
+    label = str(label or '').lower()
+    if 'tendon' in label:
+        return [0.96, 0.94, 0.90, alpha]
+    if label == 'mixed' or 'mixed' in label or label == 'interface':
+        return [0.92, 0.84, 0.34, alpha]
+    if 'belly' in label:
+        return [0.90, 0.12, 0.10, alpha]
+    return [float(belly_color[0]), float(belly_color[1]), float(belly_color[2]), alpha]
+
+
+def _face_region_label(face, vertex_regions):
+    if vertex_regions is None:
+        return None
+    parts = []
+    for vi in face:
+        if 0 <= int(vi) < len(vertex_regions):
+            region = vertex_regions[int(vi)]
+            if isinstance(region, dict):
+                parts.append(region.get('part'))
+    valid = {p for p in parts if p is not None}
+    if len(valid) > 1:
+        return 'mixed'
+    return _dominant_label(parts, default=None)
+
+
 class TetrahedronMeshMixin:
     """
     Mixin class providing tetrahedron-related methods for MeshLoader.
@@ -99,6 +172,10 @@ class TetrahedronMeshMixin:
         self.tet_cap_face_indices = []  # Indices of cap faces (for skeleton attachment)
         self.tet_anchor_vertices = []  # Vertices at origin/insertion caps
         self.tet_surface_face_count = 0  # Number of original surface faces (before caps)
+        self.tet_vertex_regions = None
+        self.tet_region_labels = None
+        self.tet_component_labels = None
+        self.tet_region_mixed = None
 
         # Tet drawing settings
         self.is_draw_tet_mesh = False
@@ -110,6 +187,8 @@ class TetrahedronMeshMixin:
         self._tet_cap_verts = None
         self._tet_cap_normals = None
         self._tet_edge_verts = None
+        self._tet_region_surface_colors = None
+        self._tet_region_cap_colors = None
 
         # Cap attachment info
         self.tet_cap_attachments = []  # List of (anchor_idx, stream_idx, end_type, skeleton_idx, subpart_idx)
@@ -1662,6 +1741,25 @@ except Exception as e:
         # Step 6: Store results with dual face system
         self.tet_vertices = closed_vertices
         self.tet_tetrahedra = interior_tetrahedra
+        self.tet_vertex_regions = None
+        mesh_regions = getattr(self, 'contour_mesh_vertex_regions', None)
+        if mesh_regions is not None and len(mesh_regions) > 0:
+            try:
+                src_vertices = np.asarray(getattr(self, 'contour_mesh_vertices', vertices_original), dtype=np.float64)
+                tree_regions = cKDTree(src_vertices)
+                _, nearest = tree_regions.query(np.asarray(self.tet_vertices, dtype=np.float64), k=1)
+                self.tet_vertex_regions = [
+                    mesh_regions[int(i)] if int(i) < len(mesh_regions) else None
+                    for i in nearest
+                ]
+            except Exception as e:
+                print(f"  Warning: tet region transfer failed: {e}")
+        self.tet_region_labels, self.tet_component_labels, self.tet_region_mixed = (
+            _derive_tet_region_labels(self.tet_tetrahedra, self.tet_vertex_regions)
+        )
+        if self.tet_region_labels is not None:
+            region_counts = _count_labels(self.tet_region_labels)
+            print(f"  Tet regions: {region_counts}")
 
         # Dual face system:
         # - tet_render_faces: Surface faces for rendering
@@ -1885,12 +1983,26 @@ except Exception as e:
                 'stream_bounding_planes': getattr(self, 'stream_bounding_planes', None),
                 'stream_groups': getattr(self, 'stream_groups', None),
                 'vertex_contour_level': getattr(self, 'vertex_contour_level', None),
+                'waypoint_level_regions': getattr(self, 'waypoint_level_regions', None),
+                'contour_mesh_vertex_regions': getattr(self, 'contour_mesh_vertex_regions', None),
+                'tet_vertex_regions': getattr(self, 'tet_vertex_regions', None),
+                'tet_region_labels': getattr(self, 'tet_region_labels', None),
+                'tet_component_labels': getattr(self, 'tet_component_labels', None),
+                'tet_region_mixed': getattr(self, 'tet_region_mixed', None),
+                'connected_contour_mesh_components': getattr(self, '_connected_contour_mesh_components', None),
+                'connected_component_fibers': getattr(self, '_connected_component_fibers', None),
             }
 
             with open(filepath, 'wb') as f:
                 pickle.dump(save_dict, f)
 
             print(f"[{name}] Saved tetrahedron mesh to {filepath}")
+            tet_labels = getattr(self, 'tet_region_labels', None)
+            if tet_labels is not None:
+                print(f"[{name}] Saved tet regions: {_count_labels(tet_labels)}")
+            comp_labels = getattr(self, 'tet_component_labels', None)
+            if comp_labels is not None:
+                print(f"[{name}] Saved tet components: {_count_labels(comp_labels)}")
             return True
         except Exception as e:
             print(f"[{name}] Failed to save tetrahedron mesh: {e}")
@@ -2004,6 +2116,18 @@ except Exception as e:
             # Load vertex contour level (for contour-guided tetrahedralization)
             if 'vertex_contour_level' in data and data['vertex_contour_level'] is not None:
                 self.vertex_contour_level = data['vertex_contour_level']
+            self.waypoint_level_regions = data.get('waypoint_level_regions', None)
+            self.contour_mesh_vertex_regions = data.get('contour_mesh_vertex_regions', None)
+            self.tet_vertex_regions = data.get('tet_vertex_regions', None)
+            self.tet_region_labels = data.get('tet_region_labels', None)
+            self.tet_component_labels = data.get('tet_component_labels', None)
+            self.tet_region_mixed = data.get('tet_region_mixed', None)
+            if self.tet_region_labels is None and getattr(self, 'tet_vertex_regions', None) is not None:
+                self.tet_region_labels, self.tet_component_labels, self.tet_region_mixed = (
+                    _derive_tet_region_labels(self.tet_tetrahedra, self.tet_vertex_regions)
+                )
+            self._connected_contour_mesh_components = data.get('connected_contour_mesh_components', None)
+            self._connected_component_fibers = data.get('connected_component_fibers', None)
 
             # Load MVC weights (for deforming waypoints with tet sim)
             if 'mvc_weights' in data and data['mvc_weights'] is not None:
@@ -2033,6 +2157,14 @@ except Exception as e:
 
             print(f"[{name}] Loaded tetrahedron mesh from {filepath}")
             print(f"  Vertices: {len(self.tet_vertices)}, Render faces: {len(self.tet_render_faces)}, Sim faces: {len(self.tet_sim_faces)}, Tets: {len(self.tet_tetrahedra)}")
+            if self.tet_region_labels is not None:
+                print(f"  Tet regions: {_count_labels(self.tet_region_labels)}")
+            if self.tet_component_labels is not None:
+                print(f"  Tet components: {_count_labels(self.tet_component_labels)}")
+            if self.tet_region_mixed is not None:
+                print(f"  Mixed/interface tets: {int(np.sum(self.tet_region_mixed))}")
+            if self._connected_component_fibers is not None:
+                print(f"  Connected component fibers: {len(self._connected_component_fibers)} components")
             return True
 
         except Exception as e:
@@ -2053,6 +2185,14 @@ except Exception as e:
                 self.tet_render_faces = data['faces']
                 self.tet_sim_faces = self._extract_tet_boundary_faces(self.tet_tetrahedra)
                 self.tet_faces = self.tet_render_faces  # Backwards compatibility alias
+                self.waypoint_level_regions = None
+                self.contour_mesh_vertex_regions = None
+                self.tet_vertex_regions = None
+                self.tet_region_labels = None
+                self.tet_component_labels = None
+                self.tet_region_mixed = None
+                self._connected_contour_mesh_components = None
+                self._connected_component_fibers = None
 
                 print(f"[{name}] Loaded tetrahedron mesh (old format) from {filepath}")
                 return True
@@ -2073,12 +2213,14 @@ except Exception as e:
 
         surface_verts = []
         surface_normals = []
-        surface_colors = []
+        surface_region_colors = []
         cap_verts = []
         cap_normals = []
+        cap_region_colors = []
 
         color = self.contour_mesh_color
-        cap_color = np.array([0.2, 0.6, 0.2])
+        alpha = float(getattr(self, 'contour_mesh_transparency', 0.8))
+        vertex_regions = getattr(self, 'tet_vertex_regions', None)
 
         # Build index arrays for fast position updates
         surface_face_indices = []
@@ -2092,20 +2234,38 @@ except Exception as e:
                 normal = normal / norm_len
 
             if face_idx in cap_set:
+                face_label = _face_region_label(face, vertex_regions)
+                face_color = _tet_region_color(face_label, color, alpha) if face_label is not None else None
                 for vi in face:
                     cap_verts.append(self.tet_vertices[vi])
                     cap_normals.append(normal)
+                    if face_color is not None:
+                        cap_region_colors.append(face_color)
                 cap_face_indices.append(face)
             else:
+                face_label = _face_region_label(face, vertex_regions)
+                face_color = _tet_region_color(face_label, color, alpha) if face_label is not None else None
                 for vi in face:
                     surface_verts.append(self.tet_vertices[vi])
                     surface_normals.append(normal)
+                    if face_color is not None:
+                        surface_region_colors.append(face_color)
                 surface_face_indices.append(face)
 
         self._tet_surface_verts = np.array(surface_verts, dtype=np.float32) if surface_verts else None
         self._tet_surface_normals = np.array(surface_normals, dtype=np.float32) if surface_normals else None
         self._tet_cap_verts = np.array(cap_verts, dtype=np.float32) if cap_verts else None
         self._tet_cap_normals = np.array(cap_normals, dtype=np.float32) if cap_normals else None
+        self._tet_region_surface_colors = (
+            np.array(surface_region_colors, dtype=np.float32)
+            if surface_region_colors and len(surface_region_colors) == len(surface_verts)
+            else None
+        )
+        self._tet_region_cap_colors = (
+            np.array(cap_region_colors, dtype=np.float32)
+            if cap_region_colors and len(cap_region_colors) == len(cap_verts)
+            else None
+        )
 
         # Store flattened vertex index arrays for fast update path
         self._tet_surface_vidx = np.array(surface_face_indices, dtype=np.int32).reshape(-1) if surface_face_indices else None
@@ -2362,21 +2522,37 @@ except Exception as e:
             heatmap_colors = getattr(self, '_tet_surface_colors', None)
             if heatmap_colors is not None and len(heatmap_colors) == len(self._tet_surface_verts):
                 glEnableClientState(GL_COLOR_ARRAY)
+                heatmap_colors[:, 3] = alpha
                 glColorPointer(4, GL_FLOAT, 0, heatmap_colors)
+            elif (getattr(self, '_tet_region_surface_colors', None) is not None
+                    and len(self._tet_region_surface_colors) == len(self._tet_surface_verts)):
+                self._tet_region_surface_colors[:, 3] = alpha
+                glEnableClientState(GL_COLOR_ARRAY)
+                glColorPointer(4, GL_FLOAT, 0, self._tet_region_surface_colors)
             else:
                 glColor4f(color[0], color[1], color[2], alpha)
             glVertexPointer(3, GL_FLOAT, 0, self._tet_surface_verts)
             glNormalPointer(GL_FLOAT, 0, self._tet_surface_normals)
             glDrawArrays(GL_TRIANGLES, 0, len(self._tet_surface_verts))
-            if heatmap_colors is not None and len(heatmap_colors) == len(self._tet_surface_verts):
+            if ((heatmap_colors is not None and len(heatmap_colors) == len(self._tet_surface_verts))
+                    or (getattr(self, '_tet_region_surface_colors', None) is not None
+                        and len(self._tet_region_surface_colors) == len(self._tet_surface_verts))):
                 glDisableClientState(GL_COLOR_ARRAY)
 
-        # Draw cap faces in green
+        # Draw cap faces
         if draw_caps and self._tet_cap_verts is not None and len(self._tet_cap_verts) > 0:
-            glColor4f(0.2, 0.6, 0.2, alpha)
+            cap_colors = getattr(self, '_tet_region_cap_colors', None)
+            if cap_colors is not None and len(cap_colors) == len(self._tet_cap_verts):
+                cap_colors[:, 3] = alpha
+                glEnableClientState(GL_COLOR_ARRAY)
+                glColorPointer(4, GL_FLOAT, 0, cap_colors)
+            else:
+                glColor4f(0.2, 0.6, 0.2, alpha)
             glVertexPointer(3, GL_FLOAT, 0, self._tet_cap_verts)
             glNormalPointer(GL_FLOAT, 0, self._tet_cap_normals)
             glDrawArrays(GL_TRIANGLES, 0, len(self._tet_cap_verts))
+            if cap_colors is not None and len(cap_colors) == len(self._tet_cap_verts):
+                glDisableClientState(GL_COLOR_ARRAY)
 
         glDisableClientState(GL_NORMAL_ARRAY)
 

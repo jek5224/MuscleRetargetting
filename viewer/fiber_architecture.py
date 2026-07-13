@@ -1872,9 +1872,118 @@ class FiberArchitectureMixin:
         one bulk finite check, then line pair building per (stream, level) gap.
         No persistent state — recomputes structure every call.
         """
+        direction_lines = getattr(self, 'epic_gradient_direction_lines', None)
+        if direction_lines is not None:
+            lines = np.asarray(direction_lines, dtype=np.float32)
+            if lines.ndim == 3 and lines.shape[1:] == (2, 3):
+                lines = lines.reshape(-1, 3)
+            if lines.ndim == 2 and lines.shape[1] == 3 and len(lines) > 0:
+                valid = np.all(np.isfinite(lines), axis=1)
+                self._fiber_draw_lines = np.ascontiguousarray(lines[valid]) if valid.any() else None
+                line_rgb = getattr(self, 'epic_gradient_direction_line_colors', None)
+                if line_rgb is not None:
+                    line_rgb = np.asarray(line_rgb, dtype=np.float32)
+                    if line_rgb.shape == lines.shape:
+                        self._fiber_draw_line_rgb = (
+                            np.ascontiguousarray(line_rgb[valid]) if valid.any() else None
+                        )
+                    else:
+                        self._fiber_draw_line_rgb = None
+                else:
+                    self._fiber_draw_line_rgb = None
+            else:
+                self._fiber_draw_lines = None
+                self._fiber_draw_line_rgb = None
+
+            direction_pts = getattr(self, 'epic_gradient_direction_points', None)
+            if direction_pts is not None:
+                pts = np.asarray(direction_pts, dtype=np.float32)
+                if pts.ndim == 2 and pts.shape[1] == 3 and len(pts) > 0:
+                    valid = np.all(np.isfinite(pts), axis=1)
+                    self._fiber_draw_pts = np.ascontiguousarray(pts[valid]) if valid.any() else None
+                    point_rgb = getattr(self, 'epic_gradient_direction_point_colors', None)
+                    if point_rgb is not None:
+                        point_rgb = np.asarray(point_rgb, dtype=np.float32)
+                        if point_rgb.shape == pts.shape:
+                            self._fiber_draw_point_rgb = (
+                                np.ascontiguousarray(point_rgb[valid]) if valid.any() else None
+                            )
+                        else:
+                            self._fiber_draw_point_rgb = None
+                    else:
+                        self._fiber_draw_point_rgb = None
+                else:
+                    self._fiber_draw_pts = None
+                    self._fiber_draw_point_rgb = None
+            else:
+                self._fiber_draw_pts = None
+                self._fiber_draw_point_rgb = None
+
+            try:
+                self._ensure_fiber_vbos()
+                if self._fiber_draw_pts is not None and len(self._fiber_draw_pts) > 0:
+                    self._upload_fiber_vbo(self._fiber_pts_vbo, self._fiber_draw_pts)
+                    self._fiber_pts_count = len(self._fiber_draw_pts)
+                else:
+                    self._fiber_pts_count = 0
+                if self._fiber_draw_lines is not None and len(self._fiber_draw_lines) > 0:
+                    self._upload_fiber_vbo(self._fiber_lines_vbo, self._fiber_draw_lines)
+                    self._fiber_lines_count = len(self._fiber_draw_lines)
+                else:
+                    self._fiber_lines_count = 0
+            except Exception:
+                self._fiber_pts_count = 0
+                self._fiber_lines_count = 0
+            return
+
+        raw_fibers = getattr(self, 'epic_fibers_raw', None)
+        if raw_fibers:
+            self._fiber_draw_point_rgb = None
+            self._fiber_draw_line_rgb = None
+            pts_arrs = []
+            line_arrs = []
+            for fiber in raw_fibers:
+                arr = np.asarray(fiber, dtype=np.float32)
+                if arr.ndim != 2 or arr.shape[1] != 3 or len(arr) < 2:
+                    continue
+                valid = np.all(np.isfinite(arr), axis=1)
+                arr = arr[valid]
+                if len(arr) < 2:
+                    continue
+                pts_arrs.append(arr)
+                pairs = np.empty(((len(arr) - 1) * 2, 3), dtype=np.float32)
+                pairs[0::2] = arr[:-1]
+                pairs[1::2] = arr[1:]
+                line_arrs.append(pairs)
+
+            self._fiber_draw_pts = (
+                np.ascontiguousarray(np.concatenate(pts_arrs, axis=0)) if pts_arrs else None
+            )
+            self._fiber_draw_lines = (
+                np.ascontiguousarray(np.concatenate(line_arrs, axis=0)) if line_arrs else None
+            )
+            try:
+                self._ensure_fiber_vbos()
+                if self._fiber_draw_pts is not None and len(self._fiber_draw_pts) > 0:
+                    self._upload_fiber_vbo(self._fiber_pts_vbo, self._fiber_draw_pts)
+                    self._fiber_pts_count = len(self._fiber_draw_pts)
+                else:
+                    self._fiber_pts_count = 0
+                if self._fiber_draw_lines is not None and len(self._fiber_draw_lines) > 0:
+                    self._upload_fiber_vbo(self._fiber_lines_vbo, self._fiber_draw_lines)
+                    self._fiber_lines_count = len(self._fiber_draw_lines)
+                else:
+                    self._fiber_lines_count = 0
+            except Exception:
+                self._fiber_pts_count = 0
+                self._fiber_lines_count = 0
+            return
+
         if not hasattr(self, 'waypoints') or not self.waypoints:
             self._fiber_draw_pts = None
             self._fiber_draw_lines = None
+            self._fiber_draw_point_rgb = None
+            self._fiber_draw_line_rgb = None
             self._fiber_pts_count = 0
             self._fiber_lines_count = 0
             return
@@ -1900,6 +2009,8 @@ class FiberArchitectureMixin:
         if not arrs:
             self._fiber_draw_pts = None
             self._fiber_draw_lines = None
+            self._fiber_draw_point_rgb = None
+            self._fiber_draw_line_rgb = None
             return
 
         big = np.concatenate(arrs, axis=0)  # (total, 3)
@@ -1933,6 +2044,8 @@ class FiberArchitectureMixin:
         self._fiber_draw_lines = (
             np.ascontiguousarray(np.concatenate(line_arrs, axis=0)) if line_arrs else None
         )
+        self._fiber_draw_point_rgb = None
+        self._fiber_draw_line_rgb = None
         # Upload to server-side VBOs.  Driver owns the memory after this,
         # so client-side numpy buffers can be freed without breaking the
         # next draw — fixes the segfaults inside glDrawArrays.
@@ -1975,6 +2088,11 @@ class FiberArchitectureMixin:
 
         alpha = getattr(self, 'fiber_transparency', 1.0)
         use_depth_fade = getattr(self, 'fiber_depth_fade', True)
+        is_direction_overlay = getattr(self, 'epic_gradient_direction_lines', None) is not None
+        point_color = (1.0, 0.9, 0.1) if is_direction_overlay else (1.0, 0.6, 0.0)
+        line_color = (0.0, 0.85, 1.0) if is_direction_overlay else (0.75, 0.0, 0.0)
+        point_size = 2 if is_direction_overlay else 5
+        line_width = 1.25 if is_direction_overlay else 2.0
 
         # Animation growth progress — fall back to slow path
         level_prog = getattr(self, '_fiber_anim_level_progress', None)
@@ -1998,20 +2116,41 @@ class FiberArchitectureMixin:
 
             pts_arr = getattr(self, '_fiber_draw_pts', None)
             if pts_arr is not None and len(pts_arr) > 0:
-                glPointSize(5)
-                glColor4f(1.0, 0.6, 0.0, alpha)
+                glPointSize(point_size)
                 glBindBuffer(GL_ARRAY_BUFFER, 0)
                 glVertexPointer(3, GL_FLOAT, 0, pts_arr)
+                point_rgb = getattr(self, '_fiber_draw_point_rgb', None)
+                if point_rgb is not None and len(point_rgb) == len(pts_arr):
+                    point_rgba = np.empty((len(point_rgb), 4), dtype=np.float32)
+                    point_rgba[:, :3] = point_rgb
+                    point_rgba[:, 3] = alpha
+                    self._fiber_pts_rgba_keepalive = point_rgba
+                    glEnableClientState(GL_COLOR_ARRAY)
+                    glColorPointer(4, GL_FLOAT, 0, point_rgba)
+                else:
+                    glDisableClientState(GL_COLOR_ARRAY)
+                    glColor4f(point_color[0], point_color[1], point_color[2], alpha)
                 glDrawArrays(GL_POINTS, 0, len(pts_arr))
 
             lines_arr = getattr(self, '_fiber_draw_lines', None)
             if lines_arr is not None and len(lines_arr) > 0:
-                glLineWidth(2)
-                glColor4f(0.75, 0, 0, alpha)
+                glLineWidth(line_width)
                 glBindBuffer(GL_ARRAY_BUFFER, 0)
                 glVertexPointer(3, GL_FLOAT, 0, lines_arr)
+                line_rgb = getattr(self, '_fiber_draw_line_rgb', None)
+                if line_rgb is not None and len(line_rgb) == len(lines_arr):
+                    line_rgba = np.empty((len(line_rgb), 4), dtype=np.float32)
+                    line_rgba[:, :3] = line_rgb
+                    line_rgba[:, 3] = alpha
+                    self._fiber_lines_rgba_keepalive = line_rgba
+                    glEnableClientState(GL_COLOR_ARRAY)
+                    glColorPointer(4, GL_FLOAT, 0, line_rgba)
+                else:
+                    glDisableClientState(GL_COLOR_ARRAY)
+                    glColor4f(line_color[0], line_color[1], line_color[2], alpha)
                 glDrawArrays(GL_LINES, 0, len(lines_arr))
 
+            glDisableClientState(GL_COLOR_ARRAY)
             glDisableClientState(GL_VERTEX_ARRAY)
         else:
             # Depth fade path — per-vertex alpha from eye-space depth
@@ -2046,9 +2185,13 @@ class FiberArchitectureMixin:
                 n_pts = len(pts_arr)
                 p_alphas = compute_depth_alphas(pts_arr, alpha)
                 pt_rgba = np.empty((n_pts, 4), dtype=np.float32)
-                pt_rgba[:, 0] = 1.0
-                pt_rgba[:, 1] = 0.6
-                pt_rgba[:, 2] = 0.0
+                point_rgb = getattr(self, '_fiber_draw_point_rgb', None)
+                if point_rgb is not None and len(point_rgb) == n_pts:
+                    pt_rgba[:, :3] = point_rgb
+                else:
+                    pt_rgba[:, 0] = point_color[0]
+                    pt_rgba[:, 1] = point_color[1]
+                    pt_rgba[:, 2] = point_color[2]
                 pt_rgba[:, 3] = p_alphas.astype(np.float32)
                 pt_rgba = np.ascontiguousarray(pt_rgba, dtype=np.float32)
                 self._fiber_draw_pts_keepalive = pts_arr
@@ -2056,7 +2199,7 @@ class FiberArchitectureMixin:
                 glBindBuffer(GL_ARRAY_BUFFER, 0)
                 glColorPointer(4, GL_FLOAT, 0, pt_rgba)
                 glVertexPointer(3, GL_FLOAT, 0, pts_arr)
-                glPointSize(5)
+                glPointSize(point_size)
                 glDrawArrays(GL_POINTS, 0, n_pts)
 
             lines_arr = getattr(self, '_fiber_draw_lines', None)
@@ -2065,9 +2208,13 @@ class FiberArchitectureMixin:
                 n_lines = len(lines_arr)
                 alphas = compute_depth_alphas(lines_arr, alpha)
                 line_rgba = np.empty((n_lines, 4), dtype=np.float32)
-                line_rgba[:, 0] = 0.75
-                line_rgba[:, 1] = 0.0
-                line_rgba[:, 2] = 0.0
+                line_rgb = getattr(self, '_fiber_draw_line_rgb', None)
+                if line_rgb is not None and len(line_rgb) == n_lines:
+                    line_rgba[:, :3] = line_rgb
+                else:
+                    line_rgba[:, 0] = line_color[0]
+                    line_rgba[:, 1] = line_color[1]
+                    line_rgba[:, 2] = line_color[2]
                 line_rgba[:, 3] = alphas.astype(np.float32)
                 line_rgba = np.ascontiguousarray(line_rgba, dtype=np.float32)
                 self._fiber_draw_lines_keepalive = lines_arr
@@ -2075,7 +2222,7 @@ class FiberArchitectureMixin:
                 glBindBuffer(GL_ARRAY_BUFFER, 0)
                 glColorPointer(4, GL_FLOAT, 0, line_rgba)
                 glVertexPointer(3, GL_FLOAT, 0, lines_arr)
-                glLineWidth(2)
+                glLineWidth(line_width)
                 glDrawArrays(GL_LINES, 0, n_lines)
 
             glDisableClientState(GL_COLOR_ARRAY)
