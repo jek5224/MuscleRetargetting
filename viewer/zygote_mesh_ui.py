@@ -14,6 +14,7 @@ import trimesh
 import json
 import time
 import copy
+import pickle
 try:
     import glfw
 except ImportError:
@@ -26,6 +27,7 @@ except ImportError:
     pass  # Headless mode
 from viewer.mesh_loader import MeshLoader
 from viewer.muscle_mesh import COLOR_MAP, cotangent_weight_matrix
+from viewer.tetrahedron_mesh import _derive_tet_region_labels
 from viewer.arap_backends import get_backend
 from core.bvhparser import MyBVH
 
@@ -34,6 +36,10 @@ wide_button_width = 308
 button_width = 150
 MIN_EYE_DISTANCE = 0.5
 ZYGOTE_TENDON_COLOR = np.array([1.0, 0.82, 0.78], dtype=np.float32)
+# Benchmarked on the Rectus Femoris group.  With the isotropic voxel boundary
+# this request produces about 30k TetGen elements after anatomical projection:
+# the best tested surface-fidelity, stability, and runtime compromise.
+RECTUS_FEMORIS_BASELINE_TETS = 20000
 
 
 def _is_zygote_tendon_mesh(name, path=None):
@@ -42,6 +48,11 @@ def _is_zygote_tendon_mesh(name, path=None):
     if path:
         tokens.append(os.path.basename(str(path)))
     return any('tendon' in token.lower() for token in tokens)
+
+
+def _is_pennation_path(path):
+    """Whether an OBJ belongs to a Pennation multi-part muscle group."""
+    return 'pennation' in str(path or '').lower()
 
 
 def _tendon_match_keys(muscle_name):
@@ -313,17 +324,18 @@ def _run_component_pipeline_quick(v, name, obj, max_step, defer=False):
             if not _connected_source_has_linked_components(obj):
                 _run_counterpart_step(v, name, obj, 11, defer=defer)
 
-    if max_step >= 12 and obj.contour_mesh_vertices is not None:
+    if max_step >= 12:
         if _skip_non_owner_connected_mesh(v, name, obj, "Tetrahedralize"):
             return True
-        obj.soft_body = None
-        obj.tetrahedralize_contour_mesh(skeleton_meshes=v.zygote_skeleton_meshes)
-        if not _connected_source_has_linked_components(obj):
+        tet_ok = _tetrahedralize_single_contour_mesh(v, name, obj, defer=defer)
+        if tet_ok and not _connected_source_has_linked_components(obj):
             _run_counterpart_step(v, name, obj, 12, defer=defer)
-        if obj.tet_vertices is not None and not defer:
+        if tet_ok and obj.tet_vertices is not None and not defer:
             obj.is_draw_contours = False
             obj.is_draw_tet_mesh = True
             obj._tetrahedralize_replayed = True
+        if not tet_ok:
+            return False
     return True
 
 
@@ -351,6 +363,1155 @@ def _process_zygote_component_group(v, group_name, max_step, tendon_step=None,
             obj.enable_tendon_extension = bool(extend_fibers)
             print(f"[{group_name}] Processing belly component {comp_name} to step {max_step}")
             _run_component_pipeline_quick(v, comp_name, obj, int(max_step), defer=defer)
+
+
+def _zygote_group_state(v, group_name):
+    if not hasattr(v, 'zygote_muscle_group_state'):
+        v.zygote_muscle_group_state = {}
+    state = v.zygote_muscle_group_state.setdefault(group_name, {})
+    state.setdefault('show_parts', False)
+    state.setdefault('belly_step', 9)
+    state.setdefault('tendon_step', 8)
+    state.setdefault('draw_parts', True)
+    state.setdefault('draw_surface', True)
+    state.setdefault('draw_surface_tet', True)
+    state.setdefault('draw_surface_tet_edges', False)
+    state.setdefault('draw_surface_tet_internals', False)
+    state.setdefault('draw_scalar_field', False)
+    state.setdefault('draw_contours', False)
+    state.setdefault('draw_fibers', False)
+    state.setdefault('draw_bounding_boxes', False)
+    state.setdefault('use_emu_volume_target', True)
+    return state
+
+
+def _zygote_group_loaded_names(v, group_name):
+    names = [
+        name for name in getattr(v, 'zygote_muscle_meshes', {}).keys()
+        if _zygote_component_group_name(name) == group_name
+    ]
+    return sorted(names)
+
+
+def _zygote_loaded_ui_group_names(v):
+    groups = _zygote_loaded_component_groups(v)
+    out = []
+    for group_name, names in groups.items():
+        # Filename suffixes alone do not make a group. Only meshes loaded from
+        # a Pennation directory get the grouped pipeline UI; ordinary muscles
+        # remain in the regular single-muscle controls.
+        is_pennation = any(
+            _is_pennation_path(getattr(v.zygote_muscle_meshes.get(name), 'obj', ''))
+            for name in names)
+        if is_pennation:
+            out.append(group_name)
+    return sorted(out)
+
+
+def _zygote_group_name_side(name):
+    _, comp = _zygote_component_role(name)
+    return comp
+
+
+def _zygote_group_auto_mapping(v, group_name):
+    names = _zygote_group_loaded_names(v, group_name)
+    mapping = {
+        'surface': group_name if group_name in getattr(v, 'zygote_muscle_meshes', {}) else '',
+        'master': '',
+        'follower': '',
+        'master_origin': '',
+        'master_insertion': '',
+        'follower_origin': '',
+        'follower_insertion': '',
+    }
+
+    for name in names:
+        if name == group_name:
+            continue
+        kind, side = _zygote_component_role(name)
+        if kind == 'belly':
+            if side == 'l' and not mapping['master']:
+                mapping['master'] = name
+            elif side == 'm' and not mapping['follower']:
+                mapping['follower'] = name
+        elif kind == 'origin_tendon':
+            if side == 'l' and not mapping['master_origin']:
+                mapping['master_origin'] = name
+            elif side == 'm' and not mapping['follower_origin']:
+                mapping['follower_origin'] = name
+        elif kind == 'insertion_tendon':
+            if side == 'l' and not mapping['master_insertion']:
+                mapping['master_insertion'] = name
+            elif side == 'm' and not mapping['follower_insertion']:
+                mapping['follower_insertion'] = name
+
+    # Fall back to any available belly/tendon if only one side exists.
+    for name in names:
+        if name == group_name:
+            continue
+        kind, side = _zygote_component_role(name)
+        if kind == 'belly':
+            mapping['master'] = mapping['master'] or name
+        elif kind == 'origin_tendon':
+            if side == _zygote_group_name_side(mapping.get('master', '')):
+                mapping['master_origin'] = mapping['master_origin'] or name
+            elif side == _zygote_group_name_side(mapping.get('follower', '')):
+                mapping['follower_origin'] = mapping['follower_origin'] or name
+            else:
+                mapping['master_origin'] = mapping['master_origin'] or name
+        elif kind == 'insertion_tendon':
+            if side == _zygote_group_name_side(mapping.get('master', '')):
+                mapping['master_insertion'] = mapping['master_insertion'] or name
+            elif side == _zygote_group_name_side(mapping.get('follower', '')):
+                mapping['follower_insertion'] = mapping['follower_insertion'] or name
+            else:
+                mapping['master_insertion'] = mapping['master_insertion'] or name
+    return mapping
+
+
+def _ensure_zygote_group_mapping(v, group_name):
+    state = _zygote_group_state(v, group_name)
+    auto = _zygote_group_auto_mapping(v, group_name)
+    for key, val in auto.items():
+        if not state.get(key) or state.get(key) not in getattr(v, 'zygote_muscle_meshes', {}):
+            state[key] = val
+    return state
+
+
+def _zygote_group_candidates(v, group_name, key):
+    names = _zygote_group_loaded_names(v, group_name)
+    candidates = ['None']
+    for name in names:
+        kind, side = _zygote_component_role(name)
+        if key == 'surface':
+            ok = name == group_name
+        elif key in ('master', 'follower'):
+            ok = name != group_name and kind == 'belly'
+        elif key.endswith('_origin'):
+            ok = kind == 'origin_tendon'
+        elif key.endswith('_insertion'):
+            ok = kind == 'insertion_tendon'
+        else:
+            ok = True
+        if ok:
+            candidates.append(name)
+    return candidates
+
+
+def _draw_group_combo(v, group_name, key, label):
+    state = _ensure_zygote_group_mapping(v, group_name)
+    candidates = _zygote_group_candidates(v, group_name, key)
+    current = state.get(key, '')
+    try:
+        idx = candidates.index(current if current else 'None')
+    except ValueError:
+        idx = 0
+    changed, new_idx = imgui.combo(f"{label}##{group_name}_{key}", idx, candidates)
+    if changed:
+        state[key] = '' if candidates[new_idx] == 'None' else candidates[new_idx]
+    return changed
+
+
+def _apply_zygote_group_links(v, group_name):
+    state = _ensure_zygote_group_mapping(v, group_name)
+    master_name = state.get('master', '')
+    follower_name = state.get('follower', '')
+    master = v.zygote_muscle_meshes.get(master_name)
+    follower = v.zygote_muscle_meshes.get(follower_name)
+    if master is not None and follower is not None:
+        master.linked_drive_counterpart = True
+        master.linked_use_shared_scalar = True
+        follower.linked_drive_counterpart = True
+        follower.linked_use_shared_scalar = True
+        _set_symmetric_counterpart_link(v, master_name, follower_name)
+
+    for a_key, b_key in (
+            ('master_origin', 'follower_origin'),
+            ('master_insertion', 'follower_insertion')):
+        a_name = state.get(a_key, '')
+        b_name = state.get(b_key, '')
+        a_obj = v.zygote_muscle_meshes.get(a_name)
+        b_obj = v.zygote_muscle_meshes.get(b_name)
+        if a_obj is None or b_obj is None:
+            continue
+        a_obj.linked_drive_counterpart = True
+        a_obj.linked_use_shared_scalar = True
+        b_obj.linked_drive_counterpart = True
+        b_obj.linked_use_shared_scalar = True
+        _set_symmetric_counterpart_link(v, a_name, b_name)
+
+    for prefix, belly_name in (('master', master_name), ('follower', follower_name)):
+        belly = v.zygote_muscle_meshes.get(belly_name)
+        if belly is None:
+            continue
+        belly.enable_tendon_extension = True
+        belly.origin_tendon_extension_name = state.get(f'{prefix}_origin', '') or ''
+        belly.insertion_tendon_extension_name = state.get(f'{prefix}_insertion', '') or ''
+
+
+def _zygote_group_guide_names(v, group_name):
+    state = _ensure_zygote_group_mapping(v, group_name)
+    keys = [
+        'master', 'follower',
+        'master_origin', 'master_insertion',
+        'follower_origin', 'follower_insertion',
+    ]
+    out = []
+    for key in keys:
+        name = state.get(key, '')
+        if name and name in getattr(v, 'zygote_muscle_meshes', {}) and name not in out:
+            out.append(name)
+    return out
+
+
+def _invalidate_tet_draw_cache(obj):
+    for attr in (
+            '_tet_surface_verts', '_tet_surface_normals', '_tet_cap_verts',
+            '_tet_cap_normals', '_tet_edge_verts', '_tet_surface_vidx',
+            '_tet_cap_vidx', '_tet_edge_vidx', '_tet_internal_verts',
+            '_tet_internal_normals', '_tet_internal_colors',
+            '_tet_internal_vidx', '_tet_internal_stride_cached',
+            '_tet_region_surface_colors', '_tet_region_cap_colors'):
+        if hasattr(obj, attr):
+            setattr(obj, attr, None)
+    if hasattr(obj, '_tet_edge_source'):
+        obj._tet_edge_source = None
+
+
+def _ensure_zygote_group_render_embedding(group_name, surface):
+    """Upgrade an older saved group tet with the exact original render skin."""
+    required = (
+        'tet_render_vertices_rest', 'tet_render_vertex_indices',
+        'tet_render_vertex_weights', 'tet_render_tet_rest_vertices')
+    if all(getattr(surface, field, None) is not None for field in required):
+        return False
+    if (getattr(surface, 'tet_vertices', None) is None or
+            getattr(surface, 'tet_tetrahedra', None) is None):
+        return False
+    anatomical_vertices, anatomical_faces = _component_original_surface(surface)
+    if (anatomical_vertices is None or anatomical_faces is None or
+            len(anatomical_faces) == 0):
+        return False
+
+    import pyvista as pv
+    tet_vertices = np.asarray(surface.tet_vertices, dtype=np.float64)
+    tetrahedra = np.asarray(surface.tet_tetrahedra, dtype=np.int32)
+    anatomical_vertices = np.asarray(anatomical_vertices, dtype=np.float64)
+    vtk_cells = np.hstack((
+        np.full((len(tetrahedra), 1), 4, dtype=np.int64),
+        tetrahedra.astype(np.int64))).ravel()
+    grid = pv.UnstructuredGrid(
+        vtk_cells,
+        np.full(len(tetrahedra), pv.CellType.TETRA, dtype=np.uint8),
+        tet_vertices)
+    containing = np.asarray(
+        grid.find_containing_cell(anatomical_vertices), dtype=np.int64)
+    inside = containing >= 0
+    cells = containing.copy()
+    if np.any(~inside):
+        cells[~inside] = np.asarray(
+            grid.find_closest_cell(anatomical_vertices[~inside]),
+            dtype=np.int64)
+    skin_indices = tetrahedra[cells]
+    x = tet_vertices[skin_indices]
+    dm = np.stack((x[:, 0] - x[:, 3], x[:, 1] - x[:, 3],
+                   x[:, 2] - x[:, 3]), axis=-1)
+    rhs = anatomical_vertices - x[:, 3]
+    bary012 = np.linalg.solve(dm, rhs[..., None])[..., 0]
+    weights = np.empty((len(anatomical_vertices), 4), dtype=np.float64)
+    weights[:, :3] = bary012
+    weights[:, 3] = 1.0 - np.sum(bary012, axis=1)
+    inside_fraction = float(np.mean(inside))
+    max_abs_weight = float(np.max(np.abs(weights)))
+    if (inside_fraction < 0.10 or not np.isfinite(max_abs_weight) or
+            max_abs_weight > 100.0):
+        print(f"[{group_name}] Saved-tet anatomical skin upgrade skipped: "
+              f"coordinate spaces do not match (inside={inside_fraction:.1%}, "
+              f"max |bary|={max_abs_weight:.3g})")
+        return False
+
+    surface.tet_render_vertices_rest = anatomical_vertices.copy()
+    surface.tet_render_faces = np.asarray(anatomical_faces, dtype=np.int32)
+    surface.tet_faces = surface.tet_render_faces
+    surface.tet_render_vertex_indices = skin_indices.astype(np.int32)
+    surface.tet_render_vertex_weights = weights
+    surface.tet_render_tet_rest_vertices = tet_vertices.copy()
+    surface.tet_cap_face_indices = []
+    surface.tet_surface_face_count = len(surface.tet_render_faces)
+    _invalidate_tet_draw_cache(surface)
+    print(f"[{group_name}] Upgraded saved tet with anatomical skin: "
+          f"{int(np.sum(inside))}/{len(inside)} embedded inside, "
+          f"bary min={float(np.min(weights)):.3g}")
+    return True
+
+
+def _relabel_zygote_group_tet_materials(v, group_name, surface):
+    """Assign belly/tendon labels to both simulation tets and render skin."""
+    guide_names = _zygote_group_guide_names(v, group_name)
+    if not guide_names:
+        return False
+    changed = False
+    if (getattr(surface, 'tet_vertices', None) is not None and
+            getattr(surface, 'tet_tetrahedra', None) is not None):
+        try:
+            labels = _classify_tets_by_component_containment(
+                v, guide_names, surface.tet_vertices, surface.tet_tetrahedra)
+            (surface.tet_vertex_regions,
+             surface.tet_region_labels,
+             surface.tet_component_labels,
+             surface.tet_region_mixed) = labels
+            changed = True
+            print(f"[{group_name}] Relabeled surface tet from "
+                  f"{len(guide_names)} guide component(s): "
+                  f"{_count_simple_labels(surface.tet_region_labels)}")
+        except Exception as exc:
+            print(f"[{group_name}] Guide tet labeling failed: {exc}")
+
+    # The anatomical render skin has independent vertices, so volume labels
+    # cannot color it by tet index. Transfer the nearest guide component's
+    # part explicitly (belly/origin tendon/insertion tendon).
+    render_rest = getattr(surface, 'tet_render_vertices_rest', None)
+    if render_rest is not None:
+        try:
+            from scipy.spatial import cKDTree
+            guide_points = []
+            guide_regions = []
+            for guide_name in guide_names:
+                guide = v.zygote_muscle_meshes.get(guide_name)
+                guide_vertices, _ = _component_original_surface(guide)
+                if guide_vertices is None:
+                    continue
+                region = {
+                    'part': _mesh_part_from_name(guide_name),
+                    'component': guide_name,
+                }
+                guide_points.extend(np.asarray(guide_vertices).tolist())
+                guide_regions.extend(
+                    [region.copy() for _ in range(len(guide_vertices))])
+            if guide_points:
+                _, nearest = cKDTree(np.asarray(guide_points)).query(
+                    np.asarray(render_rest), k=1)
+                surface.tet_render_vertex_regions = [
+                    guide_regions[int(i)] for i in nearest]
+                changed = True
+                print(f"[{group_name}] Anatomical skin regions: "
+                      f"{_count_simple_labels([r['part'] for r in surface.tet_render_vertex_regions])}")
+        except Exception as exc:
+            print(f"[{group_name}] Anatomical skin region transfer failed: {exc}")
+    if changed:
+        surface._tet_surface_colors = None
+        _invalidate_tet_draw_cache(surface)
+    return changed
+
+
+def _tetrahedralize_zygote_group_surface(v, group_name, defer=False):
+    state = _ensure_zygote_group_mapping(v, group_name)
+    surface_name = state.get('surface', '')
+    surface = v.zygote_muscle_meshes.get(surface_name)
+    if surface is None:
+        print(f"[{group_name}] Select an uncut surface mesh before tetrahedralizing")
+        return False
+
+    _apply_zygote_group_links(v, group_name)
+    # Group volumes are EMU domains, not open contour pieces. Always use the
+    # closed boundary-remesh path for them, regardless of the source component
+    # UI setting; individual component processing may still preserve its own
+    # open surface when requested.
+    surface.enable_tet_boundary_remesh = True
+    surface.preserve_tet_surface = False
+    surface._group_closed_default = True
+    print(f"[{group_name}] Group tetrahedralization: closed domain default")
+    ok = _tetrahedralize_original_surface_for_sim(v, surface_name, surface, defer=defer)
+    if not ok or surface.tet_vertices is None or surface.tet_tetrahedra is None:
+        return False
+
+    guide_names = _zygote_group_guide_names(v, group_name)
+    _relabel_zygote_group_tet_materials(v, group_name, surface)
+
+    surface._zygote_group_name = group_name
+    surface._connected_original_tet_components = [surface_name]
+    surface._connected_component_fibers = _collect_connected_component_fibers(v, guide_names)
+    surface._connected_contour_mesh_components = [
+        {'component': name, 'part': _mesh_part_from_name(name)}
+        for name in guide_names
+    ]
+    for name in guide_names:
+        comp = v.zygote_muscle_meshes.get(name)
+        if comp is not None:
+            comp._connected_mesh_owner_name = surface_name
+            comp.is_draw_tet_mesh = False
+    surface.is_draw_tet_mesh = True
+    surface.is_draw = bool(state.get('draw_surface', True))
+    return True
+
+
+def _estimate_group_surface_volume(v, group_name):
+    state = _ensure_zygote_group_mapping(v, group_name)
+    surface_name = state.get('surface', '')
+    surface = v.zygote_muscle_meshes.get(surface_name)
+    if surface is None:
+        return 0.0
+    def _safe_len(value):
+        try:
+            return len(value) if value is not None else 0
+        except Exception:
+            return 0
+    cache_key = (
+        surface_name,
+        id(getattr(surface, 'vertices', None)),
+        id(getattr(surface, 'faces_3', None)),
+        id(getattr(surface, 'faces_4', None)),
+        _safe_len(getattr(surface, 'vertices', None)),
+        _safe_len(getattr(surface, 'faces_3', None)),
+        _safe_len(getattr(surface, 'faces_4', None)),
+    )
+    cached_key = state.get('_surface_volume_cache_key')
+    if cached_key == cache_key and '_surface_volume_cache' in state:
+        return float(state.get('_surface_volume_cache', 0.0) or 0.0)
+    verts, faces = _component_original_surface(surface)
+    if verts is None or faces is None:
+        return 0.0
+    all_vertices = verts.tolist()
+    all_faces = faces.tolist()
+    regions = [{'part': 'belly', 'component': surface_name} for _ in range(len(all_vertices))]
+    _cap_component_boundary_loops(
+        surface, surface_name, verts, faces,
+        all_vertices, all_faces, regions,
+        {'part': 'belly', 'component': surface_name},
+        offset=0, cap_face_indices=None, verbose=False)
+    try:
+        closed_vertices, closed_faces, _ = _dedupe_surface_vertices(
+            all_vertices, all_faces, regions, eps=2e-5)
+        mesh = trimesh.Trimesh(vertices=closed_vertices, faces=closed_faces, process=False)
+        if not mesh.is_winding_consistent:
+            trimesh.repair.fix_normals(mesh, multibody=False)
+        volume = _estimate_closed_surface_volume(np.asarray(mesh.vertices), np.asarray(mesh.faces))
+    except Exception:
+        volume = _estimate_closed_surface_volume(all_vertices, all_faces)
+    state['_surface_volume_cache_key'] = cache_key
+    state['_surface_volume_cache'] = float(volume)
+    return float(volume)
+
+
+def _draw_emu_tet_target_controls(v, group_name, surface):
+    state = _ensure_zygote_group_mapping(v, group_name)
+    volume = _estimate_group_surface_volume(v, group_name)
+    baseline_group, baseline_volume = _rectus_femoris_baseline_volume(v)
+    emu_tets = RECTUS_FEMORIS_BASELINE_TETS
+    density = (float(emu_tets) / baseline_volume) if baseline_volume > 0.0 else 0.0
+    desired = int(round(volume * density)) if density > 0.0 else 0
+    imgui.text(f"Current closed volume: {volume:.9f} m^3")
+    if density > 0.0:
+        desired = int(np.clip(desired, 1, 1000000))
+        surface.target_tet_count = desired
+        surface._target_tet_count_source = 'emu_volume'
+        surface.enable_tet_boundary_remesh = True
+        surface.preserve_tet_surface = False
+        imgui.text(
+            f"Baseline: {baseline_group} = {emu_tets} tets, "
+            f"volume {baseline_volume:.9f} m^3")
+        imgui.text(f"Rectus-based density: {density:.3g} tets/m^3")
+        imgui.text(f"Auto desired tets: {desired}")
+    else:
+        surface._target_tet_count_source = 'manual_fallback'
+        imgui.text("Approx target inactive: load/designate Rectus Femoris surface first.")
+    return desired
+
+
+def _rectus_femoris_baseline_volume(v):
+    group_names = _zygote_loaded_ui_group_names(v)
+    preferred = []
+    for group_name in group_names:
+        low = group_name.lower()
+        if 'rectus' in low and 'femoris' in low:
+            score = 0 if group_name.startswith('L_') else 1
+            preferred.append((score, group_name))
+    preferred.sort()
+    for _score, group_name in preferred:
+        volume = _estimate_group_surface_volume(v, group_name)
+        if volume > 0.0:
+            return group_name, volume
+    return '', 0.0
+
+
+def _read_tet_file_volume_and_count(path):
+    try:
+        with open(path, 'rb') as f:
+            try:
+                data = pickle.load(f)
+            except Exception:
+                f.seek(0)
+                data = np.load(f, allow_pickle=True)
+                data = {k: data[k] for k in data.files}
+        verts = data.get('vertices', data.get('tet_vertices', None))
+        tets = data.get('tetrahedra', data.get('tet_tetrahedra', None))
+        if verts is None or tets is None:
+            return 0.0, 0
+        verts = np.asarray(verts, dtype=np.float64)
+        tets = np.asarray(tets, dtype=np.int64)
+        if len(verts) == 0 or len(tets) == 0:
+            return 0.0, 0
+        tv = verts[tets]
+        vol = np.abs(np.einsum(
+            'ij,ij->i',
+            tv[:, 1] - tv[:, 0],
+            np.cross(tv[:, 2] - tv[:, 0], tv[:, 3] - tv[:, 0]))) / 6.0
+        good = np.isfinite(vol) & (vol > 1e-15)
+        return float(np.sum(vol[good])), int(np.sum(good))
+    except Exception as exc:
+        print(f"[EMU baseline] Could not read {path}: {exc}")
+        return 0.0, 0
+
+
+def _scan_emu_baseline_tet_files(v):
+    if hasattr(v, '_emu_baseline_tet_file_cache'):
+        return v._emu_baseline_tet_file_cache
+    paths = []
+    for pattern in ('tet/*_tet.npz', 'tet_*/*_tet.npz', 'emu*/*_tet.npz', 'EMU*/*_tet.npz'):
+        paths.extend(glob.glob(pattern))
+    paths = sorted(dict.fromkeys(paths))
+    labels = ['All tet/*.npz'] + [os.path.relpath(p) for p in paths]
+    v._emu_baseline_tet_file_cache = (labels, paths)
+    return v._emu_baseline_tet_file_cache
+
+
+def _draw_emu_baseline_from_tet_files(v, group_name, state):
+    labels, paths = _scan_emu_baseline_tet_files(v)
+    if not labels:
+        return
+    idx = int(state.get('emu_baseline_tet_file_idx', 0) or 0)
+    idx = max(0, min(idx, len(labels) - 1))
+    changed, idx = imgui.combo(f"Baseline tet source##{group_name}_emu_tet_source", idx, labels)
+    if changed:
+        state['emu_baseline_tet_file_idx'] = int(idx)
+    if imgui.button(f"Compute Baseline Density From Tet Source##{group_name}_emu_tet_compute",
+                    width=wide_button_width):
+        total_volume = 0.0
+        total_tets = 0
+        selected = []
+        if idx == 0:
+            selected = [p for p in paths if os.path.dirname(p) == 'tet']
+        elif idx - 1 < len(paths):
+            selected = [paths[idx - 1]]
+        for path in selected:
+            vol, n_tets = _read_tet_file_volume_and_count(path)
+            total_volume += vol
+            total_tets += n_tets
+        if total_volume > 0.0 and total_tets > 0:
+            state['emu_baseline_muscle_volume'] = float(total_volume)
+            state['emu_baseline_muscle_tets'] = int(total_tets)
+            print(f"[{group_name}] EMU baseline density from {len(selected)} tet file(s): "
+                  f"volume={total_volume:.9g} m^3, tets={total_tets}, "
+                  f"density={total_tets / total_volume:.6g} tets/m^3")
+        else:
+            print(f"[{group_name}] EMU baseline source has no valid tet volume")
+
+
+def _reset_zygote_group_process(v, group_name):
+    state = _ensure_zygote_group_mapping(v, group_name)
+    names = _zygote_group_loaded_names(v, group_name)
+    mapped_names = [
+        state.get(key, '') for key in (
+            'surface', 'master', 'follower',
+            'master_origin', 'master_insertion',
+            'follower_origin', 'follower_insertion')
+    ]
+    for name in mapped_names:
+        if name and name not in names:
+            names.append(name)
+
+    for name in names:
+        _clear_connected_mesh_ownership(v, name)
+    for obj in getattr(v, 'zygote_muscle_meshes', {}).values():
+        if getattr(obj, '_connected_mesh_owner_name', '') in names:
+            obj._connected_mesh_owner_name = ''
+
+    reset_count = 0
+    for name in names:
+        obj = v.zygote_muscle_meshes.get(name)
+        if obj is None:
+            continue
+        if hasattr(obj, 'reset_process'):
+            obj.reset_process()
+        else:
+            # Defensive fallback for non-MuscleMesh objects.
+            for attr in (
+                    'scalar_field', 'vertex_colors', 'contours', 'bounding_planes',
+                    'contours_resampled', 'contours_resampled_params',
+                    'contours_resampled_fixed', 'contours_resampled_types',
+                    'contour_mesh_vertices', 'contour_mesh_faces',
+                    'contour_mesh_normals', 'tet_vertices', 'tet_tetrahedra',
+                    'tet_faces', 'tet_render_faces', 'tet_sim_faces',
+                    'tet_vertex_regions', 'tet_region_labels',
+                    'tet_component_labels', 'tet_region_mixed',
+                    'tet_quality_stats'):
+                if hasattr(obj, attr):
+                    setattr(obj, attr, None)
+            obj.bounding_planes = []
+            obj.waypoints = []
+            obj.fiber_architecture = [obj._sobol_sampling_barycentric_default(16)] if hasattr(obj, '_sobol_sampling_barycentric_default') else []
+            obj.soft_body = None
+        for attr in (
+                '_belly_waypoints_before_tendon_extension',
+                '_tendon_extended_inspect_contours',
+                '_connected_original_tet_components',
+                '_connected_component_fibers',
+                '_connected_contour_mesh_components',
+                '_emu_rest_vertices', '_emu_viewer_cache',
+                '_tet_region_surface_colors',
+                'tet_quality_stats',
+                'last_actual_tet_count',
+                'vertex_contour_level', '_emu_rest_waypoints'):
+            if hasattr(obj, attr):
+                if attr in ('_emu_rest_vertices', '_emu_viewer_cache',
+                            '_emu_rest_waypoints'):
+                    delattr(obj, attr)
+                else:
+                    setattr(obj, attr, None)
+        obj._connected_mesh_owner_name = ''
+        obj.is_draw = True
+        obj.is_draw_scalar_field = False
+        obj.is_draw_contours = False
+        obj.is_draw_bounding_box = False
+        obj.is_draw_contour_mesh = False
+        obj.is_draw_tet_mesh = False
+        obj.is_draw_tet_edges = False
+        if hasattr(obj, 'is_draw_tet_internal_faces'):
+            obj.is_draw_tet_internal_faces = False
+        obj.is_draw_fiber_architecture = False
+        _invalidate_tet_draw_cache(obj)
+        reset_count += 1
+
+    for store_name in ('inspect_2d_open', 'inspect_2d_stream_idx', 'inspect_2d_contour_idx'):
+        store = getattr(v, store_name, None)
+        if isinstance(store, dict):
+            for name in names:
+                store.pop(name, None)
+
+    state['draw_parts'] = True
+    state['draw_surface'] = True
+    state['draw_surface_tet'] = False
+    state['draw_surface_tet_edges'] = False
+    state['draw_surface_tet_internals'] = False
+    state['draw_scalar_field'] = False
+    state['draw_contours'] = False
+    state['draw_fibers'] = False
+    state['draw_bounding_boxes'] = False
+    state['belly_step'] = 9
+    state['tendon_step'] = 8
+    v.zygote_group_belly_step = 9
+    _apply_zygote_group_links(v, group_name)
+    print(f"[{group_name}] Reset process state for {reset_count} group mesh(es)")
+
+
+def _draw_zygote_group_pipeline_controls(v, group_name):
+    state = _ensure_zygote_group_mapping(v, group_name)
+    _apply_zygote_group_links(v, group_name)
+
+    if imgui.button(f"Reset Group Process##{group_name}_reset_process", width=wide_button_width):
+        _reset_zygote_group_process(v, group_name)
+
+    master_name = state.get('master', '')
+    master = v.zygote_muscle_meshes.get(master_name)
+    imgui.text("Belly Fiber Pipeline")
+    if master is None:
+        imgui.text("Select a master scaffold")
+    else:
+        if not hasattr(v, 'zygote_group_belly_step'):
+            v.zygote_group_belly_step = int(state.get('belly_step', 9))
+        changed, step = imgui.slider_int(
+            f"Belly target step##{group_name}_belly_step",
+            int(state.get('belly_step', v.zygote_group_belly_step)), 1, 11)
+        if changed:
+            state['belly_step'] = int(step)
+            v.zygote_group_belly_step = int(step)
+        belly_step_names = ['', 'Scalar', 'Contours', 'Fill Gap', 'Transitions',
+                            'Smooth', 'Cut', 'Stream Smooth', 'Select Contours',
+                            'Build Fibers', 'Resample', 'Build Contour Mesh']
+        step_i = int(state.get('belly_step', 9))
+        imgui.text(f"Runs master belly from Scalar through: {belly_step_names[step_i]}")
+        if imgui.button(f"Run Belly Pipeline to {belly_step_names[step_i]}##{group_name}_belly_proc",
+                        width=wide_button_width):
+            _apply_zygote_group_links(v, group_name)
+            _run_component_pipeline_quick(
+                v, master_name, master, step_i,
+                defer=getattr(master, 'animate_process', False))
+        if imgui.button(f"Extend Belly Fibers Through Tendons##{group_name}_extend",
+                        width=wide_button_width):
+            _extend_belly_and_linked_counterpart_fibers(v, master_name, master)
+        _draw_zygote_group_inspect_buttons(v, group_name)
+
+    imgui.separator()
+    imgui.text("Tendon Contour Pipeline")
+    changed, step = imgui.slider_int(
+        f"Tendon target step##{group_name}_tendon_step",
+        int(state.get('tendon_step', 8)), 1, 8)
+    if changed:
+        state['tendon_step'] = int(step)
+    tendon_step_names = ['', 'Scalar', 'Contours', 'Fill Gap', 'Transitions',
+                         'Smooth', 'Cut', 'Stream Smooth', 'Select Contours']
+    tendon_step = int(state.get('tendon_step', 8))
+    imgui.text(f"Runs each selected tendon through: {tendon_step_names[tendon_step]}")
+    if imgui.button(f"Run Tendon Pipeline to {tendon_step_names[tendon_step]}##{group_name}_tendon_proc",
+                    width=wide_button_width):
+        _apply_zygote_group_links(v, group_name)
+        for key, fallback_key in (
+                ('master_origin', 'follower_origin'),
+                ('master_insertion', 'follower_insertion')):
+            name = state.get(key, '')
+            if not name:
+                name = state.get(fallback_key, '')
+            obj = v.zygote_muscle_meshes.get(name)
+            if obj is None:
+                continue
+            other_name = getattr(obj, 'linked_counterpart_name', '')
+            linked_msg = f" with linked follower {other_name}" if other_name else ""
+            print(f"[{group_name}] Processing master tendon {name}{linked_msg} to step {tendon_step}")
+            _run_component_pipeline_quick(
+                v, name, obj, tendon_step,
+                defer=getattr(obj, 'animate_process', False))
+
+    imgui.separator()
+    surface_name = state.get('surface', '')
+    surface = v.zygote_muscle_meshes.get(surface_name)
+    imgui.text("Uncut Surface Tet")
+    if surface is None:
+        imgui.text("Select a surface mesh")
+    else:
+        if not hasattr(surface, 'target_tet_count'):
+            surface.target_tet_count = 30000
+        if not hasattr(surface, 'enable_tet_boundary_remesh'):
+            surface.enable_tet_boundary_remesh = True
+            surface.preserve_tet_surface = False
+        changed_approx, surface.enable_tet_boundary_remesh = imgui.checkbox(
+            f"Isotropic EMU surface remesh##{group_name}_approx_surface",
+            bool(surface.enable_tet_boundary_remesh))
+        if changed_approx:
+            surface.preserve_tet_surface = not bool(surface.enable_tet_boundary_remesh)
+        desired = _draw_emu_tet_target_controls(v, group_name, surface)
+        if desired > 0:
+            imgui.text(f"Tetrahedralize target: {int(surface.target_tet_count)} stable tets")
+            if bool(surface.enable_tet_boundary_remesh):
+                imgui.text("Voxel/SDF boundary remesh removes sliver-forcing triangles.")
+        elif bool(surface.enable_tet_boundary_remesh):
+            imgui.text("Tetrahedralize requires EMU-derived target.")
+        if imgui.button(f"Tetrahedralize Surface##{group_name}_tet", width=wide_button_width):
+            if (bool(surface.enable_tet_boundary_remesh)
+                    and getattr(surface, '_target_tet_count_source', '') != 'emu_volume'):
+                print(f"[{group_name}] Tetrahedralize blocked: approximate target must be computed "
+                      f"from Rectus Femoris baseline density. Load/designate Rectus Femoris "
+                      f"surface so its volume can define "
+                      f"{RECTUS_FEMORIS_BASELINE_TETS} tets.")
+            else:
+                if _tetrahedralize_zygote_group_surface(
+                        v, group_name,
+                        defer=getattr(surface, 'animate_process', False)):
+                    for attr in ('_emu_rest_vertices', '_emu_viewer_cache'):
+                        if hasattr(surface, attr):
+                            delattr(surface, attr)
+        if imgui.button(f"Save Surface Tet##{group_name}_save_tet", width=wide_button_width):
+            guide_names = _zygote_group_guide_names(v, group_name)
+            surface._zygote_group_name = group_name
+            surface._connected_original_tet_components = [surface_name]
+            surface._connected_component_fibers = _collect_connected_component_fibers(
+                v, guide_names)
+            surface._connected_contour_mesh_components = [
+                {'component': name, 'part': _mesh_part_from_name(name)}
+                for name in guide_names]
+            surface.save_tetrahedron_mesh(group_name)
+        if imgui.button(f"Load Surface Tet##{group_name}_load_tet", width=wide_button_width):
+            if surface.load_tetrahedron_mesh(group_name):
+                surface.tet_render_contact_offsets = None
+                for attr in ('_emu_rest_vertices', '_emu_viewer_cache'):
+                    if hasattr(surface, attr):
+                        delattr(surface, attr)
+                _restore_connected_component_fibers(
+                    v, group_name, surface_name, surface)
+                _ensure_zygote_group_render_embedding(group_name, surface)
+                # Recompute material designation from the currently loaded
+                # group guides. This upgrades old/transitional files whose
+                # anatomical render skin had no tendon labels.
+                _relabel_zygote_group_tet_materials(
+                    v, group_name, surface)
+                surface.is_draw_tet_mesh = True
+
+        imgui.separator()
+        imgui.text("EMU Current-Pose Bake")
+        imgui.text("EMU examples: muscle 6e6 Pa, tendon 4.5e8-1.2e9 Pa, nu=0.49")
+        defaults = {
+            'emu_muscle_youngs': 6e6,
+            'emu_tendon_youngs': 4.5e8,
+            'emu_poisson': 0.49,
+            'emu_activation': 0.0,
+            'emu_max_active_stress': 6e6,
+            'emu_alpha': 1.0,
+            'emu_k_modes': 16,
+            'emu_max_iters': 5,
+            'emu_load_steps': 10,
+            'emu_attachment_rings': 1,
+            'emu_auto_smooth': True,
+            'emu_bone_collision': True,
+            'emu_ignore_rest_inside': True,
+            'emu_collision_margin': 0.003,
+            'emu_collision_stiffness': 1e7,
+            'emu_collision_iterations': 1,
+        }
+        for key, value in defaults.items():
+            state.setdefault(key, value)
+        imgui.push_item_width(150)
+        _, state['emu_muscle_youngs'] = imgui.input_float(
+            f"Muscle E (Pa)##{group_name}_emu_muscle_E",
+            float(state['emu_muscle_youngs']), 0.0, 0.0, "%.3g")
+        _, state['emu_tendon_youngs'] = imgui.input_float(
+            f"Tendon E (Pa)##{group_name}_emu_tendon_E",
+            float(state['emu_tendon_youngs']), 0.0, 0.0, "%.3g")
+        _, state['emu_poisson'] = imgui.input_float(
+            f"Poisson##{group_name}_emu_poisson",
+            float(state['emu_poisson']), 0.0, 0.0, "%.3f")
+        _, state['emu_activation'] = imgui.slider_float(
+            f"Belly activation [0,1]##{group_name}_emu_activation",
+            float(state['emu_activation']), 0.0, 1.0)
+        _, state['emu_max_active_stress'] = imgui.input_float(
+            f"Max active coefficient (Pa)##{group_name}_emu_active_stress",
+            float(state['emu_max_active_stress']), 0.0, 0.0, "%.3g")
+        _, state['emu_alpha'] = imgui.input_float(
+            f"ACAP alpha##{group_name}_emu_alpha",
+            float(state['emu_alpha']), 0.0, 0.0, "%.3g")
+        _, state['emu_k_modes'] = imgui.input_int(
+            f"Woodbury modes##{group_name}_emu_modes",
+            int(state['emu_k_modes']))
+        _, state['emu_max_iters'] = imgui.input_int(
+            f"Newton iterations/load step##{group_name}_emu_iters",
+            int(state['emu_max_iters']))
+        _, state['emu_load_steps'] = imgui.input_int(
+            f"Attachment load steps##{group_name}_emu_load_steps",
+            int(state['emu_load_steps']))
+        _, state['emu_attachment_rings'] = imgui.slider_int(
+            f"Fixed attachment rings##{group_name}_emu_attachment_rings",
+            int(state['emu_attachment_rings']), 0, 2)
+        _, state['emu_auto_smooth'] = imgui.checkbox(
+            f"Smooth EMU quality##{group_name}_emu_smooth",
+            bool(state['emu_auto_smooth']))
+        _, state['emu_bone_collision'] = imgui.checkbox(
+            f"Bone collision##{group_name}_emu_collision",
+            bool(state['emu_bone_collision']))
+        _, state['emu_ignore_rest_inside'] = imgui.checkbox(
+            f"Ignore vertices inside bone at rest##{group_name}_emu_rest_inside",
+            bool(state['emu_ignore_rest_inside']))
+        _, state['emu_collision_margin'] = imgui.input_float(
+            f"Bone margin (m)##{group_name}_emu_margin",
+            float(state['emu_collision_margin']), 0.0, 0.0, "%.4f")
+        _, state['emu_collision_stiffness'] = imgui.input_float(
+            f"Contact stiffness##{group_name}_emu_contact_k",
+            float(state['emu_collision_stiffness']), 0.0, 0.0, "%.3g")
+        _, state['emu_collision_iterations'] = imgui.input_int(
+            f"Contact passes/iteration##{group_name}_emu_contact_iters",
+            int(state['emu_collision_iterations']))
+        imgui.pop_item_width()
+        imgui.text("Active coefficient = activation * max coefficient; belly only.")
+        if state['emu_auto_smooth']:
+            imgui.text("Quality mode uses selected alpha, modes>=16, >=5 iterations/step.")
+        if imgui.button(f"EMU Bake Current Pose##{group_name}_emu_bake",
+                        width=wide_button_width):
+            try:
+                _run_group_emu_current_pose(v, group_name, surface, state)
+            except Exception as exc:
+                state['emu_last_status'] = f"ERROR: {exc}"
+                print(f"[{group_name}] EMU current-pose bake failed: {exc}")
+                traceback.print_exc()
+        if imgui.button(f"Reset EMU Tet to Rest##{group_name}_emu_reset",
+                        width=wide_button_width):
+            _reset_group_emu_pose(v, group_name, surface)
+            state['emu_last_status'] = "Reset to saved/rest tet positions"
+        if state.get('emu_last_status'):
+            imgui.text_wrapped(str(state['emu_last_status']))
+
+
+def _focus_zygote_points(v, pts, label):
+    if pts is None or len(pts) == 0:
+        print(f"[{label}] No vertices to focus on")
+        return
+    pts = np.asarray(pts, dtype=np.float64)
+    min_pt = np.min(pts, axis=0)
+    max_pt = np.max(pts, axis=0)
+    center = (min_pt + max_pt) / 2.0
+    bbox_size = float(np.linalg.norm(max_pt - min_pt))
+    v.trans = -center * 1000.0
+    eye_dir = v.eye / (np.linalg.norm(v.eye) + 1e-10)
+    v.eye = eye_dir * max(bbox_size * 2.0, MIN_EYE_DISTANCE)
+
+
+def _focus_zygote_group(v, group_name):
+    state = _ensure_zygote_group_mapping(v, group_name)
+    surface_name = state.get('surface', '')
+    surface = v.zygote_muscle_meshes.get(surface_name)
+    if surface is not None and getattr(surface, 'vertices', None) is not None:
+        _focus_zygote_points(v, surface.vertices, group_name)
+        return
+    pts = []
+    for name in _zygote_group_loaded_names(v, group_name):
+        obj = v.zygote_muscle_meshes.get(name)
+        verts = getattr(obj, 'vertices', None)
+        if verts is not None and len(verts) > 0:
+            pts.append(np.asarray(verts, dtype=np.float64))
+    _focus_zygote_points(v, np.vstack(pts) if pts else None, group_name)
+
+
+def _open_inspect_2d(v, name, stream_idx=0, contour_idx=0):
+    obj = getattr(v, 'zygote_muscle_meshes', {}).get(name)
+    if obj is None:
+        return False
+    has_contour_data = (
+        hasattr(obj, 'contours')
+        and obj.contours is not None
+        and len(obj.contours) > 0
+    )
+    has_extended_data = (
+        getattr(obj, '_tendon_extended_inspect_contours', None) is not None
+        and len(getattr(obj, '_tendon_extended_inspect_contours', []) or []) > 0
+    )
+    if not has_contour_data and not has_extended_data:
+        print(f"[{name}] No contour data. Run 'Find Contours' first.")
+        return False
+    if not hasattr(v, 'inspect_2d_open'):
+        v.inspect_2d_open = {}
+    if not hasattr(v, 'inspect_2d_stream_idx'):
+        v.inspect_2d_stream_idx = {}
+    if not hasattr(v, 'inspect_2d_contour_idx'):
+        v.inspect_2d_contour_idx = {}
+    v.inspect_2d_open[name] = True
+    v.inspect_2d_stream_idx[name] = max(0, int(stream_idx))
+    v.inspect_2d_contour_idx[name] = max(0, int(contour_idx))
+    return True
+
+
+def _draw_zygote_group_inspect_buttons(v, group_name):
+    state = _ensure_zygote_group_mapping(v, group_name)
+    entries = [
+        ('Master Belly', state.get('master', '')),
+        ('Follower Belly', state.get('follower', '')),
+    ]
+    if not any(name and name in getattr(v, 'zygote_muscle_meshes', {}) for _, name in entries):
+        return
+
+    if not imgui.tree_node(f"Inspect 2D##{group_name}_inspect_bellies"):
+        return
+    for label, name in entries:
+        if not name or name not in getattr(v, 'zygote_muscle_meshes', {}):
+            continue
+        if imgui.button(f"{label}: Inspect 2D##{group_name}_inspect_{name}",
+                        width=wide_button_width):
+            _open_inspect_2d(v, name, stream_idx=0, contour_idx=0)
+    imgui.tree_pop()
+
+
+def _draw_tet_quality_stats(obj):
+    stats = getattr(obj, 'tet_quality_stats', None)
+    if not stats:
+        return
+    count = int(stats.get('count', 0) or 0)
+    deg = int(stats.get('degenerate', 0) or 0)
+    near = int(stats.get('near_zero', 0) or 0)
+    edge_cv = float(stats.get('edge_cv', 0.0) or 0.0)
+    imgui.text(f"Tet quality: total {count}, degenerate {deg}, near-zero {near}")
+    imgui.text(f"Volume median {float(stats.get('median_volume', 0.0) or 0.0):.3g}, "
+               f"p01 {float(stats.get('p01_volume', 0.0) or 0.0):.3g}, "
+               f"edge CV {edge_cv:.3g}")
+    imgui.text(
+        f"Shape scaled-J p01 {float(stats.get('scaled_jacobian_p01', 0.0) or 0.0):.3g}, "
+        f"mean-ratio p01 {float(stats.get('mean_ratio_p01', 0.0) or 0.0):.3g}")
+    imgui.text(
+        f"Slivers critical/weak: {int(stats.get('critical_slivers', 0) or 0)}/"
+        f"{int(stats.get('weak_slivers', 0) or 0)}")
+
+
+def _group_any_draw_flag(v, names, attr, default=False):
+    values = [
+        bool(getattr(v.zygote_muscle_meshes[name], attr, default))
+        for name in names
+        if name in getattr(v, 'zygote_muscle_meshes', {})
+    ]
+    return any(values) if values else bool(default)
+
+
+def _draw_zygote_group_draw_controls(v, group_name):
+    state = _ensure_zygote_group_mapping(v, group_name)
+    names = _zygote_group_loaded_names(v, group_name)
+    surface_name = state.get('surface', '')
+    part_names = [n for n in names if n != surface_name]
+
+    if imgui.button(f"Focus Group##{group_name}_focus", width=button_width):
+        _focus_zygote_group(v, group_name)
+
+    state['draw_scalar_field'] = _group_any_draw_flag(
+        v, part_names, 'is_draw_scalar_field', False)
+    changed, state['draw_scalar_field'] = imgui.checkbox(
+        f"Draw scalar fields##{group_name}_draw_scalar",
+        bool(state['draw_scalar_field']))
+    if changed:
+        for name in part_names:
+            obj = v.zygote_muscle_meshes.get(name)
+            if obj is not None:
+                obj.is_draw_scalar_field = bool(state['draw_scalar_field'])
+
+    state['draw_contours'] = _group_any_draw_flag(
+        v, part_names, 'is_draw_contours', False)
+    changed, state['draw_contours'] = imgui.checkbox(
+        f"Draw contours##{group_name}_draw_contours",
+        bool(state['draw_contours']))
+    if changed:
+        for name in part_names:
+            obj = v.zygote_muscle_meshes.get(name)
+            if obj is not None:
+                obj.is_draw_contours = bool(state['draw_contours'])
+
+    state['draw_fibers'] = _group_any_draw_flag(
+        v, part_names, 'is_draw_fiber_architecture', False)
+    changed, state['draw_fibers'] = imgui.checkbox(
+        f"Draw fibers##{group_name}_draw_fibers",
+        bool(state['draw_fibers']))
+    if changed:
+        for name in part_names:
+            obj = v.zygote_muscle_meshes.get(name)
+            if obj is not None:
+                obj.is_draw_fiber_architecture = bool(state['draw_fibers'])
+
+    state['draw_bounding_boxes'] = _group_any_draw_flag(
+        v, part_names, 'is_draw_bounding_box', False)
+    changed, state['draw_bounding_boxes'] = imgui.checkbox(
+        f"Draw bounding boxes##{group_name}_draw_bbox",
+        bool(state['draw_bounding_boxes']))
+    if changed:
+        for name in part_names:
+            obj = v.zygote_muscle_meshes.get(name)
+            if obj is not None:
+                obj.is_draw_bounding_box = bool(state['draw_bounding_boxes'])
+
+    state['draw_parts'] = _group_any_draw_flag(v, part_names, 'is_draw', True)
+    changed, state['draw_parts'] = imgui.checkbox(
+        f"Draw guide parts##{group_name}_draw_parts", bool(state['draw_parts']))
+    if changed:
+        for name in part_names:
+            obj = v.zygote_muscle_meshes.get(name)
+            if obj is not None:
+                obj.is_draw = bool(state['draw_parts'])
+    if surface_name in v.zygote_muscle_meshes:
+        state['draw_surface'] = bool(getattr(v.zygote_muscle_meshes[surface_name], 'is_draw', True))
+    changed, state['draw_surface'] = imgui.checkbox(
+        f"Draw surface mesh##{group_name}_draw_surface", bool(state['draw_surface']))
+    if changed and surface_name in v.zygote_muscle_meshes:
+        v.zygote_muscle_meshes[surface_name].is_draw = bool(state['draw_surface'])
+    if surface_name in v.zygote_muscle_meshes:
+        state['draw_surface_tet'] = bool(getattr(v.zygote_muscle_meshes[surface_name], 'is_draw_tet_mesh', False))
+    changed, state['draw_surface_tet'] = imgui.checkbox(
+        f"Draw surface tet##{group_name}_draw_surface_tet", bool(state['draw_surface_tet']))
+    if changed and surface_name in v.zygote_muscle_meshes:
+        v.zygote_muscle_meshes[surface_name].is_draw_tet_mesh = bool(state['draw_surface_tet'])
+    if surface_name in v.zygote_muscle_meshes:
+        state['draw_surface_tet_edges'] = bool(getattr(v.zygote_muscle_meshes[surface_name], 'is_draw_tet_edges', False))
+    changed, state['draw_surface_tet_edges'] = imgui.checkbox(
+        f"Draw tet edges##{group_name}_draw_tet_edges", bool(state['draw_surface_tet_edges']))
+    if changed and surface_name in v.zygote_muscle_meshes:
+        v.zygote_muscle_meshes[surface_name].is_draw_tet_edges = bool(state['draw_surface_tet_edges'])
+    if surface_name in v.zygote_muscle_meshes:
+        state['draw_surface_tet_internals'] = bool(getattr(v.zygote_muscle_meshes[surface_name], 'is_draw_tet_internal_faces', False))
+    changed, state['draw_surface_tet_internals'] = imgui.checkbox(
+        f"Draw tet internals##{group_name}_draw_tet_internals", bool(state['draw_surface_tet_internals']))
+    if changed and surface_name in v.zygote_muscle_meshes:
+        v.zygote_muscle_meshes[surface_name].is_draw_tet_internal_faces = bool(state['draw_surface_tet_internals'])
+    surface = v.zygote_muscle_meshes.get(surface_name)
+    if surface is not None:
+        _draw_tet_quality_stats(surface)
+
+
+def _sync_zygote_group_draw_state(v, draw_value):
+    for group_name in _zygote_loaded_ui_group_names(v):
+        state = _ensure_zygote_group_mapping(v, group_name)
+        state['draw_parts'] = bool(draw_value)
+        state['draw_surface'] = bool(draw_value)
+
+
+def _draw_zygote_group_part_panels(v, group_name):
+    state = _ensure_zygote_group_mapping(v, group_name)
+    # Establish counterpart links before rendering the per-part UI so that
+    # processing a master part from here reliably drives its follower (the
+    # follower's contours come from the master's schedule at step 2). Without
+    # this the Process button in a part panel may run before group links are
+    # applied and the follower is left with no contours.
+    _apply_zygote_group_links(v, group_name)
+    surface_name = state.get('surface', '')
+    ordered = []
+    for key in ('surface', 'master', 'follower', 'master_origin', 'master_insertion',
+                'follower_origin', 'follower_insertion'):
+        name = state.get(key, '')
+        if name and name in getattr(v, 'zygote_muscle_meshes', {}) and name not in ordered:
+            ordered.append(name)
+    for name in _zygote_group_loaded_names(v, group_name):
+        if name not in ordered:
+            ordered.append(name)
+
+    for name in ordered:
+        obj = v.zygote_muscle_meshes.get(name)
+        if obj is None:
+            continue
+        role = "surface" if name == surface_name else _mesh_part_from_name(name)
+        if imgui.tree_node(f"{name} ({role})##{group_name}_part_{name}"):
+            _draw_zygote_muscle_body(v, name, obj)
+            imgui.tree_pop()
+
+
+def _draw_zygote_group_ui(v):
+    groups = _zygote_loaded_ui_group_names(v)
+    if not groups:
+        return
+    if not imgui.tree_node("Muscle Groups", imgui.TREE_NODE_DEFAULT_OPEN):
+        return
+    for group_name in groups:
+        state = _ensure_zygote_group_mapping(v, group_name)
+        # Group headers start collapsed. Use a new ID namespace so an older
+        # imgui.ini entry that remembered these headers open cannot override
+        # the new default on the next launch.
+        if imgui.tree_node(f"{group_name}##zygote_group_collapsed_{group_name}"):
+            changed, state['show_parts'] = imgui.checkbox(
+                f"Show part panels##{group_name}_show_parts",
+                bool(state.get('show_parts', False)))
+            if changed:
+                state['show_parts'] = bool(state['show_parts'])
+
+            if imgui.tree_node(f"Part Designation##{group_name}_designation"):
+                any_changed = False
+                any_changed |= _draw_group_combo(v, group_name, 'surface', 'Surface tet mesh')
+                any_changed |= _draw_group_combo(v, group_name, 'master', 'Master scaffold')
+                any_changed |= _draw_group_combo(v, group_name, 'follower', 'Follower scaffold')
+                any_changed |= _draw_group_combo(v, group_name, 'master_origin', 'Master origin tendon')
+                any_changed |= _draw_group_combo(v, group_name, 'master_insertion', 'Master insertion tendon')
+                any_changed |= _draw_group_combo(v, group_name, 'follower_origin', 'Follower origin tendon')
+                any_changed |= _draw_group_combo(v, group_name, 'follower_insertion', 'Follower insertion tendon')
+                if any_changed:
+                    _apply_zygote_group_links(v, group_name)
+                if imgui.button(f"Apply Links##{group_name}_apply_links", width=wide_button_width):
+                    _apply_zygote_group_links(v, group_name)
+                    print(f"[{group_name}] Applied group links")
+                imgui.tree_pop()
+
+            imgui.separator()
+            _draw_zygote_group_draw_controls(v, group_name)
+            if bool(state.get('show_parts', False)):
+                imgui.separator()
+                if imgui.tree_node(f"Show Part Panels##{group_name}_show_part_tree"):
+                    _draw_zygote_group_part_panels(v, group_name)
+                    imgui.tree_pop()
+            imgui.separator()
+            _draw_zygote_group_pipeline_controls(v, group_name)
+            imgui.tree_pop()
+    imgui.tree_pop()
+
+
+def _zygote_hidden_group_part_names(v):
+    hidden = set()
+    for group_name in _zygote_loaded_ui_group_names(v):
+        hidden.update(_zygote_group_loaded_names(v, group_name))
+    return hidden
 
 
 def _apply_zygote_muscle_style(mesh, name, path, muscle_color, transparency, is_draw):
@@ -434,6 +1595,8 @@ def _sync_counterpart_display_state(v, name):
         'is_draw_contour_mesh',
         'is_draw_tet_mesh',
         'is_draw_tet_edges',
+        'is_draw_tet_internal_faces',
+        'tet_internal_face_stride',
         'is_draw_constraints',
         'draw_origin_tendon_boundary',
         'draw_insertion_tendon_boundary',
@@ -631,17 +1794,62 @@ def _sync_counterpart_level_selection(v, master_name, master, defer=False):
 
     max_stream_count = int(getattr(other, 'max_stream_count', len(other.stream_contours)))
     master_sel = getattr(master, 'stream_selected_levels', [])
+    master_bps = getattr(master, 'stream_bounding_planes', None)
+    other_bps = getattr(other, 'stream_bounding_planes', None)
+
+    def _scalar_at(bps, s, li):
+        # Post-cut stream bounding planes are one dict per (stream, level);
+        # tolerate the [contour] list form just in case.
+        if bps is None or s >= len(bps) or li < 0 or li >= len(bps[s]):
+            return None
+        bp = bps[s][li]
+        if isinstance(bp, dict):
+            return bp.get('scalar_value')
+        if isinstance(bp, (list, tuple)) and bp and isinstance(bp[0], dict):
+            return bp[0].get('scalar_value')
+        return None
+
     rows = []
     for s in range(max_stream_count):
         n = len(other.stream_contours[s])
-        src = master_sel[min(s, len(master_sel) - 1)] if master_sel else []
+        ms = min(s, len(master_sel) - 1) if master_sel else 0
+        src = master_sel[ms] if master_sel else []
         row = [False] * n
-        for li in src:
-            if 0 <= int(li) < n:
-                row[int(li)] = True
+
+        # The follower was cut independently, so its raw level indices need not
+        # line up with the master's. Both realize the same master scalar
+        # schedule, so match each master-selected level to the follower level
+        # with the same scalar value instead of copying the raw index.
+        follower_scalars = [_scalar_at(other_bps, s, li) for li in range(n)]
+        master_scalars = [_scalar_at(master_bps, ms, int(li)) for li in src]
+        matched_by_scalar = (
+            n > 0
+            and all(x is not None for x in follower_scalars)
+            and all(x is not None for x in master_scalars)
+        )
+        if matched_by_scalar:
+            for m_scalar in master_scalars:
+                best_j = min(range(n), key=lambda j: abs(follower_scalars[j] - m_scalar))
+                row[best_j] = True
+        else:
+            # Fallback: raw index copy (original behavior).
+            for li in src:
+                if 0 <= int(li) < n:
+                    row[int(li)] = True
+
         if n > 0:
             row[0] = True
             row[-1] = True
+
+        sel_count = sum(1 for b in row if b)
+        want_count = len(src) if src else sel_count
+        # Endpoints are force-added, so the master count may already include
+        # them; only warn when the follower genuinely cannot realize as many
+        # distinct levels as the master selected.
+        if src and sel_count < want_count:
+            print(f"[{master_name}] Linked counterpart {other_name}: stream {s} "
+                  f"realized {sel_count} of {want_count} master levels "
+                  f"(follower has {n} raw levels) — cut structure differs")
         rows.append(row)
     other._level_select_checkboxes = rows
     other._apply_level_selection()
@@ -877,22 +2085,21 @@ def _run_counterpart_step(v, master_name, master, step, defer=False):
                 print(f"[{master_name}] Linked counterpart {other_name}: contour mesh done")
                 return True
         elif step == 12:
-            if other.contour_mesh_vertices is not None:
-                if _skip_non_owner_connected_mesh(v, other_name, other, "Tetrahedralize"):
-                    return True
-                other.soft_body = None
-                other.tetrahedralize_contour_mesh(skeleton_meshes=v.zygote_skeleton_meshes)
-                if other.tet_vertices is not None:
-                    if defer:
-                        other._extract_internal_tet_edges()
-                        other._classify_tet_faces_into_bands()
-                        other._tetrahedralize_replayed = False
-                    else:
-                        other.is_draw_contours = False
-                        other.is_draw_tet_mesh = True
-                        other._tetrahedralize_replayed = True
-                print(f"[{master_name}] Linked counterpart {other_name}: tetrahedralize done")
+            if _skip_non_owner_connected_mesh(v, other_name, other, "Tetrahedralize"):
                 return True
+            tet_ok = _tetrahedralize_single_contour_mesh(v, other_name, other, defer=defer)
+            if tet_ok and other.tet_vertices is not None:
+                if defer:
+                    other._extract_internal_tet_edges()
+                    other._classify_tet_faces_into_bands()
+                    other._tetrahedralize_replayed = False
+                else:
+                    other.is_draw_contours = False
+                    other.is_draw_tet_mesh = True
+                    other._tetrahedralize_replayed = True
+            status = "done" if tet_ok else "failed"
+            print(f"[{master_name}] Linked counterpart {other_name}: tetrahedralize {status}")
+            return tet_ok
     except Exception as e:
         print(f"[{master_name}] Linked counterpart {other_name}: step {step} error: {e}")
         traceback.print_exc()
@@ -908,7 +2115,7 @@ def _copy_fiber_samples_for_stream(target_count, source_samples):
     return samples
 
 
-def _prepare_tendon_waypoints_from_belly(tendon, belly, reverse=False):
+def _prepare_tendon_waypoints_from_belly(tendon, belly, reverse=False, attach=None):
     if tendon is None:
         return None
     if getattr(tendon, 'bounding_planes', None) is None or len(tendon.bounding_planes) == 0:
@@ -921,18 +2128,58 @@ def _prepare_tendon_waypoints_from_belly(tendon, belly, reverse=False):
         print("Tendon extension: belly has no fiber architecture")
         return None
 
-    tendon.fiber_architecture = _copy_fiber_samples_for_stream(
-        len(tendon.bounding_planes), belly.fiber_architecture)
-    if tendon.fiber_architecture is None:
-        return None
-    tendon._regenerate_waypoints_from_fibers(skeleton_meshes=None, propagate_corners=False)
-    streams = []
-    for stream in tendon.waypoints:
-        levels = [np.asarray(wp, dtype=np.float64).copy() for wp in stream]
-        if reverse:
-            levels = list(reversed(levels))
-        streams.append(levels)
-    return streams
+    # Unlike a belly, a tendon never runs build_fibers, so its contours/
+    # bounding_planes still hold the FULL set of cut levels while the rest of
+    # the extension reads _selected_stream_* (the level-selected subset). Reduce
+    # the tendon to the selected levels here so the regenerated waypoints have
+    # the same level count as the contours pulled by _stream_major_contour_source
+    # — otherwise the inspect region boundary (built from waypoints) lands at the
+    # full-level count and diverges between two linked tendons with equal
+    # selected counts but different total cut levels.
+    sel_c = getattr(tendon, '_selected_stream_contours', None)
+    sel_bp = getattr(tendon, '_selected_stream_bounding_planes', None)
+    work_contours = sel_c if sel_c and sel_bp else tendon.contours
+    work_planes = sel_bp if sel_c and sel_bp else tendon.bounding_planes
+
+    # NOTE: seam alignment is no longer done per-tendon here (smoothing a tendon
+    # in isolation gave weird frames). Alignment now happens on the combined
+    # origin-tendon + belly + insertion-tendon sequence in
+    # _extend_belly_fibers_with_tendons. These waypoints are only used for
+    # orientation (flip detection) and region sizing.
+
+    # Regeneration writes several caches. Work on copied selected data and put
+    # every touched field back afterward so extending a belly cannot change the
+    # standalone tendon object or its later visualization/reprocessing state.
+    touched = (
+        'contours', 'bounding_planes', 'fiber_architecture', 'waypoints',
+        'normalized_Qs', 'mvc_weights', '_stream_endpoints',
+        'unit_circle_triangulations', 'fiber_embeddings',
+        'triangulated_deformed_2d')
+    missing = object()
+    saved = {name: getattr(tendon, name, missing) for name in touched}
+    try:
+        tendon.contours = _copy_stream_levels(work_contours, len(work_contours))
+        tendon.bounding_planes = _copy_stream_levels(work_planes, len(work_planes))
+        tendon.fiber_architecture = _copy_fiber_samples_for_stream(
+            len(tendon.bounding_planes), belly.fiber_architecture)
+        if tendon.fiber_architecture is None:
+            return None
+        tendon._regenerate_waypoints_from_fibers(
+            skeleton_meshes=None, propagate_corners=False)
+        streams = []
+        for stream in tendon.waypoints:
+            levels = [np.asarray(wp, dtype=np.float64).copy() for wp in stream]
+            if reverse:
+                levels = list(reversed(levels))
+            streams.append(levels)
+        return streams
+    finally:
+        for name, value in saved.items():
+            if value is missing:
+                if hasattr(tendon, name):
+                    delattr(tendon, name)
+            else:
+                setattr(tendon, name, value)
 
 
 def _orient_tendon_streams_to_belly(tendon_streams, belly_streams, attach):
@@ -981,6 +2228,25 @@ def _flip_stream_levels_by_mask(streams, flip_mask):
     return out
 
 
+def _trim_tendon_seam_level(streams, end):
+    """Drop the tendon-side junction level that duplicates the belly boundary.
+
+    After orientation the origin tendon attaches at its last level and the
+    insertion tendon at its first level; that level coincides with the belly
+    origin/insertion boundary. Drop it (keep the belly copy) so the extended
+    stream has no repeated level at the seam. ``end`` is 'last' for the origin
+    tendon, 'first' for the insertion tendon.
+    """
+    if streams is None:
+        return None
+    out = []
+    for levels in streams:
+        if levels is not None and len(levels) > 1:
+            levels = levels[:-1] if end == 'last' else levels[1:]
+        out.append(levels)
+    return out
+
+
 def _copy_stream_levels(src, target_count, reverse=False):
     if src is None:
         return None
@@ -1001,6 +2267,25 @@ def _copy_stream_levels(src, target_count, reverse=False):
     return copied
 
 
+def _stream_major_contour_source(obj, prefer_live=False):
+    if obj is None:
+        return None, None
+    if prefer_live:
+        contours = getattr(obj, 'contours', None)
+        planes = getattr(obj, 'bounding_planes', None)
+        if contours is not None and len(contours) > 0:
+            return contours, planes
+    contours = getattr(obj, '_selected_stream_contours', None)
+    planes = getattr(obj, '_selected_stream_bounding_planes', None)
+    if contours is None or len(contours) == 0:
+        contours = getattr(obj, 'stream_contours', None)
+        planes = getattr(obj, 'stream_bounding_planes', None)
+    if contours is None or len(contours) == 0:
+        contours = getattr(obj, 'contours', None)
+        planes = getattr(obj, 'bounding_planes', None)
+    return contours, planes
+
+
 def _clear_tendon_extension(obj):
     base = getattr(obj, '_belly_waypoints_before_tendon_extension', None)
     if base is not None:
@@ -1011,6 +2296,7 @@ def _clear_tendon_extension(obj):
     obj._belly_waypoints_before_tendon_extension = None
     obj._tendon_extended_inspect_contours = None
     obj._tendon_extended_inspect_bounding_planes = None
+    obj._tendon_extended_inspect_waypoints = None
     obj._connected_contour_mesh_source = None
     obj._connected_contour_mesh_params = None
     obj._connected_contour_mesh_fixed = None
@@ -1020,6 +2306,11 @@ def _clear_tendon_extension(obj):
     obj._connected_component_fibers = None
     obj._tendon_origin_auto_flip_mask = None
     obj._tendon_insertion_auto_flip_mask = None
+    for tendon_obj in getattr(obj, '_tendon_alignment_display_objects', []) or []:
+        if getattr(tendon_obj, '_aligned_extension_owner_id', None) == id(obj):
+            tendon_obj._aligned_extension_bounding_planes = None
+            tendon_obj._aligned_extension_owner_id = None
+    obj._tendon_alignment_display_objects = None
     obj.waypoint_level_regions = None
     obj.tendon_extended_fibers = False
     obj._fiber_draw_dirty = True
@@ -1117,6 +2408,15 @@ def _prepare_connected_contour_mesh_source(v, belly_name, belly, include_counter
         insertion_p = _flip_stream_levels_by_mask(insertion_p, insertion_mask)
         insertion_f = _flip_stream_levels_by_mask(insertion_f, insertion_mask)
         insertion_t = _flip_stream_levels_by_mask(insertion_t, insertion_mask)
+        # Drop the tendon-side seam level that duplicates the belly boundary.
+        origin_c = _trim_tendon_seam_level(origin_c, 'last')
+        origin_p = _trim_tendon_seam_level(origin_p, 'last')
+        origin_f = _trim_tendon_seam_level(origin_f, 'last')
+        origin_t = _trim_tendon_seam_level(origin_t, 'last')
+        insertion_c = _trim_tendon_seam_level(insertion_c, 'first')
+        insertion_p = _trim_tendon_seam_level(insertion_p, 'first')
+        insertion_f = _trim_tendon_seam_level(insertion_f, 'first')
+        insertion_t = _trim_tendon_seam_level(insertion_t, 'first')
         return {
             'name': comp_name,
             'obj': comp_obj,
@@ -1240,6 +2540,251 @@ def _prepare_connected_contour_mesh_source(v, belly_name, belly, include_counter
     return True
 
 
+def _smooth_and_regenerate_combined(belly, combined_contours, combined_planes,
+                                    belly_anchor_ranges=None,
+                                    belly_waypoints=None):
+    """Align the whole origin-tendon + belly + insertion-tendon sequence as one
+    chain and regenerate its fibers in a single pass.
+
+    Keeps the built belly frames fixed, aligns each tendon outward from its
+    adjacent belly seam, then regenerates waypoints with
+    corner correspondence re-propagated across the full sequence — no per-tendon
+    frame guessing, no seam twist. Operates on deep copies and restores the
+    belly's own contour state afterward; returns (waypoints, smoothed_contours,
+    smoothed_planes) for the combined sequence.
+    """
+    if len(combined_contours) != len(combined_planes):
+        raise ValueError("combined contour/plane stream counts differ")
+    for stream_i, (contours, planes) in enumerate(zip(combined_contours, combined_planes)):
+        if len(contours) != len(planes):
+            raise ValueError(
+                f"combined stream {stream_i} has {len(contours)} contours but "
+                f"{len(planes)} bounding planes")
+
+    combined_contours = [[np.asarray(c, dtype=np.float64).copy() for c in s]
+                         for s in combined_contours]
+    combined_planes = [[copy.deepcopy(bp) for bp in s] for s in combined_planes]
+
+    belly_snapshots = []
+    for stream_i, (contours, planes) in enumerate(zip(combined_contours, combined_planes)):
+        start, end = (belly_anchor_ranges[stream_i]
+                      if belly_anchor_ranges and stream_i < len(belly_anchor_ranges)
+                      else (0, len(planes)))
+        belly_snapshots.append((
+            start, end,
+            [np.asarray(c, dtype=np.float64).copy() for c in contours[start:end]],
+            [copy.deepcopy(bp) for bp in planes[start:end]]))
+    for si, stream in enumerate(combined_planes):
+        for li, bp in enumerate(stream):
+            if isinstance(bp, dict) and li < len(combined_contours[si]):
+                bp['contour_vertices'] = combined_contours[si][li]
+
+    saved = {a: getattr(belly, a, None) for a in (
+        'contours', 'bounding_planes', 'stream_contours', 'stream_bounding_planes',
+        'max_stream_count', 'draw_contour_stream', 'normalized_Qs', 'mvc_weights',
+        'waypoints', '_stream_endpoints')}
+    try:
+        belly.stream_contours = combined_contours
+        belly.stream_bounding_planes = combined_planes
+        belly.contours = combined_contours
+        belly.bounding_planes = combined_planes
+        belly.max_stream_count = len(combined_contours)
+        belly.draw_contour_stream = [[True] * len(s) for s in combined_contours]
+        # Both copies of a physically shared seam contour must use exactly the
+        # same chart. The tendon copy remains in the fiber sequence as a zero-gap
+        # registration level; downstream connected mesh construction removes it.
+        for stream_i, (start, end, _, _) in enumerate(belly_snapshots):
+            if start > 0:
+                belly.stream_contours[stream_i][start - 1] = np.asarray(
+                    belly.stream_contours[stream_i][start], dtype=np.float64).copy()
+                belly.stream_bounding_planes[stream_i][start - 1] = copy.deepcopy(
+                    belly.stream_bounding_planes[stream_i][start])
+            if end < len(belly.stream_bounding_planes[stream_i]):
+                belly.stream_contours[stream_i][end] = np.asarray(
+                    belly.stream_contours[stream_i][end - 1], dtype=np.float64).copy()
+                belly.stream_bounding_planes[stream_i][end] = copy.deepcopy(
+                    belly.stream_bounding_planes[stream_i][end - 1])
+        # Preserve the already-built belly frames. Make tendon z signs continuous
+        # and continuously project the fixed belly x axis into each tendon plane,
+        # working outward from each seam.
+        for stream_i, bp_stream in enumerate(belly.stream_bounding_planes):
+            start, end = belly_snapshots[stream_i][:2]
+
+            def _align_level_to_reference(level_i, reference_i, forward_hint):
+                bp = bp_stream[level_i]
+                ref = bp_stream[reference_i]
+                z_axis = np.asarray(bp['basis_z'], dtype=np.float64)
+                z_axis /= np.linalg.norm(z_axis) + 1e-10
+                forward_hint = np.asarray(forward_hint, dtype=np.float64)
+                if (np.linalg.norm(forward_hint) > 1e-10
+                        and np.dot(z_axis, forward_hint) < 0):
+                    z_axis = -z_axis
+
+                ref_z = np.asarray(ref['basis_z'], dtype=np.float64)
+                ref_z /= np.linalg.norm(ref_z) + 1e-10
+                ref_x = np.asarray(ref['basis_x'], dtype=np.float64)
+
+                # Rotation-minimizing transport: rotate the complete reference
+                # frame by the smallest 3D rotation carrying ref_z onto z_axis.
+                # Simple projection can introduce visible in-plane drift on the
+                # sharply bending origin tendon.
+                cross_z = np.cross(ref_z, z_axis)
+                sin_angle = np.linalg.norm(cross_z)
+                cos_angle = float(np.clip(np.dot(ref_z, z_axis), -1.0, 1.0))
+                if sin_angle > 1e-8:
+                    rot_axis = cross_z / sin_angle
+                    x_axis = (ref_x * cos_angle
+                              + np.cross(rot_axis, ref_x) * sin_angle
+                              + rot_axis * np.dot(rot_axis, ref_x)
+                              * (1.0 - cos_angle))
+                elif cos_angle >= 0.0:
+                    x_axis = ref_x.copy()
+                else:
+                    # Rare 180-degree case: rotate around the reference y axis.
+                    rot_axis = np.asarray(ref['basis_y'], dtype=np.float64)
+                    rot_axis /= np.linalg.norm(rot_axis) + 1e-10
+                    x_axis = -ref_x + 2.0 * rot_axis * np.dot(rot_axis, ref_x)
+
+                x_axis = x_axis - np.dot(x_axis, z_axis) * z_axis
+                if np.linalg.norm(x_axis) < 1e-8:
+                    ref_y = np.asarray(ref['basis_y'], dtype=np.float64)
+                    x_axis = np.cross(ref_y, z_axis)
+                x_axis /= np.linalg.norm(x_axis) + 1e-10
+                y_axis = np.cross(z_axis, x_axis)
+                y_axis /= np.linalg.norm(y_axis) + 1e-10
+                x_axis = np.cross(y_axis, z_axis)
+                x_axis /= np.linalg.norm(x_axis) + 1e-10
+                bp['basis_x'] = x_axis
+                bp['basis_y'] = y_axis
+                bp['basis_z'] = z_axis
+
+            # Shared seam levels (start-1 and end) are exact belly copies. Keep
+            # them fixed; orient every other tendon normal toward the next level
+            # in the origin-to-insertion sequence.
+            for level_i in range(start - 2, -1, -1):
+                forward = (np.asarray(bp_stream[level_i + 1]['mean'])
+                           - np.asarray(bp_stream[level_i]['mean']))
+                _align_level_to_reference(level_i, level_i + 1, forward)
+            for level_i in range(end + 1, len(bp_stream)):
+                if level_i + 1 < len(bp_stream):
+                    forward = (np.asarray(bp_stream[level_i + 1]['mean'])
+                               - np.asarray(bp_stream[level_i]['mean']))
+                else:
+                    forward = (np.asarray(bp_stream[level_i]['mean'])
+                               - np.asarray(bp_stream[level_i - 1]['mean']))
+                _align_level_to_reference(level_i, level_i - 1, forward)
+
+            # Refit only tendon planes after their axes change. Belly contours,
+            # planes, matches, and corner labels remain byte-for-byte untouched.
+            tendon_levels = (list(range(0, max(0, start - 1)))
+                             + list(range(min(len(bp_stream), end + 1), len(bp_stream))))
+            for level_i in tendon_levels:
+                new_contour = belly._recompute_bounding_plane_after_axis_change(
+                    bp_stream[level_i], belly.stream_contours[stream_i][level_i])
+                belly.stream_contours[stream_i][level_i] = new_contour
+                bp_stream[level_i].pop('corner_indices', None)
+
+            for label, levels in (
+                    ('origin', range(0, max(0, start - 1))),
+                    ('insertion', range(min(len(bp_stream), end + 1), len(bp_stream)))):
+                forward_dots = []
+                for level_i in levels:
+                    next_i = min(level_i + 1, len(bp_stream) - 1)
+                    if next_i == level_i:
+                        continue
+                    forward = (np.asarray(bp_stream[next_i]['mean'])
+                               - np.asarray(bp_stream[level_i]['mean']))
+                    norm = np.linalg.norm(forward)
+                    if norm > 1e-10:
+                        forward_dots.append(float(np.dot(
+                            bp_stream[level_i]['basis_z'], forward / norm)))
+                if forward_dots:
+                    print(f"  [Tendon z forward] Stream {stream_i} {label}: "
+                          f"min_dot={min(forward_dots):.4f}")
+
+            for label, first, last in (
+                    ('origin', 0, start),
+                    ('insertion', end, len(bp_stream))):
+                xy_dots = []
+                for level_i in range(first, max(first, last - 1)):
+                    xy_dots.append((
+                        float(np.dot(bp_stream[level_i]['basis_x'],
+                                     bp_stream[level_i + 1]['basis_x'])),
+                        float(np.dot(bp_stream[level_i]['basis_y'],
+                                     bp_stream[level_i + 1]['basis_y']))))
+                if xy_dots:
+                    print(f"  [Tendon xy transport] Stream {stream_i} {label}: "
+                          f"min_dot(x,y)=({min(d[0] for d in xy_dots):.4f}, "
+                          f"{min(d[1] for d in xy_dots):.4f})")
+
+            for label, left, right in (
+                    ('origin/belly', start - 1, start),
+                    ('belly/insertion', end - 1, end)):
+                if 0 <= left < len(bp_stream) and 0 <= right < len(bp_stream):
+                    dots = [float(np.dot(bp_stream[left][key], bp_stream[right][key]))
+                            for key in ('basis_x', 'basis_y', 'basis_z')]
+                    print(f"  [Seam align] Stream {stream_i} {label}: "
+                          f"dot(x,y,z)=({dots[0]:.4f}, {dots[1]:.4f}, {dots[2]:.4f})")
+
+        # Reassert the authoritative belly snapshots defensively.
+        for stream_i, (start, end, snap_contours, snap_planes) in enumerate(belly_snapshots):
+            belly.stream_contours[stream_i][start:end] = snap_contours
+            belly.stream_bounding_planes[stream_i][start:end] = snap_planes
+        belly.contours = belly.stream_contours
+        belly.bounding_planes = belly.stream_bounding_planes
+        # Generate all levels once without global corner propagation. Register
+        # each tendon chart from its *actual adjacent belly contour* so origin
+        # and insertion do not share an unrelated remote reference.
+        print("  [Tendon chart align v2] Registering origin and insertion from their belly seams")
+        belly._regenerate_waypoints_from_fibers(
+            skeleton_meshes=None, propagate_corners=False)
+        origin_refs = []
+        origin_targets = []
+        insertion_refs = []
+        insertion_targets = []
+        for stream_i, (start, end, _, _) in enumerate(belly_snapshots):
+            stream_len = len(belly.stream_bounding_planes[stream_i])
+            origin_refs.append(start if start > 0 else -1)
+            origin_targets.append((0, max(0, start - 1)))
+            insertion_refs.append(end - 1 if end < stream_len else -1)
+            insertion_targets.append((min(stream_len, end + 1), stream_len))
+        if any(ref >= 0 for ref in origin_refs):
+            belly._propagate_corner_correspondences(
+                explicit_reference_levels=origin_refs,
+                target_level_ranges=origin_targets,
+                full_uv_matching=True)
+        if any(ref >= 0 for ref in insertion_refs):
+            belly._propagate_corner_correspondences(
+                explicit_reference_levels=insertion_refs,
+                target_level_ranges=insertion_targets,
+                full_uv_matching=True)
+        wp = [[np.asarray(w, dtype=np.float64).copy() for w in stream]
+              for stream in belly.waypoints]
+        if belly_waypoints is not None:
+            for stream_i, stream_waypoints in enumerate(belly_waypoints):
+                if stream_i >= len(wp):
+                    break
+                start, end = belly_snapshots[stream_i][:2]
+                if end - start == len(stream_waypoints):
+                    wp[stream_i][start:end] = [
+                        np.asarray(w, dtype=np.float64).copy()
+                        for w in stream_waypoints]
+                    if start > 0 and stream_waypoints:
+                        wp[stream_i][start - 1] = np.asarray(
+                            stream_waypoints[0], dtype=np.float64).copy()
+                    if end < len(wp[stream_i]) and stream_waypoints:
+                        wp[stream_i][end] = np.asarray(
+                            stream_waypoints[-1], dtype=np.float64).copy()
+        smoothed_contours = [[np.asarray(c, dtype=np.float64).copy() for c in s]
+                             for s in belly.stream_contours]
+        smoothed_planes = [[copy.deepcopy(bp) for bp in s]
+                           for s in belly.stream_bounding_planes]
+    finally:
+        for a, val in saved.items():
+            setattr(belly, a, val)
+    return wp, smoothed_contours, smoothed_planes
+
+
 def _extend_belly_fibers_with_tendons(v, belly_name, belly):
     if getattr(belly, 'waypoints', None) is None or len(belly.waypoints) == 0:
         print(f"[{belly_name}] Tendon extension needs belly fibers first")
@@ -1265,68 +2810,175 @@ def _extend_belly_fibers_with_tendons(v, belly_name, belly):
                 for stream in base]
 
     origin_streams = _prepare_tendon_waypoints_from_belly(
-        origin, belly, reverse=bool(getattr(belly, 'origin_tendon_reverse', False)))
+        origin, belly, reverse=bool(getattr(belly, 'origin_tendon_reverse', False)),
+        attach='origin')
     insertion_streams = _prepare_tendon_waypoints_from_belly(
-        insertion, belly, reverse=bool(getattr(belly, 'insertion_tendon_reverse', False)))
+        insertion, belly, reverse=bool(getattr(belly, 'insertion_tendon_reverse', False)),
+        attach='insertion')
 
     n_streams = len(base)
     origin_streams, origin_flip_mask = _orient_tendon_streams_to_belly(origin_streams, base, 'origin')
     insertion_streams, insertion_flip_mask = _orient_tendon_streams_to_belly(insertion_streams, base, 'insertion')
     belly._tendon_origin_auto_flip_mask = list(origin_flip_mask)
     belly._tendon_insertion_auto_flip_mask = list(insertion_flip_mask)
-    base_contours = _copy_stream_levels(getattr(belly, 'contours', None), n_streams)
-    base_planes = _copy_stream_levels(getattr(belly, 'bounding_planes', None), n_streams)
+    # The built belly's live stream is authoritative: it is what its fibers and
+    # 3D coordinate axes currently use. `_selected_stream_bounding_planes` can
+    # be an older, separate snapshot, so aligning against it produces perfect
+    # internal diagnostics but six visibly different axes at the live junction.
+    base_src_contours, base_src_planes = _stream_major_contour_source(
+        belly, prefer_live=True)
+    origin_src_contours, origin_src_planes = _stream_major_contour_source(origin)
+    insertion_src_contours, insertion_src_planes = _stream_major_contour_source(insertion)
+    base_contours = _copy_stream_levels(base_src_contours, n_streams)
+    base_planes = _copy_stream_levels(base_src_planes, n_streams)
     origin_reverse = bool(getattr(belly, 'origin_tendon_reverse', False))
     insertion_reverse = bool(getattr(belly, 'insertion_tendon_reverse', False))
     origin_contours = _copy_stream_levels(
-        getattr(origin, 'contours', None), n_streams, reverse=origin_reverse) if origin is not None else None
+        origin_src_contours, n_streams, reverse=origin_reverse) if origin is not None else None
     origin_planes = _copy_stream_levels(
-        getattr(origin, 'bounding_planes', None), n_streams, reverse=origin_reverse) if origin is not None else None
+        origin_src_planes, n_streams, reverse=origin_reverse) if origin is not None else None
     insertion_contours = _copy_stream_levels(
-        getattr(insertion, 'contours', None), n_streams, reverse=insertion_reverse) if insertion is not None else None
+        insertion_src_contours, n_streams, reverse=insertion_reverse) if insertion is not None else None
     insertion_planes = _copy_stream_levels(
-        getattr(insertion, 'bounding_planes', None), n_streams, reverse=insertion_reverse) if insertion is not None else None
+        insertion_src_planes, n_streams, reverse=insertion_reverse) if insertion is not None else None
     origin_contours = _flip_stream_levels_by_mask(origin_contours, origin_flip_mask)
     origin_planes = _flip_stream_levels_by_mask(origin_planes, origin_flip_mask)
     insertion_contours = _flip_stream_levels_by_mask(insertion_contours, insertion_flip_mask)
     insertion_planes = _flip_stream_levels_by_mask(insertion_planes, insertion_flip_mask)
 
-    extended = []
+    # Keep the tendon-side seam levels for fiber-coordinate registration. They
+    # are replaced by exact copies of the matching belly boundary in the combined
+    # sequence. Connected contour-mesh construction removes duplicates separately.
+
+    def _validate_part_levels(label, contours, planes):
+        if contours is None:
+            return True
+        if planes is None:
+            print(f"[{belly_name}] Tendon extension: {label} has contours but no bounding planes")
+            return False
+        if len(contours) != len(planes):
+            print(f"[{belly_name}] Tendon extension: {label} has {len(contours)} contour "
+                  f"streams but {len(planes)} bounding-plane streams")
+            return False
+        for stream_i, (stream_contours, stream_planes) in enumerate(zip(contours, planes)):
+            if len(stream_contours) != len(stream_planes):
+                print(f"[{belly_name}] Tendon extension: {label} stream {stream_i} has "
+                      f"{len(stream_contours)} contours but {len(stream_planes)} "
+                      "bounding planes")
+                return False
+        return True
+
+    if not all((
+            _validate_part_levels('origin tendon', origin_contours, origin_planes),
+            _validate_part_levels('belly', base_contours, base_planes),
+            _validate_part_levels('insertion tendon', insertion_contours, insertion_planes))):
+        return False
+
+    # Assemble the combined origin-tendon + belly + insertion-tendon contour and
+    # bounding-plane sequence per stream, including both shared seam copies.
     inspect_contours = []
     inspect_planes = []
+    origin_len = []
+    insertion_len = []
+    belly_anchor_ranges = []
     for s in range(n_streams):
-        stream_levels = []
         stream_contours = []
         stream_planes = []
-        if origin_streams:
-            stream_levels.extend(origin_streams[min(s, len(origin_streams) - 1)])
-            if origin_contours:
-                stream_contours.extend(origin_contours[min(s, len(origin_contours) - 1)])
+        o_n = 0
+        i_n = 0
+        if origin_contours:
+            oc = origin_contours[min(s, len(origin_contours) - 1)]
+            stream_contours.extend(oc)
+            o_n = len(oc)
             if origin_planes:
                 stream_planes.extend(origin_planes[min(s, len(origin_planes) - 1)])
-        stream_levels.extend(base[s])
         if base_contours:
-            stream_contours.extend(base_contours[min(s, len(base_contours) - 1)])
+            bc = base_contours[min(s, len(base_contours) - 1)]
+            stream_contours.extend(bc)
+            belly_anchor_ranges.append((o_n, o_n + len(bc)))
+        else:
+            belly_anchor_ranges.append((o_n, o_n))
         if base_planes:
             stream_planes.extend(base_planes[min(s, len(base_planes) - 1)])
-        if insertion_streams:
-            stream_levels.extend(insertion_streams[min(s, len(insertion_streams) - 1)])
-            if insertion_contours:
-                stream_contours.extend(insertion_contours[min(s, len(insertion_contours) - 1)])
+        if insertion_contours:
+            ic = insertion_contours[min(s, len(insertion_contours) - 1)]
+            stream_contours.extend(ic)
+            i_n = len(ic)
             if insertion_planes:
                 stream_planes.extend(insertion_planes[min(s, len(insertion_planes) - 1)])
-        extended.append(stream_levels)
         inspect_contours.append(stream_contours)
         inspect_planes.append(stream_planes)
+        origin_len.append(o_n)
+        insertion_len.append(i_n)
+
+    # Align the whole sequence as one chain and regenerate every fiber in one
+    # pass — global frame continuity, no per-tendon seam guessing or twist.
+    extended, inspect_contours, inspect_planes = _smooth_and_regenerate_combined(
+        belly, inspect_contours, inspect_planes,
+        belly_anchor_ranges=belly_anchor_ranges,
+        belly_waypoints=base)
 
     belly.waypoints = extended
     belly.waypoints_original = [[np.asarray(wp, dtype=np.float64).copy() for wp in stream]
                                 for stream in extended]
     belly._tendon_extended_inspect_contours = inspect_contours
     belly._tendon_extended_inspect_bounding_planes = inspect_planes
+    belly._tendon_extended_inspect_waypoints = [[np.asarray(wp, dtype=np.float64).copy()
+                                                 for wp in stream]
+                                                for stream in extended]
+
+    live_belly_planes = getattr(belly, 'bounding_planes', None)
+    if live_belly_planes is not None:
+        for s in range(min(len(inspect_planes), len(live_belly_planes))):
+            checks = []
+            if origin_len[s] > 0 and live_belly_planes[s]:
+                checks.append(('origin/belly', inspect_planes[s][origin_len[s] - 1],
+                               live_belly_planes[s][0]))
+            if insertion_len[s] > 0 and live_belly_planes[s]:
+                checks.append(('belly/insertion',
+                               inspect_planes[s][len(inspect_planes[s]) - insertion_len[s]],
+                               live_belly_planes[s][-1]))
+            for label, tendon_bp, live_bp in checks:
+                dots = [float(np.dot(tendon_bp[key], live_bp[key]))
+                        for key in ('basis_x', 'basis_y', 'basis_z')]
+                mean_delta = float(np.linalg.norm(
+                    np.asarray(tendon_bp['mean']) - np.asarray(live_bp['mean'])))
+                print(f"  [Live seam check] Stream {s} {label}: "
+                      f"dot(x,y,z)=({dots[0]:.4f}, {dots[1]:.4f}, {dots[2]:.4f}), "
+                      f"mean_delta={mean_delta:.6g}")
+
+    # Standalone tendon objects retain their original processing data, but their
+    # 3D BP visualization must show the aligned copies actually used by this
+    # extension. Otherwise the viewer displays the old unaligned frames and makes
+    # a correct extension look broken.
+    for old_tendon in getattr(belly, '_tendon_alignment_display_objects', []) or []:
+        if getattr(old_tendon, '_aligned_extension_owner_id', None) == id(belly):
+            old_tendon._aligned_extension_bounding_planes = None
+            old_tendon._aligned_extension_owner_id = None
+    display_objects = []
+    if origin is not None:
+        origin._aligned_extension_bounding_planes = [
+            [copy.deepcopy(bp) for bp in inspect_planes[s][:origin_len[s]]]
+            for s in range(len(inspect_planes))]
+        for stream in origin._aligned_extension_bounding_planes:
+            if stream:
+                stream[-1]['_suppress_duplicate_seam_axes'] = True
+        origin._aligned_extension_owner_id = id(belly)
+        display_objects.append(origin)
+    if insertion is not None:
+        insertion._aligned_extension_bounding_planes = [
+            [copy.deepcopy(bp) for bp in inspect_planes[s][
+                len(inspect_planes[s]) - insertion_len[s]:]]
+            for s in range(len(inspect_planes))]
+        for stream in insertion._aligned_extension_bounding_planes:
+            if stream:
+                stream[0]['_suppress_duplicate_seam_axes'] = True
+        insertion._aligned_extension_owner_id = id(belly)
+        display_objects.append(insertion)
+    belly._tendon_alignment_display_objects = display_objects
     belly.waypoint_level_regions = [[
-        {'part': 'origin_tendon' if origin_streams and li < len(origin_streams[min(s, len(origin_streams) - 1)])
-         else 'insertion_tendon' if insertion_streams and li >= len(stream) - len(insertion_streams[min(s, len(insertion_streams) - 1)])
+        {'part': 'origin_tendon' if li < origin_len[s]
+         else 'insertion_tendon' if li >= len(stream) - insertion_len[s]
          else 'belly',
          'level': li}
         for li in range(len(stream))
@@ -1336,6 +2988,7 @@ def _extend_belly_fibers_with_tendons(v, belly_name, belly):
     belly._fiber_draw_lines = None
     belly.is_draw_fiber_architecture = True
     belly.tendon_extended_fibers = True
+
     print(f"[{belly_name}] Tendon extension applied: "
           f"origin={origin_name or 'None'}, insertion={insertion_name or 'None'}")
     return True
@@ -1366,6 +3019,1734 @@ def _connected_source_has_linked_components(obj):
     return comps is not None and len(comps) > 1
 
 
+def _original_tet_component_names(v, name, obj):
+    names = []
+
+    def add(comp_name):
+        if comp_name and comp_name in v.zygote_muscle_meshes and comp_name not in names:
+            names.append(comp_name)
+
+    add(name)
+    other_name, other = _linked_counterpart(v, obj)
+    if other is not None:
+        add(other_name)
+
+    for comp_name in list(names):
+        comp = v.zygote_muscle_meshes.get(comp_name)
+        if comp is None:
+            continue
+        _auto_fill_tendon_extension_names(v, comp_name, comp)
+        add(getattr(comp, 'origin_tendon_extension_name', ''))
+        add(getattr(comp, 'insertion_tendon_extension_name', ''))
+    return names
+
+
+def _mesh_part_from_name(name):
+    lowered = str(name or '').lower()
+    if 'origin' in lowered and 'tendon' in lowered:
+        return 'origin_tendon'
+    if 'insertion' in lowered and 'tendon' in lowered:
+        return 'insertion_tendon'
+    if 'tendon' in lowered:
+        return 'tendon'
+    return 'belly'
+
+
+def _component_original_surface(comp_obj):
+    if comp_obj is None:
+        return None, None
+    verts = getattr(comp_obj, 'vertices', None)
+    if verts is None or len(verts) == 0:
+        return None, None
+    tri_faces = []
+    faces_3 = getattr(comp_obj, 'faces_3', None)
+    if faces_3 is not None and len(faces_3) > 0:
+        tri_faces.extend(np.asarray(faces_3[:, :, 0], dtype=np.int32).tolist())
+    faces_4 = getattr(comp_obj, 'faces_4', None)
+    if faces_4 is not None and len(faces_4) > 0:
+        for face in np.asarray(faces_4[:, :, 0], dtype=np.int32):
+            tri_faces.append([int(face[0]), int(face[1]), int(face[2])])
+            tri_faces.append([int(face[0]), int(face[2]), int(face[3])])
+    for face in getattr(comp_obj, 'faces_other', []) or []:
+        f = np.asarray(face, dtype=np.int32)
+        if f.ndim != 2 or len(f) < 3:
+            continue
+        ids = f[:, 0]
+        for i in range(1, len(ids) - 1):
+            tri_faces.append([int(ids[0]), int(ids[i]), int(ids[i + 1])])
+    if len(tri_faces) == 0:
+        return None, None
+    return np.asarray(verts, dtype=np.float64), np.asarray(tri_faces, dtype=np.int32)
+
+
+def _triangulate_cap_loop(verts, loop):
+    loop = [int(i) for i in loop]
+    n = len(loop)
+    if n < 3:
+        return [], None
+    if n == 3:
+        return [[loop[0], loop[1], loop[2]]], None
+    pts_3d = np.asarray(verts, dtype=np.float64)[loop]
+    centroid = pts_3d.mean(axis=0)
+    try:
+        centered = pts_3d - centroid
+        _, _, vt = np.linalg.svd(centered, full_matrices=False)
+        pts_2d = centered @ vt[:2].T
+        segments = np.array([[i, (i + 1) % n] for i in range(n)], dtype=np.int32)
+        import triangle as tr
+        result = tr.triangulate({'vertices': pts_2d, 'segments': segments}, 'p')
+        tris = result.get('triangles', None)
+        if tris is not None and len(tris) > 0:
+            if int(np.max(tris)) >= len(loop):
+                return None, centroid
+            return [[loop[int(a)], loop[int(b)], loop[int(c)]] for a, b, c in tris], None
+    except Exception:
+        pass
+    return None, centroid
+
+
+def _surface_boundary_loops(faces):
+    from collections import defaultdict
+    faces = np.asarray(faces, dtype=np.int32)
+    edge_count = defaultdict(int)
+    for face in faces:
+        if len(face) != 3:
+            continue
+        for i in range(3):
+            a, b = int(face[i]), int(face[(i + 1) % 3])
+            if a == b:
+                continue
+            edge_count[(min(a, b), max(a, b))] += 1
+
+    open_edges = [edge for edge, count in edge_count.items() if count == 1]
+    if not open_edges:
+        return []
+
+    adjacency = defaultdict(list)
+    open_set = set(open_edges)
+    for a, b in open_edges:
+        adjacency[a].append(b)
+        adjacency[b].append(a)
+
+    visited = set()
+    loops = []
+    for start in open_edges:
+        if start in visited:
+            continue
+        a0, b0 = start
+        loop = [a0]
+        prev, cur = a0, b0
+        visited.add(start)
+        for _ in range(len(open_edges) + 2):
+            loop.append(cur)
+            candidates = []
+            for nxt in adjacency[cur]:
+                if nxt == prev:
+                    continue
+                key = (min(cur, nxt), max(cur, nxt))
+                if key not in visited:
+                    candidates.append((nxt, key))
+            if not candidates:
+                close_key = (min(cur, loop[0]), max(cur, loop[0]))
+                if close_key in open_set and close_key not in visited:
+                    visited.add(close_key)
+                break
+            nxt, key = candidates[0]
+            visited.add(key)
+            prev, cur = cur, nxt
+            if cur == loop[0]:
+                break
+        if len(loop) > 1 and loop[-1] == loop[0]:
+            loop = loop[:-1]
+        if len(loop) >= 3:
+            loops.append(loop)
+    return loops
+
+
+def _fallback_edge_group_loops(comp_obj):
+    loops = []
+    for group in getattr(comp_obj, 'edge_groups', []) or []:
+        loop = [int(i) for i in group]
+        if len(loop) >= 3:
+            loops.append(loop)
+    return loops
+
+
+def _cap_component_boundary_loops(comp_obj, comp_name, vertices, faces,
+                                  all_vertices, all_faces, vertex_regions,
+                                  region, offset=0, cap_face_indices=None,
+                                  verbose=True):
+    loops = _surface_boundary_loops(faces)
+    if not loops:
+        loops = _fallback_edge_group_loops(comp_obj)
+    if not loops:
+        return 0
+
+    added = 0
+    cap_face_indices = cap_face_indices if cap_face_indices is not None else []
+    verts_arr = np.asarray(all_vertices, dtype=np.float64)
+    for loop in loops:
+        loop = [int(i) for i in loop]
+        if len(loop) < 3:
+            continue
+        loop_global = [idx + int(offset) for idx in loop]
+        cap_faces, centroid = _triangulate_cap_loop(verts_arr, loop_global)
+        if cap_faces is None:
+            center_idx = len(all_vertices)
+            all_vertices.append(np.asarray(centroid, dtype=np.float64).tolist())
+            vertex_regions.append(region.copy())
+            cap_faces = [
+                [loop_global[i], loop_global[(i + 1) % len(loop_global)], center_idx]
+                for i in range(len(loop_global))
+            ]
+            verts_arr = np.asarray(all_vertices, dtype=np.float64)
+        for tri in cap_faces:
+            if cap_face_indices is not None:
+                cap_face_indices.append(len(all_faces))
+            all_faces.append([int(tri[0]), int(tri[1]), int(tri[2])])
+            added += 1
+    if added and verbose:
+        print(f"[{comp_name}] Capped {len(loops)} original-surface boundary loop(s), {added} faces")
+    return added
+
+
+def _dedupe_surface_vertices(vertices, faces, regions, eps=2e-5):
+    from scipy.spatial import cKDTree
+    vertices = np.asarray(vertices, dtype=np.float64)
+    faces = np.asarray(faces, dtype=np.int32)
+    if len(vertices) == 0:
+        return vertices, faces, regions
+    parent = list(range(len(vertices)))
+
+    def find(i):
+        while parent[i] != i:
+            parent[i] = parent[parent[i]]
+            i = parent[i]
+        return i
+
+    def union(a, b):
+        ra, rb = find(int(a)), find(int(b))
+        if ra != rb:
+            parent[rb] = ra
+
+    try:
+        tree = cKDTree(vertices)
+        for i, j in tree.query_pairs(r=float(eps)):
+            union(i, j)
+    except Exception:
+        pass
+
+    clusters = {}
+    for i in range(len(vertices)):
+        clusters.setdefault(find(i), []).append(i)
+    old_to_new = {}
+    new_vertices = []
+    new_regions = []
+    for members in clusters.values():
+        new_idx = len(new_vertices)
+        new_vertices.append(np.mean(vertices[members], axis=0))
+        first = regions[members[0]] if regions and members[0] < len(regions) else None
+        new_regions.append(first)
+        for old in members:
+            old_to_new[old] = new_idx
+
+    remapped = np.array([[old_to_new[int(i)] for i in face] for face in faces], dtype=np.int32)
+    face_counts = {}
+    valid_faces = []
+    for face in remapped:
+        if len(set(int(i) for i in face)) < 3:
+            continue
+        key = tuple(sorted(int(i) for i in face))
+        face_counts[key] = face_counts.get(key, 0) + 1
+        valid_faces.append((key, face))
+
+    clean_faces = []
+    for key, face in valid_faces:
+        # Coincident opposite-side faces are internal walls after welding the
+        # split belly/tendon components. Drop all copies so TetGen sees one
+        # connected volume instead of adjacent closed volumes.
+        if face_counts.get(key, 0) > 1:
+            continue
+        clean_faces.append(face.tolist())
+    return np.asarray(new_vertices, dtype=np.float64), np.asarray(clean_faces, dtype=np.int32), new_regions
+
+
+def _component_closed_surface_for_labels(comp_obj, part, component_name):
+    verts, faces = _component_original_surface(comp_obj)
+    if verts is None or faces is None:
+        return None, None, None
+    all_vertices = verts.tolist()
+    all_faces = faces.tolist()
+    regions = [{'part': part, 'component': component_name} for _ in range(len(all_vertices))]
+    _cap_component_boundary_loops(
+        comp_obj, component_name, verts, faces,
+        all_vertices, all_faces, regions,
+        {'part': part, 'component': component_name},
+        offset=0, cap_face_indices=None)
+    if not all_vertices or not all_faces:
+        return None, None, None
+    eps = 2e-5
+    return _dedupe_surface_vertices(all_vertices, all_faces, regions, eps=eps)
+
+
+def _count_simple_labels(labels):
+    counts = {}
+    for label in labels or []:
+        counts[label] = counts.get(label, 0) + 1
+    return counts
+
+
+def _estimate_closed_surface_volume(vertices, faces):
+    try:
+        mesh = trimesh.Trimesh(
+            vertices=np.asarray(vertices, dtype=np.float64),
+            faces=np.asarray(faces, dtype=np.int32),
+            process=False)
+        vol = abs(float(mesh.volume))
+        if np.isfinite(vol) and vol > 1e-12:
+            return vol
+    except Exception:
+        pass
+    verts = np.asarray(vertices, dtype=np.float64)
+    if len(verts) == 0:
+        return 0.0
+    extent = np.max(verts, axis=0) - np.min(verts, axis=0)
+    vol = float(np.prod(np.maximum(extent, 1e-9)))
+    return vol if np.isfinite(vol) else 0.0
+
+
+def _simplify_closed_surface_for_tet(name, vertices, faces, target_tet_count):
+    vertices = np.asarray(vertices, dtype=np.float64)
+    faces = np.asarray(faces, dtype=np.int32)
+    target_tet_count = max(0, int(target_tet_count or 0))
+    if target_tet_count <= 0 or len(faces) == 0:
+        return vertices, faces, False
+
+
+    # In coarse non-refined TetGen mode, this muscle family produces roughly
+    # 1.5-1.7 tets per simplified surface face. Use surface count, not TetGen
+    # volume refinement, as the main tet-count control.
+    target_faces = int(np.clip(round(target_tet_count * 0.6), 120, max(120, len(faces))))
+    if target_faces >= len(faces):
+        # Still reduce a little in approximate mode so the log and behavior are
+        # consistent, but do not crush the surface when the requested tet count
+        # is already close to what the current surface will produce.
+        target_faces = max(120, int(round(len(faces) * 0.9)))
+    if target_faces >= len(faces):
+        print(f"[{name}] Approx surface tet: surface already at/below target face budget")
+        return vertices, faces, False
+
+    try:
+        import warnings
+        import pyvista as pv
+        import fast_simplification
+        faces_flat = np.hstack([
+            np.full((len(faces), 1), 3, dtype=np.int64),
+            faces.astype(np.int64)
+        ]).ravel()
+        poly = pv.PolyData(vertices, faces_flat)
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            simp = fast_simplification.simplify_mesh(
+                poly, target_count=target_faces, agg=5, verbose=False)
+        simp_faces_flat = np.asarray(simp.faces, dtype=np.int64)
+        if len(simp_faces_flat) == 0:
+            raise RuntimeError("simplifier returned no faces")
+        simp_faces = simp_faces_flat.reshape((-1, 4))[:, 1:4].astype(np.int32)
+        simp_vertices = np.asarray(simp.points, dtype=np.float64)
+
+        # Simplification can leave a watertight but self-intersecting surface
+        # near thin tendon holes. Always run MeshFix in approximate mode because
+        # this mode explicitly allows the boundary to change.
+        import pymeshfix
+        fixer = pymeshfix.MeshFix(simp_vertices.copy(), simp_faces.copy())
+        try:
+            fixer.repair(verbose=False)
+        except TypeError:
+            fixer.repair()
+        try:
+            simp_vertices, simp_faces = fixer.v, fixer.f
+        except AttributeError:
+            simp_vertices, simp_faces = fixer._return_arrays()
+        mesh = trimesh.Trimesh(vertices=simp_vertices, faces=simp_faces, process=False)
+        if not mesh.is_winding_consistent:
+            trimesh.repair.fix_normals(mesh, multibody=False)
+        simp_vertices = np.asarray(mesh.vertices, dtype=np.float64)
+        simp_faces = np.asarray(mesh.faces, dtype=np.int32)
+        if len(simp_vertices) == 0 or len(simp_faces) == 0:
+            raise RuntimeError("simplified surface is empty")
+        print(f"[{name}] Approx surface tet: simplified {len(vertices)}v/{len(faces)}f "
+              f"-> {len(simp_vertices)}v/{len(simp_faces)}f "
+              f"(target tets {target_tet_count})")
+        return simp_vertices, simp_faces, True
+    except Exception as exc:
+        print(f"[{name}] Approx surface tet simplification failed, using capped surface: {exc}")
+        return vertices, faces, False
+
+
+def _isotropic_voxel_surface_for_tet(name, vertices, faces, target_tet_count):
+    """Create a watertight, near-isotropic boundary for stable EMU tets.
+
+    Decimation preserves pathological skinny input triangles, which then force
+    TetGen slivers regardless of its volume quality settings. A filled voxel
+    level set removes sub-grid defects and marching cubes supplies uniformly
+    sized boundary triangles. The 5.5 calibration is the measured number of
+    quality tets per filled voxel for this muscle family.
+    """
+    vertices = np.asarray(vertices, dtype=np.float64)
+    faces = np.asarray(faces, dtype=np.int32)
+    target_tet_count = max(1000, int(target_tet_count or 0))
+    try:
+        source = trimesh.Trimesh(
+            vertices=vertices, faces=faces, process=False)
+        if not source.is_winding_consistent:
+            trimesh.repair.fix_normals(source, multibody=False)
+        volume = abs(float(source.volume))
+        if not np.isfinite(volume) or volume <= 1e-12:
+            volume = _estimate_closed_surface_volume(vertices, faces)
+        pitch = float(np.power(
+            max(5.5 * volume / target_tet_count, 1e-18), 1.0 / 3.0))
+        extent = np.maximum(np.asarray(source.extents, dtype=np.float64), 1e-9)
+        pitch = float(np.clip(pitch, np.min(extent) / 80.0,
+                              np.min(extent) / 6.0))
+        voxel_grid = source.voxelized(pitch).fill()
+        remeshed = voxel_grid.marching_cubes
+        remeshed.apply_transform(voxel_grid.transform)
+        # Marching cubes over binary occupancy has isotropic connectivity but
+        # retains visible voxel-scale terraces.  Non-shrinking Taubin passes
+        # round those terraces before TetGen; unlike decimation this preserves
+        # the uniform topology which prevents boundary-forced slivers.
+        trimesh.smoothing.filter_taubin(
+            remeshed, lamb=0.5, nu=0.53, iterations=8)
+        projected, source_distance, _ = source.nearest.on_surface(
+            np.asarray(remeshed.vertices, dtype=np.float64))
+        projection_blend = 0.65
+        remeshed.vertices = (
+            (1.0 - projection_blend) *
+            np.asarray(remeshed.vertices, dtype=np.float64) +
+            projection_blend * projected)
+        volume_after_smooth = abs(float(remeshed.volume))
+        if not remeshed.is_winding_consistent:
+            trimesh.repair.fix_normals(remeshed, multibody=False)
+        remesh_vertices = np.asarray(remeshed.vertices, dtype=np.float64)
+        remesh_faces = np.asarray(remeshed.faces, dtype=np.int32)
+        if len(remesh_vertices) == 0 or len(remesh_faces) == 0:
+            raise RuntimeError("voxel marching cubes returned an empty surface")
+        print(f"[{name}] EMU isotropic boundary: pitch={pitch*1000.0:.3g} mm, "
+              f"{len(vertices)}v/{len(faces)}f -> "
+              f"{len(remesh_vertices)}v/{len(remesh_faces)}f, "
+              f"target={target_tet_count} tets, Taubin=8, "
+              f"source projection={projection_blend:.0%}, "
+              f"boundary deviation={np.mean(source_distance)*(1-projection_blend)*1000.0:.3g} mm, "
+              f"anatomical volume ratio={volume_after_smooth / max(volume, 1e-30):.4f}")
+        return remesh_vertices, remesh_faces, True
+    except Exception as exc:
+        print(f"[{name}] EMU isotropic boundary failed ({exc}); "
+              f"trying decimation/repair fallback")
+        return _simplify_closed_surface_for_tet(
+            name, vertices, faces, target_tet_count)
+
+
+def _tet_volume_quality_stats(name, tet_vertices, tetrahedra):
+    tet_vertices = np.asarray(tet_vertices, dtype=np.float64)
+    tetrahedra = np.asarray(tetrahedra, dtype=np.int32)
+    if len(tet_vertices) == 0 or len(tetrahedra) == 0:
+        return tetrahedra, {
+            'count': 0, 'degenerate': 0, 'near_zero': 0,
+            'min_volume': 0.0, 'median_volume': 0.0,
+            'edge_cv': 0.0, 'scaled_jacobian_min': 0.0,
+            'scaled_jacobian_p01': 0.0, 'mean_ratio_min': 0.0,
+            'mean_ratio_p01': 0.0, 'critical_slivers': 0,
+        }
+
+    tv = tet_vertices[tetrahedra]
+    signed = np.einsum(
+        'ij,ij->i',
+        tv[:, 1] - tv[:, 0],
+        np.cross(tv[:, 2] - tv[:, 0], tv[:, 3] - tv[:, 0])) / 6.0
+    vol = np.abs(signed)
+    finite = np.isfinite(vol)
+    finite_vol = vol[finite]
+    median = float(np.median(finite_vol)) if len(finite_vol) else 0.0
+    mean = float(np.mean(finite_vol)) if len(finite_vol) else 0.0
+    min_v = float(np.min(finite_vol)) if len(finite_vol) else 0.0
+    p01 = float(np.percentile(finite_vol, 1.0)) if len(finite_vol) else 0.0
+    p99 = float(np.percentile(finite_vol, 99.0)) if len(finite_vol) else 0.0
+    deg_eps = max(1e-18, median * 1e-10)
+    near_eps = max(1e-16, median * 1e-4)
+    degenerate = (~finite) | (vol <= deg_eps)
+    if np.any(degenerate):
+        # TetGen can leave zero-volume artifacts around capped contour seams.
+        # They cannot contribute to a valid volume and poison the percentile
+        # quality gate, so remove them and recompute all metrics on the filled
+        # nondegenerate volume before deciding whether to accept the mesh.
+        kept = tetrahedra[~degenerate]
+        print(f"[{name}] Tet quality repair: removing "
+              f"{int(np.sum(degenerate))} degenerate tetrahedra")
+        if len(kept) == 0:
+            return tetrahedra, {
+                'count': 0, 'degenerate': int(np.sum(degenerate)),
+                'near_zero': 0, 'removed_degenerate': int(np.sum(degenerate)),
+                'scaled_jacobian_p01': 0.0, 'mean_ratio_p01': 0.0,
+                'critical_slivers': 0,
+            }
+        repaired, repaired_stats = _tet_volume_quality_stats(
+            name, tet_vertices, kept)
+        repaired_stats['removed_degenerate'] = int(np.sum(degenerate))
+        return repaired, repaired_stats
+    near_zero = finite & (vol > deg_eps) & (vol <= near_eps)
+
+    edge_lens = []
+    for i in range(4):
+        for j in range(i + 1, 4):
+            edge_lens.append(np.linalg.norm(tv[:, i] - tv[:, j], axis=1))
+    edge_lens = np.asarray(edge_lens, dtype=np.float64)
+    avg_edge = np.mean(edge_lens, axis=0)
+    edge_cv = float(np.std(avg_edge) / (np.mean(avg_edge) + 1e-30)) if len(avg_edge) else 0.0
+
+    # Shape metrics are scale-independent and expose slivers that volume-only
+    # diagnostics miss. Scaled Jacobian and mean ratio equal 1 for a regular
+    # tetrahedron and approach zero for a collapsed/sliver element.
+    corner_scaled = []
+    for corner in range(4):
+        others = [i for i in range(4) if i != corner]
+        e0 = tv[:, others[0]] - tv[:, corner]
+        e1 = tv[:, others[1]] - tv[:, corner]
+        e2 = tv[:, others[2]] - tv[:, corner]
+        numerator = np.abs(np.einsum('ij,ij->i', e0, np.cross(e1, e2)))
+        denominator = (np.linalg.norm(e0, axis=1) *
+                       np.linalg.norm(e1, axis=1) *
+                       np.linalg.norm(e2, axis=1))
+        corner_scaled.append(
+            np.sqrt(2.0) * numerator / np.maximum(denominator, 1e-30))
+    scaled_jacobian = np.clip(np.min(np.asarray(corner_scaled), axis=0), 0.0, 1.0)
+    edge_sq_sum = np.sum(edge_lens ** 2, axis=0)
+    mean_ratio = np.clip(
+        12.0 * np.power(np.maximum(3.0 * vol, 0.0), 2.0 / 3.0) /
+        np.maximum(edge_sq_sum, 1e-30), 0.0, 1.0)
+    sj_min = float(np.min(scaled_jacobian)) if len(scaled_jacobian) else 0.0
+    sj_p01 = float(np.percentile(scaled_jacobian, 1.0)) if len(scaled_jacobian) else 0.0
+    mr_min = float(np.min(mean_ratio)) if len(mean_ratio) else 0.0
+    mr_p01 = float(np.percentile(mean_ratio, 1.0)) if len(mean_ratio) else 0.0
+    critical_slivers = int(np.sum((scaled_jacobian < 1e-3) | (mean_ratio < 1e-3)))
+    weak_slivers = int(np.sum((scaled_jacobian < 0.03) | (mean_ratio < 0.03)))
+
+    stats = {
+        'count': int(len(tetrahedra)),
+        'degenerate': int(np.sum(degenerate)),
+        'near_zero': int(np.sum(near_zero)),
+        'removed_degenerate': 0,
+        'min_volume': min_v,
+        'p01_volume': p01,
+        'median_volume': median,
+        'mean_volume': mean,
+        'p99_volume': p99,
+        'near_zero_threshold': near_eps,
+        'degenerate_threshold': deg_eps,
+        'edge_cv': edge_cv,
+        'scaled_jacobian_min': sj_min,
+        'scaled_jacobian_p01': sj_p01,
+        'mean_ratio_min': mr_min,
+        'mean_ratio_p01': mr_p01,
+        'critical_slivers': critical_slivers,
+        'weak_slivers': weak_slivers,
+    }
+    print(f"[{name}] Tet quality: degenerate={stats['degenerate']} "
+          f"(removed 0; volume kept filled), near_zero={stats['near_zero']} "
+          f"(vol <= {near_eps:.3g}), min={min_v:.3g}, p01={p01:.3g}, "
+          f"median={median:.3g}, p99={p99:.3g}, edge_cv={edge_cv:.3g}")
+    print(f"[{name}] Tet shape: scaled-J min/p01={sj_min:.3g}/{sj_p01:.3g}, "
+          f"mean-ratio min/p01={mr_min:.3g}/{mr_p01:.3g}, "
+          f"critical/weak slivers={critical_slivers}/{weak_slivers}")
+    return tetrahedra, stats
+
+
+def _collect_connected_component_fibers(v, component_names):
+    state_fields = (
+        'contours', 'bounding_planes', 'stream_contours', 'stream_bounding_planes',
+        '_selected_stream_contours', '_selected_stream_bounding_planes',
+        'draw_contour_stream', 'max_stream_count', 'mvc_weights',
+        'waypoints', 'waypoints_original', 'waypoint_bary_coords',
+        'waypoint_level_regions', 'fiber_architecture',
+        '_belly_waypoints_before_tendon_extension',
+        '_tendon_extended_inspect_contours',
+        '_tendon_extended_inspect_bounding_planes',
+        '_tendon_extended_inspect_waypoints',
+        '_tendon_origin_auto_flip_mask', '_tendon_insertion_auto_flip_mask',
+        '_aligned_extension_bounding_planes',
+        'tendon_extended_fibers', 'origin_tendon_extension_name',
+        'insertion_tendon_extension_name', 'origin_tendon_reverse',
+        'insertion_tendon_reverse', 'enable_tendon_extension',
+        'fiber_positioning_method', 'sampling_method', 'fiber_sampling_seed',
+        'attach_skeletons', 'attach_skeletons_sub', 'attach_skeleton_names',
+    )
+    out = []
+    for comp_name in component_names:
+        comp = v.zygote_muscle_meshes.get(comp_name)
+        if comp is None:
+            continue
+        waypoints = getattr(comp, 'waypoints', None)
+        waypoints_original = getattr(comp, 'waypoints_original', None)
+        n_streams = len(waypoints) if waypoints is not None else 0
+        out.append({
+            'snapshot_version': 2,
+            'component': comp_name,
+            'part': _mesh_part_from_name(comp_name),
+            'stream_start': None,
+            'stream_end': None,
+            'waypoints': _copy_stream_levels(waypoints, n_streams) if n_streams else None,
+            'waypoints_original': (
+                _copy_stream_levels(waypoints_original, len(waypoints_original))
+                if waypoints_original is not None else None
+            ),
+            'waypoint_level_regions': copy.deepcopy(
+                getattr(comp, 'waypoint_level_regions', None)),
+            'fiber_architecture': [
+                np.asarray(f, dtype=np.float64).copy()
+                for f in getattr(comp, 'fiber_architecture', []) or []
+            ],
+            'tendon_extended_fibers': bool(getattr(comp, 'tendon_extended_fibers', False)),
+            'origin_tendon_extension_name': getattr(comp, 'origin_tendon_extension_name', ''),
+            'insertion_tendon_extension_name': getattr(comp, 'insertion_tendon_extension_name', ''),
+            'component_state': {
+                field: copy.deepcopy(getattr(comp, field))
+                for field in state_fields if hasattr(comp, field)
+            },
+        })
+    return out
+
+
+def _restore_connected_component_fibers(v, group_name, surface_name, surface):
+    """Restore saved group component state into the live component objects."""
+    snapshots = getattr(surface, '_connected_component_fibers', None) or []
+    restored = []
+    missing = []
+    for entry in snapshots:
+        comp_name = entry.get('component', '')
+        comp = v.zygote_muscle_meshes.get(comp_name)
+        if comp is None:
+            missing.append(comp_name)
+            continue
+
+        state = entry.get('component_state') or {}
+        if state:
+            for field, value in state.items():
+                setattr(comp, field, copy.deepcopy(value))
+        else:
+            # Backward compatibility with the original lightweight snapshot.
+            for field in ('waypoints', 'waypoints_original',
+                          'waypoint_level_regions', 'fiber_architecture'):
+                if entry.get(field) is not None:
+                    setattr(comp, field, copy.deepcopy(entry[field]))
+            comp.tendon_extended_fibers = bool(
+                entry.get('tendon_extended_fibers', False))
+            comp.origin_tendon_extension_name = entry.get(
+                'origin_tendon_extension_name', '')
+            comp.insertion_tendon_extension_name = entry.get(
+                'insertion_tendon_extension_name', '')
+
+        comp._connected_mesh_owner_name = surface_name
+        if hasattr(comp, '_emu_rest_waypoints'):
+            delattr(comp, '_emu_rest_waypoints')
+        comp._fiber_draw_dirty = True
+        comp._fiber_draw_pts = None
+        comp._fiber_draw_lines = None
+        comp.is_draw_fiber_architecture = bool(getattr(comp, 'waypoints', None))
+        comp.is_draw_tet_mesh = False
+        restored.append(comp_name)
+
+    # Reconnect saved aligned tendon display planes to their owning bellies.
+    for entry in snapshots:
+        belly_name = entry.get('component', '')
+        belly = v.zygote_muscle_meshes.get(belly_name)
+        if belly is None or not getattr(belly, 'tendon_extended_fibers', False):
+            continue
+        display_objects = []
+        for field in ('origin_tendon_extension_name',
+                      'insertion_tendon_extension_name'):
+            tendon_name = getattr(belly, field, '')
+            tendon = v.zygote_muscle_meshes.get(tendon_name) if tendon_name else None
+            if (tendon is not None
+                    and getattr(tendon, '_aligned_extension_bounding_planes', None)):
+                tendon._aligned_extension_owner_id = id(belly)
+                display_objects.append(tendon)
+        belly._tendon_alignment_display_objects = display_objects
+
+    _apply_zygote_group_links(v, group_name)
+    surface._connected_original_tet_components = [surface_name]
+    surface.is_draw_tet_mesh = True
+    if missing:
+        print(f"[{group_name}] Group fiber restore missing component(s): {missing}")
+    print(f"[{group_name}] Restored current state for {len(restored)} group component(s)")
+    return len(restored) > 0
+
+
+def _deform_group_fibers_from_emu(v, group_name, rest_vertices, positions):
+    """Move saved component fiber samples with the nearest EMU tet vertex."""
+    from scipy.spatial import cKDTree
+    tree = cKDTree(np.asarray(rest_vertices, dtype=np.float64))
+    displacement = np.asarray(positions, dtype=np.float64) - rest_vertices
+    state = _ensure_zygote_group_mapping(v, group_name)
+    for name in _zygote_group_guide_names(v, group_name):
+        obj = v.zygote_muscle_meshes.get(name)
+        if obj is None or not getattr(obj, 'waypoints', None):
+            continue
+        if getattr(obj, '_emu_rest_waypoints', None) is None:
+            obj._emu_rest_waypoints = copy.deepcopy(obj.waypoints)
+        deformed = copy.deepcopy(obj._emu_rest_waypoints)
+        for si, stream in enumerate(deformed):
+            for li, points in enumerate(stream):
+                points = np.asarray(points, dtype=np.float64)
+                _, nearest = tree.query(points.reshape(-1, 3))
+                deformed[si][li] = points + displacement[nearest].reshape(points.shape)
+        obj.waypoints = deformed
+        obj._fiber_draw_dirty = True
+        obj._fiber_draw_pts = None
+        obj._fiber_draw_lines = None
+
+
+def _reset_group_emu_pose(v, group_name, surface):
+    rest = getattr(surface, '_emu_rest_vertices', None)
+    if rest is not None:
+        surface.tet_vertices = np.asarray(rest, dtype=np.float32).copy()
+        surface.tet_render_contact_offsets = None
+        _invalidate_tet_draw_cache(surface)
+        surface.is_draw_tet_mesh = True
+    for name in _zygote_group_guide_names(v, group_name):
+        obj = v.zygote_muscle_meshes.get(name)
+        if obj is not None and hasattr(obj, '_emu_rest_waypoints'):
+            obj.waypoints = copy.deepcopy(obj._emu_rest_waypoints)
+            obj._fiber_draw_dirty = True
+            obj._fiber_draw_pts = None
+            obj._fiber_draw_lines = None
+
+
+def _emu_rest_inside_bone_vertices(v, prepared, surface):
+    """Find muscle surface vertices anatomically embedded in bones at rest."""
+    from viewer.fem_sim import _build_bone_trimeshes
+    rest = np.asarray(prepared['vertices'], dtype=np.float64)
+    surface_vertices = np.unique(prepared['surface_faces']).astype(np.int32)
+    rest_min = np.min(rest, axis=0) - 0.02
+    rest_max = np.max(rest, axis=0) + 0.02
+    rest_bones = _build_bone_trimeshes(
+        v, {prepared['name']: surface}, v.env.skel, verbose=False)
+    nearby = [
+        mesh for mesh in rest_bones
+        if np.all(mesh.bounds[1] >= rest_min) and np.all(mesh.bounds[0] <= rest_max)
+    ]
+    exempt = set()
+    for bone in nearby:
+        points = rest[surface_vertices]
+        in_bbox = np.all(
+            (points >= bone.bounds[0]) & (points <= bone.bounds[1]), axis=1)
+        if not np.any(in_bbox):
+            continue
+        ids = surface_vertices[in_bbox]
+        try:
+            inside = bone.contains(rest[ids])
+            exempt.update(int(vi) for vi in ids[inside])
+        except Exception as exc:
+            print(f"[{prepared['name']}] Rest-inside collision query failed: {exc}")
+    # The displayed anatomical skin is independently embedded in the tet
+    # volume.  Preserve its own rest intersections instead of inferring them
+    # from a nearby regularized boundary vertex.
+    render_rest = getattr(surface, 'tet_render_vertices_rest', None)
+    render_exempt = set()
+    if render_rest is not None:
+        render_rest = np.asarray(render_rest, dtype=np.float64)
+        for bone in nearby:
+            in_bbox = np.all(
+                (render_rest >= bone.bounds[0]) &
+                (render_rest <= bone.bounds[1]), axis=1)
+            ids = np.where(in_bbox)[0]
+            if len(ids) == 0:
+                continue
+            try:
+                inside = bone.contains(render_rest[ids])
+                render_exempt.update(int(i) for i in ids[inside])
+            except Exception as exc:
+                print(f"[{prepared['name']}] Rest-skin collision query failed: {exc}")
+    prepared['collision_exempt_skin_vertices'] = render_exempt
+    print(f"[{prepared['name']}] EMU rest collision exemptions: {len(exempt)} "
+          f"simulation / {len(render_exempt)} anatomical-skin vertices "
+          f"inside {len(nearby)} nearby rest bone meshes")
+    return exempt
+
+
+def _select_emu_collision_bones(group_name, all_bones, reference_points):
+    """Select anatomically relevant posed bones without a swept AABB."""
+    from scipy.spatial import cKDTree
+    lowered = str(group_name).lower()
+    side = 'L_' if lowered.startswith('l_') else (
+        'R_' if lowered.startswith('r_') else '')
+    # Rectus and the other thigh muscles can contact this compact chain.  A
+    # large posed-muscle AABB previously admitted 17--23 unrelated bones.
+    thigh_tokens = (
+        'femor', 'vastus', 'adductor', 'sartorius', 'gracilis',
+        'glute', 'tensor_fascia')
+    if side and any(token in lowered for token in thigh_tokens):
+        allowed = {
+            side + 'Os_Coxae', side + 'Femur', side + 'Patella',
+            side + 'Tibia_Fibula', 'Saccrum_Coccyx',
+        }
+        selected = [
+            mesh for mesh in all_bones
+            if mesh.metadata.get('bone_name', '') in allowed]
+        if selected:
+            print(f"[{group_name}] EMU collision bones: "
+                  f"{[m.metadata.get('bone_name') for m in selected]}")
+            return selected
+
+    points = np.asarray(reference_points, dtype=np.float64)
+    tree = cKDTree(points)
+    selected = []
+    for mesh in all_bones:
+        name = str(mesh.metadata.get('bone_name', ''))
+        if side and not (name.startswith(side) or name == 'Saccrum_Coccyx'):
+            continue
+        vertices = np.asarray(mesh.vertices)
+        if len(vertices) > 2000:
+            vertices = vertices[::max(1, len(vertices) // 2000)]
+        distance = float(np.min(tree.query(vertices, k=1)[0]))
+        if distance <= 0.04:
+            selected.append(mesh)
+    print(f"[{group_name}] EMU collision bones: "
+          f"{[m.metadata.get('bone_name') for m in selected]}")
+    return selected
+
+
+def _run_group_emu_current_pose(v, group_name, surface, state):
+    """Solve one EMU quasistatic step using the DART skeleton's current pose."""
+    if (getattr(surface, 'tet_vertices', None) is None or
+            getattr(surface, 'tet_tetrahedra', None) is None):
+        raise RuntimeError("Load or tetrahedralize the group surface tet first")
+
+    # Import lazily: Taichi/EMU startup should not affect ordinary viewer use.
+    import test_emu as emu_view
+    from tools import bake_emu
+    # Contact offsets are transient display corrections for embedded skin
+    # vertices that cannot be moved through a fixed attachment tet.
+    surface.tet_render_contact_offsets = None
+
+    if getattr(surface, '_emu_rest_vertices', None) is None:
+        surface._emu_rest_vertices = np.asarray(
+            surface.tet_vertices, dtype=np.float64).copy()
+    rest = np.asarray(surface._emu_rest_vertices, dtype=np.float64)
+    tets = np.asarray(surface.tet_tetrahedra, dtype=np.int32)
+    auto_smooth = bool(state.get('emu_auto_smooth', True))
+    requested_modes = max(1, int(state.get('emu_k_modes', 16)))
+    # 32 modes was slower, gave no combined-pose improvement, and failed the
+    # large benchmark one load step earlier.  The best tested balance is 16.
+    modes = max(requested_modes, 16) if auto_smooth else requested_modes
+    attachment_rings = int(np.clip(state.get('emu_attachment_rings', 1), 0, 2))
+    cache_key = (len(rest), len(tets), float(np.sum(rest)),
+                 id(surface.tet_tetrahedra), attachment_rings)
+    cache = getattr(surface, '_emu_viewer_cache', None)
+
+    current_pose = v.env.skel.getPositions().copy()
+    try:
+        if cache is None or cache.get('key') != cache_key:
+            # Endpoint local coordinates are defined in the DART rest pose.
+            v.env.skel.setPositions(np.zeros(v.env.skel.getNumDofs()))
+            if not hasattr(v, '_emu_bone_trees'):
+                v._emu_bone_trees = emu_view._load_bone_trees()
+            data = {
+                'vertices': rest,
+                'tetrahedra': tets,
+                'tet_region_labels': getattr(surface, 'tet_region_labels', None),
+                'tet_component_labels': getattr(surface, 'tet_component_labels', None),
+                'connected_component_fibers': getattr(
+                    surface, '_connected_component_fibers', None),
+            }
+            prepared = emu_view.prepare_group_data(
+                data, group_name, v.env.skel, v._emu_bone_trees,
+                source_path='live viewer group',
+                attachment_rings=attachment_rings)
+            prepared['collision_exempt_vertices'] = _emu_rest_inside_bone_vertices(
+                v, prepared, surface)
+            precomp = bake_emu.precompute_emu(
+                prepared['vertices'], prepared['tetrahedra'],
+                prepared['fixed_vertices'], prepared['axis_coordinate'],
+                k_modes=modes)
+            cache = {'key': cache_key, 'prepared': prepared, 'precomp': precomp,
+                     'k_modes': modes}
+            surface._emu_viewer_cache = cache
+        elif cache.get('k_modes') != modes:
+            prepared = cache['prepared']
+            cache['precomp'] = bake_emu.precompute_emu(
+                prepared['vertices'], prepared['tetrahedra'],
+                prepared['fixed_vertices'], prepared['axis_coordinate'],
+                k_modes=modes)
+            cache['k_modes'] = modes
+    finally:
+        # The requested pose is authoritative; never leave DART in rest pose.
+        v.env.skel.setPositions(current_pose)
+
+    prepared = cache['prepared']
+    precomp = cache['precomp']
+    rigid_targets = bake_emu.compute_rigid_blend_positions(
+        prepared['lbs_bindings'], v.env.skel,
+        prepared['axis_coordinate'])
+    preview_F = bake_emu._deformation_gradients_from_q(
+        rigid_targets, prepared['tetrahedra'], precomp['Dm_inv'])
+    preview_J = np.linalg.det(preview_F)
+    preview_stretch = np.linalg.svd(preview_F, compute_uv=False)[:, 0]
+    print(f"[{group_name}] EMU direct-pose preview (diagnostic only): "
+          f"inverted={int(np.sum(preview_J <= 0.0))}, "
+          f"J min={float(np.min(preview_J)):.3g}, "
+          f"stretch max={float(np.max(preview_stretch)):.3g}")
+    direct_inverted = int(np.sum(preview_J <= 0.0))
+    # Empirical sweep boundary: poses above this direct-target inversion count
+    # required dozens of q-space substeps and only exchanged inversions for
+    # 10x--45x local stretch. Do not spend minutes producing an unusable mesh.
+    severe_pose_limit = max(1000, int(0.05 * len(prepared['tetrahedra'])))
+    severe_pose = direct_inverted > severe_pose_limit
+    if severe_pose:
+        print(f"[{group_name}] EMU warning: direct target has "
+              f"{direct_inverted} inverted tets (preview limit "
+              f"{severe_pose_limit}); attempting adaptive continuation")
+
+    labels = getattr(surface, 'tet_region_labels', None)
+    if labels is None or len(labels) != len(prepared['tetrahedra']):
+        labels = np.full(len(prepared['tetrahedra']), 'belly', dtype=object)
+        print(f"[{group_name}] EMU warning: tet region labels unavailable; treating all tets as belly")
+    else:
+        labels = np.asarray(labels).astype(str)
+    tendon_mask = np.char.find(labels, 'tendon') >= 0
+    belly_mask = ~tendon_mask
+    region_counts = _count_simple_labels(labels.tolist())
+    print(f"[{group_name}] EMU tet material regions: {region_counts}")
+    has_tendon_guides = any(
+        'tendon' in _mesh_part_from_name(name)
+        for name in _zygote_group_guide_names(v, group_name))
+    if has_tendon_guides and not np.any(tendon_mask):
+        raise RuntimeError(
+            "group has tendon guides but the loaded tet has no tendon-labeled "
+            "elements; retetrahedralize or reload it to refresh material labels")
+
+    muscle_E = max(float(state.get('emu_muscle_youngs', 6e6)), 1.0)
+    tendon_E = max(float(state.get('emu_tendon_youngs', 4.5e8)), 1.0)
+    poisson = float(np.clip(state.get('emu_poisson', 0.49), 0.0, 0.499))
+    youngs = np.where(tendon_mask, tendon_E, muscle_E)
+    mu, lam = bake_emu.lame_parameters(youngs, poisson)
+    activation_value = float(np.clip(state.get('emu_activation', 0.0), 0.0, 1.0))
+    max_active_stress = max(
+        float(state.get('emu_max_active_stress', 6e6)), 0.0)
+    active_coefficient = activation_value * max_active_stress
+    activation = np.where(belly_mask, active_coefficient, 0.0)
+    print(f"[{group_name}] EMU materials: belly E={muscle_E:.3g} Pa, "
+          f"tendon E={tendon_E:.3g} Pa, ratio={tendon_E/muscle_E:.3g}; "
+          f"activation={activation_value:.3g}, "
+          f"active coefficient={active_coefficient:.3g} Pa")
+
+    fixed_mask = np.zeros(len(prepared['vertices']), dtype=bool)
+    fixed_mask[prepared['fixed_vertices']] = True
+    bone_trimeshes = []
+    muscle_surfaces = None
+    if bool(state.get('emu_bone_collision', True)):
+        from viewer.fem_sim import _build_bone_trimeshes
+        all_bones = _build_bone_trimeshes(
+            v, {group_name: surface}, v.env.skel, verbose=True)
+        bone_trimeshes = _select_emu_collision_bones(
+            group_name, all_bones, rigid_targets)
+        surface_vertices = np.unique(prepared['surface_faces']).astype(np.int32)
+        collision_exempt = (
+            set(prepared.get('collision_exempt_vertices', set()))
+            if bool(state.get('emu_ignore_rest_inside', True)) else set()
+        )
+        muscle_surfaces = [{
+            'surf_verts': surface_vertices,
+            'fixed_set': set(prepared['fixed_vertices']),
+            'collision_exempt_set': collision_exempt,
+            'offset': 0,
+        }]
+        print(f"[{group_name}] EMU collision: {len(bone_trimeshes)} nearby posed bone meshes, "
+              f"{len(surface_vertices)} surface vertices, "
+              f"{len(collision_exempt)} rest-inside exempt")
+
+    effective_alpha = max(float(state.get('emu_alpha', 1.0)), 0.0)
+    effective_iters = max(int(state.get('emu_max_iters', 5)), 5) \
+        if auto_smooth else max(1, int(state.get('emu_max_iters', 5)))
+    requested_load_steps = max(1, int(state.get('emu_load_steps', 10)))
+    # Adaptive continuation: the user value is the minimum resolution, while
+    # difficult poses get finer attachment increments automatically. The
+    # direct preview is only used to choose step density; EMU still solves the
+    # actual path and validates every accepted increment.
+    preview_severity = max(
+        float(np.max(preview_stretch)) / 2.0,
+        float(direct_inverted) / max(1.0, 0.01 * len(prepared['tetrahedra'])))
+    adaptive_cap = 32 if severe_pose else 24
+    adaptive_steps = int(np.clip(
+        np.ceil(4.0 + 2.0 * preview_severity), 4, adaptive_cap))
+    load_steps = max(requested_load_steps, adaptive_steps)
+    print(f"[{group_name}] EMU adaptive attachment steps: "
+          f"requested={requested_load_steps}, selected={load_steps}, "
+          f"severity={preview_severity:.3g}")
+    started = time.time()
+    positions = prepared['vertices'].copy()
+    warm_F = precomp['G'] @ positions.ravel()
+    info = None
+    qspace_fallbacks = 0
+    for load_step in range(1, load_steps + 1):
+        previous_positions = positions.copy()
+        previous_fraction = (load_step - 1) / load_steps
+        fraction = load_step / load_steps
+        step_targets = bake_emu.compute_rigid_blend_positions_at_fraction(
+            prepared['lbs_bindings'], v.env.skel,
+            prepared['axis_coordinate'], fraction)
+        is_final_step = load_step == load_steps
+        print(f"[{group_name}] EMU attachment continuation "
+              f"{load_step}/{load_steps} ({fraction:.0%})")
+        positions, info = bake_emu.emu_solve(
+            positions, precomp, fixed_mask, step_targets, mu, lam,
+            effective_alpha, max_iters=effective_iters,
+            verbose=(load_step == 1 or is_final_step), use_gpu=False,
+            activation=activation * fraction,
+            warm_F=warm_F,
+            # Bone meshes are at the final DART pose, so contact is physically
+            # meaningful only after the attachment continuation reaches 100%.
+            bone_trimeshes=(bone_trimeshes or None) if is_final_step else None,
+            muscle_surfaces=muscle_surfaces if is_final_step else None,
+            margin=max(float(state.get('emu_collision_margin', 0.003)), 0.0),
+            collision_stiffness=max(
+                float(state.get('emu_collision_stiffness', 1e7)), 0.0),
+            collision_iterations=max(
+                int(state.get('emu_collision_iterations', 1)), 1))
+        # Start the next load increment from the deformation gradients of the
+        # reconstructed continuous mesh. Carrying discontinuous independent F
+        # across increments accumulated a huge, non-physical ACAP residual.
+        warm_F = precomp['G'] @ positions.ravel()
+        step_F = bake_emu._deformation_gradients_from_q(
+            positions, prepared['tetrahedra'], precomp['Dm_inv'])
+        step_J = np.linalg.det(step_F)
+        step_stretch = np.linalg.svd(step_F, compute_uv=False)[:, 0]
+        print(f"[{group_name}] EMU continuation quality {load_step}/{load_steps}: "
+              f"inverted={int(np.sum(step_J <= 0.0))}, "
+              f"J min={float(np.min(step_J)):.3g}, "
+              f"stretch max={float(np.max(step_stretch)):.3g}")
+        if np.max(step_stretch) >= 3.0:
+            print(f"[{group_name}] EMU high-stretch warning at load step "
+                  f"{load_step}/{load_steps}: max={np.max(step_stretch):.3g}")
+        step_max_stretch = float(np.max(step_stretch))
+        unsafe_jacobian = bool(np.any(step_J <= 0.02))
+        unsafe_stretch = step_max_stretch > 4.0
+        if unsafe_jacobian or unsafe_stretch:
+            print(f"[{group_name}] Reduced EMU unsafe at load step "
+                  f"{load_step}/{load_steps} "
+                  f"(J min={np.min(step_J):.3g}, stretch={step_max_stretch:.3g}); "
+                  f"trying exact q-space quality fallback")
+            fallback_positions = None
+            fallback_info = None
+            # If the reduced reconstruction is still orientation-preserving,
+            # it is the closest and best initial state for exact relaxation.
+            if np.min(step_J) > 0.02:
+                direct_relaxed, direct_info = (
+                    bake_emu.relax_positions_with_jacobian_barrier(
+                        positions, precomp, fixed_mask, step_targets,
+                        mu, lam, max_iters=30,
+                        activation=activation * fraction))
+                if direct_relaxed is not None:
+                    direct_F = bake_emu._deformation_gradients_from_q(
+                        direct_relaxed, prepared['tetrahedra'], precomp['Dm_inv'])
+                    direct_stretch = np.linalg.svd(
+                        direct_F, compute_uv=False)[:, 0]
+                    direct_min_j = float(np.min(np.linalg.det(direct_F)))
+                    direct_max_stretch = float(np.max(direct_stretch))
+                    if (np.all(np.isfinite(direct_stretch)) and
+                            direct_min_j > 0.02 and
+                            direct_max_stretch <= 8.0 and
+                            (not unsafe_stretch or
+                             direct_max_stretch < 0.95 * step_max_stretch)):
+                        fallback_positions = direct_relaxed
+                        fallback_info = direct_info
+                        print(f"[{group_name}] q-space direct fallback accepted, "
+                              f"J min={direct_info['min_j']:.3g}, "
+                              f"stretch max={direct_max_stretch:.3g}")
+            # Adaptively traverse only this unsafe interval. Keep accepted
+            # progress, halve a failed increment, and grow it after success.
+            if fallback_positions is None:
+                trial_positions = previous_positions.copy()
+                previous_sub_targets = (
+                    bake_emu.compute_rigid_blend_positions_at_fraction(
+                        prepared['lbs_bindings'], v.env.skel,
+                        prepared['axis_coordinate'], previous_fraction))
+                current_fraction = previous_fraction
+                interval = fraction - previous_fraction
+                increment = interval / 4.0
+                minimum_increment = interval / 1024.0
+                accepted_substeps = 0
+                rejected_substeps = 0
+                fallback_attempts = 0
+                while (current_fraction < fraction - 1e-12 and
+                        fallback_attempts < 32):
+                    fallback_attempts += 1
+                    sub_fraction = min(fraction, current_fraction + increment)
+                    sub_targets = bake_emu.compute_rigid_blend_positions_at_fraction(
+                        prepared['lbs_bindings'], v.env.skel,
+                        prepared['axis_coordinate'], sub_fraction)
+                    # Predictor: carry every vertex with the incremental
+                    # blended rigid field before snapping the hard cap. This
+                    # prevents 3-fixed/1-free sliver tets from leaving their
+                    # free vertex behind during a cap rotation.
+                    predicted = trial_positions + sub_targets - previous_sub_targets
+                    relaxed, fallback_info = (
+                        bake_emu.relax_positions_with_jacobian_barrier(
+                            predicted, precomp, fixed_mask, sub_targets,
+                            mu, lam, max_iters=40,
+                            activation=activation * sub_fraction))
+                    if relaxed is None:
+                        rejected_substeps += 1
+                        increment *= 0.5
+                        if increment < minimum_increment:
+                            break
+                        continue
+                    relaxed_F = bake_emu._deformation_gradients_from_q(
+                        relaxed, prepared['tetrahedra'], precomp['Dm_inv'])
+                    relaxed_J = np.linalg.det(relaxed_F)
+                    relaxed_stretch = np.linalg.svd(
+                        relaxed_F, compute_uv=False)[:, 0]
+                    if (np.min(relaxed_J) <= 0.02 or
+                            not np.all(np.isfinite(relaxed_stretch)) or
+                            float(np.max(relaxed_stretch)) > 8.0):
+                        rejected_substeps += 1
+                        increment *= 0.5
+                        if increment < minimum_increment:
+                            break
+                        continue
+                    trial_positions = relaxed
+                    previous_sub_targets = sub_targets
+                    current_fraction = sub_fraction
+                    accepted_substeps += 1
+                    increment = min(increment * 1.5,
+                                    fraction - current_fraction)
+                if current_fraction >= fraction - 1e-12:
+                    fallback_positions = trial_positions
+                    print(f"[{group_name}] adaptive q-space fallback accepted: "
+                          f"{accepted_substeps} accepted / "
+                          f"{rejected_substeps} rejected substeps, "
+                          f"J min={fallback_info['min_j']:.3g}")
+            if fallback_positions is None:
+                reason = fallback_info.get('reason', fallback_info.get('message', 'unsafe')) \
+                    if fallback_info else 'unsafe'
+                raise RuntimeError(
+                    f"EMU continuation became invalid at load step "
+                    f"{load_step}/{load_steps}; q-space fallback failed: {reason}")
+            positions = fallback_positions
+            warm_F = precomp['G'] @ positions.ravel()
+            qspace_fallbacks += 1
+
+    # Contact must be checked on the exact anatomical shell that the viewer
+    # displays.  That shell is embedded in the regularized simulation volume
+    # and can penetrate a bone even when the hidden tet boundary does not.
+    skin_projected = 0
+    skin_residual = 0
+    render_rest = getattr(surface, 'tet_render_vertices_rest', None)
+    render_indices = getattr(surface, 'tet_render_vertex_indices', None)
+    render_weights = getattr(surface, 'tet_render_vertex_weights', None)
+    render_tet_rest = getattr(surface, 'tet_render_tet_rest_vertices', None)
+    if (bone_trimeshes and render_rest is not None and
+            render_indices is not None and render_weights is not None and
+            render_tet_rest is not None):
+        positions, skin_projected, skin_residual, skin_offsets = (
+            bake_emu.project_embedded_skin_out_of_bones(
+                positions, precomp, bone_trimeshes,
+                render_rest, render_indices, render_weights, render_tet_rest,
+                prepared['fixed_vertices'],
+                exempt_tet_vertices=(
+                    prepared.get('collision_exempt_vertices', set())
+                    if bool(state.get('emu_ignore_rest_inside', True)) else set()),
+                exempt_skin_vertices=(
+                    prepared.get('collision_exempt_skin_vertices', set())
+                    if bool(state.get('emu_ignore_rest_inside', True)) else set()),
+                margin=max(float(state.get('emu_collision_margin', 0.003)), 0.0),
+                passes=max(int(state.get('emu_collision_iterations', 1)) + 3, 4)))
+        if skin_residual:
+            surface.tet_render_contact_offsets = np.asarray(
+                skin_offsets, dtype=np.float64)
+            _invalidate_tet_draw_cache(surface)
+        print(f"[{group_name}] EMU anatomical-skin collision: "
+              f"projected={skin_projected}, residual={skin_residual}")
+        eligible_skin_count = max(
+            len(render_rest) - len(prepared.get(
+                'collision_exempt_skin_vertices', set())), 1)
+        residual_limit = max(20, int(0.005 * eligible_skin_count))
+        if skin_residual > residual_limit:
+            print(f"[{group_name}] EMU warning: {skin_residual} residual "
+                  f"skin contacts use transient display offsets "
+                  f"(preferred limit {residual_limit})")
+    elapsed = time.time() - started
+    if not np.all(np.isfinite(positions)):
+        raise RuntimeError("EMU returned non-finite tet positions")
+    safety_scale = 1.0
+
+    deformation = bake_emu._deformation_gradients_from_q(
+        positions, prepared['tetrahedra'], precomp['Dm_inv'])
+    det_f = np.linalg.det(deformation)
+    singular_values = np.linalg.svd(deformation, compute_uv=False)
+    max_stretch = singular_values[:, 0]
+    quality_text = (
+        f"inverted={int(np.sum(det_f <= 0.0))}, "
+        f"J min/p01={float(np.min(det_f)):.3g}/"
+        f"{float(np.quantile(det_f, 0.01)):.3g}, "
+        f"stretch p99/max={float(np.quantile(max_stretch, 0.99)):.3g}/"
+        f"{float(np.max(max_stretch)):.3g}")
+    print(f"[{group_name}] EMU tet quality: {quality_text}")
+
+    if (np.any(det_f <= 0.02) or not np.all(np.isfinite(max_stretch)) or
+            float(np.max(max_stretch)) > 8.0):
+        raise RuntimeError(
+            f"EMU final quality rejected; result was not displayed: {quality_text}")
+
+    surface.tet_vertices = np.asarray(positions, dtype=np.float32)
+    surface.is_draw_tet_mesh = True
+    _invalidate_tet_draw_cache(surface)
+    _deform_group_fibers_from_emu(
+        v, group_name, prepared['vertices'], positions)
+    terms = info.get('energy_terms', {})
+    state['emu_last_status'] = (
+        f"{info['iterations']} iter, E={info['energy']:.4g}, {elapsed:.2f}s; "
+        f"{int(np.sum(belly_mask))} belly / {int(np.sum(tendon_mask))} tendon tets; "
+        f"iso/fiber/aACAP={terms.get('isotropic', 0.0):.3g}/"
+        f"{terms.get('fiber', 0.0):.3g}/{terms.get('acap_weighted', 0.0):.3g}; "
+        f"activation={activation_value:.3g}, active={active_coefficient:.3g}Pa; "
+        f"alpha={effective_alpha:.3g}, modes={modes}, load-steps={load_steps}, "
+        f"q-space-fallbacks={qspace_fallbacks}, "
+        f"collision peak/final={info.get('collisions', 0)}/"
+        f"{info.get('final_collisions', 0)}, "
+        f"projected={info.get('projected_collisions', 0)}, "
+        f"skin-projected/residual={skin_projected}/{skin_residual}, "
+        f"rest-exempt={len(prepared.get('collision_exempt_vertices', set())) if bool(state.get('emu_ignore_rest_inside', True)) else 0}; "
+        f"quality-scale={safety_scale:.3g}; "
+        f"{quality_text}")
+    print(f"[{group_name}] EMU current-pose bake complete: {state['emu_last_status']}")
+    return True
+
+
+def _classify_tets_by_component_containment(v, component_names, tet_vertices, tetrahedra):
+    tet_vertices = np.asarray(tet_vertices, dtype=np.float64)
+    tetrahedra = np.asarray(tetrahedra, dtype=np.int32)
+    if len(tet_vertices) == 0 or len(tetrahedra) == 0:
+        return None, None, None, None
+
+    centroids = tet_vertices[tetrahedra].mean(axis=1)
+    tet_regions = [None] * len(tetrahedra)
+    tet_mixed = np.zeros(len(tetrahedra), dtype=bool)
+    component_surfaces = []
+    for comp_name in component_names:
+        comp = v.zygote_muscle_meshes.get(comp_name)
+        part = _mesh_part_from_name(comp_name)
+        verts, faces, regions = _component_closed_surface_for_labels(comp, part, comp_name)
+        if verts is None or faces is None or len(faces) == 0:
+            continue
+        priority = 0 if 'tendon' in part else 1
+        component_surfaces.append({
+            'name': comp_name,
+            'part': part,
+            'vertices': verts,
+            'faces': faces,
+            'regions': regions,
+            'priority': priority,
+        })
+
+    # Tendon wins in overlaps/junctions. Belly fills the remaining volume.
+    component_surfaces.sort(key=lambda item: item['priority'])
+
+    try:
+        import pyvista as pv
+        query = pv.PolyData(centroids)
+        for surface in component_surfaces:
+            faces_flat = np.hstack([
+                np.full((len(surface['faces']), 1), 3, dtype=np.int64),
+                np.asarray(surface['faces'], dtype=np.int64)
+            ]).ravel()
+            poly = pv.PolyData(np.asarray(surface['vertices'], dtype=np.float64), faces_flat)
+            selected = query.select_enclosed_points(poly, tolerance=1e-8, check_surface=False)
+            inside = np.asarray(selected.point_data['SelectedPoints'], dtype=bool)
+            for i, flag in enumerate(inside):
+                if not flag:
+                    continue
+                if tet_regions[i] is None:
+                    tet_regions[i] = {'part': surface['part'], 'component': surface['name']}
+                else:
+                    tet_mixed[i] = True
+    except Exception as exc:
+        print(f"  Tet component containment classification failed: {exc}")
+
+    # Fallback for boundary or failed containment cases: nearest component
+    # surface vertex. This keeps every tet labeled, but successful containment
+    # labels above are preferred.
+    try:
+        from scipy.spatial import cKDTree
+        all_surface_vertices = []
+        all_surface_regions = []
+        for surface in component_surfaces:
+            all_surface_vertices.extend(np.asarray(surface['vertices'], dtype=np.float64).tolist())
+            all_surface_regions.extend([
+                {'part': surface['part'], 'component': surface['name']}
+                for _ in range(len(surface['vertices']))
+            ])
+        if all_surface_vertices:
+            tree = cKDTree(np.asarray(all_surface_vertices, dtype=np.float64))
+            _, nearest = tree.query(centroids, k=1)
+            for i, region in enumerate(tet_regions):
+                if region is None:
+                    tet_regions[i] = all_surface_regions[int(nearest[i])]
+                    tet_mixed[i] = True
+    except Exception:
+        pass
+
+    if any(region is None for region in tet_regions):
+        tet_regions = [
+            region if region is not None else {'part': 'unknown', 'component': 'unknown'}
+            for region in tet_regions
+        ]
+
+    tet_region_labels = [region.get('part', 'unknown') for region in tet_regions]
+    tet_component_labels = [region.get('component', 'unknown') for region in tet_regions]
+
+    # Per-vertex regions are still useful for surface coloring. Use nearest
+    # component surface vertices; per-tet material labels above are authoritative.
+    tet_vertex_regions = None
+    try:
+        from scipy.spatial import cKDTree
+        all_surface_vertices = []
+        all_surface_regions = []
+        for surface in component_surfaces:
+            all_surface_vertices.extend(np.asarray(surface['vertices'], dtype=np.float64).tolist())
+            all_surface_regions.extend([
+                {'part': surface['part'], 'component': surface['name']}
+                for _ in range(len(surface['vertices']))
+            ])
+        if all_surface_vertices:
+            tree = cKDTree(np.asarray(all_surface_vertices, dtype=np.float64))
+            _, nearest = tree.query(tet_vertices, k=1)
+            tet_vertex_regions = [all_surface_regions[int(i)] for i in nearest]
+    except Exception:
+        tet_vertex_regions = None
+
+    print(f"  Tet regions by component volume: {_count_simple_labels(tet_region_labels)}")
+    print(f"  Tet components by component volume: {_count_simple_labels(tet_component_labels)}")
+    if np.any(tet_mixed):
+        print(f"  Tet classification fallback/interface tets: {int(np.sum(tet_mixed))}")
+    return tet_vertex_regions, tet_region_labels, tet_component_labels, tet_mixed
+
+
+def _tetrahedralize_single_contour_mesh(v, name, obj, defer=False):
+    """Standalone-muscle tet path: use the original contour implementation."""
+    if getattr(obj, 'contour_mesh_vertices', None) is None:
+        print(f"[{name}] No contour mesh to tetrahedralize")
+        return False
+    try:
+        result = obj.tetrahedralize_contour_mesh(
+            skeleton_meshes=getattr(v, 'zygote_skeleton_meshes', None))
+        ok = bool(result) if result is not None else bool(
+            getattr(obj, 'tet_vertices', None) is not None and
+            getattr(obj, 'tet_tetrahedra', None) is not None)
+        if ok:
+            obj.tet_quality_rejected = False
+            print(f"[{name}] Single-muscle contour tetrahedralization applied")
+        return ok
+    except Exception as exc:
+        print(f"[{name}] Single-muscle contour tetrahedralization failed: {exc}")
+        traceback.print_exc()
+        return False
+
+
+def _tetrahedralize_original_surface_for_sim(v, name, obj, defer=False):
+    component_names = _original_tet_component_names(v, name, obj)
+    other_name, other = _linked_counterpart(v, obj)
+    if other is not None:
+        _connected_mesh_owner_name(v, name, obj, create=True)
+    all_vertices = []
+    all_faces = []
+    vertex_regions = []
+    cap_face_indices = []
+    surface_face_count = 0
+    component_ranges = []
+    capped_hole_face_count = 0
+
+    for comp_name in component_names:
+        comp = v.zygote_muscle_meshes.get(comp_name)
+        verts, faces = _component_original_surface(comp)
+        if verts is None or faces is None:
+            print(f"[{name}] Original tet: skipping {comp_name}, no source surface")
+            continue
+        part = _mesh_part_from_name(comp_name)
+        region = {'part': part, 'component': comp_name}
+        offset = len(all_vertices)
+        face_start = len(all_faces)
+        all_vertices.extend(verts.tolist())
+        vertex_regions.extend([region.copy() for _ in range(len(verts))])
+        all_faces.extend((faces + offset).tolist())
+        surface_face_count += len(faces)
+
+        capped_hole_face_count += _cap_component_boundary_loops(
+            comp, comp_name, verts, faces,
+            all_vertices, all_faces, vertex_regions, region,
+            offset=offset, cap_face_indices=cap_face_indices)
+        component_ranges.append({
+            'component': comp_name,
+            'part': part,
+            'surface_face_start': face_start,
+            'surface_face_end': face_start + len(faces),
+        })
+
+    if len(all_vertices) == 0 or len(all_faces) == 0:
+        print(f"[{name}] Original tet: no assembled surface")
+        return False
+
+    eps = max(float(getattr(obj, 'linked_pair_eps', 1e-5)) * 5.0, 2e-5)
+    closed_vertices, closed_faces, closed_regions = _dedupe_surface_vertices(
+        all_vertices, all_faces, vertex_regions, eps=eps)
+    # Face indices can change during weld/deduplication, so stale cap indices
+    # from the assembled pre-weld surface are not safe to expose.
+    cap_face_indices = []
+    if len(closed_faces) == 0:
+        print(f"[{name}] Original tet: no valid faces after weld")
+        return False
+    try:
+        orient_mesh = trimesh.Trimesh(
+            vertices=np.asarray(closed_vertices, dtype=np.float64),
+            faces=np.asarray(closed_faces, dtype=np.int32),
+            process=False)
+        if not orient_mesh.is_winding_consistent:
+            trimesh.repair.fix_normals(orient_mesh, multibody=False)
+            closed_faces = np.asarray(orient_mesh.faces, dtype=np.int32)
+            print(f"[{name}] Original tet: fixed inconsistent surface winding")
+    except Exception as exc:
+        print(f"[{name}] Original tet: winding check skipped ({exc})")
+
+    # Preserve the assembled anatomical shell independently from the simulation
+    # boundary.  The quality tet mesh may use a regularized level-set boundary,
+    # while this exact shell is embedded over it for rendering.
+    anatomical_render_vertices = np.asarray(closed_vertices, dtype=np.float64).copy()
+    anatomical_render_faces = np.asarray(closed_faces, dtype=np.int32).copy()
+    anatomical_render_regions = copy.deepcopy(closed_regions)
+    anatomical_cap_face_indices = list(cap_face_indices)
+    anatomical_surface_face_count = int(surface_face_count)
+
+    if not hasattr(obj, 'target_tet_count'):
+        obj.target_tet_count = 30000
+    if not hasattr(obj, 'enable_tet_boundary_remesh'):
+        obj.enable_tet_boundary_remesh = False
+    if not hasattr(obj, 'allow_tet_meshfix_fallback'):
+        obj.allow_tet_meshfix_fallback = False
+    remesh_boundary = bool(getattr(obj, 'enable_tet_boundary_remesh', False))
+    target_tet_count = (
+        max(0, int(getattr(obj, 'target_tet_count', 30000) or 0))
+        if remesh_boundary else 0
+    )
+    preserve_tet_surface = not remesh_boundary
+    allow_meshfix_fallback = (
+        bool(getattr(obj, 'allow_tet_meshfix_fallback', False))
+        if remesh_boundary else False
+    )
+    if capped_hole_face_count > 0:
+        allow_meshfix_fallback = True
+    obj.preserve_tet_surface = preserve_tet_surface
+
+    if remesh_boundary and target_tet_count > 0:
+        source_vertices_for_regions = np.asarray(closed_vertices, dtype=np.float64)
+        source_regions_for_regions = list(closed_regions)
+        closed_vertices, closed_faces, did_simplify = _isotropic_voxel_surface_for_tet(
+            name, closed_vertices, closed_faces, target_tet_count)
+        if did_simplify:
+            cap_face_indices = []
+            surface_face_count = int(len(closed_faces))
+            allow_meshfix_fallback = True
+            try:
+                from scipy.spatial import cKDTree
+                tree = cKDTree(source_vertices_for_regions)
+                _, nearest = tree.query(np.asarray(closed_vertices, dtype=np.float64), k=1)
+                closed_regions = [
+                    source_regions_for_regions[int(i)]
+                    if int(i) < len(source_regions_for_regions) else None
+                    for i in nearest
+                ]
+            except Exception:
+                default_region = {'part': _mesh_part_from_name(name), 'component': name}
+                closed_regions = [default_region.copy() for _ in range(len(closed_vertices))]
+
+    estimated_volume = _estimate_closed_surface_volume(closed_vertices, closed_faces)
+    target_maxvolume = 0.0
+    if preserve_tet_surface:
+        repair_msg = "hole-cap repair fallback=True" if allow_meshfix_fallback else "repair_fallback=False"
+        print(f"[{name}] Clean tet: preserve_surface=True, {repair_msg}")
+    elif target_tet_count > 0 and estimated_volume > 0.0:
+        target_maxvolume = 0.0
+        print(f"[{name}] Approx surface tet target: desired={target_tet_count}, "
+              f"volume={estimated_volume:.6g}, control=surface_simplification")
+
+    import subprocess
+    import sys
+    import tempfile
+    tet_vertices = None
+    tetrahedra = None
+    render_source_verts = closed_vertices
+    render_source_faces = closed_faces
+    used_meshfix_fallback = False
+    script = r'''
+import numpy as np
+import sys
+
+inp, outp = sys.argv[1], sys.argv[2]
+data = np.load(inp)
+verts = np.asarray(data["vertices"], dtype=np.float64)
+faces = np.asarray(data["faces"], dtype=np.int32)
+maxvolume = float(data["maxvolume"][0]) if "maxvolume" in data else 0.0
+preserve_surface = bool(int(data["preserve_surface"][0])) if "preserve_surface" in data else True
+allow_repair = bool(int(data["allow_repair"][0])) if "allow_repair" in data else False
+render_verts = verts
+render_faces = faces
+used_fix = False
+quality_profile = "none"
+
+def run_tet(v, f):
+    import tetgen
+    errors = []
+    # Boundary Steiner points subdivide existing surface triangles without
+    # changing the surface geometry. Forbidding them forces slivers near thin
+    # tendons and attachment caps, so EMU meshes always allow them.
+    for profile, ratio, dihedral in (
+            ("strict_q1.2_d10", 1.2, 10.0),
+            ("relaxed_q1.35_d7", 1.35, 7.0)):
+        tg = tetgen.TetGen(v.copy(), f.copy())
+        try:
+            kwargs = dict(order=1, quality=True, minratio=ratio,
+                          mindihedral=dihedral, nobisect=False)
+            if maxvolume > 0:
+                kwargs["maxvolume"] = maxvolume
+            tg.tetrahedralize(**kwargs)
+            return (np.asarray(tg.node, dtype=np.float64),
+                    np.asarray(tg.elem, dtype=np.int32), profile)
+        except Exception as exc:
+            errors.append(f"{profile}: {exc}")
+    raise RuntimeError("quality-constrained TetGen failed; " + " | ".join(errors))
+
+try:
+    tet_v, tet_t, quality_profile = run_tet(verts, faces)
+except Exception as direct_exc:
+    if not allow_repair:
+        raise RuntimeError(
+            "direct TetGen failed and pymeshfix repair fallback is disabled; "
+            "enable Allow Tet Repair Fallback if you want repaired/remeshed input"
+        ) from direct_exc
+    import pymeshfix
+    fixer = pymeshfix.MeshFix(verts.copy(), faces.copy())
+    try:
+        fixer.repair(verbose=False)
+    except TypeError:
+        fixer.repair()
+    try:
+        render_verts, render_faces = fixer.v, fixer.f
+    except AttributeError:
+        render_verts, render_faces = fixer._return_arrays()
+    render_verts = np.asarray(render_verts, dtype=np.float64)
+    render_faces = np.asarray(render_faces, dtype=np.int32)
+    tet_v, tet_t, quality_profile = run_tet(render_verts, render_faces)
+    used_fix = True
+
+if tet_t is None or len(tet_t) == 0:
+    raise RuntimeError("tetgen produced no tetrahedra")
+np.savez(outp, tet_vertices=tet_v, tetrahedra=tet_t,
+         render_vertices=render_verts, render_faces=render_faces,
+         used_fix=np.array([1 if used_fix else 0], dtype=np.int32),
+         quality_profile=np.asarray(quality_profile))
+'''
+    with tempfile.TemporaryDirectory(prefix="orig_tet_") as td:
+        in_path = os.path.join(td, "input.npz")
+        out_path = os.path.join(td, "output.npz")
+        np.savez(in_path, vertices=closed_vertices, faces=closed_faces,
+                 maxvolume=np.array([target_maxvolume], dtype=np.float64),
+                 preserve_surface=np.array([1 if preserve_tet_surface else 0], dtype=np.int32),
+                 allow_repair=np.array([1 if allow_meshfix_fallback else 0], dtype=np.int32))
+        timeout_sec = 180 if target_tet_count <= 30000 else 600
+        proc = subprocess.run(
+            [sys.executable, "-c", script, in_path, out_path],
+            capture_output=True, text=True, timeout=timeout_sec)
+        if proc.returncode != 0 or not os.path.exists(out_path):
+            print(f"[{name}] Original tet subprocess failed (rc={proc.returncode})")
+            if proc.stdout:
+                print(proc.stdout[-1000:])
+            if proc.stderr:
+                print(proc.stderr[-2000:])
+            return False
+        data = np.load(out_path)
+        tet_vertices = np.asarray(data["tet_vertices"], dtype=np.float64)
+        tetrahedra = np.asarray(data["tetrahedra"], dtype=np.int32)
+        render_source_verts = np.asarray(data["render_vertices"], dtype=np.float64)
+        render_source_faces = np.asarray(data["render_faces"], dtype=np.int32)
+        if int(data["used_fix"][0]) != 0:
+            used_meshfix_fallback = True
+            cap_face_indices = []
+            print(f"[{name}] Original tet: used pymeshfix fallback in subprocess")
+        tet_quality_profile = str(np.asarray(data["quality_profile"]).item()) \
+            if "quality_profile" in data else "unknown"
+        print(f"[{name}] TetGen EMU quality profile: {tet_quality_profile}")
+
+    if tet_vertices is None or tetrahedra is None or len(tetrahedra) == 0:
+        print(f"[{name}] Original tet: no tetrahedra produced")
+        return False
+    actual_tet_count = int(len(tetrahedra))
+    obj.last_actual_tet_count = actual_tet_count
+    if used_meshfix_fallback and target_tet_count > 0:
+        print(f"[{name}] Tet target calibration skipped: pymeshfix changed the surface")
+    elif target_tet_count > 0 and target_maxvolume > 0.0 and actual_tet_count > 0:
+        prev_calib = float(getattr(obj, 'tet_target_calibration', 1.0) or 1.0)
+        new_calib = float(np.clip(prev_calib * actual_tet_count / float(target_tet_count),
+                                  0.05, 20.0))
+        obj.tet_target_calibration = new_calib
+        print(f"[{name}] Tet target calibration updated: actual={actual_tet_count}, "
+              f"desired={target_tet_count}, next calibration={new_calib:.4g}")
+    elif target_tet_count > 0 and actual_tet_count > 0:
+        print(f"[{name}] Approx surface tet count: actual={actual_tet_count}, "
+              f"desired={target_tet_count}")
+        if actual_tet_count > target_tet_count * 2:
+            print(f"[{name}] Approx surface tet warning: actual tets are much higher than target; "
+                  f"surface complexity or repair likely dominates TetGen output")
+
+    tv = tet_vertices[tetrahedra]
+    vols = np.einsum('ij,ij->i', tv[:, 1] - tv[:, 0],
+                     np.cross(tv[:, 2] - tv[:, 0], tv[:, 3] - tv[:, 0]))
+    neg = vols < 0
+    if np.any(neg):
+        tetrahedra[neg, 1], tetrahedra[neg, 2] = tetrahedra[neg, 2].copy(), tetrahedra[neg, 1].copy()
+    tetrahedra, candidate_quality = _tet_volume_quality_stats(
+        name, tet_vertices, tetrahedra)
+    quality_failures = []
+    if int(candidate_quality.get('degenerate', 0)) > 0:
+        quality_failures.append(
+            f"{int(candidate_quality['degenerate'])} degenerate tets")
+    if int(candidate_quality.get('critical_slivers', 0)) > 0:
+        quality_failures.append(
+            f"{int(candidate_quality['critical_slivers'])} critical slivers")
+    if float(candidate_quality.get('scaled_jacobian_p01', 0.0)) < 0.05:
+        quality_failures.append(
+            f"scaled-J p01={candidate_quality.get('scaled_jacobian_p01', 0.0):.3g} < 0.05")
+    if float(candidate_quality.get('mean_ratio_p01', 0.0)) < 0.08:
+        quality_failures.append(
+            f"mean-ratio p01={candidate_quality.get('mean_ratio_p01', 0.0):.3g} < 0.08")
+    if quality_failures:
+        obj.tet_quality_rejected = True
+        obj.last_rejected_tet_quality_stats = candidate_quality
+        print(f"[{name}] EMU tet rejected: {'; '.join(quality_failures)}. "
+              f"The previous tet mesh was left unchanged.")
+        return False
+    obj.tet_quality_rejected = False
+    obj.tet_quality_stats = candidate_quality
+    obj.tet_quality_profile = tet_quality_profile
+    actual_tet_count = int(len(tetrahedra))
+    obj.last_actual_tet_count = actual_tet_count
+
+    from scipy.spatial import cKDTree
+    # Embed the exact anatomical shell in the robust tet volume. Rendering the
+    # regularized TetGen boundary directly caused the visible "Lego" result;
+    # forcing it onto the source surface reintroduced slivers. Piecewise-linear
+    # tet barycentrics exactly reproduce rigid and affine motion.
+    import pyvista as pv
+    vtk_cells = np.hstack((
+        np.full((len(tetrahedra), 1), 4, dtype=np.int64),
+        tetrahedra.astype(np.int64))).ravel()
+    tet_grid = pv.UnstructuredGrid(
+        vtk_cells,
+        np.full(len(tetrahedra), pv.CellType.TETRA, dtype=np.uint8),
+        tet_vertices)
+    containing = np.asarray(
+        tet_grid.find_containing_cell(anatomical_render_vertices),
+        dtype=np.int64)
+    inside = containing >= 0
+    embedding_cells = containing.copy()
+    if np.any(~inside):
+        # Preserve affine precision for the handful of points just outside the
+        # regularized shell by extrapolating from their closest tet.
+        embedding_cells[~inside] = np.asarray(
+            tet_grid.find_closest_cell(anatomical_render_vertices[~inside]),
+            dtype=np.int64)
+    skin_indices = tetrahedra[embedding_cells].astype(np.int32)
+    x = tet_vertices[skin_indices]
+    dm = np.stack((x[:, 0] - x[:, 3], x[:, 1] - x[:, 3],
+                   x[:, 2] - x[:, 3]), axis=-1)
+    rhs = anatomical_render_vertices - x[:, 3]
+    bary012 = np.linalg.solve(dm, rhs[..., None])[..., 0]
+    skin_weights = np.empty((len(anatomical_render_vertices), 4), dtype=np.float64)
+    skin_weights[:, :3] = bary012
+    skin_weights[:, 3] = 1.0 - np.sum(bary012, axis=1)
+    print(f"[{name}] Anatomical skin embedding: {int(np.sum(inside))}/"
+          f"{len(inside)} vertices inside simulation tets, "
+          f"bary min={float(np.min(skin_weights)):.3g}")
+    render_faces = anatomical_render_faces
+
+    obj.soft_body = None
+    obj.tet_vertices = tet_vertices.copy()
+    obj.tet_tetrahedra = tetrahedra.copy()
+    obj.tet_render_faces = render_faces.copy()
+    obj.tet_render_vertices_rest = anatomical_render_vertices.copy()
+    obj.tet_render_vertex_indices = skin_indices
+    obj.tet_render_vertex_weights = skin_weights
+    obj.tet_render_tet_rest_vertices = tet_vertices.copy()
+    obj.tet_render_vertex_regions = anatomical_render_regions
+    obj.tet_faces = obj.tet_render_faces
+    obj.tet_sim_faces = obj._extract_tet_boundary_faces(obj.tet_tetrahedra)
+    obj.tet_cap_face_indices = anatomical_cap_face_indices
+    obj.tet_anchor_vertices = []
+    obj.tet_surface_face_count = anatomical_surface_face_count
+    obj._tet_surface_verts = None
+    obj._tet_surface_normals = None
+    obj._tet_cap_verts = None
+    obj._tet_cap_normals = None
+    obj._tet_edge_verts = None
+    obj._tet_edge_source = None
+    obj._tet_surface_vidx = None
+    obj._tet_cap_vidx = None
+    obj._tet_edge_vidx = None
+    obj._tet_internal_verts = None
+    obj._tet_internal_normals = None
+    obj._tet_internal_colors = None
+    obj._tet_internal_vidx = None
+    obj._tet_internal_stride_cached = None
+    obj.vertex_contour_level = getattr(obj, 'vertex_contour_level', None)
+
+    try:
+        labels = _classify_tets_by_component_containment(
+            v, component_names, obj.tet_vertices, obj.tet_tetrahedra)
+        (obj.tet_vertex_regions,
+         obj.tet_region_labels,
+         obj.tet_component_labels,
+         obj.tet_region_mixed) = labels
+    except Exception as exc:
+        print(f"[{name}] Tet volume labeling failed, using nearest surface labels: {exc}")
+        try:
+            region_tree = cKDTree(closed_vertices)
+            _, nearest = region_tree.query(tet_vertices, k=1)
+            obj.tet_vertex_regions = [closed_regions[int(i)] for i in nearest]
+            obj.tet_region_labels, obj.tet_component_labels, obj.tet_region_mixed = (
+                _derive_tet_region_labels(obj.tet_tetrahedra, obj.tet_vertex_regions)
+            )
+        except Exception:
+            obj.tet_vertex_regions = None
+            obj.tet_region_labels = None
+            obj.tet_component_labels = None
+            obj.tet_region_mixed = None
+
+    obj._connected_original_tet_components = component_names
+    obj._connected_contour_mesh_components = component_ranges
+    obj._connected_component_fibers = _collect_connected_component_fibers(v, component_names)
+    for comp_name in component_names:
+        comp_obj = v.zygote_muscle_meshes.get(comp_name)
+        if comp_obj is not None:
+            comp_obj._connected_mesh_owner_name = name
+            if comp_name != name:
+                comp_obj.is_draw_tet_mesh = False
+    obj.is_draw_tet_mesh = True
+    if not defer:
+        obj.is_draw_contours = False
+        obj._tetrahedralize_replayed = True
+    print(f"[{name}] Tetrahedralized original surface: {len(tet_vertices)} vertices, "
+          f"{len(tetrahedra)} tets from {len(component_names)} component(s); "
+          f"embedded anatomical skin={len(anatomical_render_vertices)} vertices")
+    return True
+
+
 def _find_tendon_mesh_owner(v, tendon_name):
     if 'tendon' not in tendon_name.lower():
         return None
@@ -1391,8 +4772,6 @@ def _connected_mesh_owner_name(v, name, obj, create=False):
         owner = getattr(belly, '_connected_mesh_owner_name', '') or belly_name
         return owner if owner in v.zygote_muscle_meshes else belly_name
 
-    if not getattr(obj, 'linked_drive_counterpart', False):
-        return None
     other_name, other = _linked_counterpart(v, obj)
     if other is None:
         return None
@@ -2187,6 +5566,1231 @@ def draw_zygote_ui(v):
         imgui.tree_pop()
 
 
+def _draw_zygote_muscle_body(v, name, obj):
+    # Two-column layout: "Process All" button on left, individual buttons on right
+    imgui.columns(2, f"cols##{name}", border=False)
+    imgui.set_column_width(0, 120)
+
+    # Left column: Process button with vertical slider
+    num_process_buttons = 12  # Match number of buttons on right
+    process_all_height = num_process_buttons * imgui.get_frame_height() + (num_process_buttons - 1) * imgui.get_style().item_spacing[1]
+
+    # Process step slider is global so adjusting it on any
+    # muscle propagates to every other muscle's tree.
+    if not hasattr(v, 'global_process_step'):
+        v.global_process_step = getattr(obj, '_process_step', 12)
+    if not hasattr(obj, '_process_step'):
+        obj._process_step = v.global_process_step
+
+    # Vertical slider for step selection (top=1, bottom=12)
+    # Reversed min/max (12, 1) makes value increase downward
+    changed, new_val = imgui.v_slider_int(
+        f"##step{name}", 20, process_all_height, obj._process_step, 12, 1)
+    if changed:
+        obj._process_step = new_val
+        v.global_process_step = new_val
+        for _other in v.zygote_muscle_meshes.values():
+            _other._process_step = new_val
+    imgui.same_line()
+
+    # Step names matching button order (1=top, 12=bottom)
+    # 1:Scalar, 2:Contours, 3:FillGap, 4:Transitions, 5:Smooth, 6:Cut, 7:StreamSmooth, 8:Select, 9:Build, 10:Resample, 11:Mesh, 12:Tet
+    step_names = ['', 'Scalar', 'Contours', 'Fill Gap', 'Transitions', 'Smooth', 'Cut', 'StreamSmooth', 'Select', 'Build', 'Resample', 'Mesh', 'Tet']
+
+    # Check if pipeline is paused waiting for manual step
+    pipeline_paused = hasattr(obj, '_pipeline_paused_at') and obj._pipeline_paused_at is not None
+
+    # Button label changes if paused
+    if pipeline_paused:
+        btn_label = f"Resume\nfrom {obj._pipeline_paused_at}\n({step_names[obj._pipeline_paused_at]})"
+    else:
+        btn_label = f"Process\n1 to {obj._process_step}\n({step_names[obj._process_step]})"
+
+    if imgui.button(f"{btn_label}##{name}", width=75, height=process_all_height):
+        try:
+            max_step = obj._process_step
+            # If resuming, start from paused step
+            if pipeline_paused:
+                start_step = obj._pipeline_paused_at
+                obj._pipeline_paused_at = None
+                print(f"[{name}] Resuming pipeline from step {start_step} to {max_step}...")
+            else:
+                start_step = 1
+                print(f"[{name}] Running pipeline steps 1 to {max_step}...")
+
+            # Step 1: Scalar Field
+            defer = getattr(obj, 'animate_process', False)
+            if start_step <= 1 <= max_step and len(obj.edge_groups) > 0 and len(obj.edge_classes) > 0:
+                print(f"  [1/{max_step}] Computing Scalar Field...")
+                _t0 = time.time()
+                has_counterpart = bool(getattr(obj, 'linked_counterpart_name', ''))
+                if (has_counterpart
+                        and getattr(obj, 'linked_drive_counterpart', False)
+                        and getattr(obj, 'linked_use_shared_scalar', True)):
+                    _ensure_counterpart_scalar(v, name, obj, defer=defer)
+                else:
+                    obj.compute_scalar_field(defer=defer)
+                    if has_counterpart and getattr(obj, 'linked_drive_counterpart', False):
+                        _ensure_counterpart_scalar(v, name, obj, defer=defer)
+                print(f"  [1/{max_step}] Done in {time.time()-_t0:.3f}s")
+
+            # Step 2: Find Contours
+            if start_step <= 2 <= max_step and obj.scalar_field is not None:
+                print(f"  [2/{max_step}] Finding Contours...")
+                _t0 = time.time()
+                obj.find_contours(skeleton_meshes=v.zygote_skeleton_meshes, spacing_scale=obj.contour_spacing_scale, defer=defer)
+                if getattr(obj, 'linked_drive_counterpart', False):
+                    _apply_master_contour_schedule_to_counterpart(
+                        v, name, obj, defer=defer, label="contours")
+                print(f"  [2/{max_step}] Done in {time.time()-_t0:.3f}s")
+                if not defer:
+                    obj.is_draw_bounding_box = True
+
+            # Step 3: Fill Gaps
+            if start_step <= 3 <= max_step and obj.contours is not None and len(obj.contours) > 0:
+                print(f"  [3/{max_step}] Filling Gaps...")
+                _t0 = time.time()
+                obj.refine_contours(max_spacing_threshold=0.01, defer=defer)
+                if getattr(obj, 'linked_drive_counterpart', False):
+                    _apply_master_contour_schedule_to_counterpart(
+                        v, name, obj, defer=defer, label="gap-filled contours")
+                print(f"  [3/{max_step}] Done in {time.time()-_t0:.3f}s")
+
+            # Step 4: Find Transitions
+            if start_step <= 4 <= max_step and obj.scalar_field is not None:
+                print(f"  [4/{max_step}] Finding Transitions...")
+                _t0 = time.time()
+                field_min = float(obj.scalar_field.min())
+                field_max = float(obj.scalar_field.max())
+                scalar_min, scalar_max = field_min, field_max
+                if hasattr(obj, 'origin_contour_value') and hasattr(obj, 'insertion_contour_value'):
+                    o_val, i_val = obj.origin_contour_value, obj.insertion_contour_value
+                    if o_val != i_val:
+                        proposed_min, proposed_max = min(o_val, i_val), max(o_val, i_val)
+                        if proposed_min >= field_min and proposed_max <= field_max:
+                            scalar_min, scalar_max = proposed_min, proposed_max
+                exp_origin = len(obj.contours[0]) if obj.contours and len(obj.contours) > 0 else None
+                exp_insertion = len(obj.contours[-1]) if obj.contours and len(obj.contours) > 0 else None
+                obj.find_all_transitions(scalar_min=scalar_min, scalar_max=scalar_max, num_samples=200,
+                                        expected_origin=exp_origin, expected_insertion=exp_insertion)
+                if obj.contours is not None and len(obj.contours) > 0:
+                    obj.add_transitions_to_contours(defer=defer)
+                if getattr(obj, 'linked_drive_counterpart', False):
+                    _apply_master_contour_schedule_to_counterpart(
+                        v, name, obj, defer=defer, label="transition contours")
+                print(f"  [4/{max_step}] Done in {time.time()-_t0:.3f}s")
+
+            # Step 5: Smooth (z, x, bp - before cut)
+            if start_step <= 5 <= max_step and obj.contours is not None and len(obj.contours) > 0:
+                print(f"  [5/{max_step}] Smoothening (z, x, bp)...")
+                _t0 = time.time()
+                obj.smoothen_all(defer=defer)
+                _run_counterpart_step(v, name, obj, 5, defer=defer)
+                print(f"  [5/{max_step}] Done in {time.time()-_t0:.3f}s")
+
+            # Step 6: Cut
+            if start_step <= 6 <= max_step and obj.contours is not None and len(obj.contours) > 0 and obj.bounding_planes is not None:
+                print(f"  [6/{max_step}] Cutting streams...")
+                _t0 = time.time()
+                obj.cut_streams_animated(defer=defer, cut_method=obj.cutting_method, muscle_name=name)
+                _run_counterpart_step(v, name, obj, 6, defer=defer)
+                print(f"  [6/{max_step}] Done in {time.time()-_t0:.3f}s")
+                # Check if waiting for manual cut
+                if hasattr(obj, '_manual_cut_pending') and obj._manual_cut_pending or hasattr(obj, '_manual_cut_data') and obj._manual_cut_data is not None:
+                    obj._pipeline_paused_at = 7  # Resume from step 7 after cut is complete
+                    print(f"  [6/{max_step}] Waiting for manual cut - pipeline paused")
+                    raise StopIteration("Manual cut pending")
+
+            # Step 7: Stream Smooth (z, x, bp - after cut)
+            if start_step <= 7 <= max_step and hasattr(obj, 'stream_contours') and obj.stream_contours is not None:
+                print(f"  [7/{max_step}] Stream Smoothening (z, x, bp)...")
+                _t0 = time.time()
+                obj.stream_smoothen_all(defer=defer)
+                _run_counterpart_step(v, name, obj, 7, defer=defer)
+                print(f"  [7/{max_step}] Done in {time.time()-_t0:.3f}s")
+
+            # Step 8: Contour Select
+            if start_step <= 8 <= max_step and hasattr(obj, 'stream_contours') and obj.stream_contours is not None:
+                print(f"  [8/{max_step}] Selecting contours...")
+                _t0 = time.time()
+                obj.select_levels()
+                if not (hasattr(obj, '_level_select_window_open') and obj._level_select_window_open):
+                    _run_counterpart_step(v, name, obj, 8, defer=defer)
+                print(f"  [8/{max_step}] Done in {time.time()-_t0:.3f}s")
+                # Check if waiting for manual level selection
+                if hasattr(obj, '_level_select_window_open') and obj._level_select_window_open:
+                    obj._pipeline_paused_at = 9  # Resume from step 9 after selection
+                    print(f"  [8/{max_step}] Waiting for level selection - pipeline paused")
+                    raise StopIteration("Level selection pending")
+
+            # Step 9: Build Fiber
+            if start_step <= 9 <= max_step and hasattr(obj, 'stream_contours') and obj.stream_contours is not None:
+                print(f"  [9/{max_step}] Building fibers...")
+                _t0 = time.time()
+                _ensure_level_selection_applied(v, name, obj, defer=defer)
+                obj._belly_waypoints_before_tendon_extension = None
+                obj.build_fibers(skeleton_meshes=v.zygote_skeleton_meshes, defer=defer)
+                if (getattr(obj, 'origin_tendon_extension_name', '')
+                        or getattr(obj, 'insertion_tendon_extension_name', '')):
+                    _extend_belly_fibers_with_tendons(v, name, obj)
+                _run_counterpart_step(v, name, obj, 9, defer=defer)
+                print(f"  [9/{max_step}] Done in {time.time()-_t0:.3f}s")
+                if defer:
+                    obj._level_select_replayed = False
+
+            # Step 10: Resample Contours
+            if start_step <= 10 <= max_step and obj.contours is not None and len(obj.contours) > 0 and obj.bounding_planes is not None:
+                print(f"  [10/{max_step}] Resampling Contours...")
+                _t0 = time.time()
+                _resample_contours_with_links(v, name, obj, defer=defer)
+                _resample_linked_tendon_extensions(v, name, obj, defer=defer)
+                print(f"  [10/{max_step}] Done in {time.time()-_t0:.3f}s")
+                if defer:
+                    obj._build_fibers_replayed = False
+
+            # Step 11: Build Contour Mesh
+            if start_step <= 11 <= max_step and obj.contours is not None and len(obj.contours) > 0 and obj.draw_contour_stream is not None:
+                print(f"  [11/{max_step}] Building Contour Mesh...")
+                _t0 = time.time()
+                if _prepare_owned_connected_contour_mesh_source(v, name, obj):
+                    obj.build_contour_mesh(defer=defer)
+                    if not _connected_source_has_linked_components(obj):
+                        _run_counterpart_step(v, name, obj, 11, defer=defer)
+                print(f"  [11/{max_step}] Done in {time.time()-_t0:.3f}s")
+                if defer:
+                    obj._resample_replayed = False
+
+            # Step 12: Tetrahedralize
+            if start_step <= 12 <= max_step:
+                print(f"  [12/{max_step}] Tetrahedralizing...")
+                _t0 = time.time()
+                if _skip_non_owner_connected_mesh(v, name, obj, "Tetrahedralize"):
+                    print(f"  [12/{max_step}] Skipped in {time.time()-_t0:.3f}s")
+                    tet_ok = False
+                else:
+                    tet_ok = _tetrahedralize_single_contour_mesh(v, name, obj, defer=defer)
+                    if tet_ok and not _connected_source_has_linked_components(obj):
+                        _run_counterpart_step(v, name, obj, 12, defer=defer)
+                if tet_ok and obj.tet_vertices is not None and not _skip_non_owner_connected_mesh(v, name, obj, "Tetrahedralize display"):
+                    if defer:
+                        obj._extract_internal_tet_edges()
+                        obj._classify_tet_faces_into_bands()
+                        obj._tetrahedralize_replayed = False
+                    else:
+                        obj.is_draw_contours = False
+                        obj.is_draw_tet_mesh = True
+                        obj._tetrahedralize_replayed = True
+                status = "Done" if tet_ok else "Failed"
+                print(f"  [12/{max_step}] {status} in {time.time()-_t0:.3f}s")
+
+            obj._pipeline_paused_at = None  # Clear pause state on completion
+            print(f"[{name}] Pipeline complete (steps {start_step}-{max_step})!")
+        except StopIteration:
+            pass  # Manual cut pending - pipeline paused gracefully
+        except Exception as e:
+            print(f"[{name}] Pipeline error: {e}")
+            traceback.print_exc()
+
+    # Right column: Individual buttons (use -1 to auto-fill column width)
+    imgui.next_column()
+    col_button_width = 180  # Fits in the right column
+
+    # Helper for button coloring based on process step
+    def colored_button(label, step_num, width):
+        will_run = step_num <= obj._process_step
+        if will_run:
+            imgui.push_style_color(imgui.COLOR_BUTTON, 0.2, 0.6, 0.2, 1.0)
+            imgui.push_style_color(imgui.COLOR_BUTTON_HOVERED, 0.3, 0.7, 0.3, 1.0)
+        clicked = imgui.button(label, width=width)
+        if will_run:
+            imgui.pop_style_color(2)
+        return clicked
+
+    animate = getattr(obj, 'animate_process', False)
+    replay_w = 25
+    proc_w = col_button_width - replay_w - imgui.get_style().item_spacing[0] if animate else col_button_width
+
+    if colored_button(f"Scalar Field##{name}", 1, proc_w):
+        if len(obj.edge_groups) > 0 and len(obj.edge_classes) > 0:
+            try:
+                _t0 = time.time()
+                has_counterpart = bool(getattr(obj, 'linked_counterpart_name', ''))
+                if (has_counterpart
+                        and getattr(obj, 'linked_drive_counterpart', False)
+                        and getattr(obj, 'linked_use_shared_scalar', True)):
+                    _ensure_counterpart_scalar(v, name, obj, defer=animate)
+                else:
+                    obj.compute_scalar_field(defer=animate)
+                    if has_counterpart and getattr(obj, 'linked_drive_counterpart', False):
+                        _ensure_counterpart_scalar(v, name, obj, defer=animate)
+                print(f"[{name}] Scalar Field done in {time.time()-_t0:.3f}s")
+            except Exception as e:
+                print(f"[{name}] Scalar Field error: {e}")
+        else:
+            print(f"[{name}] Need edge_groups and edge_classes")
+    if animate and obj._scalar_anim_target_colors is not None:
+        imgui.same_line()
+        if imgui.button(f">##{name}_scalar_replay", width=replay_w):
+            obj.replay_scalar_animation()
+
+    if colored_button(f"Find Contours##{name}", 2, proc_w):
+        if obj.scalar_field is not None:
+            try:
+                _t0 = time.time()
+                obj.find_contours(skeleton_meshes=v.zygote_skeleton_meshes, spacing_scale=obj.contour_spacing_scale, defer=animate)
+                if getattr(obj, 'linked_drive_counterpart', False):
+                    _apply_master_contour_schedule_to_counterpart(
+                        v, name, obj, defer=animate, label="contours")
+                print(f"[{name}] Find Contours done in {time.time()-_t0:.3f}s")
+                if not animate:
+                    obj.is_draw_bounding_box = True
+            except Exception as e:
+                print(f"[{name}] Find Contours error: {e}")
+        else:
+            print(f"[{name}] Prerequisites: Run 'Scalar Field' first")
+    # Contour replay: only available after scalar replay has been played
+    if animate and obj.contours is not None and len(obj.contours) > 0 and getattr(obj, '_scalar_replayed', False):
+        imgui.same_line()
+        if imgui.button(f">##{name}_contour_replay", width=replay_w):
+            obj.replay_contour_animation()
+    if colored_button(f"Fill Gaps##{name}", 3, proc_w):
+        if obj.contours is not None and len(obj.contours) > 0:
+            try:
+                _t0 = time.time()
+                obj.refine_contours(max_spacing_threshold=0.01, defer=animate)
+                if getattr(obj, 'linked_drive_counterpart', False):
+                    _apply_master_contour_schedule_to_counterpart(
+                        v, name, obj, defer=animate, label="gap-filled contours")
+                print(f"[{name}] Fill Gaps done in {time.time()-_t0:.3f}s")
+            except Exception as e:
+                print(f"[{name}] Fill Gaps error: {e}")
+        else:
+            print(f"[{name}] Prerequisites: Run 'Find Contours' first")
+    # Fill gaps replay: only available after contour replay has been played
+    if animate and getattr(obj, '_fill_gaps_inserted_indices', None) is not None and getattr(obj, '_contour_replayed', False):
+        imgui.same_line()
+        if imgui.button(f">##{name}_fillgaps_replay", width=replay_w):
+            obj.replay_fill_gaps_animation()
+
+    # Find Transitions button - fast scan for contour count changes (step 4)
+    if colored_button(f"Find Transitions##{name}", 4, proc_w):
+        if hasattr(obj, 'scalar_field') and obj.scalar_field is not None:
+            try:
+                _t0 = time.time()
+                # Use actual scalar field range
+                field_min = float(obj.scalar_field.min())
+                field_max = float(obj.scalar_field.max())
+                scalar_min = field_min
+                scalar_max = field_max
+                # Optionally narrow to origin/insertion if set AND within field range
+                if hasattr(obj, 'origin_contour_value') and hasattr(obj, 'insertion_contour_value'):
+                    o_val = obj.origin_contour_value
+                    i_val = obj.insertion_contour_value
+                    # Only use if different AND within the actual scalar field range
+                    if o_val != i_val:
+                        proposed_min = min(o_val, i_val)
+                        proposed_max = max(o_val, i_val)
+                        if proposed_min >= field_min and proposed_max <= field_max:
+                            scalar_min = proposed_min
+                            scalar_max = proposed_max
+                        else:
+                            print(f"[{name}] Origin/insertion values ({o_val}, {i_val}) outside field range [{field_min:.4f}, {field_max:.4f}], using field range")
+                print(f"[{name}] Scanning scalar range: {scalar_min:.4f} to {scalar_max:.4f}")
+                # Try to get expected origin/insertion counts from existing contours
+                exp_origin = None
+                exp_insertion = None
+                if hasattr(obj, 'contours') and obj.contours is not None and len(obj.contours) > 0:
+                    exp_origin = len(obj.contours[0])
+                    exp_insertion = len(obj.contours[-1])
+                    print(f"[{name}] Expected counts from contours: origin={exp_origin}, insertion={exp_insertion}")
+                obj.find_all_transitions(scalar_min=scalar_min, scalar_max=scalar_max, num_samples=200,
+                                        expected_origin=exp_origin, expected_insertion=exp_insertion)
+                # Auto-add transitions to contours if contours exist
+                if obj.contours is not None and len(obj.contours) > 0:
+                    obj.add_transitions_to_contours(defer=animate)
+                if getattr(obj, 'linked_drive_counterpart', False):
+                    _apply_master_contour_schedule_to_counterpart(
+                        v, name, obj, defer=animate, label="transition contours")
+                print(f"[{name}] Find Transitions done in {time.time()-_t0:.3f}s")
+            except Exception as e:
+                print(f"[{name}] Find Transitions error: {e}")
+                traceback.print_exc()
+        else:
+            print(f"[{name}] Prerequisites: Run 'Scalar Field' first")
+    # Transitions replay: only available after fill gaps replay has been played
+    if animate and getattr(obj, '_transitions_inserted_indices', None) is not None and (getattr(obj, '_fill_gaps_replayed', False) or getattr(obj, '_fill_gaps_inserted_indices', None) is None):
+        imgui.same_line()
+        if imgui.button(f">##{name}_transitions_replay", width=replay_w):
+            obj.replay_transitions_animation()
+
+    # Step 5: Smoothen buttons
+    sub_button_width = (col_button_width - 8) // 3  # 3 buttons with small margins
+    if animate:
+        # Single "Smooth" button with replay when animate is on
+        if colored_button(f"Smooth##{name}", 5, proc_w):
+            if obj.contours is not None and len(obj.contours) > 0:
+                try:
+                    _t0 = time.time()
+                    obj.smoothen_all(defer=True)
+                    _run_counterpart_step(v, name, obj, 5, defer=True)
+                    print(f"[{name}] Smooth done in {time.time()-_t0:.3f}s")
+                except Exception as e:
+                    print(f"[{name}] Smooth error: {e}")
+            else:
+                print(f"[{name}] Prerequisites: Run 'Find Contours' first")
+        if getattr(obj, '_smooth_bp_after', None) is not None and (getattr(obj, '_transitions_replayed', False) or getattr(obj, '_transitions_inserted_indices', None) is None):
+            imgui.same_line()
+            if imgui.button(f">##{name}_smooth_replay", width=replay_w):
+                obj.replay_smooth_animation()
+    else:
+        # Individual z, x, bp buttons when animate is off
+        if colored_button(f"z##{name}", 5, sub_button_width):
+            if obj.contours is not None and len(obj.contours) > 0:
+                try:
+                    _t0 = time.time()
+                    obj.smoothen_contours_z()
+                    _run_counterpart_step(v, name, obj, 5, defer=False)
+                    print(f"[{name}] Smooth Z done in {time.time()-_t0:.3f}s")
+                except Exception as e:
+                    print(f"[{name}] Smoothen Z error: {e}")
+            else:
+                print(f"[{name}] Prerequisites: Run 'Find Contours' first")
+        imgui.same_line(spacing=4)
+        if colored_button(f"x##{name}", 5, sub_button_width):
+            if obj.contours is not None and len(obj.contours) > 0:
+                try:
+                    _t0 = time.time()
+                    obj.smoothen_contours_x()
+                    _run_counterpart_step(v, name, obj, 5, defer=False)
+                    print(f"[{name}] Smooth X done in {time.time()-_t0:.3f}s")
+                except Exception as e:
+                    print(f"[{name}] Smoothen X error: {e}")
+            else:
+                print(f"[{name}] Prerequisites: Run 'Find Contours' first")
+        imgui.same_line(spacing=4)
+        if colored_button(f"bp##{name}", 5, sub_button_width):
+            if obj.contours is not None and len(obj.contours) > 0:
+                try:
+                    _t0 = time.time()
+                    obj.smoothen_contours_bp()
+                    _run_counterpart_step(v, name, obj, 5, defer=False)
+                    print(f"[{name}] Smooth BP done in {time.time()-_t0:.3f}s")
+                except Exception as e:
+                    print(f"[{name}] Smoothen BP error: {e}")
+            else:
+                print(f"[{name}] Prerequisites: Run 'Find Contours' first")
+
+    # Step 6: Cut (standalone button)
+    cut_w = col_button_width - replay_w - imgui.get_style().item_spacing[0] if animate else col_button_width
+    if colored_button(f"Cut##{name}", 6, cut_w):
+        if obj.contours is not None and len(obj.contours) > 0 and obj.bounding_planes is not None and len(obj.bounding_planes) > 0:
+            try:
+                _t0 = time.time()
+                if animate:
+                    obj.cut_streams_animated(defer=True, cut_method=obj.cutting_method, muscle_name=name)
+                else:
+                    obj.cut_streams(cut_method=obj.cutting_method, muscle_name=name)
+                _run_counterpart_step(v, name, obj, 6, defer=animate)
+                print(f"[{name}] Cut done in {time.time()-_t0:.3f}s")
+            except Exception as e:
+                print(f"[{name}] Cut Streams error: {e}")
+                traceback.print_exc()
+        else:
+            print(f"[{name}] Prerequisites: Run 'Find Contours' first")
+    if animate and getattr(obj, '_cut_color_after', None) is not None and (getattr(obj, '_smooth_replayed', False) or getattr(obj, '_smooth_bp_after', None) is None):
+        imgui.same_line()
+        if imgui.button(f">##{name}_cut_replay", width=replay_w):
+            obj.replay_cut_animation()
+
+    # Step 7: Stream Smoothen buttons: z, x, bp (3 buttons in same row - after cut)
+    if animate:
+        # Single "Stream Smooth" button with replay when animate is on
+        if colored_button(f"Stream Smooth##{name}", 7, proc_w):
+            if hasattr(obj, 'stream_contours') and obj.stream_contours is not None:
+                try:
+                    _t0 = time.time()
+                    obj.stream_smoothen_all(defer=True)
+                    _run_counterpart_step(v, name, obj, 7, defer=True)
+                    print(f"[{name}] Stream Smooth done in {time.time()-_t0:.3f}s")
+                except Exception as e:
+                    print(f"[{name}] Stream Smooth error: {e}")
+            else:
+                print(f"[{name}] Prerequisites: Run 'Cut' first")
+        if getattr(obj, '_stream_smooth_bp_after', None) is not None and (getattr(obj, '_cut_replayed', False) or getattr(obj, '_cut_color_after', None) is None):
+            imgui.same_line()
+            if imgui.button(f">##{name}_stream_smooth_replay", width=replay_w):
+                obj.replay_stream_smooth_animation()
+    else:
+        # Individual z, x, bp buttons when animate is off
+        if colored_button(f"z##stream{name}", 7, sub_button_width):
+            if hasattr(obj, 'stream_contours') and obj.stream_contours is not None:
+                try:
+                    _t0 = time.time()
+                    obj.smoothen_contours_z()
+                    _run_counterpart_step(v, name, obj, 7, defer=False)
+                    print(f"[{name}] Stream Smooth Z done in {time.time()-_t0:.3f}s")
+                except Exception as e:
+                    print(f"[{name}] Stream Smoothen Z error: {e}")
+            else:
+                print(f"[{name}] Prerequisites: Run 'Cut' first")
+        imgui.same_line(spacing=4)
+        if colored_button(f"x##stream{name}", 7, sub_button_width):
+            if hasattr(obj, 'stream_contours') and obj.stream_contours is not None:
+                try:
+                    _t0 = time.time()
+                    obj.smoothen_contours_x()
+                    _run_counterpart_step(v, name, obj, 7, defer=False)
+                    print(f"[{name}] Stream Smooth X done in {time.time()-_t0:.3f}s")
+                except Exception as e:
+                    print(f"[{name}] Stream Smoothen X error: {e}")
+            else:
+                print(f"[{name}] Prerequisites: Run 'Cut' first")
+        imgui.same_line(spacing=4)
+        if colored_button(f"bp##stream{name}", 7, sub_button_width):
+            if hasattr(obj, 'stream_contours') and obj.stream_contours is not None:
+                try:
+                    _t0 = time.time()
+                    obj.smoothen_contours_bp()
+                    _run_counterpart_step(v, name, obj, 7, defer=False)
+                    print(f"[{name}] Stream Smooth BP done in {time.time()-_t0:.3f}s")
+                except Exception as e:
+                    print(f"[{name}] Stream Smoothen BP error: {e}")
+            else:
+                print(f"[{name}] Prerequisites: Run 'Cut' first")
+
+    # Step 8: Contour Select
+    if colored_button(f"Contour Select##{name}", 8, proc_w if animate else col_button_width):
+        if hasattr(obj, 'stream_contours') and obj.stream_contours is not None:
+            try:
+                _t0 = time.time()
+                obj.select_levels()
+                print(f"[{name}] Contour Select done in {time.time()-_t0:.3f}s")
+            except Exception as e:
+                print(f"[{name}] Select Levels error: {e}")
+                traceback.print_exc()
+        else:
+            print(f"[{name}] Prerequisites: Run 'Cut' first")
+    if animate and getattr(obj, '_level_select_anim_original', None) is not None and (getattr(obj, '_stream_smooth_replayed', False) or getattr(obj, '_stream_smooth_bp_after', None) is None):
+        imgui.same_line()
+        if imgui.button(f">##{name}_level_select_replay", width=replay_w):
+            obj.replay_level_select_animation()
+
+    # Step 9: Build Fiber (standalone button)
+    if colored_button(f"Build Fiber##{name}", 9, proc_w if animate else col_button_width):
+        if hasattr(obj, 'stream_contours') and obj.stream_contours is not None:
+            try:
+                _t0 = time.time()
+                _ensure_level_selection_applied(v, name, obj, defer=animate)
+                obj._belly_waypoints_before_tendon_extension = None
+                obj.build_fibers(skeleton_meshes=v.zygote_skeleton_meshes, defer=animate)
+                if (getattr(obj, 'origin_tendon_extension_name', '')
+                        or getattr(obj, 'insertion_tendon_extension_name', '')):
+                    _extend_belly_fibers_with_tendons(v, name, obj)
+                _run_counterpart_step(v, name, obj, 9, defer=animate)
+                print(f"[{name}] Build Fiber done in {time.time()-_t0:.3f}s")
+            except Exception as e:
+                print(f"[{name}] Build Fibers error: {e}")
+                traceback.print_exc()
+        else:
+            print(f"[{name}] Prerequisites: Run 'Cut' first")
+    if animate and getattr(obj, '_fiber_anim_waypoints', None) is not None and getattr(obj, '_level_select_replayed', False) and not getattr(obj, '_level_select_anim_active', False):
+        imgui.same_line()
+        if imgui.button(f">##{name}_fiber_replay", width=replay_w):
+            obj.replay_fiber_animation()
+
+    # Step 10: Resample Contours
+    if colored_button(f"Resample Contours##{name}", 10, proc_w if animate else col_button_width):
+        if obj.contours is not None and len(obj.contours) > 0 and obj.bounding_planes is not None:
+            try:
+                _t0 = time.time()
+                _resample_contours_with_links(v, name, obj, defer=animate)
+                _resample_linked_tendon_extensions(v, name, obj, defer=animate)
+                print(f"[{name}] Resample Contours done in {time.time()-_t0:.3f}s")
+            except Exception as e:
+                print(f"[{name}] Resample Contours error: {e}")
+        else:
+            print(f"[{name}] Prerequisites: Run 'Smoothen Contours' first")
+    if animate and getattr(obj, '_resample_anim_data', None) is not None and (getattr(obj, '_build_fibers_replayed', False) or getattr(obj, '_fiber_anim_waypoints', None) is None) and not getattr(obj, '_fiber_anim_active', False):
+        imgui.same_line()
+        if imgui.button(f">##{name}_resample_replay", width=replay_w):
+            obj.replay_resample_animation()
+
+    # Step 11: Build Contour Mesh
+    if colored_button(f"Build Contour Mesh##{name}", 11, proc_w if animate else col_button_width):
+        if obj.contours is not None and len(obj.contours) > 0 and obj.draw_contour_stream is not None:
+            try:
+                _t0 = time.time()
+                if _prepare_owned_connected_contour_mesh_source(v, name, obj):
+                    obj.build_contour_mesh(defer=animate)
+                    if not _connected_source_has_linked_components(obj):
+                        _run_counterpart_step(v, name, obj, 11, defer=animate)
+                print(f"[{name}] Build Contour Mesh done in {time.time()-_t0:.3f}s")
+            except Exception as e:
+                print(f"[{name}] Build Contour Mesh error: {e}")
+                traceback.print_exc()
+        else:
+            print(f"[{name}] Prerequisites: Run 'Build Fiber' first")
+    if animate and getattr(obj, '_mesh_anim_face_bands', None) is not None and (getattr(obj, '_resample_replayed', False) or getattr(obj, '_resample_anim_data', None) is None) and not getattr(obj, '_resample_anim_active', False):
+        imgui.same_line()
+        if imgui.button(f">##{name}_mesh_replay", width=replay_w):
+            obj.replay_mesh_animation()
+
+    if not hasattr(obj, 'target_tet_count'):
+        obj.target_tet_count = 30000
+    if not hasattr(obj, 'enable_tet_boundary_remesh'):
+        obj.enable_tet_boundary_remesh = False
+    if not hasattr(obj, 'allow_tet_meshfix_fallback'):
+        obj.allow_tet_meshfix_fallback = False
+    # Boundary-remesh controls and tet-count diagnostics are intentionally
+    # kept out of the process-button strip. Group/EMU controls own those
+    # advanced settings; ordinary component pipelines should stay compact.
+    obj.preserve_tet_surface = not bool(obj.enable_tet_boundary_remesh)
+
+    # Step 12: Tetrahedralize
+    if colored_button(f"Tetrahedralize##{name}", 12, proc_w if animate else col_button_width):
+        try:
+            _t0 = time.time()
+            if _skip_non_owner_connected_mesh(v, name, obj, "Tetrahedralize"):
+                print(f"[{name}] Tetrahedralize skipped in {time.time()-_t0:.3f}s")
+                tet_ok = False
+            else:
+                tet_ok = _tetrahedralize_single_contour_mesh(v, name, obj, defer=animate)
+                if tet_ok and not _connected_source_has_linked_components(obj):
+                    _run_counterpart_step(v, name, obj, 12, defer=animate)
+            status = "done" if tet_ok else "failed"
+            print(f"[{name}] Tetrahedralize {status} in {time.time()-_t0:.3f}s")
+            if tet_ok and obj.tet_vertices is not None and not _skip_non_owner_connected_mesh(v, name, obj, "Tetrahedralize display"):
+                if animate:
+                    obj._extract_internal_tet_edges()
+                    obj._classify_tet_faces_into_bands()
+                    obj._tetrahedralize_replayed = False
+                else:
+                    obj.is_draw_contours = False
+                    obj.is_draw_tet_mesh = True
+                    obj._tetrahedralize_replayed = True
+        except Exception as e:
+            print(f"[{name}] Tetrahedralize error: {e}")
+            traceback.print_exc()
+    if animate and getattr(obj, '_tet_anim_internal_edges', None) is not None and (getattr(obj, '_build_mesh_replayed', False) or getattr(obj, '_mesh_anim_face_bands', None) is None) and not getattr(obj, '_tet_anim_active', False):
+        imgui.same_line()
+        if imgui.button(f">##{name}_tet_replay", width=replay_w):
+            obj.replay_tet_animation()
+
+    # End two-column layout - back to full width for remaining GUI elements
+    imgui.columns(1)
+
+    # Reset process button
+    reset_width = button_width * 2 + imgui.get_style().item_spacing[0]
+    if imgui.button(f"Reset Process##{name}", width=reset_width):
+        _clear_connected_mesh_ownership(v, name)
+        obj.reset_process()
+
+    # Save/Load contours buttons
+    contour_filepath = f"{v.zygote_muscle_dir}{name}.contours.json"
+    if imgui.button(f"Save Contour##{name}", width=button_width):
+        if obj.contours is not None and len(obj.contours) > 0:
+            try:
+                obj.save_contours(contour_filepath)
+            except Exception as e:
+                print(f"[{name}] Save Contours error: {e}")
+        else:
+            print(f"[{name}] No contours to save")
+    imgui.same_line()
+    if imgui.button(f"Load Contour##{name}", width=button_width):
+        try:
+            obj.load_contours(contour_filepath)
+        except Exception as e:
+            print(f"[{name}] Load Contours error: {e}")
+
+    if imgui.button(f"Save Tet##{name}", width=button_width):
+        if hasattr(obj, 'tet_vertices') and obj.tet_vertices is not None:
+            try:
+                obj.save_tetrahedron_mesh(name)
+            except Exception as e:
+                print(f"[{name}] Save Tet error: {e}")
+        else:
+            print(f"[{name}] No tetrahedron mesh to save")
+    imgui.same_line()
+    if imgui.button(f"Load Tet##{name}", width=button_width):
+        try:
+            obj.soft_body = None  # Reset soft body when loading new tet
+            obj.load_tetrahedron_mesh(name)
+            if obj.tet_vertices is not None:
+                obj.is_draw = False  # Disable mesh draw
+                obj.is_draw_contours = False
+                obj.is_draw_tet_mesh = True
+                obj.is_draw_fiber_architecture = True  # Enable fiber draw
+                # Resolve skeleton attachments from names to current indices
+                skeleton_names = list(v.zygote_skeleton_meshes.keys())
+                obj.resolve_skeleton_attachments(skeleton_names)
+        except Exception as e:
+            print(f"[{name}] Load Tet error: {e}")
+
+    # Inspect 2D button - opens visualization window for contours (and fiber samples if available)
+    inspect_width = button_width * 2 + imgui.get_style().item_spacing[0]
+    has_contour_data = (hasattr(obj, 'contours') and obj.contours is not None and len(obj.contours) > 0)
+    if not has_contour_data:
+        imgui.push_style_var(imgui.STYLE_ALPHA, 0.5)
+    if imgui.button(f"Inspect 2D##{name}", width=inspect_width):
+        _open_inspect_2d(v, name, stream_idx=0, contour_idx=0)
+    if not has_contour_data:
+        imgui.pop_style_var()
+
+    # Focus camera on muscle button
+    if imgui.button(f"Focus##{name}", width=button_width):
+        if obj.vertices is not None and len(obj.vertices) > 0:
+            # Compute bounding box center
+            min_pt = np.min(obj.vertices, axis=0)
+            max_pt = np.max(obj.vertices, axis=0)
+            center = (min_pt + max_pt) / 2
+            bbox_size = np.linalg.norm(max_pt - min_pt)
+            # Set camera target (trans is scaled by 0.001 in render, so multiply by 1000)
+            v.trans = -center * 1000.0
+            # Adjust eye distance based on bounding box size
+            distance = bbox_size * 2.0
+            eye_dir = v.eye / (np.linalg.norm(v.eye) + 1e-10)
+            v.eye = eye_dir * max(distance, MIN_EYE_DISTANCE)
+        else:
+            print(f"[{name}] No vertices to focus on")
+
+    # Rotate toggle button (auto-orbit around focused muscle)
+    imgui.same_line()
+    is_rotating = v.auto_rotate
+    if is_rotating:
+        imgui.push_style_color(imgui.COLOR_BUTTON, 0.2, 0.4, 0.8, 1.0)
+        imgui.push_style_color(imgui.COLOR_BUTTON_HOVERED, 0.3, 0.5, 0.9, 1.0)
+        imgui.push_style_color(imgui.COLOR_BUTTON_ACTIVE, 0.1, 0.3, 0.7, 1.0)
+    if imgui.button(f"Rotate##{name}", width=button_width):
+        if v.auto_rotate:
+            v.auto_rotate = False
+        else:
+            v.auto_rotate = True
+    if is_rotating:
+        imgui.pop_style_color(3)
+
+    if not hasattr(v, 'global_animate_process'):
+        v.global_animate_process = getattr(obj, 'animate_process', True)
+    if not hasattr(obj, 'animate_process'):
+        obj.animate_process = v.global_animate_process
+    changed_anim, new_anim = imgui.checkbox("Animate", obj.animate_process)
+    obj.animate_process = new_anim
+    if changed_anim:
+        v.global_animate_process = new_anim
+        for _other in v.zygote_muscle_meshes.values():
+            _other.animate_process = new_anim
+
+    # Save/Load animation state + Play All
+    imgui.same_line()
+    avail = imgui.get_content_region_available_width()
+    anim_btn_w = (avail - imgui.get_style().item_spacing[0] * 2) / 3
+    anim_filepath = f"{v.zygote_muscle_dir}{name}.anim.pkl"
+    if imgui.button(f"Save Anim##{name}", width=anim_btn_w):
+        try:
+            obj.save_animation_state(anim_filepath)
+        except Exception as e:
+            print(f"[{name}] Save Animation error: {e}")
+    imgui.same_line()
+    if imgui.button(f"Load Anim##{name}", width=anim_btn_w):
+        try:
+            obj.load_animation_state(anim_filepath)
+        except Exception as e:
+            print(f"[{name}] Load Animation error: {e}")
+    imgui.same_line()
+    if imgui.button(f"Play All##{name}", width=anim_btn_w):
+        obj._play_all_active = True
+        obj._play_all_step = 0
+        # Reset visibility to pre-scalar start state
+        obj.is_draw = True
+        obj.is_draw_scalar_field = False
+        if hasattr(obj, 'reset_tendon_region_colors'):
+            obj.reset_tendon_region_colors()
+        obj.is_draw_contours = False
+        obj.is_draw_bounding_box = False
+        obj.is_draw_contour_mesh = False
+        obj.is_draw_tet_mesh = False
+        obj.is_draw_fiber_architecture = False
+        obj.is_draw_resampled_vertices = False
+        # Reset vertex colors to default muscle color
+        if obj.vertex_colors is not None:
+            n = len(obj.vertex_colors)
+            obj.vertex_colors = np.tile(
+                np.array([obj.color[0], obj.color[1], obj.color[2], obj.transparency], dtype=np.float32),
+                (n, 1)
+            )
+        # Reset all replayed flags
+        obj._scalar_replayed = False
+        obj._contour_replayed = False
+        obj._fill_gaps_replayed = False
+        obj._transitions_replayed = False
+        obj._smooth_replayed = False
+        obj._cut_replayed = False
+        obj._stream_smooth_replayed = False
+        obj._level_select_replayed = False
+        obj._build_fibers_replayed = False
+        obj._resample_replayed = False
+        obj._build_mesh_replayed = False
+        obj._tetrahedralize_replayed = False
+
+    if not hasattr(obj, 'linked_counterpart_name'):
+        obj.linked_counterpart_name = ''
+    if not hasattr(obj, 'linked_drive_counterpart'):
+        obj.linked_drive_counterpart = True
+    if not hasattr(obj, 'linked_use_shared_scalar'):
+        obj.linked_use_shared_scalar = True
+    if not hasattr(obj, 'linked_pair_eps'):
+        obj.linked_pair_eps = 1e-5
+    if imgui.tree_node(f"Linked Counterpart##{name}"):
+        linked_names = ['None'] + [n for n in v.zygote_muscle_meshes.keys() if n != name]
+        current_label = obj.linked_counterpart_name if obj.linked_counterpart_name in linked_names else 'None'
+        current_idx = linked_names.index(current_label)
+        changed_link, new_idx = imgui.combo(f"Counterpart##linked_{name}", current_idx, linked_names)
+        if changed_link:
+            _set_symmetric_counterpart_link(
+                v, name, '' if new_idx == 0 else linked_names[new_idx])
+        changed_drive, obj.linked_drive_counterpart = imgui.checkbox(
+            f"Drive counterpart schedule##linked_{name}", bool(obj.linked_drive_counterpart))
+        changed_scalar, obj.linked_use_shared_scalar = imgui.checkbox(
+            f"Shared scalar solve##linked_{name}", bool(obj.linked_use_shared_scalar))
+        changed_eps, obj.linked_pair_eps = imgui.input_float(
+            f"Pair epsilon##linked_{name}", float(obj.linked_pair_eps), 1e-6, 1e-5, "%.7f")
+        obj.linked_pair_eps = max(0.0, float(obj.linked_pair_eps))
+        if changed_link or changed_drive or changed_scalar or changed_eps:
+            _sync_counterpart_link_settings(v, name)
+        if obj.linked_counterpart_name:
+            imgui.text(f"Master: {name}")
+            imgui.text(f"Follower: {obj.linked_counterpart_name}")
+            if getattr(obj, 'linked_counterpart_pairs', None) is not None:
+                imgui.text(f"Pairs: {len(obj.linked_counterpart_pairs)}")
+        imgui.tree_pop()
+
+    if not hasattr(obj, 'origin_tendon_extension_name'):
+        obj.origin_tendon_extension_name = ''
+    if not hasattr(obj, 'insertion_tendon_extension_name'):
+        obj.insertion_tendon_extension_name = ''
+    if not hasattr(obj, 'origin_tendon_reverse'):
+        obj.origin_tendon_reverse = False
+    if not hasattr(obj, 'insertion_tendon_reverse'):
+        obj.insertion_tendon_reverse = False
+    if _is_component_belly_name(name):
+        _auto_fill_tendon_extension_names(v, name, obj)
+    elif ('tendon' not in name.lower()
+          and (obj.origin_tendon_extension_name or obj.insertion_tendon_extension_name)):
+        obj.origin_tendon_extension_name = ''
+        obj.insertion_tendon_extension_name = ''
+        _clear_tendon_extension(obj)
+    if imgui.tree_node(f"Tendon Fiber Extension##{name}"):
+        tendon_names = ['None'] + [
+            n for n in v.zygote_muscle_meshes.keys()
+            if n != name and 'tendon' in n.lower()
+        ]
+        origin_label = obj.origin_tendon_extension_name if obj.origin_tendon_extension_name in tendon_names else 'None'
+        insertion_label = obj.insertion_tendon_extension_name if obj.insertion_tendon_extension_name in tendon_names else 'None'
+        changed_o, idx_o = imgui.combo(
+            f"Origin Tendon##tendon_ext_o_{name}",
+            tendon_names.index(origin_label),
+            tendon_names)
+        if changed_o:
+            obj.origin_tendon_extension_name = '' if idx_o == 0 else tendon_names[idx_o]
+        changed_i, idx_i = imgui.combo(
+            f"Insertion Tendon##tendon_ext_i_{name}",
+            tendon_names.index(insertion_label),
+            tendon_names)
+        if changed_i:
+            obj.insertion_tendon_extension_name = '' if idx_i == 0 else tendon_names[idx_i]
+        _, obj.origin_tendon_reverse = imgui.checkbox(
+            f"Reverse Origin Tendon##tendon_ext_o_rev_{name}",
+            bool(obj.origin_tendon_reverse))
+        _, obj.insertion_tendon_reverse = imgui.checkbox(
+            f"Reverse Insertion Tendon##tendon_ext_i_rev_{name}",
+            bool(obj.insertion_tendon_reverse))
+        if imgui.button(f"Extend Fibers Through Tendons##tendon_ext_apply_{name}", width=wide_button_width):
+            _extend_belly_and_linked_counterpart_fibers(v, name, obj)
+        if getattr(obj, 'tendon_extended_fibers', False):
+            imgui.text("Extended fibers: active")
+        imgui.tree_pop()
+
+    # Min-spacing threshold for length-density auto-selection.
+    # Search increases N until any consecutive pair drops below
+    # this distance along the muscle axis.  Value is global on
+    # `v` so adjusting from any muscle's tree propagates to
+    # every muscle on the next render.
+    if not hasattr(v, 'global_level_select_min_spacing'):
+        v.global_level_select_min_spacing = 0.04
+    changed_sp, v.global_level_select_min_spacing = imgui.slider_float(
+        "Min Spacing (m)", v.global_level_select_min_spacing,
+        0.005, 0.5, "%.3f")
+    obj.level_select_min_spacing = v.global_level_select_min_spacing
+    if changed_sp:
+        for _other in v.zygote_muscle_meshes.values():
+            _other.level_select_min_spacing = v.global_level_select_min_spacing
+
+    imgui.text(obj.link_mode)
+    changed1, obj.specific_contour_value = imgui.slider_float(f"Ori##{name}", obj.specific_contour_value, 1.0, obj.contour_value_min, flags=imgui.SLIDER_FLAGS_NO_ROUND_TO_FORMAT)
+    changed2, obj.specific_contour_value = imgui.slider_float(f"Mid##{name}", obj.specific_contour_value, obj.contour_value_min, obj.contour_value_max, flags=imgui.SLIDER_FLAGS_NO_ROUND_TO_FORMAT)
+    changed3, obj.specific_contour_value = imgui.slider_float(f"Ins##{name}", obj.specific_contour_value, obj.contour_value_max, 10.0, flags=imgui.SLIDER_FLAGS_NO_ROUND_TO_FORMAT)
+    if not hasattr(obj, 'tendon_origin_value'):
+        obj.tendon_origin_value = 1.1
+    if not hasattr(obj, 'tendon_insertion_value'):
+        obj.tendon_insertion_value = 9.9
+    for attr, default in (
+        ('tendon_origin_tilt_angle', 0.0),
+        ('tendon_origin_tilt_amount', 0.0),
+        ('tendon_insertion_tilt_angle', 0.0),
+        ('tendon_insertion_tilt_amount', 0.0),
+        ('draw_origin_tendon_boundary', False),
+        ('draw_insertion_tendon_boundary', False),
+    ):
+        if not hasattr(obj, attr):
+            setattr(obj, attr, default)
+    imgui.separator()
+    imgui.text("Tendon designation")
+    imgui.text(f"Current contour value: {float(obj.specific_contour_value):.4f}")
+    imgui.text(f"Origin tendon <= {float(obj.tendon_origin_value):.4f}")
+    imgui.text(f"Insertion tendon >= {float(obj.tendon_insertion_value):.4f}")
+    single_stream = obj._is_single_stream_tendon_supported() if hasattr(obj, '_is_single_stream_tendon_supported') else False
+    if not single_stream:
+        imgui.text_colored("Only single-origin/single-insertion muscles supported", 1.0, 0.45, 0.2, 1.0)
+    if imgui.button(f"Set Current as Origin Tendon##{name}", width=wide_button_width):
+        obj.tendon_origin_value = float(obj.specific_contour_value)
+        print(f"[{name}] Origin tendon threshold set to {obj.tendon_origin_value:.4f}")
+        if getattr(obj, 'is_draw_tendon_regions', False):
+            obj.apply_tendon_region_colors(obj.tendon_origin_value, obj.tendon_insertion_value)
+    if imgui.button(f"Set Current as Insertion Tendon##{name}", width=wide_button_width):
+        obj.tendon_insertion_value = float(obj.specific_contour_value)
+        print(f"[{name}] Insertion tendon threshold set to {obj.tendon_insertion_value:.4f}")
+        if getattr(obj, 'is_draw_tendon_regions', False):
+            obj.apply_tendon_region_colors(obj.tendon_origin_value, obj.tendon_insertion_value)
+    if obj.tendon_origin_value >= obj.tendon_insertion_value:
+        imgui.text_colored("Origin threshold must be smaller", 1.0, 0.35, 0.2, 1.0)
+    if getattr(obj, 'is_draw_tendon_regions', False):
+        imgui.text_colored("LIGHT=tendon  RED=belly", 0.9, 0.85, 0.65, 1.0)
+    changed_bo, obj.draw_origin_tendon_boundary = imgui.checkbox(
+        f"Draw Origin Boundary##{name}", bool(obj.draw_origin_tendon_boundary))
+    changed_bi, obj.draw_insertion_tendon_boundary = imgui.checkbox(
+        f"Draw Insertion Boundary##{name}", bool(obj.draw_insertion_tendon_boundary))
+    if changed_bo or changed_bi:
+        _sync_counterpart_display_state(v, name)
+    obj.tendon_blend_width = 0.3
+    if getattr(obj, '_tendon_boundary_error', ""):
+        imgui.text_colored(obj._tendon_boundary_error[:90], 1.0, 0.35, 0.2, 1.0)
+    if imgui.tree_node(f"Parametric Boundary##{name}"):
+        imgui.text("Diagonal cut: threshold = base + amount * side_coordinate")
+        imgui.text("Origin diagonal cut")
+        changed_oa, obj.tendon_origin_tilt_angle = imgui.slider_float(
+            f"Deep Side Angle##origin_tilt_{name}", float(obj.tendon_origin_tilt_angle), 0.0, 6.28318, "%.3f")
+        changed_ot, obj.tendon_origin_tilt_amount = imgui.slider_float(
+            f"Tilt Amount##origin_tilt_{name}", float(obj.tendon_origin_tilt_amount), -2.5, 2.5, "%.3f")
+        imgui.separator()
+        imgui.text("Insertion diagonal cut")
+        changed_ia, obj.tendon_insertion_tilt_angle = imgui.slider_float(
+            f"Deep Side Angle##insertion_tilt_{name}", float(obj.tendon_insertion_tilt_angle), 0.0, 6.28318, "%.3f")
+        changed_it, obj.tendon_insertion_tilt_amount = imgui.slider_float(
+            f"Tilt Amount##insertion_tilt_{name}", float(obj.tendon_insertion_tilt_amount), -2.5, 2.5, "%.3f")
+        if (changed_oa or changed_ot or changed_ia or changed_it) and getattr(obj, 'is_draw_tendon_regions', False):
+            obj.apply_tendon_region_colors(obj.tendon_origin_value, obj.tendon_insertion_value)
+        if imgui.button(f"Apply Parametric Boundary##{name}", width=wide_button_width):
+            if obj.scalar_field is not None:
+                if obj.apply_tendon_region_colors(obj.tendon_origin_value, obj.tendon_insertion_value):
+                    print(f"[{name}] Applied parametric tendon boundary")
+            else:
+                print(f"[{name}] Prerequisites: Run 'Scalar Field' first")
+        imgui.tree_pop()
+    if imgui.button(f"Use Tendon Values##{name}", width=button_width):
+        if obj.scalar_field is not None:
+            if obj.apply_tendon_region_colors(obj.tendon_origin_value, obj.tendon_insertion_value):
+                print(f"[{name}] Tendon regions: origin <= {obj.tendon_origin_value:.4f}, insertion >= {obj.tendon_insertion_value:.4f}")
+        else:
+            print(f"[{name}] Prerequisites: Run 'Scalar Field' first")
+    imgui.same_line()
+    if imgui.button(f"Reset Tendon##{name}", width=button_width):
+        if hasattr(obj, 'reset_tendon_region_colors'):
+            obj.reset_tendon_region_colors()
+
+    if imgui.tree_node(f"Epic##{name}"):
+        if not hasattr(obj, 'epic_fiber_count'):
+            obj.epic_fiber_count = 100
+        if not hasattr(obj, 'epic_gradient_direction_limit'):
+            obj.epic_gradient_direction_limit = 8000
+        imgui.push_item_width(160)
+        _, obj.epic_fiber_count = imgui.slider_int(
+            f"Fiber Count##epic_fiber_count_{name}",
+            int(obj.epic_fiber_count), 1, 1000)
+        _, obj.epic_gradient_direction_limit = imgui.slider_int(
+            f"Direction Draw Limit##epic_dir_limit_{name}",
+            int(obj.epic_gradient_direction_limit), 100, 50000)
+        imgui.pop_item_width()
+
+        if imgui.button(f"1. Tetrahedralize Original Mesh##epic_tet_{name}", width=wide_button_width):
+            try:
+                _t0 = time.time()
+                ok = obj.epic_tetrahedralize_original_mesh()
+                status = "done" if ok else "failed"
+                print(f"[{name}] Epic tetrahedralize {status} in {time.time()-_t0:.3f}s")
+            except Exception as e:
+                print(f"[{name}] Epic tetrahedralize error: {e}")
+                traceback.print_exc()
+
+        if imgui.button(f"2. Find Volume Laplace Field##epic_field_{name}", width=wide_button_width):
+            try:
+                _t0 = time.time()
+                ok = obj.epic_solve_volume_laplace_field()
+                if ok:
+                    v.zygote_tet_transparency = 0.5
+                status = "done" if ok else "failed"
+                print(f"[{name}] Epic volume field {status} in {time.time()-_t0:.3f}s")
+            except Exception as e:
+                print(f"[{name}] Epic volume field error: {e}")
+                traceback.print_exc()
+
+        if imgui.button(f"3. Show Tet Gradient Directions##epic_dirs_{name}", width=wide_button_width):
+            try:
+                _t0 = time.time()
+                ok = obj.epic_show_laplace_gradient_directions(
+                    max_segments=obj.epic_gradient_direction_limit)
+                status = "done" if ok else "failed"
+                print(f"[{name}] Epic tet gradient directions {status} in {time.time()-_t0:.3f}s")
+            except Exception as e:
+                print(f"[{name}] Epic tet gradient directions error: {e}")
+                traceback.print_exc()
+
+        if imgui.button(f"4. Sample Shape-Coordinate Fibers##epic_shape_fibers_{name}", width=wide_button_width):
+            try:
+                _t0 = time.time()
+                ok = obj.epic_sample_shape_coordinate_fibers(count=obj.epic_fiber_count)
+                status = "done" if ok else "failed"
+                print(f"[{name}] Epic shape-coordinate fibers {status} in {time.time()-_t0:.3f}s")
+            except Exception as e:
+                print(f"[{name}] Epic shape-coordinate fibers error: {e}")
+                traceback.print_exc()
+
+        tet_v = 0 if getattr(obj, 'epic_tet_vertices', None) is None else len(obj.epic_tet_vertices)
+        tet_n = 0 if getattr(obj, 'epic_tetrahedra', None) is None else len(obj.epic_tetrahedra)
+        imgui.text(f"Tet: {tet_v} verts / {tet_n} tets")
+        if getattr(obj, 'epic_laplace_field', None) is not None:
+            imgui.text("Field: ready")
+        if getattr(obj, 'epic_gradient_direction_segments', None) is not None:
+            imgui.text(f"Directions: {len(obj.epic_gradient_direction_segments)}")
+        if getattr(obj, 'epic_fibers', None) is not None:
+            imgui.text(f"Fibers: {obj.epic_fibers.shape[1]}")
+        if getattr(obj, 'epic_error', ""):
+            imgui.text_colored(str(obj.epic_error)[:90], 1.0, 0.35, 0.2, 1.0)
+        imgui.tree_pop()
+
+    if imgui.tree_node(f"MinMax##{name}"):
+        _, obj.contour_value_min = imgui.input_float(f"Min##{name}", obj.contour_value_min)
+        _, obj.contour_value_max = imgui.input_float(f"Max##{name}", obj.contour_value_max)
+        imgui.tree_pop()
+    if changed1 or changed2 or changed3:
+        obj.find_contour_with_value(obj.specific_contour_value)
+    # if imgui.button(f"Find Value Contour##{name}"):
+    #     obj.find_contour_with_value()
+
+    # if imgui.button("Find Interesecting Bones"):
+    #     for other_name, other_obj in v.zygote_muscle_meshes.items():
+    #         other_obj.is_draw = False
+    #     obj.is_draw = True
+
+    #     intersecting_meshes = obj.find_intersections(v.zygote_skeleton_meshes)
+    #     # print(bb_intersect)
+    #     for skel_name, skel_obj in v.zygote_skeleton_meshes.items():
+    #         if skel_name in intersecting_meshes:
+    #             skel_obj.color = np.array([0.0, 0.0, 1.0])
+    #         else:
+    #             skel_obj.color = np.array([0.9, 0.9, 0.9])
+
+    #     v.zygote_muscle_meshes_intersection_bones[name] = intersecting_meshes
+
+    changed, obj.transparency = imgui.slider_float(f"Transparency##{name}", obj.transparency, 0.0, 1.0)
+    if changed and obj.vertex_colors is not None:
+        obj.vertex_colors[:, 3] = obj.transparency
+    if changed and getattr(obj, '_tendon_region_colors', None) is not None:
+        obj._tendon_region_colors[:, 3] = obj.transparency
+    if changed:
+        _sync_counterpart_display_state(v, name)
+
+    if imgui.tree_node("Edge Classes"):
+        for i in range(len(obj.edge_classes)):
+            # Fixed width: "insertion" is 9 chars, pad "origin" to match
+            label = f"{obj.edge_classes[i]:9s}"
+            imgui.text(label)
+            imgui.same_line()
+            if imgui.button(f"Flip class##{name}_{i}"):
+                obj.edge_classes[i] = 'insertion' if obj.edge_classes[i] == 'origin' else 'origin'
+        imgui.tree_pop()
+    if obj.draw_contour_stream is not None:
+        if imgui.tree_node("Contour Stream"):
+            if imgui.button("All Stream Off"):
+                for i in range(len(obj.draw_contour_stream)):
+                    obj.draw_contour_stream[i] = False
+            imgui.same_line()
+            if imgui.button(f"Auto Detect##{name}"):
+                obj.auto_detect_attachments(v.zygote_skeleton_meshes)
+            # Ensure attach_skeletons arrays are properly sized
+            num_streams = len(obj.draw_contour_stream)
+            while len(obj.attach_skeletons) < num_streams:
+                obj.attach_skeletons.append([0, 0])
+            while len(obj.attach_skeletons_sub) < num_streams:
+                obj.attach_skeletons_sub.append([0, 0])
+            for i in range(num_streams):
+                _, obj.draw_contour_stream[i] = imgui.checkbox(f"Stream {i}", obj.draw_contour_stream[i])
+                imgui.push_item_width(100)
+                changed, obj.attach_skeletons[i][0] = imgui.input_int(f"Origin##{name}_stream{i}_origin", obj.attach_skeletons[i][0])
+                if changed:
+                    if obj.attach_skeletons[i][0] < 0:
+                        obj.attach_skeletons[i][0] = 0
+                    elif obj.attach_skeletons[i][0] > len(v.zygote_skeleton_meshes) - 1:
+                        obj.attach_skeletons[i][0] = len(v.zygote_skeleton_meshes) - 1
+                changed, obj.attach_skeletons_sub[i][0] = imgui.input_int(f"Subpart##{name}_stream{i}_origin_sub", obj.attach_skeletons_sub[i][0])
+                if changed:
+                    if obj.attach_skeletons_sub[i][0] < 0:
+                        obj.attach_skeletons_sub[i][0] = 0
+                    elif obj.attach_skeletons_sub[i][0] > 1:
+                        obj.attach_skeletons_sub[i][0] = 1
+
+                imgui.text(list(v.zygote_skeleton_meshes.keys())[obj.attach_skeletons[i][0]] + f"{obj.attach_skeletons_sub[i][0]}")
+                changed, obj.attach_skeletons[i][1] = imgui.input_int(f"Insertion##{name}_stream{i}_insertion", obj.attach_skeletons[i][1])
+                if changed:
+                    if obj.attach_skeletons[i][1] < 0:
+                        obj.attach_skeletons[i][1] = 0
+                    elif obj.attach_skeletons[i][1] > len(v.zygote_skeleton_meshes) - 1:
+                        obj.attach_skeletons[i][1] = len(v.zygote_skeleton_meshes) - 1
+                changed, obj.attach_skeletons_sub[i][1] = imgui.input_int(f"Subpart##{name}_stream{i}_insertion_sub", obj.attach_skeletons_sub[i][1])
+                if changed:
+                    if obj.attach_skeletons_sub[i][1] < 0:
+                        obj.attach_skeletons_sub[i][1] = 0
+                    elif obj.attach_skeletons_sub[i][1] > 1:
+                        obj.attach_skeletons_sub[i][1] = 1
+                imgui.text(list(v.zygote_skeleton_meshes.keys())[obj.attach_skeletons[i][1]] + f"{obj.attach_skeletons_sub[i][1]}")
+                imgui.pop_item_width()
+
+                # if imgui.button(f"Print Contour points##{i}"):
+                #     print(f"Print {i}th contour stream")
+                #     for j, contour in enumerate(obj.contours[i]):
+                #         print(f"Contour {j}")
+                #         for v in contour:
+                #             print(v)
+                #         print()
+            imgui.tree_pop()
+
+    display_changed = False
+    changed_draw, obj.is_draw = imgui.checkbox("Draw", obj.is_draw)
+    display_changed = display_changed or changed_draw
+    changed_open, obj.is_draw_open_edges = imgui.checkbox("Draw Open Edges", obj.is_draw_open_edges)
+    display_changed = display_changed or changed_open
+    changed_scalar_draw, obj.is_draw_scalar_field = imgui.checkbox("Draw Scalar Field", obj.is_draw_scalar_field)
+    display_changed = display_changed or changed_scalar_draw
+    if changed_scalar_draw:
+        if obj.is_draw_scalar_field:
+            obj.is_draw_tendon_regions = False
+            if getattr(obj, '_scalar_anim_target_colors', None) is not None:
+                obj.vertex_colors = obj._scalar_anim_target_colors.copy()
+        elif getattr(obj, 'is_draw_tendon_regions', False) and getattr(obj, '_tendon_region_colors', None) is not None:
+            obj.vertex_colors = obj._tendon_region_colors.copy()
+    changed_contours, obj.is_draw_contours = imgui.checkbox("Draw Contours", obj.is_draw_contours)
+    display_changed = display_changed or changed_contours
+    imgui.same_line()
+    changed_vertices, obj.is_draw_contour_vertices = imgui.checkbox("Vertices", obj.is_draw_contour_vertices)
+    display_changed = display_changed or changed_vertices
+    imgui.same_line()
+    changed_pair, obj.is_draw_farthest_pair = imgui.checkbox("Farthest Pair", obj.is_draw_farthest_pair)
+    display_changed = display_changed or changed_pair
+    changed_edges, obj.is_draw_edges = imgui.checkbox("Draw Edges", obj.is_draw_edges)
+    display_changed = display_changed or changed_edges
+    changed_centroid, obj.is_draw_centroid = imgui.checkbox("Draw Centroid", obj.is_draw_centroid)
+    display_changed = display_changed or changed_centroid
+    changed_bbox, obj.is_draw_bounding_box = imgui.checkbox("Draw Bounding Box", obj.is_draw_bounding_box)
+    display_changed = display_changed or changed_bbox
+    if obj.is_draw_bounding_box:
+        imgui.same_line()
+        bb_mode = getattr(obj, 'bounding_box_draw_mode', 0)
+        bb_labels = ["Planes", "Boxes"]
+        imgui.push_item_width(80)
+        changed, new_mode = imgui.combo(f"##bb_mode_{name}", bb_mode, bb_labels)
+        imgui.pop_item_width()
+        if changed:
+            obj.bounding_box_draw_mode = new_mode
+            display_changed = True
+    changed_discarded, obj.is_draw_discarded = imgui.checkbox("Draw Discarded", obj.is_draw_discarded)
+    display_changed = display_changed or changed_discarded
+    changed_fiber, obj.is_draw_fiber_architecture = imgui.checkbox("Draw Fiber Architecture", obj.is_draw_fiber_architecture)
+    display_changed = display_changed or changed_fiber
+    if getattr(obj, 'contours_resampled', None) is not None:
+        changed_resamp, obj.is_draw_resampled_vertices = imgui.checkbox("Draw Resampled Vertices", obj.is_draw_resampled_vertices)
+        display_changed = display_changed or changed_resamp
+    changed_mesh, obj.is_draw_contour_mesh = imgui.checkbox("Draw Contour Mesh", obj.is_draw_contour_mesh)
+    display_changed = display_changed or changed_mesh
+    changed_tet, obj.is_draw_tet_mesh = imgui.checkbox("Draw Tet Mesh", obj.is_draw_tet_mesh)
+    display_changed = display_changed or changed_tet
+    imgui.same_line()
+    changed_tet_edges, obj.is_draw_tet_edges = imgui.checkbox("Tet Edges", obj.is_draw_tet_edges)
+    display_changed = display_changed or changed_tet_edges
+    if changed_tet_edges:
+        obj._tet_edge_verts = None
+        obj._tet_edge_vidx = None
+        obj._tet_edge_source = None
+    imgui.same_line()
+    if not hasattr(obj, 'is_draw_tet_internal_faces'):
+        obj.is_draw_tet_internal_faces = False
+    changed_tet_internal, obj.is_draw_tet_internal_faces = imgui.checkbox(
+        "Tet Internals", obj.is_draw_tet_internal_faces)
+    display_changed = display_changed or changed_tet_internal
+    if getattr(obj, 'is_draw_tet_internal_faces', False):
+        stride = int(getattr(obj, 'tet_internal_face_stride', 1))
+        changed_stride, new_stride = imgui.slider_int(
+            f"Internal Stride##{name}", stride, 1, 20)
+        if changed_stride:
+            obj.tet_internal_face_stride = int(new_stride)
+            obj._tet_internal_verts = None
+            display_changed = True
+    changed_constraints, obj.is_draw_constraints = imgui.checkbox("Constraints", obj.is_draw_constraints)
+    display_changed = display_changed or changed_constraints
+    if display_changed:
+        _sync_counterpart_display_state(v, name)
+    tet_labels = getattr(obj, 'tet_region_labels', None)
+    if tet_labels is not None:
+        _draw_tet_quality_stats(obj)
+        tet_region_counts = {}
+        for label in tet_labels:
+            tet_region_counts[label] = tet_region_counts.get(label, 0) + 1
+        region_text = ", ".join(
+            f"{label}:{count}" for label, count in sorted(tet_region_counts.items())
+        )
+        imgui.text(f"Tet regions: {region_text}")
+        tet_mixed = getattr(obj, 'tet_region_mixed', None)
+        if tet_mixed is not None:
+            imgui.text(f"Mixed/interface tets: {int(np.sum(tet_mixed))}")
+
+    if imgui.button("Export Muscle Waypoints", width=wide_button_width):
+        pass
+        from core.dartHelper import exportMuscleWaypoints
+        exportMuscleWaypoints(v.zygote_muscle_meshes, list(v.zygote_skeleton_meshes.keys()))
+    if imgui.button("Import zygote_muscle", width=wide_button_width):
+        muscle_file = "data/zygote_muscle.xml"
+        if not os.path.exists(muscle_file):
+            print(f"Error: Muscle file not found: {muscle_file}")
+            print("  Run 'Export Muscle Waypoints' first to create it.")
+        else:
+            try:
+                v.env.muscle_info = v.env.saveZygoteMuscleInfo(muscle_file)
+                if not v.env.muscle_info:
+                    print("No muscles loaded from file (empty or invalid)")
+                else:
+                    v.env.loading_zygote_muscle_info(v.env.muscle_info)
+                    v.env.muscle_activation_levels = np.zeros(v.env.muscles.getNumMuscles())
+
+                    v.draw_obj = True
+                    # Disable skeleton drawing when importing muscle waypoints
+                    v.is_draw_zygote_skeleton = False
+                    for sname, sobj in v.zygote_skeleton_meshes.items():
+                        sobj.is_draw = False
+                    print(f"Imported {v.env.muscles.getNumMuscles()} muscles from {muscle_file}")
+            except Exception as e:
+                print(f"Error importing muscle waypoints: {e}")
+
+    # End column layout
+    imgui.columns(1)
+
+
 def draw_zygote_muscle_ui(v):
     """Muscle section inside the Zygote tree node."""
     if imgui.tree_node("Muscle", imgui.TREE_NODE_DEFAULT_OPEN):
@@ -2194,12 +6798,12 @@ def draw_zygote_muscle_ui(v):
         if changed:
             for name, obj in v.zygote_muscle_meshes.items():
                 obj.is_draw = v.is_draw_zygote_muscle
+            _sync_zygote_group_draw_state(v, v.is_draw_zygote_muscle)
         changed, v.is_draw_zygote_muscle_open_edges = imgui.checkbox("Draw Open Edges", v.is_draw_zygote_muscle_open_edges)
         if changed:
             for name, obj in v.zygote_muscle_meshes.items():
                 obj.is_draw_open_edges = v.is_draw_zygote_muscle_open_edges
 
-        _, v.is_draw_one_zygote_muscle = imgui.checkbox("Draw One Muscle", v.is_draw_one_zygote_muscle)
         changed, v.zygote_muscle_color = imgui.color_edit3("Color", *v.zygote_muscle_color)
         if changed:
             for name, obj in v.zygote_muscle_meshes.items():
@@ -2219,6 +6823,22 @@ def draw_zygote_muscle_ui(v):
                 obj.is_draw_tet_mesh = v.is_draw_zygote_muscle_tet
         imgui.same_line()
         _, v.zygote_tet_transparency = imgui.slider_float("Tet Mesh Transparency", v.zygote_tet_transparency, 0.0, 1.0)
+        if not hasattr(v, 'is_draw_zygote_tet_internal_faces'):
+            v.is_draw_zygote_tet_internal_faces = False
+        if not hasattr(v, 'zygote_tet_internal_face_stride'):
+            v.zygote_tet_internal_face_stride = 1
+        changed, v.is_draw_zygote_tet_internal_faces = imgui.checkbox(
+            "Draw Tet Internals", v.is_draw_zygote_tet_internal_faces)
+        if changed:
+            for name, obj in v.zygote_muscle_meshes.items():
+                obj.is_draw_tet_internal_faces = v.is_draw_zygote_tet_internal_faces
+        changed, new_stride = imgui.slider_int(
+            "Tet Internal Stride", int(v.zygote_tet_internal_face_stride), 1, 20)
+        if changed:
+            v.zygote_tet_internal_face_stride = int(new_stride)
+            for name, obj in v.zygote_muscle_meshes.items():
+                obj.tet_internal_face_stride = int(new_stride)
+                obj._tet_internal_verts = None
 
         changed, v.is_draw_zygote_muscle_fibers = imgui.checkbox("##draw_fibers", v.is_draw_zygote_muscle_fibers)
         if changed:
@@ -2295,7 +6915,27 @@ def draw_zygote_muscle_ui(v):
                                 v.available_category_expanded[category] = not is_expanded
 
                             if is_expanded:
+                                component_groups = getattr(v, 'available_muscle_groups_by_category', {}).get(category, {})
+                                grouped_component_names = set()
+                                for group_name, comps in component_groups.items():
+                                    grouped_component_names.update(name for name, _path in comps)
+                                    imgui.indent(15)
+                                    is_selected = (
+                                        getattr(v, 'available_selected_group', None) == group_name
+                                        and v.available_selected_category == category
+                                    )
+                                    clicked, _ = imgui.selectable(
+                                        f"  [G] {group_name} ({len(comps)})", is_selected)
+                                    if clicked:
+                                        v.available_selected_category = category
+                                        v.available_selected_group = group_name
+                                        v.available_selected_muscle = None
+                                    if imgui.is_item_hovered() and imgui.is_mouse_double_clicked(0):
+                                        add_muscle_group(v, category, group_name)
+                                    imgui.unindent(15)
                                 for muscle_name, muscle_path in muscles:
+                                    if muscle_name in grouped_component_names:
+                                        continue
                                     imgui.indent(15)
                                     is_selected = (v.available_selected_muscle == muscle_name)
                                     clicked, _ = imgui.selectable(
@@ -2303,6 +6943,7 @@ def draw_zygote_muscle_ui(v):
                                     if clicked:
                                         v.available_selected_category = category
                                         v.available_selected_muscle = muscle_name
+                                        v.available_selected_group = None
                                     if imgui.is_item_hovered() and imgui.is_mouse_double_clicked(0):
                                         add_muscle_mesh(v, muscle_name, muscle_path)
                                     imgui.unindent(15)
@@ -2314,7 +6955,10 @@ def draw_zygote_muscle_ui(v):
 
             # Arrow buttons for add/remove
             if imgui.button("Add", width=button_width):
-                if v.available_selected_muscle and v.available_selected_category:
+                selected_group = getattr(v, 'available_selected_group', None)
+                if selected_group and v.available_selected_category:
+                    add_muscle_group(v, v.available_selected_category, selected_group)
+                elif v.available_selected_muscle and v.available_selected_category:
                     selected_path = None
                     for muscle_name, muscle_path in v.available_muscle_by_category.get(v.available_selected_category, []):
                         if muscle_name == v.available_selected_muscle:
@@ -2324,20 +6968,43 @@ def draw_zygote_muscle_ui(v):
                         add_muscle_mesh(v, v.available_selected_muscle, selected_path)
             imgui.same_line()
             if imgui.button("Remove", width=button_width):
-                loaded_names = list(v.zygote_muscle_meshes.keys())
-                if loaded_names:
-                    idx = min(v.loaded_muscle_selected, len(loaded_names) - 1)
-                    remove_muscle_mesh(v, loaded_names[idx])
+                loaded_groups = _zygote_loaded_ui_group_names(v)
+                selected_group = getattr(v, 'loaded_muscle_selected_group', None)
+                if selected_group in loaded_groups:
+                    remove_muscle_group(v, selected_group)
+                    v.loaded_muscle_selected_group = None
+                else:
+                    loaded_names = list(v.zygote_muscle_meshes.keys())
+                    if loaded_names:
+                        idx = min(v.loaded_muscle_selected, len(loaded_names) - 1)
+                        remove_muscle_mesh(v, loaded_names[idx])
 
             imgui.text("Loaded:")
-            loaded_names = list(v.zygote_muscle_meshes.keys())
+            loaded_groups = _zygote_loaded_ui_group_names(v)
+            grouped_loaded_names = set()
+            for group_name in loaded_groups:
+                grouped_loaded_names.update(_zygote_group_loaded_names(v, group_name))
+            loaded_names = [
+                name for name in v.zygote_muscle_meshes.keys()
+                if name not in grouped_loaded_names
+            ]
             # Always show child region so layout stays stable
             imgui.begin_child("##loaded_muscles_child", width=0, height=150, border=True)
+            for group_name in loaded_groups:
+                is_selected = (getattr(v, 'loaded_muscle_selected_group', None) == group_name)
+                clicked, _ = imgui.selectable(
+                    f"[G] {group_name} ({len(_zygote_group_loaded_names(v, group_name))})",
+                    is_selected)
+                if clicked:
+                    v.loaded_muscle_selected_group = group_name
+                if imgui.is_item_hovered() and imgui.is_mouse_double_clicked(0):
+                    remove_muscle_group(v, group_name)
             for i, name in enumerate(loaded_names):
                 is_selected = (v.loaded_muscle_selected == i)
                 clicked, _ = imgui.selectable(name, is_selected)
                 if clicked:
                     v.loaded_muscle_selected = i
+                    v.loaded_muscle_selected_group = None
                 # Double-click to remove
                 if imgui.is_item_hovered() and imgui.is_mouse_double_clicked(0):
                     remove_muscle_mesh(v, name)
@@ -2607,1213 +7274,14 @@ def draw_zygote_muscle_ui(v):
 
         imgui.separator()
 
+        _draw_zygote_group_ui(v)
+        hidden_group_parts = _zygote_hidden_group_part_names(v)
+
         for name, obj in v.zygote_muscle_meshes.items():
+            if name in hidden_group_parts:
+                continue
             if imgui.tree_node(name):
-                # Two-column layout: "Process All" button on left, individual buttons on right
-                imgui.columns(2, f"cols##{name}", border=False)
-                imgui.set_column_width(0, 120)
-
-                # Left column: Process button with vertical slider
-                num_process_buttons = 12  # Match number of buttons on right
-                process_all_height = num_process_buttons * imgui.get_frame_height() + (num_process_buttons - 1) * imgui.get_style().item_spacing[1]
-
-                # Process step slider is global so adjusting it on any
-                # muscle propagates to every other muscle's tree.
-                if not hasattr(v, 'global_process_step'):
-                    v.global_process_step = getattr(obj, '_process_step', 12)
-                if not hasattr(obj, '_process_step'):
-                    obj._process_step = v.global_process_step
-
-                # Vertical slider for step selection (top=1, bottom=12)
-                # Reversed min/max (12, 1) makes value increase downward
-                changed, new_val = imgui.v_slider_int(
-                    f"##step{name}", 20, process_all_height, obj._process_step, 12, 1)
-                if changed:
-                    obj._process_step = new_val
-                    v.global_process_step = new_val
-                    for _other in v.zygote_muscle_meshes.values():
-                        _other._process_step = new_val
-                imgui.same_line()
-
-                # Step names matching button order (1=top, 12=bottom)
-                # 1:Scalar, 2:Contours, 3:FillGap, 4:Transitions, 5:Smooth, 6:Cut, 7:StreamSmooth, 8:Select, 9:Build, 10:Resample, 11:Mesh, 12:Tet
-                step_names = ['', 'Scalar', 'Contours', 'Fill Gap', 'Transitions', 'Smooth', 'Cut', 'StreamSmooth', 'Select', 'Build', 'Resample', 'Mesh', 'Tet']
-
-                # Check if pipeline is paused waiting for manual step
-                pipeline_paused = hasattr(obj, '_pipeline_paused_at') and obj._pipeline_paused_at is not None
-
-                # Button label changes if paused
-                if pipeline_paused:
-                    btn_label = f"Resume\nfrom {obj._pipeline_paused_at}\n({step_names[obj._pipeline_paused_at]})"
-                else:
-                    btn_label = f"Process\n1 to {obj._process_step}\n({step_names[obj._process_step]})"
-
-                if imgui.button(f"{btn_label}##{name}", width=75, height=process_all_height):
-                    try:
-                        max_step = obj._process_step
-                        # If resuming, start from paused step
-                        if pipeline_paused:
-                            start_step = obj._pipeline_paused_at
-                            obj._pipeline_paused_at = None
-                            print(f"[{name}] Resuming pipeline from step {start_step} to {max_step}...")
-                        else:
-                            start_step = 1
-                            print(f"[{name}] Running pipeline steps 1 to {max_step}...")
-
-                        # Step 1: Scalar Field
-                        defer = getattr(obj, 'animate_process', False)
-                        if start_step <= 1 <= max_step and len(obj.edge_groups) > 0 and len(obj.edge_classes) > 0:
-                            print(f"  [1/{max_step}] Computing Scalar Field...")
-                            _t0 = time.time()
-                            has_counterpart = bool(getattr(obj, 'linked_counterpart_name', ''))
-                            if (has_counterpart
-                                    and getattr(obj, 'linked_drive_counterpart', False)
-                                    and getattr(obj, 'linked_use_shared_scalar', True)):
-                                _ensure_counterpart_scalar(v, name, obj, defer=defer)
-                            else:
-                                obj.compute_scalar_field(defer=defer)
-                                if has_counterpart and getattr(obj, 'linked_drive_counterpart', False):
-                                    _ensure_counterpart_scalar(v, name, obj, defer=defer)
-                            print(f"  [1/{max_step}] Done in {time.time()-_t0:.3f}s")
-
-                        # Step 2: Find Contours
-                        if start_step <= 2 <= max_step and obj.scalar_field is not None:
-                            print(f"  [2/{max_step}] Finding Contours...")
-                            _t0 = time.time()
-                            obj.find_contours(skeleton_meshes=v.zygote_skeleton_meshes, spacing_scale=obj.contour_spacing_scale, defer=defer)
-                            if getattr(obj, 'linked_drive_counterpart', False):
-                                _apply_master_contour_schedule_to_counterpart(
-                                    v, name, obj, defer=defer, label="contours")
-                            print(f"  [2/{max_step}] Done in {time.time()-_t0:.3f}s")
-                            if not defer:
-                                obj.is_draw_bounding_box = True
-
-                        # Step 3: Fill Gaps
-                        if start_step <= 3 <= max_step and obj.contours is not None and len(obj.contours) > 0:
-                            print(f"  [3/{max_step}] Filling Gaps...")
-                            _t0 = time.time()
-                            obj.refine_contours(max_spacing_threshold=0.01, defer=defer)
-                            if getattr(obj, 'linked_drive_counterpart', False):
-                                _apply_master_contour_schedule_to_counterpart(
-                                    v, name, obj, defer=defer, label="gap-filled contours")
-                            print(f"  [3/{max_step}] Done in {time.time()-_t0:.3f}s")
-
-                        # Step 4: Find Transitions
-                        if start_step <= 4 <= max_step and obj.scalar_field is not None:
-                            print(f"  [4/{max_step}] Finding Transitions...")
-                            _t0 = time.time()
-                            field_min = float(obj.scalar_field.min())
-                            field_max = float(obj.scalar_field.max())
-                            scalar_min, scalar_max = field_min, field_max
-                            if hasattr(obj, 'origin_contour_value') and hasattr(obj, 'insertion_contour_value'):
-                                o_val, i_val = obj.origin_contour_value, obj.insertion_contour_value
-                                if o_val != i_val:
-                                    proposed_min, proposed_max = min(o_val, i_val), max(o_val, i_val)
-                                    if proposed_min >= field_min and proposed_max <= field_max:
-                                        scalar_min, scalar_max = proposed_min, proposed_max
-                            exp_origin = len(obj.contours[0]) if obj.contours and len(obj.contours) > 0 else None
-                            exp_insertion = len(obj.contours[-1]) if obj.contours and len(obj.contours) > 0 else None
-                            obj.find_all_transitions(scalar_min=scalar_min, scalar_max=scalar_max, num_samples=200,
-                                                    expected_origin=exp_origin, expected_insertion=exp_insertion)
-                            if obj.contours is not None and len(obj.contours) > 0:
-                                obj.add_transitions_to_contours(defer=defer)
-                            if getattr(obj, 'linked_drive_counterpart', False):
-                                _apply_master_contour_schedule_to_counterpart(
-                                    v, name, obj, defer=defer, label="transition contours")
-                            print(f"  [4/{max_step}] Done in {time.time()-_t0:.3f}s")
-
-                        # Step 5: Smooth (z, x, bp - before cut)
-                        if start_step <= 5 <= max_step and obj.contours is not None and len(obj.contours) > 0:
-                            print(f"  [5/{max_step}] Smoothening (z, x, bp)...")
-                            _t0 = time.time()
-                            obj.smoothen_all(defer=defer)
-                            _run_counterpart_step(v, name, obj, 5, defer=defer)
-                            print(f"  [5/{max_step}] Done in {time.time()-_t0:.3f}s")
-
-                        # Step 6: Cut
-                        if start_step <= 6 <= max_step and obj.contours is not None and len(obj.contours) > 0 and obj.bounding_planes is not None:
-                            print(f"  [6/{max_step}] Cutting streams...")
-                            _t0 = time.time()
-                            obj.cut_streams_animated(defer=defer, cut_method=obj.cutting_method, muscle_name=name)
-                            _run_counterpart_step(v, name, obj, 6, defer=defer)
-                            print(f"  [6/{max_step}] Done in {time.time()-_t0:.3f}s")
-                            # Check if waiting for manual cut
-                            if hasattr(obj, '_manual_cut_pending') and obj._manual_cut_pending or hasattr(obj, '_manual_cut_data') and obj._manual_cut_data is not None:
-                                obj._pipeline_paused_at = 7  # Resume from step 7 after cut is complete
-                                print(f"  [6/{max_step}] Waiting for manual cut - pipeline paused")
-                                raise StopIteration("Manual cut pending")
-
-                        # Step 7: Stream Smooth (z, x, bp - after cut)
-                        if start_step <= 7 <= max_step and hasattr(obj, 'stream_contours') and obj.stream_contours is not None:
-                            print(f"  [7/{max_step}] Stream Smoothening (z, x, bp)...")
-                            _t0 = time.time()
-                            obj.stream_smoothen_all(defer=defer)
-                            _run_counterpart_step(v, name, obj, 7, defer=defer)
-                            print(f"  [7/{max_step}] Done in {time.time()-_t0:.3f}s")
-
-                        # Step 8: Contour Select
-                        if start_step <= 8 <= max_step and hasattr(obj, 'stream_contours') and obj.stream_contours is not None:
-                            print(f"  [8/{max_step}] Selecting contours...")
-                            _t0 = time.time()
-                            obj.select_levels()
-                            if not (hasattr(obj, '_level_select_window_open') and obj._level_select_window_open):
-                                _run_counterpart_step(v, name, obj, 8, defer=defer)
-                            print(f"  [8/{max_step}] Done in {time.time()-_t0:.3f}s")
-                            # Check if waiting for manual level selection
-                            if hasattr(obj, '_level_select_window_open') and obj._level_select_window_open:
-                                obj._pipeline_paused_at = 9  # Resume from step 9 after selection
-                                print(f"  [8/{max_step}] Waiting for level selection - pipeline paused")
-                                raise StopIteration("Level selection pending")
-
-                        # Step 9: Build Fiber
-                        if start_step <= 9 <= max_step and hasattr(obj, 'stream_contours') and obj.stream_contours is not None:
-                            print(f"  [9/{max_step}] Building fibers...")
-                            _t0 = time.time()
-                            _ensure_level_selection_applied(v, name, obj, defer=defer)
-                            obj._belly_waypoints_before_tendon_extension = None
-                            obj.build_fibers(skeleton_meshes=v.zygote_skeleton_meshes, defer=defer)
-                            if (getattr(obj, 'origin_tendon_extension_name', '')
-                                    or getattr(obj, 'insertion_tendon_extension_name', '')):
-                                _extend_belly_fibers_with_tendons(v, name, obj)
-                            _run_counterpart_step(v, name, obj, 9, defer=defer)
-                            print(f"  [9/{max_step}] Done in {time.time()-_t0:.3f}s")
-                            if defer:
-                                obj._level_select_replayed = False
-
-                        # Step 10: Resample Contours
-                        if start_step <= 10 <= max_step and obj.contours is not None and len(obj.contours) > 0 and obj.bounding_planes is not None:
-                            print(f"  [10/{max_step}] Resampling Contours...")
-                            _t0 = time.time()
-                            _resample_contours_with_links(v, name, obj, defer=defer)
-                            _resample_linked_tendon_extensions(v, name, obj, defer=defer)
-                            print(f"  [10/{max_step}] Done in {time.time()-_t0:.3f}s")
-                            if defer:
-                                obj._build_fibers_replayed = False
-
-                        # Step 11: Build Contour Mesh
-                        if start_step <= 11 <= max_step and obj.contours is not None and len(obj.contours) > 0 and obj.draw_contour_stream is not None:
-                            print(f"  [11/{max_step}] Building Contour Mesh...")
-                            _t0 = time.time()
-                            if _prepare_owned_connected_contour_mesh_source(v, name, obj):
-                                obj.build_contour_mesh(defer=defer)
-                                if not _connected_source_has_linked_components(obj):
-                                    _run_counterpart_step(v, name, obj, 11, defer=defer)
-                            print(f"  [11/{max_step}] Done in {time.time()-_t0:.3f}s")
-                            if defer:
-                                obj._resample_replayed = False
-
-                        # Step 12: Tetrahedralize
-                        if start_step <= 12 <= max_step and obj.contour_mesh_vertices is not None:
-                            print(f"  [12/{max_step}] Tetrahedralizing...")
-                            _t0 = time.time()
-                            if _skip_non_owner_connected_mesh(v, name, obj, "Tetrahedralize"):
-                                print(f"  [12/{max_step}] Skipped in {time.time()-_t0:.3f}s")
-                            else:
-                                obj.soft_body = None
-                                obj.tetrahedralize_contour_mesh(skeleton_meshes=v.zygote_skeleton_meshes)
-                                if not _connected_source_has_linked_components(obj):
-                                    _run_counterpart_step(v, name, obj, 12, defer=defer)
-                            if obj.tet_vertices is not None and not _skip_non_owner_connected_mesh(v, name, obj, "Tetrahedralize display"):
-                                if defer:
-                                    obj._extract_internal_tet_edges()
-                                    obj._classify_tet_faces_into_bands()
-                                    obj._tetrahedralize_replayed = False
-                                else:
-                                    obj.is_draw_contours = False
-                                    obj.is_draw_tet_mesh = True
-                                    obj._tetrahedralize_replayed = True
-                            print(f"  [12/{max_step}] Done in {time.time()-_t0:.3f}s")
-
-                        obj._pipeline_paused_at = None  # Clear pause state on completion
-                        print(f"[{name}] Pipeline complete (steps {start_step}-{max_step})!")
-                    except StopIteration:
-                        pass  # Manual cut pending - pipeline paused gracefully
-                    except Exception as e:
-                        print(f"[{name}] Pipeline error: {e}")
-                        traceback.print_exc()
-
-                # Right column: Individual buttons (use -1 to auto-fill column width)
-                imgui.next_column()
-                col_button_width = 180  # Fits in the right column
-
-                # Helper for button coloring based on process step
-                def colored_button(label, step_num, width):
-                    will_run = step_num <= obj._process_step
-                    if will_run:
-                        imgui.push_style_color(imgui.COLOR_BUTTON, 0.2, 0.6, 0.2, 1.0)
-                        imgui.push_style_color(imgui.COLOR_BUTTON_HOVERED, 0.3, 0.7, 0.3, 1.0)
-                    clicked = imgui.button(label, width=width)
-                    if will_run:
-                        imgui.pop_style_color(2)
-                    return clicked
-
-                animate = getattr(obj, 'animate_process', False)
-                replay_w = 25
-                proc_w = col_button_width - replay_w - imgui.get_style().item_spacing[0] if animate else col_button_width
-
-                if colored_button(f"Scalar Field##{name}", 1, proc_w):
-                    if len(obj.edge_groups) > 0 and len(obj.edge_classes) > 0:
-                        try:
-                            _t0 = time.time()
-                            has_counterpart = bool(getattr(obj, 'linked_counterpart_name', ''))
-                            if (has_counterpart
-                                    and getattr(obj, 'linked_drive_counterpart', False)
-                                    and getattr(obj, 'linked_use_shared_scalar', True)):
-                                _ensure_counterpart_scalar(v, name, obj, defer=animate)
-                            else:
-                                obj.compute_scalar_field(defer=animate)
-                                if has_counterpart and getattr(obj, 'linked_drive_counterpart', False):
-                                    _ensure_counterpart_scalar(v, name, obj, defer=animate)
-                            print(f"[{name}] Scalar Field done in {time.time()-_t0:.3f}s")
-                        except Exception as e:
-                            print(f"[{name}] Scalar Field error: {e}")
-                    else:
-                        print(f"[{name}] Need edge_groups and edge_classes")
-                if animate and obj._scalar_anim_target_colors is not None:
-                    imgui.same_line()
-                    if imgui.button(f">##{name}_scalar_replay", width=replay_w):
-                        obj.replay_scalar_animation()
-
-                if colored_button(f"Find Contours##{name}", 2, proc_w):
-                    if obj.scalar_field is not None:
-                        try:
-                            _t0 = time.time()
-                            obj.find_contours(skeleton_meshes=v.zygote_skeleton_meshes, spacing_scale=obj.contour_spacing_scale, defer=animate)
-                            if getattr(obj, 'linked_drive_counterpart', False):
-                                _apply_master_contour_schedule_to_counterpart(
-                                    v, name, obj, defer=animate, label="contours")
-                            print(f"[{name}] Find Contours done in {time.time()-_t0:.3f}s")
-                            if not animate:
-                                obj.is_draw_bounding_box = True
-                        except Exception as e:
-                            print(f"[{name}] Find Contours error: {e}")
-                    else:
-                        print(f"[{name}] Prerequisites: Run 'Scalar Field' first")
-                # Contour replay: only available after scalar replay has been played
-                if animate and obj.contours is not None and len(obj.contours) > 0 and getattr(obj, '_scalar_replayed', False):
-                    imgui.same_line()
-                    if imgui.button(f">##{name}_contour_replay", width=replay_w):
-                        obj.replay_contour_animation()
-                if colored_button(f"Fill Gaps##{name}", 3, proc_w):
-                    if obj.contours is not None and len(obj.contours) > 0:
-                        try:
-                            _t0 = time.time()
-                            obj.refine_contours(max_spacing_threshold=0.01, defer=animate)
-                            if getattr(obj, 'linked_drive_counterpart', False):
-                                _apply_master_contour_schedule_to_counterpart(
-                                    v, name, obj, defer=animate, label="gap-filled contours")
-                            print(f"[{name}] Fill Gaps done in {time.time()-_t0:.3f}s")
-                        except Exception as e:
-                            print(f"[{name}] Fill Gaps error: {e}")
-                    else:
-                        print(f"[{name}] Prerequisites: Run 'Find Contours' first")
-                # Fill gaps replay: only available after contour replay has been played
-                if animate and getattr(obj, '_fill_gaps_inserted_indices', None) is not None and getattr(obj, '_contour_replayed', False):
-                    imgui.same_line()
-                    if imgui.button(f">##{name}_fillgaps_replay", width=replay_w):
-                        obj.replay_fill_gaps_animation()
-
-                # Find Transitions button - fast scan for contour count changes (step 4)
-                if colored_button(f"Find Transitions##{name}", 4, proc_w):
-                    if hasattr(obj, 'scalar_field') and obj.scalar_field is not None:
-                        try:
-                            _t0 = time.time()
-                            # Use actual scalar field range
-                            field_min = float(obj.scalar_field.min())
-                            field_max = float(obj.scalar_field.max())
-                            scalar_min = field_min
-                            scalar_max = field_max
-                            # Optionally narrow to origin/insertion if set AND within field range
-                            if hasattr(obj, 'origin_contour_value') and hasattr(obj, 'insertion_contour_value'):
-                                o_val = obj.origin_contour_value
-                                i_val = obj.insertion_contour_value
-                                # Only use if different AND within the actual scalar field range
-                                if o_val != i_val:
-                                    proposed_min = min(o_val, i_val)
-                                    proposed_max = max(o_val, i_val)
-                                    if proposed_min >= field_min and proposed_max <= field_max:
-                                        scalar_min = proposed_min
-                                        scalar_max = proposed_max
-                                    else:
-                                        print(f"[{name}] Origin/insertion values ({o_val}, {i_val}) outside field range [{field_min:.4f}, {field_max:.4f}], using field range")
-                            print(f"[{name}] Scanning scalar range: {scalar_min:.4f} to {scalar_max:.4f}")
-                            # Try to get expected origin/insertion counts from existing contours
-                            exp_origin = None
-                            exp_insertion = None
-                            if hasattr(obj, 'contours') and obj.contours is not None and len(obj.contours) > 0:
-                                exp_origin = len(obj.contours[0])
-                                exp_insertion = len(obj.contours[-1])
-                                print(f"[{name}] Expected counts from contours: origin={exp_origin}, insertion={exp_insertion}")
-                            obj.find_all_transitions(scalar_min=scalar_min, scalar_max=scalar_max, num_samples=200,
-                                                    expected_origin=exp_origin, expected_insertion=exp_insertion)
-                            # Auto-add transitions to contours if contours exist
-                            if obj.contours is not None and len(obj.contours) > 0:
-                                obj.add_transitions_to_contours(defer=animate)
-                            if getattr(obj, 'linked_drive_counterpart', False):
-                                _apply_master_contour_schedule_to_counterpart(
-                                    v, name, obj, defer=animate, label="transition contours")
-                            print(f"[{name}] Find Transitions done in {time.time()-_t0:.3f}s")
-                        except Exception as e:
-                            print(f"[{name}] Find Transitions error: {e}")
-                            traceback.print_exc()
-                    else:
-                        print(f"[{name}] Prerequisites: Run 'Scalar Field' first")
-                # Transitions replay: only available after fill gaps replay has been played
-                if animate and getattr(obj, '_transitions_inserted_indices', None) is not None and (getattr(obj, '_fill_gaps_replayed', False) or getattr(obj, '_fill_gaps_inserted_indices', None) is None):
-                    imgui.same_line()
-                    if imgui.button(f">##{name}_transitions_replay", width=replay_w):
-                        obj.replay_transitions_animation()
-
-                # Step 5: Smoothen buttons
-                sub_button_width = (col_button_width - 8) // 3  # 3 buttons with small margins
-                if animate:
-                    # Single "Smooth" button with replay when animate is on
-                    if colored_button(f"Smooth##{name}", 5, proc_w):
-                        if obj.contours is not None and len(obj.contours) > 0:
-                            try:
-                                _t0 = time.time()
-                                obj.smoothen_all(defer=True)
-                                _run_counterpart_step(v, name, obj, 5, defer=True)
-                                print(f"[{name}] Smooth done in {time.time()-_t0:.3f}s")
-                            except Exception as e:
-                                print(f"[{name}] Smooth error: {e}")
-                        else:
-                            print(f"[{name}] Prerequisites: Run 'Find Contours' first")
-                    if getattr(obj, '_smooth_bp_after', None) is not None and (getattr(obj, '_transitions_replayed', False) or getattr(obj, '_transitions_inserted_indices', None) is None):
-                        imgui.same_line()
-                        if imgui.button(f">##{name}_smooth_replay", width=replay_w):
-                            obj.replay_smooth_animation()
-                else:
-                    # Individual z, x, bp buttons when animate is off
-                    if colored_button(f"z##{name}", 5, sub_button_width):
-                        if obj.contours is not None and len(obj.contours) > 0:
-                            try:
-                                _t0 = time.time()
-                                obj.smoothen_contours_z()
-                                _run_counterpart_step(v, name, obj, 5, defer=False)
-                                print(f"[{name}] Smooth Z done in {time.time()-_t0:.3f}s")
-                            except Exception as e:
-                                print(f"[{name}] Smoothen Z error: {e}")
-                        else:
-                            print(f"[{name}] Prerequisites: Run 'Find Contours' first")
-                    imgui.same_line(spacing=4)
-                    if colored_button(f"x##{name}", 5, sub_button_width):
-                        if obj.contours is not None and len(obj.contours) > 0:
-                            try:
-                                _t0 = time.time()
-                                obj.smoothen_contours_x()
-                                _run_counterpart_step(v, name, obj, 5, defer=False)
-                                print(f"[{name}] Smooth X done in {time.time()-_t0:.3f}s")
-                            except Exception as e:
-                                print(f"[{name}] Smoothen X error: {e}")
-                        else:
-                            print(f"[{name}] Prerequisites: Run 'Find Contours' first")
-                    imgui.same_line(spacing=4)
-                    if colored_button(f"bp##{name}", 5, sub_button_width):
-                        if obj.contours is not None and len(obj.contours) > 0:
-                            try:
-                                _t0 = time.time()
-                                obj.smoothen_contours_bp()
-                                _run_counterpart_step(v, name, obj, 5, defer=False)
-                                print(f"[{name}] Smooth BP done in {time.time()-_t0:.3f}s")
-                            except Exception as e:
-                                print(f"[{name}] Smoothen BP error: {e}")
-                        else:
-                            print(f"[{name}] Prerequisites: Run 'Find Contours' first")
-
-                # Step 6: Cut (standalone button)
-                cut_w = col_button_width - replay_w - imgui.get_style().item_spacing[0] if animate else col_button_width
-                if colored_button(f"Cut##{name}", 6, cut_w):
-                    if obj.contours is not None and len(obj.contours) > 0 and obj.bounding_planes is not None and len(obj.bounding_planes) > 0:
-                        try:
-                            _t0 = time.time()
-                            if animate:
-                                obj.cut_streams_animated(defer=True, cut_method=obj.cutting_method, muscle_name=name)
-                            else:
-                                obj.cut_streams(cut_method=obj.cutting_method, muscle_name=name)
-                            _run_counterpart_step(v, name, obj, 6, defer=animate)
-                            print(f"[{name}] Cut done in {time.time()-_t0:.3f}s")
-                        except Exception as e:
-                            print(f"[{name}] Cut Streams error: {e}")
-                            traceback.print_exc()
-                    else:
-                        print(f"[{name}] Prerequisites: Run 'Find Contours' first")
-                if animate and getattr(obj, '_cut_color_after', None) is not None and (getattr(obj, '_smooth_replayed', False) or getattr(obj, '_smooth_bp_after', None) is None):
-                    imgui.same_line()
-                    if imgui.button(f">##{name}_cut_replay", width=replay_w):
-                        obj.replay_cut_animation()
-
-                # Step 7: Stream Smoothen buttons: z, x, bp (3 buttons in same row - after cut)
-                if animate:
-                    # Single "Stream Smooth" button with replay when animate is on
-                    if colored_button(f"Stream Smooth##{name}", 7, proc_w):
-                        if hasattr(obj, 'stream_contours') and obj.stream_contours is not None:
-                            try:
-                                _t0 = time.time()
-                                obj.stream_smoothen_all(defer=True)
-                                _run_counterpart_step(v, name, obj, 7, defer=True)
-                                print(f"[{name}] Stream Smooth done in {time.time()-_t0:.3f}s")
-                            except Exception as e:
-                                print(f"[{name}] Stream Smooth error: {e}")
-                        else:
-                            print(f"[{name}] Prerequisites: Run 'Cut' first")
-                    if getattr(obj, '_stream_smooth_bp_after', None) is not None and (getattr(obj, '_cut_replayed', False) or getattr(obj, '_cut_color_after', None) is None):
-                        imgui.same_line()
-                        if imgui.button(f">##{name}_stream_smooth_replay", width=replay_w):
-                            obj.replay_stream_smooth_animation()
-                else:
-                    # Individual z, x, bp buttons when animate is off
-                    if colored_button(f"z##stream{name}", 7, sub_button_width):
-                        if hasattr(obj, 'stream_contours') and obj.stream_contours is not None:
-                            try:
-                                _t0 = time.time()
-                                obj.smoothen_contours_z()
-                                _run_counterpart_step(v, name, obj, 7, defer=False)
-                                print(f"[{name}] Stream Smooth Z done in {time.time()-_t0:.3f}s")
-                            except Exception as e:
-                                print(f"[{name}] Stream Smoothen Z error: {e}")
-                        else:
-                            print(f"[{name}] Prerequisites: Run 'Cut' first")
-                    imgui.same_line(spacing=4)
-                    if colored_button(f"x##stream{name}", 7, sub_button_width):
-                        if hasattr(obj, 'stream_contours') and obj.stream_contours is not None:
-                            try:
-                                _t0 = time.time()
-                                obj.smoothen_contours_x()
-                                _run_counterpart_step(v, name, obj, 7, defer=False)
-                                print(f"[{name}] Stream Smooth X done in {time.time()-_t0:.3f}s")
-                            except Exception as e:
-                                print(f"[{name}] Stream Smoothen X error: {e}")
-                        else:
-                            print(f"[{name}] Prerequisites: Run 'Cut' first")
-                    imgui.same_line(spacing=4)
-                    if colored_button(f"bp##stream{name}", 7, sub_button_width):
-                        if hasattr(obj, 'stream_contours') and obj.stream_contours is not None:
-                            try:
-                                _t0 = time.time()
-                                obj.smoothen_contours_bp()
-                                _run_counterpart_step(v, name, obj, 7, defer=False)
-                                print(f"[{name}] Stream Smooth BP done in {time.time()-_t0:.3f}s")
-                            except Exception as e:
-                                print(f"[{name}] Stream Smoothen BP error: {e}")
-                        else:
-                            print(f"[{name}] Prerequisites: Run 'Cut' first")
-
-                # Step 8: Contour Select
-                if colored_button(f"Contour Select##{name}", 8, proc_w if animate else col_button_width):
-                    if hasattr(obj, 'stream_contours') and obj.stream_contours is not None:
-                        try:
-                            _t0 = time.time()
-                            obj.select_levels()
-                            print(f"[{name}] Contour Select done in {time.time()-_t0:.3f}s")
-                        except Exception as e:
-                            print(f"[{name}] Select Levels error: {e}")
-                            traceback.print_exc()
-                    else:
-                        print(f"[{name}] Prerequisites: Run 'Cut' first")
-                if animate and getattr(obj, '_level_select_anim_original', None) is not None and (getattr(obj, '_stream_smooth_replayed', False) or getattr(obj, '_stream_smooth_bp_after', None) is None):
-                    imgui.same_line()
-                    if imgui.button(f">##{name}_level_select_replay", width=replay_w):
-                        obj.replay_level_select_animation()
-
-                # Step 9: Build Fiber (standalone button)
-                if colored_button(f"Build Fiber##{name}", 9, proc_w if animate else col_button_width):
-                    if hasattr(obj, 'stream_contours') and obj.stream_contours is not None:
-                        try:
-                            _t0 = time.time()
-                            _ensure_level_selection_applied(v, name, obj, defer=animate)
-                            obj._belly_waypoints_before_tendon_extension = None
-                            obj.build_fibers(skeleton_meshes=v.zygote_skeleton_meshes, defer=animate)
-                            if (getattr(obj, 'origin_tendon_extension_name', '')
-                                    or getattr(obj, 'insertion_tendon_extension_name', '')):
-                                _extend_belly_fibers_with_tendons(v, name, obj)
-                            _run_counterpart_step(v, name, obj, 9, defer=animate)
-                            print(f"[{name}] Build Fiber done in {time.time()-_t0:.3f}s")
-                        except Exception as e:
-                            print(f"[{name}] Build Fibers error: {e}")
-                            traceback.print_exc()
-                    else:
-                        print(f"[{name}] Prerequisites: Run 'Cut' first")
-                if animate and getattr(obj, '_fiber_anim_waypoints', None) is not None and getattr(obj, '_level_select_replayed', False) and not getattr(obj, '_level_select_anim_active', False):
-                    imgui.same_line()
-                    if imgui.button(f">##{name}_fiber_replay", width=replay_w):
-                        obj.replay_fiber_animation()
-
-                # Step 10: Resample Contours
-                if colored_button(f"Resample Contours##{name}", 10, proc_w if animate else col_button_width):
-                    if obj.contours is not None and len(obj.contours) > 0 and obj.bounding_planes is not None:
-                        try:
-                            _t0 = time.time()
-                            _resample_contours_with_links(v, name, obj, defer=animate)
-                            _resample_linked_tendon_extensions(v, name, obj, defer=animate)
-                            print(f"[{name}] Resample Contours done in {time.time()-_t0:.3f}s")
-                        except Exception as e:
-                            print(f"[{name}] Resample Contours error: {e}")
-                    else:
-                        print(f"[{name}] Prerequisites: Run 'Smoothen Contours' first")
-                if animate and getattr(obj, '_resample_anim_data', None) is not None and (getattr(obj, '_build_fibers_replayed', False) or getattr(obj, '_fiber_anim_waypoints', None) is None) and not getattr(obj, '_fiber_anim_active', False):
-                    imgui.same_line()
-                    if imgui.button(f">##{name}_resample_replay", width=replay_w):
-                        obj.replay_resample_animation()
-
-                # Step 11: Build Contour Mesh
-                if colored_button(f"Build Contour Mesh##{name}", 11, proc_w if animate else col_button_width):
-                    if obj.contours is not None and len(obj.contours) > 0 and obj.draw_contour_stream is not None:
-                        try:
-                            _t0 = time.time()
-                            if _prepare_owned_connected_contour_mesh_source(v, name, obj):
-                                obj.build_contour_mesh(defer=animate)
-                                if not _connected_source_has_linked_components(obj):
-                                    _run_counterpart_step(v, name, obj, 11, defer=animate)
-                            print(f"[{name}] Build Contour Mesh done in {time.time()-_t0:.3f}s")
-                        except Exception as e:
-                            print(f"[{name}] Build Contour Mesh error: {e}")
-                            traceback.print_exc()
-                    else:
-                        print(f"[{name}] Prerequisites: Run 'Build Fiber' first")
-                if animate and getattr(obj, '_mesh_anim_face_bands', None) is not None and (getattr(obj, '_resample_replayed', False) or getattr(obj, '_resample_anim_data', None) is None) and not getattr(obj, '_resample_anim_active', False):
-                    imgui.same_line()
-                    if imgui.button(f">##{name}_mesh_replay", width=replay_w):
-                        obj.replay_mesh_animation()
-
-                # Step 12: Tetrahedralize
-                if colored_button(f"Tetrahedralize##{name}", 12, proc_w if animate else col_button_width):
-                    if obj.contour_mesh_vertices is not None:
-                        try:
-                            _t0 = time.time()
-                            if _skip_non_owner_connected_mesh(v, name, obj, "Tetrahedralize"):
-                                print(f"[{name}] Tetrahedralize skipped in {time.time()-_t0:.3f}s")
-                            else:
-                                obj.soft_body = None  # Reset soft body when re-tetrahedralizing
-                                obj.tetrahedralize_contour_mesh(skeleton_meshes=v.zygote_skeleton_meshes)
-                                if not _connected_source_has_linked_components(obj):
-                                    _run_counterpart_step(v, name, obj, 12, defer=animate)
-                            print(f"[{name}] Tetrahedralize done in {time.time()-_t0:.3f}s")
-                            if obj.tet_vertices is not None and not _skip_non_owner_connected_mesh(v, name, obj, "Tetrahedralize display"):
-                                if animate:
-                                    obj._extract_internal_tet_edges()
-                                    obj._classify_tet_faces_into_bands()
-                                    obj._tetrahedralize_replayed = False
-                                else:
-                                    obj.is_draw_contours = False
-                                    obj.is_draw_tet_mesh = True
-                                    obj._tetrahedralize_replayed = True
-                        except Exception as e:
-                            print(f"[{name}] Tetrahedralize error: {e}")
-                            traceback.print_exc()
-                    else:
-                        print(f"[{name}] Prerequisites: Run 'Build Contour Mesh' first")
-                if animate and getattr(obj, '_tet_anim_internal_edges', None) is not None and (getattr(obj, '_build_mesh_replayed', False) or getattr(obj, '_mesh_anim_face_bands', None) is None) and not getattr(obj, '_tet_anim_active', False):
-                    imgui.same_line()
-                    if imgui.button(f">##{name}_tet_replay", width=replay_w):
-                        obj.replay_tet_animation()
-
-                # End two-column layout - back to full width for remaining GUI elements
-                imgui.columns(1)
-
-                # Reset process button
-                reset_width = button_width * 2 + imgui.get_style().item_spacing[0]
-                if imgui.button(f"Reset Process##{name}", width=reset_width):
-                    _clear_connected_mesh_ownership(v, name)
-                    obj.reset_process()
-
-                # Save/Load contours buttons
-                contour_filepath = f"{v.zygote_muscle_dir}{name}.contours.json"
-                if imgui.button(f"Save Contour##{name}", width=button_width):
-                    if obj.contours is not None and len(obj.contours) > 0:
-                        try:
-                            obj.save_contours(contour_filepath)
-                        except Exception as e:
-                            print(f"[{name}] Save Contours error: {e}")
-                    else:
-                        print(f"[{name}] No contours to save")
-                imgui.same_line()
-                if imgui.button(f"Load Contour##{name}", width=button_width):
-                    try:
-                        obj.load_contours(contour_filepath)
-                    except Exception as e:
-                        print(f"[{name}] Load Contours error: {e}")
-
-                if imgui.button(f"Save Tet##{name}", width=button_width):
-                    if hasattr(obj, 'tet_vertices') and obj.tet_vertices is not None:
-                        try:
-                            obj.save_tetrahedron_mesh(name)
-                        except Exception as e:
-                            print(f"[{name}] Save Tet error: {e}")
-                    else:
-                        print(f"[{name}] No tetrahedron mesh to save")
-                imgui.same_line()
-                if imgui.button(f"Load Tet##{name}", width=button_width):
-                    try:
-                        obj.soft_body = None  # Reset soft body when loading new tet
-                        obj.load_tetrahedron_mesh(name)
-                        if obj.tet_vertices is not None:
-                            obj.is_draw = False  # Disable mesh draw
-                            obj.is_draw_contours = False
-                            obj.is_draw_tet_mesh = True
-                            obj.is_draw_fiber_architecture = True  # Enable fiber draw
-                            # Resolve skeleton attachments from names to current indices
-                            skeleton_names = list(v.zygote_skeleton_meshes.keys())
-                            obj.resolve_skeleton_attachments(skeleton_names)
-                    except Exception as e:
-                        print(f"[{name}] Load Tet error: {e}")
-
-                # Inspect 2D button - opens visualization window for contours (and fiber samples if available)
-                inspect_width = button_width * 2 + imgui.get_style().item_spacing[0]
-                has_contour_data = (hasattr(obj, 'contours') and obj.contours is not None and len(obj.contours) > 0)
-                if not has_contour_data:
-                    imgui.push_style_var(imgui.STYLE_ALPHA, 0.5)
-                if imgui.button(f"Inspect 2D##{name}", width=inspect_width):
-                    if has_contour_data:
-                        v.inspect_2d_open[name] = True
-                        if name not in v.inspect_2d_stream_idx:
-                            v.inspect_2d_stream_idx[name] = 0
-                        if name not in v.inspect_2d_contour_idx:
-                            v.inspect_2d_contour_idx[name] = 0
-                    else:
-                        print(f"[{name}] No contour data. Run 'Find Contours' first.")
-                if not has_contour_data:
-                    imgui.pop_style_var()
-
-                # Focus camera on muscle button
-                if imgui.button(f"Focus##{name}", width=button_width):
-                    if obj.vertices is not None and len(obj.vertices) > 0:
-                        # Compute bounding box center
-                        min_pt = np.min(obj.vertices, axis=0)
-                        max_pt = np.max(obj.vertices, axis=0)
-                        center = (min_pt + max_pt) / 2
-                        bbox_size = np.linalg.norm(max_pt - min_pt)
-                        # Set camera target (trans is scaled by 0.001 in render, so multiply by 1000)
-                        v.trans = -center * 1000.0
-                        # Adjust eye distance based on bounding box size
-                        distance = bbox_size * 2.0
-                        eye_dir = v.eye / (np.linalg.norm(v.eye) + 1e-10)
-                        v.eye = eye_dir * max(distance, MIN_EYE_DISTANCE)
-                    else:
-                        print(f"[{name}] No vertices to focus on")
-
-                # Rotate toggle button (auto-orbit around focused muscle)
-                imgui.same_line()
-                is_rotating = v.auto_rotate
-                if is_rotating:
-                    imgui.push_style_color(imgui.COLOR_BUTTON, 0.2, 0.4, 0.8, 1.0)
-                    imgui.push_style_color(imgui.COLOR_BUTTON_HOVERED, 0.3, 0.5, 0.9, 1.0)
-                    imgui.push_style_color(imgui.COLOR_BUTTON_ACTIVE, 0.1, 0.3, 0.7, 1.0)
-                if imgui.button(f"Rotate##{name}", width=button_width):
-                    if v.auto_rotate:
-                        v.auto_rotate = False
-                    else:
-                        v.auto_rotate = True
-                if is_rotating:
-                    imgui.pop_style_color(3)
-
-                if not hasattr(v, 'global_animate_process'):
-                    v.global_animate_process = getattr(obj, 'animate_process', True)
-                if not hasattr(obj, 'animate_process'):
-                    obj.animate_process = v.global_animate_process
-                changed_anim, new_anim = imgui.checkbox("Animate", obj.animate_process)
-                obj.animate_process = new_anim
-                if changed_anim:
-                    v.global_animate_process = new_anim
-                    for _other in v.zygote_muscle_meshes.values():
-                        _other.animate_process = new_anim
-
-                # Save/Load animation state + Play All
-                imgui.same_line()
-                avail = imgui.get_content_region_available_width()
-                anim_btn_w = (avail - imgui.get_style().item_spacing[0] * 2) / 3
-                anim_filepath = f"{v.zygote_muscle_dir}{name}.anim.pkl"
-                if imgui.button(f"Save Anim##{name}", width=anim_btn_w):
-                    try:
-                        obj.save_animation_state(anim_filepath)
-                    except Exception as e:
-                        print(f"[{name}] Save Animation error: {e}")
-                imgui.same_line()
-                if imgui.button(f"Load Anim##{name}", width=anim_btn_w):
-                    try:
-                        obj.load_animation_state(anim_filepath)
-                    except Exception as e:
-                        print(f"[{name}] Load Animation error: {e}")
-                imgui.same_line()
-                if imgui.button(f"Play All##{name}", width=anim_btn_w):
-                    obj._play_all_active = True
-                    obj._play_all_step = 0
-                    # Reset visibility to pre-scalar start state
-                    obj.is_draw = True
-                    obj.is_draw_scalar_field = False
-                    if hasattr(obj, 'reset_tendon_region_colors'):
-                        obj.reset_tendon_region_colors()
-                    obj.is_draw_contours = False
-                    obj.is_draw_bounding_box = False
-                    obj.is_draw_contour_mesh = False
-                    obj.is_draw_tet_mesh = False
-                    obj.is_draw_fiber_architecture = False
-                    obj.is_draw_resampled_vertices = False
-                    # Reset vertex colors to default muscle color
-                    if obj.vertex_colors is not None:
-                        n = len(obj.vertex_colors)
-                        obj.vertex_colors = np.tile(
-                            np.array([obj.color[0], obj.color[1], obj.color[2], obj.transparency], dtype=np.float32),
-                            (n, 1)
-                        )
-                    # Reset all replayed flags
-                    obj._scalar_replayed = False
-                    obj._contour_replayed = False
-                    obj._fill_gaps_replayed = False
-                    obj._transitions_replayed = False
-                    obj._smooth_replayed = False
-                    obj._cut_replayed = False
-                    obj._stream_smooth_replayed = False
-                    obj._level_select_replayed = False
-                    obj._build_fibers_replayed = False
-                    obj._resample_replayed = False
-                    obj._build_mesh_replayed = False
-                    obj._tetrahedralize_replayed = False
-
-                if not hasattr(obj, 'linked_counterpart_name'):
-                    obj.linked_counterpart_name = ''
-                if not hasattr(obj, 'linked_drive_counterpart'):
-                    obj.linked_drive_counterpart = True
-                if not hasattr(obj, 'linked_use_shared_scalar'):
-                    obj.linked_use_shared_scalar = True
-                if not hasattr(obj, 'linked_pair_eps'):
-                    obj.linked_pair_eps = 1e-5
-                if imgui.tree_node(f"Linked Counterpart##{name}"):
-                    linked_names = ['None'] + [n for n in v.zygote_muscle_meshes.keys() if n != name]
-                    current_label = obj.linked_counterpart_name if obj.linked_counterpart_name in linked_names else 'None'
-                    current_idx = linked_names.index(current_label)
-                    changed_link, new_idx = imgui.combo(f"Counterpart##linked_{name}", current_idx, linked_names)
-                    if changed_link:
-                        _set_symmetric_counterpart_link(
-                            v, name, '' if new_idx == 0 else linked_names[new_idx])
-                    changed_drive, obj.linked_drive_counterpart = imgui.checkbox(
-                        f"Drive counterpart schedule##linked_{name}", bool(obj.linked_drive_counterpart))
-                    changed_scalar, obj.linked_use_shared_scalar = imgui.checkbox(
-                        f"Shared scalar solve##linked_{name}", bool(obj.linked_use_shared_scalar))
-                    changed_eps, obj.linked_pair_eps = imgui.input_float(
-                        f"Pair epsilon##linked_{name}", float(obj.linked_pair_eps), 1e-6, 1e-5, "%.7f")
-                    obj.linked_pair_eps = max(0.0, float(obj.linked_pair_eps))
-                    if changed_link or changed_drive or changed_scalar or changed_eps:
-                        _sync_counterpart_link_settings(v, name)
-                    if obj.linked_counterpart_name:
-                        imgui.text(f"Master: {name}")
-                        imgui.text(f"Follower: {obj.linked_counterpart_name}")
-                        if getattr(obj, 'linked_counterpart_pairs', None) is not None:
-                            imgui.text(f"Pairs: {len(obj.linked_counterpart_pairs)}")
-                    imgui.tree_pop()
-
-                if not hasattr(obj, 'origin_tendon_extension_name'):
-                    obj.origin_tendon_extension_name = ''
-                if not hasattr(obj, 'insertion_tendon_extension_name'):
-                    obj.insertion_tendon_extension_name = ''
-                if not hasattr(obj, 'origin_tendon_reverse'):
-                    obj.origin_tendon_reverse = False
-                if not hasattr(obj, 'insertion_tendon_reverse'):
-                    obj.insertion_tendon_reverse = False
-                if _is_component_belly_name(name):
-                    _auto_fill_tendon_extension_names(v, name, obj)
-                elif ('tendon' not in name.lower()
-                      and (obj.origin_tendon_extension_name or obj.insertion_tendon_extension_name)):
-                    obj.origin_tendon_extension_name = ''
-                    obj.insertion_tendon_extension_name = ''
-                    _clear_tendon_extension(obj)
-                if imgui.tree_node(f"Tendon Fiber Extension##{name}"):
-                    tendon_names = ['None'] + [
-                        n for n in v.zygote_muscle_meshes.keys()
-                        if n != name and 'tendon' in n.lower()
-                    ]
-                    origin_label = obj.origin_tendon_extension_name if obj.origin_tendon_extension_name in tendon_names else 'None'
-                    insertion_label = obj.insertion_tendon_extension_name if obj.insertion_tendon_extension_name in tendon_names else 'None'
-                    changed_o, idx_o = imgui.combo(
-                        f"Origin Tendon##tendon_ext_o_{name}",
-                        tendon_names.index(origin_label),
-                        tendon_names)
-                    if changed_o:
-                        obj.origin_tendon_extension_name = '' if idx_o == 0 else tendon_names[idx_o]
-                    changed_i, idx_i = imgui.combo(
-                        f"Insertion Tendon##tendon_ext_i_{name}",
-                        tendon_names.index(insertion_label),
-                        tendon_names)
-                    if changed_i:
-                        obj.insertion_tendon_extension_name = '' if idx_i == 0 else tendon_names[idx_i]
-                    _, obj.origin_tendon_reverse = imgui.checkbox(
-                        f"Reverse Origin Tendon##tendon_ext_o_rev_{name}",
-                        bool(obj.origin_tendon_reverse))
-                    _, obj.insertion_tendon_reverse = imgui.checkbox(
-                        f"Reverse Insertion Tendon##tendon_ext_i_rev_{name}",
-                        bool(obj.insertion_tendon_reverse))
-                    if imgui.button(f"Extend Fibers Through Tendons##tendon_ext_apply_{name}", width=wide_button_width):
-                        _extend_belly_and_linked_counterpart_fibers(v, name, obj)
-                    if getattr(obj, 'tendon_extended_fibers', False):
-                        imgui.text("Extended fibers: active")
-                    imgui.tree_pop()
-
-                # Min-spacing threshold for length-density auto-selection.
-                # Search increases N until any consecutive pair drops below
-                # this distance along the muscle axis.  Value is global on
-                # `v` so adjusting from any muscle's tree propagates to
-                # every muscle on the next render.
-                if not hasattr(v, 'global_level_select_min_spacing'):
-                    v.global_level_select_min_spacing = 0.04
-                changed_sp, v.global_level_select_min_spacing = imgui.slider_float(
-                    "Min Spacing (m)", v.global_level_select_min_spacing,
-                    0.005, 0.5, "%.3f")
-                obj.level_select_min_spacing = v.global_level_select_min_spacing
-                if changed_sp:
-                    for _other in v.zygote_muscle_meshes.values():
-                        _other.level_select_min_spacing = v.global_level_select_min_spacing
-
-                imgui.text(obj.link_mode)
-                changed1, obj.specific_contour_value = imgui.slider_float(f"Ori##{name}", obj.specific_contour_value, 1.0, obj.contour_value_min, flags=imgui.SLIDER_FLAGS_NO_ROUND_TO_FORMAT)
-                changed2, obj.specific_contour_value = imgui.slider_float(f"Mid##{name}", obj.specific_contour_value, obj.contour_value_min, obj.contour_value_max, flags=imgui.SLIDER_FLAGS_NO_ROUND_TO_FORMAT)
-                changed3, obj.specific_contour_value = imgui.slider_float(f"Ins##{name}", obj.specific_contour_value, obj.contour_value_max, 10.0, flags=imgui.SLIDER_FLAGS_NO_ROUND_TO_FORMAT)
-                if not hasattr(obj, 'tendon_origin_value'):
-                    obj.tendon_origin_value = 1.1
-                if not hasattr(obj, 'tendon_insertion_value'):
-                    obj.tendon_insertion_value = 9.9
-                for attr, default in (
-                    ('tendon_origin_tilt_angle', 0.0),
-                    ('tendon_origin_tilt_amount', 0.0),
-                    ('tendon_insertion_tilt_angle', 0.0),
-                    ('tendon_insertion_tilt_amount', 0.0),
-                    ('draw_origin_tendon_boundary', False),
-                    ('draw_insertion_tendon_boundary', False),
-                ):
-                    if not hasattr(obj, attr):
-                        setattr(obj, attr, default)
-                imgui.separator()
-                imgui.text("Tendon designation")
-                imgui.text(f"Current contour value: {float(obj.specific_contour_value):.4f}")
-                imgui.text(f"Origin tendon <= {float(obj.tendon_origin_value):.4f}")
-                imgui.text(f"Insertion tendon >= {float(obj.tendon_insertion_value):.4f}")
-                single_stream = obj._is_single_stream_tendon_supported() if hasattr(obj, '_is_single_stream_tendon_supported') else False
-                if not single_stream:
-                    imgui.text_colored("Only single-origin/single-insertion muscles supported", 1.0, 0.45, 0.2, 1.0)
-                if imgui.button(f"Set Current as Origin Tendon##{name}", width=wide_button_width):
-                    obj.tendon_origin_value = float(obj.specific_contour_value)
-                    print(f"[{name}] Origin tendon threshold set to {obj.tendon_origin_value:.4f}")
-                    if getattr(obj, 'is_draw_tendon_regions', False):
-                        obj.apply_tendon_region_colors(obj.tendon_origin_value, obj.tendon_insertion_value)
-                if imgui.button(f"Set Current as Insertion Tendon##{name}", width=wide_button_width):
-                    obj.tendon_insertion_value = float(obj.specific_contour_value)
-                    print(f"[{name}] Insertion tendon threshold set to {obj.tendon_insertion_value:.4f}")
-                    if getattr(obj, 'is_draw_tendon_regions', False):
-                        obj.apply_tendon_region_colors(obj.tendon_origin_value, obj.tendon_insertion_value)
-                if obj.tendon_origin_value >= obj.tendon_insertion_value:
-                    imgui.text_colored("Origin threshold must be smaller", 1.0, 0.35, 0.2, 1.0)
-                if getattr(obj, 'is_draw_tendon_regions', False):
-                    imgui.text_colored("LIGHT=tendon  RED=belly", 0.9, 0.85, 0.65, 1.0)
-                changed_bo, obj.draw_origin_tendon_boundary = imgui.checkbox(
-                    f"Draw Origin Boundary##{name}", bool(obj.draw_origin_tendon_boundary))
-                changed_bi, obj.draw_insertion_tendon_boundary = imgui.checkbox(
-                    f"Draw Insertion Boundary##{name}", bool(obj.draw_insertion_tendon_boundary))
-                if changed_bo or changed_bi:
-                    _sync_counterpart_display_state(v, name)
-                obj.tendon_blend_width = 0.3
-                if getattr(obj, '_tendon_boundary_error', ""):
-                    imgui.text_colored(obj._tendon_boundary_error[:90], 1.0, 0.35, 0.2, 1.0)
-                if imgui.tree_node(f"Parametric Boundary##{name}"):
-                    imgui.text("Diagonal cut: threshold = base + amount * side_coordinate")
-                    imgui.text("Origin diagonal cut")
-                    changed_oa, obj.tendon_origin_tilt_angle = imgui.slider_float(
-                        f"Deep Side Angle##origin_tilt_{name}", float(obj.tendon_origin_tilt_angle), 0.0, 6.28318, "%.3f")
-                    changed_ot, obj.tendon_origin_tilt_amount = imgui.slider_float(
-                        f"Tilt Amount##origin_tilt_{name}", float(obj.tendon_origin_tilt_amount), -2.5, 2.5, "%.3f")
-                    imgui.separator()
-                    imgui.text("Insertion diagonal cut")
-                    changed_ia, obj.tendon_insertion_tilt_angle = imgui.slider_float(
-                        f"Deep Side Angle##insertion_tilt_{name}", float(obj.tendon_insertion_tilt_angle), 0.0, 6.28318, "%.3f")
-                    changed_it, obj.tendon_insertion_tilt_amount = imgui.slider_float(
-                        f"Tilt Amount##insertion_tilt_{name}", float(obj.tendon_insertion_tilt_amount), -2.5, 2.5, "%.3f")
-                    if (changed_oa or changed_ot or changed_ia or changed_it) and getattr(obj, 'is_draw_tendon_regions', False):
-                        obj.apply_tendon_region_colors(obj.tendon_origin_value, obj.tendon_insertion_value)
-                    if imgui.button(f"Apply Parametric Boundary##{name}", width=wide_button_width):
-                        if obj.scalar_field is not None:
-                            if obj.apply_tendon_region_colors(obj.tendon_origin_value, obj.tendon_insertion_value):
-                                print(f"[{name}] Applied parametric tendon boundary")
-                        else:
-                            print(f"[{name}] Prerequisites: Run 'Scalar Field' first")
-                    imgui.tree_pop()
-                if imgui.button(f"Use Tendon Values##{name}", width=button_width):
-                    if obj.scalar_field is not None:
-                        if obj.apply_tendon_region_colors(obj.tendon_origin_value, obj.tendon_insertion_value):
-                            print(f"[{name}] Tendon regions: origin <= {obj.tendon_origin_value:.4f}, insertion >= {obj.tendon_insertion_value:.4f}")
-                    else:
-                        print(f"[{name}] Prerequisites: Run 'Scalar Field' first")
-                imgui.same_line()
-                if imgui.button(f"Reset Tendon##{name}", width=button_width):
-                    if hasattr(obj, 'reset_tendon_region_colors'):
-                        obj.reset_tendon_region_colors()
-
-                if imgui.tree_node(f"Epic##{name}"):
-                    if not hasattr(obj, 'epic_fiber_count'):
-                        obj.epic_fiber_count = 100
-                    if not hasattr(obj, 'epic_gradient_direction_limit'):
-                        obj.epic_gradient_direction_limit = 8000
-                    imgui.push_item_width(160)
-                    _, obj.epic_fiber_count = imgui.slider_int(
-                        f"Fiber Count##epic_fiber_count_{name}",
-                        int(obj.epic_fiber_count), 1, 1000)
-                    _, obj.epic_gradient_direction_limit = imgui.slider_int(
-                        f"Direction Draw Limit##epic_dir_limit_{name}",
-                        int(obj.epic_gradient_direction_limit), 100, 50000)
-                    imgui.pop_item_width()
-
-                    if imgui.button(f"1. Tetrahedralize Original Mesh##epic_tet_{name}", width=wide_button_width):
-                        try:
-                            _t0 = time.time()
-                            ok = obj.epic_tetrahedralize_original_mesh()
-                            status = "done" if ok else "failed"
-                            print(f"[{name}] Epic tetrahedralize {status} in {time.time()-_t0:.3f}s")
-                        except Exception as e:
-                            print(f"[{name}] Epic tetrahedralize error: {e}")
-                            traceback.print_exc()
-
-                    if imgui.button(f"2. Find Volume Laplace Field##epic_field_{name}", width=wide_button_width):
-                        try:
-                            _t0 = time.time()
-                            ok = obj.epic_solve_volume_laplace_field()
-                            if ok:
-                                v.zygote_tet_transparency = 0.5
-                            status = "done" if ok else "failed"
-                            print(f"[{name}] Epic volume field {status} in {time.time()-_t0:.3f}s")
-                        except Exception as e:
-                            print(f"[{name}] Epic volume field error: {e}")
-                            traceback.print_exc()
-
-                    if imgui.button(f"3. Show Tet Gradient Directions##epic_dirs_{name}", width=wide_button_width):
-                        try:
-                            _t0 = time.time()
-                            ok = obj.epic_show_laplace_gradient_directions(
-                                max_segments=obj.epic_gradient_direction_limit)
-                            status = "done" if ok else "failed"
-                            print(f"[{name}] Epic tet gradient directions {status} in {time.time()-_t0:.3f}s")
-                        except Exception as e:
-                            print(f"[{name}] Epic tet gradient directions error: {e}")
-                            traceback.print_exc()
-
-                    if imgui.button(f"4. Sample Shape-Coordinate Fibers##epic_shape_fibers_{name}", width=wide_button_width):
-                        try:
-                            _t0 = time.time()
-                            ok = obj.epic_sample_shape_coordinate_fibers(count=obj.epic_fiber_count)
-                            status = "done" if ok else "failed"
-                            print(f"[{name}] Epic shape-coordinate fibers {status} in {time.time()-_t0:.3f}s")
-                        except Exception as e:
-                            print(f"[{name}] Epic shape-coordinate fibers error: {e}")
-                            traceback.print_exc()
-
-                    tet_v = 0 if getattr(obj, 'epic_tet_vertices', None) is None else len(obj.epic_tet_vertices)
-                    tet_n = 0 if getattr(obj, 'epic_tetrahedra', None) is None else len(obj.epic_tetrahedra)
-                    imgui.text(f"Tet: {tet_v} verts / {tet_n} tets")
-                    if getattr(obj, 'epic_laplace_field', None) is not None:
-                        imgui.text("Field: ready")
-                    if getattr(obj, 'epic_gradient_direction_segments', None) is not None:
-                        imgui.text(f"Directions: {len(obj.epic_gradient_direction_segments)}")
-                    if getattr(obj, 'epic_fibers', None) is not None:
-                        imgui.text(f"Fibers: {obj.epic_fibers.shape[1]}")
-                    if getattr(obj, 'epic_error', ""):
-                        imgui.text_colored(str(obj.epic_error)[:90], 1.0, 0.35, 0.2, 1.0)
-                    imgui.tree_pop()
-
-                if imgui.tree_node(f"MinMax##{name}"):
-                    _, obj.contour_value_min = imgui.input_float(f"Min##{name}", obj.contour_value_min)
-                    _, obj.contour_value_max = imgui.input_float(f"Max##{name}", obj.contour_value_max)
-                    imgui.tree_pop()
-                if changed1 or changed2 or changed3:
-                    obj.find_contour_with_value(obj.specific_contour_value)
-                # if imgui.button(f"Find Value Contour##{name}"):
-                #     obj.find_contour_with_value()
-
-                # if imgui.button("Find Interesecting Bones"):
-                #     for other_name, other_obj in v.zygote_muscle_meshes.items():
-                #         other_obj.is_draw = False
-                #     obj.is_draw = True
-
-                #     intersecting_meshes = obj.find_intersections(v.zygote_skeleton_meshes)
-                #     # print(bb_intersect)
-                #     for skel_name, skel_obj in v.zygote_skeleton_meshes.items():
-                #         if skel_name in intersecting_meshes:
-                #             skel_obj.color = np.array([0.0, 0.0, 1.0])
-                #         else:
-                #             skel_obj.color = np.array([0.9, 0.9, 0.9])
-
-                #     v.zygote_muscle_meshes_intersection_bones[name] = intersecting_meshes
-
-                changed, obj.transparency = imgui.slider_float(f"Transparency##{name}", obj.transparency, 0.0, 1.0)
-                if changed and obj.vertex_colors is not None:
-                    obj.vertex_colors[:, 3] = obj.transparency
-                if changed and getattr(obj, '_tendon_region_colors', None) is not None:
-                    obj._tendon_region_colors[:, 3] = obj.transparency
-                if changed:
-                    _sync_counterpart_display_state(v, name)
-
-                if imgui.tree_node("Edge Classes"):
-                    for i in range(len(obj.edge_classes)):
-                        # Fixed width: "insertion" is 9 chars, pad "origin" to match
-                        label = f"{obj.edge_classes[i]:9s}"
-                        imgui.text(label)
-                        imgui.same_line()
-                        if imgui.button(f"Flip class##{name}_{i}"):
-                            obj.edge_classes[i] = 'insertion' if obj.edge_classes[i] == 'origin' else 'origin'
-                    imgui.tree_pop()
-                if obj.draw_contour_stream is not None:
-                    if imgui.tree_node("Contour Stream"):
-                        if imgui.button("All Stream Off"):
-                            for i in range(len(obj.draw_contour_stream)):
-                                obj.draw_contour_stream[i] = False
-                        imgui.same_line()
-                        if imgui.button(f"Auto Detect##{name}"):
-                            obj.auto_detect_attachments(v.zygote_skeleton_meshes)
-                        # Ensure attach_skeletons arrays are properly sized
-                        num_streams = len(obj.draw_contour_stream)
-                        while len(obj.attach_skeletons) < num_streams:
-                            obj.attach_skeletons.append([0, 0])
-                        while len(obj.attach_skeletons_sub) < num_streams:
-                            obj.attach_skeletons_sub.append([0, 0])
-                        for i in range(num_streams):
-                            _, obj.draw_contour_stream[i] = imgui.checkbox(f"Stream {i}", obj.draw_contour_stream[i])
-                            imgui.push_item_width(100)
-                            changed, obj.attach_skeletons[i][0] = imgui.input_int(f"Origin##{name}_stream{i}_origin", obj.attach_skeletons[i][0])
-                            if changed:
-                                if obj.attach_skeletons[i][0] < 0:
-                                    obj.attach_skeletons[i][0] = 0
-                                elif obj.attach_skeletons[i][0] > len(v.zygote_skeleton_meshes) - 1:
-                                    obj.attach_skeletons[i][0] = len(v.zygote_skeleton_meshes) - 1
-                            changed, obj.attach_skeletons_sub[i][0] = imgui.input_int(f"Subpart##{name}_stream{i}_origin_sub", obj.attach_skeletons_sub[i][0])
-                            if changed:
-                                if obj.attach_skeletons_sub[i][0] < 0:
-                                    obj.attach_skeletons_sub[i][0] = 0
-                                elif obj.attach_skeletons_sub[i][0] > 1:
-                                    obj.attach_skeletons_sub[i][0] = 1
-
-                            imgui.text(list(v.zygote_skeleton_meshes.keys())[obj.attach_skeletons[i][0]] + f"{obj.attach_skeletons_sub[i][0]}")
-                            changed, obj.attach_skeletons[i][1] = imgui.input_int(f"Insertion##{name}_stream{i}_insertion", obj.attach_skeletons[i][1])
-                            if changed:
-                                if obj.attach_skeletons[i][1] < 0:
-                                    obj.attach_skeletons[i][1] = 0
-                                elif obj.attach_skeletons[i][1] > len(v.zygote_skeleton_meshes) - 1:
-                                    obj.attach_skeletons[i][1] = len(v.zygote_skeleton_meshes) - 1
-                            changed, obj.attach_skeletons_sub[i][1] = imgui.input_int(f"Subpart##{name}_stream{i}_insertion_sub", obj.attach_skeletons_sub[i][1])
-                            if changed:
-                                if obj.attach_skeletons_sub[i][1] < 0:
-                                    obj.attach_skeletons_sub[i][1] = 0
-                                elif obj.attach_skeletons_sub[i][1] > 1:
-                                    obj.attach_skeletons_sub[i][1] = 1
-                            imgui.text(list(v.zygote_skeleton_meshes.keys())[obj.attach_skeletons[i][1]] + f"{obj.attach_skeletons_sub[i][1]}")
-                            imgui.pop_item_width()
-
-                            # if imgui.button(f"Print Contour points##{i}"):
-                            #     print(f"Print {i}th contour stream")
-                            #     for j, contour in enumerate(obj.contours[i]):
-                            #         print(f"Contour {j}")
-                            #         for v in contour:
-                            #             print(v)
-                            #         print()
-                        imgui.tree_pop()
-
-                display_changed = False
-                changed_draw, obj.is_draw = imgui.checkbox("Draw", obj.is_draw)
-                display_changed = display_changed or changed_draw
-                if changed_draw and obj.is_draw and v.is_draw_one_zygote_muscle:
-                    for other_name, other_obj in v.zygote_muscle_meshes.items():
-                        other_obj.is_draw = False
-                    obj.is_draw = True
-                changed_open, obj.is_draw_open_edges = imgui.checkbox("Draw Open Edges", obj.is_draw_open_edges)
-                display_changed = display_changed or changed_open
-                changed_scalar_draw, obj.is_draw_scalar_field = imgui.checkbox("Draw Scalar Field", obj.is_draw_scalar_field)
-                display_changed = display_changed or changed_scalar_draw
-                if changed_scalar_draw:
-                    if obj.is_draw_scalar_field:
-                        obj.is_draw_tendon_regions = False
-                        if getattr(obj, '_scalar_anim_target_colors', None) is not None:
-                            obj.vertex_colors = obj._scalar_anim_target_colors.copy()
-                    elif getattr(obj, 'is_draw_tendon_regions', False) and getattr(obj, '_tendon_region_colors', None) is not None:
-                        obj.vertex_colors = obj._tendon_region_colors.copy()
-                changed_contours, obj.is_draw_contours = imgui.checkbox("Draw Contours", obj.is_draw_contours)
-                display_changed = display_changed or changed_contours
-                imgui.same_line()
-                changed_vertices, obj.is_draw_contour_vertices = imgui.checkbox("Vertices", obj.is_draw_contour_vertices)
-                display_changed = display_changed or changed_vertices
-                imgui.same_line()
-                changed_pair, obj.is_draw_farthest_pair = imgui.checkbox("Farthest Pair", obj.is_draw_farthest_pair)
-                display_changed = display_changed or changed_pair
-                changed_edges, obj.is_draw_edges = imgui.checkbox("Draw Edges", obj.is_draw_edges)
-                display_changed = display_changed or changed_edges
-                changed_centroid, obj.is_draw_centroid = imgui.checkbox("Draw Centroid", obj.is_draw_centroid)
-                display_changed = display_changed or changed_centroid
-                changed_bbox, obj.is_draw_bounding_box = imgui.checkbox("Draw Bounding Box", obj.is_draw_bounding_box)
-                display_changed = display_changed or changed_bbox
-                if obj.is_draw_bounding_box:
-                    imgui.same_line()
-                    bb_mode = getattr(obj, 'bounding_box_draw_mode', 0)
-                    bb_labels = ["Planes", "Boxes"]
-                    imgui.push_item_width(80)
-                    changed, new_mode = imgui.combo(f"##bb_mode_{name}", bb_mode, bb_labels)
-                    imgui.pop_item_width()
-                    if changed:
-                        obj.bounding_box_draw_mode = new_mode
-                        display_changed = True
-                changed_discarded, obj.is_draw_discarded = imgui.checkbox("Draw Discarded", obj.is_draw_discarded)
-                display_changed = display_changed or changed_discarded
-                changed_fiber, obj.is_draw_fiber_architecture = imgui.checkbox("Draw Fiber Architecture", obj.is_draw_fiber_architecture)
-                display_changed = display_changed or changed_fiber
-                if getattr(obj, 'contours_resampled', None) is not None:
-                    changed_resamp, obj.is_draw_resampled_vertices = imgui.checkbox("Draw Resampled Vertices", obj.is_draw_resampled_vertices)
-                    display_changed = display_changed or changed_resamp
-                changed_mesh, obj.is_draw_contour_mesh = imgui.checkbox("Draw Contour Mesh", obj.is_draw_contour_mesh)
-                display_changed = display_changed or changed_mesh
-                changed_tet, obj.is_draw_tet_mesh = imgui.checkbox("Draw Tet Mesh", obj.is_draw_tet_mesh)
-                display_changed = display_changed or changed_tet
-                imgui.same_line()
-                changed_tet_edges, obj.is_draw_tet_edges = imgui.checkbox("Tet Edges", obj.is_draw_tet_edges)
-                display_changed = display_changed or changed_tet_edges
-                imgui.same_line()
-                changed_constraints, obj.is_draw_constraints = imgui.checkbox("Constraints", obj.is_draw_constraints)
-                display_changed = display_changed or changed_constraints
-                if display_changed:
-                    _sync_counterpart_display_state(v, name)
-                tet_labels = getattr(obj, 'tet_region_labels', None)
-                if tet_labels is not None:
-                    tet_region_counts = {}
-                    for label in tet_labels:
-                        tet_region_counts[label] = tet_region_counts.get(label, 0) + 1
-                    region_text = ", ".join(
-                        f"{label}:{count}" for label, count in sorted(tet_region_counts.items())
-                    )
-                    imgui.text(f"Tet regions: {region_text}")
-                    tet_mixed = getattr(obj, 'tet_region_mixed', None)
-                    if tet_mixed is not None:
-                        imgui.text(f"Mixed/interface tets: {int(np.sum(tet_mixed))}")
-
-                if imgui.button("Export Muscle Waypoints", width=wide_button_width):
-                    pass
-                    from core.dartHelper import exportMuscleWaypoints
-                    exportMuscleWaypoints(v.zygote_muscle_meshes, list(v.zygote_skeleton_meshes.keys()))
-                if imgui.button("Import zygote_muscle", width=wide_button_width):
-                    muscle_file = "data/zygote_muscle.xml"
-                    if not os.path.exists(muscle_file):
-                        print(f"Error: Muscle file not found: {muscle_file}")
-                        print("  Run 'Export Muscle Waypoints' first to create it.")
-                    else:
-                        try:
-                            v.env.muscle_info = v.env.saveZygoteMuscleInfo(muscle_file)
-                            if not v.env.muscle_info:
-                                print("No muscles loaded from file (empty or invalid)")
-                            else:
-                                v.env.loading_zygote_muscle_info(v.env.muscle_info)
-                                v.env.muscle_activation_levels = np.zeros(v.env.muscles.getNumMuscles())
-
-                                v.draw_obj = True
-                                # Disable skeleton drawing when importing muscle waypoints
-                                v.is_draw_zygote_skeleton = False
-                                for sname, sobj in v.zygote_skeleton_meshes.items():
-                                    sobj.is_draw = False
-                                print(f"Imported {v.env.muscles.getNumMuscles()} muscles from {muscle_file}")
-                        except Exception as e:
-                            print(f"Error importing muscle waypoints: {e}")
-
-                # End column layout
-                imgui.columns(1)
+                _draw_zygote_muscle_body(v, name, obj)
                 imgui.tree_pop()
         imgui.tree_pop()
 
@@ -4809,6 +8277,7 @@ def _render_inspect_2d_windows(v):
         is_pre_stream = not is_post_stream
         inspect_contours = getattr(obj, '_tendon_extended_inspect_contours', None)
         inspect_planes = getattr(obj, '_tendon_extended_inspect_bounding_planes', None)
+        inspect_waypoints = getattr(obj, '_tendon_extended_inspect_waypoints', None)
         use_tendon_inspect = (
             is_post_stream
             and getattr(obj, 'tendon_extended_fibers', False)
@@ -4886,6 +8355,17 @@ def _render_inspect_2d_windows(v):
                 if s_idx < len(obj.bounding_planes) and level_idx < len(obj.bounding_planes[s_idx]):
                     return obj.bounding_planes[s_idx][level_idx]
                 return None
+
+        def get_waypoints_for_level(s_idx, level_idx):
+            if use_tendon_inspect and inspect_waypoints is not None:
+                if s_idx < len(inspect_waypoints) and level_idx < len(inspect_waypoints[s_idx]):
+                    return inspect_waypoints[s_idx][level_idx]
+                return None
+            if (hasattr(obj, 'waypoints') and obj.waypoints is not None
+                    and s_idx < len(obj.waypoints)
+                    and level_idx < len(obj.waypoints[s_idx])):
+                return obj.waypoints[s_idx][level_idx]
+            return None
 
         # Different UI for pre-stream vs post-stream
         if is_pre_stream:
@@ -5035,6 +8515,25 @@ def _render_inspect_2d_windows(v):
         obj.inspector_highlight_stream = highlight_stream
         obj.inspector_highlight_level = highlight_level
 
+        # obj.contours (drawn/highlighted in 3D) is belly-only, but the inspect
+        # slider counts extended levels (origin tendon + belly + insertion tendon)
+        # after tendon extension. Map the inspect level into belly-contour space
+        # so the colored contour matches the highlighted waypoints. On a tendon
+        # level there is no belly contour to color.
+        contour_highlight_level = highlight_level
+        if use_tendon_inspect:
+            contour_highlight_level = None
+            regions = getattr(obj, 'waypoint_level_regions', None)
+            if regions is not None and highlight_stream < len(regions):
+                stream_regions = regions[highlight_stream]
+                if 0 <= highlight_level < len(stream_regions):
+                    if stream_regions[highlight_level].get('part') == 'belly':
+                        origin_count = sum(
+                            1 for r in stream_regions
+                            if r.get('part') == 'origin_tendon')
+                        contour_highlight_level = highlight_level - origin_count
+        obj.inspector_highlight_contour_level = contour_highlight_level
+
         # Initialize hover state (may not be set if contour_indices is empty)
         hovered_idx = -1
         hovered_type = None
@@ -5124,6 +8623,10 @@ def _render_inspect_2d_windows(v):
             plane_info = get_bounding_plane(stream_idx, level_idx)
             if plane_info is not None:
                 contour_match = plane_info.get('contour_match', None)
+                # For an extended tendon/belly stream, this is the registered
+                # seam chart produced by the extension. Re-running
+                # find_contour_match here independently per level discards that
+                # registration and makes the inspector show the old mismatch.
 
                 if contour_match is not None and len(contour_match) > 0 and 'basis_x' in plane_info:
                     mean = plane_info['mean']
@@ -5407,9 +8910,11 @@ def _render_inspect_2d_windows(v):
                     imgui.text(f"Corners: {q_based_corner_indices}")
 
                 # Draw waypoints (red) and check hover
-                if (hasattr(obj, 'waypoints') and obj.waypoints is not None and
-                    stream_idx < len(obj.waypoints) and level_idx < len(obj.waypoints[stream_idx])):
-                    waypoints_3d = obj.waypoints[stream_idx][level_idx]
+                waypoints_3d = get_waypoints_for_level(stream_idx, level_idx)
+                # Extended waypoints were generated from the registered chart;
+                # display them directly rather than independently regenerating
+                # another coordinate field during rendering.
+                if waypoints_3d is not None:
                     if waypoints_3d is not None and len(waypoints_3d) > 0:
                         for wi, wp in enumerate(waypoints_3d):
                             wp = np.array(wp)
@@ -5430,7 +8935,8 @@ def _render_inspect_2d_windows(v):
                     draw_list.add_circle_filled(px, py, 3, imgui.get_color_u32_rgba(1.0, 0.5, 0.0, 1.0))
 
             # Draw resampled contour vertices and edges (cyan) if available
-            if (hasattr(obj, 'contours_resampled') and obj.contours_resampled is not None and
+            if (not use_tendon_inspect and
+                hasattr(obj, 'contours_resampled') and obj.contours_resampled is not None and
                 stream_idx < len(obj.contours_resampled) and
                 level_idx < len(obj.contours_resampled[stream_idx])):
                 resampled = obj.contours_resampled[stream_idx][level_idx]
@@ -5775,22 +9281,25 @@ def _render_inspect_2d_windows(v):
                 corr_vertex = -1
                 # Save original contour_match + corner_indices + waypoints for hover restore
                 if contour_match is not None:
-                    _bp_ref = obj.bounding_planes[stream_idx][level_idx] if is_post_stream else obj.bounding_planes[level_idx][stream_idx]
+                    _bp_ref = plane_info
                     v.inspect_2d_corr_backup_cm[name] = [((np.array(p).copy(), np.array(q).copy())) for p, q in contour_match]
                     v.inspect_2d_corr_backup_ci = _bp_ref.get('corner_indices')  # may be None
                     v.inspect_2d_corr_preview_active[name] = False
                     # Backup waypoints/mvc for this level
-                    if hasattr(obj, 'waypoints') and obj.waypoints is not None:
-                        if is_post_stream and stream_idx < len(obj.waypoints) and level_idx < len(obj.waypoints[stream_idx]):
-                            wp = obj.waypoints[stream_idx][level_idx]
-                            v.inspect_2d_corr_backup_wp[name] = [np.array(w).copy() for w in wp] if wp is not None else None
+                    wp = get_waypoints_for_level(stream_idx, level_idx)
+                    v.inspect_2d_corr_backup_wp[name] = (
+                        [np.array(w).copy() for w in wp] if wp is not None else None)
                     if hasattr(obj, 'mvc_weights') and obj.mvc_weights is not None:
                         if is_post_stream and stream_idx < len(obj.mvc_weights) and level_idx < len(obj.mvc_weights[stream_idx]):
                             v.inspect_2d_corr_backup_mvc[name] = obj.mvc_weights[stream_idx][level_idx]
             elif hovered_type == 'vertex' and corr_mode and corr_corner >= 0:
                 # Clicking vertex confirms — apply permanently, clear backup
                 _apply_corner_correspondence(v, name, obj, stream_idx, level_idx,
-                                             corr_corner, hovered_idx, is_post_stream)
+                                             corr_corner, hovered_idx, is_post_stream,
+                                             bp_info_override=plane_info,
+                                             waypoint_store=(inspect_waypoints
+                                                             if use_tendon_inspect
+                                                             else None))
                 v.inspect_2d_corr_mode[name] = False
                 v.inspect_2d_corr_corner[name] = -1
                 v.inspect_2d_corr_vertex[name] = -1
@@ -5831,7 +9340,9 @@ def _render_inspect_2d_windows(v):
 
         # Hover preview for correspondence mode — temporarily apply when hovering vertex
         if corr_mode and corr_corner >= 0 and name in v.inspect_2d_corr_backup_cm:
-            if is_post_stream:
+            if use_tendon_inspect:
+                bp_info_ref = get_bounding_plane(stream_idx, level_idx)
+            elif is_post_stream:
                 bp_info_ref = obj.bounding_planes[stream_idx][level_idx]
             else:
                 bp_info_ref = obj.bounding_planes[level_idx][stream_idx]
@@ -5847,7 +9358,8 @@ def _render_inspect_2d_windows(v):
                     bp_info_ref.pop('corner_indices', None)
                 # Apply preview: only update contour_match and corner_indices, skip waypoints
                 _apply_corner_correspondence_lightweight(obj, stream_idx, level_idx,
-                                                         corr_corner, hovered_idx, is_post_stream)
+                                                         corr_corner, hovered_idx, is_post_stream,
+                                                         bp_info_override=bp_info_ref)
                 v.inspect_2d_corr_preview_active[name] = True
             elif v.inspect_2d_corr_preview_active.get(name, False):
                 # Not hovering vertex — restore backup
@@ -5862,7 +9374,7 @@ def _render_inspect_2d_windows(v):
         # so the current level's corner position reflects the hovered vertex.
         # Re-read ALL levels' corner positions (including current, which may be preview-modified).
         if corr_corner >= 0:
-            bps_src = obj.bounding_planes
+            bps_src = inspect_planes if use_tendon_inspect else obj.bounding_planes
             if bps_src is not None:
                 if is_post_stream and stream_idx < len(bps_src):
                     bp_list_all = bps_src[stream_idx]
@@ -5960,21 +9472,25 @@ def _render_inspect_2d_windows(v):
             else:
                 imgui.text(f"Selected {corner_name}, hover vertex to preview")
 
-            # "Find cor" buttons: apply this corner's unit-square ratio to all levels.
-            imgui.same_line()
-            if imgui.button(f"Find cor (x)##{name}"):
-                _find_correspondence_all_levels(v, name, obj, stream_idx, level_idx,
-                                                 corr_corner, is_post_stream, axis='x')
-            imgui.same_line()
-            if imgui.button(f"Find cor (y)##{name}"):
-                _find_correspondence_all_levels(v, name, obj, stream_idx, level_idx,
-                                                 corr_corner, is_post_stream, axis='y')
+            # "Find cor" operates on the belly-only live arrays and is therefore
+            # not offered while editing an extended tendon chart.
+            if not use_tendon_inspect:
+                imgui.same_line()
+                if imgui.button(f"Find cor (x)##{name}"):
+                    _find_correspondence_all_levels(v, name, obj, stream_idx, level_idx,
+                                                     corr_corner, is_post_stream, axis='x')
+                imgui.same_line()
+                if imgui.button(f"Find cor (y)##{name}"):
+                    _find_correspondence_all_levels(v, name, obj, stream_idx, level_idx,
+                                                     corr_corner, is_post_stream, axis='y')
 
             if imgui.button(f"Cancel##{name}_corr"):
                 # Restore backup contour_match + waypoints and exit corr mode
                 backup_cm = v.inspect_2d_corr_backup_cm.get(name)
                 if backup_cm is not None:
-                    if is_post_stream:
+                    if use_tendon_inspect:
+                        bp_info_ref = get_bounding_plane(stream_idx, level_idx)
+                    elif is_post_stream:
                         bp_info_ref = obj.bounding_planes[stream_idx][level_idx]
                     else:
                         bp_info_ref = obj.bounding_planes[level_idx][stream_idx]
@@ -5984,6 +9500,11 @@ def _render_inspect_2d_windows(v):
                 if backup_wp is not None and hasattr(obj, 'waypoints') and obj.waypoints is not None:
                     if is_post_stream and stream_idx < len(obj.waypoints) and level_idx < len(obj.waypoints[stream_idx]):
                         obj.waypoints[stream_idx][level_idx] = backup_wp
+                    if (use_tendon_inspect and inspect_waypoints is not None
+                            and stream_idx < len(inspect_waypoints)
+                            and level_idx < len(inspect_waypoints[stream_idx])):
+                        inspect_waypoints[stream_idx][level_idx] = [
+                            np.asarray(w, dtype=np.float64).copy() for w in backup_wp]
                 backup_mvc = v.inspect_2d_corr_backup_mvc.get(name)
                 if backup_mvc is not None and hasattr(obj, 'mvc_weights') and obj.mvc_weights is not None:
                     if is_post_stream and stream_idx < len(obj.mvc_weights) and level_idx < len(obj.mvc_weights[stream_idx]):
@@ -6087,6 +9608,7 @@ def _render_inspect_2d_windows(v):
             obj = v.zygote_muscle_meshes[name]
             obj.inspector_highlight_stream = None
             obj.inspector_highlight_level = None
+            obj.inspector_highlight_contour_level = None
             obj.inspector_highlight_vertex_3d = None
             obj.inspector_highlight_fiber_idx = None
             obj.inspector_highlight_corner_vertices_3d = None
@@ -6639,10 +10161,14 @@ def _apply_3d_mvc(obj, stream_idx, level_idx, is_post_stream):
 
 
 
-def _apply_corner_correspondence_lightweight(obj, stream_idx, level_idx, corner_idx, vertex_idx, is_post_stream):
+def _apply_corner_correspondence_lightweight(obj, stream_idx, level_idx, corner_idx,
+                                             vertex_idx, is_post_stream,
+                                             bp_info_override=None):
     """Update contour_match and corner_indices only, without recomputing waypoints.
     Used for hover preview to avoid expensive MVC computation on every mouse move."""
-    if is_post_stream:
+    if bp_info_override is not None:
+        bp_info = bp_info_override
+    elif is_post_stream:
         bp_info = obj.bounding_planes[stream_idx][level_idx]
     else:
         bp_info = obj.bounding_planes[level_idx][stream_idx]
@@ -6709,7 +10235,10 @@ def _apply_corner_correspondence_lightweight(obj, stream_idx, level_idx, corner_
     bp_info['corner_indices'] = new_corner_indices
 
 
-def _apply_corner_correspondence(v, name, obj, stream_idx, level_idx, corner_idx, vertex_idx, is_post_stream):
+def _apply_corner_correspondence(v, name, obj, stream_idx, level_idx, corner_idx,
+                                 vertex_idx, is_post_stream,
+                                 bp_info_override=None,
+                                 waypoint_store=None):
     """
     Apply manual corner-to-vertex correspondence.
 
@@ -6729,7 +10258,9 @@ def _apply_corner_correspondence(v, name, obj, stream_idx, level_idx, corner_idx
     # print(f"  Stream: {stream_idx}, Level: {level_idx}, Post-stream: {is_post_stream}")
 
     # Get current bounding plane info
-    if is_post_stream:
+    if bp_info_override is not None:
+        bp_info = bp_info_override
+    elif is_post_stream:
         bp_info = obj.bounding_planes[stream_idx][level_idx]
     else:
         bp_info = obj.bounding_planes[level_idx][stream_idx]
@@ -6827,6 +10358,11 @@ def _apply_corner_correspondence(v, name, obj, stream_idx, level_idx, corner_idx
                 if hasattr(obj, 'waypoints') and obj.waypoints is not None:
                     if stream_idx < len(obj.waypoints) and level_idx < len(obj.waypoints[stream_idx]):
                         obj.waypoints[stream_idx][level_idx] = waypoints_3d
+                if (waypoint_store is not None
+                        and stream_idx < len(waypoint_store)
+                        and level_idx < len(waypoint_store[stream_idx])):
+                    waypoint_store[stream_idx][level_idx] = np.asarray(
+                        waypoints_3d, dtype=np.float64).copy()
 
                 # Update MVC weights
                 if hasattr(obj, 'mvc_weights') and obj.mvc_weights is not None:
@@ -7291,18 +10827,19 @@ def _resume_pipeline_after_cut(v, obj, name):
                 obj._resample_replayed = False
 
         # Step 12: Tetrahedralize
-        if start_step <= 12 <= max_step and obj.contour_mesh_vertices is not None:
+        if start_step <= 12 <= max_step:
             print(f"  [12/{max_step}] Tetrahedralizing...")
             _t0 = time.time()
             if _skip_non_owner_connected_mesh(v, name, obj, "Tetrahedralize"):
                 print(f"  [12/{max_step}] Skipped in {time.time()-_t0:.3f}s")
+                tet_ok = False
             else:
-                obj.soft_body = None
-                obj.tetrahedralize_contour_mesh(skeleton_meshes=v.zygote_skeleton_meshes)
-                if not _connected_source_has_linked_components(obj):
+                tet_ok = _tetrahedralize_single_contour_mesh(v, name, obj, defer=_defer)
+                if tet_ok and not _connected_source_has_linked_components(obj):
                     _run_counterpart_step(v, name, obj, 12, defer=_defer)
-            print(f"  [12/{max_step}] Done in {time.time()-_t0:.3f}s")
-            if obj.tet_vertices is not None:
+            status = "Done" if tet_ok else "Failed"
+            print(f"  [12/{max_step}] {status} in {time.time()-_t0:.3f}s")
+            if tet_ok and obj.tet_vertices is not None:
                 if _defer:
                     obj._extract_internal_tet_edges()
                     obj._classify_tet_faces_into_bands()
@@ -9262,18 +12799,19 @@ def _render_level_select_windows(v):
                                 obj._resample_replayed = False
 
                         # Step 12: Tetrahedralize
-                        if start_step <= 12 <= max_step and obj.contour_mesh_vertices is not None:
+                        if start_step <= 12 <= max_step:
                             print(f"  [12/{max_step}] Tetrahedralizing...")
                             _t0 = time.time()
                             if _skip_non_owner_connected_mesh(v, name, obj, "Tetrahedralize"):
                                 print(f"  [12/{max_step}] Skipped in {time.time()-_t0:.3f}s")
+                                tet_ok = False
                             else:
-                                obj.soft_body = None
-                                obj.tetrahedralize_contour_mesh(skeleton_meshes=v.zygote_skeleton_meshes)
-                                if not _connected_source_has_linked_components(obj):
+                                tet_ok = _tetrahedralize_single_contour_mesh(v, name, obj, defer=_defer)
+                                if tet_ok and not _connected_source_has_linked_components(obj):
                                     _run_counterpart_step(v, name, obj, 12, defer=_defer)
-                            print(f"  [12/{max_step}] Done in {time.time()-_t0:.3f}s")
-                            if obj.tet_vertices is not None:
+                            status = "Done" if tet_ok else "Failed"
+                            print(f"  [12/{max_step}] {status} in {time.time()-_t0:.3f}s")
+                            if tet_ok and obj.tet_vertices is not None:
                                 if _defer:
                                     obj._extract_internal_tet_edges()
                                     obj._classify_tet_faces_into_bands()
@@ -9636,6 +13174,21 @@ def update_available_muscles(v):
         for group_name in v.available_muscle_groups_by_category[category]:
             v.available_muscle_groups_by_category[category][group_name].sort(key=lambda x: x[0])
         groups = v.available_muscle_groups_by_category[category]
+        # Only Pennation folders represent true multi-OBJ groups. Collapse
+        # ordinary component-looking filenames to their standalone base OBJ in
+        # the available-muscle UI as well as in the loading function.
+        normalized_groups = {}
+        for group_name, components in groups.items():
+            if any(_is_pennation_path(path) for _name, path in components):
+                normalized_groups[group_name] = components
+                continue
+            base = next((item for item in components if item[0] == group_name), None)
+            if base is None:
+                base = next((item for item in components
+                             if not _is_zygote_tendon_mesh(*item)), components[0])
+            normalized_groups[base[0]] = [base]
+        groups = normalized_groups
+        v.available_muscle_groups_by_category[category] = dict(sorted(groups.items()))
         belly_groups = [
             group_name for group_name, components in groups.items()
             if any('tendon' not in comp_name.lower() for comp_name, _ in components)
@@ -9732,11 +13285,21 @@ def add_muscle_mesh(v, name, path):
 
 
 def add_muscle_group(v, category, group_name):
-    """Add every OBJ component belonging to one grouped anatomical muscle."""
+    """Add Pennation components, or one standalone OBJ otherwise."""
     groups = getattr(v, 'available_muscle_groups_by_category', {})
     components = groups.get(category, {}).get(group_name, [])
     if not components:
         return
+    if not any(_is_pennation_path(path) for _name, path in components):
+        base = next((item for item in components if item[0] == group_name), None)
+        if base is None:
+            base = next((item for item in components
+                         if not _is_zygote_tendon_mesh(*item)), components[0])
+        components = [base]
+        print(f"[{group_name}] Standalone OBJ group (non-Pennation): "
+              f"loading {base[0]}")
+    else:
+        print(f"[{group_name}] Pennation group: loading {len(components)} components")
     for name, path in list(components):
         add_muscle_mesh(v, name, path)
     v.available_selected_category = None
@@ -9867,9 +13430,28 @@ def load_previous_muscles(v):
         with open(v.last_muscles_file, 'r') as f:
             muscle_list = json.load(f)
 
+        # Collapse legacy multi-component lists for ordinary muscles. Only
+        # Pennation directories represent true grouped anatomical parts.
+        grouped = {}
+        for entry in muscle_list:
+            key = _zygote_component_group_name(entry['name'])
+            grouped.setdefault(key, []).append(entry)
+        load_entries = []
+        for entries in grouped.values():
+            if any(_is_pennation_path(e.get('path')) for e in entries):
+                load_entries.extend(entries)
+                continue
+            group_key = _zygote_component_group_name(entries[0]['name'])
+            base = next((e for e in entries if e['name'] == group_key), None)
+            if base is None:
+                base = next((e for e in entries
+                             if not _is_zygote_tendon_mesh(e['name'], e.get('path'))),
+                            entries[0])
+            load_entries.append(base)
+
         # Collect work items, skipping already-loaded and missing files
         pairs = []
-        for entry in muscle_list:
+        for entry in load_entries:
             name = entry['name']
             path = entry['path']
             if name in v.zygote_muscle_meshes:

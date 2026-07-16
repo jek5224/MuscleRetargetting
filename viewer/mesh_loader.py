@@ -644,15 +644,20 @@ class MeshLoader(ContourMeshMixin, TetrahedronMeshMixin, FiberArchitectureMixin,
 
         # BP scale animation dict (used during contour reveal animation)
         bp_scale_dict = getattr(self, '_contour_anim_bp_scale', None)
+        aligned_display_planes = getattr(
+            self, '_aligned_extension_bounding_planes', None)
+        use_aligned_display = bool(aligned_display_planes)
+        bounding_planes_to_draw = (
+            aligned_display_planes if use_aligned_display else self.bounding_planes)
 
         glLineWidth(0.5)
         glDisable(GL_LIGHTING)
         glEnable(GL_BLEND)
         glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
-        for i, bounding_planes in enumerate(self.bounding_planes):
+        for i, bounding_planes in enumerate(bounding_planes_to_draw):
             for j, plane_info in enumerate(bounding_planes):
                 # Check visibility based on draw_contour_stream structure
-                if self.draw_contour_stream is not None:
+                if self.draw_contour_stream is not None and not use_aligned_display:
                     if isinstance(self.draw_contour_stream[0], (list, tuple)):
                         # 2D structure: draw_contour_stream[stream_idx][level_idx]
                         # After build_fibers: bounding_planes[stream_i][level_i]
@@ -680,32 +685,36 @@ class MeshLoader(ContourMeshMixin, TetrahedronMeshMixin, FiberArchitectureMixin,
                     bp_alpha *= ls_scales[(i, j)]
                 mean = plane_info['mean']
 
-                # Axes (center point + RGB axis lines)
-                glPushMatrix()
-                glPointSize(max(5 * bp_s, 0.1))
-                glColor4f(0, 0, 0, bp_alpha)
-                glBegin(GL_POINTS)
-                glVertex3fv(mean)
-                glEnd()
-                glPopMatrix()
+                # Axes (center point + RGB axis lines). A registered tendon seam
+                # duplicates the authoritative belly frame exactly; draw that
+                # glyph only once from the belly object to avoid six overdrawn
+                # line primitives at one coordinate frame.
+                if not plane_info.get('_suppress_duplicate_seam_axes', False):
+                    glPushMatrix()
+                    glPointSize(max(5 * bp_s, 0.1))
+                    glColor4f(0, 0, 0, bp_alpha)
+                    glBegin(GL_POINTS)
+                    glVertex3fv(mean)
+                    glEnd()
+                    glPopMatrix()
 
-                glColor4f(1, 0, 0, bp_alpha)
-                glBegin(GL_LINES)
-                glVertex3fv(mean)
-                glVertex3fv(mean + plane_info['basis_x'] * scale * 0.1 * bp_s)
-                glEnd()
+                    glColor4f(1, 0, 0, bp_alpha)
+                    glBegin(GL_LINES)
+                    glVertex3fv(mean)
+                    glVertex3fv(mean + plane_info['basis_x'] * scale * 0.1 * bp_s)
+                    glEnd()
 
-                glColor4f(0, 1, 0, bp_alpha)
-                glBegin(GL_LINES)
-                glVertex3fv(mean)
-                glVertex3fv(mean + plane_info['basis_y'] * scale * 0.1 * bp_s)
-                glEnd()
+                    glColor4f(0, 1, 0, bp_alpha)
+                    glBegin(GL_LINES)
+                    glVertex3fv(mean)
+                    glVertex3fv(mean + plane_info['basis_y'] * scale * 0.1 * bp_s)
+                    glEnd()
 
-                glColor4f(0, 0, 1, bp_alpha)
-                glBegin(GL_LINES)
-                glVertex3fv(mean)
-                glVertex3fv(mean + plane_info['basis_z'] * scale * 0.1 * bp_s)
-                glEnd()
+                    glColor4f(0, 0, 1, bp_alpha)
+                    glBegin(GL_LINES)
+                    glVertex3fv(mean)
+                    glVertex3fv(mean + plane_info['basis_z'] * scale * 0.1 * bp_s)
+                    glEnd()
 
                 # Bounding plane quad outlines (always drawn, axes + planes is the base)
                 if plane_info.get('bounding_plane') is not None:
@@ -741,8 +750,8 @@ class MeshLoader(ContourMeshMixin, TetrahedronMeshMixin, FiberArchitectureMixin,
                      isinstance(self.draw_contour_stream[0], list))
             glColor3f(0, 0, 0)
             glDisable(GL_LIGHTING)
-            for i, bounding_plane_stream in enumerate(self.bounding_planes):
-                if self.draw_contour_stream is not None:
+            for i, bounding_plane_stream in enumerate(bounding_planes_to_draw):
+                if self.draw_contour_stream is not None and not use_aligned_display:
                     if is_2d:
                         # 2D: skip stream if all levels are hidden
                         if i < len(self.draw_contour_stream) and not any(self.draw_contour_stream[i]):

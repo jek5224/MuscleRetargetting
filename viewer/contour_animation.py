@@ -1818,8 +1818,8 @@ class ContourAnimationMixin:
             return
 
         # Build tet_vertex_level by matching tet vertices to contour mesh vertices
-        vcl = self.vertex_contour_level
-        cm_verts = self.contour_mesh_vertices
+        vcl = getattr(self, 'vertex_contour_level', None)
+        cm_verts = getattr(self, 'contour_mesh_vertices', None)
         tet_verts = self.tet_vertices
         n_tet = len(tet_verts)
         tet_level = np.full(n_tet, -1, dtype=np.int32)
@@ -1856,6 +1856,10 @@ class ContourAnimationMixin:
 
         # Extract ALL edges from tetrahedra (6 per tet), classified into bands
         num_bands = int(np.max(tet_level[tet_level >= 0])) + 1 if np.any(tet_level >= 0) else 0
+        if num_bands <= 0:
+            self._tet_anim_band_edges = None
+            self._tet_anim_num_bands = 0
+            return
         band_edges = [set() for _ in range(num_bands)]
 
         for tet in self.tet_tetrahedra:

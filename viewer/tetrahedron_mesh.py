@@ -167,6 +167,12 @@ class TetrahedronMeshMixin:
         self.tet_tetrahedra = None  # (M, 4) array of tet indices
         self.tet_faces = None  # (F, 3) array of surface face indices (for backwards compat)
         self.tet_render_faces = None  # Original contour faces for rendering/collision
+        self.tet_render_vertices_rest = None
+        self.tet_render_vertex_indices = None
+        self.tet_render_vertex_weights = None
+        self.tet_render_tet_rest_vertices = None
+        self.tet_render_vertex_regions = None
+        self.tet_render_contact_offsets = None
         self.tet_sim_faces = None  # Tet boundary faces for simulation
         self.tet_face_normals = None  # (F, 3) array of face normals
         self.tet_cap_face_indices = []  # Indices of cap faces (for skeleton attachment)
@@ -180,6 +186,8 @@ class TetrahedronMeshMixin:
         # Tet drawing settings
         self.is_draw_tet_mesh = False
         self.is_draw_tet_edges = False
+        self.is_draw_tet_internal_faces = False
+        self.tet_internal_face_stride = 1
 
         # Pre-computed draw arrays for efficient rendering
         self._tet_surface_verts = None
@@ -187,6 +195,12 @@ class TetrahedronMeshMixin:
         self._tet_cap_verts = None
         self._tet_cap_normals = None
         self._tet_edge_verts = None
+        self._tet_edge_source = None
+        self._tet_internal_verts = None
+        self._tet_internal_normals = None
+        self._tet_internal_colors = None
+        self._tet_internal_vidx = None
+        self._tet_internal_stride_cached = None
         self._tet_region_surface_colors = None
         self._tet_region_cap_colors = None
 
@@ -753,17 +767,20 @@ try:
         _mesh_vol = abs(mesh.volume)
         max_vol = max(_mesh_vol / 1500, 1e-6)
         # Scale budget by component size — ~2x surface vertices
-        steiner_budget = max(len(local_verts), 300)
+        steiner_budget = max(10 * len(local_verts), 5000)
         tet = None
         try:
             t = tetgen.TetGen(local_verts.copy(), local_faces.copy())
-            t.tetrahedralize(order=1, mindihedral=5, minratio=2.0,
-                             maxvolume=max_vol, nobisect=True, steinerleft=steiner_budget)
+            t.tetrahedralize(order=1, mindihedral=10, minratio=1.2,
+                             maxvolume=max_vol, nobisect=False,
+                             steinerleft=steiner_budget)
             tet = t
         except Exception:
             try:
                 t = tetgen.TetGen(local_verts.copy(), local_faces.copy())
-                t.tetrahedralize(quality=False, nobisect=True)
+                t.tetrahedralize(order=1, mindihedral=7, minratio=1.35,
+                                 maxvolume=max_vol, nobisect=False,
+                                 steinerleft=steiner_budget)
                 tet = t
             except Exception:
                 # TetGen failed — use Delaunay + inside filter (preserves all vertices & caps)
@@ -1960,6 +1977,11 @@ except Exception as e:
                 'vertices': self.tet_vertices,
                 'faces': render_faces,  # Backwards compatible: 'faces' = render faces
                 'render_faces': render_faces,  # Explicit render faces
+                'render_vertices_rest': getattr(self, 'tet_render_vertices_rest', None),
+                'render_vertex_indices': getattr(self, 'tet_render_vertex_indices', None),
+                'render_vertex_weights': getattr(self, 'tet_render_vertex_weights', None),
+                'render_tet_rest_vertices': getattr(self, 'tet_render_tet_rest_vertices', None),
+                'render_vertex_regions': getattr(self, 'tet_render_vertex_regions', None),
                 'sim_faces': sim_faces,  # Tet boundary faces for simulation
                 'tetrahedra': self.tet_tetrahedra,
                 'cap_face_indices': np.array(self.tet_cap_face_indices) if hasattr(self, 'tet_cap_face_indices') else np.array([]),
@@ -1989,8 +2011,17 @@ except Exception as e:
                 'tet_region_labels': getattr(self, 'tet_region_labels', None),
                 'tet_component_labels': getattr(self, 'tet_component_labels', None),
                 'tet_region_mixed': getattr(self, 'tet_region_mixed', None),
+                'connected_original_tet_components': getattr(self, '_connected_original_tet_components', None),
                 'connected_contour_mesh_components': getattr(self, '_connected_contour_mesh_components', None),
                 'connected_component_fibers': getattr(self, '_connected_component_fibers', None),
+                'target_tet_count': getattr(self, 'target_tet_count', None),
+                'last_actual_tet_count': getattr(self, 'last_actual_tet_count', None),
+                'tet_target_calibration': getattr(self, 'tet_target_calibration', None),
+                'preserve_tet_surface': getattr(self, 'preserve_tet_surface', None),
+                'enable_tet_boundary_remesh': getattr(self, 'enable_tet_boundary_remesh', None),
+                'allow_tet_meshfix_fallback': getattr(self, 'allow_tet_meshfix_fallback', None),
+                'tet_quality_stats': getattr(self, 'tet_quality_stats', None),
+                'tet_quality_profile': getattr(self, 'tet_quality_profile', None),
             }
 
             with open(filepath, 'wb') as f:
@@ -2037,12 +2068,22 @@ except Exception as e:
             self._tet_surface_verts = None
             self._tet_cap_verts = None
             self._tet_edge_verts = None
+            self._tet_internal_verts = None
+            self._tet_internal_normals = None
+            self._tet_internal_colors = None
+            self._tet_internal_vidx = None
+            self._tet_internal_stride_cached = None
 
             # Load dual face system (with backwards compatibility)
             if 'render_faces' in data and data['render_faces'] is not None:
                 self.tet_render_faces = data['render_faces']
             else:
                 self.tet_render_faces = data['faces']  # Old format: faces = render faces
+            self.tet_render_vertices_rest = data.get('render_vertices_rest', None)
+            self.tet_render_vertex_indices = data.get('render_vertex_indices', None)
+            self.tet_render_vertex_weights = data.get('render_vertex_weights', None)
+            self.tet_render_tet_rest_vertices = data.get('render_tet_rest_vertices', None)
+            self.tet_render_vertex_regions = data.get('render_vertex_regions', None)
 
             if 'sim_faces' in data and data['sim_faces'] is not None:
                 self.tet_sim_faces = data['sim_faces']
@@ -2127,7 +2168,22 @@ except Exception as e:
                     _derive_tet_region_labels(self.tet_tetrahedra, self.tet_vertex_regions)
                 )
             self._connected_contour_mesh_components = data.get('connected_contour_mesh_components', None)
+            self._connected_original_tet_components = data.get('connected_original_tet_components', None)
             self._connected_component_fibers = data.get('connected_component_fibers', None)
+            if data.get('target_tet_count', None) is not None:
+                self.target_tet_count = data.get('target_tet_count')
+            if data.get('last_actual_tet_count', None) is not None:
+                self.last_actual_tet_count = data.get('last_actual_tet_count')
+            if data.get('tet_target_calibration', None) is not None:
+                self.tet_target_calibration = data.get('tet_target_calibration')
+            if data.get('preserve_tet_surface', None) is not None:
+                self.preserve_tet_surface = data.get('preserve_tet_surface')
+            if data.get('enable_tet_boundary_remesh', None) is not None:
+                self.enable_tet_boundary_remesh = data.get('enable_tet_boundary_remesh')
+            if data.get('allow_tet_meshfix_fallback', None) is not None:
+                self.allow_tet_meshfix_fallback = data.get('allow_tet_meshfix_fallback')
+            self.tet_quality_stats = data.get('tet_quality_stats', None)
+            self.tet_quality_profile = data.get('tet_quality_profile', None)
 
             # Load MVC weights (for deforming waypoints with tet sim)
             if 'mvc_weights' in data and data['mvc_weights'] is not None:
@@ -2165,6 +2221,8 @@ except Exception as e:
                 print(f"  Mixed/interface tets: {int(np.sum(self.tet_region_mixed))}")
             if self._connected_component_fibers is not None:
                 print(f"  Connected component fibers: {len(self._connected_component_fibers)} components")
+            if getattr(self, '_connected_original_tet_components', None) is not None:
+                print(f"  Connected original tet components: {len(self._connected_original_tet_components)}")
             return True
 
         except Exception as e:
@@ -2191,7 +2249,13 @@ except Exception as e:
                 self.tet_region_labels = None
                 self.tet_component_labels = None
                 self.tet_region_mixed = None
+                self._tet_internal_verts = None
+                self._tet_internal_normals = None
+                self._tet_internal_colors = None
+                self._tet_internal_vidx = None
+                self._tet_internal_stride_cached = None
                 self._connected_contour_mesh_components = None
+                self._connected_original_tet_components = None
                 self._connected_component_fibers = None
 
                 print(f"[{name}] Loaded tetrahedron mesh (old format) from {filepath}")
@@ -2200,6 +2264,29 @@ except Exception as e:
                 print(f"[{name}] Failed to load tetrahedron mesh: {e}")
                 return False
 
+    def _current_tet_render_vertices(self):
+        """Return the anatomical skin displaced by the simulation tet mesh."""
+        rest_skin = getattr(self, 'tet_render_vertices_rest', None)
+        indices = getattr(self, 'tet_render_vertex_indices', None)
+        weights = getattr(self, 'tet_render_vertex_weights', None)
+        tet_rest = getattr(self, 'tet_render_tet_rest_vertices', None)
+        if (rest_skin is None or indices is None or weights is None or
+                tet_rest is None or self.tet_vertices is None):
+            return np.asarray(self.tet_vertices)
+        indices = np.asarray(indices, dtype=np.int32)
+        if indices.size == 0 or int(np.max(indices)) >= len(self.tet_vertices):
+            return np.asarray(rest_skin)
+        displacement = (np.asarray(self.tet_vertices, dtype=np.float64)[indices] -
+                        np.asarray(tet_rest, dtype=np.float64)[indices])
+        skin_displacement = np.einsum(
+            'nk,nkj->nj', np.asarray(weights, dtype=np.float64), displacement)
+        render = np.asarray(rest_skin, dtype=np.float64) + skin_displacement
+        contact_offsets = getattr(self, 'tet_render_contact_offsets', None)
+        if (contact_offsets is not None and
+                len(contact_offsets) == len(render)):
+            render = render + np.asarray(contact_offsets, dtype=np.float64)
+        return render
+
     def _prepare_tet_draw_arrays(self):
         """Prepare vertex arrays for efficient tetrahedron mesh drawing."""
         if not hasattr(self, 'tet_vertices') or self.tet_vertices is None:
@@ -2207,6 +2294,7 @@ except Exception as e:
 
         # Use render faces for drawing (original contour mesh surface)
         render_faces = self.tet_render_faces if hasattr(self, 'tet_render_faces') and self.tet_render_faces is not None else self.tet_faces
+        render_vertices = self._current_tet_render_vertices()
 
         # Prepare surface face arrays
         cap_set = set(self.tet_cap_face_indices)
@@ -2220,14 +2308,16 @@ except Exception as e:
 
         color = self.contour_mesh_color
         alpha = float(getattr(self, 'contour_mesh_transparency', 0.8))
-        vertex_regions = getattr(self, 'tet_vertex_regions', None)
+        vertex_regions = getattr(self, 'tet_render_vertex_regions', None)
+        if vertex_regions is None:
+            vertex_regions = getattr(self, 'tet_vertex_regions', None)
 
         # Build index arrays for fast position updates
         surface_face_indices = []
         cap_face_indices = []
 
         for face_idx, face in enumerate(render_faces):
-            v0, v1, v2 = self.tet_vertices[face]
+            v0, v1, v2 = render_vertices[face]
             normal = np.cross(v1 - v0, v2 - v0)
             norm_len = np.linalg.norm(normal)
             if norm_len > 1e-10:
@@ -2237,7 +2327,7 @@ except Exception as e:
                 face_label = _face_region_label(face, vertex_regions)
                 face_color = _tet_region_color(face_label, color, alpha) if face_label is not None else None
                 for vi in face:
-                    cap_verts.append(self.tet_vertices[vi])
+                    cap_verts.append(render_vertices[vi])
                     cap_normals.append(normal)
                     if face_color is not None:
                         cap_region_colors.append(face_color)
@@ -2246,7 +2336,7 @@ except Exception as e:
                 face_label = _face_region_label(face, vertex_regions)
                 face_color = _tet_region_color(face_label, color, alpha) if face_label is not None else None
                 for vi in face:
-                    surface_verts.append(self.tet_vertices[vi])
+                    surface_verts.append(render_vertices[vi])
                     surface_normals.append(normal)
                     if face_color is not None:
                         surface_region_colors.append(face_color)
@@ -2271,13 +2361,15 @@ except Exception as e:
         self._tet_surface_vidx = np.array(surface_face_indices, dtype=np.int32).reshape(-1) if surface_face_indices else None
         self._tet_cap_vidx = np.array(cap_face_indices, dtype=np.int32).reshape(-1) if cap_face_indices else None
 
-        # Prepare surface edge arrays (from render faces for display)
+        # Prepare true tetrahedral edge arrays. The visible tet surface may be
+        # the original/render shell, so using render_faces here would only draw
+        # original mesh triangle edges rather than element edges.
         edge_set = set()
-        for face in render_faces:
-            for i in range(3):
-                v0, v1 = face[i], face[(i + 1) % 3]
-                edge = (min(v0, v1), max(v0, v1))
-                edge_set.add(edge)
+        if self.tet_tetrahedra is not None:
+            for tet in np.asarray(self.tet_tetrahedra, dtype=np.int64):
+                for a, b in ((0, 1), (0, 2), (0, 3), (1, 2), (1, 3), (2, 3)):
+                    v0, v1 = int(tet[a]), int(tet[b])
+                    edge_set.add((min(v0, v1), max(v0, v1)))
 
         edge_verts = []
         edge_vidx = []
@@ -2287,6 +2379,74 @@ except Exception as e:
             edge_vidx.extend([v0, v1])
         self._tet_edge_verts = np.array(edge_verts, dtype=np.float32) if edge_verts else None
         self._tet_edge_vidx = np.array(edge_vidx, dtype=np.int32) if edge_vidx else None
+        self._tet_edge_source = 'tetrahedra'
+        if getattr(self, '_tet_edge_log_count', None) != len(edge_set):
+            print(f"  Tet edge draw cache: {len(edge_set)} tetrahedron edges")
+            self._tet_edge_log_count = len(edge_set)
+        self._tet_internal_verts = None
+        self._tet_internal_normals = None
+        self._tet_internal_colors = None
+        self._tet_internal_vidx = None
+        self._tet_internal_stride_cached = None
+
+    def _prepare_tet_internal_draw_arrays(self):
+        """Prepare all/sampled tetrahedron faces for inspecting internal region labels."""
+        if self.tet_vertices is None or self.tet_tetrahedra is None:
+            return
+        stride = max(1, int(getattr(self, 'tet_internal_face_stride', 1)))
+        if (self._tet_internal_verts is not None
+                and self._tet_internal_stride_cached == stride):
+            return
+
+        tets = np.asarray(self.tet_tetrahedra, dtype=np.int32)
+        if stride > 1:
+            tets = tets[::stride]
+            tet_indices = np.arange(0, len(self.tet_tetrahedra), stride, dtype=np.int32)
+        else:
+            tet_indices = np.arange(len(tets), dtype=np.int32)
+        if len(tets) == 0:
+            self._tet_internal_verts = None
+            self._tet_internal_normals = None
+            self._tet_internal_colors = None
+            self._tet_internal_vidx = None
+            self._tet_internal_stride_cached = stride
+            return
+
+        local_faces = np.asarray([
+            [0, 1, 2],
+            [0, 3, 1],
+            [1, 3, 2],
+            [2, 3, 0],
+        ], dtype=np.int32)
+        face_indices = tets[:, local_faces].reshape(-1, 3)
+        verts = self.tet_vertices[face_indices].reshape(-1, 3)
+        tri = verts.reshape(-1, 3, 3)
+        normals = np.cross(tri[:, 1] - tri[:, 0], tri[:, 2] - tri[:, 0])
+        norms = np.linalg.norm(normals, axis=1, keepdims=True)
+        norms[norms < 1e-10] = 1.0
+        normals = normals / norms
+        normals = np.repeat(normals, 3, axis=0)
+
+        color = self.contour_mesh_color
+        alpha = float(getattr(self, 'contour_mesh_transparency', 0.8))
+        tet_labels = getattr(self, 'tet_region_labels', None)
+        tet_mixed = getattr(self, 'tet_region_mixed', None)
+        colors = []
+        for tet_idx in tet_indices:
+            label = None
+            if tet_mixed is not None and int(tet_idx) < len(tet_mixed) and bool(tet_mixed[int(tet_idx)]):
+                label = 'mixed'
+            if tet_labels is not None and int(tet_idx) < len(tet_labels):
+                label = label or tet_labels[int(tet_idx)]
+            c = _tet_region_color(label, color, alpha)
+            for _ in range(12):
+                colors.append(c)
+
+        self._tet_internal_verts = np.asarray(verts, dtype=np.float32)
+        self._tet_internal_normals = np.asarray(normals, dtype=np.float32)
+        self._tet_internal_colors = np.asarray(colors, dtype=np.float32)
+        self._tet_internal_vidx = face_indices.reshape(-1).astype(np.int32)
+        self._tet_internal_stride_cached = stride
 
     def _update_tet_draw_positions(self, skip_normals=False):
         """Fast path: update draw arrays from tet_vertices using precomputed index arrays.
@@ -2299,12 +2459,14 @@ except Exception as e:
         if verts is None:
             return
         n_verts = len(verts)
+        render_vertices = self._current_tet_render_vertices()
+        n_render_vertices = len(render_vertices)
         # Update surface verts + normals
         if self._tet_surface_vidx is not None and self._tet_surface_verts is not None:
-            if self._tet_surface_vidx.max() >= n_verts:
+            if self._tet_surface_vidx.max() >= n_render_vertices:
                 self._prepare_tet_draw_arrays()
                 return
-            self._tet_surface_verts[:] = verts[self._tet_surface_vidx]
+            self._tet_surface_verts[:] = render_vertices[self._tet_surface_vidx]
             if not skip_normals:
                 v = self._tet_surface_verts.reshape(-1, 3, 3)
                 normals = np.cross(v[:, 1] - v[:, 0], v[:, 2] - v[:, 0])
@@ -2314,10 +2476,10 @@ except Exception as e:
                 self._tet_surface_normals[:] = np.repeat(normals, 3, axis=0)
         # Update cap verts + normals
         if self._tet_cap_vidx is not None and self._tet_cap_verts is not None:
-            if self._tet_cap_vidx.max() >= n_verts:
+            if self._tet_cap_vidx.max() >= n_render_vertices:
                 self._prepare_tet_draw_arrays()
                 return
-            self._tet_cap_verts[:] = verts[self._tet_cap_vidx]
+            self._tet_cap_verts[:] = render_vertices[self._tet_cap_vidx]
             if not skip_normals:
                 v = self._tet_cap_verts.reshape(-1, 3, 3)
                 normals = np.cross(v[:, 1] - v[:, 0], v[:, 2] - v[:, 0])
@@ -2331,6 +2493,18 @@ except Exception as e:
                 self._prepare_tet_draw_arrays()
                 return
             self._tet_edge_verts[:] = verts[self._tet_edge_vidx]
+        if self._tet_internal_vidx is not None and self._tet_internal_verts is not None:
+            if self._tet_internal_vidx.max() >= n_verts:
+                self._tet_internal_verts = None
+                return
+            self._tet_internal_verts[:] = verts[self._tet_internal_vidx]
+            if not skip_normals:
+                v = self._tet_internal_verts.reshape(-1, 3, 3)
+                normals = np.cross(v[:, 1] - v[:, 0], v[:, 2] - v[:, 0])
+                norms = np.linalg.norm(normals, axis=1, keepdims=True)
+                norms[norms < 1e-10] = 1.0
+                normals /= norms
+                self._tet_internal_normals[:] = np.repeat(normals, 3, axis=0)
 
     def _draw_tet_mesh_animated(self):
         """Tet edge animation phases 1-2 (phase 3+ uses normal draw_tetrahedron_mesh).
@@ -2554,16 +2728,38 @@ except Exception as e:
             if cap_colors is not None and len(cap_colors) == len(self._tet_cap_verts):
                 glDisableClientState(GL_COLOR_ARRAY)
 
+        # Draw sampled internal tet faces for material-label inspection.
+        if getattr(self, 'is_draw_tet_internal_faces', False):
+            self._prepare_tet_internal_draw_arrays()
+            if self._tet_internal_verts is not None and len(self._tet_internal_verts) > 0:
+                internal_colors = self._tet_internal_colors
+                internal_colors[:, 3] = alpha
+                glDisable(GL_DEPTH_TEST)
+                glEnableClientState(GL_COLOR_ARRAY)
+                glColorPointer(4, GL_FLOAT, 0, internal_colors)
+                glVertexPointer(3, GL_FLOAT, 0, self._tet_internal_verts)
+                glNormalPointer(GL_FLOAT, 0, self._tet_internal_normals)
+                glDrawArrays(GL_TRIANGLES, 0, len(self._tet_internal_verts))
+                glDisableClientState(GL_COLOR_ARRAY)
+                glEnable(GL_DEPTH_TEST)
+
         glDisableClientState(GL_NORMAL_ARRAY)
 
         # Draw tetrahedra edges
+        if draw_tets and getattr(self, '_tet_edge_source', None) != 'tetrahedra':
+            self._tet_edge_verts = None
+            self._tet_edge_vidx = None
+            self._tet_surface_verts = None
+            self._prepare_tet_draw_arrays()
         if draw_tets and self._tet_edge_verts is not None and len(self._tet_edge_verts) > 0:
+            glDisable(GL_DEPTH_TEST)
             glDisable(GL_LIGHTING)
-            glColor4f(0.5, 0.5, 0.5, 0.3)
+            glColor4f(0.1, 0.1, 0.1, 0.8)
             glLineWidth(1.0)
             glVertexPointer(3, GL_FLOAT, 0, self._tet_edge_verts)
             glDrawArrays(GL_LINES, 0, len(self._tet_edge_verts))
             glEnable(GL_LIGHTING)
+            glEnable(GL_DEPTH_TEST)
 
         glDisableClientState(GL_VERTEX_ARRAY)
         glPopMatrix()

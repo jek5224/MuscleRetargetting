@@ -98,6 +98,9 @@ def _draw_tet_meshes_batched(app):
     cap_arrays = []
     cap_normal_arrays = []
     cap_color_arrays = []
+    internal_arrays = []
+    internal_normal_arrays = []
+    internal_color_arrays = []
     edge_muscles = []
 
     for name, obj in app.zygote_muscle_meshes.items():
@@ -168,6 +171,17 @@ def _draw_tet_meshes_batched(app):
                 cap_col[:, 3] = alpha
             cap_color_arrays.append(cap_col)
 
+        # Internal tet faces for region-label inspection.
+        if getattr(obj, 'is_draw_tet_internal_faces', False):
+            obj._prepare_tet_internal_draw_arrays()
+            if (getattr(obj, '_tet_internal_verts', None) is not None
+                    and len(obj._tet_internal_verts) > 0):
+                internal_arrays.append(obj._tet_internal_verts)
+                internal_normal_arrays.append(obj._tet_internal_normals)
+                internal_colors = obj._tet_internal_colors
+                internal_colors[:, 3] = alpha
+                internal_color_arrays.append(internal_colors)
+
         # Edges (rare, keep per-muscle)
         if obj.is_draw_tet_edges:
             edge_muscles.append(obj)
@@ -220,10 +234,43 @@ def _draw_tet_meshes_batched(app):
         glDisableClientState(GL_VERTEX_ARRAY)
         glPopMatrix()
 
+    # Batched internal tet-face draw. This intentionally draws non-boundary
+    # faces so region labels inside the volume can be inspected.
+    if internal_arrays:
+        all_internal_verts = np.concatenate(internal_arrays)
+        all_internal_normals = np.concatenate(internal_normal_arrays)
+        all_internal_colors = np.concatenate(internal_color_arrays)
+
+        glPushMatrix()
+        glDisable(GL_DEPTH_TEST)
+        glEnable(GL_LIGHTING)
+        glEnable(GL_COLOR_MATERIAL)
+        glColorMaterial(GL_FRONT_AND_BACK, GL_AMBIENT_AND_DIFFUSE)
+        glEnableClientState(GL_VERTEX_ARRAY)
+        glEnableClientState(GL_NORMAL_ARRAY)
+        glEnableClientState(GL_COLOR_ARRAY)
+
+        glVertexPointer(3, GL_FLOAT, 0, all_internal_verts)
+        glNormalPointer(GL_FLOAT, 0, all_internal_normals)
+        glColorPointer(4, GL_FLOAT, 0, all_internal_colors)
+        glDrawArrays(GL_TRIANGLES, 0, len(all_internal_verts))
+
+        glDisableClientState(GL_COLOR_ARRAY)
+        glDisableClientState(GL_NORMAL_ARRAY)
+        glDisableClientState(GL_VERTEX_ARRAY)
+        glEnable(GL_DEPTH_TEST)
+        glPopMatrix()
+
     # Edge drawing fallback (per-muscle, rarely enabled)
     for obj in edge_muscles:
+        if getattr(obj, '_tet_edge_source', None) != 'tetrahedra':
+            obj._tet_edge_verts = None
+            obj._tet_edge_vidx = None
+            obj._tet_surface_verts = None
+            obj._prepare_tet_draw_arrays()
         if obj._tet_edge_verts is not None and len(obj._tet_edge_verts) > 0:
             glPushMatrix()
+            glDisable(GL_DEPTH_TEST)
             glDisable(GL_LIGHTING)
             glEnableClientState(GL_VERTEX_ARRAY)
             glColor4f(0.1, 0.1, 0.1, 0.8)
@@ -232,6 +279,7 @@ def _draw_tet_meshes_batched(app):
             glDrawArrays(GL_LINES, 0, len(obj._tet_edge_verts))
             glDisableClientState(GL_VERTEX_ARRAY)
             glEnable(GL_LIGHTING)
+            glEnable(GL_DEPTH_TEST)
             glPopMatrix()
 
 

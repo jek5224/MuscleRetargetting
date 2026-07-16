@@ -25,6 +25,7 @@ if 'OMP_NUM_THREADS' not in os.environ:
 import numpy as np
 import scipy.sparse as sp
 from scipy.sparse.linalg import splu, eigsh
+from scipy.optimize import minimize
 
 import taichi as ti
 
@@ -505,6 +506,145 @@ def compute_lbs_positions(bindings, skel, n_verts):
     return positions
 
 
+def compute_rigid_blend_positions(bindings, skel, blend_coordinate):
+    """Pose vertices by SLERP interpolation of the two attachment transforms.
+
+    Linear blend skinning averages rotation matrices and can become singular
+    near a strongly rotated joint.  This initializer interpolates the relative
+    rigid rotations on SO(3), so the starting volume cannot suffer LBS matrix
+    collapse/candy-wrapper artifacts.
+    """
+    from scipy.spatial.transform import Rotation, Slerp
+
+    bone_data = {}
+    rest_positions = np.zeros((len(bindings), 3), dtype=np.float64)
+    for vi, (rest, weighted_bones) in enumerate(bindings):
+        rest_positions[vi] = rest
+        for name, _weight, R0, t0 in weighted_bones:
+            bone_data.setdefault(name, (np.asarray(R0), np.asarray(t0)))
+    if len(bone_data) != 2:
+        return compute_lbs_positions(bindings, skel, len(bindings))
+
+    names = list(bone_data)
+    relative_rotations = []
+    affine_offsets = []
+    for name in names:
+        R0, t0 = bone_data[name]
+        body = skel.getBodyNode(name)
+        if body is None:
+            return compute_lbs_positions(bindings, skel, len(bindings))
+        transform = body.getWorldTransform()
+        R = np.asarray(transform.rotation()) @ R0.T
+        t = np.asarray(transform.translation()) - R @ t0
+        relative_rotations.append(R)
+        affine_offsets.append(t)
+
+    u = np.clip(np.asarray(blend_coordinate, dtype=np.float64), 0.0, 1.0)
+    slerp = Slerp([0.0, 1.0], Rotation.from_matrix(relative_rotations))
+    rotations = slerp(u).as_matrix()
+    offsets = ((1.0 - u)[:, None] * affine_offsets[0] +
+               u[:, None] * affine_offsets[1])
+    return np.einsum('mij,mj->mi', rotations, rest_positions) + offsets
+
+
+def compute_rigid_blend_positions_at_fraction(
+        bindings, skel, blend_coordinate, pose_fraction):
+    """Evaluate attachment targets along a rigid DART load path.
+
+    Linear interpolation between rest and final *vertex coordinates* turns a
+    rotating cap by the affine matrix ``(1-s)I+sR``.  That matrix shrinks and
+    can become singular for large rotations.  Instead, interpolate each DART
+    body's world rotation on SO(3) and its translation linearly, then retain
+    the usual harmonic origin/insertion transform blend across the muscle.
+    """
+    from scipy.spatial.transform import Rotation, Slerp
+
+    s = float(np.clip(pose_fraction, 0.0, 1.0))
+    if s <= 0.0:
+        return np.asarray([item[0] for item in bindings], dtype=np.float64)
+    if s >= 1.0:
+        return compute_rigid_blend_positions(bindings, skel, blend_coordinate)
+
+    bone_data = {}
+    rest_positions = np.zeros((len(bindings), 3), dtype=np.float64)
+    for vi, (rest, weighted_bones) in enumerate(bindings):
+        rest_positions[vi] = rest
+        for name, _weight, R0, t0 in weighted_bones:
+            bone_data.setdefault(
+                name, (np.asarray(R0, dtype=np.float64),
+                       np.asarray(t0, dtype=np.float64)))
+    if len(bone_data) != 2:
+        # This EMU path expects two attachment bodies. Falling back to the
+        # endpoint implementation is safer than reintroducing affine chords.
+        return compute_rigid_blend_positions(bindings, skel, blend_coordinate)
+
+    names = list(bone_data)
+    relative_rotations = []
+    affine_offsets = []
+    for name in names:
+        R0, t0 = bone_data[name]
+        body = skel.getBodyNode(name)
+        if body is None:
+            return compute_rigid_blend_positions(bindings, skel, blend_coordinate)
+        transform = body.getWorldTransform()
+        R1 = np.asarray(transform.rotation(), dtype=np.float64)
+        t1 = np.asarray(transform.translation(), dtype=np.float64)
+        R_body = Slerp(
+            [0.0, 1.0], Rotation.from_matrix(np.stack((R0, R1))))([s]
+        ).as_matrix()[0]
+        t_body = (1.0 - s) * t0 + s * t1
+        R_relative = R_body @ R0.T
+        relative_rotations.append(R_relative)
+        affine_offsets.append(t_body - R_relative @ t0)
+
+    u = np.clip(np.asarray(blend_coordinate, dtype=np.float64), 0.0, 1.0)
+    rotations = Slerp(
+        [0.0, 1.0], Rotation.from_matrix(relative_rotations))(u).as_matrix()
+    offsets = ((1.0 - u)[:, None] * affine_offsets[0] +
+               u[:, None] * affine_offsets[1])
+    return np.einsum('mij,mj->mi', rotations, rest_positions) + offsets
+
+
+def harmonic_attachment_positions(rest_positions, tetrahedra, fixed_vertices,
+                                  fixed_targets):
+    """Smoothly extend exact DART attachment motion through a tet volume.
+
+    This is a robust initializer: attachment neighborhoods follow their bones
+    exactly, while free-vertex displacement minimizes graph Dirichlet energy.
+    It avoids singular matrix blending and spatially varying SLERP distortion.
+    """
+    rest = np.asarray(rest_positions, dtype=np.float64)
+    targets = np.asarray(fixed_targets, dtype=np.float64)
+    n = len(rest)
+    edge_set = set()
+    for tet in np.asarray(tetrahedra, dtype=np.int32):
+        for i in range(4):
+            for j in range(i + 1, 4):
+                edge_set.add(tuple(sorted((int(tet[i]), int(tet[j])))))
+    edges = np.asarray(sorted(edge_set), dtype=np.int32)
+    lengths = np.linalg.norm(rest[edges[:, 0]] - rest[edges[:, 1]], axis=1)
+    weights = 1.0 / np.maximum(lengths, 1e-8)
+    rows = np.concatenate((edges[:, 0], edges[:, 1]))
+    cols = np.concatenate((edges[:, 1], edges[:, 0]))
+    values = np.concatenate((weights, weights))
+    adjacency = sp.csr_matrix((values, (rows, cols)), shape=(n, n))
+    laplacian = sp.diags(np.asarray(adjacency.sum(axis=1)).ravel()) - adjacency
+
+    fixed = np.asarray(sorted(set(int(v) for v in fixed_vertices)), dtype=np.int32)
+    fixed_set = set(int(v) for v in fixed)
+    free = np.asarray([v for v in range(n) if v not in fixed_set], dtype=np.int32)
+    displacement = np.zeros_like(rest)
+    displacement[fixed] = targets[fixed] - rest[fixed]
+    if len(free):
+        Lff = laplacian[free][:, free].tocsc()
+        Lfc = laplacian[free][:, fixed].tocsc()
+        solver = splu(Lff + 1e-10 * sp.eye(len(free), format='csc'))
+        rhs = -(Lfc @ displacement[fixed])
+        for axis in range(3):
+            displacement[free, axis] = solver.solve(rhs[:, axis])
+    return rest + displacement
+
+
 def lame_parameters(youngs, poisson):
     mu = youngs / (2 * (1 + poisson))
     lam = youngs * poisson / ((1 + poisson) * (1 - 2 * poisson))
@@ -693,7 +833,12 @@ def precompute_emu(vertices, tetrahedra, fixed_vertices, vertex_contour_level, k
     # Eigendecomposition for Woodbury (Eq. 13)
     t0 = time.time()
     k = min(k_modes, 3 * n - 2)
-    eigenvalues, eigenvectors = eigsh(GtG_csc, k=k, which='LM')
+    # Eq. 13 approximates (G^T G)^-1, whose dominant modes correspond to
+    # the *lowest* eigenvalues of G^T G.  Requesting LM here retained local,
+    # high-frequency tet modes and produced visibly stair-stepped surfaces.
+    # Shift-invert around zero finds the low modes efficiently on this SPD
+    # regularized matrix.
+    eigenvalues, eigenvectors = eigsh(GtG_csc, k=k, sigma=0.0, which='LM')
     Phi = eigenvectors  # (3n, k)
     Lambda = np.diag(eigenvalues)  # (k, k)
 
@@ -723,6 +868,7 @@ def precompute_emu(vertices, tetrahedra, fixed_vertices, vertex_contour_level, k
         'Dm_inv': Dm_inv,
         'volumes': volumes,
         'fiber_dirs': fiber_dirs,
+        'tetrahedra': np.asarray(tetrahedra, dtype=np.int32),
         'n_verts': n,
         'n_tets': m,
     }
@@ -760,6 +906,14 @@ def stable_neohookean_energy(F, volumes, mu, lam):
     I_C = np.einsum('mij,mij->m', F, F)  # tr(F^T F), (m,)
     J = np.linalg.det(F)  # (m,)
 
+    # The polynomial Stable-NH expression is finite for J < 0 unless an
+    # explicit inversion guard is applied.  Without this, line search accepted
+    # flipped tets because their numerical energy was still finite.
+    if np.any(~np.isfinite(J)) or np.any(J <= 0.02):
+        return 1e40
+
+    mu = np.asarray(mu, dtype=np.float64)
+    lam = np.asarray(lam, dtype=np.float64)
     psi = mu / 2 * (I_C - 3) - mu * (J - 1) + lam / 2 * (J - 1) ** 2
     return np.sum(volumes * psi)
 
@@ -774,9 +928,225 @@ def stable_neohookean_gradient(F, volumes, mu, lam):
         F_reg[degen] += 1e-8 * np.eye(3)
     F_invT = np.linalg.inv(F_reg).transpose(0, 2, 1)  # (m, 3, 3)
 
+    mu = np.broadcast_to(np.asarray(mu, dtype=np.float64), J.shape)
+    lam = np.broadcast_to(np.asarray(lam, dtype=np.float64), J.shape)
     coeff = (lam * (J - 1) - mu) * J  # (m,)
-    P = mu * F + coeff[:, None, None] * F_invT
+    P = mu[:, None, None] * F + coeff[:, None, None] * F_invT
     return volumes[:, None, None] * P
+
+
+def relax_positions_with_jacobian_barrier(
+        q_init, precomp, fixed_mask, fixed_targets, mu, lam,
+        max_iters=20, jacobian_floor=0.02, barrier_start=0.5,
+        barrier_scale=5.0, activation=None,
+        stretch_frobenius_limit=12.0):
+    """Exact q-space fallback for poses unsafe in reduced EMU coordinates.
+
+    The reduced deformation-space solve is normally much faster, but at a
+    sharply bent joint its finite Woodbury basis can reconstruct a continuous
+    mesh with collapsed tets even while every optimized F is valid.  This
+    fallback optimizes the actual free vertex coordinates and adds a smooth
+    log barrier before J reaches ``jacobian_floor``.  Fixed attachment vertices
+    remain exact.
+    """
+    q = np.asarray(q_init, dtype=np.float64).copy()
+    fixed_mask = np.asarray(fixed_mask, dtype=bool)
+    q[fixed_mask] = np.asarray(fixed_targets, dtype=np.float64)[fixed_mask]
+    free_dofs = np.flatnonzero(np.repeat(~fixed_mask, 3))
+    q_flat = q.ravel()
+    tets = precomp['tetrahedra']
+    Dm_inv = precomp['Dm_inv']
+    volumes = precomp['volumes']
+    mu_arr = np.broadcast_to(np.asarray(mu, dtype=np.float64), (len(tets),))
+    lam_arr = np.broadcast_to(np.asarray(lam, dtype=np.float64), (len(tets),))
+    activation_arr = None if activation is None else np.broadcast_to(
+        np.asarray(activation, dtype=np.float64), (len(tets),))
+    beta = barrier_scale * mu_arr
+    s0 = max(float(barrier_start - jacobian_floor), 1e-6)
+    # Very small attachment tets contributed almost no elastic energy, so the
+    # barrier could trade inversion for 10x--30x stretch. Give only excessive
+    # distortion a volume-floored quality penalty; ordinary EMU deformation
+    # below the threshold is unchanged.
+    quality_volume = np.maximum(volumes, np.quantile(volumes, 0.10))
+    quality_weight = 0.5 * mu_arr * quality_volume
+
+    initial_F = _deformation_gradients_from_q(q, tets, Dm_inv)
+    initial_J = np.linalg.det(initial_F)
+    repaired_iterations = 0
+    repair_target = max(0.08, barrier_start * 0.25)
+    if np.min(initial_J) < repair_target:
+        # A rotating attachment cap often leaves one free vertex behind in a
+        # 3-fixed/1-free sliver. Move near-barrier elements into the safe
+        # interior too; starting L-BFGS at J=0.02--0.04 made every useful trial
+        # cross the barrier and falsely converge without moving. Do not
+        # volume-weight this repair: tiny slivers are exactly the elements that
+        # otherwise get ignored.
+        q_repair = q.copy()
+        for repair_it in range(20):
+            F_repair = _deformation_gradients_from_q(q_repair, tets, Dm_inv)
+            J_repair = np.linalg.det(F_repair)
+            if np.min(J_repair) >= repair_target:
+                repaired_iterations = repair_it
+                break
+            bad_tets = np.where(J_repair < repair_target)[0]
+            if len(bad_tets) == 0:
+                break
+            # Worst elements first. For one tet J is linear in each vertex;
+            # distributing (J_target-J) along its free-vertex gradients is the
+            # minimum-norm local correction satisfying the linearized target.
+            bad_tets = bad_tets[np.argsort(J_repair[bad_tets])]
+            moved = 0
+            for ti_idx in bad_tets:
+                tet = tets[ti_idx]
+                x3 = q_repair[tet[3]]
+                Ds = np.stack((q_repair[tet[0]] - x3,
+                               q_repair[tet[1]] - x3,
+                               q_repair[tet[2]] - x3), axis=-1)
+                F_local = Ds @ Dm_inv[ti_idx]
+                J_local = float(np.linalg.det(F_local))
+                if J_local >= repair_target:
+                    continue
+                f0, f1, f2 = (F_local[:, 0], F_local[:, 1],
+                              F_local[:, 2])
+                cof = np.stack((np.cross(f1, f2), np.cross(f2, f0),
+                                np.cross(f0, f1)), axis=-1)
+                rows = Dm_inv[ti_idx]
+                grads = [cof @ rows[c] for c in range(3)]
+                grads.append(-(grads[0] + grads[1] + grads[2]))
+                denominator = sum(
+                    float(np.dot(grads[lv], grads[lv]))
+                    for lv in range(4) if not fixed_mask[tet[lv]])
+                if denominator < 1e-24:
+                    continue
+                correction_scale = 0.6 * (repair_target - J_local) / denominator
+                for lv in range(4):
+                    vi = int(tet[lv])
+                    if fixed_mask[vi]:
+                        continue
+                    delta = correction_scale * grads[lv]
+                    length = float(np.linalg.norm(delta))
+                    if length > 5e-4:
+                        delta *= 5e-4 / length
+                    q_repair[vi] += delta
+                    moved += 1
+            q_repair[fixed_mask] = np.asarray(
+                fixed_targets, dtype=np.float64)[fixed_mask]
+            if moved == 0:
+                break
+        q = q_repair
+        q_flat = q.ravel()
+        initial_F = _deformation_gradients_from_q(q, tets, Dm_inv)
+        initial_J = np.linalg.det(initial_F)
+        if np.min(initial_J) <= jacobian_floor:
+            return None, {
+                'success': False,
+                'reason': 'fixed constraints could not be untangled',
+                'min_j': float(np.min(initial_J)),
+                'repair_iterations': int(repaired_iterations),
+            }
+
+    def objective(x):
+        q_flat[free_dofs] = x
+        current = q_flat.reshape(-1, 3)
+        F = _deformation_gradients_from_q(current, tets, Dm_inv)
+        J = np.linalg.det(F)
+        if np.any(~np.isfinite(J)) or np.min(J) <= jacobian_floor:
+            return 1e40, np.zeros_like(x)
+
+        I_C = np.einsum('mij,mij->m', F, F)
+        psi = (mu_arr / 2.0 * (I_C - 3.0) - mu_arr * (J - 1.0) +
+               lam_arr / 2.0 * (J - 1.0) ** 2)
+        energy = float(np.sum(volumes * psi))
+        grad_F = stable_neohookean_gradient(
+            F, volumes, mu_arr, lam_arr)
+        excessive_stretch = np.maximum(
+            I_C - float(stretch_frobenius_limit), 0.0)
+        if np.any(excessive_stretch > 0.0):
+            energy += float(np.sum(
+                0.5 * quality_weight * excessive_stretch ** 2))
+            grad_F += (
+                2.0 * quality_weight * excessive_stretch
+            )[:, None, None] * F
+        if activation_arr is not None:
+            energy += fiber_energy(
+                F, precomp['fiber_dirs'], activation_arr, volumes)
+            grad_F += fiber_gradient(
+                F, precomp['fiber_dirs'], activation_arr, volumes)
+
+        active = J < barrier_start
+        if np.any(active):
+            s = J[active] - jacobian_floor
+            ratio = s / s0
+            phi = -np.log(ratio) + ratio - 1.0
+            energy += float(np.sum(volumes[active] * beta[active] * phi))
+            invT = np.linalg.inv(F[active]).transpose(0, 2, 1)
+            cofactor = J[active, None, None] * invT
+            dphi = -1.0 / s + 1.0 / s0
+            grad_F[active] += (
+                volumes[active] * beta[active] * dphi
+            )[:, None, None] * cofactor
+
+        grad_q = np.asarray(precomp['Gt'] @ grad_F.ravel()).ravel()
+        return energy, grad_q[free_dofs]
+
+    # Optimize in centimeter-scaled coordinates. In raw meters the elastic
+    # gradient is large while coordinates are O(1), so L-BFGS proposes a huge
+    # first step, backtracks to machine precision, and falsely reports relative
+    # convergence without moving a single vertex.
+    # Calibrated from the q-gradient magnitude (typically 1e3--1e4): because
+    # an L-BFGS identity step in physical coordinates scales as scale²*g,
+    # 3e-4 produces an initial displacement around 0.1 mm rather than 0.1 m.
+    coordinate_scale = 6e-4
+    x0 = q_flat[free_dofs].copy()
+
+    # Feasible steepest-descent startup. Near the determinant barrier SciPy's
+    # first quasi-Newton trial can be infeasible at every line-search scale it
+    # samples, after which it reports relative-energy convergence with zero
+    # motion. A few explicitly bounded physical-space steps establish a real
+    # descent direction before L-BFGS builds its inverse-Hessian estimate.
+    for _startup in range(5):
+        startup_energy, startup_gradient = objective(x0)
+        gradient_vertices = startup_gradient.reshape(-1, 3)
+        max_gradient = float(np.max(np.linalg.norm(
+            gradient_vertices, axis=1))) if len(gradient_vertices) else 0.0
+        if not np.isfinite(max_gradient) or max_gradient < 1e-10:
+            break
+        direction = -startup_gradient
+        step = 2e-4 / max_gradient
+        accepted_startup = False
+        for _backtrack in range(24):
+            trial = x0 + step * direction
+            trial_energy, _ = objective(trial)
+            if (np.isfinite(trial_energy) and
+                    trial_energy < startup_energy - 1e-12):
+                x0 = trial
+                accepted_startup = True
+                break
+            step *= 0.5
+        if not accepted_startup:
+            break
+    q_flat[free_dofs] = x0
+
+    def scaled_objective(y):
+        energy, gradient_x = objective(y * coordinate_scale)
+        return energy, gradient_x * coordinate_scale
+
+    result = minimize(
+        scaled_objective, x0 / coordinate_scale,
+        method='L-BFGS-B', jac=True,
+        options={'maxiter': int(max_iters), 'ftol': 1e-16,
+                 'gtol': 1e-6, 'maxls': 50})
+    q_flat[free_dofs] = result.x * coordinate_scale
+    relaxed = q_flat.reshape(-1, 3).copy()
+    final_J = np.linalg.det(_deformation_gradients_from_q(
+        relaxed, tets, Dm_inv))
+    info = {'success': bool(np.min(final_J) > jacobian_floor),
+            'iterations': int(result.nit), 'energy': float(result.fun),
+            'min_j': float(np.min(final_J)), 'message': str(result.message)}
+    info['move_norm'] = float(np.linalg.norm(q_flat[free_dofs] - x0))
+    info['gradient_norm'] = float(np.linalg.norm(result.jac))
+    info['repair_iterations'] = int(repaired_iterations)
+    return relaxed if info['success'] else None, info
 
 
 def stable_neohookean_hessian_blocks(F, volumes, mu, lam):
@@ -801,6 +1171,8 @@ def stable_neohookean_hessian_blocks(F, volumes, mu, lam):
         F_reg[degen] += 1e-8 * np.eye(3)
     g = np.linalg.inv(F_reg).transpose(0, 2, 1)  # g[m,a,b] = (F^{-T})_{ab}
 
+    mu = np.broadcast_to(np.asarray(mu, dtype=np.float64), J.shape)
+    lam = np.broadcast_to(np.asarray(lam, dtype=np.float64), J.shape)
     c = lam * (J - 1) - mu                    # (m,)
     coeff1 = J * (lam * (2 * J - 1) - mu)     # (m,)
     coeff2 = c * J                             # (m,) note: sign absorbed below
@@ -810,7 +1182,7 @@ def stable_neohookean_hessian_blocks(F, volumes, mu, lam):
     g_vec = g.reshape(m, 9)  # (m, 9)
 
     # Term 1: μ I  →  (m, 9, 9)
-    H = mu * np.broadcast_to(np.eye(9), (m, 9, 9)).copy()
+    H = mu[:, None, None] * np.broadcast_to(np.eye(9), (m, 9, 9)).copy()
 
     # Term 2: coeff1 * g_ab * g_cd = coeff1 * outer(g_vec, g_vec)
     H += coeff1[:, None, None] * (g_vec[:, :, None] * g_vec[:, None, :])
@@ -879,19 +1251,80 @@ def acap_energy(Fvec, precomp, fixed_targets_flat):
 # ---------------------------------------------------------------------------
 # EMU total energy and gradient
 # ---------------------------------------------------------------------------
-def emu_energy(Fvec, precomp, fixed_targets_flat, mu, lam, alpha, use_gpu=True):
-    """Total EMU energy: Ψ_iso + α·E_C (Eq. 5, no fiber activation)."""
+def fiber_energy(F, fiber_dirs, activation, volumes):
+    """EMU Eq. 8: sum V_i a_i ||F_i u_i||²."""
+    if activation is None:
+        return 0.0
+    activation = np.broadcast_to(np.asarray(activation, dtype=np.float64), (len(F),))
+    Fu = np.einsum('mij,mj->mi', F, fiber_dirs)
+    return float(np.sum(volumes * activation * np.einsum('mi,mi->m', Fu, Fu)))
+
+
+def fiber_gradient(F, fiber_dirs, activation, volumes):
+    """Gradient of EMU Eq. 8 with respect to each deformation gradient."""
+    if activation is None:
+        return np.zeros_like(F)
+    activation = np.broadcast_to(np.asarray(activation, dtype=np.float64), (len(F),))
+    Fu = np.einsum('mij,mj->mi', F, fiber_dirs)
+    return (2.0 * volumes * activation)[:, None, None] * np.einsum(
+        'mi,mj->mij', Fu, fiber_dirs)
+
+
+def fiber_hessian_blocks(fiber_dirs, activation, volumes):
+    """Constant per-tet Hessian of EMU Eq. 8 in row-major vec(F)."""
+    m = len(fiber_dirs)
+    if activation is None:
+        return np.zeros((m, 9, 9), dtype=np.float64)
+    activation = np.broadcast_to(np.asarray(activation, dtype=np.float64), (m,))
+    # For each F row, d²||F u||²/dF_row² = 2 uu^T; rows do not couple.
+    uu = np.einsum('mi,mj->mij', fiber_dirs, fiber_dirs)
+    H = np.zeros((m, 9, 9), dtype=np.float64)
+    scale = 2.0 * volumes * activation
+    for row in range(3):
+        sl = slice(3 * row, 3 * row + 3)
+        H[:, sl, sl] = scale[:, None, None] * uu
+    return H
+
+
+def emu_energy(Fvec, precomp, fixed_targets_flat, mu, lam, alpha, use_gpu=True,
+               activation=None):
+    """Total EMU energy Ψiso + Ψfiber + α EC (paper Eq. 5)."""
     m = precomp['n_tets']
     F = _vec_to_F(Fvec, m)
     if use_gpu:
         E_iso = stable_neohookean_energy_gpu(F, precomp['volumes'], mu, lam)
     else:
         E_iso = stable_neohookean_energy(F, precomp['volumes'], mu, lam)
+    E_fiber = fiber_energy(
+        F, precomp['fiber_dirs'], activation, precomp['volumes'])
     E_c = acap_energy(Fvec, precomp, fixed_targets_flat)
-    return E_iso + alpha * E_c
+    return E_iso + E_fiber + alpha * E_c
 
 
-def emu_gradient(Fvec, precomp, fixed_targets_flat, mu, lam, alpha, use_gpu=True):
+def emu_energy_terms(Fvec, precomp, fixed_targets_flat, mu, lam, alpha,
+                     use_gpu=True, activation=None):
+    """Return separately named terms of paper Eq. 5 for diagnostics."""
+    F = _vec_to_F(Fvec, precomp['n_tets'])
+    if use_gpu:
+        isotropic = stable_neohookean_energy_gpu(
+            F, precomp['volumes'], mu, lam)
+    else:
+        isotropic = stable_neohookean_energy(
+            F, precomp['volumes'], mu, lam)
+    fiber = fiber_energy(
+        F, precomp['fiber_dirs'], activation, precomp['volumes'])
+    acap_raw = acap_energy(Fvec, precomp, fixed_targets_flat)
+    return {
+        'isotropic': float(isotropic),
+        'fiber': float(fiber),
+        'acap_raw': float(acap_raw),
+        'acap_weighted': float(alpha * acap_raw),
+        'total_volume': float(np.sum(precomp['volumes'])),
+    }
+
+
+def emu_gradient(Fvec, precomp, fixed_targets_flat, mu, lam, alpha, use_gpu=True,
+                 activation=None):
     """Gradient dE/dF (Eq. 9)."""
     m = precomp['n_tets']
     F = _vec_to_F(Fvec, m)
@@ -900,7 +1333,9 @@ def emu_gradient(Fvec, precomp, fixed_targets_flat, mu, lam, alpha, use_gpu=True
         P = stable_neohookean_gradient_gpu(F, precomp['volumes'], mu, lam)
     else:
         P = stable_neohookean_gradient(F, precomp['volumes'], mu, lam)
-    g_iso = _F_to_vec(P)
+    P_fiber = fiber_gradient(
+        F, precomp['fiber_dirs'], activation, precomp['volumes'])
+    g_iso = _F_to_vec(P + P_fiber)
 
     # ACAP gradient with constrained solve
     q = acap_positions(Fvec, precomp, fixed_targets_flat)
@@ -913,7 +1348,8 @@ def emu_gradient(Fvec, precomp, fixed_targets_flat, mu, lam, alpha, use_gpu=True
 # ---------------------------------------------------------------------------
 # Newton step with Woodbury (Eq. 14-17)
 # ---------------------------------------------------------------------------
-def newton_step_woodbury(gradient, Fvec, precomp, mu, lam, alpha):
+def newton_step_woodbury(gradient, Fvec, precomp, mu, lam, alpha,
+                         activation=None):
     """Compute Newton descent direction using Woodbury Hessian (Eq. 14-17).
 
     Paper notation:
@@ -931,6 +1367,8 @@ def newton_step_woodbury(gradient, Fvec, precomp, mu, lam, alpha):
 
     # H = ∂²Ψ_iso/∂F² + αI  (block-diagonal, m × 9 × 9)
     H_blocks = stable_neohookean_hessian_blocks(F, precomp['volumes'], mu, lam)
+    H_blocks += fiber_hessian_blocks(
+        precomp['fiber_dirs'], activation, precomp['volumes'])
     for i in range(m):
         H_blocks[i] += alpha * np.eye(9)
 
@@ -980,7 +1418,8 @@ def newton_step_woodbury(gradient, Fvec, precomp, mu, lam, alpha):
 # Collision forces (EMU Section 3.5, Algorithm 1 lines 28-35)
 # ---------------------------------------------------------------------------
 def compute_collision_forces(q, bone_trimeshes, muscle_surfaces, margin=0.002,
-                              neighbor_positions=None, fascia_pairs=None):
+                              neighbor_positions=None, fascia_pairs=None,
+                              stiffness=1e7):
     """Detect collisions and compute per-vertex contact forces.
 
     Includes bone-muscle collision AND inter-muscle fascia proximity.
@@ -1010,6 +1449,7 @@ def compute_collision_forces(q, bone_trimeshes, muscle_surfaces, margin=0.002,
             break
         surf_verts = surf_info['surf_verts']
         fixed_set = surf_info['fixed_set']
+        exempt_set = surf_info.get('collision_exempt_set', set())
         offset = surf_info['offset']
 
         sv_pos = q[np.array(surf_verts) + offset]
@@ -1038,14 +1478,23 @@ def compute_collision_forces(q, bone_trimeshes, muscle_surfaces, margin=0.002,
                 inside_sv = bbox_sv[inside]
                 closest, _, face_ids = trimesh.proximity.closest_point(
                     bone_mesh, inside_pos)
-                normals = bone_mesh.face_normals[face_ids]
                 for k in range(len(inside_sv)):
                     vi = int(inside_sv[k]) + offset
-                    if (vi - offset) in fixed_set:
+                    if ((vi - offset) in fixed_set or
+                            (vi - offset) in exempt_set):
                         continue
-                    target = closest[k] + normals[k] * margin
+                    # closest - inside points toward the exterior regardless
+                    # of triangle winding; face normals are not reliable for
+                    # all imported Zygote OBJ files.
+                    outward = closest[k] - inside_pos[k]
+                    outward_len = np.linalg.norm(outward)
+                    if outward_len > 1e-12:
+                        outward /= outward_len
+                    else:
+                        outward = bone_mesh.face_normals[face_ids[k]]
+                    target = closest[k] + outward * margin
                     # Spring-like force toward target
-                    forces[vi] = (target - q[vi]) * 1e4
+                    forces[vi] = (target - q[vi]) * stiffness
             except Exception:
                 continue
 
@@ -1072,7 +1521,7 @@ def compute_collision_forces(q, bone_trimeshes, muscle_surfaces, margin=0.002,
             dist = np.linalg.norm(diff)
             if dist < 1e-10:
                 continue
-            push = (margin * 2 - dist) * 0.5 * diff / dist * 1e4
+            push = (margin * 2 - dist) * 0.5 * diff / dist * stiffness
             forces[gvi_i] -= push
             forces[gvi_j] += push
 
@@ -1137,6 +1586,262 @@ def generalized_force_on_F(forces_q, precomp, fixed_targets_flat):
     return f_F
 
 
+def project_out_of_bones(q, tetrahedra, bone_trimeshes, surface_vertices,
+                         fixed_vertices, margin=0.002, passes=3):
+    """Resolve residual bone penetration with a harmonic displacement field.
+
+    Contact vertices receive exterior targets, attachment pins receive zero
+    displacement, and all remaining vertices solve a graph-Laplacian Dirichlet
+    problem.  Unlike independent per-vertex projection, this propagates contact
+    smoothly through neighboring tetrahedra and does not create surface stairs.
+    """
+    import trimesh
+    positions = np.asarray(q, dtype=np.float64).copy()
+    candidates = np.asarray(surface_vertices, dtype=np.int32)
+    fixed = set(int(v) for v in fixed_vertices)
+    moved = set()
+
+    n = len(positions)
+    edge_set = set()
+    for tet in np.asarray(tetrahedra, dtype=np.int32):
+        for i in range(4):
+            for j in range(i + 1, 4):
+                a, b = sorted((int(tet[i]), int(tet[j])))
+                edge_set.add((a, b))
+    if not edge_set:
+        return positions, 0
+    edges = np.asarray(sorted(edge_set), dtype=np.int32)
+    rows = np.concatenate((edges[:, 0], edges[:, 1]))
+    cols = np.concatenate((edges[:, 1], edges[:, 0]))
+    adjacency = sp.csr_matrix((np.ones(len(rows)), (rows, cols)), shape=(n, n))
+    degree = np.asarray(adjacency.sum(axis=1)).ravel()
+    laplacian = sp.diags(degree) - adjacency
+
+    for _ in range(max(int(passes), 1)):
+        targets = {}
+        for bone in bone_trimeshes or []:
+            pts = positions[candidates]
+            in_bbox = np.all(
+                (pts >= bone.bounds[0] - margin) &
+                (pts <= bone.bounds[1] + margin), axis=1)
+            if not np.any(in_bbox):
+                continue
+            ids = candidates[in_bbox]
+            pts = positions[ids]
+            try:
+                inside = bone.contains(pts)
+                if not np.any(inside):
+                    continue
+                ids = ids[inside]
+                pts = pts[inside]
+                closest, _, face_ids = trimesh.proximity.closest_point(bone, pts)
+                for j, vi in enumerate(ids):
+                    vi = int(vi)
+                    if vi in fixed:
+                        continue
+                    outward = closest[j] - pts[j]
+                    length = np.linalg.norm(outward)
+                    if length > 1e-12:
+                        outward /= length
+                    else:
+                        outward = bone.face_normals[face_ids[j]]
+                    target = closest[j] + outward * margin
+                    delta = target - positions[vi]
+                    # If overlapping bones constrain one vertex, retain the
+                    # correction with the greatest penetration depth.
+                    if vi not in targets or np.linalg.norm(delta) > np.linalg.norm(targets[vi]):
+                        targets[vi] = delta
+            except Exception:
+                continue
+        if not targets:
+            break
+
+        constrained = sorted(fixed | set(targets))
+        constrained_set = set(constrained)
+        free = np.asarray([i for i in range(n) if i not in constrained_set], dtype=np.int32)
+        constrained = np.asarray(constrained, dtype=np.int32)
+        prescribed = np.zeros((len(constrained), 3), dtype=np.float64)
+        constrained_lookup = {int(vi): i for i, vi in enumerate(constrained)}
+        for vi, delta in targets.items():
+            prescribed[constrained_lookup[vi]] = delta
+
+        displacement = np.zeros_like(positions)
+        displacement[constrained] = prescribed
+        if len(free):
+            Lff = laplacian[free][:, free].tocsc()
+            Lfc = laplacian[free][:, constrained].tocsc()
+            # Small diagonal handles isolated numerical components safely.
+            solver = splu(Lff + 1e-10 * sp.eye(len(free), format='csc'))
+            rhs = -(Lfc @ prescribed)
+            for axis in range(3):
+                displacement[free, axis] = solver.solve(rhs[:, axis])
+        positions += displacement
+        moved.update(targets)
+    return positions, len(moved)
+
+
+def project_embedded_skin_out_of_bones(
+        q, precomp, bone_trimeshes, skin_rest, skin_indices, skin_weights,
+        tet_rest, fixed_vertices, exempt_tet_vertices=None,
+        exempt_skin_vertices=None, margin=0.002, passes=3):
+    """Resolve collisions visible on an anatomical skin embedded in tets.
+
+    The render shell may not coincide with the regularized simulation boundary.
+    Contact displacements detected on that shell are mapped through its tet
+    barycentrics, then harmonically propagated through the simulation mesh.
+    """
+    import trimesh
+
+    positions = np.asarray(q, dtype=np.float64).copy()
+    skin_rest = np.asarray(skin_rest, dtype=np.float64)
+    skin_indices = np.asarray(skin_indices, dtype=np.int32)
+    skin_weights = np.asarray(skin_weights, dtype=np.float64)
+    tet_rest = np.asarray(tet_rest, dtype=np.float64)
+    fixed = set(int(v) for v in fixed_vertices)
+    exempt_values = set() if exempt_tet_vertices is None else exempt_tet_vertices
+    exempt = set(int(v) for v in exempt_values)
+    skin_exempt_values = (
+        set() if exempt_skin_vertices is None else exempt_skin_vertices)
+    skin_exempt = set(int(v) for v in skin_exempt_values)
+    dominant = skin_indices[
+        np.arange(len(skin_indices)), np.argmax(np.abs(skin_weights), axis=1)]
+    eligible_skin = ~np.isin(dominant, np.asarray(sorted(fixed | exempt), dtype=np.int32))
+    if skin_exempt:
+        eligible_skin[np.asarray(sorted(skin_exempt), dtype=np.int32)] = False
+
+    n = len(positions)
+    edge_set = set()
+    for tet in np.asarray(precomp['tetrahedra'], dtype=np.int32):
+        for i in range(4):
+            for j in range(i + 1, 4):
+                edge_set.add(tuple(sorted((int(tet[i]), int(tet[j])))))
+    edges = np.asarray(sorted(edge_set), dtype=np.int32)
+    rows = np.concatenate((edges[:, 0], edges[:, 1]))
+    cols = np.concatenate((edges[:, 1], edges[:, 0]))
+    adjacency = sp.csr_matrix((np.ones(len(rows)), (rows, cols)), shape=(n, n))
+    laplacian = sp.diags(np.asarray(adjacency.sum(axis=1)).ravel()) - adjacency
+
+    def skin_positions(current):
+        displacement = current[skin_indices] - tet_rest[skin_indices]
+        return skin_rest + np.einsum('nk,nkj->nj', skin_weights, displacement)
+
+    moved_skin = set()
+    for _ in range(max(1, int(passes))):
+        skin = skin_positions(positions)
+        skin_targets = {}
+        for bone in bone_trimeshes or []:
+            in_bbox = eligible_skin & np.all(
+                (skin >= bone.bounds[0] - margin) &
+                (skin <= bone.bounds[1] + margin), axis=1)
+            ids = np.where(in_bbox)[0]
+            if len(ids) == 0:
+                continue
+            try:
+                inside = bone.contains(skin[ids])
+                ids = ids[inside]
+                if len(ids) == 0:
+                    continue
+                points = skin[ids]
+                closest, _, face_ids = trimesh.proximity.closest_point(bone, points)
+                for local, si in enumerate(ids):
+                    outward = closest[local] - points[local]
+                    length = float(np.linalg.norm(outward))
+                    if length > 1e-12:
+                        outward /= length
+                    else:
+                        outward = bone.face_normals[face_ids[local]]
+                    delta = closest[local] + margin * outward - points[local]
+                    if (si not in skin_targets or
+                            np.linalg.norm(delta) > np.linalg.norm(skin_targets[si])):
+                        skin_targets[int(si)] = delta
+            except Exception:
+                continue
+        if not skin_targets:
+            break
+
+        accum = {}
+        accum_weight = {}
+        for si, delta in skin_targets.items():
+            weights = skin_weights[si]
+            movable = np.asarray([
+                int(vi) not in fixed and int(vi) not in exempt
+                for vi in skin_indices[si]], dtype=bool)
+            denom = float(np.sum(weights[movable] ** 2))
+            if denom < 1e-16:
+                continue
+            for local in np.where(movable)[0]:
+                vi = int(skin_indices[si, local])
+                contribution = (weights[local] / denom) * delta
+                accum[vi] = accum.get(vi, np.zeros(3)) + contribution
+                accum_weight[vi] = accum_weight.get(vi, 0) + 1
+            moved_skin.add(int(si))
+        if not accum:
+            break
+
+        targets = {vi: delta / accum_weight[vi] for vi, delta in accum.items()}
+        constrained_ids = sorted(fixed | exempt | set(targets))
+        constrained_set = set(constrained_ids)
+        free = np.asarray([i for i in range(n) if i not in constrained_set], dtype=np.int32)
+        constrained = np.asarray(constrained_ids, dtype=np.int32)
+        prescribed = np.zeros((len(constrained), 3), dtype=np.float64)
+        lookup = {int(vi): i for i, vi in enumerate(constrained)}
+        for vi, delta in targets.items():
+            prescribed[lookup[vi]] = delta
+        displacement = np.zeros_like(positions)
+        displacement[constrained] = prescribed
+        if len(free):
+            solver = splu(
+                laplacian[free][:, free].tocsc() +
+                1e-10 * sp.eye(len(free), format='csc'))
+            rhs = -(laplacian[free][:, constrained] @ prescribed)
+            for axis in range(3):
+                displacement[free, axis] = solver.solve(rhs[:, axis])
+
+        scale = 1.0
+        accepted = False
+        for _line_search in range(16):
+            candidate = positions + scale * displacement
+            F = _deformation_gradients_from_q(
+                candidate, precomp['tetrahedra'], precomp['Dm_inv'])
+            if np.all(np.isfinite(F)) and np.min(np.linalg.det(F)) > 0.02:
+                positions = candidate
+                accepted = True
+                break
+            scale *= 0.5
+        if not accepted:
+            break
+
+    residual_skin = set()
+    final_skin = skin_positions(positions)
+    residual_offsets = np.zeros_like(final_skin)
+    for bone in bone_trimeshes or []:
+        ids = np.where(eligible_skin & np.all(
+            (final_skin >= bone.bounds[0] - margin) &
+            (final_skin <= bone.bounds[1] + margin), axis=1))[0]
+        if len(ids):
+            try:
+                inside = bone.contains(final_skin[ids])
+                inside_ids = ids[inside]
+                residual_skin.update(int(i) for i in inside_ids)
+                if len(inside_ids):
+                    points = final_skin[inside_ids]
+                    closest, _, face_ids = trimesh.proximity.closest_point(
+                        bone, points)
+                    for local, si in enumerate(inside_ids):
+                        outward = closest[local] - points[local]
+                        length = float(np.linalg.norm(outward))
+                        if length > 1e-12:
+                            outward /= length
+                        else:
+                            outward = bone.face_normals[face_ids[local]]
+                        delta = closest[local] + margin * outward - points[local]
+                        if np.linalg.norm(delta) > np.linalg.norm(residual_offsets[si]):
+                            residual_offsets[si] = delta
+            except Exception:
+                pass
+    return positions, len(moved_skin), len(residual_skin), residual_offsets
+
+
 # ---------------------------------------------------------------------------
 # EMU solver (Algorithm 1)
 # ---------------------------------------------------------------------------
@@ -1144,7 +1849,8 @@ def emu_solve(q_init, precomp, fixed_mask, fixed_targets,
               mu, lam, alpha, max_iters=30, verbose=False,
               bone_trimeshes=None, muscle_surfaces=None, margin=0.002,
               use_gpu=True, warm_F=None,
-              neighbor_positions=None, fascia_pairs=None):
+              neighbor_positions=None, fascia_pairs=None, activation=None,
+              collision_stiffness=1e7, collision_iterations=1):
     """Run EMU quasi-Newton solver (Algorithm 1 from the paper).
 
     Optimizations:
@@ -1169,19 +1875,36 @@ def emu_solve(q_init, precomp, fixed_mask, fixed_targets,
     rho = 0.5
     eps = 1e-3
     e1 = 1e-4
-    e2 = 1e-6  # #2: relaxed from 1e-8 for faster early termination
+    # EMU evaluates convergence using an absolute energy change below 1e-2
+    # (paper Sec. 4), which is also a better scale for SI material energies.
+    e2 = 1e-2
 
-    E = emu_energy(Fvec, precomp, fixed_targets_flat, mu, lam, alpha, use_gpu=use_gpu)
+    heterogeneous = np.ndim(mu) > 0 or np.ndim(lam) > 0
+    if use_gpu and (heterogeneous or activation is not None):
+        print("    EMU GPU kernels do not support heterogeneous/fiber material yet; using CPU")
+        use_gpu = False
+
+    E = emu_energy(Fvec, precomp, fixed_targets_flat, mu, lam, alpha,
+                   use_gpu=use_gpu, activation=activation)
     if verbose:
-        print(f"    EMU iter 0: E={E:.6e}")
+        initial_terms = emu_energy_terms(
+            Fvec, precomp, fixed_targets_flat, mu, lam, alpha,
+            use_gpu=use_gpu, activation=activation)
+        print(f"    EMU iter 0: E={E:.6e} "
+              f"(iso={initial_terms['isotropic']:.3e}, "
+              f"fiber={initial_terms['fiber']:.3e}, "
+              f"alpha*ACAP={initial_terms['acap_weighted']:.3e})")
 
     g_norm = float('inf')
     n_coll = 0
+    max_coll = 0
+    collision_history = []
     H_cached = None  # #4: cached Hessian blocks
 
     for iteration in range(max_iters):
         # Compute gradient
-        g = emu_gradient(Fvec, precomp, fixed_targets_flat, mu, lam, alpha, use_gpu=use_gpu)
+        g = emu_gradient(Fvec, precomp, fixed_targets_flat, mu, lam, alpha,
+                         use_gpu=use_gpu, activation=activation)
         g_norm = np.linalg.norm(g)
 
         # #4: Recompute Hessian every 3 iterations (or first iteration)
@@ -1190,14 +1913,18 @@ def emu_solve(q_init, precomp, fixed_mask, fixed_targets,
             if use_gpu:
                 d = newton_step_woodbury_gpu(g, Fvec, precomp, mu, lam, alpha)
             else:
-                d = newton_step_woodbury(g, Fvec, precomp, mu, lam, alpha)
+                d = newton_step_woodbury(
+                    g, Fvec, precomp, mu, lam, alpha, activation=activation)
             # Cache the Hessian blocks for reuse
             F_mat = _vec_to_F(Fvec, m)
             if use_gpu:
                 H_cached = np.zeros((m, 9, 9), dtype=np.float64)
                 _ti_hessian_build(F_mat.reshape(m, 9).copy(), precomp['volumes'], mu, lam, 0.0, H_cached)
             else:
-                H_cached = stable_neohookean_hessian_blocks(F_mat, precomp['volumes'], mu, lam)
+                H_cached = stable_neohookean_hessian_blocks(
+                    F_mat, precomp['volumes'], mu, lam)
+                H_cached += fiber_hessian_blocks(
+                    precomp['fiber_dirs'], activation, precomp['volumes'])
             eigv, eigvc = np.linalg.eigh(H_cached)
             eigv = np.maximum(eigv, 1e-6)
             H_cached = np.einsum('mij,mj,mkj->mik', eigvc, eigv, eigvc)
@@ -1245,10 +1972,21 @@ def emu_solve(q_init, precomp, fixed_mask, fixed_targets,
         ls_success = False
         for ls_iter in range(20):
             F_new = Fvec + sigma * d
-            E_new = emu_energy(F_new, precomp, fixed_targets_flat, mu, lam, alpha, use_gpu=use_gpu)
+            E_new = emu_energy(
+                F_new, precomp, fixed_targets_flat, mu, lam, alpha,
+                use_gpu=use_gpu, activation=activation)
             if np.isfinite(E_new) and E_new <= E_prev + eps * sigma * dir_deriv:
-                ls_success = True
-                break
+                # F is discontinuous per tet; valid det(F) does not guarantee
+                # that the ACAP-reconstructed continuous mesh is valid. Check
+                # the actual displayed/simulated tet positions before accepting.
+                q_new = acap_positions(F_new, precomp, fixed_targets_flat)
+                q_new_F = _deformation_gradients_from_q(
+                    q_new, precomp['tetrahedra'], precomp['Dm_inv'])
+                q_new_J = np.linalg.det(q_new_F)
+                if (np.all(np.isfinite(q_new_J)) and
+                        np.min(q_new_J) > 0.02):
+                    ls_success = True
+                    break
             sigma *= rho
 
         if ls_success:
@@ -1257,22 +1995,48 @@ def emu_solve(q_init, precomp, fixed_mask, fixed_targets,
 
         # Collision resolution (inner loop)
         if bone_trimeshes is not None or muscle_surfaces is not None:
-            for coll_iter in range(5):
+            for coll_iter in range(max(1, int(collision_iterations))):
                 q_current = acap_positions(Fvec, precomp, fixed_targets_flat)
                 f_coll = compute_collision_forces(
-                    q_current, bone_trimeshes or [], muscle_surfaces or [], margin)
+                    q_current, bone_trimeshes or [], muscle_surfaces or [], margin,
+                    stiffness=collision_stiffness)
                 n_coll = int(np.sum(np.linalg.norm(f_coll, axis=1) > 1e-10))
+                max_coll = max(max_coll, n_coll)
+                collision_history.append(n_coll)
                 if n_coll == 0:
                     break
                 g_ext = generalized_force_on_F(f_coll, precomp, fixed_targets_flat)
                 g_ext_blocks = g_ext.reshape(m, 9)
                 try:
                     d_contact = np.linalg.solve(H_cached, g_ext_blocks[:, :, None]).squeeze(-1)
-                    Fvec = Fvec + d_contact.ravel()
+                    contact_step = d_contact.ravel()
+                    accepted_contact = False
+                    scale = 1.0
+                    for _contact_ls in range(16):
+                        candidate = Fvec + scale * contact_step
+                        candidate_J = np.linalg.det(_vec_to_F(candidate, m))
+                        if (np.all(np.isfinite(candidate_J)) and
+                                np.min(candidate_J) > 0.02):
+                            candidate_q = acap_positions(
+                                candidate, precomp, fixed_targets_flat)
+                            candidate_q_F = _deformation_gradients_from_q(
+                                candidate_q, precomp['tetrahedra'],
+                                precomp['Dm_inv'])
+                            candidate_q_J = np.linalg.det(candidate_q_F)
+                            if (np.all(np.isfinite(candidate_q_J)) and
+                                    np.min(candidate_q_J) > 0.02):
+                                Fvec = candidate
+                                accepted_contact = True
+                                break
+                        scale *= 0.5
+                    if not accepted_contact:
+                        break
                 except np.linalg.LinAlgError:
                     break  # Hessian singular, skip remaining collision iters
 
-            E = emu_energy(Fvec, precomp, fixed_targets_flat, mu, lam, alpha, use_gpu=use_gpu)
+            E = emu_energy(
+                Fvec, precomp, fixed_targets_flat, mu, lam, alpha,
+                use_gpu=use_gpu, activation=activation)
 
         if verbose and (iteration + 1) % 5 == 0:
             print(f"    EMU iter {iteration+1}: E={E:.6e}, |g|={g_norm:.2e}, "
@@ -1286,11 +2050,63 @@ def emu_solve(q_init, precomp, fixed_mask, fixed_targets,
 
     q = acap_positions(Fvec, precomp, fixed_targets_flat)
 
+    projected = 0
+    if bone_trimeshes and muscle_surfaces:
+        q_before_projection = q.copy()
+        surface_vertices = sorted({
+            int(vi) + int(info.get('offset', 0))
+            for info in muscle_surfaces for vi in info.get('surf_verts', [])
+        })
+        projection_fixed = set(np.where(np.asarray(fixed_mask, dtype=bool))[0])
+        for surface_info in muscle_surfaces:
+            offset = int(surface_info.get('offset', 0))
+            projection_fixed.update(
+                int(vi) + offset
+                for vi in surface_info.get('collision_exempt_set', set()))
+        projected_q, projected = project_out_of_bones(
+            q, precomp['tetrahedra'], bone_trimeshes, surface_vertices,
+            projection_fixed,
+            margin=margin, passes=3)
+        # Harmonic contact is smooth, but a large correction can still invert
+        # a thin attachment tet. Backtrack only the projection displacement.
+        projection_delta = projected_q - q_before_projection
+        projection_scale = 1.0
+        accepted_projection = False
+        for _projection_ls in range(16):
+            candidate_q = q_before_projection + projection_scale * projection_delta
+            candidate_F = _deformation_gradients_from_q(
+                candidate_q, precomp['tetrahedra'], precomp['Dm_inv'])
+            candidate_J = np.linalg.det(candidate_F)
+            if (np.all(np.isfinite(candidate_J)) and
+                    np.min(candidate_J) > 0.02):
+                q = candidate_q
+                accepted_projection = True
+                break
+            projection_scale *= 0.5
+        if not accepted_projection:
+            q = q_before_projection
+            projected = 0
+
     if verbose:
+        final_terms = emu_energy_terms(
+            Fvec, precomp, fixed_targets_flat, mu, lam, alpha,
+            use_gpu=use_gpu, activation=activation)
         print(f"    EMU done: E={E:.6e}, iters={iteration+1}, "
-              f"|g|={g_norm:.2e}, coll={n_coll}")
+              f"|g|={g_norm:.2e}, coll={n_coll}; "
+              f"iso={final_terms['isotropic']:.3e}, "
+              f"fiber={final_terms['fiber']:.3e}, "
+              f"alpha*ACAP={final_terms['acap_weighted']:.3e}")
+    else:
+        final_terms = emu_energy_terms(
+            Fvec, precomp, fixed_targets_flat, mu, lam, alpha,
+            use_gpu=use_gpu, activation=activation)
 
     info = {'iterations': iteration + 1, 'energy': E, 'grad_norm': g_norm,
+            'collisions': max_coll,
+            'final_collisions': collision_history[-1] if collision_history else 0,
+            'projected_collisions': projected,
+            'collision_history': collision_history,
+            'energy_terms': final_terms,
             'Fvec': Fvec}  # #3: return F for warm-start
     return q, info
 

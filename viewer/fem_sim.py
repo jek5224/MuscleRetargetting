@@ -3655,6 +3655,11 @@ def _build_bone_trimeshes(v, active_muscles, skel, verbose=False):
 
             tm = trimesh.Trimesh(vertices=posed_verts,
                                  faces=mesh_obj.trimesh.faces.copy(), process=True)
+            # Preserve identity for muscle-specific broad phase filtering.
+            # Returning anonymous meshes forced callers to use a large AABB,
+            # which could select unrelated bones in strongly posed limbs.
+            tm.metadata['bone_name'] = mesh_name
+            tm.metadata['body_name'] = body_name
             bone_meshes.append(tm)
             n_matched += 1
         except Exception:

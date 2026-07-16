@@ -499,7 +499,8 @@ class ContourMeshMixin(ContourAnimationMixin):
 
         # Inspector highlight (set by viewer when 2D inspector is open)
         self.inspector_highlight_stream = None  # Stream index to highlight
-        self.inspector_highlight_level = None   # Level index to highlight
+        self.inspector_highlight_level = None   # Level index to highlight (waypoint/inspect space)
+        self.inspector_highlight_contour_level = None  # Level in belly-only contour space (tendon-aware)
         self.inspector_highlight_vertex_3d = None  # 3D position of hovered vertex
         self.inspector_highlight_fiber_idx = None  # (stream_idx, fiber_idx) of hovered fiber
 
@@ -566,7 +567,10 @@ class ContourMeshMixin(ContourAnimationMixin):
         values = np.linspace(0, 1, len(contours_to_draw) + 2)[1:-1]
 
         highlight_stream = getattr(self, 'inspector_highlight_stream', None)
-        highlight_level = getattr(self, 'inspector_highlight_level', None)
+        # Contour draw indexes belly-only self.contours. After tendon extension
+        # the waypoint/inspect level space is offset by the prepended tendon
+        # levels, so use the belly-space level the inspector supplies.
+        highlight_level = getattr(self, 'inspector_highlight_contour_level', None)
         anim_fades = getattr(self, '_anim_highlight_fades', {})
         draw_vertices = getattr(self, 'is_draw_contour_vertices', False)
         draw_farthest = getattr(self, 'is_draw_farthest_pair', False)
@@ -718,12 +722,22 @@ class ContourMeshMixin(ContourAnimationMixin):
                         glVertex3fv(v_pos)
                     glEnd()
 
-                # Draw small x, y, z axes from bounding plane info
-                if (self.bounding_planes is not None and
-                    i < len(self.bounding_planes) and
-                    j < len(self.bounding_planes[i])):
-                    bp_info = self.bounding_planes[i][j]
-                    if 'mean' in bp_info and 'basis_x' in bp_info and 'basis_y' in bp_info and 'basis_z' in bp_info:
+                # Draw small x, y, z axes from the same aligned extension planes
+                # used by the BP renderer. Previously this path always read the
+                # tendon's original self.bounding_planes, producing six visibly
+                # different axes despite the registered seam data being equal.
+                aligned_display_planes = getattr(
+                    self, '_aligned_extension_bounding_planes', None)
+                bp_planes_to_draw = (aligned_display_planes
+                                     if aligned_display_planes
+                                     else self.bounding_planes)
+                if (bp_planes_to_draw is not None and
+                    i < len(bp_planes_to_draw) and
+                    j < len(bp_planes_to_draw[i])):
+                    bp_info = bp_planes_to_draw[i][j]
+                    if (not bp_info.get('_suppress_duplicate_seam_axes', False)
+                            and 'mean' in bp_info and 'basis_x' in bp_info
+                            and 'basis_y' in bp_info and 'basis_z' in bp_info):
                         origin = bp_info['mean']
                         basis_x = bp_info['basis_x']
                         basis_y = bp_info['basis_y']
@@ -3284,7 +3298,22 @@ class ContourMeshMixin(ContourAnimationMixin):
                     expected_count=expected_count
                 )
 
+                # Reject a candidate that lands near-identical to either
+                # neighbor. When the scalar field is saturated across the gap
+                # (e.g. a broad flat insertion attachment), every scalar sample
+                # collapses onto one side instead of spanning the physical gap,
+                # so inserting only spawns near-duplicate contours that never
+                # close it — and those duplicates later get selected twice at
+                # the boundary. Treat this as an unfillable range.
+                degenerate = False
                 if best_planes is not None and len(best_planes) > 0:
+                    new_centroid = np.mean([p['mean'] for p in best_planes], axis=0)
+                    dup_eps = 0.1 * max_spacing_threshold
+                    if (np.linalg.norm(new_centroid - centroid_low) < dup_eps
+                            or np.linalg.norm(new_centroid - centroid_high) < dup_eps):
+                        degenerate = True
+
+                if best_planes is not None and len(best_planes) > 0 and not degenerate:
                     print(f"  Inserting contour at scalar {best_scalar:.4f} (index {insert_idx})")
                     self.bounding_planes.insert(insert_idx, best_planes)
                     self.contours.insert(insert_idx, best_contours)
@@ -3292,6 +3321,11 @@ class ContourMeshMixin(ContourAnimationMixin):
                     all_inserted_indices = [idx + 1 if idx >= insert_idx else idx for idx in all_inserted_indices]
                     all_inserted_indices.append(insert_idx)
                     contours_inserted += 1
+                elif degenerate:
+                    range_key = (round(gap['current_scalar'], 6), round(gap['next_scalar'], 6))
+                    failed_scalar_ranges.add(range_key)
+                    print(f"  Skip: candidate at scalar {best_scalar:.4f} collapses onto a "
+                          f"neighbor (saturated scalar across gap); not inserting")
                 else:
                     # Mark this range as failed to avoid retrying
                     range_key = (round(gap['current_scalar'], 6), round(gap['next_scalar'], 6))
@@ -4516,13 +4550,19 @@ class ContourMeshMixin(ContourAnimationMixin):
                 best_x, best_y, best_angle = cx, cy, angle
         return best_x, best_y, best_angle
 
-    def _smoothen_contours_x_stream_mode(self):
+    def _smoothen_contours_x_stream_mode(self, anchor_level_ranges=None):
         """
         Align x-axes for stream mode (after cutting).
 
-        Simple chain propagation from origin:
-        1. Level 0: pick 4-rotation closest to (1,0,0) using full frame comparison
-        2. Level 1..end: pick 4-rotation closest to previous level
+        Chain propagation from an anchor:
+        1. Pick a non-square anchor closest to (1,0,0)
+        2. Propagate from that anchor toward both ends of the stream
+
+        ``anchor_level_ranges`` optionally supplies one ``(start, end)`` range
+        per stream (end-exclusive). The most rectangular level in that range
+        becomes the anchor. This lets a combined tendon/belly stream
+        preserve the belly's frame instead of allowing an end tendon to choose
+        the orientation for the entire chain.
 
         BP smoothening handles square-like interpolation afterward.
         """
@@ -4537,12 +4577,35 @@ class ContourMeshMixin(ContourAnimationMixin):
             if stream_len < 1:
                 continue
 
+            def _rectangularity(level):
+                corners = bp_stream[level].get('bounding_plane')
+                if corners is None or len(corners) < 4:
+                    return 0.0
+                width = np.linalg.norm(corners[1] - corners[0])
+                height = np.linalg.norm(corners[3] - corners[0])
+                if min(width, height) < 1e-10:
+                    return 0.0
+                return max(width, height) / min(width, height) - 1.0
+
+            requested_anchor = None
+            if anchor_level_ranges and stream_i < len(anchor_level_ranges):
+                start, end = anchor_level_ranges[stream_i]
+                ranged = list(range(max(0, start), min(stream_len, end)))
+                if ranged:
+                    requested_anchor = max(ranged, key=_rectangularity)
+                    # The explicit region must remain the orientation source even
+                    # when all of its levels were classified as square-like.
+                    # Workflows using this option operate on disposable BP copies.
+                    bp_stream[requested_anchor]['square_like'] = False
+
             # Step 1: Chain non-square-like levels to each other
             non_sq = [lev for lev in range(stream_len) if not bp_stream[lev].get('square_like', False)]
 
             if len(non_sq) >= 2:
-                # Align first non-square-like to (1,0,0)
-                first_ns = non_sq[0]
+                # Align the strongest rectangle in the requested region to the
+                # global reference, then carry its orientation in both directions.
+                first_ns = (requested_anchor if requested_anchor in non_sq
+                            else max(non_sq, key=_rectangularity))
                 first_bp = bp_stream[first_ns]
                 first_z = first_bp['basis_z']
 
@@ -4565,18 +4628,35 @@ class ContourMeshMixin(ContourAnimationMixin):
                 else:
                     ref_x2 = first_bp['basis_x']
                     ref_y2 = first_bp['basis_y']
-                best_x, best_y, best_angle, _ = self._best_4rotation(
-                    first_bp['basis_x'], first_bp['basis_y'], first_z,
-                    ref_x2, ref_y2, first_z)
-                if best_angle != 0:
-                    first_bp['basis_x'] = best_x
-                    first_bp['basis_y'] = best_y
-                print(f"    L{first_ns} (1st anchor): ref=(1,0,0), rot={best_angle}°")
+                if requested_anchor is not None:
+                    # A caller-provided component range is authoritative. Keep
+                    # its existing orientation and rotate only levels outside it.
+                    best_angle = 0
+                    print(f"    L{first_ns} (belly anchor): preserving existing x/y")
+                else:
+                    best_x, best_y, best_angle, _ = self._best_4rotation(
+                        first_bp['basis_x'], first_bp['basis_y'], first_z,
+                        ref_x2, ref_y2, first_z)
+                    if best_angle != 0:
+                        first_bp['basis_x'] = best_x
+                        first_bp['basis_y'] = best_y
+                    print(f"    L{first_ns} (1st anchor): ref=(1,0,0), rot={best_angle}°")
 
-                # Chain remaining non-square-like levels
-                for idx in range(1, len(non_sq)):
-                    lev = non_sq[idx]
-                    ref_lev = non_sq[idx - 1]
+                anchor_pos = non_sq.index(first_ns)
+                for idx in range(anchor_pos + 1, len(non_sq)):
+                    lev, ref_lev = non_sq[idx], non_sq[idx - 1]
+                    curr_bp = bp_stream[lev]
+                    ref_bp = bp_stream[ref_lev]
+                    best_x, best_y, best_angle, _ = self._best_4rotation(
+                        curr_bp['basis_x'], curr_bp['basis_y'], curr_bp['basis_z'],
+                        ref_bp['basis_x'], ref_bp['basis_y'], ref_bp['basis_z'])
+                    if best_angle != 0:
+                        curr_bp['basis_x'] = best_x
+                        curr_bp['basis_y'] = best_y
+                        print(f"    L{lev} (anchor): ref=L{ref_lev}, rot={best_angle}°")
+
+                for idx in range(anchor_pos - 1, -1, -1):
+                    lev, ref_lev = non_sq[idx], non_sq[idx + 1]
                     curr_bp = bp_stream[lev]
                     ref_bp = bp_stream[ref_lev]
                     best_x, best_y, best_angle, _ = self._best_4rotation(
@@ -5141,6 +5221,11 @@ class ContourMeshMixin(ContourAnimationMixin):
                 preserve = getattr(self, '_contours_normalized', False)
                 new_contour, contour_match = self.find_contour_match(contour_points, bounding_plane, preserve_order=preserve)
                 bp['contour_match'] = contour_match
+                # These indices label the four BP corners. Any x/y rotation or
+                # BP rebuild invalidates the previous labels (often by exactly
+                # one quarter-turn), so force propagation to detect them from
+                # the newly aligned plane.
+                bp.pop('corner_indices', None)
                 self.stream_contours[stream_i][i] = new_contour
 
             print(f"    Processed: {len(reference_indices)} references kept, {len(smooth_indices)} square-like interpolated")
@@ -5831,7 +5916,8 @@ class ContourMeshMixin(ContourAnimationMixin):
                 int(idx0), int(idx1),
                 np.asarray(ip0, dtype=np.float64).copy(),
                 np.asarray(ip1, dtype=np.float64).copy(),
-                [int(idx0), int(idx1)]
+                [int(idx0), int(idx1)],
+                'shared_inferred',
             ))
 
         inferred_boundary_count = 0
@@ -5916,6 +6002,29 @@ class ContourMeshMixin(ContourAnimationMixin):
         # Compute from boundary_length and average vertex spacing across both pieces.
         shared_boundary_verts_by_level = {}  # level_idx -> int
         if num_streams >= 2:
+            def _arc_len_between(contour, idx_start, idx_end):
+                contour = np.asarray(contour, dtype=np.float64)
+                n_pts = len(contour)
+                if n_pts < 2:
+                    return 0.0
+                total = 0.0
+                idx_cur = int(idx_start) % n_pts
+                idx_end = int(idx_end) % n_pts
+                guard = 0
+                while idx_cur != idx_end and guard <= n_pts:
+                    idx_next = (idx_cur + 1) % n_pts
+                    total += float(np.linalg.norm(contour[idx_next] - contour[idx_cur]))
+                    idx_cur = idx_next
+                    guard += 1
+                return total
+
+            def _boundary_arc_length_for_info(contour, boundary_data):
+                idx1, idx2, int1_3d, int2_3d = boundary_data[:4]
+                straight = float(np.linalg.norm(np.asarray(int2_3d) - np.asarray(int1_3d)))
+                path_a = _arc_len_between(contour, idx1, idx2)
+                path_b = _arc_len_between(contour, idx2, idx1)
+                return path_a if abs(path_a - straight) < abs(path_b - straight) else path_b
+
             for level_idx in range(max(len(cg) for cg in self.contours)):
                 # Check if this level is CUT for at least 2 streams
                 has_boundary = []
@@ -5927,18 +6036,33 @@ class ContourMeshMixin(ContourAnimationMixin):
                 # Get intersection points (same for both streams)
                 b0 = stream_boundary_info[has_boundary[0]][level_idx][0]
                 ip1, ip2 = np.array(b0[2]), np.array(b0[3])
-                boundary_length = np.linalg.norm(ip2 - ip1)
-                # Sum surface lengths across both pieces for total perimeter estimate
-                total_surface = 0
+                inferred = len(b0) >= 6 and b0[5] == 'shared_inferred'
+                boundary_lengths = []
+                perimeters = []
                 for s_idx in has_boundary:
                     contour = np.array(self.contours[s_idx][level_idx])
-                    total_surface += sum(np.linalg.norm(contour[(k+1) % len(contour)] - contour[k])
-                                         for k in range(len(contour)))
-                total_perimeter = total_surface + boundary_length  # boundary counted once
-                num_samples_here = stream_vertex_counts[has_boundary[0]]
-                avg_edge = total_perimeter / num_samples_here if num_samples_here > 0 else boundary_length
-                bv = max(0, int(round(boundary_length / avg_edge)) - 1)
-                bv = min(bv, num_samples_here - 3)  # Leave at least 1 for surface + 2 fixed
+                    perimeter = sum(np.linalg.norm(contour[(k+1) % len(contour)] - contour[k])
+                                    for k in range(len(contour)))
+                    perimeters.append(float(perimeter))
+                    b = stream_boundary_info[s_idx][level_idx][0]
+                    if inferred:
+                        boundary_lengths.append(_boundary_arc_length_for_info(contour, b))
+                    else:
+                        boundary_lengths.append(float(np.linalg.norm(np.asarray(b[3]) - np.asarray(b[2]))))
+                num_samples_here = int(stream_vertex_counts[has_boundary[0]])
+                distributable = max(1, num_samples_here - 2)
+                if inferred and boundary_lengths and perimeters:
+                    ratios = [
+                        np.clip(bl / max(perim, 1e-12), 0.0, 0.95)
+                        for bl, perim in zip(boundary_lengths, perimeters)
+                    ]
+                    bv = int(round(distributable * float(np.mean(ratios))))
+                else:
+                    boundary_length = float(np.mean(boundary_lengths)) if boundary_lengths else float(np.linalg.norm(ip2 - ip1))
+                    total_perimeter = float(np.sum(perimeters)) + boundary_length
+                    avg_edge = total_perimeter / num_samples_here if num_samples_here > 0 else boundary_length
+                    bv = max(0, int(round(boundary_length / avg_edge)) - 1)
+                bv = min(max(0, bv), num_samples_here - 3)  # Leave at least 1 for surface + 2 fixed
                 shared_boundary_verts_by_level[level_idx] = bv
             if shared_boundary_verts_by_level:
                 print(f"  Shared boundary verts: {dict(list(shared_boundary_verts_by_level.items())[:5])}...")
@@ -6247,16 +6371,23 @@ class ContourMeshMixin(ContourAnimationMixin):
         if len(boundaries) == 1:
             # Handle both old 4-tuple and new 5-tuple format
             boundary_data = boundaries[0]
+            is_shared_inferred = len(boundary_data) >= 6 and boundary_data[5] == 'shared_inferred'
             if len(boundary_data) >= 5:
-                idx1, idx2, int1_3d, int2_3d, all_boundary_indices = boundary_data
+                idx1, idx2, int1_3d, int2_3d, all_boundary_indices = boundary_data[:5]
             else:
                 idx1, idx2, int1_3d, int2_3d = boundary_data
                 all_boundary_indices = [idx1, idx2]  # Fallback
+            int1_3d = np.asarray(int1_3d, dtype=np.float64)
+            int2_3d = np.asarray(int2_3d, dtype=np.float64)
 
             # Ensure CONSISTENT ordering of intersection points
             # Use corner_ref (bounding plane corner 0) to determine which intersection point
             # should be "first" - this matches how normal contours are aligned
-            if corner_ref is not None:
+            if is_shared_inferred:
+                # Counterpart seams already carry pair-consistent endpoint order.
+                # Reordering independently per stream breaks exact weldability.
+                pass
+            elif corner_ref is not None:
                 # Pick the intersection point closer to corner_ref as "first"
                 dist1 = np.linalg.norm(int1_3d - corner_ref)
                 dist2 = np.linalg.norm(int2_3d - corner_ref)
@@ -6312,9 +6443,12 @@ class ContourMeshMixin(ContourAnimationMixin):
                 surface_is_path_b = False
                 print(f"      Path B=boundary (arc={path_b_length:.2f}, straight={straight_dist:.2f}), Path A=surface (arc={path_a_length:.2f})")
 
-            # Boundary length for vertex distribution is straight-line distance
-            straight_dist = np.linalg.norm(int2_3d - int1_3d)
-            boundary_length = straight_dist
+            # Boundary length for vertex distribution.  Explicit cuts are filled
+            # by a straight segment, but inferred counterpart seams must use the
+            # actual contour arc or the seam is undersampled and can collapse.
+            boundary_length = path_b_length if surface_is_path_b else path_a_length
+            if not is_shared_inferred:
+                boundary_length = np.linalg.norm(int2_3d - int1_3d)
 
             total_length = surface_length + boundary_length
             if total_length < 1e-10:
@@ -6350,8 +6484,16 @@ class ContourMeshMixin(ContourAnimationMixin):
                 # Reverse so it goes idx1 -> idx2 instead
                 surface_segment = surface_segment[::-1]
                 # Boundary goes from idx2 back to idx1
-                boundary_start = contour[idx2].copy()
-                boundary_end = contour[idx1].copy()
+                boundary_start = int2_3d.copy()
+                boundary_end = int1_3d.copy()
+                boundary_curve = []
+                idx = idx1
+                while True:
+                    boundary_curve.append(contour[idx].copy())
+                    if idx == idx2:
+                        break
+                    idx = (idx + 1) % n
+                boundary_curve = boundary_curve[::-1]
             else:
                 # Surface is path A: idx1 -> idx2 (direct) - already correct orientation
                 surface_segment = []
@@ -6362,8 +6504,15 @@ class ContourMeshMixin(ContourAnimationMixin):
                         break
                     idx = (idx + 1) % n
                 # Boundary goes from idx2 back to idx1
-                boundary_start = contour[idx2].copy()
-                boundary_end = contour[idx1].copy()
+                boundary_start = int2_3d.copy()
+                boundary_end = int1_3d.copy()
+                boundary_curve = []
+                idx = idx2
+                while True:
+                    boundary_curve.append(contour[idx].copy())
+                    if idx == idx1:
+                        break
+                    idx = (idx + 1) % n
 
             print(f"      Surface segment: {len(surface_segment)} original vertices")
 
@@ -6373,20 +6522,30 @@ class ContourMeshMixin(ContourAnimationMixin):
                     np.array(surface_segment), surface_verts + 2  # +2 for endpoints
                 )
                 # Ensure exact endpoint positions
-                resampled_surface[0] = surface_segment[0].copy()
-                resampled_surface[-1] = surface_segment[-1].copy()
+                resampled_surface[0] = int1_3d.copy()
+                resampled_surface[-1] = int2_3d.copy()
             else:
-                resampled_surface = np.array([surface_segment[0].copy(), surface_segment[-1].copy()])
+                resampled_surface = np.array([int1_3d.copy(), int2_3d.copy()])
 
-            # Create boundary segment as straight line
+            # Create boundary segment. Explicit cuts use a straight filled edge, but
+            # inferred counterpart seams already exist as curved cut-border samples.
+            # Replacing those with a chord can collapse one side of the split muscle.
             if boundary_verts > 0:
-                boundary_segment = []
-                for i in range(boundary_verts + 2):
-                    t = i / (boundary_verts + 1)
-                    pt = boundary_start + t * (boundary_end - boundary_start)
-                    boundary_segment.append(pt)
-                resampled_boundary = np.array(boundary_segment)
-                print(f"      Boundary: {len(resampled_boundary)} verts, straight line")
+                if is_shared_inferred and len(boundary_curve) >= 2:
+                    resampled_boundary = self._resample_open_segment(
+                        np.array(boundary_curve), boundary_verts + 2
+                    )
+                    resampled_boundary[0] = boundary_start.copy()
+                    resampled_boundary[-1] = boundary_end.copy()
+                    print(f"      Boundary: {len(resampled_boundary)} verts, preserved seam curve")
+                else:
+                    boundary_segment = []
+                    for i in range(boundary_verts + 2):
+                        t = i / (boundary_verts + 1)
+                        pt = boundary_start + t * (boundary_end - boundary_start)
+                        boundary_segment.append(pt)
+                    resampled_boundary = np.array(boundary_segment)
+                    print(f"      Boundary: {len(resampled_boundary)} verts, straight line")
             else:
                 resampled_boundary = np.array([boundary_start.copy(), boundary_end.copy()])
                 print(f"      Boundary: 2 verts (no intermediates)")
@@ -7648,6 +7807,7 @@ class ContourMeshMixin(ContourAnimationMixin):
             source_name = "connected tendon/belly source"
             source_params = getattr(self, '_connected_contour_mesh_params', None)
             source_fixed = getattr(self, '_connected_contour_mesh_fixed', None)
+            source_types = getattr(self, '_connected_contour_mesh_types', None)
             connected_weld = True
         else:
             # Use contours_resampled if available (has params for parametric mesh building)
@@ -7660,6 +7820,7 @@ class ContourMeshMixin(ContourAnimationMixin):
             source_name = "contours_resampled" if use_resampled else "contours"
             source_params = self.contours_resampled_params if use_resampled and hasattr(self, 'contours_resampled_params') else None
             source_fixed = self.contours_resampled_fixed if use_resampled and hasattr(self, 'contours_resampled_fixed') else None
+            source_types = self.contours_resampled_types if use_resampled and hasattr(self, 'contours_resampled_types') else None
 
         print(f"Building contour mesh from {len(source_contours)} streams (source: {source_name})...")
         num_streams = len(source_contours)
@@ -7724,6 +7885,21 @@ class ContourMeshMixin(ContourAnimationMixin):
             best = max(runs, key=len)
             return best if len(best) >= 2 else None
 
+        def _closed_arclength_params(contour):
+            contour = np.asarray(contour, dtype=np.float64)
+            n = len(contour)
+            if n == 0:
+                return np.array([], dtype=np.float64)
+            if n == 1:
+                return np.array([0.0], dtype=np.float64)
+            seg = np.linalg.norm(np.roll(contour, -1, axis=0) - contour, axis=1)
+            perimeter = float(np.sum(seg))
+            if perimeter < 1e-12:
+                return np.linspace(0.0, 1.0, n, endpoint=False)
+            params = np.zeros(n, dtype=np.float64)
+            params[1:] = np.cumsum(seg[:-1]) / perimeter
+            return params
+
         def _try_merge_two_connected_streams(stream_a, stream_b):
             merged = []
             merged_count = 0
@@ -7782,13 +7958,130 @@ class ContourMeshMixin(ContourAnimationMixin):
                 merged_count += 1
             return merged, merged_count
 
+        def _try_union_two_connected_streams(stream_a, stream_b):
+            try:
+                from shapely.geometry import MultiPolygon, Polygon
+            except Exception as exc:
+                print(f"  Connected outer union skipped: shapely unavailable ({exc})")
+                return None, 0
+
+            def _clean_polygon(poly):
+                if poly is None or poly.is_empty:
+                    return None
+                if not poly.is_valid:
+                    poly = poly.buffer(0)
+                if poly.is_empty:
+                    return None
+                if isinstance(poly, MultiPolygon):
+                    parts = [p for p in poly.geoms if p.area > 1e-12]
+                    if not parts:
+                        return None
+                    poly = max(parts, key=lambda p: p.area)
+                if not isinstance(poly, Polygon) or poly.area <= 1e-12:
+                    return None
+                return poly
+
+            def _resample_closed_for_alignment(contour, n_samples=64):
+                contour = np.asarray(contour, dtype=np.float64)
+                n_pts = len(contour)
+                if n_pts == 0:
+                    return np.zeros((0, 3), dtype=np.float64)
+                if n_pts == 1:
+                    return np.repeat(contour, n_samples, axis=0)
+                seg = np.linalg.norm(np.roll(contour, -1, axis=0) - contour, axis=1)
+                perim = float(np.sum(seg))
+                if perim < 1e-12:
+                    return np.repeat(contour[:1], n_samples, axis=0)
+                cumulative = np.concatenate([[0.0], np.cumsum(seg)])
+                targets = np.linspace(0.0, perim, n_samples, endpoint=False)
+                out = []
+                for t in targets:
+                    idx = int(np.searchsorted(cumulative, t, side='right') - 1)
+                    idx = min(max(idx, 0), n_pts - 1)
+                    local_len = seg[idx]
+                    alpha = 0.0 if local_len < 1e-12 else (t - cumulative[idx]) / local_len
+                    out.append((1.0 - alpha) * contour[idx] + alpha * contour[(idx + 1) % n_pts])
+                return np.asarray(out, dtype=np.float64)
+
+            def _align_merged_levels(contours):
+                if len(contours) < 2:
+                    return contours
+                aligned = [np.asarray(contours[0], dtype=np.float64)]
+                sample_count = 64
+                for contour in contours[1:]:
+                    contour = np.asarray(contour, dtype=np.float64)
+                    if len(contour) < 3:
+                        aligned.append(contour)
+                        continue
+                    prev_sample = _resample_closed_for_alignment(aligned[-1], sample_count)
+                    best = contour
+                    best_cost = float('inf')
+                    for reverse in (False, True):
+                        candidate = contour[::-1] if reverse else contour
+                        for offset in range(len(candidate)):
+                            rotated = np.roll(candidate, -offset, axis=0)
+                            sample = _resample_closed_for_alignment(rotated, sample_count)
+                            cost = float(np.sum(np.linalg.norm(prev_sample - sample, axis=1)))
+                            if cost < best_cost:
+                                best_cost = cost
+                                best = rotated
+                    aligned.append(best.copy())
+                return aligned
+
+            merged = []
+            for level_idx in range(min(len(stream_a), len(stream_b))):
+                if _connected_part_for_stream_level_pre(0, level_idx) != _connected_part_for_stream_level_pre(1, level_idx):
+                    print(f"  Connected outer union skipped at level {level_idx}: part mismatch "
+                          f"{_connected_part_for_stream_level_pre(0, level_idx)} vs "
+                          f"{_connected_part_for_stream_level_pre(1, level_idx)}")
+                    return None, 0
+                ca = np.asarray(stream_a[level_idx], dtype=np.float64)
+                cb = np.asarray(stream_b[level_idx], dtype=np.float64)
+                if len(ca) < 3 or len(cb) < 3:
+                    print(f"  Connected outer union skipped at level {level_idx}: degenerate contour")
+                    return None, 0
+
+                points = np.vstack([ca, cb])
+                center = np.mean(points, axis=0)
+                try:
+                    _, _, vh = np.linalg.svd(points - center, full_matrices=False)
+                except Exception:
+                    print(f"  Connected outer union skipped at level {level_idx}: projection failed")
+                    return None, 0
+                basis = vh[:2]
+                ca2 = (ca - center) @ basis.T
+                cb2 = (cb - center) @ basis.T
+                poly_a = _clean_polygon(Polygon(ca2))
+                poly_b = _clean_polygon(Polygon(cb2))
+                if poly_a is None or poly_b is None:
+                    print(f"  Connected outer union skipped at level {level_idx}: invalid polygon")
+                    return None, 0
+                union = _clean_polygon(poly_a.union(poly_b))
+                if union is None:
+                    print(f"  Connected outer union skipped at level {level_idx}: empty union")
+                    return None, 0
+                xy = np.asarray(union.exterior.coords[:-1], dtype=np.float64)
+                if len(xy) < 3:
+                    print(f"  Connected outer union skipped at level {level_idx}: tiny exterior")
+                    return None, 0
+                contour3 = center + xy @ basis
+                merged.append(contour3)
+            return _align_merged_levels(merged), len(merged)
+
+        # Merging two cut streams into one outline can remove the seam, but it
+        # also changes the sampled cross-section topology and can badly distort
+        # the original muscle shape.  Keep the original streams by default and
+        # weld/stitch only their shared seam vertices.
         if connected_weld and num_streams == 2:
-            merged_stream, merged_count = _try_merge_two_connected_streams(aligned_streams[0], aligned_streams[1])
+            merged_stream, merged_count = _try_union_two_connected_streams(aligned_streams[0], aligned_streams[1])
+            if merged_stream is None and getattr(self, '_connected_outer_merge_enabled', False):
+                merged_stream, merged_count = _try_merge_two_connected_streams(aligned_streams[0], aligned_streams[1])
             if merged_stream is not None and len(merged_stream) >= 2:
-                print(f"  Merged connected master/follower contours into one outer stream ({merged_count} levels)")
+                print(f"  Merged connected master/follower contours into one outer union stream ({merged_count} levels)")
                 aligned_streams = [merged_stream]
-                source_params = None
-                source_fixed = None
+                source_params = [[_closed_arclength_params(c) for c in merged_stream]]
+                source_fixed = [[[] for _ in merged_stream]]
+                source_types = [[['surface'] * len(c) for c in merged_stream]]
                 connected_weld = False
                 num_streams = 1
                 num_levels = len(merged_stream)
@@ -7963,6 +8256,11 @@ class ContourMeshMixin(ContourAnimationMixin):
                 for vertex_idx in stream_level_indices[stream_idx][level_idx]:
                     vertex_level_tmp[vertex_idx] = level_idx
                     vertex_stream_sets[vertex_idx].add(stream_idx)
+        self._connected_seam_vertex_ids = {
+            i for i, stream_set in enumerate(vertex_stream_sets)
+            if connected_weld and len(stream_set) > 1
+        }
+        self._connected_preserve_small_openings = bool(connected_weld)
 
         def _source_part(stream_idx, level_idx):
             return _connected_part_for_stream_level(stream_idx, level_idx)
@@ -8144,6 +8442,8 @@ class ContourMeshMixin(ContourAnimationMixin):
                 next_params = None
                 curr_fixed = None
                 next_fixed = None
+                curr_types = None
+                next_types = None
                 if has_params:
                     try:
                         if (stream_idx < len(source_params) and
@@ -8158,6 +8458,9 @@ class ContourMeshMixin(ContourAnimationMixin):
                                 if source_fixed is not None:
                                     curr_fixed = source_fixed[stream_idx][level_idx]
                                     next_fixed = source_fixed[stream_idx][level_idx + 1]
+                                if source_types is not None:
+                                    curr_types = source_types[stream_idx][level_idx]
+                                    next_types = source_types[stream_idx][level_idx + 1]
                             else:
                                 curr_params = None
                                 next_params = None
@@ -8165,8 +8468,32 @@ class ContourMeshMixin(ContourAnimationMixin):
                         curr_params = None
                         next_params = None
 
-                # Use rotation offset finding for ALL transitions (including cut↔cut)
-                # This ensures the alignment chain isn't broken at cut→cut boundaries
+                seam_face_vertex_ids = None
+                if connected_weld and curr_types is not None and next_types is not None:
+                    seam_face_vertex_ids = set()
+                    for local_idx, kind in enumerate(curr_types):
+                        if local_idx < len(curr_indices) and kind in ('fixed', 'boundary'):
+                            seam_face_vertex_ids.add(curr_indices[local_idx])
+                    for local_idx, kind in enumerate(next_types):
+                        if local_idx < len(next_indices) and kind in ('fixed', 'boundary'):
+                            seam_face_vertex_ids.add(next_indices[local_idx])
+
+                if curr_params is not None and next_params is not None:
+                    faces = self._create_contour_band_parametric(
+                        curr_indices, next_indices,
+                        curr_params, next_params,
+                        curr_fixed, next_fixed,
+                        all_vertices, processed_quads,
+                        excluded_vertex_ids=seam_face_vertex_ids
+                    )
+                    all_faces.extend(faces)
+                    face_stream_map.extend([stream_idx] * len(faces))
+                    continue
+
+                # Use rotation offset finding when no parametric data is
+                # available.  For resampled cut streams, params/fixed points are
+                # more reliable than geometric rotation because they preserve the
+                # seam endpoint correspondence.
                 if n_curr == n_next:
                     # Same size - find best rotation offset to minimize twist
                     # This is important for normal↔cut transitions where v0 positions differ
@@ -8248,19 +8575,28 @@ class ContourMeshMixin(ContourAnimationMixin):
                             face_stream_map.append(stream_idx)
                 else:
                     # Different sizes - variable band (fallback)
-                    shared_vertex_ids = None
-                    if connected_weld:
-                        shared_vertex_ids = set()
-                        for vi in curr_indices:
-                            if len(vertex_stream_sets[vi]) > 1:
-                                shared_vertex_ids.add(vi)
-                        for vi in next_indices:
-                            if len(vertex_stream_sets[vi]) > 1:
-                                shared_vertex_ids.add(vi)
-                    faces = self._create_contour_band_variable_indices(
-                        curr_indices, next_indices, all_vertices, processed_quads,
-                        shared_vertex_ids=shared_vertex_ids
-                    )
+                    if curr_params is not None and next_params is not None:
+                        faces = self._create_contour_band_parametric(
+                            curr_indices, next_indices,
+                            curr_params, next_params,
+                            curr_fixed, next_fixed,
+                            all_vertices, processed_quads,
+                            excluded_vertex_ids=seam_face_vertex_ids
+                        )
+                    else:
+                        shared_vertex_ids = None
+                        if connected_weld:
+                            shared_vertex_ids = set()
+                            for vi in curr_indices:
+                                if len(vertex_stream_sets[vi]) > 1:
+                                    shared_vertex_ids.add(vi)
+                            for vi in next_indices:
+                                if len(vertex_stream_sets[vi]) > 1:
+                                    shared_vertex_ids.add(vi)
+                        faces = self._create_contour_band_variable_indices(
+                            curr_indices, next_indices, all_vertices, processed_quads,
+                            shared_vertex_ids=shared_vertex_ids
+                        )
                     all_faces.extend(faces)
                     face_stream_map.extend([stream_idx] * len(faces))
 
@@ -8481,10 +8817,21 @@ class ContourMeshMixin(ContourAnimationMixin):
         loops_to_close = []
 
         for info in loop_info:
+            seam_ids = getattr(self, '_connected_seam_vertex_ids', set()) or set()
+            if seam_ids:
+                seam_count = sum(1 for vi in info['loop'] if int(vi) in seam_ids)
+                if seam_count >= max(2, int(np.ceil(0.5 * len(info['loop'])))):
+                    print(f"    Keeping connected seam opening: {info['size']} verts at "
+                          f"levels {info['min_level']}-{info['max_level']}")
+                    continue
             if not info['is_origin'] and not info['is_insertion']:
                 # Internal loop — always close
                 loops_to_close.append(info['loop'])
             elif info['size'] < min_opening_size:
+                if getattr(self, '_connected_preserve_small_openings', False):
+                    print(f"    Keeping connected small boundary opening: {info['size']} verts at "
+                          f"levels {info['min_level']}-{info['max_level']}")
+                    continue
                 # Small loop at origin/insertion — merge artifact, close it
                 print(f"    Closing small boundary artifact: {info['size']} verts at "
                       f"levels {info['min_level']}-{info['max_level']}")
@@ -8746,7 +9093,8 @@ class ContourMeshMixin(ContourAnimationMixin):
         return faces
 
     def _create_contour_band_parametric(self, curr_indices, next_indices, curr_params, next_params,
-                                        curr_fixed, next_fixed, all_vertices, processed_quads=None):
+                                        curr_fixed, next_fixed, all_vertices, processed_quads=None,
+                                        excluded_vertex_ids=None):
         """
         Create triangular faces between two contours using parametric matching (zipper algorithm).
 
@@ -8776,6 +9124,8 @@ class ContourMeshMixin(ContourAnimationMixin):
         # Convert params to numpy arrays for easier manipulation
         curr_params = np.array(curr_params)
         next_params = np.array(next_params)
+        excluded_vertex_ids = set(excluded_vertex_ids or [])
+        skipped_internal = 0
 
         # Create lookup from global index to local index
         curr_idx_to_local = {curr_indices[i]: i for i in range(n_curr)}
@@ -8827,32 +9177,42 @@ class ContourMeshMixin(ContourAnimationMixin):
                 # Create triangle: (v_curr, v_next_next, v_next)
                 # This advances next contour
                 tri = [v_curr, v_next_next, v_next]
-                tri_key = frozenset(tri)
-                if processed_quads is None or tri_key not in processed_quads:
+                if excluded_vertex_ids and all(v in excluded_vertex_ids for v in tri):
+                    skipped_internal += 1
+                else:
+                    tri_key = frozenset(tri)
+                    if processed_quads is None or tri_key not in processed_quads:
                     # Verify triangle is valid (no degenerate)
-                    if len(set(tri)) == 3:
-                        faces.append(tri)
-                        tri_count += 1
-                        if processed_quads is not None:
-                            processed_quads.add(tri_key)
+                        if len(set(tri)) == 3:
+                            faces.append(tri)
+                            tri_count += 1
+                            if processed_quads is not None:
+                                processed_quads.add(tri_key)
                 i_next += 1
             elif i_curr < n_curr:
                 # Create triangle: (v_curr, v_curr_next, v_next)
                 # This advances current contour
                 tri = [v_curr, v_curr_next, v_next]
-                tri_key = frozenset(tri)
-                if processed_quads is None or tri_key not in processed_quads:
+                if excluded_vertex_ids and all(v in excluded_vertex_ids for v in tri):
+                    skipped_internal += 1
+                else:
+                    tri_key = frozenset(tri)
+                    if processed_quads is None or tri_key not in processed_quads:
                     # Verify triangle is valid (no degenerate)
-                    if len(set(tri)) == 3:
-                        faces.append(tri)
-                        tri_count += 1
-                        if processed_quads is not None:
-                            processed_quads.add(tri_key)
+                        if len(set(tri)) == 3:
+                            faces.append(tri)
+                            tri_count += 1
+                            if processed_quads is not None:
+                                processed_quads.add(tri_key)
                 i_curr += 1
             else:
                 break
 
-        print(f"    Parametric band: {n_curr} -> {n_next} vertices, {tri_count} triangles")
+        if skipped_internal:
+            print(f"    Parametric band: {n_curr} -> {n_next} vertices, {tri_count} triangles "
+                  f"(skipped {skipped_internal} internal seam triangles)")
+        else:
+            print(f"    Parametric band: {n_curr} -> {n_next} vertices, {tri_count} triangles")
 
         return faces
 
@@ -9691,7 +10051,9 @@ class ContourMeshMixin(ContourAnimationMixin):
         self._regenerate_waypoints_from_fibers(skeleton_meshes=skeleton_meshes)
 
     def _regenerate_waypoints_from_fibers(self, skeleton_meshes=None,
-                                          propagate_corners=True):
+                                          propagate_corners=True,
+                                          corner_reference_ranges=None,
+                                          preserve_corner_reference_ranges=False):
         """Regenerate downstream data (normalized_Qs, waypoints, mvc_weights,
         triangulation caches, corner correspondences, stream_endpoints) from
         the current self.fiber_architecture. Reuses cached contour_match and
@@ -9703,6 +10065,14 @@ class ContourMeshMixin(ContourAnimationMixin):
         propagation across levels. When False (resample with unchanged
         contours), skip — existing corner_indices are already correct and
         re-running can pick different corners on multi-stream muscles.
+
+        corner_reference_ranges: optional per-stream ``(start, end)`` ranges
+        restricting where corner propagation chooses its reference level.
+        Combined tendon/belly streams use this to keep the unit-square mapping
+        anchored in the belly, matching the geometric x/y-frame anchor.
+
+        preserve_corner_reference_ranges: when True, use the supplied range as
+        the reference source but do not rewrite correspondence inside it.
         """
         self.normalized_Qs = [[] for _ in range(len(self.bounding_planes))]
         self.waypoints = [[] for _ in range(len(self.bounding_planes))]
@@ -9880,7 +10250,9 @@ class ContourMeshMixin(ContourAnimationMixin):
 
         # Propagate corner correspondences from most non-square-like reference level
         if propagate_corners:
-            self._propagate_corner_correspondences()
+            self._propagate_corner_correspondences(
+                reference_level_ranges=corner_reference_ranges,
+                preserve_reference_ranges=preserve_corner_reference_ranges)
 
         # Populate stream endpoints for bounding box visualization
         self._stream_endpoints = []
@@ -9950,7 +10322,11 @@ class ContourMeshMixin(ContourAnimationMixin):
         self.is_draw = False
         self.is_draw_fiber_architecture = True
 
-    def _propagate_corner_correspondences(self):
+    def _propagate_corner_correspondences(self, reference_level_ranges=None,
+                                          preserve_reference_ranges=False,
+                                          explicit_reference_levels=None,
+                                          target_level_ranges=None,
+                                          full_uv_matching=False):
         """Propagate corner correspondences from reference level using Find cor logic.
 
         For each stream:
@@ -9972,10 +10348,26 @@ class ContourMeshMixin(ContourAnimationMixin):
             if n_levels < 2:
                 continue
 
-            # Find reference: most non-square-like (highest aspect ratio)
-            best_ref = 0
+            # Find reference: most non-square-like (highest aspect ratio).
+            # When a component range is supplied, never let an attached tendon
+            # redefine the belly's semantic unit-square orientation.
+            candidates = list(range(n_levels))
+            if reference_level_ranges and stream_i < len(reference_level_ranges):
+                start, end = reference_level_ranges[stream_i]
+                ranged = list(range(max(0, start), min(n_levels, end)))
+                if ranged:
+                    candidates = ranged
+
+            explicit_ref = None
+            if explicit_reference_levels and stream_i < len(explicit_reference_levels):
+                explicit_ref = explicit_reference_levels[stream_i]
+                if not (0 <= explicit_ref < n_levels):
+                    explicit_ref = None
+
+            best_ref = explicit_ref if explicit_ref is not None else candidates[0]
             best_ratio = 0
-            for lev in range(n_levels):
+            search_levels = [best_ref] if explicit_ref is not None else candidates
+            for lev in search_levels:
                 bp = bp_stream[lev]
                 corners = bp.get('bounding_plane')
                 if corners is None or len(corners) < 4:
@@ -9984,7 +10376,7 @@ class ContourMeshMixin(ContourAnimationMixin):
                 h = np.linalg.norm(corners[3] - corners[0])
                 if min(w, h) > 1e-10:
                     ratio = max(w, h) / min(w, h)
-                    if ratio > best_ratio:
+                    if explicit_ref is not None or ratio > best_ratio:
                         best_ratio = ratio
                         best_ref = lev
 
@@ -10017,28 +10409,47 @@ class ContourMeshMixin(ContourAnimationMixin):
 
             # For each corner, compute target ratio and side
             corner_targets = []  # (target_ratio, side_above) per corner
+            corner_target_uvs = []
             for ci_idx in range(4):
                 corner_vi = ref_ci[ci_idx]
                 if corner_vi >= len(ref_match):
                     corner_targets.append((0.5, True))
+                    corner_target_uvs.append(np.array([
+                        1.0 if ci_idx in (1, 2) else 0.0,
+                        1.0 if ci_idx in (2, 3) else 0.0]))
                     continue
                 corner_p = np.array(ref_match[corner_vi][0])
                 rel = corner_p - bp_c[0]
                 result, _, _, _ = np.linalg.lstsq(A_ref, rel, rcond=None)
                 u, v = float(result[0]), float(result[1])
+                corner_target_uvs.append(np.array([u, v]))
 
                 if axis == 'x':
                     corner_targets.append((u, ci_idx in (2, 3)))  # top corners pick upper
                 else:
                     corner_targets.append((v, ci_idx in (1, 2)))  # right corners pick right
 
-            print(f"  [Corner prop] Stream {stream_i}: ref=L{best_ref} (ratio={best_ratio:.2f}), axis={axis}")
+            mode = 'full_uv' if full_uv_matching else f'axis={axis}'
+            print(f"  [Corner prop] Stream {stream_i}: ref=L{best_ref} "
+                  f"(ratio={best_ratio:.2f}), {mode}")
 
             # Apply to all other levels
             n_modified = 0
             for lev in range(n_levels):
                 if lev == best_ref:
                     continue
+                if target_level_ranges is not None:
+                    if stream_i >= len(target_level_ranges):
+                        continue
+                    target_start, target_end = target_level_ranges[stream_i]
+                    if not (target_start <= lev < target_end):
+                        continue
+                if (preserve_reference_ranges
+                        and reference_level_ranges
+                        and stream_i < len(reference_level_ranges)):
+                    preserve_start, preserve_end = reference_level_ranges[stream_i]
+                    if preserve_start <= lev < preserve_end:
+                        continue
 
                 bp_lev = bp_stream[lev]
                 match_lev = bp_lev.get('contour_match')
@@ -10065,33 +10476,48 @@ class ContourMeshMixin(ContourAnimationMixin):
                     vert_uv[vi] = [res[0], res[1]]
 
                 new_ci = []
-                for ci_idx in range(4):
-                    target_ratio, side_above = corner_targets[ci_idx]
-
-                    if axis == 'x':
-                        diffs = np.abs(vert_uv[:, 0] - target_ratio)
-                    else:
-                        diffs = np.abs(vert_uv[:, 1] - target_ratio)
-
-                    best_diff = np.min(diffs)
-                    candidates = np.where(diffs < max(best_diff * 2, 0.05))[0]
-
-                    if len(candidates) == 0:
-                        new_ci.append(0)
+                if full_uv_matching:
+                    # Match all four semantic corner coordinates jointly. The
+                    # assignment enforces distinct vertices and avoids the
+                    # unstable x-vs-y choice on nearly square seam contours.
+                    from scipy.optimize import linear_sum_assignment
+                    targets = np.asarray(corner_target_uvs, dtype=np.float64)
+                    cost = np.linalg.norm(
+                        targets[:, None, :] - vert_uv[None, :, :], axis=2)
+                    row_ind, col_ind = linear_sum_assignment(cost)
+                    assignment = {int(row): int(col)
+                                  for row, col in zip(row_ind, col_ind)}
+                    new_ci = [assignment.get(ci_idx, -1) for ci_idx in range(4)]
+                    if any(idx < 0 for idx in new_ci):
                         continue
+                else:
+                    for ci_idx in range(4):
+                        target_ratio, side_above = corner_targets[ci_idx]
 
-                    if axis == 'x':
-                        if side_above:
-                            best_vi = candidates[np.argmax(vert_uv[candidates, 1])]
+                        if axis == 'x':
+                            diffs = np.abs(vert_uv[:, 0] - target_ratio)
                         else:
-                            best_vi = candidates[np.argmin(vert_uv[candidates, 1])]
-                    else:
-                        if side_above:
-                            best_vi = candidates[np.argmax(vert_uv[candidates, 0])]
-                        else:
-                            best_vi = candidates[np.argmin(vert_uv[candidates, 0])]
+                            diffs = np.abs(vert_uv[:, 1] - target_ratio)
 
-                    new_ci.append(int(best_vi))
+                        best_diff = np.min(diffs)
+                        candidates = np.where(diffs < max(best_diff * 2, 0.05))[0]
+
+                        if len(candidates) == 0:
+                            new_ci.append(0)
+                            continue
+
+                        if axis == 'x':
+                            if side_above:
+                                best_vi = candidates[np.argmax(vert_uv[candidates, 1])]
+                            else:
+                                best_vi = candidates[np.argmin(vert_uv[candidates, 1])]
+                        else:
+                            if side_above:
+                                best_vi = candidates[np.argmax(vert_uv[candidates, 0])]
+                            else:
+                                best_vi = candidates[np.argmin(vert_uv[candidates, 0])]
+
+                        new_ci.append(int(best_vi))
 
                 if len(set(new_ci)) < 4:
                     continue
