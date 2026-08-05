@@ -34,6 +34,7 @@ from viewer.zygote_mesh_ui import (draw_zygote_ui,
     update_available_muscles, load_previous_muscles, save_loaded_muscles,
     draw_inter_muscle_constraint_lines, drawMuscles, drawTestMuscles,
     draw_dti_ui, draw_dti_overlays,
+    draw_tissue_cage_overlay,
     reset, zero_reset, _scan_motion_files,
     _motion_step_forward, _motion_bake_step)
 
@@ -1160,6 +1161,7 @@ class GLFWApp():
 
         # Draw MRI/DTI subject meshes and fiber tract overlays.
         draw_dti_overlays(self)
+        draw_tissue_cage_overlay(self)
 
         # Draw joint editor overlay on top of skeleton (disable depth test so joints show through).
         # Fire when EITHER the master Skeleton Edit Mode is ON OR the sub

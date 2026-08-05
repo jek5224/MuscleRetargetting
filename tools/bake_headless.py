@@ -295,6 +295,8 @@ def build_context(skel, muscle_meshes, skeleton_meshes, mesh_info, args):
         inter_muscle_constraint_threshold=args.constraint_threshold,
         inter_muscle_k_cap=args.inter_k,
         inter_muscle_weight=args.inter_muscle_weight,
+        inter_muscle_reciprocal=getattr(
+            args, 'inter_muscle_reciprocal', False),
         arap_anisotropic=args.anisotropic,
         arap_cross_w=args.arap_cross_w,
         arap_intra_w=args.arap_intra_w,
@@ -303,9 +305,9 @@ def build_context(skel, muscle_meshes, skeleton_meshes, mesh_info, args):
         use_gpu_arap=use_gpu,
         use_taichi_arap=use_taichi,
         use_muscle_aware_arap=args.use_muscle_aware_arap,
-        use_fem_sim=False,
+        use_fem_sim=getattr(args, 'fem', False),
         use_vbd_sim=False,
-        use_pn_sim=False,
+        use_pn_sim=getattr(args, 'pn', False),
         fem_youngs_modulus=500.0,
         fem_poisson_ratio=0.40,
         fem_collision_kappa=1e4,
@@ -313,7 +315,18 @@ def build_context(skel, muscle_meshes, skeleton_meshes, mesh_info, args):
         fem_contact_threshold=args.constraint_threshold,
         fem_outer_iterations=3,
         fem_load_steps=10,
+        volume_projection_sweeps=getattr(
+            args, 'volume_projection_sweeps', 24),
+        volume_projection_max_correction=getattr(
+            args, 'volume_projection_max_correction', 0.0),
+        volume_contact_passes=getattr(args, 'volume_contact_passes', 4),
+        volume_arap_alternations=getattr(
+            args, 'volume_arap_alternations', 1),
         motion_settle_iters=args.settle_iters,
+        lbs_init_weight=getattr(args, 'lbs_init_weight', 0.0),
+        rigid_blend_init=getattr(args, 'rigid_blend_init', False),
+        rigid_blend_only=getattr(args, 'rigid_blend_only', False),
+        tendon_elastic=getattr(args, 'tendon_elastic', True),
         skin_prior_enabled=getattr(args, 'skin_prior', False),
         skin_prior_sigma=getattr(args, 'skin_prior_sigma', 0.02),
         skin_prior_max_dist=getattr(args, 'skin_prior_max_dist', 0.05),
@@ -324,9 +337,23 @@ def build_context(skel, muscle_meshes, skeleton_meshes, mesh_info, args):
         fascia_constraints_on=getattr(args, 'fascia_constraints', False),
         fascia_constraint_threshold=getattr(args, 'fascia_constraint_threshold', 0.01),
         fascia_constraint_weight=getattr(args, 'fascia_constraint_weight', 1.0),
+        fascia_min_patch_vertices=getattr(args, 'fascia_min_patch_vertices', 12),
         unified_bone_contact=getattr(args, 'unified_bone_contact', True),
         unified_bone_contact_margin=getattr(args, 'unified_bone_contact_margin', 0.005),
         unified_bone_collision_weight=getattr(args, 'unified_bone_contact_weight', 1.5),
+        unified_bone_contact_recompute_every=getattr(
+            args, 'contact_recompute_every', 1),
+        tracked_bone_contact=getattr(args, 'tracked_bone_contact', False),
+        tracked_bone_contact_weight=getattr(
+            args, 'tracked_bone_contact_weight', 3.0),
+        attachment_rigidity=getattr(args, 'attachment_rigidity', 8.0),
+        attachment_rigidity_rings=getattr(
+            args, 'attachment_rigidity_rings', 4),
+        tracked_bone_contact_bind_distance=getattr(
+            args, 'tracked_bone_contact_bind_distance', 0.005),
+        tracked_bone_contact_max_step=getattr(
+            args, 'tracked_bone_contact_max_step', 0.0),
+        tracked_bone_contacts={},
         axial_min_ratio=getattr(args, 'axial_min_ratio', 0.65),
         axial_max_bulge=getattr(args, 'axial_max_bulge', 2.0),
         axial_curve=getattr(args, 'axial_curve', 'smooth'),
@@ -342,6 +369,104 @@ def build_context(skel, muscle_meshes, skeleton_meshes, mesh_info, args):
         _unified_sim_cache=None,
     )
     return ctx
+
+
+def precompute_tracked_bone_contacts(muscle_meshes, skeleton_meshes, skel,
+                                     bind_distance=0.012,
+                                     clearance=0.002,
+                                     protected_attachment_rings=3):
+    """Rest-oriented closest-triangle contacts; no SDF or contains()."""
+    import trimesh
+    from viewer.bone_surface_collision import compute_surface_topology
+
+    bone_names = (
+        "L_Os_Coxae", "L_Femur", "L_Tibia_Fibula", "L_Patella",
+    )
+    bones = []
+    for mesh_name in bone_names:
+        loader = skeleton_meshes.get(mesh_name)
+        body = skel.getBodyNode(mesh_name + "0")
+        mesh = getattr(loader, "trimesh", None) if loader is not None else None
+        if body is None or mesh is None:
+            continue
+        bones.append((mesh_name + "0", mesh))
+
+    result = {}
+    protected_total = 0
+    for muscle_name, mobj in muscle_meshes.items():
+        sb = getattr(mobj, "soft_body", None)
+        if sb is None:
+            continue
+        rest = np.asarray(sb.rest_positions, dtype=np.float64)
+        surf, _ = compute_surface_topology(
+            tetrahedra=getattr(mobj, "tet_tetrahedra", None),
+            tet_faces=getattr(mobj, "tet_faces", None))
+        if len(surf) == 0:
+            surf = np.arange(len(rest), dtype=np.int64)
+        contour_level = np.asarray(
+            getattr(mobj, "vertex_contour_level",
+                    np.full(len(rest), -1)), dtype=np.int32)
+        protected = np.zeros(len(rest), dtype=bool)
+        if contour_level.size == len(rest) and np.any(contour_level >= 0):
+            max_level = int(contour_level.max())
+            adjacent_rings = min(
+                protected_attachment_rings,
+                max(0, (max_level - 2) // 4))
+            # The attachment contour is level 0/max. Protect it plus the
+            # requested number of adjacent tendon rings. Adapt the count for
+            # short muscles so protection never consumes their whole belly.
+            protected = (
+                ((contour_level >= 0)
+                 & (contour_level <= adjacent_rings))
+                | (contour_level >=
+                   max_level - adjacent_rings)
+            )
+            protected_total += int(np.count_nonzero(protected[surf]))
+        points = rest[surf]
+        best_d = np.full(len(surf), np.inf)
+        best_q = np.zeros_like(points)
+        best_bone = np.full(len(surf), -1, dtype=np.int32)
+        for bone_id, (_, mesh) in enumerate(bones):
+            try:
+                q, d, _ = trimesh.proximity.closest_point(mesh, points)
+            except Exception:
+                q, d, _ = trimesh.proximity.closest_point_naive(mesh, points)
+            take = d < best_d
+            best_d[take] = d[take]
+            best_q[take] = q[take]
+            best_bone[take] = bone_id
+        active = (np.isfinite(best_d)
+                  & (best_d <= bind_distance)
+                  & ~protected[surf])
+        entries = []
+        for k in np.where(active)[0]:
+            vi = int(surf[k])
+            bone_id = int(best_bone[k])
+            body_name = bones[bone_id][0]
+            delta = points[k] - best_q[k]
+            dn = float(np.linalg.norm(delta))
+            if dn < 1e-8:
+                continue
+            n_rest = delta / dn
+            # Loaded bone meshes and tet rest positions share rest-world
+            # coordinates. Store the contact frame in the DART bone frame.
+            body = skel.getBodyNode(body_name)
+            T = np.asarray(body.getWorldTransform().matrix())
+            R = T[:3, :3]
+            t = T[:3, 3]
+            q_local = R.T @ (best_q[k] - t)
+            n_local = R.T @ n_rest
+            entries.append((
+                vi, body_name, q_local, n_local,
+                min(float(clearance), dn),
+            ))
+        if entries:
+            result[muscle_name] = entries
+    total = sum(len(v) for v in result.values())
+    print(f"[6.4/8] Tracked bone contact: {total} rest bindings "
+          f"across {len(result)} muscles; "
+          f"{protected_total} attachment-zone surface vertices protected")
+    return result
 
 
 def patch_waypoints(cache_dir, active_muscles, motion_bvh, skel):
@@ -495,6 +620,33 @@ def main():
         help="Simulation iterations per frame (default: 150)",
     )
     parser.add_argument(
+        "--lbs-init-weight",
+        type=float,
+        default=0.0,
+        help="Blend weight for per-frame LBS initialization after frame 0; "
+             "1 uses fresh LBS every frame, 0 uses the previous solution.",
+    )
+    parser.add_argument(
+        "--rigid-blend-init",
+        action="store_true",
+        help="Initialize each two-ended muscle by an SO(3) interpolation of "
+             "its attachment-bone transforms. This avoids the singular "
+             "rotation averaging and cross-section collapse of ordinary LBS.",
+    )
+    parser.add_argument(
+        "--rigid-blend-only",
+        action="store_true",
+        help="Use the SO(3) skeletal warp as the final quasistatic result, "
+             "with a smooth exact-cap correction, instead of an ARAP solve.",
+    )
+    parser.add_argument(
+        "--no-tendon-elastic",
+        dest="tendon_elastic",
+        action="store_false",
+        default=True,
+        help="Disable tendon-zone slack rest-edge modification.",
+    )
+    parser.add_argument(
         "--constraint-threshold",
         type=float,
         default=0.03,
@@ -533,12 +685,45 @@ def main():
              "muscles pinch each other to near-zero volume.",
     )
     parser.add_argument(
+        "--volume-projection-sweeps",
+        type=int,
+        default=24,
+        help="Positive-tet projection sweeps after unified ARAP.",
+    )
+    parser.add_argument(
+        "--volume-projection-max-correction",
+        type=float,
+        default=0.0,
+        help="Maximum total per-vertex displacement (metres) that volume "
+             "projection may add to the ARAP solution; 0 disables the bound.",
+    )
+    parser.add_argument(
+        "--volume-contact-passes",
+        type=int,
+        default=4,
+        help="Alternations between volume recovery and contact targets.",
+    )
+    parser.add_argument(
+        "--volume-arap-alternations",
+        type=int,
+        default=1,
+        help="Alternate short ARAP solves with positive-volume projection. "
+             "One preserves the original solve order.",
+    )
+    parser.add_argument(
         "--inter-k",
         type=int,
         default=3,
         help="Per-vertex cap on cross-muscle neighbors (default: 3). "
              "Bounds inter-muscle edge count; prevents quadratic blowup "
              "in dense regions like LowLeg.",
+    )
+    parser.add_argument(
+        "--reciprocal-inter-muscle",
+        dest="inter_muscle_reciprocal",
+        action="store_true",
+        default=False,
+        help="Use mutual nearest cross-muscle interface edges.",
     )
     parser.add_argument(
         "--isotropic",
@@ -589,6 +774,11 @@ def main():
         default=None,
         help="Region tag for per-region baking (e.g. L_UpLeg). "
              "Output goes to motion_cache/<bvh>/<tag>/ instead of motion_cache/<bvh>/",
+    )
+    parser.add_argument(
+        "--output-root",
+        default="data/motion_cache",
+        help="Root directory for motion caches (default: data/motion_cache).",
     )
     parser.add_argument(
         "--tet-dir",
@@ -758,6 +948,86 @@ def main():
              "stay below combined ARAP intra-contour pull.  Default 1.5.",
     )
     parser.add_argument(
+        "--contact-recompute-every",
+        type=int,
+        default=1,
+        help="Rebuild unified collision correspondences every N iterations.",
+    )
+    parser.add_argument(
+        "--tracked-bone-contact",
+        action="store_true",
+        default=False,
+        help="Use fast rest-oriented, history-stable closest-triangle bone "
+             "contact without SDF or inside/outside tests.",
+    )
+    parser.add_argument(
+        "--tracked-bone-contact-weight",
+        type=float,
+        default=3.0,
+        help="ARAP target weight for tracked bone contact.",
+    )
+    parser.add_argument(
+        "--attachment-rigidity",
+        type=float,
+        default=8.0,
+        help="Maximum rest-edge stiffness multiplier next to attachment "
+             "caps when tracked bone contact is enabled (default 8).",
+    )
+    parser.add_argument(
+        "--attachment-rigidity-rings",
+        type=int,
+        default=4,
+        help="Number of free contour intervals over which attachment "
+             "rigidity tapers back to ordinary ARAP (default 4).",
+    )
+    parser.add_argument(
+        "--tracked-bone-contact-bind-distance",
+        type=float,
+        default=0.005,
+        help="Rest distance (m) used to select history-stable bone-contact "
+             "candidates (default 0.005 = 5 mm).",
+    )
+    parser.add_argument(
+        "--tracked-bone-contact-max-step",
+        type=float,
+        default=0.0,
+        help="Maximum one-sided tracked-contact correction per ARAP "
+             "iteration; 0 disables the cap (default 0).",
+    )
+    parser.add_argument(
+        "--anisotropic-contact",
+        action="store_true",
+        default=False,
+        help="Enable unified muscle-muscle and bone exclusion targets.",
+    )
+    parser.add_argument(
+        "--inter-muscle-contact-margin",
+        type=float,
+        default=0.001,
+        help="Unified muscle-muscle exclusion margin in metres.",
+    )
+    parser.add_argument(
+        "--fascia-constraints",
+        action="store_true",
+        default=False,
+        help="Enable normal-only sliding fascia cohesion in unified ARAP.",
+    )
+    parser.add_argument(
+        "--fascia-constraint-threshold",
+        type=float,
+        default=0.006,
+    )
+    parser.add_argument(
+        "--fascia-constraint-weight",
+        type=float,
+        default=2.0,
+    )
+    parser.add_argument(
+        "--fascia-min-patch-vertices",
+        type=int,
+        default=12,
+    )
+    parser.add_argument(
         "--save-anim",
         action="store_true",
         help="Save per-outer-iter convergence snapshots inside each chunk so "
@@ -798,6 +1068,10 @@ def main():
 
     # Build context and find constraints
     ctx = build_context(skel, muscle_meshes, skeleton_meshes, mesh_info, args)
+    if ctx.tracked_bone_contact:
+        ctx.tracked_bone_contacts = precompute_tracked_bone_contacts(
+            muscle_meshes, skeleton_meshes, skel,
+            bind_distance=ctx.tracked_bone_contact_bind_distance)
     if ctx.skin_prior_enabled:
         include = {n.strip() for n in getattr(args, 'skin_prior_include', '').split(',') if n.strip()}
         exclude = {n.strip() for n in getattr(args, 'skin_prior_exclude', '').split(',') if n.strip()}
@@ -859,9 +1133,10 @@ def main():
     # Prepare output directory
     bvh_stem = os.path.splitext(os.path.basename(args.bvh))[0]
     if args.region_tag:
-        cache_dir = os.path.join("data", "motion_cache", bvh_stem, args.region_tag)
+        cache_dir = os.path.join(
+            args.output_root, bvh_stem, args.region_tag)
     else:
-        cache_dir = os.path.join("data", "motion_cache", bvh_stem)
+        cache_dir = os.path.join(args.output_root, bvh_stem)
     os.makedirs(cache_dir, exist_ok=True)
 
     # Remove old chunk files

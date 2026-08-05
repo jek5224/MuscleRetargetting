@@ -12,6 +12,7 @@ Architecture:
 - Merged bone collision mesh for single BVH query
 """
 
+import os
 import time
 import numpy as np
 
@@ -31,6 +32,76 @@ except ImportError:
 _ti_initialized = False
 
 
+def _triangle_intersection_pairs(mesh_a, mesh_b, eps=1e-10):
+    """Return exact crossing face pairs after an R-tree broad phase.
+
+    Vertex-containment tests miss the common case where two triangle interiors
+    cross but all six vertices remain outside the opposite closed surface.
+    """
+    tri_a = np.asarray(mesh_a.triangles, dtype=np.float64)
+    tri_b = np.asarray(mesh_b.triangles, dtype=np.float64)
+    if not len(tri_a) or not len(tri_b):
+        return np.zeros((0, 2), dtype=np.int32)
+
+    candidate_a, candidate_b = [], []
+    tree_b = mesh_b.triangles_tree
+    bounds_a = np.column_stack((tri_a.min(axis=1), tri_a.max(axis=1)))
+    for ia, bounds in enumerate(bounds_a):
+        hits = list(tree_b.intersection(bounds))
+        if hits:
+            candidate_a.extend([ia] * len(hits))
+            candidate_b.extend(hits)
+    if not candidate_a:
+        return np.zeros((0, 2), dtype=np.int32)
+    ia = np.asarray(candidate_a, dtype=np.int32)
+    ib = np.asarray(candidate_b, dtype=np.int32)
+    ta, tb = tri_a[ia], tri_b[ib]
+
+    def segments_hit_triangles(start, end, target):
+        direction = end - start
+        edge1 = target[:, 1] - target[:, 0]
+        edge2 = target[:, 2] - target[:, 0]
+        h = np.cross(direction, edge2)
+        det = np.einsum('ij,ij->i', edge1, h)
+        valid = np.abs(det) > eps
+        inv_det = np.zeros_like(det)
+        inv_det[valid] = 1.0 / det[valid]
+        s = start - target[:, 0]
+        u = inv_det * np.einsum('ij,ij->i', s, h)
+        q = np.cross(s, edge1)
+        v = inv_det * np.einsum('ij,ij->i', direction, q)
+        t = inv_det * np.einsum('ij,ij->i', edge2, q)
+        return (valid & (u >= -eps) & (v >= -eps)
+                & (u + v <= 1.0 + eps)
+                & (t > eps) & (t < 1.0 - eps))
+
+    crossing = np.zeros(len(ia), dtype=bool)
+    for e0, e1 in ((0, 1), (1, 2), (2, 0)):
+        crossing |= segments_hit_triangles(ta[:, e0], ta[:, e1], tb)
+        crossing |= segments_hit_triangles(tb[:, e0], tb[:, e1], ta)
+    return np.column_stack((ia[crossing], ib[crossing])).astype(np.int32)
+
+
+def _dilated_crossing_face_masks(mesh_a, mesh_b, rings=2):
+    """Rest-pose interface masks used to distinguish sliding from new tangles."""
+    pairs = _triangle_intersection_pairs(mesh_a, mesh_b)
+    mask_a = np.zeros(len(mesh_a.faces), dtype=bool)
+    mask_b = np.zeros(len(mesh_b.faces), dtype=bool)
+    if len(pairs):
+        mask_a[pairs[:, 0]] = True
+        mask_b[pairs[:, 1]] = True
+    for mesh, mask in ((mesh_a, mask_a), (mesh_b, mask_b)):
+        adjacency = np.asarray(mesh.face_adjacency, dtype=np.int32)
+        for _ in range(rings):
+            if not len(adjacency):
+                break
+            grow = mask[adjacency[:, 0]] | mask[adjacency[:, 1]]
+            if not np.any(grow):
+                break
+            mask[adjacency[grow].ravel()] = True
+    return mask_a, mask_b, len(pairs)
+
+
 def _ensure_ti_init():
     global _ti_initialized
     if _ti_initialized:
@@ -38,7 +109,14 @@ def _ensure_ti_init():
     if not TAICHI_AVAILABLE:
         raise RuntimeError("Taichi is required for FEM simulation")
     try:
-        ti.init(arch=ti.gpu, default_fp=ti.f64)
+        import os
+        arch_name = os.environ.get('MUSCLE_TAICHI_ARCH', 'cuda').lower()
+        arch = ti.cpu if arch_name == 'cpu' else ti.gpu
+        kwargs = dict(arch=arch, default_fp=ti.f64,
+                      offline_cache=(arch_name != 'cpu'))
+        if arch_name == 'cpu':
+            kwargs['offline_cache_file_path'] = '/tmp/muscle_taichi_cache'
+        ti.init(**kwargs)
     except RuntimeError:
         pass  # Already initialized
     _ti_initialized = True
@@ -727,6 +805,14 @@ class UnifiedFEMSolver:
         self._dist_pair_i = None
         self._dist_pair_j = None
         self._dist_rest = None
+        self._compliant_attachments = False
+        self._attachment_indices = np.zeros(0, dtype=np.int32)
+        self._attachment_targets = np.zeros((0, 3), dtype=np.float64)
+        self._attachment_kappa = 0.0
+        # Lazily populated per muscle pair. Raw source surfaces overlap in the
+        # saved rest anatomy, so collision handling must reject only crossings
+        # outside those rest interface patches.
+        self._rest_crossing_masks = {}
 
     def build(self, muscles_data):
         _ensure_ti_init()
@@ -806,6 +892,37 @@ class UnifiedFEMSolver:
                 self._muscle_surface_faces[name] = all_surface_faces[sf_idx]
                 sf_idx += 1
 
+        # Discover reciprocal rest-pose anatomical interfaces. Store only the
+        # source patch membership; closest triangles are deliberately NOT
+        # stored, because they must change as the two surfaces slide.
+        self._sliding_interfaces = []
+        if TRIMESH_AVAILABLE:
+            from scipy.spatial import cKDTree
+            directed = {}
+            names = list(self._muscle_surface_faces)
+            for ia, name_a in enumerate(names):
+                vs_a, ve_a, _, _ = self._muscle_ranges[name_a]
+                surf_a = np.unique(self._muscle_surface_faces[name_a])
+                pa = self.rest_positions[surf_a]
+                for name_b in names[ia + 1:]:
+                    vs_b, ve_b, _, _ = self._muscle_ranges[name_b]
+                    surf_b = np.unique(self._muscle_surface_faces[name_b])
+                    pb = self.rest_positions[surf_b]
+                    da, _ = cKDTree(pb).query(pa)
+                    db, _ = cKDTree(pa).query(pb)
+                    keep_a = surf_a[da < 0.006]
+                    keep_b = surf_b[db < 0.006]
+                    # Reciprocal substantial patches reject incidental point
+                    # contacts while retaining broad fascial interfaces.
+                    if len(keep_a) >= 12 and len(keep_b) >= 12:
+                        directed[(name_a, name_b)] = keep_a
+                        directed[(name_b, name_a)] = keep_b
+            for (src, tgt), global_vertices in sorted(directed.items()):
+                self._sliding_interfaces.append(
+                    (src, tgt, np.asarray(global_vertices, dtype=np.int32)))
+            print(f"  PN sliding interfaces: {len(self._sliding_interfaces)} "
+                  "directed reciprocal patches")
+
         # Tag collision regions: vertices near attachments excluded from mm collision.
         # 0=attachment (fixed), 1=near-attachment (bone-only), 2=belly (full collision)
         self._build_collision_regions(all_surface_faces)
@@ -828,8 +945,17 @@ class UnifiedFEMSolver:
         e3 = X[tets[:, 3]] - v0
         Dm = np.stack([e1, e2, e3], axis=-1)
         vol = np.abs(np.linalg.det(Dm)) / 6.0
-        edge_scale = np.mean(np.linalg.norm(e1, axis=1)) ** 3
-        good = vol > edge_scale * 1e-10
+        # Use an element-local scale.  A single global average admitted very
+        # thin contour-band slivers (for example a Rectus Femoris tet with
+        # 1.4e-11 m^3 rest volume) that become singular under an otherwise
+        # rigid attachment motion and block the entire unified solve.
+        q = X[tets]
+        edge_lengths = np.stack([
+            np.linalg.norm(q[:, i] - q[:, j], axis=1)
+            for i, j in ((0, 1), (0, 2), (0, 3),
+                         (1, 2), (1, 3), (2, 3))], axis=1)
+        local_scale = np.maximum(np.max(edge_lengths, axis=1) ** 3, 1e-30)
+        good = (vol / local_scale) > 1e-5
         n_removed = np.sum(~good)
         if n_removed > 0:
             print(f"  XPBD: Removed {n_removed} degenerate tets (of {len(tets)})")
@@ -913,20 +1039,14 @@ class UnifiedFEMSolver:
         self.ti_valence = ti.field(dtype=ti.f64, shape=N)  # vertex valence for Jacobi
         self.ti_target_J = ti.field(dtype=ti.f64, shape=M)  # per-tet volume target
 
-        # Compute per-tet target J: tets with fixed vertices accept more compression.
-        # Count fixed vertices per tet: 0 = free (target J=1), 1-3 = near-attach (lower target)
+        # Every tet preserves volume, including attachment-adjacent elements.
+        # The previous 0.1/0.3/0.5 targets deliberately collapsed cap tets and
+        # caused the visible attachment instability this solver is meant to
+        # avoid. Hard boundary conditions and incompressibility must coexist;
+        # an incompatible pose should report residual, not delete volume.
         target_J_np = np.ones(M, dtype=np.float64)
-        for t in range(M):
-            n_fixed = sum(1 for j in range(4) if self._orig_fixed_mask[self.tetrahedra[t, j]])
-            if n_fixed >= 3:
-                target_J_np[t] = 0.1  # heavily constrained: accept large compression
-            elif n_fixed >= 2:
-                target_J_np[t] = 0.3
-            elif n_fixed >= 1:
-                target_J_np[t] = 0.5
         self.ti_target_J.from_numpy(target_J_np)
-        n_relaxed = int(np.sum(target_J_np < 1.0))
-        print(f"  Relaxed volume target: {n_relaxed} tets near attachments")
+        print("  Volume target: J=1 for all tets (including attachments)")
 
         # Per-color tet arrays for Gauss-Seidel
         max_color_tets = max(len(ca) for ca in self._tet_color_arrays)
@@ -1195,11 +1315,12 @@ class UnifiedFEMSolver:
         nearby_pos = surf_pos[nearby_mask]
         nearby_free_surf = free_surf[nearby_mask]
 
-        # Phase 2: Per-bone contains() for reliable inside detection
-        # Ray-casting is much more reliable than dot-product with normals
-        inside_mask = np.zeros(len(nearby_pos), dtype=bool)
+        # Phase 2: Per-bone contains() and per-containing-bone projection.
+        # Never detect on individual bones and then project on the merged mesh:
+        # its nearest triangle can belong to a different adjacent bone.
         individual = getattr(self, '_individual_bone_meshes', [])
         if individual:
+            target_by_global = {}
             for bone_mesh in individual:
                 try:
                     # Bounding box pre-filter (fast reject)
@@ -1209,26 +1330,59 @@ class UnifiedFEMSolver:
                     if not np.any(in_bbox):
                         continue
                     # contains() uses ray-casting — reliable for watertight meshes
-                    contained = bone_mesh.contains(nearby_pos[in_bbox])
-                    inside_mask[in_bbox] |= contained
+                    bbox_indices = np.where(in_bbox)[0]
+                    contained = bone_mesh.contains(nearby_pos[bbox_indices])
+                    local_indices = bbox_indices[contained]
+                    if not len(local_indices):
+                        continue
+                    if verbose:
+                        label = bone_mesh.metadata.get(
+                            'body_name', bone_mesh.metadata.get('bone_name', '?'))
+                        print(f"      inside {label}: {len(local_indices)}")
+                    closest, distances, face_ids = (
+                        bone_mesh.nearest.on_surface(nearby_pos[local_indices]))
+                    escape = closest - nearby_pos[local_indices]
+                    escape /= np.maximum(
+                        np.linalg.norm(escape, axis=1, keepdims=True), 1e-12)
+                    # closest - contained_point is guaranteed to point toward
+                    # the exterior; imported face winding is not guaranteed.
+                    targets = closest + escape * margin
+                    for local_i, target, distance in zip(
+                            local_indices, targets, distances):
+                        global_i = int(nearby_free_surf[local_i])
+                        old = target_by_global.get(global_i)
+                        # A point inside overlapping bone volumes must escape
+                        # the enclosing volume, not merely the closest nested
+                        # surface. Prefer the deepest containing-bone escape.
+                        if old is None or float(distance) > old[0]:
+                            target_by_global[global_i] = (
+                                float(distance), np.asarray(target))
                 except Exception:
                     continue
+            if verbose:
+                print(f"    Collision: {len(free_surf)} surf verts, "
+                      f"{n_nearby} near bones, {len(target_by_global)} inside "
+                      f"({len(individual)} watertight bones)")
+            if not target_by_global:
+                return np.array([], dtype=np.int32), np.zeros((0, 3))
+            ordered = sorted(target_by_global)
+            return (np.asarray(ordered, dtype=np.int32),
+                    np.stack([target_by_global[i][1] for i in ordered]))
 
         # Fallback: dot-product test on merged mesh for non-watertight bones
-        if not individual:
-            try:
-                closest_pts, dists, face_ids = self._merged_bone_mesh.nearest.on_surface(nearby_pos)
-                normals = self._merged_bone_mesh.face_normals[face_ids]
-                to_vertex = nearby_pos - closest_pts
-                dots = np.einsum('ij,ij->i', to_vertex, normals)
-                inside_mask = (dots < 0) & (dists < margin * 10)
-            except Exception:
-                return np.array([], dtype=np.int32), np.zeros((0, 3))
+        try:
+            closest_pts, dists, face_ids = self._merged_bone_mesh.nearest.on_surface(nearby_pos)
+            normals = self._merged_bone_mesh.face_normals[face_ids]
+            to_vertex = nearby_pos - closest_pts
+            dots = np.einsum('ij,ij->i', to_vertex, normals)
+            inside_mask = (dots < 0) & (dists < margin * 10)
+        except Exception:
+            return np.array([], dtype=np.int32), np.zeros((0, 3))
 
         if verbose:
             n_inside = int(np.sum(inside_mask))
             print(f"    Collision: {len(free_surf)} surf verts, {n_nearby} near bones, "
-                  f"{n_inside} inside ({len(individual)} watertight bones)")
+                  f"{n_inside} inside (merged non-watertight fallback)")
 
         if not np.any(inside_mask):
             return np.array([], dtype=np.int32), np.zeros((0, 3))
@@ -1279,19 +1433,32 @@ class UnifiedFEMSolver:
                 for v in range(vs, ve):
                     vert_to_muscle[v] = name
             # From distance constraint pairs, find which muscles are connected
-            if self._dist_pair_i is not None:
-                for k in range(self._n_dist_constraints):
-                    m1 = vert_to_muscle.get(self._dist_pair_i[k])
-                    m2 = vert_to_muscle.get(self._dist_pair_j[k])
+            dist_pair_i = getattr(self, '_dist_pair_i', None)
+            dist_pair_j = getattr(self, '_dist_pair_j', None)
+            n_dist = int(getattr(self, '_n_dist_constraints', 0))
+            if dist_pair_i is not None and dist_pair_j is not None:
+                for k in range(n_dist):
+                    m1 = vert_to_muscle.get(dist_pair_i[k])
+                    m2 = vert_to_muscle.get(dist_pair_j[k])
                     if m1 and m2 and m1 != m2:
                         pair = tuple(sorted([m1, m2]))
                         neighbor_set.add(pair)
-            self._muscle_neighbor_pairs = list(neighbor_set)
+            # Sliding contact must not depend on legacy spring/bond
+            # constraints. Anatomical-contact baking deliberately disables
+            # those pins, so consider every muscle pair and let the cheap AABB
+            # test below reject spatially separated pairs. For a 24-muscle
+            # upper leg this is only 276 conservative candidate pairs.
+            for ia, name_a in enumerate(names):
+                for name_b in names[ia + 1:]:
+                    neighbor_set.add(tuple(sorted((name_a, name_b))))
+            self._muscle_neighbor_pairs = sorted(neighbor_set)
             if verbose:
                 print(f"    Muscle neighbor pairs: {len(self._muscle_neighbor_pairs)}")
 
         all_idx = []
         all_tgt = []
+        self._last_triangle_crossings = 0
+        self._last_triangle_crossings_raw = 0
 
         for name_a, name_b in self._muscle_neighbor_pairs:
             if name_a not in self._muscle_surface_faces or name_b not in self._muscle_surface_faces:
@@ -1317,11 +1484,11 @@ class UnifiedFEMSolver:
             try:
                 mesh_a = trimesh.Trimesh(vertices=pos_a, faces=faces_a, process=False)
                 mesh_b = trimesh.Trimesh(vertices=pos_b, faces=faces_b, process=False)
-                # Fix normals to point outward (process=False doesn't orient them)
-                # Note: process=False keeps original vertex indexing.
-                # Normals may be inconsistent but signed-distance still works
-                # well enough — most false positives are filtered by the
-                # distance threshold (dists_surf < margin * 3).
+                # Collision classification and escape directions require
+                # consistently outward normals. ``process=False`` preserves
+                # vertex indexing but does not orient the face winding.
+                mesh_a.fix_normals(multibody=True)
+                mesh_b.fix_normals(multibody=True)
             except Exception:
                 continue
 
@@ -1351,10 +1518,13 @@ class UnifiedFEMSolver:
                 except Exception:
                     continue
 
-                # Inside = vertex is on the inward side of the nearest face
+                # Inside = vertex is on the inward side of the nearest,
+                # consistently oriented face.  Restrict this to the narrow
+                # contact band; full ray-cast containment is prohibitively
+                # expensive in the repeated active-set loop.
                 to_vertex = nearby_pos - closest_pts
                 dots = np.einsum('ij,ij->i', to_vertex, normals)
-                inside = (dots < 0) & (dists_surf < margin * 3)
+                inside = ((dots < 0) & (dists_surf < margin * 3))
 
                 if not np.any(inside):
                     continue
@@ -1371,6 +1541,72 @@ class UnifiedFEMSolver:
                 if np.any(valid_mask):
                     all_idx.append(global_idx[valid_mask])
                     all_tgt.append(targets[valid_mask])
+
+            # Exact narrow phase for face crossings. This catches edge-face
+            # intersections even when every vertex is outside the other mesh.
+            try:
+                crossing_pairs = _triangle_intersection_pairs(mesh_a, mesh_b)
+            except Exception:
+                crossing_pairs = np.zeros((0, 2), dtype=np.int32)
+            self._last_triangle_crossings_raw += len(crossing_pairs)
+
+            # The input rest surfaces themselves contain intentional/baked-in
+            # overlaps. Permit crossings inside a two-face-ring rest interface
+            # patch (so it can slide), but reject crossings that migrate beyond
+            # that patch or appear between previously disjoint surfaces.
+            if not hasattr(self, '_rest_crossing_masks'):
+                self._rest_crossing_masks = {}
+            pair_key = (name_a, name_b)
+            if pair_key not in self._rest_crossing_masks:
+                rest_a = self.rest_positions[vs_a:ve_a]
+                rest_b = self.rest_positions[vs_b:ve_b]
+                try:
+                    rest_mesh_a = trimesh.Trimesh(
+                        vertices=rest_a, faces=faces_a, process=False)
+                    rest_mesh_b = trimesh.Trimesh(
+                        vertices=rest_b, faces=faces_b, process=False)
+                    allow_a, allow_b, rest_count = \
+                        _dilated_crossing_face_masks(rest_mesh_a, rest_mesh_b)
+                except Exception:
+                    allow_a = np.zeros(len(faces_a), dtype=bool)
+                    allow_b = np.zeros(len(faces_b), dtype=bool)
+                    rest_count = 0
+                self._rest_crossing_masks[pair_key] = (
+                    allow_a, allow_b, rest_count)
+            allow_a, allow_b, _ = self._rest_crossing_masks[pair_key]
+            if len(crossing_pairs):
+                allowed = (allow_a[crossing_pairs[:, 0]]
+                           & allow_b[crossing_pairs[:, 1]])
+                crossing_pairs = crossing_pairs[~allowed]
+            self._last_triangle_crossings += len(crossing_pairs)
+            if len(crossing_pairs):
+                rest_a = self.rest_positions[vs_a:ve_a]
+                rest_b = self.rest_positions[vs_b:ve_b]
+                for face_a, face_b in crossing_pairs:
+                    local_a = faces_a[int(face_a)]
+                    local_b = faces_b[int(face_b)]
+                    # Preserve the local side ordering of the supplied anatomy.
+                    # Whole-muscle centroids give the wrong direction for long,
+                    # wrapping muscles such as sartorius and gracilis.
+                    tri_axis = (rest_a[local_a].mean(axis=0)
+                                - rest_b[local_b].mean(axis=0))
+                    if np.linalg.norm(tri_axis) < 1e-8:
+                        tri_axis = (pos_a[local_a].mean(axis=0)
+                                    - pos_b[local_b].mean(axis=0))
+                    tri_axis /= max(float(np.linalg.norm(tri_axis)), 1e-12)
+                    for local_ids, offset, direction in (
+                            (local_a, vs_a, tri_axis),
+                            (local_b, vs_b, -tri_axis)):
+                        global_ids = local_ids.astype(np.int32) + offset
+                        valid = (~self.fixed_mask[global_ids])
+                        coll_region = getattr(self, '_collision_region', None)
+                        if coll_region is not None:
+                            valid &= coll_region[global_ids] == 2
+                        if np.any(valid):
+                            ids = global_ids[valid]
+                            all_idx.append(ids)
+                            all_tgt.append(
+                                self.positions[ids] + direction * margin)
 
         if not all_idx:
             return np.array([], dtype=np.int32), np.zeros((0, 3))
@@ -1938,6 +2174,57 @@ class VBDSolver:
         self._dist_rest = None
         self._has_previous_solution = False
 
+    def _compute_sliding_cohesion_targets(self, max_gap=0.0015,
+                                          verbose=False):
+        """Dynamic closest-surface, normal-only cohesive targets.
+
+        Patch membership comes from rest anatomy, but the closest triangle is
+        recomputed at every call. Moving a source vertex only toward that
+        closest point changes the normal gap and leaves tangential sliding
+        unconstrained.
+        """
+        if not getattr(self, '_sliding_interfaces', None):
+            return np.array([], dtype=np.int32), np.zeros((0, 3))
+        all_idx, all_target = [], []
+        mesh_cache = {}
+        for src_name, tgt_name, src_global in self._sliding_interfaces:
+            vs_t, ve_t, _, _ = self._muscle_ranges[tgt_name]
+            if tgt_name not in mesh_cache:
+                faces = self._muscle_surface_faces[tgt_name] - vs_t
+                mesh_cache[tgt_name] = trimesh.Trimesh(
+                    vertices=self.positions[vs_t:ve_t], faces=faces,
+                    process=False)
+            mesh = mesh_cache[tgt_name]
+            movable = (~self.fixed_mask[src_global]
+                       & (self._collision_region[src_global] == 2))
+            src = src_global[movable]
+            if not len(src):
+                continue
+            try:
+                closest, distance, _ = mesh.nearest.on_surface(
+                    self.positions[src])
+            except Exception:
+                continue
+            separated = distance > max_gap
+            if not np.any(separated):
+                continue
+            p = self.positions[src[separated]]
+            cp = closest[separated]
+            direction = p - cp
+            direction /= np.maximum(
+                np.linalg.norm(direction, axis=1, keepdims=True), 1e-12)
+            # Retain a thin physical interface rather than welding surfaces.
+            target = cp + max_gap * direction
+            all_idx.append(src[separated].astype(np.int32))
+            all_target.append(target)
+        if not all_idx:
+            return np.array([], dtype=np.int32), np.zeros((0, 3))
+        idx = np.concatenate(all_idx)
+        target = np.concatenate(all_target)
+        if verbose:
+            print(f"    Sliding cohesion: {len(idx)} separated patch vertices")
+        return idx, target
+
     def build(self, muscles_data):
         _ensure_ti_init()
 
@@ -2027,8 +2314,13 @@ class VBDSolver:
         e3 = X[tets[:, 3]] - v0
         Dm = np.stack([e1, e2, e3], axis=-1)
         vol = np.abs(np.linalg.det(Dm)) / 6.0
-        edge_scale = np.mean(np.linalg.norm(e1, axis=1)) ** 3
-        good = vol > edge_scale * 1e-10
+        q = X[tets]
+        edge_lengths = np.stack([
+            np.linalg.norm(q[:, i] - q[:, j], axis=1)
+            for i, j in ((0, 1), (0, 2), (0, 3),
+                         (1, 2), (1, 3), (2, 3))], axis=1)
+        local_scale = np.maximum(np.max(edge_lengths, axis=1) ** 3, 1e-30)
+        good = (vol / local_scale) > 1e-5
         n_removed = np.sum(~good)
         if n_removed > 0:
             print(f"  VBD: Removed {n_removed} degenerate tets (of {len(tets)})")
@@ -2874,13 +3166,18 @@ def _pn_max_step_size(
     positions: ti.template(), direction: ti.template(),
     tets: ti.template(), Bm_inv: ti.template(), n_tets: ti.i32,
 ) -> ti.f64:
-    """Inversion-safe step filter: find max α before any tet's J hits 0.
+    """Shape-safe step filter: keep every valid tet above a finite J floor.
 
     J(α) = det(Ds(x + α*p) @ Bm_inv) is cubic in α.
-    For each tet, find the smallest positive root and return 0.9× of the
-    global minimum.
+    Merely keeping J positive permits elements to become arbitrarily flat and
+    leaves no feasible step for the next moving-attachment increment.  Preserve
+    five percent of rest volume; the outer continuation separately rejects any
+    boundary move that cannot meet this condition.
     """
     alpha_max = 1.0
+    # Keep a buffer above the outer continuation's 0.05 acceptance floor so
+    # the next moving-boundary increment has nonzero deformation room.
+    j_floor = 0.10
     for k in range(n_tets):
         i0 = tets[k][0]; i1 = tets[k][1]; i2 = tets[k][2]; i3 = tets[k][3]
         B = Bm_inv[k]
@@ -2890,9 +3187,6 @@ def _pn_max_step_size(
         # Current J (should be > 0)
         Ds0 = ti.Matrix.cols([x0 - x3, x1 - x3, x2 - x3])
         J0 = (Ds0 @ B).determinant()
-        if J0 <= 0.0:
-            continue  # already inverted, don't restrict
-
         # J at α: binary search for zero crossing
         a_lo = 0.0
         a_hi = alpha_max
@@ -2900,7 +3194,11 @@ def _pn_max_step_size(
         Ds1 = Ds0 + a_hi * dDs
         J1 = (Ds1 @ B).determinant()
 
-        if J1 > 0.0:
+        # Above the desired floor, do not cross it. If an incoming boundary
+        # step is already below the floor, do not let Newton make it flatter;
+        # it may still take directions that recover volume.
+        target_j = j_floor if J0 > j_floor else J0 * 0.999
+        if J1 >= target_j:
             continue  # full step is safe for this tet
 
         # Binary search for zero crossing
@@ -2908,7 +3206,7 @@ def _pn_max_step_size(
             a_mid = (a_lo + a_hi) * 0.5
             Ds_mid = Ds0 + a_mid * dDs
             J_mid = (Ds_mid @ B).determinant()
-            if J_mid > 0.0:
+            if J_mid >= target_j:
                 a_lo = a_mid
             else:
                 a_hi = a_mid
@@ -3021,11 +3319,28 @@ class ProjectedNewtonSolver:
         self.positions = self.rest_positions.copy()
         self.tetrahedra = np.concatenate(all_tets, axis=0)
         self._orig_fixed_mask = np.concatenate(all_fixed, axis=0)
+        # Fine tetrahedralizations put several very small elements next to an
+        # attachment cap.  Exact Dirichlet motion of a single cap vertex can
+        # then make a positive-J continuation step mathematically impossible,
+        # even though a real tendon insertion is compliant over a finite area.
+        # In compliant mode the same anatomical cap vertices remain attachment
+        # vertices, but are coupled to the bone with positional energy instead
+        # of being removed from the solve.
+        self._compliant_attachments = (
+            os.environ.get('MUSCLE_PN_COMPLIANT_ATTACH', '0') == '1')
         self.fixed_mask = self._orig_fixed_mask.copy()
+        if self._compliant_attachments:
+            self.fixed_mask[:] = False
         self.surface_verts = np.concatenate(all_surface_verts, axis=0)
         self.fixed_indices = np.where(self.fixed_mask)[0]
         self.free_indices = np.where(~self.fixed_mask)[0]
         self.fixed_targets = self.positions[self.fixed_indices].copy()
+        self._attachment_indices = np.where(self._orig_fixed_mask)[0].astype(
+            np.int32)
+        self._attachment_targets = self.positions[
+            self._attachment_indices].copy()
+        self._attachment_kappa = float(os.environ.get(
+            'MUSCLE_PN_ATTACHMENT_KAPPA', '25000'))
 
         # Free surface verts for collision
         self.free_surface_verts = self.surface_verts[~self._orig_fixed_mask[self.surface_verts]]
@@ -3041,8 +3356,13 @@ class ProjectedNewtonSolver:
         e1 = X[tets[:, 1]] - v0; e2 = X[tets[:, 2]] - v0; e3 = X[tets[:, 3]] - v0
         Dm = np.stack([e1, e2, e3], axis=-1)
         vol = np.abs(np.linalg.det(Dm)) / 6.0
-        edge_scale = np.mean(np.linalg.norm(e1, axis=1)) ** 3
-        good = vol > edge_scale * 1e-10
+        q = X[tets]
+        edge_lengths = np.stack([
+            np.linalg.norm(q[:, i] - q[:, j], axis=1)
+            for i, j in ((0, 1), (0, 2), (0, 3),
+                         (1, 2), (1, 3), (2, 3))], axis=1)
+        local_scale = np.maximum(np.max(edge_lengths, axis=1) ** 3, 1e-30)
+        good = (vol / local_scale) > 1e-5
         n_removed = np.sum(~good)
         if n_removed > 0:
             print(f"  PN: Removed {n_removed} degenerate tets (of {len(tets)})")
@@ -3064,6 +3384,31 @@ class ProjectedNewtonSolver:
             if data.get('surface_faces') is not None:
                 self._muscle_surface_faces[name] = all_surface_faces[sf_idx]
                 sf_idx += 1
+
+        # PN uses reciprocal rest-pose patches only to decide anatomical
+        # neighbors. The target triangle is recomputed later, so no tangential
+        # material coordinates are fixed.
+        self._sliding_interfaces = []
+        if TRIMESH_AVAILABLE:
+            from scipy.spatial import cKDTree
+            names = list(self._muscle_surface_faces)
+            for ia, name_a in enumerate(names):
+                surf_a = np.unique(self._muscle_surface_faces[name_a])
+                pa = self.rest_positions[surf_a]
+                for name_b in names[ia + 1:]:
+                    surf_b = np.unique(self._muscle_surface_faces[name_b])
+                    pb = self.rest_positions[surf_b]
+                    da, _ = cKDTree(pb).query(pa)
+                    db, _ = cKDTree(pa).query(pb)
+                    keep_a = surf_a[da < 0.006]
+                    keep_b = surf_b[db < 0.006]
+                    if len(keep_a) >= 12 and len(keep_b) >= 12:
+                        self._sliding_interfaces.append(
+                            (name_a, name_b, keep_a.astype(np.int32)))
+                        self._sliding_interfaces.append(
+                            (name_b, name_a, keep_b.astype(np.int32)))
+            print(f"  PN sliding interfaces: {len(self._sliding_interfaces)} "
+                  "directed reciprocal patches")
 
         # Collision regions
         from collections import defaultdict, deque
@@ -3131,6 +3476,10 @@ class ProjectedNewtonSolver:
         self._built = True
         print(f"  PN unified: {N} verts, {M} tets, "
               f"{len(self._muscle_ranges)} muscles, {len(self.free_indices)} free DOFs")
+        if self._compliant_attachments:
+            print(f"  PN compliant attachments: "
+                  f"{len(self._attachment_indices)} vertices, "
+                  f"kappa={self._attachment_kappa:g}")
 
     def set_inter_muscle_constraints(self, constraints):
         # Store but don't use in Newton (handled by collision instead)
@@ -3145,6 +3494,16 @@ class ProjectedNewtonSolver:
             if 'fixed_targets' in data:
                 fi = np.where(self._orig_fixed_mask[vs:ve])[0]
                 global_fi = fi + vs
+                if self._compliant_attachments:
+                    attachment_lookup = {
+                        int(g): i for i, g in enumerate(
+                            self._attachment_indices)}
+                    for i, gfi in enumerate(global_fi):
+                        ai = attachment_lookup.get(int(gfi))
+                        if ai is not None:
+                            self._attachment_targets[ai] = (
+                                data['fixed_targets'][i])
+                    continue
                 for i, gfi in enumerate(global_fi):
                     idx_in_fixed = np.searchsorted(self.fixed_indices, gfi)
                     if idx_in_fixed < len(self.fixed_indices) and self.fixed_indices[idx_in_fixed] == gfi:
@@ -3169,10 +3528,12 @@ class ProjectedNewtonSolver:
     # Reuse collision methods from XPBD solver
     _compute_collision_targets = UnifiedFEMSolver._compute_collision_targets
     _compute_muscle_collision_targets = UnifiedFEMSolver._compute_muscle_collision_targets
+    _compute_sliding_cohesion_targets = VBDSolver._compute_sliding_cohesion_targets
 
     def solve(self, mu, lam, vol_penalty=100.0, kappa=1e4, margin=0.002,
               max_lbfgs_iters=100, n_outer=3, bone_meshes=None, verbose=False,
-              n_load_steps=0, bone_mesh_callback=None):
+              n_load_steps=0, bone_mesh_callback=None,
+              muscle_contact=True):
         """Projected Newton solve with CG and inversion-safe line search."""
         if bone_meshes is not None:
             self._build_merged_bone_mesh(bone_meshes)
@@ -3205,10 +3566,15 @@ class ProjectedNewtonSolver:
         # For first frame: start from rest (0 inversions) with internal load stepping.
         # Newton + inversion-safe line search guarantees J > 0 throughout.
         # For subsequent frames: start from previous solution (temporal coherence).
-        coll_penalty_idx = np.array([], dtype=np.int32)
-        coll_penalty_tgt = np.zeros((0, 3), dtype=np.float64)
-        collision_kappa = 0.0
-        n_penalty = 0
+        if self._compliant_attachments:
+            coll_penalty_idx = self._attachment_indices.copy()
+            coll_penalty_tgt = self._attachment_targets.copy()
+            collision_kappa = self._attachment_kappa
+        else:
+            coll_penalty_idx = np.array([], dtype=np.int32)
+            coll_penalty_tgt = np.zeros((0, 3), dtype=np.float64)
+            collision_kappa = 0.0
+        n_penalty = len(coll_penalty_idx)
 
         # Use LBS init + hard attachments.
         # The PN solver with inversion-safe line search preserves LBS inversions
@@ -3218,6 +3584,11 @@ class ProjectedNewtonSolver:
             self.ti_positions, self.ti_invm,
             self.ti_tets, self.ti_Bm_inv, self.ti_rest_volume,
             effective_mu, effective_lam, M)
+        if n_penalty > 0:
+            pos_np = self.ti_positions.to_numpy()
+            penalty_delta = pos_np[coll_penalty_idx] - coll_penalty_tgt
+            E_prev += 0.5 * collision_kappa * float(
+                np.sum(penalty_delta * penalty_delta))
 
         # Final Newton iterations at target pose
         for newton_it in range(max_newton):
@@ -3245,6 +3616,10 @@ class ProjectedNewtonSolver:
                 print(f"      newton {newton_it}: E={E_prev:.6e} |g|={grad_norm:.6e}")
             if grad_norm < 1e-6:
                 break
+            # CG reuses ``ti_gradient`` as its Hessian-vector scratch buffer.
+            # Preserve the true gradient for the Armijo directional
+            # derivative below.
+            armijo_gradient = self.ti_gradient.to_numpy()
 
             # 2. CG: solve H @ direction = -gradient
             # Initialize: r = -g, d = r, direction = 0
@@ -3308,12 +3683,32 @@ class ProjectedNewtonSolver:
             alpha_safe = min(alpha_safe, 1.0)
 
             # 4. Armijo backtracking line search (elastic + penalty energy)
-            dir_deriv = _pn_dot(self.ti_gradient, self.ti_direction, self.ti_invm, N)
+            direction_np = self.ti_direction.to_numpy()
+            dir_deriv = float(np.sum(
+                armijo_gradient[self.free_indices]
+                * direction_np[self.free_indices]))
+            # Truncated CG may return a non-descent direction when the
+            # Gauss-Newton system is poorly conditioned by moving attachment
+            # and contact penalties. Armijo cannot accept such a direction.
+            # Fall back to the negative gradient, which is guaranteed to be a
+            # descent direction, and recompute the inversion-safe step bound.
+            if not np.isfinite(dir_deriv) or dir_deriv >= 0.0:
+                direction_np = -armijo_gradient
+                direction_np[self.fixed_indices] = 0.0
+                self.ti_direction.from_numpy(direction_np)
+                _pn_zero_fixed(self.ti_direction, self.ti_invm, N)
+                alpha_safe = _pn_max_step_size(
+                    self.ti_positions, self.ti_direction,
+                    self.ti_tets, self.ti_Bm_inv, M)
+                alpha_safe = min(alpha_safe, 1.0)
+                dir_deriv = -float(np.sum(
+                    armijo_gradient[self.free_indices] ** 2))
 
             alpha = alpha_safe
             c1 = 1e-4
             _pn_copy(self.ti_pos_backup, self.ti_positions, N)
 
+            line_search_accepted = False
             for ls_it in range(15):
                 _pn_copy(self.ti_positions, self.ti_pos_backup, N)
                 _pn_axpy(self.ti_positions, alpha, self.ti_direction, self.ti_invm, N)
@@ -3332,17 +3727,24 @@ class ProjectedNewtonSolver:
                         E_new += 0.5 * collision_kappa * np.dot(d, d)
 
                 if E_new <= E_prev + c1 * alpha * dir_deriv:
+                    line_search_accepted = True
                     break
                 alpha *= 0.5
 
-            E_prev = E_new
+            if line_search_accepted:
+                E_prev = E_new
+            else:
+                _pn_copy(self.ti_positions, self.ti_pos_backup, N)
+                break
 
         n_newton = newton_it + 1
 
         # Count inversions before collision
         # Phase 2: detect collisions on deformed mesh, then Newton with penalty
         self.positions = self.ti_positions.to_numpy()
-        has_mm_coll = hasattr(self, '_muscle_surface_faces') and bool(self._muscle_surface_faces)
+        has_mm_coll = (muscle_contact
+                       and hasattr(self, '_muscle_surface_faces')
+                       and bool(self._muscle_surface_faces))
         if self._merged_bone_mesh is not None:
             bi, bt = self._compute_collision_targets(margin, verbose=verbose)
             if len(bi) > 0:
@@ -3354,10 +3756,16 @@ class ProjectedNewtonSolver:
             if len(mi) > 0:
                 coll_penalty_idx = np.concatenate([coll_penalty_idx, mi])
                 coll_penalty_tgt = np.concatenate([coll_penalty_tgt, mt])
+            ci, ct = self._compute_sliding_cohesion_targets(
+                max_gap=0.0015, verbose=verbose)
+            if len(ci) > 0:
+                coll_penalty_idx = np.concatenate([coll_penalty_idx, ci])
+                coll_penalty_tgt = np.concatenate([coll_penalty_tgt, ct])
 
         n_penalty = len(coll_penalty_idx)
         if n_penalty > 0:
-            collision_kappa = effective_lam  # strong: match volume stiffness
+            if not self._compliant_attachments:
+                collision_kappa = effective_lam  # strong: match volume stiffness
             if n_penalty > self._max_coll:
                 self._max_coll = max(n_penalty, 1000)
                 self.ti_coll_idx = ti.field(dtype=ti.i32, shape=self._max_coll)
@@ -3446,14 +3854,21 @@ class ProjectedNewtonSolver:
             Js = np.linalg.det(Ds @ self.Bm_inv)
             n_inv = int(np.sum(Js <= 0))
             # Measure attachment error: how far are fixed verts from targets
-            fixed_pos = X[self.fixed_indices]
-            attach_err = np.linalg.norm(fixed_pos - self.fixed_targets, axis=1)
+            if self._compliant_attachments:
+                fixed_pos = X[self._attachment_indices]
+                attach_err = np.linalg.norm(
+                    fixed_pos - self._attachment_targets, axis=1)
+            else:
+                fixed_pos = X[self.fixed_indices]
+                attach_err = np.linalg.norm(
+                    fixed_pos - self.fixed_targets, axis=1)
             print(f"    PN final: newton={n_newton} ||dx||={residual:.4e} "
                   f"inv={n_inv}/{M} penalty={n_penalty} "
                   f"J=[{np.min(Js):.3f},{np.max(Js):.3f}]")
-            print(f"    attachment error: max={attach_err.max()*1000:.3f}mm "
-                  f"mean={attach_err.mean()*1000:.3f}mm "
-                  f"({int(np.sum(attach_err > 0.001))} verts >1mm)")
+            if len(attach_err):
+                print(f"    attachment error: max={attach_err.max()*1000:.3f}mm "
+                      f"mean={attach_err.mean()*1000:.3f}mm "
+                      f"({int(np.sum(attach_err > 0.001))} verts >1mm)")
 
         self._has_previous_solution = True
         return n_newton, residual
@@ -3498,8 +3913,182 @@ def _write_back_positions(solver, active_muscles):
             mobj.tet_vertices[:] = new_pos.astype(mobj.tet_vertices.dtype)
 
 
+def _untangle_lbs_positions(rest, tets, lbs, fixed_indices,
+                            max_iterations=800, j_floor=0.08,
+                            j_ceiling=5.0, plane_indices=None,
+                            plane_targets=None, plane_normals=None,
+                            plane_weight=20.0, report_residual=True,
+                            max_projection_sweeps=4000):
+    """Untangle an LBS tet pose while keeping attachment vertices exact.
+
+    This is deliberately a positional preconditioner, not a material model.
+    A squared signed-Jacobian hinge removes inversions; a weak LBS tether
+    chooses the closest solution among the many positive-volume embeddings.
+    """
+    from scipy.optimize import minimize
+
+    rest = np.asarray(rest, dtype=np.float64)
+    tets = np.asarray(tets, dtype=np.int32)
+    target = np.asarray(lbs, dtype=np.float64)
+    fixed_mask = np.zeros(len(rest), dtype=bool)
+    fixed_mask[np.asarray(fixed_indices, dtype=np.int32)] = True
+    free = np.where(~fixed_mask)[0]
+    free_slot = np.full(len(rest), -1, dtype=np.int32)
+    free_slot[free] = np.arange(len(free), dtype=np.int32)
+
+    if plane_indices is None:
+        plane_indices = np.zeros(0, dtype=np.int32)
+        plane_targets = np.zeros((0, 3), dtype=np.float64)
+        plane_normals = np.zeros((0, 3), dtype=np.float64)
+    else:
+        plane_indices = np.asarray(plane_indices, dtype=np.int32)
+        plane_targets = np.asarray(plane_targets, dtype=np.float64)
+        plane_normals = np.asarray(plane_normals, dtype=np.float64)
+        valid_plane = ~fixed_mask[plane_indices]
+        plane_indices = plane_indices[valid_plane]
+        plane_targets = plane_targets[valid_plane]
+        plane_normals = plane_normals[valid_plane]
+        plane_normals /= np.maximum(
+            np.linalg.norm(plane_normals, axis=1, keepdims=True), 1e-12)
+
+    r = rest[tets]
+    Bm = np.stack([r[:, 0] - r[:, 3], r[:, 1] - r[:, 3],
+                   r[:, 2] - r[:, 3]], axis=-1)
+    det_rest = np.linalg.det(Bm)
+    edge_lengths = np.stack([
+        np.linalg.norm(r[:, i] - r[:, j], axis=1)
+        for i, j in ((0, 1), (0, 2), (0, 3),
+                     (1, 2), (1, 3), (2, 3))], axis=1)
+    quality = (np.abs(det_rest) / 6.0) / np.maximum(
+        np.max(edge_lengths, axis=1) ** 3, 1e-30)
+    keep = quality > 1e-5
+    tets = tets[keep]
+    det_rest = det_rest[keep]
+    position_scale = max(float(np.median(edge_lengths[keep])), 1e-4)
+
+    base = target.copy()
+    x0 = base[free].ravel()
+
+    def evaluate(flat, floor):
+        x = base.copy()
+        x[free] = flat.reshape(-1, 3)
+        q = x[tets]
+        a = q[:, 0] - q[:, 3]
+        b = q[:, 1] - q[:, 3]
+        c = q[:, 2] - q[:, 3]
+        J = np.einsum('ij,ij->i', a, np.cross(b, c)) / det_rest
+        low_violation = np.maximum(floor - J, 0.0)
+        high_violation = np.maximum(J - j_ceiling, 0.0)
+        active = (low_violation > 0.0) | (high_violation > 0.0)
+        # Mean normalization makes settings independent of tet resolution.
+        energy_j = 0.5 * np.mean(low_violation * low_violation
+                                 + high_violation * high_violation)
+        displacement = x[free] - target[free]
+        tether_weight = 2e-5
+        energy_p = (0.5 * tether_weight
+                    * np.mean(displacement * displacement)
+                    / (position_scale * position_scale))
+
+        if len(plane_indices):
+            plane_residual = np.einsum(
+                'ij,ij->i', x[plane_indices] - plane_targets,
+                plane_normals)
+            energy_plane = (0.5 * plane_weight
+                            * np.mean(plane_residual * plane_residual)
+                            / (position_scale * position_scale))
+        else:
+            plane_residual = np.zeros(0, dtype=np.float64)
+            energy_plane = 0.0
+
+        grad = np.zeros_like(x)
+        if np.any(active):
+            ta = a[active]; tb = b[active]; tc = c[active]
+            denom = det_rest[active, None]
+            ga = np.cross(tb, tc) / denom
+            gb = np.cross(tc, ta) / denom
+            gc = np.cross(ta, tb) / denom
+            coeff = ((-low_violation[active] + high_violation[active])
+                     / len(J))[:, None]
+            ids = tets[active]
+            np.add.at(grad, ids[:, 0], coeff * ga)
+            np.add.at(grad, ids[:, 1], coeff * gb)
+            np.add.at(grad, ids[:, 2], coeff * gc)
+            np.add.at(grad, ids[:, 3], -coeff * (ga + gb + gc))
+        grad[free] += (tether_weight * displacement
+                       / (len(free) * 3.0 * position_scale * position_scale))
+        if len(plane_indices):
+            plane_grad = ((plane_weight / len(plane_indices))
+                          * plane_residual[:, None] * plane_normals
+                          / (position_scale * position_scale))
+            np.add.at(grad, plane_indices, plane_grad)
+        return energy_j + energy_p + energy_plane, grad[free].ravel()
+
+    current = x0
+    # Staging avoids asking a deeply inverted element to cross directly to the
+    # final safety margin in one non-convex optimization.
+    for floor in (-0.25, 0.0, 0.02, float(j_floor)):
+        result = minimize(
+            lambda z: evaluate(z, floor), current, jac=True,
+            method='L-BFGS-B',
+            options={'maxiter': max_iterations, 'ftol': 1e-14,
+                     'gtol': 1e-9, 'maxls': 40})
+        current = result.x
+
+    result_x = base.copy()
+    result_x[free] = current.reshape(-1, 3)
+    # L-BFGS can settle at a compromise where two adjacent inverted tets trade
+    # equal-and-opposite gradients. Finish with local nonlinear Gauss-Seidel
+    # projections, always moving only free vertices of the offending tet.
+    for _sweep in range(max_projection_sweeps):
+        q = result_x[tets]
+        a = q[:, 0] - q[:, 3]
+        b = q[:, 1] - q[:, 3]
+        c = q[:, 2] - q[:, 3]
+        J_now = np.einsum('ij,ij->i', a, np.cross(b, c)) / det_rest
+        bad = np.where((J_now < j_floor) | (J_now > j_ceiling))[0]
+        if not len(bad):
+            break
+        changed = False
+        for ti_idx in bad[np.argsort(J_now[bad])]:
+            ids = tets[ti_idx]
+            pts = result_x[ids]
+            aa = pts[0] - pts[3]
+            bb = pts[1] - pts[3]
+            cc = pts[2] - pts[3]
+            grads = np.stack((np.cross(bb, cc),
+                              np.cross(cc, aa),
+                              np.cross(aa, bb))) / det_rest[ti_idx]
+            grads = np.vstack((grads, -np.sum(grads, axis=0)))
+            movable = ~fixed_mask[ids]
+            denom = float(np.sum(grads[movable] ** 2))
+            if denom <= 1e-20:
+                continue
+            target_j = (j_floor if J_now[ti_idx] < j_floor
+                        else j_ceiling)
+            correction = ((target_j - J_now[ti_idx]) / denom
+                          * grads[movable])
+            # Avoid one ill-conditioned tet throwing a vertex across the body.
+            norms = np.linalg.norm(correction, axis=1)
+            scale = min(1.0, 0.001 / max(float(norms.max()), 1e-12))
+            result_x[ids[movable]] += 0.8 * scale * correction
+            changed = True
+        if not changed:
+            break
+    q = result_x[tets]
+    J = np.einsum('ij,ij->i', q[:, 0] - q[:, 3],
+                  np.cross(q[:, 1] - q[:, 3],
+                           q[:, 2] - q[:, 3])) / det_rest
+    residual = np.where((J <= 0.05) | (J > j_ceiling * 1.01))[0]
+    if len(residual) and report_residual:
+        details = [(int(i), float(J[i]),
+                    int(np.sum(fixed_mask[tets[i]])), tets[i].tolist())
+                   for i in residual[:12]]
+        print(f"      untangle residual (tet, J, fixed-count, verts): {details}")
+    return result_x, J
+
+
 def run_all_fem_sim(v, max_iterations=100, tolerance=1e-4, verbose=True):
-    t0 = time.time()
+    solve_start_time = time.time()
 
     active_muscles = {
         name: mobj for name, mobj in v.zygote_muscle_meshes.items()
@@ -3530,7 +4119,9 @@ def run_all_fem_sim(v, max_iterations=100, tolerance=1e-4, verbose=True):
         else:
             return isinstance(s, UnifiedFEMSolver)
     wrong_type = solver is not None and not _solver_type_match(solver)
-    if solver is None or wrong_type or set(solver._muscle_ranges.keys()) != set(active_muscles.keys()):
+    needs_build = (solver is None or wrong_type
+                   or set(solver._muscle_ranges.keys()) != set(active_muscles.keys()))
+    if needs_build:
         if use_pn:
             solver = ProjectedNewtonSolver()
         elif use_vbd:
@@ -3550,6 +4141,551 @@ def run_all_fem_sim(v, max_iterations=100, tolerance=1e-4, verbose=True):
         if hasattr(v, 'inter_muscle_constraints') and v.inter_muscle_constraints:
             solver.set_inter_muscle_constraints(v.inter_muscle_constraints)
         v._fem_unified_solver = solver
+
+    # Projected Newton must begin from an orientation-preserving state. Move
+    # bones and hard attachment targets from rest to the requested pose in
+    # small increments, carrying each valid equilibrium into the next step.
+    # The old direct LBS jump started frame 0 with hundreds of inverted tets,
+    # which an inversion-safe line search cannot subsequently repair.
+    if use_pn and needs_build and skel is not None:
+        pn_material_only = (
+            os.environ.get('MUSCLE_PN_MATERIAL_ONLY', '0') == '1')
+        target_pose = skel.getPositions().copy()
+        rest_pose = np.zeros_like(target_pose)
+        # Direct target-pose initialization for large BVH poses. Use the
+        # project's ordinary LBS positions exactly as shown by the viewer,
+        # then overwrite every attachment vertex with its exact bone target.
+        if os.environ.get('MUSCLE_PN_DIRECT_INIT', '0') == '1':
+            for direct_name, mobj in active_muscles.items():
+                mobj._update_tet_positions_from_skeleton(skel)
+                mobj._update_fixed_targets_from_skeleton(
+                    getattr(v, 'zygote_skeleton_meshes', None), skel)
+                sb = mobj.soft_body
+                fixed = np.asarray(sb.fixed_indices, dtype=np.int32)
+                direct = np.asarray(sb.positions, dtype=np.float64).copy()
+                direct[fixed] = np.asarray(sb.fixed_targets, dtype=np.float64)
+                vs, ve, _, _ = solver._muscle_ranges[direct_name]
+                solver.positions[vs:ve] = direct
+            updates = {
+                name: {'positions': solver.get_muscle_positions(name),
+                       'fixed_targets': mobj.soft_body.fixed_targets}
+                for name, mobj in active_muscles.items()
+            }
+            solver.update_targets_and_positions(updates)
+            solver.positions[solver.fixed_indices] = solver.fixed_targets
+            tt = solver.tetrahedra
+            x3 = solver.positions[tt[:, 3]]
+            Ds = np.stack([solver.positions[tt[:, 0]] - x3,
+                           solver.positions[tt[:, 1]] - x3,
+                           solver.positions[tt[:, 2]] - x3], axis=-1)
+            direct_J = np.linalg.det(Ds @ solver.Bm_inv)
+            print(f"  PN direct LBS init: J=[{direct_J.min():.3e},"
+                  f"{direct_J.max():.3e}], inv={np.sum(direct_J <= 0)}")
+            if float(direct_J.min()) <= 0.05:
+                print("  Untangling LBS free vertices with signed-volume "
+                      "optimization (attachments remain exact)...")
+                for name, (vs, ve, _, _) in solver._muscle_ranges.items():
+                    mobj = active_muscles[name]
+                    sb = mobj.soft_body
+                    before = solver.positions[vs:ve].copy()
+                    repaired, local_J = _untangle_lbs_positions(
+                        sb.rest_positions, sb.tetrahedra, before,
+                        sb.fixed_indices, max_iterations=800, j_floor=0.08)
+                    retry = 0
+                    while np.any(local_J <= 0.05) and retry < 3:
+                        repaired, local_J = _untangle_lbs_positions(
+                            sb.rest_positions, sb.tetrahedra, repaired,
+                            sb.fixed_indices, max_iterations=2000,
+                            j_floor=0.12 + 0.04 * retry)
+                        retry += 1
+                    solver.positions[vs:ve] = repaired
+                    if verbose:
+                        print(f"    {name}: minJ={local_J.min():.3e}, "
+                              f"inv={int(np.sum(local_J <= 0))}, "
+                              f"max move={np.linalg.norm(repaired-before, axis=1).max()*1000:.2f}mm")
+                solver.positions[solver.fixed_indices] = solver.fixed_targets
+                x3 = solver.positions[tt[:, 3]]
+                Ds = np.stack([solver.positions[tt[:, 0]] - x3,
+                               solver.positions[tt[:, 1]] - x3,
+                               solver.positions[tt[:, 2]] - x3], axis=-1)
+                direct_J = np.linalg.det(Ds @ solver.Bm_inv)
+                print(f"  Signed-volume untangled init: J=[{direct_J.min():.3e},"
+                      f"{direct_J.max():.3e}], "
+                      f"inv={np.sum(direct_J <= 0)}")
+                if float(direct_J.min()) <= 0.05:
+                    raise RuntimeError(
+                        "LBS XPBD untangler did not reach positive volume: "
+                        f"minJ={direct_J.min():.3e}, "
+                        f"inversions={int(np.sum(direct_J <= 0))}")
+            solver._has_previous_solution = True
+            resume_dir = os.environ.get('MUSCLE_PN_RESUME_CACHE', '')
+            resumed_interface = False
+            if resume_dir:
+                loaded = 0
+                for resume_name, (vs, ve, _, _) in (
+                        solver._muscle_ranges.items()):
+                    resume_path = os.path.join(
+                        resume_dir, f'{resume_name}_chunk_0000.npz')
+                    if not os.path.isfile(resume_path):
+                        continue
+                    with np.load(resume_path) as resume_data:
+                        cached = np.asarray(
+                            resume_data['positions'][0], dtype=np.float64)
+                    if cached.shape != (ve - vs, 3):
+                        raise RuntimeError(
+                            f"resume cache shape mismatch for {resume_name}: "
+                            f"{cached.shape} != {(ve - vs, 3)}")
+                    solver.positions[vs:ve] = cached
+                    loaded += 1
+                if loaded != len(solver._muscle_ranges):
+                    raise RuntimeError(
+                        f"resume cache incomplete: {loaded}/"
+                        f"{len(solver._muscle_ranges)} muscles")
+                solver.positions[solver.fixed_indices] = solver.fixed_targets
+                solver.ti_positions.from_numpy(np.asarray(
+                    solver.positions, dtype=np.float64))
+                resumed_interface = True
+                print(f"  PN resumed interface state from {resume_dir}")
+            bone_meshes = _build_bone_trimeshes(v, active_muscles, skel,
+                                                verbose=False)
+            interface_passes = int(os.environ.get(
+                'MUSCLE_PN_INTERFACE_PASSES', '12'))
+            exclusion_only = (os.environ.get(
+                'MUSCLE_PN_EXCLUSION_ONLY', '0') == '1')
+            polish_passes = (0 if exclusion_only else int(os.environ.get(
+                'MUSCLE_PN_EXCLUSION_POLISH_PASSES', '4')))
+            for interface_pass in range(interface_passes + polish_passes):
+                # Establish the unconstrained elastic equilibrium once. The
+                # active-set iterations below then impose current normal
+                # contact positions as temporary Dirichlet data and solve the
+                # muscle interior around them. Correspondences are rebuilt on
+                # every pass, so this is sliding contact rather than a weld.
+                if interface_pass == 0 and not resumed_interface:
+                    solver.solve(
+                        mu=mu, lam=lam, vol_penalty=vol_penalty,
+                        kappa=kappa,
+                        max_lbfgs_iters=max_iterations,
+                        bone_meshes=bone_meshes, muscle_contact=True,
+                        verbose=verbose)
+                    solver.positions = solver.ti_positions.to_numpy()
+                bi, bt = solver._compute_collision_targets(
+                    margin=getattr(v, 'unified_bone_contact_margin', 0.001),
+                    verbose=False)
+                mi, mt = solver._compute_muscle_collision_targets(
+                    margin=getattr(v, 'inter_muscle_contact_margin', 0.001),
+                    verbose=False)
+                ci, ct = solver._compute_sliding_cohesion_targets(
+                    max_gap=0.0015, verbose=False)
+                if exclusion_only or interface_pass >= interface_passes:
+                    ci = np.zeros(0, dtype=np.int32)
+                    ct = np.zeros((0, 3), dtype=np.float64)
+                # Complementarity/priority: never average an exclusion target
+                # with a cohesion target on the same material point. Bone
+                # exclusion wins over muscle exclusion; either exclusion wins
+                # over gap-closing cohesion.
+                if len(bi) and len(mi):
+                    keep_m = ~np.isin(mi, np.unique(bi))
+                    mi, mt = mi[keep_m], mt[keep_m]
+                exclusion_idx = np.unique(np.concatenate((bi, mi)))
+                if len(exclusion_idx) and len(ci):
+                    keep_c = ~np.isin(ci, exclusion_idx)
+                    ci, ct = ci[keep_c], ct[keep_c]
+                active = len(bi) + len(mi) + len(ci)
+                print(f"    interface pass {interface_pass}: bone={len(bi)} "
+                      f"muscle={len(mi)} separated={len(ci)}")
+                if active == 0:
+                    break
+                # Average only compatible constraints incident on a vertex.
+                contact_idx = np.concatenate((bi, mi, ci))
+                contact_target = np.concatenate((bt, mt, ct), axis=0)
+                unique, inverse = np.unique(contact_idx,
+                                            return_inverse=True)
+                delta_sum = np.zeros((len(unique), 3), dtype=np.float64)
+                count = np.zeros(len(unique), dtype=np.float64)
+                np.add.at(delta_sum, inverse,
+                          contact_target - solver.positions[contact_idx])
+                np.add.at(count, inverse, 1.0)
+                desired = solver.positions[unique] + delta_sum / count[:, None]
+                movable = ~solver.fixed_mask[unique]
+                unique, desired = unique[movable], desired[movable]
+
+                moved_muscles = 0
+                for name, (vs, ve, _, _) in solver._muscle_ranges.items():
+                    selected = (unique >= vs) & (unique < ve)
+                    if not np.any(selected):
+                        continue
+                    sb = active_muscles[name].soft_body
+                    local_ids = unique[selected] - vs
+                    local_desired = desired[selected]
+                    base = solver.positions[vs:ve].copy()
+                    delta = local_desired - base[local_ids]
+                    # Gap closure is incremental; exclusion targets are already
+                    # confined to a narrow collision band. A common 4 mm cap
+                    # prevents a separated patch from jumping through its
+                    # counterpart in one active-set update.
+                    delta_norm = np.linalg.norm(delta, axis=1)
+                    delta *= np.minimum(
+                        1.0, 0.004 / np.maximum(delta_norm, 1e-12))[:, None]
+                    plane_normals = delta / np.maximum(
+                        np.linalg.norm(delta, axis=1, keepdims=True), 1e-12)
+                    accepted = False
+                    for target_scale in (1.0, 0.5, 0.25, 0.125):
+                        repaired, local_J = _untangle_lbs_positions(
+                            sb.rest_positions, sb.tetrahedra, base,
+                            sb.fixed_indices, max_iterations=500,
+                            j_floor=0.02, j_ceiling=5.0,
+                            plane_indices=local_ids,
+                            plane_targets=(base[local_ids]
+                                           + target_scale * delta),
+                            plane_normals=plane_normals,
+                            plane_weight=30.0,
+                            report_residual=False)
+                        if (len(local_J)
+                                and float(local_J.min()) > 1e-6
+                                and float(local_J.max()) <= 5.5):
+                            solver.positions[vs:ve] = repaired
+                            moved_muscles += 1
+                            accepted = True
+                            break
+                    if not accepted and verbose:
+                        print(f"      hard contact rejected for {name}")
+                if moved_muscles == 0:
+                    print("    hard interface solve made no feasible progress")
+                    break
+                solver.positions[solver.fixed_indices] = solver.fixed_targets
+                solver.ti_positions.from_numpy(np.asarray(
+                    solver.positions, dtype=np.float64))
+            # Validate the state that will actually be written, including the
+            # last accepted projection (whose counts are otherwise not shown
+            # until another active-set iteration).
+            final_bi, _ = solver._compute_collision_targets(
+                margin=getattr(v, 'unified_bone_contact_margin', 0.001),
+                verbose=False)
+            final_mi, _ = solver._compute_muscle_collision_targets(
+                margin=getattr(v, 'inter_muscle_contact_margin', 0.001),
+                verbose=False)
+            final_ci, _ = solver._compute_sliding_cohesion_targets(
+                max_gap=0.0015, verbose=False)
+            final_x3 = solver.positions[solver.tetrahedra[:, 3]]
+            final_Ds = np.stack([
+                solver.positions[solver.tetrahedra[:, 0]] - final_x3,
+                solver.positions[solver.tetrahedra[:, 1]] - final_x3,
+                solver.positions[solver.tetrahedra[:, 2]] - final_x3], axis=-1)
+            final_J = np.linalg.det(final_Ds @ solver.Bm_inv)
+            print(f"    interface final: bone={len(final_bi)} "
+                  f"muscle={len(final_mi)} separated={len(final_ci)} "
+                  f"J=[{final_J.min():.3f},{final_J.max():.3f}]")
+            if float(final_J.min()) < 1e-6 or float(final_J.max()) > 5.5:
+                raise RuntimeError("PN interface bake failed Jacobian bounds")
+            _write_back_positions(solver, active_muscles)
+            return
+        n_steps = max(int(getattr(v, 'fem_load_steps', 10)), 2)
+        step_iters = max(3, int(np.ceil(max_iterations / n_steps)))
+        print(f"  PN continuation: {n_steps} nominal pose steps, "
+              f"{step_iters} Newton iterations/accepted step (adaptive J guard)")
+        alpha = 0.0
+        accepted_steps = 0
+        nominal_delta = 1.0 / n_steps
+        # Track an absolute skeleton-driven guide for each muscle. Between
+        # continuation poses, transport the current equilibrium by the guide
+        # delta before moving the hard caps. This lets the terminal rings move
+        # with their attachments instead of asking a single thin tet layer to
+        # absorb the complete boundary increment.
+        from tools.bake_emu import compute_rigid_blend_positions
+
+        rigid_guide_data = {}
+        attachment_blend = {}
+        for name, mobj in active_muscles.items():
+            bindings = []
+            blend_coordinate = []
+            initial = getattr(mobj, 'tet_initial_bone_transforms', {})
+            for binding in getattr(mobj, 'tet_skeleton_bindings', []):
+                if binding is None:
+                    bindings.append((np.zeros(3), []))
+                    blend_coordinate.append(0.0)
+                    continue
+                origin, insertion, weight, rest_vertex = binding
+                weighted_bones = []
+                if origin in initial:
+                    R0, rest_translation = initial[origin]
+                    weighted_bones.append((origin, 1.0 - weight, R0,
+                                           rest_translation))
+                if insertion in initial:
+                    R0, rest_translation = initial[insertion]
+                    weighted_bones.append((insertion, weight, R0,
+                                           rest_translation))
+                bindings.append((np.asarray(rest_vertex, dtype=np.float64),
+                                 weighted_bones))
+                blend_coordinate.append(weight)
+            rigid_guide_data[name] = (
+                bindings, np.asarray(blend_coordinate, dtype=np.float64))
+            rest = np.asarray(mobj.soft_body.rest_positions, dtype=np.float64)
+            fixed_local = np.asarray(mobj.soft_body.fixed_indices,
+                                     dtype=np.int64)
+            from scipy.spatial import cKDTree
+            distance, nearest = cKDTree(rest[fixed_local]).query(rest, k=1)
+            # Four centimetres covers several coarse contour bands while
+            # leaving the belly governed by the rotation-preserving guide.
+            blend = np.clip(1.0 - distance / 0.04, 0.0, 1.0)
+            blend = blend * blend * (3.0 - 2.0 * blend)
+            attachment_blend[name] = (fixed_local, nearest, blend)
+
+        def rigid_guides():
+            return {
+                name: compute_rigid_blend_positions(bindings, skel, coordinate)
+                for name, (bindings, coordinate) in rigid_guide_data.items()
+            }
+
+        skel.setPositions(rest_pose)
+        guide_previous = rigid_guides()
+        # Put both guide and hard caps in the same rest-pose coordinate state.
+        # Without this, the first delta mixes a rest guide with target-pose
+        # attachment residuals and can invert a cap even as alpha approaches 0.
+        for guide_name, mobj in active_muscles.items():
+            if hasattr(mobj, '_update_fixed_targets_from_skeleton'):
+                mobj._update_fixed_targets_from_skeleton(
+                    getattr(v, 'zygote_skeleton_meshes', None), skel)
+            local_fixed = np.asarray(mobj.soft_body.fixed_indices,
+                                     dtype=np.int64)
+            fixed_target = np.asarray(mobj.soft_body.fixed_targets,
+                                      dtype=np.float64)
+            fixed_residual = fixed_target - guide_previous[guide_name][local_fixed]
+            _, nearest, blend = attachment_blend[guide_name]
+            guide_previous[guide_name] += blend[:, None] * fixed_residual[nearest]
+            guide_previous[guide_name][local_fixed] = fixed_target
+            vs, ve, _, _ = solver._muscle_ranges[guide_name]
+            solver.positions[vs:ve] = guide_previous[guide_name]
+        while alpha < 1.0 - 1e-12:
+            delta = min(nominal_delta, 1.0 - alpha)
+            accepted = False
+            while not accepted:
+                trial_alpha = alpha + delta
+                skel.setPositions((1.0 - trial_alpha) * rest_pose
+                                  + trial_alpha * target_pose)
+                guide_trial = rigid_guides()
+                for guide_trial_name, mobj in active_muscles.items():
+                    if hasattr(mobj, '_update_fixed_targets_from_skeleton'):
+                        mobj._update_fixed_targets_from_skeleton(
+                            getattr(v, 'zygote_skeleton_meshes', None), skel)
+                    local_fixed = np.asarray(
+                        mobj.soft_body.fixed_indices, dtype=np.int64)
+                    fixed_target = np.asarray(
+                        mobj.soft_body.fixed_targets, dtype=np.float64)
+                    fixed_residual = (fixed_target
+                                      - guide_trial[guide_trial_name][local_fixed])
+                    _, nearest, blend = attachment_blend[guide_trial_name]
+                    guide_trial[guide_trial_name] += (
+                        blend[:, None] * fixed_residual[nearest])
+                    guide_trial[guide_trial_name][local_fixed] = fixed_target
+                updates = {}
+                for name, mobj in active_muscles.items():
+                    updates[name] = {
+                        'positions': solver.get_muscle_positions(name),
+                        'fixed_targets': mobj.soft_body.fixed_targets,
+                    }
+                solver.update_targets_and_positions(updates)
+
+                # Test the boundary move before Newton. Positive-J Newton can
+                # preserve orientation, but cannot repair an already inverted
+                # starting state.
+                candidate = solver.positions.copy()
+                for name, (vs, ve, _, _) in solver._muscle_ranges.items():
+                    if getattr(solver, '_compliant_attachments', False):
+                        # Remove the common rigid translation from the load.
+                        # This is orientation preserving and leaves only the
+                        # relative origin/insertion motion for the elastic
+                        # penalty solve.  Applying each nearest-cap delta here
+                        # would recreate a discontinuous hard boundary.
+                        local_fixed, _, _ = attachment_blend[name]
+                        fixed_delta = (
+                            guide_trial[name][local_fixed]
+                            - guide_previous[name][local_fixed])
+                        candidate[vs:ve] += np.mean(
+                            fixed_delta, axis=0, keepdims=True)
+                        continue
+                    # Transport only the material near moving attachment caps.
+                    # A full LBS/rigid-guide delta can fold a long wrapping
+                    # muscle's belly (Rectus Femoris was the reproducible
+                    # failure) before FEM gets a chance to equilibrate it.
+                    # The nearest-cap field moves several contour bands with
+                    # the boundary while leaving the belly to the solve.
+                    local_fixed, nearest, blend = attachment_blend[name]
+                    fixed_delta = (guide_trial[name][local_fixed]
+                                   - guide_previous[name][local_fixed])
+                    candidate[vs:ve] += (
+                        blend[:, None] * fixed_delta[nearest])
+                candidate[solver.fixed_indices] = solver.fixed_targets
+                tt = solver.tetrahedra
+                x3 = candidate[tt[:, 3]]
+                Ds = np.stack([candidate[tt[:, 0]] - x3,
+                               candidate[tt[:, 1]] - x3,
+                               candidate[tt[:, 2]] - x3], axis=-1)
+                Js = np.linalg.det(Ds @ solver.Bm_inv)
+                if float(np.min(Js)) > 0.05:
+                    accepted = True
+                    solver.positions[:] = candidate
+                    guide_previous = guide_trial
+                else:
+                    if verbose and delta <= nominal_delta / 8.0:
+                        bad_tet = int(np.argmin(Js))
+                        bad_name = next(
+                            (n for n, (_, _, ts, te) in
+                             solver._muscle_ranges.items()
+                             if ts <= bad_tet < te), 'unknown')
+                        base_x3 = solver.positions[tt[:, 3]]
+                        base_Ds = np.stack([
+                            solver.positions[tt[:, 0]] - base_x3,
+                            solver.positions[tt[:, 1]] - base_x3,
+                            solver.positions[tt[:, 2]] - base_x3], axis=-1)
+                        base_Js = np.linalg.det(base_Ds @ solver.Bm_inv)
+                        print(f"    continuation reject: alpha={alpha:.6f} "
+                              f"delta={delta:.3e} muscle={bad_name} "
+                              f"tet={bad_tet} J={Js[bad_tet]:.3e} "
+                              f"base_minJ={np.min(base_Js):.3e}")
+                    delta *= 0.5
+                    if delta < 1e-6:
+                        raise RuntimeError(
+                            f"PN continuation blocked at alpha={alpha:.6f}: "
+                            "attachment motion cannot keep all tets positive")
+
+            alpha += delta
+            accepted_steps += 1
+            at_final_pose = alpha >= 1.0 - 1e-12
+            # Route wrapping muscles throughout continuation. Deferring bone
+            # and muscle contact until alpha=1 lets hamstrings take a straight
+            # folding shortcut and irreversibly flatten before the final pass.
+            bone_step = (None if pn_material_only else
+                         _build_bone_trimeshes(
+                             v, active_muscles, skel, verbose=False))
+            solver.solve(mu=mu, lam=lam, vol_penalty=vol_penalty,
+                         kappa=kappa, max_lbfgs_iters=step_iters,
+                         bone_meshes=bone_step,
+                         muscle_contact=not pn_material_only,
+                         verbose=verbose and (accepted_steps == 1
+                                              or at_final_pose))
+            if at_final_pose and not pn_material_only:
+                # Contact targets depend on the deformed surface. Refresh the
+                # active set until no free muscle surface vertex is inside a
+                # bone; one frozen projection pass is not a collision solve.
+                for contact_pass in range(12):
+                    bone_idx, bone_targets = solver._compute_collision_targets(
+                        margin=getattr(v, 'unified_bone_contact_margin', 0.001),
+                        verbose=verbose)
+                    muscle_idx, muscle_targets = (
+                        solver._compute_muscle_collision_targets(
+                            margin=getattr(
+                                v, 'inter_muscle_contact_margin', 0.001),
+                            verbose=False))
+                    contact_idx = np.concatenate((bone_idx, muscle_idx))
+                    contact_targets = np.concatenate(
+                        (bone_targets, muscle_targets), axis=0)
+                    if len(contact_idx) == 0:
+                        break
+                    base = solver.positions.copy()
+                    # Multiple contacts on one vertex are combined rather
+                    # than allowing array assignment order to choose one.
+                    unique_idx, inverse = np.unique(contact_idx,
+                                                    return_inverse=True)
+                    summed = np.zeros((len(unique_idx), 3), dtype=np.float64)
+                    count = np.zeros(len(unique_idx), dtype=np.float64)
+                    np.add.at(summed, inverse,
+                              contact_targets - base[contact_idx])
+                    np.add.at(count, inverse, 1.0)
+                    bone_idx = unique_idx
+                    displacement = summed / count[:, None]
+                    # Move a local material neighborhood with each contact
+                    # vertex. Point-only projection shears the incident tets
+                    # and can have no positive-J step even for a 1 mm escape.
+                    correction = np.zeros_like(base)
+                    used_contour_transport = False
+                    for muscle_name, (vs, ve, _, _) in solver._muscle_ranges.items():
+                        selected = np.where((bone_idx >= vs) & (bone_idx < ve))[0]
+                        if not len(selected):
+                            continue
+                        levels = np.asarray(getattr(
+                            active_muscles[muscle_name],
+                            'vertex_contour_level', []), dtype=np.int32)
+                        if levels.shape != (ve - vs,):
+                            continue
+                        local_contact = bone_idx[selected] - vs
+                        for contact_level in np.unique(levels[local_contact]):
+                            at_level = selected[levels[local_contact] == contact_level]
+                            ring_shift = np.median(displacement[at_level], axis=0)
+                            for level in range(int(contact_level) - 3,
+                                               int(contact_level) + 4):
+                                ring = np.where(levels == level)[0]
+                                if not len(ring):
+                                    continue
+                                weight = 1.0 - abs(level - contact_level) / 4.0
+                                correction[vs + ring] += weight * ring_shift
+                            used_contour_transport = True
+                    if not used_contour_transport:
+                        sigma = 0.015
+                        delta_all = (base[:, None, :]
+                                     - base[bone_idx][None, :, :])
+                        weights = np.exp(
+                            -np.sum(delta_all * delta_all, axis=2)
+                            / (2.0 * sigma * sigma))
+                        correction = ((weights @ displacement)
+                                      / np.maximum(
+                                          weights.sum(axis=1, keepdims=True),
+                                          1e-12))
+                    correction[bone_idx] = displacement
+                    correction[solver.fixed_indices] = 0.0
+                    accepted_contact = False
+                    scale = 1.0
+                    while scale >= 1e-6:
+                        candidate = base.copy()
+                        candidate += scale * correction
+                        candidate[solver.fixed_indices] = solver.fixed_targets
+                        tt = solver.tetrahedra
+                        x3 = candidate[tt[:, 3]]
+                        Ds = np.stack([
+                            candidate[tt[:, 0]] - x3,
+                            candidate[tt[:, 1]] - x3,
+                            candidate[tt[:, 2]] - x3], axis=-1)
+                        Js = np.linalg.det(Ds @ solver.Bm_inv)
+                        if float(np.min(Js)) > 1e-8:
+                            solver.positions[:] = candidate
+                            accepted_contact = True
+                            if verbose:
+                                print(f"      contact projection pass "
+                                      f"{contact_pass}: {len(bone_idx)} verts, "
+                                      f"scale={scale:.3e}, "
+                                      f"max={np.max(np.linalg.norm(displacement, axis=1))*1000:.3f}mm, "
+                                      f"minJ={np.min(Js):.3e}")
+                            break
+                        scale *= 0.5
+                    if not accepted_contact:
+                        current_x3 = base[solver.tetrahedra[:, 3]]
+                        current_Ds = np.stack([
+                            base[solver.tetrahedra[:, 0]] - current_x3,
+                            base[solver.tetrahedra[:, 1]] - current_x3,
+                            base[solver.tetrahedra[:, 2]] - current_x3], axis=-1)
+                        current_min_j = float(np.min(
+                            np.linalg.det(current_Ds @ solver.Bm_inv)))
+                        raise RuntimeError(
+                            "PN contact projection has no positive-volume step: "
+                            f"minJ={current_min_j:.3e}, "
+                            f"max displacement={np.max(np.linalg.norm(displacement, axis=1)):.3e}")
+                else:
+                    bone_idx, _ = solver._compute_collision_targets(
+                        margin=getattr(v, 'unified_bone_contact_margin', 0.001),
+                        verbose=False)
+                    muscle_idx, _ = solver._compute_muscle_collision_targets(
+                        margin=getattr(v, 'inter_muscle_contact_margin', 0.001),
+                        verbose=False)
+                    raise RuntimeError(
+                        "PN contact failed validation: "
+                        f"{len(bone_idx)} bone and {len(muscle_idx)} "
+                        "muscle penetrations remain")
+        skel.setPositions(target_pose)
+        _write_back_positions(solver, active_muscles)
+        total = time.time() - solve_start_time
+        if verbose:
+            print(f"  PN continuation complete: {accepted_steps} accepted "
+                  f"steps, total={total:.2f}s")
+        return
 
     # Update muscles from current skeleton pose
     skeleton_meshes = getattr(v, 'zygote_skeleton_meshes', None)
@@ -3588,7 +4724,7 @@ def run_all_fem_sim(v, max_iterations=100, tolerance=1e-4, verbose=True):
 
     _write_back_positions(solver, active_muscles)
 
-    total = time.time() - t0
+    total = time.time() - solve_start_time
     tag = "PN" if use_pn else ("VBD" if use_vbd else "XPBD")
     if verbose:
         print(f"  {tag}: {fevals} iters, ||dx||={residual:.4e}, total={total:.2f}s")

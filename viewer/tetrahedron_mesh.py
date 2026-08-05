@@ -2044,7 +2044,8 @@ except Exception as e:
         Load tetrahedron mesh from tet/.tet.npz file (pickle format with waypoints).
         """
         if filepath is None:
-            filepath = os.path.join("tet", f"{name}_tet.npz")
+            tet_dir = os.environ.get("MUSCLE_TET_DIR", "tet")
+            filepath = os.path.join(tet_dir, f"{name}_tet.npz")
 
         if not os.path.exists(filepath):
             print(f"[{name}] Tet file not found: {filepath}")

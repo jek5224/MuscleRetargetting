@@ -602,7 +602,7 @@ class ARAPBackendGPU(ARAPBackend):
 
 
 class ARAPBackendTaichi(ARAPBackend):
-    """Taichi backend using CUDA for parallel computation."""
+    """Taichi-parallel backend (CUDA by default, CPU when requested)."""
 
     _initialized = False
 
@@ -613,8 +613,17 @@ class ARAPBackendTaichi(ARAPBackend):
 
         # Initialize Taichi once
         if not ARAPBackendTaichi._initialized:
+            import os
             import taichi as ti
-            ti.init(arch=ti.cuda, offline_cache=True)
+            arch_name = os.environ.get('MUSCLE_TAICHI_ARCH', 'cuda').lower()
+            arch = ti.cpu if arch_name == 'cpu' else ti.cuda
+            # The project is often run in containers where ~/.cache is
+            # read-only. CPU kernel compilation is quick enough that trying
+            # (and failing) to lock that cache costs more than recompilation.
+            init_kwargs = {'arch': arch, 'offline_cache': (arch_name != 'cpu')}
+            if arch_name == 'cpu':
+                init_kwargs['offline_cache_file_path'] = '/tmp/muscle_taichi_cache'
+            ti.init(**init_kwargs)
             ARAPBackendTaichi._initialized = True
 
         self.ti = __import__('taichi')

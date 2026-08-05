@@ -335,9 +335,14 @@ def load_muscle(tet_dir, name):
         'rest_vertices': verts.copy(),
         'tetrahedra': tets,
         'fixed_vertices': sorted(fixed_verts),
+        'origin_attachment_vertices': np.asarray(
+            data.get('origin_attachment_vertices', []), dtype=np.int32),
+        'insertion_attachment_vertices': np.asarray(
+            data.get('insertion_attachment_vertices', []), dtype=np.int32),
         'cap_attachments': data.get('cap_attachments', []),
         'attach_skeleton_names': data.get('attach_skeleton_names', []),
         'vertex_contour_level': data.get('vertex_contour_level', None),
+        'fiber_directions': data.get('fiber_directions', None),
         'remap': None,
     }
 
@@ -651,6 +656,71 @@ def lame_parameters(youngs, poisson):
     return mu, lam
 
 
+def endpoint_tendon_youngs(muscle, muscle_youngs, tendon_youngs, rings):
+    """Build a face-adjacent, geometrically tapered insertion tendon."""
+    tets = muscle['tetrahedra']
+    insertion = set(int(v) for v in muscle.get(
+        'insertion_attachment_vertices', []))
+    result = np.full(len(tets), float(muscle_youngs), dtype=np.float64)
+    if rings <= 0 or not insertion:
+        return result, np.full(len(tets), -1, dtype=np.int32)
+
+    face_to_tets = {}
+    for ti, tet in enumerate(tets):
+        for opposite in range(4):
+            face = tuple(sorted(int(tet[j]) for j in range(4)
+                                if j != opposite))
+            face_to_tets.setdefault(face, []).append(ti)
+    adjacency = [set() for _ in range(len(tets))]
+    for incident in face_to_tets.values():
+        if len(incident) == 2:
+            a, b = incident
+            adjacency[a].add(b)
+            adjacency[b].add(a)
+
+    layer = np.full(len(tets), -1, dtype=np.int32)
+    frontier = [ti for ti, tet in enumerate(tets)
+                if any(int(v) in insertion for v in tet)]
+    layer[frontier] = 0
+    for depth in range(1, rings):
+        next_frontier = []
+        for ti in frontier:
+            for neighbor in adjacency[ti]:
+                if layer[neighbor] < 0:
+                    layer[neighbor] = depth
+                    next_frontier.append(neighbor)
+        frontier = next_frontier
+        if not frontier:
+            break
+
+    log_muscle = np.log(float(muscle_youngs))
+    log_tendon = np.log(float(tendon_youngs))
+    for depth in range(rings):
+        # Geometric taper avoids an equally abrupt tendon/muscle interface.
+        blend = 1.0 - depth / float(rings)
+        result[layer == depth] = np.exp(
+            log_muscle + blend * (log_tendon - log_muscle))
+    return result, layer
+
+
+def farthest_attachment_references(vertices, indices, count):
+    """Choose deterministic, well-spaced hard references on an endpoint cap."""
+    indices = np.asarray(indices, dtype=np.int32)
+    if count <= 0 or len(indices) <= count:
+        return indices
+    points = np.asarray(vertices, dtype=np.float64)[indices]
+    center = np.mean(points, axis=0)
+    selected = [int(np.argmax(np.linalg.norm(points - center, axis=1)))]
+    minimum_distance = np.linalg.norm(points - points[selected[0]], axis=1)
+    while len(selected) < count:
+        next_local = int(np.argmax(minimum_distance))
+        selected.append(next_local)
+        minimum_distance = np.minimum(
+            minimum_distance,
+            np.linalg.norm(points - points[next_local], axis=1))
+    return indices[np.asarray(selected, dtype=np.int32)]
+
+
 # ---------------------------------------------------------------------------
 # EMU Core: G matrix, ACAP, Neo-Hookean
 # ---------------------------------------------------------------------------
@@ -792,7 +862,8 @@ def compute_fiber_directions(vertices, tetrahedra, vertex_contour_level):
     return fiber_dirs
 
 
-def precompute_emu(vertices, tetrahedra, fixed_vertices, vertex_contour_level, k_modes=48):
+def precompute_emu(vertices, tetrahedra, fixed_vertices, vertex_contour_level,
+                   k_modes=48, fiber_directions=None):
     """Precompute all EMU data structures.
 
     Builds a reduced ACAP system (Eq. 21) with fixed vertex Dirichlet
@@ -849,7 +920,17 @@ def precompute_emu(vertices, tetrahedra, fixed_vertices, vertex_contour_level, k
           f"({time.time()-t0:.2f}s)")
 
     # Fiber directions
-    fiber_dirs = compute_fiber_directions(vertices, tetrahedra, vertex_contour_level)
+    if fiber_directions is not None:
+        fiber_dirs = np.asarray(fiber_directions, dtype=np.float64)
+        if fiber_dirs.shape != (m, 3):
+            raise ValueError(
+                f"fiber direction shape {fiber_dirs.shape} != {(m, 3)}")
+        fiber_norm = np.linalg.norm(fiber_dirs, axis=1, keepdims=True)
+        fiber_dirs = fiber_dirs / np.maximum(fiber_norm, 1e-12)
+        print(f"    Fibers: loaded {m} volumetric Laplace gradients")
+    else:
+        fiber_dirs = compute_fiber_directions(
+            vertices, tetrahedra, vertex_contour_level)
 
     return {
         'G': G,
@@ -896,15 +977,17 @@ def _vec_to_F(Fvec, m):
     return Fvec.reshape(m, 3, 3)
 
 
-def stable_neohookean_energy(F, volumes, mu, lam):
+def stable_neohookean_energy(F, volumes, mu, lam, active_inverse=None):
     """Stable Neo-Hookean energy, vectorized over all tets.
 
     Ψ = μ/2(I_C - 3) - μ(J - 1) + λ/2(J - 1)²
     where I_C = tr(F^T F), J = det(F).
     Total energy = sum_i V_i * Ψ_i
     """
-    I_C = np.einsum('mij,mij->m', F, F)  # tr(F^T F), (m,)
-    J = np.linalg.det(F)  # (m,)
+    elastic_F = (F if active_inverse is None else
+                 np.einsum('mij,mjk->mik', F, active_inverse))
+    I_C = np.einsum('mij,mij->m', elastic_F, elastic_F)
+    J = np.linalg.det(elastic_F)
 
     # The polynomial Stable-NH expression is finite for J < 0 unless an
     # explicit inversion guard is applied.  Without this, line search accepted
@@ -918,11 +1001,13 @@ def stable_neohookean_energy(F, volumes, mu, lam):
     return np.sum(volumes * psi)
 
 
-def stable_neohookean_gradient(F, volumes, mu, lam):
+def stable_neohookean_gradient(F, volumes, mu, lam, active_inverse=None):
     """∂Ψ/∂F for Stable Neo-Hookean, returns (m, 3, 3). Vectorized."""
-    J = np.linalg.det(F)  # (m,)
+    elastic_F = (F if active_inverse is None else
+                 np.einsum('mij,mjk->mik', F, active_inverse))
+    J = np.linalg.det(elastic_F)
     # Batch inverse — handle singular via regularization
-    F_reg = F.copy()
+    F_reg = elastic_F.copy()
     degen = np.abs(J) < 1e-12
     if np.any(degen):
         F_reg[degen] += 1e-8 * np.eye(3)
@@ -931,7 +1016,9 @@ def stable_neohookean_gradient(F, volumes, mu, lam):
     mu = np.broadcast_to(np.asarray(mu, dtype=np.float64), J.shape)
     lam = np.broadcast_to(np.asarray(lam, dtype=np.float64), J.shape)
     coeff = (lam * (J - 1) - mu) * J  # (m,)
-    P = mu[:, None, None] * F + coeff[:, None, None] * F_invT
+    P = mu[:, None, None] * elastic_F + coeff[:, None, None] * F_invT
+    if active_inverse is not None:
+        P = np.einsum('mij,mkj->mik', P, active_inverse)
     return volumes[:, None, None] * P
 
 
@@ -939,7 +1026,9 @@ def relax_positions_with_jacobian_barrier(
         q_init, precomp, fixed_mask, fixed_targets, mu, lam,
         max_iters=20, jacobian_floor=0.02, barrier_start=0.5,
         barrier_scale=5.0, activation=None,
-        stretch_frobenius_limit=12.0):
+        stretch_frobenius_limit=12.0,
+        soft_attachment_indices=None, soft_attachment_targets=None,
+        soft_attachment_weight=0.0, optimization_coordinate_scale=6e-4):
     """Exact q-space fallback for poses unsafe in reduced EMU coordinates.
 
     The reduced deformation-space solve is normally much faster, but at a
@@ -1053,12 +1142,18 @@ def relax_positions_with_jacobian_barrier(
         if np.any(~np.isfinite(J)) or np.min(J) <= jacobian_floor:
             return 1e40, np.zeros_like(x)
 
-        I_C = np.einsum('mij,mij->m', F, F)
-        psi = (mu_arr / 2.0 * (I_C - 3.0) - mu_arr * (J - 1.0) +
-               lam_arr / 2.0 * (J - 1.0) ** 2)
+        active_inverse = precomp.get('active_strain_inverse')
+        elastic_F = (F if active_inverse is None else
+                     np.einsum('mij,mjk->mik', F, active_inverse))
+        elastic_J = np.linalg.det(elastic_F)
+        I_C = np.einsum('mij,mij->m', elastic_F, elastic_F)
+        psi = (mu_arr / 2.0 * (I_C - 3.0)
+               - mu_arr * (elastic_J - 1.0) +
+               lam_arr / 2.0 * (elastic_J - 1.0) ** 2)
         energy = float(np.sum(volumes * psi))
         grad_F = stable_neohookean_gradient(
-            F, volumes, mu_arr, lam_arr)
+            F, volumes, mu_arr, lam_arr,
+            active_inverse=precomp.get('active_strain_inverse'))
         excessive_stretch = np.maximum(
             I_C - float(stretch_frobenius_limit), 0.0)
         if np.any(excessive_stretch > 0.0):
@@ -1087,6 +1182,20 @@ def relax_positions_with_jacobian_barrier(
             )[:, None, None] * cofactor
 
         grad_q = np.asarray(precomp['Gt'] @ grad_F.ravel()).ravel()
+        if (soft_attachment_indices is not None
+                and soft_attachment_targets is not None
+                and soft_attachment_weight > 0.0):
+            attachment_indices = np.asarray(
+                soft_attachment_indices, dtype=np.int64)
+            attachment_delta = (
+                current[attachment_indices]
+                - np.asarray(soft_attachment_targets, dtype=np.float64))
+            energy += float(
+                0.5 * soft_attachment_weight
+                * np.sum(attachment_delta * attachment_delta))
+            grad_q_view = grad_q.reshape(-1, 3)
+            grad_q_view[attachment_indices] += (
+                soft_attachment_weight * attachment_delta)
         return energy, grad_q[free_dofs]
 
     # Optimize in centimeter-scaled coordinates. In raw meters the elastic
@@ -1096,7 +1205,7 @@ def relax_positions_with_jacobian_barrier(
     # Calibrated from the q-gradient magnitude (typically 1e3--1e4): because
     # an L-BFGS identity step in physical coordinates scales as scale²*g,
     # 3e-4 produces an initial displacement around 0.1 mm rather than 0.1 m.
-    coordinate_scale = 6e-4
+    coordinate_scale = float(optimization_coordinate_scale)
     x0 = q_flat[free_dofs].copy()
 
     # Feasible steepest-descent startup. Near the determinant barrier SciPy's
@@ -1149,7 +1258,8 @@ def relax_positions_with_jacobian_barrier(
     return relaxed if info['success'] else None, info
 
 
-def stable_neohookean_hessian_blocks(F, volumes, mu, lam):
+def stable_neohookean_hessian_blocks(
+        F, volumes, mu, lam, active_inverse=None):
     """Per-tet 9×9 analytical Hessian of V*Ψ_iso w.r.t. vec(F_i). Vectorized.
 
     Full Stable Neo-Hookean [SGK18] Hessian including all cross-terms
@@ -1160,12 +1270,14 @@ def stable_neohookean_hessian_blocks(F, volumes, mu, lam):
                    - coeff2 · g_{cb} · g_{ad}
     """
     m = len(F)
+    elastic_F = (F if active_inverse is None else
+                 np.einsum('mij,mjk->mik', F, active_inverse))
     eps_spd = 1e-6
-    J = np.linalg.det(F)  # (m,)
+    J = np.linalg.det(elastic_F)  # (m,)
     V = np.maximum(volumes, 1e-15)  # (m,)
 
     # Batch inverse
-    F_reg = F.copy()
+    F_reg = elastic_F.copy()
     degen = np.abs(J) < 1e-12
     if np.any(degen):
         F_reg[degen] += 1e-8 * np.eye(3)
@@ -1208,6 +1320,19 @@ def stable_neohookean_hessian_blocks(F, volumes, mu, lam):
     eigvals, eigvecs = np.linalg.eigh(H)  # (m, 9), (m, 9, 9)
     eigvals = np.maximum(eigvals, eps_spd)
     H = np.einsum('mij,mj,mkj->mik', eigvecs, eigvals, eigvecs)
+
+    if active_inverse is not None:
+        # Row-major vec(F A^-1) = T vec(F), with A^-T repeated for
+        # the three spatial rows. Chain rule: H_F = T^T H_e T.
+        transform = np.zeros((m, 9, 9), dtype=np.float64)
+        block = np.transpose(active_inverse, (0, 2, 1))
+        for row in range(3):
+            sl = slice(3 * row, 3 * row + 3)
+            transform[:, sl, sl] = block
+        H = np.einsum('mji,mjk,mkl->mil', transform, H, transform)
+        eigvals, eigvecs = np.linalg.eigh(H)
+        eigvals = np.maximum(eigvals, eps_spd)
+        H = np.einsum('mij,mj,mkj->mik', eigvecs, eigvals, eigvecs)
 
     return H  # (m, 9, 9)
 
@@ -1291,10 +1416,12 @@ def emu_energy(Fvec, precomp, fixed_targets_flat, mu, lam, alpha, use_gpu=True,
     """Total EMU energy Ψiso + Ψfiber + α EC (paper Eq. 5)."""
     m = precomp['n_tets']
     F = _vec_to_F(Fvec, m)
-    if use_gpu:
+    if use_gpu and precomp.get('active_strain_inverse') is None:
         E_iso = stable_neohookean_energy_gpu(F, precomp['volumes'], mu, lam)
     else:
-        E_iso = stable_neohookean_energy(F, precomp['volumes'], mu, lam)
+        E_iso = stable_neohookean_energy(
+            F, precomp['volumes'], mu, lam,
+            active_inverse=precomp.get('active_strain_inverse'))
     E_fiber = fiber_energy(
         F, precomp['fiber_dirs'], activation, precomp['volumes'])
     E_c = acap_energy(Fvec, precomp, fixed_targets_flat)
@@ -1305,12 +1432,13 @@ def emu_energy_terms(Fvec, precomp, fixed_targets_flat, mu, lam, alpha,
                      use_gpu=True, activation=None):
     """Return separately named terms of paper Eq. 5 for diagnostics."""
     F = _vec_to_F(Fvec, precomp['n_tets'])
-    if use_gpu:
+    if use_gpu and precomp.get('active_strain_inverse') is None:
         isotropic = stable_neohookean_energy_gpu(
             F, precomp['volumes'], mu, lam)
     else:
         isotropic = stable_neohookean_energy(
-            F, precomp['volumes'], mu, lam)
+            F, precomp['volumes'], mu, lam,
+            active_inverse=precomp.get('active_strain_inverse'))
     fiber = fiber_energy(
         F, precomp['fiber_dirs'], activation, precomp['volumes'])
     acap_raw = acap_energy(Fvec, precomp, fixed_targets_flat)
@@ -1329,10 +1457,12 @@ def emu_gradient(Fvec, precomp, fixed_targets_flat, mu, lam, alpha, use_gpu=True
     m = precomp['n_tets']
     F = _vec_to_F(Fvec, m)
 
-    if use_gpu:
+    if use_gpu and precomp.get('active_strain_inverse') is None:
         P = stable_neohookean_gradient_gpu(F, precomp['volumes'], mu, lam)
     else:
-        P = stable_neohookean_gradient(F, precomp['volumes'], mu, lam)
+        P = stable_neohookean_gradient(
+            F, precomp['volumes'], mu, lam,
+            active_inverse=precomp.get('active_strain_inverse'))
     P_fiber = fiber_gradient(
         F, precomp['fiber_dirs'], activation, precomp['volumes'])
     g_iso = _F_to_vec(P + P_fiber)
@@ -1366,7 +1496,9 @@ def newton_step_woodbury(gradient, Fvec, precomp, mu, lam, alpha,
     F = _vec_to_F(Fvec, m)
 
     # H = ∂²Ψ_iso/∂F² + αI  (block-diagonal, m × 9 × 9)
-    H_blocks = stable_neohookean_hessian_blocks(F, precomp['volumes'], mu, lam)
+    H_blocks = stable_neohookean_hessian_blocks(
+        F, precomp['volumes'], mu, lam,
+        active_inverse=precomp.get('active_strain_inverse'))
     H_blocks += fiber_hessian_blocks(
         precomp['fiber_dirs'], activation, precomp['volumes'])
     for i in range(m):
@@ -1880,7 +2012,8 @@ def emu_solve(q_init, precomp, fixed_mask, fixed_targets,
     e2 = 1e-2
 
     heterogeneous = np.ndim(mu) > 0 or np.ndim(lam) > 0
-    if use_gpu and (heterogeneous or activation is not None):
+    active_strain = precomp.get('active_strain_inverse') is not None
+    if use_gpu and (heterogeneous or activation is not None or active_strain):
         print("    EMU GPU kernels do not support heterogeneous/fiber material yet; using CPU")
         use_gpu = False
 
@@ -1922,7 +2055,8 @@ def emu_solve(q_init, precomp, fixed_mask, fixed_targets,
                 _ti_hessian_build(F_mat.reshape(m, 9).copy(), precomp['volumes'], mu, lam, 0.0, H_cached)
             else:
                 H_cached = stable_neohookean_hessian_blocks(
-                    F_mat, precomp['volumes'], mu, lam)
+                    F_mat, precomp['volumes'], mu, lam,
+                    active_inverse=precomp.get('active_strain_inverse'))
                 H_cached += fiber_hessian_blocks(
                     precomp['fiber_dirs'], activation, precomp['volumes'])
             eigv, eigvc = np.linalg.eigh(H_cached)
@@ -2262,6 +2396,11 @@ def main():
     parser = argparse.ArgumentParser(description="EMU muscle simulation bake")
     parser.add_argument('--bvh', required=True, help='BVH motion file')
     parser.add_argument('--sides', default='L', help='L, R, or LR')
+    parser.add_argument(
+        '--muscles', default='',
+        help='Comma-separated exact tet muscle names. When supplied, bypasses '
+             'the built-in side/up-leg list; for example '
+             'L_Adductor_Longus_Subdivided.')
     parser.add_argument('--start-frame', type=int, default=0)
     parser.add_argument('--end-frame', type=int, default=None)
     parser.add_argument('--tet-dir', default='tet')
@@ -2269,6 +2408,33 @@ def main():
     parser.add_argument('--youngs', type=float, default=6e6,
                         help='Young\'s modulus (Pa, default: 6e6 for muscle)')
     parser.add_argument('--poisson', type=float, default=0.49)
+    parser.add_argument('--insertion-tendon-rings', type=int, default=0,
+                        help='Face-adjacent free tet layers forming a stiff, '
+                             'geometrically tapered insertion tendon.')
+    parser.add_argument('--tendon-youngs', type=float, default=4.5e8)
+    parser.add_argument('--activation-max', type=float, default=0.0,
+                        help='Maximum EMU fiber activation coefficient (Pa).')
+    parser.add_argument('--activation-full-shortening', type=float, default=0.20,
+                        help='Origin/insertion span shortening fraction that '
+                             'reaches --activation-max.')
+    parser.add_argument('--active-strain-from-span', action='store_true',
+                        help='Use det-one fiber active strain derived from the '
+                             'current attachment-span ratio instead of linear '
+                             'EMU fiber-force activation.')
+    parser.add_argument('--minimum-active-stretch', type=float, default=0.70)
+    parser.add_argument('--repair-invalid-q', action='store_true',
+                        help='Run the exact q-space Jacobian-barrier fallback '
+                             'and warm-start from its continuous deformation.')
+    parser.add_argument('--attachment-reference-count', type=int, default=0,
+                        help='If positive, hard-fix only this many well-spaced '
+                             'vertices on each endpoint cap; the rest deform '
+                             'through the tendon material.')
+    parser.add_argument('--q-refine-every-frame', action='store_true',
+                        help='Run the exact near-incompressible q-space '
+                             'material refinement after every EMU solve.')
+    parser.add_argument('--soft-cap-weight', type=float, default=0.0,
+                        help='q-space spring stiffness (N/m) for all authored '
+                             'cap vertices not selected as hard references.')
     parser.add_argument('--alpha', type=float, default=1.0,
                         help='ACAP continuity weight (paper: start at 1, increase until Newton iters spike)')
     parser.add_argument('--max-iters', type=int, default=30,
@@ -2301,16 +2467,55 @@ def main():
     # ── Load muscles ─────────────────────────────────────────────────
     print(f"[3] Loading muscles from {args.tet_dir}/...")
     muscles = []
-    for side in args.sides:
-        for muscle_name in UPLEG_MUSCLES:
-            name = f"{side}_{muscle_name}"
+    requested_muscles = [
+        name.strip() for name in args.muscles.split(',') if name.strip()]
+    if requested_muscles:
+        for name in requested_muscles:
             data = load_muscle(args.tet_dir, name)
             if data is not None:
                 muscles.append(data)
+            else:
+                print(f"    WARNING: requested muscle not found: {name}")
+    else:
+        for side in args.sides:
+            for muscle_name in UPLEG_MUSCLES:
+                name = f"{side}_{muscle_name}"
+                data = load_muscle(args.tet_dir, name)
+                if data is not None:
+                    muscles.append(data)
 
     if not muscles:
         print("ERROR: No muscles loaded!")
         sys.exit(1)
+
+    if args.insertion_tendon_rings > 0 and args.workers != 1:
+        print("    Tendon material is heterogeneous; forcing --workers 1")
+        args.workers = 1
+
+    for muscle in muscles:
+        if args.attachment_reference_count > 0:
+            origin_reference = farthest_attachment_references(
+                muscle['vertices'], muscle['origin_attachment_vertices'],
+                args.attachment_reference_count)
+            insertion_reference = farthest_attachment_references(
+                muscle['vertices'], muscle['insertion_attachment_vertices'],
+                args.attachment_reference_count)
+            muscle['fixed_vertices'] = sorted(set(
+                origin_reference.tolist() + insertion_reference.tolist()))
+            print(f"    {muscle['name']} compliant caps: "
+                  f"{len(origin_reference)} origin + "
+                  f"{len(insertion_reference)} insertion hard references")
+        youngs_field, tendon_layer = endpoint_tendon_youngs(
+            muscle, args.youngs, args.tendon_youngs,
+            args.insertion_tendon_rings)
+        if args.insertion_tendon_rings > 0:
+            muscle['mu'], muscle['lam'] = lame_parameters(
+                youngs_field, args.poisson)
+            muscle['tendon_layer'] = tendon_layer
+            counts = [int(np.sum(tendon_layer == depth))
+                      for depth in range(args.insertion_tendon_rings)]
+            print(f"    {muscle['name']} insertion tendon tet layers: "
+                  f"{counts}")
 
     total_verts = sum(len(m['vertices']) for m in muscles)
     total_tets = sum(len(m['tetrahedra']) for m in muscles)
@@ -2347,7 +2552,16 @@ def main():
     for m in muscles:
         m['emu'] = precompute_emu(
             m['vertices'], m['tetrahedra'], m['fixed_vertices'],
-            m.get('vertex_contour_level'), k_modes=args.k_modes)
+            m.get('vertex_contour_level'), k_modes=args.k_modes,
+            fiber_directions=m.get('fiber_directions'))
+        origin_vertices = np.asarray(
+            m.get('origin_attachment_vertices', []), dtype=np.int32)
+        insertion_vertices = np.asarray(
+            m.get('insertion_attachment_vertices', []), dtype=np.int32)
+        if len(origin_vertices) and len(insertion_vertices):
+            m['rest_attachment_span'] = float(np.linalg.norm(
+                np.mean(m['vertices'][insertion_vertices], axis=0)
+                - np.mean(m['vertices'][origin_vertices], axis=0)))
 
     # ── (Optional) unified precomputation for reference ──────────────
     print("[5b] Building unified vertex/tet arrays...")
@@ -2515,7 +2729,50 @@ def main():
             for vi in m['fixed_vertices']:
                 if vi < n_v:
                     fixed_mask[vi] = True
-            solve_args.append((mi, m, q_init, lbs_pos, fixed_mask))
+            activation = None
+            if ((args.activation_max > 0.0 or args.active_strain_from_span)
+                    and 'rest_attachment_span' in m):
+                origin_vertices = m['origin_attachment_vertices']
+                insertion_vertices = m['insertion_attachment_vertices']
+                current_span = float(np.linalg.norm(
+                    np.mean(lbs_pos[insertion_vertices], axis=0)
+                    - np.mean(lbs_pos[origin_vertices], axis=0)))
+                shortening = max(
+                    0.0, 1.0 - current_span / m['rest_attachment_span'])
+                level = min(
+                    1.0, shortening
+                    / max(args.activation_full_shortening, 1e-6))
+                tendon_layer = m.get('tendon_layer')
+                if args.active_strain_from_span:
+                    active_stretch = float(np.clip(
+                        current_span / m['rest_attachment_span'],
+                        args.minimum_active_stretch, 1.0))
+                    fibers = m['emu']['fiber_dirs']
+                    uu = np.einsum('mi,mj->mij', fibers, fibers)
+                    identity = np.broadcast_to(
+                        np.eye(3), (len(fibers), 3, 3)).copy()
+                    # F_a^-1 = lambda^-1 uu^T
+                    #          + sqrt(lambda)(I-uu^T), det(F_a)=1.
+                    active_inverse = (
+                        (1.0 / active_stretch) * uu
+                        + np.sqrt(active_stretch) * (identity - uu))
+                    if tendon_layer is not None:
+                        active_inverse[
+                            np.asarray(tendon_layer) >= 0] = np.eye(3)
+                    m['emu']['active_strain_inverse'] = active_inverse
+                    print(f"    {m['name']} active_stretch="
+                          f"{active_stretch:.3f} span={current_span:.6g}m",
+                          flush=True)
+                else:
+                    m['emu'].pop('active_strain_inverse', None)
+                    activation = np.full(
+                        len(m['tetrahedra']),
+                        args.activation_max * level, dtype=np.float64)
+                    if tendon_layer is not None:
+                        activation[np.asarray(tendon_layer) >= 0] = 0.0
+                    print(f"    {m['name']} activation={level:.3f} "
+                          f"span={current_span:.6g}m", flush=True)
+            solve_args.append((mi, m, q_init, lbs_pos, fixed_mask, activation))
 
         if n_workers > 1:
             import multiprocessing as mp
@@ -2538,21 +2795,55 @@ def main():
                     prev_Fvec[mname] = fvec_result
         else:
             for task in solve_args:
-                mi, m_data, q_init, lbs_pos, fixed_mask = task
+                mi, m_data, q_init, lbs_pos, fixed_mask, activation = task
                 warm_F = prev_Fvec.get(m_data['name'])
                 q, info = emu_solve(
                     q_init, m_data['emu'], fixed_mask, lbs_pos,
-                    mu, lam, args.alpha,
+                    m_data.get('mu', mu), m_data.get('lam', lam), args.alpha,
                     max_iters=args.max_iters,
                     verbose=(frame == args.start_frame),
                     bone_trimeshes=bone_tms,
                     muscle_surfaces=[muscle_surfaces[mi]],
                     margin=0.002,
                     use_gpu=use_gpu_solve,
-                    warm_F=warm_F)
+                    warm_F=warm_F, activation=activation)
+                accepted_F = _deformation_gradients_from_q(
+                    q, m_data['emu']['tetrahedra'], m_data['emu']['Dm_inv'])
+                accepted_J = np.linalg.det(accepted_F)
+                needs_q_repair = (
+                    not np.all(np.isfinite(accepted_J))
+                    or np.min(accepted_J) <= 0.02)
+                if (args.repair_invalid_q
+                        and (needs_q_repair or args.q_refine_every_frame)):
+                    print(
+                        f"    {m_data['name']} q refinement: "
+                        f"minJ={np.nanmin(accepted_J):.6g}", flush=True)
+                    repaired_q, repair_info = relax_positions_with_jacobian_barrier(
+                        q, m_data['emu'], fixed_mask, lbs_pos,
+                        m_data.get('mu', mu), m_data.get('lam', lam),
+                        max_iters=80, activation=activation,
+                        soft_attachment_indices=(
+                            np.unique(np.concatenate((
+                                m_data['origin_attachment_vertices'],
+                                m_data['insertion_attachment_vertices'])))
+                            if args.soft_cap_weight > 0.0 else None),
+                        soft_attachment_targets=(
+                            lbs_pos[np.unique(np.concatenate((
+                                m_data['origin_attachment_vertices'],
+                                m_data['insertion_attachment_vertices'])))]
+                            if args.soft_cap_weight > 0.0 else None),
+                        soft_attachment_weight=args.soft_cap_weight)
+                    print(f"    q repair result: {repair_info}", flush=True)
+                    if repaired_q is not None:
+                        q = repaired_q
+                        accepted_F = _deformation_gradients_from_q(
+                            q, m_data['emu']['tetrahedra'],
+                            m_data['emu']['Dm_inv'])
                 bake_buffers[m_data['name']][frame] = q.astype(np.float32)
-                if info.get('Fvec') is not None:
-                    prev_Fvec[m_data['name']] = info['Fvec']
+                # A discontinuous optimized F can reconstruct to an invalid
+                # continuous q. Only the accepted continuous state may seed
+                # the next quasistatic frame.
+                prev_Fvec[m_data['name']] = accepted_F.ravel().copy()
 
         dt = time.time() - t0
         print(f"  Frame {frame}: {dt:.2f}s ({n_workers}w)", flush=True)

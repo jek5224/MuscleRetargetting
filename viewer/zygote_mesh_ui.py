@@ -15,6 +15,7 @@ import json
 import time
 import copy
 import pickle
+from functools import lru_cache
 try:
     import glfw
 except ImportError:
@@ -40,6 +41,181 @@ ZYGOTE_TENDON_COLOR = np.array([1.0, 0.82, 0.78], dtype=np.float32)
 # this request produces about 30k TetGen elements after anatomical projection:
 # the best tested surface-fidelity, stability, and runtime compromise.
 RECTUS_FEMORIS_BASELINE_TETS = 20000
+
+
+def _clip_polygon_to_half_plane(polygon, normal, offset, eps=1e-12):
+    """Clip a convex 2D polygon to ``dot(normal, p) <= offset``."""
+    if len(polygon) == 0:
+        return polygon
+
+    clipped = []
+    previous = np.asarray(polygon[-1], dtype=np.float64)
+    previous_value = float(np.dot(normal, previous) - offset)
+    previous_inside = previous_value <= eps
+
+    for current_raw in polygon:
+        current = np.asarray(current_raw, dtype=np.float64)
+        current_value = float(np.dot(normal, current) - offset)
+        current_inside = current_value <= eps
+
+        if current_inside != previous_inside:
+            denominator = previous_value - current_value
+            if abs(denominator) > eps:
+                t = previous_value / denominator
+                clipped.append(previous + t * (current - previous))
+        if current_inside:
+            clipped.append(current)
+
+        previous = current
+        previous_value = current_value
+        previous_inside = current_inside
+
+    return clipped
+
+
+@lru_cache(maxsize=64)
+def _unit_square_voronoi_cells_cached(sample_key):
+    """Return Voronoi cells clipped to [0, 1]^2 for a hashable sample key.
+
+    Intersecting pairwise nearest-site half-planes avoids the unbounded-cell
+    handling required by scipy.spatial.Voronoi and also handles a single site.
+    The inspector cache makes the O(N^3) construction a one-time cost whenever
+    the fiber samples change.
+    """
+    samples = np.asarray(sample_key, dtype=np.float64)
+    if samples.size == 0:
+        return ()
+    samples = samples.reshape((-1, 2))
+    cells = []
+
+    for i, site in enumerate(samples):
+        polygon = [
+            np.array([0.0, 0.0]),
+            np.array([1.0, 0.0]),
+            np.array([1.0, 1.0]),
+            np.array([0.0, 1.0]),
+        ]
+        for j, other in enumerate(samples):
+            if i == j:
+                continue
+            normal = 2.0 * (other - site)
+            if np.dot(normal, normal) < 1e-24:
+                continue
+            offset = float(np.dot(other, other) - np.dot(site, site))
+            polygon = _clip_polygon_to_half_plane(polygon, normal, offset)
+            if not polygon:
+                break
+        cells.append(tuple((float(p[0]), float(p[1])) for p in polygon))
+
+    return tuple(cells)
+
+
+def _unit_square_voronoi_cells(samples):
+    """Compute stable, cached unit-square Voronoi cells for fiber samples."""
+    points = np.asarray(samples, dtype=np.float64)
+    if points.size == 0:
+        return ()
+    points = points.reshape((-1, points.shape[-1]))[:, :2]
+    # Rounded coordinates prevent insignificant reconstruction noise from
+    # defeating the render cache while retaining far more precision than UI
+    # sampling needs.
+    key = tuple((round(float(p[0]), 12), round(float(p[1]), 12)) for p in points)
+    return _unit_square_voronoi_cells_cached(key)
+
+
+def _map_voronoi_cells_to_contour(obj, plane_info, samples, cells):
+    """Map labeled unit-square Voronoi cells with the waypoint MVC chart.
+
+    Each returned cell contains the mapped fiber site first, followed by its
+    mapped boundary vertices.  Keeping the site lets the renderer use the same
+    triangle fan in parameter and contour space and expose local foldovers.
+    """
+    if not cells or plane_info is None:
+        return ()
+
+    sites = np.asarray(samples, dtype=np.float64)
+    if sites.size == 0:
+        return ()
+    sites = sites.reshape((-1, sites.shape[-1]))[:, :2]
+
+    query_points = []
+    cell_sizes = []
+    for site, cell in zip(sites, cells):
+        if len(cell) < 3:
+            cell_sizes.append(0)
+            continue
+        query_points.append(site)
+        query_points.extend(cell)
+        cell_sizes.append(1 + len(cell))
+    if not query_points:
+        return ()
+
+    query = np.asarray(query_points, dtype=np.float64)
+    contour_match = plane_info.get('contour_match', ())
+    try:
+        chart_values = np.asarray(
+            [np.asarray(value, dtype=np.float64)
+             for pair in contour_match for value in pair], dtype=np.float64)
+        bp_values = np.asarray(
+            plane_info.get('bounding_plane', ()), dtype=np.float64)
+        chart_signature = (
+            chart_values.shape, hash(chart_values.tobytes()),
+            bp_values.shape, hash(bp_values.tobytes()),
+        )
+    except (TypeError, ValueError):
+        chart_signature = (len(contour_match), id(contour_match))
+    cache_key = (
+        hash(query.tobytes()), query.shape, chart_signature,
+        getattr(obj, 'fiber_positioning_method', 'mvc'),
+    )
+
+    cache = getattr(obj, '_inspect_voronoi_transfer_cache', None)
+    if cache is None:
+        cache = {}
+        obj._inspect_voronoi_transfer_cache = cache
+    mapped = cache.get(cache_key)
+    if mapped is None:
+        # find_waypoints is the P<-Q MVC map used by the existing grid-fiber
+        # pipeline.  Calling it for all cell vertices in one batch keeps the
+        # displayed transfer consistent with the red waypoint locations.
+        _, mapped, _ = obj.find_waypoints(plane_info, query)
+        mapped = np.asarray(mapped, dtype=np.float64)
+
+        # A Q polygon can contain two adjacent samples at effectively the same
+        # unit-square corner (especially in older/closest-edge contour_match
+        # data).  Generic MVC then selects the first matching Q entry, which
+        # can be one contour index away from the explicit corner correspondence
+        # shown by Inspect 2D.  Unit-square corners are not ambiguous: map them
+        # directly through the stored corner_indices.
+        corner_indices = plane_info.get('corner_indices')
+        if corner_indices is not None and len(corner_indices) >= 4:
+            unit_corners = np.array([
+                [0.0, 0.0], [1.0, 0.0],
+                [1.0, 1.0], [0.0, 1.0],
+            ], dtype=np.float64)
+            for query_i, uv in enumerate(query):
+                distances = np.linalg.norm(unit_corners - uv, axis=1)
+                corner_i = int(np.argmin(distances))
+                if distances[corner_i] > 1e-10:
+                    continue
+                contour_i = int(corner_indices[corner_i])
+                if 0 <= contour_i < len(contour_match):
+                    mapped[query_i] = np.asarray(
+                        contour_match[contour_i][0], dtype=np.float64)
+
+        if len(cache) >= 64:
+            cache.pop(next(iter(cache)))
+        cache[cache_key] = mapped
+
+    mapped_cells = []
+    offset = 0
+    for size in cell_sizes:
+        if size == 0:
+            mapped_cells.append(None)
+            continue
+        mapped_cells.append(mapped[offset:offset + size])
+        offset += size
+    return tuple(mapped_cells)
 
 
 def _is_zygote_tendon_mesh(name, path=None):
@@ -6728,20 +6904,8 @@ def _draw_zygote_muscle_body(v, name, obj):
         obj._tet_edge_verts = None
         obj._tet_edge_vidx = None
         obj._tet_edge_source = None
-    imgui.same_line()
-    if not hasattr(obj, 'is_draw_tet_internal_faces'):
-        obj.is_draw_tet_internal_faces = False
-    changed_tet_internal, obj.is_draw_tet_internal_faces = imgui.checkbox(
-        "Tet Internals", obj.is_draw_tet_internal_faces)
-    display_changed = display_changed or changed_tet_internal
-    if getattr(obj, 'is_draw_tet_internal_faces', False):
-        stride = int(getattr(obj, 'tet_internal_face_stride', 1))
-        changed_stride, new_stride = imgui.slider_int(
-            f"Internal Stride##{name}", stride, 1, 20)
-        if changed_stride:
-            obj.tet_internal_face_stride = int(new_stride)
-            obj._tet_internal_verts = None
-            display_changed = True
+    # Internal tet faces/stride controls are intentionally hidden.
+    obj.is_draw_tet_internal_faces = False
     changed_constraints, obj.is_draw_constraints = imgui.checkbox("Constraints", obj.is_draw_constraints)
     display_changed = display_changed or changed_constraints
     if display_changed:
@@ -6823,22 +6987,11 @@ def draw_zygote_muscle_ui(v):
                 obj.is_draw_tet_mesh = v.is_draw_zygote_muscle_tet
         imgui.same_line()
         _, v.zygote_tet_transparency = imgui.slider_float("Tet Mesh Transparency", v.zygote_tet_transparency, 0.0, 1.0)
-        if not hasattr(v, 'is_draw_zygote_tet_internal_faces'):
-            v.is_draw_zygote_tet_internal_faces = False
-        if not hasattr(v, 'zygote_tet_internal_face_stride'):
-            v.zygote_tet_internal_face_stride = 1
-        changed, v.is_draw_zygote_tet_internal_faces = imgui.checkbox(
-            "Draw Tet Internals", v.is_draw_zygote_tet_internal_faces)
-        if changed:
-            for name, obj in v.zygote_muscle_meshes.items():
-                obj.is_draw_tet_internal_faces = v.is_draw_zygote_tet_internal_faces
-        changed, new_stride = imgui.slider_int(
-            "Tet Internal Stride", int(v.zygote_tet_internal_face_stride), 1, 20)
-        if changed:
-            v.zygote_tet_internal_face_stride = int(new_stride)
-            for name, obj in v.zygote_muscle_meshes.items():
-                obj.tet_internal_face_stride = int(new_stride)
-                obj._tet_internal_verts = None
+        # Internal tet faces are intentionally hidden; the surface/tet toggle
+        # above remains available without exposing the internal-face controls.
+        v.is_draw_zygote_tet_internal_faces = False
+        for obj in v.zygote_muscle_meshes.values():
+            obj.is_draw_tet_internal_faces = False
 
         changed, v.is_draw_zygote_muscle_fibers = imgui.checkbox("##draw_fibers", v.is_draw_zygote_muscle_fibers)
         if changed:
@@ -8022,10 +8175,20 @@ def _draw_motion_browser_ui(v):
 
     # Reload cache from disk (useful while a bake is writing fresh chunks).
     if v.motion_bvh is not None:
-        if imgui.button("Reload Cache##motion"):
+        if imgui.button("Load Latest Cache##motion"):
             import time as _t
             _t0 = _t.time()
-            _motion_load_cache(v, force=True)
+            _motion_load_cache(v, force=True, prefer_latest=True)
+            _motion_load_tissue_cage_overlay(v)
+            # Refresh the currently displayed geometry immediately. Reloading
+            # only the dictionaries left the old cache positions onscreen
+            # until the user changed frames.
+            current_frame = int(getattr(v, "motion_current_frame", 0))
+            _motion_apply_pose(v, current_frame)
+            if v.motion_use_nn and v.motion_nn_model is not None:
+                _motion_apply_nn_deformation(v, current_frame)
+            else:
+                _motion_apply_cached_deformation(v, current_frame)
             print(f"[Motion] Cache reload: {_t.time() - _t0:.2f}s, {len(v.motion_deform_cache)} muscles")
         imgui.same_line()
     if imgui.button("Reload BVH List##motion"):
@@ -8147,6 +8310,24 @@ def _draw_motion_browser_ui(v):
         num_cached = len(cached_frames)
         loading_tag = " [loading...]" if getattr(v, 'motion_cache_loading', False) else ""
         imgui.text(f"Cache: {num_cached}/{v.motion_total_frames} frames baked{loading_tag}")
+
+        changed_cage, v.draw_tissue_cage = imgui.checkbox(
+            "Draw Tissue Cage##motion_cage",
+            getattr(v, "draw_tissue_cage", False))
+        if changed_cage and v.draw_tissue_cage:
+            _motion_load_tissue_cage_overlay(v)
+        if getattr(v, "draw_tissue_cage", False):
+            _, v.draw_tissue_cage_rest = imgui.checkbox(
+                "Rest Cage##motion_cage_rest",
+                getattr(v, "draw_tissue_cage_rest", False))
+            overlay = getattr(v, "tissue_cage_overlay", None)
+            if overlay is not None:
+                frame = int(v.motion_current_frame)
+                if (not v.draw_tissue_cage_rest
+                        and frame not in overlay["frames"]):
+                    imgui.text_colored(
+                        f"No saved cage for frame {frame}; showing rest",
+                        1.0, 0.65, 0.2)
 
         # Save Current Frame button
         has_soft_bodies = any(m.soft_body is not None for m in v.zygote_muscle_meshes.values()) if hasattr(v, 'zygote_muscle_meshes') else False
@@ -8653,10 +8834,36 @@ def _render_inspect_2d_windows(v):
             draw_list.add_rect_filled(left_x0, left_y0, left_x1, left_y1, imgui.get_color_u32_rgba(0.15, 0.15, 0.15, 1.0))
             draw_list.add_rect(left_x0, left_y0, left_x1, left_y1, imgui.get_color_u32_rgba(0.5, 0.5, 0.5, 1.0), thickness=2.0)
 
-            # Draw fiber samples (green) and check hover
+            # Draw the unit-square Voronoi partition behind the fiber samples.
+            # It is derived from the live fiber architecture, so Grid Apply
+            # automatically selects/recomputes the matching cached partition.
             fiber_samples = []
             if has_fiber and stream_idx < len(obj.fiber_architecture):
                 fiber_samples = obj.fiber_architecture[stream_idx]
+                voronoi_cells = _unit_square_voronoi_cells(fiber_samples)
+                voronoi_fill = imgui.get_color_u32_rgba(0.10, 0.32, 0.22, 0.28)
+                voronoi_edge = imgui.get_color_u32_rgba(0.30, 0.72, 0.48, 0.85)
+                for cell in voronoi_cells:
+                    if len(cell) < 3:
+                        continue
+                    screen_cell = []
+                    for cell_u, cell_v in cell:
+                        cell_u, cell_v = _rot_uv(cell_u, cell_v)
+                        screen_cell.append((
+                            left_x0 + cell_u * canvas_size,
+                            left_y0 + (1 - cell_v) * canvas_size,
+                        ))
+                    draw_list.path_clear()
+                    for cell_x, cell_y in screen_cell:
+                        draw_list.path_line_to(cell_x, cell_y)
+                    draw_list.path_fill_convex(voronoi_fill)
+                    draw_list.path_clear()
+                    for cell_x, cell_y in screen_cell:
+                        draw_list.path_line_to(cell_x, cell_y)
+                    draw_list.path_stroke(
+                        voronoi_edge, flags=imgui.DRAW_CLOSED, thickness=1.0)
+
+                # Draw fiber samples (green) over their Voronoi cells and check hover.
                 for i, sample in enumerate(fiber_samples):
                     if len(sample) >= 2:
                         _fu, _fv = _rot_uv(sample[0], sample[1])
@@ -8771,6 +8978,67 @@ def _render_inspect_2d_windows(v):
                     return (right_x0 + nx * canvas_size, right_y0 + (1 - ny) * canvas_size)
 
                 p_screen_points = [_p2d_to_screen(p_2d) for p_2d in p_2d_list]
+
+                # Transfer the shared unit-square Voronoi cells through the
+                # same MVC chart used by the fiber waypoints.  A triangle fan
+                # supports concave mapped cells; locally inverted triangles are
+                # colored red so mapping defects remain visible in Inspect 2D.
+                if has_fiber and stream_idx < len(obj.fiber_architecture):
+                    right_samples = obj.fiber_architecture[stream_idx]
+                    right_cells_uv = _unit_square_voronoi_cells(right_samples)
+                    right_cells_3d = _map_voronoi_cells_to_contour(
+                        obj, plane_info, right_samples, right_cells_uv)
+                    valid_fill = imgui.get_color_u32_rgba(0.10, 0.32, 0.22, 0.25)
+                    valid_edge = imgui.get_color_u32_rgba(0.30, 0.72, 0.48, 0.82)
+                    flipped_fill = imgui.get_color_u32_rgba(0.75, 0.12, 0.12, 0.34)
+                    flipped_edge = imgui.get_color_u32_rgba(0.95, 0.25, 0.20, 0.90)
+
+                    for fiber_i, (cell_uv, cell_3d) in enumerate(
+                            zip(right_cells_uv, right_cells_3d)):
+                        if cell_3d is None or len(cell_3d) < 4:
+                            continue
+                        mapped_2d = [
+                            np.array([
+                                np.dot(point - mean, _dbx),
+                                np.dot(point - mean, _dby),
+                            ])
+                            for point in cell_3d
+                        ]
+                        mapped_screen = [_p2d_to_screen(point) for point in mapped_2d]
+                        # Use the actual fiber site, not the cell centroid, as
+                        # the parameter-space triangle-fan center.
+                        # cell_3d[0] was generated from the corresponding site.
+                        site_uv = np.asarray(right_samples[fiber_i])[:2]
+
+                        any_flipped = False
+                        boundary_count = len(cell_uv)
+                        for boundary_i in range(boundary_count):
+                            next_i = (boundary_i + 1) % boundary_count
+                            uv_a = np.asarray(cell_uv[boundary_i]) - site_uv
+                            uv_b = np.asarray(cell_uv[next_i]) - site_uv
+                            uv_cross = uv_a[0] * uv_b[1] - uv_a[1] * uv_b[0]
+                            mapped_a = mapped_2d[1 + boundary_i] - mapped_2d[0]
+                            mapped_b = mapped_2d[1 + next_i] - mapped_2d[0]
+                            mapped_cross = (mapped_a[0] * mapped_b[1]
+                                            - mapped_a[1] * mapped_b[0])
+                            flipped = uv_cross * mapped_cross < -1e-12
+                            any_flipped = any_flipped or flipped
+                            center_screen = mapped_screen[0]
+                            a_screen = mapped_screen[1 + boundary_i]
+                            b_screen = mapped_screen[1 + next_i]
+                            draw_list.add_triangle_filled(
+                                center_screen[0], center_screen[1],
+                                a_screen[0], a_screen[1],
+                                b_screen[0], b_screen[1],
+                                flipped_fill if flipped else valid_fill)
+
+                        edge_color = flipped_edge if any_flipped else valid_edge
+                        for boundary_i in range(boundary_count):
+                            a_screen = mapped_screen[1 + boundary_i]
+                            b_screen = mapped_screen[1 + ((boundary_i + 1) % boundary_count)]
+                            draw_list.add_line(
+                                a_screen[0], a_screen[1], b_screen[0], b_screen[1],
+                                edge_color, 1.0)
 
                 # Draw contour lines (yellow)
                 for i in range(len(p_screen_points)):
@@ -9110,7 +9378,9 @@ def _render_inspect_2d_windows(v):
                             draw_list.add_circle(qx, qy, 9, imgui.get_color_u32_rgba(1.0, 1.0, 1.0, 1.0), thickness=2.5)
                         break
 
-        # Set 3D highlights based on hover
+        # Set 3D highlights based on hover.  The pillar is ephemeral and must
+        # be explicitly rebuilt by a fiber/waypoint hover every frame.
+        obj.inspector_voronoi_pillar_3d = None
         if hovered_type == 'vertex' and hovered_idx >= 0 and contour_match is not None and hovered_idx < len(contour_match):
             obj.inspector_highlight_vertex_3d = np.array(contour_match[hovered_idx][0])
             obj.inspector_highlight_corner_vertices_3d = None
@@ -9170,17 +9440,52 @@ def _render_inspect_2d_windows(v):
                 obj.inspector_highlight_vertex_3d = np.array(contour_match[vi][0])
             obj.inspector_highlight_corner_vertices_3d = corner_pts if corner_pts else None
             obj.inspector_highlight_other_stream_corners_3d = other_stream_corner_pts if other_stream_corner_pts else None
-        elif hovered_type == 'waypoint' and hovered_idx >= 0:
+        elif hovered_type in ('fiber', 'waypoint') and hovered_idx >= 0:
             obj.inspector_highlight_fiber_idx = (stream_idx, hovered_idx)
             obj.inspector_highlight_corner_vertices_3d = None
             obj.inspector_highlight_other_stream_corners_3d = None
+            obj.inspector_highlight_vertex_3d = None
             if corr_corner < 0:
                 obj.inspector_highlight_other_level_contours = None
+
+            # Map the hovered fiber's one labeled unit-square Voronoi cell
+            # through every contour level.  Store level indices with rings so
+            # the 3D renderer never bridges a missing/invalid contour level.
+            obj.inspector_voronoi_pillar_3d = None
+            if (has_fiber and stream_idx < len(obj.fiber_architecture)
+                    and hovered_idx < len(obj.fiber_architecture[stream_idx])):
+                pillar_samples = obj.fiber_architecture[stream_idx]
+                pillar_cells = _unit_square_voronoi_cells(pillar_samples)
+                if hovered_idx < len(pillar_cells):
+                    selected_sample = [pillar_samples[hovered_idx]]
+                    selected_cell = [pillar_cells[hovered_idx]]
+                    pillar_rings = []
+                    for pillar_level in range(get_num_levels()):
+                        pillar_plane = get_bounding_plane(stream_idx, pillar_level)
+                        if pillar_plane is None:
+                            continue
+                        try:
+                            mapped_cell = _map_voronoi_cells_to_contour(
+                                obj, pillar_plane, selected_sample, selected_cell)
+                        except Exception:
+                            continue
+                        if (not mapped_cell or mapped_cell[0] is None
+                                or len(mapped_cell[0]) < 4):
+                            continue
+                        # Element zero is the mapped fiber site; the remaining
+                        # points are the consistently ordered cell boundary.
+                        ring = np.asarray(mapped_cell[0][1:], dtype=np.float32)
+                        if ring.ndim == 2 and ring.shape[1] == 3 \
+                                and np.all(np.isfinite(ring)):
+                            pillar_rings.append((pillar_level, ring))
+                    if pillar_rings:
+                        obj.inspector_voronoi_pillar_3d = pillar_rings
         else:
             obj.inspector_highlight_vertex_3d = None
             obj.inspector_highlight_other_stream_corners_3d = None
             obj.inspector_highlight_fiber_idx = None
             obj.inspector_highlight_corner_vertices_3d = None
+            obj.inspector_voronoi_pillar_3d = None
 
         # When in corner edit mode, show the same corner's correspondence on
         # ALL OTHER contour levels in the 3D viewer. This shows the contour
@@ -9612,6 +9917,7 @@ def _render_inspect_2d_windows(v):
             obj.inspector_highlight_vertex_3d = None
             obj.inspector_highlight_fiber_idx = None
             obj.inspector_highlight_corner_vertices_3d = None
+            obj.inspector_voronoi_pillar_3d = None
             obj.inspector_highlight_other_stream_corners_3d = None
             obj.inspector_highlight_other_level_contours = None
 
@@ -13583,6 +13889,32 @@ def find_inter_muscle_constraints(v, threshold=None, k_cap=None):
             s_fixed2 = data2['surface_fixed']
             s_vidx2 = data2['surface_vidx']
 
+            if bool(getattr(v, 'inter_muscle_reciprocal', False)):
+                # Mutual nearest neighbors define a sparse, approximately
+                # one-to-one interface. One-sided k-NN overconstrains thin
+                # muscles because many vertices on a thick neighbor can all
+                # pull the same small cross-section.
+                tree1 = cKDTree(s_verts1)
+                tree2 = cKDTree(s_verts2)
+                d12, j12 = tree2.query(
+                    s_verts1, k=1, distance_upper_bound=threshold)
+                _, i21 = tree1.query(
+                    s_verts2, k=1, distance_upper_bound=threshold)
+                for si, (dist, sj) in enumerate(zip(d12, j12)):
+                    if not np.isfinite(dist) or sj >= len(s_verts2):
+                        continue
+                    if i21[int(sj)] != si:
+                        continue
+                    fixed1 = bool(s_fixed1[si])
+                    fixed2 = bool(s_fixed2[int(sj)])
+                    if fixed1 != fixed2:
+                        continue
+                    v.inter_muscle_constraints.append((
+                        name1, int(s_vidx1[si]), fixed1,
+                        name2, int(s_vidx2[int(sj)]), fixed2,
+                        float(dist)))
+                continue
+
             # Build KD-tree on muscle2 surface verts; query k_cap nearest
             # within threshold for every muscle1 surface vert. cKDTree.query
             # with k=k_cap returns INF/k for misses, which we filter out.
@@ -13807,6 +14139,80 @@ def _apply_axial_pose_prior(v, cache, knee_angles):
     return scaled, notes
 
 
+def _project_positive_tet_volumes(positions, rest_positions, tets, fixed_mask,
+                                  sweeps=12, stiffness=0.9,
+                                  max_step=0.002):
+    """XPBD-style rest-volume projection with a positive-Jacobian barrier.
+
+    ARAP alone has no volumetric invariant.  This projection preserves each
+    tet's signed rest volume and gives inverted/near-flat tets a stronger
+    recovery target. Corrections are Jacobi-averaged per vertex and clamped so
+    dense attachment rings cannot cause a one-iteration blowout.
+    """
+    if tets is None or len(tets) == 0:
+        return positions, 0, 0.0
+    x = np.asarray(positions, dtype=np.float64).copy()
+    xr = np.asarray(rest_positions, dtype=np.float64)
+    t = np.asarray(tets, dtype=np.int64)
+
+    def signed_volume(p):
+        q = p[t]
+        return np.einsum('ij,ij->i',
+                         q[:, 1] - q[:, 0],
+                         np.cross(q[:, 2] - q[:, 0], q[:, 3] - q[:, 0])) / 6.0
+
+    v0 = signed_volume(xr)
+    usable = np.abs(v0) > 1e-14
+    t = t[usable]
+    v0 = v0[usable]
+    if len(t) == 0:
+        return x, 0, 0.0
+
+    inv_mass = (~np.asarray(fixed_mask, dtype=bool)).astype(np.float64)
+    for _ in range(max(int(sweeps), 0)):
+        q = x[t]
+        a, b, c, d = q[:, 0], q[:, 1], q[:, 2], q[:, 3]
+        volume = np.einsum('ij,ij->i', b - a,
+                           np.cross(c - a, d - a)) / 6.0
+        gb = np.cross(c - a, d - a) / 6.0
+        gc = np.cross(d - a, b - a) / 6.0
+        gd = np.cross(b - a, c - a) / 6.0
+        ga = -(gb + gc + gd)
+        grads = np.stack((ga, gb, gc, gd), axis=1)
+        w = inv_mass[t]
+        denom = np.sum(w * np.sum(grads * grads, axis=2), axis=1) + 1e-18
+
+        ratio = volume / v0
+        # Ordinary incompressibility uses V-V0.  Once orientation is lost,
+        # bias toward a small positive volume first instead of allowing the
+        # element to remain on the wrong side of the singularity.
+        target = v0.copy()
+        bad = ratio < 0.05
+        target[bad] = 0.20 * v0[bad]
+        lam = np.clip((target - volume) / denom, -1e4, 1e4)
+        corr = stiffness * w[:, :, None] * lam[:, None, None] * grads
+
+        accum = np.zeros_like(x)
+        count = np.zeros(len(x), dtype=np.float64)
+        for corner in range(4):
+            np.add.at(accum, t[:, corner], corr[:, corner])
+            np.add.at(count, t[:, corner], w[:, corner])
+        moving = count > 0
+        delta = np.zeros_like(x)
+        delta[moving] = accum[moving] / count[moving, None]
+        length = np.linalg.norm(delta, axis=1)
+        clamp = length > max_step
+        delta[clamp] *= (max_step / (length[clamp] + 1e-18))[:, None]
+        x[moving] += delta[moving]
+
+    vf = signed_volume(xr)  # overwritten below only to retain simple shape
+    q = x[t]
+    vf = np.einsum('ij,ij->i', q[:, 1] - q[:, 0],
+                   np.cross(q[:, 2] - q[:, 0], q[:, 3] - q[:, 0])) / 6.0
+    ratio = vf / v0
+    return x, int(np.sum(ratio <= 0.0)), float(np.max(np.abs(ratio - 1.0)))
+
+
 def _run_unified_volume_sim(v, active_muscles, max_iterations=100, tolerance=1e-4):
     """
     Run simulation treating all muscles as one unified volume.
@@ -13863,6 +14269,7 @@ def _run_unified_volume_sim(v, active_muscles, max_iterations=100, tolerance=1e-
         global_offset = cache['global_offset']
         global_rest_positions = cache['global_rest_positions']
         global_fixed_mask = cache['global_fixed_mask']
+        global_tets = cache.get('global_tets')
         neighbors = cache['neighbors']
         edge_weights = cache['edge_weights']
         rest_edge_vectors = cache['rest_edge_vectors']
@@ -13886,6 +14293,14 @@ def _run_unified_volume_sim(v, active_muscles, max_iterations=100, tolerance=1e-
             n = mobj.soft_body.num_vertices
             global_rest_positions[offset:offset+n] = mobj.soft_body.rest_positions
             global_fixed_mask[offset:offset+n] = mobj.soft_body.fixed_mask
+
+        global_tet_blocks = []
+        for name, mobj in active_muscles.items():
+            local_tets = np.asarray(getattr(mobj, 'tet_tetrahedra', []), dtype=np.int64)
+            if local_tets.ndim == 2 and local_tets.shape[1] == 4 and len(local_tets):
+                global_tet_blocks.append(local_tets + global_offset[name])
+        global_tets = (np.concatenate(global_tet_blocks, axis=0)
+                       if global_tet_blocks else np.zeros((0, 4), dtype=np.int64))
 
         # Build combined edge list (internal edges + inter-muscle constraints)
         all_edges = []  # (global_i, global_j, rest_length, weight)
@@ -13924,6 +14339,23 @@ def _run_unified_volume_sim(v, active_muscles, max_iterations=100, tolerance=1e-
             cross_w = float(getattr(v, 'arap_cross_w', 1.0))
             intra_w = float(getattr(v, 'arap_intra_w', 1.0))
             neutral_w = float(getattr(v, 'arap_neutral_w', 1.0))
+            # Tracked contact can pull the belly while the terminal cap is
+            # hard-fixed, concentrating stretch and twist in the first free
+            # contour interval.  Preserve the attachment transition with a
+            # smoothly tapered ARAP weight.  This is topology-driven and
+            # applies uniformly to both ends of every muscle.
+            attach_stiff = (float(getattr(v, 'attachment_rigidity', 1.0))
+                            if getattr(v, 'tracked_bone_contact', False)
+                            else 1.0)
+            attach_rings = max(
+                0, int(getattr(v, 'attachment_rigidity_rings', 0)))
+            vcl = np.asarray(
+                getattr(mobj, 'vertex_contour_level',
+                        np.full(sb.num_vertices, -1)), dtype=np.int32)
+            valid_vcl = (vcl.size == sb.num_vertices
+                         and np.any(vcl >= 0) and attach_rings > 0
+                         and attach_stiff > 1.0)
+            max_vcl = int(vcl.max()) if valid_vcl else -1
 
             for edge_idx, (i, j) in enumerate(zip(sb.edge_i, sb.edge_j)):
                 # Use stored rest_lengths if available, otherwise compute from rest positions
@@ -13941,6 +14373,12 @@ def _run_unified_volume_sim(v, active_muscles, max_iterations=100, tolerance=1e-
                     w = cross_w if etype == 1 else (intra_w if etype == 2 else neutral_w)
                 else:
                     w = 1.0
+                if valid_vcl and vcl[i] >= 0 and vcl[j] >= 0:
+                    edge_level = 0.5 * (float(vcl[i]) + float(vcl[j]))
+                    cap_dist = min(edge_level, max_vcl - edge_level)
+                    if cap_dist < attach_rings:
+                        taper = 1.0 - max(0.0, cap_dist) / attach_rings
+                        w *= 1.0 + (attach_stiff - 1.0) * taper * taper
                 all_edges.append((offset + i, offset + j, rest_len, w))
 
                 gi, gj = offset + i, offset + j
@@ -13953,12 +14391,24 @@ def _run_unified_volume_sim(v, active_muscles, max_iterations=100, tolerance=1e-
 
         # Add inter-muscle constraints as edges
         inter_w = float(getattr(v, 'inter_muscle_weight', 1.0))
+        inter_degree = np.zeros(total_verts, dtype=np.int32)
+        inter_global = []
         for constraint in v.inter_muscle_constraints:
-            name1, v1_idx, v1_fixed, name2, v2_idx, v2_fixed, rest_dist = constraint
-            if name1 in active_muscles and name2 in active_muscles:
-                global_i = global_offset[name1] + v1_idx
-                global_j = global_offset[name2] + v2_idx
-                all_edges.append((global_i, global_j, rest_dist, inter_w))
+            name1, v1_idx, _, name2, v2_idx, _, rest_dist = constraint
+            if name1 not in active_muscles or name2 not in active_muscles:
+                continue
+            gi = global_offset[name1] + v1_idx
+            gj = global_offset[name2] + v2_idx
+            inter_global.append((gi, gj, rest_dist))
+            inter_degree[gi] += 1
+            inter_degree[gj] += 1
+        for global_i, global_j, rest_dist in inter_global:
+            degree_scale = np.sqrt(
+                max(inter_degree[global_i], 1)
+                * max(inter_degree[global_j], 1))
+            all_edges.append((
+                global_i, global_j, rest_dist,
+                inter_w / degree_scale))
 
         n_inter = len(all_edges) - n_internal
         print(f"  Edges: {n_internal} internal + {n_inter} inter-muscle = {len(all_edges)} total")
@@ -14096,6 +14546,7 @@ def _run_unified_volume_sim(v, active_muscles, max_iterations=100, tolerance=1e-
             'total_verts': total_verts,
             'global_rest_positions': global_rest_positions,
             'global_fixed_mask': global_fixed_mask,
+            'global_tets': global_tets,
             'neighbors': neighbors,
             'edge_weights': edge_weights,
             'rest_edge_vectors': rest_edge_vectors,
@@ -14124,7 +14575,12 @@ def _run_unified_volume_sim(v, active_muscles, max_iterations=100, tolerance=1e-
             tri_owner = vert_owner_global[anat_face_global[:, 0]]
             anat_v_unique = np.unique(anat_face_global)
             from scipy.spatial import cKDTree as _cKDT_fc
-            fc_vi, fc_tri, fc_bary = [], [], []
+            # A binding stores a *normal gap*, not a welded 3-D position.
+            # Keeping the full barycentric point as a positional target locks
+            # both tangent directions and makes neighbouring muscles tangle.
+            # The normal-gap formulation below preserves the rest interface
+            # thickness while leaving tangential motion unconstrained.
+            fc_vi, fc_tri, fc_bary, fc_gap, fc_pair = [], [], [], [], []
             for m_id in np.unique(tri_owner):
                 other_mask = tri_owner != m_id
                 if not other_mask.any():
@@ -14153,23 +14609,172 @@ def _run_unified_volume_sim(v, active_muscles, max_iterations=100, tolerance=1e-
                     v_b = (d11 * d20 - d01 * d21) / denom
                     w_b = (d00 * d21 - d01 * d20) / denom
                     u_b = 1.0 - v_b - w_b
+                    # Reject projections far outside the triangle.  A nearest
+                    # centroid is only a broad-phase candidate; accepting an
+                    # arbitrary extrapolated barycentric point creates long,
+                    # non-anatomical cross-muscle constraints.
+                    bary = np.array([u_b, v_b, w_b], dtype=np.float64)
+                    if np.min(bary) < -0.15 or np.max(bary) > 1.15:
+                        continue
+                    closest = bary[0] * a + bary[1] * b + bary[2] * c
+                    gap = float(np.dot(my_pos[k] - closest, n_unit))
+                    if abs(gap) > fc_threshold:
+                        continue
                     fc_vi.append(int(my_verts[k]))
                     fc_tri.append(tri_v.astype(np.int64))
-                    fc_bary.append(np.array([u_b, v_b, w_b], dtype=np.float64))
+                    fc_bary.append(bary)
+                    fc_gap.append(gap)
+                    fc_pair.append((int(m_id), int(tri_owner[tri_g])))
+
+            # Keep only substantial, reciprocal rest-pose interfaces.  Tiny
+            # proximity clusters are incidental contacts and must be handled
+            # by collision, not converted into permanent fascia.
+            if fc_pair:
+                from collections import Counter as _Counter_fc
+                pair_counts = _Counter_fc(fc_pair)
+                min_patch = int(getattr(v, 'fascia_min_patch_vertices', 12))
+                keep_idx = []
+                for kk, pair in enumerate(fc_pair):
+                    reverse = (pair[1], pair[0])
+                    if pair_counts[pair] >= min_patch and pair_counts[reverse] >= min_patch:
+                        keep_idx.append(kk)
+                fc_vi = [fc_vi[k] for k in keep_idx]
+                fc_tri = [fc_tri[k] for k in keep_idx]
+                fc_bary = [fc_bary[k] for k in keep_idx]
+                fc_gap = [fc_gap[k] for k in keep_idx]
             v._unified_sim_cache['fc_vi'] = np.array(fc_vi, dtype=np.int64) if fc_vi else np.zeros(0, dtype=np.int64)
             v._unified_sim_cache['fc_tri'] = np.stack(fc_tri, axis=0) if fc_tri else np.zeros((0, 3), dtype=np.int64)
             v._unified_sim_cache['fc_bary'] = np.stack(fc_bary, axis=0) if fc_bary else np.zeros((0, 3), dtype=np.float64)
-            print(f"  Fascia constraints (barycentric): {len(fc_vi)} bindings, "
+            v._unified_sim_cache['fc_gap'] = np.asarray(fc_gap, dtype=np.float64) if fc_gap else np.zeros(0, dtype=np.float64)
+            print(f"  Sliding fascia interfaces (normal-gap): {len(fc_vi)} bindings, "
                   f"threshold={fc_threshold*1000:.1f}mm")
         print(f"  Collision candidates: {len(collision_vertex_set)} non-fixed surface verts")
 
     # Compute LBS positions from skinning weights + skeleton transforms.
     # This gives ALL vertices skeleton-consistent positions as ARAP initial guess.
+    def rigid_harmonic_coordinate(mobj):
+        cached_coordinate = getattr(
+            mobj, '_rigid_harmonic_coordinate', None)
+        n_local = mobj.soft_body.num_vertices
+        if (cached_coordinate is not None
+                and len(cached_coordinate) == n_local):
+            return cached_coordinate
+        base = np.asarray([
+            (float(binding[2]) if binding is not None else 0.5)
+            for binding in mobj.tet_skeleton_bindings
+        ], dtype=np.float64)
+        anchors = getattr(mobj, 'soft_body_local_anchors', {}) or {}
+        boundary = {}
+        for anchor_vi, (anchor_bone, _) in anchors.items():
+            binding = mobj.tet_skeleton_bindings[int(anchor_vi)]
+            if binding is None:
+                continue
+            if anchor_bone == binding[0]:
+                boundary[int(anchor_vi)] = 0.0
+            elif anchor_bone == binding[1]:
+                boundary[int(anchor_vi)] = 1.0
+        if not boundary or not any(v == 0.0 for v in boundary.values()) \
+                or not any(v == 1.0 for v in boundary.values()):
+            return base
+        tets_local = np.asarray(
+            mobj.soft_body.tetrahedra, dtype=np.int64)
+        edge_set = set()
+        for tet in tets_local:
+            for edge_a in range(4):
+                for edge_b in range(edge_a + 1, 4):
+                    edge_set.add(tuple(sorted(
+                        (int(tet[edge_a]), int(tet[edge_b])))))
+        edges_local = np.asarray(sorted(edge_set), dtype=np.int64)
+        row = np.concatenate((edges_local[:, 0], edges_local[:, 1]))
+        col = np.concatenate((edges_local[:, 1], edges_local[:, 0]))
+        weight = np.ones(len(row), dtype=np.float64)
+        adjacency_matrix = scipy.sparse.coo_matrix(
+            (weight, (row, col)), shape=(n_local, n_local)).tocsr()
+        degree = np.asarray(adjacency_matrix.sum(axis=1)).ravel()
+        laplacian = scipy.sparse.diags(degree) - adjacency_matrix
+        fixed_local = np.asarray(sorted(boundary), dtype=np.int64)
+        fixed_value = np.asarray(
+            [boundary[int(i)] for i in fixed_local], dtype=np.float64)
+        fixed_mask_local = np.zeros(n_local, dtype=bool)
+        fixed_mask_local[fixed_local] = True
+        free_local = np.where(~fixed_mask_local)[0]
+        coordinate = base.copy()
+        coordinate[fixed_local] = fixed_value
+        if len(free_local):
+            lhs = laplacian[free_local][:, free_local].tocsc()
+            rhs = -(laplacian[free_local][:, fixed_local]
+                    @ fixed_value)
+            coordinate[free_local] = scipy.sparse.linalg.spsolve(
+                lhs, rhs)
+        coordinate = np.clip(coordinate, 0.0, 1.0)
+        mobj._rigid_harmonic_coordinate = coordinate
+        return coordinate
+
+    def rigid_material_coordinate(mobj):
+        """Use the fiber binding coordinate for sweep deformation.
+
+        The harmonic attachment coordinate is unsuitable for adductor magnus:
+        its broad femoral insertion is a long surface, not a terminal cap.
+        Treating every insertion vertex as u=1 creates a discontinuity through
+        nearby tetrahedra.  The stored binding coordinate remains smooth.
+        """
+        base = np.asarray([
+            (float(binding[2]) if binding is not None else 0.5)
+            for binding in mobj.tet_skeleton_bindings
+        ], dtype=np.float64)
+        # A muscle with a broad femoral insertion is fan-shaped rather than
+        # a simple end-to-end tube. Its imported fiber coordinate is strongly
+        # femur-biased. The attachment-driven harmonic field lets the pelvic
+        # portion actually follow the pelvis while smoothly approaching the
+        # full femoral insertion surface.
+        insertion_bones = {
+            binding[1] for binding in mobj.tet_skeleton_bindings
+            if binding is not None
+        }
+        if any('Femur' in bone for bone in insertion_bones):
+            return rigid_harmonic_coordinate(mobj)
+        return base
+
     global_lbs_positions = np.zeros((total_verts, 3))
     for name, mobj in active_muscles.items():
         offset = global_offset[name]
         n = mobj.soft_body.num_vertices
         rest = mobj.soft_body.rest_positions
+
+        if (getattr(v, 'rigid_blend_init', False)
+                and getattr(mobj, 'tet_skeleton_bindings', None)):
+            from tools.bake_emu import compute_rigid_blend_positions
+            initial = getattr(mobj, 'tet_initial_bone_transforms', {})
+            rigid_bindings = []
+            blend_coordinate = []
+            harmonic_coordinate = rigid_material_coordinate(mobj)
+            for binding_vi, binding in enumerate(
+                    mobj.tet_skeleton_bindings):
+                if binding is None:
+                    rigid_bindings.append((np.zeros(3), []))
+                    blend_coordinate.append(0.0)
+                    continue
+                origin, insertion, _, rest_vertex = binding
+                weight = float(harmonic_coordinate[binding_vi])
+                weighted_bones = []
+                if origin in initial:
+                    R0, t0 = initial[origin]
+                    weighted_bones.append(
+                        (origin, 1.0 - weight, R0, t0))
+                if insertion in initial:
+                    R0, t0 = initial[insertion]
+                    weighted_bones.append(
+                        (insertion, weight, R0, t0))
+                rigid_bindings.append(
+                    (np.asarray(rest_vertex, dtype=np.float64),
+                     weighted_bones))
+                blend_coordinate.append(weight)
+            rigid = compute_rigid_blend_positions(
+                rigid_bindings, v.env.skel,
+                np.asarray(blend_coordinate, dtype=np.float64))
+            if rigid.shape == (n, 3) and np.all(np.isfinite(rigid)):
+                global_lbs_positions[offset:offset+n] = rigid
+                continue
 
         if hasattr(mobj, 'skinning_weights') and mobj.skinning_weights is not None and len(mobj.skinning_bones) > 0:
             # Compute LBS: blend bone transforms weighted by skinning weights
@@ -14206,7 +14811,34 @@ def _run_unified_volume_sim(v, active_muscles, max_iterations=100, tolerance=1e-
         print(f"  LBS({lbs_weight:.0%}) + warm({1-lbs_weight:.0%})")
     else:
         global_positions = global_lbs_positions.copy()
-        print(f"  LBS initial guess")
+        init_name = ("rigid-blend" if getattr(v, 'rigid_blend_init', False)
+                     else "LBS")
+        print(f"  {init_name} initial guess")
+
+    if getattr(v, 'rigid_blend_init', False):
+        init_ratios = []
+        for init_name, mobj in active_muscles.items():
+            init_offset = global_offset[init_name]
+            init_n = mobj.soft_body.num_vertices
+            init_tets = np.asarray(mobj.soft_body.tetrahedra, dtype=np.int64)
+            init_rest = np.asarray(mobj.soft_body.rest_positions)
+            init_pose = global_positions[init_offset:init_offset + init_n]
+            rest_q = init_rest[init_tets]
+            pose_q = init_pose[init_tets]
+            rest_det = np.einsum(
+                'ij,ij->i', rest_q[:, 0] - rest_q[:, 3],
+                np.cross(rest_q[:, 1] - rest_q[:, 3],
+                         rest_q[:, 2] - rest_q[:, 3]))
+            pose_det = np.einsum(
+                'ij,ij->i', pose_q[:, 0] - pose_q[:, 3],
+                np.cross(pose_q[:, 1] - pose_q[:, 3],
+                         pose_q[:, 2] - pose_q[:, 3]))
+            init_ratios.append(pose_det / np.where(
+                np.abs(rest_det) > 1e-15, rest_det, 1.0))
+        init_ratios = np.concatenate(init_ratios)
+        print(f"  Rigid-blend Jacobian: inv={np.sum(init_ratios <= 0)}/"
+              f"{len(init_ratios)}, J=[{init_ratios.min():.3f},"
+              f"{init_ratios.max():.3f}]")
 
     global_fixed_targets = {}  # global_idx -> target position
     for name, mobj in active_muscles.items():
@@ -14273,6 +14905,212 @@ def _run_unified_volume_sim(v, active_muscles, max_iterations=100, tolerance=1e-
     fixed_indices = np.where(global_fixed_mask)[0]
     fixed_targets_array = np.array([global_fixed_targets.get(i, global_rest_positions[i]) for i in fixed_indices])
 
+    if getattr(v, 'rigid_blend_only', False):
+        rigid_coordinates = {}
+        for rigid_name, mobj in active_muscles.items():
+            rigid_offset = global_offset[rigid_name]
+            rigid_n = mobj.soft_body.num_vertices
+            local_fixed = np.asarray(
+                mobj.soft_body.fixed_indices, dtype=np.int64)
+            if not len(local_fixed):
+                continue
+            global_fixed = rigid_offset + local_fixed
+            cap_delta = np.stack([
+                global_fixed_targets[int(gi)] - global_positions[int(gi)]
+                for gi in global_fixed])
+            coordinate = rigid_material_coordinate(mobj)
+            rigid_coordinates[rigid_name] = coordinate
+            fixed_coordinate = coordinate[local_fixed]
+            origin = fixed_coordinate < 0.5
+            insertion = ~origin
+            origin_delta = (np.mean(cap_delta[origin], axis=0)
+                            if np.any(origin) else np.mean(cap_delta, axis=0))
+            insertion_delta = (np.mean(cap_delta[insertion], axis=0)
+                               if np.any(insertion) else np.mean(cap_delta, axis=0))
+            rest_local = global_rest_positions[
+                rigid_offset:rigid_offset + rigid_n]
+            raw_local = global_positions[
+                rigid_offset:rigid_offset + rigid_n].copy()
+
+            # Build paired rest/posed centerlines from longitudinal material
+            # bins, then sweep the native cross-sections along the corrected
+            # posed centerline. This preserves thickness under flexion instead
+            # of letting endpoint displacement become axial compression.
+            sample_u = np.linspace(0.0, 1.0, 33)
+            bin_id = np.clip(
+                np.rint(coordinate * (len(sample_u) - 1)).astype(np.int32),
+                0, len(sample_u) - 1)
+            rest_center = np.full((len(sample_u), 3), np.nan)
+            pose_center = np.full((len(sample_u), 3), np.nan)
+            for center_i in range(len(sample_u)):
+                selected = bin_id == center_i
+                if np.any(selected):
+                    rest_center[center_i] = np.mean(
+                        rest_local[selected], axis=0)
+                    pose_center[center_i] = np.mean(
+                        raw_local[selected], axis=0)
+            valid = np.where(np.isfinite(rest_center[:, 0]))[0]
+            for axis in range(3):
+                rest_center[:, axis] = np.interp(
+                    np.arange(len(sample_u)), valid,
+                    rest_center[valid, axis])
+                pose_center[:, axis] = np.interp(
+                    np.arange(len(sample_u)), valid,
+                    pose_center[valid, axis])
+
+            correction = (
+                (1.0 - sample_u)[:, None] * origin_delta
+                + sample_u[:, None] * insertion_delta)
+            corrected_center = pose_center + correction
+            rest_tangent = np.gradient(rest_center, sample_u, axis=0)
+            pose_tangent = np.gradient(corrected_center, sample_u, axis=0)
+            rest_speed = np.linalg.norm(rest_tangent, axis=1)
+            pose_speed = np.linalg.norm(pose_tangent, axis=1)
+            stretch = pose_speed / np.maximum(rest_speed, 1e-8)
+            bulge = np.clip(1.0 / np.sqrt(np.maximum(stretch, 0.15)),
+                            0.75, 1.8)
+            # Tendon caps remain narrow; volume compensation acts primarily
+            # on the contractile belly.
+            belly = np.sin(np.pi * sample_u) ** 2
+            bulge = 1.0 + belly * (bulge - 1.0)
+
+            def sample_curve(values):
+                return np.stack([
+                    np.interp(coordinate, sample_u, values[:, axis])
+                    for axis in range(3)
+                ], axis=1)
+
+            raw_center_at_v = sample_curve(pose_center)
+            corrected_at_v = sample_curve(corrected_center)
+            tangent_at_v = sample_curve(pose_tangent)
+            tangent_at_v /= np.maximum(
+                np.linalg.norm(tangent_at_v, axis=1, keepdims=True), 1e-12)
+            offset = raw_local - raw_center_at_v
+            axial = np.sum(offset * tangent_at_v, axis=1, keepdims=True)
+            transverse = offset - axial * tangent_at_v
+            bulge_at_v = np.interp(coordinate, sample_u, bulge)
+            global_positions[rigid_offset:rigid_offset + rigid_n] = (
+                corrected_at_v + axial * tangent_at_v
+                + bulge_at_v[:, None] * transverse)
+
+        # Pes muscles share fascia and converge toward one distal route, but
+        # are not welded together. Blend only their centerline displacement
+        # fields, retaining the distinct rest offsets and cross-sections.
+        pes_names = [
+            name for name in ('L_Sartorius', 'L_Gracilis',
+                              'L_Semitendinosus')
+            if name in active_muscles and name in rigid_coordinates]
+        if len(pes_names) >= 2:
+            sample_u = np.linspace(0.0, 1.0, 33)
+            rest_centers = {}
+            pose_centers = {}
+            for pes_name in pes_names:
+                pes_offset = global_offset[pes_name]
+                pes_n = active_muscles[
+                    pes_name].soft_body.num_vertices
+                pes_u = rigid_coordinates[pes_name]
+                ids = np.clip(
+                    np.rint(pes_u * (len(sample_u) - 1)).astype(np.int32),
+                    0, len(sample_u) - 1)
+                rest = global_rest_positions[
+                    pes_offset:pes_offset + pes_n]
+                pose = global_positions[
+                    pes_offset:pes_offset + pes_n]
+                rest_curve = np.full((len(sample_u), 3), np.nan)
+                pose_curve = np.full((len(sample_u), 3), np.nan)
+                for curve_i in range(len(sample_u)):
+                    selected = ids == curve_i
+                    if np.any(selected):
+                        rest_curve[curve_i] = np.mean(
+                            rest[selected], axis=0)
+                        pose_curve[curve_i] = np.mean(
+                            pose[selected], axis=0)
+                valid = np.where(np.isfinite(rest_curve[:, 0]))[0]
+                for axis in range(3):
+                    rest_curve[:, axis] = np.interp(
+                        np.arange(len(sample_u)), valid,
+                        rest_curve[valid, axis])
+                    pose_curve[:, axis] = np.interp(
+                        np.arange(len(sample_u)), valid,
+                        pose_curve[valid, axis])
+                rest_centers[pes_name] = rest_curve
+                pose_centers[pes_name] = pose_curve
+            support_weight = {name: 1.0 for name in pes_names}
+            total_support = sum(support_weight.values())
+            shared_displacement = sum(
+                support_weight[name]
+                * (pose_centers[name] - rest_centers[name])
+                for name in pes_names) / total_support
+            distal_weight = np.clip(
+                (sample_u - 0.05) / 0.95, 0.0, 1.0)
+            distal_weight = (
+                distal_weight * distal_weight
+                * (3.0 - 2.0 * distal_weight))
+            for pes_name in pes_names:
+                pes_offset = global_offset[pes_name]
+                pes_n = active_muscles[
+                    pes_name].soft_body.num_vertices
+                pes_u = rigid_coordinates[pes_name]
+                own_displacement = (
+                    pose_centers[pes_name] - rest_centers[pes_name])
+                center_correction = (
+                    shared_displacement - own_displacement)
+                sampled_correction = np.stack([
+                    np.interp(pes_u, sample_u,
+                              distal_weight * center_correction[:, axis])
+                    for axis in range(3)
+                ], axis=1)
+                global_positions[
+                    pes_offset:pes_offset + pes_n] += sampled_correction
+
+        # Adductor magnus is the medial support, but it terminates broadly on
+        # the femur rather than at the pes anserinus.  Couple it spatially:
+        # nearby pes vertices inherit a fraction of the closest Magnus
+        # material displacement, fading to zero beyond 3 cm.  This resists
+        # whole-group drift without falsely matching longitudinal parameters.
+        magnus_name = 'L_Adductor_Magnus'
+        if magnus_name in active_muscles and magnus_name in rigid_coordinates:
+            magnus_offset = global_offset[magnus_name]
+            magnus_n = active_muscles[
+                magnus_name].soft_body.num_vertices
+            magnus_rest = global_rest_positions[
+                magnus_offset:magnus_offset + magnus_n]
+            magnus_pose = global_positions[
+                magnus_offset:magnus_offset + magnus_n]
+            magnus_tree = scipy.spatial.cKDTree(magnus_rest)
+            magnus_delta = magnus_pose - magnus_rest
+            for pes_name in pes_names:
+                pes_offset = global_offset[pes_name]
+                pes_n = active_muscles[pes_name].soft_body.num_vertices
+                pes_rest = global_rest_positions[
+                    pes_offset:pes_offset + pes_n]
+                distance_k, nearest_k = magnus_tree.query(pes_rest, k=8)
+                distance = distance_k[:, 0]
+                # The medial thigh fascia has a wider zone of influence than
+                # the old 3 cm point-contact band. A smooth 8 cm field keeps
+                # Sartorius and Semitendinosus engaged with Magnus during hip
+                # flexion while still permitting distal sliding.
+                support = np.clip(1.0 - distance / 0.08, 0.0, 1.0)
+                support = support * support * (3.0 - 2.0 * support)
+                # Keep exact bone attachments; couple only the muscle body.
+                material_u = rigid_coordinates[pes_name]
+                belly = np.sin(np.pi * material_u) ** 2
+                support *= belly
+                transfer_weight = np.exp(
+                    -(distance_k / 0.025) ** 2)
+                transfer_weight /= np.maximum(
+                    np.sum(transfer_weight, axis=1, keepdims=True), 1e-12)
+                supported_delta = np.sum(
+                    transfer_weight[:, :, None]
+                    * magnus_delta[nearest_k], axis=1)
+                correction = supported_delta - (
+                    global_positions[pes_offset:pes_offset + pes_n]
+                    - pes_rest)
+                global_positions[
+                    pes_offset:pes_offset + pes_n] += (
+                        0.65 * support[:, None] * correction)
+        global_positions[fixed_indices] = fixed_targets_array
+
     # Fiber-spring config (scalar Hookean spring on cross-contour edges,
     # applied per-iter via the collision_target_fn slot).  Reuses the
     # collision_vertices / collision_weight diag pipeline.  Mutually
@@ -14281,6 +15119,20 @@ def _run_unified_volume_sim(v, active_muscles, max_iterations=100, tolerance=1e-
     fiber_spring_w = float(getattr(v, 'fiber_spring_weight', 10.0)) if fiber_spring_on else 0.0
     fiber_spring_scale = float(getattr(v, 'fiber_spring_rest_scale', 0.5))
 
+    tracked_contact_global = {}
+    if bool(getattr(v, 'tracked_bone_contact', False)) and not fiber_spring_on:
+        for mname, entries in getattr(v, 'tracked_bone_contacts', {}).items():
+            if mname not in global_offset:
+                continue
+            off = global_offset[mname]
+            for vi, body_name, q_local, n_local, clearance in entries:
+                gi = off + int(vi)
+                if gi < total_verts and not global_fixed_mask[gi]:
+                    tracked_contact_global[gi] = (
+                        body_name, np.asarray(q_local), np.asarray(n_local),
+                        float(clearance))
+    tracked_contact_on = bool(tracked_contact_global)
+
     # Bone-contact penalty wiring: include collision_vertices in build_system
     # so the diagonal entry for each collision candidate gains the spring
     # weight.  Force rebuild if the contact weight changed since last call.
@@ -14288,7 +15140,13 @@ def _run_unified_volume_sim(v, active_muscles, max_iterations=100, tolerance=1e-
     collision_vertex_set = cache.get('collision_vertex_set') if cache_valid else (
         v._unified_sim_cache.get('collision_vertex_set') if hasattr(v, '_unified_sim_cache') and v._unified_sim_cache else None
     )
-    collision_weight = float(getattr(v, 'unified_bone_collision_weight', 1.5)) if bone_contact_on else 0.0
+    if tracked_contact_on:
+        collision_vertex_set = set(tracked_contact_global)
+    collision_weight = (
+        float(getattr(v, 'tracked_bone_contact_weight', 3.0))
+        if tracked_contact_on else
+        float(getattr(v, 'unified_bone_collision_weight', 1.5))
+        if bone_contact_on else 0.0)
 
     # For fiber spring: every vert that touches a cross-contour edge becomes
     # a "collision vertex" (gets diag weight) and per-iter target = position
@@ -14347,14 +15205,14 @@ def _run_unified_volume_sim(v, active_muscles, max_iterations=100, tolerance=1e-
         build_kwargs = dict(regularization=1e-6)
         if skin_prior_weights:
             build_kwargs['skin_prior_weights'] = skin_prior_weights
-        if (bone_contact_on or fiber_spring_on) and collision_vertex_set:
+        if (bone_contact_on or tracked_contact_on or fiber_spring_on) and collision_vertex_set:
             build_kwargs['collision_vertices'] = collision_vertex_set
             build_kwargs['collision_weight'] = collision_weight
         backend.build_system(
             total_verts, neighbors, edge_weights, global_fixed_mask, **build_kwargs)
         backend._collision_weight_built = collision_weight
         sp_n = len(skin_prior_weights) if skin_prior_weights else 0
-        cv_n = len(collision_vertex_set) if ((bone_contact_on or fiber_spring_on) and collision_vertex_set) else 0
+        cv_n = len(collision_vertex_set) if ((bone_contact_on or tracked_contact_on or fiber_spring_on) and collision_vertex_set) else 0
         diag_label = 'fiber-spring' if fiber_spring_on else 'bone-contact'
         print(f"  System built [{bin_name} bin] in {time.time() - start_time:.3f}s "
               f"(skin prior on {sp_n} verts, {diag_label} diag on {cv_n} verts @ w={collision_weight})")
@@ -14412,14 +15270,18 @@ def _run_unified_volume_sim(v, active_muscles, max_iterations=100, tolerance=1e-
     target_edges = None
     scaled_rest, crosser_strs = _apply_axial_pose_prior(v, cache, knee_angles)
     # Tendon-zone slack-only update — runs even when axial prior is a no-op.
-    if scaled_rest is None and cache.get('csr_tendon_mask') is not None:
+    if (scaled_rest is None
+            and getattr(v, 'tendon_elastic', True)
+            and cache.get('csr_tendon_mask') is not None):
         scaled_rest = cache['csr_rest_edges_base'].copy()
     if scaled_rest is None and fiber_spring_on:
         # Need a scaled_rest to apply intra-contour bulge for volume
         # preservation under spring contraction.
         scaled_rest = cache['csr_rest_edges_base'].copy()
     if scaled_rest is not None:
-        scaled_rest = _apply_tendon_elastic(cache, global_positions, scaled_rest)
+        if getattr(v, 'tendon_elastic', True):
+            scaled_rest = _apply_tendon_elastic(
+                cache, global_positions, scaled_rest)
         # Volume-preserving intra-contour expansion to compensate for the
         # fiber spring's axial contraction (target = rest * spring_rest_scale).
         # perp_scale = sqrt(1 / spring_rest_scale), capped at axial_max_bulge.
@@ -14516,13 +15378,45 @@ def _run_unified_volume_sim(v, active_muscles, max_iterations=100, tolerance=1e-
                 _state['targets'] = dict(zip(_cv.tolist(), target_pos))
             _state['iter'] += 1
             return _state['targets']
+    elif tracked_contact_on:
+        cv_arr = np.fromiter(tracked_contact_global, dtype=np.int64)
+        state = {'iter': 0}
+        tracked_max_step = max(
+            0.0, float(getattr(
+                v, 'tracked_bone_contact_max_step', np.inf)))
+
+        def collision_target_fn(positions, _contacts=tracked_contact_global,
+                                _cv=cv_arr, _state=state,
+                                _max_step=tracked_max_step):
+            targets = {int(vi): positions[int(vi)].copy() for vi in _cv}
+            transforms = {}
+            for vi, (body_name, q_local, n_local, clearance) in _contacts.items():
+                if body_name not in transforms:
+                    body = v.env.skel.getBodyNode(body_name)
+                    if body is None:
+                        continue
+                    T = np.asarray(body.getWorldTransform().matrix())
+                    transforms[body_name] = (T[:3, :3], T[:3, 3])
+                R, t = transforms[body_name]
+                q = R @ q_local + t
+                n = R @ n_local
+                n /= max(np.linalg.norm(n), 1e-12)
+                d = float(np.dot(positions[vi] - q, n))
+                if d < clearance:
+                    correction = clearance - d
+                    if np.isfinite(_max_step) and _max_step > 0.0:
+                        correction = min(correction, _max_step)
+                    targets[int(vi)] = (
+                        positions[vi] + correction * n)
+            _state['iter'] += 1
+            return targets
     elif bone_contact_on and collision_vertex_set and v._unified_bone_meshes:
         from scipy.spatial import cKDTree as _cKDT_coll
         bone_meshes_for_fn = list(v._unified_bone_meshes)
         bone_kdtree = _cKDT_coll(np.vstack([bm.vertices for bm in bone_meshes_for_fn]))
         cv_arr = np.fromiter(collision_vertex_set, dtype=np.int64)
         margin = float(getattr(v, 'unified_bone_contact_margin', 0.005))
-        recompute_every = int(getattr(v, 'unified_bone_contact_recompute_every', 5))
+        recompute_every = int(getattr(v, 'unified_bone_contact_recompute_every', 1))
         state = {'iter': 0, 'pen_targets': {}}
 
         def collision_target_fn(positions, _bones=bone_meshes_for_fn,
@@ -14555,12 +15449,20 @@ def _run_unified_volume_sim(v, active_muscles, max_iterations=100, tolerance=1e-
                             ipos = bbox_pos[inside]
                             isv = bbox_sv[inside]
                             cp, _, fid = trimesh.proximity.closest_point(bm, ipos)
-                            fn_arr = bm.face_normals[fid]
                             for k in range(len(isv)):
                                 vi = int(isv[k])
                                 if _fmask[vi]:
                                     continue
-                                new_pen[vi] = cp[k] + fn_arr[k] * _margin
+                                # Do not trust OBJ winding for the outward
+                                # normal.  Use the closest-point direction and
+                                # orient it away from the bone interior.
+                                away = cp[k] - ipos[k]
+                                norm = np.linalg.norm(away)
+                                if norm > 1e-12:
+                                    away /= norm
+                                else:
+                                    away = -np.asarray(bm.face_normals[fid[k]])
+                                new_pen[vi] = cp[k] + away * _margin
                         except Exception:
                             continue
                 _state['pen_targets'] = new_pen
@@ -14586,7 +15488,7 @@ def _run_unified_volume_sim(v, active_muscles, max_iterations=100, tolerance=1e-
             cv_arr = np.fromiter(collision_vertex_set, dtype=np.int64)
             mm_margin = float(getattr(v, 'inter_muscle_contact_margin', 0.002))
             bone_margin = float(getattr(v, 'unified_bone_contact_margin', 0.005))
-            recompute_every = int(getattr(v, 'unified_bone_contact_recompute_every', 5))
+            recompute_every = int(getattr(v, 'unified_bone_contact_recompute_every', 1))
             bone_meshes_for_fn = list(v._unified_bone_meshes) if v._unified_bone_meshes else []
             bone_kdtree = (_cKDT_aniso(np.vstack([bm.vertices for bm in bone_meshes_for_fn]))
                            if bone_meshes_for_fn else None)
@@ -14598,6 +15500,7 @@ def _run_unified_volume_sim(v, active_muscles, max_iterations=100, tolerance=1e-
             fc_vi = _spc.get('fc_vi')
             fc_tri = _spc.get('fc_tri')
             fc_bary = _spc.get('fc_bary')
+            fc_gap = _spc.get('fc_gap')
 
             def collision_target_fn(positions, _anatF=anat_F, _anatV=anat_v_unique,
                                     _owner=owner_of_anat, _vert_owner=vert_owner,
@@ -14605,16 +15508,26 @@ def _run_unified_volume_sim(v, active_muscles, max_iterations=100, tolerance=1e-
                                     _cv=cv_arr, _fmask=global_fixed_mask,
                                     _mmm=mm_margin, _bm=bone_margin,
                                     _every=recompute_every, _state=state,
-                                    _fc_vi=fc_vi, _fc_tri=fc_tri, _fc_bary=fc_bary):
+                                    _fc_vi=fc_vi, _fc_tri=fc_tri, _fc_bary=fc_bary,
+                                    _fc_gap=fc_gap):
                 targets = {int(vi): positions[int(vi)].copy() for vi in _cv}
-                # Always-on fascia constraint targets (cheap, recomputed every iter).
-                if _fc_vi is not None and len(_fc_vi) > 0:
-                    fc_pos = (_fc_bary[:, :, None] * positions[_fc_tri]).sum(axis=1)
+                # Always-on sliding fascia target.  Correct only signed normal
+                # separation; never pull toward the stored tangential point.
+                if (_fc_vi is not None and len(_fc_vi) > 0
+                        and _fc_gap is not None and len(_fc_gap) == len(_fc_vi)):
+                    tri_pos = positions[_fc_tri]
+                    fc_pos = (_fc_bary[:, :, None] * tri_pos).sum(axis=1)
+                    fc_n = np.cross(tri_pos[:, 1] - tri_pos[:, 0],
+                                    tri_pos[:, 2] - tri_pos[:, 0])
+                    fc_n /= np.linalg.norm(fc_n, axis=1, keepdims=True) + 1e-12
+                    current_gap = np.einsum('ij,ij->i',
+                                            positions[_fc_vi] - fc_pos, fc_n)
+                    normal_correction = (_fc_gap - current_gap)[:, None] * fc_n
                     for k in range(len(_fc_vi)):
                         vi = int(_fc_vi[k])
                         if _fmask[vi]:
                             continue
-                        targets[vi] = fc_pos[k]
+                        targets[vi] = positions[vi] + normal_correction[k]
                 if _state['iter'] % _every == 0:
                     new_pen = {}
                     # Per-vertex outward normals from current positions of
@@ -14676,12 +15589,17 @@ def _run_unified_volume_sim(v, active_muscles, max_iterations=100, tolerance=1e-
                                     ipos = bbox_pos[inside]
                                     isv = bbox_sv[inside]
                                     cp, _, fid = trimesh.proximity.closest_point(bm, ipos)
-                                    fn_arr = bm.face_normals[fid]
                                     for k in range(len(isv)):
                                         vi = int(isv[k])
                                         if _fmask[vi]:
                                             continue
-                                        new_pen[vi] = cp[k] + fn_arr[k] * _bm
+                                        away = cp[k] - ipos[k]
+                                        norm = np.linalg.norm(away)
+                                        if norm > 1e-12:
+                                            away /= norm
+                                        else:
+                                            away = -np.asarray(bm.face_normals[fid[k]])
+                                        new_pen[vi] = cp[k] + away * _bm
                                 except Exception:
                                     continue
                     _state['pen_targets'] = new_pen
@@ -14706,15 +15624,105 @@ def _run_unified_volume_sim(v, active_muscles, max_iterations=100, tolerance=1e-
         solve_kwargs['collision_target_fn'] = collision_target_fn
     if getattr(v, 'disable_plateau_exit', False):
         solve_kwargs['disable_plateau_exit'] = True
-    global_positions, iterations, max_disp = backend.solve(
-        global_positions, global_rest_positions, neighbors, edge_weights,
-        rest_edge_vectors, global_fixed_mask, fixed_targets_array, **solve_kwargs
-    )
+    volume_arap_alternations = max(
+        1, int(getattr(v, 'volume_arap_alternations', 1)))
+    if getattr(v, 'rigid_blend_only', False):
+        iterations = 0
+        max_disp = 0.0
+        print("  SO(3) rigid-blend muscle warp (ARAP bypassed)")
+    elif (volume_arap_alternations > 1 and global_tets is not None
+            and len(global_tets)):
+        total_iterations = 0
+        cycle_iters = max(5, solve_iters // volume_arap_alternations)
+        for cycle in range(volume_arap_alternations):
+            cycle_kwargs = dict(solve_kwargs)
+            cycle_kwargs['max_iterations'] = cycle_iters
+            global_positions, iterations, max_disp = backend.solve(
+                global_positions, global_rest_positions, neighbors,
+                edge_weights, rest_edge_vectors, global_fixed_mask,
+                fixed_targets_array, **cycle_kwargs)
+            total_iterations += iterations
+            if cycle + 1 < volume_arap_alternations:
+                before_volume = global_positions.copy()
+                global_positions, _, _ = _project_positive_tet_volumes(
+                    global_positions, global_rest_positions, global_tets,
+                    global_fixed_mask, sweeps=4, stiffness=0.75,
+                    max_step=0.0005)
+                # A volume pass is a local correction, not a second solver:
+                # prevent accumulated projection blow-outs within one cycle.
+                correction = global_positions - before_volume
+                correction_len = np.linalg.norm(correction, axis=1)
+                excessive = correction_len > 0.0015
+                if np.any(excessive):
+                    correction[excessive] *= (
+                        0.0015 / correction_len[excessive])[:, None]
+                    global_positions[excessive] = (
+                        before_volume[excessive] + correction[excessive])
+                global_positions[global_fixed_mask] = fixed_targets_array
+        iterations = total_iterations
+        print(f"  Alternated ARAP/volume: {volume_arap_alternations} cycles")
+    else:
+        global_positions, iterations, max_disp = backend.solve(
+            global_positions, global_rest_positions, neighbors, edge_weights,
+            rest_edge_vectors, global_fixed_mask, fixed_targets_array,
+            **solve_kwargs)
     # Restore base rest so next frame starts clean
     if v.use_muscle_aware_arap and cache.get('csr_cross_mask') is not None:
         if hasattr(backend, 'update_rest_edges'):
             backend.update_rest_edges(cache['csr_rest_edges_base'])
     print(f"  ARAP solved in {time.time() - start_time:.3f}s ({iterations} iterations)")
+
+    # ARAP/contact targets can satisfy surface constraints by crushing or
+    # inverting tets. Alternate rest-volume recovery with contact correction;
+    # hard attachment targets are restored after every pass.
+    arap_positions = global_positions.copy()
+    volume_sweeps = (0 if getattr(v, 'rigid_blend_only', False) else
+                     int(getattr(v, 'volume_projection_sweeps', 24)))
+    if global_tets is not None and len(global_tets) and volume_sweeps > 0:
+        fixed_idx = np.where(global_fixed_mask)[0]
+        max_volume_correction = float(
+            getattr(v, 'volume_projection_max_correction', 0.0))
+
+        def _bound_volume_correction():
+            """Keep a local volume repair from ejecting a vertex from ARAP."""
+            if max_volume_correction <= 0.0:
+                return
+            correction = global_positions - arap_positions
+            correction_len = np.linalg.norm(correction, axis=1)
+            excessive = (~global_fixed_mask) & (
+                correction_len > max_volume_correction)
+            if np.any(excessive):
+                scale = max_volume_correction / correction_len[excessive]
+                global_positions[excessive] = (
+                    arap_positions[excessive]
+                    + correction[excessive] * scale[:, None])
+
+        contact_passes = int(getattr(v, 'volume_contact_passes', 4))
+        for _ in range(max(contact_passes, 1)):
+            global_positions, _, _ = _project_positive_tet_volumes(
+                global_positions, global_rest_positions, global_tets,
+                global_fixed_mask, sweeps=max(1, volume_sweeps // max(contact_passes, 1)),
+                stiffness=0.85, max_step=0.001)
+            _bound_volume_correction()
+            global_positions[fixed_idx] = fixed_targets_array
+            if collision_target_fn is not None:
+                targets = collision_target_fn(global_positions)
+                for vi, target in targets.items():
+                    vi = int(vi)
+                    if global_fixed_mask[vi]:
+                        continue
+                    delta = np.asarray(target) - global_positions[vi]
+                    dn = np.linalg.norm(delta)
+                    if dn > 0.002:
+                        delta *= 0.002 / dn
+                    global_positions[vi] += 0.5 * delta
+        global_positions, n_inv, max_v_err = _project_positive_tet_volumes(
+            global_positions, global_rest_positions, global_tets,
+            global_fixed_mask, sweeps=volume_sweeps, stiffness=0.9,
+            max_step=0.001)
+        _bound_volume_correction()
+        global_positions[fixed_idx] = fixed_targets_array
+        print(f"  Volume projection: inverted={n_inv}, max |V/V0-1|={max_v_err:.3f}")
 
     # Build a vertex → muscle ID array so isolated/stuck fixes only borrow
     # displacement from same-muscle connected verts. Cross-muscle copies
@@ -15284,6 +16292,7 @@ def _load_motion_bvh(v, idx):
         _t0 = _t.time()
         try:
             _motion_load_cache(v)
+            _motion_load_tissue_cage_overlay(v)
         finally:
             v.motion_cache_loading = False
             print(f"[Motion] Cache load: {_t.time() - _t0:.2f}s, {len(v.motion_deform_cache)} muscles")
@@ -15393,6 +16402,142 @@ def _motion_cache_dir(v):
     cache_dir = f'data/motion_cache/{bvh_name}'
     os.makedirs(cache_dir, exist_ok=True)
     return cache_dir
+
+
+def _motion_cache_read_dirs(v):
+    """Return cache roots in precedence order, including local offline bakes.
+
+    ``data/motion_cache`` may be a read-only external mount.  The anatomical
+    contact baker therefore writes to ``.bake_outputs/motion_cache``; treating
+    it as a read overlay lets the viewer play those results without copying or
+    mutating the external cache.
+    """
+    primary = _motion_cache_dir(v)
+    if primary is None:
+        return []
+    bvh_name = os.path.basename(primary)
+    local = os.path.join('.bake_outputs', 'motion_cache', bvh_name)
+    dirs = [primary]
+    if os.path.isdir(local) and os.path.realpath(local) != os.path.realpath(primary):
+        dirs.append(local)
+    return dirs
+
+
+def _motion_load_tissue_cage_overlay(v):
+    """Load the newest solved tissue-cage cache for viewport inspection."""
+    candidates = []
+    for root in _motion_cache_read_dirs(v):
+        candidates.extend(glob.glob(os.path.join(
+            root, "*", "__tissue_cage_chunk_*.npz")))
+    if not candidates:
+        v.tissue_cage_overlay = None
+        print("[Tissue cage] No saved cage-state cache found")
+        return
+    candidates.sort(key=os.path.getmtime)
+    # Establish topology from the newest bake. Older experiments may use a
+    # different cage resolution; allowing the oldest file to choose topology
+    # made a newly rebuilt cage silently invisible.
+    rest = faces = None
+    for path in reversed(candidates):
+        try:
+            newest = np.load(path)
+            rest = np.asarray(newest["rest_positions"], dtype=np.float32)
+            faces = np.asarray(newest["surface_faces"], dtype=np.int32)
+            break
+        except Exception:
+            continue
+    # Assemble compatible files old-to-new so later poses overlay frames.
+    frame_positions = {}
+    used = []
+    for path in candidates:
+        try:
+            data = np.load(path)
+            if (len(data["rest_positions"]) != len(rest)
+                    or not np.array_equal(data["surface_faces"], faces)):
+                continue
+            for frame, positions in zip(data["frames"], data["positions"]):
+                frame_positions[int(frame)] = np.asarray(
+                    positions, dtype=np.float32)
+            used.append(path)
+        except Exception as exc:
+            print(f"[Tissue cage] Skip {path}: {exc}")
+    if rest is None:
+        v.tissue_cage_overlay = None
+        return
+    edge_set = set()
+    for face in faces:
+        for a, b in ((face[0], face[1]), (face[1], face[2]),
+                     (face[2], face[0])):
+            edge_set.add(tuple(sorted((int(a), int(b)))))
+    edges = np.asarray(sorted(edge_set), dtype=np.int32)
+    v.tissue_cage_overlay = {
+        "rest": rest, "faces": faces, "edges": edges,
+        "frames": frame_positions, "sources": used,
+    }
+    print(f"[Tissue cage] Loaded {len(frame_positions)} posed frames, "
+          f"{len(rest)} vertices, {len(edges)} surface edges")
+
+
+def draw_tissue_cage_overlay(v):
+    overlay = getattr(v, "tissue_cage_overlay", None)
+    if not getattr(v, "draw_tissue_cage", False) or overlay is None:
+        return
+    use_rest = getattr(v, "draw_tissue_cage_rest", False)
+    frame = int(getattr(v, "motion_current_frame", 0))
+    positions = (overlay["rest"] if use_rest
+                 else overlay["frames"].get(frame, overlay["rest"]))
+    # Cage states are baked in the original BVH world frame. Apply exactly
+    # the same root-axis/root-rotation correction used for cached muscles.
+    if (not use_rest and frame in overlay["frames"]
+            and getattr(v, "motion_bvh", None) is not None):
+        fix_offset = np.zeros(3, dtype=np.float32)
+        root_translation = getattr(v, "motion_root_translation", None)
+        if root_translation is not None:
+            baked_translation = v.motion_bvh.mocap_refs[frame, 3:6]
+            if getattr(v, "motion_fix_x", False):
+                fix_offset[0] = (
+                    root_translation[0] - baked_translation[0])
+            if getattr(v, "motion_fix_y", False):
+                fix_offset[1] = (
+                    root_translation[1] - baked_translation[1])
+            if getattr(v, "motion_fix_z", False):
+                fix_offset[2] = (
+                    root_translation[2] - baked_translation[2])
+        if (getattr(v, "motion_fix_rotation", False)
+                and getattr(v, "motion_root_rotation", None) is not None):
+            root_body = v.env.skel.getJoint(0).getChildBodyNode()
+            current_transform = root_body.getWorldTransform().matrix()
+            saved_pose = v.env.skel.getPositions().copy()
+            v.env.skel.setPositions(v.motion_bvh.mocap_refs[frame])
+            baked_transform = root_body.getWorldTransform().matrix()
+            v.env.skel.setPositions(saved_pose)
+            fix_rotation = (
+                current_transform[:3, :3]
+                @ baked_transform[:3, :3].T).astype(np.float32)
+            positions = (
+                (fix_rotation
+                 @ (positions - baked_transform[:3, 3]).T).T
+                + current_transform[:3, 3])
+        else:
+            positions = positions + fix_offset
+    edges = overlay["edges"]
+    line_vertices = np.ascontiguousarray(
+        positions[edges].reshape(-1, 3), dtype=np.float32)
+    v._tissue_cage_draw_keepalive = line_vertices
+    glPushAttrib(GL_ENABLE_BIT | GL_LINE_BIT | GL_COLOR_BUFFER_BIT)
+    glDisable(GL_LIGHTING)
+    glEnable(GL_BLEND)
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
+    glLineWidth(float(getattr(v, "tissue_cage_line_width", 1.0)))
+    color = ((0.15, 0.95, 1.0, 0.55) if use_rest
+             else (1.0, 0.75, 0.1, 0.7))
+    glColor4f(*color)
+    glEnableClientState(GL_VERTEX_ARRAY)
+    glBindBuffer(GL_ARRAY_BUFFER, 0)
+    glVertexPointer(3, GL_FLOAT, 0, line_vertices)
+    glDrawArrays(GL_LINES, 0, len(line_vertices))
+    glDisableClientState(GL_VERTEX_ARRAY)
+    glPopAttrib()
 
 
 def _motion_load_nn_checkpoint(v):
@@ -16003,7 +17148,7 @@ def _motion_patch_waypoints(v):
     print(f"Waypoint patch complete: {patched} muscles updated")
 
 
-def _motion_load_cache(v, force=False):
+def _motion_load_cache(v, force=False, prefer_latest=False):
     """Load all cached deformation data for the current BVH into memory.
     Supports both legacy single-file ({mname}.npz) and chunked ({mname}_chunk_*.npz) formats.
 
@@ -16020,6 +17165,7 @@ def _motion_load_cache(v, force=False):
     rebuild from scratch (use when chunks on disk have changed).
     """
     from concurrent.futures import ThreadPoolExecutor
+    import zipfile
     import time as _t
     _t_start = _t.time()
 
@@ -16030,8 +17176,8 @@ def _motion_load_cache(v, force=False):
         current_names = set(v.zygote_muscle_meshes.keys())
         for stale in [n for n in v.motion_deform_cache if n not in current_names]:
             del v.motion_deform_cache[stale]
-    cache_dir = _motion_cache_dir(v)
-    if cache_dir is None:
+    cache_dirs = _motion_cache_read_dirs(v)
+    if not cache_dirs:
         return
 
     # ── 1. Collect (mname, npz_files_sorted, expected_n) per muscle ──
@@ -16046,16 +17192,307 @@ def _motion_load_cache(v, force=False):
             continue
         expected_n = mobj.tet_vertices.shape[0]
         npz_files = []
-        for subdir in glob.glob(os.path.join(cache_dir, '*/')):
-            npz_files.extend(glob.glob(os.path.join(subdir, f'{mname}_chunk_*.npz')))
-            sub_legacy = os.path.join(subdir, f'{mname}.npz')
-            if os.path.exists(sub_legacy):
-                npz_files.append(sub_legacy)
-        npz_files.extend(glob.glob(os.path.join(cache_dir, f'{mname}_chunk_*.npz')))
-        legacy = os.path.join(cache_dir, f'{mname}.npz')
-        if os.path.exists(legacy):
-            npz_files.append(legacy)
-        npz_files.sort(key=lambda p: os.path.getmtime(p))
+        for cache_dir in cache_dirs:
+            for subdir in glob.glob(os.path.join(cache_dir, '*/')):
+                # Smoke/test outputs may contain a syntactically valid frame
+                # written before a bake later fails. They are diagnostics,
+                # never viewer overlays.
+                variant = os.path.basename(os.path.normpath(subdir)).lower()
+                accepted_frame0 = variant.endswith('_anatomical_contact_test')
+                if ('smoke' in variant or 'probe' in variant
+                        or (variant.endswith('_test')
+                                            and not accepted_frame0)
+                        or variant.startswith('rejected')):
+                    continue
+                npz_files.extend(glob.glob(os.path.join(subdir, f'{mname}_chunk_*.npz')))
+                sub_legacy = os.path.join(subdir, f'{mname}.npz')
+                if os.path.exists(sub_legacy):
+                    npz_files.append(sub_legacy)
+            npz_files.extend(glob.glob(os.path.join(cache_dir, f'{mname}_chunk_*.npz')))
+            legacy = os.path.join(cache_dir, f'{mname}.npz')
+            if os.path.exists(legacy):
+                npz_files.append(legacy)
+        def cache_precedence(path):
+            variant = os.path.basename(os.path.dirname(path)).lower()
+            # Deterministic semantic precedence. The corrected full bake is
+            # the baseline; a completed anatomical bake replaces it; the
+            # medial-tibia repair is the final per-muscle overlay. Do not use
+            # mtimes to decide anatomy.
+            if variant == 'l_vastus_intermedius_subdivided_fast_smooth_arap_full76_v38':
+                # Complete accelerated Smooth-ARAP bake. Frames 27-29 and
+                # 72-75 are independently initialized to prevent continuation
+                # drift while preserving a coherent formulation and topology.
+                rank = 1170
+            elif variant == 'l_vastus_intermedius_subdivided_tetwild_direct_remesh_frames0_5_v27':
+                # Direct TetWild-remeshed VI: no preserved input topology, no
+                # cage, zero inverted tets and zero active SDF residual 0-5.
+                rank = 1120
+            elif variant == 'l_vastus_intermedius_subdivided_joint_shape_contact_frames13_26_v31':
+                # Joint corotational shape/contact/volume solve. Selectively
+                # accepted through frame 26; frame 27 attachment failure omitted.
+                rank = 1130
+            elif variant == 'l_vastus_intermedius_subdivided_joint_shape_contact_frames13_27_full_v32':
+                # Unfiltered diagnostic exposure, including frame 27's known
+                # attachment failure, as explicitly requested for inspection.
+                rank = 1140
+            elif variant == 'l_vastus_intermedius_subdivided_smooth_arap_frames13_26_full_v34':
+                # Smooth ARAP (Oehri et al.) volumetric graph adaptation,
+                # fully exposed including frame 26's attachment failure.
+                rank = 1150
+            elif variant == 'l_vastus_intermedius_subdivided_smooth_arap_best_full76_v37':
+                # Complete reviewed cache: Smooth ARAP through frame 26, then
+                # validated direct-remesh fallback where continuation failed.
+                rank = 1160
+            elif variant == 'l_vastus_intermedius_subdivided_tetwild_direct_remesh_full76_v28':
+                # Full diagnostic bake. Accepted v27 overrides its first six
+                # frames; the remaining poses stay visible for failure review.
+                rank = 1115
+            elif variant == 'l_vastus_intermedius_subdivided_fast_strong_arap_quartermm_frames0_10_v26':
+                # ~40% faster continuation with a 0.25 mm shell, comparable
+                # visible-edge shape, and zero active SDF residual through 10.
+                rank = 1110
+            elif variant == 'l_vastus_intermedius_subdivided_strong_arap_halfmm_surface_frames0_10_v25':
+                # Gradual direct-tet continuation through frame 10 with zero
+                # active SDF residual and the accepted strong-ARAP settings.
+                rank = 1100
+            elif variant == 'l_vastus_intermedius_subdivided_strong_arap_halfmm_surface_frames0_5_v24':
+                # Strong direct ARAP with a 0.5 mm zero-surface contact shell;
+                # rest-inside samples remain exempt and final SDF residual is zero.
+                rank = 1090
+            elif variant == 'l_vastus_intermedius_subdivided_rest_inside_exempt_frames0_5_v21':
+                # Direct-tet frames 0-5 with a fixed authored-rest mask:
+                # vertices/edges originally inside femur receive no SDF force.
+                rank = 1080
+            elif variant == 'l_vastus_intermedius_subdivided_direct_arc_open_sdf_frames0_5_v20':
+                # Validated direct-tet frames 0-5: original open anatomical
+                # surface contact has only nanometre-scale SDF residuals.
+                rank = 1070
+            elif variant == 'l_vastus_intermedius_subdivided_direct_arc_open_sdf_frame25_v19':
+                # Direct subdivided-tet frame 25. The original open surface
+                # alone receives femur-SDF contact; the real patellar contour
+                # reaches its target through a knee-centered arc homotopy.
+                rank = 1060
+            elif variant == 'l_vastus_intermedius_subdivided_direct_tet_arap_sdf_frame25_v16':
+                # Exact subdivided surface is the simulation tet boundary:
+                # direct ARAP DOFs, direct femur-SDF contact, no render cage.
+                rank = 1050
+            elif variant == 'l_vastus_intermedius_subdivided_cap_excluded12_wrap_frame25_v12':
+                # Obsolete embedded-cage experiment retained only as history.
+                rank = 900
+            elif variant == 'l_vastus_intermedius_frame25_regime_full76_piecewise_v12':
+                # Full independent GPU bake using the stable frame-25
+                # compact-origin/coupled-contact formulation on every pose.
+                # Piecewise cage transfer retains the refined SDF clearance
+                # through the intercondylar frame instead of smoothing it away.
+                rank = 1035
+            elif variant == 'l_vastus_intermedius_cacheless_origin_shape_reference_v9':
+                # The complete origin cap keeps its internal reference shape,
+                # while all 32 femoral attachment positions remain uniformly
+                # soft. This avoids the widened near-rest cap without turning
+                # the origin into a hard positional constraint.
+                rank = 1030
+            elif variant == 'l_vastus_intermedius_cacheless_refined_origin_cohesion_v8':
+                # Eight-frame origin-quality correction. Strong rest-edge
+                # cohesion within the authored origin cap is preserved by
+                # both ARAP and coupled contact/volume refinement, preventing
+                # zero-flexion cap widening without pinning its position.
+                rank = 1025
+            elif variant == 'l_vastus_intermedius_cacheless_refined_origin_frame6shape_v6_clean':
+                # Fast seven-frame update: zero-flexion poses use the
+                # preferred frame-6-like compact origin stiffness. Frame 4
+                # retains its higher-quality validated smoothfast result.
+                rank = 1020
+            elif variant == 'l_vastus_intermedius_cacheless_refined_origin_smoothfast_v5':
+                # Fast selective rebake of the 14 near-rest transition poses.
+                # The compact origin anchors stiffen continuously over 15
+                # degrees, avoiding a binary attachment-mode shape jump while
+                # retaining validated hard-patch deep-flexion frames.
+                rank = 1015
+            elif variant == 'l_vastus_intermedius_cacheless_refined_origin_compliant_v3':
+                # Near rest, release the compact hard-origin patch and use a
+                # uniform compliant 32-vertex femoral attachment. This lets
+                # ARAP retain the natural proximal shape; the hard patch is
+                # restored above one degree knee flexion.
+                rank = 1010
+            elif variant == 'l_vastus_intermedius_cacheless_refined_origin_gated_v2':
+                # Validated VI refinement: the 22 non-hard origin-cap
+                # vertices follow the femur only below 1 degree knee flexion,
+                # preventing the near-rest attachment cap from folding
+                # forward without changing the accepted flexed poses.
+                rank = 1005
+            elif variant == 'l_vastus_intermedius_cacheless_refined_coupled_v1':
+                # Cache-free VI: independent refined-tet ARAP/SDF/volume
+                # solves with compact femoral origin and full patellar
+                # insertion, transferred by rest-pose tet embedding.
+                rank = 1000
+            elif variant == 'l_vastus_intermedius_new_corotated_arap_sdf_v2':
+                # New cache-free generalized corotated-ARAP muscle solver
+                # with dense differentiable femur-SDF contact and soft caps.
+                rank = 995
+            elif variant == 'l_vastus_intermedius_cacheless_rest_arap_sdf_v1':
+                # Sole cache-free VI bake: rest tet + BVH attachments + femur
+                # SDF, with state generated internally from frame zero.
+                rank = 990
+            elif variant == 'l_vastus_intermedius_nearperfect_regenerated_v4_exact':
+                # Reconstructed historical v4 pipeline: 16 accepted key
+                # poses, femur-local smoothstep resampling, legacy eight-guide
+                # overwrite, and five recorded SDF-refined frame replacements.
+                rank = 985
+            elif variant == 'l_vastus_intermedius_fast_sdf_raw_v1':
+                # Keep raw one-pose experiments inspectable without allowing
+                # them to split a coherent full-frame VI bake at frame 25.
+                rank = 950
+            elif variant == 'l_vastus_intermedius_nearperfect_collision_resolved_v4':
+                # Preserves the reviewed refined VI key poses exactly; smooth
+                # femur-local continuation plus coupled SDF refinement clears
+                # all authored-outside femur crossings on intermediate frames.
+                rank = 980
+            elif variant == 'quadriceps_contact_wrapped_deep_gpu_v1':
+                # Deep-flexion VI/VM overlays use differentiable femur-SDF
+                # contact coupled to signed-volume barriers. VL retains the
+                # inversion-free lateral-routing result.
+                rank = 970
+            elif variant == 'quadriceps_rest_clearance_signed_volume_gpu_v1':
+                # CUDA ARAP with sparse anatomical anchors, per-tet
+                # signed-volume barriers, and one-sided authored-rest SDF
+                # clearance. Validated across all 76 smooth-pose frames.
+                rank = 960
+            elif variant == 'quadriceps_compact_femur_following_full_v3':
+                # Compact full bake: every free vertex preserves frame-0
+                # femur proximity; only the true insertion cap follows patella.
+                rank = 940
+            elif variant == 'quadriceps_compact_manifold_full_gpu_v1':
+                # Full compact-reference bake with strong volume, rest-SDF
+                # manifold, exact caps, and a 10 mm shape trust region.
+                rank = 930
+            elif variant == 'quadriceps_vi_vl_vm_smooth_true_attached_gpu_v3':
+                # Rest-bound skeletal caps with independently verified
+                # attachment error below 3.4e-8 m across all 76 frames.
+                rank = 920
+            elif variant == 'quadriceps_vi_vl_vm_smooth_joint_gpu_v1':
+                # Full 76-frame joint GPU bake on the eased pose motion.
+                rank = 900
+            elif variant == 'quadriceps_vi_vl_vm_reference_atlas_v1':
+                # Every VM frame is rebuilt from its best collision-free
+                # reference transfer; VI and VL remain unchanged.
+                rank = 830
+            elif variant == 'quadriceps_vi_vl_vm_reference_selected_v3':
+                # Per-pose VM reference transfer selected by positive tet
+                # quality and moving-femur SDF clearance.
+                rank = 820
+            elif variant == 'quadriceps_vi_vl_vm_bounded_stable_v1':
+                # VM stabilization with an enforced 8 mm per-vertex trust
+                # radius, preventing the optimizer from producing spikes.
+                rank = 810
+            elif variant == 'quadriceps_vi_vl_vm_stable_fast_v4':
+                # VM-targeted GPU stabilization: VI/VL remain fixed contact
+                # partners while a strong positive-volume barrier repairs VM.
+                rank = 800
+            elif variant == 'quadriceps_vi_vl_vm_relational_full_collisionfree_v3':
+                # Full 16-frame relational VI/VL/VM bake with exact caps,
+                # persistent inter-muscle cohesion, and validated femur clearance.
+                rank = 790
+            elif variant == 'quadriceps_vi_vl_vm_relational_frame5_v1':
+                # Joint quadriceps frame with symmetric proximity contact plus
+                # 343 persistent rest-neighbor cohesion links.
+                rank = 780
+            elif variant == 'quadriceps_vi_vl_vm_joint_frame5_final':
+                # Joint three-muscle frame-5 solve: exact full caps, all three
+                # pair contacts, and validated femur clearance for VI/VL/VM.
+                rank = 770
+            elif variant == 'quadriceps_vi_vl_joint_frame5_final2':
+                # Joint VI/VL frame-5 solve with exact full caps, symmetric
+                # pair separation, and independently validated femur SDF.
+                rank = 760
+            elif variant == 'quadriceps_vi_vl_attached_fixed_v1':
+                # Accepted attached state: complete 32-vertex VL origin and
+                # patellar caps, with no guided transition-ring peel.
+                rank = 750
+            elif variant == 'quadriceps_vi_vl_insertion_ring1_merged_v1':
+                # Rejected as default: the strong first ring creates a sharp
+                # stiffness boundary and moves the visible peel line upward.
+                rank = 722
+            elif variant == 'quadriceps_vi_vl_fast_sdf_merged_v1':
+                # Accepted fast path: unchanged VI/full-cap poses with the
+                # difficult VL frame replaced by the validated projective-SDF
+                # continuation result.
+                rank = 724
+            elif variant == 'quadriceps_vi_vl_softtransition_merged_v1':
+                # Rejected as the default: collision-free, but the guided
+                # transition rings introduce visible longitudinal VL stretch.
+                # Keep it inspectable below the accepted full-cap variant.
+                rank = 723
+            elif variant == 'quadriceps_vi_vl_frame5_fullcap_v1':
+                # Full 32-vertex endpoint caps prevent VL's origin from
+                # peeling laterally during the 120-degree continuation.
+                rank = 730
+            elif variant == 'quadriceps_vi_vl_frame5_continuation_v1':
+                # VI + VL quasistatic pair. VL's 120-degree knee pose is
+                # reached through hidden continuation frames, then mapped
+                # back to the original 16-frame BVH indexing.
+                rank = 720
+            elif variant == 'l_vastus_intermedius_refined_transfer_v1':
+                # Distal/bone-adjacent refined tet simulation transferred to
+                # the original viewer topology, then SDF-validated.
+                rank = 710
+            elif variant == 'l_vastus_intermedius_snh_soft_attachment_diagnostic_v1':
+                # Frame-4 Stable-NH experiment: inversion-free with compliant
+                # attachments, intentionally exposed for visual diagnosis.
+                rank = 675
+            elif variant == 'l_vastus_intermedius_stiff_arap_femur_sdf_coupled_v1':
+                # Joint edge/volume/contact solve. The infeasible 120-degree
+                # stress frame uses its validated bounded-contact fallback.
+                rank = 690
+            elif variant == 'l_vastus_intermedius_stiff_arap_femur_sdf_bounded_v1':
+                # Bounded final SDF projection: collision-free without the
+                # high-weight least-squares vertex ejection failure.
+                rank = 680
+            elif variant == 'l_vastus_intermedius_stiff_arap_femur_sdf_soft_v1':
+                rank = 660
+            elif variant == 'l_vastus_intermedius_stiff_arap_femur_sdf_v1':
+                # VI override using the femur-local voxel SDF transformed by
+                # L_Femur0 at each BVH frame.
+                rank = 650
+            elif variant == 'l_vastus_intermedius_sdf_tune_ratio100000':
+                # Rejected: removes penetration by ejecting vertices. Keep it
+                # inspectable, but never let it override stable VI caches.
+                rank = 640
+            elif variant == 'l_vastus_intermedius_stiff_arap_gpu_v1':
+                # Explicit single-muscle VI override.  Without a semantic
+                # rank, the older shared-cage cache (rank 500) silently
+                # replaces this newer GPU PBD result during cache assembly.
+                rank = 600
+            elif ('contour_shared_cage' in variant
+                    or 'contour_tissue_cage' in variant):
+                # One volumetric cage drives the complete upper-leg contour
+                # group; it is a deliberate replacement for per-muscle
+                # overlays on the frames it contains.
+                rank = 500
+            elif variant.endswith('_anatomical_contact_full_0_4'):
+                # Coherent five-frame, all-muscle LBS/untangle/PN bake. It
+                # supersedes the old single-muscle and medial post-fix layers.
+                rank = 400
+            elif 'medial_tibia_repair' in variant:
+                rank = 300
+            elif variant.endswith('_anatomical_contact'):
+                rank = 200
+            elif variant.endswith('_anatomical_contact_test'):
+                # This is the accepted collision-resolved frame-0 bake. It
+                # supplements the full baseline until the complete anatomical
+                # bake has passed validation.
+                rank = 150
+            elif 'headless_full_corrected' in variant:
+                rank = 100
+            else:
+                rank = 0
+            return rank, os.path.getmtime(path), path
+        if prefer_latest:
+            # Explicit UI reload means exactly what it says: completed/newer
+            # bake files override semantic defaults without restarting the
+            # Python viewer to learn a newly authored variant name.
+            npz_files.sort(key=lambda path: (os.path.getmtime(path), path))
+        else:
+            npz_files.sort(key=cache_precedence)
         if not npz_files:
             continue
         muscle_files.append((mname, npz_files, expected_n))
@@ -16071,19 +17508,41 @@ def _motion_load_cache(v, force=False):
 
     def _load_one(item):
         mname, order_idx, path, exp_n = item
-        data = np.load(path, allow_pickle=True)
-        positions = data['positions']
-        if exp_n is not None and positions.shape[1] != exp_n:
+        try:
+            # A bake checkpoints directly into the cache tree.  If the viewer
+            # scans while that file is being replaced (or a bake was killed
+            # mid-write), the .npz may temporarily be an incomplete zip.
+            # Treat that candidate exactly like a topology mismatch: skip it
+            # and continue loading older/complete chunks for this muscle.
+            with np.load(path, allow_pickle=True) as data:
+                positions = np.asarray(data['positions'])
+                if (positions.ndim != 3
+                        or (exp_n is not None
+                            and positions.shape[1] != exp_n)):
+                    return mname, order_idx, None
+                frames = np.asarray(data['frames'])
+                if len(frames) != len(positions):
+                    raise ValueError(
+                        "frame/position count mismatch: "
+                        f"{len(frames)} != {len(positions)}")
+                has_wp = ('waypoints_flat' in data
+                          and 'waypoints_shape' in data)
+                wp_flats = (np.asarray(data['waypoints_flat'])
+                            if has_wp else None)
+                wp_shape_str = None
+                if has_wp:
+                    raw = data['waypoints_shape'][0]
+                    wp_shape_str = (raw.decode('utf-8')
+                                    if isinstance(raw, (bytes, np.bytes_))
+                                    else str(raw))
+                anim = (np.asarray(data['positions_anim'])
+                        if 'positions_anim' in data.files else None)
+            return mname, order_idx, (
+                frames, positions, wp_flats, wp_shape_str, anim, has_wp)
+        except (OSError, EOFError, ValueError, KeyError,
+                zipfile.BadZipFile) as exc:
+            print(f"[Motion] Skipping unreadable cache {path}: {exc}")
             return mname, order_idx, None
-        frames = data['frames']
-        has_wp = 'waypoints_flat' in data and 'waypoints_shape' in data
-        wp_flats = data['waypoints_flat'] if has_wp else None
-        wp_shape_str = None
-        if has_wp:
-            raw = data['waypoints_shape'][0]
-            wp_shape_str = raw.decode('utf-8') if isinstance(raw, (bytes, np.bytes_)) else str(raw)
-        anim = data['positions_anim'] if 'positions_anim' in data.files else None
-        return mname, order_idx, (frames, positions, wp_flats, wp_shape_str, anim, has_wp)
 
     # ── 3. Parallel load — disk I/O scales with threadpool, GIL released
     #       during np.load's blocking read ──

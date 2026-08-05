@@ -5301,7 +5301,14 @@ class MuscleMeshMixin:
             cap_face_adj = {}
             cap_face_set = set(self.tet_cap_face_indices)
             face_arr = self.tet_faces if self.tet_faces is not None else self.tet_render_faces
-            if face_arr is not None:
+            # Embedded anatomical skins have a distinct render-vertex index
+            # space. Their cap_attachments already enumerate simulation-cage
+            # supports explicitly, so traversing render faces from tet indices
+            # would pin unrelated cage vertices that happen to share numbers.
+            has_embedded_render_skin = (
+                getattr(self, 'tet_render_vertices_rest', None) is not None
+                and getattr(self, 'tet_render_vertex_indices', None) is not None)
+            if face_arr is not None and not has_embedded_render_skin:
                 for fi in cap_face_set:
                     if fi < len(face_arr):
                         f = face_arr[fi]

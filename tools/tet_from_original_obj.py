@@ -205,6 +205,9 @@ def _tetrahedralize(vertices, faces):
         np.savez(inp, v=rv, f=rf)
         inp_path = inp.name
     out_path = inp_path.replace('.npz', '_out.npz')
+    allow_boundary_steiner = (
+        os.environ.get('ORIG_TET_BOUNDARY_STEINER', '0') == '1')
+    nobisect_literal = 'False' if allow_boundary_steiner else 'True'
     script = f'''
 import numpy as np, tetgen, trimesh, sys
 d = np.load("{inp_path}")
@@ -218,13 +221,14 @@ try:
     # Sliver tets (low dihedral angle, small volume vs edge length) caused
     # ARAP to produce outlier verts even after boundary preservation.
     t.tetrahedralize(order=1, mindihedral=10, minratio=1.2,
-                     maxvolume=max_vol, nobisect=True, steinerleft=steiner)
+                     maxvolume=max_vol, nobisect={nobisect_literal},
+                     steinerleft=steiner)
     np.savez("{out_path}", node=np.asarray(t.node), elem=np.asarray(t.elem).astype(np.int32), mode=np.array([1]))
     sys.exit(0)
 except Exception: pass
 try:
     t = tetgen.TetGen(rv.copy(), rf.copy())
-    t.tetrahedralize(quality=False, nobisect=True)
+    t.tetrahedralize(quality=False, nobisect={nobisect_literal})
     np.savez("{out_path}", node=np.asarray(t.node), elem=np.asarray(t.elem).astype(np.int32), mode=np.array([2]))
     sys.exit(0)
 except Exception: pass
@@ -461,6 +465,21 @@ def process_muscle(muscle_name, obj_path, contour_tet_path, output_path, skel, m
     cap_face_indices_pre = [fi for fi, f in enumerate(closed_f)
                             if tuple(sorted(int(x) for x in f)) in cap_face_set]
     n_closed_v = len(closed_v)
+    # Attachment loops and fan centers below index this pre-remesh surface.
+    # Keep it explicitly: an isotropic boundary remesh changes both vertex
+    # count and indexing, so using its c2t table for these indices is invalid.
+    attachment_source_v = closed_v.copy()
+
+    isotropic_boundary = (
+        os.environ.get('ORIG_TET_ISOTROPIC_BOUNDARY', '0') == '1')
+    if isotropic_boundary:
+        from viewer.zygote_mesh_ui import _isotropic_voxel_surface_for_tet
+        target_tets = int(os.environ.get(
+            'ORIG_TET_TARGET_TETS', '12000'))
+        closed_v, closed_f, _ = _isotropic_voxel_surface_for_tet(
+            muscle_name, closed_v, closed_f, target_tets)
+        closed_v = np.asarray(closed_v, dtype=np.float64)
+        closed_f = np.asarray(closed_f, dtype=np.int32)
 
     # Tetrahedralize — TetGen preserves boundary vertices (nobisect)
     print(f'  [{muscle_name}] tetgen on {len(closed_v)}v {len(closed_f)}f', flush=True)
@@ -513,6 +532,7 @@ def process_muscle(muscle_name, obj_path, contour_tet_path, output_path, skel, m
     # Rebuild c2t with pruned tet_v.
     kd = cKDTree(tet_v)
     _, c2t = kd.query(closed_v)
+    _, attachment_c2t = kd.query(attachment_source_v)
     print(f'    pruned to {len(tet_v)}v {len(tet_e)}e (no orphans, no singleton-tet verts)', flush=True)
 
     # Render faces = all closed_f (surface + caps), remapped to pruned tet
@@ -546,7 +566,8 @@ def process_muscle(muscle_name, obj_path, contour_tet_path, output_path, skel, m
                          dtype=np.int32)
 
     # Anchor verts remapped to tet space
-    tet_anchor_verts = sorted(set(int(c2t[int(vi)]) for vi in anchor_verts))
+    tet_anchor_verts = sorted(
+        set(int(attachment_c2t[int(vi)]) for vi in anchor_verts))
 
     # Bone assignment per loop using XML waypoints
     origin_pts = np.vstack([s[2] for s in xml_data]) if xml_data else np.zeros((1, 3))
@@ -561,19 +582,101 @@ def process_muscle(muscle_name, obj_path, contour_tet_path, output_path, skel, m
     # multi-head muscles with different bones per origin stream.
     fixed_verts = {}
     anchor_tet_set = set()
-    for arc, (end_type, bone) in zip(named_cap_loops, named_cap_end_types):
-        tet_arc_verts = sorted({int(c2t[int(vi)]) for vi in arc})
-        if not bone:
-            continue
-        for vi in tet_arc_verts:
-            fixed_verts[vi] = (bone, end_type)
-            anchor_tet_set.add(vi)
-    # Also anchor fan-centroid verts to their loop's dominant bone.
-    for center_idx_obj, (bone, end_type) in extra_anchor_centers.items():
-        tet_vi = int(c2t[int(center_idx_obj)])
-        if bone:
-            fixed_verts[tet_vi] = (bone, end_type)
-            anchor_tet_set.add(tet_vi)
+    if isotropic_boundary and len(sim_faces):
+        # Transfer each source attachment as a connected surface patch. A
+        # pointwise nearest-vertex remap leaves isolated pins on a different
+        # triangulation, which produces the visible spikes at pes insertions.
+        surface = np.unique(sim_faces)
+        surface_points = tet_v[surface]
+        surface_lookup = {int(v): i for i, v in enumerate(surface)}
+        adjacency = [set() for _ in range(len(surface))]
+        surface_edges = set()
+        for face in sim_faces:
+            for a, b in ((face[0], face[1]), (face[1], face[2]),
+                         (face[2], face[0])):
+                ia, ib = surface_lookup[int(a)], surface_lookup[int(b)]
+                adjacency[ia].add(ib)
+                adjacency[ib].add(ia)
+                surface_edges.add(tuple(sorted((int(a), int(b)))))
+        edge_length = np.asarray([
+            np.linalg.norm(tet_v[a] - tet_v[b])
+            for a, b in surface_edges])
+        patch_radius = max(0.004, 2.25 * float(np.median(edge_length)))
+
+        # XML waypoints are the authoritative anatomical endpoints. Boundary
+        # loops may also include cut seams along the belly; using those loops
+        # as patch seeds made Sartorius' insertion extend 13 cm proximally.
+        grouped_sources = {}
+        for xml_origin_bone, xml_insertion_bone, origin_point, insertion_point in xml_data:
+            if xml_origin_bone:
+                grouped_sources.setdefault(
+                    (xml_origin_bone, 'origin'), []).append(
+                        np.asarray(origin_point, dtype=np.float64).reshape(-1, 3))
+            if xml_insertion_bone:
+                grouped_sources.setdefault(
+                    (xml_insertion_bone, 'insertion'), []).append(
+                        np.asarray(insertion_point, dtype=np.float64).reshape(-1, 3))
+        group_items = [
+            (key, np.vstack(parts))
+            for key, parts in grouped_sources.items() if parts]
+        group_distance = []
+        for _, source_points in group_items:
+            distance, _ = cKDTree(source_points).query(surface_points)
+            group_distance.append(distance)
+        if group_distance:
+            group_distance = np.stack(group_distance, axis=1)
+            nearest_group = np.argmin(group_distance, axis=1)
+            for group_i, ((bone, end_type), source_points) in enumerate(
+                    group_items):
+                # XML often contains a dense fiber grid. Using every fiber
+                # endpoint as an independent seed over-constrains broad
+                # muscles (notably adductor magnus), fixing much of the
+                # belly. Collapse endpoints into 4 mm spatial cells first;
+                # the resulting patch represents attachment *area*, not
+                # fiber count.
+                cell = np.floor(source_points / 0.004).astype(np.int64)
+                _, representative = np.unique(
+                    cell, axis=0, return_index=True)
+                seed_points = source_points[np.sort(representative)]
+                _, seed_local = cKDTree(surface_points).query(seed_points)
+                selected = set(int(i) for i in np.atleast_1d(seed_local))
+                frontier = set(selected)
+                # One surface ring makes a connected patch while avoiding
+                # the former two-ring expansion far into the muscle body.
+                for _ in range(1):
+                    grown = set()
+                    for local_i in frontier:
+                        grown.update(adjacency[local_i])
+                    grown = {
+                        i for i in grown
+                        if group_distance[i, group_i] <= patch_radius
+                        and nearest_group[i] == group_i
+                    }
+                    grown -= selected
+                    selected.update(grown)
+                    frontier = grown
+                for local_i in selected:
+                    tet_vi = int(surface[local_i])
+                    fixed_verts[tet_vi] = (bone, end_type)
+                    anchor_tet_set.add(tet_vi)
+        print(f'    connected attachment patches: {len(anchor_tet_set)} '
+              f'verts, radius={patch_radius*1000:.2f}mm')
+    else:
+        for arc, (end_type, bone) in zip(
+                named_cap_loops, named_cap_end_types):
+            tet_arc_verts = sorted(
+                {int(attachment_c2t[int(vi)]) for vi in arc})
+            if not bone:
+                continue
+            for vi in tet_arc_verts:
+                fixed_verts[vi] = (bone, end_type)
+                anchor_tet_set.add(vi)
+        # Also anchor fan-centroid verts to their loop's dominant bone.
+        for center_idx_obj, (bone, end_type) in extra_anchor_centers.items():
+            tet_vi = int(attachment_c2t[int(center_idx_obj)])
+            if bone:
+                fixed_verts[tet_vi] = (bone, end_type)
+                anchor_tet_set.add(tet_vi)
 
     # If no cap loops classified (all seams, or closed-mesh OBJ with no
     # boundaries): fall back to XML-waypoint-nearest tet verts. Each tet
@@ -684,7 +787,20 @@ def main():
     ap = argparse.ArgumentParser(description='OBJ → tet via contour-compatible pipeline')
     ap.add_argument('--output-dir', default='tet_orig_open')
     ap.add_argument('--contour-dir', default='tet')
+    ap.add_argument('--muscles-json', default=None,
+                    help='Optional loaded-muscle JSON used to restrict output.')
+    ap.add_argument('--allow-boundary-steiner', action='store_true',
+                    help='Allow TetGen to subdivide poor boundary triangles.')
+    ap.add_argument('--isotropic-boundary', action='store_true',
+                    help='Voxel-remesh the simulation boundary before TetGen.')
+    ap.add_argument('--target-tets', type=int, default=12000,
+                    help='Approximate tet count for isotropic-boundary mode.')
     args = ap.parse_args()
+    if args.allow_boundary_steiner:
+        os.environ['ORIG_TET_BOUNDARY_STEINER'] = '1'
+    if args.isotropic_boundary:
+        os.environ['ORIG_TET_ISOTROPIC_BOUNDARY'] = '1'
+        os.environ['ORIG_TET_TARGET_TETS'] = str(args.target_tets)
 
     os.makedirs(args.output_dir, exist_ok=True)
 
@@ -707,7 +823,15 @@ def main():
             muscle_name = fname[:-len('.obj')]
             obj_map[muscle_name] = os.path.join(sub_path, fname)
 
+    selected = None
+    if args.muscles_json:
+        import json
+        with open(args.muscles_json) as f:
+            selected = {entry['name'] for entry in json.load(f)}
+
     for muscle_name, obj_path in sorted(obj_map.items()):
+        if selected is not None and muscle_name not in selected:
+            continue
         # Prefer contour_backup (true contour tet) over tet/ (may be swapped
         # to original mesh from a previous viewer session).
         contour_backup = os.path.join(args.contour_dir, f'{muscle_name}_tet.npz.contour_backup')
@@ -727,6 +851,8 @@ def main():
     import shutil
     for fname in sorted(os.listdir(args.contour_dir)):
         if not fname.endswith('_tet.npz'):
+            continue
+        if selected is not None and fname[:-len('_tet.npz')] not in selected:
             continue
         dst = os.path.join(args.output_dir, fname)
         if not os.path.exists(dst):

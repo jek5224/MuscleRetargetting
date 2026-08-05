@@ -93,7 +93,8 @@ def build_fascia_binding(fascia_npz_path, active_muscles):
     for i in range(V_f):
         m_name = binding['src_muscle_name'][i]
         anat = anatomical_tris.get(m_name)
-        if anat is None or m_name not in active_muscles:
+        if (anat is None or m_name not in active_muscles
+                or int(src_tri[i]) < 0 or int(src_tri[i]) >= len(anat)):
             binding['src_tri_verts'][i] = -1
             skipped += 1
             continue
@@ -149,6 +150,8 @@ def parse_args():
     ap = argparse.ArgumentParser()
     ap.add_argument('--bvh', required=True)
     ap.add_argument('--region', required=True, choices=list(REGION_FASCIA_FILES))
+    ap.add_argument('--muscles-json', default=None,
+                    help='Optional muscle subset JSON for staged validation.')
     ap.add_argument('--cache-tag', default='fascia',
                     help='Cache dir suffix (region tag = "{REGION}_{cache-tag}").')
     ap.add_argument('--start-frame', type=int, default=0)
@@ -156,9 +159,25 @@ def parse_args():
     ap.add_argument('--backend', default='taichi',
                     choices=['auto', 'taichi', 'gpu', 'cpu'])
     ap.add_argument('--settle-iters', type=int, default=50)
+    ap.add_argument('--fem-volume-penalty', type=float, default=5000.0,
+                    help='Additional bulk stiffness for constrained FEM.')
     ap.add_argument('--no-plateau-exit', action='store_true', default=True)
     ap.add_argument('--no-self-collision', action='store_true', default=False)
     ap.add_argument('--tet-dir', default=TET_DIR)
+    ap.add_argument('--fem', action='store_true', default=False,
+                    help='Use unified XPBD FEM with per-tet incompressibility '
+                         'instead of the ARAP deformation path.')
+    ap.add_argument('--pn', action='store_true', default=False,
+                    help='Use positive-Jacobian projected-Newton FEM. Requires '
+                         '--fem and is intended for offline robust baking.')
+    ap.add_argument(
+        '--independent-pose', action='store_true', default=False,
+        help='Rebuild the FEM solver for every frame. With --fem --pn this '
+             'solves each requested pose through the same canonical '
+             'rest-to-target continuation, so the result cannot inherit '
+             'state from the preceding BVH frame.')
+    ap.add_argument('--output-root', default=os.path.join('data', 'motion_cache'),
+                    help='Writable cache root (default: data/motion_cache).')
     # Inherited bake-headless args (defaults match its defaults)
     ap.add_argument('--constraint-threshold', type=float, default=0.015)
     ap.add_argument('--inter-k', type=int, default=2)
@@ -196,6 +215,10 @@ def parse_args():
                          'constraint. Default 1 cm.')
     ap.add_argument('--fascia-constraint-weight', type=float, default=1.0,
                     help='Soft penalty weight for fascia constraints.')
+    ap.add_argument('--fascia-min-patch-vertices', type=int, default=12,
+                    help='Minimum bindings in both directions before a '
+                         'rest-pose proximity region is treated as a '
+                         'persistent sliding anatomical interface.')
     ap.add_argument('--unified-bone-contact-margin', type=float, default=0.005)
     ap.add_argument('--unified-bone-contact-weight', type=float, default=1.5)
     ap.add_argument('--axial-min-ratio', type=float, default=0.65)
@@ -214,7 +237,7 @@ def main():
     args = parse_args()
 
     region = args.region
-    muscles_json = REGION_MUSCLE_JSON[region]
+    muscles_json = args.muscles_json or REGION_MUSCLE_JSON[region]
     fascia_rest = REGION_FASCIA_FILES[region]
     for path in (args.bvh, muscles_json, fascia_rest):
         if not os.path.exists(path):
@@ -238,6 +261,7 @@ def main():
     print(f'[4/9] Building context (paper §4.1.2: barycentric fascia '
           f'constraints + anisotropic contact)...')
     ctx = build_context(skel, muscle_meshes, skeleton_meshes, mesh_info, args)
+    ctx.fem_volume_penalty = args.fem_volume_penalty
     ctx.inter_muscle_constraints = []   # legacy pins OFF
 
     active_muscles = {n: m for n, m in muscle_meshes.items()
@@ -260,9 +284,9 @@ def main():
     print(f'      frames: {start}..{end} ({total} of {n_frames})')
 
     stem = os.path.splitext(os.path.basename(args.bvh))[0]
-    muscle_cache_dir = os.path.join('data', 'motion_cache', stem,
+    muscle_cache_dir = os.path.join(args.output_root, stem,
                                     f'{region}_{args.cache_tag}')
-    fascia_cache_dir = os.path.join('data', 'motion_cache', stem,
+    fascia_cache_dir = os.path.join(args.output_root, stem,
                                     f'fascia_{region}')
     for d in (muscle_cache_dir, fascia_cache_dir):
         os.makedirs(d, exist_ok=True)
@@ -303,11 +327,23 @@ def main():
             mobj.waypoints_from_tet_sim = False
             mobj._baking_mode = True
 
-        run_all_tet_sim_with_constraints(
-            ctx, max_iterations=args.settle_iters,
-            tolerance=1e-4, outer_iterations=20,
-            snapshot_callback=None,
-        )
+        if args.fem:
+            from viewer.fem_sim import run_all_fem_sim
+            # Independent-pose mode rebuilds from the material rest state and
+            # follows the same rest-to-target homotopy for every frame. Direct
+            # LBS mode also requires a rebuild because it deliberately avoids
+            # carrying the preceding frame's equilibrium.
+            if (args.independent_pose
+                    or os.environ.get('MUSCLE_PN_DIRECT_INIT', '0') == '1'):
+                ctx._fem_unified_solver = None
+            run_all_fem_sim(ctx, max_iterations=args.settle_iters,
+                            tolerance=1e-4, verbose=True)
+        else:
+            run_all_tet_sim_with_constraints(
+                ctx, max_iterations=args.settle_iters,
+                tolerance=1e-4, outer_iterations=20,
+                snapshot_callback=None,
+            )
 
         # Capture muscle positions
         for mname, mobj in active_muscles.items():

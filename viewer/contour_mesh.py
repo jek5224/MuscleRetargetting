@@ -503,6 +503,9 @@ class ContourMeshMixin(ContourAnimationMixin):
         self.inspector_highlight_contour_level = None  # Level in belly-only contour space (tendon-aware)
         self.inspector_highlight_vertex_3d = None  # 3D position of hovered vertex
         self.inspector_highlight_fiber_idx = None  # (stream_idx, fiber_idx) of hovered fiber
+        # [(level_idx, ring_points)], built temporarily from the hovered fiber's
+        # transported unit-square Voronoi cell by the Inspect 2D window.
+        self.inspector_voronoi_pillar_3d = None
 
         # Manual cutting state
         self._manual_cut_pending = False  # True when waiting for user to draw cutting line

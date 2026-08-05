@@ -2433,6 +2433,52 @@ class FiberArchitectureMixin:
                     glVertexPointer(3, GL_FLOAT, 0, pts)
                     glDrawArrays(GL_POINTS, 0, len(pts))
 
+        # Draw the transported Voronoi cell of the inspector-hovered fiber as
+        # a translucent pillar.  Rings retain their source level indices, so
+        # faces are formed only between genuinely adjacent contour levels.
+        pillar = getattr(self, 'inspector_voronoi_pillar_3d', None)
+        if pillar:
+            valid_rings = []
+            for level_idx, ring in pillar:
+                ring = np.asarray(ring, dtype=np.float32)
+                if (ring.ndim == 2 and ring.shape[0] >= 3 and ring.shape[1] == 3
+                        and np.all(np.isfinite(ring))):
+                    valid_rings.append((int(level_idx), ring))
+
+            face_vertices = []
+            line_vertices = []
+            for _, ring in valid_rings:
+                for j in range(len(ring)):
+                    line_vertices.extend([ring[j], ring[(j + 1) % len(ring)]])
+
+            for (level_a, ring_a), (level_b, ring_b) in zip(
+                    valid_rings[:-1], valid_rings[1:]):
+                if level_b != level_a + 1 or len(ring_a) != len(ring_b):
+                    continue
+                for j in range(len(ring_a)):
+                    next_j = (j + 1) % len(ring_a)
+                    # Two triangles form one tapered pillar side quad.
+                    face_vertices.extend([
+                        ring_a[j], ring_b[j], ring_b[next_j],
+                        ring_a[j], ring_b[next_j], ring_a[next_j],
+                    ])
+                    line_vertices.extend([ring_a[j], ring_b[j]])
+
+            if face_vertices:
+                faces = np.ascontiguousarray(face_vertices, dtype=np.float32)
+                self._inspector_voronoi_faces_keepalive = faces
+                glColor4f(0.10, 0.85, 0.45, 0.22)
+                glVertexPointer(3, GL_FLOAT, 0, faces)
+                glDrawArrays(GL_TRIANGLES, 0, len(faces))
+
+            if line_vertices:
+                lines = np.ascontiguousarray(line_vertices, dtype=np.float32)
+                self._inspector_voronoi_lines_keepalive = lines
+                glLineWidth(2.5)
+                glColor4f(0.15, 1.0, 0.55, 0.95)
+                glVertexPointer(3, GL_FLOAT, 0, lines)
+                glDrawArrays(GL_LINES, 0, len(lines))
+
         glDisableClientState(GL_VERTEX_ARRAY)
         glEnable(GL_LIGHTING)
 
