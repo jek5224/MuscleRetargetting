@@ -1,0 +1,50 @@
+muscle_name: L_Semitendinosus
+current_tet_asset: tet/L_Semitendinosus_tet.npz
+selected_reference_asset: tet_orig_std/L_Semitendinosus_tet.npz
+diagnostic_dir: .bake_outputs/gracilis_semitendinosus_rest_fix_full_patch_final
+deterministic_seed: 0
+
+reference_candidates:
+  - tet_orig_std/L_Semitendinosus_tet.npz
+  - tet_orig_quality_v2/L_Semitendinosus_tet.npz
+  - tet_orig_sim/L_Semitendinosus_tet.npz
+  - tet/L_Semitendinosus_tet.npz
+  - Zygote_Meshes_251229/Muscle/UpLeg/L_Semitendinosus.obj
+
+surface_reconstruction:
+  path: explicit_reference
+  implicit_fallback_enabled: false
+  implicit_pitch_m: 0.00075
+  maximum_global_deviation_m: 0.006
+  maximum_contact_deviation_m: 0.001
+  maximum_contact_normal_deviation_degrees: 15.0
+  contact_radius_m: 0.005
+
+retetrahedralization:
+  mode: full_muscle
+  backend: tetgen
+  base_edge_length: 0.006
+  contact_edge_length: 0.002
+  attachment_edge_length: 0.002
+  distal_tendon_edge_length: 0.002
+  fiber_dense_edge_length: 0.003
+  curvature_refinement: true
+  gradation_limit: 1.5
+  allow_interior_steiner_points: true
+  deterministic_seed: 0
+
+quality_thresholds:
+  target_minimum_dihedral_degrees: 5.0
+  hard_minimum_dihedral_degrees: 2.0
+  target_maximum_edge_aspect_ratio: 6.0
+
+fiber_transfer:
+  require_all_samples_embedded: true
+  containment_tolerance_m: 2.0e-6
+  maximum_reconstruction_error_m: 1.0e-10
+
+attachment_transfer:
+  footprint_distance_m: 0.0005
+
+render_embedding:
+  maximum_error_m: 1.0e-10

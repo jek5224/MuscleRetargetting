@@ -1,0 +1,42 @@
+material:
+  shear_modulus: 15000.0
+  bulk_modulus: 135000.0
+  minimum_J: 0.05
+
+fiber:
+  enabled: true
+  anisotropy_enabled: true
+  extension_stiffness: 30000.0
+  compression_stiffness_ratio: 0.05
+  transition_width: 0.03
+  nearby_radius: 0.02
+  bending_enabled: true
+  bending_stiffness: 0.002
+  active_shortening_enabled: false
+  target_scale: 1.0
+
+solver:
+  max_newton_iterations: 300
+  gradient_tolerance: 1.0e-1
+  step_tolerance: 1.0e-8
+  energy_tolerance: 1.0e-16
+  max_line_search_iterations: 24
+  coordinate_scale: 1.0e-5
+  optimization_energy_scale: 1000000.0
+  pre_relaxation_iterations: 80
+  max_trust_region_iterations: 80
+  initial_trust_radius: 0.1
+  maximum_trust_radius: 10.0
+
+pose:
+  initial_substeps: 8
+  maximum_substeps: 64
+  minimum_pose_fraction: 0.015625
+  adaptive_subdivision: true
+
+debug:
+  export_surface: true
+  export_fibers: true
+  export_J: true
+  export_fiber_stretch: true
+  export_attachment_patches: true

@@ -25,3 +25,82 @@ models/skel_models_v1.1/
 ChaosFleshNodes/
 LBS/
 Zygote_Meshes_*/
+
+# Secrets / keys — never commit
+a6000sshkey
+id_ed25519*
+id_rsa*
+*.pem
+
+# Python virtualenvs
+.venv*/
+
+# Papers / reference PDFs
+Papers/
+*.pdf
+
+# Large external datasets and bake outputs
+DTI/
+NeuralDeformationGradients/
+assets/
+.bake_outputs/
+
+# Symlinks into external drive (no trailing slash: patterns with '/' skip symlinks)
+Result_Images
+ray_results
+analysis_images
+bake_pyuipc
+bp_viz
+reverse_lbs_results
+tet_old
+tet_fine
+tet_hybrid
+tet_subdiv
+tet_orig_std
+Zygote_Meshes
+Zygote_Meshes_Original
+Zygote_Meshes_Revised
+Zygote_Meshes_Subdivided
+Zygote_Meshes_Revised_Subdivided
+
+# Motion capture bulk (tracked ones stay tracked)
+data/motion/*.bvh
+data/motion/*.npy
+data/lafan_walk1_subject1.bvh
+data/motion_cache
+
+# Archives / video
+*.tar.gz
+*.mp4
+
+# Scratch / transient state
+.muscles_*.json
+.last_loaded_muscles.json.bak*
+data/tmp*.xml
+__cutting.stl
+__tracked_surface.stl
+*.stl
+_skipped.node
+_skipped.face
+
+# Tet caches and solver outputs
+tet/
+reverse_lbs_results_*
+tetgen-tmpfile_*
+
+# Training checkpoints / tensorboard runs (symlinks into external drive)
+volume_distill/checkpoints
+volume_distill/runs
+volume_distill/dance
+volume_distill/*_checkpoints
+volume_distill/*_runs
+
+# Logs
+*.log
+
+# Obsidian vault config
+journal/.obsidian/
+
+# Claude Code local machine state (project memory/summary are tracked)
+.claude/settings.local.json
+.claude/*.lock

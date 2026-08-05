@@ -1,0 +1,70 @@
+muscle_name: Left_Semitendinosus
+source_tet_asset: tet/L_Semitendinosus_tet.npz
+c3_surface: assets/generated/Left_Semitendinosus_cross_section_constrained_surface_joint/hybrid_surface.obj
+accepted_tet_candidate: assets/generated/Left_Semitendinosus_layered_retet/optimized_tet_candidate.npz
+anchor_candidate: assets/generated/Left_Semitendinosus_repaired_fibers/F3/repaired_simulation_fibers.npz
+segment_inspection: .bake_outputs/semitendinosus_invalid_fiber_segments/invalid_source_segments.json
+
+failure_analysis:
+  maximum_route_length_relative_error: 0.35
+  maximum_turn_degrees: 45.0
+  hard_clearance_m: 0.000002
+  anchor_boundary_diagnostic_m: 0.00001
+  bad_sequence_tet_threshold: 128
+
+fiber_corridor:
+  enabled: true
+  initial_radius_m: 0.00025
+  maximum_radius_m: 0.0025
+  radius_growth_factor: 1.6
+  minimum_clearance_m: 0.000002
+  tangent_alignment_weight: 1.0
+  directional_turn_weight: 4.0
+  section_coordinate_weight: 0.5
+  enforce_section_monotonicity: true
+  maximum_backward_s: 0.01
+  monotonicity_penalty: 10.0
+  maximum_sequences_per_segment: 3
+  sequence_diversity_weight: 0.75
+
+portal_optimizer:
+  enabled: true
+  portal_margin: 0.01
+  length_weight: 1.0
+  length_prior_weight: 0.5
+  source_deviation_weight: 4.0
+  tangent_weight: 5.0
+  turn_weight: 20.0
+  bending_weight: 0.5
+  clearance_weight: 3.0
+  section_weight: 0.5
+  bundle_weight: 0.25
+  preferred_turn_degrees: 20.0
+  preferred_clearance_m: 0.0002
+  hard_clearance_m: 0.000002
+  maximum_iterations: 100
+  continuation_steps: 2
+  maximum_sequences_per_segment: 3
+  maximum_portals_per_sequence: 512
+  maximum_iterations_per_sequence: 100
+  maximum_joint_fibers: 4
+  maximum_seconds_per_sequence: 3.0
+  maximum_total_optimization_seconds: 300
+  enable_portal_simplification: true
+  enable_corridor_shortcuts: true
+
+bundle_routing:
+  joint_optimization: true
+  maximum_joint_fibers: 4
+  spacing_weight: 1.0
+  ordering_weight: 2.0
+  crossing_barrier_weight: 4.0
+  minimum_fiber_spacing_m: 0.00002
+
+route_gates:
+  maximum_route_length_relative_error: 0.35
+  maximum_tangent_change_degrees: 35.0
+  maximum_turn_angle_degrees: 45.0
+  maximum_curvature_change: 0.5
+  maximum_anchor_displacement_m: 0.001
+  hard_clearance_m: 0.000002

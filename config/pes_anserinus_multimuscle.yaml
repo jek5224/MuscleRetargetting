@@ -1,0 +1,102 @@
+muscles:
+  selected:
+    - L_Gracilis
+    - L_Sartorius
+    - L_Semitendinosus
+  collision_bones:
+    L_Gracilis: [L_Femur, L_Tibia_Fibula, L_Os_Coxae]
+    L_Sartorius: [L_Femur, L_Tibia_Fibula, L_Os_Coxae]
+    L_Semitendinosus: [L_Femur, L_Tibia_Fibula, L_Os_Coxae]
+
+contact_pairs:
+  - [L_Gracilis, L_Sartorius]
+  - [L_Gracilis, L_Semitendinosus]
+  - [L_Sartorius, L_Semitendinosus]
+
+contact:
+  solver: augmented_lagrangian
+  bone_muscle_enabled: true
+  muscle_muscle_enabled: true
+  friction_enabled: false
+  bone_muscle_thickness: 0.001
+  muscle_muscle_thickness: 0.001
+  fascia_muscle_thickness: 0.001
+  stiffness: 100000.0
+  maximum_penetration: 0.0015
+  attachment_exclusion_rings: 1
+  activation_distance: 0.0005
+  release_distance: 0.001
+  penetration_tolerance: 0.0001
+  complementarity_tolerance: 0.0001
+  initial_rho: 1000.0
+  maximum_rho: 100000.0
+  rho_growth: 3.0
+  maximum_outer_iterations: 20
+  deduplicate_symmetric_constraints: true
+  pair_exclusions: {}
+
+rest_initialization:
+  enabled: true
+  classify_constraint_conflicts: true
+  correct_geometry: true
+  maximum_vertex_correction: 0.005
+  shape_weight: 1000.0
+  volume_weight: 10000.0
+  surface_weight: 100.0
+  contact_ramp_steps: 5
+
+attachment:
+  mode: full_patch
+  transition_ring_count: 1
+  transition_stiffness: 5000.0
+
+fascia:
+  enabled: true
+  mode: kinematic_sectional_shell
+  clearance: 0.004
+  smoothing_iterations: 5
+  section_count: 18
+
+cohesion:
+  enabled: false
+  stiffness: 1000.0
+  allowed_gap: 0.003
+  break_distance: 0.012
+  use_normal_only: true
+
+wrapping:
+  medial_knee_enabled: false
+  type: capsule
+  parent_bone: L_Tibia_Fibula0
+  local_center: [0.0, 0.0, 0.0]
+  local_axis: [0.0, 1.0, 0.0]
+  radius: 0.025
+  half_length: 0.035
+
+solver:
+  use_previous_solution: true
+  adaptive_pose_subdivision: true
+  max_newton_iterations: 300
+  max_line_search_iterations: 24
+  initial_substeps: 8
+  maximum_substeps: 64
+  minimum_pose_fraction: 0.015625
+  gradient_tolerance: 0.1
+  minimum_J: 0.05
+
+material:
+  contact_safe_minimum_J: 0.2
+
+debug:
+  export_all_muscles: true
+  export_fibers: true
+  export_contacts: true
+  export_fascia: true
+  export_wrapping_objects: true
+  export_compactness_metrics: true
+  neighbor_distance: 0.005
+  export_constraint_classes: true
+  export_active_contacts: true
+  export_low_J_tets: true
+  export_rest_corrections: true
+  export_multiplier_values: true

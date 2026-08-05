@@ -1,0 +1,40 @@
+muscle_animation_mvp:
+  enabled: true
+  deterministic_seed: 0
+  bvh: data/motion/left_thigh_quasistatic_5pose.bvh
+  skeleton: data/zygote_skel.xml
+  muscle_root: tet
+  bone_root: Zygote_Meshes_251229/Skeleton
+  use_existing_fibers_when_valid: true
+  require_complete_fiber_embedding: false
+  auto_generate_centerline: true
+  deformation_model: projective_dynamics
+  attachment_mode: hard
+  volume_preservation: true
+  enable_bone_collision: true
+  enable_muscle_collision: true
+  enable_centerline_guidance: true
+  enable_bone_wrapping: true
+  enable_passive_bulging: true
+  frame_substeps: 2
+  solver_iterations: 8
+  collision_iterations: 2
+  centerline_weight: 0.22
+  bone_collision_margin_m: 0.0015
+  muscle_spacing_m: 0.001
+  wrapping_radius_m: 0.020
+  maximum_sweep_deviation_from_lbs_m: 0.025
+  preview_frames:
+    neutral: 0
+    moderate_flexion: 2
+    deep_flexion: 3
+  knee_flexion:
+    moderate_angle_degrees: 45
+    deep_angle_degrees: 80
+    deep_flexion_substeps: 6
+    centerline_weight_multiplier: 1.5
+    collision_iteration_multiplier: 2
+  output:
+    export_npz_cache: true
+    export_obj_preview: true
+    export_debug_geometry: true

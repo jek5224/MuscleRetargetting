@@ -1,0 +1,83 @@
+muscle_name: L_Semitendinosus
+current_tet_asset: tet/L_Semitendinosus_tet.npz
+selected_reference_asset: tet_orig_std/L_Semitendinosus_tet.npz
+diagnostic_dir: .bake_outputs/gracilis_semitendinosus_rest_fix_full_patch_final
+
+cross_section_constraints:
+  enabled: true
+  use_bundle_longitudinal_coordinate: true
+  contact_section_spacing_m: 0.006
+  distal_section_spacing_m: 0.004
+  belly_section_spacing_m: 0.015
+  transition_section_count: 6
+  contact_arc_position_weight: 10.0
+  opposing_arc_position_weight: 8.0
+  lateral_arc_position_weight: 3.0
+  area_weight: 20.0
+  centroid_weight: 10.0
+  covariance_weight: 10.0
+  radii_weight: 10.0
+  orientation_weight: 2.0
+  perimeter_weight: 3.0
+  contour_weight: 10.0
+  thickness_weight: 20.0
+  taper_weight: 10.0
+  longitudinal_weight: 10.0
+  maximum_relative_area_error: 0.15
+  RMS_relative_area_error: 0.10
+  maximum_thickness_absolute_error_m: 0.001
+  maximum_thickness_relative_error: 0.20
+  maximum_centroid_offset_m: 0.001
+  maximum_major_radius_relative_error: 0.20
+  maximum_minor_radius_relative_error: 0.20
+  maximum_consecutive_distorted_sections: 0
+  near_circular_eigenvalue_ratio: 1.1
+  adaptive_refinement: true
+  contact_max_deviation_m: 0.001
+  contact_p95_deviation_m: 0.00075
+  maximum_triangle_aspect_ratio: 8.0
+  maximum_volume_change_fraction: 0.03
+
+surface_refinement:
+  refine_full_cross_section_band: true
+  section_band_half_width_m: 0.002
+  contact_target_edge_length: 0.00075
+  opposing_target_edge_length: 0.00075
+  lateral_target_edge_length: 0.001
+
+tetrahedralization:
+  run_only_after_surface_acceptance: true
+  minimum_layers_across_contact_thickness: 3
+  contact_edge_length: 0.001
+  opposing_edge_length: 0.001
+  distal_edge_length: 0.001
+  belly_edge_length: 0.003
+
+retetrahedralization:
+  mode: full_muscle
+  backend: tetgen
+  allow_interior_steiner_points: true
+  maximum_steiner_points: 500000
+  optimization_iterations: 10
+  smoothing_iterations: 20
+  deterministic_seed: 0
+
+quality_thresholds:
+  target_minimum_dihedral_degrees: 5.0
+  hard_minimum_dihedral_degrees: 2.0
+  target_maximum_edge_aspect_ratio: 6.0
+
+attachment_transfer:
+  footprint_distance_m: 0.0005
+
+fiber_transfer:
+  require_all_samples_embedded: true
+  containment_tolerance_m: 2.0e-6
+  maximum_reconstruction_error_m: 1.0e-10
+
+render_embedding:
+  maximum_error_m: 0.001
+
+surface_reconstruction:
+  contact_radius_m: 0.005
+  maximum_contact_deviation_m: 0.001

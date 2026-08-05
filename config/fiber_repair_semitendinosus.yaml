@@ -1,0 +1,32 @@
+muscle_name: L_Semitendinosus
+source_tet_asset: tet/L_Semitendinosus_tet.npz
+immutable_reference_asset: tet_orig_std/L_Semitendinosus_tet.npz
+invalid_tet_boundary_asset: tet/L_Semitendinosus_tet.npz
+path_b_surface: assets/generated/Left_Semitendinosus_manifold_surface_implicit/implicit_reconstruction_candidate.obj
+c3_surface: assets/generated/Left_Semitendinosus_cross_section_constrained_surface_joint/hybrid_surface.obj
+accepted_tet_candidate: assets/generated/Left_Semitendinosus_layered_retet/optimized_tet_candidate.npz
+
+fiber_repair:
+  enabled: true
+  preserve_original_asset: true
+  classify_sample_semantics: true
+  compare_all_reference_surfaces: true
+  interior_margin_m: 0.00002
+  boundary_ambiguity_m: 0.000002
+  isolated_numerical_outlier_m: 0.00005
+  short_run_max_samples: 2
+  long_run_use_section_coordinates: true
+  position_weight: 1.0
+  length_weight: 0.25
+  tangent_weight: 0.2
+  curvature_weight: 0.08
+  bundle_distribution_weight: 0.05
+  maximum_sample_displacement_m: 0.001
+  maximum_total_length_relative_error: 0.05
+  maximum_segment_length_relative_error: 0.25
+  maximum_tangent_change_degrees: 35.0
+  maximum_curvature_change: 0.5
+  require_all_volumetric_samples_inside: true
+  require_all_segments_inside: true
+  allow_semantically_external_samples: true
+  deterministic_seed: 0

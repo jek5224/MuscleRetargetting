@@ -1,0 +1,34 @@
+muscle_name: L_Semitendinosus
+source_tet_asset: tet/L_Semitendinosus_tet.npz
+c3_surface: assets/generated/Left_Semitendinosus_cross_section_constrained_surface_joint/hybrid_surface.obj
+accepted_tet_candidate: assets/generated/Left_Semitendinosus_layered_retet/optimized_tet_candidate.npz
+anchor_candidate: assets/generated/Left_Semitendinosus_repaired_fibers/F3/repaired_simulation_fibers.npz
+segment_inspection: .bake_outputs/semitendinosus_invalid_fiber_segments/invalid_source_segments.json
+
+fiber_path_routing:
+  enabled: true
+  preserve_original_anchors: true
+  use_repaired_anchor_candidate: F3
+  graph_backend: tet_face_astar
+  deterministic_seed: 0
+  interior_margin_m: 0.000002
+  preferred_clearance_m: 0.0002
+  boundary_penalty_weight: 2.0
+  source_deviation_weight: 4.0
+  tangent_weight: 1.0
+  bending_weight: 0.2
+  section_coordinate_weight: 0.5
+  bundle_consistency_weight: 0.1
+  maximum_subsegment_length_m: 0.001
+  maximum_turn_angle_degrees: 45.0
+  maximum_inserted_samples_per_source_segment: 128
+  maximum_route_length_relative_error: 0.35
+  maximum_anchor_displacement_m: 0.001
+  maximum_tangent_change_degrees: 35.0
+  maximum_curvature_change: 0.5
+  minimum_fiber_spacing_m: 0.00002
+  maximum_astar_expansions: 30000
+  maximum_route_corridor_radius_m: 0.0025
+  require_exact_tet_containment: true
+  require_all_routes_inside: true
+  require_no_introduced_crossings: true

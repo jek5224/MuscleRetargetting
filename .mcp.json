@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "research-journal": {
+      "command": "python3.10",
+      "args": ["/home/jek/muscle_imitation_learning_study/journal/research_journal_mcp.py"]
+    }
+  }
+}

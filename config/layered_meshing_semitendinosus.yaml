@@ -1,0 +1,33 @@
+muscle_name: L_Semitendinosus
+current_tet_asset: tet/L_Semitendinosus_tet.npz
+selected_reference_asset: tet_orig_std/L_Semitendinosus_tet.npz
+diagnostic_dir: .bake_outputs/gracilis_semitendinosus_rest_fix_full_patch_final
+
+layered_meshing:
+  enabled: true
+  use_cross_section_scaffold: true
+  use_opposing_surface_pairs: true
+  thickness_edge_ratio_threshold: 3.0
+  failure_region_expansion_sections: 3
+  circumferential_expansion_fraction: 0.2
+  contact_region_always_layered: true
+  distal_region_always_layered: true
+  minimum_layers_across_thickness: 3
+  maximum_layers_across_thickness: 8
+  target_layer_thickness_m: 0.001
+  layer_growth_ratio: 1.3
+  structured_cell_type: prism_or_hex
+  tet_subdivision_strategy: quality_optimized
+  deterministic_seed: 0
+  preserve_outer_surface_exactly: true
+  allow_interior_steiner_points: true
+  allow_interior_topology_flips: true
+  quality:
+    hard_minimum_dihedral_degrees: 2.0
+    target_minimum_dihedral_degrees: 5.0
+    maximum_edge_aspect_ratio: 6.0
+
+core_tetrahedralization:
+  backend: tetgen
+  preserve_interface_facets: true
+  allow_steiner_points: true

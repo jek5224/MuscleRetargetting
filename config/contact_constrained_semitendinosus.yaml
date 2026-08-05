@@ -1,0 +1,41 @@
+muscle_name: L_Semitendinosus
+current_tet_asset: tet/L_Semitendinosus_tet.npz
+selected_reference_asset: tet_orig_std/L_Semitendinosus_tet.npz
+diagnostic_dir: .bake_outputs/gracilis_semitendinosus_rest_fix_full_patch_final
+
+contact_constrained_reconstruction:
+  enabled: true
+  base_surface: path_b
+  contact_lock_radius_m: 0.005
+  contact_transition_width_m: 0.006
+  attachment_lock_radius_m: 0.001
+  attachment_transition_width_m: 0.004
+  position_fit_weight: 50.0
+  normal_fit_weight: 2.0
+  laplacian_weight: 100.0
+  edge_quality_weight: 1.0
+  volume_weight: 10.0
+  self_intersection_barrier_weight: 100.0
+  path_b_anchor_weight: 1.0
+  continuation_steps: [0.35, 0.7, 1.0]
+  contact_max_deviation_m: 0.001
+  contact_p95_deviation_m: 0.00075
+  maximum_triangle_aspect_ratio: 8.0
+  maximum_volume_change_fraction: 0.03
+  maximum_cross_section_area_error_fraction: 0.15
+  maximum_thickness_proxy_error_m: 0.001
+  preserve_local_thickness: true
+  preserve_cross_sections: true
+
+surface_refinement:
+  adaptive: true
+  contact_target_edge_length: 0.00075
+  attachment_target_edge_length: 0.00075
+  transition_target_edge_length: 0.001
+  free_target_edge_length: 0.0025
+  maximum_subdivision_levels: 2
+  gradation_limit: 1.5
+
+tetrahedralization:
+  run_only_after_surface_acceptance: true
+  contact_region_refinement: true

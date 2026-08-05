@@ -1,0 +1,25 @@
+diagnostic_original_asset:
+  enabled: true
+  asset_selection: automatic_validated
+  preserve_original_fibers: true
+  expected_fiber_count: 25
+  expected_source_sample_count: 450
+  allow_isolated_interior_flips: true
+  allow_full_remeshing: false
+  attachment_metadata_path: tet/L_Semitendinosus_tet.npz
+  material_metadata_path: config/pes_anserinus_multimuscle.yaml
+  contact_modes:
+    native_boundary: true
+    pathB_proxy: true
+    C3_proxy: false
+  proxy:
+    maximum_projection_distance_m: 0.0001
+    maximum_projected_vertex_fraction: 0.01
+    require_positive_embedding: true
+  validation:
+    require_positive_orientation: true
+    contact_safe_minimum_J: 0.2
+    require_exact_attachments: true
+    hard_minimum_dihedral_degrees: 2.0
+  keep_solver_settings_unchanged: true
+  deterministic_seed: 0

@@ -1,0 +1,47 @@
+local_remeshing:
+  enabled: true
+  target_muscle: L_Semitendinosus
+  mode: cavity
+  seed_tets: [337, 44]
+  use_diagnostic_seed_tets: true
+  adjacency_rings: 3
+  contact_radius_m: 0.003
+  include_low_quality_neighbors: true
+  include_contact_neighbors: true
+  backend: auto
+  preserve_external_surface: true
+  preserve_interface_vertices: true
+  allow_interior_steiner_points: true
+  deterministic_seed: 0
+  boundary_vertex_tolerance: 1.0e-12
+
+quality_thresholds:
+  include_minimum_dihedral_degrees: 3.0
+  include_maximum_edge_aspect_ratio: 8.0
+  maximum_radius_ratio: .inf
+  minimum_rest_volume: 0.0
+  target_minimum_dihedral_degrees: 5.0
+  hard_minimum_dihedral_degrees: 2.0
+  target_maximum_edge_aspect_ratio: 6.0
+  tetgen_minratio: 2.0
+
+surface_transfer:
+  maximum_allowed_deviation_m: 1.0e-10
+  maximum_normal_deviation_degrees: 1.0e-6
+
+seam_repair:
+  mode: classified_four_sheet_diagnostic
+  maximum_vertex_displacement_m: 1.0e-10
+  maximum_changed_surface_area_m2: 1.0e-5
+  protect_attachment_faces: true
+  protect_active_contact_triangles: true
+
+fiber_transfer:
+  require_all_samples_embedded: true
+  containment_tolerance_m: 2.0e-6
+  maximum_reconstruction_error_m: 1.0e-10
+
+validation:
+  run_isolated_rest_test: true
+  run_rigid_motion_test: true
+  run_local_perturbation_test: true
