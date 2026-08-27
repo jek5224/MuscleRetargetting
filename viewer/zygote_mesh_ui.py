@@ -1757,7 +1757,6 @@ def _sync_counterpart_display_state(v, name):
         'is_draw',
         'is_draw_open_edges',
         'is_draw_scalar_field',
-        'is_draw_tendon_regions',
         'is_draw_contours',
         'is_draw_contour_vertices',
         'is_draw_farthest_pair',
@@ -1774,22 +1773,15 @@ def _sync_counterpart_display_state(v, name):
         'is_draw_tet_internal_faces',
         'tet_internal_face_stride',
         'is_draw_constraints',
-        'draw_origin_tendon_boundary',
-        'draw_insertion_tendon_boundary',
     ]
     for field in fields:
         if hasattr(obj, field):
             setattr(other, field, getattr(obj, field))
     if getattr(other, 'vertex_colors', None) is not None:
         other.vertex_colors[:, 3] = float(getattr(other, 'transparency', 1.0))
-    if getattr(other, '_tendon_region_colors', None) is not None:
-        other._tendon_region_colors[:, 3] = float(getattr(other, 'transparency', 1.0))
     if (getattr(other, 'is_draw_scalar_field', False)
             and getattr(other, '_scalar_anim_target_colors', None) is not None):
         other.vertex_colors = other._scalar_anim_target_colors.copy()
-    elif (getattr(other, 'is_draw_tendon_regions', False)
-          and getattr(other, '_tendon_region_colors', None) is not None):
-        other.vertex_colors = other._tendon_region_colors.copy()
 
 
 def _collect_scalar_boundary_indices(obj):
@@ -1806,12 +1798,6 @@ def _collect_scalar_boundary_indices(obj):
 
 def _install_scalar_field(obj, u, defer=False):
     obj.scalar_field = np.asarray(u, dtype=np.float64)
-    obj.is_draw_tendon_regions = False
-    obj._tendon_region_colors = None
-    obj._tendon_overlay_vertices = None
-    obj._tendon_overlay_normals = None
-    obj._tendon_origin_boundary_lines = None
-    obj._tendon_insertion_boundary_lines = None
     obj._face_scalar_min = None
     obj._face_scalar_max = None
 
@@ -6478,8 +6464,6 @@ def _draw_zygote_muscle_body(v, name, obj):
         # Reset visibility to pre-scalar start state
         obj.is_draw = True
         obj.is_draw_scalar_field = False
-        if hasattr(obj, 'reset_tendon_region_colors'):
-            obj.reset_tendon_region_colors()
         obj.is_draw_contours = False
         obj.is_draw_bounding_box = False
         obj.is_draw_contour_mesh = False
@@ -6604,84 +6588,6 @@ def _draw_zygote_muscle_body(v, name, obj):
     changed1, obj.specific_contour_value = imgui.slider_float(f"Ori##{name}", obj.specific_contour_value, 1.0, obj.contour_value_min, flags=imgui.SLIDER_FLAGS_NO_ROUND_TO_FORMAT)
     changed2, obj.specific_contour_value = imgui.slider_float(f"Mid##{name}", obj.specific_contour_value, obj.contour_value_min, obj.contour_value_max, flags=imgui.SLIDER_FLAGS_NO_ROUND_TO_FORMAT)
     changed3, obj.specific_contour_value = imgui.slider_float(f"Ins##{name}", obj.specific_contour_value, obj.contour_value_max, 10.0, flags=imgui.SLIDER_FLAGS_NO_ROUND_TO_FORMAT)
-    if not hasattr(obj, 'tendon_origin_value'):
-        obj.tendon_origin_value = 1.1
-    if not hasattr(obj, 'tendon_insertion_value'):
-        obj.tendon_insertion_value = 9.9
-    for attr, default in (
-        ('tendon_origin_tilt_angle', 0.0),
-        ('tendon_origin_tilt_amount', 0.0),
-        ('tendon_insertion_tilt_angle', 0.0),
-        ('tendon_insertion_tilt_amount', 0.0),
-        ('draw_origin_tendon_boundary', False),
-        ('draw_insertion_tendon_boundary', False),
-    ):
-        if not hasattr(obj, attr):
-            setattr(obj, attr, default)
-    imgui.separator()
-    imgui.text("Tendon designation")
-    imgui.text(f"Current contour value: {float(obj.specific_contour_value):.4f}")
-    imgui.text(f"Origin tendon <= {float(obj.tendon_origin_value):.4f}")
-    imgui.text(f"Insertion tendon >= {float(obj.tendon_insertion_value):.4f}")
-    single_stream = obj._is_single_stream_tendon_supported() if hasattr(obj, '_is_single_stream_tendon_supported') else False
-    if not single_stream:
-        imgui.text_colored("Only single-origin/single-insertion muscles supported", 1.0, 0.45, 0.2, 1.0)
-    if imgui.button(f"Set Current as Origin Tendon##{name}", width=wide_button_width):
-        obj.tendon_origin_value = float(obj.specific_contour_value)
-        print(f"[{name}] Origin tendon threshold set to {obj.tendon_origin_value:.4f}")
-        if getattr(obj, 'is_draw_tendon_regions', False):
-            obj.apply_tendon_region_colors(obj.tendon_origin_value, obj.tendon_insertion_value)
-    if imgui.button(f"Set Current as Insertion Tendon##{name}", width=wide_button_width):
-        obj.tendon_insertion_value = float(obj.specific_contour_value)
-        print(f"[{name}] Insertion tendon threshold set to {obj.tendon_insertion_value:.4f}")
-        if getattr(obj, 'is_draw_tendon_regions', False):
-            obj.apply_tendon_region_colors(obj.tendon_origin_value, obj.tendon_insertion_value)
-    if obj.tendon_origin_value >= obj.tendon_insertion_value:
-        imgui.text_colored("Origin threshold must be smaller", 1.0, 0.35, 0.2, 1.0)
-    if getattr(obj, 'is_draw_tendon_regions', False):
-        imgui.text_colored("LIGHT=tendon  RED=belly", 0.9, 0.85, 0.65, 1.0)
-    changed_bo, obj.draw_origin_tendon_boundary = imgui.checkbox(
-        f"Draw Origin Boundary##{name}", bool(obj.draw_origin_tendon_boundary))
-    changed_bi, obj.draw_insertion_tendon_boundary = imgui.checkbox(
-        f"Draw Insertion Boundary##{name}", bool(obj.draw_insertion_tendon_boundary))
-    if changed_bo or changed_bi:
-        _sync_counterpart_display_state(v, name)
-    obj.tendon_blend_width = 0.3
-    if getattr(obj, '_tendon_boundary_error', ""):
-        imgui.text_colored(obj._tendon_boundary_error[:90], 1.0, 0.35, 0.2, 1.0)
-    if imgui.tree_node(f"Parametric Boundary##{name}"):
-        imgui.text("Diagonal cut: threshold = base + amount * side_coordinate")
-        imgui.text("Origin diagonal cut")
-        changed_oa, obj.tendon_origin_tilt_angle = imgui.slider_float(
-            f"Deep Side Angle##origin_tilt_{name}", float(obj.tendon_origin_tilt_angle), 0.0, 6.28318, "%.3f")
-        changed_ot, obj.tendon_origin_tilt_amount = imgui.slider_float(
-            f"Tilt Amount##origin_tilt_{name}", float(obj.tendon_origin_tilt_amount), -2.5, 2.5, "%.3f")
-        imgui.separator()
-        imgui.text("Insertion diagonal cut")
-        changed_ia, obj.tendon_insertion_tilt_angle = imgui.slider_float(
-            f"Deep Side Angle##insertion_tilt_{name}", float(obj.tendon_insertion_tilt_angle), 0.0, 6.28318, "%.3f")
-        changed_it, obj.tendon_insertion_tilt_amount = imgui.slider_float(
-            f"Tilt Amount##insertion_tilt_{name}", float(obj.tendon_insertion_tilt_amount), -2.5, 2.5, "%.3f")
-        if (changed_oa or changed_ot or changed_ia or changed_it) and getattr(obj, 'is_draw_tendon_regions', False):
-            obj.apply_tendon_region_colors(obj.tendon_origin_value, obj.tendon_insertion_value)
-        if imgui.button(f"Apply Parametric Boundary##{name}", width=wide_button_width):
-            if obj.scalar_field is not None:
-                if obj.apply_tendon_region_colors(obj.tendon_origin_value, obj.tendon_insertion_value):
-                    print(f"[{name}] Applied parametric tendon boundary")
-            else:
-                print(f"[{name}] Prerequisites: Run 'Scalar Field' first")
-        imgui.tree_pop()
-    if imgui.button(f"Use Tendon Values##{name}", width=button_width):
-        if obj.scalar_field is not None:
-            if obj.apply_tendon_region_colors(obj.tendon_origin_value, obj.tendon_insertion_value):
-                print(f"[{name}] Tendon regions: origin <= {obj.tendon_origin_value:.4f}, insertion >= {obj.tendon_insertion_value:.4f}")
-        else:
-            print(f"[{name}] Prerequisites: Run 'Scalar Field' first")
-    imgui.same_line()
-    if imgui.button(f"Reset Tendon##{name}", width=button_width):
-        if hasattr(obj, 'reset_tendon_region_colors'):
-            obj.reset_tendon_region_colors()
-
     if imgui.tree_node(f"Epic##{name}"):
         if not hasattr(obj, 'epic_fiber_count'):
             obj.epic_fiber_count = 100
@@ -6779,8 +6685,6 @@ def _draw_zygote_muscle_body(v, name, obj):
     changed, obj.transparency = imgui.slider_float(f"Transparency##{name}", obj.transparency, 0.0, 1.0)
     if changed and obj.vertex_colors is not None:
         obj.vertex_colors[:, 3] = obj.transparency
-    if changed and getattr(obj, '_tendon_region_colors', None) is not None:
-        obj._tendon_region_colors[:, 3] = obj.transparency
     if changed:
         _sync_counterpart_display_state(v, name)
 
@@ -6857,11 +6761,8 @@ def _draw_zygote_muscle_body(v, name, obj):
     display_changed = display_changed or changed_scalar_draw
     if changed_scalar_draw:
         if obj.is_draw_scalar_field:
-            obj.is_draw_tendon_regions = False
             if getattr(obj, '_scalar_anim_target_colors', None) is not None:
                 obj.vertex_colors = obj._scalar_anim_target_colors.copy()
-        elif getattr(obj, 'is_draw_tendon_regions', False) and getattr(obj, '_tendon_region_colors', None) is not None:
-            obj.vertex_colors = obj._tendon_region_colors.copy()
     changed_contours, obj.is_draw_contours = imgui.checkbox("Draw Contours", obj.is_draw_contours)
     display_changed = display_changed or changed_contours
     imgui.same_line()

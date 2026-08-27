@@ -921,62 +921,6 @@ class ContourMeshMixin(ContourAnimationMixin):
         glEnable(GL_DEPTH_TEST)
         glEnable(GL_LIGHTING)
 
-    def draw_tendon_boundary_overlay(self):
-        """Draw optional parametric tendon boundary lines."""
-        line_sets = []
-        if getattr(self, 'draw_origin_tendon_boundary', False):
-            lines = getattr(self, '_tendon_origin_boundary_lines', None)
-            if lines is not None and len(lines) > 0:
-                line_sets.append((lines, (0.0, 1.0, 1.0, 1.0)))
-        if getattr(self, 'draw_insertion_tendon_boundary', False):
-            lines = getattr(self, '_tendon_insertion_boundary_lines', None)
-            if lines is not None and len(lines) > 0:
-                line_sets.append((lines, (1.0, 1.0, 0.0, 1.0)))
-
-        if line_sets:
-            glDisable(GL_LIGHTING)
-            glDisable(GL_DEPTH_TEST)
-            glDepthMask(GL_FALSE)
-            glEnableClientState(GL_VERTEX_ARRAY)
-            glBindBuffer(GL_ARRAY_BUFFER, 0)
-            for lines, color in line_sets:
-                glColor4f(*color)
-                glLineWidth(4.0)
-                glVertexPointer(3, GL_FLOAT, 0, lines)
-                glDrawArrays(GL_LINES, 0, len(lines))
-            glDisableClientState(GL_VERTEX_ARRAY)
-            glDepthMask(GL_TRUE)
-            glEnable(GL_DEPTH_TEST)
-            glEnable(GL_LIGHTING)
-
-        overlay = getattr(self, '_tendon_overlay_vertices', None)
-        if overlay is None or len(overlay) == 0:
-            return
-        overlay_normals = getattr(self, '_tendon_overlay_normals', None)
-
-        glEnable(GL_LIGHTING)
-        glEnable(GL_DEPTH_TEST)
-        glDepthMask(GL_FALSE)
-        glEnable(GL_POLYGON_OFFSET_FILL)
-        glPolygonOffset(-8.0, -8.0)
-        glDisable(GL_CULL_FACE)
-        glEnable(GL_COLOR_MATERIAL)
-        glColorMaterial(GL_FRONT_AND_BACK, GL_AMBIENT_AND_DIFFUSE)
-        glColor4f(0.82, 0.80, 0.70, 1.0)
-
-        glEnableClientState(GL_VERTEX_ARRAY)
-        if overlay_normals is not None and len(overlay_normals) == len(overlay):
-            glEnableClientState(GL_NORMAL_ARRAY)
-            glNormalPointer(GL_FLOAT, 0, overlay_normals)
-        glBindBuffer(GL_ARRAY_BUFFER, 0)
-        glVertexPointer(3, GL_FLOAT, 0, overlay)
-        glDrawArrays(GL_TRIANGLES, 0, len(overlay))
-        if overlay_normals is not None and len(overlay_normals) == len(overlay):
-            glDisableClientState(GL_NORMAL_ARRAY)
-        glDisableClientState(GL_VERTEX_ARRAY)
-        glDisable(GL_POLYGON_OFFSET_FILL)
-        glDepthMask(GL_TRUE)
-
     def find_reference_intersection(self, contour_value):
         """
         Find where iso-contour at contour_value crosses the geodesic reference line.

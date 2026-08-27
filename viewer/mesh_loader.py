@@ -424,9 +424,7 @@ class MeshLoader(ContourMeshMixin, TetrahedronMeshMixin, FiberArchitectureMixin,
         glPushMatrix()
 
         # Determine if color array should be enabled for scalar field rendering
-        use_color_array = self.vertex_colors is not None and (
-            self.is_draw_scalar_field or getattr(self, 'is_draw_tendon_regions', False)
-        )
+        use_color_array = self.vertex_colors is not None and self.is_draw_scalar_field
 
         if use_color_array:
             glEnableClientState(GL_COLOR_ARRAY)
@@ -466,9 +464,7 @@ class MeshLoader(ContourMeshMixin, TetrahedronMeshMixin, FiberArchitectureMixin,
         glPushMatrix()
 
         # Determine if color array should be enabled for scalar field rendering
-        use_color_array = self.vertex_colors is not None and (
-            self.is_draw_scalar_field or getattr(self, 'is_draw_tendon_regions', False)
-        )
+        use_color_array = self.vertex_colors is not None and self.is_draw_scalar_field
 
         if use_color_array:
             glEnableClientState(GL_COLOR_ARRAY)

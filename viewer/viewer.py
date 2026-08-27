@@ -1193,8 +1193,6 @@ class GLFWApp():
 
         # Draw slider-selected scalar contour after meshes so it remains visible.
         for name, obj in self.zygote_muscle_meshes.items():
-            if hasattr(obj, 'draw_tendon_boundary_overlay'):
-                obj.draw_tendon_boundary_overlay()
             if hasattr(obj, 'draw_specific_contour_overlay'):
                 obj.draw_specific_contour_overlay()
 
